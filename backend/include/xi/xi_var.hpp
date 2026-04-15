@@ -120,17 +120,20 @@ public:
         entries_.clear();
     }
 
+    // Copy the value into the store and return the caller's original
+    // untouched. Never moves from the user's value — otherwise the user
+    // would be left with a moved-from variable after VAR().
+    //
+    // For cheap types (arithmetic, bool, small strings) the extra copy is
+    // noise. For heavy types (images) specialize VarTraits to stash a
+    // shared handle rather than a deep copy.
     template <class T>
-    T&& track(std::string_view name, T&& value) {
+    decltype(auto) track(std::string_view name, T&& value) {
         VarEntry e;
         e.name = std::string(name);
         using Decayed = std::decay_t<T>;
-        VarTraits<Decayed>::fill(e, std::forward<T>(value));
-        // Note: for non-trivial types we've already stashed the value into
-        // e.payload (via VarTraits::fill). We still return the moved-from
-        // value so the user sees a real variable they can keep using.
-        // For arithmetic/bool/string the value is cheap enough to keep a
-        // second copy if needed.
+        Decayed copy_for_store = value;
+        VarTraits<Decayed>::fill(e, std::move(copy_for_store));
         {
             std::lock_guard<std::mutex> g(mu_);
             entries_.push_back(std::move(e));
