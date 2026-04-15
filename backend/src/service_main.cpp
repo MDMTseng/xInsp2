@@ -18,10 +18,42 @@
 #include <string>
 #include <string_view>
 
+#include <xi/xi.hpp>
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_ws_server.hpp>
 
 namespace xp = xi::proto;
+
+// ---- Built-in demo inspect() ----
+//
+// In M3 the "script" is hardcoded in the service. M5 replaces this with
+// a dynamically loaded user .dll. The demo exercises every VarTraits
+// specialization plus parallelism.
+
+static int demo_square(int x) {
+    return x * x;
+}
+ASYNC_WRAP(demo_square)
+
+static xi::Param<int>    demo_amp {"demo_amp",  10,  {1, 100}};
+static xi::Param<double> demo_bias{"demo_bias", 0.5, {0.0, 1.0}};
+
+static void demo_inspect(int frame) {
+    VAR(gray,    frame * static_cast<int>(demo_amp));
+    VAR(doubled, gray * 2);
+
+    auto p1 = async_demo_square(gray);
+    auto p2 = async_demo_square(doubled);
+    VAR(sq1, int(p1));
+    VAR(sq2, int(p2));
+
+    VAR(score, sq1 + sq2 + static_cast<double>(demo_bias));
+    VAR(label, std::string("demo"));
+    VAR(ok,    true);
+}
+
+static std::atomic<int64_t> g_run_id{0};
+
 
 static std::atomic<bool> g_should_exit{false};
 
@@ -88,6 +120,109 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "shutdown") {
         send_rsp_ok(srv, id);
         g_should_exit = true;
+    } else if (name == "run") {
+        // Execute the (hardcoded for M3) inspection, collect vars, send back.
+        int64_t run_id = ++g_run_id;
+        xi::ValueStore::current().clear();
+        auto t0 = std::chrono::steady_clock::now();
+        try {
+            demo_inspect(/*frame=*/7);
+        } catch (const std::exception& e) {
+            send_rsp_err(srv, id, std::string("inspect threw: ") + e.what());
+            return;
+        }
+        auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - t0).count();
+
+        // Build vars message from the store snapshot.
+        xp::Vars vmsg;
+        vmsg.run_id = run_id;
+        auto snap = xi::ValueStore::current().snapshot();
+        uint32_t next_gid = 100;
+        for (auto& e : snap) {
+            xp::VarItem it;
+            it.name = e.name;
+            switch (e.kind) {
+                case xi::VarKind::Number:
+                    it.kind = xp::VarKindWire::Number;
+                    it.value_json = e.inline_json;
+                    break;
+                case xi::VarKind::Boolean:
+                    it.kind = xp::VarKindWire::Boolean;
+                    it.value_bool = (e.inline_json == "true");
+                    break;
+                case xi::VarKind::String: {
+                    it.kind = xp::VarKindWire::String;
+                    // payload holds a std::string
+                    if (e.payload.has_value()) {
+                        try { it.value_str = std::any_cast<std::string>(e.payload); }
+                        catch (...) {}
+                    }
+                    break;
+                }
+                case xi::VarKind::Image:
+                    it.kind = xp::VarKindWire::Image;
+                    it.gid = next_gid++;
+                    it.raw = false;
+                    break;
+                case xi::VarKind::Json:
+                    it.kind = xp::VarKindWire::Json;
+                    it.value_json = e.inline_json.empty() ? "null" : e.inline_json;
+                    break;
+                default:
+                    it.kind = xp::VarKindWire::Custom;
+                    it.value_json = "null";
+            }
+            vmsg.items.push_back(std::move(it));
+        }
+
+        // Respond to the `run` command first with timing, then emit vars.
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":%lld})",
+                     (long long)run_id, (long long)dt_ms);
+        send_rsp_ok(srv, id, buf);
+        srv.send_text(vmsg.to_json());
+    } else if (name == "list_params") {
+        // Emit a minimal instances message with just the param registry.
+        std::string out = "{\"type\":\"instances\",\"instances\":[],\"params\":[";
+        auto list = xi::ParamRegistry::instance().list();
+        for (size_t i = 0; i < list.size(); ++i) {
+            if (i) out += ",";
+            out += list[i]->as_json();
+        }
+        out += "]}";
+        send_rsp_ok(srv, id, "{}");
+        srv.send_text(out);
+    } else if (name == "set_param") {
+        auto pname = xp::get_string_field(parsed->args_json, "name");
+        if (!pname) {
+            send_rsp_err(srv, id, "set_param: missing name");
+            return;
+        }
+        auto* p = xi::ParamRegistry::instance().find(*pname);
+        if (!p) {
+            send_rsp_err(srv, id, std::string("no such param: ") + *pname);
+            return;
+        }
+        // Extract raw value substring from args_json. get_number_field
+        // handles int/float; for bool we fall back to a string check.
+        auto num = xp::get_number_field(parsed->args_json, "value");
+        bool ok = false;
+        if (num) {
+            char nb[64];
+            std::snprintf(nb, sizeof(nb), "%g", *num);
+            ok = p->set_from_json(nb);
+        } else {
+            // Maybe "value":true / "value":false
+            auto sv = xp::get_string_field(parsed->args_json, "value");
+            if (sv) ok = p->set_from_json(*sv);
+            else {
+                if (parsed->args_json.find("\"value\":true")  != std::string::npos) ok = p->set_from_json("true");
+                if (parsed->args_json.find("\"value\":false") != std::string::npos) ok = p->set_from_json("false");
+            }
+        }
+        if (ok) send_rsp_ok(srv, id);
+        else    send_rsp_err(srv, id, "set_param: bad value");
     } else {
         send_rsp_err(srv, id, std::string("unknown command: ") + name);
     }
