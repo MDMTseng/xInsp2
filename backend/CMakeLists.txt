@@ -30,3 +30,10 @@ add_test(NAME protocol COMMAND test_protocol)
 set_tests_properties(protocol PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures"
 )
+
+add_executable(xinsp_backend src/service_main.cpp)
+target_link_libraries(xinsp_backend PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(xinsp_backend PRIVATE Ws2_32)
+endif()
+set_target_properties(xinsp_backend PROPERTIES OUTPUT_NAME "xinsp-backend")

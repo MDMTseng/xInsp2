@@ -1,0 +1,13 @@
+{
+  "name": "xinsp2-vscode",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:protocol": "node --test test/protocol.test.mjs",
+    "test:integration": "node --test test/ws_basic.test.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
