@@ -4,6 +4,7 @@ import { spawn, ChildProcess } from 'child_process';
 import { WsClient } from './wsClient';
 import { InstanceTreeProvider } from './instanceTree';
 import { ViewerProvider } from './viewerProvider';
+import { InstanceCodeLensProvider } from './instanceCodeLens';
 import { PREVIEW_HEADER_SIZE } from './protocol';
 
 let backend: ChildProcess | null = null;
@@ -46,6 +47,22 @@ export function activate(context: vscode.ExtensionContext) {
     // Tree view
     const treeProvider = new InstanceTreeProvider();
     vscode.window.createTreeView('xinsp2.instances', { treeDataProvider: treeProvider });
+
+    // CodeLens for instance/param declarations
+    const codeLensProvider = new InstanceCodeLensProvider();
+    context.subscriptions.push(
+        vscode.languages.registerCodeLensProvider(
+            { language: 'cpp', scheme: 'file' },
+            codeLensProvider
+        )
+    );
+
+    // Param focus command (for CodeLens click on params)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.focusParam', (paramName: string) => {
+            vscode.window.showInformationMessage(`xInsp2: param "${paramName}" — use the sidebar to tune`);
+        })
+    );
 
     // Viewer webview (side panel)
     const viewerProvider = new ViewerProvider(context.extensionUri);

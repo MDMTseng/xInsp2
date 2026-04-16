@@ -112,6 +112,17 @@ async function run() {
     await sleep(1000);
     takeScreenshot('datasink_instance_created');
 
+    // --- Step 4b: Open example script to show CodeLens ---
+    console.log('\n[step 4b] Opening defect_detection.cpp to show CodeLens...');
+    const examplesDir = vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath ?? '';
+    const scriptFile = path.join(examplesDir, 'defect_detection.cpp');
+    if (fs.existsSync(scriptFile)) {
+        const doc = await vscode.workspace.openTextDocument(scriptFile);
+        await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+        await sleep(3000);  // wait for CodeLens to appear
+        takeScreenshot('codelens_visible');
+    }
+
     // --- Step 5: Open mock_camera config UI ---
     console.log('\n[step 5] Opening camera config UI...');
     let camPanel = null;
