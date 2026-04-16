@@ -1,6 +1,7 @@
 # xInsp2 Framework Reference
 
 Complete technical reference for the xInsp2 machine vision inspection framework.
+51 commits. Last updated after full code audit + production hardening pass.
 
 ---
 
@@ -13,14 +14,17 @@ Complete technical reference for the xInsp2 machine vision inspection framework.
 5. [Operator Library (xi_ops)](#5-operator-library)
 6. [Parallelism (xi_async)](#6-parallelism)
 7. [Parameters (xi_param)](#7-parameters)
-8. [Plugin System](#8-plugin-system)
-9. [C ABI Reference](#9-c-abi-reference)
-10. [Image Pool & Handles](#10-image-pool)
-11. [WebSocket Protocol](#11-websocket-protocol)
-12. [Project Structure](#12-project-structure)
-13. [VS Code Extension](#13-vs-code-extension)
-14. [Build System](#14-build-system)
-15. [File Reference](#15-file-reference)
+8. [Persistent State (xi_state)](#8-persistent-state)
+9. [Backend-Managed Instances (xi_use)](#9-backend-managed-instances)
+10. [Plugin System](#10-plugin-system)
+11. [C ABI Reference](#11-c-abi-reference)
+12. [Image Pool & Handles](#12-image-pool)
+13. [Crash Isolation (SEH)](#13-crash-isolation)
+14. [WebSocket Protocol](#14-websocket-protocol)
+15. [Project Structure](#15-project-structure)
+16. [VS Code Extension](#16-vs-code-extension)
+17. [Build System](#17-build-system)
+18. [File Reference](#18-file-reference)
 
 ---
 
@@ -38,15 +42,19 @@ Complete technical reference for the xInsp2 machine vision inspection framework.
 │  Script Compiler (MSVC cl.exe)  │     │                              │
 │    └─ user's inspection.dll     │     │  Plugin UI webviews          │
 │                                 │     │    ├─ mock_camera/ui/        │
-│  Image Pool (refcounted)        │     │    └─ blob_analysis/ui/      │
+│  Image Pool (sharded, refcount) │     │    └─ blob_analysis/ui/      │
+│  SEH crash isolation            │     │                              │
 │  WebSocket Server               │     │                              │
 └─────────────────────────────────┘     └──────────────────────────────┘
 ```
 
-**Three processes:**
-- **Backend** (`xinsp-backend.exe`) — loads plugins, compiles user scripts, runs inspections, serves WS
-- **VS Code** — editor with the xInsp2 extension for UI, viewer, and project management
-- **Plugin DLLs** — loaded at runtime via the C ABI, called through function pointers
+**Key design principles:**
+- Instances are managed by the backend, not owned by scripts
+- Scripts access instances via `xi::use("name")` — survives hot-reload
+- Cross-frame state persists via `xi::state()` — serialized before unload, restored after
+- All plugin calls are SEH-guarded — script crashes don't kill the backend
+- Images cross DLL boundaries as refcounted handles via a sharded pool
+- Universal C ABI for plugins — stable across compiler versions
 
 **Data flow:**
 ```
@@ -57,8 +65,6 @@ User .cpp → compile → .dll → inspect() → VAR() → ValueStore
 ---
 
 ## 2. User Script API
-
-A user script is a single `.cpp` file compiled at runtime into a DLL.
 
 ### Minimal script
 
@@ -77,335 +83,250 @@ void xi_inspect_entry(int frame) {
 #include <xi/xi.hpp>
 #include <xi/xi_ops.hpp>
 #include <xi/xi_record.hpp>
-#include <xi/xi_plugin_handle.hpp>
-#include <xi/xi_source.hpp>
+#include <xi/xi_use.hpp>
 
 using namespace xi::ops;
 
-// Tunable parameters (show in VS Code sidebar)
 xi::Param<int>    thresh {"threshold", 128, {0, 255}};
 xi::Param<double> sigma  {"sigma",     2.0, {0.1, 10.0}};
 
-// Plugin handles (loaded via C ABI at DLL load time)
-xi::PluginHandle blobs{"detector0", "blob_analysis"};
-
-// Camera source (runs its own acquisition thread)
-static xi::TestImageSource cam("cam0", 640, 480, 10);
-struct AutoStart {
-    AutoStart()  { cam.start(); }
-    ~AutoStart() { cam.stop(); }
-} static g_auto;
-
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto img = cam.grab_wait(500);
+    // Access backend-managed instances (survive hot-reload)
+    auto& cam  = xi::use("cam0");
+    auto& det  = xi::use("detector0");
+
+    auto img = cam.grab(500);
     if (img.empty()) return;
 
     VAR(input, img);
     VAR(gray, toGray(img));
-    VAR(blurred, gaussian(gray, (int)sigma));
 
-    // Call plugin via C ABI
-    auto result = blobs.process(xi::Record()
+    // Call plugin via C ABI — zero knowledge of plugin internals
+    auto result = det.process(xi::Record()
         .image("gray", gray)
-        .set("threshold", (int)thresh)
-        .set("min_area", 50));
+        .set("threshold", (int)thresh));
 
     VAR(detection, result);
     VAR(pass, result["blob_count"].as_int() <= 3);
+
+    // Persistent state — survives hot-reload
+    int count = xi::state()["count"].as_int(0);
+    xi::state().set("count", count + 1);
+    xi::state().set("yield", result["blob_count"].as_int() <= 3 ? 1.0 : 0.0);
 }
 ```
 
-### Macros available in scripts
+### Macros
 
 | Macro | Purpose | Example |
 |-------|---------|---------|
-| `VAR(name, expr)` | Track variable for viewer display | `VAR(gray, toGray(img));` |
-| `VAR_RAW(name, expr)` | Track with uncompressed BMP preview | `VAR_RAW(binary, threshold(gray, t));` |
-| `XI_SCRIPT_EXPORT` | Portable DLL export decorator | `XI_SCRIPT_EXPORT void xi_inspect_entry(int)` |
-| `ASYNC_WRAP(fn)` | Generate `async_fn(args...)` wrapper | `ASYNC_WRAP(myFilter)` |
+| `VAR(name, expr)` | Track for viewer | `VAR(gray, toGray(img));` |
+| `VAR_RAW(name, expr)` | Track with BMP preview | `VAR_RAW(binary, thresh(gray, t));` |
+| `XI_SCRIPT_EXPORT` | DLL export decorator | `XI_SCRIPT_EXPORT void xi_inspect_entry(int)` |
+| `ASYNC_WRAP(fn)` | Generate `async_fn()` | `ASYNC_WRAP(myFilter)` |
+| `XI_PLUGIN_IMPL(Class)` | Generate 6 C ABI exports | `XI_PLUGIN_IMPL(MyPlugin)` |
 
-### Script lifecycle
+### Multi-file scripts
 
+```json
+// project.json
+{
+  "script": ["main.cpp", "calibration.cpp", "tracking.cpp"],
+  "include_dirs": ["./include"]
+}
 ```
-cmd: compile_and_load
-  → vcvars64.bat + cl.exe /LD → inspection.dll
-  → LoadLibrary → resolve xi_inspect_entry
-  → global constructors run (Param, PluginHandle register)
 
-cmd: run
-  → xi_script_reset() clears ValueStore
-  → xi_inspect_entry(frame) called
-  → xi_script_snapshot_vars() reads tracked values
-  → JSON + JPEG sent to viewer
-```
+CompileRequest supports `extra_sources` and `include_dirs`.
 
 ---
 
 ## 3. Record
 
-`xi::Record` is the universal data container. Every plugin input/output and every `VAR()` of a complex result uses Record.
-
-### Header
-
-```cpp
-#include <xi/xi_record.hpp>
-```
+The universal data container. Every plugin input/output and every complex `VAR()` uses Record. Backed by cJSON internally.
 
 ### Building
 
 ```cpp
 xi::Record r;
-r.set("count", 5);                          // int
-r.set("score", 0.95);                       // double
-r.set("pass", true);                        // bool
-r.set("label", "ok");                       // string
-r.image("input", img);                      // named image
-r.image("edges", edge_img);                 // multiple images
+r.set("count", 5);
+r.set("score", 0.95);
+r.set("pass", true);
+r.set("label", "ok");
+r.image("input", img);
 
-// Nested record
-r.set("roi", xi::Record()
-    .set("x", 100).set("y", 50)
-    .set("width", 200).set("height", 150));
+// Nested
+r.set("roi", xi::Record().set("x", 100).set("y", 50));
 
-// Array of records
-for (auto& match : matches) {
-    r.push("items", xi::Record()
-        .image("roi", match.roi)
-        .set("area", match.area)
-        .set("pass", match.pass));
-}
+// Arrays
+r.push("items", xi::Record().set("area", 247).set("pass", true));
+r.push("items", xi::Record().set("area", 95).set("pass", false));
 ```
 
-### Reading (safe chaining with defaults)
+### Reading (three styles, all safe with defaults)
 
 ```cpp
 // Style 1: chained operator[]
-int x = r["roi"]["x"].as_int(0);
-double score = r["items"][0]["score"].as_double();
-bool ok = r["pass"].as_bool(false);
-std::string s = r["label"].as_string("unknown");
+r["roi"]["x"].as_int(0);
+r["items"][0]["score"].as_double();
 
-// Style 2: path expression
-int x = r["roi.x"].as_int(0);
-double s = r["items[0].score"].as_double();
+// Style 2: path expression (auto-detected by . or [)
+r["roi.x"].as_int(0);
+r["items[0].score"].as_double();
 
 // Style 3: explicit .at()
-int x = r.at("roi.x").as_int(0);
-
-// Style 4: direct getters
-int x = r.get_int("count", 0);
-auto sub = r.get_record("roi");
-int n = r.get_array_size("items");
-
-// Check existence
-if (r["mask"].exists()) { ... }
-if (r["items"].is_array()) { ... }
-int n = r["items"].size();
-
-// Image access
-xi::Image img = r.get_image("input");
-bool has = r.has_image("mask");
+r.at("roi.x").as_int(0);
 
 // All safe — missing keys return defaults, never crash
-r["a"]["b"]["c"]["d"].as_int(42);  // → 42
+r["a"]["b"]["c"].as_int(42);  // → 42
+
+// Check existence
+r["mask"].exists();
+r["items"].size();       // array length
+r["items"].is_array();
 ```
 
-### Serialization
+### Value proxy methods
 
-```cpp
-std::string json = r.data_json();         // compact JSON
-std::string pretty = r.data_json_pretty(); // formatted JSON
-std::string keys = r.image_keys_json();   // ["input","edges"]
-```
-
-### Internals
-
-Record uses **cJSON** internally. Images use `xi::Image` with `shared_ptr<vector<uint8_t>>` — copying a Record shares pixel buffers (zero-copy).
+| Method | Returns | Default |
+|--------|---------|---------|
+| `.as_int(def)` | int | 0 |
+| `.as_double(def)` | double | 0.0 |
+| `.as_bool(def)` | bool | false |
+| `.as_string(def)` | string | "" |
+| `.as_record()` | Record (deep copy) | empty |
+| `.size()` | array length | 0 |
+| `.exists()` | bool | — |
+| `.is_null/object/array/number/string/bool()` | bool | — |
 
 ---
 
 ## 4. Image Type
 
-### Header
-
 ```cpp
 #include <xi/xi_image.hpp>
+
+xi::Image img(640, 480, 3);           // allocate
+xi::Image copy = img;                  // shared_ptr copy (zero-copy)
+uint8_t* p = img.data();              // pixel pointer
+int w = img.width, h = img.height, c = img.channels;
 ```
 
-### API
-
-```cpp
-xi::Image img(640, 480, 3);               // allocate w×h×channels
-xi::Image img(w, h, c, raw_ptr);          // copy from raw pointer
-xi::Image copy = img;                      // shared_ptr copy (zero-copy)
-
-bool       img.empty();
-size_t     img.size();                     // total bytes
-uint8_t*   img.data();                     // pixel pointer
-int        img.width, img.height, img.channels;
-int        img.stride();                   // width * channels
-```
-
-Layout: row-major, interleaved channels, uint8 pixels. 1 (gray), 3 (RGB), or 4 (RGBA).
+Layout: row-major, interleaved, uint8. Channels: 1 (gray), 3 (RGB), 4 (RGBA).
+Copy = shared_ptr reference (zero-copy for pixel data).
 
 ---
 
 ## 5. Operator Library
-
-### Header
 
 ```cpp
 #include <xi/xi_ops.hpp>
 using namespace xi::ops;
 ```
 
-### Available operators
+| Function | Description |
+|----------|-------------|
+| `toGray(img)` | RGB → grayscale (BT.601) |
+| `threshold(gray, t)` | Binary threshold |
+| `gaussian(gray, r)` | 3-pass box blur |
+| `sobel(gray)` | Edge magnitude |
+| `invert(img)` | 255 - pixel |
+| `erode(gray, r)` / `dilate(gray, r)` | Morphology |
+| `stats(gray)` | Mean, stddev, min, max |
+| `countWhiteBlobs(binary)` | Flood-fill connected components |
 
-| Function | Input | Output | Description |
-|----------|-------|--------|-------------|
-| `toGray(img)` | RGB/RGBA | Gray | BT.601 luminance conversion |
-| `threshold(gray, t, maxval)` | Gray | Gray | Binary threshold |
-| `gaussian(gray, radius)` | Gray | Gray | 3-pass box blur approximation |
-| `boxBlur(gray, radius)` | Gray | Gray | Single-pass box blur |
-| `sobel(gray)` | Gray | Gray | Edge magnitude (3×3 Sobel) |
-| `invert(img)` | Any | Same | 255 - pixel |
-| `erode(gray, radius)` | Gray | Gray | Minimum filter |
-| `dilate(gray, radius)` | Gray | Gray | Maximum filter |
-| `stats(gray)` | Gray | `ImageStats` | Mean, stddev, min, max |
-| `countWhiteBlobs(binary)` | Gray | `int` | Flood-fill connected components |
-
-### Async variants
-
-Every operator has an `async_` version for parallel execution:
-
-```cpp
-auto p1 = async_sobel(gray);
-auto p2 = async_threshold(gray, 128);
-xi::Image edges  = p1;    // await
-xi::Image binary = p2;    // await
-```
-
-### When to use xi_ops vs plugins
-
-- **xi_ops**: lightweight, inline, zero overhead. For fast per-pixel ops.
-- **Plugins**: configurable, hot-swappable, UI-equipped. For complex algorithms.
+Each has `async_` variant: `async_sobel(gray)` returns `Future<Image>`.
 
 ---
 
 ## 6. Parallelism
 
-### Header
-
 ```cpp
-#include <xi/xi_async.hpp>
+auto p1 = xi::async(featureA, gray);    // spawn
+auto p2 = xi::async(featureB, gray);    // both running
+Image a = p1;                            // implicit await
+Image b = p2;
+
+auto [a, b, c] = xi::await_all(f1, f2, f3);  // wait all
 ```
 
-### API
-
-```cpp
-// Spawn a task
-auto future = xi::async(function, arg1, arg2, ...);
-
-// Implicit await via type conversion
-ResultType result = future;
-
-// Explicit await
-auto result = future.get();
-
-// Wait for multiple
-auto [a, b, c] = xi::await_all(f1, f2, f3);
-
-// Check without blocking
-if (future.ready()) { ... }
-
-// Pre-wrap a function
-ASYNC_WRAP(myFunction)
-// Now: async_myFunction(args...) is available
-```
-
-### How it works
-
-`xi::async` spawns a `std::async(std::launch::async, ...)` task. `Future<T>` has `operator T()` that calls `.get()` — the "implicit await" pattern. Exceptions propagate through the conversion.
-
-### Example: parallel branches
-
-```cpp
-auto p1 = xi::async(featureA, gray);    // starts immediately
-auto p2 = xi::async(featureB, gray);    // starts immediately
-// both running in parallel here
-Image a = p1;                            // blocks until p1 done
-Image b = p2;                            // blocks until p2 done (likely already finished)
-```
+`Future<T>` has `operator T()` — implicit await. Exceptions propagate through.
 
 ---
 
 ## 7. Parameters
 
-### Header
-
 ```cpp
-#include <xi/xi_param.hpp>
+xi::Param<int>    t {"threshold", 128, {0, 255}};
+xi::Param<double> s {"sigma", 3.0, {0.1, 10.0}};
+int val = t;           // atomic read via implicit conversion
 ```
 
-### API
-
-```cpp
-xi::Param<int>    thresh {"threshold", 128, {0, 255}};
-xi::Param<double> sigma  {"sigma",     3.0, {0.1, 10.0}};
-xi::Param<bool>   invert {"invert",    false};
-
-// Read via implicit conversion
-int t = thresh;          // reads atomic value
-double s = sigma;
-
-// Write (clamped to range)
-thresh.set(200);
-
-// JSON round-trip
-std::string json = thresh.as_json();
-thresh.set_from_json("150");
-```
-
-Parameters auto-register in `ParamRegistry` at construction. The VS Code sidebar shows them with type/value/range. `cmd: set_param` updates them without recompiling.
+Auto-registers in `ParamRegistry`. VS Code sidebar shows with type/value/range. `cmd: set_param` updates without recompile.
 
 ---
 
-## 8. Plugin System
+## 8. Persistent State
+
+```cpp
+#include <xi/xi_state.hpp>
+
+void xi_inspect_entry(int frame) {
+    int count = xi::state()["count"].as_int(0);
+    xi::state().set("count", count + 1);
+    xi::state().set("yield", 0.95);
+}
+```
+
+**Survives:**
+- ✅ Across frames (normal execution)
+- ✅ Across hot-reloads (serialized to JSON before unload, restored after)
+- ✅ Across save/load project
+- ❌ Across backend restarts (unless project is saved)
+
+**Mechanism:** Backend calls `xi_script_get_state()` → JSON string → stores in memory → loads new DLL → calls `xi_script_set_state(json)`.
+
+---
+
+## 9. Backend-Managed Instances
+
+```cpp
+#include <xi/xi_use.hpp>
+
+void xi_inspect_entry(int frame) {
+    auto& cam = xi::use("cam0");       // backend owns this
+    auto& det = xi::use("detector0");  // backend owns this
+    auto img = cam.grab(500);
+    auto result = det.process(Record().image("gray", img));
+}
+```
+
+**Key difference from `PluginHandle`:**
+- `PluginHandle` — script loads the DLL itself, DLL reload kills the instance
+- `xi::use()` — calls back to the backend's `InstanceRegistry` via thunks, instance survives script reload
+
+**Thread safety:** The proxy cache is mutex-protected. Multiple `xi::async` threads can call `xi::use("cam0")` concurrently.
+
+Instances are created via VS Code UI (`cmd: create_instance`) or `cmd: open_project` (auto-restores from project.json).
+
+---
+
+## 10. Plugin System
 
 ### Plugin folder structure
 
 ```
 plugins/
   blob_analysis/
-    plugin.json              manifest
-    blob_analysis.dll         compiled plugin
-    ui/
-      index.html             web UI (optional)
-  mock_camera/
-    plugin.json
-    mock_camera.dll
-    ui/
-      index.html
+    plugin.json           manifest
+    blob_analysis.dll      compiled plugin
+    ui/index.html          web UI (optional)
 ```
 
-### plugin.json manifest
-
-```json
-{
-  "name": "blob_analysis",
-  "description": "Threshold + contour extraction",
-  "dll": "blob_analysis.dll",
-  "factory": "xi_plugin_create",
-  "has_ui": true
-}
-```
-
-### Writing a plugin (new C ABI)
+### Writing a plugin (C ABI)
 
 ```cpp
 #include <xi/xi_abi.hpp>
-#include <xi/xi_ops.hpp>
 
 class MyPlugin : public xi::Plugin {
 public:
@@ -413,116 +334,61 @@ public:
 
     xi::Record process(const xi::Record& input) override {
         auto img = input.get_image("frame");
+        int t = input["threshold"].as_int(128);
         auto gray = xi::ops::toGray(img);
         return xi::Record()
             .image("result", gray)
             .set("done", true);
     }
 
-    std::string exchange(const std::string& cmd) override {
-        // Handle UI commands
-        return get_def();
-    }
-
-    std::string get_def() const override {
-        return "{\"setting\": 42}";
-    }
-
-    bool set_def(const std::string& json) override {
-        // Restore settings
-        return true;
-    }
+    std::string exchange(const std::string& cmd) override { return get_def(); }
+    std::string get_def() const override { return "{\"setting\":42}"; }
+    bool set_def(const std::string& json) override { return true; }
 };
 
 XI_PLUGIN_IMPL(MyPlugin)
 ```
 
-`XI_PLUGIN_IMPL` generates 6 `extern "C"` entry points: `xi_plugin_create`, `xi_plugin_destroy`, `xi_plugin_process`, `xi_plugin_exchange`, `xi_plugin_get_def`, `xi_plugin_set_def`.
+`XI_PLUGIN_IMPL` generates: `xi_plugin_create`, `xi_plugin_destroy`, `xi_plugin_process`, `xi_plugin_exchange`, `xi_plugin_get_def`, `xi_plugin_set_def`.
 
-### Using a plugin from a script (PluginHandle)
+### Shipped plugins
 
-```cpp
-#include <xi/xi_plugin_handle.hpp>
-
-xi::PluginHandle detector{"det0", "blob_analysis"};
-
-void xi_inspect_entry(int frame) {
-    auto result = detector.process(xi::Record()
-        .image("gray", gray_img)
-        .set("threshold", 128));
-
-    int blobs = result["blob_count"].as_int();
-    auto binary = result.get_image("binary");
-}
-```
-
-`PluginHandle` auto-discovers the DLL in `plugins/<name>/`, loads it via `LoadLibrary`, resolves all C ABI entry points, and marshals `Record` ↔ `xi_record` transparently.
-
-### Plugin UI (web-based)
-
-Plugin UIs are HTML files in `plugins/<name>/ui/index.html`. They communicate with the backend via `postMessage`:
-
-```javascript
-// Send a command to the plugin instance
-vscode.postMessage({ type: 'exchange', cmd: { command: 'set_threshold', value: 128 } });
-
-// Receive status updates
-window.addEventListener('message', (e) => {
-    if (e.data.type === 'status') { /* update UI */ }
-    if (e.data.type === 'preview') { /* render image */ }
-    if (e.data.type === 'process_result') { /* show results */ }
-});
-```
+| Plugin | Type | UI | Description |
+|--------|------|-----|-------------|
+| `mock_camera` | Source | ✅ | Simulated camera, FPS/resolution config, frame counter, live preview |
+| `blob_analysis` | Processor | ✅ | Threshold + flood-fill + contour/area/centroid/bbox, canvas overlay |
+| `data_output` | Sink | ✅ | Save results to CSV/JSON (stub) |
 
 ---
 
-## 9. C ABI Reference
-
-### Header
-
-```c
-#include <xi/xi_abi.h>    // C types
-#include <xi/xi_abi.hpp>   // C++ wrapper
-```
+## 11. C ABI Reference
 
 ### Image handles
-
-Images cross the DLL boundary as opaque `uint32_t` handles managed by the host's image pool.
 
 ```c
 typedef uint32_t xi_image_handle;
 #define XI_IMAGE_NULL 0
 ```
 
-### Host API (provided by backend to plugins)
+### Host API (backend → plugin)
 
 ```c
 typedef struct xi_host_api {
-    xi_image_handle (*image_create)(int32_t w, int32_t h, int32_t channels);
+    xi_image_handle (*image_create)(int32_t w, int32_t h, int32_t ch);
     void            (*image_addref)(xi_image_handle h);
     void            (*image_release)(xi_image_handle h);
     uint8_t*        (*image_data)(xi_image_handle h);
-    int32_t         (*image_width)(xi_image_handle h);
-    int32_t         (*image_height)(xi_image_handle h);
-    int32_t         (*image_channels)(xi_image_handle h);
-    int32_t         (*image_stride)(xi_image_handle h);
+    int32_t         (*image_width/height/channels/stride)(xi_image_handle h);
     void            (*log)(int32_t level, const char* msg);
 } xi_host_api;
 ```
 
-### Record at the C boundary
+### Record at boundary
 
 ```c
-typedef struct {
-    const char*      key;
-    xi_image_handle  handle;
-} xi_record_image;
-
-typedef struct {
-    const xi_record_image* images;
-    int32_t                image_count;
-    const char*            json;
-} xi_record;
+typedef struct { const char* key; xi_image_handle handle; } xi_record_image;
+typedef struct { const xi_record_image* images; int32_t image_count; const char* json; } xi_record;
+typedef struct { xi_record_image* images; int32_t image_count; int32_t image_capacity; char* json; } xi_record_out;
 ```
 
 ### Plugin exports
@@ -530,7 +396,7 @@ typedef struct {
 ```c
 void* xi_plugin_create(const xi_host_api* host, const char* name);
 void  xi_plugin_destroy(void* inst);
-void  xi_plugin_process(void* inst, const xi_record* input, xi_record_out* output);
+void  xi_plugin_process(void* inst, const xi_record* in, xi_record_out* out);
 int   xi_plugin_exchange(void* inst, const char* cmd, char* rsp, int rsplen);
 int   xi_plugin_get_def(void* inst, char* buf, int buflen);
 int   xi_plugin_set_def(void* inst, const char* json);
@@ -538,61 +404,73 @@ int   xi_plugin_set_def(void* inst, const char* json);
 
 ### ABI stability
 
-- All types are plain C structs with fixed layout
-- No C++ types (no std::string, no vtable) cross the boundary
-- Safe across MSVC versions, potentially across compilers
-- The C++ wrapper (`xi::Plugin`, `XI_PLUGIN_IMPL`) hides all marshaling
+All types are plain C structs. No C++ types cross the boundary. Safe across MSVC versions. The C++ wrapper (`xi::Plugin` + `XI_PLUGIN_IMPL`) hides all marshaling.
 
 ---
 
-## 10. Image Pool
+## 12. Image Pool
 
-### Header
+**Sharded, refcounted, thread-safe.**
 
-```cpp
-#include <xi/xi_image_pool.hpp>
-```
-
-The image pool manages refcounted image buffers. All images that cross plugin boundaries go through the pool.
-
-### Lifecycle
+16 independent shards, each with its own `shared_mutex`. Handles distributed by `handle & 0xF`.
 
 ```
 host->image_create(w, h, ch)  → handle (refcount=1)
-host->image_addref(handle)     → refcount++    (cache it)
-host->image_data(handle)       → pixel pointer  (read/write)
-host->image_release(handle)    → refcount--     (done with it)
-                                  refcount=0 → freed
+host->image_addref(handle)     → refcount++
+host->image_data(handle)       → pixel pointer (shared_lock, ~50ns)
+host->image_release(handle)    → refcount-- (0 → freed)
 ```
 
-### Thread safety
+| Operation | Lock type | Concurrent? |
+|-----------|-----------|-------------|
+| data/width/height | shared_lock on 1 shard | Yes |
+| addref | shared_lock + atomic | Yes |
+| create | unique_lock on 1 shard | 16x less contention |
+| release (→0) | unique_lock on 1 shard | delete outside lock |
 
-- `image_data/width/height/channels/stride`: `shared_lock` (concurrent reads OK)
-- `image_create`: `unique_lock`
-- `image_addref`: `shared_lock` + `atomic` increment
-- `image_release` (refcount→0): `unique_lock`, erase, delete outside lock
-- Memory ordering: `memory_order_acq_rel` on final release
-
-### Within same MSVC build
-
-If you trust the ABI (same compiler), `xi::Image` uses `shared_ptr` internally — zero-copy between plugins without the pool. The pool is for cross-compiler safety.
+**ABA prevention:** Internal counter is `uint64_t` (585 years at 1M/sec to wrap).
 
 ---
 
-## 11. WebSocket Protocol
+## 13. Crash Isolation
+
+Uses `_set_se_translator` to convert Windows SEH exceptions to C++ exceptions. Normal `try/catch` catches segfaults:
+
+```cpp
+try {
+    script.inspect(frame);           // user code runs here
+} catch (const seh_exception& e) {
+    log("crashed: 0x%08X (%s)", e.code, e.what());
+    // backend continues, WS stays connected
+} catch (const std::exception& e) {
+    log("threw: %s", e.what());
+}
+```
+
+**Protected call sites:**
+- `xi_inspect_entry()` — user script inspection
+- `xi_script_reset()` — script reset
+- `exchange_instance` — plugin UI commands (both backend and script-DLL instances)
+- `process_instance` — plugin process via C ABI
+- `use_process_cb` — script calling plugin via `xi::use()`
+
+**Tested crash types:**
+
+| Crash | Exception code | Backend survives | Normal script after |
+|-------|---------------|------------------|-------------------|
+| Null pointer | 0xC0000005 ACCESS_VIOLATION | ✅ | ✅ |
+| Division by zero | 0xC0000094 INT_DIVIDE_BY_ZERO | ✅ | ✅ |
+| Array overrun | 0xC0000005 ACCESS_VIOLATION | ✅ | ✅ |
+| C++ throw | std::runtime_error | ✅ | ✅ |
+| Stack overflow | 0xC00000FD | ❌ needs guard thread | — |
+
+Requires `/EHa` compiler flag (async exception handling).
+
+---
+
+## 14. WebSocket Protocol
 
 Connection: `ws://127.0.0.1:7823` (configurable)
-
-### Text messages (JSON)
-
-| Type | Direction | Purpose |
-|------|-----------|---------|
-| `cmd` | client→backend | Send a command |
-| `rsp` | backend→client | Command response |
-| `vars` | backend→client | Tracked variables after a run |
-| `instances` | backend→client | Instance/param registry state |
-| `log` | backend→client | Log messages |
-| `event` | backend→client | Out-of-band notifications |
 
 ### Commands
 
@@ -601,50 +479,44 @@ Connection: `ws://127.0.0.1:7823` (configurable)
 | `ping` | — | Health check |
 | `version` | — | Backend version |
 | `shutdown` | — | Stop backend |
-| `compile_and_load` | `{path}` | Compile .cpp → .dll, load |
+| `compile_and_load` | `{path}` | Compile .cpp → .dll, load, restore state |
 | `unload_script` | — | Unload current script |
 | `run` | — | Execute one inspection |
 | `start` | `{fps}` | Start continuous mode |
 | `stop` | — | Stop continuous mode |
-| `set_param` | `{name, value}` | Update a parameter |
+| `set_param` | `{name, value}` | Update parameter |
 | `list_params` | — | Get all params |
 | `list_instances` | — | Get all instances |
 | `set_instance_def` | `{name, def}` | Update instance config |
 | `exchange_instance` | `{name, cmd}` | Send command to instance |
 | `save_instance_config` | `{name}` | Persist instance to disk |
 | `preview_instance` | `{name}` | Grab JPEG frame from source |
-| `process_instance` | `{name, source, params}` | Run plugin process via C ABI |
+| `process_instance` | `{name, source, params}` | Run plugin process |
 | `list_plugins` | — | Discovered plugins |
-| `load_plugin` | `{name}` | Load a plugin DLL |
+| `load_plugin` | `{name}` | Load plugin DLL |
 | `create_project` | `{folder, name}` | Create project structure |
-| `open_project` | `{folder}` | Open existing project |
+| `open_project` | `{folder}` | Open project (auto-loads plugins + instances) |
 | `create_instance` | `{name, plugin}` | Create plugin instance |
 | `get_project` | — | Get project state |
 | `get_plugin_ui` | `{plugin}` | Get UI folder path |
-| `save_project` | `{path}` | Save project to file |
-| `load_project` | `{path}` | Load project from file |
+| `save_project` / `load_project` | `{path}` | Save/load project file |
 
-### Binary messages (image preview)
+### Binary preview frames
 
 ```
 [4B gid BE][4B codec BE][4B width BE][4B height BE][4B channels BE][JPEG bytes]
 ```
 
-Header = 20 bytes. Codec: 0=JPEG, 1=BMP, 2=PNG.
-
-GID ranges:
-- 100-7999: inspection variable images
-- 8000-8999: process_instance output images
-- 9000-9999: config UI preview images
+GID ranges: 100-7999 inspection vars, 8000-8999 process_instance, 9000-9999 config preview.
 
 ---
 
-## 12. Project Structure
+## 15. Project Structure
 
 ```
 my_project/
-  project.json                 project config
-  inspection.cpp               user's inspection script
+  project.json                 project config (name, script, instances)
+  inspection.cpp               user script (or multiple .cpp)
   instances/
     cam0/
       instance.json            {"plugin":"mock_camera","config":{...}}
@@ -652,75 +524,34 @@ my_project/
       instance.json            {"plugin":"blob_analysis","config":{...}}
 ```
 
-### project.json
-
-```json
-{
-  "name": "my_project",
-  "script": "inspection.cpp",
-  "instances": [
-    {"name": "cam0", "plugin": "mock_camera"},
-    {"name": "detector0", "plugin": "blob_analysis"}
-  ]
-}
-```
-
-### Persistence flow
-
-- `cmd: save_project` → writes project.json + each instance.json
-- `cmd: save_instance_config` → writes one instance.json
-- `cmd: open_project` → reads project.json, scans instances/, recreates via plugin factories, restores configs
-- `cmd: load_project` → reads a saved file, restores params + instance defs via cJSON
+`open_project` auto-loads required plugins and recreates instances from saved configs.
+`save_instance_config` persists current instance state to `instance.json`.
 
 ---
 
-## 13. VS Code Extension
-
-### Activation
-
-Extension activates on startup, spawns `xinsp-backend.exe`, connects via WebSocket.
+## 16. VS Code Extension
 
 ### UI Components
 
 | Component | Type | Purpose |
 |-----------|------|---------|
-| Activity Bar icon (beaker) | View Container | Opens the xInsp2 sidebar |
-| Instances & Params | Tree View | Shows all instances and tunable params |
-| Viewer | Webview | Variable table + image preview + Record tree |
-| Plugin UI panels | Webview Panel | Per-instance config (mock_camera controls, blob analysis canvas) |
-| CodeLens | Code Annotations | Clickable ⚙/🎚/👁 above Instance/Param/VAR declarations |
+| Activity Bar (beaker) | View Container | xInsp2 sidebar |
+| Instances & Params | Tree View | All instances + tunable params |
+| Viewer | Webview | Variable table, Record tree, image preview, PASS/FAIL badges |
+| Plugin UI panels | Webview Panel | Per-instance config (camera controls, blob canvas) |
+| CodeLens | Code Annotations | ⚙ Configure / 🎚 Tune / 👁 Preview on declarations AND usages |
 
-### Commands
+### Key features
 
-| Command | Trigger | Action |
-|---------|---------|--------|
-| `xinsp2.compile` | Palette or auto-on-save | Compile active .cpp |
-| `xinsp2.run` | Palette or toolbar | Run inspection once |
-| `xinsp2.start` / `stop` | Palette | Continuous mode |
-| `xinsp2.createProject` | Palette | Create project folder |
-| `xinsp2.createInstance` | Palette | Add plugin instance |
-| `xinsp2.openInstanceUI` | CodeLens click or tree | Open plugin config panel |
-
-### Auto-compile on save
-
-Saving any `.cpp` file triggers `compile_and_load` + `run` automatically.
-
-### CodeLens annotations
-
-```cpp
-⚙ Configure cam0                    ← click opens config UI
-xi::PluginHandle blobs{"det0", "blob_analysis"};
-
-🎚 Tune threshold                    ← click focuses sidebar
-xi::Param<int> thresh{"threshold", 128, {0, 255}};
-
-👁 Preview gray                      ← click highlights in viewer
-    VAR(gray, toGray(img));
-```
+- **Auto-compile on save** — saving `.cpp` triggers compile + run
+- **CodeLens on pipeline code** — click `⚙` on any `xi::use("cam0")` line to open config
+- **Record tree viewer** — expandable JSON + image thumbnails + PASS/FAIL badges
+- **Camera live preview** — JPEG streaming at configurable FPS in the config webview
+- **Blob analysis canvas** — contours, bounding boxes, centroids drawn on HTML5 canvas
 
 ---
 
-## 14. Build System
+## 17. Build System
 
 ### Backend
 
@@ -728,12 +559,9 @@ xi::Param<int> thresh{"threshold", 128, {0, 255}};
 cd backend/build
 cmake .. -G "Visual Studio 18 2026" -A x64
 cmake --build . --config Release
-# Outputs: xinsp-backend.exe, test_xi_core.exe, test_protocol.exe
 ```
 
-CMake options:
-- `-DXINSP2_HAS_IPP=ON` — Intel IPP JPEG encoder
-- `-DXINSP2_HAS_OPENCV=ON` — OpenCV JPEG encoder (for AMD CPUs)
+Options: `-DXINSP2_HAS_IPP=ON`, `-DXINSP2_HAS_OPENCV=ON`
 
 ### Plugins
 
@@ -741,50 +569,40 @@ CMake options:
 cd plugins/build
 cmake .. -G "Visual Studio 18 2026" -A x64
 cmake --build . --config Release
-# Outputs: mock_camera.dll, blob_analysis.dll, data_output.dll
 ```
 
-### VS Code Extension
+### Extension
 
 ```bash
-cd vscode-extension
-npm install
-npm run build          # esbuild → out/extension.js
-```
-
-### Running
-
-```bash
-# Start backend
-backend/build/Release/xinsp-backend.exe --port=7823
-
-# Or launch via VS Code extension (auto-starts backend)
-# F5 from vscode-extension/ project
+cd vscode-extension && npm install && npm run build
 ```
 
 ### Tests
 
 ```bash
-# C++ unit tests
+# C++ unit
 backend/build/Release/test_xi_core.exe
 backend/build/Release/test_protocol.exe
 
-# Node integration tests (sequential)
+# Node integration (run sequentially)
 cd vscode-extension
 for f in test/ws_*.test.mjs test/protocol.test.mjs; do
     node --test --test-timeout=600000 "$f"
 done
 
+# Crash isolation
+node --test --test-timeout=600000 test/ws_crash.test.mjs
+
 # VS Code E2E with screenshots
 node test/runE2E.mjs
 
-# Full pipeline E2E (13 screenshots)
+# Full pipeline (13 screenshots)
 node test/runPipeline.mjs
 ```
 
 ---
 
-## 15. File Reference
+## 18. File Reference
 
 ### Core headers (`backend/include/xi/`)
 
@@ -795,56 +613,55 @@ node test/runPipeline.mjs
 | `xi_var.hpp` | `VAR()`, `ValueStore`, `VarTraits<T>` |
 | `xi_param.hpp` | `Param<T>`, `ParamRegistry` |
 | `xi_instance.hpp` | `Instance<T>`, `InstanceBase`, `InstanceRegistry` |
-| `xi_image.hpp` | `Image` type (shared_ptr-backed pixel buffer) |
-| `xi_record.hpp` | `Record` (cJSON-backed, named images + schemaless data) |
+| `xi_image.hpp` | `Image` (shared_ptr pixel buffer) |
+| `xi_record.hpp` | `Record` (cJSON, named images, `operator[]` chaining, path expressions) |
 | `xi_ops.hpp` | Operator library (toGray, threshold, sobel, etc.) |
-| `xi_source.hpp` | `ImageSource`, `TestImageSource` (camera interface) |
-| `xi_plugin_handle.hpp` | `PluginHandle` (call any plugin from scripts via C ABI) |
-| `xi_abi.h` | C ABI types (xi_record, xi_host_api, xi_image_handle) |
-| `xi_abi.hpp` | C++ wrapper (`Plugin` base class, `XI_PLUGIN_IMPL`) |
-| `xi_image_pool.hpp` | `ImagePool` (refcounted host-managed image storage) |
-| `xi_plugin_manager.hpp` | Plugin discovery, loading, project/instance management |
-| `xi_script.hpp` | Script ABI contract (export symbols) |
-| `xi_script_support.hpp` | Auto-generated thunks for script DLLs |
-| `xi_script_compiler.hpp` | MSVC compile driver |
+| `xi_source.hpp` | `ImageSource`, `TestImageSource` |
+| `xi_state.hpp` | `xi::state()` — persistent cross-frame/cross-reload state |
+| `xi_use.hpp` | `xi::use("name")` — proxy to backend-managed instances |
+| `xi_plugin_handle.hpp` | `PluginHandle` — direct DLL loading (use `xi::use()` instead for hot-reload safety) |
+| `xi_abi.h` | C ABI types (stable across compilers) |
+| `xi_abi.hpp` | C++ wrapper (`Plugin`, `HostImage`, `XI_PLUGIN_IMPL`) |
+| `xi_image_pool.hpp` | Sharded refcounted image pool (16 shards) |
+| `xi_plugin_manager.hpp` | Plugin discovery, loading, project/instance management, `CAbiInstanceAdapter` |
+| `xi_script.hpp` | Script ABI contract |
+| `xi_script_support.hpp` | Auto-generated thunks + state/use callbacks |
+| `xi_script_compiler.hpp` | MSVC compile driver (multi-file, vendor includes, cjson linking) |
 | `xi_script_loader.hpp` | DLL loader + symbol resolution |
 | `xi_protocol.hpp` | WS protocol types + JSON helpers |
 | `xi_ws_server.hpp` | Header-only WebSocket server (RFC 6455) |
-| `xi_jpeg.hpp` | JPEG encoder (IPP/OpenCV/stb dispatch) |
-| `xi_project.hpp` | Project file read/write helpers |
+| `xi_jpeg.hpp` | JPEG encoder (IPP/OpenCV/stb dispatch by CPU vendor) |
+| `xi_project.hpp` | Project file read/write |
 
-### Plugins (`plugins/`)
+### Plugins
 
-| Plugin | Type | UI | Description |
-|--------|------|-----|-------------|
-| `mock_camera` | Image source | Yes | Simulated camera with frame counter, configurable FPS/resolution |
-| `blob_analysis` | Processor | Yes | Threshold + flood-fill + contour/area/centroid/bbox |
-| `data_output` | Data sink | Yes | Save results to CSV/JSON (stub) |
+| Plugin | ABI | UI | Description |
+|--------|-----|-----|-------------|
+| `mock_camera` | Old (InstanceBase*) | ✅ | Simulated camera, frame counter, FPS/resolution, live preview |
+| `blob_analysis` | New (XI_PLUGIN_IMPL) | ✅ | Threshold + contour + area/centroid/bbox, canvas overlay |
+| `data_output` | Old (InstanceBase*) | ✅ | Result persistence (stub) |
 
-### Extension (`vscode-extension/`)
-
-| File | Purpose |
-|------|---------|
-| `src/extension.ts` | Activation, commands, WS client, backend lifecycle |
-| `src/wsClient.ts` | WebSocket client with auto-reconnect |
-| `src/viewerProvider.ts` | Viewer webview (variable table + Record tree + image preview) |
-| `src/instanceTree.ts` | Tree view data provider for instances/params |
-| `src/instanceCodeLens.ts` | CodeLens for ⚙/🎚/👁 annotations in C++ files |
-| `src/protocol.ts` | TypeScript protocol types + binary header codec |
-
-### Vendored (`backend/vendor/`)
+### Vendored
 
 | File | License | Purpose |
 |------|---------|---------|
-| `cJSON.c` / `cJSON.h` | MIT | JSON parser used by Record |
+| `cJSON.c/h` | MIT | JSON parser for Record |
 | `stb_image_write.h` | Public domain | JPEG encoder fallback |
 
 ---
 
-## Version History
+## Production Hardening Status
 
-- **43 commits** from initial architecture through current state
-- M0–M7 milestones complete (core headers → protocol → WS server → vars → JPEG → compile → instances → VS Code extension)
-- Plugin system with C ABI, image pool, project persistence
-- Operator library, parallel execution, camera trigger model
-- Automated E2E tests with VS Code + screenshots
+| Issue | Status | Mechanism |
+|-------|--------|-----------|
+| Script crashes kill backend | ✅ Fixed | SEH → C++ exception translation, `try/catch` on all call sites |
+| Plugin crashes kill backend | ✅ Fixed | Same SEH protection on exchange + process |
+| Image handle leak on exception | ✅ Fixed | Release on both success and error paths |
+| Thread race on `xi::use()` | ✅ Fixed | Mutex-protected proxy cache |
+| Worker thread dangling ref | ✅ Fixed | Pointer capture, join-before-restart |
+| ImagePool ABA wraparound | ✅ Fixed | 64-bit internal counter |
+| HostImage double-addref | ✅ Fixed | `from_handle()` takes ownership without addref |
+| Stale instances on project switch | ✅ Fixed | Clear InstanceRegistry on open_project |
+| Stack overflow | ⚠ Known | Kills process — needs guard thread (future) |
+| Infinite loop in script | ⚠ Known | Needs watchdog thread (future) |
+| Heap corruption from script | ⚠ Inherent | Same-process limitation — needs subprocess for full isolation |
