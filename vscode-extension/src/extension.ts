@@ -96,9 +96,10 @@ export function activate(context: vscode.ExtensionContext) {
         const jpegBuf  = buf.subarray(PREVIEW_HEADER_SIZE);
         const b64      = jpegBuf.toString('base64');
 
-        if (gid === 9999) {
-            // Config preview — route to all open plugin UI panels
-            for (const panel of pluginUIPanels.values()) {
+        if (gid >= 9000 && gid < 10000) {
+            // Config preview — route to the specific panel
+            const panel = previewGidToPanel.get(gid);
+            if (panel) {
                 panel.webview.postMessage({
                     type: 'preview',
                     width, height,
@@ -302,6 +303,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Open a plugin's web UI in a webview panel for a specific instance
     const pluginUIPanels = new Map<string, vscode.WebviewPanel>();
+    const previewGidToPanel = new Map<number, vscode.WebviewPanel>();
 
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.openInstanceUI', async (instanceName?: string, pluginName?: string) => {
@@ -337,7 +339,12 @@ export function activate(context: vscode.ExtensionContext) {
             );
             panel.webview.html = html;
             pluginUIPanels.set(instanceName, panel);
-            panel.onDidDispose(() => pluginUIPanels.delete(instanceName));
+            panel.onDidDispose(() => {
+                pluginUIPanels.delete(instanceName);
+                for (const [gid, p] of previewGidToPanel) {
+                    if (p === panel) previewGidToPanel.delete(gid);
+                }
+            });
 
             // Wire postMessage ↔ exchange_instance + preview polling
             panel.webview.onDidReceiveMessage(async (msg: any) => {
@@ -352,8 +359,11 @@ export function activate(context: vscode.ExtensionContext) {
                         )});
                     }
                 } else if (msg.type === 'request_preview') {
-                    // Grab a frame from the instance and send preview
-                    sendCmd('preview_instance', { name: instanceName }).catch(() => {});
+                    sendCmd('preview_instance', { name: instanceName }).then((rsp: any) => {
+                        if (rsp.ok && rsp.data?.gid) {
+                            previewGidToPanel.set(rsp.data.gid, panel);
+                        }
+                    }).catch(() => {});
                 }
             });
 
@@ -383,6 +393,9 @@ export function activate(context: vscode.ExtensionContext) {
         registerPluginPanel: (name: string, panel: vscode.WebviewPanel) => {
             pluginUIPanels.set(name, panel);
             panel.onDidDispose(() => pluginUIPanels.delete(name));
+        },
+        registerPreviewGid: (gid: number, panel: vscode.WebviewPanel) => {
+            previewGidToPanel.set(gid, panel);
         },
     };
 

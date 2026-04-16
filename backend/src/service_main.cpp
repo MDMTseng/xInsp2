@@ -648,12 +648,19 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         std::vector<uint8_t> jpeg;
         if (!xi::encode_jpeg(img, 80, jpeg)) { send_rsp_ok(srv, id, R"({"frame":false})"); return; }
 
-        // Send rsp first, then the binary preview frame
-        send_rsp_ok(srv, id, R"({"frame":true})");
+        // Use a hash of the instance name as gid so the extension can
+        // route the preview to the correct panel.
+        uint32_t preview_gid = 9000;
+        for (char c : *iname) preview_gid = preview_gid * 31 + (uint8_t)c;
+        preview_gid = 9000 + (preview_gid % 1000);
+
+        char gid_buf[64];
+        std::snprintf(gid_buf, sizeof(gid_buf), R"({"frame":true,"gid":%u})", preview_gid);
+        send_rsp_ok(srv, id, gid_buf);
 
         std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
         xp::PreviewHeader hd;
-        hd.gid = 9999; // reserved gid for config preview
+        hd.gid = preview_gid;
         hd.codec = (uint32_t)xp::Codec::JPEG;
         hd.width = (uint32_t)img.width;
         hd.height = (uint32_t)img.height;

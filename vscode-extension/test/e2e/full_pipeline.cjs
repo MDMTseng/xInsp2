@@ -141,8 +141,11 @@ async function run() {
                 if (msg.type === 'exchange' && msg.cmd) {
                     await camExchange(msg.cmd);
                 } else if (msg.type === 'request_preview') {
-                    // Grab frame from camera and send binary preview
-                    sendCmd('preview_instance', { name: 'cam0' }).catch(() => {});
+                    const r = await sendCmd('preview_instance', { name: 'cam0' }).catch(() => null);
+                    // Register the gid → panel mapping so binary frames route correctly
+                    if (r && r.ok && r.data && r.data.gid && api?.registerPreviewGid) {
+                        api.registerPreviewGid(r.data.gid, camPanel);
+                    }
                 }
             });
             // Register panel so extension routes preview frames to it
