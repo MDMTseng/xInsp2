@@ -61,6 +61,15 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.focusParam', (paramName: string) => {
             vscode.window.showInformationMessage(`xInsp2: param "${paramName}" — use the sidebar to tune`);
+            try { vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}
+        })
+    );
+
+    // Preview variable command (for CodeLens click on VAR lines)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.previewVar', (varName: string) => {
+            viewerProvider.highlightVar(varName);
+            try { vscode.commands.executeCommand('xinsp2.viewer.focus'); } catch {}
         })
     );
 

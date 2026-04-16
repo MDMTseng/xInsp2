@@ -20,6 +20,10 @@ export class ViewerProvider implements vscode.WebviewViewProvider {
         this.view?.webview.postMessage({ type: 'vars', data: vars });
     }
 
+    highlightVar(varName: string): void {
+        this.view?.webview.postMessage({ type: 'highlight', name: varName });
+    }
+
     postPreview(gid: number, width: number, height: number, jpegBase64: string): void {
         this.view?.webview.postMessage({
             type: 'preview',
@@ -44,6 +48,7 @@ export class ViewerProvider implements vscode.WebviewViewProvider {
     .img-preview { max-width: 100%; border: 1px solid var(--vscode-widget-border); margin: 4px 0; cursor: pointer; }
     .img-label { font-size: 11px; opacity: 0.6; }
     #no-data { opacity: 0.5; font-style: italic; }
+    tr.highlighted { background: var(--vscode-editor-selectionBackground, rgba(38,79,120,0.5)); }
 </style>
 </head>
 <body>
@@ -66,8 +71,30 @@ window.addEventListener('message', (e) => {
         renderVars(msg.data);
     } else if (msg.type === 'preview') {
         renderPreview(msg.gid, msg.width, msg.height, msg.jpeg);
+    } else if (msg.type === 'highlight') {
+        highlightVar(msg.name);
     }
 });
+
+function highlightVar(name) {
+    // Remove old highlights
+    document.querySelectorAll('tr.highlighted').forEach(el => el.classList.remove('highlighted'));
+    // Find and highlight the row + scroll to it
+    const rows = document.querySelectorAll('#vars-body tr');
+    for (const row of rows) {
+        if (row.children[0]?.textContent === name) {
+            row.classList.add('highlighted');
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // Also show the image if it's an image var
+            const gidMatch = row.dataset?.gid;
+            if (gidMatch) {
+                const imgDiv = document.getElementById('img-' + gidMatch);
+                if (imgDiv) imgDiv.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            break;
+        }
+    }
+}
 
 function renderVars(vars) {
     document.getElementById('no-data').style.display = 'none';
