@@ -135,12 +135,76 @@ public:
         return *this;
     }
 
-    // --- Accessors ---
+    // --- Data getters (with defaults) ---
+
+    int get_int(const std::string& key, int def = 0) const {
+        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
+        return (item && cJSON_IsNumber(item)) ? item->valueint : def;
+    }
+
+    double get_double(const std::string& key, double def = 0.0) const {
+        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
+        return (item && cJSON_IsNumber(item)) ? item->valuedouble : def;
+    }
+
+    bool get_bool(const std::string& key, bool def = false) const {
+        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
+        return item ? cJSON_IsTrue(item) : def;
+    }
+
+    std::string get_string(const std::string& key, const std::string& def = "") const {
+        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
+        return (item && cJSON_IsString(item)) ? item->valuestring : def;
+    }
+
+    bool has(const std::string& key) const {
+        return cJSON_GetObjectItem(json_, key.c_str()) != nullptr;
+    }
+
+    // Get a nested Record (returns empty Record if not found)
+    Record get_record(const std::string& key) const {
+        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
+        if (!item || !cJSON_IsObject(item)) return {};
+        Record r;
+        cJSON_Delete(r.json_);
+        r.json_ = cJSON_Duplicate(item, true);
+        return r;
+    }
+
+    // Get array length (returns 0 if key not found or not array)
+    int get_array_size(const std::string& key) const {
+        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
+        return (item && cJSON_IsArray(item)) ? cJSON_GetArraySize(item) : 0;
+    }
+
+    // Get array element as Record (for arrays of objects)
+    Record get_array_item(const std::string& key, int index) const {
+        cJSON* arr = cJSON_GetObjectItem(json_, key.c_str());
+        if (!arr || !cJSON_IsArray(arr)) return {};
+        cJSON* item = cJSON_GetArrayItem(arr, index);
+        if (!item || !cJSON_IsObject(item)) return {};
+        Record r;
+        cJSON_Delete(r.json_);
+        r.json_ = cJSON_Duplicate(item, true);
+        return r;
+    }
+
+    // --- Image accessors ---
     const std::map<std::string, Image>& images() const { return images_; }
     cJSON* json() const { return json_; }
 
     bool has_image(const std::string& key) const { return images_.count(key) > 0; }
-    const Image& get_image(const std::string& key) const { return images_.at(key); }
+
+    const Image& get_image(const std::string& key) const {
+        static const Image empty;
+        auto it = images_.find(key);
+        return it != images_.end() ? it->second : empty;
+    }
+
+    Image get_image(const std::string& key, const Image& def) const {
+        auto it = images_.find(key);
+        return it != images_.end() ? it->second : def;
+    }
 
     // --- Serialization ---
     std::string data_json() const {
