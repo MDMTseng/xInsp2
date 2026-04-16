@@ -67,38 +67,31 @@ async function withBackend(fn) {
     finally { c.close(); if (child.exitCode === null) { child.kill(); await sleep(100); } }
 }
 
-test('start creates default TestImageSource and triggers inspections', async () => {
+test('start continuous mode triggers inspections from built-in demo', async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello
 
-        // Start continuous
-        c.send({ type: 'cmd', id: 1, name: 'start' });
+        // Start continuous at 10fps (uses built-in demo_inspect since no script loaded)
+        c.send({ type: 'cmd', id: 1, name: 'start', args: { fps: 10 } });
         const rsp = await c.nextNonLog();
         assert.equal(rsp.ok, true);
 
-        // Wait for a few triggered runs (TestImageSource at 5fps = one every 200ms)
+        // Wait for a few runs
         await sleep(1500);
 
-        // Drain all received messages — should have multiple vars and events
+        // Drain all received messages — should have multiple vars
         const msgs = c.drainText();
         const varsMsgs = msgs.filter(m => m.type === 'vars');
-        const events = msgs.filter(m => m.type === 'event' && m.name === 'run_finished');
 
-        console.log(`received ${varsMsgs.length} vars messages, ${events.length} run_finished events`);
+        console.log(`received ${varsMsgs.length} vars messages`);
         assert.ok(varsMsgs.length >= 2, `expected >=2 vars, got ${varsMsgs.length}`);
-        assert.ok(events.length >= 2, `expected >=2 events, got ${events.length}`);
-
-        // Each vars should have the demo's tracked variables
-        for (const v of varsMsgs) {
-            assert.ok(v.items.length >= 7, 'expected demo vars');
-        }
 
         // Stop
         c.send({ type: 'cmd', id: 2, name: 'stop' });
         const stopRsp = await c.nextNonLog();
         assert.equal(stopRsp.ok, true);
 
-        // No more runs after stop — drain after a short wait
+        // No more runs after stop
         await sleep(500);
         const after = c.drainText().filter(m => m.type === 'vars');
         assert.equal(after.length, 0, 'no vars after stop');

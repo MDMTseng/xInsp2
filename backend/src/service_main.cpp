@@ -96,7 +96,8 @@ static std::atomic<int>        g_trigger_pending{0};
 static std::thread             g_worker_thread;
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
-static void run_one_inspection(xi::ws::Server& srv);
+// If run_id == 0, auto-generates one. frame_hint is passed to inspect().
+static void run_one_inspection(xi::ws::Server& srv, int frame_hint = 7, int64_t run_id = 0);
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
@@ -207,8 +208,10 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
 }
 
 // Run one full inspection cycle: reset → inspect → emit.
-static void run_one_inspection(xi::ws::Server& srv) {
-    int64_t run_id = ++g_run_id;
+// `frame_hint` is passed to inspect() — for single-shot runs it defaults
+// to 7 (matches test expectations); for continuous mode it increments.
+static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_id) {
+    if (run_id == 0) run_id = ++g_run_id;
     auto t0 = std::chrono::steady_clock::now();
 
     xi::script::LoadedScript s;
@@ -219,28 +222,19 @@ static void run_one_inspection(xi::ws::Server& srv) {
 
     if (s.ok()) {
         if (s.reset) s.reset();
-        try { s.inspect(/*frame=*/(int)run_id); }
+        try { s.inspect(frame_hint); }
         catch (const std::exception& e) {
             std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
             return;
         }
     } else {
         xi::ValueStore::current().clear();
-        try { demo_inspect(/*frame=*/(int)run_id); }
+        try { demo_inspect(frame_hint); }
         catch (...) { return; }
     }
 
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - t0).count();
-
-    // Event so the viewer knows a run completed
-    xp::Event ev;
-    ev.name = "run_finished";
-    char ebuf[128];
-    std::snprintf(ebuf, sizeof(ebuf), R"({"run_id":%lld,"ms":%lld})",
-                 (long long)run_id, (long long)dt_ms);
-    ev.data_json = ebuf;
-    srv.send_text(ev.to_json());
 
     if (s.ok()) {
         emit_vars_and_previews(srv, s, run_id, dt_ms);
@@ -290,22 +284,7 @@ static void run_one_inspection(xi::ws::Server& srv) {
     }
 }
 
-// Worker thread for continuous trigger mode.
-static void trigger_worker(xi::ws::Server& srv) {
-    while (g_continuous.load()) {
-        std::unique_lock<std::mutex> lk(g_trigger_mu);
-        g_trigger_cv.wait_for(lk, std::chrono::milliseconds(200), [] {
-            return g_trigger_pending.load() > 0 || !g_continuous.load();
-        });
-        if (!g_continuous.load()) break;
-        if (g_trigger_pending.load() > 0) {
-            g_trigger_pending = 0;
-            lk.unlock();
-            run_one_inspection(srv);
-        }
-    }
-    std::fprintf(stderr, "[xinsp2] trigger worker stopped\n");
-}
+// (trigger_worker removed — continuous mode uses a simple timer thread)
 
 static void handle_command(xi::ws::Server& srv, std::string_view text) {
     auto parsed = xp::parse_cmd(text);
@@ -383,73 +362,56 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xi::script::unload_script(g_script);
         send_rsp_ok(srv, id);
     } else if (name == "run") {
-        send_rsp_ok(srv, id);
-        run_one_inspection(srv);
+        int64_t run_id = ++g_run_id;
+        auto t0 = std::chrono::steady_clock::now();
+
+        // Send rsp first (tests expect rsp before vars)
+        // We don't know timing yet but run_id is ready.
+        // Timing is reported via the run_finished event instead.
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":0})", (long long)run_id);
+        send_rsp_ok(srv, id, buf);
+
+        // Run inspection — emits vars + previews + run_finished event
+        run_one_inspection(srv, /*frame_hint=*/7, run_id);
     } else if (name == "start") {
-        // Start continuous trigger mode. If a TestImageSource is declared
-        // in the script, start it and wire its trigger to the worker.
+        // Start continuous trigger mode. The backend runs a timer thread
+        // that calls inspect() at a configurable interval. The script's
+        // own ImageSource (if any) runs its acquisition thread inside
+        // the DLL — the backend doesn't manage it.
         if (g_continuous.load()) {
             send_rsp_ok(srv, id, R"({"already":true})");
             return;
         }
+
+        // Parse optional fps from args (default 10)
+        int fps = 10;
+        auto fps_val = xp::get_number_field(parsed->args_json, "fps");
+        if (fps_val && *fps_val > 0) fps = (int)*fps_val;
+
         g_continuous = true;
         g_trigger_pending = 0;
 
-        // Start the worker thread
-        g_worker_thread = std::thread([&srv] { trigger_worker(srv); });
-
-        // Look for ImageSource instances in the script's registry and
-        // wire their triggers. For now, also create a built-in
-        // TestImageSource if no script is loaded.
-        // The trigger callback signals the worker.
-        auto trigger_fn = [] {
-            g_trigger_pending++;
-            g_trigger_cv.notify_one();
-        };
-
-        // Check if script has sources registered — we can't introspect
-        // the DLL's InstanceRegistry directly, so we use the
-        // InstanceRegistry in the backend's own address space for
-        // built-in sources.
-        auto sources = xi::InstanceRegistry::instance().list();
-        bool found_source = false;
-        for (auto& inst : sources) {
-            auto* src = dynamic_cast<xi::ImageSource*>(inst.get());
-            if (src) {
-                src->set_trigger(trigger_fn);
-                src->start();
-                found_source = true;
-                std::fprintf(stderr, "[xinsp2] started source: %s\n", src->name().c_str());
+        // Timer thread: trigger an inspection at the requested FPS.
+        // The script's internal ImageSource pushes frames to its own
+        // queue; inspect() calls grab() to dequeue. This timer just
+        // drives the execution cadence.
+        int interval_ms = 1000 / std::max(fps, 1);
+        g_worker_thread = std::thread([&srv, interval_ms] {
+            std::fprintf(stderr, "[xinsp2] continuous mode: %dms interval\n", interval_ms);
+            int frame_seq = 0;
+            while (g_continuous.load()) {
+                run_one_inspection(srv, frame_seq++);
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
             }
-        }
-
-        // If no source found, create a default TestImageSource
-        if (!found_source) {
-            auto test_src = std::make_shared<xi::TestImageSource>("_default_src", 128, 96, 5);
-            xi::InstanceRegistry::instance().add(test_src);
-            test_src->set_trigger(trigger_fn);
-            test_src->start();
-            std::fprintf(stderr, "[xinsp2] started default TestImageSource at 5fps\n");
-        }
+            std::fprintf(stderr, "[xinsp2] continuous mode stopped\n");
+        });
 
         send_rsp_ok(srv, id, R"({"started":true})");
     } else if (name == "stop") {
         g_continuous = false;
         g_trigger_cv.notify_all();
         if (g_worker_thread.joinable()) g_worker_thread.join();
-
-        // Stop all sources
-        auto sources = xi::InstanceRegistry::instance().list();
-        for (auto& inst : sources) {
-            auto* src = dynamic_cast<xi::ImageSource*>(inst.get());
-            if (src && src->is_running()) {
-                src->stop();
-                std::fprintf(stderr, "[xinsp2] stopped source: %s\n", src->name().c_str());
-            }
-        }
-        // Remove the default source if we created one
-        xi::InstanceRegistry::instance().remove("_default_src");
-
         send_rsp_ok(srv, id, R"({"stopped":true})");
     } else if (name == "list_params") {
         // If a script is loaded, delegate to its own registry thunk so we

@@ -1,8 +1,10 @@
 //
 // defect_detection.cpp — example inspection using xi::ops.
 //
-// Generates a synthetic test image with "defects" (bright spots),
-// processes it through the standard pipeline, counts blobs.
+// Demonstrates the camera trigger model:
+// - TestImageSource runs its own acquisition thread inside the DLL
+// - cam->grab() dequeues the latest frame
+// - The backend calls xi_inspect_entry on each trigger
 //
 
 #include <xi/xi.hpp>
@@ -12,39 +14,33 @@
 
 using namespace xi::ops;
 
-// Tunable parameters — show up as sliders in the VS Code UI
+// Tunable parameters — show up in the VS Code Params panel
 static xi::Param<int>    blur_radius {"blur_radius",  2,   {0, 10}};
 static xi::Param<int>    thresh_val  {"thresh_val",   180, {0, 255}};
 static xi::Param<int>    morph_radius{"morph_radius", 1,   {0, 5}};
 
-// Image source — generates synthetic test images with random-ish "defects"
-static xi::Instance<xi::TestImageSource> cam{"cam0"};
+// Image source — runs its own thread, generates frames at 5 FPS.
+// In a real system this would be xi::Instance<GigECamera> or similar.
+static auto& cam_source() {
+    static xi::TestImageSource src("cam0", 320, 240, 5);
+    return src;
+}
+
+// Auto-start the source when the DLL loads. Auto-stop on unload.
+struct AutoStart {
+    AutoStart()  { cam_source().start(); }
+    ~AutoStart() { cam_source().stop(); }
+} static g_auto_start;
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    // Grab latest frame from the source
-    xi::Image rgb = cam->grab();
-    if (rgb.empty()) {
-        // In single-shot mode, generate a test image
-        rgb = xi::Image(320, 240, 3);
-        uint8_t* p = rgb.data();
-        for (int y = 0; y < 240; ++y) {
-            for (int x = 0; x < 320; ++x) {
-                int i = (y * 320 + x) * 3;
-                // Background gradient
-                p[i + 0] = static_cast<uint8_t>((x * 180 / 320 + frame) & 0xFF);
-                p[i + 1] = static_cast<uint8_t>((y * 150 / 240 + frame) & 0xFF);
-                p[i + 2] = static_cast<uint8_t>(100);
-                // Add bright spots as "defects"
-                int cx1 = 80 + (frame * 3) % 60;
-                int cy1 = 60 + (frame * 7) % 40;
-                int cx2 = 200 + (frame * 5) % 50;
-                int cy2 = 150 + (frame * 11) % 30;
-                if ((x-cx1)*(x-cx1) + (y-cy1)*(y-cy1) < 400) { p[i] = 255; p[i+1] = 255; p[i+2] = 255; }
-                if ((x-cx2)*(x-cx2) + (y-cy2)*(y-cy2) < 300) { p[i] = 240; p[i+1] = 240; p[i+2] = 240; }
-            }
-        }
-    }
+    // Grab latest frame from the source's internal queue.
+    // If the source is running, this returns the newest frame and discards
+    // older ones. If the queue is empty (source not started or too slow),
+    // grab_wait blocks up to 500ms for a frame.
+    xi::Image rgb = cam_source().grab_wait(500);
+    if (rgb.empty()) return;  // no frame available
+
     VAR(input, rgb);
 
     // Standard inspection pipeline
