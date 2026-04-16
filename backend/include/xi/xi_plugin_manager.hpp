@@ -34,6 +34,8 @@
   #include <windows.h>
 #endif
 
+#include "xi_abi.h"
+#include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
 
 #include <filesystem>
@@ -58,8 +60,70 @@ struct PluginInfo {
     std::string ui_path;       // absolute path to ui/ folder (if has_ui)
     HMODULE     handle = nullptr;
 
+    // Old-style factory: InstanceBase* (name)
     using FactoryFn = InstanceBase* (*)(const char* instance_name);
     FactoryFn factory = nullptr;
+    // New C ABI factory: void* (host_api, name)
+    using CFactoryFn = void* (*)(const xi_host_api* host, const char* name);
+    CFactoryFn c_factory = nullptr;
+};
+
+// Adapter: wraps a C ABI plugin instance as an InstanceBase
+class CAbiInstanceAdapter : public InstanceBase {
+public:
+    CAbiInstanceAdapter(std::string name, std::string plugin_name,
+                        HMODULE dll, void* inst)
+        : name_(std::move(name)), plugin_name_(std::move(plugin_name)),
+          dll_(dll), inst_(inst) {
+        // Resolve function pointers
+        exchange_fn_ = reinterpret_cast<xi_plugin_exchange_fn>(GetProcAddress(dll_, "xi_plugin_exchange"));
+        get_def_fn_  = reinterpret_cast<xi_plugin_get_def_fn>(GetProcAddress(dll_, "xi_plugin_get_def"));
+        set_def_fn_  = reinterpret_cast<xi_plugin_set_def_fn>(GetProcAddress(dll_, "xi_plugin_set_def"));
+        destroy_fn_  = reinterpret_cast<xi_plugin_destroy_fn>(GetProcAddress(dll_, "xi_plugin_destroy"));
+        process_fn_  = reinterpret_cast<xi_plugin_process_fn>(GetProcAddress(dll_, "xi_plugin_process"));
+    }
+
+    ~CAbiInstanceAdapter() override {
+        if (destroy_fn_ && inst_) destroy_fn_(inst_);
+    }
+
+    const std::string& name() const override { return name_; }
+    std::string plugin_name() const override { return plugin_name_; }
+
+    std::string get_def() const override {
+        if (!get_def_fn_ || !inst_) return "{}";
+        std::vector<char> buf(4096);
+        int n = get_def_fn_(inst_, buf.data(), (int)buf.size());
+        if (n < 0) { buf.resize((size_t)(-n) + 1024); n = get_def_fn_(inst_, buf.data(), (int)buf.size()); }
+        return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
+    }
+
+    bool set_def(const std::string& j) override {
+        if (!set_def_fn_ || !inst_) return false;
+        return set_def_fn_(inst_, j.c_str()) == 0;
+    }
+
+    std::string exchange(const std::string& cmd_json) override {
+        if (!exchange_fn_ || !inst_) return "{}";
+        std::vector<char> buf(64 * 1024);
+        int n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size());
+        if (n < 0) { buf.resize((size_t)(-n) + 1024); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }
+        return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
+    }
+
+    void* raw_instance() const { return inst_; }
+    xi_plugin_process_fn process_fn() const { return process_fn_; }
+
+private:
+    std::string name_;
+    std::string plugin_name_;
+    HMODULE dll_;
+    void* inst_;
+    xi_plugin_exchange_fn exchange_fn_ = nullptr;
+    xi_plugin_get_def_fn  get_def_fn_ = nullptr;
+    xi_plugin_set_def_fn  set_def_fn_ = nullptr;
+    xi_plugin_destroy_fn  destroy_fn_ = nullptr;
+    xi_plugin_process_fn  process_fn_ = nullptr;
 };
 
 struct InstanceInfo {
@@ -111,9 +175,15 @@ public:
         pi.handle = LoadLibraryA(dll_path.string().c_str());
         if (!pi.handle) return false;
 
-        pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
+        // Try new C ABI first (xi_host_api*, const char*) → void*
+        pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
             GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
-        return pi.factory != nullptr;
+        // Try old-style factory as fallback
+        if (!pi.c_factory) {
+            pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
+                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+        }
+        return pi.c_factory != nullptr || pi.factory != nullptr;
     }
 
     // List all discovered plugins (loaded or not).
@@ -233,9 +303,10 @@ public:
         if (project_.folder_path.empty()) return nullptr;
 
         auto pit = plugins_.find(plugin_name);
-        if (pit == plugins_.end() || !pit->second.factory) return nullptr;
+        if (pit == plugins_.end()) return nullptr;
+        auto& pi = pit->second;
+        if (!pi.factory && !pi.c_factory) return nullptr;
 
-        // Create instance folder
         auto inst_folder = std::filesystem::path(project_.folder_path) / "instances" / instance_name;
         std::filesystem::create_directories(inst_folder);
 
@@ -244,10 +315,19 @@ public:
         ii.plugin_name = plugin_name;
         ii.folder_path = inst_folder.string();
 
-        // Create the instance object
-        auto* raw = pit->second.factory(instance_name.c_str());
-        if (!raw) return nullptr;
-        ii.instance.reset(raw);
+        if (pi.c_factory) {
+            // New C ABI — create via host API
+            static xi_host_api host = ImagePool::make_host_api();
+            void* raw = pi.c_factory(&host, instance_name.c_str());
+            if (!raw) return nullptr;
+            ii.instance = std::make_shared<CAbiInstanceAdapter>(
+                instance_name, plugin_name, pi.handle, raw);
+        } else {
+            // Old-style factory
+            auto* raw = pi.factory(instance_name.c_str());
+            if (!raw) return nullptr;
+            ii.instance.reset(raw);
+        }
         InstanceRegistry::instance().add(ii.instance);
 
         // Save instance.json

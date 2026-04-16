@@ -390,6 +390,17 @@ export function activate(context: vscode.ExtensionContext) {
                             previewGidToPanel.set(rsp.data.gid, panel);
                         }
                     }).catch(() => {});
+                } else if (msg.type === 'request_process') {
+                    // Plugin UI wants to run process() and see results
+                    sendCmd('exchange_instance', {
+                        name: instanceName,
+                        cmd: msg.cmd || { command: 'get_status' },
+                    }).then((rsp: any) => {
+                        if (rsp.ok && rsp.data) {
+                            const parsed = typeof rsp.data === 'string' ? JSON.parse(rsp.data) : rsp.data;
+                            panel.webview.postMessage({ type: 'process_result', ...parsed });
+                        }
+                    }).catch(() => {});
                 }
             });
 

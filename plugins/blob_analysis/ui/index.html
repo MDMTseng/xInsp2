@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground, #ccc); background: var(--vscode-editor-background, #1e1e1e); padding: 12px; margin: 0; }
+    h2 { margin: 0 0 8px; font-size: 15px; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    label { min-width: 90px; font-size: 12px; }
+    input[type=range] { flex: 1; }
+    input[type=number] { width: 60px; padding: 3px; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); font-size: 12px; }
+    .val { min-width: 30px; text-align: right; font-family: monospace; font-size: 12px; }
+    button { padding: 5px 14px; cursor: pointer; border: none; border-radius: 3px; font-size: 12px; background: #2196f3; color: white; }
+    .checkbox-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+
+    .canvas-container { position: relative; margin-top: 10px; background: #000; border: 1px solid var(--vscode-widget-border, #444); }
+    canvas { display: block; max-width: 100%; }
+
+    .stats { margin-top: 10px; padding: 8px; background: var(--vscode-input-background, #3c3c3c); border-radius: 4px; font-size: 12px; }
+    .stats-header { font-weight: 600; margin-bottom: 4px; }
+    .blob-row { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-family: monospace; font-size: 11px; }
+    .blob-row:hover { background: rgba(255,255,255,0.05); }
+    .pass { color: #4caf50; } .fail { color: #f44336; }
+
+    .legend { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; opacity: 0.6; }
+    .legend-color { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: middle; margin-right: 3px; }
+</style>
+</head>
+<body>
+    <h2>Blob Analysis</h2>
+
+    <div class="row">
+        <label>Threshold:</label>
+        <input type="range" id="threshold" min="0" max="255" value="128" oninput="onParamChange()">
+        <span class="val" id="threshVal">128</span>
+    </div>
+    <div class="row">
+        <label>Min Area:</label>
+        <input type="number" id="minArea" value="10" min="1" max="100000" onchange="onParamChange()">
+    </div>
+    <div class="row">
+        <label>Max Area:</label>
+        <input type="number" id="maxArea" value="999999" min="1" max="9999999" onchange="onParamChange()">
+    </div>
+    <div class="checkbox-row">
+        <input type="checkbox" id="invert" onchange="onParamChange()">
+        <label for="invert" style="min-width:auto">Invert threshold</label>
+    </div>
+    <div class="row">
+        <button onclick="onApply()">Apply & Run</button>
+    </div>
+
+    <div class="canvas-container">
+        <canvas id="canvas" width="640" height="480"></canvas>
+    </div>
+
+    <div class="legend">
+        <span><span class="legend-color" style="background:#0f0"></span>Contour</span>
+        <span><span class="legend-color" style="background:#ff0"></span>Bounding Box</span>
+        <span><span class="legend-color" style="background:#f00"></span>Centroid</span>
+    </div>
+
+    <div class="stats" id="statsPanel" style="display:none">
+        <div class="stats-header">Blobs: <span id="blobCount">0</span></div>
+        <div id="blobList"></div>
+    </div>
+
+<script>
+    const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let currentImage = null;
+    let currentBlobs = null;
+
+    // Contour colors — cycle through for multiple blobs
+    const COLORS = ['#00ff00','#00ccff','#ff6600','#ff00ff','#ffff00','#00ffcc','#ff3366','#66ff33'];
+
+    function sendCmd(cmd) {
+        if (vscode) vscode.postMessage({ type: 'exchange', cmd });
+    }
+
+    function onParamChange() {
+        document.getElementById('threshVal').textContent = document.getElementById('threshold').value;
+    }
+
+    function onApply() {
+        const thresh = parseInt(document.getElementById('threshold').value);
+        const minArea = parseInt(document.getElementById('minArea').value);
+        const maxArea = parseInt(document.getElementById('maxArea').value);
+        const invert = document.getElementById('invert').checked;
+        sendCmd({ command: 'set_threshold', value: thresh });
+        sendCmd({ command: 'set_min_area', value: minArea });
+        if (invert) sendCmd({ command: 'set_invert', value: true });
+        else        sendCmd({ command: 'set_invert', value: false });
+    }
+
+    function drawOverlay() {
+        if (!currentImage) return;
+
+        // Draw the base image
+        canvas.width = currentImage.width;
+        canvas.height = currentImage.height;
+        ctx.drawImage(currentImage, 0, 0);
+
+        if (!currentBlobs || !currentBlobs.length) return;
+
+        for (let i = 0; i < currentBlobs.length; ++i) {
+            const blob = currentBlobs[i];
+            const color = COLORS[i % COLORS.length];
+
+            // Draw contour points
+            if (blob.contour && blob.contour.length > 0) {
+                ctx.fillStyle = color;
+                for (const pt of blob.contour) {
+                    ctx.fillRect(pt.x, pt.y, 1, 1);
+                }
+
+                // Draw contour as connected path
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1.5;
+                ctx.globalAlpha = 0.8;
+                ctx.beginPath();
+                ctx.moveTo(blob.contour[0].x, blob.contour[0].y);
+                for (let j = 1; j < blob.contour.length; ++j) {
+                    ctx.lineTo(blob.contour[j].x, blob.contour[j].y);
+                }
+                ctx.closePath();
+                ctx.stroke();
+                ctx.globalAlpha = 1.0;
+            }
+
+            // Draw bounding box
+            ctx.strokeStyle = '#ffff00';
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.6;
+            const bw = blob.max_x - blob.min_x + 1;
+            const bh = blob.max_y - blob.min_y + 1;
+            ctx.strokeRect(blob.min_x, blob.min_y, bw, bh);
+            ctx.globalAlpha = 1.0;
+
+            // Draw centroid crosshair
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 1;
+            const cx = blob.cx, cy = blob.cy;
+            ctx.beginPath();
+            ctx.moveTo(cx - 5, cy); ctx.lineTo(cx + 5, cy);
+            ctx.moveTo(cx, cy - 5); ctx.lineTo(cx, cy + 5);
+            ctx.stroke();
+
+            // Label
+            ctx.fillStyle = color;
+            ctx.font = '10px monospace';
+            ctx.fillText('#' + i + ' A=' + blob.area, blob.min_x, blob.min_y - 3);
+        }
+    }
+
+    function updateStats(blobs) {
+        const panel = document.getElementById('statsPanel');
+        const countEl = document.getElementById('blobCount');
+        const listEl = document.getElementById('blobList');
+
+        if (!blobs || !blobs.length) {
+            panel.style.display = 'none';
+            return;
+        }
+        panel.style.display = 'block';
+        countEl.textContent = blobs.length;
+        listEl.innerHTML = '';
+        for (let i = 0; i < blobs.length; ++i) {
+            const b = blobs[i];
+            const color = COLORS[i % COLORS.length];
+            const row = document.createElement('div');
+            row.className = 'blob-row';
+            row.innerHTML =
+                '<span class="legend-color" style="background:' + color + '"></span> ' +
+                '<b>#' + i + '</b>' +
+                ' area=' + b.area +
+                ' cx=' + (b.cx||0).toFixed(1) +
+                ' cy=' + (b.cy||0).toFixed(1) +
+                ' bbox=[' + b.min_x + ',' + b.min_y + ',' + b.max_x + ',' + b.max_y + ']' +
+                ' contour=' + (b.contour_points || (b.contour||[]).length) + 'pts';
+            listEl.appendChild(row);
+        }
+    }
+
+    window.addEventListener('message', (e) => {
+        const msg = e.data;
+        if (msg.type === 'status') {
+            // Update controls from current config
+            if (msg.threshold !== undefined) {
+                document.getElementById('threshold').value = msg.threshold;
+                document.getElementById('threshVal').textContent = msg.threshold;
+            }
+            if (msg.min_area !== undefined) document.getElementById('minArea').value = msg.min_area;
+            if (msg.max_area !== undefined) document.getElementById('maxArea').value = msg.max_area;
+            if (msg.invert !== undefined) document.getElementById('invert').checked = msg.invert;
+        } else if (msg.type === 'preview') {
+            // Received a JPEG image — render on canvas
+            const img = new Image();
+            img.onload = () => {
+                currentImage = img;
+                drawOverlay();
+            };
+            img.src = 'data:image/jpeg;base64,' + msg.jpeg;
+        } else if (msg.type === 'process_result') {
+            // Received blob analysis results
+            currentBlobs = msg.blobs || [];
+            updateStats(currentBlobs);
+            drawOverlay();
+        }
+    });
+
+    // Request initial status
+    sendCmd({ command: 'get_status' });
+</script>
+</body>
+</html>

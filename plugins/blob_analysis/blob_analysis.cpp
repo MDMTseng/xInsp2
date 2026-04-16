@@ -164,6 +164,7 @@ public:
             out.push("blobs", std::move(blob_rec));
         }
 
+        cache_result(out);
         return out;
     }
 
@@ -179,7 +180,15 @@ public:
         if (cmd.find("\"set_invert\"") != std::string::npos) {
             invert_ = cmd.find("\"value\":true") != std::string::npos;
         }
+        if (cmd.find("\"get_last_result\"") != std::string::npos && last_result_json_.size() > 2) {
+            return last_result_json_;
+        }
         return get_def();
+    }
+
+    // Cache last process result so the UI can fetch it via exchange
+    void cache_result(const xi::Record& r) {
+        last_result_json_ = r.data_json();
     }
 
     std::string get_def() const override {
@@ -207,6 +216,7 @@ private:
     int min_area_ = 10;
     int max_area_ = 999999;
     bool invert_ = false;
+    std::string last_result_json_;
 };
 
 XI_PLUGIN_IMPL(BlobAnalysis)
