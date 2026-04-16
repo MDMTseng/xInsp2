@@ -205,12 +205,15 @@ async function run() {
     await sleep(1000);
     takeScreenshot('streaming_stopped');
 
-    // --- Step 9b: Open blob_analysis UI ---
+    // --- Step 9b: Open blob_analysis UI with camera background ---
     console.log('\n[step 9b] Creating blob_analysis instance and opening UI...');
     await sendCmd('load_plugin', { name: 'blob_analysis' });
     await sendCmd('create_instance', { name: 'detector0', plugin: 'blob_analysis' });
 
-    // Open blob analysis UI
+    // Restart camera so we have frames for the background
+    await camExchange({ command: 'start' });
+    await sleep(500);
+
     const blobUiRsp = await sendCmd('get_plugin_ui', { plugin: 'blob_analysis' });
     let blobPanel = null;
     if (blobUiRsp.ok) {
@@ -223,28 +226,45 @@ async function run() {
             );
             blobPanel.webview.html = html;
             if (api?.registerPluginPanel) api.registerPluginPanel('detector0', blobPanel);
-
-            // Send test blob data to the UI so we can see contour rendering
+            blobPanel.webview.onDidReceiveMessage(async (msg) => {
+                if (msg.type === 'exchange' && msg.cmd) {
+                    const r = await sendCmd('exchange_instance', { name: 'detector0', cmd: msg.cmd });
+                    if (r.ok && r.data) {
+                        const parsed = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
+                        blobPanel.webview.postMessage({ type: 'status', ...parsed });
+                    }
+                }
+            });
             await sleep(1000);
 
-            // Simulate a process result with test blobs
+            // Send camera preview as background image
+            for (let i = 0; i < 3; ++i) {
+                const pr = await sendCmd('preview_instance', { name: 'cam0' }).catch(() => null);
+                if (pr && pr.ok && pr.data && pr.data.gid && api?.registerPreviewGid) {
+                    api.registerPreviewGid(pr.data.gid, blobPanel);
+                }
+                await sleep(300);
+            }
+            await sleep(1000);
+
+            // Send blob results overlay
             blobPanel.webview.postMessage({
                 type: 'process_result',
                 blob_count: 3,
                 blobs: [
-                    { area: 247, cx: 85.2, cy: 63.1, min_x: 72, min_y: 50, max_x: 98, max_y: 76, contour_points: 52,
+                    { area: 247, cx: 85.2, cy: 63.1, min_x: 72, min_y: 50, max_x: 98, max_y: 76, contour_points: 40,
                       contour: Array.from({length: 40}, (_, i) => ({
                           x: 85 + Math.round(13 * Math.cos(i * Math.PI * 2 / 40)),
                           y: 63 + Math.round(13 * Math.sin(i * Math.PI * 2 / 40))
                       }))
                     },
-                    { area: 183, cx: 200.5, cy: 150.8, min_x: 185, min_y: 138, max_x: 216, max_y: 164, contour_points: 38,
+                    { area: 183, cx: 200.5, cy: 150.8, min_x: 185, min_y: 138, max_x: 216, max_y: 164, contour_points: 30,
                       contour: Array.from({length: 30}, (_, i) => ({
                           x: 200 + Math.round(15 * Math.cos(i * Math.PI * 2 / 30)),
                           y: 151 + Math.round(12 * Math.sin(i * Math.PI * 2 / 30))
                       }))
                     },
-                    { area: 95, cx: 280.0, cy: 200.0, min_x: 270, min_y: 192, max_x: 290, max_y: 208, contour_points: 24,
+                    { area: 95, cx: 280.0, cy: 200.0, min_x: 270, min_y: 192, max_x: 290, max_y: 208, contour_points: 20,
                       contour: Array.from({length: 20}, (_, i) => ({
                           x: 280 + Math.round(10 * Math.cos(i * Math.PI * 2 / 20)),
                           y: 200 + Math.round(8 * Math.sin(i * Math.PI * 2 / 20))
@@ -252,16 +272,11 @@ async function run() {
                     }
                 ]
             });
-
-            // Also send a preview image as background
-            // Request a frame from the camera as the background
-            const prevRsp = await sendCmd('preview_instance', { name: 'cam0' }).catch(() => null);
-            if (prevRsp && prevRsp.ok && prevRsp.data && prevRsp.data.gid && api?.registerPreviewGid) {
-                api.registerPreviewGid(prevRsp.data.gid, blobPanel);
-            }
             await sleep(2000);
         }
     }
+    // Stop camera
+    await camExchange({ command: 'stop' });
     takeScreenshot('blob_analysis_ui');
 
     // --- Step 10: Save instance configs ---

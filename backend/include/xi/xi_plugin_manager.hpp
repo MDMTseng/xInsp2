@@ -175,11 +175,14 @@ public:
         pi.handle = LoadLibraryA(dll_path.string().c_str());
         if (!pi.handle) return false;
 
-        // Try new C ABI first (xi_host_api*, const char*) → void*
-        pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
-            GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
-        // Try old-style factory as fallback
-        if (!pi.c_factory) {
+        // Distinguish new vs old ABI: new ABI also exports xi_plugin_destroy
+        auto has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
+        if (has_destroy) {
+            // New C ABI: factory takes (xi_host_api*, const char*) → void*
+            pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
+                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+        } else {
+            // Old-style: factory takes (const char*) → InstanceBase*
             pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
                 GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
         }
