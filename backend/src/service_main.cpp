@@ -19,6 +19,8 @@
 #include <string_view>
 
 #include <xi/xi.hpp>
+#include <xi/xi_image.hpp>
+#include <xi/xi_jpeg.hpp>
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_ws_server.hpp>
 
@@ -38,6 +40,22 @@ ASYNC_WRAP(demo_square)
 static xi::Param<int>    demo_amp {"demo_amp",  10,  {1, 100}};
 static xi::Param<double> demo_bias{"demo_bias", 0.5, {0.0, 1.0}};
 
+// Build a small test image — 3-channel gradient that varies with `frame`
+// so successive runs visibly differ in the preview.
+static xi::Image demo_make_image(int frame) {
+    const int W = 64, H = 48, C = 3;
+    xi::Image img(W, H, C);
+    uint8_t* p = img.data();
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            p[(y * W + x) * C + 0] = static_cast<uint8_t>((x * 4 + frame) & 0xFF);
+            p[(y * W + x) * C + 1] = static_cast<uint8_t>((y * 4 + frame) & 0xFF);
+            p[(y * W + x) * C + 2] = static_cast<uint8_t>((x + y + frame) & 0xFF);
+        }
+    }
+    return img;
+}
+
 static void demo_inspect(int frame) {
     VAR(gray,    frame * static_cast<int>(demo_amp));
     VAR(doubled, gray * 2);
@@ -50,6 +68,8 @@ static void demo_inspect(int frame) {
     VAR(score, sq1 + sq2 + static_cast<double>(demo_bias));
     VAR(label, std::string("demo"));
     VAR(ok,    true);
+
+    VAR(frame_img, demo_make_image(frame));
 }
 
 static std::atomic<int64_t> g_run_id{0};
@@ -138,6 +158,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xp::Vars vmsg;
         vmsg.run_id = run_id;
         auto snap = xi::ValueStore::current().snapshot();
+
+        // We'll need to re-walk the image entries after sending the vars
+        // message to emit the preview binary frames. Track them by gid.
+        struct ImgJob { uint32_t gid; xi::Image img; };
+        std::vector<ImgJob> img_jobs;
+
         uint32_t next_gid = 100;
         for (auto& e : snap) {
             xp::VarItem it;
@@ -160,11 +186,18 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     }
                     break;
                 }
-                case xi::VarKind::Image:
+                case xi::VarKind::Image: {
                     it.kind = xp::VarKindWire::Image;
-                    it.gid = next_gid++;
-                    it.raw = false;
+                    it.gid  = next_gid++;
+                    it.raw  = false;
+                    if (e.payload.has_value()) {
+                        try {
+                            auto img = std::any_cast<xi::Image>(e.payload);
+                            img_jobs.push_back({it.gid, std::move(img)});
+                        } catch (...) {}
+                    }
                     break;
+                }
                 case xi::VarKind::Json:
                     it.kind = xp::VarKindWire::Json;
                     it.value_json = e.inline_json.empty() ? "null" : e.inline_json;
@@ -176,12 +209,30 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             vmsg.items.push_back(std::move(it));
         }
 
-        // Respond to the `run` command first with timing, then emit vars.
+        // Respond to the `run` command first with timing, then emit vars,
+        // then one binary preview frame per image variable.
         char buf[128];
         std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":%lld})",
                      (long long)run_id, (long long)dt_ms);
         send_rsp_ok(srv, id, buf);
         srv.send_text(vmsg.to_json());
+
+        for (auto& job : img_jobs) {
+            std::vector<uint8_t> jpeg;
+            if (!xi::encode_jpeg(job.img, 85, jpeg)) continue;
+            std::vector<uint8_t> frame;
+            frame.resize(xp::kPreviewHeaderSize + jpeg.size());
+            xp::PreviewHeader h;
+            h.gid      = job.gid;
+            h.codec    = static_cast<uint32_t>(xp::Codec::JPEG);
+            h.width    = static_cast<uint32_t>(job.img.width);
+            h.height   = static_cast<uint32_t>(job.img.height);
+            h.channels = static_cast<uint32_t>(job.img.channels);
+            xp::encode_preview_header(h, frame.data());
+            std::memcpy(frame.data() + xp::kPreviewHeaderSize,
+                        jpeg.data(), jpeg.size());
+            srv.send_binary(frame.data(), frame.size());
+        }
     } else if (name == "list_params") {
         // Emit a minimal instances message with just the param registry.
         std::string out = "{\"type\":\"instances\",\"instances\":[],\"params\":[";

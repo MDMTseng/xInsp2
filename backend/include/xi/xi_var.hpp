@@ -37,6 +37,8 @@
 #include <utility>
 #include <vector>
 
+#include "xi_image.hpp"
+
 namespace xi {
 
 // Categorizes how the frontend should render a tracked value.
@@ -102,6 +104,15 @@ struct VarTraits<std::string> {
         e.kind = VarKind::String;
         // Caller is responsible for escaping when they build the final JSON.
         e.payload = std::move(v);
+    }
+};
+
+template <>
+struct VarTraits<Image> {
+    static constexpr VarKind kind = VarKind::Image;
+    static void fill(VarEntry& e, Image img) {
+        e.kind = VarKind::Image;
+        e.payload = std::move(img);  // holds shared_ptr to pixels, cheap
     }
 };
 
