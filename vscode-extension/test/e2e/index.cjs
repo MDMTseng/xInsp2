@@ -4,8 +4,33 @@
 const vscode = require('vscode');
 const path   = require('path');
 const assert = require('assert');
+const { execSync } = require('child_process');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function takeScreenshot(filepath) {
+    const fs = require('fs');
+    const os = require('os');
+    const psScript = path.join(os.tmpdir(), 'xinsp2_screenshot.ps1');
+    fs.writeFileSync(psScript, `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$pt = New-Object System.Drawing.Point(0, 0)
+$bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.CopyFromScreen($bounds.Location, $pt, $bounds.Size)
+$bmp.Save("${filepath.replace(/\\/g, '\\\\')}")
+$gfx.Dispose()
+$bmp.Dispose()
+`);
+    try {
+        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psScript}"`, { timeout: 15000 });
+        console.log('[e2e] screenshot saved:', filepath);
+    } catch (e) {
+        console.log('[e2e] screenshot failed:', e.message);
+    }
+}
 
 async function run() {
     console.log('[e2e] starting xInsp2 automated test...');
@@ -50,21 +75,27 @@ async function run() {
     await sleep(30000);
     console.log('[e2e] compile wait done');
 
-    // Run inspection
+    // Focus the xInsp2 sidebar first so the webview loads its HTML
+    try {
+        await vscode.commands.executeCommand('xinsp2.viewer.focus');
+    } catch {}
+    await sleep(2000);
+
+    // Run inspection — the webview is now ready to receive postMessage
     console.log('[e2e] running inspection...');
     await vscode.commands.executeCommand('xinsp2.run');
     await sleep(3000);
     console.log('[e2e] PASS: inspection executed');
 
-    // Focus the xInsp2 sidebar to make it visible
-    try {
-        await vscode.commands.executeCommand('xinsp2.instances.focus');
-    } catch {}
-    await sleep(1000);
+    // Run a second time to be sure the viewer catches it
+    await vscode.commands.executeCommand('xinsp2.run');
+    await sleep(3000);
 
-    // Leave VS Code open for visual inspection (or screenshot)
-    console.log('[e2e] keeping window open for 5s...');
-    await sleep(5000);
+    // Take screenshot of the final state
+    const screenshotDir = path.resolve(wf[0].uri.fsPath, '..', 'screenshot');
+    require('fs').mkdirSync(screenshotDir, { recursive: true });
+    const screenshotPath = path.join(screenshotDir, `e2e_${Date.now()}.png`);
+    takeScreenshot(screenshotPath);
 
     console.log('[e2e] ALL E2E CHECKS PASSED');
 }
