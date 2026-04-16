@@ -218,6 +218,155 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // --- Project & Plugin commands ---
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.createProject', async (folder?: string, name?: string) => {
+            if (!client?.connected) return;
+            if (!folder) {
+                const uri = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: false, openLabel: 'Create Project Here' });
+                if (!uri?.length) return;
+                folder = uri[0].fsPath;
+            }
+            if (!name) name = path.basename(folder);
+            const rsp = await sendCmd('create_project', { folder, name });
+            if (rsp.ok) {
+                output.appendLine('[xinsp2] project created: ' + folder);
+                vscode.window.setStatusBarMessage('xInsp2: project created', 3000);
+            }
+            return rsp;
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.openProject', async (folder?: string) => {
+            if (!client?.connected) return;
+            if (!folder) {
+                const uri = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: false, openLabel: 'Open Project' });
+                if (!uri?.length) return;
+                folder = uri[0].fsPath;
+            }
+            const rsp = await sendCmd('open_project', { folder });
+            if (rsp.ok) {
+                output.appendLine('[xinsp2] project opened: ' + folder);
+                sendCmd('list_instances');
+            }
+            return rsp;
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.listPlugins', async () => {
+            if (!client?.connected) return;
+            return sendCmd('list_plugins');
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.createInstance', async (instanceName?: string, pluginName?: string) => {
+            if (!client?.connected) return;
+            if (!pluginName) {
+                const plugins = await sendCmd('list_plugins');
+                if (!plugins.ok) return;
+                const pick = await vscode.window.showQuickPick(
+                    plugins.data.map((p: any) => ({ label: p.name, description: p.description })),
+                    { placeHolder: 'Select plugin type' }
+                );
+                if (!pick) return;
+                pluginName = pick.label;
+            }
+            if (!instanceName) {
+                instanceName = await vscode.window.showInputBox({ prompt: 'Instance name', value: pluginName + '0' });
+                if (!instanceName) return;
+            }
+            const rsp = await sendCmd('create_instance', { name: instanceName, plugin: pluginName });
+            if (rsp.ok) {
+                output.appendLine(`[xinsp2] instance created: ${instanceName} (${pluginName})`);
+                sendCmd('list_instances');
+            }
+            return rsp;
+        })
+    );
+
+    // Open a plugin's web UI in a webview panel for a specific instance
+    const pluginUIPanels = new Map<string, vscode.WebviewPanel>();
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.openInstanceUI', async (instanceName?: string, pluginName?: string) => {
+            if (!client?.connected || !instanceName || !pluginName) return;
+
+            // Check if panel already open
+            const existing = pluginUIPanels.get(instanceName);
+            if (existing) { existing.reveal(); return; }
+
+            // Get the plugin UI path from the backend
+            const uiRsp = await sendCmd('get_plugin_ui', { plugin: pluginName });
+            if (!uiRsp.ok) {
+                vscode.window.showWarningMessage(`No UI for plugin ${pluginName}`);
+                return;
+            }
+            const uiPath = uiRsp.data.ui_path;
+
+            // Read the UI HTML
+            const fs = require('fs');
+            const htmlPath = path.join(uiPath, 'index.html');
+            if (!fs.existsSync(htmlPath)) {
+                vscode.window.showWarningMessage(`UI not found: ${htmlPath}`);
+                return;
+            }
+            let html = fs.readFileSync(htmlPath, 'utf8');
+
+            // Create webview panel
+            const panel = vscode.window.createWebviewPanel(
+                'xinsp2.pluginUI',
+                `${instanceName} (${pluginName})`,
+                vscode.ViewColumn.Two,
+                { enableScripts: true }
+            );
+            panel.webview.html = html;
+            pluginUIPanels.set(instanceName, panel);
+            panel.onDidDispose(() => pluginUIPanels.delete(instanceName));
+
+            // Wire postMessage ↔ exchange_instance
+            panel.webview.onDidReceiveMessage(async (msg: any) => {
+                if (msg.type === 'exchange' && msg.cmd) {
+                    const rsp = await sendCmd('exchange_instance', {
+                        name: instanceName,
+                        cmd: msg.cmd,
+                    });
+                    if (rsp.ok && rsp.data) {
+                        panel.webview.postMessage({ type: 'status', ...JSON.parse(
+                            typeof rsp.data === 'string' ? rsp.data : JSON.stringify(rsp.data)
+                        )});
+                    }
+                }
+            });
+
+            // Request initial status
+            const statusRsp = await sendCmd('exchange_instance', {
+                name: instanceName,
+                cmd: { command: 'get_status' },
+            });
+            if (statusRsp.ok && statusRsp.data) {
+                const parsed = typeof statusRsp.data === 'string' ? JSON.parse(statusRsp.data) : statusRsp.data;
+                panel.webview.postMessage({ type: 'status', ...parsed });
+            }
+        })
+    );
+
+    // Expose a test API for E2E tests
+    const testAPI = {
+        sendCmd,
+        get connected() { return client?.connected ?? false; },
+        waitConnected: async (timeoutMs = 10000) => {
+            const t0 = Date.now();
+            while (!client?.connected && Date.now() - t0 < timeoutMs) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return client?.connected ?? false;
+        },
+    };
+
     // --- Auto-compile on save (S2) ---
     context.subscriptions.push(
         vscode.workspace.onDidSaveTextDocument(async (doc) => {
@@ -280,6 +429,8 @@ export function activate(context: vscode.ExtensionContext) {
             }
         },
     });
+
+    return { __test__: testAPI };
 }
 
 export function deactivate() {

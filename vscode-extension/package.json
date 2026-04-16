@@ -43,6 +43,26 @@
         "command": "xinsp2.stop",
         "title": "xInsp2: Stop Continuous",
         "icon": "$(debug-stop)"
+      },
+      {
+        "command": "xinsp2.createProject",
+        "title": "xInsp2: Create Project"
+      },
+      {
+        "command": "xinsp2.openProject",
+        "title": "xInsp2: Open Project"
+      },
+      {
+        "command": "xinsp2.listPlugins",
+        "title": "xInsp2: List Plugins"
+      },
+      {
+        "command": "xinsp2.createInstance",
+        "title": "xInsp2: Create Instance"
+      },
+      {
+        "command": "xinsp2.openInstanceUI",
+        "title": "xInsp2: Open Instance UI"
       }
     ],
     "viewsContainers": {

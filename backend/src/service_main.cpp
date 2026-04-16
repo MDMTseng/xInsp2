@@ -699,7 +699,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (!plugin) { send_rsp_err(srv, id, "missing plugin"); return; }
         auto* pi = g_plugin_mgr.find_plugin(*plugin);
         if (pi && pi->has_ui) {
-            std::string data = "{\"ui_path\":\"" + pi->ui_path + "\"}";
+            std::string data = "{\"ui_path\":";
+            xp::json_escape_into(data, pi->ui_path);
+            data += "}";
             send_rsp_ok(srv, id, data);
         } else {
             send_rsp_err(srv, id, "no UI for plugin: " + *plugin);
