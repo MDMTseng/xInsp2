@@ -22,6 +22,7 @@
 #include <xi/xi_image.hpp>
 #include <xi/xi_jpeg.hpp>
 #include <xi/xi_protocol.hpp>
+#include <xi/xi_project.hpp>
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_ws_server.hpp>
@@ -474,6 +475,136 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         if (ok) send_rsp_ok(srv, id);
         else    send_rsp_err(srv, id, "set_param: bad value");
+    } else if (name == "list_instances") {
+        std::string inst_json, params_json;
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok()) {
+                std::vector<char> buf(64 * 1024);
+                if (g_script.list_instances) {
+                    int n = g_script.list_instances(buf.data(), (int)buf.size());
+                    if (n < 0) { buf.resize((size_t)(-n) + 1024); n = g_script.list_instances(buf.data(), (int)buf.size()); }
+                    if (n > 0) inst_json.assign(buf.data(), (size_t)n);
+                }
+                if (g_script.list_params) {
+                    int n = g_script.list_params(buf.data(), (int)buf.size());
+                    if (n < 0) { buf.resize((size_t)(-n) + 1024); n = g_script.list_params(buf.data(), (int)buf.size()); }
+                    if (n > 0) params_json.assign(buf.data(), (size_t)n);
+                }
+            }
+        }
+        std::string out = "{\"type\":\"instances\",\"instances\":";
+        out += inst_json.empty() ? "[]" : inst_json;
+        out += ",\"params\":";
+        out += params_json.empty() ? "[]" : params_json;
+        out += "}";
+        send_rsp_ok(srv, id, "{}");
+        srv.send_text(out);
+    } else if (name == "set_instance_def") {
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        // Extract the def object as a raw JSON substring
+        std::string def_str;
+        const char* after;
+        if (xp::detail::find_key(parsed->args_json.data(),
+                                  parsed->args_json.data() + parsed->args_json.size(),
+                                  "def", def_str, after)) {
+            // def_str is the raw JSON value
+        } else {
+            def_str = "{}";
+        }
+        std::lock_guard<std::mutex> lk(g_script_mu);
+        if (g_script.ok() && g_script.set_instance_def) {
+            int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
+            if (rc == 0) send_rsp_ok(srv, id);
+            else         send_rsp_err(srv, id, "set_instance_def failed");
+        } else {
+            send_rsp_err(srv, id, "no script loaded");
+        }
+    } else if (name == "exchange_instance") {
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        std::string cmd_str;
+        const char* after;
+        if (xp::detail::find_key(parsed->args_json.data(),
+                                  parsed->args_json.data() + parsed->args_json.size(),
+                                  "cmd", cmd_str, after)) {
+        } else {
+            cmd_str = "{}";
+        }
+        std::lock_guard<std::mutex> lk(g_script_mu);
+        if (g_script.ok() && g_script.exchange_instance) {
+            std::vector<char> rsp(256 * 1024);
+            int n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
+                                                rsp.data(), (int)rsp.size());
+            if (n < 0) { rsp.resize((size_t)(-n) + 1024);
+                         n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
+                                                        rsp.data(), (int)rsp.size()); }
+            if (n >= 0) {
+                send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
+            } else {
+                send_rsp_err(srv, id, "exchange_instance failed");
+            }
+        } else {
+            send_rsp_err(srv, id, "no script loaded or instance not found");
+        }
+    } else if (name == "save_project") {
+        auto path = xp::get_string_field(parsed->args_json, "path");
+        if (!path) { send_rsp_err(srv, id, "missing path"); return; }
+        std::string params_json, inst_json;
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok()) {
+                std::vector<char> buf(64 * 1024);
+                if (g_script.list_params) {
+                    int n = g_script.list_params(buf.data(), (int)buf.size());
+                    if (n > 0) params_json.assign(buf.data(), (size_t)n);
+                }
+                if (g_script.list_instances) {
+                    int n = g_script.list_instances(buf.data(), (int)buf.size());
+                    if (n > 0) inst_json.assign(buf.data(), (size_t)n);
+                }
+            }
+        }
+        std::string content = xi::project::build_project_json(params_json, inst_json);
+        if (xi::project::write_text(*path, content)) {
+            send_rsp_ok(srv, id);
+        } else {
+            send_rsp_err(srv, id, "failed to write " + *path);
+        }
+    } else if (name == "load_project") {
+        auto path = xp::get_string_field(parsed->args_json, "path");
+        if (!path) { send_rsp_err(srv, id, "missing path"); return; }
+        std::string content = xi::project::read_text(*path);
+        if (content.empty()) { send_rsp_err(srv, id, "failed to read " + *path); return; }
+        // Parse params array: scan for "params": [...] and apply each.
+        // Parse instances array: scan for "instances": [...] and apply defs.
+        // Minimal extraction — full JSON parser comes when it's needed.
+        std::string params_arr;
+        const char* after;
+        if (xp::detail::find_key(content.data(), content.data() + content.size(),
+                                  "params", params_arr, after)) {
+            // Walk array items: each has "name" and "value"
+            size_t pos = 0;
+            while (true) {
+                pos = params_arr.find("\"name\"", pos);
+                if (pos == std::string::npos) break;
+                auto nm = xp::get_string_field(
+                    std::string_view(params_arr.data() + pos - 1, params_arr.size() - pos + 1), "name");
+                auto val = xp::get_number_field(
+                    std::string_view(params_arr.data() + pos - 1, params_arr.size() - pos + 1), "value");
+                if (nm && val) {
+                    std::lock_guard<std::mutex> lk(g_script_mu);
+                    if (g_script.ok() && g_script.set_param) {
+                        char nb[64];
+                        std::snprintf(nb, sizeof(nb), "%g", *val);
+                        g_script.set_param(nm->c_str(), nb);
+                    }
+                }
+                pos += 6;
+            }
+        }
+        send_rsp_ok(srv, id);
     } else {
         send_rsp_err(srv, id, std::string("unknown command: ") + name);
     }

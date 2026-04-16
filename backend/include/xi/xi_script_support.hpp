@@ -161,4 +161,46 @@ XI_SCRIPT_EXPORT void xi_script_reset() {
     xi_script_detail::image_cache().clear();
 }
 
+// --- Instance registry thunks ---
+
+XI_SCRIPT_EXPORT int xi_script_list_instances(char* buf, int buflen) {
+    auto list = xi::InstanceRegistry::instance().list();
+    std::string out = "[";
+    for (size_t i = 0; i < list.size(); ++i) {
+        if (i) out += ",";
+        out += "{\"name\":";
+        xi_script_detail::esc(out, list[i]->name().c_str());
+        out += ",\"plugin\":";
+        xi_script_detail::esc(out, list[i]->plugin_name().c_str());
+        out += ",\"def\":";
+        std::string def = list[i]->get_def();
+        out += def.empty() ? "{}" : def;
+        out += "}";
+    }
+    out += "]";
+    int needed = (int)out.size();
+    if (buflen < needed + 1) return -needed;
+    std::memcpy(buf, out.data(), out.size());
+    buf[out.size()] = 0;
+    return needed;
+}
+
+XI_SCRIPT_EXPORT int xi_script_set_instance_def(const char* name, const char* def_json) {
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    return inst->set_def(def_json) ? 0 : -2;
+}
+
+XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* cmd_json,
+                                                  char* rsp_buf, int rsp_buflen) {
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    std::string rsp = inst->exchange(cmd_json);
+    int needed = (int)rsp.size();
+    if (rsp_buflen < needed + 1) return -needed;
+    std::memcpy(rsp_buf, rsp.data(), rsp.size());
+    rsp_buf[rsp.size()] = 0;
+    return needed;
+}
+
 #endif // XI_SCRIPT_NO_DEFAULT_THUNKS

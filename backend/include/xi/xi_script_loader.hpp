@@ -23,19 +23,25 @@ struct LoadedScript {
     HMODULE handle = nullptr;
     std::string path;
 
-    using InspectFn      = void (*)(int frame);
-    using SnapshotFn     = int  (*)(char* buf, int buflen);
-    using DumpImageFn    = int  (*)(uint32_t gid, uint8_t* out, int cap, int* w, int* h, int* c);
-    using ListParamsFn   = int  (*)(char* buf, int buflen);
-    using SetParamFn     = int  (*)(const char* name, const char* value_json);
-    using ResetFn        = void (*)();
+    using InspectFn          = void (*)(int frame);
+    using SnapshotFn         = int  (*)(char* buf, int buflen);
+    using DumpImageFn        = int  (*)(uint32_t gid, uint8_t* out, int cap, int* w, int* h, int* c);
+    using ListParamsFn       = int  (*)(char* buf, int buflen);
+    using SetParamFn         = int  (*)(const char* name, const char* value_json);
+    using ResetFn            = void (*)();
+    using ListInstancesFn    = int  (*)(char* buf, int buflen);
+    using SetInstanceDefFn   = int  (*)(const char* name, const char* def_json);
+    using ExchangeInstanceFn = int  (*)(const char* name, const char* cmd_json, char* rsp, int rsplen);
 
-    InspectFn    inspect    = nullptr;
-    SnapshotFn   snapshot   = nullptr;
-    DumpImageFn  dump_image = nullptr;
-    ListParamsFn list_params = nullptr;
-    SetParamFn   set_param   = nullptr;
-    ResetFn      reset       = nullptr;
+    InspectFn          inspect          = nullptr;
+    SnapshotFn         snapshot         = nullptr;
+    DumpImageFn        dump_image       = nullptr;
+    ListParamsFn       list_params      = nullptr;
+    SetParamFn         set_param        = nullptr;
+    ResetFn            reset            = nullptr;
+    ListInstancesFn    list_instances   = nullptr;
+    SetInstanceDefFn   set_instance_def = nullptr;
+    ExchangeInstanceFn exchange_instance = nullptr;
 
     bool ok() const { return handle && inspect; }
 };
@@ -54,7 +60,10 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.dump_image  = reinterpret_cast<LoadedScript::DumpImageFn>(GetProcAddress(h, "xi_script_dump_image"));
     out.list_params = reinterpret_cast<LoadedScript::ListParamsFn>(GetProcAddress(h, "xi_script_list_params"));
     out.set_param   = reinterpret_cast<LoadedScript::SetParamFn>(GetProcAddress(h, "xi_script_set_param"));
-    out.reset       = reinterpret_cast<LoadedScript::ResetFn>(GetProcAddress(h, "xi_script_reset"));
+    out.reset            = reinterpret_cast<LoadedScript::ResetFn>(GetProcAddress(h, "xi_script_reset"));
+    out.list_instances   = reinterpret_cast<LoadedScript::ListInstancesFn>(GetProcAddress(h, "xi_script_list_instances"));
+    out.set_instance_def = reinterpret_cast<LoadedScript::SetInstanceDefFn>(GetProcAddress(h, "xi_script_set_instance_def"));
+    out.exchange_instance = reinterpret_cast<LoadedScript::ExchangeInstanceFn>(GetProcAddress(h, "xi_script_exchange_instance"));
     if (!out.inspect) {
         err = "script missing xi_inspect_entry export";
         FreeLibrary(h);
