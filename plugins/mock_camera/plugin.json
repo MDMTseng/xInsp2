@@ -1,0 +1,7 @@
+{
+  "name": "mock_camera",
+  "description": "Simulated camera — generates test images with frame counter",
+  "dll": "mock_camera.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground, #ccc); background: var(--vscode-editor-background, #1e1e1e); padding: 12px; margin: 0; }
+    h2 { margin: 0 0 12px; font-size: 15px; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    label { min-width: 80px; }
+    input[type=number] { width: 80px; padding: 4px; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); }
+    button { padding: 6px 16px; cursor: pointer; border: none; border-radius: 3px; font-size: 13px; }
+    .btn-start { background: #4caf50; color: white; }
+    .btn-stop { background: #f44336; color: white; }
+    .btn-apply { background: #2196f3; color: white; }
+    .status { margin-top: 12px; padding: 8px; background: var(--vscode-input-background, #3c3c3c); border-radius: 4px; }
+    .status-label { font-weight: bold; margin-bottom: 4px; }
+    .streaming { color: #4caf50; }
+    .stopped { color: #f44336; }
+</style>
+</head>
+<body>
+    <h2>Mock Camera</h2>
+
+    <div class="row">
+        <label>Width:</label>
+        <input type="number" id="width" value="640" min="32" max="4096">
+    </div>
+    <div class="row">
+        <label>Height:</label>
+        <input type="number" id="height" value="480" min="32" max="4096">
+    </div>
+    <div class="row">
+        <label>FPS:</label>
+        <input type="number" id="fps" value="10" min="1" max="60">
+    </div>
+
+    <div class="row" style="margin-top: 16px;">
+        <button class="btn-start" id="startBtn" onclick="doStart()">Start Streaming</button>
+        <button class="btn-stop" id="stopBtn" onclick="doStop()">Stop Streaming</button>
+        <button class="btn-apply" onclick="doApply()">Apply Settings</button>
+    </div>
+
+    <div class="status">
+        <div class="status-label">Status</div>
+        <div id="statusText" class="stopped">Stopped</div>
+        <div id="frameCount"></div>
+    </div>
+
+<script>
+    const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+
+    function sendCmd(cmd) {
+        if (vscode) {
+            vscode.postMessage({ type: 'exchange', cmd: cmd });
+        }
+    }
+
+    function doStart() {
+        sendCmd({ command: 'start' });
+        updateStatus(true);
+    }
+
+    function doStop() {
+        sendCmd({ command: 'stop' });
+        updateStatus(false);
+    }
+
+    function doApply() {
+        const w = parseInt(document.getElementById('width').value) || 640;
+        const h = parseInt(document.getElementById('height').value) || 480;
+        const f = parseInt(document.getElementById('fps').value) || 10;
+        sendCmd({ command: 'set_resolution', width: w, height: h });
+        sendCmd({ command: 'set_fps', value: f });
+    }
+
+    function updateStatus(streaming) {
+        const el = document.getElementById('statusText');
+        el.textContent = streaming ? 'Streaming' : 'Stopped';
+        el.className = streaming ? 'streaming' : 'stopped';
+    }
+
+    // Receive status updates from the extension host
+    window.addEventListener('message', (e) => {
+        const msg = e.data;
+        if (msg.type === 'status') {
+            document.getElementById('width').value = msg.width || 640;
+            document.getElementById('height').value = msg.height || 480;
+            document.getElementById('fps').value = msg.fps || 10;
+            updateStatus(msg.streaming);
+        }
+    });
+
+    // Request initial status on load
+    sendCmd({ command: 'get_status' });
+</script>
+</body>
+</html>

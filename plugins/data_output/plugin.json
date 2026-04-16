@@ -1,0 +1,7 @@
+{
+  "name": "data_output",
+  "description": "Saves inspection results to CSV/JSON files",
+  "dll": "data_output.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

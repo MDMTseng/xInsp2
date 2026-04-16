@@ -22,6 +22,7 @@
 #include <xi/xi_image.hpp>
 #include <xi/xi_jpeg.hpp>
 #include <xi/xi_protocol.hpp>
+#include <xi/xi_plugin_manager.hpp>
 #include <xi/xi_project.hpp>
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
@@ -103,6 +104,10 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint = 7, int64_t 
 // startup and uses that to locate the xi headers we ship alongside the exe.
 static std::string g_include_dir;
 static std::string g_work_dir;
+static std::string g_plugins_dir;
+
+// Plugin manager (global)
+static xi::PluginManager g_plugin_mgr;
 
 static std::string get_exe_dir() {
     char buf[MAX_PATH];
@@ -547,21 +552,29 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             cmd_str = "{}";
         }
-        std::lock_guard<std::mutex> lk(g_script_mu);
-        if (g_script.ok() && g_script.exchange_instance) {
-            std::vector<char> rsp(256 * 1024);
-            int n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
-                                                rsp.data(), (int)rsp.size());
-            if (n < 0) { rsp.resize((size_t)(-n) + 1024);
-                         n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
-                                                        rsp.data(), (int)rsp.size()); }
-            if (n >= 0) {
-                send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
-            } else {
-                send_rsp_err(srv, id, "exchange_instance failed");
-            }
+        // Try backend's own InstanceRegistry first (plugin-manager instances),
+        // then fall back to the script DLL's registry.
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        if (inst) {
+            std::string result = inst->exchange(cmd_str);
+            send_rsp_ok(srv, id, result);
         } else {
-            send_rsp_err(srv, id, "no script loaded or instance not found");
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.exchange_instance) {
+                std::vector<char> rsp(256 * 1024);
+                int n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
+                                                    rsp.data(), (int)rsp.size());
+                if (n < 0) { rsp.resize((size_t)(-n) + 1024);
+                             n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
+                                                            rsp.data(), (int)rsp.size()); }
+                if (n >= 0) {
+                    send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
+                } else {
+                    send_rsp_err(srv, id, "exchange_instance failed");
+                }
+            } else {
+                send_rsp_err(srv, id, "instance not found: " + *iname);
+            }
         }
     } else if (name == "save_project") {
         auto path = xp::get_string_field(parsed->args_json, "path");
@@ -620,6 +633,77 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             }
         }
         send_rsp_ok(srv, id);
+    } else if (name == "list_plugins") {
+        auto plugins = g_plugin_mgr.list_plugins();
+        std::string out = "[";
+        for (size_t i = 0; i < plugins.size(); ++i) {
+            if (i) out += ",";
+            auto& p = plugins[i];
+            out += "{\"name\":\"" + p.name + "\",\"description\":\"" + p.description + "\"";
+            out += ",\"has_ui\":" + std::string(p.has_ui ? "true" : "false");
+            out += ",\"loaded\":" + std::string(p.handle ? "true" : "false") + "}";
+        }
+        out += "]";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "load_plugin") {
+        auto pname = xp::get_string_field(parsed->args_json, "name");
+        if (!pname) { send_rsp_err(srv, id, "missing name"); return; }
+        if (g_plugin_mgr.load_plugin(*pname)) {
+            send_rsp_ok(srv, id);
+        } else {
+            send_rsp_err(srv, id, "failed to load plugin: " + *pname);
+        }
+    } else if (name == "create_project") {
+        auto folder = xp::get_string_field(parsed->args_json, "folder");
+        auto pname  = xp::get_string_field(parsed->args_json, "name");
+        if (!folder || !pname) { send_rsp_err(srv, id, "missing folder or name"); return; }
+        if (g_plugin_mgr.create_project(*folder, *pname)) {
+            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+        } else {
+            send_rsp_err(srv, id, "failed to create project");
+        }
+    } else if (name == "open_project") {
+        auto folder = xp::get_string_field(parsed->args_json, "folder");
+        if (!folder) { send_rsp_err(srv, id, "missing folder"); return; }
+        if (g_plugin_mgr.open_project(*folder)) {
+            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+        } else {
+            send_rsp_err(srv, id, "failed to open project in " + *folder);
+        }
+    } else if (name == "create_instance") {
+        auto iname  = xp::get_string_field(parsed->args_json, "name");
+        auto plugin = xp::get_string_field(parsed->args_json, "plugin");
+        if (!iname || !plugin) { send_rsp_err(srv, id, "missing name or plugin"); return; }
+        // Ensure plugin is loaded
+        g_plugin_mgr.load_plugin(*plugin);
+        auto* ii = g_plugin_mgr.create_instance(*iname, *plugin);
+        if (ii) {
+            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+        } else {
+            send_rsp_err(srv, id, "failed to create instance");
+        }
+    } else if (name == "get_project") {
+        send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+    } else if (name == "save_instance_config") {
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        if (g_plugin_mgr.save_instance(*iname)) {
+            send_rsp_ok(srv, id);
+        } else {
+            send_rsp_err(srv, id, "instance not found: " + *iname);
+        }
+    } else if (name == "get_plugin_ui") {
+        // Return the path to the plugin's UI folder so the extension can
+        // load it into a webview.
+        auto plugin = xp::get_string_field(parsed->args_json, "plugin");
+        if (!plugin) { send_rsp_err(srv, id, "missing plugin"); return; }
+        auto* pi = g_plugin_mgr.find_plugin(*plugin);
+        if (pi && pi->has_ui) {
+            std::string data = "{\"ui_path\":\"" + pi->ui_path + "\"}";
+            send_rsp_ok(srv, id, data);
+        } else {
+            send_rsp_err(srv, id, "no UI for plugin: " + *plugin);
+        }
     } else {
         send_rsp_err(srv, id, std::string("unknown command: ") + name);
     }
@@ -648,8 +732,27 @@ int main(int argc, char** argv) {
     }
     g_work_dir = (std::filesystem::temp_directory_path() / "xinsp2").string();
     std::filesystem::create_directories(g_work_dir);
+
+    // Find and scan plugins directory (sibling of backend/)
+    {
+        std::filesystem::path p = get_exe_dir();
+        for (int i = 0; i < 6; ++i) {
+            if (std::filesystem::exists(p / "plugins")) {
+                g_plugins_dir = (p / "plugins").string();
+                break;
+            }
+            if (!p.has_parent_path() || p.parent_path() == p) break;
+            p = p.parent_path();
+        }
+    }
+    if (!g_plugins_dir.empty()) {
+        int n = g_plugin_mgr.scan_plugins(g_plugins_dir);
+        std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, g_plugins_dir.c_str());
+    }
+
     std::fprintf(stderr, "[xinsp2] include_dir=%s\n", g_include_dir.c_str());
     std::fprintf(stderr, "[xinsp2] work_dir=%s\n",    g_work_dir.c_str());
+    std::fprintf(stderr, "[xinsp2] plugins_dir=%s\n",  g_plugins_dir.c_str());
 
     xi::ws::Server srv;
     srv.on_open  = [&] {
