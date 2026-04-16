@@ -95,7 +95,19 @@ export function activate(context: vscode.ExtensionContext) {
         const _ch      = buf.readUInt32BE(16);
         const jpegBuf  = buf.subarray(PREVIEW_HEADER_SIZE);
         const b64      = jpegBuf.toString('base64');
-        viewerProvider.postPreview(gid, width, height, b64);
+
+        if (gid === 9999) {
+            // Config preview — route to all open plugin UI panels
+            for (const panel of pluginUIPanels.values()) {
+                panel.webview.postMessage({
+                    type: 'preview',
+                    width, height,
+                    jpeg: b64,
+                });
+            }
+        } else {
+            viewerProvider.postPreview(gid, width, height, b64);
+        }
     });
 
     // Pending response map
@@ -327,7 +339,7 @@ export function activate(context: vscode.ExtensionContext) {
             pluginUIPanels.set(instanceName, panel);
             panel.onDidDispose(() => pluginUIPanels.delete(instanceName));
 
-            // Wire postMessage ↔ exchange_instance
+            // Wire postMessage ↔ exchange_instance + preview polling
             panel.webview.onDidReceiveMessage(async (msg: any) => {
                 if (msg.type === 'exchange' && msg.cmd) {
                     const rsp = await sendCmd('exchange_instance', {
@@ -339,6 +351,9 @@ export function activate(context: vscode.ExtensionContext) {
                             typeof rsp.data === 'string' ? rsp.data : JSON.stringify(rsp.data)
                         )});
                     }
+                } else if (msg.type === 'request_preview') {
+                    // Grab a frame from the instance and send preview
+                    sendCmd('preview_instance', { name: instanceName }).catch(() => {});
                 }
             });
 
@@ -364,6 +379,10 @@ export function activate(context: vscode.ExtensionContext) {
                 await new Promise(r => setTimeout(r, 100));
             }
             return client?.connected ?? false;
+        },
+        registerPluginPanel: (name: string, panel: vscode.WebviewPanel) => {
+            pluginUIPanels.set(name, panel);
+            panel.onDidDispose(() => pluginUIPanels.delete(name));
         },
     };
 

@@ -633,6 +633,34 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             }
         }
         send_rsp_ok(srv, id);
+    } else if (name == "preview_instance") {
+        // Grab the latest frame from a named ImageSource instance,
+        // JPEG-encode it, and send as a binary preview frame.
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        auto* src = inst ? dynamic_cast<xi::ImageSource*>(inst.get()) : nullptr;
+        if (!src) { send_rsp_err(srv, id, "not an ImageSource: " + *iname); return; }
+
+        xi::Image img = src->grab();
+        if (img.empty()) { send_rsp_ok(srv, id, R"({"frame":false})"); return; }
+
+        std::vector<uint8_t> jpeg;
+        if (!xi::encode_jpeg(img, 80, jpeg)) { send_rsp_ok(srv, id, R"({"frame":false})"); return; }
+
+        // Send rsp first, then the binary preview frame
+        send_rsp_ok(srv, id, R"({"frame":true})");
+
+        std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
+        xp::PreviewHeader hd;
+        hd.gid = 9999; // reserved gid for config preview
+        hd.codec = (uint32_t)xp::Codec::JPEG;
+        hd.width = (uint32_t)img.width;
+        hd.height = (uint32_t)img.height;
+        hd.channels = (uint32_t)img.channels;
+        xp::encode_preview_header(hd, frame.data());
+        std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
+        srv.send_binary(frame.data(), frame.size());
     } else if (name == "list_plugins") {
         auto plugins = g_plugin_mgr.list_plugins();
         std::string out = "[";

@@ -140,8 +140,15 @@ async function run() {
             camPanel.webview.onDidReceiveMessage(async (msg) => {
                 if (msg.type === 'exchange' && msg.cmd) {
                     await camExchange(msg.cmd);
+                } else if (msg.type === 'request_preview') {
+                    // Grab frame from camera and send binary preview
+                    sendCmd('preview_instance', { name: 'cam0' }).catch(() => {});
                 }
             });
+            // Register panel so extension routes preview frames to it
+            if (api?.registerPluginPanel) {
+                api.registerPluginPanel('cam0', camPanel);
+            }
             // Send initial status
             await camExchange({ command: 'get_status' });
             console.log('[step 5] camera UI panel opened');

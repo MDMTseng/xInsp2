@@ -12,10 +12,12 @@
     .btn-start { background: #4caf50; color: white; }
     .btn-stop { background: #f44336; color: white; }
     .btn-apply { background: #2196f3; color: white; }
-    .status { margin-top: 12px; padding: 8px; background: var(--vscode-input-background, #3c3c3c); border-radius: 4px; }
-    .status-label { font-weight: bold; margin-bottom: 4px; }
-    .streaming { color: #4caf50; }
+    .status { margin-top: 8px; padding: 6px 8px; background: var(--vscode-input-background, #3c3c3c); border-radius: 4px; font-size: 12px; }
+    .streaming { color: #4caf50; font-weight: bold; }
     .stopped { color: #f44336; }
+    .preview-container { margin-top: 12px; }
+    .preview-img { max-width: 100%; border: 1px solid var(--vscode-widget-border, #444); background: #000; display: block; }
+    .frame-info { font-size: 11px; opacity: 0.6; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -34,35 +36,38 @@
         <input type="number" id="fps" value="10" min="1" max="60">
     </div>
 
-    <div class="row" style="margin-top: 16px;">
-        <button class="btn-start" id="startBtn" onclick="doStart()">Start Streaming</button>
-        <button class="btn-stop" id="stopBtn" onclick="doStop()">Stop Streaming</button>
+    <div class="row" style="margin-top: 12px;">
+        <button class="btn-start" onclick="doStart()">Start Streaming</button>
+        <button class="btn-stop" onclick="doStop()">Stop Streaming</button>
         <button class="btn-apply" onclick="doApply()">Apply Settings</button>
     </div>
 
     <div class="status">
-        <div class="status-label">Status</div>
-        <div id="statusText" class="stopped">Stopped</div>
-        <div id="frameCount"></div>
+        Status: <span id="statusText" class="stopped">Stopped</span>
+        <span id="frameInfo" class="frame-info"></span>
+    </div>
+
+    <div class="preview-container">
+        <img id="previewImg" class="preview-img" style="display:none">
+        <div id="noPreview" style="opacity:0.4; font-style:italic; margin-top:8px;">No preview — start streaming to see frames</div>
     </div>
 
 <script>
     const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+    let isStreaming = false;
+    let previewTimer = null;
+    let frameCount = 0;
 
     function sendCmd(cmd) {
-        if (vscode) {
-            vscode.postMessage({ type: 'exchange', cmd: cmd });
-        }
+        if (vscode) vscode.postMessage({ type: 'exchange', cmd: cmd });
     }
 
     function doStart() {
         sendCmd({ command: 'start' });
-        updateStatus(true);
     }
 
     function doStop() {
         sendCmd({ command: 'stop' });
-        updateStatus(false);
     }
 
     function doApply() {
@@ -74,23 +79,42 @@
     }
 
     function updateStatus(streaming) {
+        isStreaming = streaming;
         const el = document.getElementById('statusText');
         el.textContent = streaming ? 'Streaming' : 'Stopped';
         el.className = streaming ? 'streaming' : 'stopped';
+
+        if (streaming && !previewTimer) {
+            // Start polling for preview frames
+            previewTimer = setInterval(() => {
+                if (vscode) vscode.postMessage({ type: 'request_preview' });
+            }, 200);
+        }
+        if (!streaming && previewTimer) {
+            clearInterval(previewTimer);
+            previewTimer = null;
+        }
     }
 
-    // Receive status updates from the extension host
     window.addEventListener('message', (e) => {
         const msg = e.data;
         if (msg.type === 'status') {
-            document.getElementById('width').value = msg.width || 640;
-            document.getElementById('height').value = msg.height || 480;
-            document.getElementById('fps').value = msg.fps || 10;
-            updateStatus(msg.streaming);
+            if (msg.width) document.getElementById('width').value = msg.width;
+            if (msg.height) document.getElementById('height').value = msg.height;
+            if (msg.fps) document.getElementById('fps').value = msg.fps;
+            updateStatus(!!msg.streaming);
+        } else if (msg.type === 'preview') {
+            frameCount++;
+            const img = document.getElementById('previewImg');
+            img.src = 'data:image/jpeg;base64,' + msg.jpeg;
+            img.style.display = 'block';
+            document.getElementById('noPreview').style.display = 'none';
+            document.getElementById('frameInfo').textContent =
+                ' | ' + msg.width + 'x' + msg.height + ' | frame #' + frameCount;
         }
     });
 
-    // Request initial status on load
+    // Request initial status
     sendCmd({ command: 'get_status' });
 </script>
 </body>
