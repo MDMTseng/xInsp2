@@ -1,10 +1,21 @@
 #pragma once
 //
-// xi_image_pool.hpp — host-side refcounted image pool.
+// xi_image_pool.hpp — host-side refcounted image pool (sharded).
 //
-// Implements the xi_host_api image functions. All image memory lives
-// here. Plugins get handles, call addref/release, access data via the
-// host API function pointers.
+// 16 shards, each with its own shared_mutex. Handles are distributed
+// across shards by hash, so concurrent create/release/data calls from
+// different threads rarely contend on the same lock.
+//
+// Performance:
+//   - data/width/height/channels: shared_lock on ONE shard (concurrent reads)
+//   - addref: shared_lock + atomic increment (concurrent)
+//   - create: unique_lock on ONE shard (16x less contention than single lock)
+//   - release (refcount→0): unique_lock on ONE shard, delete outside lock
+//
+// Thread safety guarantee:
+//   - Safe for xi::async parallel tasks
+//   - Safe for multiple camera threads pushing simultaneously
+//   - Safe for concurrent plugin process() calls
 //
 
 #include "xi_abi.h"
@@ -29,6 +40,14 @@ struct PoolEntry {
 };
 
 class ImagePool {
+    static constexpr int SHARD_COUNT = 16;
+    static constexpr int SHARD_MASK  = SHARD_COUNT - 1;
+
+    struct Shard {
+        std::shared_mutex mu;
+        std::unordered_map<xi_image_handle, PoolEntry*> entries;
+    };
+
 public:
     static ImagePool& instance() {
         static ImagePool pool;
@@ -36,74 +55,79 @@ public:
     }
 
     xi_image_handle create(int32_t w, int32_t h, int32_t ch) {
-        auto entry = new PoolEntry();
+        auto* entry = new PoolEntry();
         entry->pixels.resize((size_t)w * h * ch);
         entry->width = w;
         entry->height = h;
         entry->channels = ch;
         entry->refcount = 1;
+
         xi_image_handle handle = next_handle_++;
+        auto& shard = shard_for(handle);
         {
-            std::unique_lock<std::shared_mutex> lk(mu_);
-            entries_[handle] = entry;
+            std::unique_lock<std::shared_mutex> lk(shard.mu);
+            shard.entries[handle] = entry;
         }
         return handle;
     }
 
     void addref(xi_image_handle h) {
-        std::shared_lock<std::shared_mutex> lk(mu_);
-        auto it = entries_.find(h);
-        if (it != entries_.end()) {
+        auto& shard = shard_for(h);
+        std::shared_lock<std::shared_mutex> lk(shard.mu);
+        auto it = shard.entries.find(h);
+        if (it != shard.entries.end()) {
             it->second->refcount.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
     void release(xi_image_handle h) {
         PoolEntry* to_delete = nullptr;
+        auto& shard = shard_for(h);
         {
-            std::unique_lock<std::shared_mutex> lk(mu_);
-            auto it = entries_.find(h);
-            if (it == entries_.end()) return;
+            std::unique_lock<std::shared_mutex> lk(shard.mu);
+            auto it = shard.entries.find(h);
+            if (it == shard.entries.end()) return;
             if (it->second->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
                 to_delete = it->second;
-                entries_.erase(it);
+                shard.entries.erase(it);
             }
         }
-        // Delete outside the lock — pixel buffer can be large
         delete to_delete;
     }
 
-    // Data access — holds a shared lock for the lookup, then the pointer
-    // is safe as long as the caller holds a refcount (which they must,
-    // since they have the handle).
     uint8_t* data(xi_image_handle h) {
-        std::shared_lock<std::shared_mutex> lk(mu_);
-        auto it = entries_.find(h);
-        return (it != entries_.end()) ? it->second->pixels.data() : nullptr;
+        auto& shard = shard_for(h);
+        std::shared_lock<std::shared_mutex> lk(shard.mu);
+        auto it = shard.entries.find(h);
+        return (it != shard.entries.end()) ? it->second->pixels.data() : nullptr;
     }
 
     int32_t width(xi_image_handle h) {
-        std::shared_lock<std::shared_mutex> lk(mu_);
-        auto it = entries_.find(h);
-        return (it != entries_.end()) ? it->second->width : 0;
+        auto& shard = shard_for(h);
+        std::shared_lock<std::shared_mutex> lk(shard.mu);
+        auto it = shard.entries.find(h);
+        return (it != shard.entries.end()) ? it->second->width : 0;
     }
 
     int32_t height(xi_image_handle h) {
-        std::shared_lock<std::shared_mutex> lk(mu_);
-        auto it = entries_.find(h);
-        return (it != entries_.end()) ? it->second->height : 0;
+        auto& shard = shard_for(h);
+        std::shared_lock<std::shared_mutex> lk(shard.mu);
+        auto it = shard.entries.find(h);
+        return (it != shard.entries.end()) ? it->second->height : 0;
     }
 
     int32_t channels(xi_image_handle h) {
-        std::shared_lock<std::shared_mutex> lk(mu_);
-        auto it = entries_.find(h);
-        return (it != entries_.end()) ? it->second->channels : 0;
+        auto& shard = shard_for(h);
+        std::shared_lock<std::shared_mutex> lk(shard.mu);
+        auto it = shard.entries.find(h);
+        return (it != shard.entries.end()) ? it->second->channels : 0;
     }
 
     int32_t stride(xi_image_handle h) {
-        std::shared_lock<std::shared_mutex> lk(mu_);
-        auto it = entries_.find(h);
-        return (it != entries_.end()) ? it->second->width * it->second->channels : 0;
+        auto& shard = shard_for(h);
+        std::shared_lock<std::shared_mutex> lk(shard.mu);
+        auto it = shard.entries.find(h);
+        return (it != shard.entries.end()) ? it->second->width * it->second->channels : 0;
     }
 
     xi_image_handle from_image(const Image& img) {
@@ -114,9 +138,10 @@ public:
     }
 
     Image to_image(xi_image_handle h) {
-        std::shared_lock<std::shared_mutex> lk(mu_);
-        auto it = entries_.find(h);
-        if (it == entries_.end()) return {};
+        auto& shard = shard_for(h);
+        std::shared_lock<std::shared_mutex> lk(shard.mu);
+        auto it = shard.entries.find(h);
+        if (it == shard.entries.end()) return {};
         auto* e = it->second;
         return Image(e->width, e->height, e->channels, e->pixels.data());
     }
@@ -141,9 +166,12 @@ public:
     }
 
 private:
-    std::shared_mutex mu_;
-    std::unordered_map<xi_image_handle, PoolEntry*> entries_;
+    Shard shards_[SHARD_COUNT];
     std::atomic<xi_image_handle> next_handle_{1};
+
+    Shard& shard_for(xi_image_handle h) {
+        return shards_[h & SHARD_MASK];
+    }
 };
 
 } // namespace xi
