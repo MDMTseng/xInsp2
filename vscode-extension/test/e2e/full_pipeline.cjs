@@ -114,28 +114,36 @@ async function run() {
 
     // --- Step 5: Open mock_camera config UI ---
     console.log('\n[step 5] Opening camera config UI...');
-    // Get plugin UI path from backend
+    let camPanel = null;
+
+    // Helper: send an exchange command and update the webview
+    async function camExchange(cmd) {
+        const r = await sendCmd('exchange_instance', { name: 'cam0', cmd });
+        if (r.ok && r.data && camPanel) {
+            const parsed = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
+            camPanel.webview.postMessage({ type: 'status', ...parsed });
+        }
+        return r;
+    }
+
     const uiRsp = await sendCmd('get_plugin_ui', { plugin: 'mock_camera' });
     if (uiRsp.ok) {
         const uiPath = uiRsp.data.ui_path;
         const htmlPath = path.join(uiPath, 'index.html');
         if (fs.existsSync(htmlPath)) {
             const html = fs.readFileSync(htmlPath, 'utf8');
-            const panel = vscode.window.createWebviewPanel(
+            camPanel = vscode.window.createWebviewPanel(
                 'xinsp2.pluginUI', 'cam0 (mock_camera)',
                 vscode.ViewColumn.Two, { enableScripts: true }
             );
-            panel.webview.html = html;
-            // Wire exchange
-            panel.webview.onDidReceiveMessage(async (msg) => {
+            camPanel.webview.html = html;
+            camPanel.webview.onDidReceiveMessage(async (msg) => {
                 if (msg.type === 'exchange' && msg.cmd) {
-                    const r = await sendCmd('exchange_instance', { name: 'cam0', cmd: msg.cmd });
-                    if (r.ok && r.data) {
-                        const parsed = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
-                        panel.webview.postMessage({ type: 'status', ...parsed });
-                    }
+                    await camExchange(msg.cmd);
                 }
             });
+            // Send initial status
+            await camExchange({ command: 'get_status' });
             console.log('[step 5] camera UI panel opened');
         } else {
             console.log('[step 5] UI html not found:', htmlPath);
@@ -148,22 +156,17 @@ async function run() {
 
     // --- Step 6: Set FPS to 15 ---
     console.log('\n[step 6] Setting FPS to 15...');
-    const fpsRsp = await sendCmd('exchange_instance', {
-        name: 'cam0', cmd: { command: 'set_fps', value: 15 }
-    });
+    const fpsRsp = await camExchange({ command: 'set_fps', value: 15 });
     console.log('[step 6] set_fps result:', JSON.stringify(fpsRsp.data));
-    await sleep(500);
+    await sleep(1000);
     takeScreenshot('fps_set_to_15');
 
     // --- Step 7: Start streaming ---
     console.log('\n[step 7] Starting streaming...');
-    const startRsp = await sendCmd('exchange_instance', {
-        name: 'cam0', cmd: { command: 'start' }
-    });
+    const startRsp = await camExchange({ command: 'start' });
     console.log('[step 7] camera started:', JSON.stringify(startRsp.data));
-    // Also start the continuous inspection loop so vars update
     await sendCmd('start', { fps: 5 });
-    await sleep(1000);
+    await sleep(2000);
     takeScreenshot('streaming_started');
 
     // --- Step 8: Wait 5 seconds while streaming ---
@@ -176,9 +179,7 @@ async function run() {
     // --- Step 9: Stop streaming ---
     console.log('\n[step 9] Stopping streaming...');
     await sendCmd('stop');
-    const stopRsp = await sendCmd('exchange_instance', {
-        name: 'cam0', cmd: { command: 'stop' }
-    });
+    const stopRsp = await camExchange({ command: 'stop' });
     console.log('[step 9] camera stopped:', JSON.stringify(stopRsp.data));
     await sleep(1000);
     takeScreenshot('streaming_stopped');
