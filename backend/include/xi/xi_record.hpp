@@ -191,17 +191,66 @@ public:
         // Or use the raw cJSON pointer for cJSON_ArrayForEach
         cJSON* raw() const { return node_; }
 
+        // Path expression access:
+        //   val.at(".a.b[3].c")     object→object→array[3]→object
+        //   val.at("[1].x")         array[1]→object
+        //   val.at("a.b.c")         same as .a.b.c
+        Value at(const char* path) const {
+            return Value(resolve_path(node_, path));
+        }
+        Value at(const std::string& path) const { return at(path.c_str()); }
+
     private:
         cJSON* node_;
+
+        static cJSON* resolve_path(cJSON* root, const char* p) {
+            if (!root || !p) return nullptr;
+            cJSON* cur = root;
+            while (*p && cur) {
+                if (*p == '.') ++p;  // skip leading or separator dot
+                if (*p == '[') {
+                    // Array index: [N]
+                    ++p;
+                    int idx = 0;
+                    while (*p >= '0' && *p <= '9') { idx = idx * 10 + (*p - '0'); ++p; }
+                    if (*p == ']') ++p;
+                    if (!cJSON_IsArray(cur)) return nullptr;
+                    cur = cJSON_GetArrayItem(cur, idx);
+                } else {
+                    // Object key: read until next . or [ or end
+                    const char* start = p;
+                    while (*p && *p != '.' && *p != '[') ++p;
+                    if (p == start) return nullptr;
+                    // Extract key
+                    char key[256];
+                    int len = (int)(p - start);
+                    if (len >= 256) len = 255;
+                    memcpy(key, start, len);
+                    key[len] = 0;
+                    if (!cJSON_IsObject(cur)) return nullptr;
+                    cur = cJSON_GetObjectItem(cur, key);
+                }
+            }
+            return cur;
+        }
     };
 
     // Entry point for chained access
     Value operator[](const char* key) const {
+        // If key contains '.' or '[', treat as path expression
+        bool is_path = false;
+        for (const char* p = key; *p; ++p) {
+            if (*p == '.' || *p == '[') { is_path = true; break; }
+        }
+        if (is_path) return Value(json_).at(key);
         return Value(cJSON_GetObjectItem(json_, key));
     }
     Value operator[](const std::string& key) const {
         return (*this)[key.c_str()];
     }
+    // Explicit path access (always uses path parser)
+    Value at(const char* path) const { return Value(json_).at(path); }
+    Value at(const std::string& path) const { return at(path.c_str()); }
 
     // --- Data getters (with defaults) ---
 
