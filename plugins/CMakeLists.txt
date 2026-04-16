@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xinsp2_plugins CXX)
+project(xinsp2_plugins C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,6 +9,10 @@ endif()
 
 set(XI_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
 set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
+
+# cJSON as static lib for plugins that use Record/xi_abi
+add_library(cjson_plugin STATIC ${XI_VENDOR}/cJSON.c)
+target_include_directories(cjson_plugin PUBLIC ${XI_VENDOR})
 
 # mock_camera
 add_library(mock_camera SHARED mock_camera/mock_camera.cpp)
@@ -24,4 +28,13 @@ target_include_directories(data_output PRIVATE ${XI_INCLUDE})
 set_target_properties(data_output PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/data_output
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/data_output
+)
+
+# blob_analysis
+add_library(blob_analysis SHARED blob_analysis/blob_analysis.cpp)
+target_include_directories(blob_analysis PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+target_link_libraries(blob_analysis PRIVATE cjson_plugin)
+set_target_properties(blob_analysis PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
 )

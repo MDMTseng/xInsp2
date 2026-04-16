@@ -1,0 +1,7 @@
+{
+  "name": "blob_analysis",
+  "description": "Threshold + contour extraction with area, centroid, bounding box per blob",
+  "dll": "blob_analysis.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false
+}
