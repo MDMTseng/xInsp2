@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -43,44 +44,68 @@ public:
         entry->refcount = 1;
         xi_image_handle handle = next_handle_++;
         {
-            std::lock_guard<std::mutex> lk(mu_);
+            std::unique_lock<std::shared_mutex> lk(mu_);
             entries_[handle] = entry;
         }
         return handle;
     }
 
     void addref(xi_image_handle h) {
-        auto* e = find(h);
-        if (e) e->refcount.fetch_add(1);
+        std::shared_lock<std::shared_mutex> lk(mu_);
+        auto it = entries_.find(h);
+        if (it != entries_.end()) {
+            it->second->refcount.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     void release(xi_image_handle h) {
-        PoolEntry* e = nullptr;
+        PoolEntry* to_delete = nullptr;
         {
-            std::lock_guard<std::mutex> lk(mu_);
+            std::unique_lock<std::shared_mutex> lk(mu_);
             auto it = entries_.find(h);
             if (it == entries_.end()) return;
-            e = it->second;
-            if (e->refcount.fetch_sub(1) == 1) {
+            if (it->second->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                to_delete = it->second;
                 entries_.erase(it);
-            } else {
-                return; // still referenced
             }
         }
-        delete e;
+        // Delete outside the lock — pixel buffer can be large
+        delete to_delete;
     }
 
+    // Data access — holds a shared lock for the lookup, then the pointer
+    // is safe as long as the caller holds a refcount (which they must,
+    // since they have the handle).
     uint8_t* data(xi_image_handle h) {
-        auto* e = find(h);
-        return e ? e->pixels.data() : nullptr;
+        std::shared_lock<std::shared_mutex> lk(mu_);
+        auto it = entries_.find(h);
+        return (it != entries_.end()) ? it->second->pixels.data() : nullptr;
     }
 
-    int32_t width(xi_image_handle h)    { auto* e = find(h); return e ? e->width : 0; }
-    int32_t height(xi_image_handle h)   { auto* e = find(h); return e ? e->height : 0; }
-    int32_t channels(xi_image_handle h) { auto* e = find(h); return e ? e->channels : 0; }
-    int32_t stride(xi_image_handle h)   { auto* e = find(h); return e ? e->width * e->channels : 0; }
+    int32_t width(xi_image_handle h) {
+        std::shared_lock<std::shared_mutex> lk(mu_);
+        auto it = entries_.find(h);
+        return (it != entries_.end()) ? it->second->width : 0;
+    }
 
-    // Convert xi::Image to a pool handle (copies pixels into pool)
+    int32_t height(xi_image_handle h) {
+        std::shared_lock<std::shared_mutex> lk(mu_);
+        auto it = entries_.find(h);
+        return (it != entries_.end()) ? it->second->height : 0;
+    }
+
+    int32_t channels(xi_image_handle h) {
+        std::shared_lock<std::shared_mutex> lk(mu_);
+        auto it = entries_.find(h);
+        return (it != entries_.end()) ? it->second->channels : 0;
+    }
+
+    int32_t stride(xi_image_handle h) {
+        std::shared_lock<std::shared_mutex> lk(mu_);
+        auto it = entries_.find(h);
+        return (it != entries_.end()) ? it->second->width * it->second->channels : 0;
+    }
+
     xi_image_handle from_image(const Image& img) {
         if (img.empty()) return XI_IMAGE_NULL;
         auto h = create(img.width, img.height, img.channels);
@@ -88,14 +113,14 @@ public:
         return h;
     }
 
-    // Convert pool handle to xi::Image (copies pixels out)
     Image to_image(xi_image_handle h) {
-        auto* e = find(h);
-        if (!e) return {};
+        std::shared_lock<std::shared_mutex> lk(mu_);
+        auto it = entries_.find(h);
+        if (it == entries_.end()) return {};
+        auto* e = it->second;
         return Image(e->width, e->height, e->channels, e->pixels.data());
     }
 
-    // Build the xi_host_api function table pointing at this pool
     static xi_host_api make_host_api() {
         xi_host_api api = {};
         api.image_create   = [](int32_t w, int32_t h, int32_t ch) -> xi_image_handle {
@@ -116,15 +141,9 @@ public:
     }
 
 private:
-    std::mutex mu_;
+    std::shared_mutex mu_;
     std::unordered_map<xi_image_handle, PoolEntry*> entries_;
     std::atomic<xi_image_handle> next_handle_{1};
-
-    PoolEntry* find(xi_image_handle h) {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = entries_.find(h);
-        return it == entries_.end() ? nullptr : it->second;
-    }
 };
 
 } // namespace xi
