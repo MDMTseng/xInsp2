@@ -22,7 +22,11 @@
 #include <xi/xi_image.hpp>
 #include <xi/xi_jpeg.hpp>
 #include <xi/xi_protocol.hpp>
+#include <xi/xi_script_compiler.hpp>
+#include <xi/xi_script_loader.hpp>
 #include <xi/xi_ws_server.hpp>
+
+#include <filesystem>
 
 namespace xp = xi::proto;
 
@@ -73,6 +77,22 @@ static void demo_inspect(int frame) {
 }
 
 static std::atomic<int64_t> g_run_id{0};
+
+// Loaded user script state (M5). When null, fall back to demo_inspect.
+static xi::script::LoadedScript g_script;
+static std::mutex               g_script_mu;
+
+// Path resolution for the script compiler. Backend derives its own dir at
+// startup and uses that to locate the xi headers we ship alongside the exe.
+static std::string g_include_dir;
+static std::string g_work_dir;
+
+static std::string get_exe_dir() {
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    std::filesystem::path p(std::string(buf, n));
+    return p.parent_path().string();
+}
 
 
 static std::atomic<bool> g_should_exit{false};
@@ -140,11 +160,155 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "shutdown") {
         send_rsp_ok(srv, id);
         g_should_exit = true;
+    } else if (name == "compile_and_load") {
+        auto src = xp::get_string_field(parsed->args_json, "path");
+        if (!src) {
+            send_rsp_err(srv, id, "compile_and_load: missing path");
+            return;
+        }
+
+        xi::script::CompileRequest req;
+        req.source_path = *src;
+        req.output_dir  = (std::filesystem::path(g_work_dir) / "script_build").string();
+        req.include_dir = g_include_dir;
+
+        auto res = xi::script::compile(req);
+        if (!res.ok) {
+            xp::Rsp r;
+            r.id = id;
+            r.ok = false;
+            r.error = "compile failed";
+            srv.send_text(r.to_json());
+            xp::LogMsg lm;
+            lm.level = "error";
+            lm.msg = res.build_log;
+            srv.send_text(lm.to_json());
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            xi::script::unload_script(g_script);
+            std::string err;
+            if (!xi::script::load_script(res.dll_path, g_script, err)) {
+                send_rsp_err(srv, id, err);
+                return;
+            }
+        }
+
+        // Build log can be large — send as a log message, not inline data.
+        if (!res.build_log.empty()) {
+            xp::LogMsg lm;
+            lm.level = "info";
+            lm.msg = res.build_log;
+            srv.send_text(lm.to_json());
+        }
+
+        // Return success with dll path.
+        std::string data = "{\"dll\":";
+        xp::json_escape_into(data, res.dll_path);
+        data += "}";
+        send_rsp_ok(srv, id, data);
+    } else if (name == "unload_script") {
+        std::lock_guard<std::mutex> lk(g_script_mu);
+        xi::script::unload_script(g_script);
+        send_rsp_ok(srv, id);
     } else if (name == "run") {
-        // Execute the (hardcoded for M3) inspection, collect vars, send back.
         int64_t run_id = ++g_run_id;
-        xi::ValueStore::current().clear();
         auto t0 = std::chrono::steady_clock::now();
+
+        // If a user script is loaded, drive it via its exported thunks.
+        // Otherwise fall back to the built-in demo inspection (M3 path).
+        bool use_script = false;
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            use_script = g_script.ok();
+        }
+
+        if (use_script) {
+            // --- Script path ---
+            xi::script::LoadedScript s;
+            {
+                std::lock_guard<std::mutex> lk(g_script_mu);
+                s = g_script;  // copy fn pointers; handle still owned by g_script
+            }
+            if (s.reset) s.reset();
+            try {
+                s.inspect(/*frame=*/7);
+            } catch (const std::exception& e) {
+                send_rsp_err(srv, id, std::string("script inspect threw: ") + e.what());
+                return;
+            }
+
+            // Query the DLL's own ValueStore via the snapshot thunk.
+            std::vector<char> sbuf(256 * 1024);
+            int n = s.snapshot ? s.snapshot(sbuf.data(), (int)sbuf.size()) : -1;
+            if (n < 0) {
+                // Try again with larger buffer.
+                sbuf.resize(static_cast<size_t>(-n) + 1024);
+                n = s.snapshot(sbuf.data(), (int)sbuf.size());
+            }
+            if (n < 0) {
+                send_rsp_err(srv, id, "snapshot thunk failed");
+                return;
+            }
+
+            auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0).count();
+
+            // rsp first
+            char rbuf[128];
+            std::snprintf(rbuf, sizeof(rbuf),
+                R"({"run_id":%lld,"ms":%lld})", (long long)run_id, (long long)dt_ms);
+            send_rsp_ok(srv, id, rbuf);
+
+            // The thunk returned a JSON array of items; wrap it into a full
+            // vars message.
+            std::string vars_msg = "{\"type\":\"vars\",\"run_id\":";
+            vars_msg += std::to_string(run_id);
+            vars_msg += ",\"items\":";
+            vars_msg += std::string(sbuf.data(), (size_t)n);
+            vars_msg += "}";
+            srv.send_text(vars_msg);
+
+            // Scan the snapshot for image entries and dump each one.
+            // Simple substring walk to find "gid": occurrences.
+            std::string_view snap_view(sbuf.data(), (size_t)n);
+            size_t pos = 0;
+            while (true) {
+                pos = snap_view.find("\"gid\":", pos);
+                if (pos == std::string_view::npos) break;
+                pos += 6;
+                uint32_t gid = (uint32_t)std::atoi(snap_view.data() + pos);
+                // Dump image via thunk
+                if (s.dump_image) {
+                    int w = 0, h = 0, c = 0;
+                    std::vector<uint8_t> raw(32 * 1024 * 1024);
+                    int nb = s.dump_image(gid, raw.data(), (int)raw.size(), &w, &h, &c);
+                    if (nb > 0 && w > 0 && h > 0 && c > 0) {
+                        xi::Image img(w, h, c, raw.data());
+                        std::vector<uint8_t> jpeg;
+                        if (xi::encode_jpeg(img, 85, jpeg)) {
+                            std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
+                            xp::PreviewHeader hd;
+                            hd.gid = gid;
+                            hd.codec = (uint32_t)xp::Codec::JPEG;
+                            hd.width = (uint32_t)w;
+                            hd.height = (uint32_t)h;
+                            hd.channels = (uint32_t)c;
+                            xp::encode_preview_header(hd, frame.data());
+                            std::memcpy(frame.data() + xp::kPreviewHeaderSize,
+                                        jpeg.data(), jpeg.size());
+                            srv.send_binary(frame.data(), frame.size());
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        // --- Fallback: built-in demo inspection ---
+        xi::ValueStore::current().clear();
         try {
             demo_inspect(/*frame=*/7);
         } catch (const std::exception& e) {
@@ -234,14 +398,31 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             srv.send_binary(frame.data(), frame.size());
         }
     } else if (name == "list_params") {
-        // Emit a minimal instances message with just the param registry.
-        std::string out = "{\"type\":\"instances\",\"instances\":[],\"params\":[";
-        auto list = xi::ParamRegistry::instance().list();
-        for (size_t i = 0; i < list.size(); ++i) {
-            if (i) out += ",";
-            out += list[i]->as_json();
+        // If a script is loaded, delegate to its own registry thunk so we
+        // see the DLL's params. Otherwise report the backend's own.
+        std::string params_json;
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.list_params) {
+                std::vector<char> buf(64 * 1024);
+                int n = g_script.list_params(buf.data(), (int)buf.size());
+                if (n < 0) { buf.resize(static_cast<size_t>(-n) + 1024);
+                             n = g_script.list_params(buf.data(), (int)buf.size()); }
+                if (n > 0) params_json.assign(buf.data(), (size_t)n);
+            }
         }
-        out += "]}";
+        if (params_json.empty()) {
+            params_json = "[";
+            auto list = xi::ParamRegistry::instance().list();
+            for (size_t i = 0; i < list.size(); ++i) {
+                if (i) params_json += ",";
+                params_json += list[i]->as_json();
+            }
+            params_json += "]";
+        }
+        std::string out = "{\"type\":\"instances\",\"instances\":[],\"params\":";
+        out += params_json;
+        out += "}";
         send_rsp_ok(srv, id, "{}");
         srv.send_text(out);
     } else if (name == "set_param") {
@@ -249,6 +430,25 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (!pname) {
             send_rsp_err(srv, id, "set_param: missing name");
             return;
+        }
+        // Try the loaded script first, then fall back to backend registry.
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.set_param) {
+                // Extract raw value substring as a bare scalar.
+                std::string val;
+                auto num = xp::get_number_field(parsed->args_json, "value");
+                if (num) { char nb[64]; std::snprintf(nb, sizeof(nb), "%g", *num); val = nb; }
+                else {
+                    if (parsed->args_json.find("\"value\":true")  != std::string::npos) val = "true";
+                    if (parsed->args_json.find("\"value\":false") != std::string::npos) val = "false";
+                }
+                if (!val.empty()) {
+                    int rc = g_script.set_param(pname->c_str(), val.c_str());
+                    if (rc == 0) { send_rsp_ok(srv, id); return; }
+                    // fall through to backend registry on -1 (not found)
+                }
+            }
         }
         auto* p = xi::ParamRegistry::instance().find(*pname);
         if (!p) {
@@ -281,6 +481,29 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
 int main(int argc, char** argv) {
     int port = parse_port(argc, argv);
+
+    // Derive include dir for the script compiler. In a normal dev tree the
+    // backend .exe is at backend/build/Release, and headers are at
+    // backend/include. Walk up until we find xi/xi.hpp.
+    {
+        std::filesystem::path p = get_exe_dir();
+        for (int i = 0; i < 6; ++i) {
+            if (std::filesystem::exists(p / "include" / "xi" / "xi.hpp")) {
+                g_include_dir = (p / "include").string();
+                break;
+            }
+            if (!p.has_parent_path() || p.parent_path() == p) break;
+            p = p.parent_path();
+        }
+        if (g_include_dir.empty()) {
+            // Fallback: next to the exe.
+            g_include_dir = (std::filesystem::path(get_exe_dir()) / "include").string();
+        }
+    }
+    g_work_dir = (std::filesystem::temp_directory_path() / "xinsp2").string();
+    std::filesystem::create_directories(g_work_dir);
+    std::fprintf(stderr, "[xinsp2] include_dir=%s\n", g_include_dir.c_str());
+    std::fprintf(stderr, "[xinsp2] work_dir=%s\n",    g_work_dir.c_str());
 
     xi::ws::Server srv;
     srv.on_open  = [&] {
