@@ -12,22 +12,29 @@ let cmdId = 1;
 const nextId = () => cmdId++;
 
 function findBackendExe(context: vscode.ExtensionContext): string {
-    // Look relative to the extension, then fall back to workspace.
     const candidates = [
-        path.join(context.extensionPath, '..', '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'),
+        // Dev tree: vscode-extension/ is sibling of backend/
+        path.join(context.extensionPath, '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'),
+        // Packaged: exe shipped next to extension
         path.join(context.extensionPath, 'backend', 'xinsp-backend.exe'),
     ];
 
     // Also check workspace folders.
     for (const wf of vscode.workspace.workspaceFolders ?? []) {
         candidates.push(path.join(wf.uri.fsPath, 'backend', 'build', 'Release', 'xinsp-backend.exe'));
+        // Walk up from workspace to find xInsp2 root
+        candidates.push(path.join(wf.uri.fsPath, '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'));
+        candidates.push(path.join(wf.uri.fsPath, '..', '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'));
     }
 
     const fs = require('fs');
     for (const c of candidates) {
-        if (fs.existsSync(c)) return c;
+        const resolved = path.resolve(c);
+        if (fs.existsSync(resolved)) {
+            return resolved;
+        }
     }
-    return 'xinsp-backend.exe'; // hope it's on PATH
+    return 'xinsp-backend.exe';
 }
 
 export function activate(context: vscode.ExtensionContext) {
