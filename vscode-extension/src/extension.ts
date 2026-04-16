@@ -122,7 +122,7 @@ export function activate(context: vscode.ExtensionContext) {
         const jpegBuf  = buf.subarray(PREVIEW_HEADER_SIZE);
         const b64      = jpegBuf.toString('base64');
 
-        if (gid >= 9000 && gid < 10000) {
+        if ((gid >= 8000 && gid < 9000) || (gid >= 9000 && gid < 10000)) {
             // Config preview — route to the specific panel
             const panel = previewGidToPanel.get(gid);
             if (panel) {

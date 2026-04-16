@@ -237,41 +237,26 @@ async function run() {
             });
             await sleep(1000);
 
-            // Send camera preview as background image
-            for (let i = 0; i < 3; ++i) {
-                const pr = await sendCmd('preview_instance', { name: 'cam0' }).catch(() => null);
-                if (pr && pr.ok && pr.data && pr.data.gid && api?.registerPreviewGid) {
-                    api.registerPreviewGid(pr.data.gid, blobPanel);
-                }
-                await sleep(300);
-            }
-            await sleep(1000);
-
-            // Send blob results overlay
-            blobPanel.webview.postMessage({
-                type: 'process_result',
-                blob_count: 3,
-                blobs: [
-                    { area: 247, cx: 85.2, cy: 63.1, min_x: 72, min_y: 50, max_x: 98, max_y: 76, contour_points: 40,
-                      contour: Array.from({length: 40}, (_, i) => ({
-                          x: 85 + Math.round(13 * Math.cos(i * Math.PI * 2 / 40)),
-                          y: 63 + Math.round(13 * Math.sin(i * Math.PI * 2 / 40))
-                      }))
-                    },
-                    { area: 183, cx: 200.5, cy: 150.8, min_x: 185, min_y: 138, max_x: 216, max_y: 164, contour_points: 30,
-                      contour: Array.from({length: 30}, (_, i) => ({
-                          x: 200 + Math.round(15 * Math.cos(i * Math.PI * 2 / 30)),
-                          y: 151 + Math.round(12 * Math.sin(i * Math.PI * 2 / 30))
-                      }))
-                    },
-                    { area: 95, cx: 280.0, cy: 200.0, min_x: 270, min_y: 192, max_x: 290, max_y: 208, contour_points: 20,
-                      contour: Array.from({length: 20}, (_, i) => ({
-                          x: 280 + Math.round(10 * Math.cos(i * Math.PI * 2 / 20)),
-                          y: 200 + Math.round(8 * Math.sin(i * Math.PI * 2 / 20))
-                      }))
-                    }
-                ]
+            // Run the REAL blob_analysis plugin on a test image (with actual blobs)
+            console.log('[step 9b] Running process_instance...');
+            const procRsp = await sendCmd('process_instance', {
+                name: 'detector0',
+                params: { threshold: 100, min_area: 20 }
             });
+            console.log('[step 9b] process result:', JSON.stringify(procRsp.data).substring(0, 200));
+
+            if (procRsp.ok && procRsp.data) {
+                // Route output images to the blob panel
+                const imgs = procRsp.data._images || {};
+                for (const [key, gid] of Object.entries(imgs)) {
+                    if (api?.registerPreviewGid) api.registerPreviewGid(gid, blobPanel);
+                }
+                // Send the process results (blob data) to the UI
+                blobPanel.webview.postMessage({
+                    type: 'process_result',
+                    ...procRsp.data,
+                });
+            }
             await sleep(2000);
         }
     }

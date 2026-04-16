@@ -668,6 +668,141 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xp::encode_preview_header(hd, frame.data());
         std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
         srv.send_binary(frame.data(), frame.size());
+    } else if (name == "process_instance") {
+        // Call a C ABI plugin's process() with an image from another instance.
+        // args: { name: "detector0", source: "cam0", params: {...} }
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        auto source = xp::get_string_field(parsed->args_json, "source");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+
+        // Find the plugin instance
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        auto* adapter = inst ? dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get()) : nullptr;
+        if (!adapter || !adapter->process_fn()) {
+            send_rsp_err(srv, id, "not a processable plugin: " + *iname);
+            return;
+        }
+
+        // Get source image (from an ImageSource or generate a test image)
+        xi::Image src_img;
+        if (source) {
+            auto src_inst = xi::InstanceRegistry::instance().find(*source);
+            auto* img_src = src_inst ? dynamic_cast<xi::ImageSource*>(src_inst.get()) : nullptr;
+            if (img_src) src_img = img_src->grab();
+        }
+        if (src_img.empty()) {
+            // Generate a test image with actual bright blobs on dark background
+            int w = 320, h = 240;
+            src_img = xi::Image(w, h, 1); // grayscale
+            uint8_t* p = src_img.data();
+            // Dark background with gradient
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x)
+                    p[y * w + x] = (uint8_t)(30 + (x * 20 / w));
+
+            // Draw bright circles as blobs
+            auto draw_circle = [&](int cx, int cy, int r, uint8_t val) {
+                for (int dy = -r; dy <= r; ++dy)
+                    for (int dx = -r; dx <= r; ++dx)
+                        if (dx*dx + dy*dy <= r*r) {
+                            int px = cx + dx, py = cy + dy;
+                            if (px >= 0 && px < w && py >= 0 && py < h)
+                                p[py * w + px] = val;
+                        }
+            };
+            draw_circle(80,  60,  20, 220);  // large blob
+            draw_circle(200, 100, 15, 240);  // medium blob
+            draw_circle(260, 180, 12, 200);  // small blob
+            draw_circle(50,  180, 8,  210);  // tiny blob
+        }
+
+        // Build input record with the image
+        static xi_host_api host = xi::ImagePool::make_host_api();
+        xi_image_handle src_h = xi::ImagePool::instance().from_image(src_img);
+
+        // Parse extra params from args
+        std::string params_json = "{}";
+        const char* after;
+        if (xp::detail::find_key(parsed->args_json.data(),
+                                  parsed->args_json.data() + parsed->args_json.size(),
+                                  "params", params_json, after)) {
+            // params_json is already set
+        }
+
+        xi_record_image in_imgs[] = { {"gray", src_h} };
+        xi_record input_rec;
+        input_rec.images = in_imgs;
+        input_rec.image_count = 1;
+        input_rec.json = params_json.c_str();
+
+        xi_record_out output;
+        xi_record_out_init(&output);
+
+        // Call the plugin's process
+        adapter->process_fn()(adapter->raw_instance(), &input_rec, &output);
+
+        // Release input handle
+        xi::ImagePool::instance().release(src_h);
+
+        // Build response: JSON data + send output images as preview frames
+        std::string result_json = output.json ? output.json : "{}";
+
+        // Add image info to result
+        std::string full_json = result_json;
+        if (output.image_count > 0) {
+            // Insert images info into the JSON
+            if (full_json.size() > 1 && full_json.back() == '}') {
+                full_json.pop_back();
+                if (full_json.size() > 1) full_json += ",";
+                full_json += "\"_images\":{";
+                for (int i = 0; i < output.image_count; ++i) {
+                    if (i) full_json += ",";
+                    uint32_t gid = 8000 + (uint32_t)i;
+                    full_json += "\"" + std::string(output.images[i].key) + "\":" + std::to_string(gid);
+                }
+                full_json += "}}";
+            }
+        }
+
+        send_rsp_ok(srv, id, full_json);
+
+        // Send output images as binary preview frames
+        for (int i = 0; i < output.image_count; ++i) {
+            auto& oi = output.images[i];
+            xi::Image out_img = xi::ImagePool::instance().to_image(oi.handle);
+            if (out_img.empty()) continue;
+
+            // For single-channel images, convert to RGB for JPEG
+            xi::Image jpeg_img = out_img;
+            if (out_img.channels == 1) {
+                jpeg_img = xi::Image(out_img.width, out_img.height, 3);
+                for (int j = 0; j < out_img.width * out_img.height; ++j) {
+                    jpeg_img.data()[j*3+0] = out_img.data()[j];
+                    jpeg_img.data()[j*3+1] = out_img.data()[j];
+                    jpeg_img.data()[j*3+2] = out_img.data()[j];
+                }
+            }
+
+            std::vector<uint8_t> jpeg;
+            if (!xi::encode_jpeg(jpeg_img, 85, jpeg)) continue;
+
+            uint32_t gid = 8000 + (uint32_t)i;
+            std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
+            xp::PreviewHeader hd;
+            hd.gid = gid;
+            hd.codec = (uint32_t)xp::Codec::JPEG;
+            hd.width = (uint32_t)out_img.width;
+            hd.height = (uint32_t)out_img.height;
+            hd.channels = (uint32_t)jpeg_img.channels;
+            xp::encode_preview_header(hd, frame.data());
+            std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
+            srv.send_binary(frame.data(), frame.size());
+
+            // Release output handle
+            xi::ImagePool::instance().release(oi.handle);
+        }
+
+        xi_record_out_free(&output);
     } else if (name == "list_plugins") {
         auto plugins = g_plugin_mgr.list_plugins();
         std::string out = "[";
