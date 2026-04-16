@@ -121,9 +121,11 @@ private:
     std::string name_;
 };
 
-// Cache of proxies — one per name, lazily created
+// Thread-safe cache of proxies — one per name, lazily created
 inline UseProxy& use(const std::string& name) {
     static std::unordered_map<std::string, UseProxy> proxies;
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
     auto it = proxies.find(name);
     if (it == proxies.end()) {
         it = proxies.emplace(name, UseProxy(name)).first;

@@ -424,19 +424,24 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         auto fps_val = xp::get_number_field(parsed->args_json, "fps");
         if (fps_val && *fps_val > 0) fps = (int)*fps_val;
 
+        // Stop any existing worker before starting a new one
+        if (g_worker_thread.joinable()) {
+            g_continuous = false;
+            g_worker_thread.join();
+        }
+
         g_continuous = true;
         g_trigger_pending = 0;
 
-        // Timer thread: trigger an inspection at the requested FPS.
-        // The script's internal ImageSource pushes frames to its own
-        // queue; inspect() calls grab() to dequeue. This timer just
-        // drives the execution cadence.
         int interval_ms = 1000 / std::max(fps, 1);
-        g_worker_thread = std::thread([&srv, interval_ms] {
+        // Capture srv as pointer — it's a local in main(), outlives all threads
+        auto* srv_ptr = &srv;
+        g_worker_thread = std::thread([srv_ptr, interval_ms] {
+            _set_se_translator(seh_translator); // SEH on worker thread too
             std::fprintf(stderr, "[xinsp2] continuous mode: %dms interval\n", interval_ms);
             int frame_seq = 0;
             while (g_continuous.load()) {
-                run_one_inspection(srv, frame_seq++);
+                run_one_inspection(*srv_ptr, frame_seq++);
                 std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
             }
             std::fprintf(stderr, "[xinsp2] continuous mode stopped\n");
@@ -790,6 +795,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, msg);
             return;
         }
+
+        // Release input image handle (success path)
+        xi::ImagePool::instance().release(src_h);
 
         // Build response: JSON data + send output images as preview frames
         std::string result_json = output.json ? output.json : "{}";

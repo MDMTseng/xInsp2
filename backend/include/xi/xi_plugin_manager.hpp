@@ -238,6 +238,10 @@ public:
         auto pj = std::filesystem::path(folder) / "project.json";
         if (!std::filesystem::exists(pj)) return false;
 
+        // Unregister old instances from the global registry
+        for (auto& [k, v] : project_.instances) {
+            InstanceRegistry::instance().remove(k);
+        }
         project_.folder_path = folder;
         project_.instances.clear();
 

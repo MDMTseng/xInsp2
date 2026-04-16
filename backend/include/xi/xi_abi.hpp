@@ -105,9 +105,14 @@ public:
         if (!h) return {};
         uint8_t* dst = host->image_data(h);
         std::memcpy(dst, img.data(), img.size());
+        return from_handle(host, h);  // take existing refcount=1, no addref
+    }
+
+    // Take ownership of an existing handle WITHOUT addref (handle already refcount=1)
+    static HostImage from_handle(const xi_host_api* host, xi_image_handle h) {
         HostImage hi;
         hi.host_ = host;
-        hi.handle_ = h;  // already refcount=1 from create, don't addref
+        hi.handle_ = h;  // no addref — we take the existing refcount
         return hi;
     }
 
@@ -145,13 +150,12 @@ public:
     virtual bool set_def(const std::string& json) { (void)json; return true; }
 
 protected:
-    // Create a host-managed image (refcount = 1)
     HostImage create_image(int w, int h, int ch) {
         if (!host_) return {};
         xi_image_handle handle = host_->image_create(w, h, ch);
-        HostImage hi;
-        // Direct construction — handle already has refcount=1
-        return HostImage(host_, handle);
+        // from_image_handle: takes ownership of the existing refcount=1
+        // without calling addref again
+        return HostImage::from_handle(host_, handle);
     }
 
     void log_info(const std::string& msg) {

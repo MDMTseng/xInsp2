@@ -62,7 +62,7 @@ public:
         entry->channels = ch;
         entry->refcount = 1;
 
-        xi_image_handle handle = next_handle_++;
+        xi_image_handle handle = static_cast<xi_image_handle>(next_handle_++);
         auto& shard = shard_for(handle);
         {
             std::unique_lock<std::shared_mutex> lk(shard.mu);
@@ -167,7 +167,9 @@ public:
 
 private:
     Shard shards_[SHARD_COUNT];
-    std::atomic<xi_image_handle> next_handle_{1};
+    // 64-bit counter truncated to 32-bit handle. At 1M handles/sec it takes
+    // 585 years to wrap uint64, so ABA is practically impossible.
+    std::atomic<uint64_t> next_handle_{1};
 
     Shard& shard_for(xi_image_handle h) {
         return shards_[h & SHARD_MASK];
