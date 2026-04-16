@@ -1,198 +1,269 @@
 #pragma once
 //
-// xi_abi.hpp — C++ wrappers for the stable C ABI.
+// xi_abi.hpp — C++ wrapper over the stable C plugin ABI.
 //
-// Plugin authors include this and write normal C++ with Record objects.
-// The XI_PLUGIN_IMPL macro generates the C ABI entry points automatically.
+// Plugin authors write a class deriving from xi::Plugin, override
+// process() and exchange(), then put XI_PLUGIN_IMPL(MyClass) at the
+// bottom. The macro generates all 6 C entry points.
 //
-// Usage in a plugin:
+// Images are handles managed by the host. The wrapper provides a
+// HostImage class that acts like xi::Image but backed by a host handle.
+// Copying a HostImage = addref (zero-copy). Destroying = release.
 //
-//   class MyPlugin : public xi::PluginBase {
+// Usage:
+//
+//   class MyPlugin : public xi::Plugin {
 //   public:
-//       MyPlugin(const std::string& name) : xi::PluginBase(name, "my_plugin") {}
+//       using xi::Plugin::Plugin;  // inherit ctor
 //
-//       Record process(const Record& input) override {
+//       xi::Record process(const xi::Record& input) override {
 //           auto img = input.get_image("frame");
-//           auto result = doSomething(img);
-//           return Record()
-//               .image("output", result)
-//               .set("score", 0.95);
+//           auto gray = xi::ops::toGray(img);   // works with HostImage
+//           return xi::Record()
+//               .image("gray", gray)
+//               .set("done", true);
 //       }
 //   };
 //
 //   XI_PLUGIN_IMPL(MyPlugin)
-//   // ^ generates: xi_plugin_create, xi_plugin_destroy, xi_plugin_process, etc.
 //
 
 #include "xi_abi.h"
+#include "xi_image.hpp"
 #include "xi_record.hpp"
 
 #include <cstring>
 #include <map>
 #include <string>
-#include <vector>
 
 namespace xi {
 
-// --- Conversion helpers: C ↔ C++ ---
+// --- HostImage: an Image backed by a host-managed handle ---
+//
+// HostImage wraps a xi_image_handle. It refcounts via the host API:
+// copy → addref, destroy → release. Data access via host->image_data().
+//
+// HostImage is implicitly convertible to/from xi::Image so existing
+// operator code (toGray, threshold, etc.) works unchanged.
 
-// Convert a C xi_record_ref to a C++ Record (copies image data)
-inline Record record_from_ref(const xi_record_ref* ref) {
+class HostImage {
+public:
+    HostImage() = default;
+
+    HostImage(const xi_host_api* host, xi_image_handle h)
+        : host_(host), handle_(h) {
+        if (host_ && handle_) host_->image_addref(handle_);
+    }
+
+    ~HostImage() {
+        if (host_ && handle_) host_->image_release(handle_);
+    }
+
+    HostImage(const HostImage& o) : host_(o.host_), handle_(o.handle_) {
+        if (host_ && handle_) host_->image_addref(handle_);
+    }
+
+    HostImage& operator=(const HostImage& o) {
+        if (this != &o) {
+            if (host_ && handle_) host_->image_release(handle_);
+            host_ = o.host_;
+            handle_ = o.handle_;
+            if (host_ && handle_) host_->image_addref(handle_);
+        }
+        return *this;
+    }
+
+    HostImage(HostImage&& o) noexcept : host_(o.host_), handle_(o.handle_) {
+        o.handle_ = XI_IMAGE_NULL;
+    }
+
+    HostImage& operator=(HostImage&& o) noexcept {
+        if (this != &o) {
+            if (host_ && handle_) host_->image_release(handle_);
+            host_ = o.host_;
+            handle_ = o.handle_;
+            o.handle_ = XI_IMAGE_NULL;
+        }
+        return *this;
+    }
+
+    // Convert to xi::Image (copies pixel data — use when you need to
+    // pass to operators that expect xi::Image)
+    operator Image() const {
+        if (!host_ || !handle_) return {};
+        int w = host_->image_width(handle_);
+        int h = host_->image_height(handle_);
+        int c = host_->image_channels(handle_);
+        const uint8_t* p = const_cast<const xi_host_api*>(host_)->image_data(handle_);
+        return Image(w, h, c, p);
+    }
+
+    // Create a HostImage from an xi::Image (copies pixel data into host pool)
+    static HostImage from_image(const xi_host_api* host, const Image& img) {
+        if (!host || img.empty()) return {};
+        xi_image_handle h = host->image_create(img.width, img.height, img.channels);
+        if (!h) return {};
+        uint8_t* dst = host->image_data(h);
+        std::memcpy(dst, img.data(), img.size());
+        HostImage hi;
+        hi.host_ = host;
+        hi.handle_ = h;  // already refcount=1 from create, don't addref
+        return hi;
+    }
+
+    bool empty() const { return !handle_ || !host_; }
+    xi_image_handle handle() const { return handle_; }
+    const xi_host_api* host() const { return host_; }
+
+    uint8_t*       data()     { return host_ ? host_->image_data(handle_) : nullptr; }
+    const uint8_t* data() const { return host_ ? host_->image_data(handle_) : nullptr; }
+    int width()    const { return host_ ? host_->image_width(handle_) : 0; }
+    int height()   const { return host_ ? host_->image_height(handle_) : 0; }
+    int channels() const { return host_ ? host_->image_channels(handle_) : 0; }
+
+private:
+    const xi_host_api* host_ = nullptr;
+    xi_image_handle    handle_ = XI_IMAGE_NULL;
+};
+
+// --- Plugin base class ---
+
+class Plugin {
+public:
+    Plugin(const xi_host_api* host, const std::string& name)
+        : host_(host), name_(name) {}
+
+    virtual ~Plugin() = default;
+
+    const xi_host_api* host() const { return host_; }
+    const std::string& name() const { return name_; }
+
+    // Override these in your plugin:
+    virtual Record process(const Record& input) { (void)input; return {}; }
+    virtual std::string exchange(const std::string& cmd_json) { (void)cmd_json; return "{}"; }
+    virtual std::string get_def() const { return "{}"; }
+    virtual bool set_def(const std::string& json) { (void)json; return true; }
+
+protected:
+    // Create a host-managed image (refcount = 1)
+    HostImage create_image(int w, int h, int ch) {
+        if (!host_) return {};
+        xi_image_handle handle = host_->image_create(w, h, ch);
+        HostImage hi;
+        // Direct construction — handle already has refcount=1
+        return HostImage(host_, handle);
+    }
+
+    void log_info(const std::string& msg) {
+        if (host_ && host_->log) host_->log(1, msg.c_str());
+    }
+    void log_error(const std::string& msg) {
+        if (host_ && host_->log) host_->log(3, msg.c_str());
+    }
+
+    const xi_host_api* host_;
+    std::string name_;
+};
+
+// --- Conversion helpers ---
+
+// Convert a C xi_record to a C++ Record (images become HostImages → copied to xi::Image)
+inline Record record_from_c(const xi_host_api* host, const xi_record* rec) {
     Record r;
-    if (ref->json_data) {
-        cJSON* parsed = cJSON_Parse(ref->json_data);
+    if (rec->json) {
+        cJSON* parsed = cJSON_Parse(rec->json);
         if (parsed) {
-            // Iterate and copy fields
             cJSON* item = parsed->child;
             while (item) {
-                if (cJSON_IsNumber(item))
-                    r.set(item->string, item->valuedouble);
-                else if (cJSON_IsBool(item))
-                    r.set(item->string, cJSON_IsTrue(item) ? true : false);
-                else if (cJSON_IsString(item))
-                    r.set(item->string, std::string(item->valuestring));
-                else {
-                    char* s = cJSON_PrintUnformatted(item);
-                    r.set_raw(item->string, cJSON_Duplicate(item, true));
-                    cJSON_free(s);
-                }
+                if (cJSON_IsNumber(item))      r.set(item->string, item->valuedouble);
+                else if (cJSON_IsBool(item))   r.set(item->string, cJSON_IsTrue(item) ? true : false);
+                else if (cJSON_IsString(item)) r.set(item->string, std::string(item->valuestring));
+                else                           r.set_raw(item->string, cJSON_Duplicate(item, true));
                 item = item->next;
             }
             cJSON_Delete(parsed);
         }
     }
-    for (int i = 0; i < ref->image_count; ++i) {
-        auto& img = ref->images[i];
-        r.image(img.key, Image(img.width, img.height, img.channels, img.data));
+    for (int i = 0; i < rec->image_count; ++i) {
+        // Convert handle → xi::Image (copies pixels)
+        auto& entry = rec->images[i];
+        int w = host->image_width(entry.handle);
+        int h = host->image_height(entry.handle);
+        int ch = host->image_channels(entry.handle);
+        const uint8_t* p = host->image_data(entry.handle);
+        if (p && w > 0 && h > 0) {
+            r.image(entry.key, Image(w, h, ch, p));
+        }
     }
     return r;
 }
 
-// Convert a C++ Record to a C xi_record_out (copies image data)
-inline void record_to_out(const Record& r, xi_record_out* out) {
+// Convert a C++ Record to a C xi_record_out (images → host handles)
+inline void record_to_c(const xi_host_api* host, const Record& r, xi_record_out* out) {
     xi_record_out_init(out);
-
-    // JSON data
     std::string json = r.data_json();
     xi_record_out_set_json(out, json.c_str());
-
-    // Images
     for (auto& [key, img] : r.images()) {
-        if (!img.empty() && img.data()) {
-            xi_record_out_add_image(out, key.c_str(),
-                                     img.data(), img.width, img.height, img.channels);
+        if (img.empty()) continue;
+        xi_image_handle h = host->image_create(img.width, img.height, img.channels);
+        if (h) {
+            uint8_t* dst = host->image_data(h);
+            std::memcpy(dst, img.data(), img.size());
+            xi_record_out_add_image(out, key.c_str(), h);
         }
     }
 }
 
-// Build a xi_record_ref (borrowed pointers) from a Record.
-// The ref is valid as long as the Record lives. No copies.
-struct RecordRefHolder {
-    std::vector<xi_image_ref> img_refs;
-    std::string json_str;
-    xi_record_ref ref;
-
-    explicit RecordRefHolder(const Record& r) {
-        json_str = r.data_json();
-        for (auto& [key, img] : r.images()) {
-            xi_image_ref ir;
-            ir.key      = key.c_str();
-            ir.data     = img.data();
-            ir.width    = img.width;
-            ir.height   = img.height;
-            ir.channels = img.channels;
-            ir.stride   = img.stride();
-            img_refs.push_back(ir);
-        }
-        ref.images      = img_refs.data();
-        ref.image_count = (int32_t)img_refs.size();
-        ref.json_data   = json_str.c_str();
-    }
-};
-
-// --- PluginBase — C++ base class for plugin authors ---
-
-class PluginBase {
-public:
-    PluginBase(std::string name, std::string plugin_name)
-        : name_(std::move(name)), plugin_name_(std::move(plugin_name)) {}
-
-    virtual ~PluginBase() = default;
-
-    const std::string& name() const { return name_; }
-    const std::string& pluginName() const { return plugin_name_; }
-
-    // Override this to implement your plugin's processing.
-    virtual Record process(const Record& input) { (void)input; return {}; }
-
-    // Override for UI commands (start, stop, set_fps, etc.)
-    virtual std::string exchange(const std::string& cmd_json) { (void)cmd_json; return "{}"; }
-
-    // Override for persistence
-    virtual std::string get_def() const { return "{}"; }
-    virtual bool set_def(const std::string& json) { (void)json; return true; }
-
-protected:
-    std::string name_;
-    std::string plugin_name_;
-};
-
 } // namespace xi
 
-//
-// XI_PLUGIN_IMPL(ClassName) — generates all C ABI entry points.
-//
-// Put this at the bottom of your plugin .cpp file after defining
-// your PluginBase subclass.
-//
+// --- XI_PLUGIN_IMPL macro ---
+
 #define XI_PLUGIN_IMPL(ClassName)                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \
-void* xi_plugin_create(const char* instance_name) {                            \
-    return new ClassName(instance_name);                                        \
+void* xi_plugin_create(const xi_host_api* host, const char* name) {            \
+    return new ClassName(host, name);                                           \
 }                                                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \
-void xi_plugin_destroy(void* instance) {                                       \
-    delete static_cast<ClassName*>(instance);                                   \
+void xi_plugin_destroy(void* inst) {                                           \
+    delete static_cast<ClassName*>(inst);                                       \
 }                                                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \
-void xi_plugin_process(void* instance,                                         \
-                       const xi_record_ref* input,                             \
+void xi_plugin_process(void* inst,                                             \
+                       const xi_record* input,                                 \
                        xi_record_out* output) {                                \
-    auto* self = static_cast<ClassName*>(instance);                            \
-    xi::Record in_rec = xi::record_from_ref(input);                            \
+    auto* self = static_cast<ClassName*>(inst);                                \
+    xi::Record in_rec = xi::record_from_c(self->host(), input);                \
     xi::Record out_rec = self->process(in_rec);                                \
-    xi::record_to_out(out_rec, output);                                        \
+    xi::record_to_c(self->host(), out_rec, output);                            \
 }                                                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \
-int xi_plugin_exchange(void* instance,                                         \
-                       const char* cmd_json,                                   \
-                       char* rsp_buf, int rsp_buflen) {                        \
-    auto* self = static_cast<ClassName*>(instance);                            \
-    std::string rsp = self->exchange(cmd_json);                                \
-    int needed = (int)rsp.size();                                              \
-    if (rsp_buflen < needed + 1) return -needed;                               \
-    std::memcpy(rsp_buf, rsp.data(), rsp.size());                              \
-    rsp_buf[rsp.size()] = 0;                                                   \
-    return needed;                                                             \
+int xi_plugin_exchange(void* inst, const char* cmd,                            \
+                       char* rsp, int rsplen) {                                \
+    auto* self = static_cast<ClassName*>(inst);                                \
+    std::string r = self->exchange(cmd);                                       \
+    int n = (int)r.size();                                                     \
+    if (rsplen < n + 1) return -n;                                             \
+    std::memcpy(rsp, r.data(), r.size());                                      \
+    rsp[r.size()] = 0;                                                         \
+    return n;                                                                  \
 }                                                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \
-int xi_plugin_get_def(void* instance, char* buf, int buflen) {                 \
-    auto* self = static_cast<ClassName*>(instance);                            \
-    std::string def = self->get_def();                                         \
-    int needed = (int)def.size();                                              \
-    if (buflen < needed + 1) return -needed;                                   \
-    std::memcpy(buf, def.data(), def.size());                                  \
-    buf[def.size()] = 0;                                                       \
-    return needed;                                                             \
+int xi_plugin_get_def(void* inst, char* buf, int buflen) {                     \
+    auto* self = static_cast<ClassName*>(inst);                                \
+    std::string d = self->get_def();                                           \
+    int n = (int)d.size();                                                     \
+    if (buflen < n + 1) return -n;                                             \
+    std::memcpy(buf, d.data(), d.size());                                      \
+    buf[d.size()] = 0;                                                         \
+    return n;                                                                  \
 }                                                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \
-int xi_plugin_set_def(void* instance, const char* json) {                      \
-    auto* self = static_cast<ClassName*>(instance);                            \
-    return self->set_def(json) ? 0 : -1;                                       \
+int xi_plugin_set_def(void* inst, const char* json) {                          \
+    return static_cast<ClassName*>(inst)->set_def(json) ? 0 : -1;              \
 }
