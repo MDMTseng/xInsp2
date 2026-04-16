@@ -8,15 +8,32 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      { "command": "xinsp2.run", "title": "xInsp2: Run Inspection", "icon": "$(play)" },
-      { "command": "xinsp2.compile", "title": "xInsp2: Compile Script" },
-      { "command": "xinsp2.saveProject", "title": "xInsp2: Save Project" },
-      { "command": "xinsp2.loadProject", "title": "xInsp2: Load Project" }
+      {
+        "command": "xinsp2.run",
+        "title": "xInsp2: Run Inspection",
+        "icon": "$(play)"
+      },
+      {
+        "command": "xinsp2.compile",
+        "title": "xInsp2: Compile Script"
+      },
+      {
+        "command": "xinsp2.saveProject",
+        "title": "xInsp2: Save Project"
+      },
+      {
+        "command": "xinsp2.loadProject",
+        "title": "xInsp2: Load Project"
+      }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -29,13 +46,25 @@
     },
     "views": {
       "xinsp2": [
-        { "id": "xinsp2.instances", "name": "Instances & Params", "type": "tree" },
-        { "id": "xinsp2.viewer", "name": "Viewer", "type": "webview" }
+        {
+          "id": "xinsp2.instances",
+          "name": "Instances & Params",
+          "type": "tree"
+        },
+        {
+          "id": "xinsp2.viewer",
+          "name": "Viewer",
+          "type": "webview"
+        }
       ]
     },
     "menus": {
       "view/title": [
-        { "command": "xinsp2.run", "when": "view == xinsp2.instances", "group": "navigation" }
+        {
+          "command": "xinsp2.run",
+          "when": "view == xinsp2.instances",
+          "group": "navigation"
+        }
       ]
     },
     "configuration": {
@@ -63,6 +92,7 @@
   "devDependencies": {
     "@types/vscode": "^1.85.0",
     "@types/ws": "^8.5.0",
+    "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.24.0",
     "typescript": "^5.4.0"
   },
