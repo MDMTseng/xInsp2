@@ -11,6 +11,7 @@
 
 #include "xi.hpp"
 #include "xi_image.hpp"
+#include "xi_record.hpp"
 #include "xi_script.hpp"
 
 #include <cstdio>
@@ -101,10 +102,34 @@ XI_SCRIPT_EXPORT int xi_script_snapshot_vars(char* buf, int buflen) {
                 } catch (...) {}
                 break;
             }
-            case xi::VarKind::Json:
-                out += ",\"kind\":\"json\",\"value\":";
-                out += e.inline_json.empty() ? "null" : e.inline_json;
+            case xi::VarKind::Json: {
+                // Check if payload is a Record (has images)
+                bool is_record = false;
+                try {
+                    auto& rec = std::any_cast<const xi::Record&>(e.payload);
+                    is_record = true;
+                    out += ",\"kind\":\"record\",\"data\":";
+                    out += rec.data_json();
+                    out += ",\"image_keys\":";
+                    out += rec.image_keys_json();
+                    // Assign gids for each image in the record
+                    out += ",\"images\":{";
+                    bool img_first = true;
+                    for (auto& [ik, iv] : rec.images()) {
+                        if (!img_first) out += ",";
+                        img_first = false;
+                        uint32_t gid = next_gid++;
+                        out += "\"" + ik + "\":" + std::to_string(gid);
+                        image_cache().push_back({gid, iv});
+                    }
+                    out += "}";
+                } catch (...) {}
+                if (!is_record) {
+                    out += ",\"kind\":\"json\",\"value\":";
+                    out += e.inline_json.empty() ? "null" : e.inline_json;
+                }
                 break;
+            }
             default:
                 out += ",\"kind\":\"custom\",\"value\":null";
         }

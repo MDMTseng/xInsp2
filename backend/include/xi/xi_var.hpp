@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "xi_image.hpp"
+#include "xi_record.hpp"
 
 namespace xi {
 
@@ -112,7 +113,17 @@ struct VarTraits<Image> {
     static constexpr VarKind kind = VarKind::Image;
     static void fill(VarEntry& e, Image img) {
         e.kind = VarKind::Image;
-        e.payload = std::move(img);  // holds shared_ptr to pixels, cheap
+        e.payload = std::move(img);
+    }
+};
+
+template <>
+struct VarTraits<Record> {
+    static constexpr VarKind kind = VarKind::Json;
+    static void fill(VarEntry& e, Record rec) {
+        e.kind = VarKind::Json;
+        e.inline_json = rec.data_json();
+        e.payload = std::move(rec);  // keep the full Record for image access
     }
 };
 

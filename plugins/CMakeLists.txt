@@ -8,10 +8,11 @@ if(MSVC)
 endif()
 
 set(XI_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
+set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 
 # mock_camera
 add_library(mock_camera SHARED mock_camera/mock_camera.cpp)
-target_include_directories(mock_camera PRIVATE ${XI_INCLUDE})
+target_include_directories(mock_camera PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
 set_target_properties(mock_camera PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera
