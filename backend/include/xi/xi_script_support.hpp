@@ -13,6 +13,7 @@
 #include "xi_image.hpp"
 #include "xi_record.hpp"
 #include "xi_script.hpp"
+#include "xi_state.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -226,6 +227,37 @@ XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* c
     std::memcpy(rsp_buf, rsp.data(), rsp.size());
     rsp_buf[rsp.size()] = 0;
     return needed;
+}
+
+// --- Persistent state thunks ---
+
+XI_SCRIPT_EXPORT int xi_script_get_state(char* buf, int buflen) {
+    std::string json = xi::state().data_json();
+    int needed = (int)json.size();
+    if (buflen < needed + 1) return -needed;
+    std::memcpy(buf, json.data(), json.size());
+    buf[json.size()] = 0;
+    return needed;
+}
+
+XI_SCRIPT_EXPORT int xi_script_set_state(const char* json) {
+    if (!json) return -1;
+    cJSON* parsed = cJSON_Parse(json);
+    if (!parsed) return -1;
+    // Replace the state Record's internal JSON tree
+    xi::Record& s = xi::state();
+    // Clear and rebuild
+    s = xi::Record();
+    cJSON* item = parsed->child;
+    while (item) {
+        if (cJSON_IsNumber(item))      s.set(item->string, item->valuedouble);
+        else if (cJSON_IsBool(item))   s.set(item->string, cJSON_IsTrue(item) ? true : false);
+        else if (cJSON_IsString(item)) s.set(item->string, std::string(item->valuestring));
+        else                           s.set_raw(item->string, cJSON_Duplicate(item, true));
+        item = item->next;
+    }
+    cJSON_Delete(parsed);
+    return 0;
 }
 
 #endif // XI_SCRIPT_NO_DEFAULT_THUNKS

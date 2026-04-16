@@ -32,10 +32,12 @@
 namespace xi::script {
 
 struct CompileRequest {
-    std::string source_path;    // absolute path to user .cpp
-    std::string output_dir;     // where to drop the .dll + intermediate .obj
-    std::string include_dir;    // backend/include
-    std::string vcvars_path;    // full path to vcvars64.bat (auto-detect if empty)
+    std::string source_path;               // primary .cpp (used for DLL name)
+    std::vector<std::string> extra_sources; // additional .cpp files
+    std::vector<std::string> include_dirs;  // extra include dirs
+    std::string output_dir;
+    std::string include_dir;    // backend/include (always added)
+    std::string vcvars_path;
 };
 
 struct CompileResult {
@@ -120,10 +122,18 @@ inline CompileResult compile(const CompileRequest& req) {
     if (std::filesystem::exists(vendor_dir)) {
         cmd += " /I\"" + vendor_dir.string() + "\"";
     }
+    // Extra include dirs from project config
+    for (auto& d : req.include_dirs) {
+        cmd += " /I\"" + d + "\"";
+    }
     cmd += " /FIxi/xi_script_support.hpp";
     cmd += " /Fo\"" + req.output_dir + "\\\\\"";
     cmd += " /Fe\"" + out_dll.string() + "\"";
     cmd += " \"" + req.source_path + "\"";
+    // Additional source files
+    for (auto& s : req.extra_sources) {
+        cmd += " \"" + s + "\"";
+    }
     cmd += " /link /IMPLIB:\"" + (std::filesystem::path(req.output_dir) / (stem + ".lib")).string() + "\"";
     // Link against pre-built cjson.lib (needed by xi_record.hpp / xi_plugin_handle.hpp)
     auto cjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cjson.lib";

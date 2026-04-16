@@ -42,6 +42,10 @@ static std::atomic<int64_t> g_run_id{0};
 static xi::script::LoadedScript g_script;
 static std::mutex               g_script_mu;
 
+// Persistent cross-frame state — survives DLL reloads.
+// Serialized to JSON before unload, restored after load.
+static std::string g_persistent_state_json = "{}";
+
 // ---- Trigger loop state ----
 // When running in continuous mode (cmd: start), a worker thread waits for
 // trigger signals from image sources and calls inspect() for each frame.
@@ -250,11 +254,25 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         {
             std::lock_guard<std::mutex> lk(g_script_mu);
+            // Save persistent state before unloading old DLL
+            if (g_script.ok() && g_script.get_state) {
+                std::vector<char> buf(256 * 1024);
+                int n = g_script.get_state(buf.data(), (int)buf.size());
+                if (n < 0) { buf.resize((size_t)(-n) + 1024);
+                             n = g_script.get_state(buf.data(), (int)buf.size()); }
+                if (n > 0) g_persistent_state_json.assign(buf.data(), (size_t)n);
+            }
             xi::script::unload_script(g_script);
             std::string err;
             if (!xi::script::load_script(res.dll_path, g_script, err)) {
                 send_rsp_err(srv, id, err);
                 return;
+            }
+            // Restore persistent state into the new DLL
+            if (g_script.set_state && g_persistent_state_json.size() > 2) {
+                g_script.set_state(g_persistent_state_json.c_str());
+                std::fprintf(stderr, "[xinsp2] state restored (%zu bytes)\n",
+                             g_persistent_state_json.size());
             }
         }
 
