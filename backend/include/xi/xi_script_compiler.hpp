@@ -115,11 +115,21 @@ inline CompileResult compile(const CompileRequest& req) {
     cmd += " >nul 2>nul && ";
     cmd += "cl.exe /nologo /std:c++20 /LD /EHsc /MD /O2 /utf-8 /W3";
     cmd += " /I\"" + req.include_dir + "\"";
+    // Also include the vendor dir (cJSON, stb, etc.) — sibling of include/
+    auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";
+    if (std::filesystem::exists(vendor_dir)) {
+        cmd += " /I\"" + vendor_dir.string() + "\"";
+    }
     cmd += " /FIxi/xi_script_support.hpp";
     cmd += " /Fo\"" + req.output_dir + "\\\\\"";
     cmd += " /Fe\"" + out_dll.string() + "\"";
     cmd += " \"" + req.source_path + "\"";
     cmd += " /link /IMPLIB:\"" + (std::filesystem::path(req.output_dir) / (stem + ".lib")).string() + "\"";
+    // Link against pre-built cjson.lib (needed by xi_record.hpp / xi_plugin_handle.hpp)
+    auto cjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cjson.lib";
+    if (std::filesystem::exists(cjson_lib)) {
+        cmd += " \"" + cjson_lib.string() + "\"";
+    }
     cmd += " > \"" + log_path.string() + "\" 2>&1";
     cmd += "\"";
 

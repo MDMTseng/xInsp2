@@ -205,64 +205,40 @@ async function run() {
     await sleep(1000);
     takeScreenshot('streaming_stopped');
 
-    // --- Step 9b: Open blob_analysis UI with camera background ---
-    console.log('\n[step 9b] Creating blob_analysis instance and opening UI...');
-    await sendCmd('load_plugin', { name: 'blob_analysis' });
-    await sendCmd('create_instance', { name: 'detector0', plugin: 'blob_analysis' });
+    // --- Step 9b: Compile and run plugin_handle_demo.cpp ---
+    // This script calls blob_analysis via PluginHandle internally.
+    // No test-side process calls — everything happens in user C++ code.
+    console.log('\n[step 9b] Compiling plugin_handle_demo.cpp (uses PluginHandle → blob_analysis)...');
+    const pluginDemoPath = path.join(examplesDir, 'plugin_handle_demo.cpp');
+    if (fs.existsSync(pluginDemoPath)) {
+        // Open the script in editor
+        const doc2 = await vscode.workspace.openTextDocument(pluginDemoPath);
+        await vscode.window.showTextDocument(doc2, vscode.ViewColumn.One);
+        await sleep(1000);
+        takeScreenshot('plugin_handle_code');
 
-    // Restart camera so we have frames for the background
-    await camExchange({ command: 'start' });
-    await sleep(500);
-
-    const blobUiRsp = await sendCmd('get_plugin_ui', { plugin: 'blob_analysis' });
-    let blobPanel = null;
-    if (blobUiRsp.ok) {
-        const htmlPath = path.join(blobUiRsp.data.ui_path, 'index.html');
-        if (fs.existsSync(htmlPath)) {
-            const html = fs.readFileSync(htmlPath, 'utf8');
-            blobPanel = vscode.window.createWebviewPanel(
-                'xinsp2.pluginUI', 'detector0 (blob_analysis)',
-                vscode.ViewColumn.Two, { enableScripts: true }
-            );
-            blobPanel.webview.html = html;
-            if (api?.registerPluginPanel) api.registerPluginPanel('detector0', blobPanel);
-            blobPanel.webview.onDidReceiveMessage(async (msg) => {
-                if (msg.type === 'exchange' && msg.cmd) {
-                    const r = await sendCmd('exchange_instance', { name: 'detector0', cmd: msg.cmd });
-                    if (r.ok && r.data) {
-                        const parsed = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
-                        blobPanel.webview.postMessage({ type: 'status', ...parsed });
-                    }
-                }
-            });
-            await sleep(1000);
-
-            // Run the REAL blob_analysis plugin on a test image (with actual blobs)
-            console.log('[step 9b] Running process_instance...');
-            const procRsp = await sendCmd('process_instance', {
-                name: 'detector0',
-                params: { threshold: 100, min_area: 20 }
-            });
-            console.log('[step 9b] process result:', JSON.stringify(procRsp.data).substring(0, 200));
-
-            if (procRsp.ok && procRsp.data) {
-                // Route output images to the blob panel
-                const imgs = procRsp.data._images || {};
-                for (const [key, gid] of Object.entries(imgs)) {
-                    if (api?.registerPreviewGid) api.registerPreviewGid(gid, blobPanel);
-                }
-                // Send the process results (blob data) to the UI
-                blobPanel.webview.postMessage({
-                    type: 'process_result',
-                    ...procRsp.data,
-                });
-            }
+        // Compile it
+        const compRsp = await sendCmd('compile_and_load', { path: pluginDemoPath });
+        console.log('[step 9b] compile:', compRsp.ok ? 'ok' : compRsp.error);
+        if (compRsp.ok) {
+            // Focus the viewer
+            try { await vscode.commands.executeCommand('xinsp2.viewer.focus'); } catch {}
             await sleep(2000);
+
+            // Run the inspection — PluginHandle calls blob_analysis internally
+            console.log('[step 9b] Running inspection (PluginHandle → blob_analysis)...');
+            const runRsp = await sendCmd('run');
+            console.log('[step 9b] run:', runRsp.ok ? 'ok' : runRsp.error);
+            await sleep(3000);
+
+            // Run again to make sure viewer has data
+            await sendCmd('run');
+            await sleep(3000);
+            takeScreenshot('plugin_handle_result');
+        } else {
+            takeScreenshot('plugin_handle_compile_failed');
         }
     }
-    // Stop camera
-    await camExchange({ command: 'stop' });
-    takeScreenshot('blob_analysis_ui');
 
     // --- Step 10: Save instance configs ---
     console.log('\n[step 10] Saving instance configs...');
