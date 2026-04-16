@@ -1,11 +1,70 @@
 {
-  "name": "xinsp2-vscode",
-  "version": "0.0.1",
+  "name": "xinsp2",
+  "displayName": "xInsp2",
+  "description": "HDevelop-style C++ inspection authoring environment",
+  "version": "0.1.0",
+  "publisher": "xception",
   "private": true,
-  "type": "module",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "xinsp2.run", "title": "xInsp2: Run Inspection", "icon": "$(play)" },
+      { "command": "xinsp2.compile", "title": "xInsp2: Compile Script" },
+      { "command": "xinsp2.saveProject", "title": "xInsp2: Save Project" },
+      { "command": "xinsp2.loadProject", "title": "xInsp2: Load Project" }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "xinsp2",
+          "title": "xInsp2",
+          "icon": "$(beaker)"
+        }
+      ]
+    },
+    "views": {
+      "xinsp2": [
+        { "id": "xinsp2.instances", "name": "Instances & Params", "type": "tree" },
+        { "id": "xinsp2.viewer", "name": "Viewer", "type": "webview" }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        { "command": "xinsp2.run", "when": "view == xinsp2.instances", "group": "navigation" }
+      ]
+    },
+    "configuration": {
+      "title": "xInsp2",
+      "properties": {
+        "xinsp2.backendPort": {
+          "type": "number",
+          "default": 7823,
+          "description": "WebSocket port for the xInsp2 backend"
+        },
+        "xinsp2.autoStartBackend": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-start xinsp-backend.exe on activation"
+        }
+      }
+    }
+  },
   "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
     "test:protocol": "node --test test/protocol.test.mjs",
     "test:integration": "node --test test/ws_basic.test.mjs"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.4.0"
   },
   "dependencies": {
     "ws": "^8.18.0"
