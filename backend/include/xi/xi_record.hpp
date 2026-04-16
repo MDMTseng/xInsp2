@@ -135,6 +135,74 @@ public:
         return *this;
     }
 
+    // --- Proxy for chained [] access ---
+    //
+    //   rec["roi"]["x"].as_int(0)
+    //   rec["points"][2]["score"].as_double()
+    //   rec["config"]["mode"].as_string("auto")
+    //   rec["items"][0].as_record()
+    //
+    class Value {
+    public:
+        Value() : node_(nullptr) {}
+        explicit Value(cJSON* node) : node_(node) {}
+
+        // Chain into object key
+        Value operator[](const char* key) const {
+            if (!node_ || !cJSON_IsObject(node_)) return {};
+            return Value(cJSON_GetObjectItem(node_, key));
+        }
+        Value operator[](const std::string& key) const { return (*this)[key.c_str()]; }
+
+        // Chain into array index
+        Value operator[](int index) const {
+            if (!node_ || !cJSON_IsArray(node_)) return {};
+            return Value(cJSON_GetArrayItem(node_, index));
+        }
+
+        // Terminal reads with defaults
+        int         as_int(int def = 0)                       const { return (node_ && cJSON_IsNumber(node_)) ? node_->valueint : def; }
+        double      as_double(double def = 0.0)               const { return (node_ && cJSON_IsNumber(node_)) ? node_->valuedouble : def; }
+        bool        as_bool(bool def = false)                  const { return node_ ? cJSON_IsTrue(node_) : def; }
+        std::string as_string(const std::string& def = "")    const { return (node_ && cJSON_IsString(node_)) ? node_->valuestring : def; }
+
+        // Array length
+        int size() const { return (node_ && cJSON_IsArray(node_)) ? cJSON_GetArraySize(node_) : 0; }
+
+        // Check existence
+        bool exists()    const { return node_ != nullptr; }
+        bool is_null()   const { return !node_ || cJSON_IsNull(node_); }
+        bool is_object() const { return node_ && cJSON_IsObject(node_); }
+        bool is_array()  const { return node_ && cJSON_IsArray(node_); }
+        bool is_number() const { return node_ && cJSON_IsNumber(node_); }
+        bool is_string() const { return node_ && cJSON_IsString(node_); }
+        bool is_bool()   const { return node_ && cJSON_IsBool(node_); }
+
+        // Extract as a standalone Record (deep copy)
+        Record as_record() const {
+            if (!node_ || !cJSON_IsObject(node_)) return {};
+            Record r;
+            cJSON_Delete(r.json_);
+            r.json_ = cJSON_Duplicate(node_, true);
+            return r;
+        }
+
+        // Iterate array: for (int i = 0; i < val.size(); ++i) val[i]...
+        // Or use the raw cJSON pointer for cJSON_ArrayForEach
+        cJSON* raw() const { return node_; }
+
+    private:
+        cJSON* node_;
+    };
+
+    // Entry point for chained access
+    Value operator[](const char* key) const {
+        return Value(cJSON_GetObjectItem(json_, key));
+    }
+    Value operator[](const std::string& key) const {
+        return (*this)[key.c_str()];
+    }
+
     // --- Data getters (with defaults) ---
 
     int get_int(const std::string& key, int def = 0) const {
