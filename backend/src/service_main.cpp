@@ -50,6 +50,29 @@ static std::string g_persistent_state_json = "{}";
 // process/exchange/grab to the backend's InstanceRegistry.
 
 #include <xi/xi_use.hpp>
+#include <eh.h>
+
+class seh_exception : public std::exception {
+public:
+    unsigned int code;
+    seh_exception(unsigned int c) : code(c) {}
+    const char* what() const noexcept override {
+        switch (code) {
+            case 0xC0000005: return "ACCESS_VIOLATION";
+            case 0xC0000094: return "INT_DIVIDE_BY_ZERO";
+            case 0xC000008C: return "ARRAY_BOUNDS_EXCEEDED";
+            case 0xC00000FD: return "STACK_OVERFLOW";
+            case 0xC000001D: return "ILLEGAL_INSTRUCTION";
+            case 0xC0000090: return "FLOAT_INVALID_OPERATION";
+            case 0xC0000091: return "FLOAT_DIVIDE_BY_ZERO";
+            default:         return "UNKNOWN_SEH_EXCEPTION";
+        }
+    }
+};
+
+static void seh_translator(unsigned int code, EXCEPTION_POINTERS*) {
+    throw seh_exception(code);
+}
 
 static int use_process_cb(const char* name,
                           const char* input_json,
@@ -65,7 +88,16 @@ static int use_process_cb(const char* name,
         in_rec.images = input_images;
         in_rec.image_count = input_image_count;
         in_rec.json = input_json;
-        adapter->process_fn()(adapter->raw_instance(), &in_rec, output);
+        try {
+            adapter->process_fn()(adapter->raw_instance(), &in_rec, output);
+        } catch (const seh_exception& e) {
+            std::fprintf(stderr, "[xinsp2] use_process('%s') crashed: 0x%08X (%s)\n",
+                         name, e.code, e.what());
+            return -2;
+        } catch (...) {
+            std::fprintf(stderr, "[xinsp2] use_process('%s') threw exception\n", name);
+            return -2;
+        }
         return output->image_count;
     }
     return -1;
@@ -217,45 +249,7 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
     }
 }
 
-// SEH-guarded inspection call. Isolated in its own function because MSVC
-// does not allow __try/__except in functions that use C++ object unwinding.
-// Returns: 0 = ok, nonzero = SEH exception code.
-#pragma warning(push)
-#pragma warning(disable: 4611)  // setjmp/SEH interaction
-static int seh_call_inspect(xi::script::LoadedScript::InspectFn fn, int frame) {
-    __try {
-        fn(frame);
-        return 0;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return (int)GetExceptionCode();
-    }
-}
-
-static int seh_call_reset(xi::script::LoadedScript::ResetFn fn) {
-    if (!fn) return 0;
-    __try {
-        fn();
-        return 0;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return (int)GetExceptionCode();
-    }
-}
-#pragma warning(pop)
-
-static const char* seh_code_name(int code) {
-    switch ((unsigned)code) {
-        case 0xC0000005: return "ACCESS_VIOLATION";
-        case 0xC0000094: return "INT_DIVIDE_BY_ZERO";
-        case 0xC000008C: return "ARRAY_BOUNDS_EXCEEDED";
-        case 0xC00000FD: return "STACK_OVERFLOW";
-        case 0xC000001D: return "ILLEGAL_INSTRUCTION";
-        case 0xC0000090: return "FLOAT_INVALID_OPERATION";
-        case 0xC0000091: return "FLOAT_DIVIDE_BY_ZERO";
-        default:         return "UNKNOWN_EXCEPTION";
-    }
-}
+// (seh_exception and seh_translator defined above, before use_process_cb)
 
 // Run one full inspection cycle: reset → inspect → emit.
 // The inspect call is wrapped in SEH so a script crash (null deref,
@@ -278,28 +272,22 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_
     }
 
     auto t0 = std::chrono::steady_clock::now();
-
-    int reset_code = seh_call_reset(s.reset);
-    if (reset_code) {
+    try {
+        if (s.reset) s.reset();
+        s.inspect(frame_hint);
+    } catch (const seh_exception& e) {
+        auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - t0).count();
         char msg[256];
-        std::snprintf(msg, sizeof(msg),
-            "script reset crashed: 0x%08X (%s)", reset_code, seh_code_name(reset_code));
+        std::snprintf(msg, sizeof(msg), "script crashed after %lldms: 0x%08X (%s)",
+                     (long long)dt_ms, e.code, e.what());
         std::fprintf(stderr, "[xinsp2] %s\n", msg);
         xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
         srv.send_text(lm.to_json());
         return;
-    }
-
-    int inspect_code = seh_call_inspect(s.inspect, frame_hint);
-    if (inspect_code) {
-        auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         std::chrono::steady_clock::now() - t0).count();
-        char msg[256];
-        std::snprintf(msg, sizeof(msg),
-            "script crashed after %lldms: 0x%08X (%s)",
-            (long long)dt_ms, inspect_code, seh_code_name(inspect_code));
-        std::fprintf(stderr, "[xinsp2] %s\n", msg);
-        xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
+        xp::LogMsg lm; lm.level = "error"; lm.msg = std::string("script exception: ") + e.what();
         srv.send_text(lm.to_json());
         return;
     }
@@ -594,25 +582,36 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             cmd_str = "{}";
         }
-        // Try backend's own InstanceRegistry first (plugin-manager instances),
-        // then fall back to the script DLL's registry.
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
-            std::string result = inst->exchange(cmd_str);
-            send_rsp_ok(srv, id, result);
+            try {
+                std::string result = inst->exchange(cmd_str);
+                send_rsp_ok(srv, id, result);
+            } catch (const seh_exception& e) {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg), "exchange '%s' crashed: 0x%08X (%s)",
+                             iname->c_str(), e.code, e.what());
+                send_rsp_err(srv, id, msg);
+            } catch (const std::exception& e) {
+                send_rsp_err(srv, id, std::string("exchange error: ") + e.what());
+            }
         } else {
             std::lock_guard<std::mutex> lk(g_script_mu);
             if (g_script.ok() && g_script.exchange_instance) {
-                std::vector<char> rsp(256 * 1024);
-                int n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
-                                                    rsp.data(), (int)rsp.size());
-                if (n < 0) { rsp.resize((size_t)(-n) + 1024);
-                             n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
-                                                            rsp.data(), (int)rsp.size()); }
-                if (n >= 0) {
-                    send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
-                } else {
-                    send_rsp_err(srv, id, "exchange_instance failed");
+                try {
+                    std::vector<char> rsp(256 * 1024);
+                    int n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
+                                                       rsp.data(), (int)rsp.size());
+                    if (n < 0) { rsp.resize((size_t)(-n) + 1024);
+                                 n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
+                                                                rsp.data(), (int)rsp.size()); }
+                    if (n >= 0) send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
+                    else        send_rsp_err(srv, id, "exchange_instance failed");
+                } catch (const seh_exception& e) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg), "script exchange '%s' crashed: 0x%08X (%s)",
+                                 iname->c_str(), e.code, e.what());
+                    send_rsp_err(srv, id, msg);
                 }
             } else {
                 send_rsp_err(srv, id, "instance not found: " + *iname);
@@ -780,11 +779,17 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xi_record_out output;
         xi_record_out_init(&output);
 
-        // Call the plugin's process
-        adapter->process_fn()(adapter->raw_instance(), &input_rec, &output);
-
-        // Release input handle
-        xi::ImagePool::instance().release(src_h);
+        try {
+            adapter->process_fn()(adapter->raw_instance(), &input_rec, &output);
+        } catch (const seh_exception& e) {
+            xi::ImagePool::instance().release(src_h);
+            xi_record_out_free(&output);
+            char msg[256];
+            std::snprintf(msg, sizeof(msg), "process_instance '%s' crashed: 0x%08X (%s)",
+                         iname->c_str(), e.code, e.what());
+            send_rsp_err(srv, id, msg);
+            return;
+        }
 
         // Build response: JSON data + send output images as preview frames
         std::string result_json = output.json ? output.json : "{}";
@@ -932,6 +937,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 }
 
 int main(int argc, char** argv) {
+    // Install SEH → C++ exception translator so try/catch catches segfaults
+    _set_se_translator(seh_translator);
+
     int port = parse_port(argc, argv);
 
     // Derive include dir for the script compiler. In a normal dev tree the

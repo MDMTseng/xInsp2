@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
-    add_compile_options(/W3 /permissive- /utf-8)
+    add_compile_options(/W3 /permissive- /utf-8 /EHa)
 else()
     add_compile_options(-Wall -Wextra)
 endif()
