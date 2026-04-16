@@ -274,21 +274,28 @@ public:
                 ii.folder_path = entry.path().string();
                 // Try to create the instance from the plugin factory
                 auto pit = plugins_.find(*plugin);
-                if (pit != plugins_.end() && pit->second.factory) {
-                    auto* raw = pit->second.factory(ii.name.c_str());
-                    if (raw) {
-                        ii.instance.reset(raw);
-                        // Load saved config
-                        auto def_opt = extract_string(ic, "config");
-                        // Actually read full config object
-                        auto cfg_pos = ic.find("\"config\":");
-                        if (cfg_pos != std::string::npos) {
-                            // Extract the JSON value after "config":
-                            std::string cfg_val;
-                            const char* after;
-                            if (detail_find_key(ic, "config", cfg_val)) {
-                                ii.instance->set_def(cfg_val);
-                            }
+                if (pit != plugins_.end()) {
+                    auto& pi = pit->second;
+                    bool created = false;
+                    if (pi.c_factory) {
+                        static xi_host_api host = ImagePool::make_host_api();
+                        void* raw = pi.c_factory(&host, ii.name.c_str());
+                        if (raw) {
+                            ii.instance = std::make_shared<CAbiInstanceAdapter>(
+                                ii.name, *plugin, pi.handle, raw);
+                            created = true;
+                        }
+                    } else if (pi.factory) {
+                        auto* raw = pi.factory(ii.name.c_str());
+                        if (raw) {
+                            ii.instance.reset(raw);
+                            created = true;
+                        }
+                    }
+                    if (created && ii.instance) {
+                        std::string cfg_val;
+                        if (detail_find_key(ic, "config", cfg_val)) {
+                            ii.instance->set_def(cfg_val);
                         }
                         InstanceRegistry::instance().add(ii.instance);
                     }

@@ -14,6 +14,7 @@
 //
 
 #include "xi_async.hpp"
+#include "xi_image.hpp"
 #include "xi_var.hpp"
 #include "xi_param.hpp"
 #include "xi_instance.hpp"

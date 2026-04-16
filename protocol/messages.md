@@ -190,9 +190,9 @@ UIs that ship their own command vocabulary.
 ### `save_project` / `load_project`
 `args: { "path": "project.json" }` → `ok: true`
 
-### `subscribe` / `unsubscribe`
-`args: { "vars": ["gray", "edges"] }` → `ok: true`
-Filters which variables get `preview` binary frames. Default: all.
+### `subscribe` / `unsubscribe` (not yet implemented)
+Reserved for future use. Currently all preview frames are sent to all
+connected clients. Client-side filtering is the interim solution.
 
 ---
 

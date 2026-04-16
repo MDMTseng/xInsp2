@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 
+#include <cJSON.h>
 #include <xi/xi.hpp>
 #include <xi/xi_image.hpp>
 #include <xi/xi_jpeg.hpp>
@@ -513,33 +514,54 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (!path) { send_rsp_err(srv, id, "missing path"); return; }
         std::string content = xi::project::read_text(*path);
         if (content.empty()) { send_rsp_err(srv, id, "failed to read " + *path); return; }
-        // Parse params array: scan for "params": [...] and apply each.
-        // Parse instances array: scan for "instances": [...] and apply defs.
-        // Minimal extraction — full JSON parser comes when it's needed.
-        std::string params_arr;
-        const char* after;
-        if (xp::detail::find_key(content.data(), content.data() + content.size(),
-                                  "params", params_arr, after)) {
-            // Walk array items: each has "name" and "value"
-            size_t pos = 0;
-            while (true) {
-                pos = params_arr.find("\"name\"", pos);
-                if (pos == std::string::npos) break;
-                auto nm = xp::get_string_field(
-                    std::string_view(params_arr.data() + pos - 1, params_arr.size() - pos + 1), "name");
-                auto val = xp::get_number_field(
-                    std::string_view(params_arr.data() + pos - 1, params_arr.size() - pos + 1), "value");
-                if (nm && val) {
+
+        // Use cJSON to parse the project file properly
+        cJSON* root = cJSON_Parse(content.c_str());
+        if (!root) { send_rsp_err(srv, id, "invalid JSON in project file"); return; }
+
+        // Restore params
+        cJSON* params = cJSON_GetObjectItem(root, "params");
+        if (params && cJSON_IsArray(params)) {
+            int n = cJSON_GetArraySize(params);
+            for (int i = 0; i < n; ++i) {
+                cJSON* item = cJSON_GetArrayItem(params, i);
+                cJSON* nm = cJSON_GetObjectItem(item, "name");
+                cJSON* val = cJSON_GetObjectItem(item, "value");
+                if (nm && cJSON_IsString(nm) && val) {
+                    char vbuf[64] = {};
+                    if (cJSON_IsNumber(val))     std::snprintf(vbuf, sizeof(vbuf), "%g", val->valuedouble);
+                    else if (cJSON_IsBool(val))  std::snprintf(vbuf, sizeof(vbuf), "%s", cJSON_IsTrue(val) ? "true" : "false");
+                    else continue;
+                    // Try script params first, then backend params
                     std::lock_guard<std::mutex> lk(g_script_mu);
                     if (g_script.ok() && g_script.set_param) {
-                        char nb[64];
-                        std::snprintf(nb, sizeof(nb), "%g", *val);
-                        g_script.set_param(nm->c_str(), nb);
+                        g_script.set_param(nm->valuestring, vbuf);
+                    } else {
+                        auto* p = xi::ParamRegistry::instance().find(nm->valuestring);
+                        if (p) p->set_from_json(vbuf);
                     }
                 }
-                pos += 6;
             }
         }
+
+        // Restore instance configs
+        cJSON* instances = cJSON_GetObjectItem(root, "instances");
+        if (instances && cJSON_IsArray(instances)) {
+            int n = cJSON_GetArraySize(instances);
+            for (int i = 0; i < n; ++i) {
+                cJSON* item = cJSON_GetArrayItem(instances, i);
+                cJSON* nm = cJSON_GetObjectItem(item, "name");
+                cJSON* def = cJSON_GetObjectItem(item, "def");
+                if (nm && cJSON_IsString(nm) && def) {
+                    char* def_str = cJSON_PrintUnformatted(def);
+                    auto inst = xi::InstanceRegistry::instance().find(nm->valuestring);
+                    if (inst) inst->set_def(def_str);
+                    cJSON_free(def_str);
+                }
+            }
+        }
+
+        cJSON_Delete(root);
         send_rsp_ok(srv, id);
     } else if (name == "preview_instance") {
         // Grab the latest frame from a named ImageSource instance,
