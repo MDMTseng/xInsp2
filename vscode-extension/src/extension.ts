@@ -218,6 +218,39 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // --- Auto-compile on save (S2) ---
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument(async (doc) => {
+            if (!doc.fileName.endsWith('.cpp')) return;
+            if (!client?.connected) return;
+            output.appendLine(`[xinsp2] auto-compile: ${doc.fileName}`);
+            try {
+                const rsp = await sendCmd('compile_and_load', { path: doc.fileName });
+                if (rsp.ok) {
+                    output.appendLine('[xinsp2] auto-compile ok');
+                    vscode.window.setStatusBarMessage('xInsp2: recompiled', 2000);
+                    sendCmd('list_instances');
+                    // If in continuous mode, the next trigger will use the new code.
+                    // For single-shot, auto-run after compile.
+                    if (!g_continuous) {
+                        await sendCmd('run');
+                    }
+                } else {
+                    output.appendLine('[xinsp2] auto-compile FAILED: ' + (rsp.error ?? ''));
+                    vscode.window.showErrorMessage('xInsp2: compile failed — check Output');
+                }
+            } catch (e: any) {
+                output.appendLine('[xinsp2] auto-compile error: ' + e.message);
+            }
+        })
+    );
+
+    let g_continuous = false;
+    client.on('json', (msg: any) => {
+        if (msg.type === 'rsp' && msg.data?.started) g_continuous = true;
+        if (msg.type === 'rsp' && msg.data?.stopped)  g_continuous = false;
+    });
+
     // --- Start backend ---
 
     if (autoStart) {

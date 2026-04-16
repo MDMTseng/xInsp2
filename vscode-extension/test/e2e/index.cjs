@@ -62,7 +62,7 @@ async function run() {
     // Open the example script in the editor
     const wf = vscode.workspace.workspaceFolders;
     if (!wf || !wf.length) throw new Error('no workspace folder');
-    const scriptPath = path.join(wf[0].uri.fsPath, 'user_script_example.cpp');
+    const scriptPath = path.join(wf[0].uri.fsPath, 'defect_detection.cpp');
     console.log('[e2e] opening', scriptPath);
     const doc = await vscode.workspace.openTextDocument(scriptPath);
     await vscode.window.showTextDocument(doc);
