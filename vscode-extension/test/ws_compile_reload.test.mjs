@@ -100,10 +100,10 @@ test('compile_and_load + run end-to-end', async () => {
         assert.equal(vars.type, 'vars');
         const byName = Object.fromEntries(vars.items.map(v => [v.name, v]));
 
-        // user_amp default = 5 → scaled = 7 * 5 = 35; dbl = 70; biased = 71.5
-        assert.equal(byName.raw.value, 7);
-        assert.equal(byName.scaled.value, 35);
-        assert.equal(byName.dbl.value, 70);
+        // frame=1, user_amp=5 → raw=1, scaled=5, dbl=10
+        assert.equal(byName.raw.value, 1);
+        assert.equal(byName.scaled.value, 5);
+        assert.equal(byName.dbl.value, 10);
         assert.equal(byName.tag.value, 'user_script_v1');
         assert.equal(byName.alive.value, true);
     });
@@ -121,17 +121,17 @@ test('set_param on loaded script updates next run', async () => {
         c.send({ type: 'cmd', id: 2, name: 'run' });
         await c.nextNonLogText();             // rsp
         const v1 = await c.nextNonLogText();  // vars
-        assert.equal(v1.items.find(i => i.name === 'scaled').value, 35);
+        assert.equal(v1.items.find(i => i.name === 'scaled').value, 5);
 
         // Change user_amp = 9
         c.send({ type: 'cmd', id: 3, name: 'set_param', args: { name: 'user_amp', value: 9 } });
         const sr = await c.nextNonLogText();
         assert.equal(sr.ok, true);
 
-        // Re-run: scaled = 7 * 9 = 63
+        // Re-run: scaled = 1 * 9 = 9
         c.send({ type: 'cmd', id: 4, name: 'run' });
         await c.nextNonLogText();             // rsp
         const v2 = await c.nextNonLogText();  // vars
-        assert.equal(v2.items.find(i => i.name === 'scaled').value, 63);
+        assert.equal(v2.items.find(i => i.name === 'scaled').value, 9);
     });
 });

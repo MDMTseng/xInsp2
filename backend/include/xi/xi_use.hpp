@@ -17,41 +17,30 @@
 //   }
 //
 
+#include "xi_abi.h"
 #include "xi_record.hpp"
 #include "xi_image.hpp"
-#include "xi_source.hpp"
+#include "xi_image_pool.hpp"
 
 #include <cstring>
-#include <functional>
 #include <string>
 #include <unordered_map>
 
+// Defined in xi_script_support.hpp (force-included by the compiler)
+extern void* g_use_process_fn_;
+extern void* g_use_exchange_fn_;
+extern void* g_use_grab_fn_;
+
 namespace xi {
 
-// Callback type: backend sets these so the script can call back
-// into the backend's InstanceRegistry.
-struct UseCallbacks {
-    // process: (instance_name, input_json, input_images[], image_count,
-    //           output_json_buf, output_json_buflen) → output image count
-    // Output images are written back via image pool handles.
-    using ProcessFn = int (*)(const char* name,
+// Function pointer types for the callbacks
+using UseProcessFn  = int (*)(const char* name,
                               const char* input_json,
                               const xi_record_image* input_images, int input_image_count,
                               xi_record_out* output);
-    using ExchangeFn = int (*)(const char* name, const char* cmd,
-                               char* rsp, int rsplen);
-    using GrabFn = xi_image_handle (*)(const char* name, int timeout_ms);
-
-    ProcessFn  process  = nullptr;
-    ExchangeFn exchange = nullptr;
-    GrabFn     grab     = nullptr;
-};
-
-// Global callbacks — set by the backend before calling inspect()
-inline UseCallbacks& use_callbacks() {
-    static UseCallbacks cb;
-    return cb;
-}
+using UseExchangeFn = int (*)(const char* name, const char* cmd,
+                              char* rsp, int rsplen);
+using UseGrabFn     = xi_image_handle (*)(const char* name, int timeout_ms);
 
 // Proxy object returned by xi::use()
 class UseProxy {
@@ -59,8 +48,8 @@ public:
     explicit UseProxy(const std::string& name) : name_(name) {}
 
     Record process(const Record& input) {
-        auto& cb = use_callbacks();
-        if (!cb.process) return {};
+        auto process_fn = reinterpret_cast<UseProcessFn>(g_use_process_fn_);
+        if (!process_fn) return {};
 
         // Marshal input Record → C ABI
         std::vector<xi_record_image> in_imgs;
@@ -75,7 +64,7 @@ public:
         xi_record_out output;
         xi_record_out_init(&output);
 
-        cb.process(name_.c_str(), json.c_str(),
+        process_fn(name_.c_str(), json.c_str(),
                    in_imgs.data(), (int)in_imgs.size(), &output);
 
         // Release input handles
@@ -107,19 +96,19 @@ public:
     }
 
     std::string exchange(const std::string& cmd) {
-        auto& cb = use_callbacks();
-        if (!cb.exchange) return "{}";
+        auto exchange_fn = reinterpret_cast<UseExchangeFn>(g_use_exchange_fn_);
+        if (!exchange_fn) return "{}";
         std::vector<char> buf(64 * 1024);
-        int n = cb.exchange(name_.c_str(), cmd.c_str(), buf.data(), (int)buf.size());
+        int n = exchange_fn(name_.c_str(), cmd.c_str(), buf.data(), (int)buf.size());
         if (n < 0) { buf.resize((size_t)(-n) + 1024);
-                     n = cb.exchange(name_.c_str(), cmd.c_str(), buf.data(), (int)buf.size()); }
+                     n = exchange_fn(name_.c_str(), cmd.c_str(), buf.data(), (int)buf.size()); }
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
     }
 
     Image grab(int timeout_ms = 500) {
-        auto& cb = use_callbacks();
-        if (!cb.grab) return {};
-        xi_image_handle h = cb.grab(name_.c_str(), timeout_ms);
+        auto grab_fn = reinterpret_cast<UseGrabFn>(g_use_grab_fn_);
+        if (!grab_fn) return {};
+        xi_image_handle h = grab_fn(name_.c_str(), timeout_ms);
         if (h == XI_IMAGE_NULL) return {};
         Image img = ImagePool::instance().to_image(h);
         ImagePool::instance().release(h);

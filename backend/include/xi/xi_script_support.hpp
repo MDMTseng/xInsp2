@@ -14,7 +14,6 @@
 #include "xi_record.hpp"
 #include "xi_script.hpp"
 #include "xi_state.hpp"
-#include "xi_use.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -230,16 +229,18 @@ XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* c
     return needed;
 }
 
-// --- xi::use() callback thunks ---
+// --- xi::use() callback storage ---
+// Stored as void* to avoid xi_abi.h dependency. xi_use.hpp casts them.
+static void* g_use_process_fn_  = nullptr;
+static void* g_use_exchange_fn_ = nullptr;
+static void* g_use_grab_fn_     = nullptr;
 
 XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
-    xi::UseCallbacks::ProcessFn  process_fn,
-    xi::UseCallbacks::ExchangeFn exchange_fn,
-    xi::UseCallbacks::GrabFn     grab_fn)
+    void* process_fn, void* exchange_fn, void* grab_fn)
 {
-    xi::use_callbacks().process  = process_fn;
-    xi::use_callbacks().exchange = exchange_fn;
-    xi::use_callbacks().grab     = grab_fn;
+    g_use_process_fn_  = process_fn;
+    g_use_exchange_fn_ = exchange_fn;
+    g_use_grab_fn_     = grab_fn;
 }
 
 // --- Persistent state thunks ---

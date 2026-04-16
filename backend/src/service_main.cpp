@@ -103,7 +103,7 @@ static std::thread             g_worker_thread;
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
-static void run_one_inspection(xi::ws::Server& srv, int frame_hint = 0, int64_t run_id = 0);
+static void run_one_inspection(xi::ws::Server& srv, int frame_hint = 1, int64_t run_id = 0);
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
@@ -217,7 +217,49 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
     }
 }
 
+// SEH-guarded inspection call. Isolated in its own function because MSVC
+// does not allow __try/__except in functions that use C++ object unwinding.
+// Returns: 0 = ok, nonzero = SEH exception code.
+#pragma warning(push)
+#pragma warning(disable: 4611)  // setjmp/SEH interaction
+static int seh_call_inspect(xi::script::LoadedScript::InspectFn fn, int frame) {
+    __try {
+        fn(frame);
+        return 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (int)GetExceptionCode();
+    }
+}
+
+static int seh_call_reset(xi::script::LoadedScript::ResetFn fn) {
+    if (!fn) return 0;
+    __try {
+        fn();
+        return 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (int)GetExceptionCode();
+    }
+}
+#pragma warning(pop)
+
+static const char* seh_code_name(int code) {
+    switch ((unsigned)code) {
+        case 0xC0000005: return "ACCESS_VIOLATION";
+        case 0xC0000094: return "INT_DIVIDE_BY_ZERO";
+        case 0xC000008C: return "ARRAY_BOUNDS_EXCEEDED";
+        case 0xC00000FD: return "STACK_OVERFLOW";
+        case 0xC000001D: return "ILLEGAL_INSTRUCTION";
+        case 0xC0000090: return "FLOAT_INVALID_OPERATION";
+        case 0xC0000091: return "FLOAT_DIVIDE_BY_ZERO";
+        default:         return "UNKNOWN_EXCEPTION";
+    }
+}
+
 // Run one full inspection cycle: reset → inspect → emit.
+// The inspect call is wrapped in SEH so a script crash (null deref,
+// divide-by-zero, stack overflow) is caught without killing the backend.
 static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_id) {
     if (run_id == 0) run_id = ++g_run_id;
 
@@ -236,10 +278,29 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_
     }
 
     auto t0 = std::chrono::steady_clock::now();
-    if (s.reset) s.reset();
-    try { s.inspect(frame_hint); }
-    catch (const std::exception& e) {
-        std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
+
+    int reset_code = seh_call_reset(s.reset);
+    if (reset_code) {
+        char msg[256];
+        std::snprintf(msg, sizeof(msg),
+            "script reset crashed: 0x%08X (%s)", reset_code, seh_code_name(reset_code));
+        std::fprintf(stderr, "[xinsp2] %s\n", msg);
+        xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
+        srv.send_text(lm.to_json());
+        return;
+    }
+
+    int inspect_code = seh_call_inspect(s.inspect, frame_hint);
+    if (inspect_code) {
+        auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - t0).count();
+        char msg[256];
+        std::snprintf(msg, sizeof(msg),
+            "script crashed after %lldms: 0x%08X (%s)",
+            (long long)dt_ms, inspect_code, seh_code_name(inspect_code));
+        std::fprintf(stderr, "[xinsp2] %s\n", msg);
+        xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
+        srv.send_text(lm.to_json());
         return;
     }
 
@@ -357,8 +418,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":0})", (long long)run_id);
         send_rsp_ok(srv, id, buf);
 
-        // Run inspection — emits vars + previews + run_finished event
-        run_one_inspection(srv, /*frame_hint=*/7, run_id);
+        // Run inspection — emits vars + previews.
+        // SEH catches crashes; infinite loops need watchdog (future).
+        run_one_inspection(srv, /*frame_hint=*/1, run_id);
     } else if (name == "start") {
         // Start continuous trigger mode. The backend runs a timer thread
         // that calls inspect() at a configurable interval. The script's
