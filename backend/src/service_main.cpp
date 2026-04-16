@@ -35,55 +35,9 @@
 
 namespace xp = xi::proto;
 
-// ---- Built-in demo inspect() ----
-//
-// In M3 the "script" is hardcoded in the service. M5 replaces this with
-// a dynamically loaded user .dll. The demo exercises every VarTraits
-// specialization plus parallelism.
-
-static int demo_square(int x) {
-    return x * x;
-}
-ASYNC_WRAP(demo_square)
-
-static xi::Param<int>    demo_amp {"demo_amp",  10,  {1, 100}};
-static xi::Param<double> demo_bias{"demo_bias", 0.5, {0.0, 1.0}};
-
-// Build a small test image — 3-channel gradient that varies with `frame`
-// so successive runs visibly differ in the preview.
-static xi::Image demo_make_image(int frame) {
-    const int W = 64, H = 48, C = 3;
-    xi::Image img(W, H, C);
-    uint8_t* p = img.data();
-    for (int y = 0; y < H; ++y) {
-        for (int x = 0; x < W; ++x) {
-            p[(y * W + x) * C + 0] = static_cast<uint8_t>((x * 4 + frame) & 0xFF);
-            p[(y * W + x) * C + 1] = static_cast<uint8_t>((y * 4 + frame) & 0xFF);
-            p[(y * W + x) * C + 2] = static_cast<uint8_t>((x + y + frame) & 0xFF);
-        }
-    }
-    return img;
-}
-
-static void demo_inspect(int frame) {
-    VAR(gray,    frame * static_cast<int>(demo_amp));
-    VAR(doubled, gray * 2);
-
-    auto p1 = async_demo_square(gray);
-    auto p2 = async_demo_square(doubled);
-    VAR(sq1, int(p1));
-    VAR(sq2, int(p2));
-
-    VAR(score, sq1 + sq2 + static_cast<double>(demo_bias));
-    VAR(label, std::string("demo"));
-    VAR(ok,    true);
-
-    VAR(frame_img, demo_make_image(frame));
-}
-
 static std::atomic<int64_t> g_run_id{0};
 
-// Loaded user script state (M5). When null, fall back to demo_inspect.
+// Loaded user script state. When null, cmd:run returns an error.
 static xi::script::LoadedScript g_script;
 static std::mutex               g_script_mu;
 
@@ -98,7 +52,7 @@ static std::thread             g_worker_thread;
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
-static void run_one_inspection(xi::ws::Server& srv, int frame_hint = 7, int64_t run_id = 0);
+static void run_one_inspection(xi::ws::Server& srv, int frame_hint = 0, int64_t run_id = 0);
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
@@ -213,11 +167,8 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
 }
 
 // Run one full inspection cycle: reset → inspect → emit.
-// `frame_hint` is passed to inspect() — for single-shot runs it defaults
-// to 7 (matches test expectations); for continuous mode it increments.
 static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_id) {
     if (run_id == 0) run_id = ++g_run_id;
-    auto t0 = std::chrono::steady_clock::now();
 
     xi::script::LoadedScript s;
     {
@@ -225,68 +176,25 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_
         s = g_script;
     }
 
-    if (s.ok()) {
-        if (s.reset) s.reset();
-        try { s.inspect(frame_hint); }
-        catch (const std::exception& e) {
-            std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
-            return;
-        }
-    } else {
-        xi::ValueStore::current().clear();
-        try { demo_inspect(frame_hint); }
-        catch (...) { return; }
+    if (!s.ok()) {
+        xp::LogMsg lm;
+        lm.level = "warn";
+        lm.msg = "no script loaded — compile a .cpp first";
+        srv.send_text(lm.to_json());
+        return;
+    }
+
+    auto t0 = std::chrono::steady_clock::now();
+    if (s.reset) s.reset();
+    try { s.inspect(frame_hint); }
+    catch (const std::exception& e) {
+        std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
+        return;
     }
 
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - t0).count();
-
-    if (s.ok()) {
-        emit_vars_and_previews(srv, s, run_id, dt_ms);
-    } else {
-        // Demo path — emit from backend's own ValueStore
-        xp::Vars vmsg;
-        vmsg.run_id = run_id;
-        auto snap = xi::ValueStore::current().snapshot();
-        struct ImgJob { uint32_t gid; xi::Image img; };
-        std::vector<ImgJob> img_jobs;
-        uint32_t next_gid = 100;
-        for (auto& e : snap) {
-            xp::VarItem it;
-            it.name = e.name;
-            switch (e.kind) {
-                case xi::VarKind::Number:
-                    it.kind = xp::VarKindWire::Number; it.value_json = e.inline_json; break;
-                case xi::VarKind::Boolean:
-                    it.kind = xp::VarKindWire::Boolean; it.value_bool = (e.inline_json == "true"); break;
-                case xi::VarKind::String: {
-                    it.kind = xp::VarKindWire::String;
-                    try { it.value_str = std::any_cast<std::string>(e.payload); } catch (...) {}
-                    break;
-                }
-                case xi::VarKind::Image: {
-                    it.kind = xp::VarKindWire::Image; it.gid = next_gid++; it.raw = false;
-                    try { img_jobs.push_back({it.gid, std::any_cast<xi::Image>(e.payload)}); } catch (...) {}
-                    break;
-                }
-                default: it.kind = xp::VarKindWire::Custom; it.value_json = "null";
-            }
-            vmsg.items.push_back(std::move(it));
-        }
-        srv.send_text(vmsg.to_json());
-        for (auto& job : img_jobs) {
-            std::vector<uint8_t> jpeg;
-            if (!xi::encode_jpeg(job.img, 85, jpeg)) continue;
-            std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
-            xp::PreviewHeader hd;
-            hd.gid = job.gid; hd.codec = (uint32_t)xp::Codec::JPEG;
-            hd.width = (uint32_t)job.img.width; hd.height = (uint32_t)job.img.height;
-            hd.channels = (uint32_t)job.img.channels;
-            xp::encode_preview_header(hd, frame.data());
-            std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
-            srv.send_binary(frame.data(), frame.size());
-        }
-    }
+    emit_vars_and_previews(srv, s, run_id, dt_ms);
 }
 
 // (trigger_worker removed — continuous mode uses a simple timer thread)
@@ -683,7 +591,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             return;
         }
 
-        // Get source image (from an ImageSource or generate a test image)
+        // Get source image from an ImageSource instance
         xi::Image src_img;
         if (source) {
             auto src_inst = xi::InstanceRegistry::instance().find(*source);
@@ -691,29 +599,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             if (img_src) src_img = img_src->grab();
         }
         if (src_img.empty()) {
-            // Generate a test image with actual bright blobs on dark background
-            int w = 320, h = 240;
-            src_img = xi::Image(w, h, 1); // grayscale
-            uint8_t* p = src_img.data();
-            // Dark background with gradient
-            for (int y = 0; y < h; ++y)
-                for (int x = 0; x < w; ++x)
-                    p[y * w + x] = (uint8_t)(30 + (x * 20 / w));
-
-            // Draw bright circles as blobs
-            auto draw_circle = [&](int cx, int cy, int r, uint8_t val) {
-                for (int dy = -r; dy <= r; ++dy)
-                    for (int dx = -r; dx <= r; ++dx)
-                        if (dx*dx + dy*dy <= r*r) {
-                            int px = cx + dx, py = cy + dy;
-                            if (px >= 0 && px < w && py >= 0 && py < h)
-                                p[py * w + px] = val;
-                        }
-            };
-            draw_circle(80,  60,  20, 220);  // large blob
-            draw_circle(200, 100, 15, 240);  // medium blob
-            draw_circle(260, 180, 12, 200);  // small blob
-            draw_circle(50,  180, 8,  210);  // tiny blob
+            send_rsp_err(srv, id, "no image available — provide a source instance or start streaming");
+            return;
         }
 
         // Build input record with the image
