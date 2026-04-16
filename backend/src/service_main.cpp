@@ -43,8 +43,54 @@ static xi::script::LoadedScript g_script;
 static std::mutex               g_script_mu;
 
 // Persistent cross-frame state — survives DLL reloads.
-// Serialized to JSON before unload, restored after load.
 static std::string g_persistent_state_json = "{}";
+
+// --- xi::use() callback implementations ---
+// These are called FROM the script DLL back INTO the backend, routing
+// process/exchange/grab to the backend's InstanceRegistry.
+
+#include <xi/xi_use.hpp>
+
+static int use_process_cb(const char* name,
+                          const char* input_json,
+                          const xi_record_image* input_images, int input_image_count,
+                          xi_record_out* output) {
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+
+    // Check if it's a C ABI adapter with process_fn
+    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    if (adapter && adapter->process_fn()) {
+        xi_record in_rec;
+        in_rec.images = input_images;
+        in_rec.image_count = input_image_count;
+        in_rec.json = input_json;
+        adapter->process_fn()(adapter->raw_instance(), &in_rec, output);
+        return output->image_count;
+    }
+    return -1;
+}
+
+static int use_exchange_cb(const char* name, const char* cmd,
+                           char* rsp, int rsplen) {
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    std::string result = inst->exchange(cmd);
+    int n = (int)result.size();
+    if (rsplen < n + 1) return -n;
+    std::memcpy(rsp, result.data(), result.size());
+    rsp[result.size()] = 0;
+    return n;
+}
+
+static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    auto* src = inst ? dynamic_cast<xi::ImageSource*>(inst.get()) : nullptr;
+    if (!src) return XI_IMAGE_NULL;
+    xi::Image img = src->grab_wait(timeout_ms);
+    if (img.empty()) return XI_IMAGE_NULL;
+    return xi::ImagePool::instance().from_image(img);
+}
 
 // ---- Trigger loop state ----
 // When running in continuous mode (cmd: start), a worker thread waits for
@@ -267,6 +313,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             if (!xi::script::load_script(res.dll_path, g_script, err)) {
                 send_rsp_err(srv, id, err);
                 return;
+            }
+            // Wire xi::use() callbacks so the script can call back into backend
+            if (g_script.set_use_callbacks) {
+                g_script.set_use_callbacks(
+                    (void*)use_process_cb,
+                    (void*)use_exchange_cb,
+                    (void*)use_grab_cb);
             }
             // Restore persistent state into the new DLL
             if (g_script.set_state && g_persistent_state_json.size() > 2) {
@@ -763,6 +816,14 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         if (!folder) { send_rsp_err(srv, id, "missing folder"); return; }
         if (g_plugin_mgr.open_project(*folder)) {
+            auto& proj = g_plugin_mgr.project();
+            int inst_count = (int)proj.instances.size();
+            std::fprintf(stderr, "[xinsp2] project opened: %s (%d instances)\n",
+                         proj.name.c_str(), inst_count);
+            for (auto& [k, v] : proj.instances) {
+                std::fprintf(stderr, "[xinsp2]   instance: %s (%s)\n",
+                             k.c_str(), v.plugin_name.c_str());
+            }
             send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "failed to open project in " + *folder);

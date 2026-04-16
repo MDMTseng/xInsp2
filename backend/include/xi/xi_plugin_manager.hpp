@@ -272,8 +272,25 @@ public:
                 ii.name = entry.path().filename().string();
                 ii.plugin_name = *plugin;
                 ii.folder_path = entry.path().string();
-                // Try to create the instance from the plugin factory
+                // Auto-load the plugin if not yet loaded
                 auto pit = plugins_.find(*plugin);
+                if (pit != plugins_.end() && !pit->second.factory && !pit->second.c_factory) {
+                    // Plugin discovered but not loaded — load it now
+                    auto& pi2 = pit->second;
+                    auto dll_path = std::filesystem::path(pi2.folder_path) / pi2.dll_name;
+                    if (std::filesystem::exists(dll_path)) {
+                        pi2.handle = LoadLibraryA(dll_path.string().c_str());
+                        if (pi2.handle) {
+                            auto has_destroy = GetProcAddress(pi2.handle, "xi_plugin_destroy") != nullptr;
+                            if (has_destroy)
+                                pi2.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
+                                    GetProcAddress(pi2.handle, pi2.factory_symbol.c_str()));
+                            else
+                                pi2.factory = reinterpret_cast<PluginInfo::FactoryFn>(
+                                    GetProcAddress(pi2.handle, pi2.factory_symbol.c_str()));
+                        }
+                    }
+                }
                 if (pit != plugins_.end()) {
                     auto& pi = pit->second;
                     bool created = false;

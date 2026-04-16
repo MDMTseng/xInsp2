@@ -14,6 +14,7 @@
 #include "xi_record.hpp"
 #include "xi_script.hpp"
 #include "xi_state.hpp"
+#include "xi_use.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -227,6 +228,18 @@ XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* c
     std::memcpy(rsp_buf, rsp.data(), rsp.size());
     rsp_buf[rsp.size()] = 0;
     return needed;
+}
+
+// --- xi::use() callback thunks ---
+
+XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
+    xi::UseCallbacks::ProcessFn  process_fn,
+    xi::UseCallbacks::ExchangeFn exchange_fn,
+    xi::UseCallbacks::GrabFn     grab_fn)
+{
+    xi::use_callbacks().process  = process_fn;
+    xi::use_callbacks().exchange = exchange_fn;
+    xi::use_callbacks().grab     = grab_fn;
 }
 
 // --- Persistent state thunks ---
