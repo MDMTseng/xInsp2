@@ -25,9 +25,12 @@
 #include <xi/xi_project.hpp>
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
+#include <xi/xi_source.hpp>
 #include <xi/xi_ws_server.hpp>
 
+#include <condition_variable>
 #include <filesystem>
+#include <thread>
 
 namespace xp = xi::proto;
 
@@ -83,6 +86,18 @@ static std::atomic<int64_t> g_run_id{0};
 static xi::script::LoadedScript g_script;
 static std::mutex               g_script_mu;
 
+// ---- Trigger loop state ----
+// When running in continuous mode (cmd: start), a worker thread waits for
+// trigger signals from image sources and calls inspect() for each frame.
+static std::atomic<bool>       g_continuous{false};
+static std::condition_variable g_trigger_cv;
+static std::mutex              g_trigger_mu;
+static std::atomic<int>        g_trigger_pending{0};
+static std::thread             g_worker_thread;
+
+// Forward-declare: runs one inspection cycle and emits vars+previews.
+static void run_one_inspection(xi::ws::Server& srv);
+
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
 static std::string g_include_dir;
@@ -137,6 +152,159 @@ static void send_hello(xi::ws::Server& srv) {
     e.name = "hello";
     e.data_json = R"({"version":"0.1.0","abi":1})";
     srv.send_text(e.to_json());
+}
+
+// Shared function: emit vars + binary preview frames from the script's
+// thunks or the built-in demo. Called by `cmd: run` and by the continuous
+// trigger loop.
+static void emit_vars_and_previews(xi::ws::Server& srv,
+                                    xi::script::LoadedScript& s,
+                                    int64_t run_id, int64_t dt_ms) {
+    if (s.ok() && s.snapshot) {
+        // Script path — read from DLL thunks
+        std::vector<char> sbuf(256 * 1024);
+        int n = s.snapshot(sbuf.data(), (int)sbuf.size());
+        if (n < 0) { sbuf.resize((size_t)(-n) + 1024);
+                     n = s.snapshot(sbuf.data(), (int)sbuf.size()); }
+        if (n <= 0) return;
+
+        // vars text message
+        std::string vars_msg = "{\"type\":\"vars\",\"run_id\":";
+        vars_msg += std::to_string(run_id);
+        vars_msg += ",\"items\":";
+        vars_msg += std::string(sbuf.data(), (size_t)n);
+        vars_msg += "}";
+        srv.send_text(vars_msg);
+
+        // image previews
+        std::string_view snap_view(sbuf.data(), (size_t)n);
+        size_t pos = 0;
+        while (true) {
+            pos = snap_view.find("\"gid\":", pos);
+            if (pos == std::string_view::npos) break;
+            pos += 6;
+            uint32_t gid = (uint32_t)std::atoi(snap_view.data() + pos);
+            if (s.dump_image) {
+                int w = 0, h = 0, c = 0;
+                std::vector<uint8_t> raw(32 * 1024 * 1024);
+                int nb = s.dump_image(gid, raw.data(), (int)raw.size(), &w, &h, &c);
+                if (nb > 0 && w > 0 && h > 0 && c > 0) {
+                    xi::Image img(w, h, c, raw.data());
+                    std::vector<uint8_t> jpeg;
+                    if (xi::encode_jpeg(img, 85, jpeg)) {
+                        std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
+                        xp::PreviewHeader hd;
+                        hd.gid = gid; hd.codec = (uint32_t)xp::Codec::JPEG;
+                        hd.width = (uint32_t)w; hd.height = (uint32_t)h; hd.channels = (uint32_t)c;
+                        xp::encode_preview_header(hd, frame.data());
+                        std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
+                        srv.send_binary(frame.data(), frame.size());
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Run one full inspection cycle: reset → inspect → emit.
+static void run_one_inspection(xi::ws::Server& srv) {
+    int64_t run_id = ++g_run_id;
+    auto t0 = std::chrono::steady_clock::now();
+
+    xi::script::LoadedScript s;
+    {
+        std::lock_guard<std::mutex> lk(g_script_mu);
+        s = g_script;
+    }
+
+    if (s.ok()) {
+        if (s.reset) s.reset();
+        try { s.inspect(/*frame=*/(int)run_id); }
+        catch (const std::exception& e) {
+            std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
+            return;
+        }
+    } else {
+        xi::ValueStore::current().clear();
+        try { demo_inspect(/*frame=*/(int)run_id); }
+        catch (...) { return; }
+    }
+
+    auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - t0).count();
+
+    // Event so the viewer knows a run completed
+    xp::Event ev;
+    ev.name = "run_finished";
+    char ebuf[128];
+    std::snprintf(ebuf, sizeof(ebuf), R"({"run_id":%lld,"ms":%lld})",
+                 (long long)run_id, (long long)dt_ms);
+    ev.data_json = ebuf;
+    srv.send_text(ev.to_json());
+
+    if (s.ok()) {
+        emit_vars_and_previews(srv, s, run_id, dt_ms);
+    } else {
+        // Demo path — emit from backend's own ValueStore
+        xp::Vars vmsg;
+        vmsg.run_id = run_id;
+        auto snap = xi::ValueStore::current().snapshot();
+        struct ImgJob { uint32_t gid; xi::Image img; };
+        std::vector<ImgJob> img_jobs;
+        uint32_t next_gid = 100;
+        for (auto& e : snap) {
+            xp::VarItem it;
+            it.name = e.name;
+            switch (e.kind) {
+                case xi::VarKind::Number:
+                    it.kind = xp::VarKindWire::Number; it.value_json = e.inline_json; break;
+                case xi::VarKind::Boolean:
+                    it.kind = xp::VarKindWire::Boolean; it.value_bool = (e.inline_json == "true"); break;
+                case xi::VarKind::String: {
+                    it.kind = xp::VarKindWire::String;
+                    try { it.value_str = std::any_cast<std::string>(e.payload); } catch (...) {}
+                    break;
+                }
+                case xi::VarKind::Image: {
+                    it.kind = xp::VarKindWire::Image; it.gid = next_gid++; it.raw = false;
+                    try { img_jobs.push_back({it.gid, std::any_cast<xi::Image>(e.payload)}); } catch (...) {}
+                    break;
+                }
+                default: it.kind = xp::VarKindWire::Custom; it.value_json = "null";
+            }
+            vmsg.items.push_back(std::move(it));
+        }
+        srv.send_text(vmsg.to_json());
+        for (auto& job : img_jobs) {
+            std::vector<uint8_t> jpeg;
+            if (!xi::encode_jpeg(job.img, 85, jpeg)) continue;
+            std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
+            xp::PreviewHeader hd;
+            hd.gid = job.gid; hd.codec = (uint32_t)xp::Codec::JPEG;
+            hd.width = (uint32_t)job.img.width; hd.height = (uint32_t)job.img.height;
+            hd.channels = (uint32_t)job.img.channels;
+            xp::encode_preview_header(hd, frame.data());
+            std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
+            srv.send_binary(frame.data(), frame.size());
+        }
+    }
+}
+
+// Worker thread for continuous trigger mode.
+static void trigger_worker(xi::ws::Server& srv) {
+    while (g_continuous.load()) {
+        std::unique_lock<std::mutex> lk(g_trigger_mu);
+        g_trigger_cv.wait_for(lk, std::chrono::milliseconds(200), [] {
+            return g_trigger_pending.load() > 0 || !g_continuous.load();
+        });
+        if (!g_continuous.load()) break;
+        if (g_trigger_pending.load() > 0) {
+            g_trigger_pending = 0;
+            lk.unlock();
+            run_one_inspection(srv);
+        }
+    }
+    std::fprintf(stderr, "[xinsp2] trigger worker stopped\n");
 }
 
 static void handle_command(xi::ws::Server& srv, std::string_view text) {
@@ -215,189 +383,74 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xi::script::unload_script(g_script);
         send_rsp_ok(srv, id);
     } else if (name == "run") {
-        int64_t run_id = ++g_run_id;
-        auto t0 = std::chrono::steady_clock::now();
-
-        // If a user script is loaded, drive it via its exported thunks.
-        // Otherwise fall back to the built-in demo inspection (M3 path).
-        bool use_script = false;
-        {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            use_script = g_script.ok();
-        }
-
-        if (use_script) {
-            // --- Script path ---
-            xi::script::LoadedScript s;
-            {
-                std::lock_guard<std::mutex> lk(g_script_mu);
-                s = g_script;  // copy fn pointers; handle still owned by g_script
-            }
-            if (s.reset) s.reset();
-            try {
-                s.inspect(/*frame=*/7);
-            } catch (const std::exception& e) {
-                send_rsp_err(srv, id, std::string("script inspect threw: ") + e.what());
-                return;
-            }
-
-            // Query the DLL's own ValueStore via the snapshot thunk.
-            std::vector<char> sbuf(256 * 1024);
-            int n = s.snapshot ? s.snapshot(sbuf.data(), (int)sbuf.size()) : -1;
-            if (n < 0) {
-                // Try again with larger buffer.
-                sbuf.resize(static_cast<size_t>(-n) + 1024);
-                n = s.snapshot(sbuf.data(), (int)sbuf.size());
-            }
-            if (n < 0) {
-                send_rsp_err(srv, id, "snapshot thunk failed");
-                return;
-            }
-
-            auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - t0).count();
-
-            // rsp first
-            char rbuf[128];
-            std::snprintf(rbuf, sizeof(rbuf),
-                R"({"run_id":%lld,"ms":%lld})", (long long)run_id, (long long)dt_ms);
-            send_rsp_ok(srv, id, rbuf);
-
-            // The thunk returned a JSON array of items; wrap it into a full
-            // vars message.
-            std::string vars_msg = "{\"type\":\"vars\",\"run_id\":";
-            vars_msg += std::to_string(run_id);
-            vars_msg += ",\"items\":";
-            vars_msg += std::string(sbuf.data(), (size_t)n);
-            vars_msg += "}";
-            srv.send_text(vars_msg);
-
-            // Scan the snapshot for image entries and dump each one.
-            // Simple substring walk to find "gid": occurrences.
-            std::string_view snap_view(sbuf.data(), (size_t)n);
-            size_t pos = 0;
-            while (true) {
-                pos = snap_view.find("\"gid\":", pos);
-                if (pos == std::string_view::npos) break;
-                pos += 6;
-                uint32_t gid = (uint32_t)std::atoi(snap_view.data() + pos);
-                // Dump image via thunk
-                if (s.dump_image) {
-                    int w = 0, h = 0, c = 0;
-                    std::vector<uint8_t> raw(32 * 1024 * 1024);
-                    int nb = s.dump_image(gid, raw.data(), (int)raw.size(), &w, &h, &c);
-                    if (nb > 0 && w > 0 && h > 0 && c > 0) {
-                        xi::Image img(w, h, c, raw.data());
-                        std::vector<uint8_t> jpeg;
-                        if (xi::encode_jpeg(img, 85, jpeg)) {
-                            std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
-                            xp::PreviewHeader hd;
-                            hd.gid = gid;
-                            hd.codec = (uint32_t)xp::Codec::JPEG;
-                            hd.width = (uint32_t)w;
-                            hd.height = (uint32_t)h;
-                            hd.channels = (uint32_t)c;
-                            xp::encode_preview_header(hd, frame.data());
-                            std::memcpy(frame.data() + xp::kPreviewHeaderSize,
-                                        jpeg.data(), jpeg.size());
-                            srv.send_binary(frame.data(), frame.size());
-                        }
-                    }
-                }
-            }
+        send_rsp_ok(srv, id);
+        run_one_inspection(srv);
+    } else if (name == "start") {
+        // Start continuous trigger mode. If a TestImageSource is declared
+        // in the script, start it and wire its trigger to the worker.
+        if (g_continuous.load()) {
+            send_rsp_ok(srv, id, R"({"already":true})");
             return;
         }
+        g_continuous = true;
+        g_trigger_pending = 0;
 
-        // --- Fallback: built-in demo inspection ---
-        xi::ValueStore::current().clear();
-        try {
-            demo_inspect(/*frame=*/7);
-        } catch (const std::exception& e) {
-            send_rsp_err(srv, id, std::string("inspect threw: ") + e.what());
-            return;
-        }
-        auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         std::chrono::steady_clock::now() - t0).count();
+        // Start the worker thread
+        g_worker_thread = std::thread([&srv] { trigger_worker(srv); });
 
-        // Build vars message from the store snapshot.
-        xp::Vars vmsg;
-        vmsg.run_id = run_id;
-        auto snap = xi::ValueStore::current().snapshot();
+        // Look for ImageSource instances in the script's registry and
+        // wire their triggers. For now, also create a built-in
+        // TestImageSource if no script is loaded.
+        // The trigger callback signals the worker.
+        auto trigger_fn = [] {
+            g_trigger_pending++;
+            g_trigger_cv.notify_one();
+        };
 
-        // We'll need to re-walk the image entries after sending the vars
-        // message to emit the preview binary frames. Track them by gid.
-        struct ImgJob { uint32_t gid; xi::Image img; };
-        std::vector<ImgJob> img_jobs;
-
-        uint32_t next_gid = 100;
-        for (auto& e : snap) {
-            xp::VarItem it;
-            it.name = e.name;
-            switch (e.kind) {
-                case xi::VarKind::Number:
-                    it.kind = xp::VarKindWire::Number;
-                    it.value_json = e.inline_json;
-                    break;
-                case xi::VarKind::Boolean:
-                    it.kind = xp::VarKindWire::Boolean;
-                    it.value_bool = (e.inline_json == "true");
-                    break;
-                case xi::VarKind::String: {
-                    it.kind = xp::VarKindWire::String;
-                    // payload holds a std::string
-                    if (e.payload.has_value()) {
-                        try { it.value_str = std::any_cast<std::string>(e.payload); }
-                        catch (...) {}
-                    }
-                    break;
-                }
-                case xi::VarKind::Image: {
-                    it.kind = xp::VarKindWire::Image;
-                    it.gid  = next_gid++;
-                    it.raw  = false;
-                    if (e.payload.has_value()) {
-                        try {
-                            auto img = std::any_cast<xi::Image>(e.payload);
-                            img_jobs.push_back({it.gid, std::move(img)});
-                        } catch (...) {}
-                    }
-                    break;
-                }
-                case xi::VarKind::Json:
-                    it.kind = xp::VarKindWire::Json;
-                    it.value_json = e.inline_json.empty() ? "null" : e.inline_json;
-                    break;
-                default:
-                    it.kind = xp::VarKindWire::Custom;
-                    it.value_json = "null";
+        // Check if script has sources registered — we can't introspect
+        // the DLL's InstanceRegistry directly, so we use the
+        // InstanceRegistry in the backend's own address space for
+        // built-in sources.
+        auto sources = xi::InstanceRegistry::instance().list();
+        bool found_source = false;
+        for (auto& inst : sources) {
+            auto* src = dynamic_cast<xi::ImageSource*>(inst.get());
+            if (src) {
+                src->set_trigger(trigger_fn);
+                src->start();
+                found_source = true;
+                std::fprintf(stderr, "[xinsp2] started source: %s\n", src->name().c_str());
             }
-            vmsg.items.push_back(std::move(it));
         }
 
-        // Respond to the `run` command first with timing, then emit vars,
-        // then one binary preview frame per image variable.
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":%lld})",
-                     (long long)run_id, (long long)dt_ms);
-        send_rsp_ok(srv, id, buf);
-        srv.send_text(vmsg.to_json());
-
-        for (auto& job : img_jobs) {
-            std::vector<uint8_t> jpeg;
-            if (!xi::encode_jpeg(job.img, 85, jpeg)) continue;
-            std::vector<uint8_t> frame;
-            frame.resize(xp::kPreviewHeaderSize + jpeg.size());
-            xp::PreviewHeader h;
-            h.gid      = job.gid;
-            h.codec    = static_cast<uint32_t>(xp::Codec::JPEG);
-            h.width    = static_cast<uint32_t>(job.img.width);
-            h.height   = static_cast<uint32_t>(job.img.height);
-            h.channels = static_cast<uint32_t>(job.img.channels);
-            xp::encode_preview_header(h, frame.data());
-            std::memcpy(frame.data() + xp::kPreviewHeaderSize,
-                        jpeg.data(), jpeg.size());
-            srv.send_binary(frame.data(), frame.size());
+        // If no source found, create a default TestImageSource
+        if (!found_source) {
+            auto test_src = std::make_shared<xi::TestImageSource>("_default_src", 128, 96, 5);
+            xi::InstanceRegistry::instance().add(test_src);
+            test_src->set_trigger(trigger_fn);
+            test_src->start();
+            std::fprintf(stderr, "[xinsp2] started default TestImageSource at 5fps\n");
         }
+
+        send_rsp_ok(srv, id, R"({"started":true})");
+    } else if (name == "stop") {
+        g_continuous = false;
+        g_trigger_cv.notify_all();
+        if (g_worker_thread.joinable()) g_worker_thread.join();
+
+        // Stop all sources
+        auto sources = xi::InstanceRegistry::instance().list();
+        for (auto& inst : sources) {
+            auto* src = dynamic_cast<xi::ImageSource*>(inst.get());
+            if (src && src->is_running()) {
+                src->stop();
+                std::fprintf(stderr, "[xinsp2] stopped source: %s\n", src->name().c_str());
+            }
+        }
+        // Remove the default source if we created one
+        xi::InstanceRegistry::instance().remove("_default_src");
+
+        send_rsp_ok(srv, id, R"({"stopped":true})");
     } else if (name == "list_params") {
         // If a script is loaded, delegate to its own registry thunk so we
         // see the DLL's params. Otherwise report the backend's own.

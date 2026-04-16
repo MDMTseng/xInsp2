@@ -185,6 +185,23 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.start', async () => {
+            if (!client?.connected) { vscode.window.showWarningMessage('xInsp2: not connected'); return; }
+            const rsp = await sendCmd('start');
+            if (rsp.ok) vscode.window.setStatusBarMessage('xInsp2: continuous mode started', 3000);
+            else vscode.window.showErrorMessage('xInsp2 start failed: ' + rsp.error);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.stop', async () => {
+            if (!client?.connected) return;
+            const rsp = await sendCmd('stop');
+            if (rsp.ok) vscode.window.setStatusBarMessage('xInsp2: stopped', 3000);
+        })
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.loadProject', async () => {
             const uris = await vscode.window.showOpenDialog({
                 filters: { 'xInsp2 Project': ['json'] },

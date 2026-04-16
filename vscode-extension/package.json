@@ -33,6 +33,16 @@
       {
         "command": "xinsp2.loadProject",
         "title": "xInsp2: Load Project"
+      },
+      {
+        "command": "xinsp2.start",
+        "title": "xInsp2: Start Continuous",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "xinsp2.stop",
+        "title": "xInsp2: Stop Continuous",
+        "icon": "$(debug-stop)"
       }
     ],
     "viewsContainers": {
