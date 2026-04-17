@@ -136,7 +136,7 @@ test('shutdown during continuous mode exits cleanly', async () => {
 // ---------------------------------------------------------------
 // 6. Hot-reload during continuous mode — stops and restarts safely
 // ---------------------------------------------------------------
-test('compile_and_load during continuous mode stops worker safely', { skip: 'DLL file lock after FreeLibrary — needs versioned output path' }, async () => {
+test('compile_and_load during continuous mode stops worker safely', async () => {
     await withBackend(async (c) => {
         await c.nextText();
         const cr1 = await compileScript(c, scriptPath('user_script_example.cpp'));

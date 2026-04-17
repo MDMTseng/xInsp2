@@ -22,6 +22,7 @@
   #include <windows.h>
 #endif
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -114,11 +115,16 @@ inline CompileResult compile(const CompileRequest& req) {
         return r;
     }
 
-    // Derive output names.
+    // Derive output names — versioned to avoid DLL file lock conflicts.
+    // FreeLibrary doesn't always release the file handle immediately on
+    // Windows, so we compile to a new filename each time.
+    static std::atomic<int> s_version{0};
     std::filesystem::path src(req.source_path);
     std::string stem = src.stem().string();
-    std::filesystem::path out_dll = std::filesystem::path(req.output_dir) / (stem + ".dll");
-    std::filesystem::path log_path = std::filesystem::path(req.output_dir) / (stem + ".log");
+    int ver = s_version++;
+    std::string versioned_stem = stem + "_v" + std::to_string(ver);
+    std::filesystem::path out_dll = std::filesystem::path(req.output_dir) / (versioned_stem + ".dll");
+    std::filesystem::path log_path = std::filesystem::path(req.output_dir) / (versioned_stem + ".log");
     // Remove an existing dll so LoadLibrary can't grab a stale one on error.
     std::error_code ec;
     std::filesystem::remove(out_dll, ec);
@@ -161,7 +167,7 @@ inline CompileResult compile(const CompileRequest& req) {
     for (auto& s : req.extra_sources) {
         cmd += " \"" + s + "\"";
     }
-    cmd += " /link /IMPLIB:\"" + (std::filesystem::path(req.output_dir) / (stem + ".lib")).string() + "\"";
+    cmd += " /link /IMPLIB:\"" + (std::filesystem::path(req.output_dir) / (versioned_stem + ".lib")).string() + "\"";
     // Link against pre-built cjson.lib (needed by xi_record.hpp / xi_plugin_handle.hpp)
     auto cjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cjson.lib";
     if (std::filesystem::exists(cjson_lib)) {

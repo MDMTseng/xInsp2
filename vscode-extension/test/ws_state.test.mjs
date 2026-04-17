@@ -39,7 +39,7 @@ test('state persists across runs: run_count increments', { timeout: 90000 }, asy
 // ---------------------------------------------------------------
 // 2. state survives hot-reload (recompile same script)
 // ---------------------------------------------------------------
-test('state survives hot-reload: recompile does not reset run_count', { timeout: 90000, skip: 'DLL file lock — same script cannot be recompiled while loaded' }, async () => {
+test('state survives hot-reload: recompile does not reset run_count', { timeout: 90000 },async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
