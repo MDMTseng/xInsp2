@@ -46,11 +46,13 @@
       },
       {
         "command": "xinsp2.createProject",
-        "title": "xInsp2: Create Project"
+        "title": "xInsp2: Create Project",
+        "icon": "$(new-folder)"
       },
       {
         "command": "xinsp2.openProject",
-        "title": "xInsp2: Open Project"
+        "title": "xInsp2: Open Project",
+        "icon": "$(folder-opened)"
       },
       {
         "command": "xinsp2.listPlugins",
@@ -58,11 +60,13 @@
       },
       {
         "command": "xinsp2.createInstance",
-        "title": "xInsp2: Create Instance"
+        "title": "xInsp2: Add Instance",
+        "icon": "$(add)"
       },
       {
         "command": "xinsp2.openInstanceUI",
-        "title": "xInsp2: Open Instance UI"
+        "title": "xInsp2: Open Instance UI",
+        "icon": "$(settings-gear)"
       }
     ],
     "viewsContainers": {
@@ -91,9 +95,31 @@
     "menus": {
       "view/title": [
         {
+          "command": "xinsp2.createInstance",
+          "when": "view == xinsp2.instances",
+          "group": "navigation@1"
+        },
+        {
+          "command": "xinsp2.createProject",
+          "when": "view == xinsp2.instances",
+          "group": "navigation@2"
+        },
+        {
+          "command": "xinsp2.openProject",
+          "when": "view == xinsp2.instances",
+          "group": "navigation@3"
+        },
+        {
           "command": "xinsp2.run",
           "when": "view == xinsp2.instances",
-          "group": "navigation"
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "xinsp2.openInstanceUI",
+          "when": "view == xinsp2.instances && viewItem == instance",
+          "group": "inline"
         }
       ]
     },
@@ -109,6 +135,12 @@
           "type": "boolean",
           "default": true,
           "description": "Auto-start xinsp-backend.exe on activation"
+        },
+        "xinsp2.extraPluginDirs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Additional folders to scan for plugins (each subfolder with a plugin.json is registered). Lets external SDKs / 3rd-party plugins live anywhere on disk without copying."
         }
       }
     }

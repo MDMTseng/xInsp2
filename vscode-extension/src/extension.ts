@@ -42,6 +42,7 @@ export function activate(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('xinsp2');
     const port = config.get<number>('backendPort', 7823);
     const autoStart = config.get<boolean>('autoStartBackend', true);
+    const extraPluginDirs = config.get<string[]>('extraPluginDirs', []);
     const output = vscode.window.createOutputChannel('xInsp2');
 
     // Tree view
@@ -332,8 +333,20 @@ export function activate(context: vscode.ExtensionContext) {
     const previewGidToPanel = new Map<number, vscode.WebviewPanel>();
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('xinsp2.openInstanceUI', async (instanceName?: string, pluginName?: string) => {
-            if (!client?.connected || !instanceName || !pluginName) return;
+        vscode.commands.registerCommand('xinsp2.openInstanceUI', async (arg1?: any, arg2?: string) => {
+            if (!client?.connected) return;
+            // Inline view/item button passes the TreeItem as arg1; programmatic
+            // callers pass (instanceName, pluginName).
+            let instanceName: string | undefined;
+            let pluginName: string | undefined;
+            if (typeof arg1 === 'string') {
+                instanceName = arg1;
+                pluginName = arg2;
+            } else if (arg1 && typeof arg1 === 'object') {
+                instanceName = arg1.label ?? arg1.name;
+                pluginName = arg1.description ?? arg1.plugin;
+            }
+            if (!instanceName || !pluginName) return;
 
             // Check if panel already open
             const existing = pluginUIPanels.get(instanceName);
@@ -355,6 +368,31 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
             let html = fs.readFileSync(htmlPath, 'utf8');
+
+            // Inject a test shim that lets E2E tests drive DOM events as if a
+            // real user clicked / typed. Listens for postMessages from the
+            // extension and dispatches the corresponding browser events.
+            const testShim = `
+<script>
+(function(){
+  window.addEventListener('message', function(e){
+    var m = e.data;
+    if (!m || typeof m.type !== 'string') return;
+    if (m.type === '__xi_click') {
+      var el = document.querySelector(m.selector);
+      if (el) el.click();
+    } else if (m.type === '__xi_set_input') {
+      var el = document.querySelector(m.selector);
+      if (el) {
+        el.value = m.value;
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+      }
+    }
+  });
+})();
+</script>`;
+            html = html.replace('</body>', testShim + '</body>');
 
             // Create webview panel
             const panel = vscode.window.createWebviewPanel(
@@ -434,6 +472,30 @@ export function activate(context: vscode.ExtensionContext) {
         registerPreviewGid: (gid: number, panel: vscode.WebviewPanel) => {
             previewGidToPanel.set(gid, panel);
         },
+        // Simulates a user clicking a button inside the plugin's webview UI:
+        // runs the same path as panel.webview.onDidReceiveMessage, including
+        // the status post-back so the webview repaints (e.g., "Streaming").
+        simulateWebviewExchange: async (instanceName: string, cmd: any) => {
+            const rsp = await sendCmd('exchange_instance', { name: instanceName, cmd });
+            const panel = pluginUIPanels.get(instanceName);
+            if (panel && rsp.ok && rsp.data) {
+                const parsed = typeof rsp.data === 'string' ? JSON.parse(rsp.data) : rsp.data;
+                panel.webview.postMessage({ type: 'status', ...parsed });
+            }
+            return rsp;
+        },
+        // Drive the DOM inside a plugin's webview as if a real user did it.
+        // Posts a control message that the injected test shim listens for.
+        clickInWebview: (instanceName: string, selector: string) => {
+            const panel = pluginUIPanels.get(instanceName);
+            if (!panel) return false;
+            return panel.webview.postMessage({ type: '__xi_click', selector });
+        },
+        setInputInWebview: (instanceName: string, selector: string, value: string | number) => {
+            const panel = pluginUIPanels.get(instanceName);
+            if (!panel) return false;
+            return panel.webview.postMessage({ type: '__xi_set_input', selector, value: String(value) });
+        },
     };
 
     // --- Auto-compile on save (S2) ---
@@ -473,8 +535,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     if (autoStart) {
         const exe = findBackendExe(context);
-        output.appendLine(`[xinsp2] starting ${exe} --port=${port}`);
-        backend = spawn(exe, [`--port=${port}`], {
+        const args = [`--port=${port}`];
+        for (const dir of extraPluginDirs) args.push(`--plugins-dir=${dir}`);
+        output.appendLine(`[xinsp2] starting ${exe} ${args.join(' ')}`);
+        backend = spawn(exe, args, {
             stdio: ['ignore', 'pipe', 'pipe'],
         });
         backend.stdout?.on('data', (d: Buffer) => output.append(d.toString()));

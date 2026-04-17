@@ -1,0 +1,7 @@
+{
+  "name": "hello",
+  "description": "Minimal plugin — returns a greeting from input.name",
+  "dll": "hello.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false
+}

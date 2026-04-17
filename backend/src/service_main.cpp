@@ -178,6 +178,33 @@ static int parse_port(int argc, char** argv) {
     return port;
 }
 
+// Repeatable: --plugins-dir=/some/path  (or --plugins-dir /some/path).
+// Also reads XINSP2_EXTRA_PLUGIN_DIRS, semicolon- or path-separator-delimited.
+static std::vector<std::string> parse_extra_plugin_dirs(int argc, char** argv) {
+    std::vector<std::string> dirs;
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a = argv[i];
+        if (a.rfind("--plugins-dir=", 0) == 0) {
+            dirs.emplace_back(std::string(a.substr(14)));
+        } else if (a == "--plugins-dir" && i + 1 < argc) {
+            dirs.emplace_back(argv[++i]);
+        }
+    }
+    if (const char* env = std::getenv("XINSP2_EXTRA_PLUGIN_DIRS")) {
+        std::string s(env);
+        size_t start = 0;
+        while (start <= s.size()) {
+            size_t end = s.find_first_of(";,", start);
+            if (end == std::string::npos) end = s.size();
+            std::string item = s.substr(start, end - start);
+            if (!item.empty()) dirs.push_back(std::move(item));
+            if (end == s.size()) break;
+            start = end + 1;
+        }
+    }
+    return dirs;
+}
+
 static double now_seconds() {
     using namespace std::chrono;
     return duration<double>(system_clock::now().time_since_epoch()).count();
@@ -385,12 +412,17 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 send_rsp_err(srv, id, err);
                 return;
             }
-            // Wire xi::use() callbacks so the script can call back into backend
+            // Wire xi::use() callbacks so the script can call back into backend.
+            // host_api lets the script allocate/read images in the BACKEND pool —
+            // plugins only see that pool via their own host_api, so script-side
+            // ImagePool handles would be invisible to them.
             if (g_script.set_use_callbacks) {
+                static xi_host_api use_host = xi::ImagePool::make_host_api();
                 g_script.set_use_callbacks(
                     (void*)use_process_cb,
                     (void*)use_exchange_cb,
-                    (void*)use_grab_cb);
+                    (void*)use_grab_cb,
+                    (void*)&use_host);
             }
             // Restore persistent state into the new DLL
             if (g_script.set_state && g_persistent_state_json.size() > 2) {
@@ -1039,6 +1071,16 @@ int main(int argc, char** argv) {
     if (!g_plugins_dir.empty()) {
         int n = g_plugin_mgr.scan_plugins(g_plugins_dir);
         std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, g_plugins_dir.c_str());
+    }
+    // Additional plugin folders from --plugins-dir / XINSP2_EXTRA_PLUGIN_DIRS.
+    // Lets external SDKs keep their plugin DLLs in place — no copy needed.
+    for (auto& dir : parse_extra_plugin_dirs(argc, argv)) {
+        if (!std::filesystem::exists(dir)) {
+            std::fprintf(stderr, "[xinsp2] extra plugin dir not found: %s\n", dir.c_str());
+            continue;
+        }
+        int n = g_plugin_mgr.scan_plugins(dir);
+        std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, dir.c_str());
     }
 
     std::fprintf(stderr, "[xinsp2] include_dir=%s\n", g_include_dir.c_str());

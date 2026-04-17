@@ -30,6 +30,7 @@
 extern void* g_use_process_fn_;
 extern void* g_use_exchange_fn_;
 extern void* g_use_grab_fn_;
+extern void* g_use_host_api_;   // xi_host_api* into BACKEND's ImagePool
 
 namespace xi {
 
@@ -49,31 +50,33 @@ public:
 
     Record process(const Record& input) {
         auto process_fn = reinterpret_cast<UseProcessFn>(g_use_process_fn_);
-        if (!process_fn) return {};
+        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
+        if (!process_fn || !host) return {};
 
-        // Marshal input Record → C ABI
+        // Marshal input Record → C ABI. Allocate handles in the BACKEND
+        // pool (via host_api) so the receiving plugin can resolve them.
         std::vector<xi_record_image> in_imgs;
-        std::vector<xi_image_handle> in_handles;
+        std::vector<xi_image_handle>  in_handles;
         for (auto& [key, img] : input.images()) {
-            xi_image_handle h = ImagePool::instance().from_image(img);
-            in_handles.push_back(h);
+            if (img.empty()) continue;
+            xi_image_handle h = host->image_create(img.width, img.height, img.channels);
+            if (h == XI_IMAGE_NULL) continue;
+            std::memcpy(host->image_data(h), img.data(), img.size());
             in_imgs.push_back({key.c_str(), h});
+            in_handles.push_back(h);
         }
         std::string json = input.data_json();
 
         xi_record_out output;
         xi_record_out_init(&output);
 
-        // Scope guard: release input handles on any exit path
-        struct HandleGuard {
-            std::vector<xi_image_handle>& handles;
-            ~HandleGuard() { for (auto h : handles) ImagePool::instance().release(h); }
-        } guard{in_handles};
-
         process_fn(name_.c_str(), json.c_str(),
                    in_imgs.data(), (int)in_imgs.size(), &output);
 
-        // Unmarshal output
+        // Release input handles from the BACKEND pool — plugin's process()
+        // copied what it needed.
+        for (auto h : in_handles) host->image_release(h);
+
         Record result;
         if (output.json) {
             cJSON* parsed = cJSON_Parse(output.json);
@@ -89,10 +92,18 @@ public:
                 cJSON_Delete(parsed);
             }
         }
+        // Output handles live in the BACKEND pool. Copy pixels into a
+        // script-side Image, then release the backend handle.
         for (int i = 0; i < output.image_count; ++i) {
-            result.image(output.images[i].key,
-                         ImagePool::instance().to_image(output.images[i].handle));
-            ImagePool::instance().release(output.images[i].handle);
+            xi_image_handle h = output.images[i].handle;
+            int w  = host->image_width(h);
+            int hi = host->image_height(h);
+            int ch = host->image_channels(h);
+            const uint8_t* p = host->image_data(h);
+            if (p && w > 0 && hi > 0) {
+                result.image(output.images[i].key, Image(w, hi, ch, p));
+            }
+            host->image_release(h);
         }
         xi_record_out_free(&output);
         return result;

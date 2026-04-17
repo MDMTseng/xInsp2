@@ -60,6 +60,17 @@ typedef struct xi_host_api {
     /* Logging */
     void (*log)(int32_t level, const char* msg);
     /* level: 0=debug, 1=info, 2=warn, 3=error */
+
+    /* Lookup the on-disk folder for a named instance. The folder is
+     * created by the host before xi_plugin_create() is called and is the
+     * right place to persist plugin-specific data (calibration files,
+     * lookup tables, captured frames, ML weights — anything beyond the
+     * small JSON config returned by get_def).
+     *
+     * Writes the path (without trailing slash) into buf, returns bytes
+     * written, or -needed if buflen is too small. Returns 0 if the
+     * instance is unknown to the host. */
+    int32_t (*instance_folder)(const char* instance_name, char* buf, int32_t buflen);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */

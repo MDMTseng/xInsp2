@@ -1,0 +1,7 @@
+{
+  "name": "invert",
+  "description": "Inverts pixel values of the input image",
+  "dll": "invert.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false
+}

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground, #ccc); background: var(--vscode-editor-background, #1e1e1e); padding: 12px; margin: 0; }
+    h2 { margin: 0 0 12px; font-size: 15px; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    label { min-width: 90px; }
+    input[type=number] { width: 100px; padding: 4px; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); }
+    button { padding: 6px 14px; cursor: pointer; border: none; border-radius: 3px; font-size: 12px; background: #2196f3; color: white; }
+    .status { margin-top: 12px; padding: 8px; background: var(--vscode-input-background, #3c3c3c); border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+    <h2>My Plugin</h2>
+
+    <div class="row">
+        <label>Threshold:</label>
+        <input type="number" id="threshold" value="128" min="0" max="255">
+        <button onclick="apply()">Apply</button>
+    </div>
+
+    <div class="status">
+        Current threshold: <span id="current">?</span>
+    </div>
+
+<script>
+    const vscode = acquireVsCodeApi();
+
+    function apply() {
+        const v = parseInt(document.getElementById('threshold').value) || 0;
+        vscode.postMessage({
+            type: 'exchange',
+            cmd: { command: 'set_threshold', value: v }
+        });
+    }
+
+    window.addEventListener('message', (e) => {
+        const m = e.data;
+        if (m.type === 'status' && 'threshold' in m) {
+            document.getElementById('current').textContent = m.threshold;
+            document.getElementById('threshold').value = m.threshold;
+        }
+    });
+
+    // Request initial state
+    vscode.postMessage({ type: 'exchange', cmd: { command: 'get_status' } });
+</script>
+</body>
+</html>

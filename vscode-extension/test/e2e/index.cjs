@@ -100,4 +100,18 @@ async function run() {
     console.log('[e2e] ALL E2E CHECKS PASSED');
 }
 
-module.exports = { run };
+module.exports = {
+    run: async () => {
+        const suite = process.env.XINSP2_E2E_SUITE || 'default';
+        if (suite === 'user_journey') {
+            return require('./user_journey.cjs').run();
+        }
+        if (suite === 'full_pipeline') {
+            return require('./full_pipeline.cjs').run();
+        }
+        if (suite === 'json_source_ui') {
+            return require('./json_source_ui.cjs').run();
+        }
+        return run();
+    }
+};

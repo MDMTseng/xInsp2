@@ -1,0 +1,7 @@
+{
+  "name": "json_source",
+  "description": "Configurable JSON data source — emit a record built from a GUI-edited JSON object",
+  "dll": "json_source.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

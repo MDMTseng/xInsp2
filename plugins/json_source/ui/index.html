@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground, #ccc); background: var(--vscode-editor-background, #1e1e1e); padding: 12px; margin: 0; }
+    h2 { margin: 0 0 8px; font-size: 15px; }
+    .hint { font-size: 11px; opacity: 0.6; margin-bottom: 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; font-size: 11px; opacity: 0.6; padding: 4px 6px; font-weight: normal; text-transform: uppercase; letter-spacing: 0.5px; }
+    td { padding: 4px 6px; vertical-align: middle; }
+    tr.field { border-top: 1px solid var(--vscode-widget-border, #333); }
+    input[type=text], select { padding: 4px 6px; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); font-family: inherit; font-size: 12px; box-sizing: border-box; width: 100%; }
+    input[type=text].mono { font-family: monospace; }
+    input[type=checkbox] { transform: scale(1.2); }
+    button { padding: 5px 12px; cursor: pointer; border: none; border-radius: 3px; font-size: 12px; background: #2196f3; color: white; }
+    button.btn-add { background: #4caf50; margin-top: 8px; }
+    button.btn-apply { background: #2196f3; margin-left: 6px; }
+    button.btn-reset { background: #757575; margin-left: 6px; }
+    button.btn-x { background: transparent; color: #f44336; padding: 2px 8px; font-size: 16px; line-height: 1; }
+    button.btn-x:hover { background: rgba(244, 67, 54, 0.15); }
+    .col-key   { width: 30%; }
+    .col-type  { width: 18%; }
+    .col-value { width: 44%; }
+    .col-rm    { width: 8%; text-align: right; }
+    pre { background: var(--vscode-input-background, #2a2a2a); padding: 10px; border-radius: 4px; font-size: 11px; line-height: 1.5; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: 0; }
+    .preview-section { margin-top: 16px; }
+    .preview-section h3 { font-size: 11px; opacity: 0.6; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: normal; }
+    .invalid { border-color: #f44336 !important; background: rgba(244, 67, 54, 0.1) !important; }
+    .status-bar { margin-top: 10px; font-size: 11px; opacity: 0.7; }
+    .status-ok  { color: #4caf50; }
+    .status-err { color: #f44336; }
+</style>
+</head>
+<body>
+    <h2>JSON Source</h2>
+    <div class="hint">Define the JSON record this instance emits. Each row is one top-level field.</div>
+
+    <table>
+        <thead>
+            <tr>
+                <th class="col-key">Key</th>
+                <th class="col-type">Type</th>
+                <th class="col-value">Value</th>
+                <th class="col-rm"></th>
+            </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+    </table>
+
+    <button class="btn-add" onclick="addRow()">+ Add Field</button>
+    <button class="btn-apply" onclick="apply()">Apply</button>
+    <button class="btn-reset" onclick="resetAll()">Reset</button>
+
+    <div class="status-bar" id="status">&nbsp;</div>
+
+    <div class="preview-section">
+        <h3>Preview (output record)</h3>
+        <pre id="preview">{}</pre>
+    </div>
+
+<script>
+    const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+    const TYPES = ['string', 'number', 'bool', 'null', 'object', 'array'];
+
+    // In-memory rows: [{key, type, value}]  (value is a string for raw types,
+    // and a JSON-encoded string for object/array)
+    let rows = [];
+
+    function sendCmd(cmd) { if (vscode) vscode.postMessage({ type: 'exchange', cmd }); }
+
+    function el(tag, attrs, ...kids) {
+        const e = document.createElement(tag);
+        for (const k in attrs) {
+            if (k === 'on') for (const ev in attrs.on) e.addEventListener(ev, attrs.on[ev]);
+            else if (k === 'style') Object.assign(e.style, attrs.style);
+            else if (k === 'class') e.className = attrs[k];
+            else e.setAttribute(k, attrs[k]);
+        }
+        for (const c of kids) if (c != null) e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+        return e;
+    }
+
+    function render() {
+        const tbody = document.getElementById('rows');
+        tbody.innerHTML = '';
+        rows.forEach((row, i) => {
+            const keyInput = el('input', {
+                type: 'text', value: row.key, placeholder: 'field name',
+                on: { input: e => { rows[i].key = e.target.value; updatePreview(); } }
+            });
+
+            const typeSelect = el('select', {
+                on: { change: e => { rows[i].type = e.target.value; render(); updatePreview(); } }
+            });
+            for (const t of TYPES) {
+                const opt = el('option', { value: t }, t);
+                if (t === row.type) opt.selected = true;
+                typeSelect.appendChild(opt);
+            }
+
+            let valueCell;
+            if (row.type === 'bool') {
+                const cb = el('input', {
+                    type: 'checkbox',
+                    on: { change: e => { rows[i].value = e.target.checked ? 'true' : 'false'; updatePreview(); } }
+                });
+                if (row.value === 'true') cb.checked = true;
+                valueCell = el('td', { class: 'col-value' }, cb);
+            } else if (row.type === 'null') {
+                valueCell = el('td', { class: 'col-value', style: { opacity: '0.5', fontStyle: 'italic' } }, 'null');
+            } else {
+                const placeholder = row.type === 'number' ? '42' :
+                                    row.type === 'object' ? '{"a":1}' :
+                                    row.type === 'array'  ? '[1,2,3]' : 'text';
+                const klass = (row.type === 'object' || row.type === 'array' || row.type === 'number') ? 'mono' : '';
+                const inp = el('input', {
+                    type: 'text', value: row.value, placeholder, class: klass,
+                    on: { input: e => { rows[i].value = e.target.value; updatePreview(); } }
+                });
+                valueCell = el('td', { class: 'col-value' }, inp);
+            }
+
+            const rmBtn = el('button', {
+                class: 'btn-x', title: 'Remove field',
+                on: { click: () => { rows.splice(i, 1); render(); updatePreview(); } }
+            }, '✕');
+
+            tbody.appendChild(el('tr', { class: 'field' },
+                el('td', { class: 'col-key' },  keyInput),
+                el('td', { class: 'col-type' }, typeSelect),
+                valueCell,
+                el('td', { class: 'col-rm' }, rmBtn)
+            ));
+        });
+        updatePreview();
+    }
+
+    function buildJson() {
+        const obj = {};
+        let hadError = false;
+        const inputs = document.querySelectorAll('#rows input[type=text]');
+        inputs.forEach(i => i.classList.remove('invalid'));
+        for (let i = 0; i < rows.length; ++i) {
+            const r = rows[i];
+            if (!r.key) continue;
+            try {
+                if (r.type === 'string')      obj[r.key] = r.value;
+                else if (r.type === 'number') obj[r.key] = Number(r.value);
+                else if (r.type === 'bool')   obj[r.key] = r.value === 'true';
+                else if (r.type === 'null')   obj[r.key] = null;
+                else if (r.type === 'object' || r.type === 'array') {
+                    obj[r.key] = JSON.parse(r.value || (r.type === 'array' ? '[]' : '{}'));
+                }
+            } catch (e) {
+                hadError = true;
+                const valInput = inputs[i] || inputs[Math.min(i, inputs.length - 1)];
+                if (valInput) valInput.classList.add('invalid');
+            }
+        }
+        return { obj, hadError };
+    }
+
+    function updatePreview() {
+        const { obj, hadError } = buildJson();
+        document.getElementById('preview').textContent = JSON.stringify(obj, null, 2);
+        if (hadError) setStatus('JSON parse error in highlighted field', 'err');
+    }
+
+    function setStatus(msg, kind) {
+        const el = document.getElementById('status');
+        el.textContent = msg || '\u00a0';
+        el.className = 'status-bar ' + (kind === 'err' ? 'status-err' : kind === 'ok' ? 'status-ok' : '');
+    }
+
+    function addRow() {
+        rows.push({ key: 'field' + (rows.length + 1), type: 'string', value: '' });
+        render();
+    }
+
+    function apply() {
+        const { obj, hadError } = buildJson();
+        if (hadError) { setStatus('Cannot apply — fix the highlighted field first', 'err'); return; }
+        sendCmd({ command: 'set_data', value: obj });
+        setStatus('Applied at ' + new Date().toLocaleTimeString(), 'ok');
+    }
+
+    function resetAll() {
+        rows = [];
+        render();
+        sendCmd({ command: 'reset' });
+        setStatus('Reset', 'ok');
+    }
+
+    function loadFromObject(obj) {
+        rows = [];
+        for (const k in obj) {
+            const v = obj[k];
+            if (v === null) rows.push({ key: k, type: 'null', value: '' });
+            else if (typeof v === 'boolean') rows.push({ key: k, type: 'bool', value: v ? 'true' : 'false' });
+            else if (typeof v === 'number')  rows.push({ key: k, type: 'number', value: String(v) });
+            else if (typeof v === 'string')  rows.push({ key: k, type: 'string', value: v });
+            else if (Array.isArray(v))       rows.push({ key: k, type: 'array', value: JSON.stringify(v) });
+            else if (typeof v === 'object')  rows.push({ key: k, type: 'object', value: JSON.stringify(v) });
+        }
+        render();
+    }
+
+    window.addEventListener('message', (e) => {
+        const m = e.data;
+        if (m.type === 'status') {
+            // The plugin's get_def returns { data: <user object> }
+            if (m.data && typeof m.data === 'object') loadFromObject(m.data);
+        }
+    });
+
+    // Initial: ask for current state, then add an empty row if nothing came back
+    sendCmd({ command: 'get_status' });
+    setTimeout(() => { if (rows.length === 0) addRow(); }, 250);
+</script>
+</body>
+</html>

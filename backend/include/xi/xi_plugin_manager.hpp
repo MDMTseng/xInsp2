@@ -35,6 +35,8 @@
 #endif
 
 #include "xi_abi.h"
+#include "xi_baseline.hpp"
+#include "xi_cert.hpp"
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
 
@@ -162,6 +164,12 @@ public:
     }
 
     // Load a plugin's DLL and resolve the factory function.
+    //
+    // Side effect (new ABI only): if the plugin has no cert.json, or the
+    // cert is out of date relative to the DLL or the current
+    // BASELINE_VERSION, runs baseline tests and writes cert.json on pass.
+    // A failed certification unloads the DLL and returns false — the
+    // plugin cannot be instantiated until the developer fixes the issue.
     bool load_plugin(const std::string& name) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = plugins_.find(name);
@@ -181,6 +189,32 @@ public:
             // New C ABI: factory takes (xi_host_api*, const char*) → void*
             pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
                 GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+
+            // Run certification (baseline tests) if cert is missing/stale.
+            auto plugin_folder = std::filesystem::path(pi.folder_path);
+            if (!xi::cert::is_valid(plugin_folder, dll_path)) {
+                std::fprintf(stderr, "[xinsp2] certifying plugin '%s'...\n", name.c_str());
+                auto syms = xi::baseline::load_symbols(pi.handle);
+                static xi_host_api cert_host = ImagePool::make_host_api();
+                auto summary = xi::cert::certify(plugin_folder, dll_path, name, syms, &cert_host);
+                if (summary.all_passed) {
+                    std::fprintf(stderr, "[xinsp2] cert OK '%s' (%d tests, %.0fms)\n",
+                                 name.c_str(), summary.pass_count, summary.total_ms);
+                } else {
+                    std::fprintf(stderr, "[xinsp2] cert FAILED '%s' — %d/%d passed:\n",
+                                 name.c_str(), summary.pass_count,
+                                 summary.pass_count + summary.fail_count);
+                    for (auto& r : summary.results) {
+                        if (!r.passed) {
+                            std::fprintf(stderr, "  - %s: %s\n", r.name.c_str(), r.error.c_str());
+                        }
+                    }
+                    FreeLibrary(pi.handle);
+                    pi.handle = nullptr;
+                    pi.c_factory = nullptr;
+                    return false;
+                }
+            }
         } else {
             // Old-style: factory takes (const char*) → InstanceBase*
             pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
@@ -210,6 +244,11 @@ public:
         std::filesystem::create_directories(folder);
         std::filesystem::create_directories(std::filesystem::path(folder) / "instances");
 
+        // Drop any stale folder/registry entries from a previous project
+        for (auto& [k, v] : project_.instances) {
+            InstanceRegistry::instance().remove(k);
+            InstanceFolderRegistry::instance().clear(k);
+        }
         project_.name = name;
         project_.folder_path = folder;
         project_.script_path = (std::filesystem::path(folder) / "inspection.cpp").string();
@@ -238,9 +277,10 @@ public:
         auto pj = std::filesystem::path(folder) / "project.json";
         if (!std::filesystem::exists(pj)) return false;
 
-        // Unregister old instances from the global registry
+        // Unregister old instances from the global registries
         for (auto& [k, v] : project_.instances) {
             InstanceRegistry::instance().remove(k);
+            InstanceFolderRegistry::instance().clear(k);
         }
         project_.folder_path = folder;
         project_.instances.clear();
@@ -298,6 +338,8 @@ public:
                 if (pit != plugins_.end()) {
                     auto& pi = pit->second;
                     bool created = false;
+                    // Same registration as create_instance — needed for project-load too.
+                    InstanceFolderRegistry::instance().set(ii.name, ii.folder_path);
                     if (pi.c_factory) {
                         static xi_host_api host = ImagePool::make_host_api();
                         void* raw = pi.c_factory(&host, ii.name.c_str());
@@ -346,11 +388,18 @@ public:
         ii.plugin_name = plugin_name;
         ii.folder_path = inst_folder.string();
 
+        // Register the folder BEFORE the factory runs so the plugin can
+        // call host->instance_folder() from inside its constructor.
+        InstanceFolderRegistry::instance().set(instance_name, ii.folder_path);
+
         if (pi.c_factory) {
             // New C ABI — create via host API
             static xi_host_api host = ImagePool::make_host_api();
             void* raw = pi.c_factory(&host, instance_name.c_str());
-            if (!raw) return nullptr;
+            if (!raw) {
+                InstanceFolderRegistry::instance().clear(instance_name);
+                return nullptr;
+            }
             ii.instance = std::make_shared<CAbiInstanceAdapter>(
                 instance_name, plugin_name, pi.handle, raw);
         } else {

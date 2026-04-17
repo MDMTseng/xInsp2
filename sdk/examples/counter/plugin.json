@@ -1,0 +1,7 @@
+{
+  "name": "counter",
+  "description": "Counts process() calls; UI shows running total, offers Reset",
+  "dll": "counter.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

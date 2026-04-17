@@ -1,0 +1,7 @@
+{
+  "name": "histogram",
+  "description": "Compute grayscale intensity histogram + mean/stddev/peak",
+  "dll": "histogram.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

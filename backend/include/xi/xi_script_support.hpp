@@ -231,16 +231,23 @@ XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* c
 
 // --- xi::use() callback storage ---
 // Stored as void* to avoid xi_abi.h dependency. xi_use.hpp casts them.
-static void* g_use_process_fn_  = nullptr;
-static void* g_use_exchange_fn_ = nullptr;
-static void* g_use_grab_fn_     = nullptr;
+static void* g_use_process_fn_   = nullptr;
+static void* g_use_exchange_fn_  = nullptr;
+static void* g_use_grab_fn_      = nullptr;
+// Pointer to backend's xi_host_api — image_create / image_data /
+// image_release etc. all operate on the BACKEND's ImagePool, which is the
+// only pool plugins see via their own host_api. Without this, the script's
+// per-DLL ImagePool singleton would create handles invisible to plugins.
+static void* g_use_host_api_     = nullptr;
 
 XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
-    void* process_fn, void* exchange_fn, void* grab_fn)
+    void* process_fn, void* exchange_fn, void* grab_fn,
+    void* host_api)
 {
-    g_use_process_fn_  = process_fn;
-    g_use_exchange_fn_ = exchange_fn;
-    g_use_grab_fn_     = grab_fn;
+    g_use_process_fn_   = process_fn;
+    g_use_exchange_fn_  = exchange_fn;
+    g_use_grab_fn_      = grab_fn;
+    g_use_host_api_     = host_api;
 }
 
 // --- Persistent state thunks ---

@@ -34,7 +34,8 @@ struct LoadedScript {
     using ExchangeInstanceFn = int  (*)(const char* name, const char* cmd_json, char* rsp, int rsplen);
     using GetStateFn         = int  (*)(char* buf, int buflen);
     using SetStateFn         = int  (*)(const char* json);
-    using SetUseCallbacksFn  = void (*)(void* process_fn, void* exchange_fn, void* grab_fn);
+    using SetUseCallbacksFn  = void (*)(void* process_fn, void* exchange_fn,
+                                        void* grab_fn, void* host_api);
 
     InspectFn          inspect          = nullptr;
     SnapshotFn         snapshot         = nullptr;

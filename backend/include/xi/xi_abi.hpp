@@ -35,6 +35,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace xi {
 
@@ -142,6 +143,23 @@ public:
 
     const xi_host_api* host() const { return host_; }
     const std::string& name() const { return name_; }
+
+    // On-disk folder for THIS instance: project/instances/<name>/
+    // Already created by the host before this plugin was constructed.
+    // Use it to persist files beyond the JSON config returned by get_def.
+    // Returns empty string if running detached from a project.
+    std::string folder_path() const {
+        if (!host_ || !host_->instance_folder) return "";
+        char buf[1024];
+        int32_t n = host_->instance_folder(name_.c_str(), buf, sizeof(buf));
+        if (n > 0) return std::string(buf, (size_t)n);
+        if (n < 0) {
+            std::vector<char> big((size_t)(-n) + 1);
+            n = host_->instance_folder(name_.c_str(), big.data(), (int32_t)big.size());
+            if (n > 0) return std::string(big.data(), (size_t)n);
+        }
+        return "";
+    }
 
     // Override these in your plugin:
     virtual Record process(const Record& input) { (void)input; return {}; }

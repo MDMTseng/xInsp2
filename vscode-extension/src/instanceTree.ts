@@ -42,6 +42,11 @@ export class InstanceTreeProvider implements vscode.TreeDataProvider<TreeItem> {
             ti.description = element.data.plugin;
             ti.iconPath = new vscode.ThemeIcon('symbol-class');
             ti.contextValue = 'instance';
+            ti.command = {
+                command: 'xinsp2.openInstanceUI',
+                title: 'Open UI',
+                arguments: [element.data.name, element.data.plugin],
+            };
             return ti;
         }
         // param

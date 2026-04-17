@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground, #ccc); background: var(--vscode-editor-background, #1e1e1e); padding: 12px; margin: 0; }
+    h2 { margin: 0 0 12px; font-size: 15px; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    label { min-width: 110px; font-size: 12px; }
+    input[type=text] { flex: 1; padding: 4px 6px; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); font-family: monospace; font-size: 12px; }
+    button { padding: 6px 14px; cursor: pointer; border: none; border-radius: 3px; font-size: 12px; background: #2196f3; color: white; }
+    .btn-enable { background: #4caf50; }
+    .btn-disable { background: #f44336; }
+    .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .stats { margin-top: 12px; padding: 8px; background: var(--vscode-input-background, #3c3c3c); border-radius: 4px; font-size: 12px; }
+    .hint { font-size: 10px; opacity: 0.5; margin-left: 110px; margin-top: -4px; }
+    .enabled { color: #4caf50; font-weight: bold; }
+    .disabled { color: #f44336; }
+</style>
+</head>
+<body>
+    <h2>Record Save</h2>
+
+    <div class="row">
+        <label>Output Folder:</label>
+        <input type="text" id="outputDir" placeholder="C:\path\to\save\dir">
+    </div>
+
+    <div class="row">
+        <label>Naming Rule:</label>
+        <input type="text" id="namingRule" value="frame_{count}">
+    </div>
+    <div class="hint">Tokens: {count} (zero-padded), {timestamp} (YYYYMMDD_HHMMSS)</div>
+
+    <div class="row" style="margin-top: 12px;">
+        <button onclick="applySettings()">Apply Settings</button>
+        <button id="enableBtn" class="btn-enable" onclick="toggleEnable()">Enable Saving</button>
+        <button onclick="resetCount()">Reset Counter</button>
+    </div>
+
+    <div class="stats">
+        Status: <span id="statusText" class="disabled">Disabled</span><br>
+        Saves so far: <span id="countText">0</span><br>
+        Output dir: <span id="dirText" style="opacity:0.6">(not set)</span><br>
+        Naming: <span id="ruleText" style="opacity:0.6">frame_{count}</span>
+    </div>
+
+<script>
+    const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+    let isEnabled = false;
+
+    function sendCmd(cmd) {
+        if (vscode) vscode.postMessage({ type: 'exchange', cmd });
+    }
+
+    function applySettings() {
+        const dir = document.getElementById('outputDir').value;
+        const rule = document.getElementById('namingRule').value;
+        sendCmd({ command: 'set_output_dir', value: dir });
+        sendCmd({ command: 'set_naming_rule', value: rule });
+    }
+
+    function toggleEnable() {
+        sendCmd({ command: 'set_enabled', value: !isEnabled });
+    }
+
+    function resetCount() {
+        sendCmd({ command: 'reset_count' });
+    }
+
+    function updateUI(status) {
+        if (status.output_dir !== undefined) {
+            document.getElementById('outputDir').value = status.output_dir;
+            document.getElementById('dirText').textContent = status.output_dir || '(not set)';
+        }
+        if (status.naming_rule !== undefined) {
+            document.getElementById('namingRule').value = status.naming_rule;
+            document.getElementById('ruleText').textContent = status.naming_rule;
+        }
+        if (status.enabled !== undefined) {
+            isEnabled = status.enabled;
+            const txt = document.getElementById('statusText');
+            txt.textContent = isEnabled ? 'Enabled' : 'Disabled';
+            txt.className = isEnabled ? 'enabled' : 'disabled';
+            const btn = document.getElementById('enableBtn');
+            btn.textContent = isEnabled ? 'Disable Saving' : 'Enable Saving';
+            btn.className = isEnabled ? 'btn-disable' : 'btn-enable';
+        }
+        if (status.count !== undefined) {
+            document.getElementById('countText').textContent = status.count;
+        }
+    }
+
+    window.addEventListener('message', (e) => {
+        if (e.data.type === 'status') updateUI(e.data);
+    });
+
+    sendCmd({ command: 'get_status' });
+</script>
+</body>
+</html>

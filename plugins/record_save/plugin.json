@@ -1,0 +1,7 @@
+{
+  "name": "record_save",
+  "description": "Save inspection results to disk with configurable naming rule",
+  "dll": "record_save.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

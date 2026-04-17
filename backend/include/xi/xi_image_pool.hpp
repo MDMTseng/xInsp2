@@ -20,6 +20,7 @@
 
 #include "xi_abi.h"
 #include "xi_image.hpp"
+#include "xi_instance_folders.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -161,6 +162,15 @@ public:
         api.log            = [](int32_t level, const char* msg) {
             const char* lvl[] = {"DEBUG", "INFO", "WARN", "ERROR"};
             std::fprintf(stderr, "[%s] %s\n", lvl[level & 3], msg);
+        };
+        api.instance_folder = [](const char* name, char* buf, int32_t buflen) -> int32_t {
+            std::string p = InstanceFolderRegistry::instance().get(name ? name : "");
+            int32_t n = (int32_t)p.size();
+            if (n == 0) return 0;
+            if (buflen < n + 1) return -n;
+            std::memcpy(buf, p.data(), n);
+            buf[n] = 0;
+            return n;
         };
         return api;
     }

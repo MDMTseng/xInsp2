@@ -34,6 +34,27 @@ set_target_properties(data_output PROPERTIES
 add_library(blob_analysis SHARED blob_analysis/blob_analysis.cpp)
 target_include_directories(blob_analysis PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
 target_link_libraries(blob_analysis PRIVATE cjson_plugin)
+
+# json_source
+add_library(json_source SHARED json_source/json_source.cpp)
+target_include_directories(json_source PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+target_link_libraries(json_source PRIVATE cjson_plugin)
+set_target_properties(json_source PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/json_source
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/json_source
+)
+
+# record_save (uses stb_image_write for BMP output)
+add_library(record_save SHARED
+    record_save/record_save.cpp
+    ../backend/src/stb_impl.cpp
+)
+target_include_directories(record_save PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+target_link_libraries(record_save PRIVATE cjson_plugin)
+set_target_properties(record_save PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_save
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_save
+)
 set_target_properties(blob_analysis PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
