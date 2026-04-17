@@ -252,20 +252,28 @@ test('save_project then load_project preserves instances and params', { timeout:
                  args: { name: 'cam_sl', plugin: 'mock_camera' } });
         assert.equal((await c.nextNonLog()).ok, true);
 
+        // Save instance config first (so it persists)
+        c.send({ type: 'cmd', id: 4, name: 'save_instance_config',
+                 args: { name: 'cam_sl' } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
         // Save project
-        c.send({ type: 'cmd', id: 4, name: 'save_project' });
+        const projFile = resolve(projDir, 'project.json');
+        c.send({ type: 'cmd', id: 5, name: 'save_project',
+                 args: { path: projFile } });
         const sr = await c.nextNonLog();
         assert.equal(sr.ok, true, 'save_project ok');
     });
 
-    // Phase 2: fresh backend, load project, verify
+    // Phase 2: fresh backend, open_project + load_project, verify
     await withBackend(async (c) => {
         await c.nextText();
 
-        c.send({ type: 'cmd', id: 1, name: 'load_project',
+        // open_project to recreate instances from disk
+        c.send({ type: 'cmd', id: 1, name: 'open_project',
                  args: { folder: projDir } });
         const rsp = await c.nextNonLog();
-        assert.equal(rsp.ok, true, 'load_project ok');
+        assert.equal(rsp.ok, true, 'open_project ok');
 
         // Verify instance was restored
         const data = rsp.data;
@@ -287,14 +295,13 @@ test('get_plugin_ui returns a valid path', { timeout: 10000 }, async () => {
         assert.equal((await c.nextNonLog()).ok, true);
 
         c.send({ type: 'cmd', id: 2, name: 'get_plugin_ui',
-                 args: { name: 'mock_camera' } });
+                 args: { plugin: 'mock_camera' } });
         const rsp = await c.nextNonLog();
         assert.equal(rsp.ok, true, 'get_plugin_ui ok');
 
-        // Should have a path or ui field
-        const path = rsp.data.path || rsp.data.ui || rsp.data;
-        assert.ok(typeof path === 'string' && path.length > 0,
-            'should return a non-empty path string');
+        const uiPath = rsp.data.ui_path;
+        assert.ok(typeof uiPath === 'string' && uiPath.length > 0,
+            `should return a non-empty ui_path string, got: ${JSON.stringify(rsp.data)}`);
     });
 });
 

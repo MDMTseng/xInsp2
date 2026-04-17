@@ -88,21 +88,21 @@ test('set_instance_def changes behavior on next run', async () => {
         c.send({ type: 'cmd', id: 1, name: 'compile_and_load', args: { path: scriptPath } });
         assert.equal((await c.nextNonLog()).ok, true);
 
-        // Run with default factor=2: scaled = 7*10*2 = 140
+        // Run with default factor=2: scaled = frame * base * factor = 1*10*2 = 20
         c.send({ type: 'cmd', id: 2, name: 'run' });
         await c.nextNonLog(); // rsp
         const v1 = await c.nextNonLog();
-        assert.equal(v1.items.find(i => i.name === 'scaled').value, 140);
+        assert.equal(v1.items.find(i => i.name === 'scaled').value, 20);
 
         // Change factor to 5
         c.send({ type: 'cmd', id: 3, name: 'set_instance_def', args: { name: 'my_scaler', def: { factor: 5 } } });
         assert.equal((await c.nextNonLog()).ok, true);
 
-        // Run again: scaled = 7*10*5 = 350
+        // Run again: scaled = 1*10*5 = 50
         c.send({ type: 'cmd', id: 4, name: 'run' });
         await c.nextNonLog();
         const v2 = await c.nextNonLog();
-        assert.equal(v2.items.find(i => i.name === 'scaled').value, 350);
+        assert.equal(v2.items.find(i => i.name === 'scaled').value, 50);
     });
 });
 
@@ -146,11 +146,11 @@ test('save_project + load_project round-trip', async () => {
         c.send({ type: 'cmd', id: 2, name: 'load_project', args: { path: projFile } });
         assert.equal((await c.nextNonLog()).ok, true);
 
-        // Run — base_val should be 20 (restored): input = 7*20 = 140
+        // Run — base_val should be 20 (restored): input = frame * 20 = 1 * 20 = 20
         c.send({ type: 'cmd', id: 3, name: 'run' });
         await c.nextNonLog();
         const vars = await c.nextNonLog();
-        assert.equal(vars.items.find(i => i.name === 'input').value, 140);
+        assert.equal(vars.items.find(i => i.name === 'input').value, 20);
     });
 
     try { unlinkSync(projFile); } catch {}

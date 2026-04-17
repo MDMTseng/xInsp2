@@ -615,13 +615,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             def_str = "{}";
         }
-        std::lock_guard<std::mutex> lk(g_script_mu);
-        if (g_script.ok() && g_script.set_instance_def) {
-            int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
-            if (rc == 0) send_rsp_ok(srv, id);
-            else         send_rsp_err(srv, id, "set_instance_def failed");
+        // Try backend's InstanceRegistry first (plugin-manager instances)
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        if (inst) {
+            if (inst->set_def(def_str)) send_rsp_ok(srv, id);
+            else send_rsp_err(srv, id, "set_def returned false");
         } else {
-            send_rsp_err(srv, id, "no script loaded");
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.set_instance_def) {
+                int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
+                if (rc == 0) send_rsp_ok(srv, id);
+                else         send_rsp_err(srv, id, "set_instance_def failed");
+            } else {
+                send_rsp_err(srv, id, "instance not found: " + *iname);
+            }
         }
     } else if (name == "exchange_instance") {
         auto iname = xp::get_string_field(parsed->args_json, "name");
