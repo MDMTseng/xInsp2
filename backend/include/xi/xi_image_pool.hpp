@@ -62,7 +62,7 @@ public:
         entry->channels = ch;
         entry->refcount = 1;
 
-        xi_image_handle handle = static_cast<xi_image_handle>(next_handle_++);
+        xi_image_handle handle = next_handle_++;
         auto& shard = shard_for(handle);
         {
             std::unique_lock<std::shared_mutex> lk(shard.mu);
@@ -172,7 +172,7 @@ private:
     std::atomic<uint64_t> next_handle_{1};
 
     Shard& shard_for(xi_image_handle h) {
-        return shards_[h & SHARD_MASK];
+        return shards_[(int)(h & SHARD_MASK)];
     }
 };
 

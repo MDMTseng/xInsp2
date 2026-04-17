@@ -39,7 +39,7 @@ extern "C" {
 /* Image handle — opaque reference to a refcounted image in the host  */
 /* ------------------------------------------------------------------ */
 
-typedef uint32_t xi_image_handle;
+typedef uint64_t xi_image_handle;
 #define XI_IMAGE_NULL 0
 
 /* ------------------------------------------------------------------ */
