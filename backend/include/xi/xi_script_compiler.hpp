@@ -75,8 +75,35 @@ inline std::string read_file(const std::string& path) {
 
 } // namespace detail
 
+// Reject paths containing shell metacharacters to prevent command injection.
+// These characters are illegal in Windows filenames anyway (except & and %).
+inline bool is_safe_path(const std::string& p) {
+    for (char c : p) {
+        if (c == '&' || c == '|' || c == '>' || c == '<' ||
+            c == '^' || c == '%' || c == '!' || c == '`') {
+            return false;
+        }
+    }
+    return true;
+}
+
 inline CompileResult compile(const CompileRequest& req) {
     CompileResult r;
+
+    // Validate all paths against command injection
+    auto check = [&](const std::string& p, const char* name) -> bool {
+        if (!is_safe_path(p)) {
+            r.build_log = std::string("rejected unsafe ") + name + ": " + p;
+            return false;
+        }
+        return true;
+    };
+    if (!check(req.source_path, "source_path")) return r;
+    if (!check(req.output_dir, "output_dir")) return r;
+    if (!check(req.include_dir, "include_dir")) return r;
+    for (auto& s : req.extra_sources) { if (!check(s, "extra_source")) return r; }
+    for (auto& d : req.include_dirs) { if (!check(d, "include_dir")) return r; }
+
     std::filesystem::create_directories(req.output_dir);
 
     std::string vcvars = req.vcvars_path;
