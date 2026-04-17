@@ -39,20 +39,27 @@ public:
     Future& operator=(const Future&) = delete;
 
     // The "await": implicit conversion blocks and returns the value.
-    // Exceptions thrown inside the task re-throw here.
-    operator T() { return f_.get(); }
+    // Safe to call multiple times — caches the result after first get().
+    operator T() { return get(); }
 
-    // Explicit form for callers that prefer it.
-    T get() { return f_.get(); }
+    T get() {
+        if (!consumed_) {
+            cached_ = f_.get();
+            consumed_ = true;
+        }
+        return cached_;
+    }
 
-    // Non-blocking check — handy for await_any() style polling later.
     bool ready() const {
-        return f_.valid() &&
-               f_.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+        return consumed_ ||
+               (f_.valid() &&
+                f_.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
     }
 
 private:
     std::future<T> f_;
+    T cached_{};
+    bool consumed_ = false;
 };
 
 // void specialization — no value, still a synchronization point.
@@ -67,14 +74,18 @@ public:
     Future(const Future&) = delete;
     Future& operator=(const Future&) = delete;
 
-    void get() { f_.get(); }
+    void get() {
+        if (!consumed_) { f_.get(); consumed_ = true; }
+    }
     bool ready() const {
-        return f_.valid() &&
-               f_.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+        return consumed_ ||
+               (f_.valid() &&
+                f_.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
     }
 
 private:
     std::future<void> f_;
+    bool consumed_ = false;
 };
 
 // xi::async(fn, args...) — spawn a task and return a Future<R>.

@@ -226,7 +226,8 @@ inline void record_to_c(const xi_host_api* host, const Record& r, xi_record_out*
                                                                                \
 extern "C" __declspec(dllexport)                                               \
 void* xi_plugin_create(const xi_host_api* host, const char* name) {            \
-    return new ClassName(host, name);                                           \
+    try { return new ClassName(host, name); }                                   \
+    catch (...) { return nullptr; }                                             \
 }                                                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \

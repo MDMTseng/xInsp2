@@ -31,9 +31,9 @@ struct Image {
     Image() = default;
 
     Image(int w, int h, int c)
-        : width(w), height(h), channels(c),
+        : width(w > 0 ? w : 0), height(h > 0 ? h : 0), channels(c > 0 ? c : 0),
           pixels(std::make_shared<std::vector<uint8_t>>(
-              static_cast<size_t>(w) * h * c)) {}
+              static_cast<size_t>(width) * height * channels)) {}
 
     // Construct from an existing buffer (copied).
     Image(int w, int h, int c, const uint8_t* data)

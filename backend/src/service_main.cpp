@@ -105,14 +105,23 @@ static int use_process_cb(const char* name,
 
 static int use_exchange_cb(const char* name, const char* cmd,
                            char* rsp, int rsplen) {
-    auto inst = xi::InstanceRegistry::instance().find(name);
-    if (!inst) return -1;
-    std::string result = inst->exchange(cmd);
-    int n = (int)result.size();
-    if (rsplen < n + 1) return -n;
-    std::memcpy(rsp, result.data(), result.size());
-    rsp[result.size()] = 0;
-    return n;
+    try {
+        auto inst = xi::InstanceRegistry::instance().find(name);
+        if (!inst) return -1;
+        std::string result = inst->exchange(cmd);
+        int n = (int)result.size();
+        if (rsplen < n + 1) return -n;
+        std::memcpy(rsp, result.data(), result.size());
+        rsp[result.size()] = 0;
+        return n;
+    } catch (const seh_exception& e) {
+        std::fprintf(stderr, "[xinsp2] use_exchange('%s') crashed: 0x%08X (%s)\n",
+                     name, e.code, e.what());
+        return -1;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[xinsp2] use_exchange('%s') threw: %s\n", name, e.what());
+        return -1;
+    }
 }
 
 static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
@@ -409,6 +418,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xi::script::unload_script(g_script);
         send_rsp_ok(srv, id);
     } else if (name == "run") {
+        if (g_continuous.load()) {
+            send_rsp_err(srv, id, "cannot run while continuous mode is active — stop first");
+            return;
+        }
         int64_t run_id = ++g_run_id;
         auto t0 = std::chrono::steady_clock::now();
 
@@ -838,9 +851,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         for (int i = 0; i < output.image_count; ++i) {
             auto& oi = output.images[i];
             xi::Image out_img = xi::ImagePool::instance().to_image(oi.handle);
+            // Always release the output handle — regardless of encode success
+            xi::ImagePool::instance().release(oi.handle);
+
             if (out_img.empty()) continue;
 
-            // For single-channel images, convert to RGB for JPEG
             xi::Image jpeg_img = out_img;
             if (out_img.channels == 1) {
                 jpeg_img = xi::Image(out_img.width, out_img.height, 3);
@@ -865,9 +880,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             xp::encode_preview_header(hd, frame.data());
             std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
             srv.send_binary(frame.data(), frame.size());
-
-            // Release output handle
-            xi::ImagePool::instance().release(oi.handle);
         }
 
         xi_record_out_free(&output);

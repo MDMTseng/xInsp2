@@ -64,11 +64,14 @@ public:
         xi_record_out output;
         xi_record_out_init(&output);
 
+        // Scope guard: release input handles on any exit path
+        struct HandleGuard {
+            std::vector<xi_image_handle>& handles;
+            ~HandleGuard() { for (auto h : handles) ImagePool::instance().release(h); }
+        } guard{in_handles};
+
         process_fn(name_.c_str(), json.c_str(),
                    in_imgs.data(), (int)in_imgs.size(), &output);
-
-        // Release input handles
-        for (auto h : in_handles) ImagePool::instance().release(h);
 
         // Unmarshal output
         Record result;
