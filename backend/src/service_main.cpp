@@ -319,6 +319,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "version") {
         send_rsp_ok(srv, id, R"({"version":"0.1.0","abi":1,"commit":"dev"})");
     } else if (name == "shutdown") {
+        // Stop continuous mode first to avoid use-after-free on srv
+        if (g_continuous.load()) {
+            g_continuous = false;
+            if (g_worker_thread.joinable()) g_worker_thread.join();
+        }
         send_rsp_ok(srv, id);
         g_should_exit = true;
     } else if (name == "compile_and_load") {
@@ -326,6 +331,14 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (!src) {
             send_rsp_err(srv, id, "compile_and_load: missing path");
             return;
+        }
+
+        // Stop continuous mode before reloading — the worker thread holds
+        // function pointers into the DLL we're about to unload.
+        if (g_continuous.load()) {
+            g_continuous = false;
+            if (g_worker_thread.joinable()) g_worker_thread.join();
+            std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload\n");
         }
 
         xi::script::CompileRequest req;
