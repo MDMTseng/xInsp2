@@ -32,12 +32,30 @@ if(NOT MSVC)
 endif()
 add_test(NAME xi_core COMMAND test_xi_core)
 
+add_executable(test_record tests/test_record.cpp)
+target_link_libraries(test_record PRIVATE xi_core cjson)
+add_test(NAME record COMMAND test_record)
+
 add_executable(test_protocol tests/test_protocol.cpp)
 target_link_libraries(test_protocol PRIVATE xi_core cjson)
 add_test(NAME protocol COMMAND test_protocol)
 set_tests_properties(protocol PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures"
 )
+
+add_executable(test_image_pool tests/test_image_pool.cpp)
+target_link_libraries(test_image_pool PRIVATE xi_core cjson)
+if(NOT MSVC)
+    target_link_libraries(test_image_pool PRIVATE pthread)
+endif()
+add_test(NAME image_pool COMMAND test_image_pool)
+
+add_executable(test_ops tests/test_ops.cpp)
+target_link_libraries(test_ops PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_ops PRIVATE pthread)
+endif()
+add_test(NAME ops COMMAND test_ops)
 
 add_executable(xinsp_backend
     src/service_main.cpp

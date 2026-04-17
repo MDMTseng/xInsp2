@@ -574,8 +574,29 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 }
             }
         }
+        // Also include backend-managed instances (from PluginManager)
+        auto& proj = g_plugin_mgr.project();
+        std::string backend_inst = "[";
+        int bi = 0;
+        for (auto& [k, v] : proj.instances) {
+            if (bi++) backend_inst += ",";
+            backend_inst += "{\"name\":\"" + v.name + "\",\"plugin\":\"" + v.plugin_name + "\"}";
+        }
+        backend_inst += "]";
+
+        // Merge: script instances + backend instances
+        std::string merged_inst;
+        if (!inst_json.empty() && inst_json != "[]" && bi > 0) {
+            // Both have entries — merge arrays
+            merged_inst = inst_json.substr(0, inst_json.size() - 1) + "," + backend_inst.substr(1);
+        } else if (bi > 0) {
+            merged_inst = backend_inst;
+        } else {
+            merged_inst = inst_json.empty() ? "[]" : inst_json;
+        }
+
         std::string out = "{\"type\":\"instances\",\"instances\":";
-        out += inst_json.empty() ? "[]" : inst_json;
+        out += merged_inst;
         out += ",\"params\":";
         out += params_json.empty() ? "[]" : params_json;
         out += "}";
