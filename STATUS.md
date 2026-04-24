@@ -96,14 +96,14 @@ retired — coverage status lives in `TestAudit.md`):
 |----|-----|------|-------|
 | ~~A1-7~~ | ✅ MED | `xi_var.hpp` | `VarTraits<const char*>` / `char*` now copy into std::string (`25cdfd7`) |
 | A1-2 | MED | `xi_async.hpp` | `await_all` fails to compile for void Futures despite claim |
-| A1-4 | MED | `xi_record.hpp` | `image_keys_json` doesn't escape keys |
+| ~~A1-4~~ | ✅ MED | `xi_record.hpp` | `image_keys_json` now uses `append_json_escaped` (`6b5db85`) |
 | ~~A2-1~~ | ✅ MED | `xi_abi.hpp` | `(host, handle)` ctor removed; use `from_handle` / `share_handle` (`25cdfd7`) |
 | A2-3 | MED | `xi_use.hpp` | `xi_record_out_free` key lifetime (likely non-bug, verify) |
-| A2-4 | MED | `xi_plugin_manager.hpp` | DLL handle not freed on project switch |
+| ~~A2-4~~ | ✅ MED | `xi_plugin_manager.hpp` | `~PluginManager` frees handles; `scan_plugins` preserves live ones (`6b5db85`) |
 | A3-4 | MED | `service_main.cpp` | `process_instance` missing `catch(std::exception)` path |
 | ~~A4-2~~ | ✅ MED | `xi_ws_server.hpp` | Fragmentation now reassembled (`0f6a0a6`) |
 | ~~A4-3~~ | ✅ MED | `xi_ws_server.hpp` | kMaxFrame dropped to 16 MiB; rx_buf_ bounded (`0f6a0a6`) |
-| A4-5 | MED | `xi_script_support.hpp` | Image key JSON injection in snapshot thunk |
+| ~~A4-5~~ | ✅ MED | `xi_script_support.hpp` | Snapshot thunk uses `esc()` on image keys (`6b5db85`) |
 | A1-3 | LOW | `xi_record.hpp` | Path key buffer 256-char silent truncation |
 | A1-5 | LOW | `xi_record.hpp` | `[-1]` parses as idx=0 |
 | A1-9 | LOW | `xi_param.hpp` | `Param::as_json` doesn't escape name |
