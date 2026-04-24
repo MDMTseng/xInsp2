@@ -94,10 +94,10 @@ retired — coverage status lives in `TestAudit.md`):
 
 | ID | Sev | File | Issue |
 |----|-----|------|-------|
-| A1-7 | MED | `xi_var.hpp` | `VAR(x,"lit")` hits default VarTraits, stashes dangling `const char*` |
+| ~~A1-7~~ | ✅ MED | `xi_var.hpp` | `VarTraits<const char*>` / `char*` now copy into std::string (`25cdfd7`) |
 | A1-2 | MED | `xi_async.hpp` | `await_all` fails to compile for void Futures despite claim |
 | A1-4 | MED | `xi_record.hpp` | `image_keys_json` doesn't escape keys |
-| A2-1 | MED | `xi_abi.hpp` | `HostImage(host, handle)` public ctor addrefs — refcount trap |
+| ~~A2-1~~ | ✅ MED | `xi_abi.hpp` | `(host, handle)` ctor removed; use `from_handle` / `share_handle` (`25cdfd7`) |
 | A2-3 | MED | `xi_use.hpp` | `xi_record_out_free` key lifetime (likely non-bug, verify) |
 | A2-4 | MED | `xi_plugin_manager.hpp` | DLL handle not freed on project switch |
 | A3-4 | MED | `service_main.cpp` | `process_instance` missing `catch(std::exception)` path |
