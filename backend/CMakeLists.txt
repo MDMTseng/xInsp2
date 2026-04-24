@@ -68,6 +68,15 @@ if(WIN32)
 endif()
 set_target_properties(xinsp_backend PROPERTIES OUTPUT_NAME "xinsp-backend")
 
+# Headless production runner. Same libs as the server; no WebSocket.
+add_executable(xinsp_runner src/runner_main.cpp)
+target_link_libraries(xinsp_runner PRIVATE xi_core cjson)
+target_include_directories(xinsp_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
+if(WIN32)
+    target_link_libraries(xinsp_runner PRIVATE Ws2_32)
+endif()
+set_target_properties(xinsp_runner PROPERTIES OUTPUT_NAME "xinsp-runner")
+
 if(XINSP2_HAS_IPP)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_IPP=1)
     # User must set IPP_ROOT or CMAKE_PREFIX_PATH to find IPP
