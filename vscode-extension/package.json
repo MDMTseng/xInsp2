@@ -303,12 +303,22 @@
         "xinsp2.backendPort": {
           "type": "number",
           "default": 7823,
-          "description": "WebSocket port for the xInsp2 backend"
+          "description": "WebSocket port for the xInsp2 backend (local mode only)"
         },
         "xinsp2.autoStartBackend": {
           "type": "boolean",
           "default": true,
-          "description": "Auto-start xinsp-backend.exe on activation"
+          "description": "Auto-start xinsp-backend.exe on activation (ignored when xinsp2.remoteUrl is set)"
+        },
+        "xinsp2.remoteUrl": {
+          "type": "string",
+          "default": "",
+          "description": "If set, connect to a remote xinsp-backend.exe instead of spawning a local one. Example: ws://factory-pc.lan:7823. Combine with xinsp2.authSecret."
+        },
+        "xinsp2.authSecret": {
+          "type": "string",
+          "default": "",
+          "description": "Shared secret for remote backends started with --auth. Sent as Authorization: Bearer <secret> in the WebSocket handshake."
         },
         "xinsp2.extraPluginDirs": {
           "type": "array",

@@ -4,23 +4,31 @@ import { EventEmitter } from 'events';
 export interface WsClientOptions {
     url: string;
     reconnectMs?: number;
+    /** Optional shared secret — sent as `Authorization: Bearer <secret>` in
+     *  the handshake. Required when the backend was started with --auth. */
+    authSecret?: string;
 }
 
 export class WsClient extends EventEmitter {
     private ws: WebSocket | null = null;
     private url: string;
     private reconnectMs: number;
+    private authSecret?: string;
     private closed = false;
 
     constructor(opts: WsClientOptions) {
         super();
         this.url = opts.url;
         this.reconnectMs = opts.reconnectMs ?? 2000;
+        this.authSecret = opts.authSecret;
     }
 
     connect(): void {
         if (this.closed) return;
-        const ws = new WebSocket(this.url);
+        const headers = this.authSecret
+            ? { Authorization: `Bearer ${this.authSecret}` }
+            : undefined;
+        const ws = new WebSocket(this.url, { headers });
 
         ws.on('open', () => {
             this.ws = ws;

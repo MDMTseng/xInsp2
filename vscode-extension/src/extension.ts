@@ -130,6 +130,12 @@ export function activate(context: vscode.ExtensionContext) {
     const port = config.get<number>('backendPort', 7823);
     const autoStart = config.get<boolean>('autoStartBackend', true);
     const extraPluginDirs = config.get<string[]>('extraPluginDirs', []);
+    const remoteUrl = (config.get<string>('remoteUrl', '') || '').trim();
+    const authSecret = (config.get<string>('authSecret', '') || '').trim();
+    // Remote mode: skip spawning a local backend, connect to the given URL.
+    // Combine with authSecret to drive a backend started with --auth.
+    const isRemote = remoteUrl.length > 0;
+    const wsUrl = isRemote ? remoteUrl : `ws://127.0.0.1:${port}`;
     const output = vscode.window.createOutputChannel('xInsp2');
 
     // ---- State context keys ------------------------------------------
@@ -260,8 +266,11 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // WS client
-    client = new WsClient({ url: `ws://127.0.0.1:${port}` });
+    // WS client — local spawn by default, or remote when xinsp2.remoteUrl is set.
+    output.appendLine(isRemote
+        ? `[xinsp2] remote mode → ${wsUrl}${authSecret ? ' (auth)' : ''}`
+        : `[xinsp2] local mode → ws://127.0.0.1:${port}`);
+    client = new WsClient({ url: wsUrl, authSecret: authSecret || undefined });
 
     client.on('open', () => {
         output.appendLine('[xinsp2] connected to backend');
@@ -1297,7 +1306,12 @@ void xi_inspect_entry(int frame) {
 
     // --- Start backend ---
 
-    if (autoStart) {
+    if (isRemote) {
+        // Remote mode: never spawn locally; just connect. autoStart is
+        // ignored (docs note this).
+        output.appendLine(`[xinsp2] connecting to remote ${wsUrl}`);
+        client!.connect();
+    } else if (autoStart) {
         const exe = findBackendExe(context);
         const args = [`--port=${port}`];
         for (const dir of extraPluginDirs) args.push(`--plugins-dir=${dir}`);
