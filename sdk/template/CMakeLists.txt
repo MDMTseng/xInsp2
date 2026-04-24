@@ -1,28 +1,34 @@
 cmake_minimum_required(VERSION 3.16)
 project(my_plugin CXX C)
-
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-if(MSVC)
-    add_compile_options(/W3 /utf-8)
-endif()
 
-# Point this at your xInsp2 checkout root.
+# XINSP2_ROOT — env var preferred; auto-detect a sibling xInsp2 checkout
+# as a fallback so this builds without ceremony if both repos sit under a
+# common parent (the typical layout: xInsp/{xInsp2,plugins}/ ).
+if(NOT DEFINED XINSP2_ROOT AND DEFINED ENV{XINSP2_ROOT})
+    set(XINSP2_ROOT $ENV{XINSP2_ROOT})
+endif()
 if(NOT DEFINED XINSP2_ROOT)
-    set(XINSP2_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+    foreach(rel "../../xInsp2" "../../../xInsp2" "../../../../xInsp2")
+        get_filename_component(_p "${CMAKE_CURRENT_SOURCE_DIR}/${rel}" ABSOLUTE)
+        if(EXISTS "${_p}/sdk/cmake/xinsp2_plugin.cmake")
+            set(XINSP2_ROOT ${_p})
+            break()
+        endif()
+    endforeach()
 endif()
+include(${XINSP2_ROOT}/sdk/cmake/xinsp2_plugin.cmake)
 
-add_library(my_plugin SHARED
-    my_plugin.cpp
-    ${XINSP2_ROOT}/backend/vendor/cJSON.c
-)
-target_include_directories(my_plugin PRIVATE
-    ${XINSP2_ROOT}/backend/include
-    ${XINSP2_ROOT}/backend/vendor
-)
+xinsp2_add_plugin(my_plugin my_plugin.cpp)
 
-# Drop the DLL directly into the plugin folder so the host picks it up.
-set_target_properties(my_plugin PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}
-    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}
-)
+# --- Native test (loads the DLL via LoadLibrary, runs baseline + custom)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native.cpp)
+    xinsp2_add_plugin_test(my_plugin_test tests/test_native.cpp)
+    target_compile_definitions(my_plugin_test PRIVATE
+        MY_PLUGIN_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/my_plugin.dll")
+    add_dependencies(my_plugin_test my_plugin)
+    enable_testing()
+    add_test(NAME my_plugin_test
+             COMMAND my_plugin_test
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+endif()

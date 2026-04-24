@@ -3,14 +3,22 @@
 <head>
 <meta charset="utf-8">
 <style>
-    body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground, #ccc); background: var(--vscode-editor-background, #1e1e1e); padding: 12px; margin: 0; }
-    h2 { margin: 0 0 8px; font-size: 15px; }
-    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-    label { min-width: 90px; font-size: 12px; }
+    :root {
+        --card-bg: var(--vscode-editor-background);
+        --card-border: var(--vscode-widget-border, rgba(255,255,255,0.08));
+        --muted: var(--vscode-descriptionForeground, #888);
+    }
+    body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground, #ccc); background: var(--vscode-sideBar-background, #1e1e1e); padding: 16px; margin: 0; line-height: 1.5; }
+    .header { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+    .header h2 { margin: 0; font-size: 16px; font-weight: 600; }
+    .hint { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; }
+    .card-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin: 0 0 10px; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    label { min-width: 90px; font-size: 12px; color: var(--muted); }
     input[type=range] { flex: 1; }
-    input[type=number] { width: 60px; padding: 3px; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); font-size: 12px; }
+    input[type=number] { width: 72px; padding: 4px; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); font-size: 12px; border-radius: 3px; }
     .val { min-width: 30px; text-align: right; font-family: monospace; font-size: 12px; }
-    button { padding: 5px 14px; cursor: pointer; border: none; border-radius: 3px; font-size: 12px; background: #2196f3; color: white; }
     .checkbox-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 
     .canvas-container { position: relative; margin-top: 10px; background: #000; border: 1px solid var(--vscode-widget-border, #444); }
@@ -27,41 +35,50 @@
 </style>
 </head>
 <body>
-    <h2>Blob Analysis</h2>
+    <div class="header">
+        <h2>Blob Analysis</h2>
+        <vscode-badge id="blob-count-pill" variant="counter">no blobs</vscode-badge>
+    </div>
+    <div class="hint">Threshold + contour extraction. Tweak parameters and click Apply to re-run.</div>
 
-    <div class="row">
-        <label>Threshold:</label>
-        <input type="range" id="threshold" min="0" max="255" value="128" oninput="onParamChange()">
-        <span class="val" id="threshVal">128</span>
-    </div>
-    <div class="row">
-        <label>Min Area:</label>
-        <input type="number" id="minArea" value="10" min="1" max="100000" onchange="onParamChange()">
-    </div>
-    <div class="row">
-        <label>Max Area:</label>
-        <input type="number" id="maxArea" value="999999" min="1" max="9999999" onchange="onParamChange()">
-    </div>
-    <div class="checkbox-row">
-        <input type="checkbox" id="invert" onchange="onParamChange()">
-        <label for="invert" style="min-width:auto">Invert threshold</label>
-    </div>
-    <div class="row">
-        <button onclick="onApply()">Apply & Run</button>
-    </div>
-
-    <div class="canvas-container">
-        <canvas id="canvas" width="640" height="480"></canvas>
-    </div>
-
-    <div class="legend">
-        <span><span class="legend-color" style="background:#0f0"></span>Contour</span>
-        <span><span class="legend-color" style="background:#ff0"></span>Bounding Box</span>
-        <span><span class="legend-color" style="background:#f00"></span>Centroid</span>
+    <div class="card">
+        <div class="card-title">Parameters</div>
+        <div class="row">
+            <label>Threshold</label>
+            <input type="range" id="threshold" min="0" max="255" value="128" oninput="onParamChange()">
+            <span class="val" id="threshVal">128</span>
+        </div>
+        <div class="row">
+            <label>Min area</label>
+            <input type="number" id="minArea" value="10" min="1" max="100000" onchange="onParamChange()">
+        </div>
+        <div class="row">
+            <label>Max area</label>
+            <input type="number" id="maxArea" value="999999" min="1" max="9999999" onchange="onParamChange()">
+        </div>
+        <div class="checkbox-row">
+            <vscode-checkbox id="invert" label="Invert threshold"></vscode-checkbox>
+        </div>
+        <div class="row" style="margin-top: 10px">
+            <vscode-button onclick="onApply()">Apply &amp; Run</vscode-button>
+        </div>
     </div>
 
-    <div class="stats" id="statsPanel" style="display:none">
-        <div class="stats-header">Blobs: <span id="blobCount">0</span></div>
+    <div class="card">
+        <div class="card-title">Overlay</div>
+        <div class="canvas-container">
+            <canvas id="canvas" width="640" height="480"></canvas>
+        </div>
+        <div class="legend">
+            <span><span class="legend-color" style="background:#0f0"></span>Contour</span>
+            <span><span class="legend-color" style="background:#ff0"></span>Bounding Box</span>
+            <span><span class="legend-color" style="background:#f00"></span>Centroid</span>
+        </div>
+    </div>
+
+    <div class="card" id="statsPanel" style="display:none">
+        <div class="card-title">Detected blobs</div>
+        <div class="stats-header">Count: <span id="blobCount">0</span></div>
         <div id="blobList"></div>
     </div>
 

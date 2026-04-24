@@ -3,99 +3,105 @@
 <head>
 <meta charset="utf-8">
 <style>
-    body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground, #ccc); background: var(--vscode-editor-background, #1e1e1e); padding: 12px; margin: 0; }
-    h2 { margin: 0 0 12px; font-size: 15px; }
-    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-    label { min-width: 110px; font-size: 12px; }
-    input[type=text] { flex: 1; padding: 4px 6px; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); font-family: monospace; font-size: 12px; }
-    button { padding: 6px 14px; cursor: pointer; border: none; border-radius: 3px; font-size: 12px; background: #2196f3; color: white; }
-    .btn-enable { background: #4caf50; }
-    .btn-disable { background: #f44336; }
-    .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-    .stats { margin-top: 12px; padding: 8px; background: var(--vscode-input-background, #3c3c3c); border-radius: 4px; font-size: 12px; }
-    .hint { font-size: 10px; opacity: 0.5; margin-left: 110px; margin-top: -4px; }
-    .enabled { color: #4caf50; font-weight: bold; }
-    .disabled { color: #f44336; }
+    :root {
+        --card-bg: var(--vscode-editor-background);
+        --card-border: var(--vscode-widget-border, rgba(255,255,255,0.08));
+        --muted: var(--vscode-descriptionForeground, #888);
+    }
+    body { font-family: var(--vscode-font-family, sans-serif); color: var(--vscode-foreground, #ccc); background: var(--vscode-sideBar-background, #1e1e1e); padding: 18px; margin: 0; font-size: 13px; line-height: 1.5; }
+    .header { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+    .header h2 { margin: 0; font-size: 16px; font-weight: 600; }
+    .hint { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 6px; padding: 16px 18px; margin-bottom: 14px; }
+    .card-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin: 0 0 12px; }
+    .field { display: grid; grid-template-columns: 120px 1fr; gap: 12px; align-items: center; margin-bottom: 10px; }
+    .field label { color: var(--muted); }
+    .tokens { color: var(--muted); font-size: 11px; margin-top: -4px; margin-left: 132px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+    .stat-grid { display: grid; grid-template-columns: 1fr 2fr; gap: 8px 18px; font-size: 12px; }
+    .stat-grid .k { color: var(--muted); }
+    .stat-grid .v { font-family: var(--vscode-editor-font-family, monospace); word-break: break-all; }
 </style>
 </head>
 <body>
-    <h2>Record Save</h2>
+    <div class="header">
+        <h2>Record Save</h2>
+        <vscode-badge id="state-pill" variant="counter">disabled</vscode-badge>
+    </div>
+    <div class="hint">Writes each record as a JSON + one BMP per image, named by the rule below.</div>
 
-    <div class="row">
-        <label>Output Folder:</label>
-        <input type="text" id="outputDir" placeholder="C:\path\to\save\dir">
+    <div class="card">
+        <div class="card-title">Destination</div>
+        <div class="field">
+            <label for="outputDir">Output folder</label>
+            <vscode-textfield id="outputDir" placeholder="C:\path\to\save\dir"></vscode-textfield>
+        </div>
+        <div class="field">
+            <label for="namingRule">Naming rule</label>
+            <vscode-textfield id="namingRule" value="frame_{count}"></vscode-textfield>
+        </div>
+        <div class="tokens">Tokens: <code>{count}</code> (zero-padded), <code>{timestamp}</code> (YYYYMMDD_HHMMSS)</div>
+        <div class="actions">
+            <vscode-button id="btn-apply">Apply Settings</vscode-button>
+            <vscode-button id="btn-toggle">Enable Saving</vscode-button>
+            <vscode-button id="btn-reset" secondary>Reset Counter</vscode-button>
+        </div>
     </div>
 
-    <div class="row">
-        <label>Naming Rule:</label>
-        <input type="text" id="namingRule" value="frame_{count}">
-    </div>
-    <div class="hint">Tokens: {count} (zero-padded), {timestamp} (YYYYMMDD_HHMMSS)</div>
-
-    <div class="row" style="margin-top: 12px;">
-        <button onclick="applySettings()">Apply Settings</button>
-        <button id="enableBtn" class="btn-enable" onclick="toggleEnable()">Enable Saving</button>
-        <button onclick="resetCount()">Reset Counter</button>
-    </div>
-
-    <div class="stats">
-        Status: <span id="statusText" class="disabled">Disabled</span><br>
-        Saves so far: <span id="countText">0</span><br>
-        Output dir: <span id="dirText" style="opacity:0.6">(not set)</span><br>
-        Naming: <span id="ruleText" style="opacity:0.6">frame_{count}</span>
+    <div class="card">
+        <div class="card-title">Status</div>
+        <div class="stat-grid">
+            <div class="k">State</div>        <div class="v" id="s-state">disabled</div>
+            <div class="k">Saves so far</div> <div class="v" id="s-count">0</div>
+            <div class="k">Output dir</div>   <div class="v" id="s-dir">(not set)</div>
+            <div class="k">Naming</div>       <div class="v" id="s-rule">frame_{count}</div>
+        </div>
     </div>
 
 <script>
-    const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+    const vscode = acquireVsCodeApi();
     let isEnabled = false;
 
-    function sendCmd(cmd) {
-        if (vscode) vscode.postMessage({ type: 'exchange', cmd });
-    }
+    function send(cmd) { vscode.postMessage({ type: 'exchange', cmd }); }
 
-    function applySettings() {
-        const dir = document.getElementById('outputDir').value;
-        const rule = document.getElementById('namingRule').value;
-        sendCmd({ command: 'set_output_dir', value: dir });
-        sendCmd({ command: 'set_naming_rule', value: rule });
-    }
+    document.getElementById('btn-apply').addEventListener('click', () => {
+        send({ command: 'set_output_dir', value: document.getElementById('outputDir').value });
+        send({ command: 'set_naming_rule', value: document.getElementById('namingRule').value });
+    });
+    document.getElementById('btn-toggle').addEventListener('click', () => {
+        send({ command: 'set_enabled', value: !isEnabled });
+    });
+    document.getElementById('btn-reset').addEventListener('click', () => {
+        send({ command: 'reset_count' });
+    });
 
-    function toggleEnable() {
-        sendCmd({ command: 'set_enabled', value: !isEnabled });
-    }
-
-    function resetCount() {
-        sendCmd({ command: 'reset_count' });
-    }
-
-    function updateUI(status) {
-        if (status.output_dir !== undefined) {
-            document.getElementById('outputDir').value = status.output_dir;
-            document.getElementById('dirText').textContent = status.output_dir || '(not set)';
+    function updateUI(s) {
+        if (s.output_dir !== undefined) {
+            document.getElementById('outputDir').value = s.output_dir;
+            document.getElementById('s-dir').textContent = s.output_dir || '(not set)';
         }
-        if (status.naming_rule !== undefined) {
-            document.getElementById('namingRule').value = status.naming_rule;
-            document.getElementById('ruleText').textContent = status.naming_rule;
+        if (s.naming_rule !== undefined) {
+            document.getElementById('namingRule').value = s.naming_rule;
+            document.getElementById('s-rule').textContent = s.naming_rule;
         }
-        if (status.enabled !== undefined) {
-            isEnabled = status.enabled;
-            const txt = document.getElementById('statusText');
-            txt.textContent = isEnabled ? 'Enabled' : 'Disabled';
-            txt.className = isEnabled ? 'enabled' : 'disabled';
-            const btn = document.getElementById('enableBtn');
-            btn.textContent = isEnabled ? 'Disable Saving' : 'Enable Saving';
-            btn.className = isEnabled ? 'btn-disable' : 'btn-enable';
+        if (s.enabled !== undefined) {
+            isEnabled = s.enabled;
+            document.getElementById('s-state').textContent = s.enabled ? 'enabled' : 'disabled';
+            document.getElementById('state-pill').textContent = s.enabled ? 'saving' : 'disabled';
+            const btn = document.getElementById('btn-toggle');
+            btn.textContent = s.enabled ? 'Disable Saving' : 'Enable Saving';
+            if (s.enabled) btn.removeAttribute('secondary');
+            else           btn.setAttribute('secondary', '');
         }
-        if (status.count !== undefined) {
-            document.getElementById('countText').textContent = status.count;
-        }
+        if (s.count !== undefined) document.getElementById('s-count').textContent = s.count;
     }
 
     window.addEventListener('message', (e) => {
         if (e.data.type === 'status') updateUI(e.data);
     });
 
-    sendCmd({ command: 'get_status' });
+    send({ command: 'get_status' });
 </script>
 </body>
 </html>

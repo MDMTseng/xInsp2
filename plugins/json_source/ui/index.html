@@ -3,71 +3,86 @@
 <head>
 <meta charset="utf-8">
 <style>
-    body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground, #ccc); background: var(--vscode-editor-background, #1e1e1e); padding: 12px; margin: 0; }
-    h2 { margin: 0 0 8px; font-size: 15px; }
-    .hint { font-size: 11px; opacity: 0.6; margin-bottom: 12px; }
-    table { width: 100%; border-collapse: collapse; }
-    th { text-align: left; font-size: 11px; opacity: 0.6; padding: 4px 6px; font-weight: normal; text-transform: uppercase; letter-spacing: 0.5px; }
-    td { padding: 4px 6px; vertical-align: middle; }
-    tr.field { border-top: 1px solid var(--vscode-widget-border, #333); }
-    input[type=text], select { padding: 4px 6px; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); font-family: inherit; font-size: 12px; box-sizing: border-box; width: 100%; }
-    input[type=text].mono { font-family: monospace; }
-    input[type=checkbox] { transform: scale(1.2); }
-    button { padding: 5px 12px; cursor: pointer; border: none; border-radius: 3px; font-size: 12px; background: #2196f3; color: white; }
-    button.btn-add { background: #4caf50; margin-top: 8px; }
-    button.btn-apply { background: #2196f3; margin-left: 6px; }
-    button.btn-reset { background: #757575; margin-left: 6px; }
-    button.btn-x { background: transparent; color: #f44336; padding: 2px 8px; font-size: 16px; line-height: 1; }
-    button.btn-x:hover { background: rgba(244, 67, 54, 0.15); }
-    .col-key   { width: 30%; }
-    .col-type  { width: 18%; }
-    .col-value { width: 44%; }
-    .col-rm    { width: 8%; text-align: right; }
-    pre { background: var(--vscode-input-background, #2a2a2a); padding: 10px; border-radius: 4px; font-size: 11px; line-height: 1.5; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: 0; }
-    .preview-section { margin-top: 16px; }
-    .preview-section h3 { font-size: 11px; opacity: 0.6; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: normal; }
-    .invalid { border-color: #f44336 !important; background: rgba(244, 67, 54, 0.1) !important; }
-    .status-bar { margin-top: 10px; font-size: 11px; opacity: 0.7; }
-    .status-ok  { color: #4caf50; }
-    .status-err { color: #f44336; }
+    :root {
+        --card-bg: var(--vscode-editor-background);
+        --card-border: var(--vscode-widget-border, rgba(255,255,255,0.08));
+        --muted: var(--vscode-descriptionForeground, #888);
+    }
+    body { font-family: var(--vscode-font-family, sans-serif); color: var(--vscode-foreground, #ccc); background: var(--vscode-sideBar-background, #1e1e1e); padding: 18px; margin: 0; font-size: 13px; line-height: 1.5; }
+    .header { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+    .header h2 { margin: 0; font-size: 16px; font-weight: 600; }
+    .hint { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 6px; padding: 16px 18px; margin-bottom: 14px; }
+    .card-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin: 0 0 12px; }
+
+    .fields { display: grid; grid-template-columns: 1.2fr 0.9fr 1.6fr auto; gap: 8px; }
+    .fields-head { display: contents; }
+    .fields-head > div { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); padding: 2px 4px 8px; }
+
+    .row { display: contents; }
+    .row > * { align-self: center; }
+    .row input[type=text], .row select {
+        width: 100%; box-sizing: border-box;
+        background: var(--vscode-input-background, #3c3c3c);
+        color: var(--vscode-input-foreground, #ccc);
+        border: 1px solid var(--vscode-input-border, transparent);
+        border-radius: 3px; padding: 5px 8px; font-size: 12px;
+        font-family: var(--vscode-font-family);
+    }
+    .row input.mono { font-family: var(--vscode-editor-font-family, monospace); }
+    .row input:focus, .row select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+    .row .cb-cell { display:flex; align-items:center; justify-content:flex-start; padding-left: 2px; }
+    .row .null-cell { opacity: 0.5; font-style: italic; padding: 0 8px; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; }
+    .row .rm { background: transparent; color: #f44336; border: none; cursor: pointer; padding: 2px 6px; font-size: 14px; border-radius: 3px; }
+    .row .rm:hover { background: rgba(244, 67, 54, 0.15); }
+
+    .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+
+    .preview { background: var(--vscode-input-background, #2a2a2a); border: 1px solid var(--card-border); padding: 10px 12px; border-radius: 4px; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: 0; }
+
+    .invalid { border-color: #f44336 !important; background: rgba(244, 67, 54, 0.15) !important; }
+    .status-line { margin-top: 8px; font-size: 11px; color: var(--muted); }
+    .status-line.ok  { color: #4caf50; }
+    .status-line.err { color: #f44336; }
 </style>
 </head>
 <body>
-    <h2>JSON Source</h2>
-    <div class="hint">Define the JSON record this instance emits. Each row is one top-level field.</div>
+    <div class="header">
+        <h2>JSON Source</h2>
+        <vscode-badge id="count-pill" variant="counter">0 fields</vscode-badge>
+    </div>
+    <div class="hint">Define the JSON record this instance emits. Downstream plugins can override
+        any field per-frame by passing <code>{key:".path", value:…}</code> in their input.</div>
 
-    <table>
-        <thead>
-            <tr>
-                <th class="col-key">Key</th>
-                <th class="col-type">Type</th>
-                <th class="col-value">Value</th>
-                <th class="col-rm"></th>
-            </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-    </table>
+    <div class="card">
+        <div class="card-title">Fields</div>
+        <div id="grid" class="fields">
+            <div class="fields-head">
+                <div>Key</div><div>Type</div><div>Value</div><div></div>
+            </div>
+        </div>
+        <div class="actions">
+            <vscode-button id="btn-add" icon="add">Add field</vscode-button>
+            <vscode-button id="btn-apply">Apply</vscode-button>
+            <vscode-button id="btn-reset" secondary>Reset</vscode-button>
+        </div>
+        <div class="status-line" id="status">&nbsp;</div>
+    </div>
 
-    <button class="btn-add" onclick="addRow()">+ Add Field</button>
-    <button class="btn-apply" onclick="apply()">Apply</button>
-    <button class="btn-reset" onclick="resetAll()">Reset</button>
-
-    <div class="status-bar" id="status">&nbsp;</div>
-
-    <div class="preview-section">
-        <h3>Preview (output record)</h3>
-        <pre id="preview">{}</pre>
+    <div class="card">
+        <div class="card-title">Preview (emitted record)</div>
+        <pre class="preview" id="preview">{}</pre>
     </div>
 
 <script>
-    const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+    const vscode = acquireVsCodeApi();
     const TYPES = ['string', 'number', 'bool', 'null', 'object', 'array'];
 
-    // In-memory rows: [{key, type, value}]  (value is a string for raw types,
-    // and a JSON-encoded string for object/array)
+    // In-memory rows: [{key, type, value}]
     let rows = [];
 
-    function sendCmd(cmd) { if (vscode) vscode.postMessage({ type: 'exchange', cmd }); }
+    function send(cmd) { vscode.postMessage({ type: 'exchange', cmd }); }
 
     function el(tag, attrs, ...kids) {
         const e = document.createElement(tag);
@@ -82,95 +97,95 @@
     }
 
     function render() {
-        const tbody = document.getElementById('rows');
-        tbody.innerHTML = '';
-        rows.forEach((row, i) => {
-            const keyInput = el('input', {
-                type: 'text', value: row.key, placeholder: 'field name',
-                on: { input: e => { rows[i].key = e.target.value; updatePreview(); } }
-            });
+        const grid = document.getElementById('grid');
+        // Remove all rows (but keep the head)
+        while (grid.children.length > 1) grid.removeChild(grid.lastElementChild);
 
-            const typeSelect = el('select', {
-                on: { change: e => { rows[i].type = e.target.value; render(); updatePreview(); } }
+        rows.forEach((row, i) => {
+            const rowEl = el('div', { class: 'row' });
+
+            // Key
+            const keyInp = el('input', {
+                type: 'text', value: row.key || '', placeholder: 'field_name',
+                on: { input: e => { rows[i].key = e.target.value; updatePreview(); } },
+            });
+            // Type
+            const typeSel = el('select', {
+                on: { change: e => { rows[i].type = e.target.value; render(); } },
             });
             for (const t of TYPES) {
                 const opt = el('option', { value: t }, t);
                 if (t === row.type) opt.selected = true;
-                typeSelect.appendChild(opt);
+                typeSel.appendChild(opt);
             }
-
-            let valueCell;
+            // Value
+            let valEl;
             if (row.type === 'bool') {
                 const cb = el('input', {
                     type: 'checkbox',
-                    on: { change: e => { rows[i].value = e.target.checked ? 'true' : 'false'; updatePreview(); } }
+                    on: { change: e => { rows[i].value = e.target.checked ? 'true' : 'false'; updatePreview(); } },
                 });
                 if (row.value === 'true') cb.checked = true;
-                valueCell = el('td', { class: 'col-value' }, cb);
+                valEl = el('div', { class: 'cb-cell' }, cb);
             } else if (row.type === 'null') {
-                valueCell = el('td', { class: 'col-value', style: { opacity: '0.5', fontStyle: 'italic' } }, 'null');
+                valEl = el('div', { class: 'null-cell' }, 'null');
             } else {
                 const placeholder = row.type === 'number' ? '42' :
                                     row.type === 'object' ? '{"a":1}' :
                                     row.type === 'array'  ? '[1,2,3]' : 'text';
                 const klass = (row.type === 'object' || row.type === 'array' || row.type === 'number') ? 'mono' : '';
-                const inp = el('input', {
-                    type: 'text', value: row.value, placeholder, class: klass,
-                    on: { input: e => { rows[i].value = e.target.value; updatePreview(); } }
+                valEl = el('input', {
+                    type: 'text', value: row.value || '', placeholder, class: klass,
+                    on: { input: e => { rows[i].value = e.target.value; updatePreview(); } },
                 });
-                valueCell = el('td', { class: 'col-value' }, inp);
             }
-
-            const rmBtn = el('button', {
-                class: 'btn-x', title: 'Remove field',
-                on: { click: () => { rows.splice(i, 1); render(); updatePreview(); } }
+            // Remove
+            const rm = el('button', {
+                class: 'rm', title: 'Remove field',
+                on: { click: () => { rows.splice(i, 1); render(); } },
             }, '✕');
 
-            tbody.appendChild(el('tr', { class: 'field' },
-                el('td', { class: 'col-key' },  keyInput),
-                el('td', { class: 'col-type' }, typeSelect),
-                valueCell,
-                el('td', { class: 'col-rm' }, rmBtn)
-            ));
+            // Grid: append 4 direct children
+            const grid = document.getElementById('grid');
+            grid.appendChild(keyInp);
+            grid.appendChild(typeSel);
+            grid.appendChild(valEl);
+            grid.appendChild(rm);
         });
         updatePreview();
     }
 
     function buildJson() {
         const obj = {};
-        let hadError = false;
-        const inputs = document.querySelectorAll('#rows input[type=text]');
+        let err = false;
+        const inputs = document.querySelectorAll('#grid > input[type=text]');
         inputs.forEach(i => i.classList.remove('invalid'));
+        // The input order in DOM: k, v, k, v, k, v … (type selects + rm are separate selectors)
+        // But we can't easily map by position — track errors by rebuilding with try/catch.
         for (let i = 0; i < rows.length; ++i) {
             const r = rows[i];
             if (!r.key) continue;
             try {
-                if (r.type === 'string')      obj[r.key] = r.value;
+                if (r.type === 'string')      obj[r.key] = r.value || '';
                 else if (r.type === 'number') obj[r.key] = Number(r.value);
                 else if (r.type === 'bool')   obj[r.key] = r.value === 'true';
                 else if (r.type === 'null')   obj[r.key] = null;
                 else if (r.type === 'object' || r.type === 'array') {
                     obj[r.key] = JSON.parse(r.value || (r.type === 'array' ? '[]' : '{}'));
                 }
-            } catch (e) {
-                hadError = true;
-                const valInput = inputs[i] || inputs[Math.min(i, inputs.length - 1)];
-                if (valInput) valInput.classList.add('invalid');
-            }
+            } catch { err = true; }
         }
-        return { obj, hadError };
+        return { obj, err };
     }
 
     function updatePreview() {
-        const { obj, hadError } = buildJson();
+        const { obj, err } = buildJson();
         document.getElementById('preview').textContent = JSON.stringify(obj, null, 2);
-        if (hadError) setStatus('JSON parse error in highlighted field', 'err');
-    }
-
-    function setStatus(msg, kind) {
-        const el = document.getElementById('status');
-        el.textContent = msg || '\u00a0';
-        el.className = 'status-bar ' + (kind === 'err' ? 'status-err' : kind === 'ok' ? 'status-ok' : '');
+        document.getElementById('count-pill').textContent =
+            `${Object.keys(obj).length} field${Object.keys(obj).length === 1 ? '' : 's'}`;
+        const line = document.getElementById('status');
+        if (err) { line.textContent = 'JSON parse error in one of the object/array values'; line.className = 'status-line err'; }
+        else     { line.innerHTML = '&nbsp;'; line.className = 'status-line'; }
     }
 
     function addRow() {
@@ -179,24 +194,28 @@
     }
 
     function apply() {
-        const { obj, hadError } = buildJson();
-        if (hadError) { setStatus('Cannot apply — fix the highlighted field first', 'err'); return; }
-        sendCmd({ command: 'set_data', value: obj });
-        setStatus('Applied at ' + new Date().toLocaleTimeString(), 'ok');
+        const { obj, err } = buildJson();
+        if (err) { document.getElementById('status').textContent = 'Fix parse error before applying'; return; }
+        send({ command: 'set_data', value: obj });
+        const s = document.getElementById('status');
+        s.textContent = `Applied at ${new Date().toLocaleTimeString()}`;
+        s.className = 'status-line ok';
     }
 
     function resetAll() {
         rows = [];
         render();
-        sendCmd({ command: 'reset' });
-        setStatus('Reset', 'ok');
+        send({ command: 'reset' });
+        const s = document.getElementById('status');
+        s.textContent = 'Reset';
+        s.className = 'status-line ok';
     }
 
     function loadFromObject(obj) {
         rows = [];
         for (const k in obj) {
             const v = obj[k];
-            if (v === null) rows.push({ key: k, type: 'null', value: '' });
+            if (v === null)               rows.push({ key: k, type: 'null', value: '' });
             else if (typeof v === 'boolean') rows.push({ key: k, type: 'bool', value: v ? 'true' : 'false' });
             else if (typeof v === 'number')  rows.push({ key: k, type: 'number', value: String(v) });
             else if (typeof v === 'string')  rows.push({ key: k, type: 'string', value: v });
@@ -206,16 +225,17 @@
         render();
     }
 
+    document.getElementById('btn-add').addEventListener('click', addRow);
+    document.getElementById('btn-apply').addEventListener('click', apply);
+    document.getElementById('btn-reset').addEventListener('click', resetAll);
+
     window.addEventListener('message', (e) => {
-        const m = e.data;
-        if (m.type === 'status') {
-            // The plugin's get_def returns { data: <user object> }
-            if (m.data && typeof m.data === 'object') loadFromObject(m.data);
+        if (e.data.type === 'status' && e.data.data && typeof e.data.data === 'object') {
+            loadFromObject(e.data.data);
         }
     });
 
-    // Initial: ask for current state, then add an empty row if nothing came back
-    sendCmd({ command: 'get_status' });
+    send({ command: 'get_status' });
     setTimeout(() => { if (rows.length === 0) addRow(); }, 250);
 </script>
 </body>

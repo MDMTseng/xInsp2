@@ -3,6 +3,37 @@
 Write a plugin in ~30 lines of C++. Get a live GUI, JSON+image I/O,
 persistent state, and hot-reload — all without touching the host.
 
+> **New here?** Start with [GETTING_STARTED.md](./GETTING_STARTED.md) —
+> a 5-minute walkthrough from `git clone` to first plugin running in VS
+> Code. The rest of this README is the reference docs.
+
+---
+
+## Quick Start (external plugin against a cloned xInsp2)
+
+```bash
+# 1. Clone xInsp2 once
+git clone <xInsp2-url>  C:\dev\xInsp2
+
+# 2. Set XINSP2_ROOT (do this once — env var, .bashrc, or .env)
+set XINSP2_ROOT=C:\dev\xInsp2
+
+# 3. Scaffold a new plugin in any folder you want
+node %XINSP2_ROOT%\sdk\scaffold.mjs C:\dev\my_plugins\foo
+
+# 4. Build it
+cmake -S C:\dev\my_plugins\foo -B C:\dev\my_plugins\foo\build -A x64
+cmake --build C:\dev\my_plugins\foo\build --config Release
+
+# 5. Tell xInsp2 to load it (one of):
+#    - VS Code setting:  xinsp2.extraPluginDirs = ["C:\\dev\\my_plugins"]
+#    - CLI flag:         xinsp-backend.exe --plugins-dir=C:\dev\my_plugins
+```
+
+The plugin folder is yours — xInsp2 stays read-only. Edit, rebuild, the
+host hot-reloads. Cert files, screenshots, instance data all live next
+to your source. Upgrade by `git pull`-ing xInsp2 and rebuilding.
+
 ---
 
 ## What is a plugin?
@@ -393,6 +424,114 @@ cached via cert thereafter.
   up after yourself or each test run can leave artifacts that break the
   next one
 - Custom tests don't invalidate certs — only baseline changes do
+
+---
+
+## UI / E2E tests
+
+Native C++ tests cover correctness of the plugin's logic. **UI tests**
+cover the rest of the user journey — the webview, the commands the
+extension wires up, the round-trip through the live host. Both live in
+the plugin folder, both are owned by you, neither runs on the host's
+critical path (no UI test is part of cert).
+
+### Layout
+
+```
+my_plugin/
+├── plugin.json
+├── my_plugin.cpp
+├── ui/index.html
+├── CMakeLists.txt
+└── tests/
+    ├── test_native.cpp     ← C++ baseline + custom (your test.exe)
+    ├── test_ui.cjs         ← UI/E2E test (one CJS module)
+    └── screenshots/        ← created automatically by h.shot(...)
+```
+
+### `tests/test_ui.cjs` shape
+
+One module exporting `run(h)`. The launcher hands you `h`, a helpers
+object that drives VS Code commands and the live webview.
+
+```js
+module.exports = {
+    async run(h) {
+        const projDir = h.tmp();
+        await h.createProject(projDir, 'demo');
+        await h.addInstance('inst0', 'my_plugin');
+        await h.openUI('inst0', 'my_plugin');
+
+        // Drive the actual DOM
+        h.setInput('inst0', '#threshold', 128);
+        h.click('inst0', '.btn-apply');
+        await h.sleep(300);
+        h.shot('after_apply');
+
+        // Round-trip status (sets h.lastStatus)
+        await h.getStatus('inst0');
+        h.expectEq(h.lastStatus.threshold, 128);
+    },
+};
+```
+
+### Helpers (`h`) API
+
+| Call | What |
+|------|------|
+| `h.createProject(folder, name)` | runs `xinsp2.createProject` |
+| `h.addInstance(name, plugin)`   | runs `xinsp2.createInstance` |
+| `h.openUI(name, plugin)`        | opens the webview, waits for it to mount |
+| `h.click(inst, selector)`       | dispatches a real `click` inside the webview DOM |
+| `h.setInput(inst, sel, value)`  | sets `value`, fires `input` + `change` events |
+| `h.sendCmd(inst, cmd)`          | exchange round-trip; updates `h.lastStatus` |
+| `h.getStatus(inst)`             | shorthand for `sendCmd(inst, {command:'get_status'})` |
+| `h.run()`                       | runs `xinsp2.run` (one inspection cycle) |
+| `h.shot(label)`                 | full-screen PNG into `tests/screenshots/` |
+| `h.expect(cond, msg)`           | soft assertion — recorded, doesn't throw |
+| `h.expectEq(a, b, msg)`         | structural equality, JSON.stringify-compared |
+| `h.sleep(ms)`                   | promise-based sleep |
+| `h.tmp()`                       | unique per-test temp dir |
+| `h.lastStatus`                  | last successful exchange's parsed payload |
+| `h.failures`, `h.passes`        | arrays of recorded assertion outcomes |
+
+UI tests don't have to throw to fail — they accumulate. The runner
+reports the count and exit-codes non-zero if any failures recorded.
+
+### Two ways to run
+
+**CLI** (cold session — clean every time, what CI uses):
+
+```
+node <xinsp2>/sdk/testing/run_ui_test.mjs <plugin-folder>
+```
+
+Auto-detects `XINSP2_ROOT` by walking parent directories looking for
+`backend/` and `vscode-extension/`. Set the env var explicitly to skip
+auto-detection:
+
+```
+set XINSP2_ROOT=C:\path\to\xInsp2
+```
+
+**VS Code command** (warm session — saves the ~12s cold-start when
+iterating on the test itself):
+
+```
+Cmd Palette → "xInsp2: Run Plugin UI Tests"
+```
+
+Pick the plugin folder when prompted. Both run paths load the same
+`test_ui.cjs` and pass the same `h`. Set `xinsp2.sdkPath` if your SDK
+isn't at `<extension>/../sdk`.
+
+### Why UI tests aren't part of cert
+
+`cert.json` asserts the DLL won't take down the host (C-ABI safety
+gate) — it should be machine-portable. UI tests can depend on dev-only
+data (reference images, calibration files) and on a real VS Code
+instance with screen access — those signals don't transfer between
+machines, so they stay separate from cert.
 
 ---
 
