@@ -17,6 +17,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 
 #include <cJSON.h>
 #include <xi/xi.hpp>
@@ -142,6 +143,15 @@ static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
 // trigger signals from image sources and calls inspect() for each frame.
 static std::atomic<bool>       g_continuous{false};
 static std::thread             g_worker_thread;
+
+// Preview subscription (S1). Default: send every image VAR's JPEG after
+// a run (back-compat). Client sets a name allow-list via cmd:subscribe
+// to cut bandwidth for vars nobody is watching. Held under g_sub_mu so
+// the WS thread (who mutates it) and the run dispatch thread (who reads)
+// stay consistent.
+static std::mutex                    g_sub_mu;
+static bool                          g_sub_all = true;
+static std::unordered_set<std::string> g_sub_names;
 
 // ---- Trigger access (script callbacks) ---------------------------------
 // Set by the worker thread (or run_one_inspection) before invoking the
@@ -335,14 +345,35 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
         vars_msg += "}";
         srv.send_text(vars_msg);
 
-        // image previews
+        // image previews — filtered by subscription. For each
+        // `"name":"X"` followed by `"gid":N`, only emit the JPEG when
+        // the subscription set allows it (or we're in send-all mode).
+        bool sub_all;
+        std::unordered_set<std::string> sub_names;
+        {
+            std::lock_guard<std::mutex> lk(g_sub_mu);
+            sub_all = g_sub_all;
+            if (!sub_all) sub_names = g_sub_names;   // copy under lock
+        }
+
         std::string_view snap_view(sbuf.data(), (size_t)n);
         size_t pos = 0;
-        while (true) {
-            pos = snap_view.find("\"gid\":", pos);
-            if (pos == std::string_view::npos) break;
-            pos += 6;
+        std::string cur_name;
+        while (pos < snap_view.size()) {
+            // Track the latest `"name":"..."` we saw; every later `"gid":`
+            // is assumed to belong to that entry (snapshot emits name
+            // before gid within each item).
+            auto nm = snap_view.find("\"name\":\"", pos);
+            auto gd = snap_view.find("\"gid\":", pos);
+            if (gd == std::string_view::npos) break;
+            if (nm != std::string_view::npos && nm < gd) {
+                nm += 8;
+                auto end = snap_view.find('"', nm);
+                if (end != std::string_view::npos) cur_name = std::string(snap_view.substr(nm, end - nm));
+            }
+            pos = gd + 6;
             uint32_t gid = (uint32_t)std::atoi(snap_view.data() + pos);
+            if (!sub_all && !sub_names.count(cur_name)) continue;
             if (s.dump_image) {
                 int w = 0, h = 0, c = 0;
                 std::vector<uint8_t> raw(32 * 1024 * 1024);
@@ -434,6 +465,46 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         send_rsp_ok(srv, id, buf);
     } else if (name == "version") {
         send_rsp_ok(srv, id, R"({"version":"0.1.0","abi":1,"commit":"dev"})");
+    } else if (name == "subscribe") {
+        // args: { names: [...] } OR { all: true }
+        bool want_all = parsed->args_json.find("\"all\":true") != std::string::npos;
+        std::unordered_set<std::string> names;
+        if (!want_all) {
+            // Parse the names array. cJSON is simpler than hand-rolled here.
+            cJSON* root = cJSON_Parse(parsed->args_json.c_str());
+            if (root) {
+                cJSON* arr = cJSON_GetObjectItem(root, "names");
+                if (cJSON_IsArray(arr)) {
+                    int n = cJSON_GetArraySize(arr);
+                    for (int i = 0; i < n; ++i) {
+                        cJSON* it = cJSON_GetArrayItem(arr, i);
+                        if (cJSON_IsString(it) && it->valuestring) names.insert(it->valuestring);
+                    }
+                }
+                cJSON_Delete(root);
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_sub_mu);
+            g_sub_all = want_all;
+            g_sub_names = std::move(names);
+        }
+        std::string out = "{\"all\":";
+        out += want_all ? "true" : "false";
+        out += ",\"count\":";
+        {
+            std::lock_guard<std::mutex> lk(g_sub_mu);
+            out += std::to_string(g_sub_names.size());
+        }
+        out += "}";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "unsubscribe") {
+        {
+            std::lock_guard<std::mutex> lk(g_sub_mu);
+            g_sub_all = false;
+            g_sub_names.clear();
+        }
+        send_rsp_ok(srv, id, R"({"all":false,"count":0})");
     } else if (name == "shutdown") {
         // Stop continuous mode first to avoid use-after-free on srv
         if (g_continuous.load()) {

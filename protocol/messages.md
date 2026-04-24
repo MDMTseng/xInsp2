@@ -190,9 +190,28 @@ UIs that ship their own command vocabulary.
 ### `save_project` / `load_project`
 `args: { "path": "project.json" }` → `ok: true`
 
-### `subscribe` / `unsubscribe` (not yet implemented)
-Reserved for future use. Currently all preview frames are sent to all
-connected clients. Client-side filtering is the interim solution.
+### `subscribe` / `unsubscribe`
+
+Controls which VAR-image previews are JPEG-encoded and streamed as
+binary frames after each `run`. Defaults to "send everything"
+(back-compat); set an explicit list to avoid wasting CPU + bandwidth on
+images the viewer isn't showing.
+
+- `cmd: subscribe`  `args: { "names": ["gray", "edges"] }` — stream
+  preview frames only for vars in the list. Repeatable; each call
+  REPLACES the list. Pass `{ "all": true }` to re-enable send-all.
+- `cmd: unsubscribe` — empty the list. No `preview` binary frames emitted
+  after subsequent runs until `subscribe` is called again. `vars`
+  (metadata) is still sent either way.
+
+Example:
+```json
+{ "type": "cmd", "id": 5, "name": "subscribe", "args": { "names": ["gray"] } }
+```
+
+Large-image inspections (20 MP frames at ~1 MB JPEG each) benefit
+significantly — a 5-var pipeline with a 1-var subscription uses
+~80% less upstream bandwidth.
 
 ---
 
