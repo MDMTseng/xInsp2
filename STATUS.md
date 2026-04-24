@@ -95,12 +95,12 @@ retired — coverage status lives in `TestAudit.md`):
 | ID | Sev | File | Issue |
 |----|-----|------|-------|
 | ~~A1-7~~ | ✅ MED | `xi_var.hpp` | `VarTraits<const char*>` / `char*` now copy into std::string (`25cdfd7`) |
-| A1-2 | MED | `xi_async.hpp` | `await_all` fails to compile for void Futures despite claim |
+| ~~A1-2~~ | ✅ MED | `xi_async.hpp` | `tuple_cat` filters void results; non-void Futures typed as before (`158e03b`) |
 | ~~A1-4~~ | ✅ MED | `xi_record.hpp` | `image_keys_json` now uses `append_json_escaped` (`6b5db85`) |
 | ~~A2-1~~ | ✅ MED | `xi_abi.hpp` | `(host, handle)` ctor removed; use `from_handle` / `share_handle` (`25cdfd7`) |
-| A2-3 | MED | `xi_use.hpp` | `xi_record_out_free` key lifetime (likely non-bug, verify) |
+| ~~A2-3~~ | ✅ MED | `xi_record.hpp` | Verified non-bug: `Record::image(const std::string&, ...)` keys are deep-copied by `std::map` |
 | ~~A2-4~~ | ✅ MED | `xi_plugin_manager.hpp` | `~PluginManager` frees handles; `scan_plugins` preserves live ones (`6b5db85`) |
-| A3-4 | MED | `service_main.cpp` | `process_instance` missing `catch(std::exception)` path |
+| ~~A3-4~~ | ✅ MED | `service_main.cpp` | `process_instance` now catches `std::exception` + `...` with handle cleanup (`158e03b`) |
 | ~~A4-2~~ | ✅ MED | `xi_ws_server.hpp` | Fragmentation now reassembled (`0f6a0a6`) |
 | ~~A4-3~~ | ✅ MED | `xi_ws_server.hpp` | kMaxFrame dropped to 16 MiB; rx_buf_ bounded (`0f6a0a6`) |
 | ~~A4-5~~ | ✅ MED | `xi_script_support.hpp` | Snapshot thunk uses `esc()` on image keys (`6b5db85`) |
