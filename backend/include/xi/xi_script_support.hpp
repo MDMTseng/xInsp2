@@ -120,7 +120,9 @@ XI_SCRIPT_EXPORT int xi_script_snapshot_vars(char* buf, int buflen) {
                         if (!img_first) out += ",";
                         img_first = false;
                         uint32_t gid = next_gid++;
-                        out += "\"" + ik + "\":" + std::to_string(gid);
+                        esc(out, ik.c_str());
+                        out += ":";
+                        out += std::to_string(gid);
                         image_cache().push_back({gid, iv});
                     }
                     out += "}";

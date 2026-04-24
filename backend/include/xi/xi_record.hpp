@@ -20,11 +20,36 @@
 #include "xi_image.hpp"
 #include "cJSON.h"
 
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <string>
 
 namespace xi {
+
+// Minimal JSON string escape — kept local so this header stays independent
+// of xi_protocol.hpp. Emits the value already wrapped in quotes.
+inline void append_json_escaped(std::string& out, const std::string& s) {
+    out.push_back('"');
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char b[8];
+                    std::snprintf(b, sizeof(b), "\\u%04x", (unsigned)c);
+                    out += b;
+                } else {
+                    out.push_back(c);
+                }
+        }
+    }
+    out.push_back('"');
+}
 
 class Record {
 public:
@@ -346,7 +371,7 @@ public:
         for (auto& [k, _] : images_) {
             if (!first) out += ",";
             first = false;
-            out += "\"" + k + "\"";
+            append_json_escaped(out, k);
         }
         out += "]";
         return out;

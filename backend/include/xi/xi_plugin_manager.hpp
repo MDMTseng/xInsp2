@@ -155,8 +155,23 @@ struct ProjectInfo {
 
 class PluginManager {
 public:
+    ~PluginManager() {
+        // Release every loaded plugin DLL on process shutdown. In practice
+        // the OS would reclaim these, but freeing explicitly keeps leak
+        // detectors clean and avoids surprises if a plugin registers
+        // static destructors.
+        for (auto& [name, pi] : plugins_) {
+            if (pi.handle) {
+                FreeLibrary(pi.handle);
+                pi.handle = nullptr;
+            }
+        }
+    }
+
     // Scan a directory for plugin folders. Each subfolder with a plugin.json
-    // is registered.
+    // is registered. An already-loaded plugin (handle != nullptr) keeps its
+    // handle and resolved factory — we refresh only manifest metadata so
+    // rescan_plugins doesn't leak the prior HMODULE.
     int scan_plugins(const std::string& plugins_dir) {
         std::lock_guard<std::mutex> lk(mu_);
         int count = 0;
@@ -167,7 +182,17 @@ public:
             if (!std::filesystem::exists(manifest)) continue;
             auto info = parse_manifest(manifest.string(), entry.path().string());
             if (info.name.empty()) continue;
-            plugins_[info.name] = std::move(info);
+            auto existing = plugins_.find(info.name);
+            if (existing != plugins_.end() && existing->second.handle) {
+                // Preserve the live handle + factories; update only the
+                // fields that can legitimately change between scans.
+                existing->second.description = info.description;
+                existing->second.has_ui      = info.has_ui;
+                existing->second.ui_path     = info.ui_path;
+                existing->second.folder_path = info.folder_path;
+            } else {
+                plugins_[info.name] = std::move(info);
+            }
             count++;
         }
         return count;
