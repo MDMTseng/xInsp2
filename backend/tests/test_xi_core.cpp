@@ -87,6 +87,25 @@ static void test_async_wrap() {
     CHECK(v == 81);
 }
 
+static std::atomic<int> side_effect{0};
+static void bump() { side_effect.fetch_add(1); }
+
+static void test_await_all_mixed_void() {
+    SECTION("await_all accepts Future<void> + non-void, void is awaited but filtered out");
+    side_effect.store(0);
+    auto fv1 = xi::async(bump);
+    auto fi  = xi::async([](){ return 7; });
+    auto fv2 = xi::async(bump);
+    auto fd  = xi::async([](){ return 3.5; });
+
+    auto t = xi::await_all(fv1, fi, fv2, fd);
+    static_assert(std::tuple_size_v<decltype(t)> == 2,
+                  "void futures must contribute no tuple entry");
+    CHECK(std::get<0>(t) == 7);
+    CHECK(std::get<1>(t) > 3.4 && std::get<1>(t) < 3.6);
+    CHECK(side_effect.load() == 2);
+}
+
 // ---------- xi_var ----------
 
 static void test_var_basic() {
@@ -226,6 +245,7 @@ int main() {
     test_async_exception();
     test_async_wrap();
 
+    test_await_all_mixed_void();
     test_var_basic();
     test_var_string_literal();
     test_var_thread_local();

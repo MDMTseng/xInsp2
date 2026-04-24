@@ -108,10 +108,21 @@ auto async(F&& f, Args&&... args)
 }
 
 // xi::await_all(f1, f2, ...) — wait for all futures, return a tuple of results.
-// Void futures are accepted but contribute nothing to the tuple.
+// Void futures are accepted: they synchronise but contribute no tuple entry.
+//   Future<int> a = ...;  Future<void> b = ...;  Future<Image> c = ...;
+//   auto [i, img] = xi::await_all(a, b, c);  // b is awaited, not in tuple
 template <class... Ts>
 auto await_all(Future<Ts>&... fs) {
-    return std::make_tuple(fs.get()...);
+    auto one = [](auto& f) {
+        using R = std::decay_t<decltype(f.get())>;
+        if constexpr (std::is_void_v<R>) {
+            f.get();
+            return std::tuple<>{};
+        } else {
+            return std::make_tuple(f.get());
+        }
+    };
+    return std::tuple_cat(one(fs)...);
 }
 
 } // namespace xi

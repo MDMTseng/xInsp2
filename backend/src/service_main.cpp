@@ -988,6 +988,17 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                          iname->c_str(), e.code, e.what());
             send_rsp_err(srv, id, msg);
             return;
+        } catch (const std::exception& e) {
+            xi::ImagePool::instance().release(src_h);
+            xi_record_out_free(&output);
+            send_rsp_err(srv, id, std::string("process_instance '") + *iname +
+                                  "' threw: " + e.what());
+            return;
+        } catch (...) {
+            xi::ImagePool::instance().release(src_h);
+            xi_record_out_free(&output);
+            send_rsp_err(srv, id, "process_instance '" + *iname + "' threw unknown exception");
+            return;
         }
 
         // Release input image handle (success path)
