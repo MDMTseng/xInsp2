@@ -1099,7 +1099,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (!dir.empty() && std::filesystem::exists(dir)) {
             n = g_plugin_mgr.scan_plugins(dir);
         }
-        std::string out = "{\"scanned\":\"" + dir + "\",\"count\":" + std::to_string(n) + "}";
+        std::string out = "{\"scanned\":";
+        xp::json_escape_into(out, dir);
+        out += ",\"count\":" + std::to_string(n) + "}";
         send_rsp_ok(srv, id, out);
     } else if (name == "load_plugin") {
         auto pname = xp::get_string_field(parsed->args_json, "name");
@@ -1141,7 +1143,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         if (!folder) { send_rsp_err(srv, id, "missing folder"); return; }
         if (xi::TriggerRecorder::instance().start(*folder)) {
-            std::string out = "{\"recording\":true,\"folder\":\"" + *folder + "\"}";
+            std::string out = "{\"recording\":true,\"folder\":";
+            xp::json_escape_into(out, *folder);
+            out += "}";
             send_rsp_ok(srv, id, out);
         } else {
             send_rsp_err(srv, id, "already recording");
@@ -1158,7 +1162,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         out += ",\"replaying\":";
         out += xi::TriggerRecorder::instance().is_replaying() ? "true" : "false";
         out += ",\"events\":" + std::to_string(xi::TriggerRecorder::instance().event_count());
-        out += ",\"folder\":\"" + xi::TriggerRecorder::instance().folder() + "\"}";
+        out += ",\"folder\":";
+        xp::json_escape_into(out, xi::TriggerRecorder::instance().folder());
+        out += "}";
         send_rsp_ok(srv, id, out);
     } else if (name == "recording_replay") {
         auto folder = xp::get_string_field(parsed->args_json, "folder");
