@@ -186,8 +186,9 @@ Screenshots land in `tests/screenshots/`.
 |---------|------|
 | You want the complete API reference for THIS plugin | `my_first_plugin/README.md` (auto-generated, 500 lines) |
 | You want the SDK's overview + cheatsheets | `xInsp2/sdk/README.md` |
-| You want to see real working examples | `xInsp2/sdk/examples/` (hello, counter, invert, histogram) |
-| You want a complex production-grade plugin | `<plugins>/ct_shape_based_matching/` (OpenCV + AVX2 + UI + per-instance template storage) |
+| You want to see real working examples | `xInsp2/sdk/examples/` (hello, counter, invert, histogram, trigger_source) |
+| You want a complex production-grade plugin | The `ct_shape_based_matching` plugin in the parent `xInsp/plugins/` tree (OpenCV + AVX2 + UI + per-instance template storage) — an out-of-tree plugin that consumes xInsp2 the same way yours will |
+| You want the trigger-bus / multi-camera path | `xInsp2/sdk/examples/trigger_source/` + `xInsp2/plugins/synced_stereo/` (paired frames under one tid) |
 | You want the C ABI definition | `xInsp2/backend/include/xi/xi_abi.h` |
 | You want the test-framework + baseline source | `xInsp2/backend/include/xi/xi_test.hpp`, `xi_baseline.hpp` |
 
