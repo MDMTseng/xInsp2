@@ -239,6 +239,14 @@ static void* g_use_grab_fn_      = nullptr;
 // only pool plugins see via their own host_api. Without this, the script's
 // per-DLL ImagePool singleton would create handles invisible to plugins.
 static void* g_use_host_api_     = nullptr;
+// Trigger access callbacks — set whenever continuous mode is bus-driven.
+// Signatures (cast in xi_use.hpp):
+//   trigger_info_fn  : void(xi_current_trigger_info* out)
+//   trigger_image_fn : xi_image_handle(const char* source)
+//   trigger_sources_fn : int32_t(char* buf, int32_t buflen)  // \n-separated
+static void* g_trigger_info_fn_     = nullptr;
+static void* g_trigger_image_fn_    = nullptr;
+static void* g_trigger_sources_fn_  = nullptr;
 
 XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
     void* process_fn, void* exchange_fn, void* grab_fn,
@@ -248,6 +256,17 @@ XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
     g_use_exchange_fn_  = exchange_fn;
     g_use_grab_fn_      = grab_fn;
     g_use_host_api_     = host_api;
+}
+
+// Optional follow-up call (newer hosts only). Older scripts that don't
+// know about triggers simply leave these null and current_trigger() is
+// inactive — back-compat preserved.
+XI_SCRIPT_EXPORT void xi_script_set_trigger_callbacks(
+    void* info_fn, void* image_fn, void* sources_fn)
+{
+    g_trigger_info_fn_    = info_fn;
+    g_trigger_image_fn_   = image_fn;
+    g_trigger_sources_fn_ = sources_fn;
 }
 
 // --- Persistent state thunks ---

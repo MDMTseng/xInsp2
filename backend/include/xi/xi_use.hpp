@@ -31,6 +31,9 @@ extern void* g_use_process_fn_;
 extern void* g_use_exchange_fn_;
 extern void* g_use_grab_fn_;
 extern void* g_use_host_api_;   // xi_host_api* into BACKEND's ImagePool
+extern void* g_trigger_info_fn_;
+extern void* g_trigger_image_fn_;
+extern void* g_trigger_sources_fn_;
 
 namespace xi {
 
@@ -42,6 +45,108 @@ using UseProcessFn  = int (*)(const char* name,
 using UseExchangeFn = int (*)(const char* name, const char* cmd,
                               char* rsp, int rsplen);
 using UseGrabFn     = xi_image_handle (*)(const char* name, int timeout_ms);
+
+// Trigger callbacks (host-side wires these in via xi_script_set_trigger_callbacks)
+struct CurrentTriggerInfo {
+    xi_trigger_id id;
+    int64_t       timestamp_us;
+    int32_t       is_active;       // 0 if no trigger is currently being dispatched
+};
+using TriggerInfoFn    = void (*)(CurrentTriggerInfo* out);
+using TriggerImageFn   = xi_image_handle (*)(const char* source);
+using TriggerSourcesFn = int32_t (*)(char* buf, int32_t buflen);
+
+// xi::Trigger — read-only view of the current inspection event.
+//
+//   void xi_inspect_entry(int frame) {
+//       auto t = xi::current_trigger();
+//       if (t.is_active()) {
+//           auto img = t.image("cam_left");          // correlated frames
+//           auto right = t.image("cam_right");
+//           VAR(tid, t.id_string());
+//       }
+//   }
+//
+class Trigger {
+public:
+    Trigger() = default;
+
+    bool is_active() const {
+        auto info_fn = reinterpret_cast<TriggerInfoFn>(g_trigger_info_fn_);
+        if (!info_fn) return false;
+        CurrentTriggerInfo info{};
+        info_fn(&info);
+        if (!info.is_active) return false;
+        info_ = info;
+        loaded_ = true;
+        return true;
+    }
+
+    xi_trigger_id id() const          { ensure(); return info_.id; }
+    int64_t       timestamp_us() const { ensure(); return info_.timestamp_us; }
+
+    std::string id_string() const {
+        ensure();
+        char buf[40];
+        std::snprintf(buf, sizeof(buf), "%016llx%016llx",
+                      (unsigned long long)info_.id.hi,
+                      (unsigned long long)info_.id.lo);
+        return buf;
+    }
+
+    // Returns the named source's image, copied into a script-side Image.
+    // Sources with multiple frames-per-trigger use the key
+    // "<source>/<image_name>"; for the common single-frame case the
+    // key is just the source name.
+    Image image(const std::string& source) const {
+        auto fn = reinterpret_cast<TriggerImageFn>(g_trigger_image_fn_);
+        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
+        if (!fn || !host) return {};
+        xi_image_handle h = fn(source.c_str());
+        if (h == XI_IMAGE_NULL) return {};
+        int w = host->image_width(h);
+        int hh = host->image_height(h);
+        int ch = host->image_channels(h);
+        const uint8_t* p = host->image_data(h);
+        Image img;
+        if (p && w > 0 && hh > 0) img = Image(w, hh, ch, p);
+        host->image_release(h);
+        return img;
+    }
+
+    // Source names present in this trigger (\n-separated single allocation).
+    std::vector<std::string> sources() const {
+        auto fn = reinterpret_cast<TriggerSourcesFn>(g_trigger_sources_fn_);
+        if (!fn) return {};
+        char buf[2048];
+        int32_t n = fn(buf, sizeof(buf));
+        std::vector<std::string> out;
+        if (n <= 0) return out;
+        std::string s(buf, (size_t)n);
+        size_t start = 0;
+        while (start < s.size()) {
+            size_t end = s.find('\n', start);
+            if (end == std::string::npos) end = s.size();
+            if (end > start) out.emplace_back(s.substr(start, end - start));
+            start = end + 1;
+        }
+        return out;
+    }
+
+private:
+    void ensure() const {
+        if (loaded_) return;
+        auto info_fn = reinterpret_cast<TriggerInfoFn>(g_trigger_info_fn_);
+        if (!info_fn) return;
+        info_fn(&info_);
+        loaded_ = true;
+    }
+    mutable CurrentTriggerInfo info_{};
+    mutable bool               loaded_ = false;
+};
+
+// Per-call helper. Cheap to construct — internal info is fetched lazily.
+inline Trigger current_trigger() { return Trigger{}; }
 
 // Proxy object returned by xi::use()
 class UseProxy {

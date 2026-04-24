@@ -23,8 +23,12 @@
 #include <xi/xi_image.hpp>
 #include <xi/xi_jpeg.hpp>
 #include <xi/xi_protocol.hpp>
+#include <xi/xi_cert.hpp>
 #include <xi/xi_plugin_manager.hpp>
 #include <xi/xi_project.hpp>
+#include <xi/xi_trigger_bus.hpp>
+#include <xi/xi_trigger_bridge.hpp>
+#include <xi/xi_trigger_recorder.hpp>
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_source.hpp>
@@ -141,6 +145,60 @@ static std::condition_variable g_trigger_cv;
 static std::mutex              g_trigger_mu;
 static std::atomic<int>        g_trigger_pending{0};
 static std::thread             g_worker_thread;
+
+// ---- Trigger access (script callbacks) ---------------------------------
+// Set by the worker thread (or run_one_inspection) before invoking the
+// script. The script reads via xi::current_trigger() through the three
+// trigger_*_cb functions below. thread_local so multiple parallel
+// dispatch threads can each have their own current trigger.
+static thread_local const xi::TriggerEvent* g_current_trigger = nullptr;
+
+// Bus event queue feeding the continuous-mode worker. Bus sink pushes
+// events here; worker pops, dispatches, releases handles.
+static std::deque<xi::TriggerEvent> g_ev_queue;
+static std::mutex                   g_ev_mu;
+static std::condition_variable      g_ev_cv;
+
+struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hpp)
+    xi_trigger_id id;
+    int64_t       timestamp_us;
+    int32_t       is_active;
+};
+
+static void trigger_info_cb(CurrentTriggerInfoC* out) {
+    if (!out) return;
+    if (!g_current_trigger) { *out = {{0,0}, 0, 0}; return; }
+    out->id           = g_current_trigger->id;
+    out->timestamp_us = g_current_trigger->timestamp_us;
+    out->is_active    = 1;
+}
+
+static xi_image_handle trigger_image_cb(const char* source) {
+    if (!g_current_trigger || !source) return XI_IMAGE_NULL;
+    auto it = g_current_trigger->images.find(source);
+    if (it == g_current_trigger->images.end()) return XI_IMAGE_NULL;
+    // Caller (script) releases via host_api->image_release after copying
+    // pixels — addref so our own release on dispatch-end doesn't free it
+    // out from under them.
+    xi::ImagePool::instance().addref(it->second);
+    return it->second;
+}
+
+static int32_t trigger_sources_cb(char* buf, int32_t buflen) {
+    if (!g_current_trigger || !buf) return 0;
+    std::string out;
+    bool first = true;
+    for (auto& [src, h] : g_current_trigger->images) {
+        if (!first) out.push_back('\n');
+        first = false;
+        out += src;
+    }
+    int32_t n = (int32_t)out.size();
+    if (buflen < n + 1) return -n;
+    std::memcpy(buf, out.data(), n);
+    buf[n] = 0;
+    return n;
+}
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
@@ -417,12 +475,21 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // plugins only see that pool via their own host_api, so script-side
             // ImagePool handles would be invisible to them.
             if (g_script.set_use_callbacks) {
-                static xi_host_api use_host = xi::ImagePool::make_host_api();
+                static xi_host_api use_host = []{ auto a = xi::ImagePool::make_host_api(); xi::install_trigger_hook(a); return a; }();
                 g_script.set_use_callbacks(
                     (void*)use_process_cb,
                     (void*)use_exchange_cb,
                     (void*)use_grab_cb,
                     (void*)&use_host);
+            }
+            // Phase 3: trigger access callbacks. Older scripts that don't
+            // import xi_script_set_trigger_callbacks just stay null and
+            // xi::current_trigger().is_active() returns false.
+            if (g_script.set_trigger_callbacks) {
+                g_script.set_trigger_callbacks(
+                    (void*)trigger_info_cb,
+                    (void*)trigger_image_cb,
+                    (void*)trigger_sources_cb);
             }
             // Restore persistent state into the new DLL
             if (g_script.set_state && g_persistent_state_json.size() > 2) {
@@ -492,15 +559,46 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         g_trigger_pending = 0;
 
         int interval_ms = 1000 / std::max(fps, 1);
-        // Capture srv as pointer — it's a local in main(), outlives all threads
         auto* srv_ptr = &srv;
+
+        // Bus-driven worker: events arrive via TriggerBus sink → enqueued
+        // → worker pops and runs inspect with that trigger as current.
+        // Timer fallback fires too (legacy back-compat) so scripts whose
+        // sources don't emit_trigger still see periodic dispatch.
+        xi::TriggerBus::instance().set_sink([](xi::TriggerEvent ev) {
+            std::lock_guard<std::mutex> lk(g_ev_mu);
+            g_ev_queue.push_back(std::move(ev));
+            g_ev_cv.notify_one();
+        });
+
         g_worker_thread = std::thread([srv_ptr, interval_ms] {
-            _set_se_translator(seh_translator); // SEH on worker thread too
-            std::fprintf(stderr, "[xinsp2] continuous mode: %dms interval\n", interval_ms);
+            _set_se_translator(seh_translator);
+            std::fprintf(stderr, "[xinsp2] continuous mode: %dms timer + trigger bus\n",
+                         interval_ms);
             int frame_seq = 0;
             while (g_continuous.load()) {
-                run_one_inspection(*srv_ptr, frame_seq++);
-                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+                xi::TriggerEvent ev;
+                bool have_ev = false;
+                {
+                    std::unique_lock<std::mutex> lk(g_ev_mu);
+                    g_ev_cv.wait_for(lk, std::chrono::milliseconds(interval_ms),
+                                     [] { return !g_ev_queue.empty() || !g_continuous.load(); });
+                    if (!g_continuous.load()) break;
+                    if (!g_ev_queue.empty()) {
+                        ev = std::move(g_ev_queue.front());
+                        g_ev_queue.pop_front();
+                        have_ev = true;
+                    }
+                }
+                if (have_ev) {
+                    g_current_trigger = &ev;
+                    run_one_inspection(*srv_ptr, frame_seq++);
+                    g_current_trigger = nullptr;
+                    for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
+                } else {
+                    // Timer-only tick: legacy back-compat dispatch.
+                    run_one_inspection(*srv_ptr, frame_seq++);
+                }
             }
             std::fprintf(stderr, "[xinsp2] continuous mode stopped\n");
         });
@@ -509,7 +607,17 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "stop") {
         g_continuous = false;
         g_trigger_cv.notify_all();
+        g_ev_cv.notify_all();           // wake bus-driven worker
+        xi::TriggerBus::instance().clear_sink();
         if (g_worker_thread.joinable()) g_worker_thread.join();
+        // Drain any in-flight events that arrived between sink-clear and join.
+        {
+            std::lock_guard<std::mutex> lk(g_ev_mu);
+            for (auto& ev : g_ev_queue) {
+                for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
+            }
+            g_ev_queue.clear();
+        }
         send_rsp_ok(srv, id, R"({"stopped":true})");
     } else if (name == "list_params") {
         // If a script is loaded, delegate to its own registry thunk so we
@@ -946,14 +1054,41 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "list_plugins") {
         auto plugins = g_plugin_mgr.list_plugins();
         std::string out = "[";
+        auto esc = [](const std::string& s) {
+            std::string o; for (char c : s) { if (c=='\\'||c=='"') o.push_back('\\'); o.push_back(c); } return o;
+        };
         for (size_t i = 0; i < plugins.size(); ++i) {
             if (i) out += ",";
             auto& p = plugins[i];
-            out += "{\"name\":\"" + p.name + "\",\"description\":\"" + p.description + "\"";
+            out += "{\"name\":\"" + esc(p.name) + "\",\"description\":\"" + esc(p.description) + "\"";
+            out += ",\"folder\":\"" + esc(p.folder_path) + "\"";
             out += ",\"has_ui\":" + std::string(p.has_ui ? "true" : "false");
-            out += ",\"loaded\":" + std::string(p.handle ? "true" : "false") + "}";
+            out += ",\"loaded\":" + std::string(p.handle ? "true" : "false");
+            // Cert snapshot (doesn't re-run the tests — just reads cert.json if present)
+            xi::cert::Cert c;
+            if (xi::cert::read(p.folder_path, c)) {
+                auto dll_path = std::filesystem::path(p.folder_path) / p.dll_name;
+                bool valid = xi::cert::is_valid(p.folder_path, dll_path);
+                out += ",\"cert\":{\"present\":true,\"valid\":" + std::string(valid ? "true" : "false");
+                out += ",\"baseline_version\":" + std::to_string(c.baseline_version);
+                out += ",\"certified_at\":\"" + esc(c.certified_at) + "\"}";
+            } else {
+                out += ",\"cert\":{\"present\":false}";
+            }
+            out += "}";
         }
         out += "]";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "rescan_plugins") {
+        // Optional arg: {"dir": "<path>"} scans that one dir (additive).
+        // No arg: re-scan the default plugins_dir.
+        auto dir_opt = xp::get_string_field(parsed->args_json, "dir");
+        const std::string& dir = dir_opt ? *dir_opt : g_plugins_dir;
+        int n = 0;
+        if (!dir.empty() && std::filesystem::exists(dir)) {
+            n = g_plugin_mgr.scan_plugins(dir);
+        }
+        std::string out = "{\"scanned\":\"" + dir + "\",\"count\":" + std::to_string(n) + "}";
         send_rsp_ok(srv, id, out);
     } else if (name == "load_plugin") {
         auto pname = xp::get_string_field(parsed->args_json, "name");
@@ -988,6 +1123,110 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "failed to open project in " + *folder);
         }
+    } else if (name == "close_project") {
+        g_plugin_mgr.close_project();
+        send_rsp_ok(srv, id, "{\"closed\":true}");
+    } else if (name == "recording_start") {
+        auto folder = xp::get_string_field(parsed->args_json, "folder");
+        if (!folder) { send_rsp_err(srv, id, "missing folder"); return; }
+        if (xi::TriggerRecorder::instance().start(*folder)) {
+            std::string out = "{\"recording\":true,\"folder\":\"" + *folder + "\"}";
+            send_rsp_ok(srv, id, out);
+        } else {
+            send_rsp_err(srv, id, "already recording");
+        }
+    } else if (name == "recording_stop") {
+        bool ok = xi::TriggerRecorder::instance().stop();
+        std::string out = "{\"recording\":false,\"events\":" +
+            std::to_string(xi::TriggerRecorder::instance().event_count()) + "}";
+        send_rsp_ok(srv, id, out);
+        (void)ok;
+    } else if (name == "recording_status") {
+        std::string out = "{\"recording\":";
+        out += xi::TriggerRecorder::instance().is_recording() ? "true" : "false";
+        out += ",\"replaying\":";
+        out += xi::TriggerRecorder::instance().is_replaying() ? "true" : "false";
+        out += ",\"events\":" + std::to_string(xi::TriggerRecorder::instance().event_count());
+        out += ",\"folder\":\"" + xi::TriggerRecorder::instance().folder() + "\"}";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "recording_replay") {
+        auto folder = xp::get_string_field(parsed->args_json, "folder");
+        if (!folder) { send_rsp_err(srv, id, "missing folder"); return; }
+        auto speed = xp::get_number_field(parsed->args_json, "speed").value_or(1.0);
+        if (xi::TriggerRecorder::instance().start_replay(*folder, speed)) {
+            send_rsp_ok(srv, id, "{\"started\":true}");
+        } else {
+            send_rsp_err(srv, id, "could not start replay (no manifest, or already replaying)");
+        }
+    } else if (name == "set_trigger_policy") {
+        // args: { policy: "any"|"all_required"|"leader_followers",
+        //         required: ["cam_left", ...],
+        //         leader: "cam_left",
+        //         window_ms: 100 }
+        auto pol_str = xp::get_string_field(parsed->args_json, "policy");
+        xi::TriggerPolicy pol = xi::TriggerPolicy::Any;
+        if      (pol_str && *pol_str == "all_required")     pol = xi::TriggerPolicy::AllRequired;
+        else if (pol_str && *pol_str == "leader_followers") pol = xi::TriggerPolicy::LeaderFollowers;
+        // Super-minimal array parse — required sources extracted by scanning.
+        std::vector<std::string> required;
+        auto rp = parsed->args_json.find("\"required\":[");
+        if (rp != std::string::npos) {
+            auto end = parsed->args_json.find(']', rp);
+            if (end != std::string::npos) {
+                std::string section = parsed->args_json.substr(rp + 12, end - (rp + 12));
+                size_t pos = 0;
+                while (pos < section.size()) {
+                    auto q1 = section.find('"', pos); if (q1 == std::string::npos) break;
+                    auto q2 = section.find('"', q1 + 1); if (q2 == std::string::npos) break;
+                    required.emplace_back(section.substr(q1 + 1, q2 - q1 - 1));
+                    pos = q2 + 1;
+                }
+            }
+        }
+        auto leader = xp::get_string_field(parsed->args_json, "leader").value_or("");
+        auto win    = xp::get_number_field(parsed->args_json, "window_ms").value_or(100);
+        if (g_plugin_mgr.set_trigger_policy(pol, required, leader, (int)win)) {
+            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+        } else {
+            send_rsp_err(srv, id, "no project open");
+        }
+    } else if (name == "recertify_plugin") {
+        auto pname = xp::get_string_field(parsed->args_json, "name");
+        if (!pname) { send_rsp_err(srv, id, "missing name"); return; }
+        auto* pi = g_plugin_mgr.find_plugin(*pname);
+        if (!pi) { send_rsp_err(srv, id, "unknown plugin: " + *pname); return; }
+        // Delete existing cert so load_plugin re-runs baseline on next scan.
+        auto cert_path = std::filesystem::path(pi->folder_path) / "cert.json";
+        std::error_code ec;
+        std::filesystem::remove(cert_path, ec);
+        // If currently loaded, run baseline now and write cert in-place.
+        if (pi->handle) {
+            auto syms = xi::baseline::load_symbols(pi->handle);
+            static xi_host_api host = xi::ImagePool::make_host_api();
+            auto summary = xi::cert::certify(pi->folder_path,
+                std::filesystem::path(pi->folder_path) / pi->dll_name,
+                pi->name, syms, &host);
+            std::string rsp_json = "{\"passed\":" + std::string(summary.all_passed ? "true" : "false");
+            rsp_json += ",\"pass_count\":" + std::to_string(summary.pass_count);
+            rsp_json += ",\"fail_count\":" + std::to_string(summary.fail_count);
+            rsp_json += ",\"total_ms\":" + std::to_string(summary.total_ms);
+            rsp_json += ",\"failures\":[";
+            bool first = true;
+            for (auto& r : summary.results) {
+                if (!r.passed) {
+                    if (!first) rsp_json += ",";
+                    first = false;
+                    auto esc = [](const std::string& s) {
+                        std::string o; for (char c : s) { if (c=='\\'||c=='"') o.push_back('\\'); o.push_back(c); } return o;
+                    };
+                    rsp_json += "{\"name\":\"" + esc(r.name) + "\",\"error\":\"" + esc(r.error) + "\"}";
+                }
+            }
+            rsp_json += "]}";
+            send_rsp_ok(srv, id, rsp_json);
+        } else {
+            send_rsp_ok(srv, id, "{\"queued\":true,\"note\":\"will re-cert on next load\"}");
+        }
     } else if (name == "create_instance") {
         auto iname  = xp::get_string_field(parsed->args_json, "name");
         auto plugin = xp::get_string_field(parsed->args_json, "plugin");
@@ -999,6 +1238,25 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "failed to create instance");
+        }
+    } else if (name == "remove_instance") {
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        bool delete_folder =
+            parsed->args_json.find("\"delete_folder\":true") != std::string::npos;
+        if (g_plugin_mgr.remove_instance(*iname, delete_folder)) {
+            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+        } else {
+            send_rsp_err(srv, id, "instance not found: " + *iname);
+        }
+    } else if (name == "rename_instance") {
+        auto old_name = xp::get_string_field(parsed->args_json, "name");
+        auto new_name = xp::get_string_field(parsed->args_json, "new_name");
+        if (!old_name || !new_name) { send_rsp_err(srv, id, "missing name or new_name"); return; }
+        if (g_plugin_mgr.rename_instance(*old_name, *new_name)) {
+            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+        } else {
+            send_rsp_err(srv, id, "rename failed — name in use or instance missing");
         }
     } else if (name == "get_project") {
         send_rsp_ok(srv, id, g_plugin_mgr.to_json());

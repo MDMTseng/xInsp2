@@ -172,6 +172,10 @@ public:
             buf[n] = 0;
             return n;
         };
+        // emit_trigger is wired by xi::install_trigger_hook(api) in
+        // xi_trigger_bus.hpp — defaults to a no-op so plugins linked
+        // against an older host don't crash.
+        api.emit_trigger = nullptr;
         return api;
     }
 

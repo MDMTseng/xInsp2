@@ -29,7 +29,9 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <unordered_map>
 
 namespace xi {
 
@@ -48,6 +50,9 @@ public:
     // --- Producer side (called from acquisition thread) ---
 
     void push(Image img) {
+        // Capture a shared-pointer copy for the bus bridge before the
+        // queue takes ownership (shared_ptr-backed pixels — cheap).
+        Image bus_copy = img;
         {
             std::lock_guard<std::mutex> lk(mu_);
             queue_.push_back(std::move(img));
@@ -58,6 +63,9 @@ public:
         }
         cv_.notify_one();
         if (on_trigger_) on_trigger_();
+        // Side-table dispatch: looks up by source name, no per-instance
+        // member needed (preserves binary layout for older plugin DLLs).
+        notify_external_publish(name_, bus_copy);
     }
 
     // --- Consumer side (called from user script) ---
@@ -89,6 +97,19 @@ public:
 
     void set_trigger(TriggerCallback cb) { on_trigger_ = std::move(cb); }
 
+    // Side-table publish hooks: keyed by source name so the binary layout
+    // of ImageSource never changes (legacy plugin DLLs stay compatible).
+    // The host registers a hook in the table; push() looks it up.
+    using PublishHook = std::function<void(const Image&)>;
+    static void register_publish_hook(const std::string& source, PublishHook cb) {
+        std::lock_guard<std::mutex> lk(publish_mu_());
+        publish_hooks_()[source] = std::move(cb);
+    }
+    static void unregister_publish_hook(const std::string& source) {
+        std::lock_guard<std::mutex> lk(publish_mu_());
+        publish_hooks_().erase(source);
+    }
+
     // --- Lifecycle ---
 
     virtual void start() { running_ = true; }
@@ -106,6 +127,28 @@ protected:
     std::atomic<bool>        running_{false};
     std::atomic<int64_t>     frame_count_{0};
     TriggerCallback          on_trigger_;
+
+    // Side-table storage. Static singletons so the per-instance struct
+    // layout stays unchanged from before — pre-built plugin DLLs that
+    // include older xi_source.hpp continue to work without recompilation.
+    static std::mutex& publish_mu_() {
+        static std::mutex m;
+        return m;
+    }
+    static std::unordered_map<std::string, PublishHook>& publish_hooks_() {
+        static std::unordered_map<std::string, PublishHook> map;
+        return map;
+    }
+    static void notify_external_publish(const std::string& source, const Image& img) {
+        PublishHook cb;
+        {
+            std::lock_guard<std::mutex> lk(publish_mu_());
+            auto it = publish_hooks_().find(source);
+            if (it == publish_hooks_().end()) return;
+            cb = it->second;          // copy under lock; invoke outside
+        }
+        if (cb) cb(img);
+    }
 };
 
 // ---------- Synthetic test source ----------

@@ -43,6 +43,38 @@ typedef uint64_t xi_image_handle;
 #define XI_IMAGE_NULL 0
 
 /* ------------------------------------------------------------------ */
+/* Trigger ID — 128-bit identifier for a single inspection event.     */
+/* Sources tag every emitted frame with one. Frames sharing a tid are */
+/* correlated (e.g., synchronized multi-camera capture). The host's   */
+/* TriggerBus groups them and dispatches the script once per tid.     */
+/* ------------------------------------------------------------------ */
+
+typedef struct { uint64_t hi; uint64_t lo; } xi_trigger_id;
+
+#ifdef __cplusplus
+#define XI_TRIGGER_NULL (xi_trigger_id{0, 0})
+#else
+#define XI_TRIGGER_NULL ((xi_trigger_id){0, 0})
+#endif
+
+static inline int xi_trigger_id_eq(xi_trigger_id a, xi_trigger_id b) {
+    return a.hi == b.hi && a.lo == b.lo;
+}
+static inline int xi_trigger_id_is_null(xi_trigger_id a) {
+    return a.hi == 0 && a.lo == 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Record image entry — defined before xi_host_api so emit_trigger    */
+/* can reference it.                                                  */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const char*      key;       /* borrowed — valid for duration of the call */
+    xi_image_handle  handle;
+} xi_record_image;
+
+/* ------------------------------------------------------------------ */
 /* Host API — function table provided by the backend to every plugin  */
 /* ------------------------------------------------------------------ */
 
@@ -71,17 +103,32 @@ typedef struct xi_host_api {
      * written, or -needed if buflen is too small. Returns 0 if the
      * instance is unknown to the host. */
     int32_t (*instance_folder)(const char* instance_name, char* buf, int32_t buflen);
+
+    /* Image-source plugins call this to publish a frame (or set of
+     * frames) tagged with a trigger ID. The host's TriggerBus groups
+     * frames sharing a tid and dispatches the script once per complete
+     * trigger.
+     *
+     *   source_name:   the publishing instance's name (xi::Plugin::name())
+     *   tid:           caller-supplied 128-bit identifier; XI_TRIGGER_NULL
+     *                  asks the host to allocate a fresh one.
+     *   timestamp_us:  capture timestamp in microseconds (host clock).
+     *                  Pass 0 to use the host's current time.
+     *   images:        the frame(s) being published. The bus addrefs each
+     *                  handle internally — the caller may release them
+     *                  immediately after this call returns.
+     *   image_count:   number of entries in `images`.
+     */
+    void (*emit_trigger)(const char* source_name,
+                         xi_trigger_id tid,
+                         int64_t timestamp_us,
+                         const xi_record_image* images,
+                         int32_t image_count);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */
 /* Record — the universal data container crossing the boundary        */
 /* ------------------------------------------------------------------ */
-
-/* A named image entry in a record. */
-typedef struct {
-    const char*      key;       /* borrowed — valid for duration of the call */
-    xi_image_handle  handle;
-} xi_record_image;
 
 /* A record: named images + JSON metadata. */
 typedef struct {
