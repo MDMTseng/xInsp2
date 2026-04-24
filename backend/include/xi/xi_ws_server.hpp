@@ -214,6 +214,16 @@ public:
     Server() = default;
     ~Server() { stop(); }
 
+    // Bind address. Accepts "127.0.0.1" (loopback, default), "0.0.0.0"
+    // (all interfaces), or a specific IPv4 literal. Call before start().
+    void set_bind_host(std::string host) { bind_host_ = std::move(host); }
+
+    // Optional shared-secret for remote mode. When non-empty, the
+    // WebSocket handshake must carry `Authorization: Bearer <secret>`;
+    // anything else gets a 401 and is disconnected. Ignored when empty
+    // (default) so localhost-only deployments stay friction-free.
+    void set_auth_secret(std::string secret) { auth_secret_ = std::move(secret); }
+
     bool start(int port) {
 #ifdef _WIN32
         static bool wsa_inited = false;
@@ -230,7 +240,21 @@ public:
                      reinterpret_cast<const char*>(&opt), sizeof(opt));
         sockaddr_in addr{};
         addr.sin_family      = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        // Resolve bind host. Empty / "127.0.0.1" → loopback, "0.0.0.0"
+        // → INADDR_ANY, else inet_addr().
+        if (bind_host_.empty() || bind_host_ == "127.0.0.1" || bind_host_ == "localhost") {
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        } else if (bind_host_ == "0.0.0.0") {
+            addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        } else {
+            unsigned long ip = ::inet_addr(bind_host_.c_str());
+            if (ip == INADDR_NONE) {
+                CLOSESOCK(listen_);
+                listen_ = INVALID_SOCK;
+                return false;
+            }
+            addr.sin_addr.s_addr = ip;
+        }
         addr.sin_port        = htons((u_short)port);
         if (::bind(listen_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
             CLOSESOCK(listen_);
@@ -335,6 +359,9 @@ private:
     int                  msg_opcode_     = 0;
     bool                 msg_in_progress_ = false;
 
+    std::string          bind_host_;     // empty/127.0.0.1 = loopback
+    std::string          auth_secret_;   // empty = no auth required
+
     void close_client() {
         if (client_ != INVALID_SOCK) {
             CLOSESOCK(client_);
@@ -373,6 +400,45 @@ private:
         if (eol == std::string::npos) return false;
         std::string key = req.substr(key_pos, eol - key_pos);
         while (!key.empty() && (key.back() == ' ' || key.back() == '\r' || key.back() == '\t')) key.pop_back();
+
+        // Optional shared-secret auth. When configured, the client must
+        // send `Authorization: Bearer <secret>` in the handshake. Mismatch
+        // → 401 + close. Constant-time compare to reduce timing leaks.
+        if (!auth_secret_.empty()) {
+            const std::string tag = "authorization:";
+            auto a_pos = lc.find(tag);
+            bool ok = false;
+            if (a_pos != std::string::npos) {
+                a_pos += tag.size();
+                while (a_pos < req.size() && (req[a_pos] == ' ' || req[a_pos] == '\t')) ++a_pos;
+                auto a_eol = req.find("\r\n", a_pos);
+                if (a_eol != std::string::npos) {
+                    std::string hdr = req.substr(a_pos, a_eol - a_pos);
+                    while (!hdr.empty() && (hdr.back() == ' ' || hdr.back() == '\r' || hdr.back() == '\t')) hdr.pop_back();
+                    const std::string prefix = "Bearer ";
+                    if (hdr.size() >= prefix.size() + auth_secret_.size() &&
+                        hdr.compare(0, prefix.size(), prefix) == 0) {
+                        std::string_view got(hdr.data() + prefix.size(),
+                                             hdr.size() - prefix.size());
+                        if (got.size() == auth_secret_.size()) {
+                            unsigned diff = 0;
+                            for (size_t i = 0; i < got.size(); ++i)
+                                diff |= (unsigned char)got[i] ^ (unsigned char)auth_secret_[i];
+                            ok = (diff == 0);
+                        }
+                    }
+                }
+            }
+            if (!ok) {
+                const char* deny =
+                    "HTTP/1.1 401 Unauthorized\r\n"
+                    "Content-Length: 0\r\n"
+                    "WWW-Authenticate: Bearer\r\n"
+                    "\r\n";
+                ::send(s, deny, (int)std::strlen(deny), 0);
+                return false;
+            }
+        }
 
         std::string accept = detail::ws_accept_key(key);
         std::string resp =

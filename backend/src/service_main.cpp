@@ -236,6 +236,31 @@ static int parse_port(int argc, char** argv) {
     return port;
 }
 
+// --host=<addr>  (default 127.0.0.1). Pass 0.0.0.0 for remote-reachable.
+static std::string parse_host(int argc, char** argv) {
+    std::string host = "127.0.0.1";
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a = argv[i];
+        if (a.rfind("--host=", 0) == 0) host = std::string(a.substr(7));
+        else if (a == "--host" && i + 1 < argc) host = argv[++i];
+    }
+    if (const char* env = std::getenv("XINSP2_HOST"); env && *env) host = env;
+    return host;
+}
+
+// --auth=<secret>  (default empty = no auth required).
+// Also XINSP2_AUTH env var (preferred on shared servers — no argv leak to ps).
+static std::string parse_auth_secret(int argc, char** argv) {
+    std::string secret;
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a = argv[i];
+        if (a.rfind("--auth=", 0) == 0) secret = std::string(a.substr(7));
+        else if (a == "--auth" && i + 1 < argc) secret = argv[++i];
+    }
+    if (const char* env = std::getenv("XINSP2_AUTH"); env && *env) secret = env;
+    return secret;
+}
+
 // Repeatable: --plugins-dir=/some/path  (or --plugins-dir /some/path).
 // Also reads XINSP2_EXTRA_PLUGIN_DIRS, semicolon- or path-separator-delimited.
 static std::vector<std::string> parse_extra_plugin_dirs(int argc, char** argv) {
@@ -1377,11 +1402,22 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[xinsp2] unexpected binary frame: %zu bytes\n", n);
     };
 
+    std::string host   = parse_host(argc, argv);
+    std::string secret = parse_auth_secret(argc, argv);
+    srv.set_bind_host(host);
+    if (!secret.empty()) srv.set_auth_secret(secret);
+
     if (!srv.start(port)) {
-        std::fprintf(stderr, "[xinsp2] failed to start on port %d\n", port);
+        std::fprintf(stderr, "[xinsp2] failed to bind %s:%d\n", host.c_str(), port);
         return 1;
     }
-    std::fprintf(stderr, "[xinsp2] listening on ws://127.0.0.1:%d\n", port);
+    if (host == "0.0.0.0" && secret.empty()) {
+        std::fprintf(stderr,
+            "[xinsp2] WARNING: bound to 0.0.0.0 with NO --auth secret — anyone reachable can drive the backend\n");
+    }
+    std::fprintf(stderr, "[xinsp2] listening on ws://%s:%d%s\n",
+                 host.c_str(), port,
+                 secret.empty() ? "" : " (auth required)");
     std::fflush(stderr);
 
     while (!g_should_exit.load() && srv.is_running()) {
