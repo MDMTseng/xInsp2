@@ -89,9 +89,28 @@ table was stale when you read it — the source of truth is now FRAMEWORK.md
 | A3-7  | `de15479` stop worker thread before shutdown                     |
 | A1-1, A1-6, A1-8, A3-2, A3-3, A2-2, A2-5, A3-5 | `f16cf6a` 8-HIGH batch |
 
-MEDIUM / LOW items from BugAudit remain — most now tracked via
-`TestAudit.md` (26/28 bugs had no regression test when audited; coverage
-work is the active front).
+Remaining MEDIUM / LOW items (tracked here now that `BugAudit.md` is
+retired — coverage status lives in `TestAudit.md`):
+
+| ID | Sev | File | Issue |
+|----|-----|------|-------|
+| A1-7 | MED | `xi_var.hpp` | `VAR(x,"lit")` hits default VarTraits, stashes dangling `const char*` |
+| A1-2 | MED | `xi_async.hpp` | `await_all` fails to compile for void Futures despite claim |
+| A1-4 | MED | `xi_record.hpp` | `image_keys_json` doesn't escape keys |
+| A2-1 | MED | `xi_abi.hpp` | `HostImage(host, handle)` public ctor addrefs — refcount trap |
+| A2-3 | MED | `xi_use.hpp` | `xi_record_out_free` key lifetime (likely non-bug, verify) |
+| A2-4 | MED | `xi_plugin_manager.hpp` | DLL handle not freed on project switch |
+| A3-4 | MED | `service_main.cpp` | `process_instance` missing `catch(std::exception)` path |
+| A4-2 | MED | `xi_ws_server.hpp` | WS fragmentation (`fin` discarded) silently drops multi-frame |
+| A4-3 | MED | `xi_ws_server.hpp` | 64 MiB alloc on malformed frame header — localhost DoS |
+| A4-5 | MED | `xi_script_support.hpp` | Image key JSON injection in snapshot thunk |
+| A1-3 | LOW | `xi_record.hpp` | Path key buffer 256-char silent truncation |
+| A1-5 | LOW | `xi_record.hpp` | `[-1]` parses as idx=0 |
+| A1-9 | LOW | `xi_param.hpp` | `Param::as_json` doesn't escape name |
+| A3-6 | LOW | `service_main.cpp` | Dead `g_trigger_cv` / `g_trigger_pending` |
+| A4-4 | LOW | `xi_script_loader.hpp` | Optional DLL symbols' null-check contract undocumented |
+| A4-6 | LOW | `xi_script_support.hpp` | Static globals tied to DLL lifetime — document invariant |
+| A4-7 | LOW | `xi_protocol.hpp` | `data_json` trusted verbatim — document boundary |
 
 ## In flight — Phase 3: TriggerBus & multi-camera (uncommitted)
 
