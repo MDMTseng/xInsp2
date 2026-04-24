@@ -27,6 +27,41 @@ const screenshotDir = path.resolve(__dirname, '..', '..', '..', 'screenshot');
 const projectRoot = path.resolve(__dirname, '..', '..', '..');
 let stepNum = 0;
 
+// ---- UI-state assertions (complement the backend-side ones) ------------
+// These verify the EDITOR actually reflects the commanded state: webview
+// panels really open, active editor is what we expect, tree items are
+// present. Before this, the journey only asserted backend WS responses +
+// on-disk artifacts; UI correctness was only visually inspected.
+
+function pluginUITabs() {
+    const out = [];
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            const input = tab.input;
+            // vscode.TabInputWebview — title is "<instance> (<plugin>)"
+            if (input && input.viewType && input.viewType.includes('xinsp2.pluginUI')) {
+                out.push(tab.label);
+            }
+        }
+    }
+    return out;
+}
+
+function assertPluginUIOpen(instanceName, pluginName) {
+    const expected = `${instanceName} (${pluginName})`;
+    const found = pluginUITabs();
+    assert.ok(found.includes(expected),
+        `expected plugin UI tab "${expected}" open; saw [${found.join(', ')}]`);
+}
+
+function assertActiveEditor(fileBasename) {
+    const ed = vscode.window.activeTextEditor;
+    assert.ok(ed, `expected an active editor (want ${fileBasename})`);
+    const actual = path.basename(ed.document.fileName);
+    assert.strictEqual(actual, fileBasename,
+        `active editor should be ${fileBasename}, is ${actual}`);
+}
+
 // The extension host process (this one) is a descendant of the Code.exe
 // main process that owns the VS Code window. Walk up ppid via
 // Win32_Process so PowerShell can pick THAT specific window — not
@@ -36,16 +71,18 @@ let mainCodePid = null;
 function resolveMainCodePid() {
     if (mainCodePid) return mainCodePid;
     try {
-        // `process.ppid` walks one step up; the main Code.exe window is
-        // typically 2-3 hops up. Let PowerShell do the walk using CIM,
-        // then cache the result.
-        const script = `
+        // Walk up the ancestor chain from the extension host (this Node
+        // process) to find the first Code.exe that actually owns a
+        // window — that's THIS EDH, not some other VS Code the user has
+        // open. Write the PS to a file; cramming multi-line script into
+        // -Command via ; separators breaks Get-CimInstance blocks.
+        const psFile = path.join(os.tmpdir(), `xinsp2_resolve_pid_${process.pid}.ps1`);
+        fs.writeFileSync(psFile, `
 $p = ${process.pid}
 while ($true) {
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
     if (-not $proc) { break }
     $pname = [IO.Path]::GetFileNameWithoutExtension($proc.Name)
-    # Stop at the first Code.exe ancestor that actually owns a window.
     if ($pname -eq 'Code') {
         $hp = Get-Process -Id $p -ErrorAction SilentlyContinue
         if ($hp -and $hp.MainWindowHandle -ne [IntPtr]::Zero) {
@@ -55,8 +92,9 @@ while ($true) {
     }
     if (-not $proc.ParentProcessId -or $proc.ParentProcessId -eq 0) { break }
     $p = $proc.ParentProcessId
-}`;
-        const out = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${script.replace(/"/g, '\\"').replace(/\n/g, '; ')}"`,
+}
+`);
+        const out = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`,
             { timeout: 10000, encoding: 'utf8' }).trim();
         const n = parseInt(out, 10);
         if (!isNaN(n)) { mainCodePid = n; console.log(`  [screenshot] main Code.exe pid=${n}`); }
@@ -299,6 +337,8 @@ async function run() {
         { label: 'cam0', description: 'mock_camera' });
     await sleep(2000);
     shot('camera_ui_opened');
+    assertPluginUIOpen('cam0', 'mock_camera');
+    console.log(`  ✓ UI assert: mock_camera webview for cam0 is open`);
 
     // True UI driving: type into inputs, click buttons inside the webview.
     api.setInputInWebview('cam0', '#fps', 15);
@@ -317,6 +357,8 @@ async function run() {
     await vscode.commands.executeCommand('xinsp2.openInstanceUI', 'det0', 'blob_analysis');
     await sleep(2000);
     shot('blob_ui_opened');
+    assertPluginUIOpen('det0', 'blob_analysis');
+    console.log(`  ✓ UI assert: blob_analysis webview for det0 is open`);
 
     api.setInputInWebview('det0', '#threshold', 120);
     await sleep(300);
@@ -334,6 +376,13 @@ async function run() {
     await vscode.commands.executeCommand('xinsp2.openInstanceUI', 'saver0', 'record_save');
     await sleep(2000);
     shot('saver_ui_opened');
+    assertPluginUIOpen('saver0', 'record_save');
+    // All three plugin UI tabs should now coexist
+    const tabs = pluginUITabs();
+    for (const wanted of ['cam0 (mock_camera)', 'det0 (blob_analysis)', 'saver0 (record_save)']) {
+        assert.ok(tabs.includes(wanted), `expected tab "${wanted}" still open; saw [${tabs.join(', ')}]`);
+    }
+    console.log(`  ✓ UI assert: 3 plugin webviews open simultaneously`);
 
     fs.mkdirSync(saveDir, { recursive: true });
     api.setInputInWebview('saver0', '#outputDir', saveDir);
@@ -411,6 +460,8 @@ void xi_inspect_entry(int frame) {
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
     await sleep(1800);
     shot('script_in_editor');
+    assertActiveEditor('inspection.cpp');
+    console.log(`  ✓ UI assert: inspection.cpp is the active editor`);
 
     // ====== STEP 7: User compiles via command ======
     console.log('\n[STEP 7] User: Command Palette → "xInsp2: Compile Script"');
