@@ -115,6 +115,18 @@ static void test_var_basic() {
     CHECK(snap[3].kind == xi::VarKind::String);
 }
 
+static void test_var_string_literal() {
+    SECTION("VAR with string literal is copied into std::string, not stashed as const char*");
+    xi::ValueStore::current().clear();
+    VAR(greeting, "hello world");
+    auto snap = xi::ValueStore::current().snapshot();
+    CHECK(snap.size() == 1);
+    CHECK(snap[0].kind == xi::VarKind::String);
+    // Payload must own the string — an `any<const char*>` would deserialize wrong.
+    CHECK(snap[0].payload.type() == typeid(std::string));
+    CHECK(std::any_cast<std::string>(snap[0].payload) == "hello world");
+}
+
 static void test_var_thread_local() {
     SECTION("ValueStore is thread-local");
     xi::ValueStore::current().clear();
@@ -215,6 +227,7 @@ int main() {
     test_async_wrap();
 
     test_var_basic();
+    test_var_string_literal();
     test_var_thread_local();
 
     test_param_basic();

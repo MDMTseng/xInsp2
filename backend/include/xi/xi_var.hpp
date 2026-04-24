@@ -108,6 +108,27 @@ struct VarTraits<std::string> {
     }
 };
 
+// VAR(x, "literal") — without this specialization, the `const char*`
+// decay would hit the default `Custom` trait and stash a raw pointer
+// (dangling if the literal came from a temporary). Copy into std::string.
+template <>
+struct VarTraits<const char*> {
+    static constexpr VarKind kind = VarKind::String;
+    static void fill(VarEntry& e, const char* v) {
+        e.kind    = VarKind::String;
+        e.payload = std::string(v ? v : "");
+    }
+};
+
+template <>
+struct VarTraits<char*> {
+    static constexpr VarKind kind = VarKind::String;
+    static void fill(VarEntry& e, char* v) {
+        e.kind    = VarKind::String;
+        e.payload = std::string(v ? v : "");
+    }
+};
+
 template <>
 struct VarTraits<Image> {
     static constexpr VarKind kind = VarKind::Image;

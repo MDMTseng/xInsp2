@@ -51,10 +51,14 @@ class HostImage {
 public:
     HostImage() = default;
 
-    HostImage(const xi_host_api* host, xi_image_handle h)
-        : host_(host), handle_(h) {
-        if (host_ && handle_) host_->image_addref(handle_);
-    }
+    // NOTE: no public (host, handle) constructor. It was a refcount trap:
+    // `host->image_create()` returns a handle with refcount=1, so
+    // `HostImage(host, host->image_create(...))` would leave refcount=2
+    // and leak. Use the two named ctors below:
+    //   - from_handle(host, h)  — take ownership of an existing handle
+    //   - from_image(host, img) — copy an xi::Image into the host pool
+    // For the rare case you genuinely want to share (addref) an existing
+    // handle, call `share_handle` explicitly.
 
     ~HostImage() {
         if (host_ && handle_) host_->image_release(handle_);
@@ -115,6 +119,13 @@ public:
         hi.host_ = host;
         hi.handle_ = h;  // no addref — we take the existing refcount
         return hi;
+    }
+
+    // Share an existing handle by addref-ing — for when some other
+    // component owns the handle and you want an independently-managed view.
+    static HostImage share_handle(const xi_host_api* host, xi_image_handle h) {
+        if (host && h) host->image_addref(h);
+        return from_handle(host, h);
     }
 
     bool empty() const { return !handle_ || !host_; }
