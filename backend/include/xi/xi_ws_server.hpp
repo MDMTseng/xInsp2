@@ -315,7 +315,12 @@ public:
     }
 
 private:
-    static constexpr size_t kMaxFrame = 64u * 1024u * 1024u;
+    // Upper bound on a single WebSocket frame payload and on the total
+    // size of a reassembled fragmented message. 16 MiB comfortably covers
+    // JPEG previews of 20 MP frames (typical 300 KB–2 MB) while keeping
+    // the memory blast radius small for a localhost control channel.
+    static constexpr size_t kMaxFrame   = 16u * 1024u * 1024u;
+    static constexpr size_t kMaxMessage = 16u * 1024u * 1024u;
 
     socket_t    listen_ = INVALID_SOCK;
     socket_t    client_ = INVALID_SOCK;
@@ -323,11 +328,22 @@ private:
     std::vector<uint8_t> rx_buf_;
     std::mutex  tx_mu_;
 
+    // Fragmented-message reassembly state (RFC 6455 §5.4). When a data
+    // frame arrives with fin=0 we stash its opcode and payload; subsequent
+    // continuation frames (opcode 0x0) append until fin=1.
+    std::vector<uint8_t> msg_buf_;
+    int                  msg_opcode_     = 0;
+    bool                 msg_in_progress_ = false;
+
     void close_client() {
         if (client_ != INVALID_SOCK) {
             CLOSESOCK(client_);
             client_ = INVALID_SOCK;
             rx_buf_.clear();
+            msg_buf_.clear();
+            msg_buf_.shrink_to_fit();
+            msg_in_progress_ = false;
+            msg_opcode_      = 0;
         }
     }
 
@@ -383,15 +399,27 @@ private:
         int n = ::recv(client_, reinterpret_cast<char*>(tmp), (int)sizeof(tmp), 0);
         if (n <= 0) return false;
         rx_buf_.insert(rx_buf_.end(), tmp, tmp + n);
+        // Guard against unbounded growth: if we've buffered more than a
+        // legal frame's worth without finding a frame boundary, the peer
+        // is either broken or malicious. Drop.
+        if (rx_buf_.size() > kMaxFrame + 16) return false;
+
         // Parse as many frames as present
         for (;;) {
             size_t consumed = 0;
             int    op       = 0;
+            bool   fin      = false;
             std::vector<uint8_t> payload;
-            auto r = parse_frame(rx_buf_.data(), rx_buf_.size(), op, payload, consumed);
+            auto r = parse_frame(rx_buf_.data(), rx_buf_.size(), op, fin, payload, consumed);
             if (r == ParseResult::Need) break;
             if (r == ParseResult::Bad)  return false;
             rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + consumed);
+
+            // Control frames (opcode ≥ 0x8) must not be fragmented and
+            // must carry ≤125 bytes (RFC 6455 §5.5).
+            const bool is_control = (op & 0x8) != 0;
+            if (is_control && (!fin || payload.size() > 125)) return false;
+
             if (op == 0x8) return false; // close
             if (op == 0x9) {
                 // ping -> pong
@@ -399,10 +427,36 @@ private:
                 continue;
             }
             if (op == 0xA) continue; // pong ignored
-            if (op == 0x1 && on_text) {
-                on_text(std::string_view(reinterpret_cast<const char*>(payload.data()), payload.size()));
-            } else if (op == 0x2 && on_binary) {
-                on_binary(payload.data(), payload.size());
+
+            // Data frames: handle continuation / fragmentation.
+            if (op == 0x0) {
+                // Continuation frame.
+                if (!msg_in_progress_) return false; // protocol error
+                if (msg_buf_.size() + payload.size() > kMaxMessage) return false;
+                msg_buf_.insert(msg_buf_.end(), payload.begin(), payload.end());
+            } else if (op == 0x1 || op == 0x2) {
+                // Start of a new data message.
+                if (msg_in_progress_) return false; // missing continuation
+                msg_opcode_      = op;
+                msg_in_progress_ = true;
+                if (payload.size() > kMaxMessage) return false;
+                msg_buf_ = std::move(payload);
+            } else {
+                // Unknown opcode.
+                return false;
+            }
+
+            if (fin) {
+                if (msg_opcode_ == 0x1 && on_text) {
+                    on_text(std::string_view(reinterpret_cast<const char*>(msg_buf_.data()),
+                                             msg_buf_.size()));
+                } else if (msg_opcode_ == 0x2 && on_binary) {
+                    on_binary(msg_buf_.data(), msg_buf_.size());
+                }
+                msg_buf_.clear();
+                msg_buf_.shrink_to_fit();
+                msg_in_progress_ = false;
+                msg_opcode_      = 0;
             }
         }
         return true;
@@ -411,7 +465,8 @@ private:
     enum class ParseResult { Ok, Need, Bad };
 
     ParseResult parse_frame(const uint8_t* p, size_t n,
-                            int& op_out, std::vector<uint8_t>& payload,
+                            int& op_out, bool& fin_out,
+                            std::vector<uint8_t>& payload,
                             size_t& consumed) {
         if (n < 2) return ParseResult::Need;
         uint8_t b0 = p[0];
@@ -431,6 +486,7 @@ private:
             for (int i = 0; i < 8; ++i) len = (len << 8) | p[hdr + i];
             hdr += 8;
         }
+        // Reject oversized frames before any allocation happens.
         if (len > kMaxFrame) return ParseResult::Bad;
         if (!masked) return ParseResult::Bad; // clients must mask
         if (n < hdr + 4 + len) return ParseResult::Need;
@@ -442,7 +498,7 @@ private:
         }
         consumed = hdr + len;
         op_out   = opcode;
-        (void)fin;
+        fin_out  = fin;
         return ParseResult::Ok;
     }
 
