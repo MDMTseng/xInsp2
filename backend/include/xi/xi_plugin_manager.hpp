@@ -39,6 +39,8 @@
 #include "xi_cert.hpp"
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
+#include "xi_source.hpp"
+#include "xi_trigger_bus.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -141,6 +143,14 @@ struct ProjectInfo {
     std::string script_path;
     std::vector<std::string> plugin_names;  // which plugins are used
     std::unordered_map<std::string, InstanceInfo> instances;
+
+    // Trigger bus policy persisted per project. Default is Any (every
+    // source emit fires one dispatch) — back-compat with pre-trigger
+    // plugins. Change to AllRequired for multi-camera synchronisation.
+    TriggerPolicy trigger_policy    = TriggerPolicy::Any;
+    std::vector<std::string> trigger_required;    // source names (AllRequired)
+    std::string   trigger_leader;                 // source name (LeaderFollowers)
+    int           trigger_window_ms = 100;
 };
 
 class PluginManager {
@@ -272,6 +282,15 @@ public:
         return true;
     }
 
+    void close_project() {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto& [k, v] : project_.instances) {
+            InstanceRegistry::instance().remove(k);
+            InstanceFolderRegistry::instance().clear(k);
+        }
+        project_ = ProjectInfo{};
+    }
+
     bool open_project(const std::string& folder) {
         std::lock_guard<std::mutex> lk(mu_);
         auto pj = std::filesystem::path(folder) / "project.json";
@@ -297,6 +316,51 @@ public:
         auto script_opt = extract_string(content, "script");
         if (script_opt) project_.script_path = (std::filesystem::path(folder) / *script_opt).string();
         else            project_.script_path = (std::filesystem::path(folder) / "inspection.cpp").string();
+
+        // Parse trigger_policy block (optional; older project.json files
+        // have none and we default to Any).
+        project_.trigger_policy    = TriggerPolicy::Any;
+        project_.trigger_required.clear();
+        project_.trigger_leader.clear();
+        project_.trigger_window_ms = 100;
+        auto tp_pos = content.find("\"trigger_policy\"");
+        if (tp_pos != std::string::npos) {
+            // Parse just the small block — simplest: find enclosing { }
+            auto bs = content.find('{', tp_pos);
+            auto be = (bs == std::string::npos) ? std::string::npos : content.find('}', bs);
+            if (bs != std::string::npos && be != std::string::npos) {
+                std::string block = content.substr(bs, be - bs + 1);
+                auto pol = extract_string(block, "policy");
+                if (pol) {
+                    if      (*pol == "all_required")     project_.trigger_policy = TriggerPolicy::AllRequired;
+                    else if (*pol == "leader_followers") project_.trigger_policy = TriggerPolicy::LeaderFollowers;
+                }
+                auto ld = extract_string(block, "leader");
+                if (ld) project_.trigger_leader = *ld;
+                auto wp = block.find("\"window_ms\":");
+                if (wp != std::string::npos) {
+                    try { project_.trigger_window_ms = std::stoi(block.substr(wp + 12)); }
+                    catch (...) {}
+                }
+                auto rp = block.find("\"required\":[");
+                if (rp != std::string::npos) {
+                    auto re = block.find(']', rp);
+                    if (re != std::string::npos) {
+                        std::string arr = block.substr(rp + 12, re - (rp + 12));
+                        size_t pos = 0;
+                        while (pos < arr.size()) {
+                            auto q1 = arr.find('"', pos); if (q1 == std::string::npos) break;
+                            auto q2 = arr.find('"', q1 + 1); if (q2 == std::string::npos) break;
+                            project_.trigger_required.emplace_back(arr.substr(q1 + 1, q2 - q1 - 1));
+                            pos = q2 + 1;
+                        }
+                    }
+                }
+            }
+        }
+        TriggerBus::instance().set_policy(
+            project_.trigger_policy, project_.trigger_required,
+            project_.trigger_leader, project_.trigger_window_ms);
 
         // Scan instances/ subdirectories
         auto inst_dir = std::filesystem::path(folder) / "instances";
@@ -341,7 +405,7 @@ public:
                     // Same registration as create_instance — needed for project-load too.
                     InstanceFolderRegistry::instance().set(ii.name, ii.folder_path);
                     if (pi.c_factory) {
-                        static xi_host_api host = ImagePool::make_host_api();
+                        static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
                         void* raw = pi.c_factory(&host, ii.name.c_str());
                         if (raw) {
                             ii.instance = std::make_shared<CAbiInstanceAdapter>(
@@ -361,6 +425,7 @@ public:
                             ii.instance->set_def(cfg_val);
                         }
                         InstanceRegistry::instance().add(ii.instance);
+                        attach_trigger_bridge(ii.instance.get(), ii.name);
                     }
                 }
                 project_.instances[ii.name] = std::move(ii);
@@ -394,7 +459,7 @@ public:
 
         if (pi.c_factory) {
             // New C ABI — create via host API
-            static xi_host_api host = ImagePool::make_host_api();
+            static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
             void* raw = pi.c_factory(&host, instance_name.c_str());
             if (!raw) {
                 InstanceFolderRegistry::instance().clear(instance_name);
@@ -409,6 +474,7 @@ public:
             ii.instance.reset(raw);
         }
         InstanceRegistry::instance().add(ii.instance);
+        attach_trigger_bridge(ii.instance.get(), instance_name);
 
         // Save instance.json
         save_instance_json(ii);
@@ -417,6 +483,11 @@ public:
         save_project_locked();
         return &project_.instances[instance_name];
     }
+
+    // Bridge legacy xi::ImageSource into the global TriggerBus so trigger-
+    // aware scripts see push()'d frames as bus events without each plugin
+    // having to migrate. Implemented out-of-line in xi_trigger_bridge.hpp.
+    static void attach_trigger_bridge(InstanceBase* inst, const std::string& source);
 
     // Save an instance's current config to its folder.
     bool save_instance(const std::string& instance_name) {
@@ -427,7 +498,104 @@ public:
         return true;
     }
 
+    // Remove an instance: destroys the runtime object + unregisters from
+    // both registries. Optionally deletes the on-disk folder.
+    bool remove_instance(const std::string& instance_name, bool delete_folder) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = project_.instances.find(instance_name);
+        if (it == project_.instances.end()) return false;
+        InstanceRegistry::instance().remove(instance_name);
+        InstanceFolderRegistry::instance().clear(instance_name);
+        ImageSource::unregister_publish_hook(instance_name);
+        std::string folder = it->second.folder_path;
+        project_.instances.erase(it);
+        if (delete_folder && !folder.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(folder, ec);
+        }
+        save_project_locked();
+        return true;
+    }
+
+    // Rename an instance. Moves the on-disk folder and re-registers under
+    // the new name. Returns false if the new name is in use or taken by
+    // an on-disk folder not tied to any instance.
+    bool rename_instance(const std::string& old_name, const std::string& new_name) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (old_name == new_name) return true;
+        auto it = project_.instances.find(old_name);
+        if (it == project_.instances.end()) return false;
+        if (project_.instances.count(new_name)) return false;
+        // Move the folder
+        auto old_folder = std::filesystem::path(it->second.folder_path);
+        auto new_folder = old_folder.parent_path() / new_name;
+        if (std::filesystem::exists(new_folder)) return false;
+        std::error_code ec;
+        std::filesystem::rename(old_folder, new_folder, ec);
+        if (ec) return false;
+        // Update registries — InstanceBase::name() is immutable, so we
+        // recreate the instance under the new name via the plugin factory.
+        // Old instance's state is preserved via get_def → set_def.
+        auto pit = plugins_.find(it->second.plugin_name);
+        if (pit == plugins_.end()) return false;
+        auto& pi = pit->second;
+
+        std::string saved_def;
+        if (it->second.instance) saved_def = it->second.instance->get_def();
+
+        // Drop old runtime entries before creating new one (same name-map
+        // only has one slot, different keys).
+        InstanceRegistry::instance().remove(old_name);
+        InstanceFolderRegistry::instance().clear(old_name);
+
+        InstanceInfo ii;
+        ii.name = new_name;
+        ii.plugin_name = it->second.plugin_name;
+        ii.folder_path = new_folder.string();
+        InstanceFolderRegistry::instance().set(new_name, ii.folder_path);
+        if (pi.c_factory) {
+            static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+            void* raw = pi.c_factory(&host, new_name.c_str());
+            if (!raw) { InstanceFolderRegistry::instance().clear(new_name); return false; }
+            ii.instance = std::make_shared<CAbiInstanceAdapter>(
+                new_name, ii.plugin_name, pi.handle, raw);
+        } else if (pi.factory) {
+            auto* raw = pi.factory(new_name.c_str());
+            if (!raw) return false;
+            ii.instance.reset(raw);
+        } else {
+            return false;
+        }
+        if (!saved_def.empty()) ii.instance->set_def(saved_def);
+        InstanceRegistry::instance().add(ii.instance);
+
+        project_.instances.erase(it);
+        project_.instances[new_name] = std::move(ii);
+        save_instance_json(project_.instances[new_name]);
+        save_project_locked();
+        return true;
+    }
+
     ProjectInfo& project() { return project_; }
+
+    // Update the trigger policy for the current project. Applies to the
+    // global TriggerBus immediately and re-saves project.json.
+    bool set_trigger_policy(TriggerPolicy p,
+                            std::vector<std::string> required,
+                            std::string leader,
+                            int window_ms)
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (project_.folder_path.empty()) return false;
+        project_.trigger_policy    = p;
+        project_.trigger_required  = std::move(required);
+        project_.trigger_leader    = std::move(leader);
+        project_.trigger_window_ms = window_ms;
+        TriggerBus::instance().set_policy(
+            p, project_.trigger_required, project_.trigger_leader, window_ms);
+        save_project_locked();
+        return true;
+    }
 
     std::string to_json() {
         std::lock_guard<std::mutex> lk(mu_);
@@ -535,6 +703,7 @@ private:
         f << "{\n";
         f << "  \"name\": \"" << project_.name << "\",\n";
         f << "  \"script\": \"" << std::filesystem::path(project_.script_path).filename().string() << "\",\n";
+        f << "  \"trigger_policy\": " << trigger_policy_json_locked() << ",\n";
         f << "  \"instances\": [";
         int i = 0;
         for (auto& [k, v] : project_.instances) {
@@ -542,6 +711,25 @@ private:
             f << "\n    {\"name\": \"" << v.name << "\", \"plugin\": \"" << v.plugin_name << "\"}";
         }
         f << "\n  ]\n}\n";
+    }
+
+    std::string trigger_policy_json_locked() const {
+        const char* p =
+            project_.trigger_policy == TriggerPolicy::AllRequired     ? "all_required" :
+            project_.trigger_policy == TriggerPolicy::LeaderFollowers ? "leader_followers" :
+                                                                         "any";
+        std::string s = "{\"policy\":\"";
+        s += p; s += "\",\"window_ms\":";
+        s += std::to_string(project_.trigger_window_ms);
+        s += ",\"required\":[";
+        for (size_t i = 0; i < project_.trigger_required.size(); ++i) {
+            if (i) s += ",";
+            s += "\""; s += project_.trigger_required[i]; s += "\"";
+        }
+        s += "],\"leader\":\"";
+        s += project_.trigger_leader;
+        s += "\"}";
+        return s;
     }
 
     void save_instance_json(const InstanceInfo& ii) {
