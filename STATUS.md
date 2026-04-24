@@ -104,13 +104,15 @@ retired — coverage status lives in `TestAudit.md`):
 | ~~A4-2~~ | ✅ MED | `xi_ws_server.hpp` | Fragmentation now reassembled (`0f6a0a6`) |
 | ~~A4-3~~ | ✅ MED | `xi_ws_server.hpp` | kMaxFrame dropped to 16 MiB; rx_buf_ bounded (`0f6a0a6`) |
 | ~~A4-5~~ | ✅ MED | `xi_script_support.hpp` | Snapshot thunk uses `esc()` on image keys (`6b5db85`) |
-| A1-3 | LOW | `xi_record.hpp` | Path key buffer 256-char silent truncation |
-| A1-5 | LOW | `xi_record.hpp` | `[-1]` parses as idx=0 |
-| A1-9 | LOW | `xi_param.hpp` | `Param::as_json` doesn't escape name |
-| A3-6 | LOW | `service_main.cpp` | Dead `g_trigger_cv` / `g_trigger_pending` |
-| A4-4 | LOW | `xi_script_loader.hpp` | Optional DLL symbols' null-check contract undocumented |
-| A4-6 | LOW | `xi_script_support.hpp` | Static globals tied to DLL lifetime — document invariant |
-| A4-7 | LOW | `xi_protocol.hpp` | `data_json` trusted verbatim — document boundary |
+| ~~A1-3~~ | ✅ LOW | `xi_record.hpp` | Path key now std::string, no truncation |
+| ~~A1-5~~ | ✅ LOW | `xi_record.hpp` | `[-1]` and non-digit array index rejected |
+| ~~A1-9~~ | ✅ LOW | `xi_param.hpp` | `Param::as_json` escapes name |
+| ~~A3-6~~ | ✅ LOW | `service_main.cpp` | Dead `g_trigger_cv` / `g_trigger_pending` removed |
+| ~~A4-4~~ | ✅ LOW | `xi_script_loader.hpp` | Contract block added: only `inspect` required |
+| ~~A4-6~~ | ✅ LOW | `xi_script_support.hpp` | Lifetime invariant documented |
+| ~~A4-7~~ | ✅ LOW | `xi_protocol.hpp` | Trust boundary on `data_json` documented |
+
+**BugAudit findings closed: 4 CRITICAL + 8 HIGH + 10 MEDIUM + 7 LOW = 29/29.**
 
 ## In flight — Phase 3: TriggerBus & multi-camera (uncommitted)
 

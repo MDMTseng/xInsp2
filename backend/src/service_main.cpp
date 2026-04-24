@@ -141,9 +141,6 @@ static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
 // When running in continuous mode (cmd: start), a worker thread waits for
 // trigger signals from image sources and calls inspect() for each frame.
 static std::atomic<bool>       g_continuous{false};
-static std::condition_variable g_trigger_cv;
-static std::mutex              g_trigger_mu;
-static std::atomic<int>        g_trigger_pending{0};
 static std::thread             g_worker_thread;
 
 // ---- Trigger access (script callbacks) ---------------------------------
@@ -581,7 +578,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
 
         g_continuous = true;
-        g_trigger_pending = 0;
 
         int interval_ms = 1000 / std::max(fps, 1);
         auto* srv_ptr = &srv;
@@ -631,7 +627,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         send_rsp_ok(srv, id, R"({"started":true})");
     } else if (name == "stop") {
         g_continuous = false;
-        g_trigger_cv.notify_all();
         g_ev_cv.notify_all();           // wake bus-driven worker
         xi::TriggerBus::instance().clear_sink();
         if (g_worker_thread.joinable()) g_worker_thread.join();

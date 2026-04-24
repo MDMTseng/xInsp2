@@ -23,6 +23,7 @@
 //
 
 #include <atomic>
+#include <cstdio>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -135,11 +136,12 @@ public:
     }
 
     std::string as_json() const override {
-        // Minimal hand-rolled JSON to keep this header dep-free. The service
-        // layer uses nlohmann/json for anything user-facing; this is only for
-        // quick dumps and tests.
-        std::string s = "{\"name\":\"" + name_ + "\",";
-        s += "\"type\":\"" + type_name() + "\",";
+        // Minimal hand-rolled JSON to keep this header dep-free. Names
+        // are escaped (param names may contain quotes or backslashes
+        // from user-supplied identifiers).
+        std::string s = "{\"name\":";
+        escape_json(s, name_);
+        s += ",\"type\":\"" + type_name() + "\",";
         s += "\"value\":" + to_str(get());
         if (range_.min != range_.max) {
             s += ",\"min\":" + to_str(range_.min);
@@ -147,6 +149,26 @@ public:
         }
         s += "}";
         return s;
+    }
+
+    static void escape_json(std::string& out, const std::string& in) {
+        out.push_back('"');
+        for (char c : in) {
+            switch (c) {
+                case '"':  out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n";  break;
+                case '\r': out += "\\r";  break;
+                case '\t': out += "\\t";  break;
+                default:
+                    if ((unsigned char)c < 0x20) {
+                        char b[8];
+                        std::snprintf(b, sizeof(b), "\\u%04x", (unsigned)c);
+                        out += b;
+                    } else out.push_back(c);
+            }
+        }
+        out.push_back('"');
     }
 
     bool set_from_json(const std::string& v) override {

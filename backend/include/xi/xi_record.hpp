@@ -234,26 +234,25 @@ public:
             while (*p && cur) {
                 if (*p == '.') ++p;  // skip leading or separator dot
                 if (*p == '[') {
-                    // Array index: [N]
+                    // Array index: [N]. Reject non-digit (e.g. [-1], [abc])
+                    // instead of silently yielding idx=0.
                     ++p;
+                    if (*p < '0' || *p > '9') return nullptr;
                     int idx = 0;
                     while (*p >= '0' && *p <= '9') { idx = idx * 10 + (*p - '0'); ++p; }
-                    if (*p == ']') ++p;
+                    if (*p != ']') return nullptr;
+                    ++p;
                     if (!cJSON_IsArray(cur)) return nullptr;
                     cur = cJSON_GetArrayItem(cur, idx);
                 } else {
-                    // Object key: read until next . or [ or end
+                    // Object key: read until next . or [ or end. Keys of any
+                    // length — std::string, no silent truncation at 256.
                     const char* start = p;
                     while (*p && *p != '.' && *p != '[') ++p;
                     if (p == start) return nullptr;
-                    // Extract key
-                    char key[256];
-                    int len = (int)(p - start);
-                    if (len >= 256) len = 255;
-                    memcpy(key, start, len);
-                    key[len] = 0;
+                    std::string key(start, p - start);
                     if (!cJSON_IsObject(cur)) return nullptr;
-                    cur = cJSON_GetObjectItem(cur, key);
+                    cur = cJSON_GetObjectItem(cur, key.c_str());
                 }
             }
             return cur;

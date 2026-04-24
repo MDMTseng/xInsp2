@@ -171,6 +171,14 @@ struct Rsp {
         out += ok ? "true" : "false";
         if (ok && !data_json.empty()) {
             out += ",\"data\":";
+            // TRUST BOUNDARY: data_json is appended verbatim. Every caller
+            // that populates this field is responsible for emitting well-
+            // formed JSON — we do NOT revalidate here. Handler code inside
+            // the backend is the trust origin; cJSON-backed builders
+            // (xi::Json, xi::Record::data_json) are always safe, as are
+            // string-concat sites that use json_escape_into on every
+            // dynamic value. Ad-hoc `"{\"foo\":\"" + bar + "\"}"` is the
+            // pattern to watch — must escape `bar`.
             out += data_json;
         }
         if (!ok && !error.empty()) {

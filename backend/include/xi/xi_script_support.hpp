@@ -232,7 +232,15 @@ XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* c
 }
 
 // --- xi::use() callback storage ---
+//
 // Stored as void* to avoid xi_abi.h dependency. xi_use.hpp casts them.
+//
+// Lifetime invariant: these globals live inside the USER SCRIPT DLL
+// (force-included via xi_script_support.hpp). They are written from
+// the host side via xi_script_set_use_callbacks once per DLL load,
+// and consumed from script code until DLL unload. The host MUST NOT
+// retain any pointer into these after calling FreeLibrary — all
+// reads happen inside the script's address space only.
 static void* g_use_process_fn_   = nullptr;
 static void* g_use_exchange_fn_  = nullptr;
 static void* g_use_grab_fn_      = nullptr;
