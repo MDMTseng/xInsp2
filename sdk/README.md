@@ -547,5 +547,6 @@ machines, so they stay separate from cert.
   own worker
 - **Sharing images is free**: `xi::Image` uses a `shared_ptr` to pixels —
   copying a Record does not copy image bytes
-- **cJSON**: re-exported via `xi_abi.hpp` — use it freely. Parse with
-  `cJSON_Parse`, free with `cJSON_Delete`
+- **JSON**: prefer `xi::Json` (RAII, path access, defaults) for
+  exchange commands and replies. Raw cJSON is still re-exported via
+  `xi_abi.hpp` for performance-critical paths or legacy plugins
