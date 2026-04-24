@@ -530,6 +530,83 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         out += "}";
         send_rsp_ok(srv, id, out);
+    } else if (name == "compare_variants") {
+        // S7: apply variant A → run → snapshot → apply B → run → snapshot.
+        // args: { a: {params:[...], instances:[...]}, b: {...} }
+        //   params:    [{name, value}]        (value is JSON scalar)
+        //   instances: [{name, def}]          (def is JSON object)
+        // Reply: { a: {vars: <snap>}, b: {vars: <snap>} }
+        //
+        // The client drives comparison — we just guarantee atomic back-to-
+        // back runs with consistent variant state. A successful run
+        // leaves the script in variant-B state; the caller restores
+        // their own default with a follow-up set_param / load_project.
+        auto apply_variant = [&](cJSON* root) -> bool {
+            if (!root || !g_script.ok()) return false;
+            cJSON* params = cJSON_GetObjectItem(root, "params");
+            if (cJSON_IsArray(params) && g_script.set_param) {
+                int n = cJSON_GetArraySize(params);
+                for (int i = 0; i < n; ++i) {
+                    cJSON* p = cJSON_GetArrayItem(params, i);
+                    cJSON* nm = cJSON_GetObjectItem(p, "name");
+                    cJSON* vv = cJSON_GetObjectItem(p, "value");
+                    if (!cJSON_IsString(nm) || !vv) continue;
+                    char* val = cJSON_PrintUnformatted(vv);
+                    if (val) { g_script.set_param(nm->valuestring, val); cJSON_free(val); }
+                }
+            }
+            cJSON* insts = cJSON_GetObjectItem(root, "instances");
+            if (cJSON_IsArray(insts)) {
+                int n = cJSON_GetArraySize(insts);
+                for (int i = 0; i < n; ++i) {
+                    cJSON* it = cJSON_GetArrayItem(insts, i);
+                    cJSON* nm = cJSON_GetObjectItem(it, "name");
+                    cJSON* df = cJSON_GetObjectItem(it, "def");
+                    if (!cJSON_IsString(nm) || !df) continue;
+                    char* def_str = cJSON_PrintUnformatted(df);
+                    if (!def_str) continue;
+                    auto inst = xi::InstanceRegistry::instance().find(nm->valuestring);
+                    if (inst) inst->set_def(def_str);
+                    else if (g_script.set_instance_def)
+                        g_script.set_instance_def(nm->valuestring, def_str);
+                    cJSON_free(def_str);
+                }
+            }
+            return true;
+        };
+        auto run_and_snapshot = [&]() -> std::string {
+            if (!g_script.ok() || !g_script.inspect) return "[]";
+            if (g_script.reset) g_script.reset();
+            try { g_script.inspect(0); }
+            catch (...) { /* best-effort: keep going */ }
+            if (!g_script.snapshot) return "[]";
+            std::vector<char> buf(256 * 1024);
+            int n = g_script.snapshot(buf.data(), (int)buf.size());
+            if (n < 0) { buf.resize((size_t)(-n) + 1024);
+                         n = g_script.snapshot(buf.data(), (int)buf.size()); }
+            return n > 0 ? std::string(buf.data(), (size_t)n) : std::string("[]");
+        };
+        cJSON* root = cJSON_Parse(parsed->args_json.c_str());
+        if (!root) { send_rsp_err(srv, id, "invalid args JSON"); return; }
+        cJSON* a = cJSON_GetObjectItem(root, "a");
+        cJSON* b = cJSON_GetObjectItem(root, "b");
+        if (!a || !b) { cJSON_Delete(root); send_rsp_err(srv, id, "need args.a and args.b"); return; }
+        std::string snap_a, snap_b;
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (!g_script.ok()) { cJSON_Delete(root); send_rsp_err(srv, id, "no script loaded"); return; }
+            apply_variant(a);
+            snap_a = run_and_snapshot();
+            apply_variant(b);
+            snap_b = run_and_snapshot();
+        }
+        cJSON_Delete(root);
+        std::string out = "{\"a\":{\"vars\":";
+        out += snap_a;
+        out += "},\"b\":{\"vars\":";
+        out += snap_b;
+        out += "}}";
+        send_rsp_ok(srv, id, out);
     } else if (name == "resume") {
         // S3: unblock a script waiting in xi::breakpoint(). Idempotent —
         // calling when not paused is a no-op with an informative reply.

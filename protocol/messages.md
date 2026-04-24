@@ -190,6 +190,37 @@ UIs that ship their own command vocabulary.
 ### `save_project` / `load_project`
 `args: { "path": "project.json" }` → `ok: true`
 
+### `compare_variants`
+
+Run the loaded script once under each of two "variants" (sets of
+`Param` values + instance defs), back-to-back, and return both vars
+snapshots. Client-side code diffs to answer "what does sigma=3 vs
+sigma=4 look like for THIS frame?" without juggling two backends.
+
+```json
+{ "type": "cmd", "id": 7, "name": "compare_variants",
+  "args": {
+    "a": {
+      "params":    [ { "name": "sigma", "value": 3 } ],
+      "instances": [ { "name": "det0",  "def": { "threshold": 120 } } ]
+    },
+    "b": {
+      "params":    [ { "name": "sigma", "value": 4 } ],
+      "instances": [ { "name": "det0",  "def": { "threshold": 150 } } ]
+    }
+  } }
+```
+
+Reply:
+
+```json
+{ "a": { "vars": [ ... snapshot ... ] },
+  "b": { "vars": [ ... snapshot ... ] } }
+```
+
+After the call the script is left in **variant B**'s state — follow
+with your own `set_param` / `load_project` if you need to restore.
+
 ### `resume`
 
 Releases a script that's blocked inside `xi::breakpoint("label")` (S3).
