@@ -27,14 +27,55 @@ const screenshotDir = path.resolve(__dirname, '..', '..', '..', 'screenshot');
 const projectRoot = path.resolve(__dirname, '..', '..', '..');
 let stepNum = 0;
 
+// The extension host process (this one) is a descendant of the Code.exe
+// main process that owns the VS Code window. Walk up ppid via
+// Win32_Process so PowerShell can pick THAT specific window — not
+// whatever stale "Extension Development Host" session the user already
+// had open. Resolved once; the main PID doesn't change.
+let mainCodePid = null;
+function resolveMainCodePid() {
+    if (mainCodePid) return mainCodePid;
+    try {
+        // `process.ppid` walks one step up; the main Code.exe window is
+        // typically 2-3 hops up. Let PowerShell do the walk using CIM,
+        // then cache the result.
+        const script = `
+$p = ${process.pid}
+while ($true) {
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
+    if (-not $proc) { break }
+    $pname = [IO.Path]::GetFileNameWithoutExtension($proc.Name)
+    # Stop at the first Code.exe ancestor that actually owns a window.
+    if ($pname -eq 'Code') {
+        $hp = Get-Process -Id $p -ErrorAction SilentlyContinue
+        if ($hp -and $hp.MainWindowHandle -ne [IntPtr]::Zero) {
+            Write-Output $p
+            break
+        }
+    }
+    if (-not $proc.ParentProcessId -or $proc.ParentProcessId -eq 0) { break }
+    $p = $proc.ParentProcessId
+}`;
+        const out = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${script.replace(/"/g, '\\"').replace(/\n/g, '; ')}"`,
+            { timeout: 10000, encoding: 'utf8' }).trim();
+        const n = parseInt(out, 10);
+        if (!isNaN(n)) { mainCodePid = n; console.log(`  [screenshot] main Code.exe pid=${n}`); }
+    } catch (e) {
+        console.log(`  [screenshot] pid resolution failed: ${e.message}`);
+    }
+    return mainCodePid;
+}
+
 function takeScreenshot(label) {
     stepNum++;
     fs.mkdirSync(screenshotDir, { recursive: true });
     const fname = `journey_${String(stepNum).padStart(2,'0')}_${label}.png`;
     const fpath = path.join(screenshotDir, fname);
-    // Use PrintWindow: captures VS Code's window buffer even if another
-    // window is in front, so screenshots stay clean regardless of the
-    // user's desktop state.
+    const pid = resolveMainCodePid() || 0;
+    // PrintWindow with flag 3 = PW_CLIENTONLY | PW_RENDERFULLCONTENT;
+    // works with DWM-composited windows (modern VS Code) where older
+    // flag=2 captures a black bitmap. Also: we always restore + flash
+    // foreground the target before capture so DWM has a fresh frame.
     const psScript = path.join(os.tmpdir(), `xinsp2_journey_ss_${process.pid}.ps1`);
     fs.writeFileSync(psScript, `
 Add-Type -AssemblyName System.Windows.Forms
@@ -47,28 +88,32 @@ public class Win {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmd);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
 $targetHwnd = [IntPtr]::Zero
-# Prefer windows whose title names the Extension Development Host — that's
-# the specific VS Code instance the test spawned. Among candidates pick the
-# largest (guards against Code helper renderers with tiny windows).
-$candidates = Get-Process -Name Code -ErrorAction SilentlyContinue |
-              Where-Object { $_.MainWindowTitle -ne "" -and $_.MainWindowHandle -ne [IntPtr]::Zero } |
-              ForEach-Object {
-                  $r = New-Object Win+RECT
-                  [void][Win]::GetWindowRect($_.MainWindowHandle, [ref]$r)
-                  $area = [Math]::Max(0, ($r.Right - $r.Left)) * [Math]::Max(0, ($r.Bottom - $r.Top))
-                  [PSCustomObject]@{
-                      Hwnd = $_.MainWindowHandle
-                      Title = $_.MainWindowTitle
-                      Area = $area
-                      IsDev = $_.MainWindowTitle -like "*Extension Development Host*"
-                  }
-              }
-$best = $candidates | Sort-Object -Property @{Expression="IsDev";Descending=$true}, @{Expression="Area";Descending=$true} | Select-Object -First 1
-if ($best) { $targetHwnd = $best.Hwnd }
+$targetTitle = ""
+# First preference: the specific Code.exe pid we resolved from the
+# extension host's ancestor chain. That's THIS EDH, not some other one.
+$preferredPid = ${pid}
+if ($preferredPid -gt 0) {
+    $p = Get-Process -Id $preferredPid -ErrorAction SilentlyContinue
+    if ($p -and $p.MainWindowHandle -ne [IntPtr]::Zero) {
+        $targetHwnd = $p.MainWindowHandle
+        $targetTitle = $p.MainWindowTitle
+    }
+}
+# Fallback: newest Code.exe with "Extension Development Host" in title.
+if ($targetHwnd -eq [IntPtr]::Zero) {
+    $best = Get-Process -Name Code -ErrorAction SilentlyContinue |
+            Where-Object { $_.MainWindowTitle -like "*Extension Development Host*" -and
+                           $_.MainWindowHandle -ne [IntPtr]::Zero } |
+            Sort-Object -Property StartTime -Descending |
+            Select-Object -First 1
+    if ($best) { $targetHwnd = $best.MainWindowHandle; $targetTitle = $best.MainWindowTitle }
+}
+Write-Host "[ss] hwnd=$targetHwnd title='$targetTitle'"
 if ($targetHwnd -eq [IntPtr]::Zero) {
     $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
     $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
@@ -76,6 +121,9 @@ if ($targetHwnd -eq [IntPtr]::Zero) {
     $gfx.CopyFromScreen($bounds.Location, (New-Object System.Drawing.Point(0,0)), $bounds.Size)
 } else {
     if ([Win]::IsIconic($targetHwnd)) { [void][Win]::ShowWindow($targetHwnd, 9) }
+    [void][Win]::ShowWindow($targetHwnd, 5)         # SW_SHOW
+    [void][Win]::SetForegroundWindow($targetHwnd)
+    Start-Sleep -Milliseconds 150
     $r = New-Object Win+RECT
     [void][Win]::GetWindowRect($targetHwnd, [ref]$r)
     $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
@@ -83,15 +131,30 @@ if ($targetHwnd -eq [IntPtr]::Zero) {
     $bmp = New-Object System.Drawing.Bitmap($w, $h)
     $gfx = [System.Drawing.Graphics]::FromImage($bmp)
     $hdc = $gfx.GetHdc()
-    [void][Win]::PrintWindow($targetHwnd, $hdc, 2)
+    # PW_CLIENTONLY(1) | PW_RENDERFULLCONTENT(2) = 3
+    $ok = [Win]::PrintWindow($targetHwnd, $hdc, 3)
     $gfx.ReleaseHdc($hdc)
+    # If PrintWindow fails (some DWM states), fall back to screen copy
+    # of the window's rect.
+    if (-not $ok) {
+        $bmp.Dispose(); $gfx.Dispose()
+        $bmp = New-Object System.Drawing.Bitmap($w, $h)
+        $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+        $gfx.CopyFromScreen(
+            (New-Object System.Drawing.Point($r.Left, $r.Top)),
+            (New-Object System.Drawing.Point(0, 0)),
+            (New-Object System.Drawing.Size($w, $h)))
+        Write-Host "[ss] PrintWindow failed, used CopyFromScreen"
+    }
 }
 $bmp.Save("${fpath.replace(/\\/g, '\\\\')}")
 $gfx.Dispose(); $bmp.Dispose()
 `);
     try {
-        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psScript}"`, { timeout: 20000 });
-        console.log(`  📸 ${fname}`);
+        const out = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psScript}"`,
+            { timeout: 20000, encoding: 'utf8' });
+        const diag = (out.match(/\[ss\][^\r\n]*/g) || []).join(' | ');
+        console.log(`  📸 ${fname}${diag ? '   ' + diag : ''}`);
     } catch (e) {
         console.log(`  📸 ${fname} failed: ${e.message}`);
     }
