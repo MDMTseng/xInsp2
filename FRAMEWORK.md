@@ -1,7 +1,8 @@
 # xInsp2 Framework Reference
 
 Complete technical reference for the xInsp2 machine vision inspection framework.
-51 commits. Last updated after full code audit + production hardening pass.
+62 commits. Last updated 2026-04-24 — post Phase 3 (TriggerBus + multi-camera +
+recording/replay + plugin SDK).
 
 ---
 
@@ -25,6 +26,9 @@ Complete technical reference for the xInsp2 machine vision inspection framework.
 16. [VS Code Extension](#16-vs-code-extension)
 17. [Build System](#17-build-system)
 18. [File Reference](#18-file-reference)
+19. [TriggerBus & Multi-Camera](#19-triggerbus)
+20. [Recording & Replay](#20-recording)
+21. [Plugin SDK](#21-plugin-sdk)
 
 ---
 
@@ -358,6 +362,10 @@ XI_PLUGIN_IMPL(MyPlugin)
 | `mock_camera` | Source | ✅ | Simulated camera, FPS/resolution config, frame counter, live preview |
 | `blob_analysis` | Processor | ✅ | Threshold + flood-fill + contour/area/centroid/bbox, canvas overlay |
 | `data_output` | Sink | ✅ | Save results to CSV/JSON (stub) |
+| `json_source` | Source | ✅ | Replays images + records from a JSON manifest |
+| `record_save` | Sink | ✅ | Writes Records to disk |
+| `threshold_op` | Processor | ✅ | Simple threshold operator plugin |
+| `synced_stereo` | Source | ✅ | Reference multi-frame trigger source (left + right under one tid) |
 
 ---
 
@@ -500,6 +508,16 @@ Connection: `ws://127.0.0.1:7823` (configurable)
 | `get_project` | — | Get project state |
 | `get_plugin_ui` | `{plugin}` | Get UI folder path |
 | `save_project` / `load_project` | `{path}` | Save/load project file |
+| `rescan_plugins` | — | Re-discover plugin folders on disk |
+| `close_project` | — | Unload current project, clear instances |
+| `remove_instance` | `{name, delete_folder}` | Destroy instance + optional disk cleanup |
+| `rename_instance` | `{old_name, new_name}` | Rename + move on-disk folder |
+| `recertify_plugin` | `{plugin}` | Regenerate plugin cert |
+| `set_trigger_policy` | `{policy, ...}` | ANY / AllRequired / LeaderFollowers |
+| `recording_start` | `{folder}` | Begin observer-mode event recording |
+| `recording_stop` | — | Flush manifest + stop recording |
+| `recording_status` | — | Running state + event count |
+| `recording_replay` | `{folder}` | Replay events through the bus |
 
 ### Binary preview frames
 
@@ -665,3 +683,150 @@ node test/runPipeline.mjs
 | Stack overflow | ⚠ Known | Kills process — needs guard thread (future) |
 | Infinite loop in script | ⚠ Known | Needs watchdog thread (future) |
 | Heap corruption from script | ⚠ Inherent | Same-process limitation — needs subprocess for full isolation |
+
+---
+
+## 19. TriggerBus
+
+Upgrade path from "source pushes frame → inspect fires" to "sources emit
+under a 128-bit trigger id → bus correlates → dispatch one event per id."
+
+### Why
+
+Hardware-triggered multi-camera capture needs the inspect routine to see
+**paired** frames that belong to the same pulse. The old `ImageSource::push`
+path had no notion of correlation — every push started a new inspect.
+
+### Data types (`xi_abi.h`)
+
+```c
+typedef struct { uint64_t hi; uint64_t lo; } xi_trigger_id;
+#define XI_TRIGGER_NULL (xi_trigger_id{0, 0})
+
+void (*emit_trigger)(const char* source_name,
+                     xi_trigger_id tid,
+                     int64_t timestamp_us,
+                     const xi_record_image* images,
+                     int32_t image_count);
+```
+
+Pass `XI_TRIGGER_NULL` to ask the host to allocate a fresh id. The bus
+addrefs each handle internally; the caller may release immediately.
+
+### Policies (`xi_trigger_bus.hpp`)
+
+| Policy | Behaviour |
+|--------|-----------|
+| `Any` | Fire on every emit. Default; back-compat with pre-trigger plugins. |
+| `AllRequired` | Wait until every source in `required_sources` has emitted for that tid. Drop incomplete tids after `window_ms`. |
+| `LeaderFollowers` | Fire on leader emit; attach followers' latest frames (best-effort). |
+
+Configured via `cmd: set_trigger_policy`. Persisted in `project.json`
+under a `trigger_policy` block:
+
+```json
+{
+  "trigger_policy": {
+    "mode": "AllRequired",
+    "required": ["cam_left", "cam_right"],
+    "window_ms": 30
+  }
+}
+```
+
+### Script-side API (`xi_use.hpp`)
+
+```cpp
+#include <xi/xi_use.hpp>
+
+void xi_inspect_entry(int frame) {
+    auto t = xi::current_trigger();
+    if (!t.is_active()) return;
+
+    VAR(tid,  t.id_string());
+    VAR(ts,   (double)t.timestamp_us);
+    VAR(left,  t.image("cam_left"));
+    VAR(right, t.image("cam_right"));
+}
+```
+
+Multi-frame sources use `<source>/<image_name>` keys, e.g.
+`t.image("synced0/left")`.
+
+### Bridging legacy plugins
+
+`InstanceBase`-style sources that `push()` frames are bridged into the bus
+automatically by `xi_trigger_bridge.hpp` — each push becomes an
+`emit_trigger(name, fresh_tid, ...)` call. No plugin changes required.
+
+---
+
+## 20. Recording
+
+`xi_trigger_recorder.hpp` attaches as an **observer** on the bus (does not
+block live dispatch). Every TriggerEvent is deep-copied, pixels written to
+disk, manifest updated on stop.
+
+### On-disk layout
+
+```
+<recording-dir>/
+  manifest.json
+  000001_<source>.raw
+  000001_<source2>.raw
+  000002_<source>.raw
+  ...
+```
+
+Raw header (24 bytes, little-endian):
+
+```
+magic    uint32 = 0x58494D47 ('XIMG')
+version  uint32 = 1
+width    uint32
+height   uint32
+channels uint32
+reserved uint32 = 0
+```
+
+Then `width * height * channels` bytes of pixel data.
+
+### Replay
+
+`cmd: recording_replay` reads manifest in order and calls
+`host->emit_trigger` for each event so the full pipeline (sink,
+correlation policy, observers) sees events exactly as a live source would.
+
+---
+
+## 21. Plugin SDK
+
+`sdk/` provides an out-of-tree plugin workflow:
+
+### Scaffold
+
+```bash
+node %XINSP2_ROOT%\sdk\scaffold.mjs C:\dev\my_plugins\foo
+cmake -S C:\dev\my_plugins\foo -B C:\dev\my_plugins\foo\build -A x64
+cmake --build C:\dev\my_plugins\foo\build --config Release
+```
+
+### CMake module
+
+`sdk/cmake/xinsp2_plugin.cmake` — one include and a single
+`xinsp2_add_plugin(foo SRCS ...)` call gets you a DLL + cert + install
+rules against an external xInsp2 tree pointed at by `XINSP2_ROOT`.
+
+### Loading external plugins
+
+- VS Code setting: `xinsp2.extraPluginDirs = ["C:\\dev\\my_plugins"]`
+- CLI: `xinsp-backend.exe --plugins-dir=C:\dev\my_plugins`
+
+### Testing helpers
+
+- `sdk/testing/helpers.cjs` — Node client helpers for WS E2E.
+- `sdk/testing/run_ui_test.mjs` — harness for plugin webview UIs.
+- `sdk/template/tests/` — reference test layout shipped in every scaffold.
+
+The plugin folder is owned by the author; xInsp2 stays read-only. Upgrade
+by `git pull`-ing xInsp2 and rebuilding against the new `XINSP2_ROOT`.

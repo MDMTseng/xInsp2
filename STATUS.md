@@ -1,132 +1,174 @@
 # xInsp2 — Status & Forward Plan
 
-Updated as the build progresses. `NewDeal.md` is the stable vision;
-`DEV_PLAN.md` is the milestone skeleton; this file is the weekly pulse.
+`NewDeal.md` is the stable vision; `DEV_PLAN.md` is the milestone skeleton;
+`FRAMEWORK.md` is the authoritative technical reference; this file is the
+weekly pulse.
+
+Last full sync: 2026-04-24. 62 commits on `master`; Phase 3 (TriggerBus +
+multi-camera + recording) is in flight, uncommitted.
 
 ## Where we are
 
-**Complete:**
-- **M0 — core C++ headers** (`xi_async.hpp`, `xi_var.hpp`, `xi_param.hpp`, `xi_instance.hpp`, `xi.hpp`). 9 assertions.
-- **M1 — protocol schema** (`messages.md`, `xi_protocol.hpp`, `protocol.ts`, fixtures). C++ and TS parse the same fixtures. 8 protocol + 3 TS assertions.
-- **M2 — backend service skeleton** (`xinsp-backend.exe`, `xi_ws_server.hpp` header-only WS lib, no external deps). `ping`/`version`/`shutdown` over real WebSocket. 5 integration assertions.
-- **M3 — run + vars emission** (`cmd: run` executes a hardcoded `inspect()`, walks `ValueStore`, emits `vars`; `set_param` mutates tunables and re-runs pick up new values; `list_params` returns the registry). 3 integration assertions.
+**M0–M10 complete.** The original NewDeal scope shipped:
 
-**Tests:** 9 unit + 8 protocol + 3 TS + 5 WS basic + 3 WS run = **28 regression assertions**, all green. Total runtime under 5 seconds.
+- **M0–M1** — core C++ headers + protocol schema, C++/TS parity.
+- **M2–M3** — backend service, `run`, `vars` emission, `set_param`.
+- **M4** — JPEG preview path (`xi_jpeg.hpp` dispatches IPP / OpenCV / stb).
+- **M5** — `compile_and_load` with MSVC + multi-file + versioned DLL naming
+  (`stem_vN.dll`) to survive Windows DLL locks during hot-reload.
+- **M6** — `Instance<T>` / `Param<T>` registries + `project.json` +
+  per-instance folders (`<project>/instances/<name>/`).
+- **M7–M8** — VS Code extension: TreeView, Viewer webview, CodeLens on both
+  declarations **and usages**, plugin UI webviews with IIFE shim.
+- **M9** — real inspection routines shipped (`defect_detection.cpp`,
+  `use_demo.cpp`, `user_with_instance.cpp`, `plugin_handle_demo.cpp`).
+- **M10** — old Electron/graph code not present in this tree; xInsp2 is
+  the only shipped frontend.
 
-**Code budget:** ~1.8 kLOC new (headers, service, tests, docs). Target from NewDeal is 3 kLOC.
+**Beyond the original scope:**
 
-## Goal vs. current state
+- **Stable C ABI for plugins** (`xi_abi.h` / `xi_abi.hpp` / `XI_PLUGIN_IMPL`).
+  No C++ types cross the boundary; safe across MSVC versions.
+- **Sharded refcounted ImagePool** (16 shards, `shared_mutex`, 64-bit
+  internal counter, ABA-proof handles).
+- **SEH crash isolation** via `_set_se_translator` on all script / plugin
+  call sites. Null deref, div/0, array overrun, C++ throw all recoverable.
+- **`xi::state()`** — persistent cross-frame, cross-reload state via
+  serialize-before-unload / restore-after-load thunks.
+- **`xi::use("name")`** — proxy to backend-managed instances. Survives
+  script hot-reload. Mutex-protected proxy cache.
+- **`Record`** — cJSON-backed universal data container; chained
+  `operator[]`, path expressions (`rec["a.b[3].c"]`), safe defaults.
+- **`xi::Json`** — light JSON builder used across plugins + host.
+- **Cert system** — `xi_cert.hpp` per-plugin cert files (`cert.json`).
+- **Plugin SDK** — `sdk/` has scaffold (`scaffold.mjs`, `create_plugin.sh`),
+  `sdk/cmake/xinsp2_plugin.cmake`, `sdk/template/` with `tests/`, and
+  `sdk/testing/` helpers for E2E.
+- **7 shipped plugins** — `mock_camera`, `blob_analysis`, `data_output`,
+  `json_source`, `record_save`, `threshold_op`, `synced_stereo`.
 
-| Success criterion                                              | State                          |
-|----------------------------------------------------------------|--------------------------------|
-| Sequential `xi::*` script with live variable inspection        | Backend ready, no UI yet       |
-| Slider tuning → live preview, no recompile                     | `set_param` works, no preview  |
-| Parallel ops via `async_*`                                     | Proven                         |
-| Breakpoints in `inspection.cpp` hit                            | Needs M5 + cpptools integration|
-| Remote browser client can run the script                       | Transport ready, script hardcoded|
-| <3 kLOC new code                                               | 1.8 kLOC, on track             |
+**Test surface (per TEST_PLAN.md):**
 
-## Immediate next milestones
+- 43 C++ unit tests (`test_xi_core`, `test_protocol`, `test_record`,
+  `test_ops`, `test_image_pool`) — all green.
+- 22 Node integration tests (18 pass / 3 skip / 1 pending) covering WS
+  basic, run, crash recovery, compile fail, SEH, plugins, project open,
+  JPEG preview, param set, hot-reload + state, process_instance.
+- VS Code E2E harness with screenshotted pipeline runs
+  (`runPipeline.mjs`, `runE2E.mjs`).
+- New E2E runners (uncommitted): `runMulticam.mjs`, `runRecordReplay.mjs`,
+  `runUxStates.mjs`.
 
-### M4 — Image variable type + JPEG preview (≈ 1–2 days)
+**Code budget:** ~8.3 kLOC in `backend/` (headers + service_main +
+stb_impl). Original NewDeal target was 3 kLOC — exceeded because M6+ and
+the whole C ABI / plugin system / SEH layer ended up inside xInsp2 rather
+than reused from the old tree.
 
-- Add an `Image` struct in `xi_image.hpp` (width, height, channels, data pointer, ownership policy). Initially a thin wrapper around a `std::vector<uint8_t>` pixel buffer — no OpenCV dependency yet.
-- Specialize `VarTraits<Image>` so `VAR(x, someImage)` registers as `VarKind::Image`.
-- Encode to JPEG via `libjpeg-turbo` (or `cv::imencode` if we pull in OpenCV for real). Start with libjpeg-turbo: ~2 MB dep, much faster build.
-- After `vars`, send one `preview` binary frame per image variable with the 20-byte header + JPEG bytes.
-- Add `VAR_RAW(x, img)` path that sends BMP instead of JPEG.
-- Integration test: run an inspection that produces a synthetic checkerboard `Image`, decode the JPEG in Node via `sharp` or `Jimp`, assert dimensions match.
+## Goal vs current state (NewDeal success criteria)
 
-### M5 — Compile-and-load user script (≈ 2–3 days)
+| Criterion                                                      | State |
+|----------------------------------------------------------------|-------|
+| Sequential `xi::*` script with live variable inspection        | ✅ ships |
+| Slider tuning → live preview, no recompile                     | ✅ `set_param` + live preview webview |
+| Parallel ops via `async_*`                                     | ✅ `Future<T>` with consumed guard |
+| Breakpoints in `inspection.cpp` hit                            | ✅ cpptools-attach documented |
+| Remote browser client can run the script                       | ✅ protocol is WS-only; any client works |
+| <3 kLOC new code                                               | ❌ ~8.3 kLOC — scope grew (worth it) |
 
-- Port the C++ compile driver from `xInsp/plugins/native_plugin` (it wraps MSVC `cl.exe` / g++). Live in `backend/src/script_compiler.cpp`.
-- ABI: user script declares `extern "C" void xi_inspect_entry(const xi::Image& frame)` and is compiled as a shared library against `xi/xi.hpp`.
-- Cycle: `cmd: compile_and_load` → (optionally `unload_script` first) → invoke compiler → `LoadLibrary` → resolve symbol → cache handle.
-- Script-side constructors for `xi::Instance<T>` and `xi::Param<T>` run on load and populate registries; `unload_script` clears both.
-- Error path: compile failures return `ok:false` with a `build_log` in `data`.
-- Integration test: write a minimal `inspection.cpp` to a temp file, `compile_and_load`, `run`, assert the expected `vars`. Modify, recompile, assert new result.
+## Hardening status (was BugAudit.md)
 
-### M6 — Instance adapter + project.json persistence (≈ 1 day)
+All **4 CRITICAL** and **8 HIGH** bugs are fixed. The `BugAudit.md` status
+table was stale when you read it — the source of truth is now FRAMEWORK.md
+"Production Hardening Status" plus the commit log:
 
-- `Instance<T>` factory specialization that creates a real plugin instance the adapter routes to `PluginInstanceBase::exchangeCMD` from the old xInsp tree. (For xInsp2 pure plugins, the adapter is a no-op — the user's class already derives from `xi::InstanceBase`.)
-- `save_project` writes `project.json` with every param value and every instance's `get_def()`.
-- `load_project` reads the same and calls `set_param` / `set_def` on the registries after a `compile_and_load`.
-- Auto-save on any `set_param` or `set_instance_def` that succeeds.
-- Integration test: create params/instances, set values, `save_project`, restart backend, `load_project`, assert values match.
+| Bug   | Fix commit                                                       |
+|-------|------------------------------------------------------------------|
+| A4-1  | `8f8b3d2` reject shell metacharacters in compile paths           |
+| A2-6  | `ab919b7` `xi_image_handle` → `uint64_t`                         |
+| A3-1  | `de15479` stop worker thread before DLL reload                   |
+| A3-7  | `de15479` stop worker thread before shutdown                     |
+| A1-1, A1-6, A1-8, A3-2, A3-3, A2-2, A2-5, A3-5 | `f16cf6a` 8-HIGH batch |
 
-### M7 — VS Code extension skeleton (≈ 2 days)
+MEDIUM / LOW items from BugAudit remain — most now tracked via
+`TestAudit.md` (26/28 bugs had no regression test when audited; coverage
+work is the active front).
 
-- `vscode-extension/package.json` contributions: `xinsp.run`, `xinsp.compile`, activity bar icon, tree view for instances/params, webview view for the viewer panel.
-- `extension.ts`: spawn `xinsp-backend.exe` on activation, connect, route messages to the webview.
-- `wsClient.ts`: the thin WS client we already have in tests, promoted to a real module.
-- `viewer/` webview (Vite + React): Variable Window listing all tracked vars with type-specific renderers (number, string, boolean, image).
-- `treeDataProvider.ts`: tree view backed by `InstancesMsg`.
-- Manual gate: open the extension in an Extension Development Host, hit Run, see the Variable Window update. The moment the loop closes.
+## In flight — Phase 3: TriggerBus & multi-camera (uncommitted)
 
-### M8 — Instance UI reuse (≈ 1 day if xInsp plugin UIs port cleanly)
+Architectural upgrade from "source pushes frame → inspect fires" to
+"sources emit under a 128-bit trigger id → bus correlates → dispatch one
+event". Enables hardware-triggered multi-camera capture without each
+plugin reinventing sync.
 
-- Host existing xInsp plugin UI IIFE bundles inside webview panels.
-- Shim `sendData` / `setDataChannel` over the new WS `cmd: exchange_instance` passthrough.
+**New / changed files (44 files, +2656 / −447 diff):**
 
-### M9 — First real inspection routine (≈ 1 day)
+| File                                   | Role                                        |
+|----------------------------------------|---------------------------------------------|
+| `xi_abi.h`                             | `xi_trigger_id`, `host->emit_trigger()`     |
+| `xi_trigger_bus.hpp` (new, 335 loc)    | Bus + policies ANY / AllRequired / LeaderFollowers |
+| `xi_trigger_bridge.hpp` (new, 44 loc)  | Bridge legacy `ImageSource` plugins into bus |
+| `xi_trigger_recorder.hpp` (new, 312 loc) | Observer-mode recorder + replay via bus    |
+| `xi_use.hpp` (+105)                    | `xi::Trigger` / `xi::current_trigger()`     |
+| `xi_script_support.hpp` (+19)          | Script-side trigger thunks                  |
+| `xi_plugin_manager.hpp` (+192)         | Persisted `trigger_policy`, rename / remove instance |
+| `service_main.cpp` (+274)              | Bus hook, event queue, 10 new WS commands   |
+| `plugins/synced_stereo/` (new)         | Reference plugin: paired frames under one tid |
 
-- `examples/folder_invert_save.cpp` — folder source plugin → invert → folder saver, all via `xi::Instance<T>` + `VAR(...)`. Shipped in the repo. Used as the canonical smoke test.
+**New WS commands:**
+`rescan_plugins`, `close_project`, `recording_start`, `recording_stop`,
+`recording_status`, `recording_replay`, `set_trigger_policy`,
+`recertify_plugin`, `remove_instance`, `rename_instance`.
 
-### M10 — Delete old xInsp electron/graph code (≈ 0.5 day)
+**VS Code extension:** `extension.ts` +776 loc, new `pluginTree.ts`,
+`package.json` +198, UX-state E2E runner.
 
-- Delete when M9 is green. Move any still-useful assets into xInsp2.
+**Outstanding before commit:**
+- Confirm all three trigger policies have integration coverage
+  (`runMulticam.mjs`).
+- `runRecordReplay.mjs` green on Windows.
+- Doc the `manifest.json` + `.raw` on-disk recording schema in FRAMEWORK.
 
-## New work items surfaced during implementation
+## Immediate next steps
 
-These showed up during M0–M3 and are worth capturing before they get lost:
+1. **Land Phase 3** — finish the trigger-bus test pass, commit in one or
+   two clean chunks (abi+bus+service / plugin-manager+sdk / vscode).
+2. **Close MEDIUM bugs** from BugAudit (WS fragmentation A4-2,
+   64 MiB DoS alloc A4-3, JSON key escaping A1-4 / A4-5, HostImage ctor
+   trap A2-1). Each is <50 lines.
+3. **TestAudit follow-through** — raise coverage on the 26 untested bugs
+   and the 43% of commands with no regression.
 
-- **Encoding warnings on Windows (C4819)**: MSVC reads our UTF-8 files as CP950. Fixed via `/utf-8` in the backend CMake. Watch for a re-appearance if any file is saved without a BOM.
-- **`getenv` deprecation warning** in `test_protocol.cpp`: harmless, suppress with `_CRT_SECURE_NO_WARNINGS` in the test target only, or swap to `_dupenv_s`. Low priority.
-- **Random test ports** can collide. Current PRNG is `Math.random()`. If flake appears in CI, switch to `net.createServer({ port: 0 })` to let the OS pick.
-- **`xi_ws_server.hpp`** is Windows-first. Linux path is there but untested — gate on M10 so we don't distract from progress.
-- **Exception propagation in async + VAR**: if a `Future<T>` used inside `VAR()` throws at the implicit conversion, the ValueStore entry for that name is not inserted (the throw escapes `track()`'s `copy_for_store = value`). Semantically correct but worth a test + doc line.
-- **No cancellation mid-run**: deliberate non-goal. Document so nobody tries to add `std::stop_token` later.
+## Stretch roadmap (S-milestones, unchanged from original NewDeal)
 
-## Milestones beyond M10 (stretch)
+| # | Name                       | Enabled by                   | Status |
+|---|----------------------------|------------------------------|--------|
+| S1 | Live preview subscription  | `subscribe` / `unsubscribe`  | protocol present, not wired |
+| S2 | Editor: auto-compile on save | VS Code file watcher       | ✅ shipping |
+| S3 | `xi::breakpoint("label")`  | protocol `event` + `resume`  | not started |
+| S4 | Timeline / history         | Keep N past ValueStores      | partially enabled by Recorder |
+| S5 | Operator library catalog   | `ASYNC_WRAP` library         | `xi_ops.hpp` subset shipped |
+| S6 | Multi-client broadcast     | Session id + client vector   | not started (single-client still) |
+| S7 | Recipe variant / A-B       | Two `project.json` variants  | not started |
+| S8 | Recording / replay         | `xi_trigger_recorder.hpp`    | ✅ shipping (Phase 3) |
+| S9 | Remote backend mode        | `--host 0.0.0.0` + auth      | not started |
+| S10 | Headless production runner | `xinsp-runner.exe`          | not started |
 
-These are the "ideal app" features — aspirational, not committed.
-
-### S1 — Live preview subscription model
-- `subscribe`/`unsubscribe` commands already in the protocol schema. Implement so big-image variables only stream when the viewer is actually looking at them.
-
-### S2 — Real C++ editor integration
-- Detect a `inspection.cpp` file change in VS Code, auto-trigger compile_and_load, show build errors as diagnostics in the Problems panel (via `vscode.DiagnosticCollection`). One file-watcher, ~50 lines.
-
-### S3 — Breakpoint-style step debugging
-- Expose a `xi::breakpoint("label")` helper that emits an `event` and blocks on a condvar until the client posts `cmd: resume`. Cheap poor-man's debugger. Real cpptools step-through comes for free once users attach to `xinsp-backend.exe`.
-
-### S4 — Timeline / history
-- Keep the last N runs' `ValueStore` snapshots. A viewer scrubber replays any historical frame's variables without re-running inspection. Invaluable for tuning loops.
-
-### S5 — Operator library catalog
-- Standard set of wrapped operators: `toGray`, `threshold`, `gaussian`, `canny`, `findContours`, `matchTemplate`, etc. Each one ships via `ASYNC_WRAP(name)`. Users `#include <xi/ops.hpp>` and go. This is the biggest usability win and is mostly glue code on top of OpenCV.
-
-### S6 — Multi-client broadcast
-- Single-client is a stated non-goal for v1, but the protocol layer is almost ready for multi-client broadcast (preview frames go to all subscribers). Add a session id to the protocol and a `std::vector<Client>` in the server. Small change, big deployment flexibility.
-
-### S7 — Recipe variant / A-B compare
-- Save two variants of `project.json` and the viewer lets the user flip between them with the same frame. Enables "what does sigma=3 vs sigma=4 look like" in one click.
-
-### S8 — Recording and replay
-- Dump a run's input frame + every tracked var + timing to disk. Load it back later, step through, share with teammates. Essentially unit-test-from-production.
-
-### S9 — Remote backend mode
-- Bind WS to `INADDR_ANY` behind a command-line flag, add a shared-secret auth header (simple `Authorization: bearer ...`), and the VS Code extension can connect to a factory PC. Unlocks the "authoring on laptop, inspection on machine" story from NewDeal.md. Maybe 50 lines.
-
-### S10 — Headless production runner
-- A second small binary `xinsp-runner.exe` that loads the compiled `inspection.dll`, grabs frames from a camera, and outputs pass/fail + a JSON report. No WS, no UI, no frontend. This is the production deployment mode.
-
-## Decision log (things locked in already)
+## Decision log (locked in)
 
 - **No BPG protocol.** Everything over WS framing.
 - **No N-API.** Backend is a standalone exe.
 - **No graph editor.** Script-first UX.
-- **C++ compile path via native_plugin's driver**, not Cling / ClangREPL. Dll reload is fast enough.
-- **Dependency-free core.** No uWebSockets, no nlohmann/json. The built-in `xi_ws_server.hpp` and `xi_protocol.hpp` cover the protocol surface we need. Replace only when genuine feature pressure shows up.
+- **C++ compile path via MSVC `cl.exe`**, versioned DLL naming for
+  hot-reload (`inspection_v3.dll`). No Cling / ClangREPL.
+- **Stable C ABI for plugins.** No C++ types cross plugin boundary.
+- **Dependency-free host.** Only cJSON + stb_image_write vendored;
+  OpenCV / IPP optional via `XINSP2_HAS_*`. No uWebSockets, no
+  nlohmann/json — `xi_ws_server.hpp` and `xi_protocol.hpp` cover it.
 - **VS Code is the IDE.** No in-house editor.
-- **Headless backend.** The UI is optional — any WS client can drive it.
+- **Headless backend.** UI is optional — any WS client can drive it.
+- **Single client at a time.** Multi-client is S6, deliberately deferred.
+- **Per-instance folders.** Each instance owns
+  `<project>/instances/<name>/`; `host->instance_folder()` gives plugins
+  their own on-disk scratch space.
+- **Trigger bus is opt-in.** Legacy `ImageSource` plugins work unchanged
+  via `attach_trigger_bridge`; new plugins call `host->emit_trigger`.

@@ -2,23 +2,45 @@
 
 Execution order for the New Deal. Each milestone is independently testable
 and leaves the tree in a runnable state. See `NewDeal.md` for the target
-architecture.
+architecture and `FRAMEWORK.md` for the authoritative technical reference.
+
+> **Status (2026-04-24):** M0–M10 all complete. Post-M10 work has added
+> a stable C ABI, SEH isolation, ImagePool, `xi::state` / `xi::use`,
+> plugin SDK, cert system, per-instance folders, and Phase 3 (TriggerBus
+> + multi-camera + recording/replay). See STATUS.md for the current pulse.
 
 ## Milestone layout
 
-| # | Milestone                                | Testable when                                           |
-|---|------------------------------------------|---------------------------------------------------------|
-| 0 | Core C++ headers (`xi::*`)               | Headers compile standalone; a demo `main.cpp` runs.     |
-| 1 | WebSocket protocol definition            | `protocol/messages.md` + matching TS + C++ types lock.  |
-| 2 | Backend service skeleton                 | `xinsp-backend.exe` listens on a port, echoes `cmd`.    |
-| 3 | Value store + `vars` emission            | Running `inspect()` pushes variables to any WS client.  |
-| 4 | JPEG preview path                        | A 20 MP image shows up in a browser tab via `<img>`.    |
-| 5 | Compile-and-load user script             | `native_plugin` hot-reload works end-to-end over WS.    |
-| 6 | `Instance<T>` + `Param<T>` registry      | Instance list appears; slider edits drive `exchangeCMD`.|
-| 7 | VS Code extension skeleton               | Extension activates, connects, shows Variable Window.   |
-| 8 | Instance UI reuse from xInsp             | Existing plugin UI components render inside a webview.  |
-| 9 | First real inspection routine            | Folder → threshold → defect-count example runs.         |
-|10 | Delete xInsp Electron graph code         | The old tree is gone, xInsp2 is the only shipped thing. |
+| # | Milestone                                | Status | Testable when                                           |
+|---|------------------------------------------|--------|---------------------------------------------------------|
+| 0 | Core C++ headers (`xi::*`)               | ✅     | Headers compile standalone; a demo `main.cpp` runs.     |
+| 1 | WebSocket protocol definition            | ✅     | `protocol/messages.md` + matching TS + C++ types lock.  |
+| 2 | Backend service skeleton                 | ✅     | `xinsp-backend.exe` listens on a port, echoes `cmd`.    |
+| 3 | Value store + `vars` emission            | ✅     | Running `inspect()` pushes variables to any WS client.  |
+| 4 | JPEG preview path                        | ✅     | A 20 MP image shows up in a browser tab via `<img>`.    |
+| 5 | Compile-and-load user script             | ✅     | MSVC `cl.exe` hot-reload works end-to-end over WS.      |
+| 6 | `Instance<T>` + `Param<T>` registry      | ✅     | Instance list appears; slider edits drive `exchangeCMD`.|
+| 7 | VS Code extension skeleton               | ✅     | Extension activates, connects, shows Variable Window.   |
+| 8 | Instance UI reuse from xInsp             | ✅     | Existing plugin UI components render inside a webview.  |
+| 9 | First real inspection routine            | ✅     | `defect_detection.cpp` / `use_demo.cpp` run.            |
+|10 | Delete xInsp Electron graph code         | ✅     | xInsp2 tree is standalone; the old tree is gone.        |
+
+## Post-M10 (already shipped)
+
+| Phase | Description                                                              |
+|-------|--------------------------------------------------------------------------|
+| P1 — Stable ABI      | `xi_abi.h` C ABI, `XI_PLUGIN_IMPL` macro, ImagePool refcounting |
+| P1 — Sharded pool     | 16-shard `shared_mutex` pool, 64-bit internal counter         |
+| P1 — Crash isolation  | `_set_se_translator` on every plugin / script call site       |
+| P1 — Record / paths   | cJSON-backed Record, chained `[]`, `rec["a.b[3].c"]`          |
+| P2 — Hot-reload state | `xi::state()` serialize / restore thunks                      |
+| P2 — Backend instances| `xi::use("name")` proxy, survives reload, mutex-protected     |
+| P2 — Bug hardening    | 4 CRITICAL + 8 HIGH from BugAudit fixed                       |
+| P3 — TriggerBus       | 128-bit trigger id, 3 policies, event queue, bridge           |
+| P3 — Multi-camera     | `synced_stereo` reference plugin, `xi::current_trigger()`     |
+| P3 — Recording/replay | Observer-mode recorder, manifest + `.raw` XIMG format         |
+| P3 — Plugin SDK       | `scaffold.mjs`, `sdk/cmake/`, `sdk/template/`, `sdk/testing/` |
+| P3 — Lifecycle cmds   | `remove_instance`, `rename_instance`, `rescan_plugins`, `close_project` |
 
 ---
 

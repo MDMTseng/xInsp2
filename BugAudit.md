@@ -3,6 +3,10 @@
 Four parallel audit agents reviewed the entire core codebase against FRAMEWORK.md.
 28 findings total. Categorized by severity.
 
+> **Status (2026-04-24):** All 4 CRITICAL + 8 HIGH fixed. MEDIUM / LOW items
+> remain but are tracked together with test coverage in `TestAudit.md`.
+> See the updated status table at the bottom of this file.
+
 ---
 
 ## CRITICAL — Fix before any deployment
@@ -180,25 +184,25 @@ Four parallel audit agents reviewed the entire core codebase against FRAMEWORK.m
 
 ## Status tracking
 
-| ID | Severity | Fixed? | Notes |
-|----|----------|--------|-------|
-| A4-1 | CRITICAL | ❌ | Command injection |
-| A2-6 | CRITICAL | ❌ | Handle truncation |
-| A3-1 | CRITICAL | ❌ | Worker dangling DLL pointers |
-| A3-7 | CRITICAL | ❌ | Shutdown use-after-free |
-| A1-1 | HIGH | ❌ | Future double-get |
-| A1-6 | HIGH | ❌ | Negative image dimensions |
-| A1-8 | HIGH | ❌ | state() thread safety |
-| A3-2 | HIGH | ❌ | cmd:run vs worker race |
-| A3-3 | HIGH | ❌ | use_exchange_cb no SEH |
-| A2-2 | HIGH | ❌ | Handle leak on process crash |
-| A2-5 | HIGH | ❌ | Plugin ctor exception across ABI |
-| A3-5 | HIGH | ❌ | Output handle leak on encode fail |
+| ID | Severity | Fixed? | Commit / Notes |
+|----|----------|--------|----------------|
+| A4-1 | CRITICAL | ✅ | `8f8b3d2` — reject shell metacharacters in compile paths |
+| A2-6 | CRITICAL | ✅ | `ab919b7` — `xi_image_handle` typedef widened to `uint64_t` |
+| A3-1 | CRITICAL | ✅ | `de15479` — stop worker thread before DLL reload |
+| A3-7 | CRITICAL | ✅ | `de15479` — stop worker + join before shutdown |
+| A1-1 | HIGH | ✅ | `f16cf6a` — Future `consumed_` flag + cache |
+| A1-6 | HIGH | ✅ | `f16cf6a` — Image dimensions clamped to ≥ 0 |
+| A1-8 | HIGH | ✅ | `f16cf6a` — `xi::state_mutex()` documented + provided |
+| A3-2 | HIGH | ✅ | `f16cf6a` — mutex on inspect dispatch path |
+| A3-3 | HIGH | ✅ | `f16cf6a` — SEH-guard `use_exchange_cb` |
+| A2-2 | HIGH | ✅ | `f16cf6a` — RAII release of input handles on crash |
+| A2-5 | HIGH | ✅ | `f16cf6a` — `XI_PLUGIN_IMPL` wraps ctor in try/catch |
+| A3-5 | HIGH | ✅ | `f16cf6a` — release output handle on encode failure path |
 | A1-7 | MEDIUM | ❌ | const char* VarTraits |
 | A1-2 | MEDIUM | ❌ | await_all + void |
 | A1-4 | MEDIUM | ❌ | image_keys_json escaping |
 | A2-1 | MEDIUM | ❌ | HostImage ctor trap |
-| A2-3 | MEDIUM | ❌ | record_out key lifetime |
+| A2-3 | MEDIUM | ❌ | record_out key lifetime (likely non-bug — verify) |
 | A2-4 | MEDIUM | ❌ | DLL handle leak |
 | A3-4 | MEDIUM | ❌ | Missing catch paths |
 | A4-2 | MEDIUM | ❌ | WS fragmentation |
