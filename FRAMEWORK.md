@@ -478,7 +478,26 @@ Requires `/EHa` compiler flag (async exception handling).
 
 ## 14. WebSocket Protocol
 
-Connection: `ws://127.0.0.1:7823` (configurable)
+Connection: `ws://127.0.0.1:7823` (default; configurable).
+
+### Remote mode
+
+By default the backend binds to loopback only. To expose it on a LAN /
+factory network:
+
+```bash
+xinsp-backend.exe --host=0.0.0.0 --port=7823 --auth=<shared-secret>
+#  or via env:
+#   XINSP2_HOST=0.0.0.0  XINSP2_AUTH=<secret>  xinsp-backend.exe
+```
+
+Clients must send `Authorization: Bearer <secret>` in the WebSocket
+handshake. Mismatches (or missing header) get `HTTP/1.1 401
+Unauthorized` and the socket is closed. Compare is constant-time.
+
+Starting with `--host=0.0.0.0` **without** `--auth` prints a prominent
+stderr warning — the secret is the only access gate; TLS termination is
+expected to be done by a reverse proxy (nginx, caddy) if you need it.
 
 ### Commands
 

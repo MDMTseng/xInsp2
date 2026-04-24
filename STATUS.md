@@ -172,7 +172,7 @@ plugin reinventing sync.
 | S6 | Multi-client broadcast     | Session id + client vector   | not started (single-client still) |
 | S7 | Recipe variant / A-B       | Two `project.json` variants  | not started |
 | S8 | Recording / replay         | `xi_trigger_recorder.hpp`    | ✅ shipping (Phase 3) |
-| S9 | Remote backend mode        | `--host 0.0.0.0` + auth      | not started |
+| S9 | Remote backend mode        | `--host 0.0.0.0` + auth      | ✅ shipping (`b0622b4`) |
 | S10 | Headless production runner | `xinsp-runner.exe`          | not started |
 
 ## Decision log (locked in)
