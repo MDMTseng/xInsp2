@@ -141,11 +141,14 @@ plugin reinventing sync.
 **VS Code extension:** `extension.ts` +776 loc, new `pluginTree.ts`,
 `package.json` +198, UX-state E2E runner.
 
-**Outstanding before commit:**
+**Outstanding:**
 - Confirm all three trigger policies have integration coverage
-  (`runMulticam.mjs`).
-- `runRecordReplay.mjs` green on Windows.
-- Doc the `manifest.json` + `.raw` on-disk recording schema in FRAMEWORK.
+  (`runMulticam.mjs` exercises AllRequired implicitly; need dedicated
+  LeaderFollowers + Any tests).
+- ~~`runRecordReplay.mjs` green on Windows~~ — ✅ fixed in `60d19d0`
+  (folder paths were emitted unescaped, breaking client JSON.parse).
+- Doc the `manifest.json` + `.raw` on-disk recording schema in FRAMEWORK
+  (already in §20 after the Phase 3 sync).
 
 ## Immediate next steps
 
