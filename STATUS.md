@@ -166,13 +166,13 @@ plugin reinventing sync.
 
 | # | Name                       | Enabled by                   | Status |
 |---|----------------------------|------------------------------|--------|
-| S1 | Live preview subscription  | `subscribe` / `unsubscribe`  | protocol present, not wired |
+| S1 | Live preview subscription  | `subscribe` / `unsubscribe`  | ✅ shipping (`b73a660`) |
 | S2 | Editor: auto-compile on save | VS Code file watcher       | ✅ shipping |
-| S3 | `xi::breakpoint("label")`  | protocol `event` + `resume`  | not started |
+| S3 | `xi::breakpoint("label")`  | protocol `event` + `resume`  | ✅ shipping (`4371bff`) |
 | S4 | Timeline / history         | Keep N past ValueStores      | partially enabled by Recorder |
-| S5 | Operator library catalog   | `ASYNC_WRAP` library         | `xi_ops.hpp` subset shipped |
+| S5 | Operator library catalog   | `ASYNC_WRAP` library         | ✅ canny/open/close/adaptive/contours/matchTemplate (`b14420f`) |
 | S6 | Multi-client broadcast     | Session id + client vector   | not started (single-client still) |
-| S7 | Recipe variant / A-B       | Two `project.json` variants  | not started |
+| S7 | Recipe variant / A-B       | `cmd: compare_variants`      | ✅ shipping (`8124033`) |
 | S8 | Recording / replay         | `xi_trigger_recorder.hpp`    | ✅ shipping (Phase 3) |
 | S9 | Remote backend mode        | `--host 0.0.0.0` + auth      | ✅ shipping (`b0622b4`) |
 | S10 | Headless production runner | `xinsp-runner.exe`          | ✅ shipping (`62f96ed`) |
