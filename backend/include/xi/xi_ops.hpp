@@ -232,6 +232,185 @@ inline ImageStats stats(const Image& src) {
     return s;
 }
 
+// ---- Morphology: open / close ------------------------------------------
+//
+// open  = erode → dilate  (removes small bright specks)
+// close = dilate → erode  (fills small dark holes)
+//
+inline Image open(const Image& src, int radius = 1) {
+    return dilate(erode(src, radius), radius);
+}
+
+inline Image close(const Image& src, int radius = 1) {
+    return erode(dilate(src, radius), radius);
+}
+
+// ---- Adaptive threshold ------------------------------------------------
+// Pixel stays if (src - local_mean) > C. Useful for uneven lighting.
+inline Image adaptiveThreshold(const Image& src, int block_radius, int C = 0) {
+    if (src.empty() || src.channels != 1) return {};
+    auto mean = boxBlur(src, block_radius);
+    int w = src.width, h = src.height;
+    Image dst(w, h, 1);
+    const uint8_t* sp = src.data();
+    const uint8_t* mp = mean.data();
+    uint8_t* dp = dst.data();
+    int n = w * h;
+    for (int i = 0; i < n; ++i) {
+        int diff = (int)sp[i] - (int)mp[i] - C;
+        dp[i] = diff > 0 ? 255 : 0;
+    }
+    return dst;
+}
+
+// ---- Canny edge detector (simplified) ----------------------------------
+// Flow: Sobel gradient magnitude + direction → non-max suppression →
+// double-threshold hysteresis. Works well on pre-blurred input (call
+// gaussian(gray, ...) first for best results).
+inline Image canny(const Image& src, int low_thresh, int high_thresh) {
+    if (src.empty() || src.channels != 1) return {};
+    int w = src.width, h = src.height;
+    const uint8_t* sp = src.data();
+    std::vector<int>   mag(w * h, 0);
+    std::vector<float> ang(w * h, 0.f);
+
+    // Gradient
+    for (int y = 1; y < h - 1; ++y) {
+        for (int x = 1; x < w - 1; ++x) {
+            int gx = -sp[(y-1)*w+(x-1)] + sp[(y-1)*w+(x+1)]
+                   - 2*sp[y*w+(x-1)]    + 2*sp[y*w+(x+1)]
+                   - sp[(y+1)*w+(x-1)]   + sp[(y+1)*w+(x+1)];
+            int gy = -sp[(y-1)*w+(x-1)] - 2*sp[(y-1)*w+x] - sp[(y-1)*w+(x+1)]
+                   + sp[(y+1)*w+(x-1)]  + 2*sp[(y+1)*w+x] + sp[(y+1)*w+(x+1)];
+            mag[y*w + x] = (int)std::sqrt(gx*gx + gy*gy);
+            ang[y*w + x] = std::atan2((float)gy, (float)gx);
+        }
+    }
+
+    // Non-max suppression: keep only ridge pixels along gradient direction
+    std::vector<uint8_t> nms(w * h, 0);
+    for (int y = 1; y < h - 1; ++y) {
+        for (int x = 1; x < w - 1; ++x) {
+            float a = ang[y*w + x] * 180.f / 3.14159265f;
+            if (a < 0) a += 180.f;
+            int m = mag[y*w + x];
+            int n1, n2;
+            if (a < 22.5f || a >= 157.5f)         { n1 = mag[y*w + (x-1)];       n2 = mag[y*w + (x+1)]; }
+            else if (a < 67.5f)                    { n1 = mag[(y-1)*w + (x+1)];   n2 = mag[(y+1)*w + (x-1)]; }
+            else if (a < 112.5f)                   { n1 = mag[(y-1)*w + x];       n2 = mag[(y+1)*w + x]; }
+            else                                    { n1 = mag[(y-1)*w + (x-1)];   n2 = mag[(y+1)*w + (x+1)]; }
+            if (m >= n1 && m >= n2) nms[y*w + x] = (uint8_t)std::min(m, 255);
+        }
+    }
+
+    // Hysteresis: strong edges seed; weak edges kept only if connected
+    Image dst(w, h, 1);
+    uint8_t* dp = dst.data();
+    std::memset(dp, 0, w * h);
+    std::vector<std::pair<int,int>> stack;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            if (nms[y*w + x] >= high_thresh && dp[y*w + x] == 0) {
+                stack.push_back({x, y});
+                while (!stack.empty()) {
+                    auto [cx, cy] = stack.back(); stack.pop_back();
+                    if (cx < 0 || cx >= w || cy < 0 || cy >= h) continue;
+                    if (dp[cy*w + cx]) continue;
+                    if (nms[cy*w + cx] >= low_thresh) {
+                        dp[cy*w + cx] = 255;
+                        stack.push_back({cx-1, cy});   stack.push_back({cx+1, cy});
+                        stack.push_back({cx, cy-1});   stack.push_back({cx, cy+1});
+                        stack.push_back({cx-1, cy-1}); stack.push_back({cx+1, cy+1});
+                        stack.push_back({cx-1, cy+1}); stack.push_back({cx+1, cy-1});
+                    }
+                }
+            }
+        }
+    }
+    return dst;
+}
+
+// ---- Geometry primitives ----
+
+struct Point { int x, y; };
+struct Bbox  { int x, y, w, h; };
+
+// Axis-aligned bounding box of a point set. Empty input → {0,0,0,0}.
+inline Bbox bbox(const std::vector<Point>& pts) {
+    if (pts.empty()) return {0, 0, 0, 0};
+    int x0 = pts[0].x, x1 = pts[0].x, y0 = pts[0].y, y1 = pts[0].y;
+    for (auto& p : pts) {
+        if (p.x < x0) x0 = p.x;   if (p.x > x1) x1 = p.x;
+        if (p.y < y0) y0 = p.y;   if (p.y > y1) y1 = p.y;
+    }
+    return { x0, y0, x1 - x0 + 1, y1 - y0 + 1 };
+}
+
+// ---- Contours: flood-fill extraction ----
+//
+// Returns one point list per connected white component in the binary
+// image. Points are every pixel of the component (not just the outline
+// — good enough for bbox / area; a true boundary walk is a future
+// refinement). 4-connectivity.
+inline std::vector<std::vector<Point>> findContours(const Image& binary) {
+    std::vector<std::vector<Point>> out;
+    if (binary.empty() || binary.channels != 1) return out;
+    int w = binary.width, h = binary.height;
+    const uint8_t* sp = binary.data();
+    std::vector<uint8_t> seen(w * h, 0);
+    std::vector<std::pair<int,int>> stack;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            if (sp[y*w + x] == 0 || seen[y*w + x]) continue;
+            std::vector<Point> comp;
+            stack.push_back({x, y});
+            while (!stack.empty()) {
+                auto [cx, cy] = stack.back(); stack.pop_back();
+                if (cx < 0 || cx >= w || cy < 0 || cy >= h) continue;
+                if (sp[cy*w + cx] == 0 || seen[cy*w + cx]) continue;
+                seen[cy*w + cx] = 1;
+                comp.push_back({cx, cy});
+                stack.push_back({cx-1, cy});   stack.push_back({cx+1, cy});
+                stack.push_back({cx, cy-1});   stack.push_back({cx, cy+1});
+            }
+            if (!comp.empty()) out.push_back(std::move(comp));
+        }
+    }
+    return out;
+}
+
+// ---- Template matching (SSD) ----
+//
+// Slides `templ` across `src`, computing sum-of-squared-differences at
+// each position. Returns { best x, best y, best SSD }. Lower SSD = better.
+// O(W·H·TW·TH) — for small templates only.
+struct MatchResult { int x, y; double score; };
+inline MatchResult matchTemplateSSD(const Image& src, const Image& templ) {
+    MatchResult r{ 0, 0, 1e30 };
+    if (src.empty() || templ.empty() ||
+        src.channels != 1 || templ.channels != 1) return r;
+    if (templ.width > src.width || templ.height > src.height) return r;
+    const uint8_t* sp = src.data();
+    const uint8_t* tp = templ.data();
+    int sw = src.width, sh = src.height;
+    int tw = templ.width, th = templ.height;
+    for (int y = 0; y <= sh - th; ++y) {
+        for (int x = 0; x <= sw - tw; ++x) {
+            double acc = 0;
+            for (int ty = 0; ty < th; ++ty) {
+                const uint8_t* srow = sp + (y + ty) * sw + x;
+                const uint8_t* trow = tp + ty * tw;
+                for (int tx = 0; tx < tw; ++tx) {
+                    int d = (int)srow[tx] - (int)trow[tx];
+                    acc += d * d;
+                }
+            }
+            if (acc < r.score) { r.score = acc; r.x = x; r.y = y; }
+        }
+    }
+    return r;
+}
+
 // ---- Connected component labeling (simple) ----
 
 inline int countWhiteBlobs(const Image& binary) {
@@ -276,6 +455,12 @@ template<class... A> auto async_sobel(A&&... a)           { return xi::async(sob
 template<class... A> auto async_invert(A&&... a)          { return xi::async(invert, std::forward<A>(a)...); }
 template<class... A> auto async_erode(A&&... a)           { return xi::async(erode, std::forward<A>(a)...); }
 template<class... A> auto async_dilate(A&&... a)          { return xi::async(dilate, std::forward<A>(a)...); }
+template<class... A> auto async_open(A&&... a)            { return xi::async((Image(*)(const Image&, int))open, std::forward<A>(a)...); }
+template<class... A> auto async_close(A&&... a)           { return xi::async((Image(*)(const Image&, int))close, std::forward<A>(a)...); }
+template<class... A> auto async_adaptiveThreshold(A&&... a) { return xi::async(adaptiveThreshold, std::forward<A>(a)...); }
+template<class... A> auto async_canny(A&&... a)           { return xi::async(canny, std::forward<A>(a)...); }
+template<class... A> auto async_findContours(A&&... a)    { return xi::async(findContours, std::forward<A>(a)...); }
+template<class... A> auto async_matchTemplateSSD(A&&... a){ return xi::async(matchTemplateSSD, std::forward<A>(a)...); }
 template<class... A> auto async_stats(A&&... a)           { return xi::async(stats, std::forward<A>(a)...); }
 template<class... A> auto async_countWhiteBlobs(A&&... a) { return xi::async(countWhiteBlobs, std::forward<A>(a)...); }
 

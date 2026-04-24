@@ -307,6 +307,105 @@ static void test_boxBlur_radius0() {
     }
 }
 
+// ---------- open / close ----------
+
+static void test_open_removes_speck() {
+    SECTION("open removes a 1-pixel speck on black background");
+    xi::Image src(7, 7, 1);
+    std::memset(src.data(), 0, 49);
+    src.data()[3 * 7 + 3] = 255;             // isolated speck
+    auto dst = xi::ops::open(src, 1);
+    CHECK(dst.data()[3 * 7 + 3] == 0);       // speck gone
+}
+
+static void test_close_fills_hole() {
+    SECTION("close fills a 1-pixel hole inside a white block");
+    xi::Image src(7, 7, 1);
+    std::memset(src.data(), 255, 49);
+    src.data()[3 * 7 + 3] = 0;                // isolated hole
+    auto dst = xi::ops::close(src, 1);
+    CHECK(dst.data()[3 * 7 + 3] == 255);      // hole filled
+}
+
+// ---------- adaptive threshold ----------
+
+static void test_adaptive_threshold_gradient() {
+    SECTION("adaptive threshold handles a lighting gradient that fixed thresh can't");
+    // 20x20 gradient 50→150 across x, with a local bump at (10,10)
+    int W = 20, H = 20;
+    xi::Image src(W, H, 1);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x)
+            src.data()[y * W + x] = (uint8_t)(50 + x * 5);
+    // Local bump: +40 at one spot
+    src.data()[10 * W + 10] = (uint8_t)(50 + 10 * 5 + 40);
+    auto dst = xi::ops::adaptiveThreshold(src, 3, 10);
+    // The bump should stand out even though it's below the max gradient value
+    CHECK(dst.data()[10 * W + 10] == 255);
+}
+
+// ---------- canny ----------
+
+static void test_canny_blank() {
+    SECTION("canny on a uniform image yields no edges");
+    auto src = make_gray(20, 20, 128);
+    auto dst = xi::ops::canny(src, 30, 80);
+    int edge_count = 0;
+    for (int i = 0; i < dst.size(); ++i) if (dst.data()[i]) ++edge_count;
+    CHECK(edge_count == 0);
+}
+
+static void test_canny_finds_edge() {
+    SECTION("canny on a sharp step detects the edge");
+    xi::Image src(20, 20, 1);
+    for (int y = 0; y < 20; ++y)
+        for (int x = 0; x < 20; ++x)
+            src.data()[y * 20 + x] = (uint8_t)(x < 10 ? 30 : 220);
+    auto dst = xi::ops::canny(src, 30, 80);
+    int edge_count = 0;
+    for (int i = 0; i < dst.size(); ++i) if (dst.data()[i]) ++edge_count;
+    CHECK(edge_count > 5);
+    CHECK(edge_count < 40);          // canny should produce a thin ridge, not fill
+}
+
+// ---------- contours + bbox ----------
+
+static void test_findContours_two_blobs() {
+    SECTION("findContours returns one list per connected component");
+    xi::Image bin(20, 20, 1);
+    std::memset(bin.data(), 0, 400);
+    // Square A at (2..5, 2..5)
+    for (int y = 2; y <= 5; ++y)
+        for (int x = 2; x <= 5; ++x) bin.data()[y*20 + x] = 255;
+    // Square B at (12..14, 12..14)
+    for (int y = 12; y <= 14; ++y)
+        for (int x = 12; x <= 14; ++x) bin.data()[y*20 + x] = 255;
+    auto contours = xi::ops::findContours(bin);
+    CHECK(contours.size() == 2);
+    CHECK(contours[0].size() == 16);            // 4×4
+    CHECK(contours[1].size() == 9);             // 3×3
+    auto box0 = xi::ops::bbox(contours[0]);
+    CHECK(box0.x == 2 && box0.y == 2 && box0.w == 4 && box0.h == 4);
+    auto box1 = xi::ops::bbox(contours[1]);
+    CHECK(box1.x == 12 && box1.y == 12 && box1.w == 3 && box1.h == 3);
+}
+
+// ---------- matchTemplate ----------
+
+static void test_matchTemplate_finds_exact() {
+    SECTION("matchTemplateSSD locates an embedded pattern with score 0");
+    xi::Image src(16, 16, 1);
+    for (int i = 0; i < 256; ++i) src.data()[i] = (uint8_t)((i * 7) & 0xFF);
+    // Build template from src region (5..7, 3..5)
+    xi::Image templ(3, 3, 1);
+    for (int ty = 0; ty < 3; ++ty)
+        for (int tx = 0; tx < 3; ++tx)
+            templ.data()[ty * 3 + tx] = src.data()[(3 + ty) * 16 + (5 + tx)];
+    auto r = xi::ops::matchTemplateSSD(src, templ);
+    CHECK(r.x == 5 && r.y == 3);
+    CHECK(r.score < 0.5);            // exact match → 0
+}
+
 // ---------- main ----------
 
 int main() {
@@ -342,6 +441,15 @@ int main() {
     // edge cases
     test_gaussian_1x1();
     test_boxBlur_radius0();
+
+    // S5 operators
+    test_open_removes_speck();
+    test_close_fills_hole();
+    test_adaptive_threshold_gradient();
+    test_canny_blank();
+    test_canny_finds_edge();
+    test_findContours_two_blobs();
+    test_matchTemplate_finds_exact();
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
