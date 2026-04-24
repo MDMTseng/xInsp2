@@ -1,0 +1,7 @@
+{
+  "name": "trigger_source",
+  "description": "Minimal image source using emit_trigger — one frame per pulse, correlates across a multi-source pipeline",
+  "dll": "trigger_source.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false
+}

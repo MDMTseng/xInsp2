@@ -226,6 +226,90 @@ for (auto& [key, img] : r.images()) { /* iterate */ }
 
 ---
 
+## Image sources and the trigger bus
+
+If your plugin is a **camera / image source** — something that pushes
+frames into the pipeline rather than processing input — you have two
+choices, in increasing order of capability:
+
+### Old style: `xi::ImageSource` subclass
+
+Inherit `xi::ImageSource`, implement `grab()` / `grab_wait()`. The host
+wraps each push into a single-frame trigger automatically (via
+`attach_trigger_bridge`). Works for legacy plugins unchanged. Fine for
+a single free-running camera, not enough for correlated multi-source.
+
+### New style: `host->emit_trigger(...)`
+
+Call `emit_trigger` directly to publish one or more frames under a
+**128-bit trigger id**. The host's bus correlates emissions that share
+a tid and dispatches the inspection exactly once per complete event.
+
+```cpp
+// host_api signature
+void emit_trigger(
+    const char*            source_name,   // this instance's name()
+    xi_trigger_id          tid,           // shared id, or XI_TRIGGER_NULL
+    int64_t                timestamp_us,  // 0 → host clock
+    const xi_record_image* images,        // N key → handle entries
+    int32_t                image_count);
+```
+
+Minimum single-source usage:
+
+```cpp
+xi_image_handle h = host_->image_create(W, H, ch);
+// ... write pixels into host_->image_data(h) ...
+xi_record_image entry = { "frame", h };
+host_->emit_trigger(name().c_str(), XI_TRIGGER_NULL, /*ts=*/0, &entry, 1);
+host_->image_release(h);  // bus addref'd internally; drop our refcount
+```
+
+See `sdk/examples/trigger_source/` for a complete runnable plugin and
+`plugins/synced_stereo/` in the xInsp2 tree for a paired-cameras
+reference.
+
+### Trigger policies
+
+Projects pick one of three bus policies (`cmd: set_trigger_policy`,
+persisted in `project.json`):
+
+| Policy             | Dispatch rule                                               |
+|--------------------|-------------------------------------------------------------|
+| `any`              | Fire on every emit (default, back-compat)                   |
+| `all_required`     | Fire only when every source in the required list has emitted for that tid; drop incomplete tids after `window_ms` |
+| `leader_followers` | Fire on the leader emit; attach followers' most recent frames (best-effort) |
+
+### Reading a trigger from a script
+
+Scripts read the current event via `xi::current_trigger()`:
+
+```cpp
+#include <xi/xi_use.hpp>
+void xi_inspect_entry(int frame) {
+    auto t = xi::current_trigger();
+    if (!t.is_active()) return;
+    VAR(tid,   t.id_string());
+    VAR(left,  t.image("cam_left"));         // single-frame source
+    VAR(right, t.image("synced0/right"));    // multi-frame source
+}
+```
+
+Multi-frame sources use `<source>/<image_name>` keys; single-frame
+sources use just the source name. `t.sources()` lists every source that
+contributed to this event.
+
+### Recording and replay
+
+Any live project can be recorded: `recording_start` installs an
+observer on the bus that serialises every TriggerEvent to disk (manifest
++ `.raw` pixels). `recording_replay` pushes those events back through
+`emit_trigger` so the whole pipeline — including sinks and observers —
+sees them identically to the live run. Good for regression tests and
+off-line tuning.
+
+---
+
 ## Writing a config UI
 
 `ui/index.html` is a plain HTML file with one script that calls
@@ -307,13 +391,14 @@ copy the `.dll` + `plugin.json` + `ui/` into `<xInsp2>/plugins/<name>/`
 
 ```
 sdk/
-├── README.md          ← you are here
-├── template/          ← copy this folder, rename, edit
+├── README.md           ← you are here
+├── template/           ← copy this folder, rename, edit
 └── examples/
-    ├── hello/         ← 1 file, no state, no UI — the "hello world"
-    ├── counter/       ← persistent state + minimal UI
-    ├── invert/        ← image-in → image-out
-    └── histogram/     ← image analysis with rich JSON output
+    ├── hello/          ← 1 file, no state, no UI — the "hello world"
+    ├── counter/        ← persistent state + minimal UI (xi::Json)
+    ├── invert/         ← image-in → image-out
+    ├── histogram/      ← image analysis with rich JSON output
+    └── trigger_source/ ← image source using host->emit_trigger (bus)
 ```
 
 Read them in order — each one adds one new capability.
