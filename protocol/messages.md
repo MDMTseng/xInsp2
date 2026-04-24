@@ -190,6 +190,28 @@ UIs that ship their own command vocabulary.
 ### `save_project` / `load_project`
 `args: { "path": "project.json" }` → `ok: true`
 
+### `resume`
+
+Releases a script that's blocked inside `xi::breakpoint("label")` (S3).
+When the script hits a breakpoint the backend emits:
+
+```json
+{ "type": "event", "name": "breakpoint", "data": { "label": "after_gray" } }
+```
+
+The client inspects the last `vars` message and whatever else it wants,
+then sends `cmd: resume` to let the script continue. Response:
+
+```json
+{ "resumed": true, "label": "after_gray" }
+```
+
+Calling `resume` when nothing is paused replies `{ "resumed": false }`.
+Breakpoints block the worker thread running `inspect()`, so they only
+take effect during continuous mode (`cmd: start`). A blocked breakpoint
+is auto-released when the worker is joined for `cmd: stop` /
+`cmd: compile_and_load`, so neither of those can deadlock.
+
 ### `subscribe` / `unsubscribe`
 
 Controls which VAR-image previews are JPEG-encoded and streamed as

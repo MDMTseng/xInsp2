@@ -153,6 +153,16 @@ static std::mutex                    g_sub_mu;
 static bool                          g_sub_all = true;
 static std::unordered_set<std::string> g_sub_names;
 
+// Breakpoint coordination (S3). Script thread calls breakpoint_cb()
+// which: (a) emits an event on the WS, (b) blocks on g_bp_cv until
+// the WS thread receives `cmd: resume`. g_bp_paused is the predicate
+// so spurious wakeups don't miss the signal.
+static std::mutex              g_bp_mu;
+static std::condition_variable g_bp_cv;
+static bool                    g_bp_paused = false;
+static std::string             g_bp_last_label;
+static xi::ws::Server*         g_srv_for_bp = nullptr;   // set in main
+
 // ---- Trigger access (script callbacks) ---------------------------------
 // Set by the worker thread (or run_one_inspection) before invoking the
 // script. The script reads via xi::current_trigger() through the three
@@ -205,6 +215,28 @@ static int32_t trigger_sources_cb(char* buf, int32_t buflen) {
     std::memcpy(buf, out.data(), n);
     buf[n] = 0;
     return n;
+}
+
+static void breakpoint_cb(const char* label) {
+    // Called from the script thread. Emit a text event, then block until
+    // the WS thread sets g_bp_paused=false via `cmd: resume`.
+    //
+    // If we're not in continuous mode, don't park — otherwise a single
+    // `cmd: run` would deadlock the WS thread, and stop/unload would
+    // have to re-release after every inspect iteration. Breakpoints
+    // are a continuous-mode feature.
+    if (!g_srv_for_bp || !g_continuous.load()) return;
+    std::string safe = label ? label : "";
+    // Build event JSON with escaped label.
+    std::string msg = "{\"type\":\"event\",\"name\":\"breakpoint\",\"data\":{\"label\":";
+    xp::json_escape_into(msg, safe);
+    msg += "}}";
+    g_srv_for_bp->send_text(msg);
+
+    std::unique_lock<std::mutex> lk(g_bp_mu);
+    g_bp_paused     = true;
+    g_bp_last_label = safe;
+    g_bp_cv.wait(lk, []{ return !g_bp_paused; });
 }
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
@@ -498,6 +530,23 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         out += "}";
         send_rsp_ok(srv, id, out);
+    } else if (name == "resume") {
+        // S3: unblock a script waiting in xi::breakpoint(). Idempotent —
+        // calling when not paused is a no-op with an informative reply.
+        std::string out;
+        {
+            std::lock_guard<std::mutex> lk(g_bp_mu);
+            if (g_bp_paused) {
+                g_bp_paused = false;
+                out = "{\"resumed\":true,\"label\":";
+                xp::json_escape_into(out, g_bp_last_label);
+                out += "}";
+            } else {
+                out = "{\"resumed\":false}";
+            }
+        }
+        g_bp_cv.notify_all();
+        send_rsp_ok(srv, id, out);
     } else if (name == "unsubscribe") {
         {
             std::lock_guard<std::mutex> lk(g_sub_mu);
@@ -521,9 +570,14 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
 
         // Stop continuous mode before reloading — the worker thread holds
-        // function pointers into the DLL we're about to unload.
+        // function pointers into the DLL we're about to unload. Also
+        // release any breakpoint that's currently parked, so the worker
+        // can actually finish.
         if (g_continuous.load()) {
             g_continuous = false;
+            g_ev_cv.notify_all();
+            { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
+            g_bp_cv.notify_all();
             if (g_worker_thread.joinable()) g_worker_thread.join();
             std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload\n");
         }
@@ -583,6 +637,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     (void*)trigger_info_cb,
                     (void*)trigger_image_cb,
                     (void*)trigger_sources_cb);
+            }
+            // S3: breakpoint callback. Scripts without xi_breakpoint.hpp
+            // leave this null and xi::breakpoint() is a no-op.
+            if (g_script.set_breakpoint_callback) {
+                g_script.set_breakpoint_callback((void*)breakpoint_cb);
             }
             // Restore persistent state into the new DLL
             if (g_script.set_state && g_persistent_state_json.size() > 2) {
@@ -699,6 +758,15 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "stop") {
         g_continuous = false;
         g_ev_cv.notify_all();           // wake bus-driven worker
+        // Force-release any breakpoint parking the worker — otherwise
+        // join below would deadlock. breakpoint_cb also checks
+        // g_continuous, so subsequent breakpoints in the same inspect()
+        // no-op immediately.
+        {
+            std::lock_guard<std::mutex> lk(g_bp_mu);
+            g_bp_paused = false;
+        }
+        g_bp_cv.notify_all();
         xi::TriggerBus::instance().clear_sink();
         if (g_worker_thread.joinable()) g_worker_thread.join();
         // Drain any in-flight events that arrived between sink-clear and join.
@@ -1473,6 +1541,7 @@ int main(int argc, char** argv) {
     srv.set_bind_host(host);
     if (!secret.empty()) srv.set_auth_secret(secret);
 
+    g_srv_for_bp = &srv;   // S3: breakpoint_cb emits events through it
     if (!srv.start(port)) {
         std::fprintf(stderr, "[xinsp2] failed to bind %s:%d\n", host.c_str(), port);
         return 1;

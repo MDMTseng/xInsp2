@@ -38,6 +38,7 @@ struct LoadedScript {
                                         void* grab_fn, void* host_api);
     using SetTriggerCallbacksFn = void (*)(void* info_fn, void* image_fn,
                                            void* sources_fn);
+    using SetBreakpointCallbackFn = void (*)(void* fn);
 
     InspectFn          inspect          = nullptr;
     SnapshotFn         snapshot         = nullptr;
@@ -52,6 +53,7 @@ struct LoadedScript {
     SetStateFn         set_state         = nullptr;
     SetUseCallbacksFn  set_use_callbacks = nullptr;
     SetTriggerCallbacksFn set_trigger_callbacks = nullptr;
+    SetBreakpointCallbackFn set_breakpoint_callback = nullptr;
 
     bool ok() const { return handle && inspect; }
 };
@@ -84,6 +86,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_state         = reinterpret_cast<LoadedScript::SetStateFn>(GetProcAddress(h, "xi_script_set_state"));
     out.set_use_callbacks = reinterpret_cast<LoadedScript::SetUseCallbacksFn>(GetProcAddress(h, "xi_script_set_use_callbacks"));
     out.set_trigger_callbacks = reinterpret_cast<LoadedScript::SetTriggerCallbacksFn>(GetProcAddress(h, "xi_script_set_trigger_callbacks"));
+    out.set_breakpoint_callback = reinterpret_cast<LoadedScript::SetBreakpointCallbackFn>(GetProcAddress(h, "xi_script_set_breakpoint_callback"));
     if (!out.inspect) {
         err = "script missing xi_inspect_entry export";
         FreeLibrary(h);
