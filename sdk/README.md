@@ -357,10 +357,13 @@ See `examples/counter/ui/index.html` for a minimal working UI.
 }
 ```
 
-- `name` must be unique across all plugins on disk
-- `dll` is relative to the plugin folder
-- `has_ui: true` → host expects `ui/index.html`
-- `factory` should always be `xi_plugin_create` (provided by `XI_PLUGIN_IMPL`)
+- `name` — **required**; must be unique across all plugins on disk
+- `description` — optional; shown in the instance-creation picker
+- `dll` — optional; defaults to `<name>.dll`, relative to the plugin folder
+- `factory` — optional; defaults to `xi_plugin_create` (what `XI_PLUGIN_IMPL` emits).
+  Override only if you export a non-standard symbol name
+- `has_ui` — optional; `true` means the host expects `ui/index.html` next
+  to the DLL. Any other value (or absence) means "no UI"
 
 ---
 
@@ -632,6 +635,14 @@ machines, so they stay separate from cert.
   own worker
 - **Sharing images is free**: `xi::Image` uses a `shared_ptr` to pixels —
   copying a Record does not copy image bytes
+- **Raw host handles** (rare): if you need RAII over an
+  `xi_image_handle` — e.g. passing a frame between plugins without
+  decoding it — use the `HostImage` factories from `xi_abi.hpp`:
+  `HostImage::from_handle(host, h)` takes ownership of an existing
+  refcount-1 handle without addref; `HostImage::share_handle(host, h)`
+  addrefs for an independent view. The `(host, handle)` constructor is
+  deliberately private because mixing it with `image_create()` is a
+  refcount trap
 - **JSON**: prefer `xi::Json` (RAII, path access, defaults) for
   exchange commands and replies. Raw cJSON is still re-exported via
   `xi_abi.hpp` for performance-critical paths or legacy plugins
