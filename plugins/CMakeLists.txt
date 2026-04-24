@@ -22,6 +22,15 @@ set_target_properties(mock_camera PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera
 )
 
+# synced_stereo — emits left+right frames under one trigger ID
+add_library(synced_stereo SHARED synced_stereo/synced_stereo.cpp)
+target_include_directories(synced_stereo PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+target_link_libraries(synced_stereo PRIVATE cjson_plugin)
+set_target_properties(synced_stereo PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/synced_stereo
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/synced_stereo
+)
+
 # data_output
 add_library(data_output SHARED data_output/data_output.cpp)
 target_include_directories(data_output PRIVATE ${XI_INCLUDE})

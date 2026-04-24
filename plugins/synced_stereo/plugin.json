@@ -1,0 +1,7 @@
+{
+  "name": "synced_stereo",
+  "description": "Hardware-synced stereo camera pair — emits left+right under one trigger ID",
+  "dll": "synced_stereo.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false
+}
