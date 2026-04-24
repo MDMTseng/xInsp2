@@ -5,12 +5,99 @@ import { WsClient } from './wsClient';
 import { InstanceTreeProvider } from './instanceTree';
 import { ViewerProvider } from './viewerProvider';
 import { InstanceCodeLensProvider } from './instanceCodeLens';
+import { PluginTreeProvider, PluginInfo } from './pluginTree';
 import { PREVIEW_HEADER_SIZE } from './protocol';
 
 let backend: ChildProcess | null = null;
 let client: WsClient | null = null;
 let cmdId = 1;
 const nextId = () => cmdId++;
+
+// Webview HTML for the cert drill-down panel.
+function certPanelHtml(
+    pluginName: string, folder: string, plugin: any, certJson: any
+): string {
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const certState = !plugin?.cert?.present ? 'missing' :
+                       plugin.cert?.valid     ? 'valid'   : 'stale';
+    const statusColor = certState === 'valid' ? '#4caf50' :
+                         certState === 'stale' ? '#ff9800' : '#f44336';
+    const statusLabel = certState === 'valid' ? 'Valid' :
+                         certState === 'stale' ? 'Stale (DLL changed)' : 'Missing';
+    const tests = Array.isArray(certJson?.tests_passed) ? certJson.tests_passed : [];
+    const testRows = tests.map((t: string) =>
+        `<div class="test"><span class="check">✓</span> ${esc(t)}</div>`
+    ).join('');
+    return `<!doctype html>
+<html><head><meta charset="utf-8"><style>
+body { font-family: var(--vscode-font-family, sans-serif); background: var(--vscode-editor-background); color: var(--vscode-foreground); padding: 24px; line-height: 1.5; }
+h1 { margin: 0 0 4px; font-size: 20px; display:flex; align-items:center; gap:10px; }
+.status-pill { display:inline-block; padding: 2px 10px; border-radius: 10px; font-size: 11px; font-weight: 600; background: ${statusColor}; color: #fff; letter-spacing: 0.3px; }
+.meta { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 24px; }
+.card { background: var(--vscode-editor-background); border: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08)); border-radius: 6px; padding: 16px 20px; margin-bottom: 14px; }
+.card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--vscode-descriptionForeground); margin: 0 0 12px; font-weight: 600; }
+.grid { display: grid; grid-template-columns: 180px 1fr; gap: 8px 18px; font-size: 13px; }
+.grid .k { color: var(--vscode-descriptionForeground); }
+.grid .v { font-family: var(--vscode-editor-font-family, monospace); word-break: break-all; }
+.test { padding: 4px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+.check { color: #4caf50; margin-right: 8px; }
+#recert-result { margin-top: 12px; font-size: 12px; }
+.actions { margin-top: 18px; }
+</style></head><body>
+<h1>${esc(pluginName)} <span class="status-pill">${statusLabel}</span></h1>
+<div class="meta">Plugin folder: ${esc(folder)}</div>
+
+<div class="card">
+    <div class="card-title">Summary</div>
+    <div class="grid">
+        <div class="k">Name</div>             <div class="v">${esc(pluginName)}</div>
+        <div class="k">Description</div>      <div class="v">${esc(plugin?.description || '—')}</div>
+        <div class="k">Loaded</div>           <div class="v">${plugin?.loaded ? 'yes' : 'no'}</div>
+        <div class="k">Has UI</div>           <div class="v">${plugin?.has_ui ? 'yes' : 'no'}</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Certificate (cert.json)</div>
+    ${certJson ? `
+    <div class="grid">
+        <div class="k">Certified at</div>     <div class="v">${esc(certJson.certified_at || '—')}</div>
+        <div class="k">Baseline version</div> <div class="v">${certJson.baseline_version ?? '—'}</div>
+        <div class="k">Duration</div>         <div class="v">${certJson.duration_ms != null ? certJson.duration_ms.toFixed(1) + ' ms' : '—'}</div>
+        <div class="k">DLL size</div>         <div class="v">${certJson.dll_size != null ? certJson.dll_size.toLocaleString() + ' bytes' : '—'}</div>
+        <div class="k">DLL mtime</div>        <div class="v">${certJson.dll_mtime != null ? certJson.dll_mtime : '—'}</div>
+    </div>
+    <div style="margin-top: 16px;">
+        <div class="card-title" style="margin-bottom: 8px">Tests passed (${tests.length})</div>
+        ${testRows || '<div class="meta">None recorded.</div>'}
+    </div>
+    ` : `<div class="meta">No cert.json present. The host will re-certify on next load; or click below to do it now.</div>`}
+    <div class="actions">
+        <button id="btn-recert" style="padding: 6px 14px; border: none; border-radius: 3px; background: #2196f3; color: #fff; cursor: pointer;">
+            Re-certify now
+        </button>
+        <span id="recert-result"></span>
+    </div>
+</div>
+
+<script>
+const vscode = acquireVsCodeApi();
+document.getElementById('btn-recert').addEventListener('click', () => {
+    document.getElementById('recert-result').textContent = 'Running baseline…';
+    vscode.postMessage({ type: 'recert' });
+});
+window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m?.type === 'recert_result') {
+        const msg = m.passed
+            ? \`✓ \${m.pass_count} tests passed (\${m.total_ms?.toFixed?.(0) ?? '?'} ms)\`
+            : \`⚠ \${m.fail_count} failed: \` + (m.failures || []).map(f => f.name).join(', ');
+        document.getElementById('recert-result').textContent = msg;
+    }
+});
+</script>
+</body></html>`;
+}
 
 function findBackendExe(context: vscode.ExtensionContext): string {
     const candidates = [
@@ -45,9 +132,100 @@ export function activate(context: vscode.ExtensionContext) {
     const extraPluginDirs = config.get<string[]>('extraPluginDirs', []);
     const output = vscode.window.createOutputChannel('xInsp2');
 
-    // Tree view
+    // ---- State context keys ------------------------------------------
+    // Every menu contribution gates off these. Welcome views also use them.
+    const setCtx = (key: string, value: any) =>
+        vscode.commands.executeCommand('setContext', `xinsp2.${key}`, value);
+    setCtx('connected', false);
+    setCtx('hasProject', false);
+    setCtx('running', false);
+    setCtx('hasPlugins', false);
+    setCtx('hasInstances', false);
+
+    // Backend health indicator (leftmost). Toggles between connected + disconnected.
+    const healthStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 101);
+    healthStatus.command = 'xinsp2.restartBackend';
+    context.subscriptions.push(healthStatus);
+    const updateHealthStatus = (connected: boolean) => {
+        if (connected) {
+            healthStatus.text = '$(zap) xInsp2';
+            healthStatus.tooltip = 'xInsp2 backend connected. Click to restart.';
+            healthStatus.backgroundColor = undefined;
+        } else {
+            healthStatus.text = '$(debug-disconnect) xInsp2 · offline';
+            healthStatus.tooltip = 'xInsp2 backend is not reachable. Click to restart.';
+            healthStatus.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+        }
+        healthStatus.show();
+    };
+    updateHealthStatus(false);
+
+    // Persistent project label in the status bar (click to switch/close).
+    const projectStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    projectStatus.command = 'xinsp2.projectStatusClicked';
+    context.subscriptions.push(projectStatus);
+    let currentProjectName: string | undefined;
+    let currentProjectPath: string | undefined;
+    const updateProjectStatus = () => {
+        if (currentProjectName) {
+            projectStatus.text = `$(folder-active) xInsp2: ${currentProjectName}`;
+            projectStatus.tooltip = `xInsp2 project: ${currentProjectPath || ''}\nClick to switch or close.`;
+            projectStatus.show();
+        } else {
+            projectStatus.hide();
+        }
+    };
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.projectStatusClicked', async () => {
+            const pick = await vscode.window.showQuickPick([
+                { label: '$(folder-opened) Open different project…', action: 'open' },
+                { label: '$(close) Close current project', action: 'close' },
+                { label: '$(history) Recent projects…',   action: 'recent' },
+            ], { placeHolder: `Current: ${currentProjectName || '(none)'}` });
+            if (!pick) return;
+            if ((pick as any).action === 'open')   vscode.commands.executeCommand('xinsp2.openProject');
+            if ((pick as any).action === 'close')  vscode.commands.executeCommand('xinsp2.closeProject');
+            if ((pick as any).action === 'recent') vscode.commands.executeCommand('xinsp2.openRecent');
+        })
+    );
+
+    // ---- Recent projects (globalState) -------------------------------
+    const RECENT_KEY = 'xinsp2.recentProjects';
+    const MAX_RECENT = 10;
+    type Recent = { path: string; name: string; timestamp: number };
+    const getRecent = (): Recent[] => context.globalState.get<Recent[]>(RECENT_KEY, []);
+    const addRecent = (folder: string, name: string) => {
+        const list = getRecent().filter(r => path.resolve(r.path).toLowerCase() !== path.resolve(folder).toLowerCase());
+        list.unshift({ path: folder, name, timestamp: Date.now() });
+        context.globalState.update(RECENT_KEY, list.slice(0, MAX_RECENT));
+    };
+
+    // ---- Tree views --------------------------------------------------
     const treeProvider = new InstanceTreeProvider();
-    vscode.window.createTreeView('xinsp2.instances', { treeDataProvider: treeProvider });
+    const instancesView = vscode.window.createTreeView('xinsp2.instances', { treeDataProvider: treeProvider });
+
+    const pluginTreeProvider = new PluginTreeProvider();
+    pluginTreeProvider.setRemovableFolders(extraPluginDirs);
+    const pluginsView = vscode.window.createTreeView('xinsp2.plugins', { treeDataProvider: pluginTreeProvider });
+
+    // Activity-bar / view badge — surfaces connection state visually.
+    function setViewBadge(connected: boolean, instanceCount: number, pluginCount: number) {
+        // Disconnected: red "!" badge.
+        if (!connected) {
+            instancesView.badge = { tooltip: 'xInsp2 backend offline', value: 1 };
+            pluginsView.badge   = undefined;
+            return;
+        }
+        instancesView.badge = instanceCount > 0
+            ? { tooltip: `${instanceCount} instance(s)`, value: instanceCount }
+            : undefined;
+        pluginsView.badge = pluginCount > 0
+            ? { tooltip: `${pluginCount} plugin(s) discovered`, value: pluginCount }
+            : undefined;
+    }
+    let lastInstanceCount = 0;
+    let lastPluginCount = 0;
+    let lastConnected = false;
 
     // CodeLens for instance/param declarations
     const codeLensProvider = new InstanceCodeLensProvider();
@@ -88,10 +266,31 @@ export function activate(context: vscode.ExtensionContext) {
     client.on('open', () => {
         output.appendLine('[xinsp2] connected to backend');
         vscode.window.setStatusBarMessage('xInsp2: connected', 3000);
+        setCtx('connected', true);
+        updateHealthStatus(true);
+        lastConnected = true;
+        setViewBadge(true, lastInstanceCount, lastPluginCount);
+        // Pull plugin list for the Plugins view as soon as we're up.
+        sendCmd('list_plugins').then((r: any) => {
+            if (r?.ok && Array.isArray(r.data)) {
+                pluginTreeProvider.update(r.data as PluginInfo[]);
+                setCtx('hasPlugins', r.data.length > 0);
+            }
+        }).catch(() => {});
     });
 
     client.on('close', () => {
         output.appendLine('[xinsp2] disconnected');
+        setCtx('connected', false);
+        setCtx('hasProject', false);
+        setCtx('hasInstances', false);
+        currentProjectName = undefined;
+        currentProjectPath = undefined;
+        updateProjectStatus();
+        updateHealthStatus(false);
+        treeProvider.setProjectOpen(false);
+        lastConnected = false;
+        setViewBadge(false, 0, 0);
     });
 
     client.on('json', (msg: any) => {
@@ -108,6 +307,27 @@ export function activate(context: vscode.ExtensionContext) {
             viewerProvider.postVars(msg);
         } else if (msg.type === 'instances') {
             treeProvider.update(msg.instances ?? [], msg.params ?? []);
+            setCtx('hasInstances', (msg.instances?.length ?? 0) > 0);
+            lastInstanceCount = (msg.instances?.length ?? 0);
+            setViewBadge(lastConnected, lastInstanceCount, lastPluginCount);
+            // Recount plugin usage.
+            const uses = new Map<string, number>();
+            for (const i of (msg.instances ?? [])) {
+                uses.set(i.plugin, (uses.get(i.plugin) || 0) + 1);
+            }
+            pluginTreeProvider.update(
+                // Re-fetch plugin list to pick up any newly-appearing ones; but if
+                // there's nothing fresh, keep the current set with updated counts.
+                (pluginTreeProvider as any).plugins || [],
+                uses,
+            );
+            // Fire-and-forget refetch in case a plugin got loaded.
+            sendCmd('list_plugins').then((r: any) => {
+                if (r?.ok && Array.isArray(r.data)) {
+                    pluginTreeProvider.update(r.data as PluginInfo[], uses);
+                    setCtx('hasPlugins', r.data.length > 0);
+                }
+            }).catch(() => {});
         } else if (msg.type === 'log') {
             output.appendLine(`[${msg.level}] ${msg.msg}`);
         }
@@ -228,7 +448,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('xinsp2.start', async () => {
             if (!client?.connected) { vscode.window.showWarningMessage('xInsp2: not connected'); return; }
             const rsp = await sendCmd('start');
-            if (rsp.ok) vscode.window.setStatusBarMessage('xInsp2: continuous mode started', 3000);
+            if (rsp.ok) { setCtx('running', true); vscode.window.setStatusBarMessage('xInsp2: continuous mode started', 3000); }
             else vscode.window.showErrorMessage('xInsp2 start failed: ' + rsp.error);
         })
     );
@@ -237,7 +457,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('xinsp2.stop', async () => {
             if (!client?.connected) return;
             const rsp = await sendCmd('stop');
-            if (rsp.ok) vscode.window.setStatusBarMessage('xInsp2: stopped', 3000);
+            if (rsp.ok) { setCtx('running', false); vscode.window.setStatusBarMessage('xInsp2: stopped', 3000); }
         })
     );
 
@@ -273,6 +493,14 @@ export function activate(context: vscode.ExtensionContext) {
             if (rsp.ok) {
                 output.appendLine('[xinsp2] project created: ' + folder);
                 vscode.window.setStatusBarMessage('xInsp2: project created', 3000);
+                setCtx('hasProject', true);
+                setCtx('hasInstances', false);
+                addRecent(folder, name);
+                currentProjectName = name;
+                currentProjectPath = folder;
+                updateProjectStatus();
+                treeProvider.setProjectOpen(true);
+                openScriptIfExists(folder);
             }
             return rsp;
         })
@@ -289,9 +517,451 @@ export function activate(context: vscode.ExtensionContext) {
             const rsp = await sendCmd('open_project', { folder });
             if (rsp.ok) {
                 output.appendLine('[xinsp2] project opened: ' + folder);
+                setCtx('hasProject', true);
+                const n = rsp.data?.name || path.basename(folder);
+                addRecent(folder, n);
+                currentProjectName = n;
+                currentProjectPath = folder;
+                updateProjectStatus();
+                setCtx('hasInstances', (rsp.data?.instances?.length ?? 0) > 0);
                 sendCmd('list_instances');
+                treeProvider.setProjectOpen(true);
+                openScriptIfExists(folder);
             }
             return rsp;
+        })
+    );
+
+    // Open the project's inspection.cpp in an editor. Used by the auto-open
+    // hooks above and the explicit xinsp2.openScript command.
+    function openScriptIfExists(folder: string) {
+        const fs = require('fs');
+        const candidate = path.join(folder, 'inspection.cpp');
+        if (fs.existsSync(candidate)) {
+            vscode.workspace.openTextDocument(candidate).then(doc => {
+                vscode.window.showTextDocument(doc, { preserveFocus: true, preview: false });
+            }, () => { /* swallow */ });
+        }
+    }
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.openScript', async () => {
+            if (!currentProjectPath) {
+                vscode.window.showWarningMessage('xInsp2: no project open');
+                return;
+            }
+            openScriptIfExists(currentProjectPath);
+        })
+    );
+
+    // Trigger policy picker — controls how the bus correlates frames from
+    // multiple sources for this project.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.setTriggerPolicy', async () => {
+            if (!currentProjectPath) {
+                vscode.window.showWarningMessage('xInsp2: no project open');
+                return;
+            }
+            type Pol = vscode.QuickPickItem & { id: 'any'|'all_required'|'leader_followers' };
+            const choice = await vscode.window.showQuickPick<Pol>([
+                { id: 'any',              label: 'Any',              description: 'Fire on every emit (default; back-compat)' },
+                { id: 'all_required',     label: 'All required',     description: 'Wait until every listed source has emitted under the same trigger ID' },
+                { id: 'leader_followers', label: 'Leader / followers', description: 'Fire on leader emit; attach latest follower frames' },
+            ], { placeHolder: 'Trigger correlation policy' });
+            if (!choice) return;
+
+            let required: string[] = [];
+            let leader = '';
+            let window_ms = 100;
+
+            if (choice.id === 'all_required' || choice.id === 'leader_followers') {
+                // Get the list of available source instances.
+                const inst = await sendCmd('list_instances');
+                const sources: string[] = (inst?.data?.instances || []).map((i: any) => i.name);
+                if (sources.length === 0) {
+                    vscode.window.showWarningMessage('xInsp2: no instances yet — add some first');
+                    return;
+                }
+                if (choice.id === 'all_required') {
+                    const picks = await vscode.window.showQuickPick(sources,
+                        { placeHolder: 'Select required source instances', canPickMany: true });
+                    if (!picks?.length) return;
+                    required = picks;
+                } else {
+                    const pick = await vscode.window.showQuickPick(sources,
+                        { placeHolder: 'Select the leader source' });
+                    if (!pick) return;
+                    leader = pick;
+                }
+                const winStr = await vscode.window.showInputBox({
+                    prompt: 'Correlation window (ms)',
+                    value: '100',
+                    validateInput: v => /^\d+$/.test(v) ? undefined : 'must be a positive integer',
+                });
+                if (!winStr) return;
+                window_ms = parseInt(winStr, 10);
+            }
+
+            const r = await sendCmd('set_trigger_policy', {
+                policy: choice.id, required, leader, window_ms,
+            });
+            if (r?.ok) {
+                vscode.window.setStatusBarMessage(
+                    `xInsp2: trigger policy → ${choice.label}`, 3000);
+            } else {
+                vscode.window.showErrorMessage(`xInsp2: ${r?.error || 'failed'}`);
+            }
+        })
+    );
+
+    // Close-project: asks backend to forget the project, resets state.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.closeProject', async () => {
+            if (!client?.connected) return;
+            const rsp = await sendCmd('close_project');
+            if (rsp?.ok) {
+                setCtx('hasProject', false);
+                setCtx('hasInstances', false);
+                currentProjectName = undefined;
+                currentProjectPath = undefined;
+                updateProjectStatus();
+                treeProvider.update([], []);
+                treeProvider.setProjectOpen(false);
+                vscode.window.setStatusBarMessage('xInsp2: project closed', 2000);
+            }
+        })
+    );
+
+    // Cert drill-down: read cert.json + run recertify, show as a webview.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.showPluginCert', async (treeItem?: any) => {
+            // TreeItem label has the name + optional "  ×N" suffix; strip that.
+            let pluginName = '';
+            if (typeof treeItem === 'string') pluginName = treeItem;
+            else if (treeItem?.label) pluginName = String(treeItem.label).split('  ×')[0];
+            if (!pluginName) {
+                const pick = await vscode.window.showInputBox({ prompt: 'Plugin name' });
+                if (!pick) return;
+                pluginName = pick;
+            }
+            const panel = vscode.window.createWebviewPanel(
+                'xinsp2.pluginCert',
+                `Cert · ${pluginName}`,
+                vscode.ViewColumn.Active,
+                { enableScripts: true, retainContextWhenHidden: true }
+            );
+            const render = async () => {
+                // Find the plugin folder via list_plugins
+                const all = await sendCmd('list_plugins');
+                const p = (all?.data || []).find((x: any) => x.name === pluginName);
+                const folder: string = p?.folder || '';
+                let certJson: any = null;
+                try {
+                    const certPath = path.join(folder, 'cert.json');
+                    if (folder && require('fs').existsSync(certPath)) {
+                        certJson = JSON.parse(require('fs').readFileSync(certPath, 'utf8'));
+                    }
+                } catch {}
+                panel.webview.html = certPanelHtml(pluginName, folder, p, certJson);
+            };
+            panel.webview.onDidReceiveMessage(async (msg: any) => {
+                if (msg?.type === 'recert') {
+                    const r = await sendCmd('recertify_plugin', { name: pluginName });
+                    panel.webview.postMessage({ type: 'recert_result', ...r.data });
+                    await render();
+                    refreshPlugins();
+                }
+            });
+            await render();
+        })
+    );
+
+    // Remove an instance — right-click on tree item → "Remove Instance".
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.removeInstance', async (treeItem?: any) => {
+            let instanceName = '';
+            if (typeof treeItem === 'string') instanceName = treeItem;
+            else if (treeItem?.label) instanceName = String(treeItem.label);
+            if (!instanceName) return;
+            const pick = await vscode.window.showWarningMessage(
+                `Remove instance "${instanceName}"?`,
+                { modal: true, detail: 'The instance and its on-disk folder will be deleted. This cannot be undone.' },
+                'Remove (and delete folder)',
+                'Remove (keep folder)',
+            );
+            if (!pick) return;
+            const delete_folder = pick === 'Remove (and delete folder)';
+            const r = await sendCmd('remove_instance', { name: instanceName, delete_folder });
+            if (r?.ok) {
+                sendCmd('list_instances');
+                vscode.window.setStatusBarMessage(`xInsp2: removed "${instanceName}"`, 2500);
+            } else {
+                vscode.window.showErrorMessage(`Remove failed: ${r?.error || 'unknown'}`);
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.renameInstance', async (treeItem?: any) => {
+            let oldName = '';
+            if (typeof treeItem === 'string') oldName = treeItem;
+            else if (treeItem?.label) oldName = String(treeItem.label);
+            if (!oldName) return;
+            const newName = await vscode.window.showInputBox({
+                prompt: `Rename instance "${oldName}" to:`,
+                value: oldName,
+                validateInput: (v) =>
+                    !v.trim()                          ? 'Name cannot be empty'
+                    : !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(v) ? 'Must start with a letter/underscore; identifier characters only'
+                    : undefined,
+            });
+            if (!newName || newName === oldName) return;
+            const r = await sendCmd('rename_instance', { name: oldName, new_name: newName });
+            if (r?.ok) {
+                sendCmd('list_instances');
+                vscode.window.setStatusBarMessage(`xInsp2: renamed to "${newName}"`, 2500);
+            } else {
+                vscode.window.showErrorMessage(`Rename failed: ${r?.error || 'unknown'}`);
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.recertifyPlugin', async (treeItem?: any) => {
+            let pluginName = '';
+            if (typeof treeItem === 'string') pluginName = treeItem;
+            else if (treeItem?.label) pluginName = String(treeItem.label).split('  ×')[0];
+            if (!pluginName) return;
+            const r = await sendCmd('recertify_plugin', { name: pluginName });
+            if (r?.ok) {
+                const msg = r.data?.passed ? `✓ ${pluginName} re-certified` :
+                            `⚠ ${pluginName}: ${r.data?.fail_count || 0} test(s) failed`;
+                vscode.window.showInformationMessage(msg);
+                refreshPlugins();
+            } else {
+                vscode.window.showErrorMessage(`re-cert failed: ${r?.error || 'unknown'}`);
+            }
+        })
+    );
+
+    // Recent projects via QuickPick
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.openRecent', async () => {
+            // Filter out paths that no longer exist on disk + persist the cleanup.
+            const fs = require('fs');
+            const all = getRecent();
+            const live = all.filter(r => {
+                try { return fs.existsSync(path.join(r.path, 'project.json')); }
+                catch { return false; }
+            });
+            if (live.length !== all.length) {
+                context.globalState.update(RECENT_KEY, live);
+            }
+            if (live.length === 0) {
+                vscode.window.showInformationMessage(
+                    all.length === 0
+                        ? 'xInsp2: no recent projects yet'
+                        : 'xInsp2: every recent project folder is gone — list cleared');
+                return;
+            }
+            type Item = vscode.QuickPickItem & { path: string };
+            const items: Item[] = live.map(r => ({
+                label: r.name,
+                description: r.path,
+                detail: new Date(r.timestamp).toLocaleString(),
+                path: r.path,
+            }));
+            const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Open recent xInsp2 project' });
+            if (!pick) return;
+            await vscode.commands.executeCommand('xinsp2.openProject', pick.path);
+        })
+    );
+
+    // First-run sample project: create a throwaway demo project with a
+    // preconfigured mock_camera → blob_analysis pipeline so the user can
+    // see something working immediately.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.createSampleProject', async () => {
+            if (!client?.connected) {
+                vscode.window.showWarningMessage('xInsp2: not connected to backend');
+                return;
+            }
+            const { tmpdir } = require('os');
+            const fs = require('fs');
+            const sampleDir = path.join(tmpdir(),
+                `xinsp2_sample_${new Date().toISOString().slice(0,10)}_${Date.now().toString(36)}`);
+            const create = await sendCmd('create_project', {
+                folder: sampleDir, name: 'xinsp2_sample',
+            });
+            if (!create?.ok) {
+                vscode.window.showErrorMessage(`Sample project failed: ${create?.error || 'unknown'}`);
+                return;
+            }
+            // Preconfigure a small pipeline — pick whichever plugins we have.
+            const plugins: any[] = (await sendCmd('list_plugins'))?.data || [];
+            const want = ['mock_camera', 'blob_analysis'];
+            for (const p of want) {
+                if (plugins.some(x => x.name === p)) {
+                    await vscode.commands.executeCommand('xinsp2.createInstance',
+                        p + '0', p);
+                }
+            }
+            // Seed a working inspection.cpp that uses whichever instances we created.
+            const scriptPath = path.join(sampleDir, 'inspection.cpp');
+            const hasCam = plugins.some(x => x.name === 'mock_camera');
+            const hasDet = plugins.some(x => x.name === 'blob_analysis');
+            if (hasCam && hasDet) {
+                fs.writeFileSync(scriptPath, `//
+// xInsp2 sample — mock_camera → blob_analysis pipeline.
+// Edit, save (compiles automatically), and click Run Inspection.
+//
+#include <xi/xi.hpp>
+#include <xi/xi_ops.hpp>
+#include <xi/xi_use.hpp>
+
+using namespace xi::ops;
+
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int frame) {
+    auto& cam = xi::use("mock_camera0");
+    auto& det = xi::use("blob_analysis0");
+
+    auto img = cam.grab(500);
+    if (img.empty()) {
+        img = xi::Image(320, 240, 1);
+        std::memset(img.data(), 0, 320*240);
+        for (int y = 60; y < 100; ++y)
+            for (int x = 60; x < 100; ++x) img.data()[y*320+x] = 255;
+    }
+    VAR(input, img);
+
+    auto gray = toGray(img);
+    VAR(gray, gray);
+
+    auto out = det.process(xi::Record().image("gray", gray));
+    VAR(detection, out);
+    VAR(blob_count, out["blob_count"].as_int());
+    VAR(binary,     out.get_image("binary"));
+}
+`);
+            }
+            // Open the script so the user sees something concrete.
+            try {
+                const doc = await vscode.workspace.openTextDocument(scriptPath);
+                await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+            } catch {}
+            vscode.window.showInformationMessage(
+                `Sample project created at ${sampleDir}. Edit inspection.cpp or click Run.`);
+        })
+    );
+
+    // Open the SDK getting-started doc from the welcome view
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.openGettingStarted', async () => {
+            const candidate = path.resolve(context.extensionPath, '..', 'sdk', 'GETTING_STARTED.md');
+            try {
+                const doc = await vscode.workspace.openTextDocument(candidate);
+                await vscode.window.showTextDocument(doc);
+            } catch {
+                vscode.window.showInformationMessage(
+                    `xInsp2: GETTING_STARTED.md not found at ${candidate}. Set xinsp2.sdkPath if installed elsewhere.`);
+            }
+        })
+    );
+
+    // Manually restart the backend (for when it hangs / crashes)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.restartBackend', async () => {
+            if (backend) { try { backend.kill(); } catch {} backend = null; }
+            setCtx('connected', false);
+            setCtx('hasProject', false);
+            setCtx('running', false);
+            const exe = findBackendExe(context);
+            const args = [`--port=${port}`];
+            for (const dir of extraPluginDirs) args.push(`--plugins-dir=${dir}`);
+            output.appendLine(`[xinsp2] restarting ${exe} ${args.join(' ')}`);
+            backend = spawn(exe, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+            backend.stdout?.on('data', (d: Buffer) => output.append(d.toString()));
+            backend.stderr?.on('data', (d: Buffer) => output.append(d.toString()));
+            backend.on('exit', (code) => { output.appendLine(`[xinsp2] backend exited (${code})`); backend = null; });
+            setTimeout(() => client!.connect(), 500);
+        })
+    );
+
+    // ---- Plugin-manager tree actions ---------------------------------
+    async function refreshPlugins() {
+        const r = await sendCmd('list_plugins');
+        if (r?.ok && Array.isArray(r.data)) {
+            pluginTreeProvider.update(r.data as PluginInfo[]);
+            setCtx('hasPlugins', r.data.length > 0);
+            lastPluginCount = r.data.length;
+            setViewBadge(lastConnected, lastInstanceCount, lastPluginCount);
+        }
+    }
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.refreshPlugins', async () => {
+            if (!client?.connected) return;
+            // Rescan every known folder, then refresh the tree.
+            for (const dir of config.get<string[]>('extraPluginDirs', [])) {
+                await sendCmd('rescan_plugins', { dir });
+            }
+            await sendCmd('rescan_plugins'); // built-in dir
+            await refreshPlugins();
+            vscode.window.setStatusBarMessage('xInsp2: plugins rescanned', 2000);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.addPluginFolder', async () => {
+            const uris = await vscode.window.showOpenDialog({
+                canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
+                openLabel: 'Add plugin folder',
+            });
+            if (!uris?.length) return;
+            const folder = uris[0].fsPath;
+            const current = config.get<string[]>('extraPluginDirs', []);
+            if (current.some(d => path.resolve(d).toLowerCase() === path.resolve(folder).toLowerCase())) {
+                vscode.window.showInformationMessage(`xInsp2: "${folder}" already in plugin dirs`);
+                return;
+            }
+            const next = [...current, folder];
+            await config.update('extraPluginDirs', next, vscode.ConfigurationTarget.Global);
+            pluginTreeProvider.setRemovableFolders(next);
+            if (client?.connected) await sendCmd('rescan_plugins', { dir: folder });
+            await refreshPlugins();
+            vscode.window.showInformationMessage(`xInsp2: added ${folder}`);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.removePluginFolder', async (treeItem?: any) => {
+            // Invoked from the tree's inline action: arg is the TreeItem.
+            const folder = treeItem?.resourceUri?.fsPath || treeItem?.tooltip;
+            if (!folder || typeof folder !== 'string') {
+                vscode.window.showWarningMessage('xInsp2: no folder selected');
+                return;
+            }
+            const current = config.get<string[]>('extraPluginDirs', []);
+            const next = current.filter(d => path.resolve(d).toLowerCase() !== path.resolve(folder).toLowerCase());
+            await config.update('extraPluginDirs', next, vscode.ConfigurationTarget.Global);
+            pluginTreeProvider.setRemovableFolders(next);
+            // Note: host keeps the plugin registered until restart. Tell the user.
+            vscode.window.showWarningMessage(
+                `xInsp2: "${folder}" removed from settings. Restart the backend to fully unload.`,
+                'Restart Backend'
+            ).then(choice => {
+                if (choice === 'Restart Backend') vscode.commands.executeCommand('xinsp2.restartBackend');
+            });
+            await refreshPlugins();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.revealPluginFolder', async (treeItem?: any) => {
+            const folder = treeItem?.resourceUri?.fsPath || treeItem?.tooltip;
+            if (!folder) return;
+            try { await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(folder)); } catch {}
         })
     );
 
@@ -394,13 +1064,39 @@ export function activate(context: vscode.ExtensionContext) {
 </script>`;
             html = html.replace('</body>', testShim + '</body>');
 
-            // Create webview panel
+            // Create webview panel. localResourceRoots gates which files the
+            // webview can load — include the extension dir (so @vscode-elements
+            // can be served) and the plugin's own folder (for images/assets
+            // it might reference from the UI).
+            const veLibDir = vscode.Uri.joinPath(context.extensionUri,
+                'node_modules', '@vscode-elements', 'elements', 'dist');
             const panel = vscode.window.createWebviewPanel(
                 'xinsp2.pluginUI',
                 `${instanceName} (${pluginName})`,
                 vscode.ViewColumn.Two,
-                { enableScripts: true }
+                {
+                    enableScripts: true,
+                    localResourceRoots: [
+                        veLibDir,
+                        vscode.Uri.file(uiPath),
+                    ],
+                }
             );
+
+            // Inject @vscode-elements (Microsoft's web-components for VS Code
+            // webviews — native-looking buttons, inputs, tabs, badges that
+            // inherit the user's theme). If the plugin doesn't use any of the
+            // <vscode-*> tags this is just ~230KB of dead code in the webview.
+            const veUri = panel.webview.asWebviewUri(
+                vscode.Uri.joinPath(veLibDir, 'bundled.js')
+            );
+            const veScriptTag = `<script type="module" src="${veUri}"></script>`;
+            // Put it in the <head> if we can find one, else prepend to body.
+            if (html.includes('</head>')) {
+                html = html.replace('</head>', `  ${veScriptTag}\n</head>`);
+            } else {
+                html = html.replace('<body>', `<body>\n${veScriptTag}`);
+            }
             panel.webview.html = html;
             pluginUIPanels.set(instanceName, panel);
             panel.onDidDispose(() => {
@@ -497,6 +1193,74 @@ export function activate(context: vscode.ExtensionContext) {
             return panel.webview.postMessage({ type: '__xi_set_input', selector, value: String(value) });
         },
     };
+
+    // Live-session runner: load <plugin>/tests/test_ui.cjs and feed it the
+    // same `h` helpers the CLI launcher provides. Avoids the 10–20s VS Code
+    // cold-start when iterating on a plugin's UI test.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.runPluginUITests', async (folderHint?: string) => {
+            let pluginFolder = folderHint;
+            if (!pluginFolder) {
+                const uris = await vscode.window.showOpenDialog({
+                    canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
+                    openLabel: 'Pick plugin folder',
+                });
+                if (!uris?.length) return;
+                pluginFolder = uris[0].fsPath;
+            }
+            const fs = require('fs') as typeof import('fs');
+            const testFile = path.join(pluginFolder, 'tests', 'test_ui.cjs');
+            if (!fs.existsSync(testFile)) {
+                vscode.window.showErrorMessage(`No tests/test_ui.cjs in ${pluginFolder}`);
+                return;
+            }
+            // Helpers live in the SDK. In the dev workspace we resolve them
+            // relative to this extension; configurable via xinsp2.sdkPath.
+            const sdkPath = vscode.workspace.getConfiguration('xinsp2').get<string>('sdkPath')
+                || path.resolve(context.extensionPath, '..', 'sdk');
+            const helpersPath = path.join(sdkPath, 'testing', 'helpers.cjs');
+            if (!fs.existsSync(helpersPath)) {
+                vscode.window.showErrorMessage(`SDK helpers not found at ${helpersPath}. Set xinsp2.sdkPath.`);
+                return;
+            }
+
+            // Make sure the plugin's parent folder is scanned, so this
+            // plugin is loadable in the live host without a restart.
+            try {
+                await sendCmd('rescan_plugins', { dir: path.dirname(pluginFolder) });
+            } catch { /* command may not exist; harmless */ }
+
+            output.appendLine(`[xinsp2] running UI test for ${pluginFolder}`);
+            output.show(true);
+            const { makeHelpers } = require(helpersPath);
+            const h = await makeHelpers(pluginFolder);
+
+            // Reload the test module each time so the user can edit + re-run
+            delete require.cache[require.resolve(testFile)];
+            const mod = require(testFile);
+            const runFn = (typeof mod === 'function') ? mod
+                        : (mod && typeof mod.run === 'function') ? mod.run : null;
+            if (!runFn) {
+                vscode.window.showErrorMessage(`${testFile} must export run(h)`);
+                return;
+            }
+
+            try {
+                await runFn(h);
+                if (h.failures.length === 0) {
+                    vscode.window.showInformationMessage(
+                        `Plugin UI test passed (${h.passes.length} assertions)`);
+                } else {
+                    vscode.window.showErrorMessage(
+                        `Plugin UI test: ${h.failures.length} failure(s) — see Output`);
+                    for (const f of h.failures) output.appendLine(`  ✗ ${f}`);
+                }
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`Plugin UI test threw: ${e.message}`);
+                output.appendLine(`[xinsp2] threw: ${e.stack || e}`);
+            }
+        })
+    );
 
     // --- Auto-compile on save (S2) ---
     context.subscriptions.push(

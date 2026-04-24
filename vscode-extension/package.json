@@ -24,7 +24,8 @@
       },
       {
         "command": "xinsp2.compile",
-        "title": "xInsp2: Compile Script"
+        "title": "xInsp2: Compile Script",
+        "icon": "$(gear)"
       },
       {
         "command": "xinsp2.saveProject",
@@ -67,6 +68,85 @@
         "command": "xinsp2.openInstanceUI",
         "title": "xInsp2: Open Instance UI",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "xinsp2.runPluginUITests",
+        "title": "xInsp2: Run Plugin UI Tests",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "xinsp2.openRecent",
+        "title": "xInsp2: Open Recent Project…",
+        "icon": "$(history)"
+      },
+      {
+        "command": "xinsp2.openGettingStarted",
+        "title": "xInsp2: Open Getting Started"
+      },
+      {
+        "command": "xinsp2.restartBackend",
+        "title": "xInsp2: Restart Backend",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "xinsp2.refreshPlugins",
+        "title": "xInsp2: Rescan Plugins",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "xinsp2.addPluginFolder",
+        "title": "xInsp2: Add Plugin Folder…",
+        "icon": "$(add)"
+      },
+      {
+        "command": "xinsp2.removePluginFolder",
+        "title": "xInsp2: Remove Plugin Folder",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "xinsp2.revealPluginFolder",
+        "title": "xInsp2: Reveal in File Explorer",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "xinsp2.closeProject",
+        "title": "xInsp2: Close Project",
+        "icon": "$(close)"
+      },
+      {
+        "command": "xinsp2.showPluginCert",
+        "title": "xInsp2: Show Plugin Cert",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "xinsp2.recertifyPlugin",
+        "title": "xInsp2: Re-certify Plugin",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "xinsp2.removeInstance",
+        "title": "xInsp2: Remove Instance",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "xinsp2.renameInstance",
+        "title": "xInsp2: Rename Instance",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "xinsp2.createSampleProject",
+        "title": "xInsp2: Try a Sample Project",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "xinsp2.openScript",
+        "title": "xInsp2: Open Inspection Script",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "xinsp2.setTriggerPolicy",
+        "title": "xInsp2: Set Trigger Policy…",
+        "icon": "$(symbol-event)"
       }
     ],
     "viewsContainers": {
@@ -86,43 +166,137 @@
           "type": "tree"
         },
         {
+          "id": "xinsp2.plugins",
+          "name": "Plugins",
+          "type": "tree"
+        },
+        {
           "id": "xinsp2.viewer",
           "name": "Viewer",
           "type": "webview"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "xinsp2.instances",
+        "contents": "The xInsp2 backend isn't running.\n\nThe extension starts it automatically on activation. Check the Output panel for errors, or restart it manually.\n[Restart Backend](command:xinsp2.restartBackend)",
+        "when": "!xinsp2.connected"
+      },
+      {
+        "view": "xinsp2.instances",
+        "contents": "No project open yet.\n[Try a Sample Project](command:xinsp2.createSampleProject)\n\nOr start from scratch:\n[Create New Project](command:xinsp2.createProject)\n[Open Existing Project](command:xinsp2.openProject)\n[Open Recent…](command:xinsp2.openRecent)\n\n[Read Getting Started](command:xinsp2.openGettingStarted)",
+        "when": "xinsp2.connected && !xinsp2.hasProject"
+      },
+      {
+        "view": "xinsp2.plugins",
+        "contents": "No plugins discovered yet.\n\nPlugins are C++ DLLs that provide inspection capabilities (cameras, detectors, savers…).\n[Add Plugin Folder…](command:xinsp2.addPluginFolder)\n[Rescan](command:xinsp2.refreshPlugins)",
+        "when": "!xinsp2.hasPlugins"
+      },
+      {
+        "view": "xinsp2.instances",
+        "contents": "Project is open but has no instances yet.\n\nAn instance is a configured use of a plugin in this project.\n[Add First Instance](command:xinsp2.createInstance)\n\nNo plugins available? [Add a plugin folder](command:xinsp2.addPluginFolder) first.",
+        "when": "xinsp2.connected && xinsp2.hasProject && !xinsp2.hasInstances"
+      }
+    ],
     "menus": {
       "view/title": [
         {
           "command": "xinsp2.createInstance",
-          "when": "view == xinsp2.instances",
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject && xinsp2.hasPlugins",
           "group": "navigation@1"
         },
         {
-          "command": "xinsp2.createProject",
-          "when": "view == xinsp2.instances",
+          "command": "xinsp2.run",
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject && !xinsp2.running",
+          "group": "navigation@2"
+        },
+        {
+          "command": "xinsp2.stop",
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.running",
           "group": "navigation@2"
         },
         {
           "command": "xinsp2.openProject",
-          "when": "view == xinsp2.instances",
+          "when": "view == xinsp2.instances && xinsp2.connected",
           "group": "navigation@3"
         },
         {
-          "command": "xinsp2.run",
-          "when": "view == xinsp2.instances",
+          "command": "xinsp2.restartBackend",
+          "when": "view == xinsp2.instances && !xinsp2.connected",
           "group": "navigation@4"
+        },
+        {
+          "command": "xinsp2.closeProject",
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
+          "group": "navigation@5"
+        },
+        {
+          "command": "xinsp2.addPluginFolder",
+          "when": "view == xinsp2.plugins",
+          "group": "navigation@1"
+        },
+        {
+          "command": "xinsp2.refreshPlugins",
+          "when": "view == xinsp2.plugins",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "xinsp2.compile",
+          "when": "resourceFilename == inspection.cpp && xinsp2.connected",
+          "group": "navigation@1"
+        },
+        {
+          "command": "xinsp2.run",
+          "when": "resourceFilename == inspection.cpp && xinsp2.connected && xinsp2.hasProject",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
         {
           "command": "xinsp2.openInstanceUI",
           "when": "view == xinsp2.instances && viewItem == instance",
+          "group": "inline@1"
+        },
+        {
+          "command": "xinsp2.renameInstance",
+          "when": "view == xinsp2.instances && viewItem == instance",
+          "group": "inline@2"
+        },
+        {
+          "command": "xinsp2.removeInstance",
+          "when": "view == xinsp2.instances && viewItem == instance",
+          "group": "inline@3"
+        },
+        {
+          "command": "xinsp2.removePluginFolder",
+          "when": "view == xinsp2.plugins && viewItem == pluginFolderRemovable",
           "group": "inline"
+        },
+        {
+          "command": "xinsp2.revealPluginFolder",
+          "when": "view == xinsp2.plugins && (viewItem == pluginFolderRemovable || viewItem == pluginFolderLocked)",
+          "group": "inline"
+        },
+        {
+          "command": "xinsp2.showPluginCert",
+          "when": "view == xinsp2.plugins && viewItem == plugin",
+          "group": "inline@1"
+        },
+        {
+          "command": "xinsp2.recertifyPlugin",
+          "when": "view == xinsp2.plugins && viewItem == plugin",
+          "group": "inline@2"
         }
       ]
     },
+    "keybindings": [
+      { "command": "xinsp2.run",     "key": "ctrl+f5",       "when": "xinsp2.connected && xinsp2.hasProject && !xinsp2.running" },
+      { "command": "xinsp2.stop",    "key": "ctrl+shift+f5", "when": "xinsp2.connected && xinsp2.running" },
+      { "command": "xinsp2.compile", "key": "ctrl+shift+b",  "when": "xinsp2.connected && resourceLangId == cpp" }
+    ],
     "configuration": {
       "title": "xInsp2",
       "properties": {
@@ -138,9 +312,16 @@
         },
         "xinsp2.extraPluginDirs": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Additional folders to scan for plugins (each subfolder with a plugin.json is registered). Lets external SDKs / 3rd-party plugins live anywhere on disk without copying."
+        },
+        "xinsp2.sdkPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the xInsp2 plugin SDK folder (the one containing testing/helpers.cjs). Used by the Run Plugin UI Tests command. Defaults to ../sdk relative to this extension."
         }
       }
     }
@@ -159,6 +340,7 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
+    "@vscode-elements/elements": "^2.5.1",
     "ws": "^8.18.0"
   }
 }

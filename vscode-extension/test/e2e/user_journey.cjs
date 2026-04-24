@@ -32,26 +32,71 @@ function takeScreenshot(label) {
     fs.mkdirSync(screenshotDir, { recursive: true });
     const fname = `journey_${String(stepNum).padStart(2,'0')}_${label}.png`;
     const fpath = path.join(screenshotDir, fname);
-    const psScript = path.join(os.tmpdir(), 'xinsp2_journey_ss.ps1');
+    // Use PrintWindow: captures VS Code's window buffer even if another
+    // window is in front, so screenshots stay clean regardless of the
+    // user's desktop state.
+    const psScript = path.join(os.tmpdir(), `xinsp2_journey_ss_${process.pid}.ps1`);
     fs.writeFileSync(psScript, `
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$pt = New-Object System.Drawing.Point(0, 0)
-$bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-$gfx = [System.Drawing.Graphics]::FromImage($bmp)
-$gfx.CopyFromScreen($bounds.Location, $pt, $bounds.Size)
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win {
+    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmd);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+}
+"@
+$targetHwnd = [IntPtr]::Zero
+# Prefer windows whose title names the Extension Development Host — that's
+# the specific VS Code instance the test spawned. Among candidates pick the
+# largest (guards against Code helper renderers with tiny windows).
+$candidates = Get-Process -Name Code -ErrorAction SilentlyContinue |
+              Where-Object { $_.MainWindowTitle -ne "" -and $_.MainWindowHandle -ne [IntPtr]::Zero } |
+              ForEach-Object {
+                  $r = New-Object Win+RECT
+                  [void][Win]::GetWindowRect($_.MainWindowHandle, [ref]$r)
+                  $area = [Math]::Max(0, ($r.Right - $r.Left)) * [Math]::Max(0, ($r.Bottom - $r.Top))
+                  [PSCustomObject]@{
+                      Hwnd = $_.MainWindowHandle
+                      Title = $_.MainWindowTitle
+                      Area = $area
+                      IsDev = $_.MainWindowTitle -like "*Extension Development Host*"
+                  }
+              }
+$best = $candidates | Sort-Object -Property @{Expression="IsDev";Descending=$true}, @{Expression="Area";Descending=$true} | Select-Object -First 1
+if ($best) { $targetHwnd = $best.Hwnd }
+if ($targetHwnd -eq [IntPtr]::Zero) {
+    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+    $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+    $gfx.CopyFromScreen($bounds.Location, (New-Object System.Drawing.Point(0,0)), $bounds.Size)
+} else {
+    if ([Win]::IsIconic($targetHwnd)) { [void][Win]::ShowWindow($targetHwnd, 9) }
+    $r = New-Object Win+RECT
+    [void][Win]::GetWindowRect($targetHwnd, [ref]$r)
+    $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
+    if ($w -le 0 -or $h -le 0) { $w = 1200; $h = 800 }
+    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+    $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+    $hdc = $gfx.GetHdc()
+    [void][Win]::PrintWindow($targetHwnd, $hdc, 2)
+    $gfx.ReleaseHdc($hdc)
+}
 $bmp.Save("${fpath.replace(/\\/g, '\\\\')}")
-$gfx.Dispose()
-$bmp.Dispose()
+$gfx.Dispose(); $bmp.Dispose()
 `);
     try {
-        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psScript}"`, { timeout: 15000 });
+        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psScript}"`, { timeout: 20000 });
         console.log(`  📸 ${fname}`);
     } catch (e) {
-        console.log(`  📸 failed: ${e.message}`);
+        console.log(`  📸 ${fname} failed: ${e.message}`);
     }
 }
+const shot = takeScreenshot;
 
 async function run() {
     console.log('\n=== USER JOURNEY E2E ===\n');
@@ -76,6 +121,12 @@ async function run() {
     const projDir = path.join(os.tmpdir(), `xinsp2_journey_${Date.now()}`);
     const saveDir = path.join(projDir, 'inspection_results');
 
+    // ====== STEP 0: Initial state — no project, welcome view on display ======
+    console.log('\n[STEP 0] Initial state: backend connected, no project');
+    try { await vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}
+    await sleep(1500);
+    shot('initial_welcome');
+
     // ====== STEP 1: User creates project via command palette ======
     console.log('\n[STEP 1] User: Command Palette → "xInsp2: Create Project"');
     const r1 = await vscode.commands.executeCommand('xinsp2.createProject', projDir, 'my_inspection');
@@ -83,10 +134,9 @@ async function run() {
     assert.ok(fs.existsSync(path.join(projDir, 'project.json')), 'project.json created on disk');
     assert.ok(fs.existsSync(path.join(projDir, 'inspection.cpp')), 'starter inspection.cpp created');
     console.log(`  ✓ project created: ${projDir}`);
-    // Focus the xInsp2 sidebar so screenshots show the instance tree + buttons
     try { await vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}
-    await sleep(1200);
-    takeScreenshot('project_created');
+    await sleep(1500);
+    shot('project_created_empty_welcome');
 
     // ====== STEP 2: User clicks "+" in Instances view → real QuickPick + InputBox ======
     // The "+" button invokes xinsp2.createInstance with NO args, which then
@@ -181,52 +231,61 @@ async function run() {
     takeScreenshot('instances_created');
 
     // ====== STEP 3: User clicks cam0 in the tree (or its inline ⚙ icon) ======
-    // The tree's view/item/context inline button passes the TreeItem itself —
-    // we mimic that by passing a {label, description} object the same way the
-    // tree provider would.
-    console.log('\n[STEP 3] User: Click cam0 in tree → opens camera UI, set FPS=15, start');
+    console.log('\n[STEP 3] User: Click cam0 → camera UI opens, set FPS=15, start streaming');
     await vscode.commands.executeCommand('xinsp2.openInstanceUI',
         { label: 'cam0', description: 'mock_camera' });
-    await sleep(1500);
+    await sleep(2000);
+    shot('camera_ui_opened');
 
     // True UI driving: type into inputs, click buttons inside the webview.
     api.setInputInWebview('cam0', '#fps', 15);
-    await sleep(200);
-    api.clickInWebview('cam0', '.btn-apply');     // sends set_resolution + set_fps
     await sleep(400);
-    api.clickInWebview('cam0', '.btn-start');     // sends start
-    await sleep(1500);
+    api.clickInWebview('cam0', '#btn-apply');
+    await sleep(600);
+    shot('camera_settings_applied');
+
+    api.clickInWebview('cam0', '#btn-start');
+    await sleep(2000);   // let preview stream kick in
     console.log('  ✓ camera streaming at 15 fps');
-    takeScreenshot('camera_configured');
+    shot('camera_streaming');
 
     // ====== STEP 4: User opens blob analysis UI, sets threshold ======
     console.log('\n[STEP 4] User: Open blob analysis UI, set threshold=120');
     await vscode.commands.executeCommand('xinsp2.openInstanceUI', 'det0', 'blob_analysis');
-    await sleep(1500);
+    await sleep(2000);
+    shot('blob_ui_opened');
+
     api.setInputInWebview('det0', '#threshold', 120);
+    await sleep(300);
     api.setInputInWebview('det0', '#minArea', 30);
-    await sleep(200);
-    api.clickInWebview('det0', 'button[onclick="onApply()"]');  // sends set_threshold + set_min_area
-    await sleep(800);
+    await sleep(300);
+    shot('blob_params_set');
+
+    api.clickInWebview('det0', 'vscode-button[onclick="onApply()"], button[onclick="onApply()"]');
+    await sleep(1000);
     console.log('  ✓ blob analysis configured');
-    takeScreenshot('blob_configured');
+    shot('blob_applied');
 
     // ====== STEP 5: User opens saver UI, sets folder + naming, enables ======
     console.log('\n[STEP 5] User: Open saver UI, set folder + naming rule, enable');
     await vscode.commands.executeCommand('xinsp2.openInstanceUI', 'saver0', 'record_save');
-    await sleep(1500);
+    await sleep(2000);
+    shot('saver_ui_opened');
+
     fs.mkdirSync(saveDir, { recursive: true });
     api.setInputInWebview('saver0', '#outputDir', saveDir);
     api.setInputInWebview('saver0', '#namingRule', 'inspection_{count}');
-    await sleep(200);
-    api.clickInWebview('saver0', 'button[onclick="applySettings()"]');  // sends set_output_dir + set_naming_rule
     await sleep(400);
-    api.clickInWebview('saver0', '#enableBtn');                          // sends set_enabled toggle
-    await sleep(800);
+    shot('saver_fields_filled');
+
+    api.clickInWebview('saver0', '#btn-apply');
+    await sleep(500);
+    api.clickInWebview('saver0', '#btn-toggle');
+    await sleep(900);
     const enableRsp = await api.sendCmd('exchange_instance', { name: 'saver0', cmd: { command: 'get_status' } });
     console.log('  saver state after enable:', JSON.stringify(enableRsp.data));
     console.log(`  ✓ saver enabled, will write to ${saveDir}`);
-    takeScreenshot('saver_configured');
+    shot('saver_enabled');
 
     // ====== STEP 6: User writes inspection script that wires them together ======
     console.log('\n[STEP 6] User: Edit inspection.cpp');
@@ -284,15 +343,14 @@ void xi_inspect_entry(int frame) {
     fs.writeFileSync(scriptPath, scriptCode);
     console.log('  ✓ inspection.cpp written');
 
-    // Open in editor (so user sees their code)
+    // Open in editor (so user sees their code — editor title actions visible)
     const doc = await vscode.workspace.openTextDocument(scriptPath);
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
-    await sleep(1500);
-    takeScreenshot('script_edited');
+    await sleep(1800);
+    shot('script_in_editor');
 
     // ====== STEP 7: User compiles via command ======
     console.log('\n[STEP 7] User: Command Palette → "xInsp2: Compile Script"');
-    // Simulate user invoking compile through editor-relative command
     const compileRsp = await api.sendCmd('compile_and_load', { path: scriptPath });
     if (!compileRsp.ok) {
         console.log('--- compile error full payload ---');
@@ -302,24 +360,27 @@ void xi_inspect_entry(int frame) {
     assert.ok(compileRsp.ok, `compile failed: ${compileRsp.error}`);
     console.log('  ✓ compile succeeded');
     await sleep(2000);
-    takeScreenshot('compiled');
+    shot('after_compile');
 
     // ====== STEP 8: User runs inspection ======
-    console.log('\n[STEP 8] User: Command Palette → "xInsp2: Run Inspection"');
+    console.log('\n[STEP 8] User: Run Inspection');
 
-    // Run several times to accumulate saved files
+    // Run several times to accumulate saved files + see viewer update
     for (let i = 0; i < 3; ++i) {
         const runRsp = await api.sendCmd('run');
         console.log(`  run #${i+1}:`, JSON.stringify(runRsp).slice(0, 200));
         await sleep(800);
     }
-    await sleep(1500);
+    await sleep(1800);
+    // Focus the viewer so the captured vars are visible in the screenshot.
+    try { await vscode.commands.executeCommand('xinsp2.viewer.focus'); } catch {}
+    await sleep(1000);
     const saverStatus = await api.sendCmd('exchange_instance', {
         name: 'saver0', cmd: { command: 'get_status' }
     });
     console.log('  saver status after runs:', JSON.stringify(saverStatus.data));
     console.log('  ✓ ran inspection 3 times');
-    takeScreenshot('inspections_ran');
+    shot('inspections_ran_viewer');
 
     // ====== STEP 9: Verify side effects ======
     console.log('\n[STEP 9] Verify user-visible side effects');
@@ -354,12 +415,23 @@ void xi_inspect_entry(int frame) {
     assert.ok('frame' in recorded, 'saved JSON contains frame field');
     console.log(`  ✓ recorded data includes: ${Object.keys(recorded).join(', ')}`);
 
-    takeScreenshot('verified_side_effects');
+    // Focus the saver UI so the screenshot shows the updated counter.
+    try {
+        await vscode.commands.executeCommand('xinsp2.openInstanceUI', 'saver0', 'record_save');
+    } catch {}
+    await sleep(1500);
+    shot('saver_counter_after_runs');
 
     // ====== STEP 10: User stops camera, saves project, closes ======
     console.log('\n[STEP 10] User: Stop camera, save project');
-    api.clickInWebview('cam0', '.btn-stop');
-    await sleep(800);
+    try {
+        await vscode.commands.executeCommand('xinsp2.openInstanceUI', 'cam0', 'mock_camera');
+    } catch {}
+    await sleep(1000);
+    api.clickInWebview('cam0', '#btn-stop');
+    await sleep(1000);
+    shot('camera_stopped');
+
     await api.sendCmd('save_instance_config', { name: 'cam0' });
     await api.sendCmd('save_instance_config', { name: 'det0' });
     await api.sendCmd('save_instance_config', { name: 'saver0' });
@@ -376,7 +448,16 @@ void xi_inspect_entry(int frame) {
     assert.equal(saverCfg.config.enabled, true, 'saver enabled preserved');
 
     console.log('  ✓ all instance configs saved');
-    takeScreenshot('project_saved');
+    // Show the Plugins tree so usage counts + cert status are visible.
+    try { await vscode.commands.executeCommand('xinsp2.plugins.focus'); } catch {}
+    await sleep(1500);
+    shot('project_saved_plugins_view');
+
+    // ====== STEP 11: Close the project → back to the welcome state ======
+    try { await vscode.commands.executeCommand('xinsp2.closeProject'); } catch {}
+    try { await vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}
+    await sleep(1500);
+    shot('final_after_close');
 
     console.log(`\n=== USER JOURNEY COMPLETE — ${stepNum} screenshots ===`);
     console.log(`Project: ${projDir}`);

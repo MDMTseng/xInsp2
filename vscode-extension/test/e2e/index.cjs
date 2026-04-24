@@ -112,6 +112,9 @@ module.exports = {
         if (suite === 'json_source_ui') {
             return require('./json_source_ui.cjs').run();
         }
+        if (suite === 'ux_states') {
+            return require('./ux_states.cjs').run();
+        }
         return run();
     }
 };
