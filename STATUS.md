@@ -173,7 +173,7 @@ plugin reinventing sync.
 | S7 | Recipe variant / A-B       | Two `project.json` variants  | not started |
 | S8 | Recording / replay         | `xi_trigger_recorder.hpp`    | ✅ shipping (Phase 3) |
 | S9 | Remote backend mode        | `--host 0.0.0.0` + auth      | ✅ shipping (`b0622b4`) |
-| S10 | Headless production runner | `xinsp-runner.exe`          | not started |
+| S10 | Headless production runner | `xinsp-runner.exe`          | ✅ shipping (`62f96ed`) |
 
 ## Decision log (locked in)
 
