@@ -327,6 +327,11 @@
           "default": true,
           "description": "Auto-start xinsp-backend.exe on activation (ignored when xinsp2.remoteUrl is set)"
         },
+        "xinsp2.autoRespawn": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the backend exits unexpectedly, automatically respawn it (rate-limited 5/min). Per-project override: set \"auto_respawn\": false in project.json."
+        },
         "xinsp2.remoteUrl": {
           "type": "string",
           "default": "",

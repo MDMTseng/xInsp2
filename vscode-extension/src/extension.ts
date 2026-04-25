@@ -23,6 +23,26 @@ let lastProjectFolder: string | null = null;
 // Set inside activate(); used by xinsp2.restartBackend so manual restarts
 // reuse the auto-respawn-aware spawn helper.
 let spawnAndWatchHandle: (() => void) | null = null;
+
+// Effective auto-respawn flag, computed as:
+//   project.json's `auto_respawn` (when a project is open and field set)
+//     overrides the workspace setting `xinsp2.autoRespawn` (default true).
+// Recomputed on every open_project and on every workspace-config change.
+let autoRespawnEnabled = true;
+function recomputeAutoRespawn() {
+    const cfg = vscode.workspace.getConfiguration('xinsp2');
+    let next = cfg.get<boolean>('autoRespawn', true);
+    if (lastProjectFolder) {
+        try {
+            const p = require('path').join(lastProjectFolder, 'project.json');
+            if (require('fs').existsSync(p)) {
+                const j = JSON.parse(require('fs').readFileSync(p, 'utf8'));
+                if (typeof j.auto_respawn === 'boolean') next = j.auto_respawn;
+            }
+        } catch { /* ignore parse errors — keep workspace default */ }
+    }
+    autoRespawnEnabled = next;
+}
 let client: WsClient | null = null;
 let cmdId = 1;
 const nextId = () => cmdId++;
@@ -156,6 +176,14 @@ export function activate(context: vscode.ExtensionContext) {
     const isRemote = remoteUrl.length > 0;
     const wsUrl = isRemote ? remoteUrl : `ws://127.0.0.1:${port}`;
     const output = vscode.window.createOutputChannel('xInsp2');
+    // Initialise auto-respawn flag from workspace config; the project.json
+    // override picks up later when a project opens.
+    recomputeAutoRespawn();
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('xinsp2.autoRespawn')) recomputeAutoRespawn();
+        })
+    );
 
     // ---- State context keys ------------------------------------------
     // Every menu contribution gates off these. Welcome views also use them.
@@ -577,6 +605,7 @@ export function activate(context: vscode.ExtensionContext) {
                 currentProjectName = name;
                 currentProjectPath = folder;
                 lastProjectFolder = folder;          // for auto-respawn replay
+                recomputeAutoRespawn();
                 updateProjectStatus();
                 treeProvider.setProjectOpen(true);
                 openScriptIfExists(folder);
@@ -602,6 +631,7 @@ export function activate(context: vscode.ExtensionContext) {
                 currentProjectName = n;
                 currentProjectPath = folder;
                 lastProjectFolder = folder;          // for auto-respawn replay
+                recomputeAutoRespawn();
                 updateProjectStatus();
                 setCtx('hasInstances', (rsp.data?.instances?.length ?? 0) > 0);
                 sendCmd('list_instances');
@@ -1409,6 +1439,18 @@ void xi_inspect_entry(int frame) {
                 output.appendLine(`[xinsp2] backend exited (code=${code} signal=${signal})`);
                 backend = null;
                 if (!intendedRunning) return;   // clean shutdown
+                // Per-project / workspace opt-out — recompute in case
+                // the user just edited project.json.
+                recomputeAutoRespawn();
+                if (!autoRespawnEnabled) {
+                    output.appendLine(`[xinsp2] auto-respawn disabled (project.json or xinsp2.autoRespawn) — click Restart Backend to recover`);
+                    vscode.window.showWarningMessage(
+                        'xInsp2 backend exited. Auto-respawn is disabled for this project — click Restart Backend when ready.',
+                        'Restart Backend'
+                    ).then(c => { if (c) vscode.commands.executeCommand('xinsp2.restartBackend'); });
+                    intendedRunning = false;
+                    return;
+                }
                 // Rate-limit: prune to last 60 s, bail if too many.
                 const now = Date.now();
                 while (recentRespawnsMs.length > 0 && recentRespawnsMs[0] < now - 60_000) {
