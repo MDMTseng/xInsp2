@@ -30,6 +30,10 @@
   #include <opencv2/core/mat.hpp>
 #endif
 
+#ifdef XINSP2_HAS_TURBOJPEG
+  #include <turbojpeg.h>
+#endif
+
 // stb forward-declare (always available as fallback)
 extern "C" int stbi_write_jpg_to_func(
     void (*func)(void* context, void* data, int size),
@@ -139,12 +143,48 @@ inline bool encode_jpeg_stb(const Image& img, int quality, std::vector<uint8_t>&
     return ok != 0;
 }
 
+// ---------- libjpeg-turbo (direct) ----------
+//
+// Calls tjCompress2 with TJPF_RGB so xi::Image's native RGB layout flows
+// straight into the SIMD encoder — no cvtColor copy. Per-thread compressor
+// is reused via thread_local to avoid TJ handle alloc cost (~30 us each).
+#ifdef XINSP2_HAS_TURBOJPEG
+inline bool encode_jpeg_turbo(const Image& img, int quality, std::vector<uint8_t>& out) {
+    if (img.empty() || !img.data()) return false;
+    int pixfmt;
+    switch (img.channels) {
+        case 1: pixfmt = TJPF_GRAY; break;
+        case 3: pixfmt = TJPF_RGB;  break;
+        case 4: pixfmt = TJPF_RGBA; break;
+        default: return false;
+    }
+    int subsamp = (img.channels == 1) ? TJSAMP_GRAY : TJSAMP_420;
+    thread_local tjhandle h = tjInitCompress();
+    if (!h) return false;
+    unsigned char* jpeg_buf = nullptr;
+    unsigned long  jpeg_size = 0;
+    int rc = tjCompress2(h, img.data(), img.width, /*pitch=*/0, img.height,
+                         pixfmt, &jpeg_buf, &jpeg_size, subsamp, quality, 0);
+    if (rc != 0) { if (jpeg_buf) tjFree(jpeg_buf); return false; }
+    out.assign(jpeg_buf, jpeg_buf + jpeg_size);
+    tjFree(jpeg_buf);
+    return true;
+}
+#endif
+
 // ---------- dispatch ----------
 
 inline bool encode_jpeg(const Image& img, int quality, std::vector<uint8_t>& out) {
     if (img.empty()) return false;
 
     auto vendor = detect_cpu_vendor();
+    (void)vendor;
+
+#ifdef XINSP2_HAS_TURBOJPEG
+    // Best general-purpose path: SIMD JPEG with native RGB pixel format,
+    // no extra color-convert pass. Try first regardless of CPU vendor.
+    if (encode_jpeg_turbo(img, quality, out)) return true;
+#endif
 
 #ifdef XINSP2_HAS_IPP
     if (vendor == CpuVendor::Intel) {

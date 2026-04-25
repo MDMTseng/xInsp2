@@ -19,10 +19,12 @@
 #include <string_view>
 
 static const char* dispatch_label() {
-#ifdef XINSP2_HAS_IPP
+#ifdef XINSP2_HAS_TURBOJPEG
+    return "libjpeg-turbo (direct, RGB)";
+#elif defined(XINSP2_HAS_IPP)
     return "ipp";
 #elif defined(XINSP2_HAS_OPENCV)
-    return "opencv";
+    return "opencv (libjpeg + cvtColor)";
 #else
     return "stb";
 #endif
