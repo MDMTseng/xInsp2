@@ -10,15 +10,19 @@
 // M3 adds run + vars. M4 adds previews. M5 adds compile_and_load.
 //
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 
 #include <cJSON.h>
 #include <xi/xi.hpp>
@@ -41,10 +45,12 @@
 #include <thread>
 
 // Minidump support (top-level crash filter). dbghelp.lib is linked
-// via the CMake target.
+// via the CMake target. psapi for module-blame lookup.
 #include <windows.h>
 #include <dbghelp.h>
+#include <psapi.h>
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "psapi.lib")
 
 namespace xp = xi::proto;
 
@@ -154,6 +160,26 @@ static std::thread             g_worker_thread;
 // order. Threads queue up here and the watchdog operates on whichever
 // one is currently inside run_one_inspection — only one at a time.
 static std::mutex              g_run_mu;
+
+// Crash context — a snapshot of "what was happening" updated by the
+// dispatch hot path. Read by the unhandled-exception filter to produce
+// a human-readable report alongside the minidump. Pure POD + plain
+// strncpy so the filter is signal-safe (no allocations, no locks).
+struct CrashContext {
+    char last_cmd[64]      {};   // last cmd handled
+    char last_script[260]  {};   // last loaded script DLL path
+    char last_instance[64] {};   // last instance whose plugin we called
+    char last_plugin[64]   {};   // plugin name backing it
+    int  last_run_id       = 0;
+    int  last_frame        = 0;
+};
+static CrashContext g_crash_ctx;
+
+inline void crash_set(char* dst, size_t n, const char* src) {
+    if (!dst || !src) return;
+    std::strncpy(dst, src, n - 1);
+    dst[n - 1] = 0;
+}
 
 // Watchdog (P2.4). When > 0, inspect() calls have this many ms of wall-
 // clock budget; exceeding it terminates the executing thread and marks
@@ -623,6 +649,54 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         out += "}";
         send_rsp_ok(srv, id, out);
+    } else if (name == "crash_reports") {
+        // List crash JSON reports left by previous fatal crashes.
+        // Returns the file contents inline (each is small, KB-sized).
+        namespace fs = std::filesystem;
+        auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
+        std::string out = "{\"reports\":[";
+        bool first = true;
+        std::error_code ec;
+        if (fs::exists(dir, ec)) {
+            std::vector<fs::directory_entry> entries;
+            for (auto& e : fs::directory_iterator(dir, ec)) {
+                if (e.path().extension() == ".json") entries.push_back(e);
+            }
+            // Sort newest-first by mtime
+            std::sort(entries.begin(), entries.end(),
+                [](auto& a, auto& b) {
+                    std::error_code ec2;
+                    return fs::last_write_time(a.path(), ec2) > fs::last_write_time(b.path(), ec2);
+                });
+            for (auto& e : entries) {
+                std::ifstream f(e.path(), std::ios::binary);
+                std::stringstream ss; ss << f.rdbuf();
+                std::string body = ss.str();
+                while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) body.pop_back();
+                if (body.empty() || body[0] != '{') continue;
+                if (!first) out += ",";
+                first = false;
+                out += "{\"file\":";
+                xp::json_escape_into(out, e.path().filename().string());
+                out += ",\"report\":";
+                out += body;
+                out += "}";
+            }
+        }
+        out += "]}";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "clear_crash_reports") {
+        namespace fs = std::filesystem;
+        auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
+        int n = 0;
+        std::error_code ec;
+        if (fs::exists(dir, ec)) {
+            for (auto& e : fs::directory_iterator(dir, ec)) {
+                fs::remove(e.path(), ec);
+                ++n;
+            }
+        }
+        send_rsp_ok(srv, id, "{\"removed\":" + std::to_string(n) + "}");
     } else if (name == "compare_variants") {
         // S7: apply variant A → run → snapshot → apply B → run → snapshot.
         // args: { a: {params:[...], instances:[...]}, b: {...} }
@@ -872,6 +946,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 send_rsp_err(srv, id, err);
                 return;
             }
+            crash_set(g_crash_ctx.last_script, sizeof(g_crash_ctx.last_script),
+                      res.dll_path.c_str());
+            crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd),
+                      "compile_and_load");
             // Wire xi::use() callbacks so the script can call back into backend.
             // host_api lets the script allocate/read images in the BACKEND pool —
             // plugins only see that pool via their own host_api, so script-side
@@ -940,6 +1018,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // poll loop. Serialised on g_run_mu so 8 quick `cmd:run` calls
         // produce vars/history entries in run_id order.
         // SEH translator must be installed inside the thread.
+        crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "run");
+        g_crash_ctx.last_run_id = (int)run_id;
         std::thread([&srv, run_id]() {
             _set_se_translator(seh_translator);
             std::lock_guard<std::mutex> lk(g_run_mu);
@@ -1189,6 +1269,15 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             }
         }
     } else if (name == "exchange_instance") {
+        // Crash-blame: capture which instance/plugin we're about to talk to.
+        if (auto in = xp::get_string_field(parsed->args_json, "name")) {
+            crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "exchange_instance");
+            crash_set(g_crash_ctx.last_instance, sizeof(g_crash_ctx.last_instance), in->c_str());
+            if (auto inst = xi::InstanceRegistry::instance().find(*in)) {
+                crash_set(g_crash_ctx.last_plugin, sizeof(g_crash_ctx.last_plugin),
+                          inst->plugin_name().c_str());
+            }
+        }
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         std::string cmd_str;
@@ -1353,6 +1442,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
         auto source = xp::get_string_field(parsed->args_json, "source");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "process_instance");
+        crash_set(g_crash_ctx.last_instance, sizeof(g_crash_ctx.last_instance), iname->c_str());
 
         // Find the plugin instance
         auto inst = xi::InstanceRegistry::instance().find(*iname);
@@ -1722,38 +1813,147 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     }
 }
 
+// Map an instruction pointer to "<module>+0x<offset>" by scanning
+// loaded modules. Used in the crash filter to point at which DLL
+// (script vs plugin vs xinsp-backend itself) was executing.
+static std::string blame_module(void* addr) {
+    HMODULE mods[1024];
+    DWORD needed = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed))
+        return "<unknown>";
+    int n = (int)(needed / sizeof(HMODULE));
+    for (int i = 0; i < n; ++i) {
+        MODULEINFO mi{};
+        if (!GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof(mi))) continue;
+        auto base = (uintptr_t)mi.lpBaseOfDll;
+        if ((uintptr_t)addr < base || (uintptr_t)addr >= base + mi.SizeOfImage) continue;
+        char name[MAX_PATH];
+        GetModuleFileNameA(mods[i], name, sizeof(name));
+        const char* slash = std::strrchr(name, '\\');
+        std::string out = (slash ? slash + 1 : name);
+        char off[64];
+        std::snprintf(off, sizeof(off), "+0x%llx", (unsigned long long)((uintptr_t)addr - base));
+        return out + off;
+    }
+    return "<unknown>";
+}
+
+// JSON-escape a path segment in-place (writes into out). Tiny copy of
+// xp::json_escape_into to keep this filter free of any nontrivial dep.
+static void crash_json_escape(std::string& out, const char* s) {
+    out.push_back('"');
+    for (; *s; ++s) {
+        char c = *s;
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out.push_back(c);
+        }
+    }
+    out.push_back('"');
+}
+
+static const char* exception_name(DWORD code) {
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION:        return "ACCESS_VIOLATION";
+        case EXCEPTION_STACK_OVERFLOW:          return "STACK_OVERFLOW";
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:      return "INT_DIVIDE_BY_ZERO";
+        case EXCEPTION_FLT_DIVIDE_BY_ZERO:      return "FLT_DIVIDE_BY_ZERO";
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:   return "ARRAY_BOUNDS_EXCEEDED";
+        case EXCEPTION_ILLEGAL_INSTRUCTION:     return "ILLEGAL_INSTRUCTION";
+        case EXCEPTION_PRIV_INSTRUCTION:        return "PRIV_INSTRUCTION";
+        case EXCEPTION_IN_PAGE_ERROR:           return "IN_PAGE_ERROR";
+        case EXCEPTION_NONCONTINUABLE_EXCEPTION:return "NONCONTINUABLE";
+        case 0xE06D7363:                        return "MS_C++_EXCEPTION";
+        default:                                return "UNKNOWN";
+    }
+}
+
 // Top-level unhandled-exception filter. Writes a minidump under
-// %TEMP%/xinsp2/crashdumps so even uncatchable failures (stack overflow,
-// heap corruption seen too late, plugin static dtor crash) leave a
-// post-mortem the developer can open in WinDbg / VS.
+// %TEMP%/xinsp2/crashdumps PLUS a sibling .json crash report containing
+// exception kind, faulting module, and the last activity context. The
+// report is read by the backend on the NEXT startup and surfaced via
+// cmd:crash_reports — the extension shows it as a notification so the
+// user knows *which* component (script / plugin / core) caused the
+// last session's death.
 static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
     namespace fs = std::filesystem;
     auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
     std::error_code ec;
     fs::create_directories(dir, ec);
     SYSTEMTIME st; GetLocalTime(&st);
-    char fname[128];
-    std::snprintf(fname, sizeof(fname),
-        "xinsp-backend-%lu-%04d%02d%02d-%02d%02d%02d.dmp",
+    char stem[128];
+    std::snprintf(stem, sizeof(stem),
+        "xinsp-backend-%lu-%04d%02d%02d-%02d%02d%02d",
         (unsigned long)GetCurrentProcessId(),
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    auto path = (dir / fname).string();
-    HANDLE h = CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr,
+    auto dmp_path  = (dir / (std::string(stem) + ".dmp")).string();
+    auto json_path = (dir / (std::string(stem) + ".json")).string();
+
+    DWORD code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
+    void* addr = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionAddress : nullptr;
+    std::string blamed = blame_module(addr);
+
+    // 1. Minidump
+    HANDLE h = CreateFileA(dmp_path.c_str(), GENERIC_WRITE, 0, nullptr,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
         MINIDUMP_EXCEPTION_INFORMATION mei;
         mei.ThreadId          = GetCurrentThreadId();
         mei.ExceptionPointers = info;
         mei.ClientPointers    = FALSE;
-        // Normal type — small dump (~few MB) with stacks but no heap.
-        // Bump to MiniDumpWithFullMemory if you need post-mortem heap
-        // inspection (~hundreds of MB).
         MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
                           MiniDumpNormal, &mei, nullptr, nullptr);
         CloseHandle(h);
-        std::fprintf(stderr, "[xinsp2] CRASH — minidump: %s\n", path.c_str());
-        std::fflush(stderr);
     }
+
+    // 2. JSON sidecar — what the next-startup report path reads.
+    std::string out = "{\"version\":\""  XINSP2_VERSION "\""
+                      ",\"commit\":\""  XINSP2_COMMIT "\""
+                      ",\"pid\":" + std::to_string(GetCurrentProcessId())
+                    + ",\"thread_id\":" + std::to_string(GetCurrentThreadId());
+    char tsbuf[64];
+    std::snprintf(tsbuf, sizeof(tsbuf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    out += ",\"timestamp\":";
+    crash_json_escape(out, tsbuf);
+    out += ",\"exception\":{\"code\":";
+    char codebuf[24];
+    std::snprintf(codebuf, sizeof(codebuf), "\"0x%08X\"", code);
+    out += codebuf;
+    out += ",\"name\":";
+    crash_json_escape(out, exception_name(code));
+    char addrbuf[40];
+    std::snprintf(addrbuf, sizeof(addrbuf), "\"0x%llx\"", (unsigned long long)addr);
+    out += ",\"address\":"; out += addrbuf;
+    out += ",\"module\":"; crash_json_escape(out, blamed.c_str());
+    out += "}";
+    out += ",\"context\":{";
+    out += "\"last_cmd\":";    crash_json_escape(out, g_crash_ctx.last_cmd);
+    out += ",\"last_script\":"; crash_json_escape(out, g_crash_ctx.last_script);
+    out += ",\"last_instance\":"; crash_json_escape(out, g_crash_ctx.last_instance);
+    out += ",\"last_plugin\":"; crash_json_escape(out, g_crash_ctx.last_plugin);
+    out += ",\"last_run_id\":" + std::to_string(g_crash_ctx.last_run_id);
+    out += ",\"last_frame\":"  + std::to_string(g_crash_ctx.last_frame);
+    out += "}";
+    out += ",\"minidump\":";
+    crash_json_escape(out, (std::string(stem) + ".dmp").c_str());
+    out += "}\n";
+
+    HANDLE jh = CreateFileA(json_path.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (jh != INVALID_HANDLE_VALUE) {
+        DWORD wrote = 0;
+        WriteFile(jh, out.data(), (DWORD)out.size(), &wrote, nullptr);
+        CloseHandle(jh);
+    }
+
+    std::fprintf(stderr, "[xinsp2] CRASH 0x%08X (%s) in %s — minidump: %s\n",
+                 code, exception_name(code), blamed.c_str(), dmp_path.c_str());
+    std::fflush(stderr);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 

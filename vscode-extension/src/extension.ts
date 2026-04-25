@@ -305,6 +305,35 @@ export function activate(context: vscode.ExtensionContext) {
                 setCtx('hasPlugins', r.data.length > 0);
             }
         }).catch(() => {});
+        // Surface any unread crash reports from previous sessions. The
+        // notification names the faulty module so the user knows whether
+        // their script, a plugin, or the backend itself was at fault.
+        sendCmd('crash_reports').then((r: any) => {
+            const reports: any[] = r?.data?.reports || [];
+            if (reports.length === 0) return;
+            const newest = reports[0]?.report;
+            const blame = newest?.exception?.module || 'unknown';
+            const code  = newest?.exception?.name || newest?.exception?.code || 'crash';
+            const cmd   = newest?.context?.last_cmd || '';
+            const inst  = newest?.context?.last_instance;
+            const detail = inst ? ` while talking to instance "${inst}"` : (cmd ? ` during ${cmd}` : '');
+            const msg = `xInsp2 recovered: previous session crashed (${code}) in ${blame}${detail}.`
+                      + ` ${reports.length} report(s) saved.`;
+            output.appendLine('[xinsp2] ' + msg);
+            for (const rep of reports.slice(0, 3)) {
+                output.appendLine('  ' + JSON.stringify(rep.report?.exception) + ' ctx=' + JSON.stringify(rep.report?.context));
+            }
+            vscode.window.showWarningMessage(msg, 'Open dump folder', 'Dismiss & clear')
+                .then(choice => {
+                    if (choice === 'Open dump folder') {
+                        const path = require('path');
+                        const dir = path.join(require('os').tmpdir(), 'xinsp2', 'crashdumps');
+                        vscode.env.openExternal(vscode.Uri.file(dir));
+                    } else if (choice === 'Dismiss & clear') {
+                        sendCmd('clear_crash_reports');
+                    }
+                });
+        }).catch(() => {});
         // Auto-respawn recovery: if we know what project the user was in
         // before the backend died, re-open it so they land back where
         // they were. Skipped on the very first connect (lastProjectFolder
