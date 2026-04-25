@@ -40,6 +40,7 @@
 #include "xi_cert.hpp"
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
+#include "xi_script_compiler.hpp"
 #include "xi_source.hpp"
 #include "xi_trigger_bus.hpp"
 
@@ -154,8 +155,25 @@ struct ProjectInfo {
     int           trigger_window_ms = 100;
 };
 
+// Static compile environment for project-level plugins. Populated once at
+// backend startup so PluginManager doesn't need to know about service-main
+// globals; mirrors the fields service_main feeds into xi::script::compile
+// for inspection scripts.
+struct CompileEnv {
+    std::string include_dir;
+    std::string vcvars_path;
+    std::string opencv_dir;
+    std::string turbojpeg_root;
+    std::string ipp_root;
+};
+
 class PluginManager {
 public:
+    void set_compile_env(const CompileEnv& env) {
+        std::lock_guard<std::mutex> lk(mu_);
+        compile_env_ = env;
+    }
+
     ~PluginManager() {
         // Release every loaded plugin DLL on process shutdown. In practice
         // the OS would reclaim these, but freeing explicitly keeps leak
@@ -197,6 +215,178 @@ public:
             count++;
         }
         return count;
+    }
+
+    // Compile and register every plugin under <project>/plugins/. Each
+    // subfolder is one project-local plugin; we accept whichever shape the
+    // author prefers:
+    //
+    //   plugins/my_plugin/plugin.cpp                       (single file)
+    //   plugins/my_plugin/{plugin.cpp, helpers.cpp}        (multi file at root)
+    //   plugins/my_plugin/src/*.cpp                         (src/ subdir)
+    //   plugins/my_plugin/plugin.json                       (optional manifest)
+    //
+    // The DLL is built into <plugin_folder>/build/<name>.dll with PluginDev
+    // codegen flags (debugger-friendly /Od /Zi /RTC1) so the developer can
+    // F5-attach the backend and step through plugin source as if it were
+    // part of the main project.
+    //
+    // Each per-plugin compile is independent — a build failure on one
+    // plugin records a warning and continues with the rest. Surfaced via
+    // open_warnings() the same way bad instances are.
+    //
+    // Returns the count of successfully compiled+loaded project plugins.
+    int compile_project_plugins(const std::string& project_folder) {
+        std::lock_guard<std::mutex> lk(mu_);
+        return compile_project_plugins_locked(project_folder);
+    }
+
+private:
+    int compile_project_plugins_locked(const std::string& project_folder) {
+        auto root = std::filesystem::path(project_folder) / "plugins";
+        if (!std::filesystem::exists(root)) return 0;
+
+        int ok_count = 0;
+        for (auto& entry : std::filesystem::directory_iterator(root)) {
+            if (!entry.is_directory()) continue;
+            std::string pname = entry.path().filename().string();
+            try {
+                // Collect .cpp sources: prefer src/ if present, else root.
+                std::vector<std::string> sources;
+                auto src_dir = entry.path() / "src";
+                auto walk = [&](const std::filesystem::path& dir) {
+                    for (auto& f : std::filesystem::directory_iterator(dir)) {
+                        if (!f.is_regular_file()) continue;
+                        auto ext = f.path().extension().string();
+                        if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
+                            sources.push_back(f.path().string());
+                        }
+                    }
+                };
+                if (std::filesystem::exists(src_dir)) walk(src_dir);
+                else                                  walk(entry.path());
+                if (sources.empty()) {
+                    last_open_warnings_.push_back(
+                        {pname, pname, "no .cpp sources found in project plugin folder"});
+                    std::fprintf(stderr,
+                        "[xinsp2] project plugin '%s': no sources, skipped\n",
+                        pname.c_str());
+                    continue;
+                }
+
+                // Optional include/ folder for plugin's own headers.
+                std::vector<std::string> includes;
+                auto inc_dir = entry.path() / "include";
+                if (std::filesystem::exists(inc_dir)) {
+                    includes.push_back(inc_dir.string());
+                }
+
+                xi::script::CompileRequest req;
+                req.source_path    = sources.front();
+                req.extra_sources.assign(sources.begin() + 1, sources.end());
+                req.include_dirs   = includes;
+                req.output_dir     = (entry.path() / "build").string();
+                req.include_dir    = compile_env_.include_dir;
+                req.vcvars_path    = compile_env_.vcvars_path;
+                req.opencv_dir     = compile_env_.opencv_dir;
+                req.turbojpeg_root = compile_env_.turbojpeg_root;
+                req.ipp_root       = compile_env_.ipp_root;
+                req.mode           = xi::script::CompileMode::PluginDev;
+
+                std::fprintf(stderr,
+                    "[xinsp2] compiling project plugin '%s' (%zu source%s)...\n",
+                    pname.c_str(), sources.size(), sources.size() == 1 ? "" : "s");
+                auto res = xi::script::compile(req);
+                if (!res.ok) {
+                    last_open_warnings_.push_back(
+                        {pname, pname, "compile failed (see Output for details)"});
+                    std::fprintf(stderr,
+                        "[xinsp2] project plugin '%s' compile FAILED:\n%s\n",
+                        pname.c_str(), res.build_log.c_str());
+                    continue;
+                }
+
+                // Drop any prior version of this same project plugin
+                // (e.g., older DLL still loaded from a previous open).
+                auto prev = plugins_.find(pname);
+                if (prev != plugins_.end() && prev->second.handle) {
+                    FreeLibrary(prev->second.handle);
+                    prev->second.handle = nullptr;
+                    prev->second.factory = nullptr;
+                    prev->second.c_factory = nullptr;
+                }
+
+                PluginInfo pi;
+                pi.name           = pname;
+                pi.description    = "Project plugin: " + pname;
+                pi.dll_name       = std::filesystem::path(res.dll_path).filename().string();
+                pi.factory_symbol = "xi_plugin_create";
+                pi.folder_path    = std::filesystem::path(res.dll_path).parent_path().string();
+                // Optional plugin.json overrides
+                auto manifest = entry.path() / "plugin.json";
+                if (std::filesystem::exists(manifest)) {
+                    std::ifstream mf(manifest.string());
+                    std::stringstream ms; ms << mf.rdbuf();
+                    std::string mc = ms.str();
+                    if (auto n = extract_string(mc, "name"))        pi.name = *n;
+                    if (auto d = extract_string(mc, "description")) pi.description = *d;
+                    if (auto f = extract_string(mc, "factory"))     pi.factory_symbol = *f;
+                    pi.has_ui = (mc.find("\"has_ui\":true") != std::string::npos) ||
+                                (mc.find("\"has_ui\": true") != std::string::npos);
+                    if (pi.has_ui) pi.ui_path = (entry.path() / "ui").string();
+                }
+                // Load the freshly built DLL up-front. Project plugins
+                // skip the cert/baseline gate — they are inside the
+                // user's own project, not third-party code, so we trust
+                // the source. (Export will run cert.)
+                auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
+                pi.handle = LoadLibraryA(dll_path.string().c_str());
+                if (!pi.handle) {
+                    last_open_warnings_.push_back(
+                        {pname, pname, "DLL built but LoadLibrary failed"});
+                    std::fprintf(stderr,
+                        "[xinsp2] project plugin '%s': LoadLibrary failed\n",
+                        pname.c_str());
+                    continue;
+                }
+                bool has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
+                if (has_destroy) {
+                    pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
+                        GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+                } else {
+                    pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
+                        GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+                }
+                if (!pi.c_factory && !pi.factory) {
+                    last_open_warnings_.push_back(
+                        {pname, pname,
+                         "DLL loaded but factory '" + pi.factory_symbol + "' not found"});
+                    std::fprintf(stderr,
+                        "[xinsp2] project plugin '%s': factory '%s' not exported\n",
+                        pname.c_str(), pi.factory_symbol.c_str());
+                    FreeLibrary(pi.handle);
+                    pi.handle = nullptr;
+                    continue;
+                }
+                plugins_[pi.name] = std::move(pi);
+                project_plugin_origin_[pname] = entry.path().string();
+                ok_count++;
+            } catch (const std::exception& e) {
+                last_open_warnings_.push_back(
+                    {pname, pname, std::string("exception: ") + e.what()});
+                std::fprintf(stderr,
+                    "[xinsp2] project plugin '%s' threw: %s\n",
+                    pname.c_str(), e.what());
+            }
+        }
+        return ok_count;
+    }
+
+public:
+    // Was this plugin loaded from inside the current project (vs. global)?
+    bool is_project_plugin(const std::string& name) {
+        std::lock_guard<std::mutex> lk(mu_);
+        return project_plugin_origin_.count(name) > 0;
     }
 
     // Load a plugin's DLL and resolve the factory function.
@@ -389,12 +579,23 @@ public:
             project_.trigger_policy, project_.trigger_required,
             project_.trigger_leader, project_.trigger_window_ms);
 
+        // Compile project-local plugins BEFORE instances are loaded — the
+        // instance loop below resolves plugin name → loaded DLL, and we
+        // want project plugins to win over global ones with the same name.
+        // last_open_warnings_ is reset here so compile failures + bad
+        // instances both end up in the same surfaced list.
+        last_open_warnings_.clear();
+        int proj_plugins = compile_project_plugins_locked(folder);
+        if (proj_plugins > 0) {
+            std::fprintf(stderr, "[xinsp2] %d project plugin(s) built\n", proj_plugins);
+        }
+
         // Scan instances/ subdirectories. A broken instance.json or a
         // factory that throws must NOT abort the whole project load —
         // record the failure in last_open_warnings_ and move on. The
         // user can read it via cmd:open_project_warnings and decide
         // whether to fix or delete the bad instance folder.
-        last_open_warnings_.clear();
+        // (last_open_warnings_ already cleared above before plugin compile.)
         auto inst_dir = std::filesystem::path(folder) / "instances";
         if (std::filesystem::exists(inst_dir)) {
             for (auto& entry : std::filesystem::directory_iterator(inst_dir)) {
@@ -707,6 +908,11 @@ private:
     std::unordered_map<std::string, PluginInfo> plugins_;
     ProjectInfo project_;
     std::vector<OpenWarning> last_open_warnings_;
+    CompileEnv  compile_env_;
+    // Names of plugins that came from <project>/plugins/ rather than the
+    // global plugins directory — flagged so the UI can label them and so
+    // we don't re-scan their dll mtime against the global cert.
+    std::unordered_map<std::string, std::string> project_plugin_origin_;
 
     static PluginInfo parse_manifest(const std::string& path, const std::string& folder) {
         PluginInfo pi;

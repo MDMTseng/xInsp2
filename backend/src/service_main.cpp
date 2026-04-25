@@ -2082,6 +2082,16 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[xinsp2] work_dir=%s\n",    g_work_dir.c_str());
     std::fprintf(stderr, "[xinsp2] plugins_dir=%s\n",  g_plugins_dir.c_str());
 
+    // Hand the same compile environment that xi::script::compile uses
+    // to the plugin manager — project plugins (compiled when a project
+    // is opened) need the include dir, vcvars, and accelerator roots.
+    xi::CompileEnv env;
+    env.include_dir    = g_include_dir;
+    env.opencv_dir     = g_opencv_dir;
+    env.turbojpeg_root = g_turbojpeg_root;
+    env.ipp_root       = g_ipp_root;
+    g_plugin_mgr.set_compile_env(env);
+
     xi::ws::Server srv;
     srv.on_open  = [&] {
         std::fprintf(stderr, "[xinsp2] client connected\n");
