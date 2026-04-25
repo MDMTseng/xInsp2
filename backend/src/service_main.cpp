@@ -1669,6 +1669,58 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "close_project") {
         g_plugin_mgr.close_project();
         send_rsp_ok(srv, id, "{\"closed\":true}");
+    } else if (name == "recompile_project_plugin") {
+        // Hot-rebuild a single project-local plugin. The extension calls
+        // this from a file watcher when the user edits plugin source.
+        // On success the plugin's instances are re-instantiated with
+        // their previous defs intact; on failure the old DLL stays
+        // loaded so running inspection isn't disrupted.
+        auto pname = xp::get_string_field(parsed->args_json, "plugin");
+        if (!pname) { send_rsp_err(srv, id, "missing plugin"); return; }
+        if (!g_plugin_mgr.is_project_plugin(*pname)) {
+            send_rsp_err(srv, id, "not a project plugin: " + *pname);
+            return;
+        }
+        auto rr = g_plugin_mgr.recompile_project_plugin(*pname);
+        // Build diagnostics JSON — same shape as compile_and_load.
+        std::string diag_json = "[";
+        for (size_t i = 0; i < rr.diagnostics.size(); ++i) {
+            auto& d = rr.diagnostics[i];
+            if (i) diag_json += ",";
+            diag_json += "{\"file\":";  xp::json_escape_into(diag_json, d.file);
+            diag_json += ",\"line\":" + std::to_string(d.line);
+            diag_json += ",\"col\":"  + std::to_string(d.col);
+            diag_json += ",\"severity\":"; xp::json_escape_into(diag_json, d.severity);
+            diag_json += ",\"code\":";    xp::json_escape_into(diag_json, d.code);
+            diag_json += ",\"message\":"; xp::json_escape_into(diag_json, d.message);
+            diag_json += "}";
+        }
+        diag_json += "]";
+        std::string data = "{\"plugin\":";
+        xp::json_escape_into(data, *pname);
+        data += ",\"diagnostics\":" + diag_json;
+        data += ",\"reattached\":[";
+        for (size_t i = 0; i < rr.reattached_instances.size(); ++i) {
+            if (i) data += ",";
+            xp::json_escape_into(data, rr.reattached_instances[i]);
+        }
+        data += "]}";
+        if (rr.ok) {
+            send_rsp_ok(srv, id, data);
+        } else {
+            xp::Rsp r;
+            r.id = id;
+            r.ok = false;
+            r.error = rr.error;
+            r.data_json = data;
+            srv.send_text(r.to_json());
+            if (!rr.build_log.empty()) {
+                xp::LogMsg lm;
+                lm.level = "error";
+                lm.msg = rr.build_log;
+                srv.send_text(lm.to_json());
+            }
+        }
     } else if (name == "recording_start") {
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         if (!folder) { send_rsp_err(srv, id, "missing folder"); return; }

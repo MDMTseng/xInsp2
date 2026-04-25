@@ -383,6 +383,173 @@ private:
     }
 
 public:
+    // Hot-rebuild one project plugin and re-instantiate every instance
+    // using it, preserving each instance's saved def. Used by the
+    // extension's file watcher: edit plugin .cpp → save → backend
+    // recompiles + reloads → next trigger uses the new code, no
+    // backend restart needed.
+    //
+    // Returns: ok flag, build log, list of instance names that were
+    // re-instantiated. On compile failure the OLD DLL stays loaded so
+    // running inspection isn't disrupted.
+    struct RecompileResult {
+        bool                     ok = false;
+        std::string              build_log;
+        std::vector<xi::script::Diagnostic> diagnostics;
+        std::vector<std::string> reattached_instances;
+        std::string              error;
+    };
+    RecompileResult recompile_project_plugin(const std::string& plugin_name) {
+        std::lock_guard<std::mutex> lk(mu_);
+        RecompileResult r;
+        auto orig_it = project_plugin_origin_.find(plugin_name);
+        if (orig_it == project_plugin_origin_.end()) {
+            r.error = "not a project plugin: " + plugin_name;
+            return r;
+        }
+        std::string source_dir = orig_it->second;
+
+        // 1. Cache each instance's def, then destroy. We keep them in a
+        //    pending list and rebuild after the new DLL is loaded.
+        struct Pending {
+            std::string name;
+            std::string folder;
+            std::string def_json;
+        };
+        std::vector<Pending> pending;
+        for (auto& [iname, ii] : project_.instances) {
+            if (ii.plugin_name != plugin_name) continue;
+            Pending p;
+            p.name   = iname;
+            p.folder = ii.folder_path;
+            if (ii.instance) p.def_json = ii.instance->get_def();
+            pending.push_back(std::move(p));
+        }
+        for (auto& p : pending) {
+            auto& ii = project_.instances[p.name];
+            InstanceRegistry::instance().remove(p.name);
+            ii.instance.reset();   // dtor calls xi_plugin_destroy
+        }
+
+        // 2. Compile fresh into the same plugin folder. We don't drop
+        //    the old DLL until the new one is ready, so a compile
+        //    failure leaves the project in its previous working state.
+        auto plugin_dir = std::filesystem::path(source_dir);
+        std::vector<std::string> sources;
+        auto walk = [&](const std::filesystem::path& dir) {
+            for (auto& f : std::filesystem::directory_iterator(dir)) {
+                if (!f.is_regular_file()) continue;
+                auto ext = f.path().extension().string();
+                if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
+                    sources.push_back(f.path().string());
+                }
+            }
+        };
+        auto src_subdir = plugin_dir / "src";
+        if (std::filesystem::exists(src_subdir)) walk(src_subdir);
+        else                                     walk(plugin_dir);
+        if (sources.empty()) {
+            r.error = "no .cpp sources in " + plugin_dir.string();
+            return r;
+        }
+        std::vector<std::string> includes;
+        auto inc_dir = plugin_dir / "include";
+        if (std::filesystem::exists(inc_dir)) includes.push_back(inc_dir.string());
+
+        xi::script::CompileRequest req;
+        req.source_path    = sources.front();
+        req.extra_sources.assign(sources.begin() + 1, sources.end());
+        req.include_dirs   = includes;
+        req.output_dir     = (plugin_dir / "build").string();
+        req.include_dir    = compile_env_.include_dir;
+        req.vcvars_path    = compile_env_.vcvars_path;
+        req.opencv_dir     = compile_env_.opencv_dir;
+        req.turbojpeg_root = compile_env_.turbojpeg_root;
+        req.ipp_root       = compile_env_.ipp_root;
+        req.mode           = xi::script::CompileMode::PluginDev;
+
+        auto cres = xi::script::compile(req);
+        r.build_log   = cres.build_log;
+        r.diagnostics = cres.diagnostics;
+        if (!cres.ok) {
+            r.error = "compile failed";
+            // Re-instantiate against the OLD DLL so we don't leave the
+            // project broken. Old DLL is still loaded since we never
+            // FreeLibrary'd it.
+            auto pi_it = plugins_.find(plugin_name);
+            if (pi_it != plugins_.end() && pi_it->second.c_factory) {
+                static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+                for (auto& p : pending) {
+                    void* raw = pi_it->second.c_factory(&host, p.name.c_str());
+                    if (!raw) continue;
+                    auto adapter = std::make_shared<CAbiInstanceAdapter>(
+                        p.name, plugin_name, pi_it->second.handle, raw);
+                    if (!p.def_json.empty()) adapter->set_def(p.def_json);
+                    project_.instances[p.name].instance = adapter;
+                    InstanceRegistry::instance().add(adapter);
+                    attach_trigger_bridge(adapter.get(), p.name);
+                    r.reattached_instances.push_back(p.name);
+                }
+            }
+            return r;
+        }
+
+        // 3. Compile succeeded — swap DLLs.
+        auto pi_it = plugins_.find(plugin_name);
+        if (pi_it == plugins_.end()) {
+            r.error = "internal: plugin entry vanished mid-recompile";
+            return r;
+        }
+        auto& pi = pi_it->second;
+        if (pi.handle) {
+            FreeLibrary(pi.handle);
+            pi.handle    = nullptr;
+            pi.factory   = nullptr;
+            pi.c_factory = nullptr;
+        }
+        pi.dll_name    = std::filesystem::path(cres.dll_path).filename().string();
+        pi.folder_path = std::filesystem::path(cres.dll_path).parent_path().string();
+        pi.handle = LoadLibraryA(cres.dll_path.c_str());
+        if (!pi.handle) {
+            r.error = "LoadLibrary failed on freshly-built DLL";
+            return r;
+        }
+        bool has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
+        if (has_destroy) {
+            pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
+                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+        } else {
+            pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
+                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+        }
+        if (!pi.c_factory && !pi.factory) {
+            r.error = "factory '" + pi.factory_symbol + "' not exported in new DLL";
+            return r;
+        }
+
+        // 4. Re-instantiate every preserved instance using the new factory.
+        static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+        for (auto& p : pending) {
+            std::shared_ptr<InstanceBase> inst;
+            if (pi.c_factory) {
+                void* raw = pi.c_factory(&host, p.name.c_str());
+                if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
+                    p.name, plugin_name, pi.handle, raw);
+            } else if (pi.factory) {
+                auto* raw = pi.factory(p.name.c_str());
+                if (raw) inst.reset(raw);
+            }
+            if (!inst) continue;
+            if (!p.def_json.empty()) inst->set_def(p.def_json);
+            project_.instances[p.name].instance = inst;
+            InstanceRegistry::instance().add(inst);
+            attach_trigger_bridge(inst.get(), p.name);
+            r.reattached_instances.push_back(p.name);
+        }
+        r.ok = true;
+        return r;
+    }
+
     // Was this plugin loaded from inside the current project (vs. global)?
     bool is_project_plugin(const std::string& name) {
         std::lock_guard<std::mutex> lk(mu_);

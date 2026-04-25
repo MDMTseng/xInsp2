@@ -1641,6 +1641,56 @@ void xi_inspect_entry(int frame) {
         })
     );
 
+    // --- Auto-recompile project plugins on save ---
+    // When user edits a .cpp/.hpp under <project>/plugins/<name>/, we
+    // call cmd:recompile_project_plugin so the change picks up live.
+    // The plugin name is the immediate child folder of <project>/plugins/.
+    // Debounce per plugin so a multi-file save doesn't fire N rebuilds.
+    const recompileTimers = new Map<string, NodeJS.Timeout>();
+    function pluginNameForFile(filePath: string): string | null {
+        if (!lastProjectFolder) return null;
+        const projPlugins = path.join(lastProjectFolder, 'plugins') + path.sep;
+        const norm = path.normalize(filePath);
+        if (!norm.toLowerCase().startsWith(projPlugins.toLowerCase())) return null;
+        const rest = norm.slice(projPlugins.length);
+        const sep = rest.indexOf(path.sep);
+        return sep > 0 ? rest.slice(0, sep) : null;
+    }
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument((doc) => {
+            if (!client?.connected) return;
+            const ext = path.extname(doc.fileName).toLowerCase();
+            if (!['.cpp', '.cc', '.cxx', '.hpp', '.h'].includes(ext)) return;
+            const pname = pluginNameForFile(doc.fileName);
+            if (!pname) return;
+            // Debounce: cancel any pending rebuild for this plugin and
+            // re-arm. 250ms is enough to coalesce multi-file saves.
+            const prev = recompileTimers.get(pname);
+            if (prev) clearTimeout(prev);
+            recompileTimers.set(pname, setTimeout(async () => {
+                recompileTimers.delete(pname);
+                output.appendLine(`[xinsp2] hot-reload project plugin '${pname}'...`);
+                try {
+                    const rsp = await sendCmd('recompile_project_plugin', { plugin: pname });
+                    applyDiagnostics(rsp.data?.diagnostics, doc.fileName);
+                    if (rsp.ok) {
+                        const reattached = (rsp.data?.reattached || []).length;
+                        output.appendLine(
+                            `[xinsp2] plugin '${pname}' rebuilt (${reattached} instance${reattached === 1 ? '' : 's'} re-attached)`);
+                        vscode.window.setStatusBarMessage(
+                            `xInsp2: ${pname} rebuilt`, 3000);
+                    } else {
+                        output.appendLine(`[xinsp2] plugin '${pname}' rebuild FAILED: ${rsp.error}`);
+                        vscode.window.showErrorMessage(
+                            `xInsp2: plugin '${pname}' rebuild failed — check Problems panel`);
+                    }
+                } catch (e: any) {
+                    output.appendLine(`[xinsp2] hot-reload error: ${e.message}`);
+                }
+            }, 250));
+        })
+    );
+
     let g_continuous = false;
     client.on('json', (msg: any) => {
         if (msg.type === 'rsp' && msg.data?.started) g_continuous = true;
