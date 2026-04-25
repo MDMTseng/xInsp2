@@ -7,6 +7,7 @@ import { ViewerProvider } from './viewerProvider';
 import { InstanceCodeLensProvider } from './instanceCodeLens';
 import { PluginTreeProvider, PluginInfo } from './pluginTree';
 import { PREVIEW_HEADER_SIZE } from './protocol';
+import { TEMPLATE_CHOICES, renderPluginCpp, renderPluginJson, TemplateId } from './projectPluginTemplates';
 
 let backend: ChildProcess | null = null;
 // Auto-respawn state. `intendedRunning` is true while the extension wants
@@ -680,6 +681,87 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             } catch (e: any) {
                 vscode.window.showErrorMessage(`xInsp2 compile: ${e.message}`);
+            }
+        })
+    );
+
+    // --- Create a new project plugin from a template ---
+    // Walks: pick template → enter name → optional description →
+    // generate folder + plugin.cpp + plugin.json under
+    // <project>/plugins/<name>/src/, then re-open the project so the
+    // backend compiles + loads the new plugin. The .cpp opens in the
+    // editor immediately so the user sees their new file.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.createProjectPlugin', async () => {
+            if (!client?.connected) { vscode.window.showWarningMessage('xInsp2: not connected'); return; }
+            if (!lastProjectFolder) {
+                vscode.window.showWarningMessage('xInsp2: open a project first (xInsp2: Open Project).');
+                return;
+            }
+            // 1. Template
+            const tplPick = await vscode.window.showQuickPick(
+                TEMPLATE_CHOICES.map(c => ({
+                    label: c.label, description: c.description, detail: c.detail, id: c.id,
+                })),
+                { placeHolder: 'Pick a starter template — go from Easy upward', matchOnDetail: true });
+            if (!tplPick) return;
+            const tplId = (tplPick as any).id as TemplateId;
+
+            // 2. Name (must be valid folder + C++ identifier-ish)
+            const pname = await vscode.window.showInputBox({
+                prompt: 'Plugin name (folder + display)',
+                placeHolder: 'e.g. my_filter',
+                validateInput: (v) => {
+                    if (!v) return 'name is required';
+                    if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(v)) return 'use letters / digits / _ / -, start with a letter';
+                    return null;
+                },
+            });
+            if (!pname) return;
+
+            // 3. Description (optional)
+            const pdesc = (await vscode.window.showInputBox({
+                prompt: 'Short description (shown in plugin tree, optional)',
+                placeHolder: 'Leave blank to use the template name',
+            })) || '';
+
+            // 4. Materialize files. Project plugins live at
+            //    <project>/plugins/<name>/{plugin.json, src/plugin.cpp}.
+            const root = path.join(lastProjectFolder, 'plugins', pname);
+            const srcDir = path.join(root, 'src');
+            try {
+                const fs = require('fs') as typeof import('fs');
+                if (fs.existsSync(root)) {
+                    const ow = await vscode.window.showWarningMessage(
+                        `${pname} already exists. Overwrite plugin.cpp + plugin.json?`,
+                        { modal: true }, 'Overwrite');
+                    if (ow !== 'Overwrite') return;
+                }
+                fs.mkdirSync(srcDir, { recursive: true });
+                const cppPath  = path.join(srcDir, 'plugin.cpp');
+                const jsonPath = path.join(root, 'plugin.json');
+                fs.writeFileSync(cppPath,  renderPluginCpp(tplId, pname));
+                fs.writeFileSync(jsonPath, renderPluginJson(pname,
+                    pdesc || `${tplId} template plugin: ${pname}`));
+
+                // 5. Re-open the project so the backend compiles + loads
+                //    the new plugin. We use open_project rather than
+                //    recompile_project_plugin because the plugin is
+                //    brand-new and not yet in plugins_.
+                output.appendLine(`[xinsp2] created project plugin '${pname}' (${tplId} template)`);
+                const rsp = await sendCmd('open_project', { folder: lastProjectFolder });
+                if (rsp.ok) {
+                    pluginTreeProvider.update(rsp.data?.plugins || []);
+                }
+
+                // 6. Reveal the .cpp so the user sees their new code.
+                const doc = await vscode.workspace.openTextDocument(cppPath);
+                await vscode.window.showTextDocument(doc, { preview: false });
+                vscode.window.showInformationMessage(
+                    `xInsp2: created plugin '${pname}' — edit and save to recompile live.`);
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`xInsp2: create plugin failed — ${e.message}`);
+                output.appendLine(`[xinsp2] create plugin error: ${e.stack || e}`);
             }
         })
     );

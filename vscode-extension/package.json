@@ -33,6 +33,11 @@
         "icon": "$(package)"
       },
       {
+        "command": "xinsp2.createProjectPlugin",
+        "title": "xInsp2: New Project Plugin…",
+        "icon": "$(add)"
+      },
+      {
         "command": "xinsp2.saveProject",
         "title": "xInsp2: Save Project"
       },
@@ -245,6 +250,11 @@
           "command": "xinsp2.closeProject",
           "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
           "group": "navigation@5"
+        },
+        {
+          "command": "xinsp2.createProjectPlugin",
+          "when": "view == xinsp2.plugins && xinsp2.hasProject",
+          "group": "navigation@0"
         },
         {
           "command": "xinsp2.addPluginFolder",
