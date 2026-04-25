@@ -409,12 +409,14 @@ inline Bbox bbox(const std::vector<Point>& pts) {
     return { x0, y0, x1 - x0 + 1, y1 - y0 + 1 };
 }
 
-// ---- Contours: flood-fill extraction ----
+// ---- Contours: BOUNDARY points per component ----
 //
-// Returns one point list per connected white component in the binary
-// image. Points are every pixel of the component (not just the outline
-// — good enough for bbox / area; a true boundary walk is a future
-// refinement). 4-connectivity.
+// Returns one point list per connected white component, containing only
+// the BOUNDARY pixels of each component (foreground pixels with at
+// least one 4-neighbour background pixel). Matches OpenCV
+// findContours semantics. For every-pixel-in-component see
+// findFilledRegions below.
+//
 inline std::vector<std::vector<Point>> findContours(const Image& binary) {
     std::vector<std::vector<Point>> out;
     if (binary.empty() || binary.channels != 1) return out;
@@ -426,8 +428,50 @@ inline std::vector<std::vector<Point>> findContours(const Image& binary) {
         for (auto& p : c) v.push_back({ p.x, p.y });
         out.push_back(std::move(v));
     }
-    if (!out.empty() || !cv_out.empty()) return out;
+    return out;
+#else
+    // Portable fallback: flood-fill components, then keep only boundary
+    // pixels (any 4-neighbour outside or background).
+    int w = binary.width, h = binary.height;
+    const uint8_t* sp = binary.data();
+    std::vector<uint8_t> seen(w * h, 0);
+    std::vector<std::pair<int,int>> stack;
+    auto is_boundary = [&](int x, int y) {
+        if (x == 0 || x == w-1 || y == 0 || y == h-1) return true;
+        return sp[y*w + (x-1)] == 0 || sp[y*w + (x+1)] == 0 ||
+               sp[(y-1)*w + x] == 0 || sp[(y+1)*w + x] == 0;
+    };
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            if (sp[y*w + x] == 0 || seen[y*w + x]) continue;
+            std::vector<Point> comp;
+            stack.push_back({x, y});
+            while (!stack.empty()) {
+                auto [cx, cy] = stack.back(); stack.pop_back();
+                if (cx < 0 || cx >= w || cy < 0 || cy >= h) continue;
+                if (sp[cy*w + cx] == 0 || seen[cy*w + cx]) continue;
+                seen[cy*w + cx] = 1;
+                if (is_boundary(cx, cy)) comp.push_back({cx, cy});
+                stack.push_back({cx-1, cy});   stack.push_back({cx+1, cy});
+                stack.push_back({cx, cy-1});   stack.push_back({cx, cy+1});
+            }
+            if (!comp.empty()) out.push_back(std::move(comp));
+        }
+    }
+    return out;
 #endif
+}
+
+// ---- Filled regions: every pixel of each component ---------------------
+//
+// 4-connected flood-fill. Returns one point list per connected
+// component containing EVERY foreground pixel (not just the boundary).
+// Useful when callers need area = points.size() or want to iterate the
+// entire region. Slower than findContours (O(area) vs O(perimeter)).
+//
+inline std::vector<std::vector<Point>> findFilledRegions(const Image& binary) {
+    std::vector<std::vector<Point>> out;
+    if (binary.empty() || binary.channels != 1) return out;
     int w = binary.width, h = binary.height;
     const uint8_t* sp = binary.data();
     std::vector<uint8_t> seen(w * h, 0);
@@ -544,6 +588,7 @@ template<class... A> auto async_close(A&&... a)           { return xi::async((Im
 template<class... A> auto async_adaptiveThreshold(A&&... a) { return xi::async(adaptiveThreshold, std::forward<A>(a)...); }
 template<class... A> auto async_canny(A&&... a)           { return xi::async(canny, std::forward<A>(a)...); }
 template<class... A> auto async_findContours(A&&... a)    { return xi::async(findContours, std::forward<A>(a)...); }
+template<class... A> auto async_findFilledRegions(A&&... a) { return xi::async(findFilledRegions, std::forward<A>(a)...); }
 template<class... A> auto async_matchTemplateSSD(A&&... a){ return xi::async(matchTemplateSSD, std::forward<A>(a)...); }
 template<class... A> auto async_stats(A&&... a)           { return xi::async(stats, std::forward<A>(a)...); }
 template<class... A> auto async_countWhiteBlobs(A&&... a) { return xi::async(countWhiteBlobs, std::forward<A>(a)...); }

@@ -370,6 +370,21 @@ static void test_canny_finds_edge() {
 
 // ---------- contours + bbox ----------
 
+static void test_findFilledRegions_two_blobs() {
+    SECTION("findFilledRegions returns every pixel of each component");
+    xi::Image bin(20, 20, 1);
+    std::memset(bin.data(), 0, 400);
+    for (int y = 2; y <= 5; ++y)
+        for (int x = 2; x <= 5; ++x) bin.data()[y*20 + x] = 255;
+    for (int y = 12; y <= 14; ++y)
+        for (int x = 12; x <= 14; ++x) bin.data()[y*20 + x] = 255;
+    auto regions = xi::ops::findFilledRegions(bin);
+    CHECK(regions.size() == 2);
+    int total = 0;
+    for (auto& r : regions) total += (int)r.size();
+    CHECK(total == 16 + 9);    // 4×4 + 3×3
+}
+
 static void test_findContours_two_blobs() {
     SECTION("findContours returns one bbox per connected component");
     xi::Image bin(20, 20, 1);
@@ -453,6 +468,7 @@ int main() {
     test_canny_blank();
     test_canny_finds_edge();
     test_findContours_two_blobs();
+    test_findFilledRegions_two_blobs();
     test_matchTemplate_finds_exact();
 
     if (g_failures == 0) {
