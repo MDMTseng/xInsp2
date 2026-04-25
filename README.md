@@ -101,22 +101,173 @@ Key design choices:
 
 ---
 
-## Quick start
+## Install — end users
+
+The fastest way: grab the prebuilt zip from the
+[Releases page](https://github.com/MDMTseng/xInsp2/releases/latest).
+
+1. **Download** `xinsp2-<version>-win-x64.zip` and unzip somewhere stable
+   (e.g. `C:\xinsp2`).
+2. **Install the VS Code extension**: in VS Code, `Extensions` (Ctrl+Shift+X)
+   → `…` menu → `Install from VSIX…` → pick
+   `extension/xinsp2-<version>.vsix` from the unzipped folder.
+3. **Verify**:
+
+   ```bat
+   C:\xinsp2\bin\xinsp-backend.exe --version
+   ```
+
+   should print `xinsp-backend <version> (<commit>)`.
+
+The extension auto-spawns the backend on activation. If you put the
+folder somewhere other than the dev tree, set the absolute path in
+VS Code settings:
+
+- `xinsp2.backendExe` = `C:\xinsp2\bin\xinsp-backend.exe`
+
+That's it. No CMake, no MSVC, no Node required to **use** xInsp2 —
+only to write/build new plugins.
+
+---
+
+## Usage walkthrough
+
+This is the 10-step path our automated `runUserJourney` test takes —
+build a project from zero, configure 3 instances, write a script, run
+inspections, save outputs.
+
+### 1. Open the xInsp2 sidebar
+
+Click the beaker icon on the activity bar. The Welcome view shows up
+with starter actions.
+
+![Welcome view](docs/screenshots/initial_welcome.png)
+
+### 2. Add an instance
+
+After clicking **Create New Project**, the **Instances & Params** view
+opens. Hit `+` to add an instance — the QuickPick lists every
+discovered plugin (cameras, detectors, savers, …).
+
+![Plugin picker](docs/screenshots/add_cam0_a_plugin_picker.png)
+
+Add three: `cam0` (mock_camera), `det0` (blob_analysis), `saver0`
+(record_save). They show up in the tree with inline icons.
+
+![Three instances + plugin tree](docs/screenshots/instances_created.png)
+
+### 3. Configure cam0 — live preview
+
+Click `cam0`'s gear icon. The mock_camera plugin's webview opens. Set
+FPS, click **Start**, and watch the live JPEG stream in the preview pane.
+
+![Camera streaming](docs/screenshots/camera_streaming.png)
+
+### 4. Configure det0 — blob analysis
+
+Slide threshold, set min/max area, click **Apply & Run**. The plugin's
+canvas overlay highlights detected blobs.
+
+![Blob analysis applied](docs/screenshots/blob_applied.png)
+
+### 5. Configure saver0 — wire up disk output
+
+Set the output directory + naming rule, hit **Enable**.
+
+![Saver enabled](docs/screenshots/saver_enabled.png)
+
+### 6. Write the inspection script
+
+`inspection.cpp` was created when you made the project. Edit it — same
+buffer style as any C++ file (IntelliSense, save, format).
+
+```cpp
+#include <xi/xi.hpp>
+#include <xi/xi_use.hpp>
+
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int frame) {
+    auto& cam   = xi::use("cam0");
+    auto& det   = xi::use("det0");
+    auto& saver = xi::use("saver0");
+
+    auto img = cam.grab(500);
+    if (img.empty()) return;
+
+    VAR(input, img);
+    VAR(detection, det.process(xi::Record().image("gray", img)));
+    saver.process(xi::Record().image("input", img));
+}
+```
+
+### 7. Compile
+
+Click the gear icon in the editor title bar (visible when on
+`inspection.cpp`). Build runs in seconds, hot-reloads the DLL.
+
+![After compile](docs/screenshots/after_compile.png)
+
+### 8. Run
+
+Click the `▷` icon in the Instances view title bar (or hit **Ctrl+F5**).
+Each `VAR()` lights up in the Variable Window with type-specific
+renderers — numbers, booleans, image thumbnails, Record trees.
+
+![Inspections ran — viewer populated](docs/screenshots/inspections_ran_viewer.png)
+
+### 9. Headless production run
+
+For factory deployment without VS Code, use `xinsp-runner.exe`:
+
+```bat
+bin\xinsp-runner.exe path\to\project --frames=1000 --output=today.json
+```
+
+The runner loads `project.json`, restores all instances, compiles
+the script, runs N frames, and writes a JSON report — no WS, no UI,
+no UI dependencies. Exit `0` if every frame ran clean.
+
+### 10. Remote backend (LAN deployment)
+
+On the factory PC:
+
+```bat
+xinsp-backend.exe --host=0.0.0.0 --port=7823 --auth=<shared-secret>
+```
+
+In VS Code on the developer laptop:
+
+- `xinsp2.remoteUrl` = `ws://factory-pc.lan:7823`
+- `xinsp2.authSecret` = `<shared-secret>`
+
+The extension connects over the network instead of spawning locally.
+Same UI, real-machine images.
+
+---
+
+## Build from source — developers
+
+If you want to modify the framework itself (not just write plugins):
 
 ### Prerequisites
 
-- Windows 10/11 (Linux WIP; WebSocket header is Windows-first)
+- Windows 10/11 (Linux build path WIP)
 - CMake ≥ 3.16, MSVC 2019+ (or clang-cl)
-- Node.js 18+ (only for the VS Code extension build + tests)
+- Node.js 18+ (extension build + tests)
+- **Optional accelerators** (auto-detected; install any you want):
+  - **OpenCV 4.x** at `C:\opencv\opencv\build` — default ops backend
+  - **libjpeg-turbo** at `C:\libjpeg-turbo64` — fast JPEG encode (`winget install libjpeg-turbo.libjpeg-turbo.VC`)
+  - **Intel IPP 2026+** at `C:\Intel\ipp\<ver>` — image-op SIMD acceleration
 
 ### Build
 
 ```bash
 # Backend + runner
-cmake -S backend -B backend/build -A x64
+cmake -S backend -B backend/build -A x64 \
+    -DXINSP2_HAS_OPENCV=ON \
+    -DXINSP2_HAS_TURBOJPEG=ON \
+    -DXINSP2_HAS_IPP=ON
 cmake --build backend/build --config Release
-# → backend/build/Release/xinsp-backend.exe
-# → backend/build/Release/xinsp-runner.exe
 
 # Plugins (mock_camera, blob_analysis, synced_stereo, …)
 cmake -S plugins -B plugins/build -A x64
@@ -126,29 +277,23 @@ cmake --build plugins/build --config Release
 cd vscode-extension && npm install && npm run build
 ```
 
-### Run in VS Code
+Runtime DLLs (OpenCV / turbojpeg / IPP) are auto-copied next to
+`xinsp-backend.exe` by the build — no PATH munging needed.
+
+### Run in VS Code (dev mode)
+
+Open the repo in VS Code and hit `F5`. An Extension Development Host
+launches with xInsp2 wired up; the auto-detection finds the backend
+under `backend/build/Release/`.
+
+### Build a release zip
 
 ```bash
-# Open the repo in VS Code and hit F5 — an Extension Development Host
-# launches with xInsp2 wired up. Click "Create Project" in the sidebar
-# and follow the flow.
+node tools/build_release.mjs
+# → release/xinsp2-<version>-win-x64.zip
 ```
 
-### Run headless
-
-```bash
-xinsp-runner.exe path/to/project --frames=1000 --output=today.json
-```
-
-### Run remote
-
-```bash
-# On the factory PC:
-XINSP2_AUTH=$(openssl rand -hex 32) \
-  xinsp-backend.exe --host=0.0.0.0 --port=7823
-
-# From VS Code on a laptop: connect using Authorization: Bearer <secret>.
-```
+This is the same script that produced the file on the Releases page.
 
 ---
 
