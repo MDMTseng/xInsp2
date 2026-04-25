@@ -14,8 +14,12 @@
 #include <cstring>
 
 static const char* mode_label() {
-#ifdef XINSP2_HAS_IPP
-    return "ipp + cpp fallback";
+#if defined(XINSP2_HAS_IPP) && defined(XINSP2_HAS_OPENCV)
+    return "ipp > opencv > cpp";
+#elif defined(XINSP2_HAS_IPP)
+    return "ipp > cpp";
+#elif defined(XINSP2_HAS_OPENCV)
+    return "opencv > cpp";
 #else
     return "cpp only";
 #endif
