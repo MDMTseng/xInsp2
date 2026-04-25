@@ -752,6 +752,14 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             out += "]}";
         }
         send_rsp_ok(srv, id, out);
+    } else if (name == "clear_history") {
+        size_t cleared = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_hist_mu);
+            cleared = g_history.size();
+            g_history.clear();
+        }
+        send_rsp_ok(srv, id, "{\"cleared\":" + std::to_string(cleared) + "}");
     } else if (name == "set_history_depth") {
         auto d = xp::get_number_field(parsed->args_json, "depth");
         if (!d) { send_rsp_err(srv, id, "missing depth"); return; }
@@ -832,6 +840,18 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 if (n > 0) g_persistent_state_json.assign(buf.data(), (size_t)n);
             }
             xi::script::unload_script(g_script);
+            // Reset cross-script transient state — the new DLL may
+            // expose a different VAR set, so old subscription names and
+            // historical run snapshots no longer match cleanly.
+            {
+                std::lock_guard<std::mutex> sl(g_sub_mu);
+                g_sub_all = true;
+                g_sub_names.clear();
+            }
+            {
+                std::lock_guard<std::mutex> hl(g_hist_mu);
+                g_history.clear();
+            }
             std::string err;
             if (!xi::script::load_script(res.dll_path, g_script, err)) {
                 send_rsp_err(srv, id, err);

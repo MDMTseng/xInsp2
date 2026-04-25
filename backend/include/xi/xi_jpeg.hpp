@@ -72,28 +72,9 @@ inline CpuVendor detect_cpu_vendor() {
     return cached;
 }
 
-// ---------- IPP backend ----------
-
-#ifdef XINSP2_HAS_IPP
-inline bool encode_jpeg_ipp(const Image& img, int quality, std::vector<uint8_t>& out) {
-    // IPP JPEG encode via ippiEncodeJPEG.
-    // The user provides their own IPP integration here — IPP's JPEG API
-    // requires several setup steps (quantization tables, Huffman tables,
-    // state allocation) that depend on the specific IPP version installed.
-    //
-    // Skeleton:
-    //   IppiEncodeState* state;
-    //   ippiEncodeJPEGGetBufSize(..., &bufSize);
-    //   out.resize(bufSize);
-    //   ippiEncodeJPEG_8u_C3(..., out.data(), &encodedSize, state);
-    //   out.resize(encodedSize);
-    //
-    // For now, this is a placeholder — fill in with your IPP setup.
-    // Return false to fall through to the next backend.
-    (void)img; (void)quality; (void)out;
-    return false;
-}
-#endif
+// (IPP JPEG path removed — Intel deprecated the JPEG codec API in
+// IPP 2021+. The fast SIMD JPEG path is libjpeg-turbo via
+// XINSP2_HAS_TURBOJPEG; OpenCV is the secondary fallback.)
 
 // ---------- OpenCV backend ----------
 
@@ -184,13 +165,6 @@ inline bool encode_jpeg(const Image& img, int quality, std::vector<uint8_t>& out
     // Best general-purpose path: SIMD JPEG with native RGB pixel format,
     // no extra color-convert pass. Try first regardless of CPU vendor.
     if (encode_jpeg_turbo(img, quality, out)) return true;
-#endif
-
-#ifdef XINSP2_HAS_IPP
-    if (vendor == CpuVendor::Intel) {
-        if (encode_jpeg_ipp(img, quality, out)) return true;
-        // IPP failed or not implemented — fall through
-    }
 #endif
 
 #ifdef XINSP2_HAS_OPENCV
