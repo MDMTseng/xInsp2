@@ -21,3 +21,6 @@ plugins/*/cert.json
 sdk/examples/*/cert.json
 # E2E screenshot artifacts
 screenshot/
+# Release build artifacts (produced by tools/build_release.mjs)
+release/
+vscode-extension/*.vsix
