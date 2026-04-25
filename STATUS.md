@@ -169,7 +169,7 @@ plugin reinventing sync.
 | S1 | Live preview subscription  | `subscribe` / `unsubscribe`  | ✅ shipping (`b73a660`) |
 | S2 | Editor: auto-compile on save | VS Code file watcher       | ✅ shipping |
 | S3 | `xi::breakpoint("label")`  | protocol `event` + `resume`  | ✅ shipping (`4371bff`) |
-| S4 | Timeline / history         | Keep N past ValueStores      | partially enabled by Recorder |
+| S4 | Timeline / history         | `cmd: history` ring buffer   | ✅ backend shipping (`ea57715`); UI scrubber TBD |
 | S5 | Operator library catalog   | `ASYNC_WRAP` library         | ✅ canny/open/close/adaptive/contours/matchTemplate (`b14420f`) |
 | S6 | Multi-client broadcast     | Session id + client vector   | not started (single-client still) |
 | S7 | Recipe variant / A-B       | `cmd: compare_variants`      | ✅ shipping (`8124033`) |
