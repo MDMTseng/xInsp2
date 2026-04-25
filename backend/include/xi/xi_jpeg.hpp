@@ -26,6 +26,7 @@
 
 #ifdef XINSP2_HAS_OPENCV
   #include <opencv2/imgcodecs.hpp>
+  #include <opencv2/imgproc.hpp>
   #include <opencv2/core/mat.hpp>
 #endif
 
