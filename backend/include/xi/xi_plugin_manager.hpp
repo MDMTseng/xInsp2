@@ -550,6 +550,168 @@ public:
         return r;
     }
 
+    // Export a project plugin as a standalone deployable folder. Steps:
+    //   1. Recompile in PluginExport mode (/O2 /Zi — Release with PDB).
+    //   2. LoadLibrary the new DLL into a temporary handle.
+    //   3. Run baseline tests (cert::certify) — if they fail, the export
+    //      aborts so we never ship an uncertified plugin.
+    //   4. Copy <plugin>.dll, <plugin>.pdb, cert.json, plugin.json (auto-
+    //      generated if missing), and any ui/ subfolder into <dest>/<name>/.
+    //   5. Free the temporary handle (the in-process plugin keeps its
+    //      Dev DLL — export doesn't disturb the running session).
+    struct ExportResult {
+        bool                     ok = false;
+        std::string              dest_dir;       // <dest>/<name>
+        std::string              error;
+        std::string              build_log;
+        std::vector<xi::script::Diagnostic> diagnostics;
+        bool                     cert_passed = false;
+        int                      cert_pass_count = 0;
+        int                      cert_fail_count = 0;
+    };
+    ExportResult export_project_plugin(const std::string& plugin_name,
+                                        const std::string& dest_root) {
+        std::lock_guard<std::mutex> lk(mu_);
+        ExportResult er;
+        auto orig_it = project_plugin_origin_.find(plugin_name);
+        if (orig_it == project_plugin_origin_.end()) {
+            er.error = "not a project plugin: " + plugin_name;
+            return er;
+        }
+        auto src_dir = std::filesystem::path(orig_it->second);
+        auto pi_it = plugins_.find(plugin_name);
+        if (pi_it == plugins_.end()) {
+            er.error = "plugin entry missing: " + plugin_name;
+            return er;
+        }
+        auto& pi = pi_it->second;
+
+        // Re-collect sources (mirror of compile_project_plugins_locked).
+        std::vector<std::string> sources;
+        auto walk = [&](const std::filesystem::path& dir) {
+            for (auto& f : std::filesystem::directory_iterator(dir)) {
+                if (!f.is_regular_file()) continue;
+                auto ext = f.path().extension().string();
+                if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
+                    sources.push_back(f.path().string());
+                }
+            }
+        };
+        auto src_subdir = src_dir / "src";
+        if (std::filesystem::exists(src_subdir)) walk(src_subdir);
+        else                                     walk(src_dir);
+        if (sources.empty()) { er.error = "no .cpp sources"; return er; }
+        std::vector<std::string> includes;
+        auto inc_dir = src_dir / "include";
+        if (std::filesystem::exists(inc_dir)) includes.push_back(inc_dir.string());
+
+        // Build into a separate export/ folder so the dev DLL isn't touched.
+        auto export_build = src_dir / "export_build";
+        xi::script::CompileRequest req;
+        req.source_path    = sources.front();
+        req.extra_sources.assign(sources.begin() + 1, sources.end());
+        req.include_dirs   = includes;
+        req.output_dir     = export_build.string();
+        req.include_dir    = compile_env_.include_dir;
+        req.vcvars_path    = compile_env_.vcvars_path;
+        req.opencv_dir     = compile_env_.opencv_dir;
+        req.turbojpeg_root = compile_env_.turbojpeg_root;
+        req.ipp_root       = compile_env_.ipp_root;
+        req.mode           = xi::script::CompileMode::PluginExport;
+
+        std::fprintf(stderr, "[xinsp2] export: compiling '%s' (Release)...\n",
+                     plugin_name.c_str());
+        auto cres = xi::script::compile(req);
+        er.build_log   = cres.build_log;
+        er.diagnostics = cres.diagnostics;
+        if (!cres.ok) { er.error = "Release compile failed"; return er; }
+
+        // Load the freshly built DLL into a temp handle for cert.
+        HMODULE temp = LoadLibraryA(cres.dll_path.c_str());
+        if (!temp) { er.error = "LoadLibrary failed on Release DLL"; return er; }
+
+        // Run baseline. cert::certify writes cert.json beside the DLL on pass.
+        auto syms = xi::baseline::load_symbols(temp);
+        static xi_host_api cert_host = ImagePool::make_host_api();
+        auto build_dir = std::filesystem::path(cres.dll_path).parent_path();
+        std::fprintf(stderr, "[xinsp2] export: running baseline...\n");
+        auto summary = xi::cert::certify(build_dir, cres.dll_path,
+                                          plugin_name, syms, &cert_host);
+        FreeLibrary(temp);
+        er.cert_pass_count = summary.pass_count;
+        er.cert_fail_count = summary.fail_count;
+        er.cert_passed     = summary.all_passed;
+        if (!summary.all_passed) {
+            er.error = "baseline certification failed: "
+                     + std::to_string(summary.pass_count) + "/"
+                     + std::to_string(summary.pass_count + summary.fail_count)
+                     + " passed";
+            return er;
+        }
+
+        // Copy the deployable into dest_root/<plugin_name>/.
+        auto dest = std::filesystem::path(dest_root) / plugin_name;
+        std::error_code ec;
+        std::filesystem::create_directories(dest, ec);
+
+        // DLL — rename _v<n> versioning out so the deployed file is stable.
+        auto dll_dest = dest / (plugin_name + ".dll");
+        std::filesystem::copy_file(cres.dll_path, dll_dest,
+            std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) { er.error = "copy DLL: " + ec.message(); return er; }
+
+        // PDB beside DLL — keep so end-user crashes can blame source line.
+        auto pdb_src = std::filesystem::path(cres.dll_path)
+                           .replace_extension(".pdb");
+        if (std::filesystem::exists(pdb_src)) {
+            std::filesystem::copy_file(pdb_src,
+                dest / (plugin_name + ".pdb"),
+                std::filesystem::copy_options::overwrite_existing, ec);
+        }
+
+        // cert.json
+        auto cert_src = build_dir / "cert.json";
+        if (std::filesystem::exists(cert_src)) {
+            std::filesystem::copy_file(cert_src,
+                dest / "cert.json",
+                std::filesystem::copy_options::overwrite_existing, ec);
+        }
+
+        // plugin.json — synthesize from PluginInfo if there's no manifest in
+        // the source folder. Generated form points dll/factory at the names
+        // the export uses, so the deployed folder is self-contained.
+        auto src_manifest = src_dir / "plugin.json";
+        std::string manifest_text;
+        if (std::filesystem::exists(src_manifest)) {
+            std::ifstream mf(src_manifest.string());
+            std::stringstream ms; ms << mf.rdbuf();
+            manifest_text = ms.str();
+        } else {
+            manifest_text = "{\n";
+            manifest_text += "  \"name\":        \"" + pi.name + "\",\n";
+            manifest_text += "  \"description\": \"" + pi.description + "\",\n";
+            manifest_text += "  \"dll\":         \"" + pi.name + ".dll\",\n";
+            manifest_text += "  \"factory\":     \"" + pi.factory_symbol + "\",\n";
+            manifest_text += "  \"has_ui\":      " + std::string(pi.has_ui ? "true" : "false") + "\n";
+            manifest_text += "}\n";
+        }
+        xi::atomic_write(dest / "plugin.json", manifest_text);
+
+        // ui/ — copy whole subtree if present.
+        auto ui_src = src_dir / "ui";
+        if (std::filesystem::exists(ui_src)) {
+            std::filesystem::copy(ui_src, dest / "ui",
+                std::filesystem::copy_options::recursive |
+                std::filesystem::copy_options::overwrite_existing, ec);
+        }
+
+        er.ok       = true;
+        er.dest_dir = dest.string();
+        std::fprintf(stderr, "[xinsp2] exported '%s' to %s\n",
+                     plugin_name.c_str(), er.dest_dir.c_str());
+        return er;
+    }
+
     // Was this plugin loaded from inside the current project (vs. global)?
     bool is_project_plugin(const std::string& name) {
         std::lock_guard<std::mutex> lk(mu_);

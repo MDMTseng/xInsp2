@@ -684,6 +684,59 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // --- Export a project plugin as a deployable folder ---
+    // Picks any project-origin plugin from the current registry, asks for
+    // the output dir, calls the backend which: (1) compiles Release with
+    // PDB, (2) runs baseline cert, (3) copies plugin.json + DLL + cert
+    // + optional ui/ into <dest>/<name>/. Cert failure aborts the export.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.exportProjectPlugin', async (arg?: any) => {
+            if (!client?.connected) { vscode.window.showWarningMessage('xInsp2: not connected'); return; }
+            // Either invoked from tree context (passes a node with .info)
+            // or via command palette (no arg → pick from list).
+            let pname: string | undefined =
+                arg?.info?.name && arg?.info?.origin === 'project'
+                    ? arg.info.name : undefined;
+            if (!pname) {
+                const projPlugins = pluginTreeProvider.listPlugins()
+                    .filter(p => p.origin === 'project');
+                if (projPlugins.length === 0) {
+                    vscode.window.showInformationMessage('No project plugins to export. Add one under <project>/plugins/.');
+                    return;
+                }
+                const pick = await vscode.window.showQuickPick(
+                    projPlugins.map((p: any) => ({ label: p.name, description: p.description })),
+                    { placeHolder: 'Pick a project plugin to export' });
+                if (!pick) return;
+                pname = pick.label;
+            }
+            const destUri = await vscode.window.showOpenDialog({
+                canSelectFolders: true, canSelectFiles: false,
+                openLabel: 'Export here',
+            });
+            if (!destUri || destUri.length === 0) return;
+            const dest = destUri[0].fsPath;
+            output.appendLine(`[xinsp2] exporting project plugin '${pname}' → ${dest}...`);
+            try {
+                const rsp = await sendCmd('export_project_plugin', { plugin: pname, dest });
+                if (rsp.ok) {
+                    const d = rsp.data || {};
+                    const msg = `xInsp2: exported '${pname}' (${d.cert_pass_count} baseline tests passed) to ${d.dest}`;
+                    output.appendLine('[xinsp2] ' + msg);
+                    const open = await vscode.window.showInformationMessage(msg, 'Reveal');
+                    if (open === 'Reveal' && d.dest) {
+                        vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(d.dest));
+                    }
+                } else {
+                    output.appendLine(`[xinsp2] export FAILED: ${rsp.error}`);
+                    vscode.window.showErrorMessage(`xInsp2 export failed: ${rsp.error}`);
+                }
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`xInsp2 export: ${e.message}`);
+            }
+        })
+    );
+
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.saveProject', async () => {
             const uri = await vscode.window.showSaveDialog({

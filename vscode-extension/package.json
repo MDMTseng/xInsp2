@@ -28,6 +28,11 @@
         "icon": "$(gear)"
       },
       {
+        "command": "xinsp2.exportProjectPlugin",
+        "title": "xInsp2: Export Project Plugin…",
+        "icon": "$(package)"
+      },
+      {
         "command": "xinsp2.saveProject",
         "title": "xInsp2: Save Project"
       },
@@ -293,6 +298,11 @@
         {
           "command": "xinsp2.showPluginCert",
           "when": "view == xinsp2.plugins && viewItem == plugin",
+          "group": "inline@1"
+        },
+        {
+          "command": "xinsp2.exportProjectPlugin",
+          "when": "view == xinsp2.plugins && viewItem == projectPlugin",
           "group": "inline@1"
         },
         {

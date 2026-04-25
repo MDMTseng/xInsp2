@@ -33,6 +33,9 @@ export class PluginTreeProvider implements vscode.TreeDataProvider<Node> {
         this.removableFolders = new Set(folders.map(f => path.resolve(f).toLowerCase()));
     }
 
+    /** Read-only snapshot of last-known plugins for command callers. */
+    listPlugins(): readonly PluginInfo[] { return this.plugins; }
+
     update(plugins: PluginInfo[], instanceUseCounts?: Map<string, number>) {
         this.plugins = plugins.slice();
         if (instanceUseCounts) this.instanceUseCounts = instanceUseCounts;

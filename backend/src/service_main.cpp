@@ -1669,6 +1669,43 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "close_project") {
         g_plugin_mgr.close_project();
         send_rsp_ok(srv, id, "{\"closed\":true}");
+    } else if (name == "export_project_plugin") {
+        // Package a project plugin as a deployable folder. Compiles
+        // Release + runs baseline cert; on success, the destination
+        // contains a self-contained plugin.json + DLL + cert.json that
+        // can be dropped into another project's plugins folder.
+        auto pname = xp::get_string_field(parsed->args_json, "plugin");
+        auto dest  = xp::get_string_field(parsed->args_json, "dest");
+        if (!pname || !dest) { send_rsp_err(srv, id, "missing plugin or dest"); return; }
+        if (!g_plugin_mgr.is_project_plugin(*pname)) {
+            send_rsp_err(srv, id, "not a project plugin: " + *pname);
+            return;
+        }
+        auto er = g_plugin_mgr.export_project_plugin(*pname, *dest);
+        std::string data = "{\"plugin\":";
+        xp::json_escape_into(data, *pname);
+        data += ",\"dest\":";
+        xp::json_escape_into(data, er.dest_dir);
+        data += ",\"cert_passed\":" + std::string(er.cert_passed ? "true" : "false");
+        data += ",\"cert_pass_count\":" + std::to_string(er.cert_pass_count);
+        data += ",\"cert_fail_count\":" + std::to_string(er.cert_fail_count);
+        data += "}";
+        if (er.ok) {
+            send_rsp_ok(srv, id, data);
+        } else {
+            xp::Rsp r;
+            r.id = id;
+            r.ok = false;
+            r.error = er.error;
+            r.data_json = data;
+            srv.send_text(r.to_json());
+            if (!er.build_log.empty()) {
+                xp::LogMsg lm;
+                lm.level = "error";
+                lm.msg = er.build_log;
+                srv.send_text(lm.to_json());
+            }
+        }
     } else if (name == "recompile_project_plugin") {
         // Hot-rebuild a single project-local plugin. The extension calls
         // this from a file watcher when the user edits plugin source.
