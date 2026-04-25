@@ -5,10 +5,15 @@
 //     vscode.postMessage({ type: 'exchange', cmd: JSON.stringify({...}) })
 //
 // which the extension forwards to the plugin's exchange() method.
-// Responses come back as { type: 'status', ... } messages.
+// Responses come back as { type: 'status', ... } messages, and preview
+// images come as { type: 'preview', width, height, jpeg } via the
+// preview_instance flow.
 //
-// Kept in a separate file because string templates with backticks
-// inside backticks get awkward fast.
+// Inline image previews use the embeddable widget from imageViewerWidget,
+// so plugin authors get pan + cursor-anchored zoom for free without
+// needing to leave the plugin UI tab.
+
+import { imageViewerWidget } from './imageViewerWidget';
 
 export function mediumUiHtml(name: string): string {
     return `<!DOCTYPE html>
@@ -44,6 +49,12 @@ export function mediumUiHtml(name: string): string {
     <div class="stat"><span class="k">Last fg %:</span>     <span id="fg" class="v">—</span></div>
     <div class="stat"><span class="k">Active threshold:</span> <span id="active" class="v">—</span></div>
   </div>
+  <div class="card">
+    <div style="font-size:11px; opacity:0.6; margin-bottom:6px;">
+      Output preview (drag to pan, wheel to zoom around cursor)
+    </div>
+    ${imageViewerWidget('preview', { height: '280px' })}
+  </div>
 <script>
   const vscode = acquireVsCodeApi();
   const thr = document.getElementById('thr');
@@ -54,6 +65,7 @@ export function mediumUiHtml(name: string): string {
   function send(cmdObj) {
       vscode.postMessage({ type: 'exchange', cmd: JSON.stringify(cmdObj) });
   }
+  function requestPreview() { vscode.postMessage({ type: 'request_preview' }); }
   thr.addEventListener('input', () => {
       thrV.textContent = thr.value;
       if (pending) return;
@@ -63,19 +75,27 @@ export function mediumUiHtml(name: string): string {
   });
   window.addEventListener('message', e => {
       const m = e.data;
-      if (!m || m.type !== 'status') return;
-      if (typeof m.threshold === 'number') {
-          active.textContent = m.threshold;
-          if (!thr.matches(':active')) {
-              thr.value = m.threshold;
-              thrV.textContent = m.threshold;
+      if (!m) return;
+      if (m.type === 'status') {
+          if (typeof m.threshold === 'number') {
+              active.textContent = m.threshold;
+              if (!thr.matches(':active')) {
+                  thr.value = m.threshold;
+                  thrV.textContent = m.threshold;
+              }
           }
-      }
-      if (typeof m.last_fg_pct === 'number') {
-          fg.textContent = (m.last_fg_pct * 100).toFixed(2) + '%';
+          if (typeof m.last_fg_pct === 'number') {
+              fg.textContent = (m.last_fg_pct * 100).toFixed(2) + '%';
+              requestPreview();
+          }
+      } else if (m.type === 'preview' && m.jpeg) {
+          // Inline pan + cursor-anchored zoom — no separate tab.
+          window.xiViewer && window.xiViewer.preview &&
+              window.xiViewer.preview.setImage(m.jpeg, m.width, m.height);
       }
   });
   send({ command: 'get_status' });
+  requestPreview();
 </script>
 </body></html>
 `;
@@ -134,6 +154,12 @@ export function expertUiHtml(name: string): string {
     <div class="stat"><span class="k">State:</span>  <span id="state" class="v stopped">stopped</span></div>
     <div class="stat"><span class="k">Frames emitted:</span> <span id="count" class="v">0</span></div>
   </div>
+  <div class="card">
+    <div style="font-size:11px; opacity:0.6; margin-bottom:6px;">
+      Latest emitted frame (drag to pan, wheel to zoom around cursor)
+    </div>
+    ${imageViewerWidget('preview', { height: '280px' })}
+  </div>
 <script>
   const vscode = acquireVsCodeApi();
   const w = document.getElementById('w');
@@ -144,6 +170,7 @@ export function expertUiHtml(name: string): string {
   function send(cmdObj) {
       vscode.postMessage({ type: 'exchange', cmd: JSON.stringify(cmdObj) });
   }
+  function requestPreview() { vscode.postMessage({ type: 'request_preview' }); }
   document.getElementById('start').addEventListener('click', () => send({ command: 'start' }));
   document.getElementById('stop').addEventListener('click',  () => send({ command: 'stop'  }));
   document.getElementById('apply').addEventListener('click', () => {
@@ -152,7 +179,13 @@ export function expertUiHtml(name: string): string {
   });
   window.addEventListener('message', e => {
       const m = e.data;
-      if (!m || m.type !== 'status') return;
+      if (!m) return;
+      if (m.type === 'preview' && m.jpeg) {
+          window.xiViewer && window.xiViewer.preview &&
+              window.xiViewer.preview.setImage(m.jpeg, m.width, m.height);
+          return;
+      }
+      if (m.type !== 'status') return;
       if (typeof m.running === 'boolean') {
           stateEl.textContent = m.running ? 'running' : 'stopped';
           stateEl.classList.toggle('running', m.running);
@@ -163,7 +196,11 @@ export function expertUiHtml(name: string): string {
       if (typeof m.height === 'number' && document.activeElement !== h)  h.value  = m.height;
       if (typeof m.interval_ms === 'number' && document.activeElement !== iv) iv.value = m.interval_ms;
   });
-  setInterval(() => send({ command: 'get_status' }), 1000);
+  // Status + preview cadence: ~1Hz. Preview only fires when running.
+  setInterval(() => {
+      send({ command: 'get_status' });
+      if (stateEl.textContent === 'running') requestPreview();
+  }, 1000);
   send({ command: 'get_status' });
 </script>
 </body></html>
