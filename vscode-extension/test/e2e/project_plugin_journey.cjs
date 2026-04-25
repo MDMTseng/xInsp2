@@ -23,124 +23,20 @@ const path   = require('path');
 const fs     = require('fs');
 const os     = require('os');
 const assert = require('assert');
-const { execSync } = require('child_process');
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// Shared journey utilities — sleep / editAndSave / makeShooter / clearOldShots.
+// See journey_helpers.cjs for the rationale (especially editAndSave: any new
+// e2e that wants the auto-recompile path must use this, NOT fs.writeFileSync).
+const { sleep, editAndSave, restoreAndSave, makeShooter, clearOldShots } =
+    require('./journey_helpers.cjs');
 
 const screenshotDir = path.resolve(__dirname, '..', '..', '..', 'screenshot');
-let stepNum = 0;
-
-// ---- Screenshot machinery (mirrors user_journey.cjs) -------------------
-let mainCodePid = null;
-function resolveMainCodePid() {
-    if (mainCodePid) return mainCodePid;
-    try {
-        const psFile = path.join(os.tmpdir(), `xinsp2_pp_pid_${process.pid}.ps1`);
-        fs.writeFileSync(psFile, `
-$cur = ${process.pid}
-while ($true) {
-    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$cur" -ErrorAction SilentlyContinue
-    if (-not $p) { break }
-    $pp = $p.ParentProcessId
-    $par = Get-CimInstance Win32_Process -Filter "ProcessId=$pp" -ErrorAction SilentlyContinue
-    if (-not $par) { break }
-    if ($par.Name -eq "Code.exe") {
-        $proc = Get-Process -Id $pp -ErrorAction SilentlyContinue
-        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
-            Write-Host $pp
-            exit
-        }
-    }
-    $cur = $pp
-}
-`);
-        const out = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`,
-                              { encoding: 'utf8', timeout: 10000 }).trim();
-        const n = parseInt(out, 10);
-        if (!isNaN(n)) mainCodePid = n;
-    } catch (e) { /* fall through */ }
-    return mainCodePid;
-}
-
-function shot(label) {
-    stepNum++;
-    fs.mkdirSync(screenshotDir, { recursive: true });
-    const fname = `pp_journey_${String(stepNum).padStart(2, '0')}_${label}.png`;
-    const fpath = path.join(screenshotDir, fname);
-    const pid   = resolveMainCodePid() || 0;
-    const psScript = path.join(os.tmpdir(), `xinsp2_pp_ss_${process.pid}.ps1`);
-    fs.writeFileSync(psScript, `
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win {
-    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
-    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmd);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-}
-"@
-$targetHwnd = [IntPtr]::Zero
-$preferredPid = ${pid}
-if ($preferredPid -gt 0) {
-    $p = Get-Process -Id $preferredPid -ErrorAction SilentlyContinue
-    if ($p -and $p.MainWindowHandle -ne [IntPtr]::Zero) { $targetHwnd = $p.MainWindowHandle }
-}
-if ($targetHwnd -eq [IntPtr]::Zero) {
-    $best = Get-Process -Name Code -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowTitle -like "*Extension Development Host*" -and
-                           $_.MainWindowHandle -ne [IntPtr]::Zero } |
-            Sort-Object -Property StartTime -Descending |
-            Select-Object -First 1
-    if ($best) { $targetHwnd = $best.MainWindowHandle }
-}
-if ($targetHwnd -eq [IntPtr]::Zero) {
-    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-    $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-    $gfx.CopyFromScreen($bounds.Location, (New-Object System.Drawing.Point(0,0)), $bounds.Size)
-} else {
-    if ([Win]::IsIconic($targetHwnd)) { [void][Win]::ShowWindow($targetHwnd, 9) }
-    [void][Win]::ShowWindow($targetHwnd, 5)
-    [void][Win]::SetForegroundWindow($targetHwnd)
-    Start-Sleep -Milliseconds 200
-    $r = New-Object Win+RECT
-    [void][Win]::GetWindowRect($targetHwnd, [ref]$r)
-    $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
-    if ($w -le 0 -or $h -le 0) { $w = 1200; $h = 800 }
-    $bmp = New-Object System.Drawing.Bitmap($w, $h)
-    $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-    $hdc = $gfx.GetHdc()
-    $ok = [Win]::PrintWindow($targetHwnd, $hdc, 3)
-    $gfx.ReleaseHdc($hdc)
-    if (-not $ok) {
-        $bmp.Dispose(); $gfx.Dispose()
-        $bmp = New-Object System.Drawing.Bitmap($w, $h)
-        $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-        $gfx.CopyFromScreen(
-            (New-Object System.Drawing.Point($r.Left, $r.Top)),
-            (New-Object System.Drawing.Point(0, 0)),
-            (New-Object System.Drawing.Size($w, $h)))
-    }
-}
-$bmp.Save("${fpath.replace(/\\/g, '\\\\')}")
-$gfx.Dispose(); $bmp.Dispose()
-`);
-    try {
-        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psScript}"`,
-                 { timeout: 15000 });
-        console.log(`  📸 ${fname}`);
-    } catch (e) {
-        console.log(`  📸 ${fname} failed: ${e.message}`);
-    }
-}
+const shot = makeShooter(screenshotDir, 'pp_journey');
 
 // ---- Stubs for QuickPick / InputBox -----------------------------------
-// We replace these globally and restore at the end.
+// Used only for entry points that don't accept positional args. When a
+// command DOES accept positional args (e.g. xinsp2.createInstance), pass
+// them directly — see the audit notes in journey_helpers.cjs.
 function stubQuickPickByLabel(matchFn) {
     return (items, _opts) => Promise.resolve(items)
         .then(arr => Array.isArray(arr) ? arr.find(it => matchFn(it)) : arr);
@@ -161,12 +57,7 @@ async function run() {
     await sleep(4000);
     if (api) await api.waitConnected(10000);
 
-    // Clean previous pp_journey_* shots so re-runs have a clean directory.
-    try {
-        for (const f of fs.readdirSync(screenshotDir)) {
-            if (f.startsWith('pp_journey_')) fs.unlinkSync(path.join(screenshotDir, f));
-        }
-    } catch {}
+    clearOldShots(screenshotDir, 'pp_journey');
 
     const projDir = path.join(os.tmpdir(), `xinsp2_pp_${Date.now()}`);
     const exportDir = path.join(os.tmpdir(), `xinsp2_pp_exp_${Date.now()}`);
@@ -209,44 +100,21 @@ async function run() {
     shot('list_plugins_after_easy');
 
     // ====== STEP 5 — introduce typo, save, expect diagnostic ======
-    // The save event ONLY fires if the in-memory document is dirty —
-    // writing the file externally with fs.writeFileSync wouldn't dirty
-    // it. We use a WorkspaceEdit so VS Code's editor model is the one
-    // making the change, then save() flushes it and onDidSaveTextDocument
-    // fires for our recompile watcher.
+    // editAndSave from journey_helpers does the WorkspaceEdit + save
+    // dance correctly so onDidSaveTextDocument actually fires.
     console.log('\n[5] introduce typo → save → expect diagnostic');
     const cppPath = path.join(projDir, 'plugins', 'easy_thru', 'src', 'plugin.cpp');
     const cppUri  = vscode.Uri.file(cppPath);
-    const doc1    = await vscode.workspace.openTextDocument(cppUri);
-    const ed1     = await vscode.window.showTextDocument(doc1);
-
-    // Find the line with our pass-through return and break it.
-    const origText = doc1.getText();
-    const targetIdx = origText.indexOf('return xi::Record{};');
-    assert.ok(targetIdx >= 0, 'pass-through return present in template');
-    const startPos = doc1.positionAt(targetIdx);
-    const endPos   = doc1.positionAt(targetIdx + 'return xi::Record{};'.length);
-    {
-        const we = new vscode.WorkspaceEdit();
-        we.replace(cppUri, new vscode.Range(startPos, endPos),
-            'return xi::Record{}  /* MISSING SEMICOLON, intentional */');
-        await vscode.workspace.applyEdit(we);
-    }
-    await ed1.document.save();
+    const origText = await editAndSave(cppUri,
+        'return xi::Record{};',
+        'return xi::Record{}  /* MISSING SEMICOLON, intentional */');
     // Recompile is async — give cl.exe time. ~12s is conservative.
     await sleep(12000);
     shot('after_typo_save');
 
     // ====== STEP 6 — fix typo, save again ======
     console.log('\n[6] fix typo → save → expect clean recompile');
-    {
-        const we = new vscode.WorkspaceEdit();
-        const fullStart = doc1.positionAt(0);
-        const fullEnd   = doc1.positionAt(doc1.getText().length);
-        we.replace(cppUri, new vscode.Range(fullStart, fullEnd), origText);
-        await vscode.workspace.applyEdit(we);
-    }
-    await ed1.document.save();
+    await restoreAndSave(cppUri, origText);
     await sleep(12000);
     shot('after_fix_save');
 
