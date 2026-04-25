@@ -8,6 +8,7 @@ import { InstanceCodeLensProvider } from './instanceCodeLens';
 import { PluginTreeProvider, PluginInfo } from './pluginTree';
 import { PREVIEW_HEADER_SIZE } from './protocol';
 import { TEMPLATE_CHOICES, renderPluginCpp, renderPluginJson, TemplateId } from './projectPluginTemplates';
+import { ImageViewerPanel } from './imageViewerPanel';
 
 let backend: ChildProcess | null = null;
 // Auto-respawn state. `intendedRunning` is true while the extension wants
@@ -611,8 +612,45 @@ export function activate(context: vscode.ExtensionContext) {
             }
         } else {
             viewerProvider.postPreview(gid, width, height, b64);
+            // Also remember the most-recent preview so the
+            // xinsp2.openImageViewer command can re-show it in the
+            // rich viewer (with pan/zoom + pick tools).
+            lastPreview = { gid, width, height, b64,
+                            name: lastPreviewName.get(gid) || `gid:${gid}` };
         }
     });
+
+    // Cache the most-recent preview message so the user can pop it
+    // open in the interactive viewer after-the-fact.
+    let lastPreview: { gid: number; width: number; height: number; b64: string; name: string } | null = null;
+    const lastPreviewName = new Map<number, string>();
+
+    // Expose openImageViewer to the user — palette + later wired into
+    // viewer thumbnails. Picks the most recent image if no arg given.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.openImageViewer', (arg?: { gid?: number, name?: string, width?: number, height?: number, jpeg?: string }) => {
+            const src = arg && arg.jpeg
+                ? { name: arg.name || 'image', width: arg.width!, height: arg.height!, jpegBase64: arg.jpeg }
+                : (lastPreview
+                    ? { name: lastPreview.name, width: lastPreview.width, height: lastPreview.height, jpegBase64: lastPreview.b64 }
+                    : null);
+            if (!src) {
+                vscode.window.showInformationMessage('No image to view yet — run an inspection or preview an instance first.');
+                return;
+            }
+            ImageViewerPanel.show(context.extensionUri, src);
+        }),
+    );
+
+    // Surface picks so other extensions / scripts can react. We just
+    // log + show a toast; future hooks could write a ROI param.
+    context.subscriptions.push(ImageViewerPanel.onPick.event((p) => {
+        const text = p.tool === 'point'
+            ? `Picked point (${p.x}, ${p.y}) on ${p.image}`
+            : `Picked rect (${p.x}, ${p.y}) ${p.w}×${p.h} on ${p.image}`;
+        output.appendLine('[xinsp2] ' + text);
+        vscode.window.setStatusBarMessage('xInsp2: ' + text, 4000);
+    }));
 
     // Pending response map
     const pendingRsp = new Map<number, (msg: any) => void>();

@@ -63,6 +63,11 @@
         "icon": "$(clear-all)"
       },
       {
+        "command": "xinsp2.openImageViewer",
+        "title": "xInsp2: Open Interactive Image Viewer",
+        "icon": "$(eye)"
+      },
+      {
         "command": "xinsp2.saveProject",
         "title": "xInsp2: Save Project"
       },
