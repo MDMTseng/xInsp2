@@ -671,6 +671,25 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.setStatusBarMessage('xInsp2: ' + text, 4000);
     }));
 
+    // Test hook: run the image viewer's pan/zoom invariants. Used by
+    // the e2e journey to validate cursor-anchored zoom math without
+    // needing real mouse events. Returns the next selftest_result via
+    // a one-shot promise.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.imageViewer.runSelftest', async () => {
+            return new Promise((resolve) => {
+                const sub = ImageViewerPanel.onSelftest.event((r) => {
+                    sub.dispose();
+                    resolve(r);
+                });
+                if (!ImageViewerPanel.runSelftest()) {
+                    sub.dispose();
+                    resolve({ ok: false, steps: [{ label: 'no panel open', ok: false }] });
+                }
+            });
+        }),
+    );
+
     // Pending response map
     const pendingRsp = new Map<number, (msg: any) => void>();
 

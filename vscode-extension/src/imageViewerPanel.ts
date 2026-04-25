@@ -32,6 +32,15 @@ export class ImageViewerPanel {
     private static current: ImageViewerPanel | undefined;
 
     public static onPick: vscode.EventEmitter<PickReport> = new vscode.EventEmitter();
+    // Fired with the selftest result when the harness sends type:'selftest'.
+    public static onSelftest: vscode.EventEmitter<any> = new vscode.EventEmitter();
+
+    /** Test hook: run zoom/pan invariants headlessly inside the webview. */
+    public static runSelftest(): boolean {
+        if (!ImageViewerPanel.current) return false;
+        ImageViewerPanel.current.panel.webview.postMessage({ type: 'selftest' });
+        return true;
+    }
 
     private readonly panel: vscode.WebviewPanel;
     private disposables: vscode.Disposable[] = [];
@@ -57,6 +66,8 @@ export class ImageViewerPanel {
         this.panel.webview.onDidReceiveMessage((m: any) => {
             if (m && m.type === 'pick') {
                 ImageViewerPanel.onPick.fire(m as PickReport);
+            } else if (m && m.type === 'selftest_result') {
+                ImageViewerPanel.onSelftest.fire(m);
             }
         }, null, this.disposables);
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
@@ -124,13 +135,13 @@ export class ImageViewerPanel {
 </style></head>
 <body>
   <div id="toolbar">
-    <button id="t-move" class="on" title="Pan with drag, zoom with wheel">$ Move</button>
-    <button id="t-point" title="Click to pick a point in image space">$ Pick Point</button>
-    <button id="t-area"  title="Drag to pick a rectangular region">$ Pick Area</button>
+    <button id="t-move" class="on" title="Pan with drag, zoom with wheel (M)">✥ Move</button>
+    <button id="t-point" title="Click to pick a point in image space (P)">⌖ Pick Point</button>
+    <button id="t-area"  title="Drag to pick a rectangular region (A)">▭ Pick Area</button>
     <div class="sep"></div>
-    <button id="zoom-fit" title="Fit image to viewport">Fit</button>
-    <button id="zoom-1"   title="100% zoom">1:1</button>
-    <button id="zoom-out" title="Zoom out">$-$</button>
+    <button id="zoom-fit" title="Fit image to viewport (F)">Fit</button>
+    <button id="zoom-1"   title="100% zoom (0)">1:1</button>
+    <button id="zoom-out" title="Zoom out">−</button>
     <button id="zoom-in"  title="Zoom in">+</button>
     <span id="last-pick"></span>
     <span id="status">—</span>
@@ -335,18 +346,63 @@ export class ImageViewerPanel {
   // ---- Receive image data from extension --------------------------------
   window.addEventListener('message', async (e) => {
       const msg = e.data;
-      if (msg.type !== 'image') return;
-      imageLabel = msg.name || '';
-      empty.style.display = 'none';
-      const blob = await (await fetch('data:image/jpeg;base64,' + msg.jpegBase64)).blob();
-      bitmap = await createImageBitmap(blob);
-      // Prefer message-supplied dimensions (raw pixels). Fall back to
-      // bitmap natural size when the caller (e.g. inline thumbnail
-      // re-emit) doesn't know — bitmap's intrinsic size is still the
-      // correct one for image-space coords.
-      imgW = msg.width  || bitmap.width;
-      imgH = msg.height || bitmap.height;
-      fit();
+      if (msg.type === 'image') {
+          imageLabel = msg.name || '';
+          empty.style.display = 'none';
+          const blob = await (await fetch('data:image/jpeg;base64,' + msg.jpegBase64)).blob();
+          bitmap = await createImageBitmap(blob);
+          imgW = msg.width  || bitmap.width;
+          imgH = msg.height || bitmap.height;
+          fit();
+      } else if (msg.type === 'selftest') {
+          // Headless validation of pan + zoom math. We can't drive real
+          // mouse events from the extension host, so the e2e harness
+          // sends this message and reads the result back. Each step
+          // checks an invariant of zoomAt: the IMAGE-space point under
+          // the (sx,sy) anchor must stay constant across the zoom.
+          const out = { type: 'selftest_result', steps: [], ok: true };
+          function step(label, fn) {
+              try {
+                  const r = fn();
+                  out.steps.push({ label, ok: !!r.ok, detail: r.detail });
+                  if (!r.ok) out.ok = false;
+              } catch (err) {
+                  out.steps.push({ label, ok: false, detail: String(err) });
+                  out.ok = false;
+              }
+          }
+          if (!imgW) {
+              vscode.postMessage({ type: 'selftest_result', ok: false,
+                  steps: [{ label: 'preconditions', ok: false, detail: 'no image loaded' }] });
+              return;
+          }
+          // Reset to fit so we have a known starting transform.
+          fit();
+          step('zoom keeps anchor pixel under cursor', () => {
+              const sx = 50, sy = 50;
+              const ix0 = (sx - pan.x) / scale, iy0 = (sy - pan.y) / scale;
+              zoomAt(sx, sy, 2.0);
+              const ix1 = (sx - pan.x) / scale, iy1 = (sy - pan.y) / scale;
+              const dx = Math.abs(ix1 - ix0), dy = Math.abs(iy1 - iy0);
+              return { ok: dx < 0.001 && dy < 0.001,
+                       detail: 'anchor drift dx=' + dx.toFixed(4) + ' dy=' + dy.toFixed(4) };
+          });
+          step('pan moves canvas in screen px', () => {
+              const x0 = pan.x, y0 = pan.y;
+              pan.x = x0 + 30; pan.y = y0 - 17; applyTransform();
+              const ok = pan.x === x0 + 30 && pan.y === y0 - 17;
+              return { ok, detail: 'final pan=' + pan.x + ',' + pan.y };
+          });
+          step('clamp keeps zoom in [0.05, 64]', () => {
+              for (let i = 0; i < 30; ++i) zoomAt(50, 50, 2.0);
+              const high = scale; if (high > 64.001) return { ok: false, detail: 'too high ' + high };
+              for (let i = 0; i < 60; ++i) zoomAt(50, 50, 0.5);
+              const low = scale;  if (low  < 0.049)  return { ok: false, detail: 'too low '  + low };
+              return { ok: true, detail: 'high=' + high.toFixed(2) + ' low=' + low.toFixed(3) };
+          });
+          fit();
+          vscode.postMessage(out);
+      }
   });
 
   // First-load hint: keep "no image" until message arrives.

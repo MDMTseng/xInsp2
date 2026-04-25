@@ -149,12 +149,37 @@ async function run() {
     shot('instance_ui');
 
     // ====== STEP 10 — open the interactive image viewer ======
-    // No image yet → command shows an info toast. We still capture the
-    // moment to verify the command at least dispatches without throwing.
+    // First confirm the no-image branch (info toast).
     console.log('\n[10] open interactive image viewer');
     await vscode.commands.executeCommand('xinsp2.openImageViewer');
     await sleep(1500);
     shot('image_viewer_no_image');
+
+    // ====== STEP 10b — open viewer with a real synthetic JPEG ======
+    // 16x16 minimal JPEG (valid baseline encoder output, decodes via
+    // createImageBitmap inside the webview).
+    const tinyJpeg =
+        '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIx' +
+        'wcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAAQABABAREA/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL' +
+        '/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJi' +
+        'coKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ip' +
+        'qrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/9oACAEBAAA/APvSiiiigD//2Q==';
+    await vscode.commands.executeCommand('xinsp2.openImageViewer', {
+        jpeg: tinyJpeg, name: 'selftest-16x16', width: 16, height: 16,
+    });
+    await sleep(2000);
+    shot('image_viewer_with_image');
+
+    // ====== STEP 10c — programmatic pan/zoom invariants ======
+    console.log('\n[10c] image viewer self-test (zoom anchor + pan + clamp)');
+    const selftest = await vscode.commands.executeCommand('xinsp2.imageViewer.runSelftest');
+    console.log(`  selftest ok=${selftest.ok}`);
+    for (const s of (selftest.steps || [])) {
+        console.log(`    ${s.ok ? '✓' : '✗'} ${s.label}: ${s.detail}`);
+    }
+    assert.ok(selftest.ok, 'image viewer pan/zoom self-test must pass');
+    await sleep(800);
+    shot('image_viewer_after_selftest');
 
     // ====== STEP 11 — export easy_thru (capped) ======
     // Export does Release compile + baseline cert; that can run 60s+ in
