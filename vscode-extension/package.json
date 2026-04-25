@@ -2,7 +2,7 @@
   "name": "xinsp2",
   "displayName": "xInsp2",
   "description": "HDevelop-style C++ inspection authoring environment",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "xception",
   "private": true,
   "engines": {

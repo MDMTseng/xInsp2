@@ -1,5 +1,30 @@
 cmake_minimum_required(VERSION 3.16)
-project(xinsp2_backend C CXX)
+
+# ---- Single source of truth for the project version --------------------
+# Drives: cmd:version response, hello event, --version CLI, the SDK
+# template's plugin.json, VS Code extension package.json (manually
+# kept in sync), and the release zip filename.
+set(XINSP2_VERSION "0.2.0")
+project(xinsp2_backend VERSION ${XINSP2_VERSION} LANGUAGES C CXX)
+
+# Embed git short hash if available (release builds will set XINSP2_COMMIT
+# explicitly via -DXINSP2_COMMIT=...); fallback to "dev".
+if(NOT DEFINED XINSP2_COMMIT)
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..
+            OUTPUT_VARIABLE _git_hash
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(_git_hash)
+            set(XINSP2_COMMIT "${_git_hash}")
+        endif()
+    endif()
+    if(NOT DEFINED XINSP2_COMMIT)
+        set(XINSP2_COMMIT "dev")
+    endif()
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -138,6 +163,9 @@ if(WIN32)
     target_link_libraries(xinsp_backend PRIVATE Ws2_32)
 endif()
 set_target_properties(xinsp_backend PROPERTIES OUTPUT_NAME "xinsp-backend")
+target_compile_definitions(xinsp_backend PRIVATE
+    XINSP2_VERSION="${XINSP2_VERSION}"
+    XINSP2_COMMIT="${XINSP2_COMMIT}")
 
 # Headless production runner. Same libs as the server; no WebSocket.
 add_executable(xinsp_runner src/runner_main.cpp)
@@ -147,6 +175,9 @@ if(WIN32)
     target_link_libraries(xinsp_runner PRIVATE Ws2_32)
 endif()
 set_target_properties(xinsp_runner PROPERTIES OUTPUT_NAME "xinsp-runner")
+target_compile_definitions(xinsp_runner PRIVATE
+    XINSP2_VERSION="${XINSP2_VERSION}"
+    XINSP2_COMMIT="${XINSP2_COMMIT}")
 
 # JPEG-encoder benchmark — quantifies the IPP/OpenCV/stb dispatch.
 # Not run as a test (no pass/fail); invoke manually for numbers.

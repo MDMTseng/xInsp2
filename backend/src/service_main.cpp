@@ -394,7 +394,9 @@ static void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err) {
 static void send_hello(xi::ws::Server& srv) {
     xp::Event e;
     e.name = "hello";
-    e.data_json = R"({"version":"0.1.0","abi":1})";
+    e.data_json = std::string(R"({"version":")") + XINSP2_VERSION
+                + R"(","commit":")" + XINSP2_COMMIT
+                + R"(","abi":1})";
     srv.send_text(e.to_json());
 }
 
@@ -574,7 +576,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         std::snprintf(buf, sizeof(buf), R"({"pong":true,"ts":%.3f})", now_seconds());
         send_rsp_ok(srv, id, buf);
     } else if (name == "version") {
-        send_rsp_ok(srv, id, R"({"version":"0.1.0","abi":1,"commit":"dev"})");
+        std::string vd = std::string(R"({"version":")") + XINSP2_VERSION
+                       + R"(","commit":")" + XINSP2_COMMIT
+                       + R"(","abi":1})";
+        send_rsp_ok(srv, id, vd);
     } else if (name == "subscribe") {
         // args: { names: [...] } OR { all: true }
         bool want_all = parsed->args_json.find("\"all\":true") != std::string::npos;
@@ -1707,6 +1712,30 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 int main(int argc, char** argv) {
     // Install SEH → C++ exception translator so try/catch catches segfaults
     _set_se_translator(seh_translator);
+
+    // --version / -v / --help / -h short-circuit before any side effects.
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a = argv[i];
+        if (a == "--version" || a == "-v") {
+            std::printf("xinsp-backend %s (%s)\n", XINSP2_VERSION, XINSP2_COMMIT);
+            return 0;
+        }
+        if (a == "--help" || a == "-h") {
+            std::printf(
+                "xinsp-backend %s — xInsp2 inspection server\n"
+                "\n"
+                "Usage: xinsp-backend [options]\n"
+                "  --port=N             WebSocket port (default 7823)\n"
+                "  --host=ADDR          bind address (default 127.0.0.1; use 0.0.0.0 for remote)\n"
+                "  --auth=SECRET        require Bearer SECRET in handshake\n"
+                "  --plugins-dir=DIR    extra plugin folder (repeatable)\n"
+                "  --watchdog=MS        terminate inspect after MS ms (default 0 = off)\n"
+                "  --version, -v        print version and exit\n"
+                "  --help, -h           this help\n",
+                XINSP2_VERSION);
+            return 0;
+        }
+    }
 
     int port = parse_port(argc, argv);
 

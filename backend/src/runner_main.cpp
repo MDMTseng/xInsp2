@@ -164,6 +164,13 @@ static std::string get_exe_dir() {
 }
 
 int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a = argv[i];
+        if (a == "--version" || a == "-v") {
+            std::printf("xinsp-runner %s (%s)\n", XINSP2_VERSION, XINSP2_COMMIT);
+            return 0;
+        }
+    }
     Args args = parse_args(argc, argv);
     if (args.help || args.project_dir.empty()) {
         print_usage();
