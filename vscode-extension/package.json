@@ -293,13 +293,30 @@
       ]
     },
     "keybindings": [
-      { "command": "xinsp2.run",     "key": "ctrl+f5",       "when": "xinsp2.connected && xinsp2.hasProject && !xinsp2.running" },
-      { "command": "xinsp2.stop",    "key": "ctrl+shift+f5", "when": "xinsp2.connected && xinsp2.running" },
-      { "command": "xinsp2.compile", "key": "ctrl+shift+b",  "when": "xinsp2.connected && resourceLangId == cpp" }
+      {
+        "command": "xinsp2.run",
+        "key": "ctrl+f5",
+        "when": "xinsp2.connected && xinsp2.hasProject && !xinsp2.running"
+      },
+      {
+        "command": "xinsp2.stop",
+        "key": "ctrl+shift+f5",
+        "when": "xinsp2.connected && xinsp2.running"
+      },
+      {
+        "command": "xinsp2.compile",
+        "key": "ctrl+shift+b",
+        "when": "xinsp2.connected && resourceLangId == cpp"
+      }
     ],
     "configuration": {
       "title": "xInsp2",
       "properties": {
+        "xinsp2.backendExe": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to xinsp-backend.exe. Leave empty to auto-detect (dev tree → workspace → packaged)."
+        },
         "xinsp2.backendPort": {
           "type": "number",
           "default": 7823,
@@ -346,6 +363,7 @@
     "@types/vscode": "^1.85.0",
     "@types/ws": "^8.5.0",
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.9.1",
     "esbuild": "^0.24.0",
     "typescript": "^5.4.0"
   },

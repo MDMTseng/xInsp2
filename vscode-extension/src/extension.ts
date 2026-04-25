@@ -100,6 +100,11 @@ window.addEventListener('message', (e) => {
 }
 
 function findBackendExe(context: vscode.ExtensionContext): string {
+    // Explicit override always wins.
+    const cfg = vscode.workspace.getConfiguration('xinsp2');
+    const explicit = (cfg.get<string>('backendExe', '') || '').trim();
+    if (explicit) return explicit;
+
     const candidates = [
         // Dev tree: vscode-extension/ is sibling of backend/
         path.join(context.extensionPath, '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'),
