@@ -17,6 +17,8 @@
 // registries via the thunk functions.
 //
 
+#include "xi_atomic_io.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -33,12 +35,7 @@ inline std::string read_text(const std::string& path) {
 }
 
 inline bool write_text(const std::string& path, const std::string& content) {
-    std::filesystem::create_directories(
-        std::filesystem::path(path).parent_path());
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return false;
-    f.write(content.data(), (std::streamsize)content.size());
-    return f.good();
+    return xi::atomic_write(std::filesystem::path(path), content);
 }
 
 // Build project.json content from the script's thunk outputs.

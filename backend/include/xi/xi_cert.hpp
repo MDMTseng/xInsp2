@@ -12,6 +12,7 @@
 //   - baseline_version in cert < current BASELINE_VERSION
 //
 
+#include "xi_atomic_io.hpp"
 #include "xi_baseline.hpp"
 #include "cJSON.h"
 
@@ -71,12 +72,10 @@ inline bool write(const std::filesystem::path& plugin_folder, const Cert& c) {
     for (auto& t : c.tests_passed) cJSON_AddItemToArray(arr, cJSON_CreateString(t.c_str()));
     cJSON_AddItemToObject(root, "tests_passed", arr);
     char* s = cJSON_Print(root);
-    std::ofstream f(cert_path(plugin_folder).string());
-    if (!f) { std::free(s); cJSON_Delete(root); return false; }
-    f << s;
+    bool ok = xi::atomic_write(cert_path(plugin_folder), std::string(s ? s : ""));
     std::free(s);
     cJSON_Delete(root);
-    return true;
+    return ok;
 }
 
 inline bool read(const std::filesystem::path& plugin_folder, Cert& out) {

@@ -27,6 +27,7 @@
 //
 
 #include "xi_abi.h"
+#include "xi_atomic_io.hpp"
 #include "xi_image_pool.hpp"
 #include "xi_trigger_bus.hpp"
 
@@ -172,29 +173,31 @@ private:
 
     void write_manifest() {
         auto p = std::filesystem::path(folder_) / "manifest.json";
-        std::ofstream f(p.string());
-        f << "{\n  \"version\": 1,\n";
+        std::string out = "{\n  \"version\": 1,\n";
         if (!events_.empty()) {
-            f << "  \"first_ts_us\": " << events_.front().timestamp_us << ",\n";
-            f << "  \"last_ts_us\": "  << events_.back().timestamp_us  << ",\n";
+            out += "  \"first_ts_us\": " + std::to_string(events_.front().timestamp_us) + ",\n";
+            out += "  \"last_ts_us\": "  + std::to_string(events_.back().timestamp_us)  + ",\n";
         }
-        f << "  \"events\": [\n";
+        out += "  \"events\": [\n";
         for (size_t i = 0; i < events_.size(); ++i) {
             auto& e = events_[i];
-            f << "    { \"tid\": \"";
             char buf[40];
             std::snprintf(buf, sizeof(buf), "%016llx%016llx",
                           (unsigned long long)e.id.hi, (unsigned long long)e.id.lo);
-            f << buf << "\", \"ts\": " << e.timestamp_us << ", \"frames\": { ";
+            out += "    { \"tid\": \"";
+            out += buf;
+            out += "\", \"ts\": " + std::to_string(e.timestamp_us) + ", \"frames\": { ";
             for (size_t j = 0; j < e.images.size(); ++j) {
-                if (j) f << ", ";
-                f << "\"" << e.images[j].source << "\": \"" << e.images[j].path << "\"";
+                if (j) out += ", ";
+                out += "\""; out += e.images[j].source; out += "\": \"";
+                out += e.images[j].path; out += "\"";
             }
-            f << " } }";
-            if (i + 1 < events_.size()) f << ",";
-            f << "\n";
+            out += " } }";
+            if (i + 1 < events_.size()) out += ",";
+            out += "\n";
         }
-        f << "  ]\n}\n";
+        out += "  ]\n}\n";
+        xi::atomic_write(p, out);
     }
 
     std::vector<RecordedEvent> load_manifest(const std::string& folder) {

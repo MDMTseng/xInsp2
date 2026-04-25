@@ -35,6 +35,7 @@
 #endif
 
 #include "xi_abi.h"
+#include "xi_atomic_io.hpp"
 #include "xi_baseline.hpp"
 #include "xi_cert.hpp"
 #include "xi_image_pool.hpp"
@@ -294,15 +295,16 @@ public:
 
         // Create a starter inspection.cpp if it doesn't exist
         if (!std::filesystem::exists(project_.script_path)) {
-            std::ofstream f(project_.script_path);
-            f << "// " << name << " — inspection script\n"
-              << "#include <xi/xi.hpp>\n"
-              << "#include <xi/xi_image.hpp>\n"
-              << "#include <xi/xi_ops.hpp>\n\n"
-              << "XI_SCRIPT_EXPORT\n"
-              << "void xi_inspect_entry(int frame) {\n"
-              << "    // TODO: add inspection logic\n"
-              << "}\n";
+            std::string body =
+                "// " + name + " — inspection script\n"
+                "#include <xi/xi.hpp>\n"
+                "#include <xi/xi_image.hpp>\n"
+                "#include <xi/xi_ops.hpp>\n\n"
+                "XI_SCRIPT_EXPORT\n"
+                "void xi_inspect_entry(int frame) {\n"
+                "    // TODO: add inspection logic\n"
+                "}\n";
+            xi::atomic_write(project_.script_path, body);
         }
         return true;
     }
@@ -724,18 +726,18 @@ private:
 
     void save_project_locked() {
         auto pj = std::filesystem::path(project_.folder_path) / "project.json";
-        std::ofstream f(pj.string());
-        f << "{\n";
-        f << "  \"name\": \"" << project_.name << "\",\n";
-        f << "  \"script\": \"" << std::filesystem::path(project_.script_path).filename().string() << "\",\n";
-        f << "  \"trigger_policy\": " << trigger_policy_json_locked() << ",\n";
-        f << "  \"instances\": [";
+        std::string out = "{\n";
+        out += "  \"name\": \""   + project_.name + "\",\n";
+        out += "  \"script\": \"" + std::filesystem::path(project_.script_path).filename().string() + "\",\n";
+        out += "  \"trigger_policy\": " + trigger_policy_json_locked() + ",\n";
+        out += "  \"instances\": [";
         int i = 0;
         for (auto& [k, v] : project_.instances) {
-            if (i++) f << ",";
-            f << "\n    {\"name\": \"" << v.name << "\", \"plugin\": \"" << v.plugin_name << "\"}";
+            if (i++) out += ",";
+            out += "\n    {\"name\": \"" + v.name + "\", \"plugin\": \"" + v.plugin_name + "\"}";
         }
-        f << "\n  ]\n}\n";
+        out += "\n  ]\n}\n";
+        xi::atomic_write(pj, out);
     }
 
     std::string trigger_policy_json_locked() const {
@@ -759,13 +761,12 @@ private:
 
     void save_instance_json(const InstanceInfo& ii) {
         auto path = std::filesystem::path(ii.folder_path) / "instance.json";
-        std::ofstream f(path.string());
-        f << "{\n";
-        f << "  \"plugin\": \"" << ii.plugin_name << "\",\n";
-        f << "  \"config\": ";
-        if (ii.instance) f << ii.instance->get_def();
-        else             f << "{}";
-        f << "\n}\n";
+        std::string out = "{\n";
+        out += "  \"plugin\": \"" + ii.plugin_name + "\",\n";
+        out += "  \"config\": ";
+        out += ii.instance ? ii.instance->get_def() : "{}";
+        out += "\n}\n";
+        xi::atomic_write(path, out);
     }
 };
 
