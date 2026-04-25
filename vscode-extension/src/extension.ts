@@ -7,7 +7,8 @@ import { ViewerProvider } from './viewerProvider';
 import { InstanceCodeLensProvider } from './instanceCodeLens';
 import { PluginTreeProvider, PluginInfo } from './pluginTree';
 import { PREVIEW_HEADER_SIZE } from './protocol';
-import { TEMPLATE_CHOICES, renderPluginCpp, renderPluginJson, TemplateId } from './projectPluginTemplates';
+import { TEMPLATE_CHOICES, renderPluginCpp, renderPluginJson, TemplateId,
+         templateHasUi, renderPluginUiHtml } from './projectPluginTemplates';
 import { ImageViewerPanel } from './imageViewerPanel';
 
 let backend: ChildProcess | null = null;
@@ -458,6 +459,24 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Viewer webview (side panel)
     const viewerProvider = new ViewerProvider(context.extensionUri);
+    // Thumbnail shift-click / double-click in the Viewer panel pops the
+    // rich image viewer (pan + cursor-anchored zoom + pick tools).
+    context.subscriptions.push(viewerProvider.onMessage.event(async (m: any) => {
+        if (m && m.type === 'openInteractive' && m.src) {
+            // src is a data URL like "data:image/jpeg;base64,...". Strip
+            // the prefix so we can re-pack into ImageMessage shape.
+            const i = String(m.src).indexOf('base64,');
+            if (i < 0) return;
+            const b64 = String(m.src).slice(i + 7);
+            // We don't get width/height here; ImageViewerPanel will
+            // discover them from the bitmap once it decodes. Stub w/h
+            // are overwritten on bitmap load.
+            const ImageViewerPanelMod = require('./imageViewerPanel');
+            ImageViewerPanelMod.ImageViewerPanel.show(context.extensionUri, {
+                name: m.name || 'image', width: 0, height: 0, jpegBase64: b64,
+            });
+        }
+    }));
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider('xinsp2.viewer', viewerProvider, {
             webviewOptions: { retainContextWhenHidden: true },
@@ -778,9 +797,20 @@ export function activate(context: vscode.ExtensionContext) {
                 fs.mkdirSync(srcDir, { recursive: true });
                 const cppPath  = path.join(srcDir, 'plugin.cpp');
                 const jsonPath = path.join(root, 'plugin.json');
+                const hasUi    = templateHasUi(tplId);
                 fs.writeFileSync(cppPath,  renderPluginCpp(tplId, pname));
                 fs.writeFileSync(jsonPath, renderPluginJson(pname,
-                    pdesc || `${tplId} template plugin: ${pname}`));
+                    pdesc || `${tplId} template plugin: ${pname}`, hasUi));
+                if (hasUi) {
+                    // ui/index.html is loaded by xinsp2.openInstanceUI when
+                    // the user clicks the instance. Backend's get_plugin_ui
+                    // returns the ui_path = <plugin>/ui/, and the extension
+                    // mounts it as a webview localResourceRoot.
+                    const uiDir = path.join(root, 'ui');
+                    fs.mkdirSync(uiDir, { recursive: true });
+                    const html = renderPluginUiHtml(tplId, pname);
+                    if (html) fs.writeFileSync(path.join(uiDir, 'index.html'), html);
+                }
 
                 // 5. Re-open the project so the backend compiles + loads
                 //    the new plugin. We use open_project rather than

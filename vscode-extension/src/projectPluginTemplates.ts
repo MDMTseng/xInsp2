@@ -1,3 +1,5 @@
+import { mediumUiHtml, expertUiHtml } from './projectPluginTemplatesUi';
+
 // projectPluginTemplates.ts — starter source for "Create Project Plugin"
 // command. Three templates from minimal to advanced; each one is heavily
 // commented so the file itself doubles as a tutorial that walks the
@@ -55,15 +57,32 @@ export function renderPluginCpp(template: TemplateId, name: string): string {
     return expertTemplate(className, name);
 }
 
-export function renderPluginJson(name: string, description: string): string {
+export function renderPluginJson(name: string, description: string,
+                                 hasUi: boolean): string {
     return JSON.stringify({
         name,
         description,
         dll: `${name}.dll`,
         factory: 'xi_plugin_create',
-        has_ui: false,
+        has_ui: hasUi,
     }, null, 2) + '\n';
 }
+
+// Whether a template ships a ui/index.html scaffold. Easy stays UI-less
+// to keep its surface area minimal; Medium and Expert get a tiny webview
+// that drives the plugin via exchange().
+export function templateHasUi(t: TemplateId): boolean {
+    return t === 'medium' || t === 'expert';
+}
+
+// Returns null if the template has no UI; else the index.html body.
+export function renderPluginUiHtml(template: TemplateId, name: string): string | null {
+    if (template === 'medium') return mediumUiHtml(name);
+    if (template === 'expert') return expertUiHtml(name);
+    return null;
+}
+// Re-export so other modules see one entry point.
+export { mediumUiHtml, expertUiHtml };
 
 function toClassName(folder: string): string {
     // PascalCase, drop non-alnum. "my_filter" → "MyFilter", "blob 2" → "Blob2".
@@ -243,17 +262,39 @@ public:
         out.image("binary", bin);
         out.set("fg_pct", fg_pct);
         out.set("threshold", (double)threshold_);
+        last_fg_pct_ = fg_pct;
         return out;
     }
 
-    std::string exchange(const std::string& /*cmd*/) {
-        return "{}";
+    // The UI panel talks to us through here. We accept either a "raw"
+    // get-status query or a JSON command the UI posts via
+    // webview.postMessage({ type: 'exchange', cmd: { command: ..., value: ... } }).
+    // The extension wraps that into JSON and lands here.
+    std::string exchange(const std::string& cmd) {
+        cJSON* root = cJSON_Parse(cmd.c_str());
+        if (root) {
+            cJSON* c = cJSON_GetObjectItem(root, "command");
+            if (c && cJSON_IsString(c) && std::string(c->valuestring) == "set_threshold") {
+                cJSON* v = cJSON_GetObjectItem(root, "value");
+                if (v && cJSON_IsNumber(v)) {
+                    int n = (int)v->valuedouble;
+                    if (n < 0)   n = 0;
+                    if (n > 255) n = 255;
+                    threshold_ = n;
+                }
+            }
+            cJSON_Delete(root);
+        }
+        // Return current status in a UI-friendly shape.
+        return std::string("{\\"threshold\\":") + std::to_string(threshold_)
+             + ",\\"last_fg_pct\\":" + std::to_string(last_fg_pct_) + "}";
     }
 
 private:
     const xi_host_api* host_;
     std::string        name_;
     int                threshold_ = 128;
+    double             last_fg_pct_ = 0.0;
 };
 
 XI_PLUGIN_IMPL(${cls})
@@ -282,6 +323,7 @@ function expertTemplate(cls: string, folder: string): string {
 //
 
 #include <xi/xi_thread.hpp>   // xi::spawn_worker
+#include <cJSON.h>            // backend ships cJSON in vendor/
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -339,13 +381,48 @@ public:
     //   "start"  → spin up the worker
     //   "stop"   → join the worker
     //   "count"  → return {"count": N}
+    // The UI talks to us with JSON commands of the form
+    //   { command: "start" | "stop" | "set_interval" | "set_size", value?: ... }
+    // We accept the older bare-string forms ("start", "stop", "count")
+    // for ad-hoc CLI calls too.
     std::string exchange(const std::string& cmd) {
-        if (cmd.find("start") != std::string::npos) { start_(); return "{\\"ok\\":true}"; }
-        if (cmd.find("stop")  != std::string::npos) { stop_();  return "{\\"ok\\":true}"; }
-        if (cmd.find("count") != std::string::npos) {
-            return std::string("{\\"count\\":") + std::to_string(emit_count_.load()) + "}";
+        // JSON command path (UI panel)
+        cJSON* root = cJSON_Parse(cmd.c_str());
+        std::string command;
+        if (root) {
+            cJSON* c = cJSON_GetObjectItem(root, "command");
+            if (c && cJSON_IsString(c)) command = c->valuestring;
+            if (command == "set_interval") {
+                cJSON* v = cJSON_GetObjectItem(root, "value");
+                if (v && cJSON_IsNumber(v)) {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    int n = (int)v->valuedouble;
+                    interval_ms_ = n < 1 ? 1 : (n > 10000 ? 10000 : n);
+                }
+            } else if (command == "set_size") {
+                cJSON* w = cJSON_GetObjectItem(root, "width");
+                cJSON* h = cJSON_GetObjectItem(root, "height");
+                std::lock_guard<std::mutex> lk(mu_);
+                if (w && cJSON_IsNumber(w)) width_  = (int)w->valuedouble;
+                if (h && cJSON_IsNumber(h)) height_ = (int)h->valuedouble;
+            }
+            cJSON_Delete(root);
         }
-        return "{}";
+        if (!command.empty()) {
+            if (command == "start") start_();
+            if (command == "stop")  stop_();
+        } else {
+            // Bare-string fallback for human-typed exchange.
+            if (cmd.find("start") != std::string::npos) start_();
+            if (cmd.find("stop")  != std::string::npos) stop_();
+        }
+        // Report current status — the UI uses these to render counters.
+        std::lock_guard<std::mutex> lk(mu_);
+        return std::string("{\\"running\\":") + (running_.load() ? "true" : "false")
+             + ",\\"count\\":" + std::to_string(emit_count_.load())
+             + ",\\"interval_ms\\":" + std::to_string(interval_ms_)
+             + ",\\"width\\":" + std::to_string(width_)
+             + ",\\"height\\":" + std::to_string(height_) + "}";
     }
 
 private:

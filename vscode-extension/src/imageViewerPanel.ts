@@ -336,11 +336,16 @@ export class ImageViewerPanel {
   window.addEventListener('message', async (e) => {
       const msg = e.data;
       if (msg.type !== 'image') return;
-      imgW = msg.width; imgH = msg.height;
       imageLabel = msg.name || '';
       empty.style.display = 'none';
       const blob = await (await fetch('data:image/jpeg;base64,' + msg.jpegBase64)).blob();
       bitmap = await createImageBitmap(blob);
+      // Prefer message-supplied dimensions (raw pixels). Fall back to
+      // bitmap natural size when the caller (e.g. inline thumbnail
+      // re-emit) doesn't know — bitmap's intrinsic size is still the
+      // correct one for image-space coords.
+      imgW = msg.width  || bitmap.width;
+      imgH = msg.height || bitmap.height;
       fit();
   });
 

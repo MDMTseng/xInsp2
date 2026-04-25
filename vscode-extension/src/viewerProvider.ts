@@ -5,6 +5,11 @@ export class ViewerProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'xinsp2.viewer';
     private view?: vscode.WebviewView;
 
+    // Fires whenever the webview posts a message back. The extension
+    // subscribes so it can route 'openInteractive' from a thumbnail
+    // shift-click / double-click into the rich Image Viewer panel.
+    public readonly onMessage = new vscode.EventEmitter<any>();
+
     constructor(private extensionUri: vscode.Uri) {}
 
     resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -14,6 +19,7 @@ export class ViewerProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'webview')],
         };
         webviewView.webview.html = this.getHtml();
+        webviewView.webview.onDidReceiveMessage((m) => this.onMessage.fire(m));
     }
 
     postVars(vars: unknown): void {
@@ -137,13 +143,25 @@ function renderVars(vars) {
         });
     });
 
-    // Wire up image thumbnails
+    // Wire up image thumbnails. A single click pops the inline preview
+    // (a static img — quick glance, no interaction). A double-click or
+    // shift-click opens the rich Image Viewer panel with pan + cursor-
+    // anchored zoom + pick tools.
     list.querySelectorAll('.img-thumb').forEach(img => {
-        img.addEventListener('click', () => {
+        img.addEventListener('click', (ev) => {
+            if (ev.shiftKey) {
+                vscode.postMessage({ type: 'openInteractive',
+                    name: img.title, src: img.src });
+                return;
+            }
             document.getElementById('preview-panel').style.display = 'block';
             document.getElementById('preview-img').src = img.src;
             document.getElementById('preview-img').style.display = 'block';
             document.getElementById('preview-label').textContent = img.title;
+        });
+        img.addEventListener('dblclick', () => {
+            vscode.postMessage({ type: 'openInteractive',
+                name: img.title, src: img.src });
         });
     });
 }
