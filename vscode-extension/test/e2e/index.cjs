@@ -115,6 +115,9 @@ module.exports = {
         if (suite === 'ux_states') {
             return require('./ux_states.cjs').run();
         }
+        if (suite === 'project_plugin_journey') {
+            return require('./project_plugin_journey.cjs').run();
+        }
         return run();
     }
 };

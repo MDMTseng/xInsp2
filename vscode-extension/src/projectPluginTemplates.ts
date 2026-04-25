@@ -238,7 +238,9 @@ public:
         const long long pixels = (long long)src.width * src.height;
         const double fg_pct = pixels > 0 ? (double)fg / (double)pixels : 0.0;
 
-        out.set_image("binary", bin);
+        // Record API: .image(key, img) builds the image map; .set(key, val)
+        // chains numbers / strings / bools into the JSON payload.
+        out.image("binary", bin);
         out.set("fg_pct", fg_pct);
         out.set("threshold", (double)threshold_);
         return out;
@@ -373,9 +375,9 @@ private:
             // Allocate a backend pool image and copy into it. The host
             // API is the only legal way to allocate images that the
             // backend (and other plugins) can see.
-            xi_image_handle h = host_->image_create(host_->ud, width_, height_, 1);
+            xi_image_handle h = host_->image_create(width_, height_, 1);
             if (h != XI_IMAGE_NULL) {
-                std::memcpy(host_->image_data(host_->ud, h), buf.data(), buf.size());
+                std::memcpy(host_->image_data(h), buf.data(), buf.size());
 
                 // Build a one-image record and push it onto the bus
                 // under our own source name.
@@ -384,11 +386,11 @@ private:
                 int64_t         ts_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                             std::chrono::steady_clock::now().time_since_epoch()).count();
                 if (host_->emit_trigger) {
-                    host_->emit_trigger(host_->ud, name_.c_str(), tid, ts_us, &rec_img, 1);
+                    host_->emit_trigger(name_.c_str(), tid, ts_us, &rec_img, 1);
                 }
                 emit_count_.fetch_add(1);
                 // emit_trigger addrefs internally; release our ref.
-                host_->image_release(host_->ud, h);
+                host_->image_release(h);
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));

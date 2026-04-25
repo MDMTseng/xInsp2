@@ -35,7 +35,7 @@
       {
         "command": "xinsp2.createProjectPlugin",
         "title": "xInsp2: New Project Plugin…",
-        "icon": "$(add)"
+        "icon": "$(file-code)"
       },
       {
         "command": "xinsp2.startRecording",

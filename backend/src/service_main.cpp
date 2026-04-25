@@ -1588,6 +1588,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             out += ",\"folder\":\"" + esc(p.folder_path) + "\"";
             out += ",\"has_ui\":" + std::string(p.has_ui ? "true" : "false");
             out += ",\"loaded\":" + std::string(p.handle ? "true" : "false");
+            // Same origin field as to_json — extension's pluginTree relies
+            // on it to badge project plugins, e2e journey asserts it.
+            bool is_proj = g_plugin_mgr.is_project_plugin(p.name);
+            out += ",\"origin\":\"" + std::string(is_proj ? "project" : "global") + "\"";
             // Cert snapshot (doesn't re-run the tests — just reads cert.json if present)
             xi::cert::Cert c;
             if (xi::cert::read(p.folder_path, c)) {
