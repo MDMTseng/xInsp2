@@ -22,6 +22,10 @@
 #include "xi_async.hpp"
 #include "xi_image.hpp"
 
+#ifdef XINSP2_HAS_IPP
+#  include "xi_ops_ipp.hpp"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -34,6 +38,9 @@ namespace xi::ops {
 inline Image toGray(const Image& src) {
     if (src.empty()) return {};
     if (src.channels == 1) return src; // already gray
+#ifdef XINSP2_HAS_IPP
+    if (auto out = ipp::toGray(src); !out.empty()) return out;
+#endif
     Image dst(src.width, src.height, 1);
     const uint8_t* sp = src.data();
     uint8_t* dp = dst.data();
@@ -53,6 +60,9 @@ inline Image toGray(const Image& src) {
 
 inline Image threshold(const Image& src, int t, int max_val = 255) {
     if (src.empty() || src.channels != 1) return {};
+#ifdef XINSP2_HAS_IPP
+    if (auto out = ipp::threshold(src, t, max_val); !out.empty()) return out;
+#endif
     Image dst(src.width, src.height, 1);
     const uint8_t* sp = src.data();
     uint8_t* dp = dst.data();
@@ -111,8 +121,12 @@ inline Image boxBlur(const Image& src, int radius) {
     return dst;
 }
 
-// Gaussian approximation via 3-pass box blur (good enough for preview)
+// Gaussian. With IPP: real sigma-based separable kernel. Without:
+// 3-pass box blur (good enough for preview).
 inline Image gaussian(const Image& src, int radius) {
+#ifdef XINSP2_HAS_IPP
+    if (auto out = ipp::gaussian(src, radius); !out.empty()) return out;
+#endif
     auto a = boxBlur(src, radius);
     auto b = boxBlur(a, radius);
     return boxBlur(b, radius);
@@ -122,6 +136,9 @@ inline Image gaussian(const Image& src, int radius) {
 
 inline Image sobel(const Image& src) {
     if (src.empty() || src.channels != 1) return {};
+#ifdef XINSP2_HAS_IPP
+    if (auto out = ipp::sobel(src); !out.empty()) return out;
+#endif
     int w = src.width, h = src.height;
     Image dst(w, h, 1);
     const uint8_t* sp = src.data();
@@ -158,6 +175,9 @@ inline Image invert(const Image& src) {
 
 inline Image erode(const Image& src, int radius = 1) {
     if (src.empty() || src.channels != 1) return {};
+#ifdef XINSP2_HAS_IPP
+    if (auto out = ipp::erode(src, radius); !out.empty()) return out;
+#endif
     int w = src.width, h = src.height;
     Image dst(w, h, 1);
     const uint8_t* sp = src.data();
@@ -180,6 +200,9 @@ inline Image erode(const Image& src, int radius = 1) {
 
 inline Image dilate(const Image& src, int radius = 1) {
     if (src.empty() || src.channels != 1) return {};
+#ifdef XINSP2_HAS_IPP
+    if (auto out = ipp::dilate(src, radius); !out.empty()) return out;
+#endif
     int w = src.width, h = src.height;
     Image dst(w, h, 1);
     const uint8_t* sp = src.data();

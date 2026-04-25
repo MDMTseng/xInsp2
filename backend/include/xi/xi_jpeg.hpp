@@ -19,10 +19,10 @@
 
 #include "xi_image.hpp"
 
-#ifdef XINSP2_HAS_IPP
-  #include <ippi.h>
-  #include <ippj.h>
-#endif
+// Note: IPP no longer ships a JPEG codec (ippj.h was removed in IPP 2021+).
+// The encode_jpeg_ipp body below is intentionally a stub; the IPP build
+// gate stays around in case a future release reintroduces JPEG, but the
+// real fast path is libjpeg-turbo (XINSP2_HAS_TURBOJPEG).
 
 #ifdef XINSP2_HAS_OPENCV
   #include <opencv2/imgcodecs.hpp>
