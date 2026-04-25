@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -152,6 +153,15 @@ static std::thread             g_worker_thread;
 static std::mutex                    g_sub_mu;
 static bool                          g_sub_all = true;
 static std::unordered_set<std::string> g_sub_names;
+
+// History ring (S4). After every run we stash {run_id, ts_ms, vars_json}
+// in a bounded deque so a client can scroll back through recent runs
+// without re-executing. Default depth 50; client may resize via
+// cmd: set_history_depth.
+struct HistoryEntry { int64_t run_id; int64_t ts_ms; std::string vars_json; };
+static std::mutex                  g_hist_mu;
+static std::deque<HistoryEntry>    g_history;
+static size_t                      g_hist_max = 50;
 
 // Breakpoint coordination (S3). Script thread calls breakpoint_cb()
 // which: (a) emits an event on the WS, (b) blocks on g_bp_cv until
@@ -376,6 +386,16 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
         vars_msg += std::string(sbuf.data(), (size_t)n);
         vars_msg += "}";
         srv.send_text(vars_msg);
+
+        // S4: stash this run's vars snapshot in the history ring so a
+        // client can scrub backward through recent runs without re-running.
+        {
+            std::lock_guard<std::mutex> lk(g_hist_mu);
+            int64_t ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            g_history.push_back({ run_id, ts_ms, std::string(sbuf.data(), (size_t)n) });
+            while (g_history.size() > g_hist_max) g_history.pop_front();
+        }
 
         // image previews — filtered by subscription. For each
         // `"name":"X"` followed by `"gid":N`, only emit the JPEG when
@@ -624,6 +644,49 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         g_bp_cv.notify_all();
         send_rsp_ok(srv, id, out);
+    } else if (name == "history") {
+        // S4: return the most recent N vars snapshots (default: all kept).
+        // args: { count?: N, since_run_id?: id }
+        auto cnt_opt = xp::get_number_field(parsed->args_json, "count");
+        auto since_opt = xp::get_number_field(parsed->args_json, "since_run_id");
+        size_t want = cnt_opt ? (size_t)std::max(0, (int)*cnt_opt) : (size_t)-1;
+        int64_t since = since_opt ? (int64_t)*since_opt : 0;
+        std::string out = "{\"depth\":";
+        {
+            std::lock_guard<std::mutex> lk(g_hist_mu);
+            out += std::to_string(g_hist_max);
+            out += ",\"size\":";
+            out += std::to_string(g_history.size());
+            out += ",\"runs\":[";
+            // Walk newest-to-oldest until we've collected `want` or exhausted.
+            size_t emitted = 0;
+            bool first = true;
+            for (auto it = g_history.rbegin(); it != g_history.rend(); ++it) {
+                if (emitted >= want) break;
+                if (it->run_id <= since) break;
+                if (!first) out += ",";
+                first = false;
+                out += "{\"run_id\":" + std::to_string(it->run_id);
+                out += ",\"ts_ms\":" + std::to_string(it->ts_ms);
+                out += ",\"vars\":" + it->vars_json;
+                out += "}";
+                ++emitted;
+            }
+            out += "]}";
+        }
+        send_rsp_ok(srv, id, out);
+    } else if (name == "set_history_depth") {
+        auto d = xp::get_number_field(parsed->args_json, "depth");
+        if (!d) { send_rsp_err(srv, id, "missing depth"); return; }
+        int n = (int)*d;
+        if (n < 0) n = 0;
+        if (n > 10000) n = 10000;
+        {
+            std::lock_guard<std::mutex> lk(g_hist_mu);
+            g_hist_max = (size_t)n;
+            while (g_history.size() > g_hist_max) g_history.pop_front();
+        }
+        send_rsp_ok(srv, id, "{\"depth\":" + std::to_string(n) + "}");
     } else if (name == "unsubscribe") {
         {
             std::lock_guard<std::mutex> lk(g_sub_mu);

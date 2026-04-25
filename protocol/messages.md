@@ -190,6 +190,33 @@ UIs that ship their own command vocabulary.
 ### `save_project` / `load_project`
 `args: { "path": "project.json" }` → `ok: true`
 
+### `history` / `set_history_depth`
+
+Backend keeps a ring buffer of the last N vars snapshots so a client
+can scrub backward through recent runs without re-executing. Default
+depth is 50.
+
+```json
+{ "type": "cmd", "id": 9, "name": "history", "args": { "count": 5 } }
+```
+
+Reply (newest first):
+
+```json
+{ "depth": 50, "size": 12,
+  "runs": [
+    { "run_id": 12, "ts_ms": 1777..., "vars": [ ... ] },
+    { "run_id": 11, "ts_ms": 1777..., "vars": [ ... ] },
+    ...
+  ] }
+```
+
+Optional `since_run_id`: stop once a run with that id-or-older is hit
+(useful to incrementally pull only new entries).
+
+`cmd: set_history_depth { depth: N }` resizes the ring; entries beyond
+the new cap are dropped immediately. Bounded to [0, 10000].
+
 ### `compare_variants`
 
 Run the loaded script once under each of two "variants" (sets of
