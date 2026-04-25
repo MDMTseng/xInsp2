@@ -819,6 +819,110 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // --- Recording / Replay (closes a UI gap exposed by audit) ---------
+    // Backend has cmd:recording_{start,stop,replay,status} but until now
+    // they were only reachable via the WS protocol. These commands give
+    // the user proper UI entry points: file pickers + status feedback.
+    let recordingFolder: string | null = null;
+    const recordingStatus = vscode.window.createStatusBarItem(
+        vscode.StatusBarAlignment.Left, 42);
+    recordingStatus.command = 'xinsp2.stopRecording';
+    context.subscriptions.push(recordingStatus);
+    function showRecordingStatus(folder: string | null) {
+        if (folder) {
+            recordingStatus.text = `$(circle-filled) REC ${path.basename(folder)}`;
+            recordingStatus.tooltip = `Recording trigger events to ${folder}\nClick to stop.`;
+            recordingStatus.color = new vscode.ThemeColor('errorForeground');
+            recordingStatus.show();
+        } else {
+            recordingStatus.hide();
+        }
+    }
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.startRecording', async () => {
+            if (!client?.connected) { vscode.window.showWarningMessage('xInsp2: not connected'); return; }
+            const dest = await vscode.window.showOpenDialog({
+                canSelectFolders: true, canSelectFiles: false,
+                openLabel: 'Record into this folder',
+            });
+            if (!dest || dest.length === 0) return;
+            const folder = dest[0].fsPath;
+            const rsp = await sendCmd('recording_start', { folder });
+            if (rsp.ok) {
+                recordingFolder = folder;
+                showRecordingStatus(folder);
+                vscode.window.showInformationMessage(`xInsp2: recording → ${folder}`);
+            } else {
+                vscode.window.showErrorMessage(`xInsp2: recording_start failed — ${rsp.error}`);
+            }
+        }),
+        vscode.commands.registerCommand('xinsp2.stopRecording', async () => {
+            if (!client?.connected) return;
+            const rsp = await sendCmd('recording_stop');
+            recordingFolder = null;
+            showRecordingStatus(null);
+            if (rsp.ok) {
+                const ev = rsp.data?.events ?? '?';
+                vscode.window.showInformationMessage(`xInsp2: recording stopped (${ev} events captured)`);
+            } else {
+                vscode.window.showWarningMessage(`xInsp2: stop returned ${rsp.error}`);
+            }
+        }),
+        vscode.commands.registerCommand('xinsp2.replayRecording', async () => {
+            if (!client?.connected) { vscode.window.showWarningMessage('xInsp2: not connected'); return; }
+            const dest = await vscode.window.showOpenDialog({
+                canSelectFolders: true, canSelectFiles: false,
+                openLabel: 'Replay this recording',
+                defaultUri: recordingFolder ? vscode.Uri.file(recordingFolder) : undefined,
+            });
+            if (!dest || dest.length === 0) return;
+            const folder = dest[0].fsPath;
+            // Speed picker: real-time / 2x / 0.5x / instant.
+            const speedPick = await vscode.window.showQuickPick(
+                [
+                    { label: '1.0× — real time',     speed: 1.0 },
+                    { label: '2.0× — fast',          speed: 2.0 },
+                    { label: '0.5× — slow',          speed: 0.5 },
+                    { label: '0× — instant (no waits)', speed: 0 },
+                ],
+                { placeHolder: 'Replay speed' });
+            if (!speedPick) return;
+            const rsp = await sendCmd('recording_replay', { folder, speed: (speedPick as any).speed });
+            if (rsp.ok) {
+                vscode.window.showInformationMessage(`xInsp2: replay started @ ${(speedPick as any).speed}× — ${folder}`);
+            } else {
+                vscode.window.showErrorMessage(`xInsp2: replay failed — ${rsp.error}`);
+            }
+        }),
+        // --- Breakpoint resume ---------------------------------------------
+        // While script breakpoint is paused, scripts block in xi::breakpoint().
+        // This command resumes them. Bind it to a key in keybindings if you
+        // hit breakpoints frequently.
+        vscode.commands.registerCommand('xinsp2.resume', async () => {
+            if (!client?.connected) return;
+            const rsp = await sendCmd('resume');
+            if (rsp.ok) {
+                vscode.window.setStatusBarMessage('xInsp2: resumed', 1500);
+            } else {
+                vscode.window.showWarningMessage(`xInsp2: resume — ${rsp.error}`);
+            }
+        }),
+        // --- Clear inspection history --------------------------------------
+        vscode.commands.registerCommand('xinsp2.clearHistory', async () => {
+            if (!client?.connected) return;
+            const ok = await vscode.window.showWarningMessage(
+                'Clear all inspection history snapshots? This cannot be undone.',
+                { modal: true }, 'Clear');
+            if (ok !== 'Clear') return;
+            const rsp = await sendCmd('clear_history');
+            if (rsp.ok) {
+                vscode.window.setStatusBarMessage('xInsp2: history cleared', 2000);
+            } else {
+                vscode.window.showWarningMessage(`xInsp2: clear_history — ${rsp.error}`);
+            }
+        }),
+    );
+
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.saveProject', async () => {
             const uri = await vscode.window.showSaveDialog({

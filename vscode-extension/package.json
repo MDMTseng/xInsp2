@@ -38,6 +38,31 @@
         "icon": "$(add)"
       },
       {
+        "command": "xinsp2.startRecording",
+        "title": "xInsp2: Start Recording…",
+        "icon": "$(record)"
+      },
+      {
+        "command": "xinsp2.stopRecording",
+        "title": "xInsp2: Stop Recording",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "xinsp2.replayRecording",
+        "title": "xInsp2: Replay Recording…",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "xinsp2.resume",
+        "title": "xInsp2: Resume Script (breakpoint)",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "xinsp2.clearHistory",
+        "title": "xInsp2: Clear Inspection History",
+        "icon": "$(clear-all)"
+      },
+      {
         "command": "xinsp2.saveProject",
         "title": "xInsp2: Save Project"
       },
