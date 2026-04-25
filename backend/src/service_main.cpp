@@ -1645,6 +1645,23 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 std::fprintf(stderr, "[xinsp2]   instance: %s (%s)\n",
                              k.c_str(), v.plugin_name.c_str());
             }
+            // Surface skip-bad-instance warnings to the user. The project
+            // open still succeeds; bad instances are simply absent from
+            // the runtime registry. Extension can show a toast.
+            auto warns = g_plugin_mgr.open_warnings();
+            if (!warns.empty()) {
+                std::string s = "project opened with " + std::to_string(warns.size())
+                              + " skipped instance(s):";
+                for (auto& w : warns) {
+                    s += "\n  - " + w.instance;
+                    if (!w.plugin.empty()) s += " (" + w.plugin + ")";
+                    s += ": " + w.reason;
+                }
+                xp::LogMsg lm;
+                lm.level = "warn";
+                lm.msg = s;
+                srv.send_text(lm.to_json());
+            }
             send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "failed to open project in " + *folder);

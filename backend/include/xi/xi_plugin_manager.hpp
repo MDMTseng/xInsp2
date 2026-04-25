@@ -389,22 +389,39 @@ public:
             project_.trigger_policy, project_.trigger_required,
             project_.trigger_leader, project_.trigger_window_ms);
 
-        // Scan instances/ subdirectories
+        // Scan instances/ subdirectories. A broken instance.json or a
+        // factory that throws must NOT abort the whole project load —
+        // record the failure in last_open_warnings_ and move on. The
+        // user can read it via cmd:open_project_warnings and decide
+        // whether to fix or delete the bad instance folder.
+        last_open_warnings_.clear();
         auto inst_dir = std::filesystem::path(folder) / "instances";
         if (std::filesystem::exists(inst_dir)) {
             for (auto& entry : std::filesystem::directory_iterator(inst_dir)) {
                 if (!entry.is_directory()) continue;
+                std::string inst_name = entry.path().filename().string();
+                try {
                 auto ij = entry.path() / "instance.json";
-                if (!std::filesystem::exists(ij)) continue;
+                if (!std::filesystem::exists(ij)) {
+                    last_open_warnings_.push_back({inst_name, "", "missing instance.json"});
+                    std::fprintf(stderr, "[xinsp2] skip instance '%s': missing instance.json\n",
+                                 inst_name.c_str());
+                    continue;
+                }
                 std::ifstream ijf(ij.string());
                 std::stringstream iss;
                 iss << ijf.rdbuf();
                 std::string ic = iss.str();
                 auto plugin = extract_string(ic, "plugin");
-                if (!plugin) continue;
+                if (!plugin) {
+                    last_open_warnings_.push_back({inst_name, "", "instance.json missing 'plugin' field (or unparseable)"});
+                    std::fprintf(stderr, "[xinsp2] skip instance '%s': no plugin field\n",
+                                 inst_name.c_str());
+                    continue;
+                }
 
                 InstanceInfo ii;
-                ii.name = entry.path().filename().string();
+                ii.name = inst_name;
                 ii.plugin_name = *plugin;
                 ii.folder_path = entry.path().string();
                 // Auto-load the plugin if not yet loaded
@@ -454,8 +471,34 @@ public:
                         InstanceRegistry::instance().add(ii.instance);
                         attach_trigger_bridge(ii.instance.get(), ii.name);
                     }
+                    if (!created) {
+                        last_open_warnings_.push_back(
+                            {inst_name, *plugin, "factory returned null"});
+                        std::fprintf(stderr,
+                            "[xinsp2] skip instance '%s' (%s): factory returned null\n",
+                            inst_name.c_str(), plugin->c_str());
+                    }
+                } else {
+                    last_open_warnings_.push_back(
+                        {inst_name, *plugin, "plugin not loaded / not found"});
+                    std::fprintf(stderr,
+                        "[xinsp2] skip instance '%s': plugin '%s' not loaded\n",
+                        inst_name.c_str(), plugin->c_str());
                 }
                 project_.instances[ii.name] = std::move(ii);
+                } catch (const std::exception& e) {
+                    last_open_warnings_.push_back(
+                        {inst_name, "", std::string("exception: ") + e.what()});
+                    std::fprintf(stderr,
+                        "[xinsp2] skip instance '%s': %s\n",
+                        inst_name.c_str(), e.what());
+                } catch (...) {
+                    last_open_warnings_.push_back(
+                        {inst_name, "", "unknown exception during load"});
+                    std::fprintf(stderr,
+                        "[xinsp2] skip instance '%s': unknown exception\n",
+                        inst_name.c_str());
+                }
             }
         }
         return true;
@@ -646,10 +689,24 @@ public:
         return out;
     }
 
+    // Per-instance failure record from the most recent open_project. The
+    // open succeeds even if individual instances fail (skip-bad-instance);
+    // callers can read these to surface a warning to the user.
+    struct OpenWarning {
+        std::string instance;   // folder name; "" if we couldn't determine it
+        std::string plugin;     // referenced plugin (may be empty/unknown)
+        std::string reason;     // human-readable
+    };
+    std::vector<OpenWarning> open_warnings() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return last_open_warnings_;
+    }
+
 private:
     std::mutex mu_;
     std::unordered_map<std::string, PluginInfo> plugins_;
     ProjectInfo project_;
+    std::vector<OpenWarning> last_open_warnings_;
 
     static PluginInfo parse_manifest(const std::string& path, const std::string& folder) {
         PluginInfo pi;
