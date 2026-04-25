@@ -290,6 +290,41 @@ export function activate(context: vscode.ExtensionContext) {
     const isRemote = remoteUrl.length > 0;
     const wsUrl = isRemote ? remoteUrl : `ws://127.0.0.1:${port}`;
     const output = vscode.window.createOutputChannel('xInsp2');
+
+    // Diagnostics from compile_and_load — drives Problems panel + squiggles.
+    // Cleared and rebuilt on each compile (success or failure).
+    const diagnostics = vscode.languages.createDiagnosticCollection('xinsp2');
+    context.subscriptions.push(diagnostics);
+    function applyDiagnostics(diags: any[] | undefined, sourceCpp: string) {
+        diagnostics.clear();
+        if (!Array.isArray(diags) || diags.length === 0) return;
+        const baseDir = path.dirname(sourceCpp);
+        const buckets = new Map<string, vscode.Diagnostic[]>();
+        for (const d of diags) {
+            if (!d || !d.file) continue;
+            // cl.exe may print relative paths ("inspection.cpp") or absolute.
+            const abs = path.isAbsolute(d.file) ? d.file : path.resolve(baseDir, d.file);
+            const line = Math.max(0, (Number(d.line) || 1) - 1);
+            const col  = Math.max(0, (Number(d.col)  || 1) - 1);
+            // Highlight to end of token (word) by anchoring at col and
+            // letting VS Code show a single squiggle at that position.
+            const range = new vscode.Range(line, col, line, col + 1);
+            const sev = d.severity === 'error'
+                ? vscode.DiagnosticSeverity.Error
+                : d.severity === 'warning'
+                ? vscode.DiagnosticSeverity.Warning
+                : vscode.DiagnosticSeverity.Information;
+            const msg = (d.code ? `${d.code}: ` : '') + (d.message || '');
+            const diag = new vscode.Diagnostic(range, msg, sev);
+            diag.source = 'xinsp2';
+            const arr = buckets.get(abs) ?? [];
+            arr.push(diag);
+            buckets.set(abs, arr);
+        }
+        for (const [file, arr] of buckets) {
+            diagnostics.set(vscode.Uri.file(file), arr);
+        }
+    }
     // Initialise auto-respawn flag from workspace config; the project.json
     // override picks up later when a project opens.
     recomputeAutoRespawn();
@@ -633,6 +668,7 @@ export function activate(context: vscode.ExtensionContext) {
             output.appendLine(`[xinsp2] compiling ${filePath}...`);
             try {
                 const rsp = await sendCmd('compile_and_load', { path: filePath });
+                applyDiagnostics(rsp.data?.diagnostics, filePath);
                 if (rsp.ok) {
                     output.appendLine('[xinsp2] compile ok: ' + (rsp.data?.dll ?? ''));
                     vscode.window.setStatusBarMessage('xInsp2: compiled', 3000);
@@ -1585,6 +1621,7 @@ void xi_inspect_entry(int frame) {
             output.appendLine(`[xinsp2] auto-compile: ${doc.fileName}`);
             try {
                 const rsp = await sendCmd('compile_and_load', { path: doc.fileName });
+                applyDiagnostics(rsp.data?.diagnostics, doc.fileName);
                 if (rsp.ok) {
                     output.appendLine('[xinsp2] auto-compile ok');
                     vscode.window.setStatusBarMessage('xInsp2: recompiled', 2000);

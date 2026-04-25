@@ -169,7 +169,7 @@ struct Rsp {
         out += std::to_string(id);
         out += ",\"ok\":";
         out += ok ? "true" : "false";
-        if (ok && !data_json.empty()) {
+        if (!data_json.empty()) {
             out += ",\"data\":";
             // TRUST BOUNDARY: data_json is appended verbatim. Every caller
             // that populates this field is responsible for emitting well-

@@ -124,6 +124,10 @@ add_test(NAME record COMMAND test_record)
 add_executable(test_protocol tests/test_protocol.cpp)
 target_link_libraries(test_protocol PRIVATE xi_core cjson)
 add_test(NAME protocol COMMAND test_protocol)
+
+add_executable(test_diagnostics tests/test_diagnostics.cpp)
+target_link_libraries(test_diagnostics PRIVATE xi_core cjson)
+add_test(NAME diagnostics COMMAND test_diagnostics)
 set_tests_properties(protocol PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures"
 )

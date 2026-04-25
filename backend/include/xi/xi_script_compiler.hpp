@@ -25,10 +25,12 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace xi::script {
 
@@ -48,11 +50,114 @@ struct CompileRequest {
     std::string ipp_root;          // Intel IPP install root (image ops only)
 };
 
-struct CompileResult {
-    bool        ok = false;
-    std::string dll_path;
-    std::string build_log;
+// One diagnostic line parsed out of cl.exe / link.exe output.
+// `file` is whatever cl.exe printed (may be relative); upstream code
+// is expected to resolve to an absolute workspace path.
+struct Diagnostic {
+    std::string file;
+    int         line     = 0;   // 1-based; 0 if unknown (e.g. linker errors)
+    int         col      = 0;   // 1-based; 0 if unknown
+    std::string severity;       // "error" | "warning" | "note"
+    std::string code;           // "C2065", "LNK2019", ...
+    std::string message;
 };
+
+struct CompileResult {
+    bool                    ok = false;
+    std::string             dll_path;
+    std::string             build_log;
+    std::vector<Diagnostic> diagnostics;
+};
+
+// Parse cl.exe / link.exe output into structured diagnostics. The format
+// is one of:
+//   foo.cpp(42,15): error C2065: 'x': undeclared identifier
+//   foo.cpp(42): warning C4996: ...
+//   foo.obj : error LNK2019: unresolved external symbol ...
+// Lines that don't match any of these patterns are skipped.
+inline std::vector<Diagnostic> parse_diagnostics(const std::string& log) {
+    std::vector<Diagnostic> out;
+    size_t pos = 0;
+    while (pos < log.size()) {
+        size_t eol = log.find('\n', pos);
+        std::string line = log.substr(pos, (eol == std::string::npos ? log.size() : eol) - pos);
+        pos = (eol == std::string::npos) ? log.size() : eol + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        // Find ": error " / ": warning " / ": fatal error " / ": note "
+        // *after* a possible (line,col) suffix on the file portion.
+        // `has_code` distinguishes "<sev> CXXXX: msg" (error/warning/fatal,
+        // which always carry a code) from "note: msg" (no code).
+        struct SevMatch { const char* tag; const char* sev; bool has_code; };
+        const SevMatch sevs[] = {
+            { ": fatal error ", "error",   true  },
+            { ": error ",       "error",   true  },
+            { ": warning ",     "warning", true  },
+            { ": note: ",       "note",    false },
+        };
+        size_t sev_at = std::string::npos;
+        const char* sev_name = nullptr;
+        size_t sev_len = 0;
+        bool has_code = true;
+        for (auto& s : sevs) {
+            size_t hit = line.find(s.tag);
+            if (hit != std::string::npos && (sev_at == std::string::npos || hit < sev_at)) {
+                sev_at = hit;
+                sev_name = s.sev;
+                sev_len = std::strlen(s.tag);
+                has_code = s.has_code;
+            }
+        }
+        if (sev_at == std::string::npos) continue;
+
+        Diagnostic d;
+        d.severity = sev_name;
+
+        // Left of severity: "<file>" or "<file>(line)" or "<file>(line,col)".
+        std::string left = line.substr(0, sev_at);
+        // Trim trailing space (e.g. "foo.obj ")
+        while (!left.empty() && (left.back() == ' ' || left.back() == '\t')) left.pop_back();
+        if (!left.empty() && left.back() == ')') {
+            size_t op = left.rfind('(');
+            if (op != std::string::npos) {
+                std::string loc = left.substr(op + 1, left.size() - op - 2);
+                d.file = left.substr(0, op);
+                size_t comma = loc.find(',');
+                try {
+                    if (comma == std::string::npos) {
+                        d.line = std::stoi(loc);
+                    } else {
+                        d.line = std::stoi(loc.substr(0, comma));
+                        d.col  = std::stoi(loc.substr(comma + 1));
+                    }
+                } catch (...) { /* leave 0 */ }
+            } else {
+                d.file = left;
+            }
+        } else {
+            d.file = left;
+        }
+
+        // Right of severity: "<code>: <message>" for error/warning,
+        // or just "<message>" for notes.
+        std::string right = line.substr(sev_at + sev_len);
+        if (has_code) {
+            size_t colon = right.find(':');
+            if (colon != std::string::npos) {
+                d.code    = right.substr(0, colon);
+                size_t mstart = colon + 1;
+                while (mstart < right.size() && right[mstart] == ' ') ++mstart;
+                d.message = right.substr(mstart);
+            } else {
+                d.message = right;
+            }
+        } else {
+            d.message = right;
+        }
+        out.push_back(std::move(d));
+    }
+    return out;
+}
 
 namespace detail {
 
@@ -290,6 +395,7 @@ inline CompileResult compile(const CompileRequest& req) {
         r.ok = true;
         r.dll_path = out_dll.string();
     }
+    r.diagnostics = parse_diagnostics(r.build_log);
     return r;
 }
 

@@ -68,29 +68,10 @@ static std::string g_persistent_state_json = "{}";
 // process/exchange/grab to the backend's InstanceRegistry.
 
 #include <xi/xi_use.hpp>
-#include <eh.h>
+#include <xi/xi_seh.hpp>
 
-class seh_exception : public std::exception {
-public:
-    unsigned int code;
-    seh_exception(unsigned int c) : code(c) {}
-    const char* what() const noexcept override {
-        switch (code) {
-            case 0xC0000005: return "ACCESS_VIOLATION";
-            case 0xC0000094: return "INT_DIVIDE_BY_ZERO";
-            case 0xC000008C: return "ARRAY_BOUNDS_EXCEEDED";
-            case 0xC00000FD: return "STACK_OVERFLOW";
-            case 0xC000001D: return "ILLEGAL_INSTRUCTION";
-            case 0xC0000090: return "FLOAT_INVALID_OPERATION";
-            case 0xC0000091: return "FLOAT_DIVIDE_BY_ZERO";
-            default:         return "UNKNOWN_SEH_EXCEPTION";
-        }
-    }
-};
-
-static void seh_translator(unsigned int code, EXCEPTION_POINTERS*) {
-    throw seh_exception(code);
-}
+using xi::seh_exception;
+using xi::seh_translator;
 
 static int use_process_cb(const char* name,
                           const char* input_json,
@@ -905,11 +886,33 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         req.ipp_root        = g_ipp_root;
 
         auto res = xi::script::compile(req);
+
+        // Serialize diagnostics for both error & success paths so the
+        // extension can drive Problems panel / squiggles either way.
+        auto build_diag_json = [&]() -> std::string {
+            std::string s = "[";
+            for (size_t i = 0; i < res.diagnostics.size(); ++i) {
+                auto& d = res.diagnostics[i];
+                if (i) s += ",";
+                s += "{\"file\":";  xp::json_escape_into(s, d.file);
+                s += ",\"line\":" + std::to_string(d.line);
+                s += ",\"col\":"  + std::to_string(d.col);
+                s += ",\"severity\":"; xp::json_escape_into(s, d.severity);
+                s += ",\"code\":";    xp::json_escape_into(s, d.code);
+                s += ",\"message\":"; xp::json_escape_into(s, d.message);
+                s += "}";
+            }
+            s += "]";
+            return s;
+        };
+
         if (!res.ok) {
+            std::string data = "{\"diagnostics\":" + build_diag_json() + "}";
             xp::Rsp r;
             r.id = id;
             r.ok = false;
             r.error = "compile failed";
+            r.data_json = data;
             srv.send_text(r.to_json());
             xp::LogMsg lm;
             lm.level = "error";
@@ -992,10 +995,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             srv.send_text(lm.to_json());
         }
 
-        // Return success with dll path.
+        // Return success with dll path + diagnostics (warnings only on
+        // success; extension still wants them for squiggle).
         std::string data = "{\"dll\":";
         xp::json_escape_into(data, res.dll_path);
-        data += "}";
+        data += ",\"diagnostics\":" + build_diag_json() + "}";
         send_rsp_ok(srv, id, data);
     } else if (name == "unload_script") {
         std::lock_guard<std::mutex> lk(g_script_mu);

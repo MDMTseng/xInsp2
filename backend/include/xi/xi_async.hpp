@@ -20,6 +20,8 @@
 // without touching user code — the API is stable.
 //
 
+#include "xi_seh.hpp"
+
 #include <future>
 #include <tuple>
 #include <type_traits>
@@ -101,6 +103,10 @@ auto async(F&& f, Args&&... args)
     auto closure =
         [fn  = std::forward<F>(f),
          tup = std::make_tuple(std::forward<Args>(args)...)]() mutable -> R {
+            // Install SEH translator on the worker thread so segfaults
+            // become seh_exception and propagate through std::promise
+            // to the .get() / await site.
+            xi::install_seh_translator();
             return std::apply(std::move(fn), std::move(tup));
         };
 

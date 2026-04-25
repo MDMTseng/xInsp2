@@ -51,17 +51,9 @@
 namespace fs = std::filesystem;
 
 // --- SEH translator so backend survives script crashes ------------------
-
-class seh_exception : public std::exception {
-public:
-    unsigned int code;
-    explicit seh_exception(unsigned int c) : code(c) {}
-    const char* what() const noexcept override { return "seh"; }
-};
-
-static void seh_translator(unsigned int code, EXCEPTION_POINTERS*) {
-    throw seh_exception(code);
-}
+#include <xi/xi_seh.hpp>
+using xi::seh_exception;
+using xi::seh_translator;
 
 // --- xi::use() callbacks (minimal copy of service_main equivalents) -----
 
