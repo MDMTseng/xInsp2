@@ -147,6 +147,11 @@
         "command": "xinsp2.setTriggerPolicy",
         "title": "xInsp2: Set Trigger Policy…",
         "icon": "$(symbol-event)"
+      },
+      {
+        "command": "xinsp2.openProjectSettings",
+        "title": "xInsp2: Project Settings…",
+        "icon": "$(settings)"
       }
     ],
     "viewsContainers": {
@@ -224,6 +229,11 @@
         {
           "command": "xinsp2.restartBackend",
           "when": "view == xinsp2.instances && !xinsp2.connected",
+          "group": "navigation@4"
+        },
+        {
+          "command": "xinsp2.openProjectSettings",
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
           "group": "navigation@4"
         },
         {

@@ -29,6 +29,120 @@ let spawnAndWatchHandle: (() => void) | null = null;
 //     overrides the workspace setting `xinsp2.autoRespawn` (default true).
 // Recomputed on every open_project and on every workspace-config change.
 let autoRespawnEnabled = true;
+// ---- Project Settings webview HTML ------------------------------------
+// Plain HTML/CSS form, no framework. State.sources is the list of
+// instance names the user can pick as required / leader.
+function renderProjectSettingsHtml(s: any): string {
+    const esc = (x: string) => String(x ?? '').replace(/[&<>"']/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+    const checked = (b: boolean) => b ? 'checked' : '';
+    const sel = (v: string, want: string) => v === want ? 'selected' : '';
+    const requiredSet = new Set(s.trigger_policy.required || []);
+    const sourcesHtml = (s.sources || []).map((n: string) =>
+        `<label class="check"><input type="checkbox" data-required="${esc(n)}" ${requiredSet.has(n) ? 'checked' : ''}/> ${esc(n)}</label>`
+    ).join('') || '<div class="hint">No instances yet — add some via the + button in Instances view.</div>';
+    const leaderOpts = ['<option value="">(none)</option>']
+        .concat((s.sources || []).map((n: string) =>
+            `<option value="${esc(n)}" ${sel(s.trigger_policy.leader, n)}>${esc(n)}</option>`))
+        .join('');
+    return `<!doctype html><html><head><meta charset="utf-8">
+<style>
+    body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px 20px; max-width: 720px; }
+    h1 { font-size: 1.2em; margin: 0 0 4px; }
+    .folder { color: var(--vscode-descriptionForeground); font-size: 0.9em; margin-bottom: 18px; word-break: break-all; }
+    section { border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 12px 14px; margin-bottom: 14px; }
+    section h2 { font-size: 0.95em; margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); }
+    label.check { display: flex; align-items: center; gap: 6px; padding: 3px 0; cursor: pointer; }
+    label.field { display: grid; grid-template-columns: 160px 1fr; align-items: center; gap: 10px; padding: 4px 0; }
+    label.field input, label.field select { padding: 4px 6px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; min-width: 0; }
+    .hint { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 4px; }
+    .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+    .row-buttons { display: flex; gap: 8px; margin-top: 6px; }
+    button { padding: 6px 14px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 2px; cursor: pointer; font: inherit; }
+    button:hover { background: var(--vscode-button-hoverBackground); }
+    button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+    .saved { color: var(--vscode-charts-green); margin-left: 8px; opacity: 0; transition: opacity 0.3s; }
+    .saved.show { opacity: 1; }
+    .policy-deps { margin-top: 8px; padding-left: 20px; }
+</style></head>
+<body>
+<h1>${esc(s.name)} <span class="folder">— ${esc(s.folder)}</span></h1>
+
+<section>
+    <h2>Project</h2>
+    <label class="field"><span>Name</span><input id="name" value="${esc(s.name)}"/></label>
+    <label class="field"><span>Script</span><input id="script" value="${esc(s.script)}"/></label>
+    <div class="hint">"name" and "script" are read by the backend on open_project.</div>
+</section>
+
+<section>
+    <h2>Reliability</h2>
+    <label class="check"><input id="auto_respawn" type="checkbox" ${checked(s.auto_respawn)}/> Auto-respawn backend on crash (rate-limited 5/min)</label>
+    <label class="field"><span>Watchdog (ms)</span><input id="watchdog_ms" type="number" min="0" max="600000" value="${s.watchdog_ms}"/></label>
+    <div class="hint">0 = disabled. When non-zero, every <code>inspect()</code> call has this many ms of wall-clock budget; runaway scripts are terminated.</div>
+</section>
+
+<section>
+    <h2>Trigger Bus Policy</h2>
+    <label class="field"><span>Mode</span>
+      <select id="tp_mode">
+        <option value="any" ${sel(s.trigger_policy.mode, 'any')}>Any — fire on every emit (default)</option>
+        <option value="all_required" ${sel(s.trigger_policy.mode, 'all_required')}>All required — wait for every listed source</option>
+        <option value="leader_followers" ${sel(s.trigger_policy.mode, 'leader_followers')}>Leader / followers — leader drives, followers attached best-effort</option>
+      </select>
+    </label>
+    <div class="policy-deps">
+      <div><b>Required sources</b> (used by All-required and as followers under Leader/followers):</div>
+      <div class="checks">${sourcesHtml}</div>
+    </div>
+    <div class="policy-deps">
+      <label class="field"><span>Leader source</span>
+        <select id="tp_leader">${leaderOpts}</select>
+      </label>
+      <label class="field"><span>Window (ms)</span>
+        <input id="tp_window_ms" type="number" min="1" max="60000" value="${s.trigger_policy.window_ms}"/>
+      </label>
+    </div>
+    <div class="hint">Window = how long to keep partial events around before dropping.</div>
+</section>
+
+<div class="row-buttons">
+    <button id="save">Save</button>
+    <span id="saved" class="saved">✓ saved</span>
+</div>
+
+<script>
+const vscode = acquireVsCodeApi();
+function collect() {
+    const reqs = Array.from(document.querySelectorAll('[data-required]'))
+        .filter(e => e.checked).map(e => e.dataset.required);
+    return {
+        name:         document.getElementById('name').value.trim(),
+        script:       document.getElementById('script').value.trim(),
+        auto_respawn: document.getElementById('auto_respawn').checked,
+        watchdog_ms:  parseInt(document.getElementById('watchdog_ms').value || '0', 10),
+        trigger_policy: {
+            mode:      document.getElementById('tp_mode').value,
+            required:  reqs,
+            leader:    document.getElementById('tp_leader').value,
+            window_ms: parseInt(document.getElementById('tp_window_ms').value || '100', 10),
+        },
+    };
+}
+document.getElementById('save').addEventListener('click', () => {
+    vscode.postMessage({ type: 'save', data: collect() });
+});
+window.addEventListener('message', e => {
+    if (e.data?.type === 'saved') {
+        const el = document.getElementById('saved');
+        el.classList.add('show');
+        setTimeout(() => el.classList.remove('show'), 1500);
+    }
+});
+</script>
+</body></html>`;
+}
+
 function recomputeAutoRespawn() {
     const cfg = vscode.workspace.getConfiguration('xinsp2');
     let next = cfg.get<boolean>('autoRespawn', true);
@@ -721,6 +835,89 @@ export function activate(context: vscode.ExtensionContext) {
             } else {
                 vscode.window.showErrorMessage(`xInsp2: ${r?.error || 'failed'}`);
             }
+        })
+    );
+
+    // ---- Project Settings webview -------------------------------------
+    // One-stop form for everything that lives in project.json. Save
+    // writes the file directly + applies live where the backend cares
+    // (trigger policy, watchdog). Open via Instances view title bar
+    // gear icon, or "xInsp2: Project Settings…" in Command Palette.
+    let settingsPanel: vscode.WebviewPanel | undefined;
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.openProjectSettings', async () => {
+            if (!currentProjectPath) {
+                vscode.window.showWarningMessage('xInsp2: open a project first');
+                return;
+            }
+            const projDir = currentProjectPath;
+            const projFile = path.join(projDir, 'project.json');
+            const fs = require('fs');
+            let pj: any = {};
+            try { pj = JSON.parse(fs.readFileSync(projFile, 'utf8')); } catch { pj = {}; }
+
+            // Get available source instance names (for trigger policy fields).
+            const instRsp = await sendCmd('list_instances');
+            const sources: string[] = (instRsp?.data?.instances || []).map((i: any) => i.name);
+
+            if (settingsPanel) {
+                settingsPanel.reveal(vscode.ViewColumn.Active);
+            } else {
+                settingsPanel = vscode.window.createWebviewPanel(
+                    'xinsp2.projectSettings',
+                    `Project Settings · ${pj.name || path.basename(projDir)}`,
+                    vscode.ViewColumn.Active,
+                    { enableScripts: true, retainContextWhenHidden: true }
+                );
+                settingsPanel.onDidDispose(() => { settingsPanel = undefined; });
+                settingsPanel.webview.onDidReceiveMessage(async (msg: any) => {
+                    if (msg.type !== 'save') return;
+                    const next = msg.data || {};
+                    // Merge into existing pj — don't drop unknown fields the
+                    // user may have hand-edited.
+                    let cur: any = {};
+                    try { cur = JSON.parse(fs.readFileSync(projFile, 'utf8')); } catch { cur = {}; }
+                    cur.name           = next.name ?? cur.name;
+                    cur.script         = next.script ?? cur.script;
+                    cur.auto_respawn   = next.auto_respawn;
+                    if (next.watchdog_ms !== undefined) cur.watchdog_ms = next.watchdog_ms;
+                    if (next.trigger_policy) cur.trigger_policy = next.trigger_policy;
+                    fs.writeFileSync(projFile, JSON.stringify(cur, null, 2) + '\n', 'utf8');
+                    output.appendLine('[xinsp2] project.json saved');
+                    // Apply live where it matters.
+                    recomputeAutoRespawn();
+                    if (typeof next.watchdog_ms === 'number') {
+                        await sendCmd('set_watchdog_ms', { ms: next.watchdog_ms });
+                    }
+                    if (next.trigger_policy?.mode) {
+                        await sendCmd('set_trigger_policy', {
+                            policy:    next.trigger_policy.mode,
+                            required:  next.trigger_policy.required || [],
+                            leader:    next.trigger_policy.leader || '',
+                            window_ms: next.trigger_policy.window_ms ?? 100,
+                        });
+                    }
+                    vscode.window.setStatusBarMessage('xInsp2: project settings saved', 3000);
+                    settingsPanel?.webview.postMessage({ type: 'saved' });
+                });
+            }
+            // (Re)render with current state.
+            const tp = pj.trigger_policy || {};
+            const state = {
+                name:         pj.name || path.basename(projDir),
+                script:       pj.script || 'inspection.cpp',
+                folder:       projDir,
+                auto_respawn: pj.auto_respawn !== false,    // default true
+                watchdog_ms:  typeof pj.watchdog_ms === 'number' ? pj.watchdog_ms : 0,
+                trigger_policy: {
+                    mode:      tp.mode || 'any',
+                    required:  Array.isArray(tp.required) ? tp.required : [],
+                    leader:    tp.leader || '',
+                    window_ms: typeof tp.window_ms === 'number' ? tp.window_ms : 100,
+                },
+                sources,
+            };
+            settingsPanel.webview.html = renderProjectSettingsHtml(state);
         })
     );
 
