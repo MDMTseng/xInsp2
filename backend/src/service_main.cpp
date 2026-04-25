@@ -145,6 +145,19 @@ static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
 static std::atomic<bool>       g_continuous{false};
 static std::thread             g_worker_thread;
 
+// Watchdog (P2.4). When > 0, inspect() calls have this many ms of wall-
+// clock budget; exceeding it terminates the executing thread and marks
+// the script as broken. Default 0 = disabled (back-compat). Set via
+// cmd:set_watchdog_ms or --watchdog=N.
+static std::atomic<int>        g_watchdog_ms{0};
+// State accessed from both the dispatch thread (writer) and the
+// watchdog thread (reader). Set BEFORE inspect, cleared AFTER.
+static std::atomic<int64_t>    g_inspect_deadline_ms{0};
+static std::atomic<HANDLE>     g_inspect_thread_handle{nullptr};
+static std::atomic<int>        g_watchdog_trips{0};
+static std::thread             g_watchdog_thread;
+static std::atomic<bool>       g_watchdog_run{false};
+
 // Preview subscription (S1). Default: send every image VAR's JPEG after
 // a run (back-compat). Client sets a name allow-list via cmd:subscribe
 // to cut bandwidth for vars nobody is watching. Held under g_sub_mu so
@@ -300,6 +313,21 @@ static std::string parse_host(int argc, char** argv) {
     }
     if (const char* env = std::getenv("XINSP2_HOST"); env && *env) host = env;
     return host;
+}
+
+// --watchdog=<ms>  (default 0 = disabled). When non-zero, every inspect()
+// call has this many ms of wall-clock budget before the watchdog
+// terminates the runaway thread.
+static int parse_watchdog_ms(int argc, char** argv) {
+    int ms = 0;
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a = argv[i];
+        if (a.rfind("--watchdog=", 0) == 0) { try { ms = std::stoi(std::string(a.substr(11))); } catch (...) {} }
+        else if (a == "--watchdog" && i + 1 < argc) { try { ms = std::stoi(argv[++i]); } catch (...) {} }
+    }
+    if (ms < 0) ms = 0;
+    if (ms > 600000) ms = 600000;
+    return ms;
 }
 
 // --auth=<secret>  (default empty = no auth required).
@@ -476,10 +504,31 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_
     }
 
     auto t0 = std::chrono::steady_clock::now();
+    // Arm watchdog: store deadline + current thread handle. Cleared in
+    // the post-inspect path below regardless of throw.
+    HANDLE self_h = nullptr;
+    int wd_ms = g_watchdog_ms.load();
+    if (wd_ms > 0) {
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                        GetCurrentProcess(), &self_h, 0, FALSE,
+                        DUPLICATE_SAME_ACCESS);
+        g_inspect_thread_handle.store(self_h);
+        auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(wd_ms);
+        g_inspect_deadline_ms.store(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline.time_since_epoch()).count());
+    }
+    auto disarm = [&]() {
+        g_inspect_deadline_ms.store(0);
+        HANDLE prev = g_inspect_thread_handle.exchange(nullptr);
+        if (prev) CloseHandle(prev);
+    };
     try {
         if (s.reset) s.reset();
         s.inspect(frame_hint);
+        disarm();
     } catch (const seh_exception& e) {
+        disarm();
         auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                          std::chrono::steady_clock::now() - t0).count();
         char msg[256];
@@ -490,9 +539,13 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_
         srv.send_text(lm.to_json());
         return;
     } catch (const std::exception& e) {
+        disarm();
         std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
         xp::LogMsg lm; lm.level = "error"; lm.msg = std::string("script exception: ") + e.what();
         srv.send_text(lm.to_json());
+        return;
+    } catch (...) {
+        disarm();
         return;
     }
 
@@ -631,6 +684,25 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         out += "},\"b\":{\"vars\":";
         out += snap_b;
         out += "}}";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "set_watchdog_ms") {
+        // P2.4. Set the wall-clock budget (ms) for a single inspect()
+        // call. 0 disables. Tripping the watchdog does not auto-reset —
+        // the next inspect re-arms with the new budget.
+        auto ms_opt = xp::get_number_field(parsed->args_json, "ms");
+        int ms = ms_opt ? (int)*ms_opt : 0;
+        if (ms < 0) ms = 0;
+        if (ms > 600000) ms = 600000;     // 10-minute hard cap
+        g_watchdog_ms = ms;
+        std::string out = "{\"ms\":" + std::to_string(ms);
+        out += ",\"trips\":" + std::to_string(g_watchdog_trips.load()) + "}";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "watchdog_status") {
+        std::string out = "{\"ms\":" + std::to_string(g_watchdog_ms.load());
+        out += ",\"trips\":" + std::to_string(g_watchdog_trips.load());
+        out += ",\"armed\":";
+        out += (g_inspect_deadline_ms.load() > 0 ? "true" : "false");
+        out += "}";
         send_rsp_ok(srv, id, out);
     } else if (name == "resume") {
         // S3: unblock a script waiting in xi::breakpoint(). Idempotent —
@@ -822,18 +894,19 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             return;
         }
         int64_t run_id = ++g_run_id;
-        auto t0 = std::chrono::steady_clock::now();
 
-        // Send rsp first (tests expect rsp before vars)
-        // We don't know timing yet but run_id is ready.
-        // Timing is reported via the run_finished event instead.
+        // Send rsp first (tests expect rsp before vars).
         char buf[128];
         std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":0})", (long long)run_id);
         send_rsp_ok(srv, id, buf);
 
-        // Run inspection — emits vars + previews.
-        // SEH catches crashes; infinite loops need watchdog (future).
-        run_one_inspection(srv, /*frame_hint=*/1, run_id);
+        // Run inspection on a detached thread so the watchdog can
+        // TerminateThread the runaway script without killing the WS
+        // poll loop. SEH translator must be installed inside the thread.
+        std::thread([&srv, run_id]() {
+            _set_se_translator(seh_translator);
+            run_one_inspection(srv, /*frame_hint=*/1, run_id);
+        }).detach();
     } else if (name == "start") {
         // Start continuous trigger mode. The backend runs a timer thread
         // that calls inspect() at a configurable interval. The script's
@@ -1699,7 +1772,42 @@ int main(int argc, char** argv) {
     srv.set_bind_host(host);
     if (!secret.empty()) srv.set_auth_secret(secret);
 
+    g_watchdog_ms = parse_watchdog_ms(argc, argv);
+    if (g_watchdog_ms.load() > 0) {
+        std::fprintf(stderr, "[xinsp2] watchdog enabled: %d ms per inspect\n", g_watchdog_ms.load());
+    }
     g_srv_for_bp = &srv;   // S3: breakpoint_cb emits events through it
+    // P2.4 watchdog. Always-on monitor thread; only acts when
+    // g_inspect_deadline_ms > 0 (set by run_one_inspection when
+    // g_watchdog_ms > 0). On trip: TerminateThread the inspect thread,
+    // bump trip counter, emit a log event. Resources leak (TerminateThread
+    // is unsafe by design), but the alternative is an unkillable hang.
+    g_watchdog_run = true;
+    g_watchdog_thread = std::thread([&srv]() {
+        while (g_watchdog_run.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            int64_t dl = g_inspect_deadline_ms.load();
+            if (dl == 0) continue;
+            int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            if (now < dl) continue;
+            HANDLE h = g_inspect_thread_handle.exchange(nullptr);
+            g_inspect_deadline_ms.store(0);
+            if (!h) continue;
+            #pragma warning(push)
+            #pragma warning(disable: 6258)   // TerminateThread is intentional
+            TerminateThread(h, 1);
+            #pragma warning(pop)
+            CloseHandle(h);
+            int n = ++g_watchdog_trips;
+            std::fprintf(stderr, "[xinsp2] watchdog tripped (#%d) — terminated runaway inspect\n", n);
+            xp::LogMsg lm;
+            lm.level = "error";
+            lm.msg = "watchdog tripped — inspect exceeded "
+                   + std::to_string(g_watchdog_ms.load()) + "ms; thread terminated";
+            srv.send_text(lm.to_json());
+        }
+    });
     if (!srv.start(port)) {
         std::fprintf(stderr, "[xinsp2] failed to bind %s:%d\n", host.c_str(), port);
         return 1;
@@ -1718,6 +1826,8 @@ int main(int argc, char** argv) {
     }
 
     srv.stop();
+    g_watchdog_run = false;
+    if (g_watchdog_thread.joinable()) g_watchdog_thread.join();
     std::fprintf(stderr, "[xinsp2] shutdown complete\n");
     return 0;
 }
