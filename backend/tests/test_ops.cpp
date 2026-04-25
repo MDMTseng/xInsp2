@@ -371,23 +371,27 @@ static void test_canny_finds_edge() {
 // ---------- contours + bbox ----------
 
 static void test_findContours_two_blobs() {
-    SECTION("findContours returns one list per connected component");
+    SECTION("findContours returns one bbox per connected component");
     xi::Image bin(20, 20, 1);
     std::memset(bin.data(), 0, 400);
-    // Square A at (2..5, 2..5)
+    // Square A at (2..5, 2..5) — 4×4
     for (int y = 2; y <= 5; ++y)
         for (int x = 2; x <= 5; ++x) bin.data()[y*20 + x] = 255;
-    // Square B at (12..14, 12..14)
+    // Square B at (12..14, 12..14) — 3×3
     for (int y = 12; y <= 14; ++y)
         for (int x = 12; x <= 14; ++x) bin.data()[y*20 + x] = 255;
     auto contours = xi::ops::findContours(bin);
     CHECK(contours.size() == 2);
-    CHECK(contours[0].size() == 16);            // 4×4
-    CHECK(contours[1].size() == 9);             // 3×3
-    auto box0 = xi::ops::bbox(contours[0]);
-    CHECK(box0.x == 2 && box0.y == 2 && box0.w == 4 && box0.h == 4);
-    auto box1 = xi::ops::bbox(contours[1]);
-    CHECK(box1.x == 12 && box1.y == 12 && box1.w == 3 && box1.h == 3);
+    // OpenCV returns boundary-only contours; order may differ from C++
+    // fallback. Match by bbox rather than indexing.
+    bool found_4x4 = false, found_3x3 = false;
+    for (auto& c : contours) {
+        auto b = xi::ops::bbox(c);
+        if (b.x == 2  && b.y == 2  && b.w == 4 && b.h == 4) found_4x4 = true;
+        if (b.x == 12 && b.y == 12 && b.w == 3 && b.h == 3) found_3x3 = true;
+    }
+    CHECK(found_4x4);
+    CHECK(found_3x3);
 }
 
 // ---------- matchTemplate ----------

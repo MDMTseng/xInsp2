@@ -105,4 +105,94 @@ inline Image dilate(const Image& src, int radius = 1) {
     return dst;
 }
 
+// ---- invert (255 - x), any channel count -------------------------------
+inline Image invert(const Image& src) {
+    if (src.empty()) return {};
+    Image dst = alloc(src.width, src.height, src.channels);
+    cv::Mat sm = as_mat(src), dm = as_mat_out(dst);
+    cv::bitwise_not(sm, dm);
+    return dst;
+}
+
+// ---- stats: mean / stddev / min / max ----------------------------------
+struct StatsResult { double mean, stddev; int min_val, max_val, pixel_count; };
+inline StatsResult stats(const Image& src) {
+    StatsResult r{};
+    if (src.empty() || src.channels != 1) return r;
+    cv::Mat sm = as_mat(src);
+    cv::Scalar mean, stddev;
+    cv::meanStdDev(sm, mean, stddev);
+    double mn = 0, mx = 0;
+    cv::minMaxLoc(sm, &mn, &mx);
+    r.mean        = mean[0];
+    r.stddev      = stddev[0];
+    r.min_val     = (int)mn;
+    r.max_val     = (int)mx;
+    r.pixel_count = src.width * src.height;
+    return r;
+}
+
+// ---- adaptiveThreshold (Gaussian-mean variant) -------------------------
+inline Image adaptiveThreshold(const Image& src, int block_radius, int C = 0) {
+    if (src.empty() || src.channels != 1 || block_radius <= 0) return {};
+    Image dst = alloc(src.width, src.height, 1);
+    cv::Mat sm = as_mat(src), dm = as_mat_out(dst);
+    int blockSize = 2 * block_radius + 1;
+    cv::adaptiveThreshold(sm, dm, 255,
+                           cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY,
+                           blockSize, (double)C);
+    return dst;
+}
+
+// ---- canny edge ---------------------------------------------------------
+inline Image canny(const Image& src, int low_thresh, int high_thresh) {
+    if (src.empty() || src.channels != 1) return {};
+    Image dst = alloc(src.width, src.height, 1);
+    cv::Mat sm = as_mat(src), dm = as_mat_out(dst);
+    cv::Canny(sm, dm, (double)low_thresh, (double)high_thresh, 3, false);
+    return dst;
+}
+
+// ---- countWhiteBlobs ----------------------------------------------------
+inline int countWhiteBlobs(const Image& binary) {
+    if (binary.empty() || binary.channels != 1) return 0;
+    cv::Mat sm = as_mat(binary), labels;
+    int n = cv::connectedComponents(sm, labels, 8, CV_32S);
+    return n - 1;   // label 0 is background
+}
+
+// ---- findContours ------------------------------------------------------
+struct PointXY { int x, y; };
+inline std::vector<std::vector<PointXY>> findContours(const Image& binary) {
+    std::vector<std::vector<PointXY>> out;
+    if (binary.empty() || binary.channels != 1) return out;
+    cv::Mat sm = as_mat(binary);
+    std::vector<std::vector<cv::Point>> cv_contours;
+    cv::findContours(sm.clone(), cv_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+    out.reserve(cv_contours.size());
+    for (auto& c : cv_contours) {
+        std::vector<PointXY> v;
+        v.reserve(c.size());
+        for (auto& p : c) v.push_back({ p.x, p.y });
+        out.push_back(std::move(v));
+    }
+    return out;
+}
+
+// ---- matchTemplate (sum of squared differences) ------------------------
+struct MatchPoint { int x, y; double score; };
+inline MatchPoint matchTemplateSSD(const Image& src, const Image& templ) {
+    MatchPoint r{0, 0, 1e30};
+    if (src.empty() || templ.empty() ||
+        src.channels != 1 || templ.channels != 1) return r;
+    if (templ.width > src.width || templ.height > src.height) return r;
+    cv::Mat sm = as_mat(src), tm = as_mat(templ);
+    cv::Mat result;
+    cv::matchTemplate(sm, tm, result, cv::TM_SQDIFF);
+    double mn = 0, mx = 0; cv::Point mnLoc, mxLoc;
+    cv::minMaxLoc(result, &mn, &mx, &mnLoc, &mxLoc);
+    r.x = mnLoc.x; r.y = mnLoc.y; r.score = mn;
+    return r;
+}
+
 } // namespace xi::ops::cv_backend

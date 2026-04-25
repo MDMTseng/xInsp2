@@ -178,6 +178,9 @@ inline Image sobel(const Image& src) {
 
 inline Image invert(const Image& src) {
     if (src.empty()) return {};
+#ifdef XINSP2_HAS_OPENCV
+    if (auto out = cv_backend::invert(src); !out.empty()) return out;
+#endif
     Image dst(src.width, src.height, src.channels);
     const uint8_t* sp = src.data();
     uint8_t* dp = dst.data();
@@ -256,6 +259,16 @@ struct ImageStats {
 
 inline ImageStats stats(const Image& src) {
     if (src.empty() || src.channels != 1) return {};
+#ifdef XINSP2_HAS_OPENCV
+    auto r = cv_backend::stats(src);
+    if (r.pixel_count > 0) {
+        ImageStats s;
+        s.mean = r.mean; s.stddev = r.stddev;
+        s.min_val = r.min_val; s.max_val = r.max_val;
+        s.pixel_count = r.pixel_count;
+        return s;
+    }
+#endif
     const uint8_t* sp = src.data();
     int n = src.width * src.height;
     int64_t sum = 0, sum2 = 0;
@@ -293,6 +306,9 @@ inline Image close(const Image& src, int radius = 1) {
 // Pixel stays if (src - local_mean) > C. Useful for uneven lighting.
 inline Image adaptiveThreshold(const Image& src, int block_radius, int C = 0) {
     if (src.empty() || src.channels != 1) return {};
+#ifdef XINSP2_HAS_OPENCV
+    if (auto out = cv_backend::adaptiveThreshold(src, block_radius, C); !out.empty()) return out;
+#endif
     auto mean = boxBlur(src, block_radius);
     int w = src.width, h = src.height;
     Image dst(w, h, 1);
@@ -313,6 +329,9 @@ inline Image adaptiveThreshold(const Image& src, int block_radius, int C = 0) {
 // gaussian(gray, ...) first for best results).
 inline Image canny(const Image& src, int low_thresh, int high_thresh) {
     if (src.empty() || src.channels != 1) return {};
+#ifdef XINSP2_HAS_OPENCV
+    if (auto out = cv_backend::canny(src, low_thresh, high_thresh); !out.empty()) return out;
+#endif
     int w = src.width, h = src.height;
     const uint8_t* sp = src.data();
     std::vector<int>   mag(w * h, 0);
@@ -399,6 +418,16 @@ inline Bbox bbox(const std::vector<Point>& pts) {
 inline std::vector<std::vector<Point>> findContours(const Image& binary) {
     std::vector<std::vector<Point>> out;
     if (binary.empty() || binary.channels != 1) return out;
+#ifdef XINSP2_HAS_OPENCV
+    auto cv_out = cv_backend::findContours(binary);
+    out.reserve(cv_out.size());
+    for (auto& c : cv_out) {
+        std::vector<Point> v; v.reserve(c.size());
+        for (auto& p : c) v.push_back({ p.x, p.y });
+        out.push_back(std::move(v));
+    }
+    if (!out.empty() || !cv_out.empty()) return out;
+#endif
     int w = binary.width, h = binary.height;
     const uint8_t* sp = binary.data();
     std::vector<uint8_t> seen(w * h, 0);
@@ -434,6 +463,13 @@ inline MatchResult matchTemplateSSD(const Image& src, const Image& templ) {
     if (src.empty() || templ.empty() ||
         src.channels != 1 || templ.channels != 1) return r;
     if (templ.width > src.width || templ.height > src.height) return r;
+#ifdef XINSP2_HAS_OPENCV
+    auto cv_r = cv_backend::matchTemplateSSD(src, templ);
+    if (cv_r.score < 1e29) {
+        r.x = cv_r.x; r.y = cv_r.y; r.score = cv_r.score;
+        return r;
+    }
+#endif
     const uint8_t* sp = src.data();
     const uint8_t* tp = templ.data();
     int sw = src.width, sh = src.height;
@@ -459,6 +495,10 @@ inline MatchResult matchTemplateSSD(const Image& src, const Image& templ) {
 
 inline int countWhiteBlobs(const Image& binary) {
     if (binary.empty() || binary.channels != 1) return 0;
+#ifdef XINSP2_HAS_OPENCV
+    int n = cv_backend::countWhiteBlobs(binary);
+    if (n >= 0) return n;
+#endif
     int w = binary.width, h = binary.height;
     std::vector<int> labels(w * h, 0);
     const uint8_t* sp = binary.data();
