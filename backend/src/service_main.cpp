@@ -40,6 +40,12 @@
 #include <filesystem>
 #include <thread>
 
+// Minidump support (top-level crash filter). dbghelp.lib is linked
+// via the CMake target.
+#include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+
 namespace xp = xi::proto;
 
 static std::atomic<int64_t> g_run_id{0};
@@ -144,6 +150,10 @@ static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
 // trigger signals from image sources and calls inspect() for each frame.
 static std::atomic<bool>       g_continuous{false};
 static std::thread             g_worker_thread;
+// Serialise cmd:run dispatch threads so history / vars arrive in run_id
+// order. Threads queue up here and the watchdog operates on whichever
+// one is currently inside run_one_inspection — only one at a time.
+static std::mutex              g_run_mu;
 
 // Watchdog (P2.4). When > 0, inspect() calls have this many ms of wall-
 // clock budget; exceeding it terminates the executing thread and marks
@@ -927,9 +937,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         // Run inspection on a detached thread so the watchdog can
         // TerminateThread the runaway script without killing the WS
-        // poll loop. SEH translator must be installed inside the thread.
+        // poll loop. Serialised on g_run_mu so 8 quick `cmd:run` calls
+        // produce vars/history entries in run_id order.
+        // SEH translator must be installed inside the thread.
         std::thread([&srv, run_id]() {
             _set_se_translator(seh_translator);
+            std::lock_guard<std::mutex> lk(g_run_mu);
             run_one_inspection(srv, /*frame_hint=*/1, run_id);
         }).detach();
     } else if (name == "start") {
@@ -1709,9 +1722,56 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     }
 }
 
+// Top-level unhandled-exception filter. Writes a minidump under
+// %TEMP%/xinsp2/crashdumps so even uncatchable failures (stack overflow,
+// heap corruption seen too late, plugin static dtor crash) leave a
+// post-mortem the developer can open in WinDbg / VS.
+static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
+    namespace fs = std::filesystem;
+    auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    SYSTEMTIME st; GetLocalTime(&st);
+    char fname[128];
+    std::snprintf(fname, sizeof(fname),
+        "xinsp-backend-%lu-%04d%02d%02d-%02d%02d%02d.dmp",
+        (unsigned long)GetCurrentProcessId(),
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    auto path = (dir / fname).string();
+    HANDLE h = CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei;
+        mei.ThreadId          = GetCurrentThreadId();
+        mei.ExceptionPointers = info;
+        mei.ClientPointers    = FALSE;
+        // Normal type — small dump (~few MB) with stacks but no heap.
+        // Bump to MiniDumpWithFullMemory if you need post-mortem heap
+        // inspection (~hundreds of MB).
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
+                          MiniDumpNormal, &mei, nullptr, nullptr);
+        CloseHandle(h);
+        std::fprintf(stderr, "[xinsp2] CRASH — minidump: %s\n", path.c_str());
+        std::fflush(stderr);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 int main(int argc, char** argv) {
+    // Top-level guard: minidump on crashes that escape the SEH translator
+    // (stack overflow, plugin static destructor faults, etc.).
+    SetUnhandledExceptionFilter(write_minidump);
     // Install SEH → C++ exception translator so try/catch catches segfaults
     _set_se_translator(seh_translator);
+
+    // --test-crash: deliberately trigger a fatal exception so the
+    // top-level minidump filter fires. Used by runCrashDump E2E.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--test-crash") {
+            RaiseException(0xE0000001, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+            return 99;  // unreachable
+        }
+    }
 
     // --version / -v / --help / -h short-circuit before any side effects.
     for (int i = 1; i < argc; ++i) {

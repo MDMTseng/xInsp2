@@ -9,6 +9,20 @@ import { PluginTreeProvider, PluginInfo } from './pluginTree';
 import { PREVIEW_HEADER_SIZE } from './protocol';
 
 let backend: ChildProcess | null = null;
+// Auto-respawn state. `intendedRunning` is true while the extension wants
+// the backend up — set to false on `dispose()` and on the explicit
+// shutdown command, so a clean exit doesn't trigger a respawn.
+let intendedRunning = false;
+// Sliding window of recent respawn timestamps (ms epoch) for rate limit.
+const recentRespawnsMs: number[] = [];
+const MAX_RESPAWNS_PER_MINUTE = 5;
+// Last project we know was opened. Set by handlers below; replayed on
+// every successful (re)connect so a respawned backend lands the user
+// back on their working tree.
+let lastProjectFolder: string | null = null;
+// Set inside activate(); used by xinsp2.restartBackend so manual restarts
+// reuse the auto-respawn-aware spawn helper.
+let spawnAndWatchHandle: (() => void) | null = null;
 let client: WsClient | null = null;
 let cmdId = 1;
 const nextId = () => cmdId++;
@@ -291,6 +305,27 @@ export function activate(context: vscode.ExtensionContext) {
                 setCtx('hasPlugins', r.data.length > 0);
             }
         }).catch(() => {});
+        // Auto-respawn recovery: if we know what project the user was in
+        // before the backend died, re-open it so they land back where
+        // they were. Skipped on the very first connect (lastProjectFolder
+        // is still null) and after a clean closeProject (set to null).
+        if (lastProjectFolder) {
+            output.appendLine(`[xinsp2] restoring project: ${lastProjectFolder}`);
+            sendCmd('open_project', { folder: lastProjectFolder }).then((r: any) => {
+                if (r?.ok) {
+                    setCtx('hasProject', true);
+                    currentProjectName = r.data?.name || path.basename(lastProjectFolder!);
+                    currentProjectPath = lastProjectFolder!;
+                    setCtx('hasInstances', (r.data?.instances?.length ?? 0) > 0);
+                    sendCmd('list_instances');
+                    treeProvider.setProjectOpen(true);
+                    updateProjectStatus();
+                    vscode.window.setStatusBarMessage('xInsp2: project restored', 3000);
+                } else {
+                    output.appendLine(`[xinsp2] could not restore project: ${r?.error || 'unknown'}`);
+                }
+            }).catch((e) => output.appendLine(`[xinsp2] restore error: ${e?.message || e}`));
+        }
     });
 
     client.on('close', () => {
@@ -512,6 +547,7 @@ export function activate(context: vscode.ExtensionContext) {
                 addRecent(folder, name);
                 currentProjectName = name;
                 currentProjectPath = folder;
+                lastProjectFolder = folder;          // for auto-respawn replay
                 updateProjectStatus();
                 treeProvider.setProjectOpen(true);
                 openScriptIfExists(folder);
@@ -536,6 +572,7 @@ export function activate(context: vscode.ExtensionContext) {
                 addRecent(folder, n);
                 currentProjectName = n;
                 currentProjectPath = folder;
+                lastProjectFolder = folder;          // for auto-respawn replay
                 updateProjectStatus();
                 setCtx('hasInstances', (rsp.data?.instances?.length ?? 0) > 0);
                 sendCmd('list_instances');
@@ -638,6 +675,7 @@ export function activate(context: vscode.ExtensionContext) {
                 setCtx('hasInstances', false);
                 currentProjectName = undefined;
                 currentProjectPath = undefined;
+                lastProjectFolder = null;            // user closed; don't replay on respawn
                 updateProjectStatus();
                 treeProvider.update([], []);
                 treeProvider.setProjectOpen(false);
@@ -883,21 +921,28 @@ void xi_inspect_entry(int frame) {
         })
     );
 
-    // Manually restart the backend (for when it hangs / crashes)
+    // Manually restart the backend (for when it hangs / crashes, or to
+    // resume after the auto-respawn rate-limit has tripped).
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.restartBackend', async () => {
+            // Reset the rate-limit so the user gets a fresh budget.
+            recentRespawnsMs.length = 0;
+            // Suppress the imminent-exit handler so it doesn't double-spawn.
+            intendedRunning = false;
             if (backend) { try { backend.kill(); } catch {} backend = null; }
             setCtx('connected', false);
             setCtx('hasProject', false);
             setCtx('running', false);
-            const exe = findBackendExe(context);
-            const args = [`--port=${port}`];
-            for (const dir of extraPluginDirs) args.push(`--plugins-dir=${dir}`);
-            output.appendLine(`[xinsp2] restarting ${exe} ${args.join(' ')}`);
-            backend = spawn(exe, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-            backend.stdout?.on('data', (d: Buffer) => output.append(d.toString()));
-            backend.stderr?.on('data', (d: Buffer) => output.append(d.toString()));
-            backend.on('exit', (code) => { output.appendLine(`[xinsp2] backend exited (${code})`); backend = null; });
+            output.appendLine(`[xinsp2] manual restart`);
+            intendedRunning = true;
+            // Reuse the same spawn-and-watch helper so subsequent crashes
+            // are handled by auto-respawn just like a fresh activation.
+            if (spawnAndWatchHandle) {
+                spawnAndWatchHandle();
+            } else {
+                // Fallback (remote mode / no autoStart) — just connect.
+                output.appendLine('[xinsp2] no spawn handle (remote mode?); just reconnecting');
+            }
             setTimeout(() => client!.connect(), 500);
         })
     );
@@ -1317,19 +1362,51 @@ void xi_inspect_entry(int frame) {
         output.appendLine(`[xinsp2] connecting to remote ${wsUrl}`);
         client!.connect();
     } else if (autoStart) {
-        const exe = findBackendExe(context);
-        const args = [`--port=${port}`];
-        for (const dir of extraPluginDirs) args.push(`--plugins-dir=${dir}`);
-        output.appendLine(`[xinsp2] starting ${exe} ${args.join(' ')}`);
-        backend = spawn(exe, args, {
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
-        backend.stdout?.on('data', (d: Buffer) => output.append(d.toString()));
-        backend.stderr?.on('data', (d: Buffer) => output.append(d.toString()));
-        backend.on('exit', (code) => {
-            output.appendLine(`[xinsp2] backend exited (${code})`);
-            backend = null;
-        });
+        // Single function used by both initial spawn and auto-respawn.
+        // Hoisted to the activate() closure so xinsp2.restartBackend
+        // below can reuse it (gives identical respawn behaviour after
+        // a manual restart).
+        const _spawnAndWatch = () => {
+            const exe = findBackendExe(context);
+            const args = [`--port=${port}`];
+            for (const dir of extraPluginDirs) args.push(`--plugins-dir=${dir}`);
+            output.appendLine(`[xinsp2] starting ${exe} ${args.join(' ')}`);
+            backend = spawn(exe, args, {
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            backend.stdout?.on('data', (d: Buffer) => output.append(d.toString()));
+            backend.stderr?.on('data', (d: Buffer) => output.append(d.toString()));
+            backend.on('exit', (code: number | null, signal: string | null) => {
+                output.appendLine(`[xinsp2] backend exited (code=${code} signal=${signal})`);
+                backend = null;
+                if (!intendedRunning) return;   // clean shutdown
+                // Rate-limit: prune to last 60 s, bail if too many.
+                const now = Date.now();
+                while (recentRespawnsMs.length > 0 && recentRespawnsMs[0] < now - 60_000) {
+                    recentRespawnsMs.shift();
+                }
+                if (recentRespawnsMs.length >= MAX_RESPAWNS_PER_MINUTE) {
+                    output.appendLine(`[xinsp2] backend crashed ${recentRespawnsMs.length}× in last minute — giving up. Use "Restart Backend" to try again.`);
+                    vscode.window.showErrorMessage(
+                        `xInsp2 backend crashed ${recentRespawnsMs.length}× in 60s. Auto-respawn paused — check Output panel and click Restart Backend when ready.`
+                    );
+                    intendedRunning = false;
+                    return;
+                }
+                recentRespawnsMs.push(now);
+                output.appendLine(`[xinsp2] auto-respawn in 1.5 s (${recentRespawnsMs.length}/${MAX_RESPAWNS_PER_MINUTE} this minute)`);
+                vscode.window.setStatusBarMessage('xInsp2: backend crashed — respawning…', 4000);
+                setTimeout(() => {
+                    if (!intendedRunning) return;
+                    _spawnAndWatch();
+                    setTimeout(() => client?.connect(), 500);
+                }, 1500);
+            });
+        };
+        // Stash for restartBackend command (closure captures activate's locals)
+        spawnAndWatchHandle = _spawnAndWatch;
+        intendedRunning = true;
+        _spawnAndWatch();
         // Give it a moment to bind, then connect.
         setTimeout(() => client!.connect(), 500);
     } else {
@@ -1339,6 +1416,7 @@ void xi_inspect_entry(int frame) {
     // Cleanup
     context.subscriptions.push({
         dispose: () => {
+            intendedRunning = false;     // suppress auto-respawn
             client?.dispose();
             if (backend) {
                 try { backend.kill(); } catch {}
