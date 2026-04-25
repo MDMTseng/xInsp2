@@ -34,6 +34,17 @@
 
 namespace xi::script {
 
+// What kind of DLL we're building. Affects:
+//   - which header gets force-included (script vs plugin support)
+//   - debug vs optimized codegen / PDB emission
+//   - whether the produced DLL is intended to be exported as a standalone
+//     plugin (Export mode = Release + PDB stripped + cert pre-baked)
+enum class CompileMode {
+    Script,         // user inspection.cpp — Release, /O2, force-include script support
+    PluginDev,      // project-local plugin during development — Debug, /Zi /Od
+    PluginExport,   // export-ready build — Release, /O2, /Zi (PDB beside DLL for crash blame)
+};
+
 struct CompileRequest {
     std::string source_path;               // primary .cpp (used for DLL name)
     std::vector<std::string> extra_sources; // additional .cpp files
@@ -41,6 +52,7 @@ struct CompileRequest {
     std::string output_dir;
     std::string include_dir;    // backend/include (always added)
     std::string vcvars_path;
+    CompileMode mode = CompileMode::Script;
     // Optional accelerator install roots — when set, the script DLL is
     // compiled with the matching XINSP2_HAS_* define so xi::ops dispatch
     // gets the same backend as the main process. Empty = no acceleration
@@ -312,7 +324,17 @@ inline CompileResult compile(const CompileRequest& req) {
     cmd += "cmd /C \"";
     cmd += "\"" + vcvars + "\"";
     cmd += " >nul 2>nul && ";
-    cmd += "cl.exe /nologo /std:c++20 /LD /EHsc /MD /O2 /utf-8 /W3";
+    // Mode-dependent codegen flags:
+    //   Script        → /O2 (Release) — main inspection loop wants speed
+    //   PluginDev     → /Od /Zi /RTC1 — debugger-friendly, fast iteration
+    //   PluginExport  → /O2 /Zi — Release perf + keep PDB for crash blame
+    const char* opt_flags =
+        (req.mode == CompileMode::PluginDev) ? "/Od /Zi /RTC1"
+      : (req.mode == CompileMode::PluginExport) ? "/O2 /Zi"
+      : "/O2";
+    cmd += "cl.exe /nologo /std:c++20 /LD /EHsc /MD ";
+    cmd += opt_flags;
+    cmd += " /utf-8 /W3";
     cmd += " /I\"" + req.include_dir + "\"";
     // Also include the vendor dir (cJSON, stb, etc.) — sibling of include/
     auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";
@@ -323,7 +345,14 @@ inline CompileResult compile(const CompileRequest& req) {
     for (auto& d : req.include_dirs) {
         cmd += " /I\"" + d + "\"";
     }
-    cmd += " /FIxi/xi_script_support.hpp";
+    // Force-include the right convenience header for the kind of DLL.
+    // Script gets the inspect_entry plumbing; plugin gets the C ABI
+    // export macros so the user only writes a plain class.
+    if (req.mode == CompileMode::Script) {
+        cmd += " /FIxi/xi_script_support.hpp";
+    } else {
+        cmd += " /FIxi/xi_plugin_support.hpp";
+    }
     // Accelerator includes — defines and -I; libs added at /link below.
     if (!req.opencv_dir.empty()) {
         cmd += " /D XINSP2_HAS_OPENCV=1";
