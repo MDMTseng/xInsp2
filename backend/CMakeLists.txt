@@ -77,6 +77,22 @@ if(WIN32)
 endif()
 set_target_properties(xinsp_runner PROPERTIES OUTPUT_NAME "xinsp-runner")
 
+# JPEG-encoder benchmark — quantifies the IPP/OpenCV/stb dispatch.
+# Not run as a test (no pass/fail); invoke manually for numbers.
+add_executable(bench_jpeg tests/bench_jpeg.cpp src/stb_impl.cpp)
+target_link_libraries(bench_jpeg PRIVATE xi_core cjson)
+if(XINSP2_HAS_IPP)
+    target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_IPP=1)
+    if(IPP_INCLUDE_DIR AND IPP_CORE_LIB)
+        target_include_directories(bench_jpeg PRIVATE ${IPP_INCLUDE_DIR})
+        target_link_libraries(bench_jpeg PRIVATE ${IPP_CORE_LIB} ${IPP_I_LIB} ${IPP_J_LIB})
+    endif()
+endif()
+if(XINSP2_HAS_OPENCV)
+    target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_OPENCV=1)
+    target_link_libraries(bench_jpeg PRIVATE ${OpenCV_LIBS})
+endif()
+
 if(XINSP2_HAS_IPP)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_IPP=1)
     # User must set IPP_ROOT or CMAKE_PREFIX_PATH to find IPP
