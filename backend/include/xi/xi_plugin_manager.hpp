@@ -505,6 +505,17 @@ public:
             InstanceRegistry::instance().remove(k);
             InstanceFolderRegistry::instance().clear(k);
         }
+        // Drop project plugins entirely — their DLLs were built into the
+        // closed project's build/ folder and won't be valid against a
+        // different project. Global plugins stay registered.
+        for (auto& [pname, _] : project_plugin_origin_) {
+            auto it = plugins_.find(pname);
+            if (it != plugins_.end()) {
+                if (it->second.handle) FreeLibrary(it->second.handle);
+                plugins_.erase(it);
+            }
+        }
+        project_plugin_origin_.clear();
         project_ = ProjectInfo{};
     }
 
@@ -518,6 +529,16 @@ public:
             InstanceRegistry::instance().remove(k);
             InstanceFolderRegistry::instance().clear(k);
         }
+        // Drop the previous project's plugins — they're built against
+        // that project's source tree and stale once the project changes.
+        for (auto& [pname, _] : project_plugin_origin_) {
+            auto it = plugins_.find(pname);
+            if (it != plugins_.end()) {
+                if (it->second.handle) FreeLibrary(it->second.handle);
+                plugins_.erase(it);
+            }
+        }
+        project_plugin_origin_.clear();
         project_.folder_path = folder;
         project_.instances.clear();
 
@@ -882,9 +903,22 @@ public:
         i = 0;
         for (auto& [k, v] : plugins_) {
             if (i++) out += ",";
+            bool is_proj = project_plugin_origin_.count(v.name) > 0;
             out += "{\"name\":\"" + v.name + "\",\"description\":\"" + v.description + "\"";
             out += ",\"has_ui\":" + std::string(v.has_ui ? "true" : "false");
-            out += ",\"loaded\":" + std::string(v.handle ? "true" : "false") + "}";
+            out += ",\"loaded\":" + std::string(v.handle ? "true" : "false");
+            // origin: "project" if compiled from <project>/plugins, else "global"
+            out += ",\"origin\":\"" + std::string(is_proj ? "project" : "global") + "\"";
+            if (is_proj) {
+                out += ",\"source_dir\":\"";
+                // escape backslashes for JSON
+                for (char c : project_plugin_origin_[v.name]) {
+                    if (c == '\\' || c == '"') out += '\\';
+                    out += c;
+                }
+                out += "\"";
+            }
+            out += "}";
         }
         out += "]}";
         return out;

@@ -9,6 +9,10 @@ export interface PluginInfo {
     has_ui: boolean;
     loaded: boolean;
     cert?: { present: boolean; valid?: boolean; baseline_version?: number; certified_at?: string };
+    // origin: "project" → built from <project>/plugins/<name>/, "global" → from a plugin folder on disk.
+    // source_dir is set only when origin === "project".
+    origin?: 'project' | 'global';
+    source_dir?: string;
 }
 
 type Node =
@@ -81,15 +85,23 @@ export class PluginTreeProvider implements vscode.TreeDataProvider<Node> {
         }
 
         ti.iconPath = new vscode.ThemeIcon(icon, color);
-        ti.description = p.description;
+        // Project plugins get a clear label in the description so the
+        // user knows they live inside the open project (and can be
+        // hot-edited / exported), not in the global plugins folder.
+        const isProj = p.origin === 'project';
+        ti.description = isProj
+            ? `[project] ${p.description || ''}`
+            : p.description;
         ti.tooltip = new vscode.MarkdownString(
-            `**${p.name}**\n\n${p.description || ''}\n\n` +
-            `Folder: \`${p.folder}\`\n\n` +
+            `**${p.name}**${isProj ? ' 🏠 _project plugin_' : ''}\n\n${p.description || ''}\n\n` +
+            (isProj
+                ? `Source: \`${p.source_dir || p.folder}\`\n\n`
+                : `Folder: \`${p.folder}\`\n\n`) +
             `Status: ${statusHint}\n\n` +
             (p.has_ui ? 'Has UI panel\n\n' : 'No UI panel\n\n') +
             (uses ? `Used by ${uses} instance(s) in current project.` : 'Not in use.')
         );
-        ti.contextValue = 'plugin';
+        ti.contextValue = isProj ? 'projectPlugin' : 'plugin';
         return ti;
     }
 
