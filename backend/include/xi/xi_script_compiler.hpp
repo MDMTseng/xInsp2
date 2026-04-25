@@ -39,6 +39,13 @@ struct CompileRequest {
     std::string output_dir;
     std::string include_dir;    // backend/include (always added)
     std::string vcvars_path;
+    // Optional accelerator install roots — when set, the script DLL is
+    // compiled with the matching XINSP2_HAS_* define so xi::ops dispatch
+    // gets the same backend as the main process. Empty = no acceleration
+    // for that path (script falls back to portable C++).
+    std::string opencv_dir;        // OpenCV install root with include/ and lib/
+    std::string turbojpeg_root;    // libjpeg-turbo install root
+    std::string ipp_root;          // Intel IPP install root (image ops only)
 };
 
 struct CompileResult {
@@ -72,6 +79,58 @@ inline std::string read_file(const std::string& path) {
     std::stringstream ss;
     ss << f.rdbuf();
     return ss.str();
+}
+
+// Probe well-known install locations for accelerator libraries. Each
+// probe checks for a sentinel header to confirm the layout. Empty
+// string means "not found — script will fall back to portable C++".
+inline std::string probe_opencv_dir() {
+    if (const char* env = std::getenv("OpenCV_DIR")) {
+        // OpenCV_DIR conventionally points at <root>/x64/<vc>/lib —
+        // walk up to the actual install root.
+        std::filesystem::path p(env);
+        for (int i = 0; i < 3; ++i) {
+            if (p.has_parent_path()) p = p.parent_path();
+        }
+        if (std::filesystem::exists(p / "include" / "opencv2" / "core.hpp")) return p.string();
+    }
+    const char* roots[] = {
+        R"(C:\opencv\opencv\build)",
+        R"(C:\opencv\build)",
+    };
+    for (const char* r : roots) {
+        if (std::filesystem::exists(std::filesystem::path(r) / "include" / "opencv2" / "core.hpp"))
+            return r;
+    }
+    return {};
+}
+
+inline std::string probe_turbojpeg_root() {
+    if (const char* env = std::getenv("TURBOJPEG_ROOT")) {
+        if (std::filesystem::exists(std::filesystem::path(env) / "include" / "turbojpeg.h"))
+            return env;
+    }
+    const char* roots[] = {
+        R"(C:\libjpeg-turbo64)",
+        R"(C:\libjpeg-turbo)",
+    };
+    for (const char* r : roots) {
+        if (std::filesystem::exists(std::filesystem::path(r) / "include" / "turbojpeg.h"))
+            return r;
+    }
+    return {};
+}
+
+inline std::string probe_ipp_root() {
+    if (const char* env = std::getenv("IPP_ROOT")) {
+        if (std::filesystem::exists(std::filesystem::path(env) / "include" / "ippi.h"))
+            return env;
+    }
+    std::error_code ec;
+    for (auto& dir : std::filesystem::directory_iterator(R"(C:\Intel\ipp)", ec)) {
+        if (std::filesystem::exists(dir.path() / "include" / "ippi.h")) return dir.path().string();
+    }
+    return {};
 }
 
 } // namespace detail
@@ -160,6 +219,19 @@ inline CompileResult compile(const CompileRequest& req) {
         cmd += " /I\"" + d + "\"";
     }
     cmd += " /FIxi/xi_script_support.hpp";
+    // Accelerator includes — defines and -I; libs added at /link below.
+    if (!req.opencv_dir.empty()) {
+        cmd += " /D XINSP2_HAS_OPENCV=1";
+        cmd += " /I\"" + req.opencv_dir + "\\include\"";
+    }
+    if (!req.turbojpeg_root.empty()) {
+        cmd += " /D XINSP2_HAS_TURBOJPEG=1";
+        cmd += " /I\"" + req.turbojpeg_root + "\\include\"";
+    }
+    if (!req.ipp_root.empty()) {
+        cmd += " /D XINSP2_HAS_IPP=1";
+        cmd += " /I\"" + req.ipp_root + "\\include\"";
+    }
     cmd += " /Fo\"" + req.output_dir + "\\\\\"";
     cmd += " /Fe\"" + out_dll.string() + "\"";
     cmd += " \"" + req.source_path + "\"";
@@ -172,6 +244,35 @@ inline CompileResult compile(const CompileRequest& req) {
     auto cjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cjson.lib";
     if (std::filesystem::exists(cjson_lib)) {
         cmd += " \"" + cjson_lib.string() + "\"";
+    }
+    // Accelerator import libs — match the /D defines added above.
+    if (!req.opencv_dir.empty()) {
+        // Pre-built OpenCV ships opencv_world<ver>.lib at x64/vc16/lib.
+        std::error_code ec_lib;
+        for (auto& vc : { "vc16", "vc17", "vc14" }) {
+            auto libdir = std::filesystem::path(req.opencv_dir) / "x64" / vc / "lib";
+            if (!std::filesystem::exists(libdir, ec_lib)) continue;
+            for (auto& f : std::filesystem::directory_iterator(libdir, ec_lib)) {
+                auto n = f.path().filename().string();
+                if (n.rfind("opencv_world", 0) == 0 && n.size() > 4 &&
+                    n.substr(n.size() - 4) == ".lib" &&
+                    n.find('d') != n.size() - 5 /*skip *_d.lib debug*/) {
+                    cmd += " \"" + f.path().string() + "\"";
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    if (!req.turbojpeg_root.empty()) {
+        auto tj = std::filesystem::path(req.turbojpeg_root) / "lib" / "turbojpeg.lib";
+        if (std::filesystem::exists(tj)) cmd += " \"" + tj.string() + "\"";
+    }
+    if (!req.ipp_root.empty()) {
+        for (auto& n : { "ippcore.lib", "ippi.lib", "ippcv.lib", "ippcc.lib" }) {
+            auto p = std::filesystem::path(req.ipp_root) / "lib" / n;
+            if (std::filesystem::exists(p)) cmd += " \"" + p.string() + "\"";
+        }
     }
     cmd += " > \"" + log_path.string() + "\" 2>&1";
     cmd += "\"";

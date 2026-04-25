@@ -258,6 +258,11 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint = 1, int64_t 
 static std::string g_include_dir;
 static std::string g_work_dir;
 static std::string g_plugins_dir;
+// Accelerator install roots, probed once at startup. Empty string =
+// not installed → user scripts fall back to portable C++ for that path.
+static std::string g_opencv_dir;
+static std::string g_turbojpeg_root;
+static std::string g_ipp_root;
 
 // Plugin manager (global)
 static xi::PluginManager g_plugin_mgr;
@@ -723,9 +728,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
 
         xi::script::CompileRequest req;
-        req.source_path = *src;
-        req.output_dir  = (std::filesystem::path(g_work_dir) / "script_build").string();
-        req.include_dir = g_include_dir;
+        req.source_path     = *src;
+        req.output_dir      = (std::filesystem::path(g_work_dir) / "script_build").string();
+        req.include_dir     = g_include_dir;
+        req.opencv_dir      = g_opencv_dir;
+        req.turbojpeg_root  = g_turbojpeg_root;
+        req.ipp_root        = g_ipp_root;
 
         auto res = xi::script::compile(req);
         if (!res.ok) {
@@ -1629,6 +1637,16 @@ int main(int argc, char** argv) {
     }
     g_work_dir = (std::filesystem::temp_directory_path() / "xinsp2").string();
     std::filesystem::create_directories(g_work_dir);
+
+    // Probe accelerators once. Logged so the user can see what their
+    // compiled scripts will inherit.
+    g_opencv_dir     = xi::script::detail::probe_opencv_dir();
+    g_turbojpeg_root = xi::script::detail::probe_turbojpeg_root();
+    g_ipp_root       = xi::script::detail::probe_ipp_root();
+    std::fprintf(stderr, "[xinsp2] script-side accelerators: opencv=%s  turbojpeg=%s  ipp=%s\n",
+                 g_opencv_dir.empty()     ? "no" : g_opencv_dir.c_str(),
+                 g_turbojpeg_root.empty() ? "no" : g_turbojpeg_root.c_str(),
+                 g_ipp_root.empty()       ? "no" : g_ipp_root.c_str());
 
     // Find and scan plugins directory (sibling of backend/)
     {

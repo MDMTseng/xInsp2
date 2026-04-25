@@ -229,9 +229,12 @@ int main(int argc, char** argv) {
         return 2;
     }
     xi::script::CompileRequest req;
-    req.source_path = script_path;
-    req.output_dir  = (fs::temp_directory_path() / "xinsp2_runner_build").string();
-    req.include_dir = include_dir;
+    req.source_path    = script_path;
+    req.output_dir     = (fs::temp_directory_path() / "xinsp2_runner_build").string();
+    req.include_dir    = include_dir;
+    req.opencv_dir     = xi::script::detail::probe_opencv_dir();
+    req.turbojpeg_root = xi::script::detail::probe_turbojpeg_root();
+    req.ipp_root       = xi::script::detail::probe_ipp_root();
     auto res = xi::script::compile(req);
     if (!res.ok) {
         std::fprintf(stderr, "[runner] compile failed:\n%s\n", res.build_log.c_str());
