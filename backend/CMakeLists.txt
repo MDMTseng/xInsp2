@@ -168,6 +168,10 @@ add_executable(test_script_process_adapter tests/test_script_process_adapter.cpp
 target_link_libraries(test_script_process_adapter PRIVATE xi_core cjson)
 add_dependencies(test_script_process_adapter xinsp_script_runner test_script_runner_dll)
 add_test(NAME script_process_adapter COMMAND test_script_process_adapter)
+
+add_executable(test_shm_ipc_edges tests/test_shm_ipc_edges.cpp)
+target_link_libraries(test_shm_ipc_edges PRIVATE xi_core cjson)
+add_test(NAME shm_ipc_edges COMMAND test_shm_ipc_edges)
 set_tests_properties(protocol PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures"
 )

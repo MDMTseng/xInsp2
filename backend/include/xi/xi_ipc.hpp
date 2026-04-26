@@ -226,11 +226,19 @@ struct Frame {
     std::vector<uint8_t> payload;
 };
 
+// Sanity bound for incoming frame payloads. Anything bigger is either
+// a programming bug or a hostile peer trying to OOM the receiver via
+// uint32-max len. Production might raise this for huge JSON blobs;
+// 16 MB is comfortable for the current RPC surface.
+constexpr uint32_t MAX_PAYLOAD_BYTES = 16u * 1024 * 1024;
+
 inline Frame recv_frame(Pipe& p) {
     FrameHeader h;
     p.read_exact(&h, sizeof(h));
     if (h.magic != FRAME_MAGIC)
         throw std::runtime_error("frame magic mismatch");
+    if (h.len > MAX_PAYLOAD_BYTES)
+        throw std::runtime_error("frame payload too large: " + std::to_string(h.len));
     Frame f;
     f.seq = h.seq;
     f.type = h.type;
