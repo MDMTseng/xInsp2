@@ -37,6 +37,7 @@
 #include <xi/xi_trigger_recorder.hpp>
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
+#include <xi/xi_script_process_adapter.hpp>
 #include <xi/xi_source.hpp>
 #include <xi/xi_ws_server.hpp>
 
@@ -58,6 +59,12 @@ static std::atomic<int64_t> g_run_id{0};
 
 // Loaded user script state. When null, cmd:run returns an error.
 static xi::script::LoadedScript g_script;
+
+// Optional cross-process isolation for the user script. Populated by the
+// cmd:script_isolated_run handler on first call when XINSP2_ISOLATE_SCRIPT
+// is set; demonstrates the path without disrupting the in-proc run flow.
+static std::unique_ptr<xi::script::ScriptProcessAdapter> g_script_iso_adapter;
+static std::string g_shm_name;   // populated in main(), used by the iso adapter
 static std::mutex               g_script_mu;
 
 // Persistent cross-frame state — survives DLL reloads.
@@ -1021,7 +1028,113 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "unload_script") {
         std::lock_guard<std::mutex> lk(g_script_mu);
         xi::script::unload_script(g_script);
+        // Tear down isolated runner if one was spawned for this script.
+        g_script_iso_adapter.reset();
         send_rsp_ok(srv, id);
+    } else if (name == "script_isolated_run") {
+        // Phase 3.8 wire-up: run xi_inspect_entry inside xinsp-script-runner.exe
+        // so a buggy / segfaulting / hanging user script doesn't take the
+        // backend down. Lazy-spawns the runner on first call. The runner
+        // attaches the same SHM region, and use_*/exchange/grab callbacks
+        // route back here via Session::set_handler so the script can still
+        // talk to the in-proc instance registry transparently.
+        //
+        // Args: { "frame": <int> } (default 0)
+        // Reply: { "vars": <json string> }
+        std::lock_guard<std::mutex> lk(g_script_mu);
+        if (!g_script.ok()) {
+            send_rsp_err(srv, id, "no script loaded");
+            return;
+        }
+        // Lazy spawn — keeps the cost out of compile_and_load.
+        if (!g_script_iso_adapter) {
+            auto runner_exe = std::filesystem::path(get_exe_dir()) / "xinsp-script-runner.exe";
+            if (!std::filesystem::exists(runner_exe)) {
+                send_rsp_err(srv, id, "xinsp-script-runner.exe not found alongside backend");
+                return;
+            }
+            if (g_shm_name.empty()) {
+                send_rsp_err(srv, id, "shm region not initialised");
+                return;
+            }
+            auto adapter = std::make_unique<xi::script::ScriptProcessAdapter>();
+            std::string err;
+            if (!adapter->start(runner_exe, g_script.path, g_shm_name, err)) {
+                send_rsp_err(srv, id, "spawn failed: " + err);
+                return;
+            }
+            // Route the runner's callbacks back into our existing
+            // in-proc handlers — same logic the in-proc script DLL
+            // would hit, just reached via IPC.
+            adapter->set_handler([](uint32_t type,
+                                    const std::vector<uint8_t>& payload)
+                                 -> std::vector<uint8_t> {
+                if (type == xi::ipc::RPC_USE_PROCESS) {
+                    xi::ipc::Reader r(payload);
+                    std::string instance_name = r.str();
+                    uint64_t in_h = r.u64();
+                    auto json_bytes = r.bytes();
+                    std::string in_json(json_bytes.begin(), json_bytes.end());
+                    xi_record_image in_img{ "frame", in_h };
+                    xi_record_out out_rec{};
+                    int n = use_process_cb(instance_name.c_str(), in_json.c_str(),
+                                            &in_img, 1, &out_rec);
+                    xi::ipc::Writer w;
+                    w.u64((n > 0 && out_rec.image_count > 0)
+                          ? out_rec.images[0].handle : 0);
+                    const char* j = out_rec.json ? out_rec.json : "{}";
+                    w.bytes(j, std::strlen(j));
+                    return w.buf();
+                }
+                if (type == xi::ipc::RPC_USE_EXCHANGE) {
+                    xi::ipc::Reader r(payload);
+                    std::string instance_name = r.str();
+                    std::string cmd = r.str();
+                    std::vector<char> rsp(64 * 1024);
+                    int n = use_exchange_cb(instance_name.c_str(), cmd.c_str(),
+                                             rsp.data(), (int)rsp.size());
+                    xi::ipc::Writer w;
+                    if (n > 0) w.bytes(rsp.data(), (size_t)n);
+                    else       w.bytes("", 0);
+                    return w.buf();
+                }
+                if (type == xi::ipc::RPC_USE_GRAB) {
+                    xi::ipc::Reader r(payload);
+                    std::string instance_name = r.str();
+                    int32_t timeout_ms = (int32_t)r.u32();
+                    xi_image_handle h = use_grab_cb(instance_name.c_str(), timeout_ms);
+                    xi::ipc::Writer w; w.u64(h);
+                    return w.buf();
+                }
+                throw std::runtime_error("unhandled rpc type "
+                                          + std::to_string(type));
+            });
+            g_script_iso_adapter = std::move(adapter);
+            std::fprintf(stderr, "[xinsp2] script isolated runner spawned\n");
+        }
+
+        // Parse "frame" out of the args. Tiny so cJSON is overkill —
+        // a manual scan is fine.
+        int frame = 0;
+        {
+            const std::string& a = parsed->args_json;
+            auto p = a.find("\"frame\"");
+            if (p != std::string::npos) {
+                auto colon = a.find(':', p);
+                if (colon != std::string::npos)
+                    try { frame = std::stoi(a.substr(colon + 1)); } catch (...) {}
+            }
+        }
+
+        std::string vars_json, err;
+        if (!g_script_iso_adapter->inspect_and_snapshot(frame, vars_json, err)) {
+            send_rsp_err(srv, id, "inspect failed: " + err);
+            return;
+        }
+        std::string data = "{\"vars\":";
+        xp::json_escape_into(data, vars_json);
+        data += "}";
+        send_rsp_ok(srv, id, data);
     } else if (name == "run") {
         if (g_continuous.load()) {
             send_rsp_err(srv, id, "cannot run while continuous mode is active — stop first");
@@ -2201,6 +2314,7 @@ int main(int argc, char** argv) {
     char shm_name[64];
     std::snprintf(shm_name, sizeof(shm_name), "xinsp2-shm-%lu",
                   (unsigned long)GetCurrentProcessId());
+    g_shm_name = shm_name;
     try {
         g_shm_region = std::make_unique<xi::ShmRegion>(
             xi::ShmRegion::create(shm_name, 512ull * 1024 * 1024));
