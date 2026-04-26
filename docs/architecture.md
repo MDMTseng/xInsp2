@@ -1,8 +1,26 @@
-# xInsp2 Framework Reference
+# xInsp2 Architecture Reference
 
-Complete technical reference for the xInsp2 machine vision inspection framework.
-62 commits. Last updated 2026-04-24 — post Phase 3 (TriggerBus + multi-camera +
-recording/replay + plugin SDK).
+Complete technical reference for the xInsp2 machine vision inspection
+framework. This is the deep dive — pick a section from the table of
+contents below.
+
+> **Quick navigation:**
+> - [`status.md`](./status.md) — what's currently shipping vs in flight
+> - [`testing.md`](./testing.md) — how testing is organised
+> - [`protocol.md`](./protocol.md) — WS wire format
+> - [`guides/`](./guides/) — task-shaped onboarding (adding a plugin,
+>   writing a script, debugging, extending the UI)
+> - [`reference/`](./reference/) — per-API surface details
+> - [`archive/`](./archive/) — historical snapshots
+>
+> **Recent additions documented elsewhere** (don't duplicate here):
+> - **Project-level plugin authoring** — see
+>   [`guides/adding-a-plugin.md`](./guides/adding-a-plugin.md).
+> - **Interactive image viewer** (pan + cursor zoom + Pick tools) — see
+>   [`guides/extending-the-ui.md`](./guides/extending-the-ui.md).
+> - **Cross-process isolation spike** (SHM + worker / script-runner exes)
+>   — currently on the `shm-process-isolation` branch; see
+>   [`status.md`](./status.md) for state.
 
 ---
 
