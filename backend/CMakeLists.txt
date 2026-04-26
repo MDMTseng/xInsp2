@@ -174,6 +174,15 @@ target_link_libraries(test_script_runner_respawn PRIVATE xi_core cjson)
 add_dependencies(test_script_runner_respawn xinsp_script_runner test_script_runner_dll)
 add_test(NAME script_runner_respawn COMMAND test_script_runner_respawn)
 
+add_library(test_hang_plugin SHARED tests/test_hang_plugin.cpp)
+target_link_libraries(test_hang_plugin PRIVATE xi_core)
+set_target_properties(test_hang_plugin PROPERTIES PREFIX "")
+
+add_executable(test_worker_timeout tests/test_worker_timeout.cpp)
+target_link_libraries(test_worker_timeout PRIVATE xi_core cjson)
+add_dependencies(test_worker_timeout xinsp_worker test_hang_plugin)
+add_test(NAME worker_timeout COMMAND test_worker_timeout)
+
 add_executable(test_shm_ipc_edges tests/test_shm_ipc_edges.cpp)
 target_link_libraries(test_shm_ipc_edges PRIVATE xi_core cjson)
 add_test(NAME shm_ipc_edges COMMAND test_shm_ipc_edges)

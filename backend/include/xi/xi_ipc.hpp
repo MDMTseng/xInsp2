@@ -194,6 +194,11 @@ public:
 
     bool valid() const { return h_ != INVALID_HANDLE_VALUE; }
 
+    // For watchdog code that needs to abort an in-flight blocking
+    // ReadFile / WriteFile via CancelIoEx. Hand out the raw HANDLE
+    // grudgingly — only the timeout machinery should touch this.
+    HANDLE native_handle() const { return h_; }
+
 private:
     HANDLE h_ = INVALID_HANDLE_VALUE;
     void close_() {

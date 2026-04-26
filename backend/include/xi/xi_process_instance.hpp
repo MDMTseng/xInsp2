@@ -31,11 +31,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <filesystem>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace xi {
 
@@ -213,6 +215,14 @@ public:
         return worker_proc_ ? GetProcessId(worker_proc_) : 0;
     }
 
+    // Maximum time a single RPC may block before the adapter cancels
+    // the in-flight read/write via CancelIoEx and treats it like a
+    // crashed worker. 30s is generous for normal plugin process()
+    // calls; tune via set_call_timeout_ms() for slow operators (e.g.
+    // long-exposure cameras' grab()).
+    int  call_timeout_ms() const { return call_timeout_ms_; }
+    void set_call_timeout_ms(int ms) { call_timeout_ms_ = ms; }
+
 private:
     ipc::Frame call_(uint32_t type, const std::vector<uint8_t>& payload) {
         std::lock_guard<std::mutex> lk(mu_);
@@ -232,11 +242,54 @@ private:
     }
 
     ipc::Frame raw_call_locked_(uint32_t type, const std::vector<uint8_t>& payload) {
-        uint32_t seq = ++seq_;
-        ipc::send_frame(pipe_, seq, type, payload.data(), (uint32_t)payload.size());
-        auto f = ipc::recv_frame(pipe_);
-        if (f.seq != seq) throw std::runtime_error("RPC seq mismatch");
-        return f;
+        // Watchdog thread: waits up to call_timeout_ms_ on a condvar.
+        // If the call doesn't complete in time, it CancelIoEx's the
+        // pipe handle, which makes the in-flight ReadFile / WriteFile
+        // return with ERROR_OPERATION_ABORTED → Pipe::read_exact /
+        // write_all throws → call_() catches and triggers respawn.
+        std::mutex                      m;
+        std::condition_variable         cv;
+        bool                            done    = false;
+        bool                            timeout = false;
+        HANDLE                          ph      = pipe_.native_handle();
+        const int                       wait_ms = call_timeout_ms_;
+        std::thread watchdog([&] {
+            std::unique_lock<std::mutex> lk(m);
+            if (cv.wait_for(lk, std::chrono::milliseconds(wait_ms),
+                            [&]{ return done; })) {
+                return;          // RPC completed in time
+            }
+            timeout = true;
+            // CancelIoEx works even for non-overlapped pending I/O
+            // since Vista. Cancels ReadFile + WriteFile on this pipe
+            // for ALL threads — fine, only one in flight at a time.
+            CancelIoEx(ph, nullptr);
+        });
+
+        // Helper: signal watchdog + join.
+        auto release_watchdog = [&] {
+            { std::lock_guard<std::mutex> lk(m); done = true; }
+            cv.notify_all();
+            if (watchdog.joinable()) watchdog.join();
+        };
+
+        try {
+            uint32_t seq = ++seq_;
+            ipc::send_frame(pipe_, seq, type, payload.data(), (uint32_t)payload.size());
+            auto f = ipc::recv_frame(pipe_);
+            release_watchdog();
+            if (f.seq != seq) throw std::runtime_error("RPC seq mismatch");
+            return f;
+        } catch (...) {
+            release_watchdog();
+            if (timeout) {
+                // Re-throw with a clearer error so respawn logs see
+                // "timeout" rather than "pipe read EOF".
+                throw std::runtime_error(
+                    "worker call timeout (" + std::to_string(wait_ms) + "ms)");
+            }
+            throw;
+        }
     }
 
     // Reset pipe + worker proc, spawn a fresh worker, send CREATE, and
@@ -381,6 +434,11 @@ private:
     int      respawn_count_           = 0;   // total this lifetime, for diagnostics
     int      respawn_count_in_window_ = 0;
     int64_t  respawn_window_start_ms_ = 0;
+
+    // Per-call hard timeout. A worker that hangs (plugin's process()
+    // deadlocks, infinite loop, etc.) gets cancelled at this point and
+    // treated like a crash — respawn_locked_ kicks in.
+    int      call_timeout_ms_         = 30000;
 
     // Most recent set_def value that the worker accepted. Re-applied
     // automatically on respawn so isolation:process plugins keep their
