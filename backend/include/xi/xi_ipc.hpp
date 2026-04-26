@@ -33,6 +33,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -64,6 +66,23 @@ enum RpcType : uint32_t {
     // xi_inspect_entry once, then snapshot ValueStore back as JSON.
     RPC_SCRIPT_RUN  = 7,   // payload: u32 frame_num
                            // reply  : u32 vars_len + vars_json
+
+    // --- Phase 3.5: script→backend callback proxy ---------------------
+    // When a script in the runner calls xi::use<T>("name").process(...),
+    // the runner sends this back to the backend over the SAME pipe; the
+    // backend dispatches to its local instance (or the instance's own
+    // ProcessInstanceAdapter for triple-hop) and replies with a SHM
+    // output handle. This is a runner→backend request, not the usual
+    // backend→runner.
+    RPC_USE_PROCESS  = 8,  // payload: u32 name_len + name
+                           //          u64 input_handle + u32 json_len + json
+                           // reply  : u64 output_handle + u32 json_len + json
+
+    // Test-only: drive a scratch input handle into the running script.
+    // Lets the test driver hand the script an SHM image to feed into
+    // its first xi::use<>().process() call.
+    RPC_TEST_SET_INPUT = 9, // payload: u64 input_handle
+                            // reply  : u8 ok
 };
 
 struct FrameHeader {
@@ -213,6 +232,104 @@ inline Frame recv_frame(Pipe& p) {
     if (h.len) p.read_exact(f.payload.data(), h.len);
     return f;
 }
+
+// ----- Session: bidirectional RPC over a single pipe ------------------
+//
+// Both ends use a Session. Calling code does:
+//
+//   Frame reply = sess.call(type, payload);
+//
+// Internally call() sends, then reads frames in a loop until it gets
+// the matching reply seq. If a frame arrives that's a REQUEST from the
+// other end (no REPLY_BIT), it's dispatched through the registered
+// handler and the result is sent back as a reply — then the loop keeps
+// looking for the original reply. This lets a script running in the
+// runner call xi::use(...) which in turn RPCs back into the backend
+// while the backend is still waiting for the script's main reply.
+//
+// Single-threaded per session: pipe I/O is serialised by mu_. The
+// handler runs synchronously inside loop_until_reply_; it must NOT
+// re-enter call() on the same Session.
+
+class Session {
+public:
+    // Returns reply payload bytes. Throw to send an error reply.
+    using Handler = std::function<std::vector<uint8_t>(uint32_t type,
+                                                       const std::vector<uint8_t>& payload)>;
+
+    Session() = default;
+    explicit Session(Pipe&& p) : pipe_(std::move(p)) {}
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
+    // Non-movable: contains std::mutex. Heap-allocate via unique_ptr if
+    // you need late binding.
+    Session(Session&&) = delete;
+    Session& operator=(Session&&) = delete;
+
+    bool valid() const { return pipe_.valid(); }
+    void set_handler(Handler h) { handler_ = std::move(h); }
+
+    // Direct access to the underlying pipe — useful when you want to
+    // run a custom dispatch loop alongside Session-based call()s. Callers
+    // that mix raw pipe reads with sess.call() must serialise the I/O
+    // themselves; the Session's mutex doesn't cover external reads.
+    Pipe& pipe() { return pipe_; }
+
+    // Blocking call. Returns the reply frame (type has REPLY_BIT set,
+    // or RPC_TYPE_ERROR for a remote error).
+    Frame call(uint32_t type, const std::vector<uint8_t>& payload) {
+        std::lock_guard<std::mutex> lk(mu_);
+        uint32_t seq = ++seq_;
+        send_frame(pipe_, seq, type, payload.data(), (uint32_t)payload.size());
+        return loop_until_reply_(seq);
+    }
+
+    // Server-side: keep handling incoming requests forever (or until
+    // the pipe closes). For sessions that only RECEIVE requests; if
+    // the side may also call(), use call() / loop_until_reply_ instead.
+    void serve_forever() {
+        while (true) {
+            Frame f = recv_frame(pipe_);
+            if ((f.type & RPC_REPLY_BIT) || f.type == RPC_TYPE_ERROR) {
+                // Orphan reply on a serve-only session.
+                continue;
+            }
+            dispatch_(f);
+        }
+    }
+
+private:
+    Frame loop_until_reply_(uint32_t want_seq) {
+        for (;;) {
+            Frame f = recv_frame(pipe_);
+            bool is_reply = (f.type & RPC_REPLY_BIT) || f.type == RPC_TYPE_ERROR;
+            if (is_reply) {
+                if (f.seq != want_seq)
+                    throw std::runtime_error("orphan reply seq " + std::to_string(f.seq));
+                return f;
+            }
+            // Incoming nested request — dispatch + reply, then keep waiting.
+            dispatch_(f);
+        }
+    }
+
+    void dispatch_(const Frame& f) {
+        std::vector<uint8_t> reply;
+        std::string err;
+        try {
+            if (handler_) reply = handler_(f.type, f.payload);
+            else          err = "no handler installed";
+        } catch (const std::exception& e) { err = e.what(); }
+        if (!err.empty()) send_error_reply(pipe_, f.seq, err);
+        else              send_reply(pipe_, f.seq, f.type,
+                                     reply.data(), (uint32_t)reply.size());
+    }
+
+    Pipe       pipe_;
+    std::mutex mu_;
+    uint32_t   seq_ = 0;
+    Handler    handler_;
+};
 
 // ----- Tiny binary cursor for payload encode/decode --------------------
 //

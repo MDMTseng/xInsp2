@@ -156,6 +156,7 @@ add_test(NAME worker_respawn COMMAND test_worker_respawn)
 
 # Phase 3 minimum: script-runner + tiny test "script" DLL + driver.
 add_library(test_script_runner_dll SHARED tests/test_script_runner_dll.cpp)
+target_link_libraries(test_script_runner_dll PRIVATE xi_core)
 set_target_properties(test_script_runner_dll PROPERTIES PREFIX "")
 
 add_executable(test_script_runner tests/test_script_runner.cpp)

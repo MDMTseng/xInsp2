@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <string>
 
+#include <xi/xi_image_pool.hpp>
 #include <xi/xi_ipc.hpp>
 #include <xi/xi_shm.hpp>
 
@@ -52,7 +53,7 @@ int main() {
                   (unsigned long)GetCurrentProcessId());
 
     auto shm = xi::ShmRegion::create(shm_name, 8 * 1024 * 1024);
-    (void)shm;  // not used directly here, but the runner attaches it
+    xi::ImagePool::set_shm_region(&shm);
 
     // Spawn runner.
     std::string cmd = "\"" + runner_exe.string() + "\""
@@ -69,20 +70,44 @@ int main() {
     }
     HANDLE proc = pi.hProcess; CloseHandle(pi.hThread);
 
-    ipc::Pipe pipe;
-    try { pipe = ipc::Pipe::accept_one(pipe_name); }
-    catch (const std::exception& e) {
-        std::fprintf(stderr, "accept failed: %s\n", e.what());
-        TerminateProcess(proc, 1); CloseHandle(proc);
-        return 4;
-    }
+    ipc::Session sess(ipc::Pipe::accept_one(pipe_name));
     std::fprintf(stderr, "[test] pipe accepted\n");
 
+    // The runner forwards script-side use_process calls back to us via
+    // RPC_USE_PROCESS. We act as the "backend" — for the test this is
+    // a hard-coded doubler that mirrors test_worker_plugin's logic.
+    sess.set_handler([&](uint32_t type, const std::vector<uint8_t>& payload)
+                     -> std::vector<uint8_t> {
+        if (type != ipc::RPC_USE_PROCESS) {
+            throw std::runtime_error("unexpected nested rpc " + std::to_string(type));
+        }
+        ipc::Reader r(payload);
+        std::string name = r.str();
+        uint64_t in_h = r.u64();
+        auto in_json = r.bytes();
+        std::fprintf(stderr,
+            "[test/handler] use_process(name=%s, in_h=0x%llx, json=%.*s)\n",
+            name.c_str(), (unsigned long long)in_h,
+            (int)in_json.size(), in_json.data());
+
+        // Allocate output in SHM (zero-copy back to the script).
+        int w = shm.width(in_h), h = shm.height(in_h), ch = shm.channels(in_h);
+        uint64_t out_h = shm.alloc_image(w, h, ch);
+        const uint8_t* sp = shm.data(in_h);
+        uint8_t*       dp = shm.data(out_h);
+        const int total = w * h * ch;
+        for (int i = 0; i < total; ++i) {
+            int v = sp[i] * 2;
+            dp[i] = (uint8_t)(v > 255 ? 255 : v);
+        }
+        ipc::Writer w_out;
+        w_out.u64(out_h);
+        w_out.bytes("{\"who\":\"test/handler\"}", 21);
+        return w_out.buf();
+    });
+
     auto rpc = [&](uint32_t type, const std::vector<uint8_t>& payload) {
-        static uint32_t s_seq = 100;
-        uint32_t seq = ++s_seq;
-        ipc::send_frame(pipe, seq, type, payload.data(), (uint32_t)payload.size());
-        return ipc::recv_frame(pipe);
+        return sess.call(type, payload);
     };
 
     // RUN with frame = 7.
@@ -110,6 +135,63 @@ int main() {
         std::fprintf(stderr, "[test] vars after frame=21: %s\n", vars_json.c_str());
         CHECK(vars_json.find("\"value\":42") != std::string::npos);
     }
+
+    // ---- Phase 3.5: script→backend use_process round-trip ----
+    // Allocate an input image in SHM, pass its handle through to the
+    // script via RPC_TEST_SET_INPUT, then RUN. During inspect, the
+    // script calls g_use_process which RPCs back here mid-call; our
+    // handler doubles pixels and returns the output handle, which the
+    // script stashes in its snapshot under "out_handle". We verify the
+    // bytes — proves the full triangle (driver → runner script →
+    // back to driver handler → script → reply).
+    static xi_host_api host = xi::ImagePool::make_host_api();
+    xi_image_handle in_h = host.shm_create_image(32, 16, 1);
+    CHECK(in_h != 0);
+    {
+        uint8_t* px = host.image_data(in_h);
+        for (int i = 0; i < 32 * 16; ++i) px[i] = (uint8_t)((i * 5 + 3) & 0x7F);
+    }
+    {
+        ipc::Writer w; w.u64(in_h);
+        auto r = rpc(ipc::RPC_TEST_SET_INPUT, w.buf());
+        CHECK(r.type == (ipc::RPC_TEST_SET_INPUT | ipc::RPC_REPLY_BIT));
+    }
+    {
+        ipc::Writer w; w.u32(99);
+        auto r = rpc(ipc::RPC_SCRIPT_RUN, w.buf());
+        CHECK(r.type == (ipc::RPC_SCRIPT_RUN | ipc::RPC_REPLY_BIT));
+        ipc::Reader rd(r.payload);
+        auto vars = rd.bytes();
+        std::string vars_json(vars.begin(), vars.end());
+        std::fprintf(stderr, "[test] phase3.5 vars: %s\n", vars_json.c_str());
+
+        // Parse out_handle from the JSON.
+        auto p = vars_json.find("\"out_handle\"");
+        CHECK(p != std::string::npos);
+        auto vp = vars_json.find("\"value\":", p);
+        CHECK(vp != std::string::npos);
+        uint64_t out_h = std::stoull(vars_json.substr(vp + 8));
+        CHECK(out_h != 0);
+        std::fprintf(stderr, "[test] script reported out_handle=0x%llx\n",
+                     (unsigned long long)out_h);
+
+        // Verify pixels are doubled. Both sides are looking at the
+        // same SHM bytes — no copy.
+        const uint8_t* op = host.image_data(out_h);
+        int wrong = 0;
+        for (int i = 0; i < 32 * 16; ++i) {
+            int in_v = (i * 5 + 3) & 0x7F;
+            int exp = in_v * 2; if (exp > 255) exp = 255;
+            if (op[i] != (uint8_t)exp) ++wrong;
+        }
+        CHECK(wrong == 0);
+        std::fprintf(stderr, "[test] phase3.5 use_process round-trip %s "
+                              "(%d wrong of %d)\n",
+                     wrong == 0 ? "ZERO-COPY OK" : "MISMATCH",
+                     wrong, 32 * 16);
+        host.image_release(out_h);
+    }
+    host.image_release(in_h);
 
     // DESTROY → runner exits 0.
     {
