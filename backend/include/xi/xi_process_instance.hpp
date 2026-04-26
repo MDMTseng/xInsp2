@@ -30,6 +30,7 @@
 #include "xi_ipc.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <mutex>
@@ -47,7 +48,9 @@ public:
                            const std::filesystem::path& worker_exe,
                            const std::filesystem::path& plugin_dll,
                            const std::string& shm_name)
-        : name_(std::move(instance_name)), plugin_name_(std::move(plugin_name))
+        : name_(std::move(instance_name)), plugin_name_(std::move(plugin_name)),
+          worker_exe_path_(worker_exe), plugin_dll_path_(plugin_dll),
+          shm_name_(shm_name)
     {
         // Per-instance pipe name. Worker process is short-lived enough
         // that name reuse across runs isn't a concern.
@@ -125,7 +128,14 @@ public:
             auto rsp = call_(ipc::RPC_SET_DEF, w.buf());
             if (rsp.type == ipc::RPC_TYPE_ERROR) return false;
             ipc::Reader r(rsp.payload);
-            return r.u8() == 1;
+            bool ok = (r.u8() == 1);
+            if (ok) {
+                // Cache for auto-restore after a respawn so the worker
+                // we get back isn't blank-slate.
+                std::lock_guard<std::mutex> lk(mu_);
+                saved_def_ = json;
+            }
+            return ok;
         } catch (...) { dead_ = true; return false; }
     }
 
@@ -198,15 +208,141 @@ public:
     }
 
     bool is_dead() const { return dead_; }
+    int  respawn_count() const { return respawn_count_; }
+    DWORD worker_pid() const {
+        return worker_proc_ ? GetProcessId(worker_proc_) : 0;
+    }
 
 private:
     ipc::Frame call_(uint32_t type, const std::vector<uint8_t>& payload) {
         std::lock_guard<std::mutex> lk(mu_);
+        // First attempt. If pipe is broken (worker died since last
+        // call), this throws — we catch, respawn, then retry once.
+        try {
+            return raw_call_locked_(type, payload);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                "[ProcessInstanceAdapter] '%s' RPC failed: %s — attempting respawn\n",
+                name_.c_str(), e.what());
+            if (!try_respawn_locked_()) throw;
+            // Retry once on the freshly spawned worker. If THIS fails
+            // we propagate so the caller sees the error.
+            return raw_call_locked_(type, payload);
+        }
+    }
+
+    ipc::Frame raw_call_locked_(uint32_t type, const std::vector<uint8_t>& payload) {
         uint32_t seq = ++seq_;
         ipc::send_frame(pipe_, seq, type, payload.data(), (uint32_t)payload.size());
         auto f = ipc::recv_frame(pipe_);
         if (f.seq != seq) throw std::runtime_error("RPC seq mismatch");
         return f;
+    }
+
+    // Reset pipe + worker proc, spawn a fresh worker, send CREATE, and
+    // re-apply the most recent successful set_def so the new instance
+    // isn't blank. Rate-limited: at most 3 respawns per 60s rolling
+    // window, after which dead_ stays true and call_ throws.
+    bool try_respawn_locked_() {
+        using clock = std::chrono::steady_clock;
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            clock::now().time_since_epoch()).count();
+        if (now_ms - respawn_window_start_ms_ > 60000) {
+            respawn_window_start_ms_ = now_ms;
+            respawn_count_in_window_ = 0;
+        }
+        if (respawn_count_in_window_ >= 3) {
+            std::fprintf(stderr,
+                "[ProcessInstanceAdapter] '%s' respawn cap hit (3/60s) — staying dead\n",
+                name_.c_str());
+            return false;
+        }
+        ++respawn_count_in_window_;
+        ++respawn_count_;
+
+        // Tear down stale state.
+        pipe_ = ipc::Pipe{};
+        if (worker_proc_) {
+            TerminateProcess(worker_proc_, 1);
+            CloseHandle(worker_proc_);
+            worker_proc_ = nullptr;
+        }
+
+        // New unique pipe name so we don't collide with the dead one.
+        char nbuf[112];
+        std::snprintf(nbuf, sizeof(nbuf), "xinsp2-pipe-%lu-%s-r%d",
+                      (unsigned long)GetCurrentProcessId(),
+                      name_.c_str(), respawn_count_);
+        pipe_name_ = nbuf;
+
+        std::string cmd = "\"" + worker_exe_path_.string() + "\""
+            + " --pipe=" + pipe_name_
+            + " --shm=" + shm_name_
+            + " --plugin-dll=\"" + plugin_dll_path_.string() + "\""
+            + " --instance=" + name_;
+
+        STARTUPINFOA si{}; si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        std::vector<char> buf(cmd.begin(), cmd.end()); buf.push_back(0);
+        if (!CreateProcessA(nullptr, buf.data(), nullptr, nullptr, FALSE, 0,
+                            nullptr, nullptr, &si, &pi)) {
+            std::fprintf(stderr,
+                "[ProcessInstanceAdapter] '%s' respawn CreateProcess failed (%lu)\n",
+                name_.c_str(), GetLastError());
+            return false;
+        }
+        worker_proc_ = pi.hProcess;
+        CloseHandle(pi.hThread);
+
+        try {
+            pipe_ = ipc::Pipe::accept_one(pipe_name_);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                "[ProcessInstanceAdapter] '%s' respawn accept failed: %s\n",
+                name_.c_str(), e.what());
+            TerminateProcess(worker_proc_, 1);
+            CloseHandle(worker_proc_); worker_proc_ = nullptr;
+            return false;
+        }
+
+        // Re-CREATE on the new worker.
+        seq_ = 0;
+        ipc::Writer w; w.str(name_); w.str(plugin_dll_path_.string());
+        try {
+            auto rsp = raw_call_locked_(ipc::RPC_CREATE, w.buf());
+            if (rsp.type == ipc::RPC_TYPE_ERROR) {
+                std::string msg(rsp.payload.begin(), rsp.payload.end());
+                std::fprintf(stderr,
+                    "[ProcessInstanceAdapter] '%s' respawn CREATE error: %s\n",
+                    name_.c_str(), msg.c_str());
+                return false;
+            }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                "[ProcessInstanceAdapter] '%s' respawn CREATE threw: %s\n",
+                name_.c_str(), e.what());
+            return false;
+        }
+
+        // Restore the last known-good config so the new instance isn't
+        // back at default. Best-effort — failure to set_def is logged
+        // but doesn't block the respawn from being usable.
+        if (!saved_def_.empty() && saved_def_ != "{}") {
+            ipc::Writer sw; sw.str(saved_def_);
+            try { raw_call_locked_(ipc::RPC_SET_DEF, sw.buf()); }
+            catch (...) {
+                std::fprintf(stderr,
+                    "[ProcessInstanceAdapter] '%s' respawn restore-def failed\n",
+                    name_.c_str());
+            }
+        }
+
+        dead_ = false;
+        std::fprintf(stderr,
+            "[ProcessInstanceAdapter] '%s' respawned — new worker pid=%lu (count=%d)\n",
+            name_.c_str(), (unsigned long)GetProcessId(worker_proc_),
+            respawn_count_);
+        return true;
     }
 
     void shutdown_() {
@@ -234,6 +370,22 @@ private:
     mutable std::mutex mu_;
     uint32_t    seq_ = 0;
     std::atomic<bool> dead_{false};
+
+    // Spawn parameters — cached so try_respawn_locked_ can re-spawn
+    // identical workers without the caller having to pass them again.
+    std::filesystem::path worker_exe_path_;
+    std::filesystem::path plugin_dll_path_;
+    std::string           shm_name_;
+
+    // Auto-respawn rate-limit: at most 3 respawns per 60s rolling window.
+    int      respawn_count_           = 0;   // total this lifetime, for diagnostics
+    int      respawn_count_in_window_ = 0;
+    int64_t  respawn_window_start_ms_ = 0;
+
+    // Most recent set_def value that the worker accepted. Re-applied
+    // automatically on respawn so isolation:process plugins keep their
+    // tuning across crashes.
+    std::string saved_def_;
 
     // Storage for the most recent process_via_rpc reply — pointers in
     // xi_record_out alias these.
