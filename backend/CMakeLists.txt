@@ -132,6 +132,17 @@ add_test(NAME diagnostics COMMAND test_diagnostics)
 add_executable(test_xi_shm tests/test_xi_shm.cpp)
 target_link_libraries(test_xi_shm PRIVATE xi_core cjson)
 add_test(NAME xi_shm COMMAND test_xi_shm)
+
+# Worker E2E: tiny test plugin DLL + a process driver. Validates the
+# zero-copy contract end-to-end across the backend/worker boundary.
+add_library(test_worker_plugin SHARED tests/test_worker_plugin.cpp)
+target_link_libraries(test_worker_plugin PRIVATE xi_core)
+set_target_properties(test_worker_plugin PROPERTIES PREFIX "")  # no "lib" prefix
+
+add_executable(test_worker tests/test_worker.cpp)
+target_link_libraries(test_worker PRIVATE xi_core cjson)
+add_dependencies(test_worker xinsp_worker test_worker_plugin)
+add_test(NAME worker COMMAND test_worker)
 set_tests_properties(protocol PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures"
 )
@@ -176,6 +187,11 @@ target_compile_definitions(xinsp_backend PRIVATE
     XINSP2_COMMIT="${XINSP2_COMMIT}")
 
 # Headless production runner. Same libs as the server; no WebSocket.
+add_executable(xinsp_worker src/worker_main.cpp)
+target_link_libraries(xinsp_worker PRIVATE xi_core cjson)
+target_include_directories(xinsp_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
+set_target_properties(xinsp_worker PROPERTIES OUTPUT_NAME "xinsp-worker")
+
 add_executable(xinsp_runner src/runner_main.cpp)
 target_link_libraries(xinsp_runner PRIVATE xi_core cjson)
 target_include_directories(xinsp_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
