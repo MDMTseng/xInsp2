@@ -125,6 +125,15 @@ location:
 Pan / zoom / coordinate math is identical. Pick tools (Point / Area)
 are available only on the standalone panel.
 
+**Test hooks.** Two commands let an e2e drive the standalone viewer
+without real mouse events:
+- `xinsp2.imageViewer.runSelftest` — runs the cursor-anchored zoom +
+  pan + clamp invariants in one shot, returns `{ ok, steps }`.
+- `xinsp2.imageViewer.applyOp` — performs a single op
+  (`{ kind: 'fit'|'oneToOne'|'zoom'|'pan'|'tool', sx?, sy?, factor?, dx?, dy?, tool? }`)
+  and resolves with the post-op transform `{ scale, panX, panY, tool }`.
+  Used by `image_viewer_journey.cjs` to screenshot each step.
+
 ---
 
 ## Sending diagnostics (squiggles)

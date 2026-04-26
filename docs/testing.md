@@ -85,6 +85,7 @@ cd vscode-extension && node test/runUserJourney.mjs
 | `runRecordReplay` | record observer-mode → replay through bus → events match |
 | `runUserJourney` | full 10-step real-user flow (24 screenshots) |
 | `runProjectPluginJourney` | in-project plugin create / edit / typo / fix / instance / export (12 screenshots) |
+| `runImageViewerJourney` | plugin + interactive image viewer pan/zoom/fit/1:1/tool ops (18 screenshots, scripted via `xinsp2.imageViewer.applyOp`) |
 | `runUxStates` | UX state transitions (welcome → project → instance) |
 
 ---
@@ -101,6 +102,7 @@ capture screenshots via `Win32 PrintWindow` for human spot-checks.
 | `index.cjs` | dispatches by `XINSP2_E2E_SUITE` env |
 | `user_journey.cjs` | `runUserJourney.mjs` |
 | `project_plugin_journey.cjs` | `runProjectPluginJourney.mjs` |
+| `image_viewer_journey.cjs` | `runImageViewerJourney.mjs` |
 | `full_pipeline.cjs` | `runE2E.mjs` |
 | `json_source_ui.cjs` | `runJsonSourceUI.mjs` |
 | `ux_states.cjs` | `runUxStates.mjs` |
