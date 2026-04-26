@@ -153,6 +153,15 @@ add_executable(test_worker_respawn tests/test_worker_respawn.cpp)
 target_link_libraries(test_worker_respawn PRIVATE xi_core cjson)
 add_dependencies(test_worker_respawn xinsp_worker test_worker_plugin)
 add_test(NAME worker_respawn COMMAND test_worker_respawn)
+
+# Phase 3 minimum: script-runner + tiny test "script" DLL + driver.
+add_library(test_script_runner_dll SHARED tests/test_script_runner_dll.cpp)
+set_target_properties(test_script_runner_dll PROPERTIES PREFIX "")
+
+add_executable(test_script_runner tests/test_script_runner.cpp)
+target_link_libraries(test_script_runner PRIVATE xi_core cjson)
+add_dependencies(test_script_runner xinsp_script_runner test_script_runner_dll)
+add_test(NAME script_runner COMMAND test_script_runner)
 set_tests_properties(protocol PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures"
 )
@@ -201,6 +210,11 @@ add_executable(xinsp_worker src/worker_main.cpp)
 target_link_libraries(xinsp_worker PRIVATE xi_core cjson)
 target_include_directories(xinsp_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 set_target_properties(xinsp_worker PROPERTIES OUTPUT_NAME "xinsp-worker")
+
+add_executable(xinsp_script_runner src/script_runner_main.cpp)
+target_link_libraries(xinsp_script_runner PRIVATE xi_core cjson)
+target_include_directories(xinsp_script_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
+set_target_properties(xinsp_script_runner PROPERTIES OUTPUT_NAME "xinsp-script-runner")
 
 add_executable(xinsp_runner src/runner_main.cpp)
 target_link_libraries(xinsp_runner PRIVATE xi_core cjson)

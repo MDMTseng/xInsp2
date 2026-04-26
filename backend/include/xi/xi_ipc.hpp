@@ -56,6 +56,14 @@ enum RpcType : uint32_t {
                         // reply  : u32 def_len + def
     RPC_SET_DEF  = 6,   // payload: u32 def_len + def
                         // reply  : u8 ok
+
+    // --- script-runner RPCs (Phase 3 minimal slice) -------------------
+    // The runner hosts an inspection script DLL; backend drives it over
+    // the same pipe. use_*/trigger/breakpoint/params/state proxying is
+    // deferred — Phase 3 minimum is: ask the runner to RESET + run
+    // xi_inspect_entry once, then snapshot ValueStore back as JSON.
+    RPC_SCRIPT_RUN  = 7,   // payload: u32 frame_num
+                           // reply  : u32 vars_len + vars_json
 };
 
 struct FrameHeader {
