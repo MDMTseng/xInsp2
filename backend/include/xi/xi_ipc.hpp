@@ -83,6 +83,12 @@ enum RpcType : uint32_t {
     // its first xi::use<>().process() call.
     RPC_TEST_SET_INPUT = 9, // payload: u64 input_handle
                             // reply  : u8 ok
+
+    // Phase 3.7 — full xi::use<T>() proxy surface.
+    RPC_USE_EXCHANGE = 10, // payload: u32 name_len + name + u32 cmd_len + cmd
+                           // reply  : u32 rsp_len + rsp
+    RPC_USE_GRAB     = 11, // payload: u32 name_len + name + i32 timeout_ms
+                           // reply  : u64 image_handle  (0 = no image / timeout)
 };
 
 struct FrameHeader {

@@ -179,13 +179,46 @@ int main(int argc, char** argv) {
         }
     };
 
-    // Install callbacks on the script. exchange/grab still null —
-    // Phase 3.5 only proxies use_process. Plus the script needs the
+    // use_exchange(name, cmd_json, rsp_buf, rsp_len) → bytes written or -needed.
+    auto runner_use_exchange = [](const char* name, const char* cmd,
+                                   char* rsp_buf, int rsp_buflen) -> int {
+        if (!g_sess || !name) return -1;
+        ipc::Writer w;
+        w.str(name);
+        w.str(cmd ? cmd : "");
+        try {
+            auto rsp = g_sess->call(ipc::RPC_USE_EXCHANGE, w.buf());
+            if (rsp.type == ipc::RPC_TYPE_ERROR) return -1;
+            ipc::Reader r(rsp.payload);
+            auto bytes = r.bytes();
+            int n = (int)bytes.size();
+            if (rsp_buflen < n + 1) return -n;
+            std::memcpy(rsp_buf, bytes.data(), (size_t)n);
+            rsp_buf[n] = 0;
+            return n;
+        } catch (...) { return -1; }
+    };
+
+    // use_grab(name, timeout_ms) → image handle.
+    auto runner_use_grab = [](const char* name, int timeout_ms) -> xi_image_handle {
+        if (!g_sess || !name) return XI_IMAGE_NULL;
+        ipc::Writer w;
+        w.str(name);
+        w.u32((uint32_t)timeout_ms);
+        try {
+            auto rsp = g_sess->call(ipc::RPC_USE_GRAB, w.buf());
+            if (rsp.type == ipc::RPC_TYPE_ERROR) return XI_IMAGE_NULL;
+            ipc::Reader r(rsp.payload);
+            return r.u64();
+        } catch (...) { return XI_IMAGE_NULL; }
+    };
+
+    // Install callbacks on the script. Plus the script needs the
     // host_api so it can deref input image bytes locally (SHM).
     if (set_cb) {
         set_cb((void*)+runner_use_process,
-               nullptr,        // exchange — todo
-               nullptr,        // grab     — todo
+               (void*)+runner_use_exchange,
+               (void*)+runner_use_grab,
                (void*)&host);
     }
 

@@ -78,32 +78,58 @@ int main() {
     // a hard-coded doubler that mirrors test_worker_plugin's logic.
     sess.set_handler([&](uint32_t type, const std::vector<uint8_t>& payload)
                      -> std::vector<uint8_t> {
-        if (type != ipc::RPC_USE_PROCESS) {
-            throw std::runtime_error("unexpected nested rpc " + std::to_string(type));
-        }
-        ipc::Reader r(payload);
-        std::string name = r.str();
-        uint64_t in_h = r.u64();
-        auto in_json = r.bytes();
-        std::fprintf(stderr,
-            "[test/handler] use_process(name=%s, in_h=0x%llx, json=%.*s)\n",
-            name.c_str(), (unsigned long long)in_h,
-            (int)in_json.size(), in_json.data());
+        if (type == ipc::RPC_USE_PROCESS) {
+            ipc::Reader r(payload);
+            std::string name = r.str();
+            uint64_t in_h = r.u64();
+            auto in_json = r.bytes();
+            std::fprintf(stderr,
+                "[test/handler] use_process(name=%s, in_h=0x%llx, json=%.*s)\n",
+                name.c_str(), (unsigned long long)in_h,
+                (int)in_json.size(), in_json.data());
 
-        // Allocate output in SHM (zero-copy back to the script).
-        int w = shm.width(in_h), h = shm.height(in_h), ch = shm.channels(in_h);
-        uint64_t out_h = shm.alloc_image(w, h, ch);
-        const uint8_t* sp = shm.data(in_h);
-        uint8_t*       dp = shm.data(out_h);
-        const int total = w * h * ch;
-        for (int i = 0; i < total; ++i) {
-            int v = sp[i] * 2;
-            dp[i] = (uint8_t)(v > 255 ? 255 : v);
+            // Allocate output in SHM (zero-copy back to the script).
+            int w = shm.width(in_h), h = shm.height(in_h), ch = shm.channels(in_h);
+            uint64_t out_h = shm.alloc_image(w, h, ch);
+            const uint8_t* sp = shm.data(in_h);
+            uint8_t*       dp = shm.data(out_h);
+            const int total = w * h * ch;
+            for (int i = 0; i < total; ++i) {
+                int v = sp[i] * 2;
+                dp[i] = (uint8_t)(v > 255 ? 255 : v);
+            }
+            ipc::Writer w_out;
+            w_out.u64(out_h);
+            w_out.bytes("{\"who\":\"test/handler\"}", 21);
+            return w_out.buf();
         }
-        ipc::Writer w_out;
-        w_out.u64(out_h);
-        w_out.bytes("{\"who\":\"test/handler\"}", 21);
-        return w_out.buf();
+        if (type == ipc::RPC_USE_EXCHANGE) {
+            ipc::Reader r(payload);
+            std::string name = r.str();
+            std::string cmd  = r.str();
+            std::fprintf(stderr,
+                "[test/handler] use_exchange(name=%s, cmd=%s)\n",
+                name.c_str(), cmd.c_str());
+            ipc::Writer w_out;
+            std::string rsp = "{\"who\":\"doubler\",\"got\":" + std::to_string(cmd.size()) + "}";
+            w_out.bytes(rsp.data(), rsp.size());
+            return w_out.buf();
+        }
+        if (type == ipc::RPC_USE_GRAB) {
+            ipc::Reader r(payload);
+            std::string name = r.str();
+            uint32_t timeout_ms = r.u32();
+            std::fprintf(stderr,
+                "[test/handler] use_grab(name=%s, timeout=%u)\n",
+                name.c_str(), timeout_ms);
+            // Allocate a fresh SHM image, fill with sentinel 0x42 so
+            // the script side can verify "yes that came from the host".
+            uint64_t h = shm.alloc_image(8, 8, 1);
+            std::memset(shm.data(h), 0x42, 64);
+            ipc::Writer w_out; w_out.u64(h);
+            return w_out.buf();
+        }
+        throw std::runtime_error("unexpected nested rpc " + std::to_string(type));
     });
 
     auto rpc = [&](uint32_t type, const std::vector<uint8_t>& payload) {
@@ -190,6 +216,38 @@ int main() {
                      wrong == 0 ? "ZERO-COPY OK" : "MISMATCH",
                      wrong, 32 * 16);
         host.image_release(out_h);
+
+        // Phase 3.7 assertions — the script's inspect_entry also calls
+        // exchange + grab; verify the outcomes landed in vars.
+        //
+        // SHM handles have 0xA5 in the top byte → values exceed int64
+        // max, so use stoull throughout.
+        auto find_num = [&](const std::string& key) -> uint64_t {
+            auto p = vars_json.find("\"" + key + "\"");
+            if (p == std::string::npos) return 0;
+            auto vp = vars_json.find("\"value\":", p);
+            if (vp == std::string::npos) return 0;
+            try { return std::stoull(vars_json.substr(vp + 8)); }
+            catch (...) { return 0; }
+        };
+        uint64_t exch_rc = find_num("exch_rc");
+        uint64_t grabbed = find_num("grabbed_handle");
+        std::fprintf(stderr,
+            "[test] phase3.7 exch_rc=%llu grabbed=0x%llx\n",
+            (unsigned long long)exch_rc, (unsigned long long)grabbed);
+        CHECK(exch_rc > 0);
+        CHECK(grabbed != 0);
+        CHECK(vars_json.find("doubler") != std::string::npos);
+        // Verify the grabbed image's bytes are 0x42 — proves zero-copy
+        // path for grab too.
+        const uint8_t* gp = host.image_data((xi_image_handle)grabbed);
+        CHECK(gp != nullptr);
+        bool all_42 = true;
+        if (gp) {
+            for (int i = 0; i < 64; ++i) if (gp[i] != 0x42) { all_42 = false; break; }
+        }
+        CHECK(all_42);
+        if (grabbed) host.image_release((xi_image_handle)grabbed);
     }
     host.image_release(in_h);
 
