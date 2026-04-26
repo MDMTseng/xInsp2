@@ -80,6 +80,23 @@ static int use_process_cb(const char* name,
     auto inst = xi::InstanceRegistry::instance().find(name);
     if (!inst) return -1;
 
+    // Isolated (separate-process) adapters: forward over IPC. Pixels go
+    // via SHM so this is still zero-copy — only handles + tiny JSON
+    // ride the named pipe.
+    if (auto* p = dynamic_cast<xi::ProcessInstanceAdapter*>(inst.get())) {
+        xi_record in_rec;
+        in_rec.images      = input_images;
+        in_rec.image_count = input_image_count;
+        in_rec.json        = input_json;
+        std::string err;
+        if (!p->process_via_rpc(&in_rec, output, &err)) {
+            std::fprintf(stderr, "[xinsp2] use_process('%s') isolated: %s\n",
+                         name, err.c_str());
+            return -2;
+        }
+        return output->image_count;
+    }
+
     // Check if it's a C ABI adapter with process_fn
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (adapter && adapter->process_fn()) {
@@ -2191,6 +2208,19 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[xinsp2] shm region '%s' size=%lluMB\n",
                      shm_name,
                      (unsigned long long)(g_shm_region->total_size() / (1024 * 1024)));
+
+        // Hand the worker exe path + SHM name to the PluginManager so
+        // it can spawn isolated workers when an instance asks for it.
+        // Worker exe lives next to xinsp-backend.exe.
+        auto worker_exe = std::filesystem::path(get_exe_dir()) / "xinsp-worker.exe";
+        if (std::filesystem::exists(worker_exe)) {
+            g_plugin_mgr.set_isolation_env(worker_exe, shm_name);
+            std::fprintf(stderr, "[xinsp2] isolation env: worker=%s\n",
+                         worker_exe.string().c_str());
+        } else {
+            std::fprintf(stderr, "[xinsp2] xinsp-worker.exe not found — "
+                                 "isolation:process disabled\n");
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[xinsp2] shm region create failed: %s "
                               "(plugins will use heap pool only)\n", e.what());

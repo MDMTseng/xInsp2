@@ -1,0 +1,244 @@
+#pragma once
+//
+// xi_process_instance.hpp — InstanceBase adapter that hosts a plugin in
+// a separate `xinsp-worker.exe` process. Methods proxy across the pipe
+// using xi_ipc; pixel data crosses via the shared SHM region — no copy.
+//
+// One worker process per isolated instance. Lifecycle:
+//
+//   ctor  → spawn worker → accept pipe → send CREATE
+//   <method calls> → RPC over pipe
+//   dtor  → send DESTROY → wait for worker → close handles
+//
+// Workers crash → adapter sees EOF on next RPC, marks itself dead,
+// surfaces an error to the caller. The PluginManager owner is then
+// expected to clean it up; auto-respawn is deferred to a later phase.
+//
+
+#ifdef _WIN32
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <windows.h>
+#endif
+
+#include "xi_abi.h"
+#include "xi_instance.hpp"
+#include "xi_ipc.hpp"
+
+#include <atomic>
+#include <cstdio>
+#include <filesystem>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+
+namespace xi {
+
+class ProcessInstanceAdapter : public InstanceBase {
+public:
+    // Spawn the worker, accept the pipe, run CREATE. Throws on any failure
+    // — caller (PluginManager) catches + records as an open warning.
+    ProcessInstanceAdapter(std::string instance_name,
+                           std::string plugin_name,
+                           const std::filesystem::path& worker_exe,
+                           const std::filesystem::path& plugin_dll,
+                           const std::string& shm_name)
+        : name_(std::move(instance_name)), plugin_name_(std::move(plugin_name))
+    {
+        // Per-instance pipe name. Worker process is short-lived enough
+        // that name reuse across runs isn't a concern.
+        char nbuf[96];
+        std::snprintf(nbuf, sizeof(nbuf), "xinsp2-pipe-%lu-%s",
+                      (unsigned long)GetCurrentProcessId(), name_.c_str());
+        pipe_name_ = nbuf;
+
+        // Spawn the worker first; pipe accept blocks until it connects.
+        std::string cmd = "\"" + worker_exe.string() + "\""
+            + " --pipe=" + pipe_name_
+            + " --shm=" + shm_name
+            + " --plugin-dll=\"" + plugin_dll.string() + "\""
+            + " --instance=" + name_;
+
+        STARTUPINFOA si{}; si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        std::vector<char> buf(cmd.begin(), cmd.end()); buf.push_back(0);
+        if (!CreateProcessA(nullptr, buf.data(), nullptr, nullptr, FALSE, 0,
+                            nullptr, nullptr, &si, &pi)) {
+            throw std::runtime_error("CreateProcess(xinsp-worker) failed: "
+                + std::to_string(GetLastError()));
+        }
+        worker_proc_ = pi.hProcess;
+        CloseHandle(pi.hThread);
+
+        try {
+            pipe_ = ipc::Pipe::accept_one(pipe_name_);
+        } catch (...) {
+            // Worker started but failed to connect — kill it before we throw.
+            TerminateProcess(worker_proc_, 1);
+            CloseHandle(worker_proc_); worker_proc_ = nullptr;
+            throw;
+        }
+
+        // CREATE — gives the plugin its real instance name.
+        ipc::Writer w; w.str(name_); w.str(plugin_dll.string());
+        auto rsp = call_(ipc::RPC_CREATE, w.buf());
+        if (rsp.type == ipc::RPC_TYPE_ERROR) {
+            std::string msg(rsp.payload.begin(), rsp.payload.end());
+            shutdown_();
+            throw std::runtime_error("worker CREATE failed: " + msg);
+        }
+        std::fprintf(stderr,
+            "[ProcessInstanceAdapter] '%s' spawned worker pid=%lu pipe=%s\n",
+            name_.c_str(), (unsigned long)GetProcessId(worker_proc_),
+            pipe_name_.c_str());
+    }
+
+    ~ProcessInstanceAdapter() override { shutdown_(); }
+
+    // ---- InstanceBase ----
+    const std::string& name() const override { return name_; }
+    std::string plugin_name() const override { return plugin_name_; }
+
+    std::string get_def() const override {
+        // get_def is `const` on InstanceBase but RPC needs to mutate the
+        // pipe state. const_cast is the smaller evil here than touching
+        // the base interface.
+        auto* self = const_cast<ProcessInstanceAdapter*>(this);
+        if (self->dead_) return "{}";
+        try {
+            auto rsp = self->call_(ipc::RPC_GET_DEF, {});
+            if (rsp.type == ipc::RPC_TYPE_ERROR) return "{}";
+            ipc::Reader r(rsp.payload);
+            auto bytes = r.bytes();
+            return std::string(bytes.begin(), bytes.end());
+        } catch (...) { self->dead_ = true; return "{}"; }
+    }
+
+    bool set_def(const std::string& json) override {
+        if (dead_) return false;
+        try {
+            ipc::Writer w; w.str(json);
+            auto rsp = call_(ipc::RPC_SET_DEF, w.buf());
+            if (rsp.type == ipc::RPC_TYPE_ERROR) return false;
+            ipc::Reader r(rsp.payload);
+            return r.u8() == 1;
+        } catch (...) { dead_ = true; return false; }
+    }
+
+    std::string exchange(const std::string& cmd_json) override {
+        if (dead_) return "{}";
+        try {
+            ipc::Writer w; w.str(cmd_json);
+            auto rsp = call_(ipc::RPC_EXCHANGE, w.buf());
+            if (rsp.type == ipc::RPC_TYPE_ERROR) return "{}";
+            ipc::Reader r(rsp.payload);
+            auto bytes = r.bytes();
+            return std::string(bytes.begin(), bytes.end());
+        } catch (...) { dead_ = true; return "{}"; }
+    }
+
+    // ---- Process via RPC ----
+    //
+    // Fills `out` with the worker's response. SHM-backed handles, so the
+    // pixel buffer is the SAME memory the script will read.
+    //
+    // The output handle's refcount is whatever the plugin set (1 from
+    // shm_create_image). The caller owns that ref and is expected to
+    // release it after consuming the result.
+    bool process_via_rpc(const xi_record* in,
+                         xi_record_out* out,
+                         std::string* err = nullptr) {
+        if (dead_) { if (err) *err = "worker dead"; return false; }
+        if (!in || in->image_count <= 0 || !in->images) {
+            if (err) *err = "process: missing input image";
+            return false;
+        }
+        try {
+            // Pass the FIRST input image's handle (most processors take
+            // one). Multi-image input is supported by the wire format
+            // but worker_main currently only reads one — keeps the
+            // first slice tight.
+            ipc::Writer w;
+            w.u64(in->images[0].handle);
+            const char* j = in->json ? in->json : "{}";
+            w.bytes(j, std::strlen(j));
+            auto rsp = call_(ipc::RPC_PROCESS, w.buf());
+            if (rsp.type == ipc::RPC_TYPE_ERROR) {
+                if (err) *err = std::string(rsp.payload.begin(), rsp.payload.end());
+                return false;
+            }
+            ipc::Reader r(rsp.payload);
+            uint64_t out_h = r.u64();
+            auto out_json_bytes = r.bytes();
+
+            // Stash the response in instance-owned storage so the caller
+            // can read it after this call returns. xi_record_out's
+            // pointers must outlive the call site's stack — these
+            // members do. Single-image output is the common case.
+            out_image_.key = "out";
+            out_image_.handle = out_h;
+            out_json_.assign(out_json_bytes.begin(), out_json_bytes.end());
+
+            out->images       = (out_h ? &out_image_ : nullptr);
+            out->image_count  = (out_h ? 1 : 0);
+            // xi_record_out::json is char* (plugin-owned, non-const ABI).
+            // out_json_ outlives this call (member of the adapter), so
+            // exposing data() is safe; nothing writes to it.
+            out->json         = out_json_.data();
+            return true;
+        } catch (const std::exception& e) {
+            if (err) *err = e.what();
+            dead_ = true;
+            return false;
+        }
+    }
+
+    bool is_dead() const { return dead_; }
+
+private:
+    ipc::Frame call_(uint32_t type, const std::vector<uint8_t>& payload) {
+        std::lock_guard<std::mutex> lk(mu_);
+        uint32_t seq = ++seq_;
+        ipc::send_frame(pipe_, seq, type, payload.data(), (uint32_t)payload.size());
+        auto f = ipc::recv_frame(pipe_);
+        if (f.seq != seq) throw std::runtime_error("RPC seq mismatch");
+        return f;
+    }
+
+    void shutdown_() {
+        // Best-effort DESTROY then drop the pipe. Worker exits on either.
+        if (!dead_) {
+            try { call_(ipc::RPC_DESTROY, {}); } catch (...) {}
+            dead_ = true;
+        }
+        pipe_ = ipc::Pipe{};   // close pipe handle
+        if (worker_proc_) {
+            // 2 s grace, then nuke. Plugin destructor might be slow;
+            // we don't want to wait forever for a stuck worker.
+            DWORD wait = WaitForSingleObject(worker_proc_, 2000);
+            if (wait != WAIT_OBJECT_0) TerminateProcess(worker_proc_, 1);
+            CloseHandle(worker_proc_);
+            worker_proc_ = nullptr;
+        }
+    }
+
+    std::string name_;
+    std::string plugin_name_;
+    std::string pipe_name_;
+    HANDLE      worker_proc_ = nullptr;
+    ipc::Pipe   pipe_;
+    mutable std::mutex mu_;
+    uint32_t    seq_ = 0;
+    std::atomic<bool> dead_{false};
+
+    // Storage for the most recent process_via_rpc reply — pointers in
+    // xi_record_out alias these.
+    xi_record_image out_image_{};
+    std::string     out_json_;
+};
+
+} // namespace xi

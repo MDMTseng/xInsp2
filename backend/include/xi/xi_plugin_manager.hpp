@@ -40,6 +40,7 @@
 #include "xi_cert.hpp"
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
+#include "xi_process_instance.hpp"
 #include "xi_script_compiler.hpp"
 #include "xi_source.hpp"
 #include "xi_trigger_bus.hpp"
@@ -172,6 +173,18 @@ public:
     void set_compile_env(const CompileEnv& env) {
         std::lock_guard<std::mutex> lk(mu_);
         compile_env_ = env;
+    }
+
+    // Where xinsp-worker.exe lives + the name of the backend's SHM
+    // region. Both are passed to spawned workers so they can attach
+    // and serve isolated instances. Empty values disable isolation —
+    // instances declaring isolation:"process" then fall back to in-proc
+    // with a warning.
+    void set_isolation_env(std::filesystem::path worker_exe,
+                           std::string shm_name) {
+        std::lock_guard<std::mutex> lk(mu_);
+        worker_exe_ = std::move(worker_exe);
+        shm_name_   = std::move(shm_name);
     }
 
     ~PluginManager() {
@@ -999,7 +1012,35 @@ public:
                     bool created = false;
                     // Same registration as create_instance — needed for project-load too.
                     InstanceFolderRegistry::instance().set(ii.name, ii.folder_path);
-                    if (pi.c_factory) {
+
+                    // Optional opt-in: instance.json: "isolation": "process"
+                    // → spawn a xinsp-worker.exe and proxy method calls
+                    // over IPC. Pixel data still goes via SHM so process()
+                    // is zero-copy. If env not configured, fall through to
+                    // the in-proc path with a warning.
+                    auto iso = extract_string(ic, "isolation");
+                    bool want_isolated = (iso && *iso == "process");
+                    if (want_isolated && !worker_exe_.empty() && !shm_name_.empty()) {
+                        try {
+                            auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
+                            ii.instance = std::make_shared<ProcessInstanceAdapter>(
+                                ii.name, *plugin, worker_exe_, dll_path, shm_name_);
+                            created = true;
+                        } catch (const std::exception& e) {
+                            std::fprintf(stderr,
+                                "[xinsp2] isolation:process spawn failed for '%s': %s — "
+                                "falling back to in-proc\n",
+                                ii.name.c_str(), e.what());
+                            // fall through to in-proc path below
+                        }
+                    } else if (want_isolated) {
+                        std::fprintf(stderr,
+                            "[xinsp2] isolation:process requested for '%s' but "
+                            "worker env not configured — using in-proc\n",
+                            ii.name.c_str());
+                    }
+
+                    if (!created && pi.c_factory) {
                         static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
                         void* raw = pi.c_factory(&host, ii.name.c_str());
                         if (raw) {
@@ -1007,7 +1048,7 @@ public:
                                 ii.name, *plugin, pi.handle, raw);
                             created = true;
                         }
-                    } else if (pi.factory) {
+                    } else if (!created && pi.factory) {
                         auto* raw = pi.factory(ii.name.c_str());
                         if (raw) {
                             ii.instance.reset(raw);
@@ -1272,6 +1313,9 @@ private:
     ProjectInfo project_;
     std::vector<OpenWarning> last_open_warnings_;
     CompileEnv  compile_env_;
+    // Set by set_isolation_env(); both must be non-empty for worker spawn.
+    std::filesystem::path worker_exe_;
+    std::string           shm_name_;
     // Names of plugins that came from <project>/plugins/ rather than the
     // global plugins directory — flagged so the UI can label them and so
     // we don't re-scan their dll mtime against the global cert.
