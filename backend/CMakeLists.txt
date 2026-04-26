@@ -143,6 +143,11 @@ add_executable(test_worker tests/test_worker.cpp)
 target_link_libraries(test_worker PRIVATE xi_core cjson)
 add_dependencies(test_worker xinsp_worker test_worker_plugin)
 add_test(NAME worker COMMAND test_worker)
+
+add_executable(test_isolated_instance tests/test_isolated_instance.cpp)
+target_link_libraries(test_isolated_instance PRIVATE xi_core cjson)
+add_dependencies(test_isolated_instance xinsp_worker test_worker_plugin)
+add_test(NAME isolated_instance COMMAND test_isolated_instance)
 set_tests_properties(protocol PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures"
 )
