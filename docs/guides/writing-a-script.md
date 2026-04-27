@@ -162,6 +162,14 @@ image, and Record (recursive tree).
 `VAR(string_literal, ...)` — backed by `std::string`. There's no
 lifetime bug: the macro copies into a `std::string` value.
 
+> **Gotcha — `VAR(name, ...)` declares a local.** The macro expands to
+> roughly `auto name = expr; <ship to viewer>`, so `name` becomes a
+> real variable in the enclosing scope. You **cannot** `VAR(gray, ...)`
+> if `gray` is already declared earlier — you'll get a redeclaration
+> error from the compiler. Either inline the expression as the second
+> arg (`VAR(gray, toGray(img))`) so the VAR macro is its own
+> declaration, or use a fresh name.
+
 For images, the panel shows a thumbnail; double-click (or shift-click)
 opens the **interactive image viewer** with pan + cursor-anchored zoom +
 Pick Point / Pick Area tools.

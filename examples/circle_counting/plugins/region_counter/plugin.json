@@ -1,0 +1,7 @@
+{
+  "name": "region_counter",
+  "description": "Morphologically-clean a binary mask, label connected regions, count those whose area falls in [min_area, max_area].",
+  "dll": "region_counter.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

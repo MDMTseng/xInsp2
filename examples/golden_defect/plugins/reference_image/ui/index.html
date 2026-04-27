@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body { font-family: var(--vscode-font-family, system-ui); color: var(--vscode-foreground, #ccc);
+       background: var(--vscode-sideBar-background, #1e1e1e); padding: 16px; font-size: 13px; }
+h2 { margin: 0 0 4px; font-size: 16px; }
+.hint { color: #888; margin-bottom: 14px; font-size: 12px; }
+.card { background: var(--vscode-editor-background); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; }
+.card-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
+              letter-spacing: 0.6px; color: #888; margin-bottom: 10px; }
+.field { display: grid; grid-template-columns: 110px 1fr; gap: 10px; align-items: center; margin-bottom: 8px; }
+.field label { color: #888; }
+.field input[type=text] {
+    background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc);
+    border: 1px solid var(--vscode-input-border, #555); padding: 4px 8px; border-radius: 3px; font-size: 12px;
+    width: 100%; box-sizing: border-box; font-family: monospace;
+}
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+button { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff);
+         border: none; padding: 6px 14px; border-radius: 3px; font-size: 12px; cursor: pointer; }
+button.secondary { background: var(--vscode-button-secondaryBackground, #3a3d41); }
+button:hover { opacity: 0.9; }
+.stat { display: grid; grid-template-columns: 110px 1fr; gap: 10px; font-size: 12px; }
+.stat .k { color: #888; }
+.stat .v { font-family: monospace; word-break: break-all; }
+.status-pill { display: inline-block; padding: 4px 12px; border-radius: 12px; font-weight: 600; font-size: 12px; }
+.status-pill.ok  { background: #1b5e20; color: #c8e6c9; }
+.status-pill.bad { background: #5e1414; color: #ffcdd2; }
+.big-status { text-align: center; padding: 18px; }
+.err { color: #ff8a80; font-size: 11px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h2>Reference Image</h2>
+<div class="hint">Loads the golden-good-part reference once, caches it, and hands it out to the inspection script every run. Set the path here or in <code>instance.json</code>.</div>
+
+<div class="card big-status">
+  <div id="status-pill" class="status-pill bad">NOT LOADED</div>
+  <div id="status-dim" style="margin-top:10px; font-family:monospace; color:#aaa; font-size:12px;">—</div>
+</div>
+
+<div class="card">
+  <div class="card-title">Reference path</div>
+  <div class="field"><label for="path">Path</label>
+    <input type="text" id="path" placeholder="C:/path/to/reference.png"></div>
+  <div class="actions">
+    <button id="load">Load Reference</button>
+    <button id="reload" class="secondary">Reload current</button>
+  </div>
+  <div id="err" class="err"></div>
+</div>
+
+<div class="card">
+  <div class="card-title">Status</div>
+  <div class="stat">
+    <div class="k">Path</div>        <div class="v" id="s-path">—</div>
+    <div class="k">Dimensions</div>  <div class="v" id="s-dim">—</div>
+    <div class="k">Loaded count</div><div class="v" id="s-count">0</div>
+    <div class="k">Last error</div>  <div class="v" id="s-err">—</div>
+  </div>
+</div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  const send = (cmd) => vscode.postMessage({ type: 'exchange', cmd });
+  const $ = id => document.getElementById(id);
+
+  $('load').onclick   = () => send({ command: 'set_path', value: $('path').value });
+  $('reload').onclick = () => send({ command: 'reload' });
+
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m.type !== 'status') return;
+    if ('reference_path' in m && !document.activeElement.matches('#path')) {
+      $('path').value = m.reference_path || '';
+    }
+    if ('reference_path' in m) $('s-path').textContent = m.reference_path || '—';
+    if ('loaded' in m) {
+      const pill = $('status-pill');
+      if (m.loaded) {
+        pill.className = 'status-pill ok'; pill.textContent = 'REFERENCE LOADED';
+      } else {
+        pill.className = 'status-pill bad'; pill.textContent = 'NOT LOADED';
+      }
+    }
+    if ('width' in m && 'height' in m) {
+      const dim = (m.width && m.height) ? (m.width + ' × ' + m.height) : '—';
+      $('status-dim').textContent = dim;
+      $('s-dim').textContent = dim;
+    }
+    if ('load_count' in m) $('s-count').textContent = m.load_count;
+    if ('error' in m) {
+      $('s-err').textContent = m.error || '—';
+      $('err').textContent   = m.error || '';
+    }
+  });
+
+  send({ command: 'get_status' });
+</script>
+</body>
+</html>

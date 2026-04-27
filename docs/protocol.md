@@ -187,8 +187,49 @@ Generic passthrough to an instance's `exchange()` method — used by plugin
 UIs that ship their own command vocabulary.
 `args: { "name": "cam0", "cmd": { ... } }` → `data: <whatever the plugin returns>`
 
-### `save_project` / `load_project`
+### `save_project` / `load_project` / `open_project`
 `args: { "path": "project.json" }` → `ok: true`
+
+`load_project` / `open_project` reattach instances and restore Param
+values, but **do NOT recompile the inspection script** — call
+`compile_and_load` separately afterwards. Cold opens of a project with
+N project-local plugins compile each plugin under `cl.exe` and can
+take 30–120 s; clients should pass a long timeout for this command.
+
+### `recompile_project_plugin`
+
+Hot-rebuilds a single project-local plugin. The extension's file watcher
+calls this when the user edits plugin source; the Python SDK exposes it
+as `c.recompile_project_plugin(name)`. On success, instances of that
+plugin are re-instantiated with their previous defs intact; on failure
+the old DLL stays loaded so a running inspection isn't disrupted.
+
+`args: { "plugin": "<plugin_name>" }`
+
+Reply data:
+```json
+{
+  "plugin": "local_contrast_detector",
+  "diagnostics": [
+    { "file": "...", "line": 42, "col": 5,
+      "severity": "error", "code": "C2065", "message": "..." }
+  ],
+  "reattached": ["det0", "det1"]
+}
+```
+
+This is the linchpin command for the live-tune workflow: edit a
+project plugin's source, hit save, recompile, watch instances pop back
+with their state intact and the next `run` use the new code.
+
+### `open_project_warnings` *(planned, not yet wired)*
+
+The plugin manager records non-fatal load issues (missing/broken
+`instance.json`, factory throws) in `last_open_warnings_`, but no WS
+handler currently exposes them. Calling this command returns a generic
+"unknown command" error today. Until it's wired, fall back to
+the `log` channel — those warnings are also emitted as `level: warn`
+log messages during `open_project`.
 
 ### `history` / `set_history_depth`
 

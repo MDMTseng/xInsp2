@@ -1,0 +1,7 @@
+{
+  "name": "local_contrast_detector",
+  "description": "Gradient-tolerant binary mask: pixels darker (or brighter) than the local mean by more than C.",
+  "dll": "local_contrast_detector.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

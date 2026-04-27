@@ -1,0 +1,7 @@
+{
+  "name": "png_frame_source",
+  "description": "Load a PNG frame from a configurable directory (frame_NN.png) by index.",
+  "dll": "png_frame_source.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

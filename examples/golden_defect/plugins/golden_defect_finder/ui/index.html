@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body { font-family: var(--vscode-font-family, system-ui); color: var(--vscode-foreground, #ccc);
+       background: var(--vscode-sideBar-background, #1e1e1e); padding: 16px; font-size: 13px; }
+h2 { margin: 0 0 4px; font-size: 16px; }
+.hint { color: #888; margin-bottom: 14px; font-size: 12px; }
+.card { background: var(--vscode-editor-background); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; }
+.card-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
+              letter-spacing: 0.6px; color: #888; margin-bottom: 10px; }
+.field { display: grid; grid-template-columns: 130px 60px 1fr; gap: 10px; align-items: center; margin-bottom: 8px; }
+.field label { color: #888; }
+.field input[type=range] { width: 100%; }
+.field .v { font-family: monospace; color: #ddd; text-align: right; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+button { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff);
+         border: none; padding: 5px 14px; border-radius: 3px; font-size: 12px; cursor: pointer; }
+button.secondary { background: var(--vscode-button-secondaryBackground, #3a3d41); }
+button:hover { opacity: 0.9; }
+.stat { display: grid; grid-template-columns: 130px 1fr; gap: 10px; font-size: 12px; }
+.stat .k { color: #888; }
+.stat .v { font-family: monospace; }
+.present-yes { color: #ff8a80; font-weight: 600; }
+.present-no  { color: #81c784; font-weight: 600; }
+</style>
+</head>
+<body>
+<h2>Golden Defect Finder</h2>
+<div class="hint"><code>|frame − reference|</code> → blur → threshold → close → labelled regions →
+filtered by area. Tune the four knobs while live runs are streaming.</div>
+
+<div class="card">
+  <div class="card-title">Pipeline knobs</div>
+  <div class="field"><label for="blur">Blur radius</label>
+    <span class="v" id="blur-v">2</span>
+    <input type="range" id="blur" min="0" max="10" step="1"></div>
+  <div class="field"><label for="thresh">Diff threshold</label>
+    <span class="v" id="thresh-v">18</span>
+    <input type="range" id="thresh" min="1" max="80" step="1"></div>
+  <div class="field"><label for="close">Close radius</label>
+    <span class="v" id="close-v">2</span>
+    <input type="range" id="close" min="0" max="8" step="1"></div>
+  <div class="field"><label for="minarea">Min area</label>
+    <span class="v" id="minarea-v">25</span>
+    <input type="range" id="minarea" min="1" max="500" step="1"></div>
+  <div class="field"><label for="maxarea">Max area</label>
+    <span class="v" id="maxarea-v">5000</span>
+    <input type="range" id="maxarea" min="100" max="20000" step="50"></div>
+  <div class="actions">
+    <button id="reset" class="secondary">Reset to defaults</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Last run</div>
+  <div class="stat">
+    <div class="k">Defect present</div><div class="v" id="s-present">—</div>
+    <div class="k">Largest area</div>  <div class="v" id="s-largest">—</div>
+    <div class="k">Kept / total</div>  <div class="v" id="s-kept">—</div>
+    <div class="k">Bbox</div>          <div class="v" id="s-bbox">—</div>
+    <div class="k">Frames seen</div>  <div class="v" id="s-frames">—</div>
+  </div>
+</div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  const send = (cmd) => vscode.postMessage({ type: 'exchange', cmd });
+  const $ = id => document.getElementById(id);
+
+  function bind(id, vid, command) {
+    const el = $(id), vv = $(vid);
+    el.addEventListener('input', () => { vv.textContent = el.value; });
+    el.addEventListener('change', () => { send({ command, value: parseInt(el.value) }); });
+  }
+  bind('blur',    'blur-v',    'set_blur_radius');
+  bind('thresh',  'thresh-v',  'set_diff_threshold');
+  bind('close',   'close-v',   'set_close_radius');
+  bind('minarea', 'minarea-v', 'set_min_area');
+  bind('maxarea', 'maxarea-v', 'set_max_area');
+  $('reset').onclick = () => send({ command: 'reset' });
+
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m.type !== 'status') return;
+    const setSlider = (id, vid, val) => {
+      if (val === undefined) return;
+      $(id).value = val;
+      $(vid).textContent = val;
+    };
+    setSlider('blur',    'blur-v',    m.blur_radius);
+    setSlider('thresh',  'thresh-v',  m.diff_threshold);
+    setSlider('close',   'close-v',   m.close_radius);
+    setSlider('minarea', 'minarea-v', m.min_area);
+    setSlider('maxarea', 'maxarea-v', m.max_area);
+    if ('last_present' in m) {
+      $('s-present').innerHTML = m.last_present
+        ? '<span class="present-yes">YES</span>'
+        : '<span class="present-no">no</span>';
+    }
+    if ('last_largest' in m) $('s-largest').textContent = m.last_largest;
+    if ('last_kept' in m && 'last_total' in m)
+      $('s-kept').textContent = m.last_kept + ' / ' + m.last_total;
+    if ('last_bbox_x0' in m) {
+      const ok = m.last_bbox_x0 >= 0;
+      $('s-bbox').textContent = ok
+        ? `[${m.last_bbox_x0}, ${m.last_bbox_y0}] – [${m.last_bbox_x1}, ${m.last_bbox_y1}]`
+        : '—';
+    }
+    if ('frames_processed' in m) $('s-frames').textContent = m.frames_processed;
+  });
+
+  send({ command: 'get_status' });
+</script>
+</body>
+</html>

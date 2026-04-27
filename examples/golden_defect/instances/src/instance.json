@@ -1,0 +1,9 @@
+{
+  "plugin": "png_frame_source",
+  "config": {
+    "frames_dir": "C:/Users/TRS001/Documents/workspace/xInsp/xInsp2/examples/golden_defect/frames",
+    "filename_pattern": "frame_{idx}.png",
+    "pad_width": 2,
+    "force_grayscale": true
+  }
+}

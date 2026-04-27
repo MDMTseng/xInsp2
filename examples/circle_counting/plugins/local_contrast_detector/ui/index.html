@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body { font-family: var(--vscode-font-family, system-ui); color: var(--vscode-foreground, #ccc);
+       background: var(--vscode-sideBar-background, #1e1e1e); padding: 16px; font-size: 13px; }
+h2 { margin: 0 0 4px; font-size: 16px; }
+.hint { color: #888; margin-bottom: 14px; font-size: 12px; }
+.card { background: var(--vscode-editor-background); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; }
+.card-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
+              letter-spacing: 0.6px; color: #888; margin-bottom: 10px; }
+.field { display: grid; grid-template-columns: 130px 1fr 60px; gap: 10px; align-items: center; margin-bottom: 8px; }
+.field label { color: #888; }
+.field input[type=range] { width: 100%; }
+.field .num { font-family: monospace; text-align: right; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+button { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff);
+         border: none; padding: 5px 14px; border-radius: 3px; font-size: 12px; cursor: pointer; }
+button.secondary { background: var(--vscode-button-secondaryBackground, #3a3d41); }
+.stat { display: grid; grid-template-columns: 130px 1fr; gap: 10px; font-size: 12px; }
+.stat .k { color: #888; }
+.stat .v { font-family: monospace; }
+.radio { display: flex; gap: 12px; }
+</style>
+</head>
+<body>
+<h2>Local-Contrast Detector</h2>
+<div class="hint">Mask = where (local-mean − pixel) × polarity &gt; <code>diff_C</code>.
+Tunes the dark-spot-on-bright-gradient detector behind the circle-counting case.</div>
+
+<div class="card">
+  <div class="card-title">Parameters</div>
+  <div class="field">
+    <label>Blur radius</label>
+    <input type="range" id="blur" min="0" max="10" step="1">
+    <div class="num" id="blur-v">2</div>
+  </div>
+  <div class="field">
+    <label>Block radius</label>
+    <input type="range" id="block" min="3" max="120" step="1">
+    <div class="num" id="block-v">40</div>
+  </div>
+  <div class="field">
+    <label>diff_C (Δ)</label>
+    <input type="range" id="diff" min="1" max="80" step="1">
+    <div class="num" id="diff-v">15</div>
+  </div>
+  <div class="field">
+    <label>Polarity</label>
+    <div class="radio">
+      <label><input type="radio" name="pol" value="1"> dark on bright</label>
+      <label><input type="radio" name="pol" value="-1"> bright on dark</label>
+    </div>
+    <div></div>
+  </div>
+  <div class="actions">
+    <button id="apply">Apply</button>
+    <button id="reset" class="secondary">Reset to defaults</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Last run</div>
+  <div class="stat">
+    <div class="k">Frames processed</div> <div class="v" id="s-frames">—</div>
+    <div class="k">Mask mean</div>        <div class="v" id="s-mean">—</div>
+    <div class="k">Polarity</div>         <div class="v" id="s-pol">—</div>
+  </div>
+  <div style="color:#888;font-size:11px;margin-top:8px">
+    Mask mean ≈ 255 × (foreground fraction). For the circle-counting test
+    set the goal is roughly 8–25.
+  </div>
+</div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  const send = (cmd) => vscode.postMessage({ type: 'exchange', cmd });
+  const $ = id => document.getElementById(id);
+  const wire = (id, vid) => { $(id).addEventListener('input', () => $(vid).textContent = $(id).value); };
+  wire('blur', 'blur-v'); wire('block', 'block-v'); wire('diff', 'diff-v');
+
+  $('apply').onclick = () => {
+    send({ command: 'set_blur_radius',  value: parseInt($('blur').value)  });
+    send({ command: 'set_block_radius', value: parseInt($('block').value) });
+    send({ command: 'set_diff_C',       value: parseInt($('diff').value)  });
+    const pol = document.querySelector('input[name=pol]:checked');
+    if (pol) send({ command: 'set_polarity', value: parseInt(pol.value) });
+  };
+  $('reset').onclick = () => send({ command: 'reset' });
+
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m.type !== 'status') return;
+    if ('blur_radius'  in m) { $('blur').value  = m.blur_radius;  $('blur-v').textContent  = m.blur_radius; }
+    if ('block_radius' in m) { $('block').value = m.block_radius; $('block-v').textContent = m.block_radius; }
+    if ('diff_C'       in m) { $('diff').value  = m.diff_C;       $('diff-v').textContent  = m.diff_C; }
+    if ('polarity'     in m) {
+      const r = document.querySelector(`input[name=pol][value="${m.polarity}"]`);
+      if (r) r.checked = true;
+      $('s-pol').textContent = m.polarity === -1 ? 'bright on dark' : 'dark on bright';
+    }
+    if ('frames_processed' in m) $('s-frames').textContent = m.frames_processed;
+    if ('mask_mean'        in m) $('s-mean').textContent   = (+m.mask_mean).toFixed(2);
+  });
+
+  send({ command: 'get_status' });
+</script>
+</body>
+</html>

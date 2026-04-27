@@ -1,0 +1,10 @@
+{
+  "plugin": "golden_defect_finder",
+  "config": {
+    "blur_radius": 2,
+    "diff_threshold": 18,
+    "close_radius": 2,
+    "min_area": 25,
+    "max_area": 5000
+  }
+}

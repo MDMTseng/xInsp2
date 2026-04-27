@@ -52,6 +52,9 @@ Historical snapshots — kept for context, not for planning.
 - **[`sdk/README.md`](../sdk/README.md)** — plugin SDK reference.
 - **[`sdk/GETTING_STARTED.md`](../sdk/GETTING_STARTED.md)** — SDK
   5-minute walkthrough.
+- **[`tools/xinsp2_py/README.md`](../tools/xinsp2_py/README.md)** —
+  Python WS client for AI-driven inspection workflows. Pairs with the
+  `.claude/skills/xinsp2/` skill.
 
 ---
 

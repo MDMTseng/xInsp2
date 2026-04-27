@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body { font-family: var(--vscode-font-family, system-ui); color: var(--vscode-foreground, #ccc);
+       background: var(--vscode-sideBar-background, #1e1e1e); padding: 16px; font-size: 13px; }
+h2 { margin: 0 0 4px; font-size: 16px; }
+.hint { color: #888; margin-bottom: 14px; font-size: 12px; }
+.card { background: var(--vscode-editor-background); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; }
+.card-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
+              letter-spacing: 0.6px; color: #888; margin-bottom: 10px; }
+.field { display: grid; grid-template-columns: 130px 1fr; gap: 10px; align-items: center; margin-bottom: 8px; }
+.field label { color: #888; }
+.field input[type=text], .field input[type=number] {
+    background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc);
+    border: 1px solid var(--vscode-input-border, #555); padding: 4px 8px; border-radius: 3px; font-size: 12px;
+    width: 100%; box-sizing: border-box;
+}
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+button { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff);
+         border: none; padding: 5px 14px; border-radius: 3px; font-size: 12px; cursor: pointer; }
+button.secondary { background: var(--vscode-button-secondaryBackground, #3a3d41); }
+button:hover { opacity: 0.9; }
+.stat { display: grid; grid-template-columns: 130px 1fr; gap: 10px; font-size: 12px; }
+.stat .k { color: #888; }
+.stat .v { font-family: monospace; word-break: break-all; }
+.ok  { color: #4caf50; }
+.bad { color: #f44336; }
+</style>
+</head>
+<body>
+<h2>PNG Frame Source</h2>
+<div class="hint">Loads <code>&lt;frames_dir&gt;/&lt;pattern&gt;</code> per <code>process({idx})</code> call.
+The script asks for an index; this plugin owns the file I/O so paths never live in C++.</div>
+
+<div class="card">
+  <div class="card-title">Configuration</div>
+  <div class="field"><label for="frames_dir">Frames dir</label>
+    <input type="text" id="frames_dir" placeholder="C:/path/to/frames"></div>
+  <div class="field"><label for="pattern">Filename pattern</label>
+    <input type="text" id="pattern" placeholder="frame_{idx}.png"></div>
+  <div class="field"><label for="pad">Pad width</label>
+    <input type="number" id="pad" min="0" max="8" value="2"></div>
+  <div class="field"><label for="gray">Force grayscale</label>
+    <input type="checkbox" id="gray" checked></div>
+  <div class="actions">
+    <button id="apply">Apply</button>
+    <button id="probe" class="secondary">Probe (try idx 0)</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Last result</div>
+  <div class="stat">
+    <div class="k">Last idx</div>      <div class="v" id="s-idx">—</div>
+    <div class="k">Last path</div>     <div class="v" id="s-path">—</div>
+    <div class="k">Loaded</div>        <div class="v" id="s-loaded">—</div>
+    <div class="k">Dimensions</div>    <div class="v" id="s-dim">—</div>
+    <div class="k">Loaded count</div>  <div class="v" id="s-count">—</div>
+    <div class="k">Probe</div>         <div class="v" id="s-probe">—</div>
+    <div class="k">Folder</div>        <div class="v" id="s-folder" style="font-size:11px">—</div>
+  </div>
+</div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  const send = (cmd) => vscode.postMessage({ type: 'exchange', cmd });
+  const $ = id => document.getElementById(id);
+
+  $('apply').onclick = () => {
+    send({ command: 'set_frames_dir',       value: $('frames_dir').value });
+    send({ command: 'set_filename_pattern', value: $('pattern').value });
+    send({ command: 'set_pad_width',        value: parseInt($('pad').value) || 0 });
+    send({ command: 'set_force_grayscale',  value: $('gray').checked });
+  };
+  $('probe').onclick = () => send({ command: 'probe', value: 0 });
+
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m.type !== 'status') return;
+    if ('frames_dir'       in m) $('frames_dir').value = m.frames_dir || '';
+    if ('filename_pattern' in m) $('pattern').value    = m.filename_pattern || '';
+    if ('pad_width'        in m) $('pad').value        = m.pad_width;
+    if ('force_grayscale'  in m) $('gray').checked     = !!m.force_grayscale;
+    if ('last_idx'         in m) $('s-idx').textContent  = m.last_idx;
+    if ('last_path'        in m) $('s-path').textContent = m.last_path || '—';
+    if ('last_loaded'      in m) {
+      $('s-loaded').innerHTML = m.last_loaded
+        ? '<span class="ok">yes</span>' : '<span class="bad">no</span>';
+    }
+    if ('last_width' in m && 'last_height' in m) {
+      $('s-dim').textContent = (m.last_width && m.last_height)
+        ? (m.last_width + '×' + m.last_height) : '—';
+    }
+    if ('loaded_count' in m) $('s-count').textContent = m.loaded_count;
+    if ('folder' in m)       $('s-folder').textContent = m.folder || '—';
+    if ('probe_path' in m) {
+      const ok = m.probe_ok ? `<span class="ok">ok ${m.probe_width}×${m.probe_height}×${m.probe_channels}</span>` : '<span class="bad">missing</span>';
+      $('s-probe').innerHTML = ok + ' ' + m.probe_path;
+    }
+  });
+
+  send({ command: 'get_status' });
+</script>
+</body>
+</html>
