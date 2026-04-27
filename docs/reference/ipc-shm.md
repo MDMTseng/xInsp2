@@ -1,10 +1,13 @@
 # IPC + SHM (cross-process isolation)
 
-> **Status: spike, not on master.** Lives on the
-> `shm-process-isolation` branch. This document describes that
-> branch's architecture so a future merge has a written spec to land
-> against. Master plugins / scripts run in-proc and ignore everything
-> below.
+> **Status: shipping; opt-in.** The full mesh (worker / runner / SHM /
+> respawn) is merged from `shm-process-isolation` and exercised by 9
+> backend tests. Activation is per-instance: set
+> `"isolation": "process"` in `instance.json`, or call
+> `cmd:script_isolated_run` for the script side. Default-on is tracked
+> work — needs broader real-plugin coverage (heap-pool conversion is in
+> place, but multi-image Records / plugin-side handle storage / error
+> paths still need validation across real plugins).
 
 ---
 
@@ -20,9 +23,10 @@ failure modes leak through the in-proc model:
   may be in unknown state).
 - Third-party plugins you don't fully trust.
 
-The spike adds an **opt-in** layer: a plugin instance can be marked
-`isolation: "process"`, and the backend hosts it in a separate
-`xinsp-worker.exe`. Same for user scripts via `xinsp-script-runner.exe`.
+An instance can opt in via `instance.json: "isolation": "process"`:
+the plugin runs in a separate `xinsp-worker.exe`. User scripts have
+the analogous `xinsp-script-runner.exe` available via
+`cmd:script_isolated_run`.
 
 Pixel data still flows zero-copy via shared memory (`CreateFileMapping`
 + refcount in mapped pages); only handles + small JSON ride the

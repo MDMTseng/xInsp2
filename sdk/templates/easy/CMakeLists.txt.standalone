@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(my_plugin CXX C)
+project({{NAME}} CXX C)
 set(CMAKE_CXX_STANDARD 20)
 
 # XINSP2_ROOT — env var preferred; auto-detect a sibling xInsp2 checkout
@@ -19,16 +19,4 @@ if(NOT DEFINED XINSP2_ROOT)
 endif()
 include(${XINSP2_ROOT}/sdk/cmake/xinsp2_plugin.cmake)
 
-xinsp2_add_plugin(my_plugin my_plugin.cpp)
-
-# --- Native test (loads the DLL via LoadLibrary, runs baseline + custom)
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native.cpp)
-    xinsp2_add_plugin_test(my_plugin_test tests/test_native.cpp)
-    target_compile_definitions(my_plugin_test PRIVATE
-        MY_PLUGIN_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/my_plugin.dll")
-    add_dependencies(my_plugin_test my_plugin)
-    enable_testing()
-    add_test(NAME my_plugin_test
-             COMMAND my_plugin_test
-             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-endif()
+xinsp2_add_plugin({{NAME}} src/plugin.cpp)

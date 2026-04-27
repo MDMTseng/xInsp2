@@ -124,6 +124,32 @@ typedef struct xi_host_api {
                          int64_t timestamp_us,
                          const xi_record_image* images,
                          int32_t image_count);
+
+    /* --------------------------------------------------------------- */
+    /* SHM zero-copy buffer pool (opt-in, added in v2 of the host API) */
+    /* --------------------------------------------------------------- */
+    /* Plugins / scripts call these when they want to allocate an image
+     * or buffer that the OTHER side (a worker process, the host, a
+     * different plugin) can deref WITHOUT a memcpy. Returned handle
+     * lives in the same uint64 namespace as image_handle, so all the
+     * existing image_data / image_width / ... functions also work on
+     * SHM-backed handles transparently.
+     *
+     * If shm_create_image is null, the host has no SHM region (older
+     * host or feature disabled). Callers should fall back to
+     * image_create in that case.
+     *
+     *   size_bytes for shm_alloc_buffer: an opaque byte buffer (e.g.
+     *     ML weights, big metadata). image_data() returns the start.
+     *
+     * Refcount semantics match image_addref / image_release.
+     */
+    xi_image_handle (*shm_create_image)(int32_t w, int32_t h, int32_t channels);
+    xi_image_handle (*shm_alloc_buffer)(int32_t size_bytes);
+    void            (*shm_addref)(xi_image_handle h);
+    void            (*shm_release)(xi_image_handle h);
+    /* Returns 1 if the handle came from the SHM region, 0 if heap. */
+    int32_t         (*shm_is_shm_handle)(xi_image_handle h);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */

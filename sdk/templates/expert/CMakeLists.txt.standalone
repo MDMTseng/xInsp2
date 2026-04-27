@@ -1,0 +1,22 @@
+cmake_minimum_required(VERSION 3.16)
+project({{NAME}} CXX C)
+set(CMAKE_CXX_STANDARD 20)
+
+# XINSP2_ROOT — env var preferred; auto-detect a sibling xInsp2 checkout
+# as a fallback so this builds without ceremony if both repos sit under a
+# common parent (the typical layout: xInsp/{xInsp2,plugins}/ ).
+if(NOT DEFINED XINSP2_ROOT AND DEFINED ENV{XINSP2_ROOT})
+    set(XINSP2_ROOT $ENV{XINSP2_ROOT})
+endif()
+if(NOT DEFINED XINSP2_ROOT)
+    foreach(rel "../../xInsp2" "../../../xInsp2" "../../../../xInsp2")
+        get_filename_component(_p "${CMAKE_CURRENT_SOURCE_DIR}/${rel}" ABSOLUTE)
+        if(EXISTS "${_p}/sdk/cmake/xinsp2_plugin.cmake")
+            set(XINSP2_ROOT ${_p})
+            break()
+        endif()
+    endforeach()
+endif()
+include(${XINSP2_ROOT}/sdk/cmake/xinsp2_plugin.cmake)
+
+xinsp2_add_plugin({{NAME}} src/plugin.cpp)

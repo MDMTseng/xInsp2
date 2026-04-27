@@ -1,0 +1,327 @@
+//
+// worker_main.cpp — `xinsp-worker.exe` entry point.
+//
+// Hosts ONE plugin instance in an isolated process. The backend spawns
+// us with --pipe and --shm names + the plugin DLL path; we attach the
+// SHM region, LoadLibrary the plugin, and serve RPCs from the pipe
+// until the backend disconnects (or sends DESTROY).
+//
+// Crashes here don't take down the backend — that's the whole point of
+// running plugins in their own process. The backend will see an EOF on
+// the pipe and can spawn a replacement.
+//
+// CLI:
+//
+//   xinsp-worker.exe --pipe=<name> --shm=<name> \
+//                    --plugin-dll=<path> [--instance=<name>]
+//
+
+#ifndef NOMINMAX
+  #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <string>
+
+#include <xi/xi_abi.h>
+#include <xi/xi_image_pool.hpp>
+#include <xi/xi_ipc.hpp>
+#include <xi/xi_seh.hpp>
+#include <xi/xi_shm.hpp>
+
+namespace ipc = xi::ipc;
+
+static std::string arg_get(int argc, char** argv, const std::string& key,
+                           const std::string& def = "") {
+    std::string prefix = "--" + key + "=";
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a.rfind(prefix, 0) == 0) return a.substr(prefix.size());
+    }
+    return def;
+}
+
+// Minimal C ABI plugin proxy — resolves the entry points we need from
+// the loaded DLL once, then delegates calls.
+struct PluginProxy {
+    HMODULE dll = nullptr;
+    void*   inst = nullptr;
+    using create_fn   = void* (*)(const xi_host_api*, const char*);
+    using destroy_fn  = void  (*)(void*);
+    using process_fn  = void  (*)(void*, const xi_record*, xi_record_out*);
+    using exchange_fn = int   (*)(void*, const char*, char*, int);
+    using get_def_fn  = int   (*)(void*, char*, int);
+    using set_def_fn  = int   (*)(void*, const char*);
+
+    create_fn   create   = nullptr;
+    destroy_fn  destroy  = nullptr;
+    process_fn  process  = nullptr;
+    exchange_fn exchange = nullptr;
+    get_def_fn  get_def  = nullptr;
+    set_def_fn  set_def  = nullptr;
+
+    bool load(const std::string& dll_path) {
+        dll = LoadLibraryA(dll_path.c_str());
+        if (!dll) return false;
+        create   = (create_fn)  GetProcAddress(dll, "xi_plugin_create");
+        destroy  = (destroy_fn) GetProcAddress(dll, "xi_plugin_destroy");
+        process  = (process_fn) GetProcAddress(dll, "xi_plugin_process");
+        exchange = (exchange_fn)GetProcAddress(dll, "xi_plugin_exchange");
+        get_def  = (get_def_fn) GetProcAddress(dll, "xi_plugin_get_def");
+        set_def  = (set_def_fn) GetProcAddress(dll, "xi_plugin_set_def");
+        return create && destroy;
+    }
+};
+
+int main(int argc, char** argv) {
+    // SEH translator at thread entry so any plugin segfault becomes a
+    // C++ exception we can catch + report cleanly to the backend.
+    xi::install_seh_translator();
+
+    std::string pipe_name   = arg_get(argc, argv, "pipe");
+    std::string shm_name    = arg_get(argc, argv, "shm");
+    std::string plugin_dll  = arg_get(argc, argv, "plugin-dll");
+    std::string instance    = arg_get(argc, argv, "instance", "worker0");
+
+    if (pipe_name.empty() || shm_name.empty() || plugin_dll.empty()) {
+        std::fprintf(stderr,
+            "usage: xinsp-worker --pipe=NAME --shm=NAME --plugin-dll=PATH [--instance=NAME]\n");
+        return 2;
+    }
+
+    std::fprintf(stderr,
+        "[worker] pipe=%s shm=%s dll=%s instance=%s\n",
+        pipe_name.c_str(), shm_name.c_str(), plugin_dll.c_str(), instance.c_str());
+
+    // Attach the backend's SHM region. After this every image_data() in
+    // host_api will return a pointer into shared memory — completely
+    // transparent to the plugin code.
+    std::unique_ptr<xi::ShmRegion> shm;
+    try {
+        shm = std::make_unique<xi::ShmRegion>(xi::ShmRegion::attach(shm_name));
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[worker] shm attach failed: %s\n", e.what());
+        return 3;
+    }
+    xi::ImagePool::set_shm_region(shm.get());
+    std::fprintf(stderr, "[worker] shm attached, %lluMB visible\n",
+                 (unsigned long long)(shm->total_size() / (1024 * 1024)));
+
+    // Build a host_api for the plugin. Heap-pool fns still work — they
+    // hit the worker's local ImagePool, which is fine for any image the
+    // plugin creates only for its own use. But normally the plugin will
+    // use shm_create_image so the backend can see the result.
+    static xi_host_api host = xi::ImagePool::make_host_api();
+
+    // Connect to the backend's pipe. Backend should already have the
+    // server side waiting.
+    ipc::Pipe pipe;
+    try {
+        pipe = ipc::Pipe::connect(pipe_name);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[worker] pipe connect failed: %s\n", e.what());
+        return 4;
+    }
+    std::fprintf(stderr, "[worker] pipe connected\n");
+
+    // Load the plugin DLL and let the first CREATE request instantiate it.
+    PluginProxy plugin;
+    if (!plugin.load(plugin_dll)) {
+        std::fprintf(stderr, "[worker] failed to load %s or resolve entry points\n",
+                     plugin_dll.c_str());
+        return 5;
+    }
+
+    // RPC service loop. ONE plugin instance per worker; CREATE allocates,
+    // DESTROY frees + exits, anything else needs the instance to exist.
+    auto require_inst = [&](uint32_t seq) -> bool {
+        if (plugin.inst) return true;
+        ipc::send_error_reply(pipe, seq, "no instance — call CREATE first");
+        return false;
+    };
+
+    while (true) {
+        ipc::Frame f;
+        try { f = ipc::recv_frame(pipe); }
+        catch (const std::exception& e) {
+            std::fprintf(stderr, "[worker] pipe closed: %s\n", e.what());
+            break;
+        }
+
+        try {
+            switch (f.type) {
+            case ipc::RPC_CREATE: {
+                ipc::Reader r(f.payload);
+                std::string name    = r.str();
+                std::string dll_arg = r.str();   // currently unused; plugin already loaded
+                (void)dll_arg;
+                if (plugin.inst) plugin.destroy(plugin.inst);
+                plugin.inst = plugin.create(&host, name.empty() ? instance.c_str() : name.c_str());
+                if (!plugin.inst) {
+                    ipc::send_error_reply(pipe, f.seq, "plugin create returned null");
+                    break;
+                }
+                ipc::Writer w; w.u8(1);
+                ipc::send_reply(pipe, f.seq, ipc::RPC_CREATE,
+                                w.buf().data(), (uint32_t)w.buf().size());
+                std::fprintf(stderr, "[worker] CREATE ok\n");
+                break;
+            }
+            case ipc::RPC_DESTROY: {
+                if (plugin.inst) { plugin.destroy(plugin.inst); plugin.inst = nullptr; }
+                ipc::Writer w; w.u8(1);
+                ipc::send_reply(pipe, f.seq, ipc::RPC_DESTROY,
+                                w.buf().data(), (uint32_t)w.buf().size());
+                std::fprintf(stderr, "[worker] DESTROY ok, exiting\n");
+                return 0;
+            }
+            case ipc::RPC_PROCESS: {
+                if (!require_inst(f.seq)) break;
+                if (!plugin.process) {
+                    ipc::send_error_reply(pipe, f.seq, "plugin has no process()");
+                    break;
+                }
+                ipc::Reader r(f.payload);
+                xi_image_handle in_h = r.u64();
+                std::vector<uint8_t> in_json = r.bytes();
+
+                // Build the input record. Source plugins receive json-only
+                // (in_h == 0); transformer plugins get the SHM handle
+                // straight through (zero copy).
+                xi_record_image in_rec_img{ "frame", in_h };
+                xi_record       in_rec{};
+                in_rec.images      = (in_h ? &in_rec_img : nullptr);
+                in_rec.image_count = (in_h ? 1 : 0);
+                std::string in_str(in_json.begin(), in_json.end());
+                in_rec.json        = in_str.c_str();
+
+                xi_record_out out_rec{};
+                plugin.process(plugin.inst, &in_rec, &out_rec);
+
+                // Pack the output.
+                //
+                // Heap-pool handles (no 0xA5 tag) point into the worker's
+                // local ImagePool — useless to the backend. Plugins that
+                // know about isolation use host->shm_create_image; plugins
+                // that don't (i.e. most of them) just `xi::Image{...}`
+                // which goes through image_create. Auto-convert heap-only
+                // handles to SHM here so plugin authors don't have to know
+                // which mode they're running in.
+                xi_image_handle out_h = (out_rec.image_count > 0)
+                    ? out_rec.images[0].handle : 0;
+                const char* out_k = (out_rec.image_count > 0 && out_rec.images[0].key)
+                    ? out_rec.images[0].key : "";
+
+                if (out_h && !host.shm_is_shm_handle(out_h)) {
+                    // heap → SHM copy. Single-image output is the common
+                    // case; multi-image plugins that need cross-process
+                    // visibility should call shm_create_image directly.
+                    int w_ = host.image_width(out_h);
+                    int h_ = host.image_height(out_h);
+                    int c_ = host.image_channels(out_h);
+                    int s_ = host.image_stride(out_h);
+                    const uint8_t* src = host.image_data(out_h);
+                    if (src && w_ > 0 && h_ > 0 && c_ > 0) {
+                        xi_image_handle shm_h = host.shm_create_image(w_, h_, c_);
+                        if (shm_h) {
+                            uint8_t* dst = const_cast<uint8_t*>(host.image_data(shm_h));
+                            // Most images are tightly packed (stride == w*c);
+                            // honour stride so non-packed sources still land
+                            // contiguously in SHM.
+                            int row_bytes = w_ * c_;
+                            for (int y = 0; y < h_; ++y)
+                                std::memcpy(dst + y * row_bytes,
+                                            src + y * (s_ > 0 ? s_ : row_bytes),
+                                            (size_t)row_bytes);
+                            host.image_release(out_h);
+                            out_h = shm_h;
+                        }
+                    }
+                }
+
+                std::string out_json = out_rec.json ? out_rec.json : "{}";
+
+                ipc::Writer w;
+                w.u64(out_h);
+                w.bytes(out_k, std::strlen(out_k));
+                w.bytes(out_json.data(), out_json.size());
+                ipc::send_reply(pipe, f.seq, ipc::RPC_PROCESS,
+                                w.buf().data(), (uint32_t)w.buf().size());
+                break;
+            }
+            case ipc::RPC_EXCHANGE: {
+                if (!require_inst(f.seq)) break;
+                if (!plugin.exchange) {
+                    ipc::send_error_reply(pipe, f.seq, "plugin has no exchange()");
+                    break;
+                }
+                ipc::Reader r(f.payload);
+                std::string cmd = r.str();
+                std::vector<char> rsp(64 * 1024);
+                int n = plugin.exchange(plugin.inst, cmd.c_str(),
+                                        rsp.data(), (int)rsp.size());
+                if (n < 0) { rsp.resize((size_t)(-n) + 1024);
+                             n = plugin.exchange(plugin.inst, cmd.c_str(),
+                                                 rsp.data(), (int)rsp.size()); }
+                ipc::Writer w;
+                if (n > 0) w.bytes(rsp.data(), (size_t)n);
+                else       w.bytes("", 0);
+                ipc::send_reply(pipe, f.seq, ipc::RPC_EXCHANGE,
+                                w.buf().data(), (uint32_t)w.buf().size());
+                break;
+            }
+            case ipc::RPC_GET_DEF: {
+                if (!require_inst(f.seq)) break;
+                if (!plugin.get_def) {
+                    ipc::send_error_reply(pipe, f.seq, "plugin has no get_def()");
+                    break;
+                }
+                std::vector<char> buf(4096);
+                int n = plugin.get_def(plugin.inst, buf.data(), (int)buf.size());
+                if (n < 0) { buf.resize((size_t)(-n) + 1024);
+                             n = plugin.get_def(plugin.inst, buf.data(), (int)buf.size()); }
+                ipc::Writer w;
+                w.bytes(buf.data(), (size_t)(n > 0 ? n : 0));
+                ipc::send_reply(pipe, f.seq, ipc::RPC_GET_DEF,
+                                w.buf().data(), (uint32_t)w.buf().size());
+                break;
+            }
+            case ipc::RPC_SET_DEF: {
+                if (!require_inst(f.seq)) break;
+                if (!plugin.set_def) {
+                    ipc::send_error_reply(pipe, f.seq, "plugin has no set_def()");
+                    break;
+                }
+                ipc::Reader r(f.payload);
+                std::string def = r.str();
+                int rc = plugin.set_def(plugin.inst, def.c_str());
+                ipc::Writer w; w.u8(rc == 0 ? 1 : 0);
+                ipc::send_reply(pipe, f.seq, ipc::RPC_SET_DEF,
+                                w.buf().data(), (uint32_t)w.buf().size());
+                break;
+            }
+            default:
+                ipc::send_error_reply(pipe, f.seq,
+                    "unknown rpc type " + std::to_string(f.type));
+                break;
+            }
+        } catch (const xi::seh_exception& e) {
+            std::fprintf(stderr, "[worker] plugin SEH: 0x%08X (%s)\n", e.code, e.what());
+            ipc::send_error_reply(pipe, f.seq,
+                std::string("plugin crashed: ") + e.what());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[worker] exception: %s\n", e.what());
+            ipc::send_error_reply(pipe, f.seq, e.what());
+        }
+    }
+
+    if (plugin.inst) plugin.destroy(plugin.inst);
+    if (plugin.dll)  FreeLibrary(plugin.dll);
+    return 0;
+}

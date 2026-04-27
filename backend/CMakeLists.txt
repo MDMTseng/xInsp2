@@ -128,6 +128,64 @@ add_test(NAME protocol COMMAND test_protocol)
 add_executable(test_diagnostics tests/test_diagnostics.cpp)
 target_link_libraries(test_diagnostics PRIVATE xi_core cjson)
 add_test(NAME diagnostics COMMAND test_diagnostics)
+
+add_executable(test_xi_shm tests/test_xi_shm.cpp)
+target_link_libraries(test_xi_shm PRIVATE xi_core cjson)
+add_test(NAME xi_shm COMMAND test_xi_shm)
+
+# Worker E2E: tiny test plugin DLL + a process driver. Validates the
+# zero-copy contract end-to-end across the backend/worker boundary.
+add_library(test_worker_plugin SHARED tests/test_worker_plugin.cpp)
+target_link_libraries(test_worker_plugin PRIVATE xi_core)
+set_target_properties(test_worker_plugin PROPERTIES PREFIX "")  # no "lib" prefix
+
+add_executable(test_worker tests/test_worker.cpp)
+target_link_libraries(test_worker PRIVATE xi_core cjson)
+add_dependencies(test_worker xinsp_worker test_worker_plugin)
+add_test(NAME worker COMMAND test_worker)
+
+add_executable(test_isolated_instance tests/test_isolated_instance.cpp)
+target_link_libraries(test_isolated_instance PRIVATE xi_core cjson)
+add_dependencies(test_isolated_instance xinsp_worker test_worker_plugin)
+add_test(NAME isolated_instance COMMAND test_isolated_instance)
+
+add_executable(test_worker_respawn tests/test_worker_respawn.cpp)
+target_link_libraries(test_worker_respawn PRIVATE xi_core cjson)
+add_dependencies(test_worker_respawn xinsp_worker test_worker_plugin)
+add_test(NAME worker_respawn COMMAND test_worker_respawn)
+
+# Phase 3 minimum: script-runner + tiny test "script" DLL + driver.
+add_library(test_script_runner_dll SHARED tests/test_script_runner_dll.cpp)
+target_link_libraries(test_script_runner_dll PRIVATE xi_core)
+set_target_properties(test_script_runner_dll PROPERTIES PREFIX "")
+
+add_executable(test_script_runner tests/test_script_runner.cpp)
+target_link_libraries(test_script_runner PRIVATE xi_core cjson)
+add_dependencies(test_script_runner xinsp_script_runner test_script_runner_dll)
+add_test(NAME script_runner COMMAND test_script_runner)
+
+add_executable(test_script_process_adapter tests/test_script_process_adapter.cpp)
+target_link_libraries(test_script_process_adapter PRIVATE xi_core cjson)
+add_dependencies(test_script_process_adapter xinsp_script_runner test_script_runner_dll)
+add_test(NAME script_process_adapter COMMAND test_script_process_adapter)
+
+add_executable(test_script_runner_respawn tests/test_script_runner_respawn.cpp)
+target_link_libraries(test_script_runner_respawn PRIVATE xi_core cjson)
+add_dependencies(test_script_runner_respawn xinsp_script_runner test_script_runner_dll)
+add_test(NAME script_runner_respawn COMMAND test_script_runner_respawn)
+
+add_library(test_hang_plugin SHARED tests/test_hang_plugin.cpp)
+target_link_libraries(test_hang_plugin PRIVATE xi_core)
+set_target_properties(test_hang_plugin PROPERTIES PREFIX "")
+
+add_executable(test_worker_timeout tests/test_worker_timeout.cpp)
+target_link_libraries(test_worker_timeout PRIVATE xi_core cjson)
+add_dependencies(test_worker_timeout xinsp_worker test_hang_plugin)
+add_test(NAME worker_timeout COMMAND test_worker_timeout)
+
+add_executable(test_shm_ipc_edges tests/test_shm_ipc_edges.cpp)
+target_link_libraries(test_shm_ipc_edges PRIVATE xi_core cjson)
+add_test(NAME shm_ipc_edges COMMAND test_shm_ipc_edges)
 set_tests_properties(protocol PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures"
 )
@@ -172,6 +230,16 @@ target_compile_definitions(xinsp_backend PRIVATE
     XINSP2_COMMIT="${XINSP2_COMMIT}")
 
 # Headless production runner. Same libs as the server; no WebSocket.
+add_executable(xinsp_worker src/worker_main.cpp)
+target_link_libraries(xinsp_worker PRIVATE xi_core cjson)
+target_include_directories(xinsp_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
+set_target_properties(xinsp_worker PROPERTIES OUTPUT_NAME "xinsp-worker")
+
+add_executable(xinsp_script_runner src/script_runner_main.cpp)
+target_link_libraries(xinsp_script_runner PRIVATE xi_core cjson)
+target_include_directories(xinsp_script_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
+set_target_properties(xinsp_script_runner PROPERTIES OUTPUT_NAME "xinsp-script-runner")
+
 add_executable(xinsp_runner src/runner_main.cpp)
 target_link_libraries(xinsp_runner PRIVATE xi_core cjson)
 target_include_directories(xinsp_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
