@@ -46,6 +46,50 @@ inline bool atomic_write(const std::filesystem::path& path,
     }
     auto tmp = path;
     tmp += ".tmp";
+#ifdef _WIN32
+    // Use Win32 directly so we can FlushFileBuffers before rename.
+    // std::ofstream::flush() only flushes user-space buffers — it
+    // does NOT push them to disk. MOVEFILE_WRITE_THROUGH on the
+    // rename flushes the *directory entry change*, not the file
+    // contents. Without an explicit FlushFileBuffers(handle) here,
+    // a power loss between the close and the rename can leave the
+    // .tmp file with metadata committed but contents zero / torn,
+    // and the rename then makes a corrupt file the canonical one.
+    HANDLE h = CreateFileW(
+        tmp.wstring().c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD wrote = 0;
+    if (!WriteFile(h, content.data(),
+                   (DWORD)content.size(), &wrote, nullptr)
+        || wrote != (DWORD)content.size()) {
+        CloseHandle(h);
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        return false;
+    }
+    if (!FlushFileBuffers(h)) {
+        // Best-effort — if flush fails (e.g., disk full), bail and
+        // don't rename the bad data over the good.
+        CloseHandle(h);
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        return false;
+    }
+    CloseHandle(h);
+    if (!MoveFileExW(tmp.wstring().c_str(), path.wstring().c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        return false;
+    }
+    return true;
+#else
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) return false;
@@ -55,22 +99,8 @@ inline bool atomic_write(const std::filesystem::path& path,
             fs::remove(tmp, ec);
             return false;
         }
-        // Force flush so a process crash AFTER close() but before
-        // rename() doesn't leave a half-written tmp masquerading as
-        // complete.
         f.flush();
     }
-#ifdef _WIN32
-    // MoveFileExW with REPLACE_EXISTING: atomic on the same volume,
-    // overwrites destination. Convert paths through native string.
-    if (!MoveFileExW(tmp.wstring().c_str(), path.wstring().c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        std::error_code ec;
-        fs::remove(tmp, ec);
-        return false;
-    }
-    return true;
-#else
     std::error_code ec;
     fs::rename(tmp, path, ec);
     if (ec) {
