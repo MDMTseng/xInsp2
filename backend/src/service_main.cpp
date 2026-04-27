@@ -82,6 +82,11 @@ static std::string g_persistent_state_json = "{}";
 using xi::seh_exception;
 using xi::seh_translator;
 
+// Forward decl — definition near g_srv_for_bp / g_iso_dead_*. Emits a
+// log + isolation_dead event the first time we see an instance gone
+// permanently dead (worker respawn cap hit), silent on later calls.
+static void report_isolation_dead_once(const char* instance, const char* what);
+
 static int use_process_cb(const char* name,
                           const char* input_json,
                           const xi_record_image* input_images, int input_image_count,
@@ -101,6 +106,7 @@ static int use_process_cb(const char* name,
         if (!p->process_via_rpc(&in_rec, output, &err)) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') isolated: %s\n",
                          name, err.c_str());
+            if (p->is_dead()) report_isolation_dead_once(name, err.c_str());
             return -2;
         }
         return output->image_count;
@@ -228,6 +234,37 @@ static std::condition_variable g_bp_cv;
 static bool                    g_bp_paused = false;
 static std::string             g_bp_last_label;
 static xi::ws::Server*         g_srv_for_bp = nullptr;   // set in main
+
+// Fail-loud channel for ProcessInstanceAdapter "worker dead" state.
+// Once an isolated instance hits the 3-respawns/60s cap and goes
+// permanently dead, the adapter returns silent defaults forever
+// ({}, false, etc). Without this, a script keeps iterating against a
+// no-op detector and downstream pipeline output silently drifts.
+//
+// We emit one `log` (level=error) and one `event` per dead instance
+// — the first time use_process_cb / use_exchange_cb sees it dead.
+// Subsequent calls stay silent so the log doesn't flood.
+static std::mutex                       g_iso_dead_mu;
+static std::unordered_set<std::string>  g_iso_dead_reported;
+static void report_isolation_dead_once(const char* instance, const char* what) {
+    if (!g_srv_for_bp) return;
+    {
+        std::lock_guard<std::mutex> lk(g_iso_dead_mu);
+        if (!g_iso_dead_reported.insert(instance).second) return;
+    }
+    std::string msg = std::string("isolated instance '") + instance
+                    + "' is permanently dead (worker respawn cap hit) — "
+                    + (what && *what ? what : "no further detail")
+                    + ". Subsequent calls will return safe defaults.";
+    xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
+    g_srv_for_bp->send_text(lm.to_json());
+    std::string ev = std::string("{\"type\":\"event\",\"name\":\"isolation_dead\","
+                                  "\"data\":{\"instance\":");
+    xp::json_escape_into(ev, instance);
+    ev += "}}";
+    g_srv_for_bp->send_text(ev);
+    std::fprintf(stderr, "[xinsp2] %s\n", msg.c_str());
+}
 
 // ---- Trigger access (script callbacks) ---------------------------------
 // Set by the worker thread (or run_one_inspection) before invoking the

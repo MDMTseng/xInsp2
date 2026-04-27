@@ -117,7 +117,15 @@ Out-of-band notifications that don't fit the above.
 { "type": "event", "name": "run_started", "data": { "run_id": 17 } }
 { "type": "event", "name": "run_finished", "data": { "run_id": 17, "ms": 42 } }
 { "type": "event", "name": "script_reloaded", "data": { "path": "..." } }
+{ "type": "event", "name": "isolation_dead", "data": { "instance": "cam0" } }
 ```
+
+`isolation_dead` fires once per instance the first time
+`use_process` / `use_exchange` sees an isolated instance gone
+permanently dead (worker respawn cap hit; subsequent calls would
+return safe defaults silently). Pair with the `log` (level=error)
+message that lands in the same beat. Reset by reopening the project
+or removing/recreating the instance.
 
 ---
 
