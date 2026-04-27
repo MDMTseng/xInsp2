@@ -17,7 +17,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <fstream>
+#include <typeinfo>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -2208,12 +2210,98 @@ static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+// std::terminate handler — fires when an unhandled C++ exception
+// unwinds out of a thread (e.g. a detached worker thread that didn't
+// wrap its body in try/catch). This path bypasses
+// SetUnhandledExceptionFilter on its own, so a silent terminate would
+// produce no crashdump. We:
+//   1. Log the current exception's what()/type so the cause appears
+//      in stderr (and thus the bash exit summary).
+//   2. RaiseException with a recognisable code so write_minidump
+//      sees a thread context and can write the dump + json sidecar.
+[[noreturn]] static void on_terminate() noexcept {
+    const char* what  = "<no exception>";
+    const char* tname = "<no exception>";
+    try {
+        if (auto p = std::current_exception()) std::rethrow_exception(p);
+    } catch (const std::exception& e) {
+        what  = e.what();
+        tname = typeid(e).name();
+    } catch (const seh_exception& e) {
+        what  = e.what();
+        tname = "xi::seh_exception";
+    } catch (...) {
+        tname = "<non-std exception>";
+    }
+    std::fprintf(stderr,
+        "[xinsp2] std::terminate (thread %lu): %s — %s\n",
+        (unsigned long)GetCurrentThreadId(), tname, what);
+    std::fflush(stderr);
+    crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "terminate");
+    // 0xE0000002 — distinct from --test-crash's 0xE0000001 so blame_module
+    // and exception_name still tag it as MS_C++ish; the json_path will
+    // record this code so the next-startup report distinguishes the
+    // two paths. NONCONTINUABLE so the filter actually runs.
+    RaiseException(0xE0000002, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    std::abort();   // unreachable; quiets [[noreturn]]
+}
+
+// Vectored exception handler — runs BEFORE SEH translators, before
+// any per-thread try/__except. Logs first-chance exceptions that
+// might get swallowed silently. Returning EXCEPTION_CONTINUE_SEARCH
+// lets normal handling proceed; we're just listening here.
+//
+// Filtered to the codes that would actually kill the process if
+// unhandled: AVs, illegal instructions, stack overflow, fastfail,
+// our own RaiseException codes. Skipping benign first-chance C++
+// exceptions (0xE06D7363) that happen all the time during normal
+// try/catch flow.
+static LONG WINAPI veh_logger(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    DWORD code = info->ExceptionRecord->ExceptionCode;
+    // Whitelist things that are actually concerning. C++ exceptions
+    // (0xE06D7363) and breakpoints get filtered out.
+    bool concerning =
+        code == EXCEPTION_ACCESS_VIOLATION ||
+        code == EXCEPTION_ILLEGAL_INSTRUCTION ||
+        code == EXCEPTION_STACK_OVERFLOW ||
+        code == EXCEPTION_INT_DIVIDE_BY_ZERO ||
+        code == EXCEPTION_NONCONTINUABLE_EXCEPTION ||
+        code == 0xC0000409 /* STATUS_STACK_BUFFER_OVERRUN / fastfail */ ||
+        code == 0xC0000374 /* STATUS_HEAP_CORRUPTION */ ||
+        (code >= 0xE0000001 && code <= 0xE0000010);
+    if (concerning) {
+        void* addr = info->ExceptionRecord->ExceptionAddress;
+        std::string blamed = blame_module(addr);
+        std::fprintf(stderr,
+            "[xinsp2] VEH first-chance 0x%08X (%s) thread %lu at %s\n",
+            code, exception_name(code),
+            (unsigned long)GetCurrentThreadId(), blamed.c_str());
+        std::fflush(stderr);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int main(int argc, char** argv) {
     // Top-level guard: minidump on crashes that escape the SEH translator
     // (stack overflow, plugin static destructor faults, etc.).
     SetUnhandledExceptionFilter(write_minidump);
     // Install SEH → C++ exception translator so try/catch catches segfaults
     _set_se_translator(seh_translator);
+    // C++ terminate path — covers unhandled exceptions in detached threads
+    // (the silent-exit pattern the spike branch's process-isolation work
+    // hit during validation).
+    std::set_terminate(on_terminate);
+    // Vectored handler — first crack at every concerning exception, even
+    // ones that get suppressed somewhere downstream. Diagnostic only;
+    // doesn't change the exception's normal handling path.
+    AddVectoredExceptionHandler(/*first=*/1, veh_logger);
+    // Tell Windows not to silently kill us on heap corruption — we want
+    // to see crashpad's report instead. (HeapEnableTerminationOnCorruption
+    // is opt-IN; HeapDisableCoalesceOnFree is unrelated. The default in
+    // newer Windows versions IS termination-on-corruption; flipping it
+    // off via SetProcessDEPPolicy isn't needed — just ensure we get the
+    // event.)
 
     // --test-crash: deliberately trigger a fatal exception so the
     // top-level minidump filter fires. Used by runCrashDump E2E.
