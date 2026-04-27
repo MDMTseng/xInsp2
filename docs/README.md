@@ -34,6 +34,16 @@ shapes.
 | [`reference/instance-model.md`](./reference/instance-model.md) | How instances are loaded, persisted, registered, destroyed; `instance.json` schema; isolation modes |
 | [`reference/ipc-shm.md`](./reference/ipc-shm.md) | Cross-process isolation architecture (currently on `shm-process-isolation` spike branch) |
 
+## Design sketches (`design/`)
+
+Forward-looking design docs for work that isn't implemented yet.
+Updated when scope solidifies; deleted when the work lands and the
+content moves into the relevant reference / guide.
+
+| File | Subject |
+|---|---|
+| [`design/interactive-tool-registry.md`](./design/interactive-tool-registry.md) | How plugins that need GUI setup (shape-model template editing, ROI mask drawing) hook into a shared image-viewer panel without reimplementing pan/zoom/draw plumbing. |
+
 ## Archive (`archive/`)
 
 Historical snapshots — kept for context, not for planning.
