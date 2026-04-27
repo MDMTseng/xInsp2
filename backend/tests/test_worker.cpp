@@ -158,11 +158,24 @@ int main(int argc, char** argv) {
     // memory in its own process. NO memcpy happens here.
     uint64_t out_h = 0;
     {
-        ipc::Writer w; w.u64(in_h); w.bytes("{}", 2);
+        // New wire format: u32 in_count, per-image (str key | u64 handle), bytes json.
+        ipc::Writer w;
+        w.u32(1);
+        w.str("frame");
+        w.u64(in_h);
+        w.bytes("{}", 2);
         auto r = rpc_call(ipc::RPC_PROCESS, w.buf());
         CHECK(r.type == (ipc::RPC_PROCESS | ipc::RPC_REPLY_BIT));
+        // Reply: u32 out_count, per-image (str key | u64 handle), bytes json.
         ipc::Reader rd(r.payload);
-        out_h = rd.u64();
+        uint32_t n_out = rd.u32();
+        CHECK(n_out >= 1);
+        if (n_out >= 1) {
+            rd.bytes();             // key (unused)
+            out_h = rd.u64();
+            // Skip remaining outputs if any (none expected).
+            for (uint32_t i = 1; i < n_out; ++i) { rd.bytes(); rd.u64(); }
+        }
         rd.bytes(); // out json (unused)
     }
     CHECK(out_h != 0);

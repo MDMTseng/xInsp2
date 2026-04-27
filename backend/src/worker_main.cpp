@@ -187,69 +187,63 @@ int main(int argc, char** argv) {
                     ipc::send_error_reply(pipe, f.seq, "plugin has no process()");
                     break;
                 }
+                // Wire format (matches ProcessInstanceAdapter::process_via_rpc):
+                //   in : u32 count | for each (str key | u64 handle) | bytes json
+                //   out: u32 count | for each (str key | u64 handle) | bytes json
                 ipc::Reader r(f.payload);
-                xi_image_handle in_h = r.u64();
+                uint32_t n_in = r.u32();
+                std::vector<std::string>     in_keys(n_in);
+                std::vector<xi_record_image> in_imgs(n_in);
+                for (uint32_t i = 0; i < n_in; ++i) {
+                    in_keys[i] = r.str();
+                    in_imgs[i].key    = in_keys[i].c_str();
+                    in_imgs[i].handle = r.u64();
+                }
                 std::vector<uint8_t> in_json = r.bytes();
 
-                // Build the input record. Source plugins receive json-only
-                // (in_h == 0); transformer plugins get the SHM handle
-                // straight through (zero copy).
-                xi_record_image in_rec_img{ "frame", in_h };
-                xi_record       in_rec{};
-                in_rec.images      = (in_h ? &in_rec_img : nullptr);
-                in_rec.image_count = (in_h ? 1 : 0);
+                xi_record in_rec{};
+                in_rec.images      = n_in ? in_imgs.data() : nullptr;
+                in_rec.image_count = (int)n_in;
                 std::string in_str(in_json.begin(), in_json.end());
                 in_rec.json        = in_str.c_str();
 
                 xi_record_out out_rec{};
                 plugin.process(plugin.inst, &in_rec, &out_rec);
 
-                // Pack the output.
-                //
                 // Heap-pool handles (no 0xA5 tag) point into the worker's
-                // local ImagePool — useless to the backend. Plugins that
-                // know about isolation use host->shm_create_image; plugins
-                // that don't (i.e. most of them) just `xi::Image{...}`
-                // which goes through image_create. Auto-convert heap-only
-                // handles to SHM here so plugin authors don't have to know
-                // which mode they're running in.
-                xi_image_handle out_h = (out_rec.image_count > 0)
-                    ? out_rec.images[0].handle : 0;
-                const char* out_k = (out_rec.image_count > 0 && out_rec.images[0].key)
-                    ? out_rec.images[0].key : "";
-
-                if (out_h && !host.shm_is_shm_handle(out_h)) {
-                    // heap → SHM copy. Single-image output is the common
-                    // case; multi-image plugins that need cross-process
-                    // visibility should call shm_create_image directly.
-                    int w_ = host.image_width(out_h);
-                    int h_ = host.image_height(out_h);
-                    int c_ = host.image_channels(out_h);
-                    int s_ = host.image_stride(out_h);
-                    const uint8_t* src = host.image_data(out_h);
-                    if (src && w_ > 0 && h_ > 0 && c_ > 0) {
-                        xi_image_handle shm_h = host.shm_create_image(w_, h_, c_);
-                        if (shm_h) {
-                            uint8_t* dst = const_cast<uint8_t*>(host.image_data(shm_h));
-                            // Most images are tightly packed (stride == w*c);
-                            // honour stride so non-packed sources still land
-                            // contiguously in SHM.
-                            int row_bytes = w_ * c_;
-                            for (int y = 0; y < h_; ++y)
-                                std::memcpy(dst + y * row_bytes,
-                                            src + y * (s_ > 0 ? s_ : row_bytes),
-                                            (size_t)row_bytes);
-                            host.image_release(out_h);
-                            out_h = shm_h;
-                        }
-                    }
-                }
-
-                std::string out_json = out_rec.json ? out_rec.json : "{}";
+                // local ImagePool — useless to the backend. Auto-convert
+                // every output image to SHM so plugin authors don't have
+                // to know which mode they're running in.
+                auto promote_to_shm = [&](xi_image_handle h) -> xi_image_handle {
+                    if (!h || host.shm_is_shm_handle(h)) return h;
+                    int w_ = host.image_width(h);
+                    int h_ = host.image_height(h);
+                    int c_ = host.image_channels(h);
+                    int s_ = host.image_stride(h);
+                    const uint8_t* src = host.image_data(h);
+                    if (!src || w_ <= 0 || h_ <= 0 || c_ <= 0) return h;
+                    xi_image_handle shm_h = host.shm_create_image(w_, h_, c_);
+                    if (!shm_h) return h;
+                    uint8_t* dst = const_cast<uint8_t*>(host.image_data(shm_h));
+                    int row_bytes = w_ * c_;
+                    for (int y = 0; y < h_; ++y)
+                        std::memcpy(dst + y * row_bytes,
+                                    src + y * (s_ > 0 ? s_ : row_bytes),
+                                    (size_t)row_bytes);
+                    host.image_release(h);
+                    return shm_h;
+                };
 
                 ipc::Writer w;
-                w.u64(out_h);
-                w.bytes(out_k, std::strlen(out_k));
+                uint32_t n_out = (uint32_t)out_rec.image_count;
+                w.u32(n_out);
+                for (uint32_t i = 0; i < n_out; ++i) {
+                    auto& img = out_rec.images[i];
+                    const char* k = img.key ? img.key : "";
+                    w.str(std::string(k));
+                    w.u64(promote_to_shm(img.handle));
+                }
+                std::string out_json = out_rec.json ? out_rec.json : "{}";
                 w.bytes(out_json.data(), out_json.size());
                 ipc::send_reply(pipe, f.seq, ipc::RPC_PROCESS,
                                 w.buf().data(), (uint32_t)w.buf().size());
