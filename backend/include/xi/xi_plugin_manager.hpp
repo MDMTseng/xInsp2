@@ -1013,13 +1013,19 @@ public:
                     // Same registration as create_instance — needed for project-load too.
                     InstanceFolderRegistry::instance().set(ii.name, ii.folder_path);
 
-                    // Optional opt-in: instance.json: "isolation": "process"
-                    // → spawn a xinsp-worker.exe and proxy method calls
-                    // over IPC. Pixel data still goes via SHM so process()
-                    // is zero-copy. If env not configured, fall through to
-                    // the in-proc path with a warning.
+                    // Process isolation. Default-on: every instance runs in
+                    // xinsp-worker.exe with method calls proxied over IPC,
+                    // pixel data shared via SHM (zero-copy). A buggy plugin
+                    // can crash its worker without taking the backend with
+                    // it; ProcessInstanceAdapter respawns the worker and
+                    // restores the last set_def. To opt out (debugging,
+                    // hot-path latency), set instance.json:
+                    //   "isolation": "in_process"
+                    // If env isn't configured (xinsp-worker.exe missing,
+                    // SHM not initialised), every instance falls back to
+                    // in-proc with a warning logged once per instance.
                     auto iso = extract_string(ic, "isolation");
-                    bool want_isolated = (iso && *iso == "process");
+                    bool want_isolated = !iso || *iso != "in_process";
                     if (want_isolated && !worker_exe_.empty() && !shm_name_.empty()) {
                         try {
                             auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
@@ -1035,8 +1041,8 @@ public:
                         }
                     } else if (want_isolated) {
                         std::fprintf(stderr,
-                            "[xinsp2] isolation:process requested for '%s' but "
-                            "worker env not configured — using in-proc\n",
+                            "[xinsp2] process isolation default-on but worker env "
+                            "not configured for '%s' — using in-proc\n",
                             ii.name.c_str());
                     }
 
@@ -1119,8 +1125,26 @@ public:
         // call host->instance_folder() from inside its constructor.
         InstanceFolderRegistry::instance().set(instance_name, ii.folder_path);
 
-        if (pi.c_factory) {
-            // New C ABI — create via host API
+        // Process-isolated by default — same path as open_project. Falls
+        // back to in-proc if the worker env isn't configured. (Runtime
+        // create_instance has no instance.json yet to opt out via
+        // "isolation":"in_process"; if you need that, save_project,
+        // edit instance.json, reload.)
+        bool created = false;
+        if (!worker_exe_.empty() && !shm_name_.empty()) {
+            try {
+                auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
+                ii.instance = std::make_shared<ProcessInstanceAdapter>(
+                    instance_name, plugin_name, worker_exe_, dll_path, shm_name_);
+                created = true;
+            } catch (const std::exception& e) {
+                std::fprintf(stderr,
+                    "[xinsp2] isolation:process spawn failed for '%s': %s — "
+                    "falling back to in-proc\n",
+                    instance_name.c_str(), e.what());
+            }
+        }
+        if (!created && pi.c_factory) {
             static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
             void* raw = pi.c_factory(&host, instance_name.c_str());
             if (!raw) {
@@ -1129,8 +1153,7 @@ public:
             }
             ii.instance = std::make_shared<CAbiInstanceAdapter>(
                 instance_name, plugin_name, pi.handle, raw);
-        } else {
-            // Old-style factory
+        } else if (!created) {
             auto* raw = pi.factory(instance_name.c_str());
             if (!raw) return nullptr;
             ii.instance.reset(raw);

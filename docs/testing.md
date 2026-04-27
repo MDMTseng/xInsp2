@@ -155,11 +155,17 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
 
 ## Known limitations / gaps
 
-- **Stack overflow** in user script still kills the backend process
-  (no guard thread; in-proc layout). Process isolation spike
-  addresses this — see `docs/status.md`.
-- **Heap corruption** from a script can corrupt the backend (same
-  address space). Same caveat as above.
+- **Plugin crashes** (AV, heap corruption, stack overflow inside an
+  instance) are now isolated — every plugin instance runs in
+  `xinsp-worker.exe` by default, the worker dies alone and is auto-
+  respawned, the backend stays up. See `docs/reference/ipc-shm.md`.
+- **User-script crashes still kill the backend** on the default
+  `cmd:run` path. Isolated execution exists (`cmd:script_isolated_run`)
+  but doesn't yet emit binary previews / history; folding it into the
+  default run cmd is tracked work.
+- **Linux** build path untested (Windows-first WS server, SEH usage,
+  `cl.exe` compile driver).
+- **Multi-client server** deliberately deferred to S6.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

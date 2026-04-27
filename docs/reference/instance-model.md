@@ -38,7 +38,7 @@ own folder, config, and identity.
 └── instances/
     ├── cam0/
     │   ├── instance.json     ← { "plugin": "mock_camera",
-    │   │                          "isolation": "process"?,    (spike)
+    │   │                          "isolation": "in_process"?,
     │   │                          "config": { ... } }
     │   └── (whatever the plugin chose to write here)
     └── det0/
@@ -63,9 +63,11 @@ anything bigger than `instance.json`'s small config blob.
    - Read `instance.json`. Field `plugin` names the type.
    - Look up the plugin in the registered set (scanned earlier from
      `plugins_dir` + extra dirs).
-   - **(spike branch)** If `isolation: "process"` and worker exe is
-     available, build a `ProcessInstanceAdapter`. Otherwise:
-   - Call `xi_plugin_create(host_api, instance_name)`.
+   - **Default**: build a `ProcessInstanceAdapter` (spawn the plugin
+     in `xinsp-worker.exe`). Falls back to in-proc with a warning if
+     `xinsp-worker.exe` or the SHM region isn't available. To opt out
+     per-instance, set `"isolation": "in_process"` in `instance.json`.
+   - In-proc path: call `xi_plugin_create(host_api, instance_name)`.
    - Apply persisted `config` via `xi_plugin_set_def`.
    - Register in `InstanceRegistry`.
 4. **Skip-bad-instance**: any failure (broken JSON, missing plugin,
@@ -158,21 +160,30 @@ Two adapters wrap the C ABI:
 
 ---
 
-## isolation modes (spike branch)
+## isolation modes
 
-`instance.json` may declare:
+**Default: process-isolated.** Every instance runs in
+`xinsp-worker.exe`, with method calls (`set_def` / `exchange` /
+`get_def`) proxied over a named pipe and pixel data shared zero-copy
+through SHM. A buggy plugin can crash its worker process without
+taking the backend with it; `ProcessInstanceAdapter` auto-respawns the
+worker and replays the last `set_def` so the next call to the
+instance succeeds with the same config.
+
+To opt **out** for a specific instance (debugging convenience, or
+sub-millisecond hot path where the RPC cost matters), set:
 
 ```json
 {
   "plugin": "shape_match",
-  "isolation": "process",        // opt-in
+  "isolation": "in_process",
   "config": { ... }
 }
 ```
 
-When `isolation: "process"` is set AND the backend was started with the
-isolation env wired (`worker_exe_` + `shm_name_`), `open_project`
-constructs a `ProcessInstanceAdapter` instead of `CAbiInstanceAdapter`.
+If `xinsp-worker.exe` isn't found alongside `xinsp-backend.exe` (or
+the SHM region failed to initialise), every instance silently falls
+back to in-proc with a warning logged once per instance.
 
 A spawned `xinsp-worker.exe`:
 - Attaches the backend's SHM region (so image handles dereference to
@@ -184,13 +195,9 @@ A spawned `xinsp-worker.exe`:
 - A hung `process()` is bounded by the per-call timeout
   (default 30s) → `CancelIoEx` watchdog → respawn.
 
-Default mode without the field is in-proc (`CAbiInstanceAdapter`); no
-changes for existing projects.
-
-The `default_isolation` choice is per-instance, not per-project — you
-can mix in-proc and isolated instances in the same project. Useful
-for sandboxing one suspect plugin without paying RPC overhead on the
-rest.
+The isolation choice is per-instance, not per-project — you can mix
+isolated and in-proc instances in the same project (e.g., put one
+known-stable hot-path plugin in-proc, leave the rest isolated).
 
 ---
 

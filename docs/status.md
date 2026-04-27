@@ -24,8 +24,10 @@ xInsp2 ships as a single-machine inspection-authoring environment:
 - **SDK** — scaffold + cmake helpers + tests for plugin authors who
   want to ship distributable plugins.
 
-Master holds **9 shipped plugins** and an active spike for cross-process
-isolation (see *Active Spikes* below).
+Master holds **9 shipped plugins** and now ships **process-isolated
+plugin instances by default** (merged from the `shm-process-isolation`
+spike — see *Process isolation* below). User-script isolation remains
+opt-in via `cmd:script_isolated_run`.
 
 ---
 
@@ -101,31 +103,32 @@ isolation (see *Active Spikes* below).
 
 ---
 
-## Active spikes
+## Process isolation (merged, instance side default-on)
 
-### `shm-process-isolation` branch — cross-process plugin / script isolation
-
-**Status:** branch pushed, **not merged**. ~16 commits, all 9 SHM tests
-green. Demonstrates the full mesh:
+Merged from the `shm-process-isolation` spike. All 9 SHM/IPC tests
+green; instance default flipped to process so plugin AVs / heap
+corruption no longer take the backend with them.
 
 - `xi_shm.hpp` — Windows `CreateFileMapping`-backed buffer pool with
-  cross-process atomic refcount and bump allocator.
+  cross-process atomic refcount and bump allocator (512 MB region per
+  backend).
 - `host_api` extensions: `shm_create_image` / `shm_alloc_buffer` /
   `shm_addref` / `shm_release` / `shm_is_shm_handle` (binary-compatible
-  append).
-- `xinsp-worker.exe` — hosts ONE plugin in a separate process; pipes
-  RPC, pixels go through SHM (zero copy).
-- `xinsp-script-runner.exe` — same shape for user scripts.
+  append — pre-isolation plugin DLLs still load).
+- `xinsp-worker.exe` — hosts ONE plugin instance in its own process.
+  Method calls go over a named pipe; pixel data rides SHM (zero-copy).
+- `xinsp-script-runner.exe` — analogous host for user scripts.
 - `ProcessInstanceAdapter` + `ScriptProcessAdapter` — host-side handles
   with auto-respawn (rate-limited 3/60s) and per-call timeout via
   `CancelIoEx` watchdog.
-- Opt-in via `instance.json: "isolation": "process"`; default is in-proc.
-- New cmd `cmd:script_isolated_run` exposes script-in-runner from the
-  WebSocket protocol.
-
-**Decision pending:** keep as a spike (re-enable when needed for an
-unstable third-party plugin) or merge to master once the team agrees on
-the operator story for hung-vs-crashed worker semantics.
+- **Default for plugin instances**: process. Opt out per-instance with
+  `instance.json: "isolation": "in_process"`. Falls back to in-proc
+  with a warning if `xinsp-worker.exe` isn't on disk.
+- **User-script isolation**: still opt-in via the
+  `cmd:script_isolated_run` command. Default `cmd:run` continues to
+  load the script DLL in-proc (so it keeps emitting binary previews,
+  history entries, etc.). Folding script-isolation into `cmd:run` is
+  next-up work — see "In flight" below.
 
 ---
 
@@ -159,8 +162,10 @@ See [`testing.md`](./testing.md) for the full breakdown. Summary:
 - **Per-instance folders.** Each instance owns `<project>/instances/<name>/`.
 - **Trigger bus is opt-in.** Legacy `ImageSource` plugins continue to
   work unchanged.
-- **Process isolation is opt-in.** Default in-proc DLL load; spike
-  proves the path for when third-party plugins make sandboxing valuable.
+- **Process isolation: instance side default-on.** Every plugin instance
+  spawns a worker; opt out per-instance with `"isolation":"in_process"`.
+  User scripts are still in-proc by default (binary-preview path needs
+  SHM rewiring before the default flip is safe).
 
 ---
 
@@ -185,12 +190,13 @@ See [`testing.md`](./testing.md) for the full breakdown. Summary:
 
 Priorities depend on real usage feedback. Candidate work:
 
-- **Decide on SHM spike** — merge or shelve.
+- **Script-side isolation by default.** Refactor `cmd:run` to host the
+  script in `xinsp-script-runner.exe` while preserving binary previews,
+  history, watchdog, breakpoint, and continuous mode. The runner +
+  `ScriptProcessAdapter` already exist — the work is wiring snapshot
+  vars + SHM-resolved gids back through `emit_vars_and_previews`.
 - **Multi-client broadcast (S6)** — opens the door to operator dashboards.
 - **History UI scrubber (finish S4)** — currently backend-only.
-- **Plugin SDK templates unification** (currently TS strings vs
-  `sdk/template/`; spike branch has the unified version at
-  `sdk/templates/`).
 - **Per-component reference docs** — see [`docs/reference/`](./reference/).
 
 For historical context (M0 vision, retired bug audits) see
