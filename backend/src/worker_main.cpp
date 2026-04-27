@@ -191,27 +191,65 @@ int main(int argc, char** argv) {
                 xi_image_handle in_h = r.u64();
                 std::vector<uint8_t> in_json = r.bytes();
 
-                // Build a one-image input record over the SHM-backed handle.
-                // Zero copy: we pass the handle straight through.
+                // Build the input record. Source plugins receive json-only
+                // (in_h == 0); transformer plugins get the SHM handle
+                // straight through (zero copy).
                 xi_record_image in_rec_img{ "frame", in_h };
                 xi_record       in_rec{};
-                in_rec.images      = &in_rec_img;
-                in_rec.image_count = 1;
+                in_rec.images      = (in_h ? &in_rec_img : nullptr);
+                in_rec.image_count = (in_h ? 1 : 0);
                 std::string in_str(in_json.begin(), in_json.end());
                 in_rec.json        = in_str.c_str();
 
                 xi_record_out out_rec{};
                 plugin.process(plugin.inst, &in_rec, &out_rec);
 
-                // Pack the output. We trust the plugin to have used
-                // host->image_create or shm_create_image; we just forward
-                // whichever handle came back.
+                // Pack the output.
+                //
+                // Heap-pool handles (no 0xA5 tag) point into the worker's
+                // local ImagePool — useless to the backend. Plugins that
+                // know about isolation use host->shm_create_image; plugins
+                // that don't (i.e. most of them) just `xi::Image{...}`
+                // which goes through image_create. Auto-convert heap-only
+                // handles to SHM here so plugin authors don't have to know
+                // which mode they're running in.
                 xi_image_handle out_h = (out_rec.image_count > 0)
                     ? out_rec.images[0].handle : 0;
+                const char* out_k = (out_rec.image_count > 0 && out_rec.images[0].key)
+                    ? out_rec.images[0].key : "";
+
+                if (out_h && !host.shm_is_shm_handle(out_h)) {
+                    // heap → SHM copy. Single-image output is the common
+                    // case; multi-image plugins that need cross-process
+                    // visibility should call shm_create_image directly.
+                    int w_ = host.image_width(out_h);
+                    int h_ = host.image_height(out_h);
+                    int c_ = host.image_channels(out_h);
+                    int s_ = host.image_stride(out_h);
+                    const uint8_t* src = host.image_data(out_h);
+                    if (src && w_ > 0 && h_ > 0 && c_ > 0) {
+                        xi_image_handle shm_h = host.shm_create_image(w_, h_, c_);
+                        if (shm_h) {
+                            uint8_t* dst = const_cast<uint8_t*>(host.image_data(shm_h));
+                            // Most images are tightly packed (stride == w*c);
+                            // honour stride so non-packed sources still land
+                            // contiguously in SHM.
+                            int row_bytes = w_ * c_;
+                            for (int y = 0; y < h_; ++y)
+                                std::memcpy(dst + y * row_bytes,
+                                            src + y * (s_ > 0 ? s_ : row_bytes),
+                                            (size_t)row_bytes);
+                            host.image_release(out_h);
+                            out_h = shm_h;
+                        }
+                    }
+                }
+
                 std::string out_json = out_rec.json ? out_rec.json : "{}";
 
                 ipc::Writer w;
                 w.u64(out_h);
+                w.bytes(out_k, std::strlen(out_k));
                 w.bytes(out_json.data(), out_json.size());
                 ipc::send_reply(pipe, f.seq, ipc::RPC_PROCESS,
                                 w.buf().data(), (uint32_t)w.buf().size());

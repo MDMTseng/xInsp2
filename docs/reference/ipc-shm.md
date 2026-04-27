@@ -1,11 +1,13 @@
 # IPC + SHM (cross-process isolation)
 
-> **Status: shipping; instance side default-on.** Plugin instances run
-> in `xinsp-worker.exe` by default — opt out per-instance with
-> `"isolation": "in_process"`. User scripts still run in-proc on the
-> default `cmd:run` path; isolated execution is exposed via
-> `cmd:script_isolated_run`. Folding the script side into `cmd:run` is
-> tracked separately (it requires SHM-aware preview / history wiring).
+> **Status: shipping; opt-in.** The full mesh (worker / runner / SHM /
+> respawn) is merged from `shm-process-isolation` and exercised by 9
+> backend tests. Activation is per-instance: set
+> `"isolation": "process"` in `instance.json`, or call
+> `cmd:script_isolated_run` for the script side. Default-on is tracked
+> work — needs broader real-plugin coverage (heap-pool conversion is in
+> place, but multi-image Records / plugin-side handle storage / error
+> paths still need validation across real plugins).
 
 ---
 
@@ -21,9 +23,10 @@ failure modes leak through the in-proc model:
   may be in unknown state).
 - Third-party plugins you don't fully trust.
 
-The default behaviour is now: every plugin instance hosted in a
-separate `xinsp-worker.exe`; user scripts can be hosted in
-`xinsp-script-runner.exe` via `cmd:script_isolated_run`.
+An instance can opt in via `instance.json: "isolation": "process"`:
+the plugin runs in a separate `xinsp-worker.exe`. User scripts have
+the analogous `xinsp-script-runner.exe` available via
+`cmd:script_isolated_run`.
 
 Pixel data still flows zero-copy via shared memory (`CreateFileMapping`
 + refcount in mapped pages); only handles + small JSON ride the

@@ -155,14 +155,11 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
 
 ## Known limitations / gaps
 
-- **Plugin crashes** (AV, heap corruption, stack overflow inside an
-  instance) are now isolated — every plugin instance runs in
-  `xinsp-worker.exe` by default, the worker dies alone and is auto-
-  respawned, the backend stays up. See `docs/reference/ipc-shm.md`.
-- **User-script crashes still kill the backend** on the default
-  `cmd:run` path. Isolated execution exists (`cmd:script_isolated_run`)
-  but doesn't yet emit binary previews / history; folding it into the
-  default run cmd is tracked work.
+- **Plugin / script crashes still kill the backend** on the default
+  in-proc path. Process isolation is shipped but opt-in:
+  `instance.json: "isolation": "process"` for plugins,
+  `cmd:script_isolated_run` for scripts. Default-on is tracked work.
+  See `docs/reference/ipc-shm.md`.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

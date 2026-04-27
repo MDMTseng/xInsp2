@@ -38,7 +38,7 @@ own folder, config, and identity.
 └── instances/
     ├── cam0/
     │   ├── instance.json     ← { "plugin": "mock_camera",
-    │   │                          "isolation": "in_process"?,
+    │   │                          "isolation": "process"?,
     │   │                          "config": { ... } }
     │   └── (whatever the plugin chose to write here)
     └── det0/
@@ -63,11 +63,11 @@ anything bigger than `instance.json`'s small config blob.
    - Read `instance.json`. Field `plugin` names the type.
    - Look up the plugin in the registered set (scanned earlier from
      `plugins_dir` + extra dirs).
-   - **Default**: build a `ProcessInstanceAdapter` (spawn the plugin
-     in `xinsp-worker.exe`). Falls back to in-proc with a warning if
-     `xinsp-worker.exe` or the SHM region isn't available. To opt out
-     per-instance, set `"isolation": "in_process"` in `instance.json`.
-   - In-proc path: call `xi_plugin_create(host_api, instance_name)`.
+   - If `instance.json` has `"isolation": "process"` AND the worker env
+     is configured, build a `ProcessInstanceAdapter` (plugin runs in
+     `xinsp-worker.exe`, method calls go over IPC, pixel data via SHM).
+     Falls back to in-proc with a warning if the worker env is missing.
+   - Otherwise (default): in-proc — `xi_plugin_create(host_api, instance_name)`.
    - Apply persisted `config` via `xi_plugin_set_def`.
    - Register in `InstanceRegistry`.
 4. **Skip-bad-instance**: any failure (broken JSON, missing plugin,
@@ -162,28 +162,39 @@ Two adapters wrap the C ABI:
 
 ## isolation modes
 
-**Default: process-isolated.** Every instance runs in
-`xinsp-worker.exe`, with method calls (`set_def` / `exchange` /
-`get_def`) proxied over a named pipe and pixel data shared zero-copy
-through SHM. A buggy plugin can crash its worker process without
-taking the backend with it; `ProcessInstanceAdapter` auto-respawns the
-worker and replays the last `set_def` so the next call to the
-instance succeeds with the same config.
+**Default: in-proc.** Plugin instance lives in the backend's address
+space and is reached via direct C ABI calls. Fastest, but a plugin AV
+or heap corruption can take the backend with it.
 
-To opt **out** for a specific instance (debugging convenience, or
-sub-millisecond hot path where the RPC cost matters), set:
+**Opt-in `"isolation": "process"`** — plugin runs in
+`xinsp-worker.exe`, method calls (`set_def` / `exchange` / `get_def`)
+proxy over a named pipe, pixel data shares zero-copy via SHM. A buggy
+plugin can crash its worker process without taking the backend with it;
+`ProcessInstanceAdapter` auto-respawns the worker (rate-limited 3/60s)
+and replays the last `set_def` so the next call still works.
 
 ```json
 {
   "plugin": "shape_match",
-  "isolation": "in_process",
+  "isolation": "process",
   "config": { ... }
 }
 ```
 
-If `xinsp-worker.exe` isn't found alongside `xinsp-backend.exe` (or
-the SHM region failed to initialise), every instance silently falls
-back to in-proc with a warning logged once per instance.
+Worker-side conveniences (so plugin authors don't need to know which
+mode they're running in):
+
+- Plugins that allocate output via `xi::Image{...}` (heap-pool) get
+  their pixels auto-copied into SHM by `worker_main` before the reply.
+  The plugin sees a normal heap allocation; the backend sees an SHM
+  handle.
+- The output image's key (`record.image("mask", img)` → `"mask"`) is
+  preserved across the IPC boundary, so scripts calling
+  `record.get_image("mask")` work the same in-proc and isolated.
+
+**Default-on is tracked work** — see `status.md`. Unblocking it needs
+broader real-plugin testing (multi-image Records, plugins that store
+handles in their JSON, error paths, hot-reload semantics).
 
 A spawned `xinsp-worker.exe`:
 - Attaches the backend's SHM region (so image handles dereference to
@@ -196,8 +207,9 @@ A spawned `xinsp-worker.exe`:
   (default 30s) → `CancelIoEx` watchdog → respawn.
 
 The isolation choice is per-instance, not per-project — you can mix
-isolated and in-proc instances in the same project (e.g., put one
-known-stable hot-path plugin in-proc, leave the rest isolated).
+isolated and in-proc instances in the same project. Useful for
+sandboxing one suspect / third-party plugin without paying RPC
+overhead on the rest.
 
 ---
 

@@ -165,18 +165,16 @@ public:
                          xi_record_out* out,
                          std::string* err = nullptr) {
         if (dead_) { if (err) *err = "worker dead"; return false; }
-        if (!in || in->image_count <= 0 || !in->images) {
-            if (err) *err = "process: missing input image";
-            return false;
-        }
+        // Note: image_count == 0 is legal (source plugins, json-only ops).
+        // Pass handle 0 in that case; the worker side resolves to a null
+        // input image and the plugin's process() sees an empty Record.
         try {
-            // Pass the FIRST input image's handle (most processors take
-            // one). Multi-image input is supported by the wire format
-            // but worker_main currently only reads one — keeps the
-            // first slice tight.
             ipc::Writer w;
-            w.u64(in->images[0].handle);
-            const char* j = in->json ? in->json : "{}";
+            uint64_t in_h = (in && in->image_count > 0 && in->images)
+                            ? in->images[0].handle
+                            : 0ull;
+            w.u64(in_h);
+            const char* j = (in && in->json) ? in->json : "{}";
             w.bytes(j, std::strlen(j));
             auto rsp = call_(ipc::RPC_PROCESS, w.buf());
             if (rsp.type == ipc::RPC_TYPE_ERROR) {
@@ -185,13 +183,15 @@ public:
             }
             ipc::Reader r(rsp.payload);
             uint64_t out_h = r.u64();
+            auto out_key_bytes  = r.bytes();
             auto out_json_bytes = r.bytes();
 
             // Stash the response in instance-owned storage so the caller
             // can read it after this call returns. xi_record_out's
             // pointers must outlive the call site's stack — these
             // members do. Single-image output is the common case.
-            out_image_.key = "out";
+            out_key_.assign(out_key_bytes.begin(), out_key_bytes.end());
+            out_image_.key = out_key_.c_str();
             out_image_.handle = out_h;
             out_json_.assign(out_json_bytes.begin(), out_json_bytes.end());
 
@@ -448,6 +448,7 @@ private:
     // Storage for the most recent process_via_rpc reply — pointers in
     // xi_record_out alias these.
     xi_record_image out_image_{};
+    std::string     out_key_;
     std::string     out_json_;
 };
 

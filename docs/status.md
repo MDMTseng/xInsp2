@@ -24,10 +24,11 @@ xInsp2 ships as a single-machine inspection-authoring environment:
 - **SDK** — scaffold + cmake helpers + tests for plugin authors who
   want to ship distributable plugins.
 
-Master holds **9 shipped plugins** and now ships **process-isolated
-plugin instances by default** (merged from the `shm-process-isolation`
-spike — see *Process isolation* below). User-script isolation remains
-opt-in via `cmd:script_isolated_run`.
+Master holds **9 shipped plugins** and ships the cross-process
+isolation mesh as an **opt-in** (merged from the
+`shm-process-isolation` spike). Set `"isolation": "process"` per
+instance, or call `cmd:script_isolated_run` for scripts. Default-on is
+tracked work — see *Process isolation* below.
 
 ---
 
@@ -103,11 +104,11 @@ opt-in via `cmd:script_isolated_run`.
 
 ---
 
-## Process isolation (merged, instance side default-on)
+## Process isolation (merged, opt-in)
 
 Merged from the `shm-process-isolation` spike. All 9 SHM/IPC tests
-green; instance default flipped to process so plugin AVs / heap
-corruption no longer take the backend with them.
+green. Default is in-proc; per-instance opt-in via
+`"isolation": "process"`.
 
 - `xi_shm.hpp` — Windows `CreateFileMapping`-backed buffer pool with
   cross-process atomic refcount and bump allocator (512 MB region per
@@ -121,14 +122,20 @@ corruption no longer take the backend with them.
 - `ProcessInstanceAdapter` + `ScriptProcessAdapter` — host-side handles
   with auto-respawn (rate-limited 3/60s) and per-call timeout via
   `CancelIoEx` watchdog.
-- **Default for plugin instances**: process. Opt out per-instance with
-  `instance.json: "isolation": "in_process"`. Falls back to in-proc
-  with a warning if `xinsp-worker.exe` isn't on disk.
-- **User-script isolation**: still opt-in via the
-  `cmd:script_isolated_run` command. Default `cmd:run` continues to
-  load the script DLL in-proc (so it keeps emitting binary previews,
-  history entries, etc.). Folding script-isolation into `cmd:run` is
-  next-up work — see "In flight" below.
+- **Worker-side conveniences merged with the spike**:
+    - heap-pool → SHM auto-copy in `worker_main` so plugins that use
+      `xi::Image{...}` (the common case) work cross-process without
+      knowing they're isolated.
+    - Output image key preserved across the IPC boundary (e.g.
+      `record.image("mask", img)` still surfaces as `"mask"` to the
+      script, not as a fixed `"out"`).
+- **Default**: in-proc for both plugin instances and scripts.
+  Per-instance `"isolation": "process"` opts plugins in;
+  `cmd:script_isolated_run` opts scripts in.
+- **Default-on tracked**: needs broader real-plugin testing
+  (multi-image outputs, plugins that store image handles in their
+  JSON, error / hot-reload paths) plus folding script isolation into
+  `cmd:run` while preserving previews / history / watchdog.
 
 ---
 
@@ -162,10 +169,9 @@ See [`testing.md`](./testing.md) for the full breakdown. Summary:
 - **Per-instance folders.** Each instance owns `<project>/instances/<name>/`.
 - **Trigger bus is opt-in.** Legacy `ImageSource` plugins continue to
   work unchanged.
-- **Process isolation: instance side default-on.** Every plugin instance
-  spawns a worker; opt out per-instance with `"isolation":"in_process"`.
-  User scripts are still in-proc by default (binary-preview path needs
-  SHM rewiring before the default flip is safe).
+- **Process isolation: opt-in.** Set `"isolation":"process"` per
+  instance or call `cmd:script_isolated_run` for scripts. Default-on
+  is gated on broader plugin coverage + script-side preview wiring.
 
 ---
 
@@ -190,11 +196,15 @@ See [`testing.md`](./testing.md) for the full breakdown. Summary:
 
 Priorities depend on real usage feedback. Candidate work:
 
-- **Script-side isolation by default.** Refactor `cmd:run` to host the
-  script in `xinsp-script-runner.exe` while preserving binary previews,
-  history, watchdog, breakpoint, and continuous mode. The runner +
-  `ScriptProcessAdapter` already exist — the work is wiring snapshot
-  vars + SHM-resolved gids back through `emit_vars_and_previews`.
+- **Process-isolation default-on.**
+    - Instance side: needs real-plugin coverage beyond the 9 spike
+      tests — multi-image Records, plugin-side handle storage in JSON,
+      hot-reload semantics, fallback / fail-loud policy.
+    - Script side: refactor `cmd:run` to host the script in
+      `xinsp-script-runner.exe` while preserving binary previews,
+      history, watchdog, breakpoint, continuous mode. The runner +
+      `ScriptProcessAdapter` exist — the work is wiring snapshot vars
+      + SHM-resolved gids back through `emit_vars_and_previews`.
 - **Multi-client broadcast (S6)** — opens the door to operator dashboards.
 - **History UI scrubber (finish S4)** — currently backend-only.
 - **Per-component reference docs** — see [`docs/reference/`](./reference/).

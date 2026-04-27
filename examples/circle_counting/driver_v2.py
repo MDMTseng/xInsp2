@@ -32,14 +32,6 @@ def run_all():
         print(f"  plugins: {plugins}")
         print(f"  instances: {instances}")
 
-        # Surface project-open warnings (compile failures, missing instances).
-        try:
-            warns = c.call("open_project_warnings")
-            if warns:
-                print("  warnings:", warns)
-        except ProtocolError:
-            pass
-
         # Compile the inspection script.
         try:
             c.compile_and_load(str(INSPECT_CPP))
