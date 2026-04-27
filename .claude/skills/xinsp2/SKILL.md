@@ -100,6 +100,29 @@ These are patterns observed to work, not the only way.
 
 `dump_run` exists because image bytes in conversation context are expensive. After dumping, `Read snapshots/run-NNNNNN/report.json` for shape, then read specific image files only when needed. If you're doing 1-2 runs and want everything in working memory, skip `dump_run` — use `run.image(...)` directly.
 
+## Seeing the VS Code UI
+
+`xinsp2.screenshot()` captures the primary display as a PNG (Windows
+only — wraps `System.Drawing.Graphics.CopyFromScreen` via PowerShell;
+same path the e2e tests use).
+
+```python
+from xinsp2 import screenshot
+p = screenshot()      # writes %TEMP%/xinsp2_screenshot_<ms>.png
+# ... or screenshot("./shot.png") for a fixed path
+```
+
+Use the **Read** tool on the returned path to view the image. Useful
+when you're verifying that a slider you set actually moved, that an
+overlay rendered correctly, or what state the plugin UI is in. Less
+useful when the user can describe the screen themselves — ask first
+rather than always grabbing.
+
+Captures the entire primary screen, not just the VS Code window —
+assumes VS Code is visible. If VS Code is minimised or the user
+switched to another app, you'll get whatever else is on screen, which
+is rarely what you want.
+
 ## Discovering plugins
 
 `cmd:list_plugins` and `cmd:open_project` reply with each plugin's

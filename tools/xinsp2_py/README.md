@@ -56,6 +56,18 @@ specific image files only when needed — keeps context small.
 - **Long-running observation**: `c.on_log(print)` to mirror backend logs
   to stdout while you drive runs.
 
+## Capturing the VS Code UI
+
+```python
+from xinsp2 import screenshot
+p = screenshot()             # %TEMP%/xinsp2_screenshot_<ms>.png
+# or screenshot("./shot.png")
+```
+
+Wraps a PowerShell call to `System.Drawing.Graphics.CopyFromScreen`
+(Windows only — same approach the e2e suites use). Captures the
+entire primary display; assumes VS Code is visible.
+
 ## What's NOT in scope
 
 - Multi-client concurrency (single-client v1 backend).
