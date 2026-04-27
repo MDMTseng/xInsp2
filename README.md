@@ -308,7 +308,7 @@ This is the same script that produced the file on the Releases page.
 | `plugins/`            | Shipped plugins: `mock_camera`, `blob_analysis`, `data_output`, `json_source`, `record_save`, `threshold_op`, `synced_stereo` |
 | `sdk/`                | Plugin SDK: `scaffold.mjs`, `cmake/` module, `template/`, `testing/` helpers, worked examples |
 | `examples/`           | User-script examples (defect_detection, use_demo, …)        |
-| `protocol/messages.md`| WebSocket wire-protocol reference                           |
+| `docs/`               | Architecture, status, testing, protocol reference, guides   |
 
 ---
 
@@ -407,14 +407,14 @@ Full SDK docs: [`sdk/README.md`](sdk/README.md) and
 ```
 xInsp2/
 ├── README.md                ← you are here
-├── NewDeal.md               ← the stable architectural vision
-├── FRAMEWORK.md             ← authoritative technical reference (20+ sections)
-├── DEV_PLAN.md              ← milestone skeleton (M0–M10 + Post-M10 phases)
-├── STATUS.md                ← weekly pulse; remaining work; decision log
-├── TEST_PLAN.md             ← planned test coverage
-├── TestAudit.md             ← test-coverage audit findings
-├── protocol/
-│   └── messages.md          ← WS wire-protocol spec
+├── docs/
+│   ├── architecture.md      ← technical map: components, data flow, lifecycles
+│   ├── status.md            ← what's shipping / WIP / planned (no parallel files)
+│   ├── testing.md           ← test surface + how to run + how to add
+│   ├── protocol.md          ← WebSocket wire-format reference
+│   ├── guides/              ← task-shaped onboarding (adding a plugin, debugging, …)
+│   ├── reference/           ← per-API references (host_api, plugin-abi, instance-model, …)
+│   └── archive/             ← historical snapshots (M0 plan, retired audits)
 ├── backend/
 │   ├── include/xi/          ← 30+ headers (xi_abi, xi_async, xi_var, …)
 │   ├── src/
@@ -423,7 +423,7 @@ xInsp2/
 │   ├── tests/               ← C++ unit tests (xi_core, record, protocol, …)
 │   └── CMakeLists.txt
 ├── vscode-extension/        ← VS Code integration + Node E2E tests
-├── plugins/                 ← shipped plugins (7 plugins)
+├── plugins/                 ← shipped plugins
 ├── sdk/                     ← plugin SDK (scaffold, cmake, template, examples)
 └── examples/                ← user-script examples + crash_tests
 ```
@@ -446,32 +446,31 @@ xInsp2/
 
 ## Status
 
-**M0–M10 complete.** Stretch milestones S2 (auto-compile), S8
-(recording/replay), S9 (remote backend), S10 (headless runner) shipping.
-S1, S3, S4, S5, S6, S7 open.
-
-See [STATUS.md](STATUS.md) for the week-by-week pulse + remaining LOW
-bugs + stretch roadmap.
-
-### Production hardening
-
-All 4 CRITICAL + 8 HIGH + 10 MEDIUM audit findings resolved. Remaining
-items are 7 LOW / polish. Details in STATUS.md.
+See [`docs/status.md`](docs/status.md) for what's shipping, what's in
+flight (process-isolation spike on `shm-process-isolation` branch), and
+the locked-in decision log.
 
 ---
 
 ## Documentation index
 
-| Doc                                           | When to read it                                         |
-|-----------------------------------------------|---------------------------------------------------------|
-| [NewDeal.md](NewDeal.md)                      | "What is xInsp2 trying to be?"                          |
-| [FRAMEWORK.md](FRAMEWORK.md)                  | Full technical reference (API, ABI, protocol, build)    |
-| [DEV_PLAN.md](DEV_PLAN.md)                    | Milestone execution order                               |
-| [STATUS.md](STATUS.md)                        | Current state, open work, decision log                  |
-| [protocol/messages.md](protocol/messages.md)  | WebSocket wire-format spec                              |
-| [sdk/README.md](sdk/README.md)                | Writing a plugin (full reference)                       |
-| [sdk/GETTING_STARTED.md](sdk/GETTING_STARTED.md) | First-plugin-in-5-minutes walkthrough                |
-| [TEST_PLAN.md](TEST_PLAN.md)                  | Planned test coverage; what each test proves            |
+Pick the entry point closest to your task — every doc tells you the
+next jump.
+
+| If you need to… | Read |
+|---|---|
+| Understand what xInsp2 is | This README |
+| See the technical map | [`docs/architecture.md`](docs/architecture.md) |
+| Know what's shipping vs WIP | [`docs/status.md`](docs/status.md) |
+| Run / add tests | [`docs/testing.md`](docs/testing.md) |
+| Drive the WebSocket protocol | [`docs/protocol.md`](docs/protocol.md) |
+| Add a plugin | [`docs/guides/adding-a-plugin.md`](docs/guides/adding-a-plugin.md) |
+| Write an inspection script | [`docs/guides/writing-a-script.md`](docs/guides/writing-a-script.md) |
+| Debug a crash | [`docs/guides/debugging.md`](docs/guides/debugging.md) |
+| Extend the VS Code UI | [`docs/guides/extending-the-ui.md`](docs/guides/extending-the-ui.md) |
+| Look up `host_api` / ABI | [`docs/reference/`](docs/reference/) |
+| Browse worked examples | [`sdk/examples/`](sdk/examples/) + [`sdk/README.md`](sdk/README.md) |
+| First plugin in 5 minutes | [`sdk/GETTING_STARTED.md`](sdk/GETTING_STARTED.md) |
 
 ---
 

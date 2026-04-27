@@ -1603,6 +1603,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             } else {
                 out += ",\"cert\":{\"present\":false}";
             }
+            // Optional `manifest` block from plugin.json (free-form;
+            // see docs/reference/plugin-abi.md). AI agents and doc
+            // tools read this to discover params / inputs / outputs /
+            // exchange surface without grepping plugin source.
+            if (!p.manifest_json.empty()) {
+                out += ",\"manifest\":" + p.manifest_json;
+            }
             out += "}";
         }
         out += "]";

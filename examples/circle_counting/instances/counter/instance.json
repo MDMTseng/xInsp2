@@ -1,0 +1,8 @@
+{
+  "plugin": "region_counter",
+  "config": {
+    "close_radius": 2,
+    "min_area": 300,
+    "max_area": 4000
+  }
+}

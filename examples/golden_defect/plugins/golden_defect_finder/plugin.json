@@ -1,0 +1,7 @@
+{
+  "name": "golden_defect_finder",
+  "description": "Compares a frame to a golden reference: |frame-ref| → blur → threshold → close → connected regions → defect_present + bbox.",
+  "dll": "golden_defect_finder.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

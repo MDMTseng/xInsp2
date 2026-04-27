@@ -118,6 +118,9 @@ module.exports = {
         if (suite === 'project_plugin_journey') {
             return require('./project_plugin_journey.cjs').run();
         }
+        if (suite === 'image_viewer_journey') {
+            return require('./image_viewer_journey.cjs').run();
+        }
         return run();
     }
 };

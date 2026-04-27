@@ -1,0 +1,7 @@
+{
+  "name": "reference_image",
+  "description": "Holds the golden-reference image. Setup-time plugin: load once, reuse across runs. Path comes from instance.json or the UI Load button.",
+  "dll": "reference_image.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

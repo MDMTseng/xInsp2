@@ -690,6 +690,14 @@ export function activate(context: vscode.ExtensionContext) {
         }),
     );
 
+    // Test hook: drive a discrete pan/zoom op so journeys can
+    // screenshot between operations. See ImageViewerPanel.applyOp.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.imageViewer.applyOp', async (op: any) => {
+            return ImageViewerPanel.applyOp(op || {});
+        }),
+    );
+
     // Pending response map
     const pendingRsp = new Map<number, (msg: any) => void>();
 

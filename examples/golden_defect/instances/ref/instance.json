@@ -1,0 +1,6 @@
+{
+  "plugin": "reference_image",
+  "config": {
+    "reference_path": "C:/Users/TRS001/Documents/workspace/xInsp/xInsp2/examples/golden_defect/reference.png"
+  }
+}

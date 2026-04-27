@@ -1,0 +1,177 @@
+{
+  "width": 320,
+  "height": 240,
+  "noise_sigma": 8.0,
+  "frames": [
+    {
+      "file": "frame_00.png",
+      "defect": true,
+      "type": "blob",
+      "bbox": [
+        222,
+        20,
+        240,
+        38
+      ]
+    },
+    {
+      "file": "frame_01.png",
+      "defect": false,
+      "type": "none",
+      "bbox": null
+    },
+    {
+      "file": "frame_02.png",
+      "defect": false,
+      "type": "none",
+      "bbox": null
+    },
+    {
+      "file": "frame_03.png",
+      "defect": true,
+      "type": "blob",
+      "bbox": [
+        303,
+        20,
+        315,
+        32
+      ]
+    },
+    {
+      "file": "frame_04.png",
+      "defect": false,
+      "type": "none",
+      "bbox": null
+    },
+    {
+      "file": "frame_05.png",
+      "defect": false,
+      "type": "none",
+      "bbox": null
+    },
+    {
+      "file": "frame_06.png",
+      "defect": true,
+      "type": "scratch",
+      "bbox": [
+        123,
+        19,
+        144,
+        23
+      ]
+    },
+    {
+      "file": "frame_07.png",
+      "defect": true,
+      "type": "blob",
+      "bbox": [
+        219,
+        41,
+        233,
+        55
+      ]
+    },
+    {
+      "file": "frame_08.png",
+      "defect": false,
+      "type": "none",
+      "bbox": null
+    },
+    {
+      "file": "frame_09.png",
+      "defect": false,
+      "type": "none",
+      "bbox": null
+    },
+    {
+      "file": "frame_10.png",
+      "defect": false,
+      "type": "none",
+      "bbox": null
+    },
+    {
+      "file": "frame_11.png",
+      "defect": true,
+      "type": "blob",
+      "bbox": [
+        162,
+        148,
+        180,
+        166
+      ]
+    },
+    {
+      "file": "frame_12.png",
+      "defect": false,
+      "type": "none",
+      "bbox": null
+    },
+    {
+      "file": "frame_13.png",
+      "defect": false,
+      "type": "none",
+      "bbox": null
+    },
+    {
+      "file": "frame_14.png",
+      "defect": true,
+      "type": "blob",
+      "bbox": [
+        302,
+        151,
+        312,
+        161
+      ]
+    },
+    {
+      "file": "frame_15.png",
+      "defect": true,
+      "type": "blob",
+      "bbox": [
+        54,
+        145,
+        68,
+        159
+      ]
+    },
+    {
+      "file": "frame_16.png",
+      "defect": false,
+      "type": "none",
+      "bbox": null
+    },
+    {
+      "file": "frame_17.png",
+      "defect": true,
+      "type": "blob",
+      "bbox": [
+        35,
+        163,
+        53,
+        181
+      ]
+    },
+    {
+      "file": "frame_18.png",
+      "defect": true,
+      "type": "blob",
+      "bbox": [
+        277,
+        114,
+        293,
+        130
+      ]
+    },
+    {
+      "file": "frame_19.png",
+      "defect": true,
+      "type": "scratch",
+      "bbox": [
+        242,
+        100,
+        276,
+        104
+      ]
+    }
+  ]
+}

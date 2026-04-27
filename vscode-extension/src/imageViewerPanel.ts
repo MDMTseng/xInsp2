@@ -42,6 +42,29 @@ export class ImageViewerPanel {
         return true;
     }
 
+    // Fired with { seq, scale, panX, panY, tool } after an applyOp completes.
+    public static onOpDone: vscode.EventEmitter<any> = new vscode.EventEmitter();
+    private static opSeq = 0;
+    /** Test hook: drive a single pan/zoom op so an e2e can screenshot
+     *  between operations. op = { kind: 'fit' | 'oneToOne' | 'zoom' |
+     *  'pan' | 'tool', sx?, sy?, factor?, dx?, dy?, tool? }. Resolves
+     *  with the post-op transform state. */
+    public static applyOp(op: any): Promise<any> {
+        return new Promise((resolve) => {
+            if (!ImageViewerPanel.current) {
+                resolve({ ok: false, error: 'no panel open' });
+                return;
+            }
+            const seq = ++ImageViewerPanel.opSeq;
+            const sub = ImageViewerPanel.onOpDone.event((r) => {
+                if (r.seq !== seq) return;
+                sub.dispose();
+                resolve(r);
+            });
+            ImageViewerPanel.current.panel.webview.postMessage({ type: 'op', seq, ...op });
+        });
+    }
+
     private readonly panel: vscode.WebviewPanel;
     private disposables: vscode.Disposable[] = [];
 
@@ -68,6 +91,8 @@ export class ImageViewerPanel {
                 ImageViewerPanel.onPick.fire(m as PickReport);
             } else if (m && m.type === 'selftest_result') {
                 ImageViewerPanel.onSelftest.fire(m);
+            } else if (m && m.type === 'op_done') {
+                ImageViewerPanel.onOpDone.fire(m);
             }
         }, null, this.disposables);
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
@@ -354,6 +379,32 @@ export class ImageViewerPanel {
           imgW = msg.width  || bitmap.width;
           imgH = msg.height || bitmap.height;
           fit();
+      } else if (msg.type === 'op') {
+          // Drive a single pan/zoom op programmatically. The e2e
+          // journey uses this to screenshot between operations
+          // (real wheel events can't reach webviews from the
+          // extension host). Echoes back transform state so the
+          // test can assert.
+          const ack = (extra) => vscode.postMessage({ type: 'op_done',
+              seq: msg.seq, ok: !!imgW, kind: msg.kind,
+              scale, panX: pan.x, panY: pan.y, tool, ...extra });
+          if (!imgW) { ack({ error: 'no image loaded' }); return; }
+          if (msg.kind === 'fit')        { fit();        ack({}); }
+          else if (msg.kind === 'oneToOne') { oneToOne(); ack({}); }
+          else if (msg.kind === 'zoom')  {
+              const sx = (typeof msg.sx === 'number') ? msg.sx : stage.clientWidth/2;
+              const sy = (typeof msg.sy === 'number') ? msg.sy : stage.clientHeight/2;
+              const f  = (typeof msg.factor === 'number') ? msg.factor : 1.25;
+              zoomAt(sx, sy, f); ack({});
+          }
+          else if (msg.kind === 'pan')   {
+              pan.x += (msg.dx || 0); pan.y += (msg.dy || 0);
+              applyTransform(); ack({});
+          }
+          else if (msg.kind === 'tool')  {
+              setTool(msg.tool || 'move'); ack({});
+          }
+          else { ack({ error: 'unknown op kind ' + msg.kind }); }
       } else if (msg.type === 'selftest') {
           // Headless validation of pan + zoom math. We can't drive real
           // mouse events from the extension host, so the e2e harness
