@@ -176,6 +176,23 @@ followed by an asynchronous `vars` message and zero or more binary previews.
 ### `list_instances`
 `args: {}` → triggers an `instances` message.
 
+### `list_plugins`
+`args: {}` → `data:` JSON array, one entry per registered plugin:
+
+```json
+[
+  { "name": "blob_analysis", "description": "...", "folder": "...",
+    "has_ui": true, "loaded": true, "origin": "global",
+    "cert": { "present": true, "valid": true, ... },
+    "manifest": { "params": [...], "inputs": [...], "outputs": [...] } }
+]
+```
+
+`manifest` is present only if the plugin's `plugin.json` defines a
+top-level `manifest` block (free-form; see
+`docs/reference/plugin-abi.md`). Backend passes it through verbatim —
+older plugins simply omit the field.
+
 ### `set_param`
 `args: { "name": "sigma", "value": 3.5 }` → `ok: true`
 

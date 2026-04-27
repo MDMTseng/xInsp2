@@ -66,6 +66,14 @@ struct PluginInfo {
     std::string ui_path;       // absolute path to ui/ folder (if has_ui)
     HMODULE     handle = nullptr;
 
+    // Optional. If `plugin.json` has a top-level `manifest` object, its
+    // raw JSON text lands here. The backend doesn't validate or reshape
+    // it — clients (AI agents, doc tools) parse the content themselves.
+    // Convention (free-form): `params` / `inputs` / `outputs` / `exchange`
+    // arrays describing what the plugin tunes, consumes, produces, and
+    // accepts via exchange_instance. See docs/reference/plugin-abi.md.
+    std::string manifest_json;
+
     // Old-style factory: InstanceBase* (name)
     using FactoryFn = InstanceBase* (*)(const char* instance_name);
     FactoryFn factory = nullptr;
@@ -205,10 +213,11 @@ public:
             if (existing != plugins_.end() && existing->second.handle) {
                 // Preserve the live handle + factories; update only the
                 // fields that can legitimately change between scans.
-                existing->second.description = info.description;
-                existing->second.has_ui      = info.has_ui;
-                existing->second.ui_path     = info.ui_path;
-                existing->second.folder_path = info.folder_path;
+                existing->second.description   = info.description;
+                existing->second.has_ui        = info.has_ui;
+                existing->second.ui_path       = info.ui_path;
+                existing->second.folder_path   = info.folder_path;
+                existing->second.manifest_json = info.manifest_json;
             } else {
                 plugins_[info.name] = std::move(info);
             }
@@ -334,6 +343,8 @@ private:
                     pi.has_ui = (mc.find("\"has_ui\":true") != std::string::npos) ||
                                 (mc.find("\"has_ui\": true") != std::string::npos);
                     if (pi.has_ui) pi.ui_path = (entry.path() / "ui").string();
+                    std::string mblock;
+                    if (detail_find_key(mc, "manifest", mblock)) pi.manifest_json = std::move(mblock);
                 }
                 // Load the freshly built DLL up-front. Project plugins
                 // skip the cert/baseline gate — they are inside the
@@ -1247,6 +1258,12 @@ public:
                 }
                 out += "\"";
             }
+            // Optional `manifest` block from plugin.json — passed through
+            // verbatim. Clients (AI agents, doc tools) parse the body
+            // themselves; the backend doesn't validate or reshape it.
+            if (!v.manifest_json.empty()) {
+                out += ",\"manifest\":" + v.manifest_json;
+            }
             out += "}";
         }
         out += "]}";
@@ -1302,6 +1319,9 @@ private:
         if (pi.has_ui) {
             pi.ui_path = (std::filesystem::path(folder) / "ui").string();
         }
+        // Optional manifest block — preserved verbatim. Empty if absent.
+        std::string m;
+        if (detail_find_key(content, "manifest", m)) pi.manifest_json = std::move(m);
         return pi;
     }
 

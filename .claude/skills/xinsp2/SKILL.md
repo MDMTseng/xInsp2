@@ -100,6 +100,29 @@ These are patterns observed to work, not the only way.
 
 `dump_run` exists because image bytes in conversation context are expensive. After dumping, `Read snapshots/run-NNNNNN/report.json` for shape, then read specific image files only when needed. If you're doing 1-2 runs and want everything in working memory, skip `dump_run` — use `run.image(...)` directly.
 
+## Discovering plugins
+
+`cmd:list_plugins` and `cmd:open_project` reply with each plugin's
+metadata. If the plugin's `plugin.json` includes an optional
+`"manifest"` block (params / inputs / outputs / exchange — see
+`docs/reference/plugin-abi.md`), it lands as `plugin["manifest"]` in
+the reply. Plugins without one still work; the field is just absent.
+
+```python
+plugins = c.call("list_plugins")
+for p in plugins:
+    if "manifest" in p:
+        # params, inputs, outputs, exchange — read what's there
+        ...
+    else:
+        # fall back to grepping plugin source / inferring from samples
+        ...
+```
+
+Treat the manifest as a hint, not a contract — fields are free-form,
+older plugins won't have one, and what's listed there can drift from
+the implementation. If you need ground truth, read the source.
+
 ## Escape hatches
 
 - Anything not wrapped → `c.call(name, args)`. Spec at `docs/protocol.md`.

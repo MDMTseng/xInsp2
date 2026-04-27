@@ -250,6 +250,26 @@ Fields:
 - `has_ui` (bool, optional) — if `true`, a `ui/index.html` next to the
   manifest is served as the plugin webview when the user opens the
   instance UI.
+- `manifest` (object, optional) — machine-readable description of the
+  plugin's tunables and IO surface. The backend passes this through
+  verbatim in `cmd:list_plugins` and `cmd:open_project` replies; it
+  doesn't validate or reshape the contents. Convention:
+
+  ```json
+  "manifest": {
+    "params":   [{"name": "...", "type": "int|float|bool|string",
+                  "min": 0, "max": 10, "default": 0,
+                  "enum": ["..."], "doc": "..."}],
+    "inputs":   [{"name": "...", "kind": "image|json", "doc": "..."}],
+    "outputs":  [{"name": "...", "kind": "image|json|number|bool|string",
+                  "doc": "..."}],
+    "exchange": [{"command": "...", "args": "...", "result": "...", "doc": "..."}]
+  }
+  ```
+
+  Plugins without a manifest still work — listings just omit the
+  field. The intent is letting AI agents and doc tools discover what a
+  plugin does without grepping its source.
 
 ---
 
