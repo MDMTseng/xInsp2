@@ -21,6 +21,7 @@
 #include "xi_abi.h"
 #include "xi_image.hpp"
 #include "xi_instance_folders.hpp"
+#include "xi_shm.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -147,18 +148,63 @@ public:
         return Image(e->width, e->height, e->channels, e->pixels.data());
     }
 
+    // Backend wires this once at startup (post-create). Plugins / scripts
+    // see it via host_api->shm_create_image. nullptr = no SHM available;
+    // shm_create_image / shm_alloc_buffer in host_api will then return 0.
+    // Stored as a raw pointer because ShmRegion lifetime is owned by the
+    // backend and outlives any plugin DLL.
+    static ShmRegion*& shm_region_singleton() {
+        static ShmRegion* s = nullptr;
+        return s;
+    }
+    static void set_shm_region(ShmRegion* r) { shm_region_singleton() = r; }
+
+    // SHM-tagged handles have 0xA5 in the top byte (see xi_shm.hpp).
+    // Heap-pool handles are small uint32 values, never reaching the top.
+    static bool is_shm_handle(xi_image_handle h) {
+        return ((h >> 56) & 0xFF) == 0xA5;
+    }
+
     static xi_host_api make_host_api() {
         xi_host_api api = {};
         api.image_create   = [](int32_t w, int32_t h, int32_t ch) -> xi_image_handle {
             return ImagePool::instance().create(w, h, ch);
         };
-        api.image_addref   = [](xi_image_handle h) { ImagePool::instance().addref(h); };
-        api.image_release  = [](xi_image_handle h) { ImagePool::instance().release(h); };
-        api.image_data     = [](xi_image_handle h) -> uint8_t* { return ImagePool::instance().data(h); };
-        api.image_width    = [](xi_image_handle h) -> int32_t { return ImagePool::instance().width(h); };
-        api.image_height   = [](xi_image_handle h) -> int32_t { return ImagePool::instance().height(h); };
-        api.image_channels = [](xi_image_handle h) -> int32_t { return ImagePool::instance().channels(h); };
-        api.image_stride   = [](xi_image_handle h) -> int32_t { return ImagePool::instance().stride(h); };
+        // image_addref / release / data / width etc. dispatch to whichever
+        // pool the handle came from. This lets plugins mix SHM-backed and
+        // heap-backed images freely; the high-bit tag tells us which.
+        api.image_addref   = [](xi_image_handle h) {
+            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); if (r) r->addref(h); }
+            else                    ImagePool::instance().addref(h);
+        };
+        api.image_release  = [](xi_image_handle h) {
+            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); if (r) r->release(h); }
+            else                    ImagePool::instance().release(h);
+        };
+        api.image_data     = [](xi_image_handle h) -> uint8_t* {
+            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); return r ? r->data(h) : nullptr; }
+            return ImagePool::instance().data(h);
+        };
+        api.image_width    = [](xi_image_handle h) -> int32_t {
+            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); return r ? r->width(h) : 0; }
+            return ImagePool::instance().width(h);
+        };
+        api.image_height   = [](xi_image_handle h) -> int32_t {
+            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); return r ? r->height(h) : 0; }
+            return ImagePool::instance().height(h);
+        };
+        api.image_channels = [](xi_image_handle h) -> int32_t {
+            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); return r ? r->channels(h) : 0; }
+            return ImagePool::instance().channels(h);
+        };
+        api.image_stride   = [](xi_image_handle h) -> int32_t {
+            // SHM images store contiguous pixels: stride = w * channels.
+            if (is_shm_handle(h)) {
+                auto* r = shm_region_singleton();
+                return r ? r->width(h) * r->channels(h) : 0;
+            }
+            return ImagePool::instance().stride(h);
+        };
         api.log            = [](int32_t level, const char* msg) {
             const char* lvl[] = {"DEBUG", "INFO", "WARN", "ERROR"};
             std::fprintf(stderr, "[%s] %s\n", lvl[level & 3], msg);
@@ -176,6 +222,29 @@ public:
         // xi_trigger_bus.hpp — defaults to a no-op so plugins linked
         // against an older host don't crash.
         api.emit_trigger = nullptr;
+
+        // SHM extensions. Return 0 (INVALID_HANDLE) when no SHM region is
+        // installed — plugins are expected to fall back to image_create.
+        api.shm_create_image = [](int32_t w, int32_t h, int32_t ch) -> xi_image_handle {
+            auto* r = shm_region_singleton();
+            return r ? r->alloc_image(w, h, ch) : 0;
+        };
+        api.shm_alloc_buffer = [](int32_t size_bytes) -> xi_image_handle {
+            auto* r = shm_region_singleton();
+            return r ? r->alloc_buffer(size_bytes) : 0;
+        };
+        // shm_addref / release route through the same per-handle dispatch
+        // as image_addref / release above, but exposed separately so a
+        // plugin that ALWAYS wants the SHM path can skip the tag check.
+        api.shm_addref  = [](xi_image_handle h) {
+            auto* r = shm_region_singleton(); if (r) r->addref(h);
+        };
+        api.shm_release = [](xi_image_handle h) {
+            auto* r = shm_region_singleton(); if (r) r->release(h);
+        };
+        api.shm_is_shm_handle = [](xi_image_handle h) -> int32_t {
+            return is_shm_handle(h) ? 1 : 0;
+        };
         return api;
     }
 

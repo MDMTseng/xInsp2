@@ -1,0 +1,34 @@
+# {{NAME}}
+
+{{DESCRIPTION}}
+
+Generated from xInsp2's **{{TEMPLATE_ID}}** plugin template (standalone mode). The
+in-project equivalent is created by the VS Code command *xInsp2: New Project Plugin…*.
+
+## Build
+
+```sh
+mkdir build && cd build
+cmake ..
+cmake --build . --config Release
+```
+
+The DLL lands at `build/{{NAME}}.dll`. Drop into a project's `plugins/{{NAME}}/` folder
+or any backend's global plugins directory.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `src/plugin.cpp` | Plugin class + `XI_PLUGIN_IMPL` |
+| `plugin.json` | Manifest read by the backend's plugin scanner |
+| `CMakeLists.txt` | Standalone build via the SDK's `xinsp2_add_plugin` macro |
+
+## API surface this template demonstrates
+
+- `Class(host, name)` ctor + `host()` accessor required by `XI_PLUGIN_IMPL`
+- `get_def()` / `set_def()` for JSON config persistence
+- `process(Record)` — the per-frame hook
+- `exchange(string)` — script-side RPC channel
+
+For the next step up, see the **medium** template (image processing) or **expert** (background source thread).

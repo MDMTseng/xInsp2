@@ -1,7 +1,0 @@
-{
-  "name": "my_plugin",
-  "description": "Describe what this plugin does",
-  "dll": "my_plugin.dll",
-  "factory": "xi_plugin_create",
-  "has_ui": true
-}

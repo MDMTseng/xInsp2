@@ -395,7 +395,13 @@ copy the `.dll` + `plugin.json` + `ui/` into `<xInsp2>/plugins/<name>/`
 ```
 sdk/
 ├── README.md           ← you are here
-├── template/           ← copy this folder, rename, edit
+├── scaffold.mjs        ← CLI: scaffold a new plugin from a template
+├── scaffold/render.mjs ← shared template renderer (used by extension too)
+├── templates/          ← single source of truth for both VS Code + CLI
+│   ├── easy/           ← minimal pass-through (constructor / def / process / exchange)
+│   ├── medium/         ← image processor + UI (threshold + inline pan/zoom preview)
+│   ├── expert/         ← stateful source with worker thread + UI (start/stop)
+│   └── _shared/        ← reusable HTML snippets (image_viewer_widget.html)
 └── examples/
     ├── hello/          ← 1 file, no state, no UI — the "hello world"
     ├── counter/        ← persistent state + minimal UI (xi::Json)
@@ -404,7 +410,27 @@ sdk/
     └── trigger_source/ ← image source using host->emit_trigger (bus)
 ```
 
-Read them in order — each one adds one new capability.
+Two ways to start a new plugin:
+
+1. **In-project** (fastest iteration):
+   In VS Code, run **xInsp2: New Project Plugin…** — picks a template,
+   asks for a name, drops files into `<project>/plugins/<name>/`, backend
+   auto-compiles on save with hot-reload + state preservation. Export it
+   later via **xInsp2: Export Project Plugin…** to produce a standalone
+   deployable.
+
+2. **Standalone** (for distribution):
+   ```sh
+   node sdk/scaffold.mjs <output-dir> --name foo --template medium
+   cmake -S <output-dir> -B <output-dir>/build -A x64
+   cmake --build <output-dir>/build --config Release
+   ```
+   Adds CMakeLists + README so it builds on its own. Same templates as
+   the in-project path; output is byte-identical for shared files.
+
+The `examples/` folder shows what to look at for specific patterns
+(state, image ops, trigger source). Read them in order — each adds one
+capability.
 
 ---
 
