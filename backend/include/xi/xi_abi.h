@@ -201,14 +201,32 @@ static inline void xi_record_out_set_json(xi_record_out* out, const char* json) 
     out->json = _strdup(json);
 }
 
+/* Free strings the plugin allocated via the inline malloc/strdup
+ * helpers above. SAFE TO CALL on outputs populated by `record_to_c`
+ * (xi_abi.hpp) — `image_capacity == 0` signals "plugin-owned tls
+ * storage; nothing to free", which is the path the C++ macro generates.
+ *
+ * Background: when these helpers are inlined into a plugin DLL that
+ * uses a different CRT than the backend EXE, the plugin's `_strdup` /
+ * `realloc` is paired with the backend's `free()` — undefined
+ * behaviour. The C++ helpers in `xi_abi.hpp::record_to_c` route output
+ * strings through thread-local storage owned by the plugin DLL, so no
+ * cross-CRT free happens. Direct-C plugins that call
+ * `xi_record_out_add_image` etc still use the malloc path and are
+ * safe ONLY if the plugin and backend share a CRT (the CMake default
+ * `/MD` does this). */
 static inline void xi_record_out_free(xi_record_out* out) {
-    for (int32_t i = 0; i < out->image_count; ++i) {
-        free((void*)out->images[i].key);
-        /* NOTE: do NOT release the image handle here — the backend
-         * takes ownership of output handles. */
+    if (out->image_capacity > 0) {
+        /* Legacy / direct-C path: plugin used the realloc + strdup
+         * helpers. Free with the same allocator the calling EXE was
+         * compiled against (best effort; same-CRT contract). */
+        for (int32_t i = 0; i < out->image_count; ++i) {
+            free((void*)out->images[i].key);
+        }
+        free(out->images);
+        free(out->json);
     }
-    free(out->images);
-    free(out->json);
+    /* image_capacity == 0: plugin-owned thread-local storage, no free. */
     out->images = NULL;
     out->image_count = 0;
     out->image_capacity = 0;
