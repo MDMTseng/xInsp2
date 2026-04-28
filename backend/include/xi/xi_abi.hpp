@@ -218,15 +218,16 @@ inline Record record_from_c(const xi_host_api* host, const xi_record* rec) {
         }
     }
     for (int i = 0; i < rec->image_count; ++i) {
-        // Convert handle → xi::Image (copies pixels)
+        // Zero-copy: wrap the handle as a refcounted view over pool
+        // memory. The xi::Image addrefs the handle on adopt and releases
+        // when its last copy goes away — so the plugin can read pool
+        // bytes directly without a memcpy. (The caller of process_fn
+        // still owns its own ref on each input handle and releases it
+        // independently after the call returns; see UseProxy::process.)
         auto& entry = rec->images[i];
-        int w = host->image_width(entry.handle);
-        int h = host->image_height(entry.handle);
-        int ch = host->image_channels(entry.handle);
-        const uint8_t* p = host->image_data(entry.handle);
-        if (p && w > 0 && h > 0) {
-            r.image(entry.key, Image(w, h, ch, p));
-        }
+        if (!entry.handle) continue;
+        Image img = Image::adopt_pool_handle(host, entry.handle);
+        if (!img.empty()) r.image(entry.key, std::move(img));
     }
     return r;
 }
@@ -274,9 +275,22 @@ inline void record_to_c(const xi_host_api* host, const Record& r, xi_record_out*
     s.images.reserve(n);
     for (auto& [key, img] : r.images()) {
         if (img.empty()) continue;
-        xi_image_handle h = host->image_create(img.width, img.height, img.channels);
-        if (!h) continue;
-        std::memcpy(host->image_data(h), img.data(), img.size());
+        xi_image_handle h = XI_IMAGE_NULL;
+        if (img.pool_handle() && img.pool_host() == host) {
+            // Zero-copy forward: this Image is already a view over a
+            // pool handle from THIS host. Hand the same handle out (with
+            // a fresh ref) instead of allocating a new slot and memcpy'ing
+            // pixels we already have in the pool.
+            h = img.pool_handle();
+            host->image_addref(h);
+        } else {
+            // Fresh / heap-backed Image — allocate a pool slot and copy
+            // the bytes in. (One copy on the way out per genuinely-new
+            // image is structurally unavoidable.)
+            h = host->image_create(img.width, img.height, img.channels);
+            if (!h) continue;
+            std::memcpy(host->image_data(h), img.data(), img.size());
+        }
         s.keys.push_back(key);
         xi_record_image rec{};
         rec.key    = s.keys.back().c_str();
