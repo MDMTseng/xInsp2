@@ -132,10 +132,19 @@ or removing/recreating the instance.
 script DLL declares a different `xi_script_state_schema_version()`
 than the old one (and both are non-zero). The persisted `xi::state()`
 JSON would default-fill into a different shape, so the backend drops
-it and the new script runs with empty state. Set
-`#define XI_STATE_SCHEMA_VERSION N` before `#include <xi/xi.hpp>` to
-opt in; absent / 0 means "unversioned" and the legacy "restore
-blindly" path runs.
+it and the new script runs with empty state. Register from user
+script code:
+
+```cpp
+XI_STATE_SCHEMA(2);    // file-scope macro at the top of inspect.cpp
+```
+
+(Earlier docs suggested `#define XI_STATE_SCHEMA_VERSION 2` before
+including `<xi/xi.hpp>` — that didn't work because
+`xi_script_support.hpp` is force-included via `cl.exe /FI` before
+the user TU is parsed, so the user's `#define` arrived too late.
+`XI_STATE_SCHEMA(N)` declares a runtime static initialiser, which
+runs at DLL load and wins.)
 
 ---
 
