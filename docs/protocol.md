@@ -206,6 +206,36 @@ top-level `manifest` block (free-form; see
 `docs/reference/plugin-abi.md`). Backend passes it through verbatim —
 older plugins simply omit the field.
 
+### `recent_errors`
+
+Returns the last 64 errors captured across the three asynchronous
+error channels (`rsp.error`, `log` level=error, `event` errors).
+Lets a scripted client correlate "the cmd I just sent" with any
+side-channel errors that landed around the same time — the WS spec
+doesn't carry `cmd_id` / `run_id` on async events / logs yet, so
+this ring is the workaround.
+
+`args: { "since_ms": <int> (optional) }` — return only entries with
+`ts_ms >= since_ms`. Use the `ts_ms` of the last-known error from a
+previous poll to fetch incrementally.
+
+Reply (`data` is an array, newest last):
+
+```json
+[
+  { "ts_ms": 1777300000123, "source": "rsp",
+    "message": "compile_and_load: missing path", "cmd_id": 17 },
+  { "ts_ms": 1777300000456, "source": "log",
+    "message": "script crashed after 12ms: 0xC0000005 (...)",
+    "run_id": 42 }
+]
+```
+
+`cmd_id` / `run_id` are present only when the error site knew about
+them. Migration of all error sites to the unified `emit_error_log` /
+`send_rsp_err` helpers is incremental — older sites still emit the
+log without recording, so the ring is best-effort coverage today.
+
 ### `image_pool_stats`
 
 Per-owner ImagePool footprint. Each plugin instance and each loaded

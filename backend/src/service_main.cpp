@@ -473,12 +473,57 @@ static void send_rsp_ok(xi::ws::Server& srv, int64_t id, std::string data_json =
     srv.send_text(r.to_json());
 }
 
+// Ring buffer of recent error messages so an AI / scripted client can
+// correlate a synchronous cmd with any side-channel errors that might
+// have raced in (run-thread crashes, log-level=error from background
+// activity, isolation_dead events, etc). Three error channels exist
+// in the protocol — rsp.error (sync), `event` (async), `log`
+// level=error (async) — and the WS spec doesn't carry cmd_id /
+// run_id on the async two. Until that's fixed protocol-wide, this
+// ring lets the client pull "anything error-shaped that happened
+// in the last minute" with a single query.
+struct RecentError {
+    int64_t     ts_ms = 0;
+    std::string source;     // "rsp" / "log" / "event"
+    std::string message;
+    int64_t     cmd_id  = 0;   // 0 if unknown
+    int64_t     run_id  = 0;   // 0 if unknown
+};
+static std::mutex                     g_recent_errors_mu;
+static std::deque<RecentError>        g_recent_errors;
+static constexpr size_t               kRecentErrorsCap = 64;
+
+static int64_t now_ms_() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+static void push_recent_error(std::string source, std::string message,
+                              int64_t cmd_id = 0, int64_t run_id = 0) {
+    RecentError e{ now_ms_(), std::move(source), std::move(message), cmd_id, run_id };
+    std::lock_guard<std::mutex> lk(g_recent_errors_mu);
+    g_recent_errors.push_back(std::move(e));
+    while (g_recent_errors.size() > kRecentErrorsCap) g_recent_errors.pop_front();
+}
+
 static void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err) {
     xp::Rsp r;
     r.id = id;
     r.ok = false;
-    r.error = std::move(err);
+    r.error = err;
     srv.send_text(r.to_json());
+    push_recent_error("rsp", std::move(err), id);
+}
+
+// Send a log {level:error, msg:...} AND record it in the recent-error
+// ring so cmd:recent_errors can surface it. Most error logs go
+// through this; a few legacy sites still build the LogMsg inline —
+// migrating them to this helper is mechanical and ongoing.
+static void emit_error_log(xi::ws::Server& srv, const std::string& msg,
+                           int64_t run_id = 0) {
+    xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
+    srv.send_text(lm.to_json());
+    push_recent_error("log", msg, /*cmd_id=*/0, run_id);
 }
 
 static void send_hello(xi::ws::Server& srv) {
@@ -658,14 +703,12 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         std::snprintf(msg, sizeof(msg), "script crashed after %lldms: 0x%08X (%s)",
                      (long long)dt_ms, e.code, e.what());
         std::fprintf(stderr, "[xinsp2] %s\n", msg);
-        xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
-        srv.send_text(lm.to_json());
+        emit_error_log(srv, msg, run_id);
         return;
     } catch (const std::exception& e) {
         disarm();
         std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
-        xp::LogMsg lm; lm.level = "error"; lm.msg = std::string("script exception: ") + e.what();
-        srv.send_text(lm.to_json());
+        emit_error_log(srv, std::string("script exception: ") + e.what(), run_id);
         return;
     } catch (...) {
         disarm();
@@ -1834,6 +1877,30 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 out += ",\"manifest\":" + p.manifest_json;
             }
             out += "}";
+        }
+        out += "]";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "recent_errors") {
+        // Return error events captured by the cross-channel ring
+        // (rsp.error / log level=error / event:isolation_dead etc).
+        // Optional `since_ms` arg filters out older entries — useful
+        // for "any errors since I sent my last cmd?" polling.
+        auto since_opt = xp::get_number_field(parsed->args_json, "since_ms");
+        int64_t since = since_opt ? (int64_t)*since_opt : 0;
+        std::string out = "[";
+        {
+            std::lock_guard<std::mutex> lk(g_recent_errors_mu);
+            int n = 0;
+            for (auto& e : g_recent_errors) {
+                if (e.ts_ms < since) continue;
+                if (n++) out += ",";
+                out += "{\"ts_ms\":" + std::to_string(e.ts_ms);
+                out += ",\"source\":"; xp::json_escape_into(out, e.source);
+                out += ",\"message\":"; xp::json_escape_into(out, e.message);
+                if (e.cmd_id) out += ",\"cmd_id\":" + std::to_string(e.cmd_id);
+                if (e.run_id) out += ",\"run_id\":" + std::to_string(e.run_id);
+                out += "}";
+            }
         }
         out += "]";
         send_rsp_ok(srv, id, out);
