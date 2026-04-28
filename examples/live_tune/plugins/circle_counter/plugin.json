@@ -1,0 +1,15 @@
+{
+  "name": "circle_counter",
+  "description": "Local-contrast detector + count. Initially MIS-TUNED (over-aggressive erosion drops small blobs); agent must edit source + recompile_project_plugin to converge.",
+  "dll": "circle_counter.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true,
+  "manifest": {
+    "params":  [],
+    "inputs":  [{"name": "src", "kind": "image"}],
+    "outputs": [
+      {"name": "mask",  "kind": "image"},
+      {"name": "count", "kind": "number"}
+    ]
+  }
+}

@@ -367,6 +367,12 @@ This is the linchpin command for the live-tune workflow: edit a
 project plugin's source, hit save, recompile, watch instances pop back
 with their state intact and the next `run` use the new code.
 
+On compile failure the rsp is `ok: false` with `error` set to the
+short build error and the **same `{plugin, diagnostics, reattached}`
+structure attached as `data`** so live-tune loops can inspect
+`diagnostics` programmatically. The Python SDK surfaces this as
+`ProtocolError.data` (see `xinsp2.client.ProtocolError`).
+
 ### `open_project_warnings` *(planned, not yet wired)*
 
 The plugin manager records non-fatal load issues (missing/broken

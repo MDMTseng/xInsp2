@@ -1,0 +1,8 @@
+{
+  "name": "live_tune",
+  "script": "inspect.cpp",
+  "trigger_policy": { "kind": "Any" },
+  "instances": [
+    { "name": "det", "plugin": "circle_counter", "config": {} }
+  ]
+}

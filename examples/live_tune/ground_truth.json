@@ -1,0 +1,45 @@
+{
+  "target_count": 8,
+  "frames": [
+    {
+      "file": "frame_00.png",
+      "count": 8
+    },
+    {
+      "file": "frame_01.png",
+      "count": 8
+    },
+    {
+      "file": "frame_02.png",
+      "count": 8
+    },
+    {
+      "file": "frame_03.png",
+      "count": 8
+    },
+    {
+      "file": "frame_04.png",
+      "count": 8
+    },
+    {
+      "file": "frame_05.png",
+      "count": 8
+    },
+    {
+      "file": "frame_06.png",
+      "count": 8
+    },
+    {
+      "file": "frame_07.png",
+      "count": 8
+    },
+    {
+      "file": "frame_08.png",
+      "count": 8
+    },
+    {
+      "file": "frame_09.png",
+      "count": 8
+    }
+  ]
+}

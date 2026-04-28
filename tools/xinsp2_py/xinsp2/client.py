@@ -16,7 +16,16 @@ import websocket  # websocket-client
 
 
 class ProtocolError(RuntimeError):
-    pass
+    """Raised when a backend cmd returns ok=false.
+
+    `data` carries the structured `rsp.data` payload when the backend
+    attaches one (e.g. `recompile_project_plugin` ships its diagnostics
+    array on compile failure). `error` is the short error string.
+    """
+    def __init__(self, message: str, *, error: str | None = None, data: Any = None):
+        super().__init__(message)
+        self.error = error
+        self.data = data
 
 
 @dataclass
@@ -110,7 +119,12 @@ class Client:
         finally:
             self._rsp_waiters.pop(cid, None)
         if not rsp.get("ok"):
-            raise ProtocolError(f"cmd {name!r} failed: {rsp.get('error')}")
+            err = rsp.get("error")
+            raise ProtocolError(
+                f"cmd {name!r} failed: {err}",
+                error=err,
+                data=rsp.get("data"),
+            )
         return rsp.get("data")
 
     # ---- high-level ---------------------------------------------------
@@ -156,8 +170,11 @@ class Client:
         """Hot-rebuild one project-local plugin. Linchpin for live tuning.
 
         Returns `{plugin, diagnostics, reattached}` on success. On compile
-        failure raises `ProtocolError` whose message contains the build
-        log; the previous DLL stays loaded so the inspection keeps working.
+        failure raises `ProtocolError` whose `.data` field carries the
+        same `{plugin, diagnostics, reattached}` structure (so live-tune
+        loops can inspect `diagnostics` programmatically without parsing
+        the error string); the previous DLL stays loaded so the
+        inspection keeps working.
         """
         return self.call("recompile_project_plugin", {"plugin": plugin}, timeout=120)
 
