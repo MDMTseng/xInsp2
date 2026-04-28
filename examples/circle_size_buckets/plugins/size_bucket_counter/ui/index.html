@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body { font-family: var(--vscode-font-family, system-ui); color: var(--vscode-foreground, #ccc);
+       background: var(--vscode-sideBar-background, #1e1e1e); padding: 16px; font-size: 13px; }
+h2 { margin: 0 0 4px; font-size: 16px; }
+.hint { color: #888; margin-bottom: 14px; font-size: 12px; }
+.card { background: var(--vscode-editor-background); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; }
+.card-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
+              letter-spacing: 0.6px; color: #888; margin-bottom: 10px; }
+.field { display: grid; grid-template-columns: 130px 1fr 70px; gap: 10px; align-items: center; margin-bottom: 8px; }
+.field label { color: #888; }
+.field input[type=range] { width: 100%; }
+.field .num { font-family: monospace; text-align: right; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+button { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff);
+         border: none; padding: 5px 14px; border-radius: 3px; font-size: 12px; cursor: pointer; }
+button.secondary { background: var(--vscode-button-secondaryBackground, #3a3d41); }
+.stat { display: grid; grid-template-columns: 130px 1fr; gap: 10px; font-size: 12px; }
+.stat .k { color: #888; }
+.stat .v { font-family: monospace; }
+.buckets { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; text-align: center; }
+.bucket { padding: 8px; border-radius: 4px; background: rgba(255,255,255,0.04); }
+.bucket .lbl { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.bucket .v { font-size: 22px; font-weight: 600; color: #4caf50; font-family: monospace; }
+</style>
+</head>
+<body>
+<h2>Size Bucket Counter</h2>
+<div class="hint">
+Connected-component label a binary mask, drop areas outside
+[<code>min_area</code>, <code>max_area</code>], and bucket the rest by area
+into small / medium / large via the two cutoffs. Cutoffs sit in the GAPS
+between bucket area ranges.
+</div>
+
+<div class="card">
+  <div class="card-title">Parameters</div>
+  <div class="field">
+    <label>Close radius</label>
+    <input type="range" id="close" min="0" max="6" step="1">
+    <div class="num" id="close-v">1</div>
+  </div>
+  <div class="field">
+    <label>Min area (px)</label>
+    <input type="range" id="min" min="0" max="500" step="5">
+    <div class="num" id="min-v">20</div>
+  </div>
+  <div class="field">
+    <label>Small &lt; (px)</label>
+    <input type="range" id="smax" min="50" max="600" step="5">
+    <div class="num" id="smax-v">290</div>
+  </div>
+  <div class="field">
+    <label>Medium &lt; (px)</label>
+    <input type="range" id="mmax" min="400" max="1200" step="10">
+    <div class="num" id="mmax-v">820</div>
+  </div>
+  <div class="field">
+    <label>Max area (px)</label>
+    <input type="range" id="max" min="800" max="8000" step="50">
+    <div class="num" id="max-v">2200</div>
+  </div>
+  <div class="actions">
+    <button id="apply">Apply</button>
+    <button id="reset" class="secondary">Reset</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Last run</div>
+  <div class="buckets">
+    <div class="bucket"><div class="lbl">Small</div>  <div class="v" id="b-s">—</div></div>
+    <div class="bucket"><div class="lbl">Medium</div> <div class="v" id="b-m">—</div></div>
+    <div class="bucket"><div class="lbl">Large</div>  <div class="v" id="b-l">—</div></div>
+  </div>
+  <div class="stat">
+    <div class="k">Total regions</div>     <div class="v" id="s-total">—</div>
+    <div class="k">Rejected (too small)</div> <div class="v" id="s-rs">—</div>
+    <div class="k">Rejected (too big)</div>   <div class="v" id="s-rb">—</div>
+    <div class="k">Frames processed</div>  <div class="v" id="s-frames">—</div>
+  </div>
+</div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  const send = (cmd) => vscode.postMessage({ type: 'exchange', cmd });
+  const $ = id => document.getElementById(id);
+  const wire = (id, vid) => $(id).addEventListener('input', () => $(vid).textContent = $(id).value);
+  wire('close', 'close-v'); wire('min', 'min-v'); wire('smax', 'smax-v');
+  wire('mmax', 'mmax-v');   wire('max', 'max-v');
+
+  $('apply').onclick = () => {
+    send({ command: 'set_close_radius', value: parseInt($('close').value) });
+    send({ command: 'set_min_area',     value: parseInt($('min').value)   });
+    send({ command: 'set_small_max',    value: parseInt($('smax').value)  });
+    send({ command: 'set_medium_max',   value: parseInt($('mmax').value)  });
+    send({ command: 'set_max_area',     value: parseInt($('max').value)   });
+  };
+  $('reset').onclick = () => send({ command: 'reset' });
+
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m.type !== 'status') return;
+    if ('close_radius' in m) { $('close').value = m.close_radius; $('close-v').textContent = m.close_radius; }
+    if ('min_area'     in m) { $('min').value   = m.min_area;    $('min-v').textContent   = m.min_area; }
+    if ('small_max'    in m) { $('smax').value  = m.small_max;   $('smax-v').textContent  = m.small_max; }
+    if ('medium_max'   in m) { $('mmax').value  = m.medium_max;  $('mmax-v').textContent  = m.medium_max; }
+    if ('max_area'     in m) { $('max').value   = m.max_area;    $('max-v').textContent   = m.max_area; }
+    if ('last_small'   in m) $('b-s').textContent = m.last_small;
+    if ('last_medium'  in m) $('b-m').textContent = m.last_medium;
+    if ('last_large'   in m) $('b-l').textContent = m.last_large;
+    if ('last_total'   in m) $('s-total').textContent = m.last_total;
+    if ('last_rej_small' in m) $('s-rs').textContent  = m.last_rej_small;
+    if ('last_rej_big'   in m) $('s-rb').textContent  = m.last_rej_big;
+    if ('frames_processed' in m) $('s-frames').textContent = m.frames_processed;
+  });
+
+  send({ command: 'get_status' });
+</script>
+</body>
+</html>

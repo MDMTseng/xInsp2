@@ -1,0 +1,42 @@
+{
+  "name": "size_bucket_counter",
+  "description": "Count regions in a binary mask and classify each by area into small / medium / large buckets.",
+  "dll": "size_bucket_counter.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true,
+  "manifest": {
+    "params": [
+      { "name": "close_radius", "type": "int", "min": 0, "max": 8,    "default": 1,
+        "doc": "Morphological close radius applied to the mask before labelling. Keep small (1-2) so adjacent small circles don't merge." },
+      { "name": "min_area",     "type": "int", "min": 0, "max": 500,  "default": 20,
+        "doc": "Areas below this are treated as noise and dropped (rejected_small)." },
+      { "name": "small_max",    "type": "int", "min": 50, "max": 600, "default": 290,
+        "doc": "Upper bound (exclusive) of the SMALL bucket. Sit in the gap between max small area (~201) and min medium area (~380)." },
+      { "name": "medium_max",   "type": "int", "min": 400, "max": 1200, "default": 820,
+        "doc": "Upper bound (exclusive) of the MEDIUM bucket. Sit in the gap between max medium area (~615) and min large area (~1018)." },
+      { "name": "max_area",     "type": "int", "min": 800, "max": 8000, "default": 2200,
+        "doc": "Areas above this are treated as merged blobs / artefacts and dropped (rejected_big)." }
+    ],
+    "inputs": [
+      { "name": "mask", "kind": "image", "doc": "1-channel binary mask (0 / 255)." }
+    ],
+    "outputs": [
+      { "name": "cleaned",        "kind": "image",  "doc": "Mask after morphological close." },
+      { "name": "count_small",    "kind": "number", "doc": "Number of regions classified as small." },
+      { "name": "count_medium",   "kind": "number", "doc": "Number of regions classified as medium." },
+      { "name": "count_large",    "kind": "number", "doc": "Number of regions classified as large." },
+      { "name": "total_regions",  "kind": "number", "doc": "Total connected components found before area filtering." },
+      { "name": "rejected_small", "kind": "number", "doc": "Components with area < min_area (treated as noise)." },
+      { "name": "rejected_big",   "kind": "number", "doc": "Components with area > max_area (treated as merged blobs)." }
+    ],
+    "exchange": [
+      { "command": "set_close_radius", "args": "{value:int}",  "result": "current def JSON" },
+      { "command": "set_min_area",     "args": "{value:int}",  "result": "current def JSON" },
+      { "command": "set_small_max",    "args": "{value:int}",  "result": "current def JSON" },
+      { "command": "set_medium_max",   "args": "{value:int}",  "result": "current def JSON" },
+      { "command": "set_max_area",     "args": "{value:int}",  "result": "current def JSON" },
+      { "command": "reset",            "args": "{}",           "result": "current def JSON" },
+      { "command": "get_status",       "args": "{}",           "result": "current def JSON (alias of get_def)" }
+    ]
+  }
+}

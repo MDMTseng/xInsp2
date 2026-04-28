@@ -1,0 +1,6 @@
+{
+  "name": "circle_size_buckets",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}
