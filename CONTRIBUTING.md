@@ -100,6 +100,14 @@ how to add new tests.
   the code already says clearly.
 - Logs go to stderr in the format `[xinsp2] <message>` so they show up
   in the extension's Output channel.
+- **Keep new code cross-platform-friendly.** A Linux port isn't on the
+  schedule but is in the cards. New Win32 API calls should be guarded
+  by `#ifdef _WIN32` with a `// TODO(linux):` comment naming the
+  POSIX equivalent. Don't bake `cl.exe`, `MAX_PATH`, `_strdup`,
+  PowerShell, `taskkill` etc into a path that has a portable
+  alternative. The full inventory of what's currently Win-only lives
+  at [`docs/design/linux-port.md`](docs/design/linux-port.md) — when
+  you add to that surface, update the inventory in the same commit.
 
 ## Doc culture
 

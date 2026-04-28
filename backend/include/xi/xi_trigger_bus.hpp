@@ -181,7 +181,7 @@ public:
                 break;
             }
             case TriggerPolicy::AllRequired: {
-                auto& p = pending_[id_key(tid)];
+                auto& p = pending_[tid];
                 if (p.event.id.hi == 0 && p.event.id.lo == 0) {
                     p.event.id = tid;
                     p.event.timestamp_us = ts_us;
@@ -201,7 +201,7 @@ public:
                 p.sources_seen.insert(source);
                 if (is_complete_locked(p)) {
                     event_to_dispatch = std::move(p.event);
-                    pending_.erase(id_key(tid));
+                    pending_.erase(tid);
                     to_fire = sink_;
                 }
                 evict_stale_locked();
@@ -287,7 +287,29 @@ private:
         int64_t                            first_seen_us = 0;
     };
 
-    static uint64_t id_key(xi_trigger_id t) { return t.hi ^ t.lo; }
+    // Hash + equality for using xi_trigger_id directly as the
+    // pending_ map key. Was previously folded to uint64_t via XOR
+    // (`hi ^ lo`); two distinct tids whose halves XOR to the same
+    // value collided, causing AllRequired to cross-correlate frames
+    // from different acquisitions silently.
+    struct TidHash {
+        std::size_t operator()(const xi_trigger_id& t) const noexcept {
+            // 64-bit splitmix-style mix; collisions in the *hash*
+            // are fine (map then falls through to TidEq), what
+            // matters is no information loss in the KEY.
+            uint64_t x = t.hi ^ (t.lo + 0x9E3779B97F4A7C15ull
+                + (t.hi << 6) + (t.hi >> 2));
+            x ^= x >> 33; x *= 0xff51afd7ed558ccdull;
+            x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ull;
+            x ^= x >> 33;
+            return (std::size_t)x;
+        }
+    };
+    struct TidEq {
+        bool operator()(const xi_trigger_id& a, const xi_trigger_id& b) const noexcept {
+            return a.hi == b.hi && a.lo == b.lo;
+        }
+    };
 
     bool is_complete_locked(const Pending& p) const {
         for (auto& src : required_) {
@@ -318,7 +340,7 @@ private:
     std::unordered_set<std::string>             required_;
     std::string                                 leader_;
     int                                         window_ms_ = 100;
-    std::unordered_map<uint64_t, Pending>       pending_;          // by tid
+    std::unordered_map<xi_trigger_id, Pending, TidHash, TidEq> pending_;
     std::unordered_map<std::string, xi_image_handle> follower_latest_;
 };
 

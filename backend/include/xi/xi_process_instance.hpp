@@ -165,15 +165,27 @@ public:
                          xi_record_out* out,
                          std::string* err = nullptr) {
         if (dead_) { if (err) *err = "worker dead"; return false; }
-        // Note: image_count == 0 is legal (source plugins, json-only ops).
-        // Pass handle 0 in that case; the worker side resolves to a null
-        // input image and the plugin's process() sees an empty Record.
+        // Wire format (matches worker_main.cpp RPC_PROCESS handler):
+        //   u32 in_count
+        //   for each: str key | u64 handle
+        //   bytes input_json
+        // Reply:
+        //   u32 out_count
+        //   for each: str key | u64 handle
+        //   bytes output_json
+        //
+        // Empty input (image_count == 0) is legal — source plugins
+        // receive a json-only Record. Empty output is also legal —
+        // sink plugins return only json.
         try {
             ipc::Writer w;
-            uint64_t in_h = (in && in->image_count > 0 && in->images)
-                            ? in->images[0].handle
-                            : 0ull;
-            w.u64(in_h);
+            uint32_t n_in = (in && in->images) ? (uint32_t)in->image_count : 0;
+            w.u32(n_in);
+            for (uint32_t i = 0; i < n_in; ++i) {
+                const auto& img = in->images[i];
+                w.str(img.key ? std::string(img.key) : std::string{});
+                w.u64(img.handle);
+            }
             const char* j = (in && in->json) ? in->json : "{}";
             w.bytes(j, std::strlen(j));
             auto rsp = call_(ipc::RPC_PROCESS, w.buf());
@@ -182,25 +194,33 @@ public:
                 return false;
             }
             ipc::Reader r(rsp.payload);
-            uint64_t out_h = r.u64();
-            auto out_key_bytes  = r.bytes();
+            uint32_t n_out = r.u32();
+            // Reserve up front — xi_record_image::key borrows from
+            // out_keys_[i].c_str(), and a vector realloc would
+            // invalidate those pointers between the loop and the
+            // moment the caller reads them.
+            out_keys_.clear();
+            out_keys_.reserve(n_out);
+            out_images_.clear();
+            out_images_.reserve(n_out);
+            for (uint32_t i = 0; i < n_out; ++i) {
+                auto k_bytes = r.bytes();
+                uint64_t h   = r.u64();
+                out_keys_.emplace_back(k_bytes.begin(), k_bytes.end());
+                xi_record_image rec{};
+                rec.key    = out_keys_.back().c_str();
+                rec.handle = h;
+                out_images_.push_back(rec);
+            }
             auto out_json_bytes = r.bytes();
-
-            // Stash the response in instance-owned storage so the caller
-            // can read it after this call returns. xi_record_out's
-            // pointers must outlive the call site's stack — these
-            // members do. Single-image output is the common case.
-            out_key_.assign(out_key_bytes.begin(), out_key_bytes.end());
-            out_image_.key = out_key_.c_str();
-            out_image_.handle = out_h;
             out_json_.assign(out_json_bytes.begin(), out_json_bytes.end());
 
-            out->images       = (out_h ? &out_image_ : nullptr);
-            out->image_count  = (out_h ? 1 : 0);
+            out->images      = out_images_.empty() ? nullptr : out_images_.data();
+            out->image_count = (int)out_images_.size();
             // xi_record_out::json is char* (plugin-owned, non-const ABI).
             // out_json_ outlives this call (member of the adapter), so
             // exposing data() is safe; nothing writes to it.
-            out->json         = out_json_.data();
+            out->json        = out_json_.data();
             return true;
         } catch (const std::exception& e) {
             if (err) *err = e.what();
@@ -447,9 +467,12 @@ private:
 
     // Storage for the most recent process_via_rpc reply — pointers in
     // xi_record_out alias these.
-    xi_record_image out_image_{};
-    std::string     out_key_;
-    std::string     out_json_;
+    // Per-call output storage. The xi_record_image array's `key` field
+    // is `const char*` borrowing into out_keys_ — vector reallocation
+    // would invalidate the pointers, so we reserve before populating.
+    std::vector<xi_record_image> out_images_;
+    std::vector<std::string>     out_keys_;
+    std::string                  out_json_;
 };
 
 } // namespace xi

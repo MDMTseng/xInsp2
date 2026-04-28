@@ -197,6 +197,13 @@ if(NOT MSVC)
 endif()
 add_test(NAME image_pool COMMAND test_image_pool)
 
+add_executable(test_image_pool_stress tests/test_image_pool_stress.cpp)
+target_link_libraries(test_image_pool_stress PRIVATE xi_core cjson)
+if(NOT MSVC)
+    target_link_libraries(test_image_pool_stress PRIVATE pthread)
+endif()
+add_test(NAME image_pool_stress COMMAND test_image_pool_stress)
+
 add_executable(test_ops tests/test_ops.cpp)
 target_link_libraries(test_ops PRIVATE xi_core)
 if(NOT MSVC)
@@ -218,6 +225,7 @@ add_test(NAME ops COMMAND test_ops)
 add_executable(xinsp_backend
     src/service_main.cpp
     src/stb_impl.cpp
+    src/xi_image_io.cpp
 )
 target_link_libraries(xinsp_backend PRIVATE xi_core cjson)
 target_include_directories(xinsp_backend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
@@ -230,17 +238,17 @@ target_compile_definitions(xinsp_backend PRIVATE
     XINSP2_COMMIT="${XINSP2_COMMIT}")
 
 # Headless production runner. Same libs as the server; no WebSocket.
-add_executable(xinsp_worker src/worker_main.cpp)
+add_executable(xinsp_worker src/worker_main.cpp src/stb_impl.cpp src/xi_image_io.cpp)
 target_link_libraries(xinsp_worker PRIVATE xi_core cjson)
 target_include_directories(xinsp_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 set_target_properties(xinsp_worker PROPERTIES OUTPUT_NAME "xinsp-worker")
 
-add_executable(xinsp_script_runner src/script_runner_main.cpp)
+add_executable(xinsp_script_runner src/script_runner_main.cpp src/stb_impl.cpp src/xi_image_io.cpp)
 target_link_libraries(xinsp_script_runner PRIVATE xi_core cjson)
 target_include_directories(xinsp_script_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 set_target_properties(xinsp_script_runner PROPERTIES OUTPUT_NAME "xinsp-script-runner")
 
-add_executable(xinsp_runner src/runner_main.cpp)
+add_executable(xinsp_runner src/runner_main.cpp src/stb_impl.cpp src/xi_image_io.cpp)
 target_link_libraries(xinsp_runner PRIVATE xi_core cjson)
 target_include_directories(xinsp_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 if(WIN32)

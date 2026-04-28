@@ -14,6 +14,8 @@
   #include <windows.h>
 #endif
 
+#include "xi_image_pool.hpp"
+
 #include <cstdint>
 #include <string>
 
@@ -22,6 +24,10 @@ namespace xi::script {
 struct LoadedScript {
     HMODULE handle = nullptr;
     std::string path;
+    // Owner ledger id for the ImagePool. Allocated on each successful
+    // load_script; release_all_for(owner) is called on unload to sweep
+    // any handles the script forgot. Anonymous (0) until load completes.
+    ImagePoolOwnerId owner_id = 0;
 
     using InspectFn          = void (*)(int frame);
     using SnapshotFn         = int  (*)(char* buf, int buflen);
@@ -39,6 +45,7 @@ struct LoadedScript {
     using SetTriggerCallbacksFn = void (*)(void* info_fn, void* image_fn,
                                            void* sources_fn);
     using SetBreakpointCallbackFn = void (*)(void* fn);
+    using SetRunContextFn         = void (*)(const char* frame_path);
 
     InspectFn          inspect          = nullptr;
     SnapshotFn         snapshot         = nullptr;
@@ -54,6 +61,7 @@ struct LoadedScript {
     SetUseCallbacksFn  set_use_callbacks = nullptr;
     SetTriggerCallbacksFn set_trigger_callbacks = nullptr;
     SetBreakpointCallbackFn set_breakpoint_callback = nullptr;
+    SetRunContextFn    set_run_context  = nullptr;
 
     bool ok() const { return handle && inspect; }
 };
@@ -87,16 +95,29 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_use_callbacks = reinterpret_cast<LoadedScript::SetUseCallbacksFn>(GetProcAddress(h, "xi_script_set_use_callbacks"));
     out.set_trigger_callbacks = reinterpret_cast<LoadedScript::SetTriggerCallbacksFn>(GetProcAddress(h, "xi_script_set_trigger_callbacks"));
     out.set_breakpoint_callback = reinterpret_cast<LoadedScript::SetBreakpointCallbackFn>(GetProcAddress(h, "xi_script_set_breakpoint_callback"));
+    out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
     if (!out.inspect) {
         err = "script missing xi_inspect_entry export";
         FreeLibrary(h);
         out.handle = nullptr;
         return false;
     }
+    out.owner_id = ImagePool::alloc_owner_id();
     return true;
 }
 
 inline void unload_script(LoadedScript& s) {
+    // Sweep image handles the script left in the pool before we tear
+    // the DLL down. Without this every compile_and_load reload leaks
+    // any handle the script kept in a long-lived `xi::Image`.
+    if (s.owner_id != 0) {
+        int swept = ImagePool::instance().release_all_for(s.owner_id);
+        if (swept > 0) {
+            std::fprintf(stderr,
+                "[xinsp2] script unload: swept %d leaked image handle(s)\n",
+                swept);
+        }
+    }
     if (s.handle) {
         FreeLibrary(s.handle);
     }

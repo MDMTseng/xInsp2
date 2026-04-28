@@ -263,6 +263,17 @@ static void* g_trigger_sources_fn_  = nullptr;
 // Signature: void(const char* label).
 static void* g_breakpoint_fn_       = nullptr;
 
+// Per-run context. Set by the host before each xi_inspect_entry call,
+// cleared after. Currently just the optional `frame_path` arg from
+// cmd:run; future per-run fields (run_id, request id, etc.) join here.
+//
+// Scripts read these via accessors in xi_io.hpp — never touch the raw
+// globals. Host writes them via xi_script_set_run_context.
+//
+// `g_run_frame_path_` is sized to 1024 — paths longer than that are
+// truncated. Plenty for any reasonable file system.
+static char g_run_frame_path_[1024] = {0};
+
 XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
     void* process_fn, void* exchange_fn, void* grab_fn,
     void* host_api)
@@ -288,6 +299,20 @@ XI_SCRIPT_EXPORT void xi_script_set_trigger_callbacks(
 // Scripts that don't include xi_breakpoint.hpp leave this null.
 XI_SCRIPT_EXPORT void xi_script_set_breakpoint_callback(void* fn) {
     g_breakpoint_fn_ = fn;
+}
+
+// Per-run context setter (called by host before each xi_inspect_entry,
+// optional cleanup after). `frame_path` may be null/empty when the
+// caller didn't provide one — scripts get back an empty string from
+// xi::current_frame_path() in that case.
+XI_SCRIPT_EXPORT void xi_script_set_run_context(const char* frame_path) {
+    if (!frame_path) frame_path = "";
+    size_t n = 0;
+    while (frame_path[n] && n + 1 < sizeof(g_run_frame_path_)) {
+        g_run_frame_path_[n] = frame_path[n];
+        ++n;
+    }
+    g_run_frame_path_[n] = 0;
 }
 
 // --- Persistent state thunks ---

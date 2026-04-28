@@ -17,7 +17,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <fstream>
+#include <typeinfo>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -80,6 +82,11 @@ static std::string g_persistent_state_json = "{}";
 using xi::seh_exception;
 using xi::seh_translator;
 
+// Forward decl — definition near g_srv_for_bp / g_iso_dead_*. Emits a
+// log + isolation_dead event the first time we see an instance gone
+// permanently dead (worker respawn cap hit), silent on later calls.
+static void report_isolation_dead_once(const char* instance, const char* what);
+
 static int use_process_cb(const char* name,
                           const char* input_json,
                           const xi_record_image* input_images, int input_image_count,
@@ -99,6 +106,7 @@ static int use_process_cb(const char* name,
         if (!p->process_via_rpc(&in_rec, output, &err)) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') isolated: %s\n",
                          name, err.c_str());
+            if (p->is_dead()) report_isolation_dead_once(name, err.c_str());
             return -2;
         }
         return output->image_count;
@@ -111,6 +119,10 @@ static int use_process_cb(const char* name,
         in_rec.images = input_images;
         in_rec.image_count = input_image_count;
         in_rec.json = input_json;
+        // Tag any image_create calls inside the plugin's process_fn
+        // with this adapter's owner_id so destruction can sweep the
+        // plugin's leaked handles.
+        xi::ImagePool::OwnerGuard og(adapter->owner_id());
         try {
             adapter->process_fn()(adapter->raw_instance(), &in_rec, output);
         } catch (const seh_exception& e) {
@@ -227,6 +239,37 @@ static bool                    g_bp_paused = false;
 static std::string             g_bp_last_label;
 static xi::ws::Server*         g_srv_for_bp = nullptr;   // set in main
 
+// Fail-loud channel for ProcessInstanceAdapter "worker dead" state.
+// Once an isolated instance hits the 3-respawns/60s cap and goes
+// permanently dead, the adapter returns silent defaults forever
+// ({}, false, etc). Without this, a script keeps iterating against a
+// no-op detector and downstream pipeline output silently drifts.
+//
+// We emit one `log` (level=error) and one `event` per dead instance
+// — the first time use_process_cb / use_exchange_cb sees it dead.
+// Subsequent calls stay silent so the log doesn't flood.
+static std::mutex                       g_iso_dead_mu;
+static std::unordered_set<std::string>  g_iso_dead_reported;
+static void report_isolation_dead_once(const char* instance, const char* what) {
+    if (!g_srv_for_bp) return;
+    {
+        std::lock_guard<std::mutex> lk(g_iso_dead_mu);
+        if (!g_iso_dead_reported.insert(instance).second) return;
+    }
+    std::string msg = std::string("isolated instance '") + instance
+                    + "' is permanently dead (worker respawn cap hit) — "
+                    + (what && *what ? what : "no further detail")
+                    + ". Subsequent calls will return safe defaults.";
+    xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
+    g_srv_for_bp->send_text(lm.to_json());
+    std::string ev = std::string("{\"type\":\"event\",\"name\":\"isolation_dead\","
+                                  "\"data\":{\"instance\":");
+    xp::json_escape_into(ev, instance);
+    ev += "}}";
+    g_srv_for_bp->send_text(ev);
+    std::fprintf(stderr, "[xinsp2] %s\n", msg.c_str());
+}
+
 // ---- Trigger access (script callbacks) ---------------------------------
 // Set by the worker thread (or run_one_inspection) before invoking the
 // script. The script reads via xi::current_trigger() through the three
@@ -305,7 +348,13 @@ static void breakpoint_cb(const char* label) {
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
-static void run_one_inspection(xi::ws::Server& srv, int frame_hint = 1, int64_t run_id = 0);
+// frame_path (optional) is plumbed to the script via
+// `xi_script_set_run_context`; readable inside the script as
+// `xi::current_frame_path()`. Empty string means none.
+static void run_one_inspection(xi::ws::Server& srv,
+                               int frame_hint = 1,
+                               int64_t run_id = 0,
+                               const std::string& frame_path = "");
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
@@ -529,7 +578,8 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
 // Run one full inspection cycle: reset → inspect → emit.
 // The inspect call is wrapped in SEH so a script crash (null deref,
 // divide-by-zero, stack overflow) is caught without killing the backend.
-static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_id) {
+static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
+                               int64_t run_id, const std::string& frame_path) {
     if (run_id == 0) run_id = ++g_run_id;
 
     xi::script::LoadedScript s;
@@ -545,6 +595,12 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_
         srv.send_text(lm.to_json());
         return;
     }
+
+    // Plumb the optional per-run context (frame_path) into the script
+    // DLL's globals before inspect runs. Cleared on the way out so a
+    // subsequent run with no frame_path arg sees an empty string,
+    // not the previous value.
+    if (s.set_run_context) s.set_run_context(frame_path.c_str());
 
     auto t0 = std::chrono::steady_clock::now();
     // Arm watchdog: store deadline + current thread handle. Cleared in
@@ -567,6 +623,12 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_
         if (prev) CloseHandle(prev);
     };
     try {
+        // Tag any image_create calls inside the script's inspect (and
+        // any plugin process_fn it transitively calls that didn't set
+        // its own guard) with the script's owner_id. Per-script
+        // sweep-on-unload + per-instance sweep-on-destroy together
+        // catch the leaked-handle case from both directions.
+        xi::ImagePool::OwnerGuard sg(s.owner_id);
         if (s.reset) s.reset();
         s.inspect(frame_hint);
         disarm();
@@ -595,6 +657,10 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - t0).count();
     emit_vars_and_previews(srv, s, run_id, dt_ms);
+
+    // Clear so the next run, if it doesn't carry a frame_path arg,
+    // sees an empty path instead of the stale previous one.
+    if (s.set_run_context) s.set_run_context("");
 }
 
 // (trigger_worker removed — continuous mode uses a simple timer thread)
@@ -1142,6 +1208,15 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         int64_t run_id = ++g_run_id;
 
+        // Optional `frame_path` arg — plumbed to the script via
+        // `xi::current_frame_path()`. Was previously parsed by tests /
+        // SDKs but ignored by this handler ("phantom argument"). Now
+        // wired end to end.
+        std::string frame_path;
+        if (auto fp = xp::get_string_field(parsed->args_json, "frame_path")) {
+            frame_path = *fp;
+        }
+
         // Send rsp first (tests expect rsp before vars).
         char buf[128];
         std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":0})", (long long)run_id);
@@ -1154,10 +1229,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // SEH translator must be installed inside the thread.
         crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "run");
         g_crash_ctx.last_run_id = (int)run_id;
-        std::thread([&srv, run_id]() {
+        std::thread([&srv, run_id, frame_path = std::move(frame_path)]() {
             _set_se_translator(seh_translator);
             std::lock_guard<std::mutex> lk(g_run_mu);
-            run_one_inspection(srv, /*frame_hint=*/1, run_id);
+            run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
         }).detach();
     } else if (name == "start") {
         // Start continuous trigger mode. The backend runs a timer thread
@@ -1744,6 +1819,56 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         out += "]";
         send_rsp_ok(srv, id, out);
+    } else if (name == "image_pool_stats") {
+        // Per-owner ImagePool footprint. Owner IDs alone are
+        // meaningless to humans — we look them up against the
+        // running project's instances + script so the reply names
+        // who is holding the memory. Anonymous (owner == 0) is
+        // collapsed under "label":"<host>".
+        auto totals   = xi::ImagePool::instance().stats();
+        auto by_owner = xi::ImagePool::instance().stats_by_owner();
+
+        // Build owner_id → label map.
+        std::unordered_map<xi::ImagePoolOwnerId, std::string> labels;
+        labels[0] = "<host>";
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.owner_id != 0) {
+                labels[g_script.owner_id] =
+                    "script:" + std::filesystem::path(g_script.path).filename().string();
+            }
+        }
+        for (auto& [iname, ii] : g_plugin_mgr.project().instances) {
+            if (auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(ii.instance.get())) {
+                labels[a->owner_id()] = "instance:" + ii.name + " (" + ii.plugin_name + ")";
+            }
+            // ProcessInstanceAdapter owns handles in the worker's pool,
+            // not the host's — they don't show up here. SHM-backed
+            // handles also don't show up in the host ImagePool stats.
+        }
+
+        auto label_for = [&](xi::ImagePoolOwnerId o) -> std::string {
+            auto it = labels.find(o);
+            if (it != labels.end()) return it->second;
+            return "owner:" + std::to_string(o) + " (orphan)";
+        };
+
+        std::string out = "{\"total\":{\"handles\":"
+                        + std::to_string(totals.handle_count)
+                        + ",\"bytes\":"
+                        + std::to_string(totals.total_bytes)
+                        + "},\"by_owner\":[";
+        for (size_t i = 0; i < by_owner.size(); ++i) {
+            if (i) out += ",";
+            out += "{\"owner\":"   + std::to_string(by_owner[i].owner)
+                +  ",\"label\":";
+            xp::json_escape_into(out, label_for(by_owner[i].owner));
+            out +=  ",\"handles\":" + std::to_string(by_owner[i].handle_count)
+                +  ",\"bytes\":"    + std::to_string(by_owner[i].total_bytes)
+                +  "}";
+        }
+        out += "]}";
+        send_rsp_ok(srv, id, out);
     } else if (name == "rescan_plugins") {
         // Optional arg: {"dir": "<path>"} scans that one dir (additive).
         // No arg: re-scan the default plugins_dir.
@@ -2208,12 +2333,98 @@ static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+// std::terminate handler — fires when an unhandled C++ exception
+// unwinds out of a thread (e.g. a detached worker thread that didn't
+// wrap its body in try/catch). This path bypasses
+// SetUnhandledExceptionFilter on its own, so a silent terminate would
+// produce no crashdump. We:
+//   1. Log the current exception's what()/type so the cause appears
+//      in stderr (and thus the bash exit summary).
+//   2. RaiseException with a recognisable code so write_minidump
+//      sees a thread context and can write the dump + json sidecar.
+[[noreturn]] static void on_terminate() noexcept {
+    const char* what  = "<no exception>";
+    const char* tname = "<no exception>";
+    try {
+        if (auto p = std::current_exception()) std::rethrow_exception(p);
+    } catch (const std::exception& e) {
+        what  = e.what();
+        tname = typeid(e).name();
+    } catch (const seh_exception& e) {
+        what  = e.what();
+        tname = "xi::seh_exception";
+    } catch (...) {
+        tname = "<non-std exception>";
+    }
+    std::fprintf(stderr,
+        "[xinsp2] std::terminate (thread %lu): %s — %s\n",
+        (unsigned long)GetCurrentThreadId(), tname, what);
+    std::fflush(stderr);
+    crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "terminate");
+    // 0xE0000002 — distinct from --test-crash's 0xE0000001 so blame_module
+    // and exception_name still tag it as MS_C++ish; the json_path will
+    // record this code so the next-startup report distinguishes the
+    // two paths. NONCONTINUABLE so the filter actually runs.
+    RaiseException(0xE0000002, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    std::abort();   // unreachable; quiets [[noreturn]]
+}
+
+// Vectored exception handler — runs BEFORE SEH translators, before
+// any per-thread try/__except. Logs first-chance exceptions that
+// might get swallowed silently. Returning EXCEPTION_CONTINUE_SEARCH
+// lets normal handling proceed; we're just listening here.
+//
+// Filtered to the codes that would actually kill the process if
+// unhandled: AVs, illegal instructions, stack overflow, fastfail,
+// our own RaiseException codes. Skipping benign first-chance C++
+// exceptions (0xE06D7363) that happen all the time during normal
+// try/catch flow.
+static LONG WINAPI veh_logger(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    DWORD code = info->ExceptionRecord->ExceptionCode;
+    // Whitelist things that are actually concerning. C++ exceptions
+    // (0xE06D7363) and breakpoints get filtered out.
+    bool concerning =
+        code == EXCEPTION_ACCESS_VIOLATION ||
+        code == EXCEPTION_ILLEGAL_INSTRUCTION ||
+        code == EXCEPTION_STACK_OVERFLOW ||
+        code == EXCEPTION_INT_DIVIDE_BY_ZERO ||
+        code == EXCEPTION_NONCONTINUABLE_EXCEPTION ||
+        code == 0xC0000409 /* STATUS_STACK_BUFFER_OVERRUN / fastfail */ ||
+        code == 0xC0000374 /* STATUS_HEAP_CORRUPTION */ ||
+        (code >= 0xE0000001 && code <= 0xE0000010);
+    if (concerning) {
+        void* addr = info->ExceptionRecord->ExceptionAddress;
+        std::string blamed = blame_module(addr);
+        std::fprintf(stderr,
+            "[xinsp2] VEH first-chance 0x%08X (%s) thread %lu at %s\n",
+            code, exception_name(code),
+            (unsigned long)GetCurrentThreadId(), blamed.c_str());
+        std::fflush(stderr);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int main(int argc, char** argv) {
     // Top-level guard: minidump on crashes that escape the SEH translator
     // (stack overflow, plugin static destructor faults, etc.).
     SetUnhandledExceptionFilter(write_minidump);
     // Install SEH → C++ exception translator so try/catch catches segfaults
     _set_se_translator(seh_translator);
+    // C++ terminate path — covers unhandled exceptions in detached threads
+    // (the silent-exit pattern the spike branch's process-isolation work
+    // hit during validation).
+    std::set_terminate(on_terminate);
+    // Vectored handler — first crack at every concerning exception, even
+    // ones that get suppressed somewhere downstream. Diagnostic only;
+    // doesn't change the exception's normal handling path.
+    AddVectoredExceptionHandler(/*first=*/1, veh_logger);
+    // Tell Windows not to silently kill us on heap corruption — we want
+    // to see crashpad's report instead. (HeapEnableTerminationOnCorruption
+    // is opt-IN; HeapDisableCoalesceOnFree is unrelated. The default in
+    // newer Windows versions IS termination-on-corruption; flipping it
+    // off via SetProcessDEPPolicy isn't needed — just ensure we get the
+    // event.)
 
     // --test-crash: deliberately trigger a fatal exception so the
     // top-level minidump filter fires. Used by runCrashDump E2E.

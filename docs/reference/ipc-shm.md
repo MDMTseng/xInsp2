@@ -4,10 +4,10 @@
 > respawn) is merged from `shm-process-isolation` and exercised by 9
 > backend tests. Activation is per-instance: set
 > `"isolation": "process"` in `instance.json`, or call
-> `cmd:script_isolated_run` for the script side. Default-on is tracked
-> work — needs broader real-plugin coverage (heap-pool conversion is in
-> place, but multi-image Records / plugin-side handle storage / error
-> paths still need validation across real plugins).
+> `cmd:script_isolated_run` for the script side. Multi-image
+> input/output is symmetric (was first-image-only). Default-on is
+> tracked work — fail-loud worker-dead policy and heap-pool
+> input-direction auto-convert still missing.
 
 ---
 

@@ -231,20 +231,62 @@ inline Record record_from_c(const xi_host_api* host, const xi_record* rec) {
     return r;
 }
 
-// Convert a C++ Record to a C xi_record_out (images → host handles)
+namespace detail {
+// Per-plugin-DLL thread-local storage for the strings populated
+// during process_fn. The backend reads `out->images[i].key` and
+// `out->json` directly; previously these were `_strdup`/`malloc`'d
+// inside the plugin DLL and freed by the backend, which is UB across
+// CRT boundaries. Owning them in thread_local std::string +
+// std::vector inside the plugin DLL means the same allocator that
+// allocated them frees them (when the next process_fn call clears
+// the storage, or when the plugin DLL unloads at process exit). The
+// strings stay valid until the next call to `process_fn` on the same
+// thread — the backend's read happens before that.
+struct PluginOutputStorage {
+    std::vector<std::string>     keys;
+    std::string                  json;
+    std::vector<xi_record_image> images;
+};
+inline PluginOutputStorage& tls_output_storage() {
+    static thread_local PluginOutputStorage s;
+    return s;
+}
+} // namespace detail
+
+// Convert a C++ Record to a C xi_record_out (images → host handles).
+//
+// Strings (image keys + json) live in thread-local storage owned by
+// the plugin DLL — see PluginOutputStorage. The output's
+// `image_capacity` is set to 0 to signal "no malloc'd backing"; the
+// C inline `xi_record_out_free` honours that and skips the free path
+// entirely. This closes the cross-CRT heap-corruption hole that
+// existed when plugin DLLs and the backend EXE used different CRTs.
 inline void record_to_c(const xi_host_api* host, const Record& r, xi_record_out* out) {
-    xi_record_out_init(out);
-    std::string json = r.data_json();
-    xi_record_out_set_json(out, json.c_str());
+    auto& s = detail::tls_output_storage();
+    s.keys.clear();
+    s.images.clear();
+    s.json = r.data_json();
+
+    out->json = const_cast<char*>(s.json.c_str());
+
+    const size_t n = r.images().size();
+    s.keys.reserve(n);
+    s.images.reserve(n);
     for (auto& [key, img] : r.images()) {
         if (img.empty()) continue;
         xi_image_handle h = host->image_create(img.width, img.height, img.channels);
-        if (h) {
-            uint8_t* dst = host->image_data(h);
-            std::memcpy(dst, img.data(), img.size());
-            xi_record_out_add_image(out, key.c_str(), h);
-        }
+        if (!h) continue;
+        std::memcpy(host->image_data(h), img.data(), img.size());
+        s.keys.push_back(key);
+        xi_record_image rec{};
+        rec.key    = s.keys.back().c_str();
+        rec.handle = h;
+        s.images.push_back(rec);
     }
+
+    out->images         = s.images.empty() ? nullptr : s.images.data();
+    out->image_count    = (int32_t)s.images.size();
+    out->image_capacity = 0;   // tls-owned, see xi_record_out_free
 }
 
 } // namespace xi
