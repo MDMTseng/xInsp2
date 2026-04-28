@@ -138,6 +138,11 @@ public:
     }
 
     ImagePoolOwnerId owner_id() const { return owner_id_; }
+    // Replace the auto-allocated id with one the caller pre-allocated
+    // (used by open_project / create_instance to tag handles the
+    // plugin's ctor allocates BEFORE the adapter exists). The
+    // sweep-on-destroy still sees the right bucket either way.
+    void adopt_owner_id(ImagePoolOwnerId id) { owner_id_ = id; }
 
     const std::string& name() const override { return name_; }
     std::string plugin_name() const override { return plugin_name_; }
@@ -1150,11 +1155,32 @@ public:
 
                     if (!created && pi.c_factory) {
                         static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
-                        void* raw = pi.c_factory(&host, ii.name.c_str());
+                        // Pre-allocate the owner id and install a guard
+                        // around the ctor itself so any host->image_create
+                        // calls inside xi_plugin_create are tagged. If
+                        // the ctor returns null OR throws, sweep — the
+                        // adapter never got built, so its destructor
+                        // can't sweep for us.
+                        ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
+                        void* raw = nullptr;
+                        try {
+                            ImagePool::OwnerGuard og(pre_owner);
+                            raw = pi.c_factory(&host, ii.name.c_str());
+                        } catch (...) {
+                            ImagePool::instance().release_all_for(pre_owner);
+                            throw;
+                        }
                         if (raw) {
-                            ii.instance = std::make_shared<CAbiInstanceAdapter>(
+                            auto adapter = std::make_shared<CAbiInstanceAdapter>(
                                 ii.name, *plugin, pi.handle, raw);
+                            // Hand the pre-allocated owner id over to the
+                            // adapter so subsequent process / exchange
+                            // calls keep tagging into the same bucket.
+                            adapter->adopt_owner_id(pre_owner);
+                            ii.instance = std::move(adapter);
                             created = true;
+                        } else {
+                            ImagePool::instance().release_all_for(pre_owner);
                         }
                     } else if (!created && pi.factory) {
                         auto* raw = pi.factory(ii.name.c_str());
@@ -1228,15 +1254,30 @@ public:
         InstanceFolderRegistry::instance().set(instance_name, ii.folder_path);
 
         if (pi.c_factory) {
-            // New C ABI — create via host API
+            // New C ABI — create via host API. Pre-allocate the owner
+            // id so any host->image_create called from inside the
+            // plugin's ctor is tagged. Sweep on null return / throw
+            // so a half-initialised plugin doesn't leak handles.
             static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
-            void* raw = pi.c_factory(&host, instance_name.c_str());
+            ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
+            void* raw = nullptr;
+            try {
+                ImagePool::OwnerGuard og(pre_owner);
+                raw = pi.c_factory(&host, instance_name.c_str());
+            } catch (...) {
+                ImagePool::instance().release_all_for(pre_owner);
+                InstanceFolderRegistry::instance().clear(instance_name);
+                throw;
+            }
             if (!raw) {
+                ImagePool::instance().release_all_for(pre_owner);
                 InstanceFolderRegistry::instance().clear(instance_name);
                 return nullptr;
             }
-            ii.instance = std::make_shared<CAbiInstanceAdapter>(
+            auto adapter = std::make_shared<CAbiInstanceAdapter>(
                 instance_name, plugin_name, pi.handle, raw);
+            adapter->adopt_owner_id(pre_owner);
+            ii.instance = std::move(adapter);
         } else {
             // Old-style factory
             auto* raw = pi.factory(instance_name.c_str());
