@@ -154,7 +154,24 @@ static int use_process_cb(const char* name,
             std::fprintf(stderr, "[xinsp2] use_process('%s') isolated: %s\n",
                          name, err.c_str());
             if (p->is_dead()) report_isolation_dead_once(name, err.c_str());
-            return -2;
+            // Surface the error to the script side. Without this the
+            // script's `xi::use(...).process(...)` returns an empty
+            // Record and a crashed plugin is observationally identical
+            // to one that returned nothing on purpose. Populate
+            // `output->json` with `{"error": "<message>"}` so the
+            // script can do `out["error"].as_string(...)` to detect
+            // and react. Storage is thread_local so the json pointer
+            // stays valid until the next call on this thread.
+            static thread_local std::string err_json_storage;
+            err_json_storage.clear();
+            err_json_storage += "{\"error\":";
+            xp::json_escape_into(err_json_storage, err);
+            err_json_storage += "}";
+            output->images      = nullptr;
+            output->image_count = 0;
+            output->image_capacity = 0;
+            output->json        = const_cast<char*>(err_json_storage.c_str());
+            return 0;
         }
         return output->image_count;
     }

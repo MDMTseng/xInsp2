@@ -207,11 +207,33 @@ thread. The backend's TriggerBus correlates by `tid`. See the Expert
 template for a working synthetic source.
 
 **Crash isolation?**
-Same-process plugins are protected by `_set_se_translator`: a segfault
-in `process()` becomes an exception and the backend stays up. For
-deeper isolation (separate process), see the
-`shm-process-isolation` spike on its branch — `instance.json` gains
-`"isolation": "process"` opt-in.
+Plugin instances default to running in their own `xinsp-worker.exe`
+(see [`docs/reference/instance-model.md`](../reference/instance-model.md)
+"isolation modes"). Two layers protect the backend:
+
+1. The worker has an SEH wrapper around `process()`. An access
+   violation, null deref, divide-by-zero, etc. inside the plugin is
+   caught and replied to over the IPC pipe as a per-call error — the
+   worker process keeps running, the next call goes straight through.
+2. If something kills the worker process itself (an asynchronous
+   `std::abort`, the OS OOM-killing it, the SEH wrapper itself
+   crashing), `ProcessInstanceAdapter` auto-respawns it (rate-limited
+   3 per 60 s) and replays the last `set_def` so state survives.
+
+On the script / Python SDK side, a crashed `process()` returns a
+Record with an `error` field set to the underlying exception text:
+
+```cpp
+auto out = xi::use("det").process(input);
+if (!out["error"].as_string("").empty()) {
+    // worker reported a crash this call — handle and continue
+}
+```
+
+If you want the legacy in-process behaviour (debugger easier, lower
+per-call latency, but a plugin crash WILL take the backend down with
+it) opt out per instance with `"isolation": "in_process"` in
+`instance.json`.
 
 **My plugin won't load.** Check:
 1. Backend stderr — usually says exactly which symbol failed to
