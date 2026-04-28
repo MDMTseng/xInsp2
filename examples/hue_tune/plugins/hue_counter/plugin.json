@@ -1,0 +1,33 @@
+{
+  "name": "hue_counter",
+  "description": "Count saturated discs in a 3-channel image whose hue falls in [hue_lo, hue_hi]. Live-tunable via exchange().",
+  "dll": "hue_counter.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true,
+  "manifest": {
+    "params": [
+      { "name": "hue_lo",   "type": "int", "min": 0, "max": 179, "default": 0,
+        "doc": "Inclusive lower bound of HSV hue band (OpenCV scale: 0-179)." },
+      { "name": "hue_hi",   "type": "int", "min": 0, "max": 179, "default": 15,
+        "doc": "Inclusive upper bound of HSV hue band." },
+      { "name": "min_area", "type": "int", "min": 1, "max": 100000, "default": 300,
+        "doc": "Minimum connected-component area (pixels) to count a region." }
+    ],
+    "inputs":  [{ "name": "src",  "kind": "image", "doc": "Input 3-channel RGB image." }],
+    "outputs": [
+      { "name": "mask",     "kind": "image",  "doc": "Binary mask (0 / 255), 1-channel." },
+      { "name": "count",    "kind": "number", "doc": "Number of accepted regions." },
+      { "name": "hue_lo",   "kind": "number", "doc": "Hue band lower bound used for this run." },
+      { "name": "hue_hi",   "kind": "number", "doc": "Hue band upper bound used for this run." },
+      { "name": "min_area", "kind": "number", "doc": "Min area used for this run." }
+    ],
+    "exchange": [
+      { "command": "set_hue_range", "args": "{lo:int, hi:int}", "result": "new get_def()",
+        "doc": "Atomically set hue_lo and hue_hi. Next process() picks them up." },
+      { "command": "set_min_area",  "args": "{value:int}", "result": "new get_def()",
+        "doc": "Set the area floor for component acceptance." },
+      { "command": "reset", "args": "{}", "result": "new get_def()",
+        "doc": "Restore initial defaults (red band: 0..15, min_area=300)." }
+    ]
+  }
+}

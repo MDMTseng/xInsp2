@@ -1,0 +1,6 @@
+{
+  "name": "hue_tune",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

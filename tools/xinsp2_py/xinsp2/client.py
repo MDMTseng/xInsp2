@@ -73,7 +73,20 @@ class Client:
     # ---- lifecycle ----------------------------------------------------
 
     def connect(self) -> dict:
-        self._ws = websocket.create_connection(self.url, timeout=self.timeout)
+        try:
+            self._ws = websocket.create_connection(self.url, timeout=self.timeout)
+        except (ConnectionRefusedError, OSError) as e:
+            # Translate the kernel-level "no listener" error into a
+            # plain-English hint about how to start the backend. The
+            # bare ConnectionRefusedError tells the agent / human
+            # nothing about what's supposed to be on this port.
+            raise ConnectionRefusedError(
+                f"can't reach xInsp2 backend at {self.url} ({e}). "
+                f"If you're running outside VS Code, start it yourself: "
+                f"`backend/build/Release/xinsp-backend.exe &` "
+                f"(see tools/xinsp2_py/README.md). Inside VS Code the "
+                f"extension auto-starts one when a project opens."
+            ) from e
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
         # `hello` arrives as an event right after connect

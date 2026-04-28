@@ -46,8 +46,13 @@ inline std::string current_frame_path() {
 
 // Read a file into an xi::Image. Empty Image on any failure (file
 // missing, unsupported format, decode error). Decoder runs on the
-// host side (via host_api->read_image_file); pixels are copied into
-// a fresh xi::Image so the script's image lifetime is independent
+// host side (via host_api->read_image_file, which is stb_image).
+// **Pixel order is RGB**, NOT OpenCV's default BGR — when handing
+// the resulting `as_cv_mat()` to cv::cvtColor, use `cv::COLOR_RGB2*`,
+// not `BGR2*`. (Getting this wrong is a silent failure: red discs
+// would map to where blue ones should be in HSV space.)
+// Pixels are copied into a fresh xi::Image so the script's image
+// lifetime is independent
 // of the host pool.
 inline Image imread(const std::string& path) {
     auto* host = static_cast<const xi_host_api*>(g_use_host_api_);

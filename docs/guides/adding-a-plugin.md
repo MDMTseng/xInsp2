@@ -163,6 +163,14 @@ cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0, 0}, 2.0);
 return xi::Record().image("blurred", dst);               // zero-copy across ABI
 ```
 
+**Pixel order is RGB**, not OpenCV's default BGR. The decoder behind
+`xi::imread` is stb_image, which emits RGB-ordered pixels; that order
+flows through the host pool unchanged. When you hand a Mat to
+`cv::cvtColor`, use `cv::COLOR_RGB2*` (e.g. `RGB2GRAY`, `RGB2HSV`),
+**not** `BGR2*`. Mixing them up is a silent failure — red and blue
+swap, hue values land 120° away from where they should be, and the
+plugin still "works", just on the wrong colour.
+
 For the API contracts in detail, see
 [`docs/reference/plugin-abi.md`](../reference/plugin-abi.md) and
 [`docs/reference/host_api.md`](../reference/host_api.md).
