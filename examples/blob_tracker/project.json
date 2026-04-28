@@ -1,0 +1,6 @@
+{
+  "name": "blob_tracker",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

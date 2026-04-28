@@ -361,18 +361,19 @@ XI_SCRIPT_EXPORT int xi_script_set_state(const char* json) {
 // drops the state on mismatch instead of silently restoring garbage.
 //
 // Default 0 means "unversioned" — backend skips the migration check
-// and restores blindly (legacy back-compat). User overrides via:
+// and restores blindly (legacy back-compat). Register from user code:
 //
-//   #define XI_STATE_SCHEMA_VERSION 2
-//   #include <xi/xi.hpp>
+//   XI_STATE_SCHEMA(2);   // file-scope macro
 //
-// or by exporting their own thunk before this header takes effect.
-#ifndef XI_STATE_SCHEMA_VERSION
-#define XI_STATE_SCHEMA_VERSION 0
-#endif
-
+// or manually:
+//
+//   static int _sv = (xi::set_state_schema_version(2), 0);
+//
+// The export below reads the runtime atomic, so the user's static
+// initialiser (which runs at DLL load, BEFORE the host's first
+// xi_script_set_state) wins.
 XI_SCRIPT_EXPORT int xi_script_state_schema_version(void) {
-    return XI_STATE_SCHEMA_VERSION;
+    return xi::state_schema_version();
 }
 
 #endif // XI_SCRIPT_NO_DEFAULT_THUNKS

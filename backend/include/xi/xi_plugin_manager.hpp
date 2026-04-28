@@ -961,13 +961,24 @@ public:
         auto pj = std::filesystem::path(folder) / "project.json";
         if (!std::filesystem::exists(pj)) return false;
 
-        // Unregister old instances from the global registries
+        // Unregister old instances from the global registries.
         for (auto& [k, v] : project_.instances) {
             InstanceRegistry::instance().remove(k);
             InstanceFolderRegistry::instance().clear(k);
         }
-        // Drop the previous project's plugins — they're built against
-        // that project's source tree and stale once the project changes.
+        // Destroy old instances FIRST — CAbiInstanceAdapter's destructor
+        // calls its plugin's destroy_fn, which lives in the project
+        // plugin's DLL. If we FreeLibrary the DLL before the adapter
+        // dies (the prior order did), the destructor calls a dangling
+        // function pointer and SEGVs the backend on a reopen.
+        // ProcessInstanceAdapter's destructor closes a pipe + tears
+        // down its worker process, no host DLL dependency, so order
+        // doesn't matter for that branch — but doing it here keeps a
+        // single deterministic teardown sequence.
+        project_.instances.clear();
+
+        // Now safe to drop the previous project's plugins — adapters
+        // are gone, no live destroy_fn callers remain.
         for (auto& [pname, _] : project_plugin_origin_) {
             auto it = plugins_.find(pname);
             if (it != plugins_.end()) {
@@ -977,7 +988,6 @@ public:
         }
         project_plugin_origin_.clear();
         project_.folder_path = folder;
-        project_.instances.clear();
 
         // Parse project.json
         std::ifstream f(pj.string());

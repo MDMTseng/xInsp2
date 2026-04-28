@@ -124,15 +124,33 @@ class Client:
     def compile_and_load(self, path: str) -> dict:
         return self.call("compile_and_load", {"path": path}, timeout=180)
 
-    def load_project(self, path: str) -> None:
-        # Cold opens compile every project-local plugin under cl.exe; the
-        # 30 s default is too short for any non-trivial project.
-        self.call("load_project", {"path": path}, timeout=180)
+    def load_project(self, path: str) -> dict:
+        """Read a `project.json` from disk into the backend's project
+        state — but does NOT compile project plugins or instantiate
+        from `instances/`. Use `open_project()` for the full flow
+        (read + compile plugins + instantiate instances + run instance
+        ctors). 90% of the time you want `open_project()`.
+        """
+        return self.call("load_project", {"path": path}, timeout=180)
 
-    def open_project(self, path: str) -> None:
-        # Alias for `load_project`; some tooling uses the `open_project`
-        # cmd name. Behaviour is identical from the SDK's perspective.
-        self.call("open_project", {"path": path}, timeout=180)
+    def open_project(self, path: str) -> dict:
+        """Open a project folder end-to-end: scan `instances/`, compile
+        every project-local plugin, instantiate each instance, restore
+        each instance's saved `def`. The reply includes the project's
+        plugin list (with manifest blocks) and instance list. Cold
+        opens with N project plugins compile each plugin under cl.exe;
+        a 180 s timeout is the SDK default to cover that.
+
+        Re-opening a project: tearing down the old project's plugins
+        unloads their DLLs, which means any persisted `xi::state()`
+        from a script linked against those plugins won't survive. If
+        you reopen the same project mid-session, expect script state
+        to reset on the next `compile_and_load`. Re-prime by replaying
+        prior frames if the script's logic depends on accumulated
+        state. (The agent feedback loop hit this on the trend_monitor
+        case.)
+        """
+        return self.call("open_project", {"path": path}, timeout=180)
 
     def recompile_project_plugin(self, plugin: str) -> dict:
         """Hot-rebuild one project-local plugin. Linchpin for live tuning.
@@ -233,11 +251,17 @@ class Client:
 
         Drains vars + binary frames until either run_finished event arrives or
         the timeout elapses.
+
+        IMPORTANT: this drains stale `vars` and `previews` queues but
+        DOES NOT drain `events` — earlier calls' events (e.g.
+        `state_dropped` after a `compile_and_load`) stay queued so the
+        caller can read them out via `_inbox_events.get_nowait()`.
+        Vars/previews are drained because they're tightly coupled to a
+        specific run_id and stale ones would mismatch.
         """
-        # Drain stale messages from any prior async activity.
         self._drain(self._inbox_vars)
         self._drain(self._inbox_previews)
-        self._drain(self._inbox_events)
+        # Note: _inbox_events deliberately left intact — see docstring.
 
         args = {"frame_path": frame_path} if frame_path else {}
         data = self.call("run", args, timeout=timeout or self.timeout)

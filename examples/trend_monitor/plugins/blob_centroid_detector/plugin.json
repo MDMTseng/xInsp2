@@ -1,0 +1,44 @@
+{
+  "name": "blob_centroid_detector",
+  "description": "Find dark circular blobs on a noisy gradient background and emit centroids as a JSON array. One pass: gaussian blur, local-mean background subtract, threshold, morph close, connected components, area filter, centroid mean.",
+  "dll": "blob_centroid_detector.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true,
+  "manifest": {
+    "params": [
+      { "name": "blur_radius",  "type": "int", "min": 0, "max": 20,    "default": 2,
+        "doc": "Gaussian denoise radius applied before background subtract. 2 is plenty for sigma=8 noise." },
+      { "name": "block_radius", "type": "int", "min": 1, "max": 200,   "default": 40,
+        "doc": "Box-blur radius used to estimate the local-mean background. Must be larger than the blob radius (~14) so the blob does not pull its own background dark." },
+      { "name": "diff_C",       "type": "int", "min": 1, "max": 200,   "default": 15,
+        "doc": "How much darker than local background a pixel must be to enter the mask. Tune up if the noisy bg leaks into the mask, down if blob edges are fragmenting." },
+      { "name": "close_radius", "type": "int", "min": 0, "max": 10,    "default": 1,
+        "doc": "Morphological close radius applied to the mask before labelling. 1 seals noise pinholes inside the disc without merging neighbours." },
+      { "name": "min_area",     "type": "int", "min": 0, "max": 2000,  "default": 200,
+        "doc": "Areas below this are dropped as noise (rejected_small). r=14 disc is ~615 px — 200 gives 3x margin." },
+      { "name": "max_area",     "type": "int", "min": 100, "max": 20000, "default": 4000,
+        "doc": "Areas above this are dropped as merged blobs / artefacts (rejected_big)." }
+    ],
+    "inputs": [
+      { "name": "src", "kind": "image", "doc": "1-channel grayscale frame (loaded via xi::imread)." }
+    ],
+    "outputs": [
+      { "name": "mask",           "kind": "image",  "doc": "Binary mask (0/255) before morphology." },
+      { "name": "cleaned",        "kind": "image",  "doc": "Mask after morphological close — what's actually labelled." },
+      { "name": "count",          "kind": "number", "doc": "Number of regions accepted by the area filter (= number of centroids)." },
+      { "name": "total_regions",  "kind": "number", "doc": "Connected components found before area filtering." },
+      { "name": "rejected_small", "kind": "number", "doc": "Components dropped by min_area." },
+      { "name": "rejected_big",   "kind": "number", "doc": "Components dropped by max_area." },
+      { "name": "centroids",      "kind": "array",  "doc": "Array of {x:int,y:int,area:int} — centroid of each accepted region." }
+    ],
+    "exchange": [
+      { "command": "set_blur_radius",  "args": "{value:int}", "result": "current def JSON" },
+      { "command": "set_block_radius", "args": "{value:int}", "result": "current def JSON" },
+      { "command": "set_diff_C",       "args": "{value:int}", "result": "current def JSON" },
+      { "command": "set_close_radius", "args": "{value:int}", "result": "current def JSON" },
+      { "command": "set_min_area",     "args": "{value:int}", "result": "current def JSON" },
+      { "command": "set_max_area",     "args": "{value:int}", "result": "current def JSON" },
+      { "command": "reset",            "args": "{}",          "result": "current def JSON" }
+    ]
+  }
+}
