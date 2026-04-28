@@ -140,6 +140,15 @@ class Client:
         plugin list (with manifest blocks) and instance list. Cold
         opens with N project plugins compile each plugin under cl.exe;
         a 180 s timeout is the SDK default to cover that.
+
+        Re-opening a project: tearing down the old project's plugins
+        unloads their DLLs, which means any persisted `xi::state()`
+        from a script linked against those plugins won't survive. If
+        you reopen the same project mid-session, expect script state
+        to reset on the next `compile_and_load`. Re-prime by replaying
+        prior frames if the script's logic depends on accumulated
+        state. (The agent feedback loop hit this on the trend_monitor
+        case.)
         """
         return self.call("open_project", {"path": path}, timeout=180)
 

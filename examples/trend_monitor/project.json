@@ -1,0 +1,6 @@
+{
+  "name": "trend_monitor",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

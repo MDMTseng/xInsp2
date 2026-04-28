@@ -1,0 +1,11 @@
+{
+  "plugin": "blob_centroid_detector",
+  "config": {
+    "blur_radius": 2,
+    "block_radius": 40,
+    "diff_C": 15,
+    "close_radius": 1,
+    "min_area": 200,
+    "max_area": 4000
+  }
+}

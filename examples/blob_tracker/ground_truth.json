@@ -1,0 +1,368 @@
+{
+  "width": 640,
+  "height": 480,
+  "gate_x": 320,
+  "frames": [
+    {
+      "file": "frame_00.png",
+      "frame_idx": 0,
+      "blob_xs": [
+        40,
+        20,
+        0,
+        0,
+        360
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_01.png",
+      "frame_idx": 1,
+      "blob_xs": [
+        52,
+        38,
+        20,
+        4,
+        370
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_02.png",
+      "frame_idx": 2,
+      "blob_xs": [
+        64,
+        56,
+        40,
+        8,
+        380
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_03.png",
+      "frame_idx": 3,
+      "blob_xs": [
+        76,
+        74,
+        60,
+        12,
+        390
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_04.png",
+      "frame_idx": 4,
+      "blob_xs": [
+        88,
+        92,
+        80,
+        16,
+        400
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_05.png",
+      "frame_idx": 5,
+      "blob_xs": [
+        100,
+        110,
+        100,
+        20,
+        410
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_06.png",
+      "frame_idx": 6,
+      "blob_xs": [
+        112,
+        128,
+        120,
+        24,
+        420
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_07.png",
+      "frame_idx": 7,
+      "blob_xs": [
+        124,
+        146,
+        140,
+        28,
+        430
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_08.png",
+      "frame_idx": 8,
+      "blob_xs": [
+        136,
+        164,
+        160,
+        32,
+        440
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_09.png",
+      "frame_idx": 9,
+      "blob_xs": [
+        148,
+        182,
+        180,
+        36,
+        450
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_10.png",
+      "frame_idx": 10,
+      "blob_xs": [
+        160,
+        200,
+        200,
+        40,
+        460
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_11.png",
+      "frame_idx": 11,
+      "blob_xs": [
+        172,
+        218,
+        220,
+        44,
+        470
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_12.png",
+      "frame_idx": 12,
+      "blob_xs": [
+        184,
+        236,
+        240,
+        48,
+        480
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_13.png",
+      "frame_idx": 13,
+      "blob_xs": [
+        196,
+        254,
+        260,
+        52,
+        490
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_14.png",
+      "frame_idx": 14,
+      "blob_xs": [
+        208,
+        272,
+        280,
+        56,
+        500
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_15.png",
+      "frame_idx": 15,
+      "blob_xs": [
+        220,
+        290,
+        300,
+        60,
+        510
+      ],
+      "crossings_so_far": 0
+    },
+    {
+      "file": "frame_16.png",
+      "frame_idx": 16,
+      "blob_xs": [
+        232,
+        308,
+        320,
+        64,
+        520
+      ],
+      "crossings_so_far": 1
+    },
+    {
+      "file": "frame_17.png",
+      "frame_idx": 17,
+      "blob_xs": [
+        244,
+        326,
+        340,
+        68,
+        530
+      ],
+      "crossings_so_far": 2
+    },
+    {
+      "file": "frame_18.png",
+      "frame_idx": 18,
+      "blob_xs": [
+        256,
+        344,
+        360,
+        72,
+        540
+      ],
+      "crossings_so_far": 2
+    },
+    {
+      "file": "frame_19.png",
+      "frame_idx": 19,
+      "blob_xs": [
+        268,
+        362,
+        380,
+        76,
+        550
+      ],
+      "crossings_so_far": 2
+    },
+    {
+      "file": "frame_20.png",
+      "frame_idx": 20,
+      "blob_xs": [
+        280,
+        380,
+        400,
+        80,
+        560
+      ],
+      "crossings_so_far": 2
+    },
+    {
+      "file": "frame_21.png",
+      "frame_idx": 21,
+      "blob_xs": [
+        292,
+        398,
+        420,
+        84,
+        570
+      ],
+      "crossings_so_far": 2
+    },
+    {
+      "file": "frame_22.png",
+      "frame_idx": 22,
+      "blob_xs": [
+        304,
+        416,
+        440,
+        88,
+        580
+      ],
+      "crossings_so_far": 2
+    },
+    {
+      "file": "frame_23.png",
+      "frame_idx": 23,
+      "blob_xs": [
+        316,
+        434,
+        460,
+        92,
+        590
+      ],
+      "crossings_so_far": 2
+    },
+    {
+      "file": "frame_24.png",
+      "frame_idx": 24,
+      "blob_xs": [
+        328,
+        452,
+        480,
+        96,
+        600
+      ],
+      "crossings_so_far": 3
+    },
+    {
+      "file": "frame_25.png",
+      "frame_idx": 25,
+      "blob_xs": [
+        340,
+        470,
+        500,
+        100,
+        610
+      ],
+      "crossings_so_far": 3
+    },
+    {
+      "file": "frame_26.png",
+      "frame_idx": 26,
+      "blob_xs": [
+        352,
+        488,
+        520,
+        104,
+        620
+      ],
+      "crossings_so_far": 3
+    },
+    {
+      "file": "frame_27.png",
+      "frame_idx": 27,
+      "blob_xs": [
+        364,
+        506,
+        540,
+        108,
+        630
+      ],
+      "crossings_so_far": 3
+    },
+    {
+      "file": "frame_28.png",
+      "frame_idx": 28,
+      "blob_xs": [
+        376,
+        524,
+        560,
+        112,
+        640
+      ],
+      "crossings_so_far": 3
+    },
+    {
+      "file": "frame_29.png",
+      "frame_idx": 29,
+      "blob_xs": [
+        388,
+        542,
+        580,
+        116,
+        650
+      ],
+      "crossings_so_far": 3
+    }
+  ],
+  "total_crossings": 3
+}
