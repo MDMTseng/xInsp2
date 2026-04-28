@@ -1,0 +1,10 @@
+{
+  "plugin": "size_bucket_counter",
+  "config": {
+    "close_radius": 1,
+    "min_area": 20,
+    "small_max": 290,
+    "medium_max": 820,
+    "max_area": 2200
+  }
+}

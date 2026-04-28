@@ -246,6 +246,20 @@ them. Migration of all error sites to the unified `emit_error_log` /
 `send_rsp_err` helpers is incremental — older sites still emit the
 log without recording, so the ring is best-effort coverage today.
 
+A happy-path call returns `[]` — that's the "nothing to report"
+answer, not an indication the ring is disabled. To see one in action,
+trip a deliberate failure and re-poll:
+
+```python
+from xinsp2 import Client
+with Client() as c:
+    try: c.call("nonexistent_cmd")
+    except Exception: pass
+    print(c.recent_errors())
+    # → [{'ts_ms': ..., 'source': 'rsp',
+    #    'message': 'unknown command: nonexistent_cmd', 'cmd_id': N}]
+```
+
 ### `image_pool_stats`
 
 Per-owner ImagePool footprint. Each plugin instance and each loaded
@@ -258,7 +272,10 @@ should be releasing.
 
 ```json
 {
-  "total": { "handles": 47, "bytes": 14745600 },
+  "total":      { "handles": 47, "bytes": 14745600 },
+  "cumulative": { "total_created": 8210,
+                   "high_water":    52,
+                   "live_now":      47 },
   "by_owner": [
     { "owner": 1, "label": "script:inspect_v3.dll",
       "handles": 32, "bytes": 9830400 },
@@ -269,6 +286,19 @@ should be releasing.
   ]
 }
 ```
+
+`total` and `by_owner` are **live snapshots** — they reflect what's
+in the pool right now. Between runs (after `emit_vars_and_previews`
+finishes releasing the run's VAR images), they typically drop to
+zero, which can be confusing. `cumulative` solves that:
+
+- `total_created` — every `image_create` since backend startup.
+- `high_water`   — peak `live_now` ever observed.
+- `live_now`     — same as `total.handles` (alias for clarity).
+
+For "did this script ever allocate?" / "is the peak growing across
+runs?" use `cumulative`. For "what's holding memory right now?"
+use `by_owner`.
 
 `label` is human-readable (`script:<dll>` / `instance:<name> (<plugin>)` /
 `<host>`); the `(orphan)` suffix appears when an owner_id can't be

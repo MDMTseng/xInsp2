@@ -1,0 +1,9 @@
+{
+  "plugin": "local_contrast_detector",
+  "config": {
+    "blur_radius": 1,
+    "block_radius": 30,
+    "diff_C": 12,
+    "polarity": 1
+  }
+}

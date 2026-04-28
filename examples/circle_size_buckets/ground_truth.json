@@ -1,0 +1,1100 @@
+{
+  "width": 640,
+  "height": 480,
+  "buckets": {
+    "small": [
+      5,
+      8
+    ],
+    "medium": [
+      11,
+      14
+    ],
+    "large": [
+      18,
+      22
+    ]
+  },
+  "frames": [
+    {
+      "file": "frame_00.png",
+      "counts": {
+        "small": 4,
+        "medium": 2,
+        "large": 5
+      },
+      "circles": [
+        {
+          "cx": 487,
+          "cy": 285,
+          "r": 21,
+          "bucket": "large"
+        },
+        {
+          "cx": 212,
+          "cy": 434,
+          "r": 19,
+          "bucket": "large"
+        },
+        {
+          "cx": 215,
+          "cy": 73,
+          "r": 21,
+          "bucket": "large"
+        },
+        {
+          "cx": 162,
+          "cy": 63,
+          "r": 13,
+          "bucket": "medium"
+        },
+        {
+          "cx": 427,
+          "cy": 253,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 187,
+          "cy": 345,
+          "r": 22,
+          "bucket": "large"
+        },
+        {
+          "cx": 69,
+          "cy": 27,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 624,
+          "cy": 25,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 311,
+          "cy": 265,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 477,
+          "cy": 344,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 582,
+          "cy": 448,
+          "r": 14,
+          "bucket": "medium"
+        }
+      ]
+    },
+    {
+      "file": "frame_01.png",
+      "counts": {
+        "small": 2,
+        "medium": 2,
+        "large": 4
+      },
+      "circles": [
+        {
+          "cx": 346,
+          "cy": 412,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 41,
+          "cy": 46,
+          "r": 7,
+          "bucket": "small"
+        },
+        {
+          "cx": 432,
+          "cy": 77,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 86,
+          "cy": 26,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 240,
+          "cy": 129,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 396,
+          "cy": 374,
+          "r": 8,
+          "bucket": "small"
+        },
+        {
+          "cx": 92,
+          "cy": 307,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 299,
+          "cy": 195,
+          "r": 19,
+          "bucket": "large"
+        }
+      ]
+    },
+    {
+      "file": "frame_02.png",
+      "counts": {
+        "small": 3,
+        "medium": 4,
+        "large": 1
+      },
+      "circles": [
+        {
+          "cx": 32,
+          "cy": 226,
+          "r": 13,
+          "bucket": "medium"
+        },
+        {
+          "cx": 262,
+          "cy": 371,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 70,
+          "cy": 247,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 588,
+          "cy": 112,
+          "r": 12,
+          "bucket": "medium"
+        },
+        {
+          "cx": 150,
+          "cy": 230,
+          "r": 12,
+          "bucket": "medium"
+        },
+        {
+          "cx": 16,
+          "cy": 154,
+          "r": 12,
+          "bucket": "medium"
+        },
+        {
+          "cx": 628,
+          "cy": 340,
+          "r": 8,
+          "bucket": "small"
+        },
+        {
+          "cx": 65,
+          "cy": 96,
+          "r": 18,
+          "bucket": "large"
+        }
+      ]
+    },
+    {
+      "file": "frame_03.png",
+      "counts": {
+        "small": 2,
+        "medium": 3,
+        "large": 4
+      },
+      "circles": [
+        {
+          "cx": 26,
+          "cy": 412,
+          "r": 13,
+          "bucket": "medium"
+        },
+        {
+          "cx": 327,
+          "cy": 221,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 101,
+          "cy": 115,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 38,
+          "cy": 330,
+          "r": 19,
+          "bucket": "large"
+        },
+        {
+          "cx": 481,
+          "cy": 82,
+          "r": 13,
+          "bucket": "medium"
+        },
+        {
+          "cx": 613,
+          "cy": 94,
+          "r": 21,
+          "bucket": "large"
+        },
+        {
+          "cx": 173,
+          "cy": 175,
+          "r": 12,
+          "bucket": "medium"
+        },
+        {
+          "cx": 204,
+          "cy": 91,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 227,
+          "cy": 377,
+          "r": 22,
+          "bucket": "large"
+        }
+      ]
+    },
+    {
+      "file": "frame_04.png",
+      "counts": {
+        "small": 4,
+        "medium": 6,
+        "large": 1
+      },
+      "circles": [
+        {
+          "cx": 446,
+          "cy": 39,
+          "r": 11,
+          "bucket": "medium"
+        },
+        {
+          "cx": 48,
+          "cy": 271,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 417,
+          "cy": 147,
+          "r": 12,
+          "bucket": "medium"
+        },
+        {
+          "cx": 318,
+          "cy": 284,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 138,
+          "cy": 125,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 301,
+          "cy": 123,
+          "r": 11,
+          "bucket": "medium"
+        },
+        {
+          "cx": 79,
+          "cy": 146,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 273,
+          "cy": 48,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 298,
+          "cy": 198,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 160,
+          "cy": 73,
+          "r": 22,
+          "bucket": "large"
+        },
+        {
+          "cx": 477,
+          "cy": 185,
+          "r": 12,
+          "bucket": "medium"
+        }
+      ]
+    },
+    {
+      "file": "frame_05.png",
+      "counts": {
+        "small": 4,
+        "medium": 4,
+        "large": 4
+      },
+      "circles": [
+        {
+          "cx": 58,
+          "cy": 32,
+          "r": 19,
+          "bucket": "large"
+        },
+        {
+          "cx": 336,
+          "cy": 34,
+          "r": 13,
+          "bucket": "medium"
+        },
+        {
+          "cx": 502,
+          "cy": 43,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 350,
+          "cy": 93,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 472,
+          "cy": 288,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 147,
+          "cy": 421,
+          "r": 11,
+          "bucket": "medium"
+        },
+        {
+          "cx": 103,
+          "cy": 367,
+          "r": 13,
+          "bucket": "medium"
+        },
+        {
+          "cx": 442,
+          "cy": 419,
+          "r": 11,
+          "bucket": "medium"
+        },
+        {
+          "cx": 598,
+          "cy": 19,
+          "r": 8,
+          "bucket": "small"
+        },
+        {
+          "cx": 413,
+          "cy": 323,
+          "r": 21,
+          "bucket": "large"
+        },
+        {
+          "cx": 91,
+          "cy": 55,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 285,
+          "cy": 235,
+          "r": 18,
+          "bucket": "large"
+        }
+      ]
+    },
+    {
+      "file": "frame_06.png",
+      "counts": {
+        "small": 1,
+        "medium": 4,
+        "large": 5
+      },
+      "circles": [
+        {
+          "cx": 469,
+          "cy": 254,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 553,
+          "cy": 406,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 339,
+          "cy": 329,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 34,
+          "cy": 129,
+          "r": 8,
+          "bucket": "small"
+        },
+        {
+          "cx": 286,
+          "cy": 30,
+          "r": 21,
+          "bucket": "large"
+        },
+        {
+          "cx": 163,
+          "cy": 364,
+          "r": 13,
+          "bucket": "medium"
+        },
+        {
+          "cx": 553,
+          "cy": 109,
+          "r": 19,
+          "bucket": "large"
+        },
+        {
+          "cx": 528,
+          "cy": 141,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 274,
+          "cy": 119,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 230,
+          "cy": 134,
+          "r": 21,
+          "bucket": "large"
+        }
+      ]
+    },
+    {
+      "file": "frame_07.png",
+      "counts": {
+        "small": 5,
+        "medium": 4,
+        "large": 2
+      },
+      "circles": [
+        {
+          "cx": 225,
+          "cy": 80,
+          "r": 7,
+          "bucket": "small"
+        },
+        {
+          "cx": 371,
+          "cy": 440,
+          "r": 8,
+          "bucket": "small"
+        },
+        {
+          "cx": 292,
+          "cy": 429,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 470,
+          "cy": 250,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 439,
+          "cy": 211,
+          "r": 12,
+          "bucket": "medium"
+        },
+        {
+          "cx": 531,
+          "cy": 370,
+          "r": 22,
+          "bucket": "large"
+        },
+        {
+          "cx": 346,
+          "cy": 56,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 53,
+          "cy": 358,
+          "r": 7,
+          "bucket": "small"
+        },
+        {
+          "cx": 608,
+          "cy": 205,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 154,
+          "cy": 222,
+          "r": 11,
+          "bucket": "medium"
+        },
+        {
+          "cx": 41,
+          "cy": 409,
+          "r": 12,
+          "bucket": "medium"
+        }
+      ]
+    },
+    {
+      "file": "frame_08.png",
+      "counts": {
+        "small": 4,
+        "medium": 2,
+        "large": 4
+      },
+      "circles": [
+        {
+          "cx": 58,
+          "cy": 332,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 123,
+          "cy": 334,
+          "r": 8,
+          "bucket": "small"
+        },
+        {
+          "cx": 103,
+          "cy": 374,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 496,
+          "cy": 141,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 492,
+          "cy": 282,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 205,
+          "cy": 137,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 569,
+          "cy": 374,
+          "r": 13,
+          "bucket": "medium"
+        },
+        {
+          "cx": 189,
+          "cy": 227,
+          "r": 22,
+          "bucket": "large"
+        },
+        {
+          "cx": 112,
+          "cy": 233,
+          "r": 19,
+          "bucket": "large"
+        },
+        {
+          "cx": 22,
+          "cy": 208,
+          "r": 12,
+          "bucket": "medium"
+        }
+      ]
+    },
+    {
+      "file": "frame_09.png",
+      "counts": {
+        "small": 1,
+        "medium": 4,
+        "large": 7
+      },
+      "circles": [
+        {
+          "cx": 377,
+          "cy": 263,
+          "r": 22,
+          "bucket": "large"
+        },
+        {
+          "cx": 117,
+          "cy": 385,
+          "r": 12,
+          "bucket": "medium"
+        },
+        {
+          "cx": 240,
+          "cy": 146,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 332,
+          "cy": 289,
+          "r": 11,
+          "bucket": "medium"
+        },
+        {
+          "cx": 33,
+          "cy": 195,
+          "r": 13,
+          "bucket": "medium"
+        },
+        {
+          "cx": 60,
+          "cy": 247,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 299,
+          "cy": 267,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 555,
+          "cy": 181,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 504,
+          "cy": 99,
+          "r": 19,
+          "bucket": "large"
+        },
+        {
+          "cx": 476,
+          "cy": 278,
+          "r": 22,
+          "bucket": "large"
+        },
+        {
+          "cx": 248,
+          "cy": 246,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 323,
+          "cy": 451,
+          "r": 22,
+          "bucket": "large"
+        }
+      ]
+    },
+    {
+      "file": "frame_10.png",
+      "counts": {
+        "small": 4,
+        "medium": 3,
+        "large": 5
+      },
+      "circles": [
+        {
+          "cx": 558,
+          "cy": 286,
+          "r": 19,
+          "bucket": "large"
+        },
+        {
+          "cx": 343,
+          "cy": 367,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 327,
+          "cy": 451,
+          "r": 12,
+          "bucket": "medium"
+        },
+        {
+          "cx": 597,
+          "cy": 265,
+          "r": 7,
+          "bucket": "small"
+        },
+        {
+          "cx": 560,
+          "cy": 70,
+          "r": 8,
+          "bucket": "small"
+        },
+        {
+          "cx": 408,
+          "cy": 36,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 550,
+          "cy": 227,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 150,
+          "cy": 277,
+          "r": 22,
+          "bucket": "large"
+        },
+        {
+          "cx": 77,
+          "cy": 285,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 431,
+          "cy": 155,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 516,
+          "cy": 77,
+          "r": 8,
+          "bucket": "small"
+        },
+        {
+          "cx": 505,
+          "cy": 286,
+          "r": 14,
+          "bucket": "medium"
+        }
+      ]
+    },
+    {
+      "file": "frame_11.png",
+      "counts": {
+        "small": 5,
+        "medium": 2,
+        "large": 3
+      },
+      "circles": [
+        {
+          "cx": 439,
+          "cy": 326,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 143,
+          "cy": 370,
+          "r": 7,
+          "bucket": "small"
+        },
+        {
+          "cx": 207,
+          "cy": 88,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 299,
+          "cy": 173,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 274,
+          "cy": 341,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 526,
+          "cy": 389,
+          "r": 11,
+          "bucket": "medium"
+        },
+        {
+          "cx": 544,
+          "cy": 341,
+          "r": 18,
+          "bucket": "large"
+        },
+        {
+          "cx": 559,
+          "cy": 239,
+          "r": 12,
+          "bucket": "medium"
+        },
+        {
+          "cx": 435,
+          "cy": 434,
+          "r": 8,
+          "bucket": "small"
+        },
+        {
+          "cx": 189,
+          "cy": 301,
+          "r": 22,
+          "bucket": "large"
+        }
+      ]
+    },
+    {
+      "file": "frame_12.png",
+      "counts": {
+        "small": 3,
+        "medium": 2,
+        "large": 4
+      },
+      "circles": [
+        {
+          "cx": 249,
+          "cy": 297,
+          "r": 22,
+          "bucket": "large"
+        },
+        {
+          "cx": 248,
+          "cy": 389,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 209,
+          "cy": 185,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 223,
+          "cy": 135,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 146,
+          "cy": 464,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 100,
+          "cy": 142,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 460,
+          "cy": 441,
+          "r": 11,
+          "bucket": "medium"
+        },
+        {
+          "cx": 221,
+          "cy": 222,
+          "r": 12,
+          "bucket": "medium"
+        },
+        {
+          "cx": 393,
+          "cy": 83,
+          "r": 20,
+          "bucket": "large"
+        }
+      ]
+    },
+    {
+      "file": "frame_13.png",
+      "counts": {
+        "small": 6,
+        "medium": 4,
+        "large": 2
+      },
+      "circles": [
+        {
+          "cx": 538,
+          "cy": 375,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 502,
+          "cy": 63,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 573,
+          "cy": 323,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 518,
+          "cy": 101,
+          "r": 22,
+          "bucket": "large"
+        },
+        {
+          "cx": 127,
+          "cy": 114,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 299,
+          "cy": 354,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 146,
+          "cy": 357,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 114,
+          "cy": 182,
+          "r": 11,
+          "bucket": "medium"
+        },
+        {
+          "cx": 454,
+          "cy": 281,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 233,
+          "cy": 325,
+          "r": 14,
+          "bucket": "medium"
+        },
+        {
+          "cx": 56,
+          "cy": 447,
+          "r": 11,
+          "bucket": "medium"
+        },
+        {
+          "cx": 427,
+          "cy": 242,
+          "r": 6,
+          "bucket": "small"
+        }
+      ]
+    },
+    {
+      "file": "frame_14.png",
+      "counts": {
+        "small": 5,
+        "medium": 2,
+        "large": 3
+      },
+      "circles": [
+        {
+          "cx": 439,
+          "cy": 123,
+          "r": 20,
+          "bucket": "large"
+        },
+        {
+          "cx": 120,
+          "cy": 285,
+          "r": 19,
+          "bucket": "large"
+        },
+        {
+          "cx": 97,
+          "cy": 421,
+          "r": 7,
+          "bucket": "small"
+        },
+        {
+          "cx": 608,
+          "cy": 331,
+          "r": 21,
+          "bucket": "large"
+        },
+        {
+          "cx": 275,
+          "cy": 154,
+          "r": 7,
+          "bucket": "small"
+        },
+        {
+          "cx": 425,
+          "cy": 78,
+          "r": 6,
+          "bucket": "small"
+        },
+        {
+          "cx": 459,
+          "cy": 408,
+          "r": 13,
+          "bucket": "medium"
+        },
+        {
+          "cx": 223,
+          "cy": 381,
+          "r": 8,
+          "bucket": "small"
+        },
+        {
+          "cx": 358,
+          "cy": 163,
+          "r": 5,
+          "bucket": "small"
+        },
+        {
+          "cx": 25,
+          "cy": 197,
+          "r": 11,
+          "bucket": "medium"
+        }
+      ]
+    }
+  ]
+}

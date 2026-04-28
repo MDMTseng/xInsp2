@@ -1,0 +1,26 @@
+{
+  "name": "local_contrast_detector",
+  "description": "Gradient-tolerant binary mask: pixels darker (or brighter) than the local mean by more than C.",
+  "dll": "local_contrast_detector.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true,
+  "manifest": {
+    "params": [
+      { "name": "blur_radius",  "type": "int", "min": 0, "max": 10,  "default": 2,
+        "doc": "Pre-smoothing radius (gaussian) before local-mean estimation." },
+      { "name": "block_radius", "type": "int", "min": 3, "max": 200, "default": 40,
+        "doc": "Box-blur radius used to estimate local background. Should be >> object radius." },
+      { "name": "diff_C",       "type": "int", "min": 1, "max": 80,  "default": 15,
+        "doc": "How many grayscale levels darker (bright_on_dark=false) or brighter (true) than local mean a pixel must be to mark it." },
+      { "name": "polarity",     "type": "string", "default": "dark_on_bright",
+        "enum": ["dark_on_bright", "bright_on_dark"],
+        "doc": "Which direction the target deviates from background." }
+    ],
+    "inputs":  [{ "name": "src",  "kind": "image", "doc": "Input image (any 1- or 3-channel)." }],
+    "outputs": [
+      { "name": "mask",      "kind": "image",  "doc": "Binary mask (0 / 255), 1-channel." },
+      { "name": "mask_mean", "kind": "number", "doc": "Mean of the mask. Use as a numeric proxy when the JPEG preview of a binary mask is misleading." }
+    ],
+    "exchange": []
+  }
+}
