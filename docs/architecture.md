@@ -30,7 +30,7 @@ contents below.
 2. [User Script API](#2-user-script-api)
 3. [Record — The Universal Data Container](#3-record)
 4. [Image Type](#4-image-type)
-5. [Operator Library (xi_ops)](#5-operator-library)
+5. [Image operators — OpenCV directly](#5-image-operators--opencv-directly)
 6. [Parallelism (xi_async)](#6-parallelism)
 7. [Parameters (xi_param)](#7-parameters)
 8. [Persistent State (xi_state)](#8-persistent-state)
@@ -102,12 +102,9 @@ void xi_inspect_entry(int frame) {
 ### Full-featured script
 
 ```cpp
-#include <xi/xi.hpp>
-#include <xi/xi_ops.hpp>
+#include <xi/xi.hpp>           // pulls in OpenCV
 #include <xi/xi_record.hpp>
 #include <xi/xi_use.hpp>
-
-using namespace xi::ops;
 
 xi::Param<int>    thresh {"threshold", 128, {0, 255}};
 xi::Param<double> sigma  {"sigma",     2.0, {0.1, 10.0}};
@@ -239,25 +236,32 @@ Copy = shared_ptr reference (zero-copy for pixel data).
 
 ---
 
-## 5. Operator Library
+## 5. Image operators — OpenCV directly
+
+xInsp2 doesn't ship its own operator library. Plugins and scripts call
+`cv::*` directly using a `cv::Mat` view over `xi::Image` bytes:
 
 ```cpp
-#include <xi/xi_ops.hpp>
-using namespace xi::ops;
+#include <xi/xi.hpp>     // pulls in <opencv2/opencv.hpp>
+
+xi::Image src = ...;
+xi::Image dst = pool_image(src.width, src.height, 1);   // pool-backed (plugin only)
+cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0, 0}, 2.0);
+return xi::Record().image("blurred", dst);              // zero-copy across the ABI
 ```
 
-| Function | Description |
-|----------|-------------|
-| `toGray(img)` | RGB → grayscale (BT.601) |
-| `threshold(gray, t)` | Binary threshold |
-| `gaussian(gray, r)` | 3-pass box blur |
-| `sobel(gray)` | Edge magnitude |
-| `invert(img)` | 255 - pixel |
-| `erode(gray, r)` / `dilate(gray, r)` | Morphology |
-| `stats(gray)` | Mean, stddev, min, max |
-| `countWhiteBlobs(binary)` | Flood-fill connected components |
+`xi::Image::as_cv_mat()` returns a non-owning `cv::Mat` view — no
+allocation, no copy. `Plugin::pool_image(w, h, c)` (or
+`xi::Image::create_in_pool(host, w, h, c)` from a script) allocates a
+fresh ImagePool slot and returns a refcounted Image whose `data()`
+points straight at pool memory. `cv::` writes land in the pool, so when
+the Image is returned through the plugin ABI it forwards as an
+`addref`'d handle (no memcpy).
 
-Each has `async_` variant: `async_sobel(gray)` returns `Future<Image>`.
+For inspection scripts the ergonomic shorthand is `cv::Mat → xi::Image`
+via the `Image(w,h,c, data)` ctor (one heap copy). That copy doesn't
+matter for VAR / preview frames; for hot-path plugin output use
+`pool_image` instead.
 
 ---
 
@@ -355,9 +359,10 @@ public:
     using xi::Plugin::Plugin;
 
     xi::Record process(const xi::Record& input) override {
-        auto img = input.get_image("frame");
+        auto img  = input.get_image("frame");
         int t = input["threshold"].as_int(128);
-        auto gray = xi::ops::toGray(img);
+        auto gray = pool_image(img.width, img.height, 1);
+        cv::cvtColor(img.as_cv_mat(), gray.as_cv_mat(), cv::COLOR_RGB2GRAY);
         return xi::Record()
             .image("result", gray)
             .set("done", true);
@@ -688,7 +693,6 @@ node test/runPipeline.mjs
 | `xi_instance.hpp` | `Instance<T>`, `InstanceBase`, `InstanceRegistry` |
 | `xi_image.hpp` | `Image` (shared_ptr pixel buffer) |
 | `xi_record.hpp` | `Record` (cJSON, named images, `operator[]` chaining, path expressions) |
-| `xi_ops.hpp` | Operator library (toGray, threshold, sobel, etc.) |
 | `xi_source.hpp` | `ImageSource`, `TestImageSource` |
 | `xi_state.hpp` | `xi::state()` — persistent cross-frame/cross-reload state |
 | `xi_use.hpp` | `xi::use("name")` — proxy to backend-managed instances |

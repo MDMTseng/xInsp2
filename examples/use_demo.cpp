@@ -7,11 +7,8 @@
 //
 
 #include <xi/xi.hpp>
-#include <xi/xi_ops.hpp>
 #include <xi/xi_record.hpp>
 #include <xi/xi_use.hpp>
-
-using namespace xi::ops;
 
 xi::Param<int> thresh{"threshold", 128, {0, 255}};
 
@@ -35,10 +32,22 @@ void xi_inspect_entry(int frame) {
     }
 
     VAR(input, img);
-    VAR(gray, toGray(img));
-    VAR(binary, threshold(gray, (int)thresh));
+    cv::Mat gray_mat;
+    cv::cvtColor(img.as_cv_mat(), gray_mat, cv::COLOR_RGB2GRAY);
+    cv::Mat bin;
+    cv::threshold(gray_mat, bin, (int)thresh, 255, cv::THRESH_BINARY);
 
-    int blobs = countWhiteBlobs(binary);
+    // Wrap the cv::Mat results back as xi::Image for VAR previews. The
+    // ctor does a one-shot copy into a heap buffer; for hot-path code
+    // prefer Image::create_in_pool() and write cv:: output directly.
+    xi::Image gray(gray_mat.cols, gray_mat.rows, 1, gray_mat.data);
+    xi::Image binary(bin.cols, bin.rows, 1, bin.data);
+    VAR(gray, gray);
+    VAR(binary, binary);
+
+    cv::Mat labels;
+    int n_labels = cv::connectedComponents(bin, labels, 8, CV_32S);
+    int blobs = std::max(0, n_labels - 1);
     VAR(blob_count, blobs);
     VAR(pass, blobs <= 5);
 

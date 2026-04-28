@@ -36,11 +36,11 @@ namespace xi {
 // side `is_cancelled()` polls. Cooperation is required — a long-
 // running op that never polls won't notice.
 //
-// Ops in the `xi::ops` library should call
+// Long-running plugin / script code should call
 // `xi::cancellation_requested()` (below) at loop heads / on chunk
-// boundaries to make themselves abort-friendly. Anything that doesn't
-// is documented as "uncancellable" and runs to completion regardless
-// of token state.
+// boundaries to make itself abort-friendly. cv:: calls cannot be
+// cancelled mid-op; structure work into chunks and poll between them
+// if cancellation responsiveness matters.
 //
 // TODO(watchdog): hook this up so cmd:run's watchdog cancels all
 // outstanding tokens before falling back to TerminateThread. Lets a

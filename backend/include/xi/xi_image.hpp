@@ -25,6 +25,8 @@
 
 #include "xi_abi.h"
 
+#include <opencv2/core.hpp>
+
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -63,6 +65,26 @@ struct Image {
         }
     }
 
+    // Allocate a fresh slot in the host's ImagePool and return a
+    // pool-backed Image whose `data()` points directly at that slot.
+    // Plugins use this when they need to *produce* a new image — the
+    // bytes get written straight into the pool, so the cross-ABI return
+    // path (record_to_c) can short-circuit to addref instead of doing
+    // a heap-to-pool memcpy. Works for both in-process pool and SHM
+    // handles since `host->image_create` routes correctly.
+    //
+    // Refcount accounting: image_create returns refcount=1; we adopt
+    // (=2); release once back to 1, owned by the returned Image's
+    // shared_ptr deleter.
+    static Image create_in_pool(const xi_host_api* host, int w, int h, int c) {
+        if (!host || w <= 0 || h <= 0 || c <= 0) return Image{};
+        xi_image_handle hndl = host->image_create(w, h, c);
+        if (!hndl) return Image{};
+        Image img = adopt_pool_handle(host, hndl);
+        host->image_release(hndl);
+        return img;
+    }
+
     // Zero-copy view over a refcounted host pool handle. Bumps refcount
     // on construction; releases on the last copy's destruction. The
     // returned Image's `data()` points directly at pool memory — no
@@ -93,6 +115,24 @@ struct Image {
     uint8_t*       data()       { return pixels_.get(); }
     const uint8_t* data() const { return pixels_.get(); }
     int    stride() const { return width * channels; }
+
+    // Non-owning cv::Mat view over the same bytes (no allocation, no
+    // copy). Plugin code typically:
+    //
+    //   auto src = input.get_image("src");
+    //   auto dst = xi::Image::create_in_pool(host(), w, h, 1);
+    //   cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0,0}, 2.0);
+    //   return xi::Record().image("blurred", dst);
+    //
+    // Both Mats are non-owning — they hold pointers into pool memory
+    // owned by the xi::Image's shared_ptr. The Mat must not outlive
+    // the xi::Image.
+    cv::Mat as_cv_mat() const {
+        if (empty()) return {};
+        int type = CV_8UC(channels);
+        return cv::Mat(height, width, type, const_cast<uint8_t*>(data()),
+                       static_cast<size_t>(stride()));
+    }
 
     // Pool-backed introspection — non-zero only when this Image is a
     // zero-copy view over a host handle. Used by record_to_c and

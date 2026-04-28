@@ -19,9 +19,7 @@
 // or too loose without stepping outside the IDE.
 //
 
-#include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
-#include <xi/xi_ops.hpp>
 
 class RegionCounter : public xi::Plugin {
 public:
@@ -40,19 +38,34 @@ public:
         if (close_r < 0) close_r = 0;
         if (max_a < min_a) max_a = min_a;
 
-        xi::Image cleaned = (close_r > 0) ? xi::ops::close(mask, close_r) : mask;
-        auto regions = xi::ops::findFilledRegions(cleaned);
+        xi::Image cleaned = pool_image(mask.width, mask.height, 1);
+        if (close_r > 0) {
+            int k = 2 * close_r + 1;
+            auto kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k));
+            cv::morphologyEx(mask.as_cv_mat(), cleaned.as_cv_mat(),
+                             cv::MORPH_CLOSE, kernel);
+        } else {
+            mask.as_cv_mat().copyTo(cleaned.as_cv_mat());
+        }
+
+        // connectedComponentsWithStats labels every 8-connected component of
+        // non-zero pixels; stats[i] gives {x,y,w,h,area} per label, with
+        // label 0 reserved for background.
+        cv::Mat labels, stats, centroids;
+        int n_labels = cv::connectedComponentsWithStats(
+            cleaned.as_cv_mat(), labels, stats, centroids, 8, CV_32S);
 
         int n_count = 0, n_small = 0, n_big = 0;
-        for (auto& r : regions) {
-            int area = (int)r.size();
+        for (int i = 1; i < n_labels; ++i) {  // skip background
+            int area = stats.at<int>(i, cv::CC_STAT_AREA);
             if (area < min_a) { ++n_small; continue; }
             if (area > max_a) { ++n_big;   continue; }
             ++n_count;
         }
+        int total_regions = std::max(0, n_labels - 1);
 
         last_count_   = n_count;
-        last_total_   = (int)regions.size();
+        last_total_   = total_regions;
         last_small_   = n_small;
         last_big_     = n_big;
         ++frames_processed_;
@@ -60,7 +73,7 @@ public:
         return xi::Record()
             .image("cleaned", cleaned)
             .set("count",          n_count)
-            .set("total_regions",  (int)regions.size())
+            .set("total_regions",  total_regions)
             .set("rejected_small", n_small)
             .set("rejected_big",   n_big)
             .set("close_radius",   close_r)

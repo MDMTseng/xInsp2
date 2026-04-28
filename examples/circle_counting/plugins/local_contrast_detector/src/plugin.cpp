@@ -12,19 +12,18 @@
 // matches the circle-counting test set). `polarity = -1` finds BRIGHT
 // regions on a darker background.
 //
-// Generalising this op-pair into a plugin (vs inlining the lambda the
-// previous agent shipped) lets the user retune blur / block / threshold
-// from the sidebar without recompiling, and lets the same plugin be
-// reused for any "spot vs gradient" task.
+// Image ops use OpenCV directly with xi::Image::as_cv_mat() (a non-owning
+// view over pool memory) and `pool_image(w,h,c)` (a fresh pool slot
+// wrapped as an xi::Image). cv:: writes land straight in pool memory, so
+// returning the resulting Images from process() is zero-copy across the
+// plugin ABI.
 //
 // Usage from script:
 //   auto out = xi::use("det").process(xi::Record().image("src", gray));
 //   auto mask = out.get_image("mask");
 //
 
-#include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
-#include <xi/xi_ops.hpp>
 
 #include <cstdint>
 
@@ -46,10 +45,23 @@ public:
         int  pol     = input["polarity"].as_int(polarity_);
         if (pol != -1 && pol != 1) pol = 1;
 
-        xi::Image blurred = (blur_r > 0) ? xi::ops::gaussian(src, blur_r) : src;
-        xi::Image bg      = xi::ops::boxBlur(blurred, block_r);
+        xi::Image blurred = pool_image(src.width, src.height, 1);
+        if (blur_r > 0) {
+            int k = 2 * blur_r + 1;
+            cv::GaussianBlur(src.as_cv_mat(), blurred.as_cv_mat(),
+                             cv::Size(k, k), 0);
+        } else {
+            src.as_cv_mat().copyTo(blurred.as_cv_mat());
+        }
 
-        xi::Image mask(src.width, src.height, 1);
+        xi::Image bg = pool_image(src.width, src.height, 1);
+        {
+            int k = 2 * block_r + 1;
+            cv::boxFilter(blurred.as_cv_mat(), bg.as_cv_mat(), -1,
+                          cv::Size(k, k));
+        }
+
+        xi::Image mask = pool_image(src.width, src.height, 1);
         const uint8_t* sp = blurred.data();
         const uint8_t* bp = bg.data();
         uint8_t*       mp = mask.data();

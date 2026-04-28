@@ -13,11 +13,8 @@ C++, edited in VS Code, wired over WebSockets.**
 ## The model
 
 ```cpp
-#include <xi/xi.hpp>
-#include <xi/xi_ops.hpp>
+#include <xi/xi.hpp>           // xi::Image, xi::Param, VAR, OpenCV (cv::*)
 #include <xi/xi_use.hpp>
-
-using namespace xi::ops;
 
 xi::Param<int>    thresh {"threshold", 128, {0, 255}};
 xi::Param<double> sigma  {"sigma",     2.0, {0.1, 10.0}};
@@ -31,8 +28,12 @@ void xi_inspect_entry(int frame) {
     if (img.empty()) return;
 
     VAR(input, img);                          // tracked & visible in UI
-    VAR(gray,  toGray(img));
-    VAR(blur,  gaussian(gray, sigma));
+
+    cv::Mat gm, bm;
+    cv::cvtColor(img.as_cv_mat(), gm, cv::COLOR_RGB2GRAY);
+    int k = (int)(sigma * 2 + 1) | 1;
+    cv::GaussianBlur(gm, bm, cv::Size(k, k), (double)sigma);
+    xi::Image blur(bm.cols, bm.rows, 1, bm.data);
 
     auto result = det.process(xi::Record()
         .image("gray", blur)
@@ -379,8 +380,10 @@ class MyPlugin : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
     xi::Record process(const xi::Record& input) override {
-        int t = input["threshold"].as_int(128);
-        auto out = xi::ops::threshold(input.get_image("gray"), t);
+        int t   = input["threshold"].as_int(128);
+        auto in = input.get_image("gray");
+        auto out = pool_image(in.width, in.height, 1);
+        cv::threshold(in.as_cv_mat(), out.as_cv_mat(), t, 255, cv::THRESH_BINARY);
         return xi::Record().image("dst", out).set("t_used", t);
     }
 };

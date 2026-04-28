@@ -19,9 +19,7 @@
 // Tunable via UI. Per-run override via input record fields.
 //
 
-#include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
-#include <xi/xi_ops.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -54,53 +52,65 @@ public:
         int max_a   = input["max_area"].as_int(max_area_);
         if (max_a < min_a) max_a = min_a;
 
-        const int W = ref.width, H = ref.height, N = W * H;
+        const int W = ref.width, H = ref.height;
 
         // 1) absolute difference
-        xi::Image diff(W, H, 1);
-        const uint8_t* rp = ref.data();
-        const uint8_t* fp = frame.data();
-        uint8_t*       dp = diff.data();
-        for (int i = 0; i < N; ++i) {
-            int d = (int)fp[i] - (int)rp[i];
-            dp[i] = (uint8_t)(d < 0 ? -d : d);
-        }
+        xi::Image diff = pool_image(W, H, 1);
+        cv::absdiff(frame.as_cv_mat(), ref.as_cv_mat(), diff.as_cv_mat());
 
         // 2) blur (gaussian on diff to suppress per-pixel noise)
-        xi::Image blurred = (blur_r > 0) ? xi::ops::gaussian(diff, blur_r) : diff;
-
-        // 3) threshold
-        xi::Image mask(W, H, 1);
-        const uint8_t* bp = blurred.data();
-        uint8_t*       mp = mask.data();
-        for (int i = 0; i < N; ++i) {
-            mp[i] = (bp[i] > thresh) ? 255 : 0;
+        xi::Image blurred = pool_image(W, H, 1);
+        if (blur_r > 0) {
+            int k = 2 * blur_r + 1;
+            cv::GaussianBlur(diff.as_cv_mat(), blurred.as_cv_mat(),
+                             cv::Size(k, k), 0);
+        } else {
+            diff.as_cv_mat().copyTo(blurred.as_cv_mat());
         }
 
-        // 4) morphological close (helps thin scratches survive)
-        xi::Image cleaned = (close_r > 0) ? xi::ops::close(mask, close_r) : mask;
+        // 3) threshold
+        xi::Image mask = pool_image(W, H, 1);
+        cv::threshold(blurred.as_cv_mat(), mask.as_cv_mat(),
+                      thresh, 255, cv::THRESH_BINARY);
 
-        // 5) connected regions
-        auto regions = xi::ops::findFilledRegions(cleaned);
+        // 4) morphological close (helps thin scratches survive)
+        xi::Image cleaned = pool_image(W, H, 1);
+        if (close_r > 0) {
+            int k = 2 * close_r + 1;
+            auto kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k));
+            cv::morphologyEx(mask.as_cv_mat(), cleaned.as_cv_mat(),
+                             cv::MORPH_CLOSE, kernel);
+        } else {
+            mask.as_cv_mat().copyTo(cleaned.as_cv_mat());
+        }
+
+        // 5) connected components with stats — area + bbox per label.
+        cv::Mat labels, stats, centroids;
+        int n_labels = cv::connectedComponentsWithStats(
+            cleaned.as_cv_mat(), labels, stats, centroids, 8, CV_32S);
 
         // 6) area filter — find LARGEST in [min_a, max_a]
         int largest_area = 0;
-        const std::vector<xi::ops::Point>* largest = nullptr;
-        int kept = 0, total = (int)regions.size();
-        for (auto& r : regions) {
-            int a = (int)r.size();
+        int largest_idx  = -1;
+        int kept = 0;
+        int total = std::max(0, n_labels - 1);
+        for (int i = 1; i < n_labels; ++i) {
+            int a = stats.at<int>(i, cv::CC_STAT_AREA);
             if (a < min_a || a > max_a) continue;
             ++kept;
-            if (a > largest_area) { largest_area = a; largest = &r; }
+            if (a > largest_area) { largest_area = a; largest_idx = i; }
         }
 
         bool defect_present = (kept > 0);
         int bx0 = -1, by0 = -1, bx1 = -1, by1 = -1;
-        if (largest) {
-            auto bb = xi::ops::bbox(*largest);
-            bx0 = bb.x; by0 = bb.y;
-            bx1 = bb.x + bb.w - 1;
-            by1 = bb.y + bb.h - 1;
+        if (largest_idx >= 0) {
+            int x = stats.at<int>(largest_idx, cv::CC_STAT_LEFT);
+            int y = stats.at<int>(largest_idx, cv::CC_STAT_TOP);
+            int w = stats.at<int>(largest_idx, cv::CC_STAT_WIDTH);
+            int h = stats.at<int>(largest_idx, cv::CC_STAT_HEIGHT);
+            bx0 = x; by0 = y;
+            bx1 = x + w - 1;
+            by1 = y + h - 1;
         }
         double score = (min_a > 0) ? (double)largest_area / (double)min_a : 0.0;
 

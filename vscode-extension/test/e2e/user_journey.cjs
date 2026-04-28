@@ -403,12 +403,9 @@ async function run() {
     console.log('\n[STEP 6] User: Edit inspection.cpp');
     const scriptPath = path.join(projDir, 'inspection.cpp');
     const scriptCode = `
-#include <xi/xi.hpp>
-#include <xi/xi_ops.hpp>
+#include <xi/xi.hpp>           // pulls in OpenCV
 #include <xi/xi_record.hpp>
 #include <xi/xi_use.hpp>
-
-using namespace xi::ops;
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
@@ -418,8 +415,6 @@ void xi_inspect_entry(int frame) {
 
     auto img = cam.grab(500);
     if (img.empty()) {
-        // Fallback: synthesize an image with bright blobs so the rest of the
-        // pipeline runs even if the C-ABI camera isn't reachable via grab().
         img = xi::Image(320, 240, 1);
         std::memset(img.data(), 0, 320 * 240);
         for (int by = 60; by < 100; ++by)
@@ -430,12 +425,11 @@ void xi_inspect_entry(int frame) {
                 img.data()[by * 320 + bx] = 255;
     }
     VAR(input, img);
-
-    auto gray = toGray(img);
-    VAR(gray_img, gray);
+    // Source is already 1-channel; if your camera produces RGB, convert
+    // with cv::cvtColor(img.as_cv_mat(), out, cv::COLOR_RGB2GRAY).
 
     auto detection = det.process(xi::Record()
-        .image("gray", gray));
+        .image("gray", img));
     VAR(detection_record, detection);
 
     int n_blobs = detection["blob_count"].as_int();

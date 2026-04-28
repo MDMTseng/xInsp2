@@ -12,11 +12,8 @@ uses, with pointers into the deeper reference for each piece.
 ## The shape
 
 ```cpp
-#include <xi/xi.hpp>
-#include <xi/xi_ops.hpp>
+#include <xi/xi.hpp>           // xi::Image, xi::Param, VAR, xi::Record, OpenCV
 #include <xi/xi_use.hpp>
-
-using namespace xi::ops;
 
 // File-scope: parameters tunable from the UI without recompile.
 xi::Param<int>    thresh{ "threshold", 128, {0, 255} };
@@ -31,8 +28,24 @@ void xi_inspect_entry(int frame) {
     if (img.empty()) return;
 
     VAR(input, img);                                 // visible in viewer
-    VAR(gray,  toGray(img));
-    VAR(blur,  gaussian(gray, sigma));
+
+    // Image ops: call cv:: directly. xi::Image::as_cv_mat() returns a
+    // non-owning view over the same bytes; for outputs that you want
+    // the next plugin / VAR to consume zero-copy, use a fresh
+    // pool-backed Image and write into its as_cv_mat().
+    cv::Mat src = img.as_cv_mat();
+    cv::Mat gray_mat;
+    cv::cvtColor(src, gray_mat, cv::COLOR_RGB2GRAY);
+
+    cv::Mat blur_mat;
+    int k = (int)(sigma * 2 + 1) | 1;        // odd-sized kernel
+    cv::GaussianBlur(gray_mat, blur_mat, cv::Size(k, k), (double)sigma);
+
+    // Wrap a cv::Mat back as xi::Image so it crosses the plugin ABI.
+    // For inspection scripts this is a one-shot copy; project plugins
+    // skip it by using xi::Image::create_in_pool(host(), ...) + cv::
+    // writing directly into pool memory (see docs/guides/adding-a-plugin.md).
+    xi::Image blur(blur_mat.cols, blur_mat.rows, 1, blur_mat.data);
 
     auto result = det.process(xi::Record()
         .image("gray", blur)
@@ -236,19 +249,14 @@ no copy when passing through `process()`.
 ## `xi::async` — parallel ops
 
 ```cpp
-auto fa = xi::async(toGray, img);
-auto fb = xi::async(blur,  img, 2.0);
-auto [g, b] = xi::await_all(fa, fb);    // tuple<Image, Image>
+auto fa = xi::async([&]{ cv::Mat g; cv::cvtColor(src, g, cv::COLOR_RGB2GRAY); return g; });
+auto fb = xi::async([&]{ cv::Mat b; cv::GaussianBlur(src, b, {0,0}, 2.0); return b; });
+auto [g, b] = xi::await_all(fa, fb);    // tuple<cv::Mat, cv::Mat>
 ```
 
-Or shorthand for an op already in the library:
-
-```cpp
-ASYNC_WRAP(gaussian)        // declared once in xi_ops.hpp / your header
-auto fb = async_gaussian(img, 2.0);
-```
-
-`Future<T>` is consumed once; reuse compiles to an error.
+Wrap the cv:: call in a lambda so `xi::async` can capture by value /
+reference as needed. `Future<T>` is consumed once; reuse compiles to an
+error.
 SEH-translated, so a segfault inside a parallel branch surfaces as an
 exception at the await site rather than crashing the backend.
 

@@ -17,11 +17,10 @@
 //       using xi::Plugin::Plugin;  // inherit ctor
 //
 //       xi::Record process(const xi::Record& input) override {
-//           auto img = input.get_image("frame");
-//           auto gray = xi::ops::toGray(img);   // works with HostImage
-//           return xi::Record()
-//               .image("gray", gray)
-//               .set("done", true);
+//           auto src  = input.get_image("frame");
+//           auto gray = xi::Image::create_in_pool(host(), src.width, src.height, 1);
+//           cv::cvtColor(src.as_cv_mat(), gray.as_cv_mat(), cv::COLOR_BGR2GRAY);
+//           return xi::Record().image("gray", gray).set("done", true);
 //       }
 //   };
 //
@@ -185,6 +184,19 @@ protected:
         // from_image_handle: takes ownership of the existing refcount=1
         // without calling addref again
         return HostImage::from_handle(host_, handle);
+    }
+
+    // Allocate a fresh pool slot and return it as a refcounted xi::Image
+    // view. Bytes written via the Image's `data()` (or via cv::Mat from
+    // `as_cv_mat()`) land directly in pool memory — no heap-to-pool copy
+    // when this Image is returned from process(). This is the standard
+    // way for plugins to produce an output image:
+    //
+    //   auto dst = pool_image(src.width, src.height, 1);
+    //   cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0,0}, 2.0);
+    //   return xi::Record().image("blurred", dst);
+    Image pool_image(int w, int h, int ch) {
+        return Image::create_in_pool(host_, w, h, ch);
     }
 
     void log_info(const std::string& msg) {

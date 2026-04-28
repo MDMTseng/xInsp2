@@ -49,7 +49,6 @@ await send('create_project', { folder: projDir, name: 'sub_test' });
 const script = join(projDir, 'inspection.cpp');
 writeFileSync(script, `
 #include <xi/xi.hpp>
-#include <xi/xi_ops.hpp>
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
     xi::Image a(64, 64, 1); std::memset(a.data(), 10, 64*64);

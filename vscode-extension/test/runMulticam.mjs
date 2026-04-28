@@ -54,7 +54,6 @@ console.log('--- write inspection.cpp using xi::current_trigger() ---');
 const scriptPath = resolve(projDir, 'inspection.cpp');
 writeFileSync(scriptPath, `
 #include <xi/xi.hpp>
-#include <xi/xi_ops.hpp>
 #include <xi/xi_record.hpp>
 #include <xi/xi_use.hpp>
 

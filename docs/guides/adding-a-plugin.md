@@ -126,33 +126,42 @@ per DLL hash; cached in `cert.json` next to the DLL.
 ## What a plugin looks like (Easy template, abbreviated)
 
 ```cpp
-class MyPlugin {
+class MyPlugin : public xi::Plugin {
 public:
-    MyPlugin(const xi_host_api* host, const char* name)
-        : host_(host), name_(name ? name : "") {}
+    using xi::Plugin::Plugin;
 
-    const xi_host_api* host() const { return host_; }   // required by XI_PLUGIN_IMPL
-
-    std::string get_def() const                  { return "{}"; }
-    bool        set_def(const std::string& json) { return true; }
-
-    xi::Record process(const xi::Record& in) {
-        // your logic here
-        return xi::Record{};
+    xi::Record process(const xi::Record& in) override {
+        auto src = in.get_image("frame");
+        auto dst = pool_image(src.width, src.height, 1);
+        cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0, 0}, 2.0);
+        return xi::Record().image("blurred", dst);
     }
-
-    std::string exchange(const std::string& cmd) { return "{}"; }
-
-private:
-    const xi_host_api* host_;
-    std::string        name_;
 };
 
 XI_PLUGIN_IMPL(MyPlugin)
 ```
 
-Six members are mandatory; everything else is optional. The macro
-`XI_PLUGIN_IMPL` generates the C ABI exports.
+`xi::Plugin` is the base; `XI_PLUGIN_IMPL` generates the C ABI exports.
+
+### Image ops
+
+xInsp2 doesn't ship its own operator library — `xi.hpp` /
+`xi_plugin_support.hpp` pull in `<opencv2/opencv.hpp>` and plugins call
+`cv::*` directly. Two helpers make it zero-copy across the ABI:
+
+| Helper | Purpose |
+|---|---|
+| `xi::Image::as_cv_mat()` | Non-owning `cv::Mat` view over the same bytes — no allocation, no copy. The Mat must not outlive the Image. |
+| `Plugin::pool_image(w, h, c)` | Allocate a fresh slot in the host's ImagePool and return a refcounted Image whose `data()` (and `as_cv_mat()`) point straight at pool memory. cv:: writes land in the pool, so returning the Image from `process()` short-circuits to an `addref` — no heap-to-pool memcpy on the way out. |
+
+Pattern:
+
+```cpp
+auto src = input.get_image("src");                       // pool-backed view
+auto dst = pool_image(src.width, src.height, 1);         // pool-backed sink
+cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0, 0}, 2.0);
+return xi::Record().image("blurred", dst);               // zero-copy across ABI
+```
 
 For the API contracts in detail, see
 [`docs/reference/plugin-abi.md`](../reference/plugin-abi.md) and

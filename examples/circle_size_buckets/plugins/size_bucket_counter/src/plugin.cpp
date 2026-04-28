@@ -27,9 +27,7 @@
 // bleed of a few pixels never tips a circle into the wrong bucket.
 //
 
-#include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
-#include <xi/xi_ops.hpp>
 
 class SizeBucketCounter : public xi::Plugin {
 public:
@@ -52,24 +50,36 @@ public:
         if (med_max < small_max) med_max = small_max;
         if (max_a < med_max)    max_a = med_max;
 
-        xi::Image cleaned = (close_r > 0) ? xi::ops::close(mask, close_r) : mask;
-        auto regions = xi::ops::findFilledRegions(cleaned);
+        xi::Image cleaned = pool_image(mask.width, mask.height, 1);
+        if (close_r > 0) {
+            int k = 2 * close_r + 1;
+            auto kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k));
+            cv::morphologyEx(mask.as_cv_mat(), cleaned.as_cv_mat(),
+                             cv::MORPH_CLOSE, kernel);
+        } else {
+            mask.as_cv_mat().copyTo(cleaned.as_cv_mat());
+        }
+
+        cv::Mat labels, stats, centroids;
+        int n_labels = cv::connectedComponentsWithStats(
+            cleaned.as_cv_mat(), labels, stats, centroids, 8, CV_32S);
 
         int n_small = 0, n_med = 0, n_large = 0;
         int rej_small = 0, rej_big = 0;
-        for (auto& r : regions) {
-            int area = (int)r.size();
+        for (int i = 1; i < n_labels; ++i) {
+            int area = stats.at<int>(i, cv::CC_STAT_AREA);
             if (area < min_a)        { ++rej_small; continue; }
             if (area > max_a)        { ++rej_big;   continue; }
             if (area < small_max)    ++n_small;
             else if (area < med_max) ++n_med;
             else                     ++n_large;
         }
+        int total_regions = std::max(0, n_labels - 1);
 
         last_small_  = n_small;
         last_med_    = n_med;
         last_large_  = n_large;
-        last_total_  = (int)regions.size();
+        last_total_  = total_regions;
         last_rej_s_  = rej_small;
         last_rej_b_  = rej_big;
         ++frames_processed_;
@@ -79,7 +89,7 @@ public:
             .set("count_small",     n_small)
             .set("count_medium",    n_med)
             .set("count_large",     n_large)
-            .set("total_regions",   (int)regions.size())
+            .set("total_regions",   total_regions)
             .set("rejected_small",  rej_small)
             .set("rejected_big",    rej_big)
             .set("close_radius",    close_r)

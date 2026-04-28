@@ -925,8 +925,8 @@ public:
             std::string body =
                 "// " + name + " — inspection script\n"
                 "#include <xi/xi.hpp>\n"
-                "#include <xi/xi_image.hpp>\n"
-                "#include <xi/xi_ops.hpp>\n\n"
+                "// xi.hpp pulls in OpenCV. For image ops call cv:: directly\n"
+                "// with xi::Image::as_cv_mat() / create_in_pool().\n\n"
                 "XI_SCRIPT_EXPORT\n"
                 "void xi_inspect_entry(int frame) {\n"
                 "    // TODO: add inspection logic\n"

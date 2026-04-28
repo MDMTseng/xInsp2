@@ -8,9 +8,9 @@
 //   xi::PluginHandle blobs{"detector0", "blob_analysis"};
 //
 //   void xi_inspect_entry(int frame) {
-//       auto gray = xi::ops::toGray(cam->grab());
+//       auto frame = cam->grab();
 //       auto result = blobs.process(xi::Record()
-//           .image("gray", gray)
+//           .image("frame", frame)
 //           .set("threshold", 128));
 //       VAR(detection, result);
 //   }

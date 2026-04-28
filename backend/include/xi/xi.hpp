@@ -9,8 +9,9 @@
 //   void inspect(Image frame) { ... }
 //
 // This pulls in the async primitives, the value-tracking macro, tunable
-// params, and the instance registry. Plus the op library once it exists
-// (expected layer above this header, not shipped yet).
+// params, and the instance registry — plus OpenCV for image operators.
+// xInsp2's own op library (xi::ops::*) was removed; scripts and plugins
+// call cv:: directly with xi::Image::as_cv_mat() / create_in_pool().
 //
 
 #include "xi_async.hpp"
@@ -20,3 +21,5 @@
 #include "xi_param.hpp"
 #include "xi_instance.hpp"
 #include "xi_state.hpp"
+
+#include <opencv2/opencv.hpp>

@@ -1,11 +1,11 @@
 // cancel_aware_script.cpp — pattern for long-running user code that
 // honours the watchdog's cooperative cancel.
 //
-// xi::ops (gaussian, threshold, sobel, …) don't currently poll the
-// global cancel flag, so any user loop that runs for > a few seconds
-// should poll it itself. The check is one atomic load — call it on a
-// reasonable cadence (every N rows, every chunk boundary, between
-// independent passes).
+// cv:: calls (cv::GaussianBlur, cv::threshold, cv::Sobel, …) cannot
+// be cancelled mid-call, so any user loop that runs for > a few
+// seconds should poll the global cancel flag itself between op calls.
+// The check is one atomic load — call it on a reasonable cadence
+// (every N rows, every chunk boundary, between independent passes).
 //
 // When watchdog trips:
 //   1. Backend sets the global cancel flag via the script DLL's
