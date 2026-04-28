@@ -162,21 +162,37 @@ Two adapters wrap the C ABI:
 
 ## isolation modes
 
-**Default: in-proc.** Plugin instance lives in the backend's address
-space and is reached via direct C ABI calls. Fastest, but a plugin AV
-or heap corruption can take the backend with it.
-
-**Opt-in `"isolation": "process"`** — plugin runs in
-`xinsp-worker.exe`, method calls (`set_def` / `exchange` / `get_def`)
-proxy over a named pipe, pixel data shares zero-copy via SHM. A buggy
-plugin can crash its worker process without taking the backend with it;
-`ProcessInstanceAdapter` auto-respawns the worker (rate-limited 3/60s)
+**Default: process.** A new instance with no `isolation` field in its
+`instance.json` runs in its own `xinsp-worker.exe`. Method calls
+(`set_def` / `exchange` / `get_def` / `process`) proxy over a named
+pipe, pixel data shares zero-copy via SHM. A buggy plugin can crash
+its worker process without taking the backend with it;
+`ProcessInstanceAdapter` auto-respawns the worker (rate-limited 3/60 s)
 and replays the last `set_def` so the next call still works.
+
+If the backend was started without an isolation environment (no
+`xinsp-worker.exe` next to it, or SHM region creation failed) every
+default-isolated instance falls back to in-proc with one warning per
+project open.
+
+**Opt out with `"isolation": "in_process"`** (or `"none"`) when you
+want the plugin to share the backend's address space — typically:
+
+- you're actively debugging a plugin and want a single stack to step
+  through,
+- the per-call IPC latency matters (ns-scale function calls instead of
+  µs-scale named-pipe round trips), or
+- the plugin needs to share statics with backend / other plugins
+  (uncommon by design — a plugin is supposed to be a self-contained
+  function with its own UI config).
+
+The legacy value `"isolation": "process"` keeps working as an explicit
+declaration of the default.
 
 ```json
 {
   "plugin": "shape_match",
-  "isolation": "process",
+  "isolation": "in_process",
   "call_timeout_ms": 60000,
   "config": { ... }
 }
@@ -192,17 +208,28 @@ matches) so the watchdog doesn't trip during normal work.
 Worker-side conveniences (so plugin authors don't need to know which
 mode they're running in):
 
-- Plugins that allocate output via `xi::Image{...}` (heap-pool) get
-  their pixels auto-copied into SHM by `worker_main` before the reply.
-  The plugin sees a normal heap allocation; the backend sees an SHM
-  handle.
+- `xi::Plugin::pool_image(w, h, c)` (and the `xi::Image::create_in_pool`
+  it wraps) automatically allocates from the SHM region in the worker
+  process, so cv:: writes land directly in shared memory and the
+  cross-ABI return is `addref`-only — no heap-to-shm copy at the
+  boundary.
+- Plugins that still allocate output via the legacy `xi::Image{w,h,c}`
+  ctor (heap) get their pixels auto-promoted to SHM by `worker_main`
+  before the reply.
 - The output image's key (`record.image("mask", img)` → `"mask"`) is
   preserved across the IPC boundary, so scripts calling
   `record.get_image("mask")` work the same in-proc and isolated.
 
-**Default-on is tracked work** — see `status.md`. Unblocking it needs
-broader real-plugin testing (multi-image Records, plugins that store
-handles in their JSON, error paths, hot-reload semantics).
+### `instance.json` schema
+
+Recognised top-level keys (anything else is ignored, no error):
+
+| Key | Type | Required | Notes |
+|---|---|---|---|
+| `plugin` | string | yes | Name of the plugin this instance is bound to. |
+| `config` | object | no | Passed verbatim to `Plugin::set_def(json)` after construction. |
+| `isolation` | string | no | `"process"` (default) / `"in_process"` (opt out) / `"none"` (alias for `in_process`). |
+| `call_timeout_ms` | int | no | Per-call IPC timeout for isolated instances, in ms. |
 
 A spawned `xinsp-worker.exe`:
 - Attaches the backend's SHM region (so image handles dereference to

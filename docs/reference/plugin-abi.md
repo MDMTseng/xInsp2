@@ -195,6 +195,16 @@ int xi_plugin_exchange(void* inst, const char* cmd,
 Convention: `cmd` is a JSON object string, return a JSON object
 string. `xi::Json` makes both directions a few lines.
 
+**Return shape convention.** Most plugins simply return their current
+`get_def()` after applying the command. That gives the UI / script a
+single round-trip to mutate state and observe the result; the Python
+SDK's `c.exchange_instance(name, cmd)` parses the return as a dict,
+the VS Code UI posts it back to the panel as `{type: 'status', ...}`.
+Returning anything else is fine (e.g. a one-shot `{"matched": true}`
+for a "run template match now" command), but agents and human plugin
+authors expect "post-state object" by default — see
+`local_contrast_detector` for a representative implementation.
+
 Return value:
 - `> 0` — number of bytes written to `rsp_buf` (excluding NUL).
 - `< 0` — buffer too small; absolute value is bytes needed. Host
