@@ -43,6 +43,7 @@ content moves into the relevant reference / guide.
 | File | Subject |
 |---|---|
 | [`design/interactive-tool-registry.md`](./design/interactive-tool-registry.md) | How plugins that need GUI setup (shape-model template editing, ROI mask drawing) hook into a shared image-viewer panel without reimplementing pan/zoom/draw plumbing. |
+| [`design/linux-port.md`](./design/linux-port.md) | Windows-only logic inventory + the going-forward rule that new code stays cross-platform-friendly. Not scheduled. |
 
 ## Archive (`archive/`)
 
