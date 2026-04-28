@@ -100,16 +100,57 @@ static int use_process_cb(const char* name,
     auto inst = xi::InstanceRegistry::instance().find(name);
     if (!inst) return -1;
 
-    // Isolated (separate-process) adapters: forward over IPC. Pixels go
-    // via SHM so this is still zero-copy — only handles + tiny JSON
-    // ride the named pipe.
+    // Isolated (separate-process) adapters: forward over IPC. Worker
+    // can only deref SHM-backed handles (not backend-local pool ones),
+    // so any input handle that isn't already SHM gets promoted here:
+    // allocate a SHM slot, memcpy the pixels in, send THAT handle. We
+    // hold the temp SHM ref until the RPC returns and then release it.
+    // (Output direction is symmetric — worker_main.cpp does the same
+    // on the way back.)
     if (auto* p = dynamic_cast<xi::ProcessInstanceAdapter*>(inst.get())) {
+        static xi_host_api host = xi::ImagePool::make_host_api();
+        std::vector<xi_record_image> promoted_imgs;
+        std::vector<xi_image_handle> temp_shm;
+        promoted_imgs.reserve((size_t)input_image_count);
+        for (int i = 0; i < input_image_count; ++i) {
+            const auto& img = input_images[i];
+            xi_image_handle h = img.handle;
+            if (h && !host.shm_is_shm_handle(h)) {
+                int w  = host.image_width(h);
+                int hh = host.image_height(h);
+                int ch = host.image_channels(h);
+                int s  = host.image_stride(h);
+                const uint8_t* src = host.image_data(h);
+                if (src && w > 0 && hh > 0 && ch > 0) {
+                    xi_image_handle shm_h = host.shm_create_image(w, hh, ch);
+                    if (shm_h) {
+                        uint8_t* dst = host.image_data(shm_h);
+                        int row_bytes = w * ch;
+                        int src_stride = s > 0 ? s : row_bytes;
+                        for (int y = 0; y < hh; ++y)
+                            std::memcpy(dst + y * row_bytes,
+                                        src + y * src_stride,
+                                        (size_t)row_bytes);
+                        h = shm_h;
+                        temp_shm.push_back(shm_h);
+                    }
+                }
+            }
+            xi_record_image rec{};
+            rec.key    = img.key;
+            rec.handle = h;
+            promoted_imgs.push_back(rec);
+        }
         xi_record in_rec;
-        in_rec.images      = input_images;
-        in_rec.image_count = input_image_count;
+        in_rec.images      = promoted_imgs.empty() ? nullptr : promoted_imgs.data();
+        in_rec.image_count = (int)promoted_imgs.size();
         in_rec.json        = input_json;
         std::string err;
-        if (!p->process_via_rpc(&in_rec, output, &err)) {
+        bool ok = p->process_via_rpc(&in_rec, output, &err);
+        // Release the temporary SHM handles regardless of outcome —
+        // the worker has already read what it needs.
+        for (auto h : temp_shm) host.image_release(h);
+        if (!ok) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') isolated: %s\n",
                          name, err.c_str());
             if (p->is_dead()) report_isolation_dead_once(name, err.c_str());

@@ -110,6 +110,11 @@ int main(int argc, char** argv) {
         return 3;
     }
     xi::ImagePool::set_shm_region(shm.get());
+    // Switch xi::Image::create_in_pool / Plugin::pool_image to use
+    // host->shm_create_image so plugin outputs land in SHM directly.
+    // Without this they'd go to the worker's local heap pool and the
+    // RPC reply path would have to memcpy them into SHM at the boundary.
+    xi::set_worker_mode(true);
     std::fprintf(stderr, "[worker] shm attached, %lluMB visible\n",
                  (unsigned long long)(shm->total_size() / (1024 * 1024)));
 

@@ -80,6 +80,10 @@ int main(int argc, char** argv) {
         return 3;
     }
     xi::ImagePool::set_shm_region(shm.get());
+    // Same reason as worker_main: route Image::create_in_pool through
+    // host->shm_create_image so script-side images land directly in SHM
+    // (the backend reads them via the same handle, no boundary memcpy).
+    xi::set_worker_mode(true);
 
     // host_api is configured but use_* fn pointers stay null in this
     // minimum slice — the script gets image_create / shm_create_image
