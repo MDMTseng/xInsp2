@@ -206,6 +206,42 @@ top-level `manifest` block (free-form; see
 `docs/reference/plugin-abi.md`). Backend passes it through verbatim —
 older plugins simply omit the field.
 
+### `image_pool_stats`
+
+Per-owner ImagePool footprint. Each plugin instance and each loaded
+script gets a unique `owner` id; allocations made on behalf of that
+owner are tagged. Use this to spot leaks — a plugin / script whose
+handle count keeps climbing across runs is holding pool entries it
+should be releasing.
+
+`args: {}` →
+
+```json
+{
+  "total": { "handles": 47, "bytes": 14745600 },
+  "by_owner": [
+    { "owner": 1, "label": "script:inspect_v3.dll",
+      "handles": 32, "bytes": 9830400 },
+    { "owner": 2, "label": "instance:det (local_contrast_detector)",
+      "handles": 15, "bytes": 4915200 },
+    { "owner": 0, "label": "<host>",
+      "handles": 0,  "bytes": 0 }
+  ]
+}
+```
+
+`label` is human-readable (`script:<dll>` / `instance:<name> (<plugin>)` /
+`<host>`); the `(orphan)` suffix appears when an owner_id can't be
+matched to a live instance — those are the sweep candidates the
+ledger missed (rare, indicates a logic gap).
+
+Backend automatically `release_all_for(owner)` sweeps:
+- on `CAbiInstanceAdapter` destruction (instance destroyed)
+- on `unload_script` (compile_and_load reload)
+
+Process-isolated instances and SHM-backed handles are NOT counted
+here — they live in the worker's local pool / SHM region.
+
 ### `set_param`
 `args: { "name": "sigma", "value": 3.5 }` → `ok: true`
 

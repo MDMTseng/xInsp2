@@ -89,7 +89,8 @@ public:
     CAbiInstanceAdapter(std::string name, std::string plugin_name,
                         HMODULE dll, void* inst)
         : name_(std::move(name)), plugin_name_(std::move(plugin_name)),
-          dll_(dll), inst_(inst) {
+          dll_(dll), inst_(inst),
+          owner_id_(ImagePool::alloc_owner_id()) {
         // Resolve function pointers
         exchange_fn_ = reinterpret_cast<xi_plugin_exchange_fn>(GetProcAddress(dll_, "xi_plugin_exchange"));
         get_def_fn_  = reinterpret_cast<xi_plugin_get_def_fn>(GetProcAddress(dll_, "xi_plugin_get_def"));
@@ -100,13 +101,29 @@ public:
 
     ~CAbiInstanceAdapter() override {
         if (destroy_fn_ && inst_) destroy_fn_(inst_);
+        // Sweep any image handles the plugin allocated and forgot to
+        // release. Without this, plugin crashes / careless authors leak
+        // ImagePool entries forever.
+        int swept = ImagePool::instance().release_all_for(owner_id_);
+        if (swept > 0) {
+            std::fprintf(stderr,
+                "[xinsp2] '%s' destroyed; swept %d leaked image handle(s)\n",
+                name_.c_str(), swept);
+        }
     }
+
+    ImagePoolOwnerId owner_id() const { return owner_id_; }
 
     const std::string& name() const override { return name_; }
     std::string plugin_name() const override { return plugin_name_; }
 
+    // OwnerGuard wraps every plugin entry-point call so any image
+    // handles the plugin allocates via host_api->image_create get
+    // tagged with this instance's owner_id. The destructor's
+    // release_all_for then knows what to sweep.
     std::string get_def() const override {
         if (!get_def_fn_ || !inst_) return "{}";
+        ImagePool::OwnerGuard g(owner_id_);
         std::vector<char> buf(4096);
         int n = get_def_fn_(inst_, buf.data(), (int)buf.size());
         if (n < 0) { buf.resize((size_t)(-n) + 1024); n = get_def_fn_(inst_, buf.data(), (int)buf.size()); }
@@ -115,11 +132,13 @@ public:
 
     bool set_def(const std::string& j) override {
         if (!set_def_fn_ || !inst_) return false;
+        ImagePool::OwnerGuard g(owner_id_);
         return set_def_fn_(inst_, j.c_str()) == 0;
     }
 
     std::string exchange(const std::string& cmd_json) override {
         if (!exchange_fn_ || !inst_) return "{}";
+        ImagePool::OwnerGuard g(owner_id_);
         std::vector<char> buf(64 * 1024);
         int n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size());
         if (n < 0) { buf.resize((size_t)(-n) + 1024); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }
@@ -139,6 +158,7 @@ private:
     xi_plugin_set_def_fn  set_def_fn_ = nullptr;
     xi_plugin_destroy_fn  destroy_fn_ = nullptr;
     xi_plugin_process_fn  process_fn_ = nullptr;
+    ImagePoolOwnerId      owner_id_ = 0;
 };
 
 struct InstanceInfo {

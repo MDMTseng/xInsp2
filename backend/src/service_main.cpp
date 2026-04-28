@@ -119,6 +119,10 @@ static int use_process_cb(const char* name,
         in_rec.images = input_images;
         in_rec.image_count = input_image_count;
         in_rec.json = input_json;
+        // Tag any image_create calls inside the plugin's process_fn
+        // with this adapter's owner_id so destruction can sweep the
+        // plugin's leaked handles.
+        xi::ImagePool::OwnerGuard og(adapter->owner_id());
         try {
             adapter->process_fn()(adapter->raw_instance(), &in_rec, output);
         } catch (const seh_exception& e) {
@@ -619,6 +623,12 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         if (prev) CloseHandle(prev);
     };
     try {
+        // Tag any image_create calls inside the script's inspect (and
+        // any plugin process_fn it transitively calls that didn't set
+        // its own guard) with the script's owner_id. Per-script
+        // sweep-on-unload + per-instance sweep-on-destroy together
+        // catch the leaked-handle case from both directions.
+        xi::ImagePool::OwnerGuard sg(s.owner_id);
         if (s.reset) s.reset();
         s.inspect(frame_hint);
         disarm();
@@ -1808,6 +1818,56 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             out += "}";
         }
         out += "]";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "image_pool_stats") {
+        // Per-owner ImagePool footprint. Owner IDs alone are
+        // meaningless to humans — we look them up against the
+        // running project's instances + script so the reply names
+        // who is holding the memory. Anonymous (owner == 0) is
+        // collapsed under "label":"<host>".
+        auto totals   = xi::ImagePool::instance().stats();
+        auto by_owner = xi::ImagePool::instance().stats_by_owner();
+
+        // Build owner_id → label map.
+        std::unordered_map<xi::ImagePoolOwnerId, std::string> labels;
+        labels[0] = "<host>";
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.owner_id != 0) {
+                labels[g_script.owner_id] =
+                    "script:" + std::filesystem::path(g_script.path).filename().string();
+            }
+        }
+        for (auto& [iname, ii] : g_plugin_mgr.project().instances) {
+            if (auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(ii.instance.get())) {
+                labels[a->owner_id()] = "instance:" + ii.name + " (" + ii.plugin_name + ")";
+            }
+            // ProcessInstanceAdapter owns handles in the worker's pool,
+            // not the host's — they don't show up here. SHM-backed
+            // handles also don't show up in the host ImagePool stats.
+        }
+
+        auto label_for = [&](xi::ImagePoolOwnerId o) -> std::string {
+            auto it = labels.find(o);
+            if (it != labels.end()) return it->second;
+            return "owner:" + std::to_string(o) + " (orphan)";
+        };
+
+        std::string out = "{\"total\":{\"handles\":"
+                        + std::to_string(totals.handle_count)
+                        + ",\"bytes\":"
+                        + std::to_string(totals.total_bytes)
+                        + "},\"by_owner\":[";
+        for (size_t i = 0; i < by_owner.size(); ++i) {
+            if (i) out += ",";
+            out += "{\"owner\":"   + std::to_string(by_owner[i].owner)
+                +  ",\"label\":";
+            xp::json_escape_into(out, label_for(by_owner[i].owner));
+            out +=  ",\"handles\":" + std::to_string(by_owner[i].handle_count)
+                +  ",\"bytes\":"    + std::to_string(by_owner[i].total_bytes)
+                +  "}";
+        }
+        out += "]}";
         send_rsp_ok(srv, id, out);
     } else if (name == "rescan_plugins") {
         // Optional arg: {"dir": "<path>"} scans that one dir (additive).

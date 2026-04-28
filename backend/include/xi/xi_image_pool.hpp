@@ -33,12 +33,25 @@
 
 namespace xi {
 
+// Per-creator identity. Lets the pool sweep all handles allocated on
+// behalf of a given plugin instance / script when that owner dies
+// (instance destroyed, worker process exited, script unloaded). An
+// owner of 0 means "anonymous / framework" — handles created with no
+// owner context (e.g. the backend's own grab path) are never swept.
+//
+// Owner IDs are uint32, allocated monotonically by alloc_owner_id().
+// Two instances created and destroyed at different times will have
+// different IDs even if their names match — sweeps target the
+// specific live-instance.
+using ImagePoolOwnerId = uint32_t;
+
 struct PoolEntry {
     std::vector<uint8_t> pixels;
     int32_t width = 0;
     int32_t height = 0;
     int32_t channels = 0;
     std::atomic<int32_t> refcount{1};
+    ImagePoolOwnerId owner = 0;     // who allocated this; 0 = anonymous
 };
 
 class ImagePool {
@@ -63,6 +76,10 @@ public:
         entry->height = h;
         entry->channels = ch;
         entry->refcount = 1;
+        // Tag with whoever's running on this thread right now. 0 if
+        // no OwnerGuard is active (host-internal allocations are
+        // anonymous and therefore never swept).
+        entry->owner = current_owner();
 
         xi_image_handle handle = next_handle_++;
         auto& shard = shard_for(handle);
@@ -71,6 +88,115 @@ public:
             shard.entries[handle] = entry;
         }
         return handle;
+    }
+
+    // ---- Owner ledger ----
+    //
+    // alloc_owner_id() — give an instance / script a unique non-zero id.
+    // OwnerGuard — RAII install/restore of the per-thread current owner.
+    // release_all_for(id) — sweep every handle tagged with `id` and
+    //   release once each. Used on instance destroy / worker death /
+    //   script unload to clean up handles that the dying party held.
+    // stats(id) — for cmd:image_pool_stats: count + total bytes per
+    //   owner (or all owners if id == 0).
+    //
+    // The thread-local current_owner is process-wide (via a stable
+    // accessor), so it survives DLL reloads.
+
+    static ImagePoolOwnerId alloc_owner_id() {
+        // Start at 1; 0 reserved for anonymous.
+        static std::atomic<ImagePoolOwnerId> next{1};
+        return next.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    static ImagePoolOwnerId& current_owner_ref() {
+        static thread_local ImagePoolOwnerId v = 0;
+        return v;
+    }
+    static ImagePoolOwnerId  current_owner() { return current_owner_ref(); }
+
+    struct OwnerGuard {
+        ImagePoolOwnerId prev;
+        explicit OwnerGuard(ImagePoolOwnerId next) : prev(current_owner_ref()) {
+            current_owner_ref() = next;
+        }
+        ~OwnerGuard() { current_owner_ref() = prev; }
+        OwnerGuard(const OwnerGuard&) = delete;
+        OwnerGuard& operator=(const OwnerGuard&) = delete;
+    };
+
+    int release_all_for(ImagePoolOwnerId owner) {
+        if (owner == 0) return 0;   // never sweep anonymous
+        int swept = 0;
+        for (int i = 0; i < SHARD_COUNT; ++i) {
+            auto& shard = shards_[i];
+            std::vector<PoolEntry*> to_delete;
+            std::vector<xi_image_handle> erased;
+            {
+                std::unique_lock<std::shared_mutex> lk(shard.mu);
+                for (auto it = shard.entries.begin(); it != shard.entries.end();) {
+                    if (it->second->owner == owner) {
+                        // Force release regardless of refcount — the
+                        // owner is gone and no further consumers can
+                        // legitimately hold a ref.
+                        to_delete.push_back(it->second);
+                        erased.push_back(it->first);
+                        it = shard.entries.erase(it);
+                        ++swept;
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+            for (auto* e : to_delete) delete e;
+            (void)erased;
+        }
+        return swept;
+    }
+
+    struct OwnerStats {
+        int      handle_count = 0;
+        uint64_t total_bytes  = 0;
+    };
+    // owner == 0 → aggregate across all owners (including anonymous).
+    OwnerStats stats(ImagePoolOwnerId owner = 0) {
+        OwnerStats s{};
+        for (int i = 0; i < SHARD_COUNT; ++i) {
+            auto& shard = shards_[i];
+            std::shared_lock<std::shared_mutex> lk(shard.mu);
+            for (auto& [_, e] : shard.entries) {
+                if (owner != 0 && e->owner != owner) continue;
+                ++s.handle_count;
+                s.total_bytes += e->pixels.size();
+            }
+        }
+        return s;
+    }
+
+    // For cmd:image_pool_stats: list every owner's footprint. Returns
+    // a vector of (owner_id, count, bytes); owner_id == 0 means
+    // anonymous.
+    struct PerOwnerStat {
+        ImagePoolOwnerId owner = 0;
+        int              handle_count = 0;
+        uint64_t         total_bytes  = 0;
+    };
+    std::vector<PerOwnerStat> stats_by_owner() {
+        std::unordered_map<ImagePoolOwnerId, PerOwnerStat> agg;
+        for (int i = 0; i < SHARD_COUNT; ++i) {
+            auto& shard = shards_[i];
+            std::shared_lock<std::shared_mutex> lk(shard.mu);
+            for (auto& [_, e] : shard.entries) {
+                auto& s = agg[e->owner];
+                s.owner = e->owner;
+                ++s.handle_count;
+                s.total_bytes += e->pixels.size();
+            }
+        }
+        std::vector<PerOwnerStat> out;
+        out.reserve(agg.size());
+        for (auto& [_, s] : agg) out.push_back(s);
+        return out;
     }
 
     void addref(xi_image_handle h) {

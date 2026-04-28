@@ -14,6 +14,8 @@
   #include <windows.h>
 #endif
 
+#include "xi_image_pool.hpp"
+
 #include <cstdint>
 #include <string>
 
@@ -22,6 +24,10 @@ namespace xi::script {
 struct LoadedScript {
     HMODULE handle = nullptr;
     std::string path;
+    // Owner ledger id for the ImagePool. Allocated on each successful
+    // load_script; release_all_for(owner) is called on unload to sweep
+    // any handles the script forgot. Anonymous (0) until load completes.
+    ImagePoolOwnerId owner_id = 0;
 
     using InspectFn          = void (*)(int frame);
     using SnapshotFn         = int  (*)(char* buf, int buflen);
@@ -96,10 +102,22 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
         out.handle = nullptr;
         return false;
     }
+    out.owner_id = ImagePool::alloc_owner_id();
     return true;
 }
 
 inline void unload_script(LoadedScript& s) {
+    // Sweep image handles the script left in the pool before we tear
+    // the DLL down. Without this every compile_and_load reload leaks
+    // any handle the script kept in a long-lived `xi::Image`.
+    if (s.owner_id != 0) {
+        int swept = ImagePool::instance().release_all_for(s.owner_id);
+        if (swept > 0) {
+            std::fprintf(stderr,
+                "[xinsp2] script unload: swept %d leaked image handle(s)\n",
+                swept);
+        }
+    }
     if (s.handle) {
         FreeLibrary(s.handle);
     }
