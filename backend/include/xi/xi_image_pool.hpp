@@ -245,7 +245,24 @@ public:
         api.shm_is_shm_handle = [](xi_image_handle h) -> int32_t {
             return is_shm_handle(h) ? 1 : 0;
         };
+        // read_image_file is wired by backend / worker / runner via
+        // install_read_image_file (linked from xi_image_io.cpp). Test
+        // executables that don't link the io TU leave it null —
+        // callers MUST null-check.
+        api.read_image_file = read_image_file_fn();
         return api;
+    }
+
+    // Pluggable file-decoder. Defaults to null (returns 0 / no
+    // decoder). Backend, worker, runner each link xi_image_io.cpp
+    // which calls install_read_image_file() at static-init time.
+    using ReadImageFileFn = xi_image_handle (*)(const char* path);
+    static ReadImageFileFn& read_image_file_fn() {
+        static ReadImageFileFn fn = nullptr;
+        return fn;
+    }
+    static void install_read_image_file(ReadImageFileFn fn) {
+        read_image_file_fn() = fn;
     }
 
 private:

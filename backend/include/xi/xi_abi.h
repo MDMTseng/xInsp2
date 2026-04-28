@@ -150,6 +150,16 @@ typedef struct xi_host_api {
     void            (*shm_release)(xi_image_handle h);
     /* Returns 1 if the handle came from the SHM region, 0 if heap. */
     int32_t         (*shm_is_shm_handle)(xi_image_handle h);
+
+    /* --------------------------------------------------------------- */
+    /* File I/O (host-provided so plugins / scripts don't have to vendor
+     * stb_image themselves). Reads PNG / JPEG / BMP / TGA / GIF /
+     * PSD / HDR / PIC into a fresh image_create-allocated handle.
+     * Returns 0 on failure (file missing, decode error, OOM).
+     *
+     * The returned handle has refcount 1; the caller is responsible
+     * for image_release when done. */
+    xi_image_handle (*read_image_file)(const char* path);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */

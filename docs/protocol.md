@@ -181,6 +181,11 @@ constructors (which populate the registries), and returns the new state.
 → `data: { "run_id": <int>, "ms": <int> }`
 followed by an asynchronous `vars` message and zero or more binary previews.
 
+`frame_path` is plumbed to the script as `xi::current_frame_path()`
+(see `docs/guides/writing-a-script.md`). Empty / missing means the
+script gets an empty string. Combine with `xi::imread()` to load a
+file frame on demand without a custom source plugin.
+
 ### `list_instances`
 `args: {}` → triggers an `instances` message.
 

@@ -344,7 +344,13 @@ static void breakpoint_cb(const char* label) {
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
-static void run_one_inspection(xi::ws::Server& srv, int frame_hint = 1, int64_t run_id = 0);
+// frame_path (optional) is plumbed to the script via
+// `xi_script_set_run_context`; readable inside the script as
+// `xi::current_frame_path()`. Empty string means none.
+static void run_one_inspection(xi::ws::Server& srv,
+                               int frame_hint = 1,
+                               int64_t run_id = 0,
+                               const std::string& frame_path = "");
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
@@ -568,7 +574,8 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
 // Run one full inspection cycle: reset → inspect → emit.
 // The inspect call is wrapped in SEH so a script crash (null deref,
 // divide-by-zero, stack overflow) is caught without killing the backend.
-static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_id) {
+static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
+                               int64_t run_id, const std::string& frame_path) {
     if (run_id == 0) run_id = ++g_run_id;
 
     xi::script::LoadedScript s;
@@ -584,6 +591,12 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_
         srv.send_text(lm.to_json());
         return;
     }
+
+    // Plumb the optional per-run context (frame_path) into the script
+    // DLL's globals before inspect runs. Cleared on the way out so a
+    // subsequent run with no frame_path arg sees an empty string,
+    // not the previous value.
+    if (s.set_run_context) s.set_run_context(frame_path.c_str());
 
     auto t0 = std::chrono::steady_clock::now();
     // Arm watchdog: store deadline + current thread handle. Cleared in
@@ -634,6 +647,10 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint, int64_t run_
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - t0).count();
     emit_vars_and_previews(srv, s, run_id, dt_ms);
+
+    // Clear so the next run, if it doesn't carry a frame_path arg,
+    // sees an empty path instead of the stale previous one.
+    if (s.set_run_context) s.set_run_context("");
 }
 
 // (trigger_worker removed — continuous mode uses a simple timer thread)
@@ -1181,6 +1198,15 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         int64_t run_id = ++g_run_id;
 
+        // Optional `frame_path` arg — plumbed to the script via
+        // `xi::current_frame_path()`. Was previously parsed by tests /
+        // SDKs but ignored by this handler ("phantom argument"). Now
+        // wired end to end.
+        std::string frame_path;
+        if (auto fp = xp::get_string_field(parsed->args_json, "frame_path")) {
+            frame_path = *fp;
+        }
+
         // Send rsp first (tests expect rsp before vars).
         char buf[128];
         std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":0})", (long long)run_id);
@@ -1193,10 +1219,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // SEH translator must be installed inside the thread.
         crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "run");
         g_crash_ctx.last_run_id = (int)run_id;
-        std::thread([&srv, run_id]() {
+        std::thread([&srv, run_id, frame_path = std::move(frame_path)]() {
             _set_se_translator(seh_translator);
             std::lock_guard<std::mutex> lk(g_run_mu);
-            run_one_inspection(srv, /*frame_hint=*/1, run_id);
+            run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
         }).detach();
     } else if (name == "start") {
         // Start continuous trigger mode. The backend runs a timer thread

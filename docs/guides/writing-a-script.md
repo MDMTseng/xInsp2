@@ -170,6 +170,37 @@ lifetime bug: the macro copies into a `std::string` value.
 > arg (`VAR(gray, toGray(img))`) so the VAR macro is its own
 > declaration, or use a fresh name.
 
+## Reading a frame from disk
+
+The host can hand the script a `frame_path` per `cmd:run` (the Python
+SDK's `c.run(frame_path=...)`); the script reads it via
+`xi::current_frame_path()` and decodes via `xi::imread()`:
+
+```cpp
+#include <xi/xi.hpp>
+
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int) {
+    VAR(frame_path, xi::current_frame_path());
+    VAR(input,      xi::imread(xi::current_frame_path()));
+    if (input.empty()) {
+        VAR(error, std::string("frame load failed"));
+        return;
+    }
+    // ... pipeline
+}
+```
+
+`imread` returns an empty `xi::Image` on failure (file missing,
+unsupported format). It accepts PNG / JPEG / BMP / TGA / GIF / PSD /
+HDR / PIC via the host's bundled stb_image. Pixels are copied into
+the script's own `xi::Image` so the image lifetime is decoupled
+from the host pool.
+
+If the run was started with no `frame_path` arg, `current_frame_path()`
+returns an empty string. Scripts that always need a path should error
+out explicitly when they see one.
+
 For images, the panel shows a thumbnail; double-click (or shift-click)
 opens the **interactive image viewer** with pan + cursor-anchored zoom +
 Pick Point / Pick Area tools.

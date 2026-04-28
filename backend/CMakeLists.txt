@@ -218,6 +218,7 @@ add_test(NAME ops COMMAND test_ops)
 add_executable(xinsp_backend
     src/service_main.cpp
     src/stb_impl.cpp
+    src/xi_image_io.cpp
 )
 target_link_libraries(xinsp_backend PRIVATE xi_core cjson)
 target_include_directories(xinsp_backend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
@@ -230,17 +231,17 @@ target_compile_definitions(xinsp_backend PRIVATE
     XINSP2_COMMIT="${XINSP2_COMMIT}")
 
 # Headless production runner. Same libs as the server; no WebSocket.
-add_executable(xinsp_worker src/worker_main.cpp)
+add_executable(xinsp_worker src/worker_main.cpp src/stb_impl.cpp src/xi_image_io.cpp)
 target_link_libraries(xinsp_worker PRIVATE xi_core cjson)
 target_include_directories(xinsp_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 set_target_properties(xinsp_worker PROPERTIES OUTPUT_NAME "xinsp-worker")
 
-add_executable(xinsp_script_runner src/script_runner_main.cpp)
+add_executable(xinsp_script_runner src/script_runner_main.cpp src/stb_impl.cpp src/xi_image_io.cpp)
 target_link_libraries(xinsp_script_runner PRIVATE xi_core cjson)
 target_include_directories(xinsp_script_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 set_target_properties(xinsp_script_runner PROPERTIES OUTPUT_NAME "xinsp-script-runner")
 
-add_executable(xinsp_runner src/runner_main.cpp)
+add_executable(xinsp_runner src/runner_main.cpp src/stb_impl.cpp src/xi_image_io.cpp)
 target_link_libraries(xinsp_runner PRIVATE xi_core cjson)
 target_include_directories(xinsp_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 if(WIN32)
