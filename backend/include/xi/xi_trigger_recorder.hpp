@@ -38,6 +38,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -260,11 +261,20 @@ private:
             // Load all frames + group by source. Each recorded image's
             // "source" field is the FULL stored name ("source" or
             // "source/key"); split on the first '/' to recover the pair.
+            //
+            // Use std::map (ordered) — std::unordered_map iteration
+            // order is unspecified, which made replays non-deterministic
+            // under LeaderFollowers (same recording could produce
+            // different inspection sequences depending on hash seeding).
+            // Lexicographic ordering is good enough; if a project needs
+            // a specific leader-first emit order, the project can name
+            // its leader source so it sorts first (or we add an
+            // explicit ordering field later).
             struct PerSource {
                 std::vector<xi_image_handle>  handles;
                 std::vector<std::string>      keys;     // owned strings (we'll point xi_record_image::key at these)
             };
-            std::unordered_map<std::string, PerSource> by_source;
+            std::map<std::string, PerSource> by_source;
             std::vector<xi_image_handle> all_allocs;
 
             for (auto& img : e.images) {
@@ -294,14 +304,22 @@ private:
                 ps.keys.push_back(std::move(key));
             }
 
-            // Emit one bus event per source-group, sharing the recorded tid.
+            // Emit one bus event per source-group. Use a FRESH tid
+            // per replayed event (not the recorded e.id) to defend
+            // against collisions with live emits or with later
+            // replayed events that happen to share a (hi,lo) pair.
+            // The bus's correlation invariant — events from the same
+            // tid go into the same pending slot — is preserved
+            // because we hand all source-groups in this event the
+            // same fresh tid.
+            xi_trigger_id replay_tid = xi::make_trigger_id();
             for (auto& [source, ps] : by_source) {
                 std::vector<xi_record_image> entries;
                 entries.reserve(ps.handles.size());
                 for (size_t i = 0; i < ps.handles.size(); ++i) {
                     entries.push_back({ ps.keys[i].c_str(), ps.handles[i] });
                 }
-                TriggerBus::instance().emit(source, e.id, e.timestamp_us,
+                TriggerBus::instance().emit(source, replay_tid, e.timestamp_us,
                                              entries.data(), (int)entries.size());
             }
             // Bus addref'd internally for each emit; release our refs.
