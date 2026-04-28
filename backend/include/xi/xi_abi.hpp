@@ -342,4 +342,13 @@ int xi_plugin_get_def(void* inst, char* buf, int buflen) {                     \
 extern "C" __declspec(dllexport)                                               \
 int xi_plugin_set_def(void* inst, const char* json) {                          \
     return static_cast<ClassName*>(inst)->set_def(json) ? 0 : -1;              \
+}                                                                              \
+                                                                               \
+/* ABI version stamp — host loader checks this against its own        */ \
+/* XI_ABI_VERSION and refuses plugins requesting a newer ABI than     */ \
+/* the host provides. Plugins compiled before this stamp existed are  */ \
+/* treated as v1 with a "pre-versioning" warning, not refused.        */ \
+extern "C" __declspec(dllexport)                                               \
+int xi_plugin_abi_version(void) {                                              \
+    return XI_ABI_VERSION;                                                     \
 }

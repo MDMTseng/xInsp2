@@ -57,6 +57,31 @@
 
 namespace xi {
 
+// Plugin ABI compatibility check. Reads the plugin DLL's
+// xi_plugin_abi_version() export and compares against the host's
+// XI_ABI_VERSION. Pre-versioning plugins (no export) are accepted as
+// v1 with a one-shot warning logged; plugins requesting a newer ABI
+// than the host provides are refused (caller should FreeLibrary +
+// skip + record a warning).
+inline bool plugin_abi_compatible(HMODULE dll, const std::string& plugin_name,
+                                   std::string* err_msg = nullptr) {
+    using AbiVerFn = int (*)();
+    auto fn = reinterpret_cast<AbiVerFn>(GetProcAddress(dll, "xi_plugin_abi_version"));
+    int v = fn ? fn() : 1;
+    if (v > XI_ABI_VERSION) {
+        if (err_msg) *err_msg = "plugin '" + plugin_name + "' requires ABI v"
+                              + std::to_string(v) + " but host is v"
+                              + std::to_string(XI_ABI_VERSION);
+        return false;
+    }
+    if (!fn) {
+        std::fprintf(stderr,
+            "[xinsp2] '%s': pre-versioning plugin (no xi_plugin_abi_version "
+            "export); assuming v1\n", plugin_name.c_str());
+    }
+    return true;
+}
+
 struct PluginInfo {
     std::string name;
     std::string description;
@@ -393,6 +418,16 @@ private:
                         pname.c_str());
                     continue;
                 }
+                {
+                    std::string err;
+                    if (!plugin_abi_compatible(pi.handle, pname, &err)) {
+                        last_open_warnings_.push_back({pname, pname, err});
+                        std::fprintf(stderr, "[xinsp2] %s\n", err.c_str());
+                        FreeLibrary(pi.handle);
+                        pi.handle = nullptr;
+                        continue;
+                    }
+                }
                 bool has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
                 if (has_destroy) {
                     pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
@@ -557,6 +592,15 @@ public:
         if (!pi.handle) {
             r.error = "LoadLibrary failed on freshly-built DLL";
             return r;
+        }
+        {
+            std::string err;
+            if (!plugin_abi_compatible(pi.handle, plugin_name, &err)) {
+                r.error = err;
+                FreeLibrary(pi.handle);
+                pi.handle = nullptr;
+                return r;
+            }
         }
         bool has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
         if (has_destroy) {
@@ -723,7 +767,11 @@ public:
 
         // plugin.json — synthesize from PluginInfo if there's no manifest in
         // the source folder. Generated form points dll/factory at the names
-        // the export uses, so the deployed folder is self-contained.
+        // the export uses, so the deployed folder is self-contained. The
+        // synthesized version stamps `abi_version` so a target backend
+        // older than the plugin's compile-time ABI can detect the
+        // mismatch on scan (matches the runtime plugin_abi_compatible
+        // check via the DLL's xi_plugin_abi_version export).
         auto src_manifest = src_dir / "plugin.json";
         std::string manifest_text;
         if (std::filesystem::exists(src_manifest)) {
@@ -736,7 +784,8 @@ public:
             manifest_text += "  \"description\": \"" + pi.description + "\",\n";
             manifest_text += "  \"dll\":         \"" + pi.name + ".dll\",\n";
             manifest_text += "  \"factory\":     \"" + pi.factory_symbol + "\",\n";
-            manifest_text += "  \"has_ui\":      " + std::string(pi.has_ui ? "true" : "false") + "\n";
+            manifest_text += "  \"has_ui\":      " + std::string(pi.has_ui ? "true" : "false") + ",\n";
+            manifest_text += "  \"abi_version\": " + std::to_string(XI_ABI_VERSION) + "\n";
             manifest_text += "}\n";
         }
         xi::atomic_write(dest / "plugin.json", manifest_text);
@@ -781,6 +830,16 @@ public:
 
         pi.handle = LoadLibraryA(dll_path.string().c_str());
         if (!pi.handle) return false;
+
+        {
+            std::string err;
+            if (!plugin_abi_compatible(pi.handle, name, &err)) {
+                std::fprintf(stderr, "[xinsp2] %s\n", err.c_str());
+                FreeLibrary(pi.handle);
+                pi.handle = nullptr;
+                return false;
+            }
+        }
 
         // Distinguish new vs old ABI: new ABI also exports xi_plugin_destroy
         auto has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;

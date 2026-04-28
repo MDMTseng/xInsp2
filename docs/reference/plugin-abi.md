@@ -250,6 +250,13 @@ Fields:
 - `has_ui` (bool, optional) — if `true`, a `ui/index.html` next to the
   manifest is served as the plugin webview when the user opens the
   instance UI.
+- `abi_version` (int, optional but written by `cmd:export_project_plugin`)
+  — the `XI_ABI_VERSION` the plugin was compiled against. Matches the
+  plugin DLL's `xi_plugin_abi_version()` export. Backends refuse
+  plugins requesting a newer ABI than the host provides;
+  pre-versioning plugins (no export) are accepted as v1 with a
+  warning. Bump when `xi_abi.h` gains a load-bearing field plugins
+  depend on.
 - `manifest` (object, optional) — machine-readable description of the
   plugin's tunables and IO surface. The backend passes this through
   verbatim in `cmd:list_plugins` and `cmd:open_project` replies; it
