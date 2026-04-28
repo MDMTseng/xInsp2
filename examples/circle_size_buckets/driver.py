@@ -32,7 +32,7 @@ def main():
 
         print(f"opening project {PROJECT}")
         try:
-            proj = c.call("open_project", {"folder": str(PROJECT)}, timeout=240)
+            proj = c.open_project(str(PROJECT), timeout=240)
         except ProtocolError as e:
             print("OPEN PROJECT FAILED:", e)
             for m in log_lines[-20:]:
