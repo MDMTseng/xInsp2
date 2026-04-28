@@ -59,7 +59,24 @@ inline CancelToken*& current_cancel_token_ref() {
     static thread_local CancelToken* p = nullptr;
     return p;
 }
+
+// Global "cancel everything" flag. Set by the host's watchdog when
+// an inspect overruns its deadline; cleared after the inspect
+// returns (cooperative path) or after the watchdog falls back to
+// TerminateThread. Lives in the calling TU (script DLL or backend)
+// — backend toggles the script DLL's copy via the exported
+// `xi_script_set_global_cancel(int)` thunk in xi_script_support.hpp.
+//
+// `cancellation_requested()` returns true when EITHER the per-task
+// token is set OR the global flag is. Long-running ops only need
+// to poll one accessor.
+inline std::atomic<bool>& global_cancel_flag() {
+    static std::atomic<bool> f{false};
+    return f;
+}
+
 inline bool cancellation_requested() {
+    if (global_cancel_flag().load(std::memory_order_relaxed)) return true;
     auto* t = current_cancel_token_ref();
     return t && t->cancelled.load(std::memory_order_relaxed);
 }

@@ -315,6 +315,15 @@ XI_SCRIPT_EXPORT void xi_script_set_run_context(const char* frame_path) {
     g_run_frame_path_[n] = 0;
 }
 
+// Watchdog cancel flag setter — host sets this when inspect overruns
+// its deadline; script's `xi::cancellation_requested()` returns true
+// while it's set. Long-running ops poll this and exit early. Host
+// clears it after the inspect returns (or after watchdog falls back
+// to TerminateThread).
+XI_SCRIPT_EXPORT void xi_script_set_global_cancel(int set) {
+    xi::global_cancel_flag().store(set != 0, std::memory_order_relaxed);
+}
+
 // --- Persistent state thunks ---
 
 XI_SCRIPT_EXPORT int xi_script_get_state(char* buf, int buflen) {

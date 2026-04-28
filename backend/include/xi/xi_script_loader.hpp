@@ -46,6 +46,7 @@ struct LoadedScript {
                                            void* sources_fn);
     using SetBreakpointCallbackFn = void (*)(void* fn);
     using SetRunContextFn         = void (*)(const char* frame_path);
+    using SetGlobalCancelFn       = void (*)(int set);
 
     InspectFn          inspect          = nullptr;
     SnapshotFn         snapshot         = nullptr;
@@ -62,6 +63,7 @@ struct LoadedScript {
     SetTriggerCallbacksFn set_trigger_callbacks = nullptr;
     SetBreakpointCallbackFn set_breakpoint_callback = nullptr;
     SetRunContextFn    set_run_context  = nullptr;
+    SetGlobalCancelFn  set_global_cancel = nullptr;
 
     bool ok() const { return handle && inspect; }
 };
@@ -96,6 +98,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_trigger_callbacks = reinterpret_cast<LoadedScript::SetTriggerCallbacksFn>(GetProcAddress(h, "xi_script_set_trigger_callbacks"));
     out.set_breakpoint_callback = reinterpret_cast<LoadedScript::SetBreakpointCallbackFn>(GetProcAddress(h, "xi_script_set_breakpoint_callback"));
     out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
+    out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
     if (!out.inspect) {
         err = "script missing xi_inspect_entry export";
         FreeLibrary(h);

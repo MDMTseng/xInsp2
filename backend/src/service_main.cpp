@@ -2692,8 +2692,46 @@ int main(int argc, char** argv) {
             int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
             if (now < dl) continue;
+
+            // Two-phase trip:
+            //   Phase 1: signal cooperative cancel via the script DLL's
+            //     g_global_cancel_flag. Long-running ops in xi::ops
+            //     poll xi::cancellation_requested() and exit early.
+            //     Give them a 100 ms grace window.
+            //   Phase 2: if the inspect still hasn't returned (deadline
+            //     still armed), fall back to TerminateThread. That's
+            //     the unsafe primitive — only used when cooperative
+            //     cancel didn't take.
+            {
+                std::lock_guard<std::mutex> lk(g_script_mu);
+                if (g_script.set_global_cancel) g_script.set_global_cancel(1);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            // Re-check deadline. If clear, the script cooperated.
+            if (g_inspect_deadline_ms.load() == 0) {
+                {
+                    std::lock_guard<std::mutex> lk(g_script_mu);
+                    if (g_script.set_global_cancel) g_script.set_global_cancel(0);
+                }
+                int n = ++g_watchdog_trips;
+                std::fprintf(stderr,
+                    "[xinsp2] watchdog tripped (#%d) — script honoured cooperative cancel\n", n);
+                emit_error_log(srv,
+                    "watchdog tripped — inspect exceeded "
+                    + std::to_string(g_watchdog_ms.load())
+                    + "ms; cooperative cancel succeeded");
+                continue;
+            }
+
             HANDLE h = g_inspect_thread_handle.exchange(nullptr);
             g_inspect_deadline_ms.store(0);
+            // Clear the cancel flag now that we're going for the
+            // hammer — the next inspect should start clean.
+            {
+                std::lock_guard<std::mutex> lk(g_script_mu);
+                if (g_script.set_global_cancel) g_script.set_global_cancel(0);
+            }
             if (!h) continue;
             #pragma warning(push)
             #pragma warning(disable: 6258)   // TerminateThread is intentional
@@ -2702,11 +2740,10 @@ int main(int argc, char** argv) {
             CloseHandle(h);
             int n = ++g_watchdog_trips;
             std::fprintf(stderr, "[xinsp2] watchdog tripped (#%d) — terminated runaway inspect\n", n);
-            xp::LogMsg lm;
-            lm.level = "error";
-            lm.msg = "watchdog tripped — inspect exceeded "
-                   + std::to_string(g_watchdog_ms.load()) + "ms; thread terminated";
-            srv.send_text(lm.to_json());
+            emit_error_log(srv,
+                "watchdog tripped — inspect exceeded "
+                + std::to_string(g_watchdog_ms.load())
+                + "ms; cooperative cancel did not take, thread terminated");
         }
     });
     if (!srv.start(port)) {
