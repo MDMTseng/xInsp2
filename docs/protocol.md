@@ -118,6 +118,7 @@ Out-of-band notifications that don't fit the above.
 { "type": "event", "name": "run_finished", "data": { "run_id": 17, "ms": 42 } }
 { "type": "event", "name": "script_reloaded", "data": { "path": "..." } }
 { "type": "event", "name": "isolation_dead", "data": { "instance": "cam0" } }
+{ "type": "event", "name": "state_dropped", "data": { "old_schema": 1, "new_schema": 2 } }
 ```
 
 `isolation_dead` fires once per instance the first time
@@ -126,6 +127,15 @@ permanently dead (worker respawn cap hit; subsequent calls would
 return safe defaults silently). Pair with the `log` (level=error)
 message that lands in the same beat. Reset by reopening the project
 or removing/recreating the instance.
+
+`state_dropped` fires after `cmd:compile_and_load` when the new
+script DLL declares a different `xi_script_state_schema_version()`
+than the old one (and both are non-zero). The persisted `xi::state()`
+JSON would default-fill into a different shape, so the backend drops
+it and the new script runs with empty state. Set
+`#define XI_STATE_SCHEMA_VERSION N` before `#include <xi/xi.hpp>` to
+opt in; absent / 0 means "unversioned" and the legacy "restore
+blindly" path runs.
 
 ---
 

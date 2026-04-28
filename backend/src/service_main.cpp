@@ -71,6 +71,12 @@ static std::mutex               g_script_mu;
 
 // Persistent cross-frame state — survives DLL reloads.
 static std::string g_persistent_state_json = "{}";
+// Schema version of the DLL that wrote g_persistent_state_json. The
+// next DLL's xi_script_state_schema_version() is compared against
+// this on restore — mismatch (and both non-zero) drops the state
+// rather than letting set_state default-fill into a different shape.
+// 0 means "unversioned" — restore proceeds without the check.
+static int         g_persistent_state_schema = 0;
 
 // --- xi::use() callback implementations ---
 // These are called FROM the script DLL back INTO the backend, routing
@@ -1074,13 +1080,18 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         {
             std::lock_guard<std::mutex> lk(g_script_mu);
-            // Save persistent state before unloading old DLL
+            // Save persistent state before unloading old DLL.
+            // Stamp the OLD DLL's schema version alongside so restore
+            // into the new DLL can detect a shape mismatch.
             if (g_script.ok() && g_script.get_state) {
                 std::vector<char> buf(256 * 1024);
                 int n = g_script.get_state(buf.data(), (int)buf.size());
                 if (n < 0) { buf.resize((size_t)(-n) + 1024);
                              n = g_script.get_state(buf.data(), (int)buf.size()); }
                 if (n > 0) g_persistent_state_json.assign(buf.data(), (size_t)n);
+                g_persistent_state_schema = g_script.state_schema_version
+                                          ? g_script.state_schema_version()
+                                          : 0;
             }
             xi::script::unload_script(g_script);
             // Reset cross-script transient state — the new DLL may
@@ -1130,11 +1141,35 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             if (g_script.set_breakpoint_callback) {
                 g_script.set_breakpoint_callback((void*)breakpoint_cb);
             }
-            // Restore persistent state into the new DLL
+            // Restore persistent state into the new DLL — but drop it
+            // when the schema versions disagree (and both sides
+            // declared one), since set_state's silent default-fill on
+            // a shape change would confuse the new code more than
+            // starting fresh would.
             if (g_script.set_state && g_persistent_state_json.size() > 2) {
-                g_script.set_state(g_persistent_state_json.c_str());
-                std::fprintf(stderr, "[xinsp2] state restored (%zu bytes)\n",
-                             g_persistent_state_json.size());
+                int new_schema = g_script.state_schema_version
+                               ? g_script.state_schema_version()
+                               : 0;
+                bool drop = (g_persistent_state_schema != 0 &&
+                             new_schema != 0 &&
+                             g_persistent_state_schema != new_schema);
+                if (drop) {
+                    std::fprintf(stderr,
+                        "[xinsp2] state schema changed (v%d → v%d) — dropping prior state\n",
+                        g_persistent_state_schema, new_schema);
+                    std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
+                                     "\"data\":{\"old_schema\":"
+                                   + std::to_string(g_persistent_state_schema)
+                                   + ",\"new_schema\":"
+                                   + std::to_string(new_schema)
+                                   + "}}";
+                    srv.send_text(ev);
+                    g_persistent_state_json = "{}";
+                } else {
+                    g_script.set_state(g_persistent_state_json.c_str());
+                    std::fprintf(stderr, "[xinsp2] state restored (%zu bytes, schema v%d)\n",
+                                 g_persistent_state_json.size(), new_schema);
+                }
             }
         }
 
