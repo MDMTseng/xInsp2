@@ -94,6 +94,19 @@ public:
         entry->channels = ch;
         entry->refcount.store(1, std::memory_order_relaxed);
         entry->owner    = current_owner();
+        // Cumulative counters — never decrement. Live snapshots
+        // (current handle_count) go back to zero between runs as
+        // entries get released, which made the per-instance ledger
+        // look empty even when a script was busy. The cumulative
+        // figures expose actual activity for "did this script ever
+        // create images?" / "what's the peak we've seen?" questions.
+        uint64_t cum = total_created_.fetch_add(1, std::memory_order_relaxed) + 1;
+        (void)cum;
+        int32_t live = live_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        int32_t hw = high_water_.load(std::memory_order_relaxed);
+        while (live > hw &&
+               !high_water_.compare_exchange_weak(hw, live,
+                       std::memory_order_relaxed)) {}
 
         uint32_t idx = acquire_slot_();
         if (idx == 0xFFFFFFFFu) {       // pool exhausted
@@ -129,6 +142,7 @@ public:
             slots_[idx].entry.store(nullptr, std::memory_order_release);
             release_slot_(idx);
             delete e;
+            live_count_.fetch_sub(1, std::memory_order_relaxed);
         }
     }
 
@@ -199,7 +213,21 @@ public:
             delete e;
             ++swept;
         }
+        if (swept > 0) live_count_.fetch_sub(swept, std::memory_order_relaxed);
         return swept;
+    }
+
+    struct GlobalCum {
+        uint64_t total_created = 0;   // lifetime allocation count
+        int32_t  high_water    = 0;   // max simultaneous live count seen
+        int32_t  live_now      = 0;   // current live (== stats().handle_count)
+    };
+    GlobalCum cumulative() const {
+        GlobalCum g;
+        g.total_created = total_created_.load(std::memory_order_relaxed);
+        g.high_water    = high_water_.load(std::memory_order_relaxed);
+        g.live_now      = live_count_.load(std::memory_order_relaxed);
+        return g;
     }
 
     struct OwnerStats {
@@ -355,6 +383,12 @@ private:
     // version field defends against ABA on push/pop races. 0 in the
     // low bits = list empty.
     std::atomic<uint64_t> free_head_{0};
+    // Cumulative diagnostics — never decremented except `live_count_`,
+    // which mirrors stats().handle_count via cheap atomics so the
+    // peak watermark math doesn't have to walk the slot array.
+    std::atomic<uint64_t> total_created_{0};
+    std::atomic<int32_t>  live_count_{0};
+    std::atomic<int32_t>  high_water_{0};
 
     uint32_t acquire_slot_() {
         // Try the free list first.

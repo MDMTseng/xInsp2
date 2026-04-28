@@ -1973,10 +1973,21 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             return "owner:" + std::to_string(o) + " (orphan)";
         };
 
+        // Cumulative diagnostics: total_created and high_water never
+        // decrement, so they expose activity even when live counts are
+        // zero between runs (the agent feedback loop hit this — live
+        // snapshots looked empty mid-test, hiding real allocation).
+        auto cum = xi::ImagePool::instance().cumulative();
         std::string out = "{\"total\":{\"handles\":"
                         + std::to_string(totals.handle_count)
                         + ",\"bytes\":"
                         + std::to_string(totals.total_bytes)
+                        + "},\"cumulative\":{\"total_created\":"
+                        + std::to_string(cum.total_created)
+                        + ",\"high_water\":"
+                        + std::to_string(cum.high_water)
+                        + ",\"live_now\":"
+                        + std::to_string(cum.live_now)
                         + "},\"by_owner\":[";
         for (size_t i = 0; i < by_owner.size(); ++i) {
             if (i) out += ",";
@@ -2020,8 +2031,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, "failed to create project");
         }
     } else if (name == "open_project") {
+        // Accept either `folder` (historical) or `path` (matches what
+        // the protocol doc + Python SDK / load_project use). Same arg,
+        // different name; this defuses the inconsistency the AI agent
+        // hit on the size-buckets case.
         auto folder = xp::get_string_field(parsed->args_json, "folder");
-        if (!folder) { send_rsp_err(srv, id, "missing folder"); return; }
+        if (!folder) folder = xp::get_string_field(parsed->args_json, "path");
+        if (!folder) { send_rsp_err(srv, id, "missing folder/path"); return; }
         if (g_plugin_mgr.open_project(*folder)) {
             auto& proj = g_plugin_mgr.project();
             int inst_count = (int)proj.instances.size();
