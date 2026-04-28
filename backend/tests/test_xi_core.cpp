@@ -80,6 +80,40 @@ static void test_async_exception() {
 static int square(int x) { return x * x; }
 ASYNC_WRAP(square)
 
+static void test_async_cancel_cooperative() {
+    SECTION("async cancel — cooperative task observes the flag");
+    // Long-running task that polls cancellation_requested() at a
+    // 1ms loop. We expect it to exit early (well under the 500ms it
+    // would otherwise take) once we call cancel().
+    std::atomic<bool> task_started{false};
+    std::atomic<int>  iterations{0};
+    auto f = xi::async([&] {
+        task_started.store(true);
+        for (int i = 0; i < 500; ++i) {
+            if (xi::cancellation_requested()) return -1;
+            iterations.fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return 999;
+    });
+    while (!task_started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    f.cancel();
+    int rc = f;
+    CHECK(rc == -1);
+    CHECK(iterations.load() < 100);   // cancel observed early; 500 means it never noticed
+}
+
+static void test_async_cancel_idempotent() {
+    SECTION("async cancel — idempotent + survives task without cancellation API");
+    auto f = xi::async([] { return 42; });
+    int v = f;       // task already returned; cancel() after the fact must be safe
+    f.cancel();
+    f.cancel();
+    CHECK(v == 42);
+    CHECK(f.cancelled());
+}
+
 static void test_async_wrap() {
     SECTION("ASYNC_WRAP");
     auto f    = async_square(9);
@@ -244,6 +278,8 @@ int main() {
     test_async_parallel();
     test_async_exception();
     test_async_wrap();
+    test_async_cancel_cooperative();
+    test_async_cancel_idempotent();
 
     test_await_all_mixed_void();
     test_var_basic();
