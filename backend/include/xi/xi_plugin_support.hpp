@@ -18,7 +18,14 @@
 // are unaffected — these headers are #pragma once and idempotent.
 //
 
+// Note on operators: xInsp2 used to ship its own xi::ops library
+// (gaussian, erode, threshold, ...). That has been removed; plugins
+// call OpenCV directly via xi::Image::as_cv_mat() (a non-owning view
+// over pool memory) and xi::Image::create_in_pool(host(), w, h, c)
+// for outputs. See docs/guides/adding-a-plugin.md.
+
 #include "xi_abi.hpp"
 #include "xi_image.hpp"
-#include "xi_ops.hpp"
 #include "xi_record.hpp"
+
+#include <opencv2/opencv.hpp>

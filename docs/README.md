@@ -32,7 +32,6 @@ shapes.
 | [`reference/host_api.md`](./reference/host_api.md) | The `xi_host_api` function table the host hands to every plugin |
 | [`reference/plugin-abi.md`](./reference/plugin-abi.md) | The C exports a plugin DLL must provide; `XI_PLUGIN_IMPL` macro |
 | [`reference/instance-model.md`](./reference/instance-model.md) | How instances are loaded, persisted, registered, destroyed; `instance.json` schema; isolation modes |
-| [`reference/ops.md`](./reference/ops.md) | `xi::ops` operator cheatsheet — signatures, tradeoffs, async wrappers, dispatch order |
 | [`reference/ipc-shm.md`](./reference/ipc-shm.md) | Cross-process isolation architecture (currently on `shm-process-isolation` spike branch) |
 
 ## Design sketches (`design/`)

@@ -925,8 +925,8 @@ public:
             std::string body =
                 "// " + name + " — inspection script\n"
                 "#include <xi/xi.hpp>\n"
-                "#include <xi/xi_image.hpp>\n"
-                "#include <xi/xi_ops.hpp>\n\n"
+                "// xi.hpp pulls in OpenCV. For image ops call cv:: directly\n"
+                "// with xi::Image::as_cv_mat() / create_in_pool().\n\n"
                 "XI_SCRIPT_EXPORT\n"
                 "void xi_inspect_entry(int frame) {\n"
                 "    // TODO: add inspection logic\n"
@@ -1065,6 +1065,7 @@ public:
         // whether to fix or delete the bad instance folder.
         // (last_open_warnings_ already cleared above before plugin compile.)
         auto inst_dir = std::filesystem::path(folder) / "instances";
+        bool warned_no_iso_env = false;
         if (std::filesystem::exists(inst_dir)) {
             for (auto& entry : std::filesystem::directory_iterator(inst_dir)) {
                 if (!entry.is_directory()) continue;
@@ -1118,19 +1119,40 @@ public:
                     // Same registration as create_instance — needed for project-load too.
                     InstanceFolderRegistry::instance().set(ii.name, ii.folder_path);
 
-                    // Optional opt-in: instance.json: "isolation": "process"
-                    // → spawn a xinsp-worker.exe and proxy method calls
-                    // over IPC. Pixel data still goes via SHM so process()
-                    // is zero-copy. Worker auto-respawns on crash so a
-                    // buggy plugin doesn't take the backend down.
+                    // Default: isolation:"process" → spawn a xinsp-worker.exe
+                    // per instance and proxy method calls over IPC. Pixel
+                    // data goes via SHM so process() is zero-copy across
+                    // the process boundary. A buggy plugin can crash its
+                    // worker without taking the backend down; the manager
+                    // auto-respawns it.
                     //
-                    // Why opt-in (for now): the auto-conversion of heap-
-                    // pool handles to SHM is in worker_main but plugins
-                    // that hand back complex multi-image Records or that
-                    // store image_handle in their own JSON aren't fully
-                    // covered yet. Default-on is tracked in status.md.
+                    // Opt out per instance with `"isolation": "in_process"`
+                    // when you want the plugin to share the backend's
+                    // address space (debugger easier; lower per-call
+                    // latency; higher blast radius on crash). The legacy
+                    // value `"process"` keeps working as an explicit
+                    // declaration of the default.
+                    //
+                    // If the isolation env isn't configured (the
+                    // xinsp-worker.exe / SHM region weren't wired up at
+                    // backend startup), every instance falls back to
+                    // in-proc with a single warning per project open.
                     auto iso = extract_string(ic, "isolation");
-                    bool want_isolated = (iso && *iso == "process");
+                    bool isolation_env_ok = !worker_exe_.empty() && !shm_name_.empty();
+                    bool want_isolated;
+                    if (!iso) {
+                        want_isolated = isolation_env_ok;
+                    } else if (*iso == "in_process" || *iso == "none") {
+                        want_isolated = false;
+                    } else if (*iso == "process") {
+                        want_isolated = true;
+                    } else {
+                        std::fprintf(stderr,
+                            "[xinsp2] instance '%s' has unknown isolation value '%s' — using default (process)\n",
+                            ii.name.c_str(), iso->c_str());
+                        want_isolated = isolation_env_ok;
+                    }
+
                     // Optional per-instance IPC call timeout. Honoured only
                     // for isolation:"process" instances — the in-proc path
                     // doesn't have a watchdog of its own (the script-level
@@ -1141,11 +1163,12 @@ public:
                     if (auto tm = extract_string(ic, "call_timeout_ms")) {
                         try { call_timeout_ms = std::stoi(*tm); } catch (...) {}
                     }
-                    if (want_isolated && !worker_exe_.empty() && !shm_name_.empty()) {
+                    if (want_isolated && isolation_env_ok) {
                         try {
                             auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
                             auto adapter = std::make_shared<ProcessInstanceAdapter>(
-                                ii.name, *plugin, worker_exe_, dll_path, shm_name_);
+                                ii.name, *plugin, worker_exe_, dll_path, shm_name_,
+                                ii.folder_path);
                             if (call_timeout_ms > 0) adapter->set_call_timeout_ms(call_timeout_ms);
                             ii.instance = std::move(adapter);
                             created = true;
@@ -1156,11 +1179,16 @@ public:
                                 ii.name.c_str(), e.what());
                             // fall through to in-proc path below
                         }
-                    } else if (want_isolated) {
-                        std::fprintf(stderr,
-                            "[xinsp2] isolation:process requested for '%s' but "
-                            "worker env not configured — using in-proc\n",
-                            ii.name.c_str());
+                    } else if (want_isolated && !isolation_env_ok) {
+                        // Print this warning at most once per project open
+                        // so a project with N instances doesn't get N
+                        // identical lines.
+                        if (!warned_no_iso_env) {
+                            std::fprintf(stderr,
+                                "[xinsp2] isolation env not configured (worker exe / shm) "
+                                "— this project's plugins will run in-proc\n");
+                            warned_no_iso_env = true;
+                        }
                     }
 
                     if (!created && pi.c_factory) {

@@ -5,11 +5,8 @@
 
 #include <xi/xi.hpp>
 #include <xi/xi_image.hpp>
-#include <xi/xi_ops.hpp>
 #include <xi/xi_record.hpp>
 #include <xi/xi_plugin_handle.hpp>
-
-using namespace xi::ops;
 
 // Tunable params
 xi::Param<int> thresh{"threshold", 100, {0, 255}};
@@ -51,7 +48,9 @@ void xi_inspect_entry(int frame) {
     auto img = make_test_image(frame);
     VAR(input, img);
 
-    auto gray = toGray(img);
+    cv::Mat gm;
+    cv::cvtColor(img.as_cv_mat(), gm, cv::COLOR_RGB2GRAY);
+    xi::Image gray(gm.cols, gm.rows, 1, gm.data);
     VAR(gray_img, gray);
 
     // Call blob_analysis through the C ABI — zero knowledge of its internals

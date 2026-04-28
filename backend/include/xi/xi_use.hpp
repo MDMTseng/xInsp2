@@ -20,7 +20,6 @@
 #include "xi_abi.h"
 #include "xi_record.hpp"
 #include "xi_image.hpp"
-#include "xi_image_pool.hpp"
 
 #include <cstring>
 #include <string>
@@ -94,7 +93,10 @@ public:
         return buf;
     }
 
-    // Returns the named source's image, copied into a script-side Image.
+    // Returns the named source's image as a zero-copy view over the
+    // host pool handle. `fn` returned a fresh ref (refcount=1);
+    // adopt_pool_handle addrefs (=2); we release once (=1) — the
+    // remaining ref is owned by the returned Image's shared_ptr deleter.
     // Sources with multiple frames-per-trigger use the key
     // "<source>/<image_name>"; for the common single-frame case the
     // key is just the source name.
@@ -104,12 +106,7 @@ public:
         if (!fn || !host) return {};
         xi_image_handle h = fn(source.c_str());
         if (h == XI_IMAGE_NULL) return {};
-        int w = host->image_width(h);
-        int hh = host->image_height(h);
-        int ch = host->image_channels(h);
-        const uint8_t* p = host->image_data(h);
-        Image img;
-        if (p && w > 0 && hh > 0) img = Image(w, hh, ch, p);
+        Image img = Image::adopt_pool_handle(host, h);
         host->image_release(h);
         return img;
     }
@@ -158,15 +155,23 @@ public:
         auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
         if (!process_fn || !host) return {};
 
-        // Marshal input Record → C ABI. Allocate handles in the BACKEND
-        // pool (via host_api) so the receiving plugin can resolve them.
+        // Marshal input Record → C ABI. Pool-backed Images forward
+        // their existing handle (just addref); heap-backed Images
+        // allocate a new pool slot and memcpy the bytes in. The
+        // receiving plugin sees the handle either way.
         std::vector<xi_record_image> in_imgs;
         std::vector<xi_image_handle>  in_handles;
         for (auto& [key, img] : input.images()) {
             if (img.empty()) continue;
-            xi_image_handle h = host->image_create(img.width, img.height, img.channels);
-            if (h == XI_IMAGE_NULL) continue;
-            std::memcpy(host->image_data(h), img.data(), img.size());
+            xi_image_handle h = XI_IMAGE_NULL;
+            if (img.pool_handle() && img.pool_host() == host) {
+                h = img.pool_handle();
+                host->image_addref(h);
+            } else {
+                h = host->image_create(img.width, img.height, img.channels);
+                if (h == XI_IMAGE_NULL) continue;
+                std::memcpy(host->image_data(h), img.data(), img.size());
+            }
             in_imgs.push_back({key.c_str(), h});
             in_handles.push_back(h);
         }
@@ -197,18 +202,16 @@ public:
                 cJSON_Delete(parsed);
             }
         }
-        // Output handles live in the BACKEND pool. Copy pixels into a
-        // script-side Image, then release the backend handle.
+        // Output handles live in the BACKEND pool. Zero-copy: wrap as
+        // a pool-backed view (adopt_pool_handle addrefs internally) and
+        // release our process_fn ref. Net refcount: still 1, held by
+        // the script-side xi::Image via its shared_ptr deleter.
         for (int i = 0; i < output.image_count; ++i) {
             xi_image_handle h = output.images[i].handle;
-            int w  = host->image_width(h);
-            int hi = host->image_height(h);
-            int ch = host->image_channels(h);
-            const uint8_t* p = host->image_data(h);
-            if (p && w > 0 && hi > 0) {
-                result.image(output.images[i].key, Image(w, hi, ch, p));
-            }
+            if (!h) continue;
+            Image img = Image::adopt_pool_handle(host, h);
             host->image_release(h);
+            if (!img.empty()) result.image(output.images[i].key, std::move(img));
         }
         xi_record_out_free(&output);
         return result;
@@ -226,11 +229,12 @@ public:
 
     Image grab(int timeout_ms = 500) {
         auto grab_fn = reinterpret_cast<UseGrabFn>(g_use_grab_fn_);
-        if (!grab_fn) return {};
+        auto* host   = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
+        if (!grab_fn || !host) return {};
         xi_image_handle h = grab_fn(name_.c_str(), timeout_ms);
         if (h == XI_IMAGE_NULL) return {};
-        Image img = ImagePool::instance().to_image(h);
-        ImagePool::instance().release(h);
+        Image img = Image::adopt_pool_handle(host, h);
+        host->image_release(h);
         return img;
     }
 

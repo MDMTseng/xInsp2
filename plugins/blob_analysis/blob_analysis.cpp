@@ -23,7 +23,6 @@
 //
 
 #include <xi/xi_abi.hpp>
-#include <xi/xi_ops.hpp>
 
 #include <algorithm>
 #include <cmath>

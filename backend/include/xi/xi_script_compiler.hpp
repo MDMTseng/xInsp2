@@ -53,13 +53,14 @@ struct CompileRequest {
     std::string include_dir;    // backend/include (always added)
     std::string vcvars_path;
     CompileMode mode = CompileMode::Script;
-    // Optional accelerator install roots — when set, the script DLL is
-    // compiled with the matching XINSP2_HAS_* define so xi::ops dispatch
-    // gets the same backend as the main process. Empty = no acceleration
-    // for that path (script falls back to portable C++).
-    std::string opencv_dir;        // OpenCV install root with include/ and lib/
+    // OpenCV install root — REQUIRED. Plugins/scripts include
+    // <opencv2/opencv.hpp> directly via xi.hpp / xi_plugin_support.hpp,
+    // so the compile step needs the include + lib paths wired in.
+    std::string opencv_dir;
+    // Optional accelerator roots for the JPEG-encode dispatch in
+    // xi_jpeg.hpp; not used for image operators (those are cv::).
     std::string turbojpeg_root;    // libjpeg-turbo install root
-    std::string ipp_root;          // Intel IPP install root (image ops only)
+    std::string ipp_root;          // Intel IPP install root
 };
 
 // One diagnostic line parsed out of cl.exe / link.exe output.
@@ -353,18 +354,18 @@ inline CompileResult compile(const CompileRequest& req) {
     } else {
         cmd += " /FIxi/xi_plugin_support.hpp";
     }
-    // Accelerator includes — defines and -I; libs added at /link below.
-    if (!req.opencv_dir.empty()) {
-        cmd += " /D XINSP2_HAS_OPENCV=1";
-        cmd += " /I\"" + req.opencv_dir + "\\include\"";
+    // OpenCV is mandatory: xi.hpp / xi_plugin_support.hpp pull in
+    // <opencv2/opencv.hpp> for cv:: image operators.
+    if (req.opencv_dir.empty()) {
+        CompileResult r;
+        r.ok = false;
+        r.build_log = "OpenCV not configured (set OpenCV_DIR or install to a default location); xInsp2 requires OpenCV for image operators";
+        return r;
     }
+    cmd += " /I\"" + req.opencv_dir + "\\include\"";
     if (!req.turbojpeg_root.empty()) {
         cmd += " /D XINSP2_HAS_TURBOJPEG=1";
         cmd += " /I\"" + req.turbojpeg_root + "\\include\"";
-    }
-    if (!req.ipp_root.empty()) {
-        cmd += " /D XINSP2_HAS_IPP=1";
-        cmd += " /I\"" + req.ipp_root + "\\include\"";
     }
     cmd += " /Fo\"" + req.output_dir + "\\\\\"";
     cmd += " /Fe\"" + out_dll.string() + "\"";

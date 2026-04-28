@@ -33,23 +33,21 @@ if(MSVC)
     add_compile_options(/W3 /utf-8)
 endif()
 
-# Optional OpenCV — when available, plugins get faster xi::ops automatically.
-# Auto-detect typical Windows install location; allow override via OpenCV_DIR.
-option(XINSP2_PLUGIN_USE_OPENCV "Link OpenCV into plugins for accelerated xi::ops" ON)
-if(XINSP2_PLUGIN_USE_OPENCV)
-    if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
-        foreach(_d "C:/opencv/opencv/build/x64/vc16/lib"
-                   "C:/opencv/opencv/build/x64/vc17/lib"
-                   "C:/opencv/build/x64/vc16/lib"
-                   "C:/opencv/build/x64/vc17/lib")
-            if(EXISTS "${_d}/OpenCVConfig.cmake")
-                set(OpenCV_DIR "${_d}")
-                break()
-            endif()
-        endforeach()
-    endif()
-    find_package(OpenCV QUIET COMPONENTS core imgcodecs imgproc)
+# OpenCV: mandatory. xInsp2 headers (xi.hpp / xi_plugin_support.hpp)
+# pull in <opencv2/opencv.hpp> for image operators, so every plugin
+# needs OpenCV's include + libs visible.
+if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
+    foreach(_d "C:/opencv/opencv/build/x64/vc16/lib"
+               "C:/opencv/opencv/build/x64/vc17/lib"
+               "C:/opencv/build/x64/vc16/lib"
+               "C:/opencv/build/x64/vc17/lib")
+        if(EXISTS "${_d}/OpenCVConfig.cmake")
+            set(OpenCV_DIR "${_d}")
+            break()
+        endif()
+    endforeach()
 endif()
+find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
 
 # xinsp2_add_plugin(<target> <sources...>)
 #
@@ -63,11 +61,8 @@ function(xinsp2_add_plugin name)
     set_target_properties(${name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}
         LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR})
-    if(XINSP2_PLUGIN_USE_OPENCV AND OpenCV_FOUND)
-        target_compile_definitions(${name} PRIVATE XINSP2_HAS_OPENCV=1)
-        target_include_directories(${name} PRIVATE ${OpenCV_INCLUDE_DIRS})
-        target_link_libraries(${name} PRIVATE ${OpenCV_LIBS})
-    endif()
+    target_include_directories(${name} PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(${name} PRIVATE ${OpenCV_LIBS})
 endfunction()
 
 # xinsp2_add_plugin_test(<target> <sources...>)

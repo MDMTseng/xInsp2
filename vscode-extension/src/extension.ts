@@ -1491,11 +1491,8 @@ export function activate(context: vscode.ExtensionContext) {
 // xInsp2 sample — mock_camera → blob_analysis pipeline.
 // Edit, save (compiles automatically), and click Run Inspection.
 //
-#include <xi/xi.hpp>
-#include <xi/xi_ops.hpp>
+#include <xi/xi.hpp>          // pulls in OpenCV
 #include <xi/xi_use.hpp>
-
-using namespace xi::ops;
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
@@ -1511,10 +1508,9 @@ void xi_inspect_entry(int frame) {
     }
     VAR(input, img);
 
-    auto gray = toGray(img);
-    VAR(gray, gray);
-
-    auto out = det.process(xi::Record().image("gray", gray));
+    // Source is already 1-channel here; if your camera produces RGB,
+    // run cv::cvtColor(img.as_cv_mat(), ..., cv::COLOR_RGB2GRAY).
+    auto out = det.process(xi::Record().image("gray", img));
     VAR(detection, out);
     VAR(blob_count, out["blob_count"].as_int());
     VAR(binary,     out.get_image("binary"));

@@ -35,13 +35,10 @@ else()
     add_compile_options(-Wall -Wextra)
 endif()
 
-# JPEG encoder + image-op backends.
-# Defaults: OpenCV is auto-detected (it's the default ops backend below
-# the IPP layer); IPP and turbojpeg stay opt-in because they're not
-# universally installed.
-option(XINSP2_HAS_IPP        "Link Intel IPP for JPEG encode + image ops" OFF)
+# OpenCV is mandatory (image operators); IPP / turbojpeg stay opt-in
+# accelerators for the JPEG-encode path only.
+option(XINSP2_HAS_IPP        "Link Intel IPP for JPEG encode acceleration" OFF)
 option(XINSP2_HAS_TURBOJPEG  "Link libjpeg-turbo for direct SIMD JPEG encode" OFF)
-option(XINSP2_HAS_OPENCV     "Link OpenCV (default ops backend; auto-detected)" ON)
 # Default install root: C:\libjpeg-turbo64 (Windows) or /opt/libjpeg-turbo (Linux)
 set(TURBOJPEG_ROOT "C:/libjpeg-turbo64" CACHE PATH "libjpeg-turbo install root")
 
@@ -53,29 +50,30 @@ target_include_directories(xi_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 )
+# xi.hpp / xi_plugin_support.hpp pull in <opencv2/opencv.hpp>, so every
+# target that uses xi_core needs OpenCV's include + libs visible.
+# OpenCV is configured immediately below.
 
 enable_testing()
 
 # Resolve optional encoder libs ONCE so every target that needs them
 # (xinsp_backend, xinsp_runner, bench_jpeg) shares the same lookup.
-if(XINSP2_HAS_OPENCV)
-    # Auto-detect typical Windows install locations if OpenCV_DIR not set.
-    if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
-        foreach(_d "C:/opencv/opencv/build/x64/vc16/lib"
-                   "C:/opencv/opencv/build/x64/vc17/lib"
-                   "C:/opencv/build/x64/vc16/lib"
-                   "C:/opencv/build/x64/vc17/lib")
-            if(EXISTS "${_d}/OpenCVConfig.cmake")
-                set(OpenCV_DIR "${_d}")
-                break()
-            endif()
-        endforeach()
-    endif()
-    find_package(OpenCV QUIET COMPONENTS core imgcodecs imgproc)
-    if(NOT OpenCV_FOUND)
-        message(WARNING "XINSP2_HAS_OPENCV=ON but OpenCV not found; ops fall back to portable C++. Pass -DOpenCV_DIR=... or install OpenCV.")
-    endif()
+# OpenCV: mandatory. Auto-detect typical Windows install locations if
+# OpenCV_DIR isn't already set.
+if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
+    foreach(_d "C:/opencv/opencv/build/x64/vc16/lib"
+               "C:/opencv/opencv/build/x64/vc17/lib"
+               "C:/opencv/build/x64/vc16/lib"
+               "C:/opencv/build/x64/vc17/lib")
+        if(EXISTS "${_d}/OpenCVConfig.cmake")
+            set(OpenCV_DIR "${_d}")
+            break()
+        endif()
+    endforeach()
 endif()
+find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
+target_include_directories(xi_core INTERFACE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(xi_core INTERFACE ${OpenCV_LIBS})
 if(XINSP2_HAS_IPP)
     # Default install layout: C:/Intel/ipp/<ver>/{include,lib,bin}
     # Override with -DIPP_ROOT=... or env IPP_ROOT.
@@ -208,24 +206,6 @@ add_executable(test_sha256 tests/test_sha256.cpp)
 target_link_libraries(test_sha256 PRIVATE xi_core)
 add_test(NAME sha256 COMMAND test_sha256)
 
-add_executable(test_ops tests/test_ops.cpp)
-target_link_libraries(test_ops PRIVATE xi_core)
-if(NOT MSVC)
-    target_link_libraries(test_ops PRIVATE pthread)
-endif()
-if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
-    target_compile_definitions(test_ops PRIVATE XINSP2_HAS_IPP=1)
-    target_include_directories(test_ops PRIVATE ${IPP_INCLUDE_DIR})
-    target_link_libraries(test_ops PRIVATE
-        ${IPP_CORE_LIB} ${IPP_I_LIB} ${IPP_CV_LIB} ${IPP_CC_LIB})
-endif()
-if(XINSP2_HAS_OPENCV AND OpenCV_FOUND)
-    target_compile_definitions(test_ops PRIVATE XINSP2_HAS_OPENCV=1)
-    target_include_directories(test_ops PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(test_ops PRIVATE ${OpenCV_LIBS})
-endif()
-add_test(NAME ops COMMAND test_ops)
-
 add_executable(xinsp_backend
     src/service_main.cpp
     src/stb_impl.cpp
@@ -273,43 +253,12 @@ if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_link_libraries(bench_jpeg PRIVATE
         ${IPP_CORE_LIB} ${IPP_I_LIB} ${IPP_CV_LIB} ${IPP_CC_LIB})
 endif()
-if(XINSP2_HAS_OPENCV AND OpenCV_FOUND)
-    target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_OPENCV=1)
-    target_include_directories(bench_jpeg PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(bench_jpeg PRIVATE ${OpenCV_LIBS})
-endif()
+target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_OPENCV=1)
+# OpenCV include + libs come via xi_core's INTERFACE.
 if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
     target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_TURBOJPEG=1)
     target_include_directories(bench_jpeg PRIVATE ${TURBOJPEG_INCLUDE_DIR})
     target_link_libraries(bench_jpeg PRIVATE ${TURBOJPEG_LIB})
-endif()
-
-# xi::ops benchmark — toGray / threshold / gaussian / sobel / erode / dilate
-add_executable(bench_ops tests/bench_ops.cpp)
-target_link_libraries(bench_ops PRIVATE xi_core)
-if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
-    target_compile_definitions(bench_ops PRIVATE XINSP2_HAS_IPP=1)
-    target_include_directories(bench_ops PRIVATE ${IPP_INCLUDE_DIR})
-    target_link_libraries(bench_ops PRIVATE
-        ${IPP_CORE_LIB} ${IPP_I_LIB} ${IPP_CV_LIB} ${IPP_CC_LIB})
-endif()
-if(XINSP2_HAS_OPENCV AND OpenCV_FOUND)
-    target_compile_definitions(bench_ops PRIVATE XINSP2_HAS_OPENCV=1)
-    target_include_directories(bench_ops PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(bench_ops PRIVATE ${OpenCV_LIBS})
-endif()
-
-# Always-cpp variant for side-by-side comparison.
-add_executable(bench_ops_cpp tests/bench_ops.cpp)
-target_link_libraries(bench_ops_cpp PRIVATE xi_core)
-
-# OpenCV-only variant (no IPP).
-if(XINSP2_HAS_OPENCV AND OpenCV_FOUND)
-    add_executable(bench_ops_cv tests/bench_ops.cpp)
-    target_link_libraries(bench_ops_cv PRIVATE xi_core)
-    target_compile_definitions(bench_ops_cv PRIVATE XINSP2_HAS_OPENCV=1)
-    target_include_directories(bench_ops_cv PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(bench_ops_cv PRIVATE ${OpenCV_LIBS})
 endif()
 
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
@@ -319,11 +268,8 @@ if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
         ${IPP_CORE_LIB} ${IPP_I_LIB} ${IPP_CV_LIB} ${IPP_CC_LIB})
 endif()
 
-if(XINSP2_HAS_OPENCV AND OpenCV_FOUND)
-    target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_OPENCV=1)
-    target_include_directories(xinsp_backend PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(xinsp_backend PRIVATE ${OpenCV_LIBS})
-endif()
+target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_OPENCV=1)
+# OpenCV include + libs come via xi_core's INTERFACE.
 
 if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_TURBOJPEG=1)
@@ -336,17 +282,15 @@ endif()
 # pre-mangled PATH. We do this for xinsp_backend and xinsp_runner.
 function(_xinsp_deploy_dlls tgt)
     set(_dll_files "")
-    if(XINSP2_HAS_OPENCV AND OpenCV_FOUND)
-        # Pre-built OpenCV ships its DLLs in <root>/x64/<vc>/bin.
-        foreach(_vc "vc16" "vc17" "vc14")
-            set(_bin "${OpenCV_DIR}/../bin")
-            if(EXISTS "${_bin}")
-                file(GLOB _cv_dlls "${_bin}/opencv_world*.dll" "${_bin}/opencv_videoio_*.dll")
-                list(APPEND _dll_files ${_cv_dlls})
-                break()
-            endif()
-        endforeach()
-    endif()
+    # Pre-built OpenCV ships its DLLs in <root>/x64/<vc>/bin.
+    foreach(_vc "vc16" "vc17" "vc14")
+        set(_bin "${OpenCV_DIR}/../bin")
+        if(EXISTS "${_bin}")
+            file(GLOB _cv_dlls "${_bin}/opencv_world*.dll" "${_bin}/opencv_videoio_*.dll")
+            list(APPEND _dll_files ${_cv_dlls})
+            break()
+        endif()
+    endforeach()
     if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_LIB)
         get_filename_component(_tj_dir "${TURBOJPEG_LIB}" DIRECTORY)
         get_filename_component(_tj_root "${_tj_dir}" DIRECTORY)

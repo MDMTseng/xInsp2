@@ -49,10 +49,11 @@ public:
                            std::string plugin_name,
                            const std::filesystem::path& worker_exe,
                            const std::filesystem::path& plugin_dll,
-                           const std::string& shm_name)
+                           const std::string& shm_name,
+                           std::string instance_folder = {})
         : name_(std::move(instance_name)), plugin_name_(std::move(plugin_name)),
           worker_exe_path_(worker_exe), plugin_dll_path_(plugin_dll),
-          shm_name_(shm_name)
+          shm_name_(shm_name), instance_folder_(std::move(instance_folder))
     {
         // Per-instance pipe name. Worker process is short-lived enough
         // that name reuse across runs isn't a concern.
@@ -62,11 +63,19 @@ public:
         pipe_name_ = nbuf;
 
         // Spawn the worker first; pipe accept blocks until it connects.
+        // `--instance-folder` is the persistent dir for this instance
+        // (project/instances/<name>/) — worker registers it in its own
+        // InstanceFolderRegistry so plugin code can call host->
+        // instance_folder() / Plugin::folder_path() the same way it
+        // would in-proc.
         std::string cmd = "\"" + worker_exe.string() + "\""
             + " --pipe=" + pipe_name_
             + " --shm=" + shm_name
             + " --plugin-dll=\"" + plugin_dll.string() + "\""
             + " --instance=" + name_;
+        if (!instance_folder_.empty()) {
+            cmd += " --instance-folder=\"" + instance_folder_ + "\"";
+        }
 
         STARTUPINFOA si{}; si.cb = sizeof(si);
         PROCESS_INFORMATION pi{};
@@ -353,6 +362,9 @@ private:
             + " --shm=" + shm_name_
             + " --plugin-dll=\"" + plugin_dll_path_.string() + "\""
             + " --instance=" + name_;
+        if (!instance_folder_.empty()) {
+            cmd += " --instance-folder=\"" + instance_folder_ + "\"";
+        }
 
         STARTUPINFOA si{}; si.cb = sizeof(si);
         PROCESS_INFORMATION pi{};
@@ -449,6 +461,7 @@ private:
     std::filesystem::path worker_exe_path_;
     std::filesystem::path plugin_dll_path_;
     std::string           shm_name_;
+    std::string           instance_folder_;
 
     // Auto-respawn rate-limit: at most 3 respawns per 60s rolling window.
     int      respawn_count_           = 0;   // total this lifetime, for diagnostics

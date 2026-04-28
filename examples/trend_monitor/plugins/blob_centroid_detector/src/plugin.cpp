@@ -38,9 +38,7 @@
 //     "centroids"         : array of {"x":int,"y":int,"area":int}
 //
 
-#include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
-#include <xi/xi_ops.hpp>
 
 #include <cstdint>
 #include <vector>
@@ -67,11 +65,24 @@ public:
         if (max_a   < min_a) max_a = min_a;
 
         // 1) Smooth + local-mean background.
-        xi::Image blurred = (blur_r > 0) ? xi::ops::gaussian(src, blur_r) : src;
-        xi::Image bg      = xi::ops::boxBlur(blurred, block_r);
+        xi::Image blurred = pool_image(src.width, src.height, 1);
+        if (blur_r > 0) {
+            int k = 2 * blur_r + 1;
+            cv::GaussianBlur(src.as_cv_mat(), blurred.as_cv_mat(),
+                             cv::Size(k, k), 0);
+        } else {
+            src.as_cv_mat().copyTo(blurred.as_cv_mat());
+        }
+
+        xi::Image bg = pool_image(src.width, src.height, 1);
+        {
+            int k = 2 * block_r + 1;
+            cv::boxFilter(blurred.as_cv_mat(), bg.as_cv_mat(), -1,
+                          cv::Size(k, k));
+        }
 
         // 2) Threshold: pixel is "dark vs local bg" when bg - blurred > C.
-        xi::Image mask(src.width, src.height, 1);
+        xi::Image mask = pool_image(src.width, src.height, 1);
         const uint8_t* sp = blurred.data();
         const uint8_t* bp = bg.data();
         uint8_t*       mp = mask.data();
@@ -82,36 +93,40 @@ public:
         }
 
         // 3) Morph-close to seal noise pinholes inside the disc.
-        xi::Image cleaned = (close_r > 0) ? xi::ops::close(mask, close_r) : mask;
+        xi::Image cleaned = pool_image(src.width, src.height, 1);
+        if (close_r > 0) {
+            int k = 2 * close_r + 1;
+            auto kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k));
+            cv::morphologyEx(mask.as_cv_mat(), cleaned.as_cv_mat(),
+                             cv::MORPH_CLOSE, kernel);
+        } else {
+            mask.as_cv_mat().copyTo(cleaned.as_cv_mat());
+        }
 
-        // 4) Connected components → centroids.
-        auto regions = xi::ops::findFilledRegions(cleaned);
+        // 4) Connected components with centroids built in.
+        cv::Mat labels, stats, centroids;
+        int n_labels = cv::connectedComponentsWithStats(
+            cleaned.as_cv_mat(), labels, stats, centroids, 8, CV_32S);
 
         int n_small = 0, n_big = 0, n_count = 0;
-        // Build a JSON array via xi::Json so it nests correctly
-        // through Record::set_raw / cJSON.
         xi::Json arr = xi::Json::array();
-        for (auto& r : regions) {
-            int area = (int)r.size();
+        for (int i = 1; i < n_labels; ++i) {
+            int area = stats.at<int>(i, cv::CC_STAT_AREA);
             if (area < min_a) { ++n_small; continue; }
             if (area > max_a) { ++n_big;   continue; }
             ++n_count;
-            // Centroid = mean of integer pixel coords (good enough for
-            // tracking purposes — sub-pixel accuracy not needed since
-            // per-frame motion is 4..20 px).
-            long sx = 0, sy = 0;
-            for (auto& pt : r) { sx += pt.x; sy += pt.y; }
-            int cx = (int)(sx / (long)r.size());
-            int cy = (int)(sy / (long)r.size());
+            int cx = (int)centroids.at<double>(i, 0);
+            int cy = (int)centroids.at<double>(i, 1);
             xi::Json c = xi::Json::object();
             c.set("x", cx);
             c.set("y", cy);
             c.set("area", area);
             arr.push(c);
         }
+        int total_regions = std::max(0, n_labels - 1);
 
         last_count_ = n_count;
-        last_total_ = (int)regions.size();
+        last_total_ = total_regions;
         last_small_ = n_small;
         last_big_   = n_big;
         ++frames_processed_;
@@ -120,7 +135,7 @@ public:
         out.image("mask",    mask)
            .image("cleaned", cleaned)
            .set("count",          n_count)
-           .set("total_regions",  (int)regions.size())
+           .set("total_regions",  total_regions)
            .set("rejected_small", n_small)
            .set("rejected_big",   n_big)
            .set("blur_radius",    blur_r)
@@ -129,10 +144,6 @@ public:
            .set("close_radius",   close_r)
            .set("min_area",       min_a)
            .set("max_area",       max_a);
-        // Attach the centroids array as a raw cJSON child so the
-        // script can read it via record["centroids"][i]["x"] etc.
-        // Duplicate so `arr` (xi::Json owning) can RAII-free its
-        // own copy when the function returns.
         out.set_raw("centroids", cJSON_Duplicate(arr.raw(), 1));
         return out;
     }

@@ -157,6 +157,30 @@ Don't `image_release` input handles — the host owns them for the
 call's duration. Don't `image_release` output handles — they belong
 to the host after this returns.
 
+#### Zero-copy across the ABI
+
+Image bytes never get memcpy'd just because they cross the plugin
+boundary. The C++ wrapper's `record_from_c` adopts each input handle
+as a refcounted view (`xi::Image::adopt_pool_handle`) — the resulting
+`xi::Image::data()` points directly at pool memory, not at a heap
+copy. On the way out, `record_to_c` checks whether the returned
+`xi::Image` is itself pool-backed; if it is (and from this same
+host), it forwards the existing handle with an `addref` instead of
+allocating a fresh slot and memcpy'ing pixels into it.
+
+That makes pure forwarding (e.g. plugin A passing its input mask to
+plugin B unchanged) genuinely zero-copy. Plugins that **produce new
+pixels** (the usual case — gaussian, threshold, erode, …) still pay
+exactly one memcpy when their freshly-allocated `xi::Image` lands in
+the pool on the way out. That copy is structurally unavoidable until
+operators are rewritten to write directly into pool slots via
+`host->image_create()`; it's a future-work item, not a bug.
+
+Cross-process isolation goes through the worker's SHM region rather
+than the in-process pool, but the same handle-based contract applies
+— the worker's RPC layer transfers handles, not bytes. See
+`xi_process_instance.hpp::process_via_rpc`.
+
 ### `xi_plugin_exchange`
 
 Generic RPC channel. Used for:

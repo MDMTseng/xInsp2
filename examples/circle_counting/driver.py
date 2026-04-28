@@ -39,6 +39,11 @@ def run_all(params=None):
     results = []
     with Client() as c:
         try:
+            c.open_project(str(ROOT))
+        except ProtocolError as e:
+            print("OPEN_PROJECT FAILED:", e)
+            return None
+        try:
             c.compile_and_load(str(INSPECT_CPP))
         except ProtocolError as e:
             print("COMPILE FAILED:", e)

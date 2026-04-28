@@ -88,16 +88,26 @@ int main(int argc, char** argv) {
     std::string shm_name    = arg_get(argc, argv, "shm");
     std::string plugin_dll  = arg_get(argc, argv, "plugin-dll");
     std::string instance    = arg_get(argc, argv, "instance", "worker0");
+    std::string inst_folder = arg_get(argc, argv, "instance-folder");
 
     if (pipe_name.empty() || shm_name.empty() || plugin_dll.empty()) {
         std::fprintf(stderr,
-            "usage: xinsp-worker --pipe=NAME --shm=NAME --plugin-dll=PATH [--instance=NAME]\n");
+            "usage: xinsp-worker --pipe=NAME --shm=NAME --plugin-dll=PATH "
+            "[--instance=NAME] [--instance-folder=PATH]\n");
         return 2;
     }
 
     std::fprintf(stderr,
         "[worker] pipe=%s shm=%s dll=%s instance=%s\n",
         pipe_name.c_str(), shm_name.c_str(), plugin_dll.c_str(), instance.c_str());
+
+    // Register the instance folder so host->instance_folder() inside
+    // the worker (and Plugin::folder_path()) returns the same path the
+    // backend would. Otherwise the plugin sees an empty string under
+    // isolation and any "save calibration / load template" code breaks.
+    if (!inst_folder.empty()) {
+        xi::InstanceFolderRegistry::instance().set(instance, inst_folder);
+    }
 
     // Attach the backend's SHM region. After this every image_data() in
     // host_api will return a pointer into shared memory — completely
@@ -110,6 +120,11 @@ int main(int argc, char** argv) {
         return 3;
     }
     xi::ImagePool::set_shm_region(shm.get());
+    // Switch xi::Image::create_in_pool / Plugin::pool_image to use
+    // host->shm_create_image so plugin outputs land in SHM directly.
+    // Without this they'd go to the worker's local heap pool and the
+    // RPC reply path would have to memcpy them into SHM at the boundary.
+    xi::set_worker_mode(true);
     std::fprintf(stderr, "[worker] shm attached, %lluMB visible\n",
                  (unsigned long long)(shm->total_size() / (1024 * 1024)));
 
