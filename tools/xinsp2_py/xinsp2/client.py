@@ -146,6 +146,88 @@ class Client:
     def set_param(self, name: str, value) -> None:
         self.call("set_param", {"name": name, "value": value})
 
+    # ---- discovery / introspection -----------------------------------
+
+    def list_plugins(self) -> list[dict]:
+        """Every registered plugin (global + project-local).
+
+        Each entry: `{name, description, folder, has_ui, loaded, origin,
+        cert, manifest?}`. `manifest` is the optional structured
+        `params / inputs / outputs / exchange` block from the plugin's
+        `plugin.json` (see docs/reference/plugin-abi.md).
+        """
+        return self.call("list_plugins")
+
+    def list_instances(self) -> dict:
+        """Trigger an `instances` message and return its payload.
+
+        Unlike most cmds, the backend replies via the
+        `instances` text-message channel (not in the rsp data). We
+        block briefly to grab it; if you need fully async access,
+        use raw `call("list_instances")` and consume the inbox.
+        """
+        # The cmd's rsp itself just acks; the real payload comes as
+        # an `instances` message dispatched as an event by our reader.
+        self._drain(self._inbox_events)
+        self.call("list_instances")
+        # The reader pushes `instances` messages into _inbox_events
+        # under the synthesised name "instances".
+        ev = self._inbox_events.get(timeout=self.timeout)
+        if ev.get("name") != "instances":
+            # Older clients may receive direct rsp data — allow both.
+            return ev if isinstance(ev, dict) else {}
+        return ev.get("data", {})
+
+    def set_instance_def(self, name: str, def_obj: dict) -> None:
+        self.call("set_instance_def", {"name": name, "def": def_obj})
+
+    def exchange_instance(self, name: str, cmd_obj: dict) -> Any:
+        """Invoke a plugin instance's `exchange()` method directly.
+
+        Returns whatever the plugin chose to send back (typically a
+        JSON object parsed into a dict).
+        """
+        return self.call("exchange_instance", {"name": name, "cmd": cmd_obj})
+
+    # ---- runtime control ---------------------------------------------
+
+    def resume(self) -> dict:
+        """Release a script parked at `xi::breakpoint("label")`.
+
+        Returns `{resumed: bool, label: str}`. `resumed=false` if no
+        breakpoint was active.
+        """
+        return self.call("resume")
+
+    def shutdown(self) -> None:
+        """Tell the backend to close the socket and exit. After this
+        the client should not reuse the connection."""
+        try:
+            self.call("shutdown", timeout=5.0)
+        except Exception:
+            # Backend often closes before sending a clean rsp.
+            pass
+
+    # ---- observability -----------------------------------------------
+
+    def image_pool_stats(self) -> dict:
+        """Per-owner ImagePool footprint. Use to spot leaks: a
+        plugin/script whose handle count keeps climbing across runs is
+        holding pool entries it should be releasing.
+        """
+        return self.call("image_pool_stats")
+
+    def recent_errors(self, since_ms: int | None = None) -> list[dict]:
+        """Errors captured by the cross-channel ring (rsp / log / event).
+
+        After calling a cmd, poll this with the previous max ts_ms to
+        catch any side-channel errors that landed in the same beat.
+        """
+        args = {}
+        if since_ms is not None:
+            args["since_ms"] = since_ms
+        return self.call("recent_errors", args)
+
     def run(self, frame_path: str | None = None, timeout: float | None = None) -> RunResult:
         """Run one inspect() and collect the resulting vars + previews.
 

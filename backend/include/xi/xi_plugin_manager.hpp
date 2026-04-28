@@ -57,6 +57,31 @@
 
 namespace xi {
 
+// Plugin ABI compatibility check. Reads the plugin DLL's
+// xi_plugin_abi_version() export and compares against the host's
+// XI_ABI_VERSION. Pre-versioning plugins (no export) are accepted as
+// v1 with a one-shot warning logged; plugins requesting a newer ABI
+// than the host provides are refused (caller should FreeLibrary +
+// skip + record a warning).
+inline bool plugin_abi_compatible(HMODULE dll, const std::string& plugin_name,
+                                   std::string* err_msg = nullptr) {
+    using AbiVerFn = int (*)();
+    auto fn = reinterpret_cast<AbiVerFn>(GetProcAddress(dll, "xi_plugin_abi_version"));
+    int v = fn ? fn() : 1;
+    if (v > XI_ABI_VERSION) {
+        if (err_msg) *err_msg = "plugin '" + plugin_name + "' requires ABI v"
+                              + std::to_string(v) + " but host is v"
+                              + std::to_string(XI_ABI_VERSION);
+        return false;
+    }
+    if (!fn) {
+        std::fprintf(stderr,
+            "[xinsp2] '%s': pre-versioning plugin (no xi_plugin_abi_version "
+            "export); assuming v1\n", plugin_name.c_str());
+    }
+    return true;
+}
+
 struct PluginInfo {
     std::string name;
     std::string description;
@@ -113,6 +138,11 @@ public:
     }
 
     ImagePoolOwnerId owner_id() const { return owner_id_; }
+    // Replace the auto-allocated id with one the caller pre-allocated
+    // (used by open_project / create_instance to tag handles the
+    // plugin's ctor allocates BEFORE the adapter exists). The
+    // sweep-on-destroy still sees the right bucket either way.
+    void adopt_owner_id(ImagePoolOwnerId id) { owner_id_ = id; }
 
     const std::string& name() const override { return name_; }
     std::string plugin_name() const override { return plugin_name_; }
@@ -393,6 +423,16 @@ private:
                         pname.c_str());
                     continue;
                 }
+                {
+                    std::string err;
+                    if (!plugin_abi_compatible(pi.handle, pname, &err)) {
+                        last_open_warnings_.push_back({pname, pname, err});
+                        std::fprintf(stderr, "[xinsp2] %s\n", err.c_str());
+                        FreeLibrary(pi.handle);
+                        pi.handle = nullptr;
+                        continue;
+                    }
+                }
                 bool has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
                 if (has_destroy) {
                     pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
@@ -557,6 +597,15 @@ public:
         if (!pi.handle) {
             r.error = "LoadLibrary failed on freshly-built DLL";
             return r;
+        }
+        {
+            std::string err;
+            if (!plugin_abi_compatible(pi.handle, plugin_name, &err)) {
+                r.error = err;
+                FreeLibrary(pi.handle);
+                pi.handle = nullptr;
+                return r;
+            }
         }
         bool has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
         if (has_destroy) {
@@ -723,7 +772,11 @@ public:
 
         // plugin.json — synthesize from PluginInfo if there's no manifest in
         // the source folder. Generated form points dll/factory at the names
-        // the export uses, so the deployed folder is self-contained.
+        // the export uses, so the deployed folder is self-contained. The
+        // synthesized version stamps `abi_version` so a target backend
+        // older than the plugin's compile-time ABI can detect the
+        // mismatch on scan (matches the runtime plugin_abi_compatible
+        // check via the DLL's xi_plugin_abi_version export).
         auto src_manifest = src_dir / "plugin.json";
         std::string manifest_text;
         if (std::filesystem::exists(src_manifest)) {
@@ -736,7 +789,8 @@ public:
             manifest_text += "  \"description\": \"" + pi.description + "\",\n";
             manifest_text += "  \"dll\":         \"" + pi.name + ".dll\",\n";
             manifest_text += "  \"factory\":     \"" + pi.factory_symbol + "\",\n";
-            manifest_text += "  \"has_ui\":      " + std::string(pi.has_ui ? "true" : "false") + "\n";
+            manifest_text += "  \"has_ui\":      " + std::string(pi.has_ui ? "true" : "false") + ",\n";
+            manifest_text += "  \"abi_version\": " + std::to_string(XI_ABI_VERSION) + "\n";
             manifest_text += "}\n";
         }
         xi::atomic_write(dest / "plugin.json", manifest_text);
@@ -781,6 +835,16 @@ public:
 
         pi.handle = LoadLibraryA(dll_path.string().c_str());
         if (!pi.handle) return false;
+
+        {
+            std::string err;
+            if (!plugin_abi_compatible(pi.handle, name, &err)) {
+                std::fprintf(stderr, "[xinsp2] %s\n", err.c_str());
+                FreeLibrary(pi.handle);
+                pi.handle = nullptr;
+                return false;
+            }
+        }
 
         // Distinguish new vs old ABI: new ABI also exports xi_plugin_destroy
         auto has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
@@ -1057,11 +1121,23 @@ public:
                     // covered yet. Default-on is tracked in status.md.
                     auto iso = extract_string(ic, "isolation");
                     bool want_isolated = (iso && *iso == "process");
+                    // Optional per-instance IPC call timeout. Honoured only
+                    // for isolation:"process" instances — the in-proc path
+                    // doesn't have a watchdog of its own (the script-level
+                    // g_watchdog_ms covers it). Range: any positive int;
+                    // typical values 5000..120000 ms. Missing / non-positive
+                    // → adapter's built-in 30 s default.
+                    int call_timeout_ms = 0;
+                    if (auto tm = extract_string(ic, "call_timeout_ms")) {
+                        try { call_timeout_ms = std::stoi(*tm); } catch (...) {}
+                    }
                     if (want_isolated && !worker_exe_.empty() && !shm_name_.empty()) {
                         try {
                             auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
-                            ii.instance = std::make_shared<ProcessInstanceAdapter>(
+                            auto adapter = std::make_shared<ProcessInstanceAdapter>(
                                 ii.name, *plugin, worker_exe_, dll_path, shm_name_);
+                            if (call_timeout_ms > 0) adapter->set_call_timeout_ms(call_timeout_ms);
+                            ii.instance = std::move(adapter);
                             created = true;
                         } catch (const std::exception& e) {
                             std::fprintf(stderr,
@@ -1079,11 +1155,32 @@ public:
 
                     if (!created && pi.c_factory) {
                         static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
-                        void* raw = pi.c_factory(&host, ii.name.c_str());
+                        // Pre-allocate the owner id and install a guard
+                        // around the ctor itself so any host->image_create
+                        // calls inside xi_plugin_create are tagged. If
+                        // the ctor returns null OR throws, sweep — the
+                        // adapter never got built, so its destructor
+                        // can't sweep for us.
+                        ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
+                        void* raw = nullptr;
+                        try {
+                            ImagePool::OwnerGuard og(pre_owner);
+                            raw = pi.c_factory(&host, ii.name.c_str());
+                        } catch (...) {
+                            ImagePool::instance().release_all_for(pre_owner);
+                            throw;
+                        }
                         if (raw) {
-                            ii.instance = std::make_shared<CAbiInstanceAdapter>(
+                            auto adapter = std::make_shared<CAbiInstanceAdapter>(
                                 ii.name, *plugin, pi.handle, raw);
+                            // Hand the pre-allocated owner id over to the
+                            // adapter so subsequent process / exchange
+                            // calls keep tagging into the same bucket.
+                            adapter->adopt_owner_id(pre_owner);
+                            ii.instance = std::move(adapter);
                             created = true;
+                        } else {
+                            ImagePool::instance().release_all_for(pre_owner);
                         }
                     } else if (!created && pi.factory) {
                         auto* raw = pi.factory(ii.name.c_str());
@@ -1157,15 +1254,30 @@ public:
         InstanceFolderRegistry::instance().set(instance_name, ii.folder_path);
 
         if (pi.c_factory) {
-            // New C ABI — create via host API
+            // New C ABI — create via host API. Pre-allocate the owner
+            // id so any host->image_create called from inside the
+            // plugin's ctor is tagged. Sweep on null return / throw
+            // so a half-initialised plugin doesn't leak handles.
             static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
-            void* raw = pi.c_factory(&host, instance_name.c_str());
+            ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
+            void* raw = nullptr;
+            try {
+                ImagePool::OwnerGuard og(pre_owner);
+                raw = pi.c_factory(&host, instance_name.c_str());
+            } catch (...) {
+                ImagePool::instance().release_all_for(pre_owner);
+                InstanceFolderRegistry::instance().clear(instance_name);
+                throw;
+            }
             if (!raw) {
+                ImagePool::instance().release_all_for(pre_owner);
                 InstanceFolderRegistry::instance().clear(instance_name);
                 return nullptr;
             }
-            ii.instance = std::make_shared<CAbiInstanceAdapter>(
+            auto adapter = std::make_shared<CAbiInstanceAdapter>(
                 instance_name, plugin_name, pi.handle, raw);
+            adapter->adopt_owner_id(pre_owner);
+            ii.instance = std::move(adapter);
         } else {
             // Old-style factory
             auto* raw = pi.factory(instance_name.c_str());

@@ -71,6 +71,12 @@ static std::mutex               g_script_mu;
 
 // Persistent cross-frame state — survives DLL reloads.
 static std::string g_persistent_state_json = "{}";
+// Schema version of the DLL that wrote g_persistent_state_json. The
+// next DLL's xi_script_state_schema_version() is compared against
+// this on restore — mismatch (and both non-zero) drops the state
+// rather than letting set_state default-fill into a different shape.
+// 0 means "unversioned" — restore proceeds without the check.
+static int         g_persistent_state_schema = 0;
 
 // --- xi::use() callback implementations ---
 // These are called FROM the script DLL back INTO the backend, routing
@@ -473,12 +479,57 @@ static void send_rsp_ok(xi::ws::Server& srv, int64_t id, std::string data_json =
     srv.send_text(r.to_json());
 }
 
+// Ring buffer of recent error messages so an AI / scripted client can
+// correlate a synchronous cmd with any side-channel errors that might
+// have raced in (run-thread crashes, log-level=error from background
+// activity, isolation_dead events, etc). Three error channels exist
+// in the protocol — rsp.error (sync), `event` (async), `log`
+// level=error (async) — and the WS spec doesn't carry cmd_id /
+// run_id on the async two. Until that's fixed protocol-wide, this
+// ring lets the client pull "anything error-shaped that happened
+// in the last minute" with a single query.
+struct RecentError {
+    int64_t     ts_ms = 0;
+    std::string source;     // "rsp" / "log" / "event"
+    std::string message;
+    int64_t     cmd_id  = 0;   // 0 if unknown
+    int64_t     run_id  = 0;   // 0 if unknown
+};
+static std::mutex                     g_recent_errors_mu;
+static std::deque<RecentError>        g_recent_errors;
+static constexpr size_t               kRecentErrorsCap = 64;
+
+static int64_t now_ms_() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+static void push_recent_error(std::string source, std::string message,
+                              int64_t cmd_id = 0, int64_t run_id = 0) {
+    RecentError e{ now_ms_(), std::move(source), std::move(message), cmd_id, run_id };
+    std::lock_guard<std::mutex> lk(g_recent_errors_mu);
+    g_recent_errors.push_back(std::move(e));
+    while (g_recent_errors.size() > kRecentErrorsCap) g_recent_errors.pop_front();
+}
+
 static void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err) {
     xp::Rsp r;
     r.id = id;
     r.ok = false;
-    r.error = std::move(err);
+    r.error = err;
     srv.send_text(r.to_json());
+    push_recent_error("rsp", std::move(err), id);
+}
+
+// Send a log {level:error, msg:...} AND record it in the recent-error
+// ring so cmd:recent_errors can surface it. Most error logs go
+// through this; a few legacy sites still build the LogMsg inline —
+// migrating them to this helper is mechanical and ongoing.
+static void emit_error_log(xi::ws::Server& srv, const std::string& msg,
+                           int64_t run_id = 0) {
+    xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
+    srv.send_text(lm.to_json());
+    push_recent_error("log", msg, /*cmd_id=*/0, run_id);
 }
 
 static void send_hello(xi::ws::Server& srv) {
@@ -552,20 +603,38 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
             uint32_t gid = (uint32_t)std::atoi(snap_view.data() + pos);
             if (!sub_all && !sub_names.count(cur_name)) continue;
             if (s.dump_image) {
+                // Buffers are thread_local + reused across calls. Without
+                // this, every preview allocated 32 MB of raw + a fresh
+                // JPEG vector + a fresh frame vector PER IMAGE PER FRAME
+                // — at 30 fps × 4 images = 3.8 GB/s of allocator churn,
+                // which dominated the encode time and tail-latency-spiked
+                // the malloc heap. Reuse + size-on-demand keeps the
+                // resident set bounded by the largest image seen so far.
+                static thread_local std::vector<uint8_t> raw;
+                static thread_local std::vector<uint8_t> jpeg;
+                static thread_local std::vector<uint8_t> frame;
                 int w = 0, h = 0, c = 0;
-                std::vector<uint8_t> raw(32 * 1024 * 1024);
+                // First call asks for size via the convention
+                // (negative return = need that much). dump_image still
+                // wants a real buffer — start at 1 MB and grow.
+                if (raw.size() < 1 * 1024 * 1024) raw.resize(1 * 1024 * 1024);
                 int nb = s.dump_image(gid, raw.data(), (int)raw.size(), &w, &h, &c);
+                if (nb < 0) {
+                    raw.resize((size_t)(-nb) + 1024);
+                    nb = s.dump_image(gid, raw.data(), (int)raw.size(), &w, &h, &c);
+                }
                 if (nb > 0 && w > 0 && h > 0 && c > 0) {
                     xi::Image img(w, h, c, raw.data());
-                    std::vector<uint8_t> jpeg;
+                    jpeg.clear();
                     if (xi::encode_jpeg(img, 85, jpeg)) {
-                        std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
+                        size_t total = xp::kPreviewHeaderSize + jpeg.size();
+                        if (frame.size() < total) frame.resize(total);
                         xp::PreviewHeader hd;
                         hd.gid = gid; hd.codec = (uint32_t)xp::Codec::JPEG;
                         hd.width = (uint32_t)w; hd.height = (uint32_t)h; hd.channels = (uint32_t)c;
                         xp::encode_preview_header(hd, frame.data());
                         std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
-                        srv.send_binary(frame.data(), frame.size());
+                        srv.send_binary(frame.data(), total);
                     }
                 }
             }
@@ -640,14 +709,12 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         std::snprintf(msg, sizeof(msg), "script crashed after %lldms: 0x%08X (%s)",
                      (long long)dt_ms, e.code, e.what());
         std::fprintf(stderr, "[xinsp2] %s\n", msg);
-        xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
-        srv.send_text(lm.to_json());
+        emit_error_log(srv, msg, run_id);
         return;
     } catch (const std::exception& e) {
         disarm();
         std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
-        xp::LogMsg lm; lm.level = "error"; lm.msg = std::string("script exception: ") + e.what();
-        srv.send_text(lm.to_json());
+        emit_error_log(srv, std::string("script exception: ") + e.what(), run_id);
         return;
     } catch (...) {
         disarm();
@@ -1013,13 +1080,18 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         {
             std::lock_guard<std::mutex> lk(g_script_mu);
-            // Save persistent state before unloading old DLL
+            // Save persistent state before unloading old DLL.
+            // Stamp the OLD DLL's schema version alongside so restore
+            // into the new DLL can detect a shape mismatch.
             if (g_script.ok() && g_script.get_state) {
                 std::vector<char> buf(256 * 1024);
                 int n = g_script.get_state(buf.data(), (int)buf.size());
                 if (n < 0) { buf.resize((size_t)(-n) + 1024);
                              n = g_script.get_state(buf.data(), (int)buf.size()); }
                 if (n > 0) g_persistent_state_json.assign(buf.data(), (size_t)n);
+                g_persistent_state_schema = g_script.state_schema_version
+                                          ? g_script.state_schema_version()
+                                          : 0;
             }
             xi::script::unload_script(g_script);
             // Reset cross-script transient state — the new DLL may
@@ -1069,11 +1141,35 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             if (g_script.set_breakpoint_callback) {
                 g_script.set_breakpoint_callback((void*)breakpoint_cb);
             }
-            // Restore persistent state into the new DLL
+            // Restore persistent state into the new DLL — but drop it
+            // when the schema versions disagree (and both sides
+            // declared one), since set_state's silent default-fill on
+            // a shape change would confuse the new code more than
+            // starting fresh would.
             if (g_script.set_state && g_persistent_state_json.size() > 2) {
-                g_script.set_state(g_persistent_state_json.c_str());
-                std::fprintf(stderr, "[xinsp2] state restored (%zu bytes)\n",
-                             g_persistent_state_json.size());
+                int new_schema = g_script.state_schema_version
+                               ? g_script.state_schema_version()
+                               : 0;
+                bool drop = (g_persistent_state_schema != 0 &&
+                             new_schema != 0 &&
+                             g_persistent_state_schema != new_schema);
+                if (drop) {
+                    std::fprintf(stderr,
+                        "[xinsp2] state schema changed (v%d → v%d) — dropping prior state\n",
+                        g_persistent_state_schema, new_schema);
+                    std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
+                                     "\"data\":{\"old_schema\":"
+                                   + std::to_string(g_persistent_state_schema)
+                                   + ",\"new_schema\":"
+                                   + std::to_string(new_schema)
+                                   + "}}";
+                    srv.send_text(ev);
+                    g_persistent_state_json = "{}";
+                } else {
+                    g_script.set_state(g_persistent_state_json.c_str());
+                    std::fprintf(stderr, "[xinsp2] state restored (%zu bytes, schema v%d)\n",
+                                 g_persistent_state_json.size(), new_schema);
+                }
             }
         }
 
@@ -1816,6 +1912,30 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 out += ",\"manifest\":" + p.manifest_json;
             }
             out += "}";
+        }
+        out += "]";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "recent_errors") {
+        // Return error events captured by the cross-channel ring
+        // (rsp.error / log level=error / event:isolation_dead etc).
+        // Optional `since_ms` arg filters out older entries — useful
+        // for "any errors since I sent my last cmd?" polling.
+        auto since_opt = xp::get_number_field(parsed->args_json, "since_ms");
+        int64_t since = since_opt ? (int64_t)*since_opt : 0;
+        std::string out = "[";
+        {
+            std::lock_guard<std::mutex> lk(g_recent_errors_mu);
+            int n = 0;
+            for (auto& e : g_recent_errors) {
+                if (e.ts_ms < since) continue;
+                if (n++) out += ",";
+                out += "{\"ts_ms\":" + std::to_string(e.ts_ms);
+                out += ",\"source\":"; xp::json_escape_into(out, e.source);
+                out += ",\"message\":"; xp::json_escape_into(out, e.message);
+                if (e.cmd_id) out += ",\"cmd_id\":" + std::to_string(e.cmd_id);
+                if (e.run_id) out += ",\"run_id\":" + std::to_string(e.run_id);
+                out += "}";
+            }
         }
         out += "]";
         send_rsp_ok(srv, id, out);
@@ -2607,8 +2727,50 @@ int main(int argc, char** argv) {
             int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
             if (now < dl) continue;
+
+            // Two-phase trip:
+            //   Phase 1: signal cooperative cancel via the script DLL's
+            //     g_global_cancel_flag. Long-running ops in xi::ops
+            //     poll xi::cancellation_requested() and exit early.
+            //     Give them a 1000 ms grace window — big ops (gaussian
+            //     on 20 MP, matchTemplate, contour walks) need a few
+            //     hundred ms to finish their current chunk; 100 ms was
+            //     too tight and made cooperative cancel fail more
+            //     often than necessary.
+            //   Phase 2: if the inspect still hasn't returned (deadline
+            //     still armed), fall back to TerminateThread. That's
+            //     the unsafe primitive — only used when cooperative
+            //     cancel didn't take.
+            {
+                std::lock_guard<std::mutex> lk(g_script_mu);
+                if (g_script.set_global_cancel) g_script.set_global_cancel(1);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+            // Re-check deadline. If clear, the script cooperated.
+            if (g_inspect_deadline_ms.load() == 0) {
+                {
+                    std::lock_guard<std::mutex> lk(g_script_mu);
+                    if (g_script.set_global_cancel) g_script.set_global_cancel(0);
+                }
+                int n = ++g_watchdog_trips;
+                std::fprintf(stderr,
+                    "[xinsp2] watchdog tripped (#%d) — script honoured cooperative cancel\n", n);
+                emit_error_log(srv,
+                    "watchdog tripped — inspect exceeded "
+                    + std::to_string(g_watchdog_ms.load())
+                    + "ms; cooperative cancel succeeded");
+                continue;
+            }
+
             HANDLE h = g_inspect_thread_handle.exchange(nullptr);
             g_inspect_deadline_ms.store(0);
+            // Clear the cancel flag now that we're going for the
+            // hammer — the next inspect should start clean.
+            {
+                std::lock_guard<std::mutex> lk(g_script_mu);
+                if (g_script.set_global_cancel) g_script.set_global_cancel(0);
+            }
             if (!h) continue;
             #pragma warning(push)
             #pragma warning(disable: 6258)   // TerminateThread is intentional
@@ -2617,11 +2779,10 @@ int main(int argc, char** argv) {
             CloseHandle(h);
             int n = ++g_watchdog_trips;
             std::fprintf(stderr, "[xinsp2] watchdog tripped (#%d) — terminated runaway inspect\n", n);
-            xp::LogMsg lm;
-            lm.level = "error";
-            lm.msg = "watchdog tripped — inspect exceeded "
-                   + std::to_string(g_watchdog_ms.load()) + "ms; thread terminated";
-            srv.send_text(lm.to_json());
+            emit_error_log(srv,
+                "watchdog tripped — inspect exceeded "
+                + std::to_string(g_watchdog_ms.load())
+                + "ms; cooperative cancel did not take, thread terminated");
         }
     });
     if (!srv.start(port)) {

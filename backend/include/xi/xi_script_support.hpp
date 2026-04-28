@@ -315,6 +315,15 @@ XI_SCRIPT_EXPORT void xi_script_set_run_context(const char* frame_path) {
     g_run_frame_path_[n] = 0;
 }
 
+// Watchdog cancel flag setter — host sets this when inspect overruns
+// its deadline; script's `xi::cancellation_requested()` returns true
+// while it's set. Long-running ops poll this and exit early. Host
+// clears it after the inspect returns (or after watchdog falls back
+// to TerminateThread).
+XI_SCRIPT_EXPORT void xi_script_set_global_cancel(int set) {
+    xi::global_cancel_flag().store(set != 0, std::memory_order_relaxed);
+}
+
 // --- Persistent state thunks ---
 
 XI_SCRIPT_EXPORT int xi_script_get_state(char* buf, int buflen) {
@@ -344,6 +353,26 @@ XI_SCRIPT_EXPORT int xi_script_set_state(const char* json) {
     }
     cJSON_Delete(parsed);
     return 0;
+}
+
+// State schema version — bump when the shape of xi::state() changes
+// in a way the previous DLL's persisted JSON would default-fill
+// incorrectly. Backend records the version alongside saved state and
+// drops the state on mismatch instead of silently restoring garbage.
+//
+// Default 0 means "unversioned" — backend skips the migration check
+// and restores blindly (legacy back-compat). User overrides via:
+//
+//   #define XI_STATE_SCHEMA_VERSION 2
+//   #include <xi/xi.hpp>
+//
+// or by exporting their own thunk before this header takes effect.
+#ifndef XI_STATE_SCHEMA_VERSION
+#define XI_STATE_SCHEMA_VERSION 0
+#endif
+
+XI_SCRIPT_EXPORT int xi_script_state_schema_version(void) {
+    return XI_STATE_SCHEMA_VERSION;
 }
 
 #endif // XI_SCRIPT_NO_DEFAULT_THUNKS

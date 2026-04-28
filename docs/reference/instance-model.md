@@ -177,9 +177,17 @@ and replays the last `set_def` so the next call still works.
 {
   "plugin": "shape_match",
   "isolation": "process",
+  "call_timeout_ms": 60000,
   "config": { ... }
 }
 ```
+
+`call_timeout_ms` (optional, isolated instances only) bounds how long
+a single IPC call (`process` / `exchange` / `set_def` / `get_def`)
+may block before the adapter cancels it via `CancelIoEx` and treats
+the worker as crashed. Default 30 s — bump it for plugins with slow
+operations (long-exposure cameras, heavy ML inference, big template
+matches) so the watchdog doesn't trip during normal work.
 
 Worker-side conveniences (so plugin authors don't need to know which
 mode they're running in):

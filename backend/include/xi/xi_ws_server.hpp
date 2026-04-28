@@ -48,9 +48,13 @@
   #define CLOSESOCK ::close
 #endif
 
+#include "xi_sha256.hpp"
+
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -401,10 +405,29 @@ private:
         std::string key = req.substr(key_pos, eol - key_pos);
         while (!key.empty() && (key.back() == ' ' || key.back() == '\r' || key.back() == '\t')) key.pop_back();
 
-        // Optional shared-secret auth. When configured, the client must
-        // send `Authorization: Bearer <secret>` in the handshake. Mismatch
-        // → 401 + close. Constant-time compare to reduce timing leaks.
+        // Optional shared-secret auth. Two modes:
+        //
+        // 1. Plain bearer (legacy): auth_secret is the secret itself.
+        //    Client sends `Authorization: Bearer <secret>`. Anyone
+        //    sniffing the handshake can replay forever — only use on
+        //    trusted networks (loopback / VPN).
+        //
+        // 2. HMAC challenge (auth_secret starts with "hmac:"): the
+        //    rest of auth_secret is the HMAC key. Client sends
+        //    `X-Xi-Timestamp: <unix_seconds>` and
+        //    `Authorization: Bearer <hex(hmac_sha256(key, ts))>`.
+        //    Server verifies the timestamp is within ±60 s of now AND
+        //    the HMAC matches. Replay window is 60 s instead of
+        //    forever — but the WS frames after handshake are still
+        //    plaintext, so for hostile networks use a TLS reverse
+        //    proxy (nginx) in front of this. HMAC mode is a layered
+        //    defence, not a substitute for TLS.
         if (!auth_secret_.empty()) {
+            const std::string hmac_prefix = "hmac:";
+            bool hmac_mode = auth_secret_.compare(0, hmac_prefix.size(), hmac_prefix) == 0;
+            std::string hmac_key = hmac_mode
+                ? auth_secret_.substr(hmac_prefix.size())
+                : std::string{};
             const std::string tag = "authorization:";
             auto a_pos = lc.find(tag);
             bool ok = false;
@@ -416,11 +439,37 @@ private:
                     std::string hdr = req.substr(a_pos, a_eol - a_pos);
                     while (!hdr.empty() && (hdr.back() == ' ' || hdr.back() == '\r' || hdr.back() == '\t')) hdr.pop_back();
                     const std::string prefix = "Bearer ";
-                    if (hdr.size() >= prefix.size() + auth_secret_.size() &&
+                    if (hdr.size() > prefix.size() &&
                         hdr.compare(0, prefix.size(), prefix) == 0) {
                         std::string_view got(hdr.data() + prefix.size(),
                                              hdr.size() - prefix.size());
-                        if (got.size() == auth_secret_.size()) {
+                        if (hmac_mode) {
+                            // Pull X-Xi-Timestamp header.
+                            const std::string ts_tag = "x-xi-timestamp:";
+                            auto ts_pos = lc.find(ts_tag);
+                            if (ts_pos != std::string::npos) {
+                                ts_pos += ts_tag.size();
+                                while (ts_pos < req.size() && (req[ts_pos] == ' ' || req[ts_pos] == '\t')) ++ts_pos;
+                                auto ts_eol = req.find("\r\n", ts_pos);
+                                if (ts_eol != std::string::npos) {
+                                    std::string ts_str = req.substr(ts_pos, ts_eol - ts_pos);
+                                    while (!ts_str.empty() && (ts_str.back() == ' ' || ts_str.back() == '\r' || ts_str.back() == '\t')) ts_str.pop_back();
+                                    int64_t ts = 0;
+                                    try { ts = std::stoll(ts_str); } catch (...) {}
+                                    int64_t now = (int64_t)std::time(nullptr);
+                                    if (ts != 0 && std::abs(now - ts) <= 60) {
+                                        std::string expected =
+                                            xi::sha256::hmac_sha256(hmac_key, ts_str);
+                                        if (got.size() == expected.size()) {
+                                            unsigned diff = 0;
+                                            for (size_t i = 0; i < got.size(); ++i)
+                                                diff |= (unsigned char)got[i] ^ (unsigned char)expected[i];
+                                            ok = (diff == 0);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (got.size() == auth_secret_.size()) {
                             unsigned diff = 0;
                             for (size_t i = 0; i < got.size(); ++i)
                                 diff |= (unsigned char)got[i] ^ (unsigned char)auth_secret_[i];

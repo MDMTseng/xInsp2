@@ -118,6 +118,7 @@ Out-of-band notifications that don't fit the above.
 { "type": "event", "name": "run_finished", "data": { "run_id": 17, "ms": 42 } }
 { "type": "event", "name": "script_reloaded", "data": { "path": "..." } }
 { "type": "event", "name": "isolation_dead", "data": { "instance": "cam0" } }
+{ "type": "event", "name": "state_dropped", "data": { "old_schema": 1, "new_schema": 2 } }
 ```
 
 `isolation_dead` fires once per instance the first time
@@ -126,6 +127,15 @@ permanently dead (worker respawn cap hit; subsequent calls would
 return safe defaults silently). Pair with the `log` (level=error)
 message that lands in the same beat. Reset by reopening the project
 or removing/recreating the instance.
+
+`state_dropped` fires after `cmd:compile_and_load` when the new
+script DLL declares a different `xi_script_state_schema_version()`
+than the old one (and both are non-zero). The persisted `xi::state()`
+JSON would default-fill into a different shape, so the backend drops
+it and the new script runs with empty state. Set
+`#define XI_STATE_SCHEMA_VERSION N` before `#include <xi/xi.hpp>` to
+opt in; absent / 0 means "unversioned" and the legacy "restore
+blindly" path runs.
 
 ---
 
@@ -205,6 +215,36 @@ file frame on demand without a custom source plugin.
 top-level `manifest` block (free-form; see
 `docs/reference/plugin-abi.md`). Backend passes it through verbatim —
 older plugins simply omit the field.
+
+### `recent_errors`
+
+Returns the last 64 errors captured across the three asynchronous
+error channels (`rsp.error`, `log` level=error, `event` errors).
+Lets a scripted client correlate "the cmd I just sent" with any
+side-channel errors that landed around the same time — the WS spec
+doesn't carry `cmd_id` / `run_id` on async events / logs yet, so
+this ring is the workaround.
+
+`args: { "since_ms": <int> (optional) }` — return only entries with
+`ts_ms >= since_ms`. Use the `ts_ms` of the last-known error from a
+previous poll to fetch incrementally.
+
+Reply (`data` is an array, newest last):
+
+```json
+[
+  { "ts_ms": 1777300000123, "source": "rsp",
+    "message": "compile_and_load: missing path", "cmd_id": 17 },
+  { "ts_ms": 1777300000456, "source": "log",
+    "message": "script crashed after 12ms: 0xC0000005 (...)",
+    "run_id": 42 }
+]
+```
+
+`cmd_id` / `run_id` are present only when the error site knew about
+them. Migration of all error sites to the unified `emit_error_log` /
+`send_rsp_err` helpers is incremental — older sites still emit the
+log without recording, so the ring is best-effort coverage today.
 
 ### `image_pool_stats`
 
