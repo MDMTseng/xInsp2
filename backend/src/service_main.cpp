@@ -552,20 +552,38 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
             uint32_t gid = (uint32_t)std::atoi(snap_view.data() + pos);
             if (!sub_all && !sub_names.count(cur_name)) continue;
             if (s.dump_image) {
+                // Buffers are thread_local + reused across calls. Without
+                // this, every preview allocated 32 MB of raw + a fresh
+                // JPEG vector + a fresh frame vector PER IMAGE PER FRAME
+                // — at 30 fps × 4 images = 3.8 GB/s of allocator churn,
+                // which dominated the encode time and tail-latency-spiked
+                // the malloc heap. Reuse + size-on-demand keeps the
+                // resident set bounded by the largest image seen so far.
+                static thread_local std::vector<uint8_t> raw;
+                static thread_local std::vector<uint8_t> jpeg;
+                static thread_local std::vector<uint8_t> frame;
                 int w = 0, h = 0, c = 0;
-                std::vector<uint8_t> raw(32 * 1024 * 1024);
+                // First call asks for size via the convention
+                // (negative return = need that much). dump_image still
+                // wants a real buffer — start at 1 MB and grow.
+                if (raw.size() < 1 * 1024 * 1024) raw.resize(1 * 1024 * 1024);
                 int nb = s.dump_image(gid, raw.data(), (int)raw.size(), &w, &h, &c);
+                if (nb < 0) {
+                    raw.resize((size_t)(-nb) + 1024);
+                    nb = s.dump_image(gid, raw.data(), (int)raw.size(), &w, &h, &c);
+                }
                 if (nb > 0 && w > 0 && h > 0 && c > 0) {
                     xi::Image img(w, h, c, raw.data());
-                    std::vector<uint8_t> jpeg;
+                    jpeg.clear();
                     if (xi::encode_jpeg(img, 85, jpeg)) {
-                        std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
+                        size_t total = xp::kPreviewHeaderSize + jpeg.size();
+                        if (frame.size() < total) frame.resize(total);
                         xp::PreviewHeader hd;
                         hd.gid = gid; hd.codec = (uint32_t)xp::Codec::JPEG;
                         hd.width = (uint32_t)w; hd.height = (uint32_t)h; hd.channels = (uint32_t)c;
                         xp::encode_preview_header(hd, frame.data());
                         std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
-                        srv.send_binary(frame.data(), frame.size());
+                        srv.send_binary(frame.data(), total);
                     }
                 }
             }
