@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>hue_counter</title>
+<style>
+body { font-family: var(--vscode-font-family, system-ui); color: var(--vscode-foreground, #ccc);
+       background: var(--vscode-sideBar-background, #1e1e1e); padding: 16px; font-size: 13px; }
+h2 { margin: 0 0 4px; font-size: 16px; }
+.hint { color: #888; margin-bottom: 14px; font-size: 12px; }
+.card { background: var(--vscode-editor-background); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; }
+.card-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
+              letter-spacing: 0.6px; color: #888; margin-bottom: 10px; }
+.field { display: grid; grid-template-columns: 130px 1fr 60px; gap: 10px; align-items: center; margin-bottom: 8px; }
+.field label { color: #888; }
+.field input[type=range] { width: 100%; }
+.field .num { font-family: monospace; text-align: right; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+button { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff);
+         border: none; padding: 5px 14px; border-radius: 3px; font-size: 12px; cursor: pointer; }
+button.secondary { background: var(--vscode-button-secondaryBackground, #3a3d41); }
+.stat { display: grid; grid-template-columns: 130px 1fr; gap: 10px; font-size: 12px; }
+.stat .k { color: #888; }
+.stat .v { font-family: monospace; }
+.swatch { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: middle;
+          margin-right: 6px; border: 1px solid rgba(255,255,255,0.15); }
+.preset-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h2>Hue Counter</h2>
+<div class="hint">Counts saturated discs whose H is within <code>[hue_lo, hue_hi]</code>
+(OpenCV scale 0&ndash;179). Drag the sliders to live-tune the band; the inspection
+script picks up the new range on the next run, no recompile.</div>
+
+<div class="card">
+  <div class="card-title">Hue band</div>
+  <div class="field">
+    <label>hue_lo</label>
+    <input type="range" id="hue_lo" min="0" max="179" step="1" value="0">
+    <div class="num" id="hue_lo_v">0</div>
+  </div>
+  <div class="field">
+    <label>hue_hi</label>
+    <input type="range" id="hue_hi" min="0" max="179" step="1" value="15">
+    <div class="num" id="hue_hi_v">15</div>
+  </div>
+  <div class="preset-row">
+    <button data-lo="0"   data-hi="15"  class="secondary"><span class="swatch" style="background:#e22"></span>red</button>
+    <button data-lo="50"  data-hi="70"  class="secondary"><span class="swatch" style="background:#2c2"></span>green</button>
+    <button data-lo="110" data-hi="130" class="secondary"><span class="swatch" style="background:#39f"></span>blue</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Area filter</div>
+  <div class="field">
+    <label>min_area</label>
+    <input type="range" id="min_area" min="0" max="5000" step="10" value="300">
+    <div class="num" id="min_area_v">300</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Status</div>
+  <div class="stat">
+    <div class="k">last_count</div><div class="v" id="last_count">&mdash;</div>
+    <div class="k">frames_processed</div><div class="v" id="frames_processed">&mdash;</div>
+  </div>
+  <div class="actions">
+    <button id="reset" class="secondary">Reset to red defaults</button>
+    <button id="refresh" class="secondary">Refresh</button>
+  </div>
+</div>
+
+<script>
+const vscode = (typeof acquireVsCodeApi === "function") ? acquireVsCodeApi() : null;
+
+function send(cmd) {
+  if (!vscode) return;
+  vscode.postMessage({ type: 'exchange', cmd: JSON.stringify(cmd) });
+}
+
+function applyDef(d) {
+  if (!d) return;
+  if (typeof d.hue_lo   === "number") { lo.value = d.hue_lo;   loV.textContent = d.hue_lo; }
+  if (typeof d.hue_hi   === "number") { hi.value = d.hue_hi;   hiV.textContent = d.hue_hi; }
+  if (typeof d.min_area === "number") { ma.value = d.min_area; maV.textContent = d.min_area; }
+  if (typeof d.last_count       === "number") document.getElementById('last_count').textContent       = d.last_count;
+  if (typeof d.frames_processed === "number") document.getElementById('frames_processed').textContent = d.frames_processed;
+}
+
+const lo  = document.getElementById('hue_lo');
+const hi  = document.getElementById('hue_hi');
+const ma  = document.getElementById('min_area');
+const loV = document.getElementById('hue_lo_v');
+const hiV = document.getElementById('hue_hi_v');
+const maV = document.getElementById('min_area_v');
+
+function pushBand() {
+  let l = +lo.value, h = +hi.value;
+  if (h < l) { [l, h] = [h, l]; }
+  loV.textContent = l; hiV.textContent = h;
+  send({ command: "set_hue_range", lo: l, hi: h });
+}
+lo.addEventListener('input', pushBand);
+hi.addEventListener('input', pushBand);
+
+ma.addEventListener('input', () => {
+  maV.textContent = ma.value;
+  send({ command: "set_min_area", value: +ma.value });
+});
+
+document.querySelectorAll('button[data-lo]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    lo.value = btn.dataset.lo;
+    hi.value = btn.dataset.hi;
+    pushBand();
+  });
+});
+
+document.getElementById('reset').addEventListener('click', () => {
+  send({ command: "reset" });
+});
+document.getElementById('refresh').addEventListener('click', () => {
+  send({ command: "noop" }); // returns get_def() unchanged
+});
+
+window.addEventListener('message', ev => {
+  const m = ev.data;
+  if (m && m.type === 'status' && m.def) {
+    try {
+      const parsed = (typeof m.def === "string") ? JSON.parse(m.def) : m.def;
+      applyDef(parsed);
+    } catch (e) { /* ignore */ }
+  }
+});
+</script>
+</body>
+</html>

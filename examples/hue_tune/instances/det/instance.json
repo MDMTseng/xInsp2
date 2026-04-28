@@ -1,0 +1,8 @@
+{
+  "plugin": "hue_counter",
+  "config": {
+    "hue_lo": 0,
+    "hue_hi": 15,
+    "min_area": 300
+  }
+}

@@ -10,8 +10,14 @@ driven from a script — including AI agents using a code-execution sandbox
 pip install -e tools/xinsp2_py
 ```
 
-Backend must be running on `ws://127.0.0.1:7823/` (the VS Code extension
-auto-starts one; or run `xinsp-backend.exe` from `backend/build/Release/`).
+Backend must be running on `ws://127.0.0.1:7823/`. Two ways to get one:
+
+- Inside VS Code, the xInsp2 extension auto-starts one when you open a
+  project — nothing to do.
+- Outside VS Code (CI, scripts, agent runs), launch it yourself in the
+  background: `backend/build/Release/xinsp-backend.exe &`. The SDK
+  doesn't start it for you. If you see `ConnectionRefusedError`, that's
+  what's missing.
 
 ## Quick start
 
