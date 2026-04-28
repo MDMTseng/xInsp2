@@ -1167,7 +1167,8 @@ public:
                         try {
                             auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
                             auto adapter = std::make_shared<ProcessInstanceAdapter>(
-                                ii.name, *plugin, worker_exe_, dll_path, shm_name_);
+                                ii.name, *plugin, worker_exe_, dll_path, shm_name_,
+                                ii.folder_path);
                             if (call_timeout_ms > 0) adapter->set_call_timeout_ms(call_timeout_ms);
                             ii.instance = std::move(adapter);
                             created = true;
