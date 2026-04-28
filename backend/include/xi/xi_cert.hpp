@@ -7,13 +7,22 @@
 // and reads it on load to decide whether to skip re-testing.
 //
 // Cert is invalidated if ANY of:
-//   - DLL file size changed
-//   - DLL file mtime changed
+//   - DLL SHA-256 changed (anything in the file is different)
 //   - baseline_version in cert < current BASELINE_VERSION
+//
+// Tamper detection used to be (file_size, mtime) — `touch` plus a same-size
+// rebuild bypassed it (deep architecture review 2026-04-28). SHA-256
+// of the DLL bytes is now the canonical fingerprint; size/mtime are
+// retained as informational fields only.
+//
+// cert_format_version distinguishes the new schema from the legacy one
+// so older certs (no `dll_sha256` field) are forced through re-cert
+// rather than silently treated as valid.
 //
 
 #include "xi_atomic_io.hpp"
 #include "xi_baseline.hpp"
+#include "xi_sha256.hpp"
 #include "cJSON.h"
 
 #include <cstdint>
@@ -25,10 +34,16 @@
 
 namespace xi::cert {
 
+// Bumped when the cert.json schema changes incompatibly. Old certs
+// missing required new fields are treated as invalid (forces re-cert).
+constexpr int CERT_FORMAT_VERSION = 2;   // v1 = (size, mtime); v2 = SHA-256
+
 struct Cert {
     std::string              plugin_name;
-    int64_t                  dll_size         = 0;
-    int64_t                  dll_mtime        = 0;
+    int                      cert_format_version = 0;
+    std::string              dll_sha256;       // 64-hex; canonical fingerprint
+    int64_t                  dll_size         = 0;   // informational
+    int64_t                  dll_mtime        = 0;   // informational
     int                      baseline_version = 0;
     std::string              certified_at;     // ISO 8601
     double                   duration_ms      = 0;
@@ -62,12 +77,14 @@ inline std::filesystem::path cert_path(const std::filesystem::path& plugin_folde
 
 inline bool write(const std::filesystem::path& plugin_folder, const Cert& c) {
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "plugin_name",      c.plugin_name.c_str());
-    cJSON_AddNumberToObject(root, "dll_size",         (double)c.dll_size);
-    cJSON_AddNumberToObject(root, "dll_mtime",        (double)c.dll_mtime);
-    cJSON_AddNumberToObject(root, "baseline_version", (double)c.baseline_version);
-    cJSON_AddStringToObject(root, "certified_at",     c.certified_at.c_str());
-    cJSON_AddNumberToObject(root, "duration_ms",      c.duration_ms);
+    cJSON_AddStringToObject(root, "plugin_name",         c.plugin_name.c_str());
+    cJSON_AddNumberToObject(root, "cert_format_version", (double)c.cert_format_version);
+    cJSON_AddStringToObject(root, "dll_sha256",          c.dll_sha256.c_str());
+    cJSON_AddNumberToObject(root, "dll_size",            (double)c.dll_size);
+    cJSON_AddNumberToObject(root, "dll_mtime",           (double)c.dll_mtime);
+    cJSON_AddNumberToObject(root, "baseline_version",    (double)c.baseline_version);
+    cJSON_AddStringToObject(root, "certified_at",        c.certified_at.c_str());
+    cJSON_AddNumberToObject(root, "duration_ms",         c.duration_ms);
     cJSON* arr = cJSON_CreateArray();
     for (auto& t : c.tests_passed) cJSON_AddItemToArray(arr, cJSON_CreateString(t.c_str()));
     cJSON_AddItemToObject(root, "tests_passed", arr);
@@ -92,26 +109,37 @@ inline bool read(const std::filesystem::path& plugin_folder, Cert& out) {
         cJSON* j = cJSON_GetObjectItem(root, k);
         if (j && cJSON_IsNumber(j)) dst = (decltype(dst))j->valuedouble;
     };
-    str("plugin_name",  out.plugin_name);
-    num("dll_size",     out.dll_size);
-    num("dll_mtime",    out.dll_mtime);
-    num("baseline_version", out.baseline_version);
-    str("certified_at", out.certified_at);
-    num("duration_ms",  out.duration_ms);
+    str("plugin_name",         out.plugin_name);
+    num("cert_format_version", out.cert_format_version);
+    str("dll_sha256",          out.dll_sha256);
+    num("dll_size",            out.dll_size);
+    num("dll_mtime",           out.dll_mtime);
+    num("baseline_version",    out.baseline_version);
+    str("certified_at",        out.certified_at);
+    num("duration_ms",         out.duration_ms);
     cJSON_Delete(root);
     return true;
 }
 
 // Is the existing cert (if any) still valid for the given DLL at the
-// current baseline version?
+// current baseline version? Validity is keyed off the SHA-256 of the
+// DLL bytes, not (size, mtime) — `touch` plus a same-size rebuild
+// would otherwise pass the old check.
+//
+// Legacy v1 certs (no `dll_sha256` / `cert_format_version` field)
+// are treated as invalid → caller re-runs the baseline. Cheap one-
+// time cost; no false positives from a stale fingerprint.
 inline bool is_valid(const std::filesystem::path& plugin_folder,
                      const std::filesystem::path& dll_path)
 {
     Cert c;
     if (!read(plugin_folder, c)) return false;
-    if (c.baseline_version != xi::baseline::BASELINE_VERSION) return false;
-    if (c.dll_size  != dll_size_of(dll_path))   return false;
-    if (c.dll_mtime != dll_mtime_of(dll_path)) return false;
+    if (c.cert_format_version != CERT_FORMAT_VERSION) return false;
+    if (c.baseline_version    != xi::baseline::BASELINE_VERSION) return false;
+    if (c.dll_sha256.empty()) return false;
+    auto fresh = xi::sha256::sha256_file(dll_path.string());
+    if (fresh.empty()) return false;
+    if (fresh != c.dll_sha256) return false;
     return true;
 }
 
@@ -126,12 +154,14 @@ inline baseline::Summary certify(const std::filesystem::path& plugin_folder,
     auto summary = baseline::run_all(syms, host);
     if (summary.all_passed) {
         Cert c;
-        c.plugin_name      = plugin_name;
-        c.dll_size         = dll_size_of(dll_path);
-        c.dll_mtime        = dll_mtime_of(dll_path);
-        c.baseline_version = baseline::BASELINE_VERSION;
-        c.certified_at     = iso8601_now();
-        c.duration_ms      = summary.total_ms;
+        c.plugin_name         = plugin_name;
+        c.cert_format_version = CERT_FORMAT_VERSION;
+        c.dll_sha256          = xi::sha256::sha256_file(dll_path.string());
+        c.dll_size            = dll_size_of(dll_path);
+        c.dll_mtime           = dll_mtime_of(dll_path);
+        c.baseline_version    = baseline::BASELINE_VERSION;
+        c.certified_at        = iso8601_now();
+        c.duration_ms         = summary.total_ms;
         for (auto& r : summary.results) c.tests_passed.push_back(r.name);
         write(plugin_folder, c);
     }

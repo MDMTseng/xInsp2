@@ -204,6 +204,10 @@ if(NOT MSVC)
 endif()
 add_test(NAME image_pool_stress COMMAND test_image_pool_stress)
 
+add_executable(test_sha256 tests/test_sha256.cpp)
+target_link_libraries(test_sha256 PRIVATE xi_core)
+add_test(NAME sha256 COMMAND test_sha256)
+
 add_executable(test_ops tests/test_ops.cpp)
 target_link_libraries(test_ops PRIVATE xi_core)
 if(NOT MSVC)
