@@ -62,7 +62,7 @@ def run_all():
         c.on_log(_log)
         print(f"opening project {PROJECT}")
         try:
-            c.call("open_project", {"folder": str(PROJECT)}, timeout=600)
+            c.open_project(str(PROJECT), timeout=600)
         except ProtocolError as e:
             print("OPEN FAILED:", e)
             for m in logs[-30:]:

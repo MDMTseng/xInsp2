@@ -231,6 +231,14 @@ Recognised top-level keys (anything else is ignored, no error):
 | `isolation` | string | no | `"process"` (default) / `"in_process"` (opt out) / `"none"` (alias for `in_process`). |
 | `call_timeout_ms` | int | no | Per-call IPC timeout for isolated instances, in ms. |
 
+`config` is **not** required to be the same shape as `Plugin::get_def()`'s
+return. Plugins commonly include read-only telemetry in `get_def()`
+(`frames_processed`, `last_count`, etc.) that has no place in the
+seeded `instance.json` config — `set_def()` just ignores keys it
+doesn't recognise. Treat `config` as "fields the user may want to set
+at project-create time"; treat `get_def()` as "everything the UI panel
+needs to render the live state".
+
 A spawned `xinsp-worker.exe`:
 - Attaches the backend's SHM region (so image handles dereference to
   the same physical pages → zero-copy `process()`).

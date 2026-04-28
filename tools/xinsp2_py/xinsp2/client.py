@@ -146,13 +146,19 @@ class Client:
         """
         return self.call("load_project", {"path": path}, timeout=180)
 
-    def open_project(self, path: str) -> dict:
+    def open_project(self, path: str, timeout: float = 180) -> dict:
         """Open a project folder end-to-end: scan `instances/`, compile
         every project-local plugin, instantiate each instance, restore
         each instance's saved `def`. The reply includes the project's
         plugin list (with manifest blocks) and instance list. Cold
         opens with N project plugins compile each plugin under cl.exe;
-        a 180 s timeout is the SDK default to cover that.
+        a 180 s timeout is the SDK default to cover that — bump it via
+        `timeout=` if you have many large plugins.
+
+        The backend accepts both `path` and `folder` as the args key
+        for `cmd:open_project`; this helper sends `path`. Older driver
+        scripts may use `c.call("open_project", {"folder": ...})` —
+        same effect, prefer the helper for new code.
 
         Re-opening a project: tearing down the old project's plugins
         unloads their DLLs, which means any persisted `xi::state()`
@@ -163,7 +169,7 @@ class Client:
         state. (The agent feedback loop hit this on the trend_monitor
         case.)
         """
-        return self.call("open_project", {"path": path}, timeout=180)
+        return self.call("open_project", {"path": path}, timeout=timeout)
 
     def recompile_project_plugin(self, plugin: str) -> dict:
         """Hot-rebuild one project-local plugin. Linchpin for live tuning.
@@ -215,8 +221,18 @@ class Client:
     def exchange_instance(self, name: str, cmd_obj: dict) -> Any:
         """Invoke a plugin instance's `exchange()` method directly.
 
-        Returns whatever the plugin chose to send back (typically a
-        JSON object parsed into a dict).
+        Returns whatever the plugin chose to send back, JSON-parsed.
+        Convention: most plugins return their post-mutation `get_def()`,
+        so you typically get back a dict in the same shape as the
+        instance's stored config plus any read-only telemetry the
+        plugin chose to expose. Example:
+
+            >>> c.exchange_instance("det", {"command": "set_hue_range",
+            ...                              "lo": 110, "hi": 130})
+            {'hue_lo': 110, 'hi_hi': 130, 'min_area': 300,
+             'frames_processed': 8, 'last_count': 4}
+
+        See `docs/reference/plugin-abi.md` ("Return shape convention").
         """
         return self.call("exchange_instance", {"name": name, "cmd": cmd_obj})
 
