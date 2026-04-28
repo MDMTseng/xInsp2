@@ -509,9 +509,27 @@ xinsp-backend.exe --host=0.0.0.0 --port=7823 --auth=<shared-secret>
 #   XINSP2_HOST=0.0.0.0  XINSP2_AUTH=<secret>  xinsp-backend.exe
 ```
 
-Clients must send `Authorization: Bearer <secret>` in the WebSocket
-handshake. Mismatches (or missing header) get `HTTP/1.1 401
-Unauthorized` and the socket is closed. Compare is constant-time.
+Two auth modes:
+
+**Plain bearer (default).** Set `--auth=<secret>`. Client sends
+`Authorization: Bearer <secret>` in the handshake; constant-time
+compare. Anyone who sniffs the handshake can replay forever, so
+this mode is only safe on trusted networks (loopback / VPN /
+SSH tunnel).
+
+**HMAC challenge** (replay-window-bounded). Set
+`--auth=hmac:<key>`; the rest of the secret is the HMAC key. Client
+sends two headers:
+
+```
+X-Xi-Timestamp: <unix_seconds>
+Authorization: Bearer <hex(hmac_sha256(key, "<unix_seconds>"))>
+```
+
+Server requires the timestamp to be within ±60 s of `now()` AND the
+HMAC to match. Replay window is 60 s instead of forever — but the
+WS frames after handshake are still plaintext, so for hostile
+networks use TLS termination upstream regardless.
 
 Starting with `--host=0.0.0.0` **without** `--auth` prints a prominent
 stderr warning — the secret is the only access gate; TLS termination is

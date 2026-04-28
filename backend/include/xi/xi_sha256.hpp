@@ -126,6 +126,47 @@ inline std::string sha256_bytes(const void* data, size_t n) {
     return detail::to_hex(out);
 }
 
+// HMAC-SHA-256 of message under key. Standard FIPS 198-1 algorithm:
+// inner pad XOR key, append message, hash. Outer pad XOR key, append
+// inner hash, hash again. Returns lowercase hex (64 chars).
+inline std::string hmac_sha256(const void* key, size_t key_len,
+                                const void* msg, size_t msg_len) {
+    constexpr size_t BLOCK = 64;
+    uint8_t k[BLOCK] = {0};
+    if (key_len > BLOCK) {
+        // Long keys are first hashed.
+        detail::State s;
+        s.update((const uint8_t*)key, key_len);
+        uint8_t digest[32];
+        s.finalize(digest);
+        std::memcpy(k, digest, 32);
+    } else {
+        std::memcpy(k, key, key_len);
+    }
+    uint8_t ipad[BLOCK], opad[BLOCK];
+    for (size_t i = 0; i < BLOCK; ++i) {
+        ipad[i] = k[i] ^ 0x36;
+        opad[i] = k[i] ^ 0x5c;
+    }
+    uint8_t inner_hash[32];
+    {
+        detail::State s;
+        s.update(ipad, BLOCK);
+        s.update((const uint8_t*)msg, msg_len);
+        s.finalize(inner_hash);
+    }
+    detail::State s;
+    s.update(opad, BLOCK);
+    s.update(inner_hash, 32);
+    uint8_t out[32];
+    s.finalize(out);
+    return detail::to_hex(out);
+}
+
+inline std::string hmac_sha256(const std::string& key, const std::string& msg) {
+    return hmac_sha256(key.data(), key.size(), msg.data(), msg.size());
+}
+
 // Hash a file by path. Returns "" on open / read failure.
 inline std::string sha256_file(const std::string& path) {
     std::ifstream f(path, std::ios::binary);

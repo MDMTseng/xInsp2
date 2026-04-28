@@ -51,6 +51,22 @@ int main() {
               "6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e");
     }
 
+    using xi::sha256::hmac_sha256;
+
+    // RFC 4231 §4.2 — Test Case 1.
+    // Key = 0x0b * 20, Data = "Hi There"
+    {
+        std::string k(20, (char)0x0b);
+        CHECK(hmac_sha256(k, "Hi There"),
+              "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+    }
+    // RFC 4231 §4.3 — Test Case 2.
+    // Key = "Jefe", Data = "what do ya want for nothing?"
+    {
+        CHECK(hmac_sha256("Jefe", "what do ya want for nothing?"),
+              "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    }
+
     std::fprintf(stderr, "ALL TESTS PASSED\n");
     return 0;
 }
