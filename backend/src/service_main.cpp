@@ -2697,7 +2697,11 @@ int main(int argc, char** argv) {
             //   Phase 1: signal cooperative cancel via the script DLL's
             //     g_global_cancel_flag. Long-running ops in xi::ops
             //     poll xi::cancellation_requested() and exit early.
-            //     Give them a 100 ms grace window.
+            //     Give them a 1000 ms grace window — big ops (gaussian
+            //     on 20 MP, matchTemplate, contour walks) need a few
+            //     hundred ms to finish their current chunk; 100 ms was
+            //     too tight and made cooperative cancel fail more
+            //     often than necessary.
             //   Phase 2: if the inspect still hasn't returned (deadline
             //     still armed), fall back to TerminateThread. That's
             //     the unsafe primitive — only used when cooperative
@@ -2706,7 +2710,7 @@ int main(int argc, char** argv) {
                 std::lock_guard<std::mutex> lk(g_script_mu);
                 if (g_script.set_global_cancel) g_script.set_global_cancel(1);
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
             // Re-check deadline. If clear, the script cooperated.
             if (g_inspect_deadline_ms.load() == 0) {

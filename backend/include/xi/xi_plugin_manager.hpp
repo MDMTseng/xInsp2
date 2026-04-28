@@ -1116,11 +1116,23 @@ public:
                     // covered yet. Default-on is tracked in status.md.
                     auto iso = extract_string(ic, "isolation");
                     bool want_isolated = (iso && *iso == "process");
+                    // Optional per-instance IPC call timeout. Honoured only
+                    // for isolation:"process" instances — the in-proc path
+                    // doesn't have a watchdog of its own (the script-level
+                    // g_watchdog_ms covers it). Range: any positive int;
+                    // typical values 5000..120000 ms. Missing / non-positive
+                    // → adapter's built-in 30 s default.
+                    int call_timeout_ms = 0;
+                    if (auto tm = extract_string(ic, "call_timeout_ms")) {
+                        try { call_timeout_ms = std::stoi(*tm); } catch (...) {}
+                    }
                     if (want_isolated && !worker_exe_.empty() && !shm_name_.empty()) {
                         try {
                             auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
-                            ii.instance = std::make_shared<ProcessInstanceAdapter>(
+                            auto adapter = std::make_shared<ProcessInstanceAdapter>(
                                 ii.name, *plugin, worker_exe_, dll_path, shm_name_);
+                            if (call_timeout_ms > 0) adapter->set_call_timeout_ms(call_timeout_ms);
+                            ii.instance = std::move(adapter);
                             created = true;
                         } catch (const std::exception& e) {
                             std::fprintf(stderr,
