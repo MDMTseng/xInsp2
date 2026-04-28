@@ -197,6 +197,13 @@ if(NOT MSVC)
 endif()
 add_test(NAME image_pool COMMAND test_image_pool)
 
+add_executable(test_image_pool_stress tests/test_image_pool_stress.cpp)
+target_link_libraries(test_image_pool_stress PRIVATE xi_core cjson)
+if(NOT MSVC)
+    target_link_libraries(test_image_pool_stress PRIVATE pthread)
+endif()
+add_test(NAME image_pool_stress COMMAND test_image_pool_stress)
+
 add_executable(test_ops tests/test_ops.cpp)
 target_link_libraries(test_ops PRIVATE xi_core)
 if(NOT MSVC)
