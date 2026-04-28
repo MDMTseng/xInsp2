@@ -171,6 +171,15 @@ flows through the host pool unchanged. When you hand a Mat to
 swap, hue values land 120° away from where they should be, and the
 plugin still "works", just on the wrong colour.
 
+**You don't manage refcounts yourself.** `pool_image()` returns an
+`xi::Image` that holds the pool handle's ref via its internal
+`shared_ptr`. Storing it in a local, returning it through
+`xi::Record::image("key", img)`, copy-constructing — all the obvious
+C++ patterns do the right thing. The cross-ABI return path picks the
+handle up with one `addref` and the local `xi::Image` releases its
+ref when it goes out of scope. Net refcount: 1, owned by the receiver.
+You never call `image_addref` / `image_release` from plugin code.
+
 For the API contracts in detail, see
 [`docs/reference/plugin-abi.md`](../reference/plugin-abi.md) and
 [`docs/reference/host_api.md`](../reference/host_api.md).
