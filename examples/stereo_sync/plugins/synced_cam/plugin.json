@@ -1,0 +1,7 @@
+{
+  "name": "synced_cam",
+  "description": "Synthetic 320x240 grayscale source. Two instances pair via shared tid for stereo correlation.",
+  "dll": "synced_cam.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

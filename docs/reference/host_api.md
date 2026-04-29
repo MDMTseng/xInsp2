@@ -156,6 +156,15 @@ inspection event per complete trigger.
 `emit_trigger` is null on hosts older than the trigger bus addition;
 plugins should null-check.
 
+**Isolation gotcha**: when a source-plugin instance runs under the
+current default `"isolation": "process"`, the worker gets a stub
+`emit_trigger` that logs a warning and no-ops — emits can't reach
+the backend's TriggerBus because the bus is a singleton in the
+backend's address space, not the worker's. Source-plugin instances
+must therefore set `"isolation": "in_process"` in their
+`instance.json`. Cross-process emit_trigger is queued as future
+work.
+
 For threading safety inside source plugins, use `xi::spawn_worker`
 (see `xi/xi_thread.hpp`) — it installs the SEH translator on the
 worker thread so a segfault becomes a recoverable C++ exception.

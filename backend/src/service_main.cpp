@@ -2263,21 +2263,25 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xi::TriggerPolicy pol = xi::TriggerPolicy::Any;
         if      (pol_str && *pol_str == "all_required")     pol = xi::TriggerPolicy::AllRequired;
         else if (pol_str && *pol_str == "leader_followers") pol = xi::TriggerPolicy::LeaderFollowers;
-        // Super-minimal array parse — required sources extracted by scanning.
+        // Parse `required` properly (cJSON, not substring). The old
+        // substring scan looked for `"required":[` (no space) and
+        // silently fell back to an empty list when the args came from
+        // Python's default `json.dumps(...)` which emits `"required":
+        // [` (with space). The empty list then got persisted to
+        // project.json by save_project_locked() — silent destruction
+        // of the user's policy.
         std::vector<std::string> required;
-        auto rp = parsed->args_json.find("\"required\":[");
-        if (rp != std::string::npos) {
-            auto end = parsed->args_json.find(']', rp);
-            if (end != std::string::npos) {
-                std::string section = parsed->args_json.substr(rp + 12, end - (rp + 12));
-                size_t pos = 0;
-                while (pos < section.size()) {
-                    auto q1 = section.find('"', pos); if (q1 == std::string::npos) break;
-                    auto q2 = section.find('"', q1 + 1); if (q2 == std::string::npos) break;
-                    required.emplace_back(section.substr(q1 + 1, q2 - q1 - 1));
-                    pos = q2 + 1;
+        if (cJSON* root = cJSON_Parse(parsed->args_json.c_str())) {
+            if (cJSON* arr = cJSON_GetObjectItem(root, "required");
+                arr && cJSON_IsArray(arr)) {
+                cJSON* it;
+                cJSON_ArrayForEach(it, arr) {
+                    if (cJSON_IsString(it) && it->valuestring) {
+                        required.emplace_back(it->valuestring);
+                    }
                 }
             }
+            cJSON_Delete(root);
         }
         auto leader = xp::get_string_field(parsed->args_json, "leader").value_or("");
         auto win    = xp::get_number_field(parsed->args_json, "window_ms").value_or(100);

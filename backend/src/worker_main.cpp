@@ -133,6 +133,28 @@ int main(int argc, char** argv) {
     // plugin creates only for its own use. But normally the plugin will
     // use shm_create_image so the backend can see the result.
     static xi_host_api host = xi::ImagePool::make_host_api();
+    // emit_trigger across the worker→backend boundary needs a reverse
+    // pipe (worker pushing async events up to the backend's TriggerBus
+    // singleton). That's queued as future work — see task #71. For now,
+    // stub it with a logger so source plugins that try to emit fail
+    // loudly with a clear pointer at the workaround instead of
+    // null-derefing inside their worker thread (which used to manifest
+    // as a silent ProcessInstanceAdapter respawn loop and zero
+    // dispatches on the script side). Set
+    // `"isolation": "in_process"` on any instance whose plugin calls
+    // `host->emit_trigger`.
+    host.emit_trigger = [](const char* source, xi_trigger_id, int64_t,
+                           const xi_record_image*, int32_t) {
+        static thread_local bool warned = false;
+        if (!warned) {
+            std::fprintf(stderr,
+                "[worker] WARNING: emit_trigger('%s') from isolated worker is a no-op. "
+                "Set the instance's `isolation` to `in_process` in instance.json — "
+                "cross-process emit_trigger is not yet implemented.\n",
+                source ? source : "?");
+            warned = true;
+        }
+    };
 
     // Connect to the backend's pipe. Backend should already have the
     // server side waiting.
