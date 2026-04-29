@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace xi {
@@ -151,8 +152,18 @@ public:
 
     // ---- Builder API (mutating, only valid on owning root) -------------
 
-    Json& set(const char* key, int v)              { return set_node(key, cJSON_CreateNumber(v)); }
+    // Generic integral overload (int / long / long long / int64_t /
+    // size_t / uint32_t / ...) — values up to 2^53 round-trip via
+    // cJSON's double; bigger ints lose precision (cJSON has no native
+    // int64 path). bool excluded so it routes to the bool overload.
+    template <typename T,
+              typename = std::enable_if_t<std::is_integral_v<T> &&
+                                          !std::is_same_v<T, bool>>>
+    Json& set(const char* key, T v) {
+        return set_node(key, cJSON_CreateNumber(static_cast<double>(v)));
+    }
     Json& set(const char* key, double v)           { return set_node(key, cJSON_CreateNumber(v)); }
+    Json& set(const char* key, float v)            { return set_node(key, cJSON_CreateNumber((double)v)); }
     Json& set(const char* key, bool v)             { return set_node(key, cJSON_CreateBool(v)); }
     Json& set(const char* key, const char* v)      { return set_node(key, cJSON_CreateString(v ? v : "")); }
     Json& set(const char* key, const std::string& v) { return set(key, v.c_str()); }
@@ -161,8 +172,12 @@ public:
     }
     Json& set_null(const char* key)                { return set_node(key, cJSON_CreateNull()); }
 
-    Json& push(int v)              { return push_node(cJSON_CreateNumber(v)); }
+    template <typename T,
+              typename = std::enable_if_t<std::is_integral_v<T> &&
+                                          !std::is_same_v<T, bool>>>
+    Json& push(T v)                { return push_node(cJSON_CreateNumber(static_cast<double>(v))); }
     Json& push(double v)           { return push_node(cJSON_CreateNumber(v)); }
+    Json& push(float v)            { return push_node(cJSON_CreateNumber((double)v)); }
     Json& push(bool v)             { return push_node(cJSON_CreateBool(v)); }
     Json& push(const char* v)      { return push_node(cJSON_CreateString(v ? v : "")); }
     Json& push(const std::string& v) { return push(v.c_str()); }

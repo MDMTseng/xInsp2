@@ -24,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <type_traits>
 
 namespace xi {
 
@@ -93,14 +94,29 @@ public:
     }
 
     // --- Data builders (add to the JSON object) ---
-    Record& set(const std::string& key, int v) {
+    //
+    // Integer overload accepts every standard integral type — int,
+    // long, long long, int64_t, size_t, uint32_t, ... — collapsed
+    // through cJSON's number (which is a double). Values ≤ 2^53
+    // round-trip exactly; bigger ints lose precision (cJSON has no
+    // native int64 path). bool is excluded so it goes to the
+    // dedicated bool overload below.
+    template <typename T,
+              typename = std::enable_if_t<std::is_integral_v<T> &&
+                                          !std::is_same_v<T, bool>>>
+    Record& set(const std::string& key, T v) {
         cJSON_DeleteItemFromObject(json_, key.c_str());
-        cJSON_AddNumberToObject(json_, key.c_str(), v);
+        cJSON_AddNumberToObject(json_, key.c_str(), static_cast<double>(v));
         return *this;
     }
     Record& set(const std::string& key, double v) {
         cJSON_DeleteItemFromObject(json_, key.c_str());
         cJSON_AddNumberToObject(json_, key.c_str(), v);
+        return *this;
+    }
+    Record& set(const std::string& key, float v) {
+        cJSON_DeleteItemFromObject(json_, key.c_str());
+        cJSON_AddNumberToObject(json_, key.c_str(), (double)v);
         return *this;
     }
     Record& set(const std::string& key, bool v) {

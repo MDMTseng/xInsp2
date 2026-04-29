@@ -1,0 +1,12 @@
+{
+  "name": "frame_source",
+  "description": "Synthetic image source: ticks at fps Hz, emits 320x240 grayscale with seq stamped in first 8 bytes. Used by burst_pipeline to drive parallelism stress tests.",
+  "dll": "frame_source.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params":  [{"name": "fps", "type": "int", "default": 60, "min": 1, "max": 240}],
+    "inputs":  [],
+    "outputs": [{"name": "img", "kind": "image", "doc": "320x240 gray, first 8 bytes = uint64 LE seq"}]
+  }
+}

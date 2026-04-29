@@ -365,15 +365,26 @@ fills:
 Probe live state with `cmd:dispatch_stats` (Python: `c.call("dispatch_stats")`):
 
 ```python
-{ "queue_depth_now": 4, "queue_depth_max": 100,
+{ "queue_depth_now": 4,
+  "queue_depth_cap": 100,
+  "queue_depth_high_watermark": 27,
   "overflow": "drop_oldest", "dispatch_threads": 4,
   "dropped_oldest": 88, "dropped_newest": 0 }
 ```
 
-If `queue_depth_now` stays pinned at the cap and `dropped_oldest`
-keeps growing, your source is producing faster than your pipeline
-can keep up — bump `dispatch_threads`, optimise the plugin, or
-accept the drops.
+- `queue_depth_now` — current size.
+- `queue_depth_cap` — the configured `queue_depth` from project.json.
+- `queue_depth_high_watermark` — peak depth observed since the last
+  `cmd:start`. Counters reset on each `cmd:start`. **This is the
+  real tuning signal**: if peak << cap you have headroom; if peak
+  == cap you're saturating.
+- `dropped_oldest` / `dropped_newest` — overflow counters since
+  last `cmd:start`.
+
+If `queue_depth_high_watermark` stays pinned at the cap and
+`dropped_oldest` keeps growing, your source is producing faster than
+your pipeline can keep up — bump `dispatch_threads`, optimise the
+plugin, or accept the drops.
 
 **Caveats — your responsibility once N > 1:**
 

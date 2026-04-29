@@ -1652,6 +1652,16 @@ private:
         out += "  \"name\": \""   + project_.name + "\",\n";
         out += "  \"script\": \"" + std::filesystem::path(project_.script_path).filename().string() + "\",\n";
         out += "  \"trigger_policy\": " + trigger_policy_json_locked() + ",\n";
+        // Preserve `parallelism` block. Earlier versions only wrote
+        // name / script / trigger_policy / instances, so any UI flow
+        // that called cmd:save_project silently dropped the user's
+        // dispatch_threads / queue_depth / overflow config. Always
+        // write the block — defaults round-trip cleanly.
+        out += "  \"parallelism\": {";
+        out += "\"dispatch_threads\":" + std::to_string(project_.dispatch_threads);
+        out += ",\"queue_depth\":"     + std::to_string(project_.queue_depth);
+        out += ",\"overflow\":\""      + project_.overflow + "\"";
+        out += "},\n";
         out += "  \"instances\": [";
         int i = 0;
         for (auto& [k, v] : project_.instances) {
