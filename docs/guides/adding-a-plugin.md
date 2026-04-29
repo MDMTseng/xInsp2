@@ -206,6 +206,21 @@ Call `host->emit_trigger(name, tid, ts, images, count)` from a worker
 thread. The backend's TriggerBus correlates by `tid`. See the Expert
 template for a working synthetic source.
 
+**Source plugins must opt out of process isolation.** Cross-process
+emit_trigger isn't implemented yet — the worker's bus is a different
+singleton from the backend's, so emits from an isolated worker would
+go nowhere. Add `"isolation": "in_process"` to the source instance's
+`instance.json`:
+
+```json
+{ "plugin": "my_camera", "isolation": "in_process", "config": { ... } }
+```
+
+If you forget, the worker's stub `emit_trigger` logs a warning to
+backend stderr (`emit_trigger from isolated worker is a no-op`) and
+the bus stays empty. Track of the cross-process feature: future
+work, alongside burst-frame parallelism.
+
 **Crash isolation?**
 Plugin instances default to running in their own `xinsp-worker.exe`
 (see [`docs/reference/instance-model.md`](../reference/instance-model.md)

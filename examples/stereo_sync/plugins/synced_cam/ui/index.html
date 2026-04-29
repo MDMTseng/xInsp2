@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>synced_cam</title>
+<style>
+  body { font-family: sans-serif; padding: 12px; color: #ddd; background: #1e1e1e; }
+  label { display: inline-block; min-width: 80px; }
+  input[type=number] { width: 80px; }
+  pre { background: #111; padding: 8px; font-size: 12px; }
+  button { margin-right: 6px; }
+</style></head>
+<body>
+  <h2>synced_cam</h2>
+  <p>Synthetic 320x240 grayscale source. Worker thread auto-starts on construction.</p>
+  <div>
+    <label>fps</label>
+    <input id="fps" type="number" value="20" min="1" max="240"/>
+    <button onclick="setFps()">Set</button>
+  </div>
+  <div style="margin-top:8px">
+    <button onclick="cmd('start')">Start</button>
+    <button onclick="cmd('stop')">Stop</button>
+    <button onclick="cmd('get_status')">Refresh</button>
+  </div>
+  <pre id="status">(loading...)</pre>
+<script>
+  const vscode = acquireVsCodeApi();
+  function cmd(c) {
+    vscode.postMessage({ type: 'exchange', cmd: JSON.stringify({ command: c }) });
+  }
+  function setFps() {
+    const v = parseInt(document.getElementById('fps').value, 10) || 20;
+    vscode.postMessage({
+      type: 'exchange',
+      cmd: JSON.stringify({ command: 'set_fps', value: v }),
+    });
+  }
+  window.addEventListener('message', (ev) => {
+    const m = ev.data;
+    if (m && m.type === 'status') {
+      document.getElementById('status').textContent = JSON.stringify(m, null, 2);
+    }
+  });
+  // Initial pull
+  setTimeout(() => cmd('get_status'), 200);
+</script>
+</body></html>

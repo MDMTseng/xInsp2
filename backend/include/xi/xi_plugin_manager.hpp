@@ -1003,45 +1003,43 @@ public:
         else            project_.script_path = (std::filesystem::path(folder) / "inspection.cpp").string();
 
         // Parse trigger_policy block (optional; older project.json files
-        // have none and we default to Any).
+        // have none and we default to Any). Use cJSON instead of
+        // substring search — the previous string-scan version assumed
+        // `"required":[` with no whitespace and silently dropped the
+        // list when a tool / human formatted the JSON with a space
+        // after the colon (Python's json.dumps default).
         project_.trigger_policy    = TriggerPolicy::Any;
         project_.trigger_required.clear();
         project_.trigger_leader.clear();
         project_.trigger_window_ms = 100;
-        auto tp_pos = content.find("\"trigger_policy\"");
-        if (tp_pos != std::string::npos) {
-            // Parse just the small block — simplest: find enclosing { }
-            auto bs = content.find('{', tp_pos);
-            auto be = (bs == std::string::npos) ? std::string::npos : content.find('}', bs);
-            if (bs != std::string::npos && be != std::string::npos) {
-                std::string block = content.substr(bs, be - bs + 1);
-                auto pol = extract_string(block, "policy");
-                if (pol) {
-                    if      (*pol == "all_required")     project_.trigger_policy = TriggerPolicy::AllRequired;
-                    else if (*pol == "leader_followers") project_.trigger_policy = TriggerPolicy::LeaderFollowers;
+        if (cJSON* root = cJSON_Parse(content.c_str())) {
+            if (cJSON* tp = cJSON_GetObjectItem(root, "trigger_policy");
+                tp && cJSON_IsObject(tp)) {
+                if (cJSON* k = cJSON_GetObjectItem(tp, "policy");
+                    k && cJSON_IsString(k) && k->valuestring) {
+                    std::string p = k->valuestring;
+                    if      (p == "all_required")     project_.trigger_policy = TriggerPolicy::AllRequired;
+                    else if (p == "leader_followers") project_.trigger_policy = TriggerPolicy::LeaderFollowers;
                 }
-                auto ld = extract_string(block, "leader");
-                if (ld) project_.trigger_leader = *ld;
-                auto wp = block.find("\"window_ms\":");
-                if (wp != std::string::npos) {
-                    try { project_.trigger_window_ms = std::stoi(block.substr(wp + 12)); }
-                    catch (...) {}
+                if (cJSON* k = cJSON_GetObjectItem(tp, "leader");
+                    k && cJSON_IsString(k) && k->valuestring) {
+                    project_.trigger_leader = k->valuestring;
                 }
-                auto rp = block.find("\"required\":[");
-                if (rp != std::string::npos) {
-                    auto re = block.find(']', rp);
-                    if (re != std::string::npos) {
-                        std::string arr = block.substr(rp + 12, re - (rp + 12));
-                        size_t pos = 0;
-                        while (pos < arr.size()) {
-                            auto q1 = arr.find('"', pos); if (q1 == std::string::npos) break;
-                            auto q2 = arr.find('"', q1 + 1); if (q2 == std::string::npos) break;
-                            project_.trigger_required.emplace_back(arr.substr(q1 + 1, q2 - q1 - 1));
-                            pos = q2 + 1;
+                if (cJSON* k = cJSON_GetObjectItem(tp, "window_ms");
+                    k && cJSON_IsNumber(k)) {
+                    project_.trigger_window_ms = (int)k->valuedouble;
+                }
+                if (cJSON* arr = cJSON_GetObjectItem(tp, "required");
+                    arr && cJSON_IsArray(arr)) {
+                    cJSON* it;
+                    cJSON_ArrayForEach(it, arr) {
+                        if (cJSON_IsString(it) && it->valuestring) {
+                            project_.trigger_required.emplace_back(it->valuestring);
                         }
                     }
                 }
             }
+            cJSON_Delete(root);
         }
         TriggerBus::instance().set_policy(
             project_.trigger_policy, project_.trigger_required,

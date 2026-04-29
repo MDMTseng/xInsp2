@@ -1,0 +1,5 @@
+{
+  "plugin": "synced_cam",
+  "isolation": "in_process",
+  "config": { "fps": 20 }
+}
