@@ -272,7 +272,13 @@ static void* g_breakpoint_fn_       = nullptr;
 //
 // `g_run_frame_path_` is sized to 1024 — paths longer than that are
 // truncated. Plenty for any reasonable file system.
-static char g_run_frame_path_[1024] = {0};
+//
+// thread_local so multiple dispatcher threads (project.json
+// `parallelism.dispatch_threads > 1`) each see their own per-run
+// path. Each thread's `xi_script_set_run_context` writes its own
+// slot; `xi::current_frame_path()` reads it back from the same
+// thread.
+static thread_local char g_run_frame_path_[1024] = {0};
 
 XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
     void* process_fn, void* exchange_fn, void* grab_fn,

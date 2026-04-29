@@ -1,0 +1,5 @@
+{
+  "name": "burst_dispatch",
+  "script": "inspect.cpp",
+  "parallelism": { "dispatch_threads": 4 }
+}

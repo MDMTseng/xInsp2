@@ -212,6 +212,14 @@ struct ProjectInfo {
     std::vector<std::string> trigger_required;    // source names (AllRequired)
     std::string   trigger_leader;                 // source name (LeaderFollowers)
     int           trigger_window_ms = 100;
+
+    // `parallelism.dispatch_threads`: how many dispatcher threads
+    // run xi_inspect_entry concurrently in continuous mode.
+    // Default 1 — single threaded, current behaviour, watchdog
+    // active. >1 fans out the trigger queue + timer ticks across
+    // N threads. Caveats (xi::state, plugin process() reentrance,
+    // watchdog disabled) — see writing-a-script.md.
+    int           dispatch_threads = 1;
 };
 
 // Static compile environment for project-level plugins. Populated once at
@@ -1012,6 +1020,7 @@ public:
         project_.trigger_required.clear();
         project_.trigger_leader.clear();
         project_.trigger_window_ms = 100;
+        project_.dispatch_threads  = 1;
         if (cJSON* root = cJSON_Parse(content.c_str())) {
             if (cJSON* tp = cJSON_GetObjectItem(root, "trigger_policy");
                 tp && cJSON_IsObject(tp)) {
@@ -1037,6 +1046,17 @@ public:
                             project_.trigger_required.emplace_back(it->valuestring);
                         }
                     }
+                }
+            }
+            // parallelism.dispatch_threads block.
+            if (cJSON* par = cJSON_GetObjectItem(root, "parallelism");
+                par && cJSON_IsObject(par)) {
+                if (cJSON* k = cJSON_GetObjectItem(par, "dispatch_threads");
+                    k && cJSON_IsNumber(k)) {
+                    int n = (int)k->valuedouble;
+                    if (n < 1) n = 1;
+                    if (n > 32) n = 32;  // sanity cap
+                    project_.dispatch_threads = n;
                 }
             }
             cJSON_Delete(root);

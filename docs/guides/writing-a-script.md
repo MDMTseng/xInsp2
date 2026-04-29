@@ -327,6 +327,47 @@ See [`docs/architecture.md`](../architecture.md) for bus policies (Any
 / AllRequired / LeaderFollowers) and the `synced_stereo` reference
 plugin.
 
+## Parallel dispatch (`parallelism.dispatch_threads`)
+
+By default `cmd:start` runs one dispatcher thread — every inspect call
+is serial. Add to `project.json`:
+
+```json
+{
+  "name": "my_project",
+  "script": "inspect.cpp",
+  "parallelism": { "dispatch_threads": 4 }
+}
+```
+
+…to fan out across **N concurrent inspect calls**. A burst of 4 frames
+arriving in the same 10 ms window now lands on 4 worker threads that
+all run `xi_inspect_entry` simultaneously. See `examples/burst_dispatch/`
+for a baseline measurement; with `sleep_ms=50` per inspect and
+`fps=100`, N=1 yields ~16 events/sec, N=4 yields ~58.
+
+**Caveats — your responsibility once N > 1:**
+
+- **`xi::state()`** is a single shared dict. Concurrent reads/writes
+  race. Wrap mutations in your own `std::mutex`, or design the
+  pipeline so only one thread writes a given key.
+- **Plugin instances** are likewise shared. A plugin called via
+  `xi::use("det").process(...)` from N script threads has N concurrent
+  `process()` calls. Plugin author must either declare
+  `manifest.thread_safe: true` (no current effect — opt-in is just a
+  contract for now) or write reentrancy-safe code (cv:: ops on
+  pool-backed Images are mostly fine; member counters / caches are
+  not).
+- **Watchdog is disabled** under N > 1 (single-slot atomics can't
+  track multiple in-flight inspects).
+- **`vars` events** arrive on the wire interleaved across run_ids.
+  Order them client-side by `run_id` if order matters.
+- **`xi::Param<T>`** reads are atomic and safe.
+- **VAR** writes go to a thread-local ValueStore — each dispatcher
+  has its own.
+
+When in doubt, leave `dispatch_threads` at 1.
+
 ---
 
 ## Common pitfalls

@@ -1,0 +1,12 @@
+{
+  "name": "slow_detector",
+  "description": "Sleeps inside process() to simulate a heavy CV pipeline. Used to verify dispatch_threads parallelism.",
+  "dll": "slow_detector.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params":  [{"name": "sleep_ms", "type": "int", "default": 50}],
+    "inputs":  [],
+    "outputs": [{"name": "count", "kind": "number"}]
+  }
+}
