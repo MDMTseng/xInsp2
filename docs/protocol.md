@@ -188,12 +188,25 @@ Stable set for v1. Arguments are listed under each entry.
 
 ### `compile_and_load`
 `args: { "path": "C:/.../inspection.cpp" }`
-→ `data: { "build_log": "...", "instances": [...], "params": [...] }`
+→ `data: { "dll": "C:/.../inspect_v3.dll",
+           "diagnostics": [...],
+           "resumed_continuous": true (optional) }`
+
 Invokes the C++ compiler (see M5), loads the resulting .dll, runs any global
-constructors (which populate the registries), and returns the new state.
+constructors (which populate the registries). On compile failure the rsp
+is `ok: false` with `error: "compile failed"` and `data.diagnostics` carrying
+the structured cl.exe error array.
+
+Hot-reload semantics: across the call, the backend (a) saves and restores
+`xi::state()` JSON (drops it on schema mismatch via `state_dropped`
+event), (b) replays every `cmd:set_param` value the user pushed into
+the previous DLL into the new one, (c) if `cmd:start` was active,
+captures the fps + auto-resumes a fresh worker after the new DLL is
+ready (rsp gets `"resumed_continuous": true`). The cl.exe rebuild gap
+is unavoidable (~3-5 s cold) but the run continues afterwards.
 
 ### `unload_script`
-`args: {}` → `ok: true`
+`args: {}` → `ok: true`. Also clears the param replay cache.
 
 ### `run`
 `args: { "frame_path": "..." (optional) }`
@@ -204,6 +217,26 @@ followed by an asynchronous `vars` message and zero or more binary previews.
 (see `docs/guides/writing-a-script.md`). Empty / missing means the
 script gets an empty string. Combine with `xi::imread()` to load a
 file frame on demand without a custom source plugin.
+
+### `start` / `stop`
+`start args: { "fps": int (default 10) }` → `data: { "started": true }`
+or `data: { "already": true }` when continuous mode was already running.
+
+`stop args: {}` → `data: { "stopped": true }`.
+
+Continuous mode runs a single worker thread inside the backend. Each
+tick comes from one of two sources:
+
+- The trigger bus dispatches one inspect call per complete trigger
+  (see `instance-model.md` "isolation modes" / trigger sections).
+- A wall-clock timer at the requested fps fires a fallback dispatch
+  even when no trigger is queued. Scripts that read trigger images
+  must guard `xi::current_trigger().is_active()` because timer-only
+  ticks have no trigger attached.
+
+`vars` messages are emitted on each dispatch, same shape as for
+`cmd:run`. There is no per-frame rsp; the only ack for `start` is the
+initial one.
 
 ### `list_instances`
 `args: {}` → triggers an `instances` message.
