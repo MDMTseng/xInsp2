@@ -1,0 +1,7 @@
+{
+  "name": "count_or_crash",
+  "description": "Threshold + connectedComponents; deliberately null-deref crashes when blob count exceeds a configured limit. Used to validate xInsp2 plugin crash isolation.",
+  "dll": "count_or_crash.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false
+}
