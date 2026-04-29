@@ -1,0 +1,62 @@
+[xinsp2] script-side accelerators: opencv=C:\opencv\opencv\build  turbojpeg=C:\libjpeg-turbo64  ipp=C:\Intel\ipp\2026.0.0
+[xinsp2] scanned 6 plugins from C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\plugins
+[xinsp2] include_dir=C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\backend\include
+[xinsp2] work_dir=C:\Users\TRS001\AppData\Local\Temp\xinsp2
+[xinsp2] plugins_dir=C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\plugins
+[xinsp2] shm region 'xinsp2-shm-17348' size=512MB
+[xinsp2] isolation env: worker=C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\backend\build\Release\xinsp-worker.exe
+[xinsp2] listening on ws://127.0.0.1:7823
+[xinsp2] client connected
+[xinsp2] compiling project plugin 'count_or_crash' (1 source)...
+[xinsp2] 1 project plugin(s) built
+[worker] pipe=xinsp2-pipe-17348-cnt shm=xinsp2-shm-17348 dll=C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\examples\crash_recovery\plugins\count_or_crash\build\plugin_v0.dll instance=cnt
+[worker] shm attached, 512MB visible
+[worker] pipe connected
+[worker] CREATE ok
+[ProcessInstanceAdapter] 'cnt' spawned worker pid=7428 pipe=xinsp2-pipe-17348-cnt
+[xinsp2] project opened: crash_recovery (1 instances)
+[xinsp2]   instance: cnt (count_or_crash)
+[worker] plugin SEH: 0xC0000005 (ACCESS_VIOLATION)
+[xinsp2] use_process('cnt') isolated: plugin crashed: ACCESS_VIOLATION
+[worker] plugin SEH: 0xC0000005 (ACCESS_VIOLATION)
+[xinsp2] use_process('cnt') isolated: plugin crashed: ACCESS_VIOLATION
+[worker] plugin SEH: 0xC0000005 (ACCESS_VIOLATION)
+[xinsp2] use_process('cnt') isolated: plugin crashed: ACCESS_VIOLATION
+[xinsp2] client disconnected
+[xinsp2] client connected
+[worker] DESTROY ok, exiting
+[xinsp2] compiling project plugin 'count_or_crash' (1 source)...
+[xinsp2] 1 project plugin(s) built
+[worker] pipe=xinsp2-pipe-17348-cnt shm=xinsp2-shm-17348 dll=C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\examples\crash_recovery\plugins\count_or_crash\build\plugin_v2.dll instance=cnt
+[worker] shm attached, 512MB visible
+[worker] pipe connected
+[worker] CREATE ok
+[ProcessInstanceAdapter] 'cnt' spawned worker pid=20332 pipe=xinsp2-pipe-17348-cnt
+[xinsp2] project opened: crash_recovery (1 instances)
+[xinsp2]   instance: cnt (count_or_crash)
+[worker] plugin SEH: 0xC0000005 (ACCESS_VIOLATION)
+[xinsp2] use_process('cnt') isolated: plugin crashed: ACCESS_VIOLATION
+[worker] plugin SEH: 0xC0000005 (ACCESS_VIOLATION)
+[xinsp2] use_process('cnt') isolated: plugin crashed: ACCESS_VIOLATION
+[worker] plugin SEH: 0xC0000005 (ACCESS_VIOLATION)
+[xinsp2] use_process('cnt') isolated: plugin crashed: ACCESS_VIOLATION
+[xinsp2] client disconnected
+[xinsp2] client connected
+[worker] DESTROY ok, exiting
+[xinsp2] compiling project plugin 'count_or_crash' (1 source)...
+[xinsp2] 1 project plugin(s) built
+[worker] pipe=xinsp2-pipe-17348-cnt shm=xinsp2-shm-17348 dll=C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\examples\crash_recovery\plugins\count_or_crash\build\plugin_v4.dll instance=cnt
+[worker] shm attached, 512MB visible
+[worker] pipe connected
+[worker] CREATE ok
+[ProcessInstanceAdapter] 'cnt' spawned worker pid=12152 pipe=xinsp2-pipe-17348-cnt
+[xinsp2] project opened: crash_recovery (1 instances)
+[xinsp2]   instance: cnt (count_or_crash)
+[worker] plugin SEH: 0xC0000005 (ACCESS_VIOLATION)
+[xinsp2] use_process('cnt') isolated: plugin crashed: ACCESS_VIOLATION
+[worker] plugin SEH: 0xC0000005 (ACCESS_VIOLATION)
+[xinsp2] use_process('cnt') isolated: plugin crashed: ACCESS_VIOLATION
+[worker] plugin SEH: 0xC0000005 (ACCESS_VIOLATION)
+[xinsp2] use_process('cnt') isolated: plugin crashed: ACCESS_VIOLATION
+[xinsp2] client disconnected
+[worker] pipe closed: pipe read EOF

@@ -165,10 +165,31 @@ Two adapters wrap the C ABI:
 **Default: process.** A new instance with no `isolation` field in its
 `instance.json` runs in its own `xinsp-worker.exe`. Method calls
 (`set_def` / `exchange` / `get_def` / `process`) proxy over a named
-pipe, pixel data shares zero-copy via SHM. A buggy plugin can crash
-its worker process without taking the backend with it;
-`ProcessInstanceAdapter` auto-respawns the worker (rate-limited 3/60 s)
-and replays the last `set_def` so the next call still works.
+pipe, pixel data shares zero-copy via SHM.
+
+Crash recovery is two-layered:
+
+1. **In-worker SEH catch.** The worker process wraps every `process()`
+   call in `_set_se_translator`. An access violation / null deref /
+   divide-by-zero / similar SEH inside the plugin is caught and
+   replied to over the pipe as a per-call error — the worker process
+   keeps running, the next call goes straight through, no IPC
+   re-handshake. Backend logs `[xinsp2] use_process('<name>')
+   isolated: plugin crashed: <reason>`; the script side gets a Record
+   with `error` set to the same string.
+
+2. **Process-level respawn.** If something kills the worker process
+   itself (an async `std::abort`, the OS OOM-killer, the SEH wrapper
+   itself faulting), `ProcessInstanceAdapter` re-spawns a fresh
+   worker (rate-limited 3 per 60 s) and replays the last `set_def`
+   so the new worker has the same state. After 3 respawns inside the
+   window the adapter gives up: `is_dead()` returns true, future
+   calls error out, and a one-shot `event:isolation_dead` is emitted
+   to clients.
+
+In normal use (sane plugins, occasional bugs caught during
+development) layer 1 handles everything and you never see the
+respawn path fire.
 
 If the backend was started without an isolation environment (no
 `xinsp-worker.exe` next to it, or SHM region creation failed) every
@@ -244,10 +265,13 @@ A spawned `xinsp-worker.exe`:
   the same physical pages → zero-copy `process()`).
 - Loads the plugin DLL on its side.
 - Services RPC over a named pipe.
-- A crash in the plugin only kills the worker; backend respawns it
-  (rate-limited 3/60s).
+- An SEH inside `process()` is caught by the worker's own translator
+  and replied to as a per-call error (worker process stays up).
+- Only if the worker process itself dies (OOM kill, async std::abort,
+  SEH wrapper itself faulting) does the adapter respawn it (rate-
+  limited 3/60s, last `set_def` replayed).
 - A hung `process()` is bounded by the per-call timeout
-  (default 30s) → `CancelIoEx` watchdog → respawn.
+  (default 30s) → `CancelIoEx` watchdog → forced respawn.
 
 The isolation choice is per-instance, not per-project — you can mix
 isolated and in-proc instances in the same project. Useful for

@@ -1,0 +1,24 @@
+{
+  "name": "count_or_crash",
+  "description": "Threshold + connectedComponents count. If count exceeds the configured limit, deliberately segfault to exercise framework crash isolation.",
+  "dll": "count_or_crash.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [
+      { "name": "crash_when_count_above", "type": "int", "min": 0, "max": 100000, "default": 8,
+        "doc": "If connectedComponents (minus background) exceeds this, the plugin deliberately null-derefs. Used to test crash isolation." }
+    ],
+    "inputs": [
+      { "name": "src", "kind": "image", "doc": "1-channel grayscale image." }
+    ],
+    "outputs": [
+      { "name": "count", "kind": "number", "doc": "Connected components (excluding background). Only emitted on the non-crash path." },
+      { "name": "mask",  "kind": "image",  "doc": "Threshold mask. Only emitted on the non-crash path." }
+    ],
+    "exchange": [
+      { "command": "set_threshold", "args": "{value:int}", "result": "current def JSON" },
+      { "command": "reset",         "args": "{}",          "result": "current def JSON" }
+    ]
+  }
+}
