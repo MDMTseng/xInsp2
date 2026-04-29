@@ -46,6 +46,13 @@ namespace xi {
 struct TriggerEvent {
     xi_trigger_id  id{0, 0};
     int64_t        timestamp_us = 0;          // earliest source timestamp
+    // Stamped by the dispatcher worker the moment this event is popped
+    // off the dispatch queue (g_ev_queue). Same clock as timestamp_us
+    // (system_clock microseconds — see xi::now_us()), so scripts can
+    // compute queue_wait_us = dequeued_at_us - timestamp_us and
+    // inspect_us = xi::now_us() - dequeued_at_us. Zero until the
+    // worker stamps it; observer/recorder copies see 0.
+    int64_t        dequeued_at_us = 0;
     // Source name → image handle. Caller must release each handle after use.
     std::unordered_map<std::string, xi_image_handle> images;
     // Best-effort metadata: which source first published this tid.
@@ -58,11 +65,14 @@ enum class TriggerPolicy {
     LeaderFollowers,    // fire on leader; attach follower latest
 };
 
+#ifndef XI_NOW_US_DEFINED
+#define XI_NOW_US_DEFINED
 inline int64_t now_us() {
     auto now = std::chrono::system_clock::now();
     return std::chrono::duration_cast<std::chrono::microseconds>(
         now.time_since_epoch()).count();
 }
+#endif
 
 inline xi_trigger_id make_trigger_id() {
     // 128-bit identifier from a fast TLS PRNG. Not cryptographically random

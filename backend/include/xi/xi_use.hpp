@@ -21,9 +21,11 @@
 #include "xi_record.hpp"
 #include "xi_image.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // Defined in xi_script_support.hpp (force-included by the compiler)
 extern void* g_use_process_fn_;
@@ -35,6 +37,22 @@ extern void* g_trigger_image_fn_;
 extern void* g_trigger_sources_fn_;
 
 namespace xi {
+
+// Microseconds since the Unix epoch (system_clock). Same clock the host
+// uses to stamp TriggerEvent::timestamp_us / dequeued_at_us, so script-
+// side subtraction across the host/script boundary is meaningful.
+// Defined here (and not pulled from xi_trigger_bus.hpp) so scripts don't
+// have to include host-only headers to compute the latency split.
+// Guarded so the host's xi_trigger_bus.hpp can also define it without
+// ODR conflict when both headers land in the same TU.
+#ifndef XI_NOW_US_DEFINED
+#define XI_NOW_US_DEFINED
+inline int64_t now_us() {
+    auto now = std::chrono::system_clock::now();
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        now.time_since_epoch()).count();
+}
+#endif
 
 // Function pointer types for the callbacks
 using UseProcessFn  = int (*)(const char* name,
@@ -48,8 +66,13 @@ using UseGrabFn     = xi_image_handle (*)(const char* name, int timeout_ms);
 // Trigger callbacks (host-side wires these in via xi_script_set_trigger_callbacks)
 struct CurrentTriggerInfo {
     xi_trigger_id id;
-    int64_t       timestamp_us;
-    int32_t       is_active;       // 0 if no trigger is currently being dispatched
+    int64_t       timestamp_us;     // emit timestamp (host->emit_trigger ts)
+    int32_t       is_active;        // 0 if no trigger is currently being dispatched
+    int32_t       _pad = 0;         // align dequeued_at_us to 8 bytes
+    int64_t       dequeued_at_us;   // moment dispatcher worker popped this event
+                                    // off g_ev_queue (same clock as timestamp_us).
+                                    // queue_wait_us = dequeued_at_us - timestamp_us
+                                    // inspect_us    = now_us()       - dequeued_at_us
 };
 using TriggerInfoFn    = void (*)(CurrentTriggerInfo* out);
 using TriggerImageFn   = xi_image_handle (*)(const char* source);
@@ -83,6 +106,19 @@ public:
 
     xi_trigger_id id() const          { ensure(); return info_.id; }
     int64_t       timestamp_us() const { ensure(); return info_.timestamp_us; }
+
+    // Microseconds (system_clock, same base as timestamp_us) when the
+    // dispatcher worker pulled this event off the internal queue. Useful
+    // for separating "time spent waiting in queue" from "time spent in
+    // process()":
+    //
+    //   double queue_wait_us = (double)(t.dequeued_at_us() - t.timestamp_us());
+    //   double inspect_us    = (double)(xi::now_us()        - t.dequeued_at_us());
+    //
+    // 0 if the host hasn't stamped one (e.g. single-shot cmd:run path
+    // before this field was introduced, or synthetic timer ticks with
+    // no trigger). Always check is_active() first.
+    int64_t       dequeued_at_us() const { ensure(); return info_.dequeued_at_us; }
 
     std::string id_string() const {
         ensure();

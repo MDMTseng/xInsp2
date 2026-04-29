@@ -327,6 +327,56 @@ See [`docs/architecture.md`](../architecture.md) for bus policies (Any
 / AllRequired / LeaderFollowers) and the `synced_stereo` reference
 plugin.
 
+### `xi::Trigger` accessors
+
+| Accessor                  | Returns                                                               |
+| ------------------------- | --------------------------------------------------------------------- |
+| `t.is_active()`           | `false` for synthetic timer ticks; `true` once a real event landed    |
+| `t.id()` / `t.id_string()`| 128-bit trigger id (struct or 32-char hex)                            |
+| `t.timestamp_us()`        | μs since Unix epoch when the source called `host->emit_trigger`       |
+| `t.dequeued_at_us()`      | μs (same clock) when the dispatcher worker popped this event          |
+| `t.image(name)`           | the named source's frame, zero-copy view                              |
+| `t.sources()`             | list of source names present in this event                            |
+
+### Latency: queue-wait vs inspect-time
+
+End-to-end latency (`now - emit_ts`) lumps two very different things
+together: time the trigger sat in the dispatch queue waiting for a free
+worker, and time spent actually executing `xi_inspect_entry`. Under
+bursty load with `dispatch_threads > 1` the distribution goes bimodal —
+median is the post-surge tail running at full pipeline; p95 is the
+front of the surge waiting in queue. You can't tell which one is your
+bottleneck from the lump.
+
+Use `dequeued_at_us()` to split:
+
+```cpp
+auto t = xi::current_trigger();
+if (!t.is_active()) return;
+
+int64_t now = xi::now_us();
+double queue_wait_us = (double)(t.dequeued_at_us() - t.timestamp_us());
+double inspect_us    = (double)(now              - t.dequeued_at_us());
+
+VAR(queue_wait_us, queue_wait_us);   // queue saturated → grows during surge
+VAR(inspect_us,    inspect_us);      // your code's actual cost
+```
+
+Both clocks are `std::chrono::system_clock` microseconds, so subtraction
+is meaningful across the host/script boundary. Reading from
+`examples/multi_source_surge/`, a 200-frame surge into `queue_depth=32`
+with a single ~30 ms inspect produces `queue_wait_us` that grows roughly
+linearly across the surge (FIFO accumulation) while `inspect_us` stays
+near 30 ms — which is the diagnostic signature of "I need more
+`dispatch_threads`," not "my inspect is too slow." Bumping to N=8 with
+`queue_depth=128` collapses `queue_wait_us` while leaving `inspect_us`
+unchanged.
+
+`dequeued_at_us()` is 0 in single-shot `cmd:run` and on synthetic timer
+ticks where there's no trigger event — always check `is_active()`
+first, and treat 0 as "no split available, fall back to end-to-end
+latency."
+
 ## Parallel dispatch (`parallelism.dispatch_threads`)
 
 By default `cmd:start` runs one dispatcher thread — every inspect call

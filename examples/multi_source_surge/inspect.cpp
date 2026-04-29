@@ -14,7 +14,9 @@
 //      inspect end-to-end:
 //        src                — short string identifying source
 //        seq                — frame seq from source
-//        latency_us         — now - emit_ts
+//        latency_us         — now - emit_ts (end-to-end)
+//        queue_wait_us      — dequeued_at - emit_ts (time spent in queue)
+//        inspect_us         — now - dequeued_at (time inside this script)
 //        used_fast / used_slow — booleans
 //        fast_total / slow_total — detector's running counter for THIS src
 //
@@ -84,12 +86,14 @@ void xi_inspect_entry(int /*frame*/) {
     std::memcpy(&seq_u64, img.data(),     sizeof(seq_u64));
     std::memcpy(&src_tag, img.data() + 8, sizeof(src_tag));
 
-    int64_t ts_emit = t.timestamp_us();
+    int64_t ts_emit    = t.timestamp_us();
+    int64_t ts_dequeue = t.dequeued_at_us();
 
-    VAR(src,        std::string(tag_to_str(src_tag)));
-    VAR(src_name,   source);
-    VAR(seq,        (int)(seq_u64 & 0x7fffffff));
-    VAR(emit_ts_us, (double)ts_emit);
+    VAR(src,            std::string(tag_to_str(src_tag)));
+    VAR(src_name,       source);
+    VAR(seq,            (int)(seq_u64 & 0x7fffffff));
+    VAR(emit_ts_us,     (double)ts_emit);
+    VAR(dequeue_ts_us,  (double)ts_dequeue);
 
     bool route_fast = (src_tag == TAG_STEADY) || (src_tag == TAG_BURST);
     bool route_slow = (src_tag == TAG_BURST)  || (src_tag == TAG_VARIABLE);
@@ -110,10 +114,14 @@ void xi_inspect_entry(int /*frame*/) {
         VAR(slow_for_src, out["processed_for_src"].as_int(-1));
     }
 
-    using clk = std::chrono::system_clock;
-    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                      clk::now().time_since_epoch()).count();
-    int64_t lat = now_us - ts_emit;
-    if (lat < 0) lat = 0;
-    VAR(latency_us, (double)lat);
+    int64_t now      = xi::now_us();
+    int64_t lat_v    = now - ts_emit;     // end-to-end
+    int64_t qwait_v  = (ts_dequeue > 0) ? (ts_dequeue - ts_emit) : 0;
+    int64_t insp_v   = (ts_dequeue > 0) ? (now - ts_dequeue) : lat_v;
+    if (lat_v < 0)   lat_v   = 0;
+    if (qwait_v < 0) qwait_v = 0;
+    if (insp_v < 0)  insp_v  = 0;
+    VAR(latency_us,    (double)lat_v);
+    VAR(queue_wait_us, (double)qwait_v);
+    VAR(inspect_us,    (double)insp_v);
 }

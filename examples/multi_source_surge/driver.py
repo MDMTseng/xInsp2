@@ -152,6 +152,17 @@ def summarise(events: list[dict], stats_before: dict, stats_after: dict,
 
     lats = [float(e["latency_us"]) for e in active_events
             if isinstance(e.get("latency_us"), (int, float))]
+    qwaits = [float(e["queue_wait_us"]) for e in active_events
+              if isinstance(e.get("queue_wait_us"), (int, float))]
+    insps  = [float(e["inspect_us"]) for e in active_events
+              if isinstance(e.get("inspect_us"), (int, float))]
+
+    def _stats(xs):
+        if not xs:
+            return None, None, None
+        return (statistics.mean(xs),
+                statistics.median(xs),
+                sorted(xs)[max(0, int(len(xs)*0.95)-1)])
 
     # cmd:start resets the drop counters and the high watermark (see
     # backend/src/service_main.cpp `name == "start"`); stats_after's
@@ -172,10 +183,18 @@ def summarise(events: list[dict], stats_before: dict, stats_after: dict,
     print(f"  by source                      : {dict(by_src)}")
     print(f"  used fast / slow / both        : {n_used_fast} / {n_used_slow} / {n_used_both}")
     if lats:
-        print(f"  latency_us mean / median / p95 : "
+        print(f"  latency_us    mean / median / p95: "
               f"{statistics.mean(lats):.0f} / "
               f"{statistics.median(lats):.0f} / "
               f"{sorted(lats)[max(0, int(len(lats)*0.95)-1)]:.0f}")
+    if qwaits:
+        m, md, p95 = _stats(qwaits)
+        print(f"  queue_wait_us mean / median / p95: "
+              f"{m:.0f} / {md:.0f} / {p95:.0f}")
+    if insps:
+        m, md, p95 = _stats(insps)
+        print(f"  inspect_us    mean / median / p95: "
+              f"{m:.0f} / {md:.0f} / {p95:.0f}")
     print(f"  throughput (active / sec)      : {throughput:.1f}")
     print(f"  dispatch_stats AFTER           : {stats_after}")
     print(f"  drops during sweep             : {drops}")
@@ -212,6 +231,12 @@ def summarise(events: list[dict], stats_before: dict, stats_after: dict,
         "lat_mean":    statistics.mean(lats) if lats else None,
         "lat_median":  statistics.median(lats) if lats else None,
         "lat_p95":     (sorted(lats)[max(0, int(len(lats)*0.95)-1)] if lats else None),
+        "qwait_mean":   _stats(qwaits)[0],
+        "qwait_median": _stats(qwaits)[1],
+        "qwait_p95":    _stats(qwaits)[2],
+        "inspect_mean":   _stats(insps)[0],
+        "inspect_median": _stats(insps)[1],
+        "inspect_p95":    _stats(insps)[2],
         "stats_after": stats_after,
         "stats_before": stats_before,
     }
@@ -275,7 +300,8 @@ def main() -> int:
 
         print("\n\n=========== COMPARISON TABLE ===========\n")
         hdr = ("Sweep", "N", "Q", "active", "thr/s", "drops",
-               "qmax", "lat_mean_us", "lat_p95_us")
+               "qmax", "lat_mean_us", "lat_p95_us",
+               "qwait_p95", "inspect_p95")
         print("  ".join(f"{h:>14}" for h in hdr))
         for (label, n, q, r) in results:
             row = (label[:14],
@@ -285,7 +311,9 @@ def main() -> int:
                    f"{r['drops']}",
                    f"{r['qmax']}",
                    f"{r['lat_mean']:.0f}" if r['lat_mean'] is not None else "-",
-                   f"{r['lat_p95']:.0f}"  if r['lat_p95']  is not None else "-")
+                   f"{r['lat_p95']:.0f}"  if r['lat_p95']  is not None else "-",
+                   f"{r['qwait_p95']:.0f}"   if r.get('qwait_p95')   is not None else "-",
+                   f"{r['inspect_p95']:.0f}" if r.get('inspect_p95') is not None else "-")
             print("  ".join(f"{x:>14}" for x in row))
 
         print("\n=========== PER-SOURCE BREAKDOWN ===========\n")
