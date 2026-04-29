@@ -122,6 +122,14 @@ green. Default is in-proc; per-instance opt-in via
 - `ProcessInstanceAdapter` + `ScriptProcessAdapter` — host-side handles
   with auto-respawn (rate-limited 3/60s) and per-call timeout via
   `CancelIoEx` watchdog.
+- **Always-on reader thread** (Task #74 / PR #19 follow-up) — each
+  `ProcessInstanceAdapter` runs a dedicated thread that owns the pipe's
+  read side. Replies for in-flight RPCs fulfil per-seq promises;
+  `seq=0` async frames (`RPC_EMIT_TRIGGER`) dispatch straight to
+  `TriggerBus` whether or not a backend→worker call is in flight.
+  This unblocks `"isolation":"process"` for source plugins; previously
+  triggers piled up unread until the next backend RPC. Exercised by
+  `examples/cross_proc_trigger/`.
 - **Worker-side conveniences merged with the spike**:
     - heap-pool → SHM auto-copy in `worker_main` so plugins that use
       `xi::Image{...}` (the common case) work cross-process without

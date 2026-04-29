@@ -156,6 +156,7 @@ RPC types covered:
 | `SCRIPT_RUN` | backend → script-runner | reset + inspect_entry + snapshot |
 | `USE_PROCESS` / `USE_EXCHANGE` / `USE_GRAB` | script-runner → backend | mid-call callbacks back to backend's instance registry |
 | `TEST_SET_INPUT` | tests only | drive a test handle into the script |
+| `EMIT_TRIGGER` | worker → backend, **one-way** (`seq=0`, no reply) | source plugins running in isolated workers push `host->emit_trigger` calls back to the backend's `TriggerBus`. Image handles are SHM-tagged before sending (worker promotes any heap-pool handles via `shm_create_image` first). |
 
 ---
 
@@ -166,14 +167,32 @@ RPC types covered:
   `--instance` args.
 - Caches the `set_def` JSON last accepted; replayed on respawn so the
   fresh worker isn't blank.
-- Watchdog thread per call: if the call doesn't complete in
-  `call_timeout_ms` (default 30s), `CancelIoEx` aborts the in-flight
-  read; the throw triggers `try_respawn_locked_`.
-- Auto-respawn on pipe failure: tear down old, spawn new (with
-  `-r<count>` pipe name suffix to avoid collision), re-CREATE,
-  reapply saved_def, retry once. Capped at 3 respawns per 60s
-  rolling window — over the cap the adapter goes dead and returns
-  safe defaults.
+- **Always-on reader thread** owns the pipe's read side. Replies for
+  in-flight `do_call_locked_()` calls fulfil a per-seq
+  `std::promise<Frame>`; `seq=0` async frames (currently only
+  `RPC_EMIT_TRIGGER` from source plugins) dispatch straight to
+  `TriggerBus::instance().emit()` regardless of whether any RPC is
+  in flight. This is what lets a process-isolated source plugin
+  emit triggers continuously when the backend is silent (Task #74 /
+  PR #19 follow-up). See the comment block above
+  `start_reader_()` in `xi_process_instance.hpp` for the
+  broken-pipe history that motivated this design.
+- Pipe handles use `FILE_FLAG_OVERLAPPED` with synchronous wrappers
+  (`OVERLAPPED` + `WaitForSingleObject`) inside `Pipe::read_exact` /
+  `Pipe::write_all`. Synchronous I/O on a non-overlapped handle
+  serialises concurrent R+W in the kernel I/O manager — fatal for
+  the reader-thread design — but every caller still sees plain
+  blocking semantics.
+- Per-call timeout: `do_call_locked_()` `wait_for`s the promise. On
+  timeout it pops the inflight entry and `CancelIoEx`'s the pipe
+  handle; the cancelled `ReadFile` aborts the reader, the throw
+  surfaces, `call_()` catches and respawns. `call_timeout_ms`
+  defaults to 30s.
+- Auto-respawn on pipe failure: stop reader, tear down old, spawn
+  new (with `-r<count>` pipe name suffix to avoid collision), start
+  fresh reader, re-CREATE, reapply saved_def, retry once. Capped at
+  3 respawns per 60s rolling window — over the cap the adapter
+  goes dead and returns safe defaults.
 
 `ScriptProcessAdapter`:
 - Same lifecycle (spawn / accept / CREATE-equivalent / RPC).
@@ -201,6 +220,19 @@ test_shm_ipc_edges           DoS / OOM / bogus handle / attach error edges
 ```
 
 All 9 green at branch tip.
+
+Plus end-to-end driver coverage in `examples/`:
+
+```
+examples/cross_proc_trigger/    isolated source emits at 60 Hz; driver
+                                  observes a 1-s silent window with no
+                                  backend->worker RPCs and asserts >=50
+                                  triggers reach the bus (proves the
+                                  always-on reader is live)
+examples/multi_source_surge/    3 isolated/in-proc sources + 2 detectors
+                                  + 2 surges — exercises the full mesh
+examples/burst_pipeline/        bursty source + parallel dispatch
+```
 
 ---
 
