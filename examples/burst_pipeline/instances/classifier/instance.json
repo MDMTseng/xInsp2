@@ -1,0 +1,5 @@
+{
+  "plugin": "light_classifier",
+  "isolation": "in_process",
+  "config": {}
+}

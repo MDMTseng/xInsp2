@@ -823,6 +823,10 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
 // pressure without scraping stderr.
 static std::atomic<uint64_t> g_dropped_oldest{0};
 static std::atomic<uint64_t> g_dropped_newest{0};
+// Observed peak queue depth since cmd:start. Useful for tuning —
+// sweep1 with N=1 / queue=32 might pin at 32; sweep2 with N=4 might
+// peak at 3. Reset on cmd:start.
+static std::atomic<uint64_t> g_queue_high_watermark{0};
 
 // Apply the project's queue policy and push (or drop) the event. Caller
 // owns the event by value. Caller must NOT hold g_ev_mu — this fn
@@ -838,6 +842,12 @@ static bool enqueue_event_(xi::TriggerEvent ev) {
     std::unique_lock<std::mutex> lk(g_ev_mu);
     if ((int)g_ev_queue.size() < depth) {
         g_ev_queue.push_back(std::move(ev));
+        // Update high watermark (post-push depth).
+        uint64_t now_size = g_ev_queue.size();
+        uint64_t prev = g_queue_high_watermark.load(std::memory_order_relaxed);
+        while (now_size > prev &&
+               !g_queue_high_watermark.compare_exchange_weak(prev, now_size,
+                                                              std::memory_order_relaxed)) {}
         g_ev_cv.notify_one();
         return true;
     }
@@ -1626,6 +1636,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         g_continuous_fps = fps;
         g_continuous = true;
+        // Reset queue stats so each cmd:start gets a fresh observation
+        // window. Keeps `dispatch_stats` per-run comparable.
+        g_dropped_oldest = 0;
+        g_dropped_newest = 0;
+        g_queue_high_watermark = 0;
 
         int interval_ms = 1000 / std::max(fps, 1);
         int n_threads = g_plugin_mgr.project().dispatch_threads;
@@ -2453,11 +2468,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "dispatch_stats") {
         // Snapshot of queue health. Useful for drivers / agents that
         // want to know if their source is overproducing.
+        //
+        // Field semantics:
+        //   queue_depth_now             — current queue size
+        //   queue_depth_cap             — configured project.json cap
+        //   queue_depth_high_watermark  — peak depth observed since
+        //                                 last cmd:start (real obs.)
+        //   dropped_oldest / dropped_newest — overflow counters since
+        //                                 last cmd:start
         std::string data;
         size_t qsz;
         { std::lock_guard<std::mutex> lk(g_ev_mu); qsz = g_ev_queue.size(); }
         data  = "{\"queue_depth_now\":" + std::to_string(qsz);
-        data += ",\"queue_depth_max\":" + std::to_string(g_plugin_mgr.project().queue_depth);
+        data += ",\"queue_depth_cap\":" + std::to_string(g_plugin_mgr.project().queue_depth);
+        data += ",\"queue_depth_high_watermark\":" + std::to_string(g_queue_high_watermark.load());
         data += ",\"overflow\":\"" + g_plugin_mgr.project().overflow + "\"";
         data += ",\"dispatch_threads\":" + std::to_string(g_plugin_mgr.project().dispatch_threads);
         data += ",\"dropped_oldest\":" + std::to_string(g_dropped_oldest.load());

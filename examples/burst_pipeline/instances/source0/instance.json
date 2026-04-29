@@ -1,0 +1,5 @@
+{
+  "plugin": "frame_source",
+  "isolation": "in_process",
+  "config": { "fps": 60 }
+}

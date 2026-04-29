@@ -1,0 +1,14 @@
+{
+  "name": "light_classifier",
+  "description": "Reads seq from frame's first 8 bytes, sleeps ~5 ms (cheap CV stand-in), returns {seq, kind=seq%3}. Reentrancy-safe — no per-instance mutable state.",
+  "dll": "light_classifier.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params":   [{"name": "sleep_ms", "type": "int", "default": 5}],
+    "inputs":   [{"name": "img", "kind": "image"}],
+    "outputs":  [{"name": "seq", "kind": "number"},
+                 {"name": "kind", "kind": "number"}],
+    "thread_safe": true
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "burst_pipeline",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "parallelism": {
+    "dispatch_threads": 4,
+    "queue_depth": 4,
+    "overflow": "drop_oldest"
+  },
+  "instances": [
+    {
+      "name": "source0",
+      "plugin": "frame_source"
+    },
+    {
+      "name": "classifier",
+      "plugin": "light_classifier"
+    }
+  ]
+}
