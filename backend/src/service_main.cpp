@@ -371,14 +371,18 @@ struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hp
     xi_trigger_id id;
     int64_t       timestamp_us;
     int32_t       is_active;
+    int32_t       _pad;             // align dequeued_at_us to 8 bytes
+    int64_t       dequeued_at_us;   // worker-stamped on pop from g_ev_queue
 };
 
 static void trigger_info_cb(CurrentTriggerInfoC* out) {
     if (!out) return;
-    if (!g_current_trigger) { *out = {{0,0}, 0, 0}; return; }
-    out->id           = g_current_trigger->id;
-    out->timestamp_us = g_current_trigger->timestamp_us;
-    out->is_active    = 1;
+    if (!g_current_trigger) { *out = {{0,0}, 0, 0, 0, 0}; return; }
+    out->id             = g_current_trigger->id;
+    out->timestamp_us   = g_current_trigger->timestamp_us;
+    out->is_active      = 1;
+    out->_pad           = 0;
+    out->dequeued_at_us = g_current_trigger->dequeued_at_us;
 }
 
 static xi_image_handle trigger_image_cb(const char* source) {
@@ -926,6 +930,13 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
                 }
             }
             if (!have_ev) continue;
+            // Stamp the dequeue moment so the script can decompose
+            // end-to-end latency into queue-wait vs inspect-time. Same
+            // clock as ev.timestamp_us (xi::now_us() == system_clock us).
+            // Done outside g_ev_mu — the field is owned by `ev` now,
+            // and no other thread has a reference until we publish via
+            // g_current_trigger below.
+            ev.dequeued_at_us = xi::now_us();
             int frame_seq = (int)g_run_id.fetch_add(0);  // cheap snapshot for hint
             if (!ev.images.empty() || ev.id.hi || ev.id.lo) {
                 g_current_trigger = &ev;
