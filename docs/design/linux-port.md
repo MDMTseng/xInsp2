@@ -77,6 +77,7 @@ the port itself; it's a record so we know what to expect.
 |---|---|
 | `examples/multi_source_surge/` (FL r6) | Pure `<thread>` + `<chrono>` + `<atomic>` + the `xi_*` portable headers. No Win32 calls in plugins or inspect. Builds via the same `cl.exe` path the rest of the SDK uses; on Linux it'll go through whatever the script compiler abstracts to. |
 | `dispatch_stats` watchdog warning log on `cmd:start` (FL r6) | Pure C++; lives in service_main.cpp's existing log-emission path which is already non-Win-specific. |
+| `examples/multi_source_surge2/` (FL r6 regression) | Same plugin sources as `multi_source_surge/`; new `inspect.cpp` + `driver.py` use only `<chrono>`/`<cstdint>`/`<cstring>` + `xi_*` headers + Python stdlib. No Win32. |
 
 ## Things to actively reduce Win-coupling for, even before the port
 
