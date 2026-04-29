@@ -344,6 +344,24 @@ class Client:
             args["since_ms"] = since_ms
         return self.call("recent_errors", args)
 
+    def next_vars(self, timeout: float | None = None) -> dict | None:
+        """Pop the next `vars` message from the queue, blocking up to
+        `timeout` seconds. Returns the raw vars dict (`{"type":"vars",
+        "run_id":N,"items":[...]}`) or `None` on timeout.
+
+        Use this to consume the stream produced by `cmd:start`
+        (continuous mode), which doesn't follow the request/reply
+        shape of `cmd:run`. The caller is responsible for wiring any
+        per-frame logic — the SDK doesn't auto-correlate previews
+        here. For the typical "drive 100 frames continuously and
+        score them" pattern see the hot_reload_run / stereo_sync
+        example drivers.
+        """
+        try:
+            return self._inbox_vars.get(timeout=timeout or self.timeout)
+        except Empty:
+            return None
+
     def run(self, frame_path: str | None = None, timeout: float | None = None) -> RunResult:
         """Run one inspect() and collect the resulting vars + previews.
 
