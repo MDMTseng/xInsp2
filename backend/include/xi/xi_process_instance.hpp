@@ -109,12 +109,38 @@ public:
         start_reader_();
 
         // CREATE — gives the plugin its real instance name.
-        ipc::Writer w; w.str(name_); w.str(plugin_dll.string());
-        auto rsp = call_(ipc::RPC_CREATE, w.buf());
-        if (rsp.type == ipc::RPC_TYPE_ERROR) {
-            std::string msg(rsp.payload.begin(), rsp.payload.end());
-            shutdown_();
-            throw std::runtime_error("worker CREATE failed: " + msg);
+        //
+        // CRITICAL: once start_reader_() has been called, ANY exit path
+        // out of this constructor MUST tear the reader down first.
+        // `reader_` is a std::thread member; if the constructor exits
+        // with an exception while the thread is still joinable, the
+        // implicit `~thread()` call invoked by member destruction
+        // calls std::terminate(), which kills the host process. That
+        // exact scenario is what FL r7 P0 (worker disconnect during
+        // CREATE) was hitting — the call_() respawn machinery would
+        // give up after a malformed worker, the constructor would
+        // throw, and the thread destructor would terminate before
+        // PluginManager's catch could see it. Wrap the rest of
+        // construction in a try/catch that funnels every failure mode
+        // through shutdown_() so the reader is joined first.
+        try {
+            ipc::Writer w; w.str(name_); w.str(plugin_dll.string());
+            auto rsp = call_(ipc::RPC_CREATE, w.buf());
+            if (rsp.type == ipc::RPC_TYPE_ERROR) {
+                std::string msg(rsp.payload.begin(), rsp.payload.end());
+                shutdown_();
+                throw std::runtime_error("worker CREATE failed: " + msg);
+            }
+        } catch (...) {
+            // call_() threw (broken pipe / respawn cap / etc.) OR
+            // shutdown_() in the RPC_TYPE_ERROR branch above already
+            // ran — either way, ensure the reader is joined and the
+            // worker process is reaped before we let the exception
+            // propagate. shutdown_() is idempotent (dead_ guards the
+            // DESTROY call; stop_reader_ no-ops on a non-joinable
+            // thread; the worker_proc_ branch checks for null).
+            try { shutdown_(); } catch (...) {}
+            throw;
         }
         std::fprintf(stderr,
             "[ProcessInstanceAdapter] '%s' spawned worker pid=%lu pipe=%s\n",
@@ -421,59 +447,128 @@ private:
         inflight_.clear();
     }
 
+    // Mark the adapter dead and fail every in-flight RPC's promise
+    // with `reason`. Called from the reader's exception handlers; also
+    // belt-and-suspenders for any catch-all path that needs to leave
+    // the adapter in a defined state.
+    void reader_fail_all_inflight_(const std::string& reason) noexcept {
+        try {
+            std::lock_guard<std::mutex> lk(inflight_mu_);
+            reader_dead_ = true;
+            reader_err_  = reason;
+            for (auto& [seq, ent] : inflight_) {
+                try {
+                    ent->prom.set_exception(std::make_exception_ptr(
+                        std::runtime_error(std::string("worker pipe: ") + reason)));
+                } catch (...) {
+                    // promise may already have a value set, or have
+                    // been moved-from. Either way, swallow — caller is
+                    // already in a teardown path.
+                }
+            }
+            inflight_.clear();
+        } catch (...) {
+            // Last-resort: even allocating the lock_guard / string
+            // couldn't proceed. There is no productive recovery here;
+            // the next do_call_locked_ will see reader_dead_ on its
+            // next pre-write check IF we managed to set it, and
+            // otherwise will time out. Returning is the right move —
+            // letting an exception escape this thread is what was
+            // crashing the host in the first place.
+        }
+    }
+
+    // Reader thread entry point. The body must NOT let any exception
+    // escape: this thread runs unsupervised, so an escaping throw
+    // crashes the host (via std::terminate at the thread boundary).
+    // Two layers of catch:
+    //   1. Inner try around recv_frame (the expected throw site —
+    //      EOF / broken pipe / malformed-frame from a hostile or
+    //      crashed worker).
+    //   2. Outer catch-all around the whole loop, so any unforeseen
+    //      throw (bad_alloc inside set_exception / lock_guard /
+    //      handle_async_frame_, an unknown-type exception from a
+    //      future implementation, etc.) still ends in a clean exit
+    //      with reader_dead_ set + waiters notified.
+    // The harness in examples/fl_r7_fuzz/harness_evil_worker_host.py
+    // exercises 16 strategies against this; all must keep the host
+    // process alive.
     void run_reader_() {
-        for (;;) {
-            ipc::Frame f;
-            try {
-                f = ipc::recv_frame(pipe_);
-            } catch (const std::exception& e) {
-                if (stopping_) return;          // clean shutdown
-                // Worker died (or hung + watchdog cancelled us).
-                std::lock_guard<std::mutex> lk(inflight_mu_);
-                reader_dead_ = true;
-                reader_err_  = e.what();
-                for (auto& [seq, ent] : inflight_) {
-                    try {
-                        ent->prom.set_exception(std::make_exception_ptr(
-                            std::runtime_error(std::string("worker pipe: ")
-                                               + e.what())));
-                    } catch (const std::future_error&) {}
+        try {
+            for (;;) {
+                ipc::Frame f;
+                try {
+                    f = ipc::recv_frame(pipe_);
+                } catch (const std::exception& e) {
+                    if (stopping_) return;          // clean shutdown
+                    // Worker died (or hung + watchdog cancelled us).
+                    reader_fail_all_inflight_(e.what());
+                    return;
+                } catch (...) {
+                    if (stopping_) return;
+                    reader_fail_all_inflight_("unknown exception in recv_frame");
+                    return;
                 }
-                inflight_.clear();
-                return;
-            }
-            if (f.seq == 0) {
-                // One-way async frame from the worker — dispatch
-                // straight to the trigger bus. No promise to fulfil,
-                // no reply to send. handle_async_frame_ must be
-                // non-blocking; TriggerBus::emit pushes onto the
-                // dispatch queue and returns.
-                try { handle_async_frame_(f); }
-                catch (const std::exception& e) {
+                if (f.seq == 0) {
+                    // One-way async frame from the worker — dispatch
+                    // straight to the trigger bus. No promise to fulfil,
+                    // no reply to send. handle_async_frame_ must be
+                    // non-blocking; TriggerBus::emit pushes onto the
+                    // dispatch queue and returns. We swallow throws
+                    // here so that one bad async frame from a hostile
+                    // worker doesn't tear down the whole reader (the
+                    // worker will hit EOF on next bad frame anyway).
+                    try { handle_async_frame_(f); }
+                    catch (const std::exception& e) {
+                        std::fprintf(stderr,
+                            "[ProcessInstanceAdapter] '%s' async dispatch threw: %s\n",
+                            name_.c_str(), e.what());
+                    } catch (...) {
+                        std::fprintf(stderr,
+                            "[ProcessInstanceAdapter] '%s' async dispatch threw unknown\n",
+                            name_.c_str());
+                    }
+                    continue;
+                }
+                // Reply for an in-flight call. Pop and fulfil.
+                std::shared_ptr<InflightEntry> ent;
+                {
+                    std::lock_guard<std::mutex> lk(inflight_mu_);
+                    auto it = inflight_.find(f.seq);
+                    if (it != inflight_.end()) {
+                        ent = it->second;
+                        inflight_.erase(it);
+                    }
+                }
+                if (ent) {
+                    try { ent->prom.set_value(std::move(f)); }
+                    catch (const std::future_error&) {}
+                    catch (...) {
+                        // set_value can in theory throw bad_alloc on
+                        // the shared state's exception_ptr storage. We
+                        // can't recover the call, but we can at least
+                        // not crash the reader thread.
+                    }
+                } else {
                     std::fprintf(stderr,
-                        "[ProcessInstanceAdapter] '%s' async dispatch threw: %s\n",
-                        name_.c_str(), e.what());
-                }
-                continue;
-            }
-            // Reply for an in-flight call. Pop and fulfil.
-            std::shared_ptr<InflightEntry> ent;
-            {
-                std::lock_guard<std::mutex> lk(inflight_mu_);
-                auto it = inflight_.find(f.seq);
-                if (it != inflight_.end()) {
-                    ent = it->second;
-                    inflight_.erase(it);
+                        "[ProcessInstanceAdapter] '%s' orphan reply seq=%u — dropped\n",
+                        name_.c_str(), (unsigned)f.seq);
                 }
             }
-            if (ent) {
-                try { ent->prom.set_value(std::move(f)); }
-                catch (const std::future_error&) {}
-            } else {
-                std::fprintf(stderr,
-                    "[ProcessInstanceAdapter] '%s' orphan reply seq=%u — dropped\n",
-                    name_.c_str(), (unsigned)f.seq);
-            }
+        } catch (const std::exception& e) {
+            // Belt-and-suspenders: anything that escaped the inner
+            // handlers (e.g. bad_alloc from std::lock_guard, an
+            // exception from std::fprintf-via-iostream in some other
+            // build, etc.) MUST NOT escape this thread.
+            std::fprintf(stderr,
+                "[ProcessInstanceAdapter] '%s' reader unexpected exception: %s\n",
+                name_.c_str(), e.what());
+            reader_fail_all_inflight_(std::string("unexpected: ") + e.what());
+        } catch (...) {
+            std::fprintf(stderr,
+                "[ProcessInstanceAdapter] '%s' reader unknown exception\n",
+                name_.c_str());
+            reader_fail_all_inflight_("unknown exception");
         }
     }
 
