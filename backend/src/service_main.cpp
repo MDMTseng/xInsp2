@@ -23,6 +23,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -77,6 +78,14 @@ static std::string g_persistent_state_json = "{}";
 // rather than letting set_state default-fill into a different shape.
 // 0 means "unversioned" — restore proceeds without the check.
 static int         g_persistent_state_schema = 0;
+
+// Cache of every successful `cmd:set_param` value the backend pushed
+// into the live script. compile_and_load replays these into the new
+// DLL via xi_script_set_param so user-tuned slider values aren't
+// silently reset to file-scope defaults across a recompile. Keyed by
+// param name → JSON-encoded scalar (number / bool / string token,
+// same shape as set_param's `value` arg). Protected by g_script_mu.
+static std::unordered_map<std::string, std::string> g_param_cache;
 
 // --- xi::use() callback implementations ---
 // These are called FROM the script DLL back INTO the backend, routing
@@ -236,6 +245,11 @@ static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
 // When running in continuous mode (cmd: start), a worker thread waits for
 // trigger signals from image sources and calls inspect() for each frame.
 static std::atomic<bool>       g_continuous{false};
+// FPS the most recent cmd:start was launched with. compile_and_load
+// captures this to re-arm continuous mode at the same rate after the
+// reload completes — without it, mid-run hot-reload would silently
+// halt the stream.
+static std::atomic<int>        g_continuous_fps{10};
 static std::thread             g_worker_thread;
 // Serialise cmd:run dispatch threads so history / vars arrive in run_id
 // order. Threads queue up here and the watchdog operates on whichever
@@ -1082,14 +1096,21 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Stop continuous mode before reloading — the worker thread holds
         // function pointers into the DLL we're about to unload. Also
         // release any breakpoint that's currently parked, so the worker
-        // can actually finish.
+        // can actually finish. Remember whether the run was active so
+        // we can re-arm it after the reload — without this, scripts
+        // that get hot-reloaded mid-run would silently halt and the
+        // caller would have to know to re-issue cmd:start.
+        bool was_continuous = false;
+        int  prior_continuous_fps = 10;
         if (g_continuous.load()) {
+            was_continuous = true;
+            prior_continuous_fps = g_continuous_fps.load();
             g_continuous = false;
             g_ev_cv.notify_all();
             { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
             g_bp_cv.notify_all();
             if (g_worker_thread.joinable()) g_worker_thread.join();
-            std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload\n");
+            std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload (will resume)\n");
         }
 
         xi::script::CompileRequest req;
@@ -1199,6 +1220,26 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             if (g_script.set_breakpoint_callback) {
                 g_script.set_breakpoint_callback((void*)breakpoint_cb);
             }
+            // Replay any param values the user set on the previous
+            // DLL. The new DLL's xi::Param<T> file-scope ctors run on
+            // load and seed registry slots with default values; we
+            // overwrite each one whose name we've seen via cmd:set_param
+            // since the project opened. set_param returns -1 for
+            // params the new DLL doesn't declare (renamed / deleted) —
+            // those entries stay in the cache but quietly no-op until
+            // the user hits set_param again, which is the right
+            // failure mode (no false positives, no spurious errors).
+            if (g_script.set_param) {
+                for (auto& [pname, pval] : g_param_cache) {
+                    g_script.set_param(pname.c_str(), pval.c_str());
+                }
+                if (!g_param_cache.empty()) {
+                    std::fprintf(stderr,
+                        "[xinsp2] replayed %zu param value(s) into reloaded script\n",
+                        g_param_cache.size());
+                }
+            }
+
             // Restore persistent state into the new DLL — but drop it
             // when the schema versions disagree (and both sides
             // declared one), since set_state's silent default-fill on
@@ -1239,17 +1280,72 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             srv.send_text(lm.to_json());
         }
 
+        // Re-arm continuous mode if it was running before the reload,
+        // at the same fps the original cmd:start asked for. The 4 s
+        // cl.exe gap inside the reload is unavoidable; what we don't
+        // want is the run staying dead afterwards and forcing the
+        // caller to know they need to re-issue cmd:start.
+        if (was_continuous) {
+            int fps = prior_continuous_fps > 0 ? prior_continuous_fps : 10;
+            g_continuous_fps = fps;
+            g_continuous = true;
+            int interval_ms = 1000 / std::max(fps, 1);
+            auto* srv_ptr = &srv;
+            xi::TriggerBus::instance().set_sink([](xi::TriggerEvent ev) {
+                std::lock_guard<std::mutex> lk(g_ev_mu);
+                g_ev_queue.push_back(std::move(ev));
+                g_ev_cv.notify_one();
+            });
+            g_worker_thread = std::thread([srv_ptr, interval_ms] {
+                _set_se_translator(seh_translator);
+                std::fprintf(stderr,
+                    "[xinsp2] continuous mode resumed after reload: %dms timer + trigger bus\n",
+                    interval_ms);
+                int frame_seq = 0;
+                while (g_continuous.load()) {
+                    xi::TriggerEvent ev;
+                    bool have_ev = false;
+                    {
+                        std::unique_lock<std::mutex> lk(g_ev_mu);
+                        g_ev_cv.wait_for(lk, std::chrono::milliseconds(interval_ms),
+                                         [] { return !g_ev_queue.empty() || !g_continuous.load(); });
+                        if (!g_continuous.load()) break;
+                        if (!g_ev_queue.empty()) {
+                            ev = std::move(g_ev_queue.front());
+                            g_ev_queue.pop_front();
+                            have_ev = true;
+                        }
+                    }
+                    if (have_ev) {
+                        g_current_trigger = &ev;
+                        run_one_inspection(*srv_ptr, frame_seq++);
+                        g_current_trigger = nullptr;
+                        for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
+                    } else {
+                        run_one_inspection(*srv_ptr, frame_seq++);
+                    }
+                }
+                std::fprintf(stderr, "[xinsp2] continuous mode stopped\n");
+            });
+        }
+
         // Return success with dll path + diagnostics (warnings only on
         // success; extension still wants them for squiggle).
         std::string data = "{\"dll\":";
         xp::json_escape_into(data, res.dll_path);
-        data += ",\"diagnostics\":" + build_diag_json() + "}";
+        data += ",\"diagnostics\":" + build_diag_json();
+        if (was_continuous) data += ",\"resumed_continuous\":true";
+        data += "}";
         send_rsp_ok(srv, id, data);
     } else if (name == "unload_script") {
         std::lock_guard<std::mutex> lk(g_script_mu);
         xi::script::unload_script(g_script);
         // Tear down isolated runner if one was spawned for this script.
         g_script_iso_adapter.reset();
+        // Drop the param replay cache — there's no live script to
+        // replay into, and a future load_project / compile_and_load
+        // is free to start clean.
+        g_param_cache.clear();
         send_rsp_ok(srv, id);
     } else if (name == "script_isolated_run") {
         // Phase 3.8 wire-up: run xi_inspect_entry inside xinsp-script-runner.exe
@@ -1409,6 +1505,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             g_worker_thread.join();
         }
 
+        g_continuous_fps = fps;
         g_continuous = true;
 
         int interval_ms = 1000 / std::max(fps, 1);
@@ -1528,7 +1625,15 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 }
                 if (!val.empty()) {
                     int rc = g_script.set_param(pname->c_str(), val.c_str());
-                    if (rc == 0) { send_rsp_ok(srv, id); return; }
+                    if (rc == 0) {
+                        // Cache so compile_and_load can replay this
+                        // value into the next DLL load (otherwise the
+                        // new DLL's file-scope default would silently
+                        // overwrite the user's tuned value).
+                        g_param_cache[*pname] = val;
+                        send_rsp_ok(srv, id);
+                        return;
+                    }
                     // fall through to backend registry on -1 (not found)
                 }
             }
