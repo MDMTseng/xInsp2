@@ -1,0 +1,6 @@
+{
+  "name": "crash_recovery2",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

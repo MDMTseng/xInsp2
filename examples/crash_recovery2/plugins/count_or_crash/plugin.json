@@ -1,0 +1,22 @@
+{
+  "name": "count_or_crash",
+  "description": "Threshold + connected-components blob counter that deliberately segfaults when the count exceeds a configurable budget. Used to validate framework crash isolation.",
+  "dll": "count_or_crash.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [
+      {"name": "crash_when_count_above", "type": "int", "min": 0, "max": 1000000, "default": 8,
+       "doc": "If the connected-component count exceeds this, process() deliberately segfaults."}
+    ],
+    "inputs":  [{"name": "src", "kind": "image", "doc": "1-channel grayscale image."}],
+    "outputs": [{"name": "mask",  "kind": "image",  "doc": "Threshold mask used for counting."},
+                {"name": "count", "kind": "number", "doc": "Number of connected components (excluding background)."}],
+    "exchange": [
+      {"command": "set_threshold",
+       "args": "{value:int}",
+       "result": "get_def() post-mutation",
+       "doc": "Update crash_when_count_above live."}
+    ]
+  }
+}

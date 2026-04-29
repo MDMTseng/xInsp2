@@ -1,0 +1,45 @@
+{
+  "frames": [
+    {
+      "file": "frame_00.png",
+      "blob_count": 5
+    },
+    {
+      "file": "frame_01.png",
+      "blob_count": 12
+    },
+    {
+      "file": "frame_02.png",
+      "blob_count": 5
+    },
+    {
+      "file": "frame_03.png",
+      "blob_count": 5
+    },
+    {
+      "file": "frame_04.png",
+      "blob_count": 12
+    },
+    {
+      "file": "frame_05.png",
+      "blob_count": 12
+    },
+    {
+      "file": "frame_06.png",
+      "blob_count": 5
+    },
+    {
+      "file": "frame_07.png",
+      "blob_count": 5
+    },
+    {
+      "file": "frame_08.png",
+      "blob_count": 12
+    },
+    {
+      "file": "frame_09.png",
+      "blob_count": 12
+    }
+  ],
+  "crash_when_count_above_default": 8
+}
