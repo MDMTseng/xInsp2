@@ -16,7 +16,47 @@ import websocket  # websocket-client
 
 
 class ProtocolError(RuntimeError):
-    pass
+    """Raised when a backend cmd returns ok=false.
+
+    `error` is the short error string from the rsp. `data` carries the
+    structured `rsp.data` payload when the backend attaches one (e.g.
+    compile-failure paths ship a `diagnostics` array there). Both
+    default to None so callers that don't care can ignore them.
+    """
+    def __init__(self, message: str, *, error: str | None = None, data: Any = None):
+        super().__init__(message)
+        self.error = error
+        self.data = data
+
+
+def _enrich_compile_error(orig: ProtocolError, what: str, target: str) -> ProtocolError:
+    """Re-raise a compile-failure ProtocolError with the diagnostics
+    folded into the message. Bare `compile failed` text is useless on
+    its own; the build log lives on `rsp.data["diagnostics"]` but
+    nothing told you to look there until now."""
+    diagnostics = []
+    data = orig.data
+    if isinstance(data, dict):
+        diagnostics = data.get("diagnostics") or []
+    lines = [f"{what} {target!r} failed: {orig.error or 'compile failed'}"]
+    for d in diagnostics[:20]:
+        if not isinstance(d, dict):
+            continue
+        loc = d.get("file", "")
+        if d.get("line"):
+            loc += f":{d['line']}"
+            if d.get("col"):
+                loc += f":{d['col']}"
+        sev = d.get("severity", "error")
+        code = d.get("code", "")
+        msg = d.get("message", "")
+        lines.append(f"  {loc} {sev} {code}: {msg}".rstrip())
+    if len(diagnostics) > 20:
+        lines.append(f"  ... and {len(diagnostics) - 20} more")
+    if not diagnostics:
+        lines.append("  (no structured diagnostics on rsp.data; check "
+                     r"%TEMP%\xinsp2\script_build\*.log for the raw cl.exe output)")
+    return ProtocolError("\n".join(lines), error=orig.error, data=orig.data)
 
 
 @dataclass
@@ -123,7 +163,12 @@ class Client:
         finally:
             self._rsp_waiters.pop(cid, None)
         if not rsp.get("ok"):
-            raise ProtocolError(f"cmd {name!r} failed: {rsp.get('error')}")
+            err = rsp.get("error")
+            raise ProtocolError(
+                f"cmd {name!r} failed: {err}",
+                error=err,
+                data=rsp.get("data"),
+            )
         return rsp.get("data")
 
     # ---- high-level ---------------------------------------------------
@@ -135,7 +180,26 @@ class Client:
         return self.call("version")
 
     def compile_and_load(self, path: str) -> dict:
-        return self.call("compile_and_load", {"path": path}, timeout=180)
+        """Compile an inspection script and hot-load the resulting DLL.
+
+        On success returns `{"build_log": "...", "instances": [...],
+        "params": [...]}`.
+
+        On compile failure raises `ProtocolError` whose message
+        includes a formatted summary of cl.exe diagnostics (first 20
+        lines + count of any extras). The full structured array is on
+        `e.data["diagnostics"]`; e.g.::
+
+            try:
+                c.compile_and_load(path)
+            except ProtocolError as e:
+                for d in (e.data or {}).get("diagnostics", []):
+                    fix(d["file"], d["line"], d["message"])
+        """
+        try:
+            return self.call("compile_and_load", {"path": path}, timeout=180)
+        except ProtocolError as e:
+            raise _enrich_compile_error(e, "compile_and_load", path) from None
 
     def load_project(self, path: str) -> dict:
         """Read a `project.json` from disk into the backend's project
@@ -175,10 +239,15 @@ class Client:
         """Hot-rebuild one project-local plugin. Linchpin for live tuning.
 
         Returns `{plugin, diagnostics, reattached}` on success. On compile
-        failure raises `ProtocolError` whose message contains the build
-        log; the previous DLL stays loaded so the inspection keeps working.
+        failure raises `ProtocolError` whose message summarises the
+        cl.exe diagnostics; the full structured array is on
+        `e.data["diagnostics"]`. The previous DLL stays loaded so the
+        inspection keeps working.
         """
-        return self.call("recompile_project_plugin", {"plugin": plugin}, timeout=120)
+        try:
+            return self.call("recompile_project_plugin", {"plugin": plugin}, timeout=120)
+        except ProtocolError as e:
+            raise _enrich_compile_error(e, "recompile_project_plugin", plugin) from None
 
     def set_param(self, name: str, value) -> None:
         self.call("set_param", {"name": name, "value": value})
