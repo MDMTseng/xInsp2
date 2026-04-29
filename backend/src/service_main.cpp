@@ -2254,6 +2254,28 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "could not start replay (no manifest, or already replaying)");
         }
+    } else if (name == "open_project_warnings") {
+        // Returns the per-instance warnings collected during the most
+        // recent open_project. open_project itself succeeds even when
+        // individual instances fail (skip-bad-instance), so this is
+        // how a UI / agent surfaces those problems instead of having
+        // to scrape backend stderr.
+        auto warnings = g_plugin_mgr.open_warnings();
+        std::string data = "{\"warnings\":[";
+        bool first = true;
+        for (auto& w : warnings) {
+            if (!first) data += ",";
+            first = false;
+            data += "{\"instance\":";
+            xp::json_escape_into(data, w.instance);
+            data += ",\"plugin\":";
+            xp::json_escape_into(data, w.plugin);
+            data += ",\"reason\":";
+            xp::json_escape_into(data, w.reason);
+            data += "}";
+        }
+        data += "]}";
+        send_rsp_ok(srv, id, data);
     } else if (name == "set_trigger_policy") {
         // args: { policy: "any"|"all_required"|"leader_followers",
         //         required: ["cam_left", ...],

@@ -1,0 +1,24 @@
+{
+  "name": "synced_cam",
+  "description": "Synthetic camera that emits 320x240 grayscale frames; two instances generate matching TIDs from a shared wall-clock epoch so the trigger bus pairs them.",
+  "dll": "synced_cam.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true,
+  "manifest": {
+    "params": [
+      {"name": "period_ms", "type": "int", "min": 10, "max": 1000, "default": 50,
+       "doc": "Cycle period in ms; both instances must use the same value."},
+      {"name": "auto_start", "type": "bool", "default": true,
+       "doc": "Whether the worker thread starts emitting immediately."}
+    ],
+    "outputs": [
+      {"name": "frame", "kind": "image",
+       "doc": "320x240 grayscale frame; first 4 bytes embed seq number (LE u32)."}
+    ],
+    "exchange": [
+      {"command": "start", "doc": "Start the worker."},
+      {"command": "stop",  "doc": "Stop the worker."},
+      {"command": "set_period_ms", "args": "{value:int}", "doc": "Change cycle period."}
+    ]
+  }
+}

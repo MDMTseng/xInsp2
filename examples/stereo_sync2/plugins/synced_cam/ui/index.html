@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>synced_cam</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 12px; color: #ddd; background: #1e1e1e; }
+    button { margin-right: 6px; padding: 4px 10px; }
+    pre { background: #111; padding: 8px; border: 1px solid #333; }
+    label { display: inline-block; min-width: 80px; }
+  </style>
+</head>
+<body>
+  <h3>synced_cam</h3>
+  <p>Synthetic 320x240 grayscale source. Two instances paired by wall-clock-derived TID.</p>
+  <div>
+    <button id="btn-start">Start</button>
+    <button id="btn-stop">Stop</button>
+    <button id="btn-refresh">Refresh</button>
+  </div>
+  <div style="margin-top:10px;">
+    <label>period_ms</label>
+    <input id="period" type="number" min="10" max="1000" value="50">
+    <button id="btn-set-period">Set</button>
+  </div>
+  <h4>Status</h4>
+  <pre id="status">(loading...)</pre>
+
+  <script>
+    const vscode = acquireVsCodeApi ? acquireVsCodeApi() : { postMessage: () => {} };
+    function send(cmd) {
+      vscode.postMessage({ type: 'exchange', cmd: JSON.stringify(cmd) });
+    }
+    document.getElementById('btn-start').onclick   = () => send({ command: 'start' });
+    document.getElementById('btn-stop').onclick    = () => send({ command: 'stop' });
+    document.getElementById('btn-refresh').onclick = () => send({ command: 'status' });
+    document.getElementById('btn-set-period').onclick = () => {
+      const v = parseInt(document.getElementById('period').value, 10);
+      send({ command: 'set_period_ms', value: v });
+    };
+    window.addEventListener('message', (ev) => {
+      const m = ev.data;
+      if (m && m.type === 'status') {
+        document.getElementById('status').textContent = JSON.stringify(m, null, 2);
+      }
+    });
+    send({ command: 'status' });
+  </script>
+</body>
+</html>

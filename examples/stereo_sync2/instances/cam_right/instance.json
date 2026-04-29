@@ -1,0 +1,8 @@
+{
+  "plugin": "synced_cam",
+  "isolation": "in_process",
+  "config": {
+    "period_ms": 50,
+    "auto_start": true
+  }
+}

@@ -313,6 +313,16 @@ auto right = t.image("cam_right");
 VAR(disp, stereo_match(left, right));
 ```
 
+The `is_active()` guard is **required** in continuous mode
+(`cmd:start fps=N`). The host runs two dispatch sources side-by-side:
+the trigger bus dispatches one inspect call per complete trigger AND a
+wall-clock timer dispatches one per frame regardless of whether a
+trigger fired. The timer-driven dispatches arrive with no trigger
+attached (`is_active() == false`); without the guard your script
+would null-deref / read empty Images on those ticks. In single-shot
+mode (`cmd:run`) this distinction doesn't apply — there's exactly one
+dispatch per command.
+
 See [`docs/architecture.md`](../architecture.md) for bus policies (Any
 / AllRequired / LeaderFollowers) and the `synced_stereo` reference
 plugin.
