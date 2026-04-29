@@ -817,6 +817,62 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
 
 // (trigger_worker removed — continuous mode uses a simple timer thread)
 
+// Counters for queue overflow logging — incremented by enqueue_event_
+// when an event has to be dropped because the dispatch queue is full.
+// Logged via the WS log channel periodically so callers can see
+// pressure without scraping stderr.
+static std::atomic<uint64_t> g_dropped_oldest{0};
+static std::atomic<uint64_t> g_dropped_newest{0};
+
+// Apply the project's queue policy and push (or drop) the event. Caller
+// owns the event by value. Caller must NOT hold g_ev_mu — this fn
+// takes it. Returns true if pushed, false if dropped or rejected.
+//
+// queue_depth and overflow read once per call from the project info
+// (cheap atomics not worth it; they only change on open_project).
+static bool enqueue_event_(xi::TriggerEvent ev) {
+    int depth = g_plugin_mgr.project().queue_depth;
+    if (depth < 1) depth = 1;
+    const std::string& overflow = g_plugin_mgr.project().overflow;
+
+    std::unique_lock<std::mutex> lk(g_ev_mu);
+    if ((int)g_ev_queue.size() < depth) {
+        g_ev_queue.push_back(std::move(ev));
+        g_ev_cv.notify_one();
+        return true;
+    }
+    // Queue full.
+    if (overflow == "drop_newest") {
+        ++g_dropped_newest;
+        // Caller's `ev` destructs as fn returns; release any image
+        // refs it carries.
+        for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
+        return false;
+    }
+    if (overflow == "block") {
+        // Wait until at least one slot frees up. Bounded by g_continuous
+        // so cmd:stop wakes us.
+        g_ev_cv.wait(lk, [depth] {
+            return (int)g_ev_queue.size() < depth || !g_continuous.load();
+        });
+        if (!g_continuous.load()) {
+            for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
+            return false;
+        }
+        g_ev_queue.push_back(std::move(ev));
+        g_ev_cv.notify_one();
+        return true;
+    }
+    // Default: drop_oldest.
+    auto& front = g_ev_queue.front();
+    for (auto& [src, h] : front.images) xi::ImagePool::instance().release(h);
+    g_ev_queue.pop_front();
+    g_ev_queue.push_back(std::move(ev));
+    g_ev_cv.notify_one();
+    ++g_dropped_oldest;
+    return true;
+}
+
 // Spawn the dispatcher pool + timer thread for cmd:start / hot-reload
 // resume. `n_threads` comes from project.dispatch_threads (default 1).
 // The timer thread pushes a synthetic empty trigger event at the
@@ -877,19 +933,14 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
     }
 
     // Timer thread: every interval_ms push a synthetic empty event so
-    // scripts without trigger sources still tick. If real trigger events
-    // are coming through, we still push the synthetic — workers handle
-    // both kinds and the synthetic is a no-trigger inspect, which is
-    // exactly what older scripts expect on a timer.
+    // scripts without trigger sources still tick. Goes through the
+    // queue-policy helper so synthetic events also get dropped under
+    // backpressure rather than infinitely accumulating.
     g_timer_thread = std::thread([interval_ms] {
         while (g_continuous.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
             if (!g_continuous.load()) break;
-            {
-                std::lock_guard<std::mutex> lk(g_ev_mu);
-                g_ev_queue.push_back(xi::TriggerEvent{});  // synthetic
-                g_ev_cv.notify_one();
-            }
+            (void)enqueue_event_(xi::TriggerEvent{});
         }
     });
 }
@@ -1390,9 +1441,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             int interval_ms = 1000 / std::max(fps, 1);
             int n_threads = g_plugin_mgr.project().dispatch_threads;
             xi::TriggerBus::instance().set_sink([](xi::TriggerEvent ev) {
-                std::lock_guard<std::mutex> lk(g_ev_mu);
-                g_ev_queue.push_back(std::move(ev));
-                g_ev_cv.notify_one();
+                (void)enqueue_event_(std::move(ev));
             });
             spawn_dispatch_pool_(&srv, interval_ms, n_threads);
             std::fprintf(stderr,
@@ -1587,9 +1636,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Timer thread emits synthetic events on schedule for scripts
         // without trigger sources.
         xi::TriggerBus::instance().set_sink([](xi::TriggerEvent ev) {
-            std::lock_guard<std::mutex> lk(g_ev_mu);
-            g_ev_queue.push_back(std::move(ev));
-            g_ev_cv.notify_one();
+            (void)enqueue_event_(std::move(ev));
         });
 
         spawn_dispatch_pool_(&srv, interval_ms, n_threads);
@@ -2403,6 +2450,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "could not start replay (no manifest, or already replaying)");
         }
+    } else if (name == "dispatch_stats") {
+        // Snapshot of queue health. Useful for drivers / agents that
+        // want to know if their source is overproducing.
+        std::string data;
+        size_t qsz;
+        { std::lock_guard<std::mutex> lk(g_ev_mu); qsz = g_ev_queue.size(); }
+        data  = "{\"queue_depth_now\":" + std::to_string(qsz);
+        data += ",\"queue_depth_max\":" + std::to_string(g_plugin_mgr.project().queue_depth);
+        data += ",\"overflow\":\"" + g_plugin_mgr.project().overflow + "\"";
+        data += ",\"dispatch_threads\":" + std::to_string(g_plugin_mgr.project().dispatch_threads);
+        data += ",\"dropped_oldest\":" + std::to_string(g_dropped_oldest.load());
+        data += ",\"dropped_newest\":" + std::to_string(g_dropped_newest.load());
+        data += "}";
+        send_rsp_ok(srv, id, data);
     } else if (name == "open_project_warnings") {
         // Returns the per-instance warnings collected during the most
         // recent open_project. open_project itself succeeds even when

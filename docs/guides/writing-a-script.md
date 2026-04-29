@@ -336,7 +336,11 @@ is serial. Add to `project.json`:
 {
   "name": "my_project",
   "script": "inspect.cpp",
-  "parallelism": { "dispatch_threads": 4 }
+  "parallelism": {
+    "dispatch_threads": 4,
+    "queue_depth": 100,
+    "overflow": "drop_oldest"
+  }
 }
 ```
 
@@ -345,6 +349,31 @@ arriving in the same 10 ms window now lands on 4 worker threads that
 all run `xi_inspect_entry` simultaneously. See `examples/burst_dispatch/`
 for a baseline measurement; with `sleep_ms=50` per inspect and
 `fps=100`, N=1 yields ~16 events/sec, N=4 yields ~58.
+
+`queue_depth` (default 100) bounds how many trigger events buffer
+when workers are busy. `overflow` picks the policy when the queue
+fills:
+
+- **`drop_oldest`** (default): pop front, push new. Latest frame
+  always gets in. Right for live inspection where stale frames
+  are useless.
+- **`drop_newest`**: refuse new, preserve FIFO. Right when downstream
+  ordering matters (archival, ML training capture).
+- **`block`**: `emit_trigger` blocks until room. Back-pressure to
+  the source. Right when the source itself can throttle.
+
+Probe live state with `cmd:dispatch_stats` (Python: `c.call("dispatch_stats")`):
+
+```python
+{ "queue_depth_now": 4, "queue_depth_max": 100,
+  "overflow": "drop_oldest", "dispatch_threads": 4,
+  "dropped_oldest": 88, "dropped_newest": 0 }
+```
+
+If `queue_depth_now` stays pinned at the cap and `dropped_oldest`
+keeps growing, your source is producing faster than your pipeline
+can keep up — bump `dispatch_threads`, optimise the plugin, or
+accept the drops.
 
 **Caveats — your responsibility once N > 1:**
 
