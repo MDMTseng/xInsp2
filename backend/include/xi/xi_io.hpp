@@ -35,7 +35,7 @@
 #include <cstring>
 #include <string>
 
-extern char  g_run_frame_path_[];   // xi_script_support.hpp
+extern thread_local char  g_run_frame_path_[];   // xi_script_support.hpp
 extern void* g_use_host_api_;       // xi_script_support.hpp (xi_host_api*)
 
 namespace xi {

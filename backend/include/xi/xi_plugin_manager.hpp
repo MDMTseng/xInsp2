@@ -212,6 +212,31 @@ struct ProjectInfo {
     std::vector<std::string> trigger_required;    // source names (AllRequired)
     std::string   trigger_leader;                 // source name (LeaderFollowers)
     int           trigger_window_ms = 100;
+
+    // `parallelism.dispatch_threads`: how many dispatcher threads
+    // run xi_inspect_entry concurrently in continuous mode.
+    // Default 1 — single threaded, current behaviour, watchdog
+    // active. >1 fans out the trigger queue + timer ticks across
+    // N threads. Caveats (xi::state, plugin process() reentrance,
+    // watchdog disabled) — see writing-a-script.md.
+    int           dispatch_threads = 1;
+
+    // `parallelism.queue_depth`: maximum number of trigger events
+    // (real bus emits + synthetic timer ticks) buffered while
+    // workers are busy. Default 100 — enough to absorb a normal
+    // burst without runaway memory if a source overproduces.
+    int           queue_depth      = 100;
+
+    // `parallelism.overflow`: what to do when queue_depth is full
+    // and another event arrives.
+    //   "drop_oldest" (default) — pop the front, push the new one.
+    //                            Live inspection prefers freshest.
+    //   "drop_newest"           — keep the FIFO ordering, refuse
+    //                            the new event. Use for archival /
+    //                            ML logging where order matters.
+    //   "block"                 — emit_trigger blocks until room is
+    //                            available. Back-pressure to source.
+    std::string   overflow         = "drop_oldest";
 };
 
 // Static compile environment for project-level plugins. Populated once at
@@ -1012,6 +1037,9 @@ public:
         project_.trigger_required.clear();
         project_.trigger_leader.clear();
         project_.trigger_window_ms = 100;
+        project_.dispatch_threads  = 1;
+        project_.queue_depth       = 100;
+        project_.overflow          = "drop_oldest";
         if (cJSON* root = cJSON_Parse(content.c_str())) {
             if (cJSON* tp = cJSON_GetObjectItem(root, "trigger_policy");
                 tp && cJSON_IsObject(tp)) {
@@ -1036,6 +1064,36 @@ public:
                         if (cJSON_IsString(it) && it->valuestring) {
                             project_.trigger_required.emplace_back(it->valuestring);
                         }
+                    }
+                }
+            }
+            // parallelism block.
+            if (cJSON* par = cJSON_GetObjectItem(root, "parallelism");
+                par && cJSON_IsObject(par)) {
+                if (cJSON* k = cJSON_GetObjectItem(par, "dispatch_threads");
+                    k && cJSON_IsNumber(k)) {
+                    int n = (int)k->valuedouble;
+                    if (n < 1) n = 1;
+                    if (n > 32) n = 32;  // sanity cap
+                    project_.dispatch_threads = n;
+                }
+                if (cJSON* k = cJSON_GetObjectItem(par, "queue_depth");
+                    k && cJSON_IsNumber(k)) {
+                    int n = (int)k->valuedouble;
+                    if (n < 1)     n = 1;
+                    if (n > 10000) n = 10000;
+                    project_.queue_depth = n;
+                }
+                if (cJSON* k = cJSON_GetObjectItem(par, "overflow");
+                    k && cJSON_IsString(k) && k->valuestring) {
+                    std::string s = k->valuestring;
+                    if (s == "drop_oldest" || s == "drop_newest" || s == "block") {
+                        project_.overflow = s;
+                    } else {
+                        std::fprintf(stderr,
+                            "[xinsp2] project.json parallelism.overflow "
+                            "unknown value '%s' — using drop_oldest\n",
+                            s.c_str());
                     }
                 }
             }

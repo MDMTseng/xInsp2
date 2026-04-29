@@ -250,7 +250,13 @@ static std::atomic<bool>       g_continuous{false};
 // reload completes — without it, mid-run hot-reload would silently
 // halt the stream.
 static std::atomic<int>        g_continuous_fps{10};
-static std::thread             g_worker_thread;
+// Worker thread pool. project.json `parallelism.dispatch_threads: N`
+// controls the size; default 1 (current behaviour). All workers pull
+// from the same g_ev_queue. A separate timer thread (`g_timer_thread`)
+// pushes a synthetic empty event at the configured fps so scripts
+// that don't have a trigger source still get periodic dispatch.
+static std::vector<std::thread> g_worker_threads;
+static std::thread              g_timer_thread;
 // Serialise cmd:run dispatch threads so history / vars arrive in run_id
 // order. Threads queue up here and the watchdog operates on whichever
 // one is currently inside run_one_inspection — only one at a time.
@@ -746,9 +752,16 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
     auto t0 = std::chrono::steady_clock::now();
     // Arm watchdog: store deadline + current thread handle. Cleared in
     // the post-inspect path below regardless of throw.
+    //
+    // Watchdog state is single-slot (one deadline + one thread handle)
+    // and can only track ONE inspect at a time. Skip it under
+    // multi-dispatch (N > 1) — long-running inspects there have no
+    // single-thread protection. A future enhancement could carry
+    // per-thread watchdog state.
     HANDLE self_h = nullptr;
     int wd_ms = g_watchdog_ms.load();
-    if (wd_ms > 0) {
+    int n_disp = g_plugin_mgr.project().dispatch_threads;
+    if (wd_ms > 0 && n_disp <= 1) {
         DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
                         GetCurrentProcess(), &self_h, 0, FALSE,
                         DUPLICATE_SAME_ACCESS);
@@ -803,6 +816,145 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
 }
 
 // (trigger_worker removed — continuous mode uses a simple timer thread)
+
+// Counters for queue overflow logging — incremented by enqueue_event_
+// when an event has to be dropped because the dispatch queue is full.
+// Logged via the WS log channel periodically so callers can see
+// pressure without scraping stderr.
+static std::atomic<uint64_t> g_dropped_oldest{0};
+static std::atomic<uint64_t> g_dropped_newest{0};
+
+// Apply the project's queue policy and push (or drop) the event. Caller
+// owns the event by value. Caller must NOT hold g_ev_mu — this fn
+// takes it. Returns true if pushed, false if dropped or rejected.
+//
+// queue_depth and overflow read once per call from the project info
+// (cheap atomics not worth it; they only change on open_project).
+static bool enqueue_event_(xi::TriggerEvent ev) {
+    int depth = g_plugin_mgr.project().queue_depth;
+    if (depth < 1) depth = 1;
+    const std::string& overflow = g_plugin_mgr.project().overflow;
+
+    std::unique_lock<std::mutex> lk(g_ev_mu);
+    if ((int)g_ev_queue.size() < depth) {
+        g_ev_queue.push_back(std::move(ev));
+        g_ev_cv.notify_one();
+        return true;
+    }
+    // Queue full.
+    if (overflow == "drop_newest") {
+        ++g_dropped_newest;
+        // Caller's `ev` destructs as fn returns; release any image
+        // refs it carries.
+        for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
+        return false;
+    }
+    if (overflow == "block") {
+        // Wait until at least one slot frees up. Bounded by g_continuous
+        // so cmd:stop wakes us.
+        g_ev_cv.wait(lk, [depth] {
+            return (int)g_ev_queue.size() < depth || !g_continuous.load();
+        });
+        if (!g_continuous.load()) {
+            for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
+            return false;
+        }
+        g_ev_queue.push_back(std::move(ev));
+        g_ev_cv.notify_one();
+        return true;
+    }
+    // Default: drop_oldest.
+    auto& front = g_ev_queue.front();
+    for (auto& [src, h] : front.images) xi::ImagePool::instance().release(h);
+    g_ev_queue.pop_front();
+    g_ev_queue.push_back(std::move(ev));
+    g_ev_cv.notify_one();
+    ++g_dropped_oldest;
+    return true;
+}
+
+// Spawn the dispatcher pool + timer thread for cmd:start / hot-reload
+// resume. `n_threads` comes from project.dispatch_threads (default 1).
+// The timer thread pushes a synthetic empty trigger event at the
+// requested fps so scripts without a real trigger source still see
+// periodic dispatch. All N workers pull from the same g_ev_queue.
+//
+// Caller must have already set g_continuous = true and installed a
+// TriggerBus sink that pushes into g_ev_queue.
+static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
+                                 int interval_ms,
+                                 int n_threads) {
+    if (n_threads < 1) n_threads = 1;
+    g_worker_threads.clear();
+    g_worker_threads.reserve((size_t)n_threads);
+    std::fprintf(stderr,
+        "[xinsp2] continuous mode: %dms timer + %d dispatcher thread(s) + trigger bus\n",
+        interval_ms, n_threads);
+
+    // N worker threads — each pops from g_ev_queue and dispatches.
+    // run_one_inspection allocates its own run_id from g_run_id; ordering
+    // of vars / preview frames on the wire is by run_id (not by arrival
+    // order). Watchdog state is single-slot atomics today; with N>1
+    // we leave it disabled (worker thread doesn't arm it) so multiple
+    // long-running inspects don't fight over the slot. Single-thread
+    // case (N==1) keeps the legacy watchdog path intact.
+    auto worker_body = [srv_ptr] {
+        _set_se_translator(seh_translator);
+        while (g_continuous.load()) {
+            xi::TriggerEvent ev;
+            bool have_ev = false;
+            {
+                std::unique_lock<std::mutex> lk(g_ev_mu);
+                g_ev_cv.wait(lk, [] {
+                    return !g_ev_queue.empty() || !g_continuous.load();
+                });
+                if (!g_continuous.load()) break;
+                if (!g_ev_queue.empty()) {
+                    ev = std::move(g_ev_queue.front());
+                    g_ev_queue.pop_front();
+                    have_ev = true;
+                }
+            }
+            if (!have_ev) continue;
+            int frame_seq = (int)g_run_id.fetch_add(0);  // cheap snapshot for hint
+            if (!ev.images.empty() || ev.id.hi || ev.id.lo) {
+                g_current_trigger = &ev;
+                run_one_inspection(*srv_ptr, frame_seq);
+                g_current_trigger = nullptr;
+                for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
+            } else {
+                // Synthetic timer tick from g_timer_thread — no trigger.
+                run_one_inspection(*srv_ptr, frame_seq);
+            }
+        }
+    };
+    for (int i = 0; i < n_threads; ++i) {
+        g_worker_threads.emplace_back(worker_body);
+    }
+
+    // Timer thread: every interval_ms push a synthetic empty event so
+    // scripts without trigger sources still tick. Goes through the
+    // queue-policy helper so synthetic events also get dropped under
+    // backpressure rather than infinitely accumulating.
+    g_timer_thread = std::thread([interval_ms] {
+        while (g_continuous.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+            if (!g_continuous.load()) break;
+            (void)enqueue_event_(xi::TriggerEvent{});
+        }
+    });
+}
+
+// Stop the pool + timer. Safe to call if nothing was spawned.
+static void stop_dispatch_pool_() {
+    g_continuous = false;
+    g_ev_cv.notify_all();
+    if (g_timer_thread.joinable()) g_timer_thread.join();
+    for (auto& t : g_worker_threads) {
+        if (t.joinable()) t.join();
+    }
+    g_worker_threads.clear();
+}
 
 static void handle_command(xi::ws::Server& srv, std::string_view text) {
     auto parsed = xp::parse_cmd(text);
@@ -1081,8 +1233,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "shutdown") {
         // Stop continuous mode first to avoid use-after-free on srv
         if (g_continuous.load()) {
-            g_continuous = false;
-            if (g_worker_thread.joinable()) g_worker_thread.join();
+            stop_dispatch_pool_();
         }
         send_rsp_ok(srv, id);
         g_should_exit = true;
@@ -1105,11 +1256,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (g_continuous.load()) {
             was_continuous = true;
             prior_continuous_fps = g_continuous_fps.load();
-            g_continuous = false;
-            g_ev_cv.notify_all();
             { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
             g_bp_cv.notify_all();
-            if (g_worker_thread.joinable()) g_worker_thread.join();
+            stop_dispatch_pool_();
             std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload (will resume)\n");
         }
 
@@ -1290,43 +1439,14 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             g_continuous_fps = fps;
             g_continuous = true;
             int interval_ms = 1000 / std::max(fps, 1);
-            auto* srv_ptr = &srv;
+            int n_threads = g_plugin_mgr.project().dispatch_threads;
             xi::TriggerBus::instance().set_sink([](xi::TriggerEvent ev) {
-                std::lock_guard<std::mutex> lk(g_ev_mu);
-                g_ev_queue.push_back(std::move(ev));
-                g_ev_cv.notify_one();
+                (void)enqueue_event_(std::move(ev));
             });
-            g_worker_thread = std::thread([srv_ptr, interval_ms] {
-                _set_se_translator(seh_translator);
-                std::fprintf(stderr,
-                    "[xinsp2] continuous mode resumed after reload: %dms timer + trigger bus\n",
-                    interval_ms);
-                int frame_seq = 0;
-                while (g_continuous.load()) {
-                    xi::TriggerEvent ev;
-                    bool have_ev = false;
-                    {
-                        std::unique_lock<std::mutex> lk(g_ev_mu);
-                        g_ev_cv.wait_for(lk, std::chrono::milliseconds(interval_ms),
-                                         [] { return !g_ev_queue.empty() || !g_continuous.load(); });
-                        if (!g_continuous.load()) break;
-                        if (!g_ev_queue.empty()) {
-                            ev = std::move(g_ev_queue.front());
-                            g_ev_queue.pop_front();
-                            have_ev = true;
-                        }
-                    }
-                    if (have_ev) {
-                        g_current_trigger = &ev;
-                        run_one_inspection(*srv_ptr, frame_seq++);
-                        g_current_trigger = nullptr;
-                        for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
-                    } else {
-                        run_one_inspection(*srv_ptr, frame_seq++);
-                    }
-                }
-                std::fprintf(stderr, "[xinsp2] continuous mode stopped\n");
-            });
+            spawn_dispatch_pool_(&srv, interval_ms, n_threads);
+            std::fprintf(stderr,
+                "[xinsp2] continuous mode resumed after reload (%d threads)\n",
+                n_threads);
         }
 
         // Return success with dll path + diagnostics (warnings only on
@@ -1499,61 +1619,32 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         auto fps_val = xp::get_number_field(parsed->args_json, "fps");
         if (fps_val && *fps_val > 0) fps = (int)*fps_val;
 
-        // Stop any existing worker before starting a new one
-        if (g_worker_thread.joinable()) {
-            g_continuous = false;
-            g_worker_thread.join();
+        // Stop any existing pool before starting a new one.
+        if (!g_worker_threads.empty() || g_timer_thread.joinable()) {
+            stop_dispatch_pool_();
         }
 
         g_continuous_fps = fps;
         g_continuous = true;
 
         int interval_ms = 1000 / std::max(fps, 1);
-        auto* srv_ptr = &srv;
+        int n_threads = g_plugin_mgr.project().dispatch_threads;
+        if (n_threads < 1) n_threads = 1;
 
-        // Bus-driven worker: events arrive via TriggerBus sink → enqueued
-        // → worker pops and runs inspect with that trigger as current.
-        // Timer fallback fires too (legacy back-compat) so scripts whose
-        // sources don't emit_trigger still see periodic dispatch.
+        // Bus-driven dispatch: events arrive via TriggerBus sink → enqueued
+        // → workers pop and run inspect with that trigger as current.
+        // Timer thread emits synthetic events on schedule for scripts
+        // without trigger sources.
         xi::TriggerBus::instance().set_sink([](xi::TriggerEvent ev) {
-            std::lock_guard<std::mutex> lk(g_ev_mu);
-            g_ev_queue.push_back(std::move(ev));
-            g_ev_cv.notify_one();
+            (void)enqueue_event_(std::move(ev));
         });
 
-        g_worker_thread = std::thread([srv_ptr, interval_ms] {
-            _set_se_translator(seh_translator);
-            std::fprintf(stderr, "[xinsp2] continuous mode: %dms timer + trigger bus\n",
-                         interval_ms);
-            int frame_seq = 0;
-            while (g_continuous.load()) {
-                xi::TriggerEvent ev;
-                bool have_ev = false;
-                {
-                    std::unique_lock<std::mutex> lk(g_ev_mu);
-                    g_ev_cv.wait_for(lk, std::chrono::milliseconds(interval_ms),
-                                     [] { return !g_ev_queue.empty() || !g_continuous.load(); });
-                    if (!g_continuous.load()) break;
-                    if (!g_ev_queue.empty()) {
-                        ev = std::move(g_ev_queue.front());
-                        g_ev_queue.pop_front();
-                        have_ev = true;
-                    }
-                }
-                if (have_ev) {
-                    g_current_trigger = &ev;
-                    run_one_inspection(*srv_ptr, frame_seq++);
-                    g_current_trigger = nullptr;
-                    for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
-                } else {
-                    // Timer-only tick: legacy back-compat dispatch.
-                    run_one_inspection(*srv_ptr, frame_seq++);
-                }
-            }
-            std::fprintf(stderr, "[xinsp2] continuous mode stopped\n");
-        });
+        spawn_dispatch_pool_(&srv, interval_ms, n_threads);
 
-        send_rsp_ok(srv, id, R"({"started":true})");
+        char buf[64];
+        std::snprintf(buf, sizeof(buf),
+                      R"({"started":true,"dispatch_threads":%d})", n_threads);
+        send_rsp_ok(srv, id, buf);
     } else if (name == "stop") {
         g_continuous = false;
         g_ev_cv.notify_all();           // wake bus-driven worker
@@ -1567,7 +1658,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         g_bp_cv.notify_all();
         xi::TriggerBus::instance().clear_sink();
-        if (g_worker_thread.joinable()) g_worker_thread.join();
+        stop_dispatch_pool_();
         // Drain any in-flight events that arrived between sink-clear and join.
         {
             std::lock_guard<std::mutex> lk(g_ev_mu);
@@ -2359,6 +2450,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "could not start replay (no manifest, or already replaying)");
         }
+    } else if (name == "dispatch_stats") {
+        // Snapshot of queue health. Useful for drivers / agents that
+        // want to know if their source is overproducing.
+        std::string data;
+        size_t qsz;
+        { std::lock_guard<std::mutex> lk(g_ev_mu); qsz = g_ev_queue.size(); }
+        data  = "{\"queue_depth_now\":" + std::to_string(qsz);
+        data += ",\"queue_depth_max\":" + std::to_string(g_plugin_mgr.project().queue_depth);
+        data += ",\"overflow\":\"" + g_plugin_mgr.project().overflow + "\"";
+        data += ",\"dispatch_threads\":" + std::to_string(g_plugin_mgr.project().dispatch_threads);
+        data += ",\"dropped_oldest\":" + std::to_string(g_dropped_oldest.load());
+        data += ",\"dropped_newest\":" + std::to_string(g_dropped_newest.load());
+        data += "}";
+        send_rsp_ok(srv, id, data);
     } else if (name == "open_project_warnings") {
         // Returns the per-instance warnings collected during the most
         // recent open_project. open_project itself succeeds even when
