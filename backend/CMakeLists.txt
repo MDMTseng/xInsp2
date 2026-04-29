@@ -227,6 +227,19 @@ target_link_libraries(xinsp_worker PRIVATE xi_core cjson)
 target_include_directories(xinsp_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 set_target_properties(xinsp_worker PROPERTIES OUTPUT_NAME "xinsp-worker")
 
+# evil_worker — FL r7 fuzz harness #3 counterpart. Drops in as
+# xinsp-worker.exe (renamed by the Python driver) to inject malformed
+# IPC frames into the host's reader thread. Kept minimal: no xi_core
+# linkage on purpose so we can hand-craft framing and not depend on
+# any victim-side helper drifting under our feet. Win32-only today
+# (matches xi_ipc.hpp's Windows-only Pipe). TODO(linux): port when
+# xi_ipc grows a POSIX backend.
+if(WIN32)
+    add_executable(evil_worker
+        ${CMAKE_CURRENT_SOURCE_DIR}/../examples/fl_r7_fuzz/evil_worker.cpp)
+    set_target_properties(evil_worker PROPERTIES OUTPUT_NAME "evil_worker")
+endif()
+
 add_executable(xinsp_script_runner src/script_runner_main.cpp src/stb_impl.cpp src/xi_image_io.cpp)
 target_link_libraries(xinsp_script_runner PRIVATE xi_core cjson)
 target_include_directories(xinsp_script_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
