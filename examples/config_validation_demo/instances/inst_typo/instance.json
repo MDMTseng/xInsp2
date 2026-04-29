@@ -1,0 +1,10 @@
+{
+  "plugin": "burst_source",
+  "isolation": "in_process",
+  "config": {
+    "fsp":    30,
+    "shape":  "burts",
+    "width":  10000,
+    "height": "tall"
+  }
+}

@@ -1286,6 +1286,16 @@ public:
                     if (created && ii.instance) {
                         std::string cfg_val;
                         if (detail_find_key(ic, "config", cfg_val)) {
+                            // FL r6 P2-3: validate instance.json.config against
+                            // plugin.json.manifest.params before handing it to
+                            // the plugin. Bad keys / out-of-range values still
+                            // fall through to set_def() (which silently ignores
+                            // unknown keys); the warnings here are how the user
+                            // learns about a typo. Skipped if the plugin
+                            // doesn't declare manifest.params (back-compat).
+                            validate_config_against_manifest(
+                                inst_name, *plugin, cfg_val,
+                                pi.manifest_json, last_open_warnings_);
                             ii.instance->set_def(cfg_val);
                         }
                         InstanceRegistry::instance().add(ii.instance);
@@ -1644,6 +1654,178 @@ private:
         }
         out.assign(start, p);
         return true;
+    }
+
+    // FL r6 P2-3: validate an instance's `config` JSON against the
+    // plugin's `manifest.params` declarations. Emits one OpenWarning per
+    // unknown key / type-mismatch / out-of-range / not-in-enum value.
+    //
+    // Validation is best-effort and warnings-only: a bad value still
+    // gets passed to `Plugin::set_def`, which already silently falls
+    // back to its compiled-in default for unknown / unparseable fields.
+    // The warning is the user-visible signal that a typo or stale
+    // value made it through.
+    //
+    // Back-compat: if `manifest_json` is empty, doesn't parse, or
+    // doesn't contain a `params` array, validation is skipped without
+    // warnings. Plugins predating manifests stay silent.
+    //
+    // Pure C++ / cJSON; no platform calls. Safe to share across
+    // open_project() invocations.
+    static void validate_config_against_manifest(
+        const std::string& instance,
+        const std::string& plugin,
+        const std::string& config_json,
+        const std::string& manifest_json,
+        std::vector<OpenWarning>& out_warnings)
+    {
+        if (manifest_json.empty()) return;
+        cJSON* mroot = cJSON_Parse(manifest_json.c_str());
+        if (!mroot) return;
+        cJSON* params = cJSON_GetObjectItem(mroot, "params");
+        if (!params || !cJSON_IsArray(params)) {
+            cJSON_Delete(mroot);
+            return;
+        }
+        cJSON* croot = cJSON_Parse(config_json.c_str());
+        if (!croot || !cJSON_IsObject(croot)) {
+            if (croot) cJSON_Delete(croot);
+            cJSON_Delete(mroot);
+            return;
+        }
+
+        // Build a quick name -> param-decl index. The manifest is small
+        // (a few params) so a linear scan would also be fine.
+        std::unordered_map<std::string, cJSON*> by_name;
+        cJSON* it = nullptr;
+        cJSON_ArrayForEach(it, params) {
+            if (!cJSON_IsObject(it)) continue;
+            cJSON* nm = cJSON_GetObjectItem(it, "name");
+            if (nm && cJSON_IsString(nm) && nm->valuestring) {
+                by_name[nm->valuestring] = it;
+            }
+        }
+
+        auto type_of_default = [](cJSON* decl) -> const char* {
+            // Prefer explicit "type" if declared; else infer from the
+            // "default" value's JSON type. Returns one of:
+            // "int", "float", "bool", "string", "" (unknown).
+            if (cJSON* t = cJSON_GetObjectItem(decl, "type");
+                t && cJSON_IsString(t) && t->valuestring) {
+                return t->valuestring;
+            }
+            cJSON* d = cJSON_GetObjectItem(decl, "default");
+            if (!d) return "";
+            if (cJSON_IsBool(d))   return "bool";
+            if (cJSON_IsString(d)) return "string";
+            if (cJSON_IsNumber(d)) {
+                // Best-effort split of int vs float based on the literal.
+                double v = d->valuedouble;
+                if (v == (double)(long long)v) return "int";
+                return "float";
+            }
+            return "";
+        };
+
+        auto value_matches_type = [](cJSON* v, const std::string& t) -> bool {
+            if (t == "int" || t == "float" || t == "number") {
+                return cJSON_IsNumber(v) != 0;
+            }
+            if (t == "bool" || t == "boolean") {
+                return cJSON_IsBool(v) != 0;
+            }
+            if (t == "string") {
+                return cJSON_IsString(v) != 0;
+            }
+            // Unknown type tag — don't false-positive.
+            return true;
+        };
+
+        cJSON* cv = nullptr;
+        cJSON_ArrayForEach(cv, croot) {
+            if (!cv->string) continue;
+            const std::string key = cv->string;
+            auto pit = by_name.find(key);
+            if (pit == by_name.end()) {
+                out_warnings.push_back({
+                    instance, plugin,
+                    "unknown_config_key: '" + key +
+                    "' is not declared in plugin manifest.params"
+                });
+                continue;
+            }
+            cJSON* decl = pit->second;
+            std::string declared_type = type_of_default(decl);
+            if (!declared_type.empty() &&
+                !value_matches_type(cv, declared_type)) {
+                out_warnings.push_back({
+                    instance, plugin,
+                    "type_mismatch: config['" + key +
+                    "'] does not match declared type '" + declared_type + "'"
+                });
+                // Don't bother with min/max/enum if the type is wrong.
+                continue;
+            }
+
+            // Numeric range check (min / max).
+            if (cJSON_IsNumber(cv)) {
+                double v = cv->valuedouble;
+                cJSON* mn = cJSON_GetObjectItem(decl, "min");
+                cJSON* mx = cJSON_GetObjectItem(decl, "max");
+                if (mn && cJSON_IsNumber(mn) && v < mn->valuedouble) {
+                    out_warnings.push_back({
+                        instance, plugin,
+                        "out_of_range: config['" + key + "'] = " +
+                        std::to_string(v) + " is below declared min " +
+                        std::to_string(mn->valuedouble)
+                    });
+                }
+                if (mx && cJSON_IsNumber(mx) && v > mx->valuedouble) {
+                    out_warnings.push_back({
+                        instance, plugin,
+                        "out_of_range: config['" + key + "'] = " +
+                        std::to_string(v) + " is above declared max " +
+                        std::to_string(mx->valuedouble)
+                    });
+                }
+            }
+
+            // Enum check for strings — declared as a JSON array under
+            // "enum". Membership is exact-string.
+            if (cJSON_IsString(cv) && cv->valuestring) {
+                cJSON* en = cJSON_GetObjectItem(decl, "enum");
+                if (en && cJSON_IsArray(en)) {
+                    bool found = false;
+                    std::string allowed;
+                    cJSON* eit = nullptr;
+                    cJSON_ArrayForEach(eit, en) {
+                        if (cJSON_IsString(eit) && eit->valuestring) {
+                            if (!allowed.empty()) allowed += ", ";
+                            allowed += "'";
+                            allowed += eit->valuestring;
+                            allowed += "'";
+                            if (std::string(eit->valuestring) == cv->valuestring) {
+                                found = true;
+                            }
+                        }
+                    }
+                    if (!found) {
+                        out_warnings.push_back({
+                            instance, plugin,
+                            "not_in_enum: config['" + key + "'] = '" +
+                            cv->valuestring + "' is not in declared enum {" +
+                            allowed + "}"
+                        });
+                    }
+                }
+            }
+            // TODO(p2-3-extend): structured object/array params — current
+            // schema only declares scalar params. When manifest.params
+            // grows nested-object support, extend the recursion here.
+        }
+
+        cJSON_Delete(croot);
+        cJSON_Delete(mroot);
     }
 
     void save_project_locked() {

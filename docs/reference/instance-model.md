@@ -260,6 +260,16 @@ doesn't recognise. Treat `config` as "fields the user may want to set
 at project-create time"; treat `get_def()` as "everything the UI panel
 needs to render the live state".
 
+**Validation against the plugin manifest.** On `cmd:open_project` the
+backend cross-checks each `config` key against the plugin's declared
+`manifest.params` (if any) and surfaces typos / type errors / out-of-
+range values as entries in `cmd:open_project_warnings`. Validation
+never blocks load — bad keys still fall through to `set_def`, which
+defaults silently. See `docs/reference/plugin-abi.md` "Plugin
+manifest" for the four warning kinds (`unknown_config_key`,
+`type_mismatch`, `out_of_range`, `not_in_enum`). Plugins without a
+`manifest.params` block skip validation entirely.
+
 A spawned `xinsp-worker.exe`:
 - Attaches the backend's SHM region (so image handles dereference to
   the same physical pages → zero-copy `process()`).

@@ -257,6 +257,16 @@ basic validation against.
 
 **Deferred** to framework owner — non-trivial behavioural change.
 
+**Fixed** on branch `feature/instance-config-validation` (see
+`examples/config_validation_demo/` for the end-to-end demo).
+`xi::PluginManager::open_project` now validates each instance's
+`config` against `plugin.json.manifest.params` and emits four warning
+kinds — `unknown_config_key`, `type_mismatch`, `out_of_range`,
+`not_in_enum` — through the existing `open_project_warnings` channel.
+Warnings only, no behaviour change for valid configs; plugins without
+`manifest.params` skip validation entirely. Schema docs updated in
+`docs/reference/plugin-abi.md` and `docs/reference/instance-model.md`.
+
 ---
 
 ## P2-4: `manifest.exchange` is purely descriptive; unknown commands silently no-op
