@@ -71,6 +71,13 @@ the port itself; it's a record so we know what to expect.
 | `sdk/templates/*/CMakeLists.txt.standalone` + scaffold | MSVC-specific flags (`/MD /EHa /utf-8`, `cl.exe`-style includes) | Already mostly portable; tighten any `if (MSVC)` blocks; ship matching gcc/clang flags |
 | `vscode-extension/test/runE2E.mjs` etc that call `taskkill` | Win-only process kill | `pkill` / Node `process.kill()` |
 
+## Recent additions audited as cross-platform-clean
+
+| Addition | Notes |
+|---|---|
+| `examples/multi_source_surge/` (FL r6) | Pure `<thread>` + `<chrono>` + `<atomic>` + the `xi_*` portable headers. No Win32 calls in plugins or inspect. Builds via the same `cl.exe` path the rest of the SDK uses; on Linux it'll go through whatever the script compiler abstracts to. |
+| `dispatch_stats` watchdog warning log on `cmd:start` (FL r6) | Pure C++; lives in service_main.cpp's existing log-emission path which is already non-Win-specific. |
+
 ## Things to actively reduce Win-coupling for, even before the port
 
 - `cl.exe` mojibake on CP-950 — already worked around with `VSLANG=1033`,

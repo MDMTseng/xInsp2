@@ -238,6 +238,32 @@ tick comes from one of two sources:
 `cmd:run`. There is no per-frame rsp; the only ack for `start` is the
 initial one.
 
+`cmd:start` **resets** the per-run dispatch counters used by
+[`dispatch_stats`](#dispatch_stats) — `dropped_oldest`,
+`dropped_newest`, and `queue_depth_high_watermark` all zero. Drivers
+that snapshot `dispatch_stats` before *and* after a `cmd:start` and
+subtract will get nonsense across run boundaries. Either record only
+the AFTER snapshot, or treat the field values as scoped to the most
+recent cmd:start window.
+
+### `dispatch_stats`
+`args: {}` → `data: { ... }`. Snapshot of the dispatch queue's
+health since the most recent `cmd:start`:
+
+| Field | Meaning |
+|---|---|
+| `queue_depth_now` | current queue size at snapshot time |
+| `queue_depth_cap` | configured `project.parallelism.queue_depth` |
+| `queue_depth_high_watermark` | peak queue depth observed since last `cmd:start` |
+| `overflow` | configured policy: `drop_oldest` / `drop_newest` / `block` |
+| `dispatch_threads` | configured `project.parallelism.dispatch_threads` |
+| `dropped_oldest` | events dropped under `drop_oldest` since last `cmd:start` |
+| `dropped_newest` | events dropped under `drop_newest` since last `cmd:start` |
+
+The three counter fields (`dropped_*`, `queue_depth_high_watermark`)
+are reset on every `cmd:start`. Sample after stop for the
+end-of-run total; do not subtract a pre-start snapshot.
+
 ### `list_instances`
 `args: {}` → triggers an `instances` message.
 
