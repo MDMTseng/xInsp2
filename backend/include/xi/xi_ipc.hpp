@@ -139,12 +139,20 @@ public:
     ~Pipe() { close_(); }
 
     // Server: create the pipe and block until a client connects.
+    //
+    // FILE_FLAG_OVERLAPPED matters even though `read_exact` /
+    // `write_all` are synchronous-blocking from the caller's POV.
+    // Without overlapped, the kernel I/O manager serialises ALL ops
+    // on a handle: a thread reading and another thread writing on
+    // the same handle queue behind each other. With overlapped, R
+    // and W can proceed concurrently — which the always-on reader
+    // thread in ProcessInstanceAdapter relies on.
     static Pipe accept_one(const std::string& name) {
 #ifdef _WIN32
         std::string full = R"(\\.\pipe\)" + name;
         HANDLE h = CreateNamedPipeA(
             full.c_str(),
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             1,                  // maxInstances
             64 * 1024,          // outBufferSize
@@ -154,9 +162,25 @@ public:
         if (h == INVALID_HANDLE_VALUE)
             throw std::runtime_error("CreateNamedPipeA failed");
 
-        BOOL connected = ConnectNamedPipe(h, nullptr) ?
-            TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
-        if (!connected) {
+        // ConnectNamedPipe on an OVERLAPPED handle returns FALSE
+        // with ERROR_IO_PENDING (or ERROR_PIPE_CONNECTED if the
+        // client beat us here). Handle both, plus the synchronous
+        // success path, defensively.
+        OVERLAPPED ov{};
+        ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+        BOOL ok = ConnectNamedPipe(h, &ov);
+        if (!ok) {
+            DWORD err = GetLastError();
+            if (err == ERROR_IO_PENDING) {
+                WaitForSingleObject(ov.hEvent, INFINITE);
+                DWORD got = 0;
+                ok = GetOverlappedResult(h, &ov, &got, FALSE);
+            } else if (err == ERROR_PIPE_CONNECTED) {
+                ok = TRUE;
+            }
+        }
+        CloseHandle(ov.hEvent);
+        if (!ok) {
             CloseHandle(h);
             throw std::runtime_error("ConnectNamedPipe failed");
         }
@@ -167,7 +191,8 @@ public:
     }
 
     // Client: connect to an existing pipe. Retries briefly while the
-    // server is still initialising.
+    // server is still initialising. FILE_FLAG_OVERLAPPED — see
+    // accept_one for the rationale.
     static Pipe connect(const std::string& name, int timeout_ms = 5000) {
 #ifdef _WIN32
         std::string full = R"(\\.\pipe\)" + name;
@@ -175,7 +200,7 @@ public:
         for (;;) {
             HANDLE h = CreateFileA(full.c_str(),
                 GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                OPEN_EXISTING, 0, nullptr);
+                OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
             if (h != INVALID_HANDLE_VALUE) {
                 Pipe p; p.h_ = h; return p;
             }
@@ -193,11 +218,25 @@ public:
     }
 
     // Block until exactly `n` bytes are read. Throws on EOF / pipe error.
+    //
+    // OVERLAPPED + Wait pattern: caller-side semantics are still
+    // "block until done", but the kernel doesn't serialise this
+    // op against a concurrent op on the same handle. CancelIoEx
+    // cancels the pending read; the cancelled op completes with
+    // ERROR_OPERATION_ABORTED → throw → caller treats as EOF.
     void read_exact(void* buf, size_t n) {
         uint8_t* p = (uint8_t*)buf;
         while (n) {
+            OVERLAPPED ov{};
+            ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
             DWORD got = 0;
-            if (!ReadFile(h_, p, (DWORD)n, &got, nullptr) || got == 0)
+            BOOL ok = ReadFile(h_, p, (DWORD)n, &got, &ov);
+            if (!ok && GetLastError() == ERROR_IO_PENDING) {
+                WaitForSingleObject(ov.hEvent, INFINITE);
+                ok = GetOverlappedResult(h_, &ov, &got, FALSE);
+            }
+            CloseHandle(ov.hEvent);
+            if (!ok || got == 0)
                 throw std::runtime_error("pipe read EOF");
             p += got; n -= got;
         }
@@ -206,8 +245,16 @@ public:
     void write_all(const void* buf, size_t n) {
         const uint8_t* p = (const uint8_t*)buf;
         while (n) {
+            OVERLAPPED ov{};
+            ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
             DWORD wrote = 0;
-            if (!WriteFile(h_, p, (DWORD)n, &wrote, nullptr) || wrote == 0)
+            BOOL ok = WriteFile(h_, p, (DWORD)n, &wrote, &ov);
+            if (!ok && GetLastError() == ERROR_IO_PENDING) {
+                WaitForSingleObject(ov.hEvent, INFINITE);
+                ok = GetOverlappedResult(h_, &ov, &wrote, FALSE);
+            }
+            CloseHandle(ov.hEvent);
+            if (!ok || wrote == 0)
                 throw std::runtime_error("pipe write failed");
             p += wrote; n -= wrote;
         }

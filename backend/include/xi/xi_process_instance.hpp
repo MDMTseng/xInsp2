@@ -35,6 +35,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <filesystem>
+#include <future>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -98,8 +99,14 @@ public:
             CloseHandle(worker_proc_); worker_proc_ = nullptr;
             throw;
         }
-        // (Reader thread disabled — using inline recv in do_call_locked_)
-        // start_reader_();
+        // Always-on reader thread. The reader owns ALL reads on the
+        // pipe — writes still go through the per-call write path under
+        // mu_. seq=0 frames (RPC_EMIT_TRIGGER) dispatch to the trigger
+        // bus immediately; seq!=0 frames fulfil the matching in-flight
+        // promise registered by do_call_locked_(). See the comment
+        // block above run_reader_() for the broken-pipe history that
+        // motivated this design.
+        start_reader_();
 
         // CREATE — gives the plugin its real instance name.
         ipc::Writer w; w.str(name_); w.str(plugin_dll.string());
@@ -274,54 +281,78 @@ private:
         }
     }
 
-    // Inline send + recv (no reader thread). For source plugins that
-    // emit triggers without a corresponding RPC, we drain async
-    // frames inside this loop until our reply arrives. This is the
-    // simpler design — keep until concurrent in-flight calls become
-    // necessary (burst parallelism).
+    // Reader-thread-driven send + wait. The reader owns the pipe's
+    // read side; do_call_locked_ only writes (under pipe_write_mu_)
+    // and waits on a per-seq promise. This lets seq=0 async frames
+    // (RPC_EMIT_TRIGGER) reach the bus the instant they arrive, even
+    // when no backend→worker RPC is in flight.
     ipc::Frame do_call_locked_(uint32_t type, const std::vector<uint8_t>& payload) {
         const int wait_ms = call_timeout_ms_;
-        std::mutex                      m;
-        std::condition_variable         cv;
-        bool                            done    = false;
-        bool                            timeout = false;
-        HANDLE                          ph      = pipe_.native_handle();
-        std::thread watchdog([&] {
-            std::unique_lock<std::mutex> lk(m);
-            if (cv.wait_for(lk, std::chrono::milliseconds(wait_ms),
-                            [&]{ return done; })) {
-                return;
+
+        // Reserve sequence + promise BEFORE writing. If the reply
+        // somehow lands between write and registration the reader
+        // would discard it as orphan; registering first closes that
+        // race.
+        uint32_t seq = ++seq_;
+        auto entry = std::make_shared<InflightEntry>();
+        std::future<ipc::Frame> fut = entry->prom.get_future();
+        {
+            std::lock_guard<std::mutex> lk(inflight_mu_);
+            if (reader_dead_) {
+                throw std::runtime_error("worker pipe dead: " + reader_err_);
             }
-            timeout = true;
-            CancelIoEx(ph, nullptr);
-        });
-        auto release_watchdog = [&] {
-            { std::lock_guard<std::mutex> lk(m); done = true; }
-            cv.notify_all();
-            if (watchdog.joinable()) watchdog.join();
-        };
+            inflight_[seq] = entry;
+        }
+
+        // Send. Holding pipe_write_mu_ matters once we lift mu_ for
+        // burst parallelism (task #71); today mu_ already serialises
+        // callers but the dedicated write mutex documents intent and
+        // is cheap.
         try {
-            uint32_t seq = ++seq_;
+            std::lock_guard<std::mutex> wlk(pipe_write_mu_);
             ipc::send_frame(pipe_, seq, type,
                             payload.data(), (uint32_t)payload.size());
-            for (;;) {
-                auto f = ipc::recv_frame(pipe_);
-                if (f.seq == 0) {
-                    handle_async_frame_(f);
-                    continue;
-                }
-                release_watchdog();
-                if (f.seq != seq) throw std::runtime_error("RPC seq mismatch");
-                return f;
-            }
         } catch (...) {
-            release_watchdog();
-            if (timeout) {
-                throw std::runtime_error(
-                    "worker call timeout (" + std::to_string(wait_ms) + "ms)");
-            }
+            // Send failed — the reader will likely also see a dead
+            // pipe shortly. Clean our entry up so we don't leak.
+            std::lock_guard<std::mutex> lk(inflight_mu_);
+            inflight_.erase(seq);
             throw;
         }
+
+        // Wait for the reader to fulfil the promise (or for timeout).
+        if (fut.wait_for(std::chrono::milliseconds(wait_ms))
+                != std::future_status::ready) {
+            // Pop the entry first — if the reader is mid-fulfil (the
+            // reply just arrived right at the deadline) it will see
+            // the entry already gone and log+drop. Either way our
+            // future will not be set after this point.
+            {
+                std::lock_guard<std::mutex> lk(inflight_mu_);
+                auto it = inflight_.find(seq);
+                if (it == inflight_.end()) {
+                    // Reader already popped + fulfilled. Race won by
+                    // the reader; honour the real reply.
+                    return fut.get();
+                }
+                inflight_.erase(it);
+            }
+            // Hung worker. Cancel the reader's blocking ReadFile so
+            // it exits + the call_() catch can respawn.
+            //
+            // CancelIoEx(h, nullptr) cancels ALL pending I/O on the
+            // handle. On a non-overlapped pipe this is the only way
+            // to unblock the reader's ReadFile; the worker is wedged
+            // anyway so nuking the connection is the right move.
+            HANDLE ph = pipe_.native_handle();
+            if (ph != INVALID_HANDLE_VALUE) CancelIoEx(ph, nullptr);
+            throw std::runtime_error(
+                "worker call timeout (" + std::to_string(wait_ms) + "ms)");
+        }
+
+        // Either a reply or a reader-side exception (broken pipe etc.)
+        // get() rethrows whatever the reader stored.
+        return fut.get();
     }
 
     // Backwards-compat alias used by try_respawn_locked_'s set_def
@@ -330,19 +361,121 @@ private:
         return do_call_locked_(type, payload);
     }
 
-    // NOTE — async reader thread design was attempted here but didn't
-    // work reliably (pipe spuriously reported ERROR_BROKEN_PIPE on the
-    // second recv after a successful first reply). Falling back to
-    // inline recv inside do_call_locked_ which drains async frames
-    // (RPC_EMIT_TRIGGER) opportunistically while a call is in flight.
+    // ---- Always-on reader thread --------------------------------------
     //
-    // Trade-off: source plugins under default isolation can only emit
-    // triggers while the backend has an RPC in flight to them. For
-    // pure sources (synced_cam) the backend doesn't call them after
-    // CREATE, so emits past the first RPC pile up unread. Workaround
-    // remains: source-plugin instances should set
-    // `"isolation": "in_process"` until a proper async drain
-    // mechanism (overlapped I/O reader, or periodic poll) lands.
+    // Why a dedicated reader, after the prior attempt was rolled back:
+    //
+    // The earlier reader-thread implementation (rolled back before
+    // PR #19) "spuriously" reported ERROR_BROKEN_PIPE on the second
+    // recv. The actual cause was that `do_call_locked_` was ALSO
+    // calling `recv_frame` directly. Two threads doing blocking
+    // ReadFile on a byte-mode named pipe split the byte stream
+    // arbitrarily — one thread would consume part of frame N's
+    // header, the other the rest, magic mismatched, the wrapper
+    // throws, the pipe gets closed mid-stream, and the next read
+    // sees ERROR_BROKEN_PIPE. This design fixes that by making the
+    // reader the SOLE reader; do_call_locked_ never calls
+    // recv_frame, it waits on a promise.
+    //
+    // Pipe is non-overlapped (`PIPE_WAIT`, no FILE_FLAG_OVERLAPPED —
+    // see xi_ipc.hpp Pipe::accept_one). Concurrent read+write on the
+    // same handle is supported by Win32 named pipes; concurrent
+    // readers are not. We rely on this.
+    //
+    // Shutdown: `stop_reader_()` flips `stopping_` then `CancelIoEx`s
+    // the pipe to unblock the reader's ReadFile. The reader sees a
+    // throw, observes `stopping_`, exits cleanly, and we join.
+    //
+    // Worker-died vs we-asked-to-stop: distinguished by `stopping_`.
+    // If `stopping_` is true when the reader's ReadFile throws, it's
+    // shutdown — exit silently. Otherwise it's "worker died" —
+    // record the error, fail every in-flight promise, set
+    // `reader_dead_` so future do_call_locked_ throws fast (lets
+    // call_() proceed to try_respawn_locked_).
+    void start_reader_() {
+        stopping_       = false;
+        reader_dead_    = false;
+        reader_err_.clear();
+        reader_ = std::thread([this] { run_reader_(); });
+    }
+
+    void stop_reader_() {
+        stopping_ = true;
+        // Wake the reader's blocking ReadFile. CancelIoEx returns
+        // ERROR_NOT_FOUND if no I/O is pending — that's fine.
+        // TODO(linux): epoll-based reader; eventfd to wake. Pipe is
+        // Win32-only today (see docs/design/linux-port.md).
+#ifdef _WIN32
+        HANDLE ph = pipe_.native_handle();
+        if (ph != INVALID_HANDLE_VALUE) CancelIoEx(ph, nullptr);
+#endif
+        if (reader_.joinable()) reader_.join();
+        // Fail every still-pending promise so callers don't hang.
+        std::lock_guard<std::mutex> lk(inflight_mu_);
+        for (auto& [seq, e] : inflight_) {
+            try {
+                e->prom.set_exception(std::make_exception_ptr(
+                    std::runtime_error("worker pipe shut down")));
+            } catch (const std::future_error&) {}
+        }
+        inflight_.clear();
+    }
+
+    void run_reader_() {
+        for (;;) {
+            ipc::Frame f;
+            try {
+                f = ipc::recv_frame(pipe_);
+            } catch (const std::exception& e) {
+                if (stopping_) return;          // clean shutdown
+                // Worker died (or hung + watchdog cancelled us).
+                std::lock_guard<std::mutex> lk(inflight_mu_);
+                reader_dead_ = true;
+                reader_err_  = e.what();
+                for (auto& [seq, ent] : inflight_) {
+                    try {
+                        ent->prom.set_exception(std::make_exception_ptr(
+                            std::runtime_error(std::string("worker pipe: ")
+                                               + e.what())));
+                    } catch (const std::future_error&) {}
+                }
+                inflight_.clear();
+                return;
+            }
+            if (f.seq == 0) {
+                // One-way async frame from the worker — dispatch
+                // straight to the trigger bus. No promise to fulfil,
+                // no reply to send. handle_async_frame_ must be
+                // non-blocking; TriggerBus::emit pushes onto the
+                // dispatch queue and returns.
+                try { handle_async_frame_(f); }
+                catch (const std::exception& e) {
+                    std::fprintf(stderr,
+                        "[ProcessInstanceAdapter] '%s' async dispatch threw: %s\n",
+                        name_.c_str(), e.what());
+                }
+                continue;
+            }
+            // Reply for an in-flight call. Pop and fulfil.
+            std::shared_ptr<InflightEntry> ent;
+            {
+                std::lock_guard<std::mutex> lk(inflight_mu_);
+                auto it = inflight_.find(f.seq);
+                if (it != inflight_.end()) {
+                    ent = it->second;
+                    inflight_.erase(it);
+                }
+            }
+            if (ent) {
+                try { ent->prom.set_value(std::move(f)); }
+                catch (const std::future_error&) {}
+            } else {
+                std::fprintf(stderr,
+                    "[ProcessInstanceAdapter] '%s' orphan reply seq=%u — dropped\n",
+                    name_.c_str(), (unsigned)f.seq);
+            }
+        }
+    }
 
     // Handle a worker-initiated one-way frame (seq=0). Currently the
     // only one is RPC_EMIT_TRIGGER from source plugins — forward into
@@ -407,8 +540,9 @@ private:
         ++respawn_count_in_window_;
         ++respawn_count_;
 
-        // (Reader thread disabled)
-        // stop_reader_();
+        // Tear down reader before we drop the pipe — otherwise the
+        // reader holds onto a HANDLE we're about to invalidate.
+        stop_reader_();
         pipe_ = ipc::Pipe{};
         if (worker_proc_) {
             TerminateProcess(worker_proc_, 1);
@@ -455,8 +589,7 @@ private:
             CloseHandle(worker_proc_); worker_proc_ = nullptr;
             return false;
         }
-        // (Reader thread disabled)
-        // start_reader_();
+        start_reader_();
 
         // Re-CREATE on the new worker.
         seq_ = 0;
@@ -504,8 +637,7 @@ private:
             try { call_(ipc::RPC_DESTROY, {}); } catch (...) {}
             dead_ = true;
         }
-        // (Reader thread disabled)
-        // stop_reader_();
+        stop_reader_();
         pipe_ = ipc::Pipe{};   // close pipe handle
         if (worker_proc_) {
             // 2 s grace, then nuke. Plugin destructor might be slow;
@@ -529,9 +661,25 @@ private:
     uint32_t    seq_ = 0;
     std::atomic<bool> dead_{false};
 
-    // (Async reader machinery removed — see comment above
-    // do_call_locked_.) Inline recv inside do_call_locked_ drains
-    // RPC_EMIT_TRIGGER frames opportunistically.
+    // ---- Reader thread machinery (see start_reader_ / run_reader_) ---
+    // Per in-flight call: a promise the reader fulfils when the
+    // matching reply arrives (or set_exception's on broken pipe /
+    // shutdown). Held by shared_ptr so do_call_locked_ keeps its
+    // future alive even if the reader pops the entry concurrently.
+    struct InflightEntry {
+        std::promise<ipc::Frame> prom;
+    };
+    std::thread        reader_;
+    std::atomic<bool>  stopping_{false};
+    bool               reader_dead_ = false;     // guarded by inflight_mu_
+    std::string        reader_err_;              // ditto
+    std::mutex         inflight_mu_;
+    std::unordered_map<uint32_t, std::shared_ptr<InflightEntry>> inflight_;
+    // Two writers can hit the host-side pipe send path — currently
+    // there is only one (do_call_locked_ holds mu_) but burst
+    // parallelism (task #71) will lift mu_. The dedicated write
+    // mutex documents the invariant up front.
+    std::mutex         pipe_write_mu_;
 
     // Spawn parameters — cached so try_respawn_locked_ can re-spawn
     // identical workers without the caller having to pass them again.

@@ -1,0 +1,21 @@
+{
+  "name": "cross_proc_trigger",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "parallelism": {
+    "dispatch_threads": 1,
+    "queue_depth": 256,
+    "overflow": "drop_oldest"
+  },
+  "instances": [
+    {
+      "name": "source_iso",
+      "plugin": "burst_source"
+    }
+  ]
+}

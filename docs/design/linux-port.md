@@ -50,10 +50,10 @@ the port itself; it's a record so we know what to expect.
 |---|---|---|
 | `backend/include/xi/xi_seh.hpp` | `_set_se_translator` + `__try`/`__except` | `sigaction(SIGSEGV / SIGFPE / SIGBUS)` + `sigsetjmp`/`siglongjmp`. Or wire Google Breakpad. |
 | `backend/include/xi/xi_shm.hpp` | `CreateFileMapping` + `MapViewOfFile` | `shm_open` + `mmap` + `ftruncate`. Refcount logic and handle layout unchanged. |
-| `backend/include/xi/xi_ipc.hpp` (named pipes) | `CreateNamedPipe` + `WriteFile`/`ReadFile` | Unix domain sockets via `socket(AF_UNIX, SOCK_STREAM, 0)`. Frame format unchanged. |
+| `backend/include/xi/xi_ipc.hpp` (named pipes) | `CreateNamedPipe` + `FILE_FLAG_OVERLAPPED` + `WriteFile`/`ReadFile` with `OVERLAPPED` events. Overlapped is required because `ProcessInstanceAdapter`'s always-on reader thread reads concurrently with host-side writers. | Unix domain sockets via `socket(AF_UNIX, SOCK_STREAM, 0)` — concurrent R+W on the same fd is the default; no overlapped equivalent needed. Frame format unchanged. |
 | `backend/include/xi/xi_script_compiler.hpp` | `cl.exe` + `vcvars64.bat` + `cmd /C` | `g++` or `clang++` direct spawn; rewrite the diagnostic parser for gcc / clang error format. |
 | Crash forensics in `backend/src/service_main.cpp` | `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` + `EnumProcessModules` + `AddVectoredExceptionHandler` | Google Breakpad or manual `sigaction` + core-file generation; `dl_iterate_phdr` for module-blame addresses. |
-| `ProcessInstanceAdapter::raw_call_locked_` watchdog | `CancelIoEx` to break a stuck pipe read | `pthread_kill(SIGUSR1)` + non-blocking `read`/`poll(timeout)` |
+| `ProcessInstanceAdapter::do_call_locked_` watchdog + reader-thread shutdown | `CancelIoEx(h, nullptr)` cancels both pending overlapped read AND the write side; reader's `OVERLAPPED` `ReadFile` returns `ERROR_OPERATION_ABORTED`. | Same surface, different mechanics: reader does `read()` on a non-blocking socket multiplexed with an `eventfd`/`pipe` wakeup via `poll`/`epoll_wait`. Watchdog signals the eventfd to interrupt the wait. No `CancelIoEx` analogue needed. |
 
 ### Hard — different semantics (re-design)
 
@@ -78,6 +78,8 @@ the port itself; it's a record so we know what to expect.
 | `examples/multi_source_surge/` (FL r6) | Pure `<thread>` + `<chrono>` + `<atomic>` + the `xi_*` portable headers. No Win32 calls in plugins or inspect. Builds via the same `cl.exe` path the rest of the SDK uses; on Linux it'll go through whatever the script compiler abstracts to. |
 | `dispatch_stats` watchdog warning log on `cmd:start` (FL r6) | Pure C++; lives in service_main.cpp's existing log-emission path which is already non-Win-specific. |
 | `examples/multi_source_surge2/` (FL r6 regression) | Same plugin sources as `multi_source_surge/`; new `inspect.cpp` + `driver.py` use only `<chrono>`/`<cstdint>`/`<cstring>` + `xi_*` headers + Python stdlib. No Win32. |
+| `ProcessInstanceAdapter` always-on reader thread (Task #74 / PR #19 follow-up) | New `start_reader_` / `run_reader_` / `stop_reader_` use `std::thread`, `std::promise`, and a `std::unordered_map<seq, promise>`. The only Win-coupled piece is `CancelIoEx` for shutdown / timeout, gated by `#ifdef _WIN32` with a `TODO(linux)` pointing at the eventfd-based wakeup pattern. Pipe-flag change to `FILE_FLAG_OVERLAPPED` is inside the existing Win-only `xi_ipc.hpp` block; no new Win surface area at the Adapter layer. |
+| `examples/cross_proc_trigger/` (Task #74 validation) | C++ plugin source + Python driver use only `<chrono>`, `<cstdint>`, `<atomic>`, `<thread>`, the portable `xi_*` headers, and Python stdlib. No Win32. |
 
 ## Things to actively reduce Win-coupling for, even before the port
 
