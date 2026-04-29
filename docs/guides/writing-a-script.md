@@ -381,6 +381,11 @@ Probe live state with `cmd:dispatch_stats` (Python: `c.call("dispatch_stats")`):
 - `dropped_oldest` / `dropped_newest` — overflow counters since
   last `cmd:start`.
 
+> **Don't subtract a pre-`cmd:start` snapshot from a post-`cmd:stop`
+> one.** The counters and the high-watermark zero on every `cmd:start`,
+> so `after - before` will go negative across run boundaries. Snapshot
+> AFTER stop and treat the values as the per-run total.
+
 If `queue_depth_high_watermark` stays pinned at the cap and
 `dropped_oldest` keeps growing, your source is producing faster than
 your pipeline can keep up — bump `dispatch_threads`, optimise the

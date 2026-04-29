@@ -202,6 +202,14 @@ private:
 //   VAR_RAW(name, expr);    // same but flags as raw (no JPEG on preview)
 //
 // The value is evaluated exactly once. `name` is available after the macro.
+//
+// COLLISION FOOTGUN: because the macro introduces a local binding for
+// `name`, you cannot do `VAR(foo, foo)` to surface a pre-existing local
+// `foo` — cl.exe will fire C2374 (redefinition) with no hint that the
+// VAR macro is at fault. Either inline the expression
+// (`VAR(foo, computeFoo())`) or rename one of the two. Documented in
+// docs/guides/writing-a-script.md, "Gotcha — VAR(name, ...) declares
+// a local."
 #define VAR(name, expr)                                                        \
     auto name = ::xi::ValueStore::current().track(#name, (expr))
 

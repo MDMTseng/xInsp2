@@ -1656,6 +1656,24 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         spawn_dispatch_pool_(&srv, interval_ms, n_threads);
 
+        // Surface the watchdog-disabled-under-N>1 caveat (see
+        // run_one_inspection() — single-slot watchdog state can only
+        // protect one inspect at a time, so it's bypassed for N>1).
+        // Without this log line, a driver running with N=8 has no
+        // signal that switching from N=1 traded crash-isolation for
+        // throughput. FL r6 friction P1-3.
+        if (n_threads > 1 && g_watchdog_ms.load() > 0) {
+            xp::LogMsg lm;
+            lm.level = "warn";
+            lm.msg   = std::string("dispatch_threads=")
+                     + std::to_string(n_threads)
+                     + " — script watchdog disabled under N>1 "
+                       "(single-slot deadline state). Long-running "
+                       "ops should poll xi::cancellation_requested(). "
+                       "See docs/guides/writing-a-script.md.";
+            srv.send_text(lm.to_json());
+        }
+
         char buf[64];
         std::snprintf(buf, sizeof(buf),
                       R"({"started":true,"dispatch_threads":%d})", n_threads);
@@ -2476,6 +2494,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         //                                 last cmd:start (real obs.)
         //   dropped_oldest / dropped_newest — overflow counters since
         //                                 last cmd:start
+        //
+        // ALL THREE COUNTERS (high_watermark, dropped_oldest,
+        // dropped_newest) are reset by cmd:start. Drivers that snapshot
+        // before AND after a start will see the AFTER values come back
+        // smaller than BEFORE — don't subtract. See docs/protocol.md
+        // `dispatch_stats` for the public contract.
         std::string data;
         size_t qsz;
         { std::lock_guard<std::mutex> lk(g_ev_mu); qsz = g_ev_queue.size(); }
