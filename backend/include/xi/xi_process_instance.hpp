@@ -28,6 +28,7 @@
 #include "xi_abi.h"
 #include "xi_instance.hpp"
 #include "xi_ipc.hpp"
+#include "xi_trigger_bus.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -38,6 +39,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 namespace xi {
 
@@ -96,6 +98,8 @@ public:
             CloseHandle(worker_proc_); worker_proc_ = nullptr;
             throw;
         }
+        // (Reader thread disabled — using inline recv in do_call_locked_)
+        // start_reader_();
 
         // CREATE — gives the plugin its real instance name.
         ipc::Writer w; w.str(name_); w.str(plugin_dll.string());
@@ -270,54 +274,115 @@ private:
         }
     }
 
-    ipc::Frame raw_call_locked_(uint32_t type, const std::vector<uint8_t>& payload) {
-        // Watchdog thread: waits up to call_timeout_ms_ on a condvar.
-        // If the call doesn't complete in time, it CancelIoEx's the
-        // pipe handle, which makes the in-flight ReadFile / WriteFile
-        // return with ERROR_OPERATION_ABORTED → Pipe::read_exact /
-        // write_all throws → call_() catches and triggers respawn.
+    // Inline send + recv (no reader thread). For source plugins that
+    // emit triggers without a corresponding RPC, we drain async
+    // frames inside this loop until our reply arrives. This is the
+    // simpler design — keep until concurrent in-flight calls become
+    // necessary (burst parallelism).
+    ipc::Frame do_call_locked_(uint32_t type, const std::vector<uint8_t>& payload) {
+        const int wait_ms = call_timeout_ms_;
         std::mutex                      m;
         std::condition_variable         cv;
         bool                            done    = false;
         bool                            timeout = false;
         HANDLE                          ph      = pipe_.native_handle();
-        const int                       wait_ms = call_timeout_ms_;
         std::thread watchdog([&] {
             std::unique_lock<std::mutex> lk(m);
             if (cv.wait_for(lk, std::chrono::milliseconds(wait_ms),
                             [&]{ return done; })) {
-                return;          // RPC completed in time
+                return;
             }
             timeout = true;
-            // CancelIoEx works even for non-overlapped pending I/O
-            // since Vista. Cancels ReadFile + WriteFile on this pipe
-            // for ALL threads — fine, only one in flight at a time.
             CancelIoEx(ph, nullptr);
         });
-
-        // Helper: signal watchdog + join.
         auto release_watchdog = [&] {
             { std::lock_guard<std::mutex> lk(m); done = true; }
             cv.notify_all();
             if (watchdog.joinable()) watchdog.join();
         };
-
         try {
             uint32_t seq = ++seq_;
-            ipc::send_frame(pipe_, seq, type, payload.data(), (uint32_t)payload.size());
-            auto f = ipc::recv_frame(pipe_);
-            release_watchdog();
-            if (f.seq != seq) throw std::runtime_error("RPC seq mismatch");
-            return f;
+            ipc::send_frame(pipe_, seq, type,
+                            payload.data(), (uint32_t)payload.size());
+            for (;;) {
+                auto f = ipc::recv_frame(pipe_);
+                if (f.seq == 0) {
+                    handle_async_frame_(f);
+                    continue;
+                }
+                release_watchdog();
+                if (f.seq != seq) throw std::runtime_error("RPC seq mismatch");
+                return f;
+            }
         } catch (...) {
             release_watchdog();
             if (timeout) {
-                // Re-throw with a clearer error so respawn logs see
-                // "timeout" rather than "pipe read EOF".
                 throw std::runtime_error(
                     "worker call timeout (" + std::to_string(wait_ms) + "ms)");
             }
             throw;
+        }
+    }
+
+    // Backwards-compat alias used by try_respawn_locked_'s set_def
+    // restoration path. Same semantics as do_call_locked_.
+    ipc::Frame raw_call_locked_(uint32_t type, const std::vector<uint8_t>& payload) {
+        return do_call_locked_(type, payload);
+    }
+
+    // NOTE — async reader thread design was attempted here but didn't
+    // work reliably (pipe spuriously reported ERROR_BROKEN_PIPE on the
+    // second recv after a successful first reply). Falling back to
+    // inline recv inside do_call_locked_ which drains async frames
+    // (RPC_EMIT_TRIGGER) opportunistically while a call is in flight.
+    //
+    // Trade-off: source plugins under default isolation can only emit
+    // triggers while the backend has an RPC in flight to them. For
+    // pure sources (synced_cam) the backend doesn't call them after
+    // CREATE, so emits past the first RPC pile up unread. Workaround
+    // remains: source-plugin instances should set
+    // `"isolation": "in_process"` until a proper async drain
+    // mechanism (overlapped I/O reader, or periodic poll) lands.
+
+    // Handle a worker-initiated one-way frame (seq=0). Currently the
+    // only one is RPC_EMIT_TRIGGER from source plugins — forward into
+    // the backend's TriggerBus singleton. Image handles in the payload
+    // are SHM-tagged (worker promoted them before sending) so the bus
+    // can deref them through host_api.
+    void handle_async_frame_(const ipc::Frame& f) {
+        switch (f.type) {
+        case ipc::RPC_EMIT_TRIGGER: {
+            ipc::Reader r(f.payload);
+            auto src_bytes = r.bytes();
+            std::string source(src_bytes.begin(), src_bytes.end());
+            uint64_t tid_hi = r.u64();
+            uint64_t tid_lo = r.u64();
+            int64_t  ts_us  = (int64_t)r.u64();
+            uint32_t n_img  = r.u32();
+            std::vector<std::string>     keys;
+            std::vector<xi_record_image> imgs;
+            keys.reserve(n_img);
+            imgs.reserve(n_img);
+            for (uint32_t i = 0; i < n_img; ++i) {
+                auto k_bytes = r.bytes();
+                uint64_t h   = r.u64();
+                keys.emplace_back(k_bytes.begin(), k_bytes.end());
+                xi_record_image rec{};
+                rec.key    = keys.back().c_str();
+                rec.handle = h;
+                imgs.push_back(rec);
+            }
+            xi_trigger_id tid{tid_hi, tid_lo};
+            TriggerBus::instance().emit(source, tid, ts_us,
+                                         imgs.empty() ? nullptr : imgs.data(),
+                                         (int32_t)imgs.size());
+            break;
+        }
+        default:
+            std::fprintf(stderr,
+                "[ProcessInstanceAdapter] '%s' got async frame type=%u — ignored\n",
+                name_.c_str(), (unsigned)f.type);
+            break;
         }
     }
 
@@ -342,7 +407,8 @@ private:
         ++respawn_count_in_window_;
         ++respawn_count_;
 
-        // Tear down stale state.
+        // (Reader thread disabled)
+        // stop_reader_();
         pipe_ = ipc::Pipe{};
         if (worker_proc_) {
             TerminateProcess(worker_proc_, 1);
@@ -389,6 +455,8 @@ private:
             CloseHandle(worker_proc_); worker_proc_ = nullptr;
             return false;
         }
+        // (Reader thread disabled)
+        // start_reader_();
 
         // Re-CREATE on the new worker.
         seq_ = 0;
@@ -436,6 +504,8 @@ private:
             try { call_(ipc::RPC_DESTROY, {}); } catch (...) {}
             dead_ = true;
         }
+        // (Reader thread disabled)
+        // stop_reader_();
         pipe_ = ipc::Pipe{};   // close pipe handle
         if (worker_proc_) {
             // 2 s grace, then nuke. Plugin destructor might be slow;
@@ -452,9 +522,16 @@ private:
     std::string pipe_name_;
     HANDLE      worker_proc_ = nullptr;
     ipc::Pipe   pipe_;
+    // `mu_` serialises calls — only one in-flight RPC per adapter.
+    // Burst parallelism (task #71) will lift this to a worker pool;
+    // for now keep it simple.
     mutable std::mutex mu_;
     uint32_t    seq_ = 0;
     std::atomic<bool> dead_{false};
+
+    // (Async reader machinery removed — see comment above
+    // do_call_locked_.) Inline recv inside do_call_locked_ drains
+    // RPC_EMIT_TRIGGER frames opportunistically.
 
     // Spawn parameters — cached so try_respawn_locked_ can re-spawn
     // identical workers without the caller having to pass them again.

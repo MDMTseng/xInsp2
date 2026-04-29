@@ -27,7 +27,9 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #include <xi/xi_abi.h>
 #include <xi/xi_image_pool.hpp>
@@ -36,6 +38,33 @@
 #include <xi/xi_shm.hpp>
 
 namespace ipc = xi::ipc;
+
+// Globals shared between the worker's main RPC loop and the source
+// plugin's worker thread (when the plugin runs in this isolated
+// worker and calls host->emit_trigger). The lambda installed on
+// `host.emit_trigger` writes async frames into the pipe on behalf of
+// the plugin thread; the main loop writes replies. Win32 named pipes
+// allow concurrent read+write on the same handle, but two writers
+// must serialise.
+static std::mutex g_pipe_write_mu;
+static ipc::Pipe* g_pipe_for_async = nullptr;
+static xi_host_api g_host_for_async;
+
+// Mutex-protected wrappers around the pipe write helpers. Required
+// because the source-plugin's worker thread (when present) writes
+// async frames via emit_trigger while the main RPC loop is also
+// writing replies. Win32 named pipes tolerate concurrent reads and
+// writes against the same handle, but not concurrent writers.
+static void mu_send_reply(ipc::Pipe& p, uint32_t seq, uint32_t type,
+                          const void* data, uint32_t len) {
+    std::lock_guard<std::mutex> lk(g_pipe_write_mu);
+    ipc::send_reply(p, seq, type, data, len);
+}
+static void mu_send_error_reply(ipc::Pipe& p, uint32_t seq,
+                                const std::string& msg) {
+    std::lock_guard<std::mutex> lk(g_pipe_write_mu);
+    ipc::send_error_reply(p, seq, msg);
+}
 
 static std::string arg_get(int argc, char** argv, const std::string& key,
                            const std::string& def = "") {
@@ -133,27 +162,84 @@ int main(int argc, char** argv) {
     // plugin creates only for its own use. But normally the plugin will
     // use shm_create_image so the backend can see the result.
     static xi_host_api host = xi::ImagePool::make_host_api();
-    // emit_trigger across the worker→backend boundary needs a reverse
-    // pipe (worker pushing async events up to the backend's TriggerBus
-    // singleton). That's queued as future work — see task #71. For now,
-    // stub it with a logger so source plugins that try to emit fail
-    // loudly with a clear pointer at the workaround instead of
-    // null-derefing inside their worker thread (which used to manifest
-    // as a silent ProcessInstanceAdapter respawn loop and zero
-    // dispatches on the script side). Set
-    // `"isolation": "in_process"` on any instance whose plugin calls
-    // `host->emit_trigger`.
-    host.emit_trigger = [](const char* source, xi_trigger_id, int64_t,
-                           const xi_record_image*, int32_t) {
-        static thread_local bool warned = false;
-        if (!warned) {
-            std::fprintf(stderr,
-                "[worker] WARNING: emit_trigger('%s') from isolated worker is a no-op. "
-                "Set the instance's `isolation` to `in_process` in instance.json — "
-                "cross-process emit_trigger is not yet implemented.\n",
-                source ? source : "?");
-            warned = true;
+    // emit_trigger from inside an isolated worker pushes the call back
+    // to the backend's TriggerBus singleton via a one-way frame
+    // (RPC_EMIT_TRIGGER, seq=0, no reply expected). This lets source
+    // plugins run isolated and still drive multi-camera correlation.
+    //
+    // Concurrency: the source plugin's worker thread calls this lambda
+    // while the worker's main loop may be in the middle of replying to
+    // a different RPC (or blocked in recv_frame waiting for the next
+    // request). Win32 named pipes allow concurrent read+write on the
+    // same handle, but two writers (main loop sending replies, plugin
+    // thread sending async events) must serialise — `g_pipe_write_mu`
+    // below covers that.
+    //
+    // Image handles in the payload need to be SHM-tagged so the
+    // backend's bus can deref them through host_api. Heap-pool handles
+    // (the worker's local pool) are useless across the process
+    // boundary — promote them to SHM here, same logic that
+    // promote_to_shm uses for process replies.
+    g_host_for_async = host;  // capture host_api fns for the async lambda
+    host.emit_trigger = [](const char* source, xi_trigger_id tid,
+                           int64_t ts_us,
+                           const xi_record_image* images, int32_t n) {
+        if (!g_pipe_for_async) return;
+        // Promote any non-SHM handles to SHM before sending — the
+        // backend can't dereference worker-local heap-pool handles.
+        std::vector<xi_image_handle> temp_shm;
+        std::vector<xi_record_image> promoted;
+        promoted.reserve((size_t)n);
+        for (int32_t i = 0; i < n; ++i) {
+            xi_image_handle h = images[i].handle;
+            if (h && !g_host_for_async.shm_is_shm_handle(h)) {
+                int w  = g_host_for_async.image_width(h);
+                int hh = g_host_for_async.image_height(h);
+                int ch = g_host_for_async.image_channels(h);
+                int s  = g_host_for_async.image_stride(h);
+                const uint8_t* src = g_host_for_async.image_data(h);
+                if (src && w > 0 && hh > 0 && ch > 0) {
+                    xi_image_handle shm_h = g_host_for_async.shm_create_image(w, hh, ch);
+                    if (shm_h) {
+                        uint8_t* dst = g_host_for_async.image_data(shm_h);
+                        int row = w * ch;
+                        int src_stride = s > 0 ? s : row;
+                        for (int y = 0; y < hh; ++y)
+                            std::memcpy(dst + y * row, src + y * src_stride, (size_t)row);
+                        h = shm_h;
+                        temp_shm.push_back(shm_h);
+                    }
+                }
+            }
+            xi_record_image rec{};
+            rec.key    = images[i].key;
+            rec.handle = h;
+            promoted.push_back(rec);
         }
+        ipc::Writer w;
+        w.bytes(source ? source : "", source ? std::strlen(source) : 0);
+        w.u64(tid.hi);
+        w.u64(tid.lo);
+        w.u64((uint64_t)ts_us);
+        w.u32((uint32_t)promoted.size());
+        for (auto& rec : promoted) {
+            w.bytes(rec.key ? rec.key : "", rec.key ? std::strlen(rec.key) : 0);
+            w.u64(rec.handle);
+        }
+        try {
+            std::lock_guard<std::mutex> lk(g_pipe_write_mu);
+            ipc::send_frame(*g_pipe_for_async, /*seq=*/0,
+                            ipc::RPC_EMIT_TRIGGER,
+                            w.buf().data(), (uint32_t)w.buf().size());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                "[worker] emit_trigger send failed for '%s': %s\n",
+                source ? source : "?", e.what());
+        }
+        // Release the temp SHM handles — we only needed them to ferry
+        // the bytes; the bus addrefs each handle on emit, the original
+        // refcount==1 we're holding can drop.
+        for (auto h : temp_shm) g_host_for_async.image_release(h);
     };
 
     // Connect to the backend's pipe. Backend should already have the
@@ -166,6 +252,8 @@ int main(int argc, char** argv) {
         return 4;
     }
     std::fprintf(stderr, "[worker] pipe connected\n");
+    // Publish the pipe to the async-write path (emit_trigger lambda).
+    g_pipe_for_async = &pipe;
 
     // Load the plugin DLL and let the first CREATE request instantiate it.
     PluginProxy plugin;
@@ -179,7 +267,7 @@ int main(int argc, char** argv) {
     // DESTROY frees + exits, anything else needs the instance to exist.
     auto require_inst = [&](uint32_t seq) -> bool {
         if (plugin.inst) return true;
-        ipc::send_error_reply(pipe, seq, "no instance — call CREATE first");
+        mu_send_error_reply(pipe, seq, "no instance — call CREATE first");
         return false;
     };
 
@@ -201,11 +289,11 @@ int main(int argc, char** argv) {
                 if (plugin.inst) plugin.destroy(plugin.inst);
                 plugin.inst = plugin.create(&host, name.empty() ? instance.c_str() : name.c_str());
                 if (!plugin.inst) {
-                    ipc::send_error_reply(pipe, f.seq, "plugin create returned null");
+                    mu_send_error_reply(pipe, f.seq, "plugin create returned null");
                     break;
                 }
                 ipc::Writer w; w.u8(1);
-                ipc::send_reply(pipe, f.seq, ipc::RPC_CREATE,
+                mu_send_reply(pipe, f.seq, ipc::RPC_CREATE,
                                 w.buf().data(), (uint32_t)w.buf().size());
                 std::fprintf(stderr, "[worker] CREATE ok\n");
                 break;
@@ -213,7 +301,7 @@ int main(int argc, char** argv) {
             case ipc::RPC_DESTROY: {
                 if (plugin.inst) { plugin.destroy(plugin.inst); plugin.inst = nullptr; }
                 ipc::Writer w; w.u8(1);
-                ipc::send_reply(pipe, f.seq, ipc::RPC_DESTROY,
+                mu_send_reply(pipe, f.seq, ipc::RPC_DESTROY,
                                 w.buf().data(), (uint32_t)w.buf().size());
                 std::fprintf(stderr, "[worker] DESTROY ok, exiting\n");
                 return 0;
@@ -221,7 +309,7 @@ int main(int argc, char** argv) {
             case ipc::RPC_PROCESS: {
                 if (!require_inst(f.seq)) break;
                 if (!plugin.process) {
-                    ipc::send_error_reply(pipe, f.seq, "plugin has no process()");
+                    mu_send_error_reply(pipe, f.seq, "plugin has no process()");
                     break;
                 }
                 // Wire format (matches ProcessInstanceAdapter::process_via_rpc):
@@ -282,14 +370,14 @@ int main(int argc, char** argv) {
                 }
                 std::string out_json = out_rec.json ? out_rec.json : "{}";
                 w.bytes(out_json.data(), out_json.size());
-                ipc::send_reply(pipe, f.seq, ipc::RPC_PROCESS,
+                mu_send_reply(pipe, f.seq, ipc::RPC_PROCESS,
                                 w.buf().data(), (uint32_t)w.buf().size());
                 break;
             }
             case ipc::RPC_EXCHANGE: {
                 if (!require_inst(f.seq)) break;
                 if (!plugin.exchange) {
-                    ipc::send_error_reply(pipe, f.seq, "plugin has no exchange()");
+                    mu_send_error_reply(pipe, f.seq, "plugin has no exchange()");
                     break;
                 }
                 ipc::Reader r(f.payload);
@@ -303,14 +391,14 @@ int main(int argc, char** argv) {
                 ipc::Writer w;
                 if (n > 0) w.bytes(rsp.data(), (size_t)n);
                 else       w.bytes("", 0);
-                ipc::send_reply(pipe, f.seq, ipc::RPC_EXCHANGE,
+                mu_send_reply(pipe, f.seq, ipc::RPC_EXCHANGE,
                                 w.buf().data(), (uint32_t)w.buf().size());
                 break;
             }
             case ipc::RPC_GET_DEF: {
                 if (!require_inst(f.seq)) break;
                 if (!plugin.get_def) {
-                    ipc::send_error_reply(pipe, f.seq, "plugin has no get_def()");
+                    mu_send_error_reply(pipe, f.seq, "plugin has no get_def()");
                     break;
                 }
                 std::vector<char> buf(4096);
@@ -319,36 +407,36 @@ int main(int argc, char** argv) {
                              n = plugin.get_def(plugin.inst, buf.data(), (int)buf.size()); }
                 ipc::Writer w;
                 w.bytes(buf.data(), (size_t)(n > 0 ? n : 0));
-                ipc::send_reply(pipe, f.seq, ipc::RPC_GET_DEF,
+                mu_send_reply(pipe, f.seq, ipc::RPC_GET_DEF,
                                 w.buf().data(), (uint32_t)w.buf().size());
                 break;
             }
             case ipc::RPC_SET_DEF: {
                 if (!require_inst(f.seq)) break;
                 if (!plugin.set_def) {
-                    ipc::send_error_reply(pipe, f.seq, "plugin has no set_def()");
+                    mu_send_error_reply(pipe, f.seq, "plugin has no set_def()");
                     break;
                 }
                 ipc::Reader r(f.payload);
                 std::string def = r.str();
                 int rc = plugin.set_def(plugin.inst, def.c_str());
                 ipc::Writer w; w.u8(rc == 0 ? 1 : 0);
-                ipc::send_reply(pipe, f.seq, ipc::RPC_SET_DEF,
+                mu_send_reply(pipe, f.seq, ipc::RPC_SET_DEF,
                                 w.buf().data(), (uint32_t)w.buf().size());
                 break;
             }
             default:
-                ipc::send_error_reply(pipe, f.seq,
+                mu_send_error_reply(pipe, f.seq,
                     "unknown rpc type " + std::to_string(f.type));
                 break;
             }
         } catch (const xi::seh_exception& e) {
             std::fprintf(stderr, "[worker] plugin SEH: 0x%08X (%s)\n", e.code, e.what());
-            ipc::send_error_reply(pipe, f.seq,
+            mu_send_error_reply(pipe, f.seq,
                 std::string("plugin crashed: ") + e.what());
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[worker] exception: %s\n", e.what());
-            ipc::send_error_reply(pipe, f.seq, e.what());
+            mu_send_error_reply(pipe, f.seq, e.what());
         }
     }
 

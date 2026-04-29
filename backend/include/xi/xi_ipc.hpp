@@ -89,6 +89,27 @@ enum RpcType : uint32_t {
                            // reply  : u32 rsp_len + rsp
     RPC_USE_GRAB     = 11, // payload: u32 name_len + name + i32 timeout_ms
                            // reply  : u64 image_handle  (0 = no image / timeout)
+
+    // Worker → backend, ONE-WAY (seq=0, no reply expected). Lets a
+    // source plugin running in an isolated worker push frames into
+    // the backend's TriggerBus singleton (which is in a different
+    // address space). Receiver dispatches, doesn't ack — emit_trigger
+    // semantics are fire-and-forget anyway, the worker's plugin
+    // thread doesn't want to block on bus correlation logic.
+    //
+    // payload:
+    //   u32 source_name_len + source_name
+    //   u64 tid_hi + u64 tid_lo
+    //   i64 ts_us
+    //   u32 image_count
+    //   for each image: u32 key_len + key + u64 handle (must be SHM-tagged)
+    //
+    // Image handles must already be in the backend-visible SHM region
+    // (worker's emit_trigger lambda promotes any local-pool images to
+    // SHM before sending). Backend's TriggerBus dereferences via
+    // host_api which routes by tag, so SHM-tagged handles work
+    // unchanged across the boundary.
+    RPC_EMIT_TRIGGER = 12,
 };
 
 struct FrameHeader {
