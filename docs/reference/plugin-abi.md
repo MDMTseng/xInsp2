@@ -312,6 +312,23 @@ Fields:
   field. The intent is letting AI agents and doc tools discover what a
   plugin does without grepping its source.
 
+  **Validation on `cmd:open_project`** (since FL r6 P2-3): if a plugin
+  declares `manifest.params`, the backend walks each instance's
+  `instance.json.config` against those declarations and emits an entry
+  to `cmd:open_project_warnings` for every:
+  - **`unknown_config_key`** — config key not in `manifest.params`,
+  - **`type_mismatch`** — value's JSON type doesn't match declared
+    `type` (or, if `type` is absent, the type of `default`),
+  - **`out_of_range`** — numeric value below `min` or above `max`,
+  - **`not_in_enum`** — string value not in declared `enum` array.
+
+  Validation is warnings-only — the bad value still flows through to
+  the plugin's `set_def`, which silently falls back to its compiled-in
+  default for unknown / unparseable fields. A typo'd key never blocks
+  project load; the warning is just the user-visible signal. Plugins
+  that don't declare `manifest.params` skip validation entirely
+  (back-compat).
+
 ---
 
 ## Old C++ ABI (legacy)

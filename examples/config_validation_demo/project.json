@@ -1,0 +1,10 @@
+{
+  "name": "config_validation_demo",
+  "script": "inspect.cpp",
+  "trigger_policy": {"policy": "any", "window_ms": 1000, "required": [], "leader": ""},
+  "parallelism": {"dispatch_threads": 1, "queue_depth": 32, "overflow": "drop_oldest"},
+  "instances": [
+    {"name": "inst_clean", "plugin": "burst_source"},
+    {"name": "inst_typo",  "plugin": "burst_source"}
+  ]
+}
