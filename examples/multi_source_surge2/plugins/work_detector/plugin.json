@@ -1,0 +1,14 @@
+{
+  "name": "work_detector",
+  "description": "Configurable-cost detector for multi_source_surge. process() sleeps `sleep_ms` (5..30 typical), counts invocations per source-tag in an atomic map, and returns {seq, src_tag, processed_total, processed_for_src}.",
+  "dll": "work_detector.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params":  [
+      {"name": "sleep_ms", "type": "int", "default": 10, "min": 0, "max": 100}
+    ],
+    "inputs":  [{"name": "img", "kind": "image"}],
+    "outputs": []
+  }
+}

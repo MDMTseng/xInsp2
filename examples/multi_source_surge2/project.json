@@ -1,0 +1,29 @@
+{
+  "name": "multi_source_surge2",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "parallelism": {
+    "dispatch_threads": 4,
+    "queue_depth": 64,
+    "overflow": "drop_oldest"
+  },
+  "instances": [
+    {
+      "name": "source_a",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "source_b",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "sink",
+      "plugin": "work_detector"
+    }
+  ]
+}
