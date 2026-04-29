@@ -325,6 +325,15 @@ inline CompileResult compile(const CompileRequest& req) {
     cmd += "cmd /C \"";
     cmd += "\"" + vcvars + "\"";
     cmd += " >nul 2>nul && ";
+    // Force English diagnostics regardless of system locale. Without
+    // this, cl.exe / link.exe emit messages in whatever language the
+    // OS UI is set to (Traditional Chinese / Japanese / German / ...)
+    // which (a) confuses agents and tools that expect English keywords
+    // for parsing, and (b) round-trips through the local code page on
+    // the way to the SDK, producing mojibake. /utf-8 is already passed
+    // below for source + execution charset, but it doesn't override
+    // the diagnostic language. VSLANG=1033 == LCID for en-US.
+    cmd += "set VSLANG=1033 && ";
     // Mode-dependent codegen flags:
     //   Script        → /O2 (Release) — main inspection loop wants speed
     //   PluginDev     → /Od /Zi /RTC1 — debugger-friendly, fast iteration
@@ -414,12 +423,62 @@ inline CompileResult compile(const CompileRequest& req) {
 
     int rc = std::system(cmd.c_str());
     r.build_log = detail::read_file(log_path.string());
-    // Sanitize build log: MSVC on non-English Windows may produce CP950/GBK
-    // bytes that are not valid UTF-8. Replace any non-ASCII non-UTF8 byte
-    // with '?' so the WS text frame stays legal.
-    for (auto& c : r.build_log) {
-        if (static_cast<unsigned char>(c) >= 0x80) c = '?';
+    // Sanitize build log for the WS text frame, which must be UTF-8.
+    // cl.exe / link.exe emit diagnostics in the system code page (CP950
+    // on zh-TW Windows, CP932 on ja-JP, CP1252 on en-US, etc.). Even
+    // with /utf-8 passed for source + execution charset, message text
+    // localized for non-English locales lands in the local ACP. The
+    // result is mojibake on the wire and a useless friction-log entry
+    // for AI agents trying to act on the diagnostic.
+    //
+    // Strategy: if the log is already valid UTF-8 (English locale, or
+    // VSLANG=1033 took effect), leave it alone. Otherwise convert from
+    // the active code page → wide → UTF-8. Only if BOTH steps fail do
+    // we fall back to the old strip-non-ASCII-to-? heuristic.
+#ifdef _WIN32
+    auto is_valid_utf8 = [](const std::string& s) {
+        size_t i = 0, n = s.size();
+        while (i < n) {
+            unsigned char c = (unsigned char)s[i];
+            int extra;
+            if      (c < 0x80) extra = 0;
+            else if ((c >> 5) == 0x06) extra = 1;
+            else if ((c >> 4) == 0x0E) extra = 2;
+            else if ((c >> 3) == 0x1E) extra = 3;
+            else return false;
+            if (i + (size_t)extra >= n) return false;
+            for (int k = 1; k <= extra; ++k)
+                if ((((unsigned char)s[i + k]) >> 6) != 0x02) return false;
+            i += (size_t)extra + 1;
+        }
+        return true;
+    };
+    if (!is_valid_utf8(r.build_log) && !r.build_log.empty()) {
+        bool converted = false;
+        int n_in = (int)r.build_log.size();
+        int wlen = MultiByteToWideChar(CP_ACP, 0, r.build_log.data(), n_in, nullptr, 0);
+        if (wlen > 0) {
+            std::wstring w((size_t)wlen, L'\0');
+            if (MultiByteToWideChar(CP_ACP, 0, r.build_log.data(), n_in, w.data(), wlen) == wlen) {
+                int u8len = WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, nullptr, 0, nullptr, nullptr);
+                if (u8len > 0) {
+                    std::string u8((size_t)u8len, '\0');
+                    if (WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, u8.data(), u8len, nullptr, nullptr) == u8len) {
+                        r.build_log = std::move(u8);
+                        converted = true;
+                    }
+                }
+            }
+        }
+        if (!converted) {
+            for (auto& c : r.build_log)
+                if (static_cast<unsigned char>(c) >= 0x80) c = '?';
+        }
     }
+#else
+    // TODO(linux): cl.exe path doesn't apply; build log will already be
+    // UTF-8 from gcc/clang in typical setups. Leave as-is.
+#endif
 
     if (rc == 0 && std::filesystem::exists(out_dll)) {
         r.ok = true;

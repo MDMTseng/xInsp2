@@ -1,0 +1,6 @@
+{
+  "plugin": "count_or_crash",
+  "config": {
+    "crash_when_count_above": 8
+  }
+}
