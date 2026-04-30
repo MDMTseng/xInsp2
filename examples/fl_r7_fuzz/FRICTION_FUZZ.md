@@ -3,7 +3,18 @@
 Friction encountered while building the four fuzz harnesses. Each
 entry: assumption I made, friction I hit, suggested follow-up.
 
-## P0 (the headline finding)
+## P0 (the headline finding) — FIXED 2026-04-29 (PR `fix/r7-p0-reader-disconnect`)
+
+> **Status: FIXED.** Root cause was subtler than the original write-up
+> (the reader's `recv_frame` IS wrapped — the actual escape route was
+> the constructor: when CREATE failed after `start_reader_()` had
+> spawned the thread, the constructor threw without joining, and the
+> implicit `~thread()` on member destruction called `std::terminate`).
+> Fix wraps post-`start_reader_()` ctor body in try/catch + funnels
+> failures through `shutdown_()`; also belt-and-suspenders catch-all
+> in `run_reader_()`. Harness now reports 16/16 strategies survived,
+> 0 fatal. See `docs/reference/ipc-shm.md` § "Reader thread failure
+> modes" for the post-fix design.
 
 ### IPC reader thread does not catch the EOF exception
 

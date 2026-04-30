@@ -177,6 +177,33 @@ RPC types covered:
   PR #19 follow-up). See the comment block above
   `start_reader_()` in `xi_process_instance.hpp` for the
   broken-pipe history that motivated this design.
+- **Reader thread failure modes (FL r7 P0 fix).** The reader runs
+  unsupervised, so any exception that escapes the thread boundary
+  calls `std::terminate()` and kills the host process — defeating
+  `isolation:process`. The implementation hardens against this with
+  two layers of protection:
+  1. `run_reader_()` wraps `recv_frame` in an inner `try` (the
+     expected throw site — EOF / broken pipe / malformed frame from
+     a hostile or crashed worker), and the entire loop in an outer
+     `catch (const std::exception&)` + `catch (...)` so any
+     unforeseen throw still ends in a clean exit. Both inner and
+     outer exits funnel through `reader_fail_all_inflight_()` which
+     marks `reader_dead_` and `set_exception`s every pending promise
+     — callers stuck in `do_call_locked_().fut.wait_for` get a clean
+     error instead of hanging until timeout.
+  2. The constructor wraps everything after `start_reader_()` in a
+     try/catch that calls `shutdown_()` before rethrow. Without this,
+     a worker that connects-then-dies during CREATE caused the
+     constructor to throw with the reader thread still joinable; the
+     implicit `~thread()` on member destruction then terminated the
+     host. The same idempotent `shutdown_()` path is used by the
+     destructor.
+  Worker-died vs we-asked-to-stop is distinguished via the
+  `stopping_` flag set by `stop_reader_()` before it `CancelIoEx`s
+  the pipe; a true shutdown returns silently, an unexpected EOF
+  logs and notifies waiters. Validated by
+  `examples/fl_r7_fuzz/harness_evil_worker_host.py` (16/16 strategies
+  keep the host alive after the fix).
 - Pipe handles use `FILE_FLAG_OVERLAPPED` with synchronous wrappers
   (`OVERLAPPED` + `WaitForSingleObject`) inside `Pipe::read_exact` /
   `Pipe::write_all`. Synchronous I/O on a non-overlapped handle
