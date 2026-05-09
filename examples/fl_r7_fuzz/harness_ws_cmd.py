@@ -207,12 +207,14 @@ def main() -> int:
             except Exception:
                 pass
 
-            # liveness probe every ~200 iters (less frequent — opening
-            # a 2nd ws while sustained-fuzz traffic is in flight gets
-            # transient ECONNREFUSED on Windows because the backend's
-            # accept loop is briefly serving the existing socket.
-            # See FRICTION_FUZZ.md for the full theory.)
+            # liveness probe every ~200 iters. The backend WS server is
+            # single-client by design (xi_ws_server.hpp); a 2nd connection
+            # while one is alive gets a fast HTTP 503 reject. Close our
+            # main ws first so the probe sees a clean port.
             if (i + 1) % 200 == 0:
+                try: ws.close()
+                except Exception: pass
+                ws = None
                 ok, info = liveness_check()
                 if not ok:
                     proc_alive = bp.proc_alive()
@@ -238,9 +240,7 @@ def main() -> int:
                     else:
                         findings[-1]["recovered"] = True
                         print(f"[STALL] recovered after wait", flush=True)
-                    # reopen ws and continue
-                    try: ws.close()
-                    except Exception: pass
+                if ws is None:
                     try:
                         ws = open_ws(timeout=8.0)
                     except Exception:
@@ -256,8 +256,10 @@ def main() -> int:
                     except Exception:
                         pass
 
-        try: ws.close()
-        except Exception: pass
+        if ws is not None:
+            try: ws.close()
+            except Exception: pass
+            ws = None
 
         # final
         ok, info = liveness_check()
