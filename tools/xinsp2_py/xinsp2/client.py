@@ -29,6 +29,52 @@ class ProtocolError(RuntimeError):
         self.data = data
 
 
+class CmdTimeoutError(TimeoutError):
+    """Raised by `Client.call(...)` when the rsp doesn't arrive within
+    the requested timeout. The cmd is NOT cancelled on the backend —
+    the SDK simply stopped waiting. Subsequent state queries may still
+    observe the cmd's effects landing later. If the rsp eventually
+    arrives it is dropped silently.
+
+    Subclass of the builtin `TimeoutError` so callers using
+    `except TimeoutError` (the natural idiom) catch it.
+    """
+    def __init__(self, name: str, timeout: float):
+        super().__init__(
+            f"cmd {name!r} timed out after {timeout}s waiting for rsp; "
+            f"the backend is still running it (no server-side cancel — "
+            f"avoid retrying without checking state first)."
+        )
+        self.cmd_name = name
+        self.timeout = timeout
+
+
+class ConnectionLostError(ConnectionError):
+    """Raised when the SDK detects the WS connection has dropped, e.g.
+    `next_vars()` is called after the read loop exited. Callers
+    looping on `next_vars()` should treat this as a stop signal."""
+    pass
+
+
+class UnknownCommandError(ProtocolError):
+    """Plugin's `exchange()` returned the canonical
+    `{"error": "unknown_command", "command": "<name>"}` shape (see
+    `docs/reference/plugin-abi.md` § "Unknown commands"). The SDK's
+    `Client.exchange_instance()` raises this when it sees that
+    payload, so callers don't have to remember to inspect
+    `rsp.get("error")` themselves.
+    """
+    def __init__(self, plugin_name: str, command: str, raw: dict):
+        super().__init__(
+            f"plugin instance {plugin_name!r} did not recognise command "
+            f"{command!r} (canonical unknown_command shape)",
+            error="unknown_command",
+            data=raw,
+        )
+        self.plugin_name = plugin_name
+        self.command = command
+
+
 def _enrich_compile_error(orig: ProtocolError, what: str, target: str) -> ProtocolError:
     """Re-raise a compile-failure ProtocolError with the diagnostics
     folded into the message. Bare `compile failed` text is useless on
@@ -108,6 +154,7 @@ class Client:
         self._inbox_logs: Queue = Queue()
         self._reader: threading.Thread | None = None
         self._closed = False
+        self._read_loop_dead = False
         self._on_log: Callable[[dict], None] | None = None
 
     # ---- lifecycle ----------------------------------------------------
@@ -153,15 +200,58 @@ class Client:
     # ---- low-level send/recv -----------------------------------------
 
     def call(self, name: str, args: dict | None = None, timeout: float | None = None) -> Any:
+        """Send a `cmd` and block for its `rsp`.
+
+        Parameters
+        ----------
+        name : str          cmd name (e.g. "ping", "open_project")
+        args : dict | None  cmd args; defaults to {}
+        timeout : float|None  override the Client's default timeout (seconds)
+
+        Returns the parsed `rsp.data` on success.
+
+        Raises
+        ------
+        CmdTimeoutError    no rsp within timeout. The backend is NOT
+                           told to cancel — it keeps running the cmd
+                           and any side effects still land. Callers
+                           that retry MUST verify state hasn't already
+                           been mutated by the prior call.
+        ProtocolError      rsp.ok=false; carries `.error` and `.data`.
+        ConnectionLostError  the WS read loop has exited (peer closed
+                             the socket, or kill -9 on the backend).
+        """
+        if self._read_loop_dead:
+            raise ConnectionLostError(
+                f"cannot send cmd {name!r}: WS connection is closed"
+            )
         cid = self._next_id
         self._next_id += 1
         q: Queue = Queue()
         self._rsp_waiters[cid] = q
+        eff_timeout = timeout if timeout is not None else self.timeout
         self._ws.send(json.dumps({"type": "cmd", "id": cid, "name": name, "args": args or {}}))
         try:
-            rsp = q.get(timeout=timeout or self.timeout)
+            try:
+                rsp = q.get(timeout=eff_timeout)
+            except Empty:
+                # The bare queue.Empty was confusing — callers wrote
+                # `except TimeoutError` (the natural idiom) and never
+                # caught the real exception. Promote to a typed,
+                # subclassable error that preserves the catch-all
+                # `except TimeoutError` semantics.
+                if self._read_loop_dead:
+                    raise ConnectionLostError(
+                        f"cmd {name!r}: WS closed while waiting for rsp"
+                    ) from None
+                raise CmdTimeoutError(name, eff_timeout) from None
         finally:
             self._rsp_waiters.pop(cid, None)
+        if rsp.get("_synthetic"):
+            # Read loop signalled disconnect via the rsp queue.
+            raise ConnectionLostError(
+                f"cmd {name!r}: WS closed before rsp arrived"
+            )
         if not rsp.get("ok"):
             err = rsp.get("error")
             raise ProtocolError(
@@ -179,11 +269,16 @@ class Client:
     def version(self) -> dict:
         return self.call("version")
 
-    def compile_and_load(self, path: str) -> dict:
+    def compile_and_load(self, path: str, timeout: float = 180) -> dict:
         """Compile an inspection script and hot-load the resulting DLL.
 
-        On success returns `{"build_log": "...", "instances": [...],
-        "params": [...]}`.
+        On success returns the rsp data which the wire actually carries:
+        `{"dll": "<absolute_path>", "diagnostics": [...],
+          "resumed_continuous"?: true}`. The build log is delivered as a
+        SEPARATE `log` text message during compile, not inside this
+        return value. (Earlier versions of this docstring documented
+        a `{build_log, instances, params}` shape that the backend never
+        produced — fixed in the audit pass.)
 
         On compile failure raises `ProtocolError` whose message
         includes a formatted summary of cl.exe diagnostics (first 20
@@ -195,9 +290,13 @@ class Client:
             except ProtocolError as e:
                 for d in (e.data or {}).get("diagnostics", []):
                     fix(d["file"], d["line"], d["message"])
+
+        Cold compiles dominate the wall-clock window (cl.exe ~3-4 s
+        per source file). The default 180 s covers a typical project;
+        bump for slow / many-source rebuilds via `timeout=`.
         """
         try:
-            return self.call("compile_and_load", {"path": path}, timeout=180)
+            return self.call("compile_and_load", {"path": path}, timeout=timeout)
         except ProtocolError as e:
             raise _enrich_compile_error(e, "compile_and_load", path) from None
 
@@ -301,9 +400,25 @@ class Client:
             {'hue_lo': 110, 'hi_hi': 130, 'min_area': 300,
              'frames_processed': 8, 'last_count': 4}
 
+        Unknown commands: per `docs/reference/plugin-abi.md` § "Unknown
+        commands", a well-behaved plugin returns the canonical
+        `{"error": "unknown_command", "command": "<name>"}` for
+        misspelt commands. The SDK detects that shape and raises
+        `UnknownCommandError` (subclass of `ProtocolError`), so a
+        driver typo doesn't silently get a no-op `get_def()`. To opt
+        out of the auto-raise and inspect the raw shape yourself, use
+        `c.call("exchange_instance", ...)` directly.
+
         See `docs/reference/plugin-abi.md` ("Return shape convention").
         """
-        return self.call("exchange_instance", {"name": name, "cmd": cmd_obj})
+        rsp = self.call("exchange_instance", {"name": name, "cmd": cmd_obj})
+        # Surface the canonical unknown_command shape as a typed error.
+        # Plugins are free to return any other error shape — those
+        # remain in the dict for the caller to inspect.
+        if isinstance(rsp, dict) and rsp.get("error") == "unknown_command":
+            cmd_name = cmd_obj.get("command", "") if isinstance(cmd_obj, dict) else ""
+            raise UnknownCommandError(name, cmd_name, rsp)
+        return rsp
 
     # ---- runtime control ---------------------------------------------
 
@@ -349,6 +464,11 @@ class Client:
         `timeout` seconds. Returns the raw vars dict (`{"type":"vars",
         "run_id":N,"items":[...]}`) or `None` on timeout.
 
+        Raises `ConnectionLostError` if the WS read loop has already
+        exited. Loop callers should treat that as a stop signal —
+        without it a `while next_vars(1) is not None` after disconnect
+        would spin forever returning None.
+
         Use this to consume the stream produced by `cmd:start`
         (continuous mode), which doesn't follow the request/reply
         shape of `cmd:run`. The caller is responsible for wiring any
@@ -357,16 +477,30 @@ class Client:
         score them" pattern see the hot_reload_run / stereo_sync
         example drivers.
         """
+        if self._read_loop_dead and self._inbox_vars.empty():
+            raise ConnectionLostError(
+                "WS connection is closed; no further vars will arrive"
+            )
         try:
             return self._inbox_vars.get(timeout=timeout or self.timeout)
         except Empty:
+            if self._read_loop_dead:
+                raise ConnectionLostError(
+                    "WS closed while waiting for vars"
+                ) from None
             return None
 
     def run(self, frame_path: str | None = None, timeout: float | None = None) -> RunResult:
         """Run one inspect() and collect the resulting vars + previews.
 
-        Drains vars + binary frames until either run_finished event arrives or
-        the timeout elapses.
+        Synchronisation: blocks until the `vars` message for this run's
+        `run_id` arrives, then drains exactly the previews referenced
+        by that vars message (one per `kind:image` item). Events that
+        landed during the run are scooped non-blocking into
+        `RunResult.events`. (Earlier docstring versions claimed this
+        waited for a `run_finished` event — that event is not currently
+        emitted by the backend; the rsp + matching `vars` is the
+        completion signal.)
 
         IMPORTANT: this drains stale `vars` and `previews` queues but
         DOES NOT drain `events` — earlier calls' events (e.g.
@@ -442,6 +576,20 @@ class Client:
                     return
         except Exception:
             return
+        finally:
+            # Signal callers waiting on next_vars / call() that the
+            # connection is gone. Without this they'd block until their
+            # individual timeouts expire and then return None forever.
+            self._read_loop_dead = True
+            # Wake any pending rsp-waiters with a synthetic shutdown
+            # marker so call() can raise ConnectionLostError instead of
+            # hanging until its timeout.
+            for q in list(self._rsp_waiters.values()):
+                try:
+                    q.put({"ok": False, "error": "connection_lost",
+                           "data": None, "_synthetic": True})
+                except Exception:
+                    pass
 
     def _handle_text(self, msg: dict):
         t = msg.get("type")

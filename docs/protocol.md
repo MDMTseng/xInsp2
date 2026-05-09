@@ -116,12 +116,22 @@ Out-of-band notifications that don't fit the above.
 ```json
 { "type": "event", "name": "run_started", "data": { "run_id": 17 } }
 { "type": "event", "name": "run_finished", "data": { "run_id": 17, "ms": 42 } }
+{ "type": "event", "name": "run_error", "data": { "run_id": 17, "what": "..." } }
 { "type": "event", "name": "script_reloaded", "data": { "path": "..." } }
 { "type": "event", "name": "isolation_dead", "data": { "instance": "cam0" } }
 { "type": "event", "name": "state_dropped", "data": { "old_schema": 1, "new_schema": 2 } }
 { "type": "event", "name": "compile_started", "data": { "path": "..." } }
 { "type": "event", "name": "compile_finished", "data": { "path": "...", "ok": true } }
 ```
+
+> ⚠️ **`run_started` / `run_finished` / `run_error` are NOT yet emitted.**
+> They are documented here as the planned event names so SDK
+> callers writing forward-compatible listeners can pattern against
+> them; the producer landed for `compile_*` but not yet for the run
+> lifecycle. Until then, `cmd:run`'s synchronous rsp is the
+> completion signal and a script-side runtime exception manifests
+> only as a missing rsp / non-arriving vars (the SDK's `c.run()`
+> waits for vars and times out). Tracked under audit P1 F-1.
 
 `isolation_dead` fires once per instance the first time
 `use_process` / `use_exchange` sees an isolated instance gone
@@ -230,8 +240,11 @@ script gets an empty string. Combine with `xi::imread()` to load a
 file frame on demand without a custom source plugin.
 
 ### `start` / `stop`
-`start args: { "fps": int (default 10) }` → `data: { "started": true }`
-or `data: { "already": true }` when continuous mode was already running.
+`start args: { "fps": int (default 10) }` → `data: { "started": true,
+"dispatch_threads": int }` (the int reflects the project's
+`parallelism.dispatch_threads`, default 1; included so callers can
+verify the pool size that just came up).
+On already-running: `data: { "already": true }`.
 
 `stop args: {}` → `data: { "stopped": true }`.
 
@@ -437,14 +450,34 @@ This is the linchpin command for the live-tune workflow: edit a
 project plugin's source, hit save, recompile, watch instances pop back
 with their state intact and the next `run` use the new code.
 
-### `open_project_warnings` *(planned, not yet wired)*
+### `open_project_warnings`
 
-The plugin manager records non-fatal load issues (missing/broken
-`instance.json`, factory throws) in `last_open_warnings_`, but no WS
-handler currently exposes them. Calling this command returns a generic
-"unknown command" error today. Until it's wired, fall back to
-the `log` channel — those warnings are also emitted as `level: warn`
-log messages during `open_project`.
+Returns the list of non-fatal load issues from the most recent
+`open_project` call: missing/broken `instance.json`, factory throws,
+unknown config keys, type mismatches, out-of-range values, enum
+violations.
+
+```json
+{ "type": "cmd", "id": 8, "name": "open_project_warnings" }
+```
+
+Reply:
+
+```json
+{ "type": "rsp", "id": 8, "ok": true,
+  "data": { "warnings": [
+    { "instance": "cam0", "plugin": "burst_source", "reason": "..." }
+  ] } }
+```
+
+`warnings` is empty for a clean open. Each entry has `instance`,
+optional `plugin`, and a human-readable `reason`. The same warnings
+are also emitted on the `log` channel as `level: warn` during
+`open_project` so a UI listener can surface them in real time.
+
+> Earlier versions of this doc said "planned, not yet wired" — the
+> handler has been wired since the FL r6 P2-3 fix (PR #25). Doc
+> updated 2026-05-10.
 
 ### `history` / `set_history_depth`
 
