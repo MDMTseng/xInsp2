@@ -62,6 +62,8 @@ struct LoadedScript {
     SetStateFn         set_state         = nullptr;
     SetUseCallbacksFn  set_use_callbacks = nullptr;
     SetTriggerCallbacksFn set_trigger_callbacks = nullptr;
+    using SetTriggerLeaderCallbackFn = void (*)(void* leader_fn);
+    SetTriggerLeaderCallbackFn set_trigger_leader_callback = nullptr;
     SetBreakpointCallbackFn set_breakpoint_callback = nullptr;
     SetRunContextFn    set_run_context  = nullptr;
     SetGlobalCancelFn  set_global_cancel = nullptr;
@@ -98,6 +100,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_state         = reinterpret_cast<LoadedScript::SetStateFn>(GetProcAddress(h, "xi_script_set_state"));
     out.set_use_callbacks = reinterpret_cast<LoadedScript::SetUseCallbacksFn>(GetProcAddress(h, "xi_script_set_use_callbacks"));
     out.set_trigger_callbacks = reinterpret_cast<LoadedScript::SetTriggerCallbacksFn>(GetProcAddress(h, "xi_script_set_trigger_callbacks"));
+    out.set_trigger_leader_callback = reinterpret_cast<LoadedScript::SetTriggerLeaderCallbackFn>(GetProcAddress(h, "xi_script_set_trigger_leader_callback"));
     out.set_breakpoint_callback = reinterpret_cast<LoadedScript::SetBreakpointCallbackFn>(GetProcAddress(h, "xi_script_set_breakpoint_callback"));
     out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
     out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));

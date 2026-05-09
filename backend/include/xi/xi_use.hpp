@@ -35,6 +35,7 @@ extern void* g_use_host_api_;   // xi_host_api* into BACKEND's ImagePool
 extern void* g_trigger_info_fn_;
 extern void* g_trigger_image_fn_;
 extern void* g_trigger_sources_fn_;
+extern void* g_trigger_leader_fn_;
 
 namespace xi {
 
@@ -77,6 +78,11 @@ struct CurrentTriggerInfo {
 using TriggerInfoFn    = void (*)(CurrentTriggerInfo* out);
 using TriggerImageFn   = xi_image_handle (*)(const char* source);
 using TriggerSourcesFn = int32_t (*)(char* buf, int32_t buflen);
+// Returns the policy leader's source name (or empty string when the
+// trigger has no leader, e.g. policy=any). Same buf-or-needed convention
+// as TriggerSourcesFn: positive return = bytes written, negative return
+// = -needed_bytes (caller resizes and retries), 0 = no leader.
+using TriggerLeaderFn  = int32_t (*)(char* buf, int32_t buflen);
 
 // xi::Trigger — read-only view of the current inspection event.
 //
@@ -148,14 +154,30 @@ public:
     }
 
     // Source names present in this trigger (\n-separated single allocation).
+    //
+    // Two-pass against the host: first call with a small stack buffer; if
+    // the host returns a negative value (= -needed_bytes), retry once with
+    // a heap buffer of the requested size. Avoids both an unconditional
+    // heap allocation (common case is <100 bytes) and silent truncation
+    // for projects with many or long source names.
     std::vector<std::string> sources() const {
         auto fn = reinterpret_cast<TriggerSourcesFn>(g_trigger_sources_fn_);
         if (!fn) return {};
-        char buf[2048];
-        int32_t n = fn(buf, sizeof(buf));
+        char stack_buf[512];
+        int32_t n = fn(stack_buf, sizeof(stack_buf));
         std::vector<std::string> out;
-        if (n <= 0) return out;
-        std::string s(buf, (size_t)n);
+        std::string s;
+        if (n > 0) {
+            s.assign(stack_buf, (size_t)n);
+        } else if (n < 0) {
+            int32_t needed = -n;
+            std::vector<char> heap((size_t)needed + 1);
+            int32_t n2 = fn(heap.data(), (int32_t)heap.size());
+            if (n2 <= 0) return out;
+            s.assign(heap.data(), (size_t)n2);
+        } else {
+            return out;
+        }
         size_t start = 0;
         while (start < s.size()) {
             size_t end = s.find('\n', start);
@@ -164,6 +186,38 @@ public:
             start = end + 1;
         }
         return out;
+    }
+
+    // Policy leader's source name. For `policy:"leader_followers"` this
+    // is the leader instance; for `policy:"any"` it's the source that
+    // emitted this event; for `policy:"all_required"` it may be empty.
+    // Falls back to the first sources() entry when the host has no
+    // leader callback (older backends) or returns empty.
+    std::string primary_source() const {
+        auto fn = reinterpret_cast<TriggerLeaderFn>(g_trigger_leader_fn_);
+        if (fn) {
+            char stack_buf[256];
+            int32_t n = fn(stack_buf, sizeof(stack_buf));
+            if (n > 0) return std::string(stack_buf, (size_t)n);
+            if (n < 0) {
+                int32_t needed = -n;
+                std::vector<char> heap((size_t)needed + 1);
+                int32_t n2 = fn(heap.data(), (int32_t)heap.size());
+                if (n2 > 0) return std::string(heap.data(), (size_t)n2);
+            }
+        }
+        // Fallback: first source name (matches policy=any semantics).
+        auto srcs = sources();
+        return srcs.empty() ? std::string{} : srcs.front();
+    }
+
+    // True if `name` appears in this trigger's source list. Cheap routing
+    // affordance for multi-source scripts that switch on source identity
+    // without re-implementing string compare or hashing in the hot path.
+    bool has_source(const char* name) const {
+        if (!name) return false;
+        for (auto& s : sources()) if (s == name) return true;
+        return false;
     }
 
 private:

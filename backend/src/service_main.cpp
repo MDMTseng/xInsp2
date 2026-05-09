@@ -412,6 +412,22 @@ static int32_t trigger_sources_cb(char* buf, int32_t buflen) {
     return n;
 }
 
+// P2-2: expose TriggerEvent::leader_source to scripts. For policy=any the
+// leader is whichever instance emitted; for leader_followers it's the
+// configured leader; for all_required it's typically empty and the script
+// should consult sources(). Same -needed_bytes convention as
+// trigger_sources_cb so scripts can resize and retry.
+static int32_t trigger_leader_cb(char* buf, int32_t buflen) {
+    if (!g_current_trigger || !buf) return 0;
+    const std::string& s = g_current_trigger->leader_source;
+    int32_t n = (int32_t)s.size();
+    if (n == 0) return 0;
+    if (buflen < n + 1) return -n;
+    std::memcpy(buf, s.data(), n);
+    buf[n] = 0;
+    return n;
+}
+
 static void breakpoint_cb(const char* label) {
     // Called from the script thread. Emit a text event, then block until
     // the WS thread sets g_bp_paused=false via `cmd: resume`.
@@ -1291,7 +1307,38 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         req.turbojpeg_root  = g_turbojpeg_root;
         req.ipp_root        = g_ipp_root;
 
+        // P2-6: emit a `compile_started` event before kicking off cl.exe.
+        // compile_and_load is a request/response that can take 4+ s on a
+        // fresh checkout; without this event drivers see a silent WS for
+        // multiple seconds and can't show "compiling..." UI. data carries
+        // the source path so concurrent compiles can be disambiguated.
+        {
+            xp::Event ev;
+            ev.name = "compile_started";
+            std::string data = "{\"path\":";
+            xp::json_escape_into(data, *src);
+            data += "}";
+            ev.data_json = data;
+            srv.send_text(ev.to_json());
+        }
+
         auto res = xi::script::compile(req);
+
+        // Pair the started event with a finished event so drivers can
+        // bracket the operation. Carries `ok` and a short summary so a
+        // listener that missed the rsp can still tell success from
+        // failure.
+        {
+            xp::Event ev;
+            ev.name = "compile_finished";
+            std::string data = "{\"path\":";
+            xp::json_escape_into(data, *src);
+            data += ",\"ok\":";
+            data += (res.ok ? "true" : "false");
+            data += "}";
+            ev.data_json = data;
+            srv.send_text(ev.to_json());
+        }
 
         // Serialize diagnostics for both error & success paths so the
         // extension can drive Problems panel / squiggles either way.
@@ -1384,6 +1431,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     (void*)trigger_info_cb,
                     (void*)trigger_image_cb,
                     (void*)trigger_sources_cb);
+            }
+            // Optional newer symbol — scripts compiled before P2-2
+            // simply don't export it and t.primary_source() falls back
+            // to sources().front().
+            if (g_script.set_trigger_leader_callback) {
+                g_script.set_trigger_leader_callback((void*)trigger_leader_cb);
             }
             // S3: breakpoint callback. Scripts without xi_breakpoint.hpp
             // leave this null and xi::breakpoint() is a no-op.

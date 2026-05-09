@@ -257,6 +257,7 @@ static void* g_use_host_api_     = nullptr;
 static void* g_trigger_info_fn_     = nullptr;
 static void* g_trigger_image_fn_    = nullptr;
 static void* g_trigger_sources_fn_  = nullptr;
+static void* g_trigger_leader_fn_   = nullptr;
 
 // Breakpoint callback (S3). Host sets this so xi::breakpoint(label)
 // inside user script blocks until the WS client sends `cmd: resume`.
@@ -299,6 +300,14 @@ XI_SCRIPT_EXPORT void xi_script_set_trigger_callbacks(
     g_trigger_info_fn_    = info_fn;
     g_trigger_image_fn_   = image_fn;
     g_trigger_sources_fn_ = sources_fn;
+}
+
+// Separate symbol so adding the leader callback doesn't break the older
+// 3-arg signature scripts already export. Hosts that load this DLL look up
+// the symbol via GetProcAddress; missing = leader unavailable, in which
+// case xi::Trigger::primary_source() falls back to sources().front().
+XI_SCRIPT_EXPORT void xi_script_set_trigger_leader_callback(void* leader_fn) {
+    g_trigger_leader_fn_ = leader_fn;
 }
 
 // Optional: install a breakpoint callback for xi::breakpoint(label).

@@ -210,6 +210,43 @@ Return value:
 - `< 0` — buffer too small; absolute value is bytes needed. Host
   retries with a bigger buffer.
 
+#### Unknown commands
+
+Plugin authors typically write `exchange` as an `if (cmd == "x") ...
+else if (cmd == "y") ...` chain. The default fallthrough — silently
+returning `{}` or `get_def()` — hides driver typos: a misspelled
+command name looks indistinguishable from a successful no-op.
+
+Use `xi::Plugin::exchange_unknown_command(name)` for the fallthrough
+case. It returns the canonical error shape:
+
+```json
+{"error": "unknown_command", "command": "<name>"}
+```
+
+```cpp
+std::string MyPlugin::exchange(const std::string& cmd_json) {
+    auto cmd = xi::Json(cmd_json);
+    auto name = cmd["command"].as_string();
+    if (name == "burst")    { /* ... */ return get_def(); }
+    if (name == "set_fps")  { /* ... */ return get_def(); }
+    return exchange_unknown_command(name);
+}
+```
+
+Drivers can detect the error by checking for the `error` key:
+
+```python
+rsp = c.exchange_instance("source_steady", {"command": "burts"})
+if rsp.get("error") == "unknown_command":
+    raise RuntimeError(f"plugin rejected command: {rsp['command']}")
+```
+
+This is convention, not enforcement: plugins remain free to define
+their own error shapes for command-specific failures (e.g.
+`{"error": "out_of_range"}`). `unknown_command` is reserved for the
+"name not recognised" case.
+
 ### `xi_plugin_get_def` / `xi_plugin_set_def`
 
 Persisted config. `get_def` is called on project save; `set_def` on

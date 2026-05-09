@@ -1,0 +1,23 @@
+{
+  "name": "burst_source",
+  "description": "Heterogeneous synthetic image source for multi_source_surge. Three shapes: steady (constant fps), bursty (sleeps mostly idle, fires N-frame bursts on demand via exchange{command:burst}), variable (fps varies sinusoidally between 0.5x and 1.5x of nominal). Each frame stamps {seq, src_tag} into the first 16 bytes; src_tag identifies the source instance for routing in inspect.cpp.",
+  "dll": "burst_source.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params":  [
+      {"name": "fps",    "type": "int",    "default": 30,  "min": 1, "max": 240},
+      {"name": "width",  "type": "int",    "default": 320, "min": 32, "max": 1920},
+      {"name": "height", "type": "int",    "default": 240, "min": 32, "max": 1080},
+      {"name": "shape",  "type": "string", "default": "steady"}
+    ],
+    "inputs":  [],
+    "outputs": [{"name": "img", "kind": "image", "doc": "WxH gray, first 8 bytes = uint64 LE seq, next 8 bytes = uint64 LE src_tag (FNV-1a hash of instance name)"}],
+    "exchange": [
+      {"command": "burst",     "doc": "fire `count` frames as fast as possible (back-to-back). args: {count:int}"},
+      {"command": "set_fps",   "doc": "args: {value:int}"},
+      {"command": "start"},
+      {"command": "stop"}
+    ]
+  }
+}
