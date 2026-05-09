@@ -632,7 +632,14 @@ private:
                 name_.c_str());
             return false;
         }
-        ++respawn_count_in_window_;
+        // C-P1-4: count the in-window quota only on SUCCESSFUL respawns
+        // below. A transient OOM that fails CreateProcess used to burn
+        // an entry of the 3-per-60s budget, so 3 quick CreateProcess
+        // failures left the adapter permanently dead even though every
+        // failure was independent of the plugin. Move the increment to
+        // the success path; track total respawn_count_ (used for the
+        // pipe-name suffix) here so failed attempts still get unique
+        // names if they ever did succeed.
         ++respawn_count_;
 
         // Tear down reader before we drop the pipe — otherwise the
@@ -706,18 +713,49 @@ private:
         }
 
         // Restore the last known-good config so the new instance isn't
-        // back at default. Best-effort — failure to set_def is logged
-        // but doesn't block the respawn from being usable.
+        // back at default. Failure here is NOT best-effort — if the
+        // saved def is what's killing the worker, dead_=false would
+        // leave the host issuing process()es to a default-config
+        // plugin, silently producing wrong outputs. C-P1-5: keep
+        // dead_=true on restore failure and log at error level.
+        bool restore_ok = true;
         if (!saved_def_.empty() && saved_def_ != "{}") {
             ipc::Writer sw; sw.str(saved_def_);
-            try { raw_call_locked_(ipc::RPC_SET_DEF, sw.buf()); }
-            catch (...) {
+            try {
+                auto rsp = raw_call_locked_(ipc::RPC_SET_DEF, sw.buf());
+                if (rsp.type == ipc::RPC_TYPE_ERROR) {
+                    restore_ok = false;
+                    std::string msg(rsp.payload.begin(), rsp.payload.end());
+                    std::fprintf(stderr,
+                        "[ProcessInstanceAdapter] '%s' respawn SET_DEF rejected: %s "
+                        "— staying dead so callers don't get default-config outputs\n",
+                        name_.c_str(), msg.c_str());
+                }
+            } catch (const std::exception& e) {
+                restore_ok = false;
                 std::fprintf(stderr,
-                    "[ProcessInstanceAdapter] '%s' respawn restore-def failed\n",
-                    name_.c_str());
+                    "[ProcessInstanceAdapter] '%s' respawn SET_DEF threw: %s "
+                    "— staying dead so callers don't get default-config outputs\n",
+                    name_.c_str(), e.what());
             }
         }
 
+        if (!restore_ok) {
+            // Tear the freshly-spawned worker back down so a future
+            // try_respawn_locked_ can try again with a hopefully-fixed
+            // saved_def. Don't let dead_=false slip through.
+            stop_reader_();
+            pipe_ = ipc::Pipe{};
+            if (worker_proc_) {
+                TerminateProcess(worker_proc_, 1);
+                CloseHandle(worker_proc_);
+                worker_proc_ = nullptr;
+            }
+            return false;
+        }
+
+        // C-P1-4 commit: only count the quota on successful respawns.
+        ++respawn_count_in_window_;
         dead_ = false;
         std::fprintf(stderr,
             "[ProcessInstanceAdapter] '%s' respawned — new worker pid=%lu (count=%d)\n",
