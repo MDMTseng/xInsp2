@@ -24,3 +24,13 @@ screenshot/
 # Release build artifacts (produced by tools/build_release.mjs)
 release/
 vscode-extension/*.vsix
+# Python bytecode caches
+**/__pycache__/
+*.pyc
+# FL example driver / harness output artifacts (regenerated each run)
+examples/*/driver_summary.json
+examples/*/results.json
+examples/*/_results_*.json
+examples/*/driver_log.json
+# FL agent progress telemetry (per memory: feedback_agent_progress_brief)
+.fl_progress/
