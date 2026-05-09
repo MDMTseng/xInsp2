@@ -319,7 +319,17 @@ private:
         // somehow lands between write and registration the reader
         // would discard it as orphan; registering first closes that
         // race.
+        //
+        // P0-C2: skip seq=0. Async frames (RPC_EMIT_TRIGGER from the
+        // worker into the host's TriggerBus) are tagged seq=0 in the
+        // protocol; if our monotonic counter ever wraps from
+        // UINT32_MAX back to 0 a synchronous reply would route to the
+        // async-frame handler instead of the inflight registry, the
+        // caller would block to its timeout, and the host would think
+        // the worker is wedged. ~50 days at 1 RPC/ms — possible in
+        // 24/7 deployments. Cheap to foreclose.
         uint32_t seq = ++seq_;
+        if (seq == 0) seq = ++seq_;
         auto entry = std::make_shared<InflightEntry>();
         std::future<ipc::Frame> fut = entry->prom.get_future();
         {
