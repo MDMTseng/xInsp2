@@ -174,6 +174,41 @@ public:
     // Override these in your plugin:
     virtual Record process(const Record& input) { (void)input; return {}; }
     virtual std::string exchange(const std::string& cmd_json) { (void)cmd_json; return "{}"; }
+
+    // Helper for the `else` branch of an exchange() if/else-if chain. Returns
+    // a JSON object documenting that the command name was not recognised:
+    //
+    //     {"error":"unknown_command","command":"<name>"}
+    //
+    // Caller passes the command name they parsed (often via xi_json). This
+    // gives drivers a uniform error shape rather than the silent no-op /
+    // empty-object that plugin authors otherwise return on fallthrough.
+    // P2-4: Surface unknown commands instead of silently dropping them.
+    static std::string exchange_unknown_command(const std::string& cmd_name) {
+        std::string out = "{\"error\":\"unknown_command\",\"command\":";
+        // Inline JSON escape — same minimal handling as everywhere else
+        // in xi_abi.hpp; cmd_name is plugin-controlled and short.
+        out.push_back('"');
+        for (char c : cmd_name) {
+            switch (c) {
+                case '"':  out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n";  break;
+                case '\r': out += "\\r";  break;
+                case '\t': out += "\\t";  break;
+                default:
+                    if ((unsigned char)c < 0x20) {
+                        char b[8];
+                        std::snprintf(b, sizeof(b), "\\u%04x", (unsigned)(unsigned char)c);
+                        out += b;
+                    } else {
+                        out.push_back(c);
+                    }
+            }
+        }
+        out += "\"}";
+        return out;
+    }
     virtual std::string get_def() const { return "{}"; }
     virtual bool set_def(const std::string& json) { (void)json; return true; }
 

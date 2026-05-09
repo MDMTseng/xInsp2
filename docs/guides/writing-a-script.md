@@ -337,6 +337,36 @@ plugin.
 | `t.dequeued_at_us()`      | μs (same clock) when the dispatcher worker popped this event          |
 | `t.image(name)`           | the named source's frame, zero-copy view                              |
 | `t.sources()`             | list of source names present in this event                            |
+| `t.primary_source()`      | leader source name (policy-aware); falls back to `sources().front()`  |
+| `t.has_source(name)`      | `true` if `name` appears in `sources()`; routing without manual hash  |
+
+#### Routing by source identity
+
+Multi-source scripts often need different processing per source. Before
+P2-2 the idiom was to stamp an FNV-1a hash into pixel bytes [8..15] at
+the plugin and recompute it at the script — workable but awkward. The
+direct path is now:
+
+```cpp
+auto t = xi::current_trigger();
+if (!t.is_active()) return;
+
+// Single-source case (policy=any with one source): primary == only source
+if (t.has_source("camera_left")) {
+    auto img = t.image("camera_left");
+    // ...
+}
+
+// Leader/follower case (policy:"leader_followers"): primary is the leader
+if (t.primary_source() == "camera_top") {
+    // run the leader-specific pipeline
+}
+```
+
+`primary_source()` is policy-aware on the host side: for `policy:"any"`
+it's whichever instance emitted; for `leader_followers` it's the
+configured leader; for `all_required` it may be empty (consult
+`sources()` instead).
 
 ### Latency: queue-wait vs inspect-time
 

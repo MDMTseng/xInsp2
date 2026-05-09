@@ -119,6 +119,8 @@ Out-of-band notifications that don't fit the above.
 { "type": "event", "name": "script_reloaded", "data": { "path": "..." } }
 { "type": "event", "name": "isolation_dead", "data": { "instance": "cam0" } }
 { "type": "event", "name": "state_dropped", "data": { "old_schema": 1, "new_schema": 2 } }
+{ "type": "event", "name": "compile_started", "data": { "path": "..." } }
+{ "type": "event", "name": "compile_finished", "data": { "path": "...", "ok": true } }
 ```
 
 `isolation_dead` fires once per instance the first time
@@ -127,6 +129,15 @@ permanently dead (worker respawn cap hit; subsequent calls would
 return safe defaults silently). Pair with the `log` (level=error)
 message that lands in the same beat. Reset by reopening the project
 or removing/recreating the instance.
+
+`compile_started` / `compile_finished` bracket the `cmd:compile_and_load`
+operation. `compile_started` fires immediately before cl.exe is invoked
+(useful so drivers can show "compiling..." UI without parsing log
+lines); `compile_finished` fires immediately after with the same
+`path` plus an `ok` boolean so a listener that missed the rsp can
+still tell success from failure. Cold compiles take 4+ s on this
+project and dominate the WS quiet window — without these events the
+connection looks hung.
 
 `state_dropped` fires after `cmd:compile_and_load` when the new
 script DLL declares a different `xi_script_state_schema_version()`

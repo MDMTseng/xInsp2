@@ -1,0 +1,18 @@
+{
+  "name": "r6_p2_demo",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "parallelism": {
+    "dispatch_threads": 1,
+    "queue_depth": 64,
+    "overflow": "drop_oldest"
+  },
+  "instances": [
+    { "name": "src_main", "plugin": "burst_source" }
+  ]
+}
