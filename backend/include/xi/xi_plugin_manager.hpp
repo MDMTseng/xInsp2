@@ -156,7 +156,7 @@ public:
         ImagePool::OwnerGuard g(owner_id_);
         std::vector<char> buf(4096);
         int n = get_def_fn_(inst_, buf.data(), (int)buf.size());
-        if (n < 0) { buf.resize((size_t)(-n) + 1024); n = get_def_fn_(inst_, buf.data(), (int)buf.size()); }
+        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = get_def_fn_(inst_, buf.data(), (int)buf.size()); }
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
     }
 
@@ -171,7 +171,7 @@ public:
         ImagePool::OwnerGuard g(owner_id_);
         std::vector<char> buf(64 * 1024);
         int n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size());
-        if (n < 0) { buf.resize((size_t)(-n) + 1024); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }
+        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
     }
 

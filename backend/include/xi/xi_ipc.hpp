@@ -452,13 +452,24 @@ public:
     uint32_t u32() { uint32_t v; take(&v, 4); return v; }
     uint64_t u64() { uint64_t v; take(&v, 8); return v; }
     uint8_t  u8 () { uint8_t  v; take(&v, 1); return v; }
+    // P0-D1: bounds-check the wire-controlled length BEFORE allocating /
+    // copying. The frame's outer length is already capped by recv_frame's
+    // MAX_PAYLOAD_BYTES, but a malformed inner str/bytes whose length
+    // exceeds the remaining payload must throw rather than read past
+    // end_ and OOM-allocate a 4 GB string/vector.
     std::string str() {
         uint32_t n = u32();
+        if ((size_t)(end_ - p_) < n) {
+            throw std::runtime_error("ipc: str length exceeds payload remainder");
+        }
         std::string s; s.assign((const char*)p_, n);
         p_ += n; return s;
     }
     std::vector<uint8_t> bytes() {
         uint32_t n = u32();
+        if ((size_t)(end_ - p_) < n) {
+            throw std::runtime_error("ipc: bytes length exceeds payload remainder");
+        }
         std::vector<uint8_t> v(p_, p_ + n);
         p_ += n; return v;
     }

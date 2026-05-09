@@ -231,9 +231,17 @@ public:
 
     // Allocate an image block. Refcount starts at 1. Returns
     // INVALID_HANDLE on out-of-space.
+    //
+    // P0-D2: payload_size is int32. A 50000x50000x4 image has
+    // pixels=1e10 which truncates to a much smaller int32 — the
+    // bump allocator would carve out a small block but the caller
+    // would then write w*h*ch bytes, scribbling past the block end
+    // into the next block's payload. Reject anything that doesn't
+    // fit in int32 at the API boundary.
     uint64_t alloc_image(int32_t w, int32_t h, int32_t ch) {
-        const int64_t pixels = int64_t(w) * h * ch;
-        if (pixels <= 0) return INVALID_HANDLE;
+        if (w <= 0 || h <= 0 || ch <= 0) return INVALID_HANDLE;
+        const int64_t pixels = int64_t(w) * int64_t(h) * int64_t(ch);
+        if (pixels <= 0 || pixels > INT32_MAX) return INVALID_HANDLE;
         return alloc_(Kind::Image, w, h, ch, (int32_t)pixels);
     }
 

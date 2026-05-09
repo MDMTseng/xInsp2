@@ -385,7 +385,7 @@ int main(int argc, char** argv) {
                 std::vector<char> rsp(64 * 1024);
                 int n = plugin.exchange(plugin.inst, cmd.c_str(),
                                         rsp.data(), (int)rsp.size());
-                if (n < 0) { rsp.resize((size_t)(-n) + 1024);
+                if (n < 0) { rsp.resize((size_t)(-(int64_t)n) + 1024);
                              n = plugin.exchange(plugin.inst, cmd.c_str(),
                                                  rsp.data(), (int)rsp.size()); }
                 ipc::Writer w;
@@ -403,7 +403,7 @@ int main(int argc, char** argv) {
                 }
                 std::vector<char> buf(4096);
                 int n = plugin.get_def(plugin.inst, buf.data(), (int)buf.size());
-                if (n < 0) { buf.resize((size_t)(-n) + 1024);
+                if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
                              n = plugin.get_def(plugin.inst, buf.data(), (int)buf.size()); }
                 ipc::Writer w;
                 w.bytes(buf.data(), (size_t)(n > 0 ? n : 0));

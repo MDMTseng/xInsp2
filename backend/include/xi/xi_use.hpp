@@ -312,7 +312,7 @@ public:
         if (!exchange_fn) return "{}";
         std::vector<char> buf(64 * 1024);
         int n = exchange_fn(name_.c_str(), cmd.c_str(), buf.data(), (int)buf.size());
-        if (n < 0) { buf.resize((size_t)(-n) + 1024);
+        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
                      n = exchange_fn(name_.c_str(), cmd.c_str(), buf.data(), (int)buf.size()); }
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
     }

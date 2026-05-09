@@ -87,19 +87,44 @@ public:
     // ---- create / release -------------------------------------------
 
     xi_image_handle create(int32_t w, int32_t h, int32_t ch) {
-        auto* entry = new PoolEntry();
-        entry->pixels.resize((size_t)w * h * ch);
+        // D-P1-7: validate dimensions BEFORE entering counter / slot
+        // bookkeeping. The original `(size_t)w * h * ch` cast applies
+        // only to the first multiplicand; `h * ch` is int32 mul first,
+        // signed-overflow UB for big inputs. And the previous code
+        // incremented live_count_ / total_created_ before the slot
+        // acquire — when the pool was exhausted those counters drifted
+        // permanently. Reject + early-out before any side effect.
+        if (w <= 0 || h <= 0 || ch <= 0) return 0;
+        const int64_t pixels =
+            int64_t(w) * int64_t(h) * int64_t(ch);
+        // Cap at 1 GiB per image to avoid runaway allocations from a
+        // hostile / careless plugin; INT32_MAX is technically the wider
+        // limit but 1 GiB is comfortably above any real CV input and
+        // keeps each create's allocator pressure bounded.
+        if (pixels <= 0 || pixels > (int64_t(1) << 30)) return 0;
+
+        std::unique_ptr<PoolEntry> entry(new PoolEntry());
+        try {
+            entry->pixels.resize((size_t)pixels);
+        } catch (const std::bad_alloc&) {
+            // entry deletes via unique_ptr; counters untouched.
+            return 0;
+        }
         entry->width    = w;
         entry->height   = h;
         entry->channels = ch;
         entry->refcount.store(1, std::memory_order_relaxed);
         entry->owner    = current_owner();
-        // Cumulative counters — never decrement. Live snapshots
-        // (current handle_count) go back to zero between runs as
-        // entries get released, which made the per-instance ledger
-        // look empty even when a script was busy. The cumulative
-        // figures expose actual activity for "did this script ever
-        // create images?" / "what's the peak we've seen?" questions.
+
+        uint32_t idx = acquire_slot_();
+        if (idx == 0xFFFFFFFFu) {       // pool exhausted
+            std::fprintf(stderr,
+                "[xinsp2] ImagePool exhausted (cap=%u live handles)\n",
+                SLOT_COUNT);
+            return 0;
+        }
+        // Past the failure points; commit counters now (cumulative
+        // never decrements, live_count_ tracks actual occupancy).
         uint64_t cum = total_created_.fetch_add(1, std::memory_order_relaxed) + 1;
         (void)cum;
         int32_t live = live_count_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -107,20 +132,13 @@ public:
         while (live > hw &&
                !high_water_.compare_exchange_weak(hw, live,
                        std::memory_order_relaxed)) {}
-
-        uint32_t idx = acquire_slot_();
-        if (idx == 0xFFFFFFFFu) {       // pool exhausted
-            delete entry;
-            std::fprintf(stderr,
-                "[xinsp2] ImagePool exhausted (cap=%u live handles)\n",
-                SLOT_COUNT);
-            return 0;
-        }
+        // Hand ownership to the slot.
+        PoolEntry* raw = entry.release();
         // Bump the slot's running generation; stamp it into the entry.
         uint64_t gen = (slots_[idx].generation.fetch_add(1, std::memory_order_relaxed) + 1)
                        & GEN_MAX;
-        entry->generation = gen;
-        slots_[idx].entry.store(entry, std::memory_order_release);
+        raw->generation = gen;
+        slots_[idx].entry.store(raw, std::memory_order_release);
 
         return ((uint64_t)gen << SLOT_BITS) | (uint64_t)idx;
     }

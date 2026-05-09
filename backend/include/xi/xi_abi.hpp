@@ -164,7 +164,7 @@ public:
         int32_t n = host_->instance_folder(name_.c_str(), buf, sizeof(buf));
         if (n > 0) return std::string(buf, (size_t)n);
         if (n < 0) {
-            std::vector<char> big((size_t)(-n) + 1);
+            std::vector<char> big((size_t)(-(int64_t)n) + 1);
             n = host_->instance_folder(name_.c_str(), big.data(), (int32_t)big.size());
             if (n > 0) return std::string(big.data(), (size_t)n);
         }
