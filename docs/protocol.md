@@ -124,14 +124,13 @@ Out-of-band notifications that don't fit the above.
 { "type": "event", "name": "compile_finished", "data": { "path": "...", "ok": true } }
 ```
 
-> ⚠️ **`run_started` / `run_finished` / `run_error` are NOT yet emitted.**
-> They are documented here as the planned event names so SDK
-> callers writing forward-compatible listeners can pattern against
-> them; the producer landed for `compile_*` but not yet for the run
-> lifecycle. Until then, `cmd:run`'s synchronous rsp is the
-> completion signal and a script-side runtime exception manifests
-> only as a missing rsp / non-arriving vars (the SDK's `c.run()`
-> waits for vars and times out). Tracked under audit P1 F-1.
+`run_started` / `run_finished` bracket every `cmd:run` and every
+inspect dispatched by continuous mode. `run_started.data` carries
+`{run_id}`; `run_finished.data` carries `{run_id, ms}` (the inspect
+wall-clock duration). `run_error.data` is `{run_id, what}` and fires
+INSTEAD of `run_finished` when the inspect throws (C++ exception or
+SEH). Drivers waiting for run completion should listen for
+`run_finished` OR `run_error` — exactly one fires per run.
 
 `isolation_dead` fires once per instance the first time
 `use_process` / `use_exchange` sees an isolated instance gone

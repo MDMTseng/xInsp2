@@ -769,6 +769,21 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
     // not the previous value.
     if (s.set_run_context) s.set_run_context(frame_path.c_str());
 
+    // F-P1-1: bracket the inspect with run_started / run_finished /
+    // run_error events so SDK callers can observe lifecycle outside the
+    // synchronous rsp path. Documented in docs/protocol.md.
+    auto emit_run_event = [&srv, run_id](const char* name,
+                                          const std::string& extra_data = "") {
+        xp::Event ev;
+        ev.name = name;
+        std::string data = "{\"run_id\":" + std::to_string(run_id);
+        if (!extra_data.empty()) { data += ","; data += extra_data; }
+        data += "}";
+        ev.data_json = data;
+        srv.send_text(ev.to_json());
+    };
+    emit_run_event("run_started");
+
     auto t0 = std::chrono::steady_clock::now();
     // Arm watchdog: store deadline + current thread handle. Cleared in
     // the post-inspect path below regardless of throw.
@@ -815,20 +830,32 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
                      (long long)dt_ms, e.code, e.what());
         std::fprintf(stderr, "[xinsp2] %s\n", msg);
         emit_error_log(srv, msg, run_id);
+        // run_error event: same channel as compile_finished error case;
+        // gives drivers a single subscribe-once way to detect failed
+        // runs without scraping the log channel.
+        std::string what = std::string("\"what\":");
+        xp::json_escape_into(what, std::string(msg));
+        emit_run_event("run_error", what);
         return;
     } catch (const std::exception& e) {
         disarm();
         std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
         emit_error_log(srv, std::string("script exception: ") + e.what(), run_id);
+        std::string what = std::string("\"what\":");
+        xp::json_escape_into(what, std::string("script exception: ") + e.what());
+        emit_run_event("run_error", what);
         return;
     } catch (...) {
         disarm();
+        emit_run_event("run_error", "\"what\":\"unknown_exception\"");
         return;
     }
 
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - t0).count();
     emit_vars_and_previews(srv, s, run_id, dt_ms);
+    emit_run_event("run_finished",
+                   "\"ms\":" + std::to_string((long long)dt_ms));
 
     // Clear so the next run, if it doesn't carry a frame_path arg,
     // sees an empty path instead of the stale previous one.
