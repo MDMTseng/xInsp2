@@ -1020,6 +1020,55 @@ static void stop_dispatch_pool_() {
     g_worker_threads.clear();
 }
 
+// Quiesce the dispatcher + timer + breakpoint park before any handler
+// that's about to touch the script DLL or project plugin DLLs (audit
+// P0-AB-1..5). Returns the prior continuous state so the caller can
+// re-arm if it wants. Mirrors the inline block compile_and_load has
+// used since FL r5.
+//
+// IMPORTANT: this only quiesces the bus-driven dispatcher pool. Any
+// detached cmd:run threads are not joined here — those snapshot the
+// script under g_script_mu and the destructive caller still holds
+// g_script_mu (or equivalent) while the inspect runs to completion.
+// For project plugin DLLs (touched by close/open/recompile/export),
+// no equivalent detached path exists; the dispatch pool is the only
+// in-flight surface.
+struct DispatchPoolGuard {
+    bool was_continuous = false;
+    int  prior_fps = 10;
+    bool quiesced = false;
+};
+
+static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name) {
+    DispatchPoolGuard g;
+    if (g_continuous.load()) {
+        g.was_continuous = true;
+        g.prior_fps = g_continuous_fps.load();
+        // Release any breakpoint-parked thread so it can finish.
+        { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
+        g_bp_cv.notify_all();
+        stop_dispatch_pool_();
+        g.quiesced = true;
+        std::fprintf(stderr,
+            "[xinsp2] stopped continuous mode for %s (will resume if op succeeds)\n",
+            op_name);
+    }
+    // Drain any events still in g_ev_queue; they reference plugin
+    // images whose handles must be released before the plugin DLL is
+    // unloaded, otherwise the eventual ImagePool sweep races with
+    // FreeLibrary.
+    {
+        std::lock_guard<std::mutex> lk(g_ev_mu);
+        for (auto& ev : g_ev_queue) {
+            for (auto& [src, h] : ev.images) {
+                xi::ImagePool::instance().release(h);
+            }
+        }
+        g_ev_queue.clear();
+    }
+    return g;
+}
+
 static void handle_command(xi::ws::Server& srv, std::string_view text) {
     auto parsed = xp::parse_cmd(text);
     if (!parsed) {
@@ -1559,6 +1608,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         data += "}";
         send_rsp_ok(srv, id, data);
     } else if (name == "unload_script") {
+        // P0-AB-1: dispatcher workers snapshot g_script under
+        // g_script_mu and may be mid-inspect when unload_script
+        // FreeLibrary's the DLL. Drain the pool first.
+        (void)quiesce_dispatch_for_lifecycle_op_("unload_script");
         std::lock_guard<std::mutex> lk(g_script_mu);
         xi::script::unload_script(g_script);
         // Tear down isolated runner if one was spawned for this script.
@@ -2416,6 +2469,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         if (!folder) folder = xp::get_string_field(parsed->args_json, "path");
         if (!folder) { send_rsp_err(srv, id, "missing folder/path"); return; }
+        // P0-AB-3: must drain dispatch pool BEFORE the old project is
+        // torn down. open_project (the PluginManager method) destroys
+        // the previous project's instances and FreeLibrary's its
+        // plugin DLLs; if a worker is mid-inspect into a now-freed
+        // plugin function we SEGV.
+        (void)quiesce_dispatch_for_lifecycle_op_("open_project");
         if (g_plugin_mgr.open_project(*folder)) {
             auto& proj = g_plugin_mgr.project();
             int inst_count = (int)proj.instances.size();
@@ -2447,6 +2506,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, "failed to open project in " + *folder);
         }
     } else if (name == "close_project") {
+        // P0-AB-3: must drain dispatch pool BEFORE close_project tears
+        // down instances and FreeLibrary's plugin DLLs. (PR #33 fixed
+        // the in-PluginManager teardown order; this fixes the
+        // dispatcher-still-running case the dispatcher pool hit when
+        // close_project is sent during continuous mode.)
+        (void)quiesce_dispatch_for_lifecycle_op_("close_project");
         g_plugin_mgr.close_project();
         send_rsp_ok(srv, id, "{\"closed\":true}");
     } else if (name == "export_project_plugin") {
@@ -2461,6 +2526,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, "not a project plugin: " + *pname);
             return;
         }
+        // P0-AB-3: export_project_plugin runs the plugin under cert,
+        // which loads + invokes its DLL. Make sure no dispatcher
+        // worker is mid-call into the same plugin's instances.
+        (void)quiesce_dispatch_for_lifecycle_op_("export_project_plugin");
         auto er = g_plugin_mgr.export_project_plugin(*pname, *dest);
         std::string data = "{\"plugin\":";
         xp::json_escape_into(data, *pname);
@@ -2498,6 +2567,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, "not a project plugin: " + *pname);
             return;
         }
+        // P0-AB-4: recompile resets each instance pointer then
+        // FreeLibrary's the old DLL. Any in-flight set_def / exchange
+        // on those instances from a dispatcher worker would dereference
+        // freed code. Drain first.
+        auto guard = quiesce_dispatch_for_lifecycle_op_("recompile_project_plugin");
         auto rr = g_plugin_mgr.recompile_project_plugin(*pname);
         // Build diagnostics JSON — same shape as compile_and_load.
         std::string diag_json = "[";
