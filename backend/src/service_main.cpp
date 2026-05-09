@@ -801,7 +801,13 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
                         GetCurrentProcess(), &self_h, 0, FALSE,
                         DUPLICATE_SAME_ACCESS);
         g_inspect_thread_handle.store(self_h);
-        auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(wd_ms);
+        // D-P1-10: deadline must use steady_clock, not system_clock.
+        // An NTP backward step (or DST jump if the host is misconfigured
+        // to use TZ-aware clocks) would either skip every armed deadline
+        // (clock jumps forward → premature trip on healthy script) or
+        // never trip (clock jumps back → permanent hang, watchdog
+        // useless). steady_clock is monotonic.
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wd_ms);
         g_inspect_deadline_ms.store(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline.time_since_epoch()).count());
@@ -3247,8 +3253,11 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             int64_t dl = g_inspect_deadline_ms.load();
             if (dl == 0) continue;
+            // D-P1-10: comparison MUST use the same clock as the
+            // deadline writer (run_one_inspection). Now both use
+            // steady_clock.
             int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
+                std::chrono::steady_clock::now().time_since_epoch()).count();
             if (now < dl) continue;
 
             // Two-phase trip:
