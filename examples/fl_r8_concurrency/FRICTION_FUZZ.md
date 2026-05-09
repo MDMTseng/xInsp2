@@ -4,9 +4,32 @@ Concurrency-surface findings ranked P0/P1/P2. Per FL convention,
 nothing in this survey was fixed in-PR — fixes follow in a separate
 commit / PR after the parent triages.
 
-## P1
+## P1 — RESOLVED 2026-05-09
 
 ### close_project after open(multi_source_surge) returns Empty / closes WS
+
+**Status: FIXED.** Root cause was teardown ordering in
+`xi::PluginManager::close_project` (`backend/include/xi/xi_plugin_manager.hpp`):
+the function called `FreeLibrary()` on each project plugin's DLL
+**before** `project_ = ProjectInfo{}` destroyed the in-process
+`CAbiInstanceAdapter`s. Each adapter's destructor calls the plugin's
+`destroy_fn`, which lives in the just-freed DLL → access of unmapped
+memory → ACCESS_VIOLATION (`0xC0000005`). The WS handler thread died
+mid-destructor, never sending a rsp; the SDK's `c.call("close_project")`
+saw an `Empty()` queue.
+
+The same bug existed historically in `open_project` and was fixed
+there with a `// Destroy old instances FIRST` block (line ~995). The
+matching fix in `close_project` was simply not applied. This PR
+mirrors the open_project ordering: clear `project_.instances`
+explicitly before `FreeLibrary`.
+
+After fix:
+- single-instance close: ~0.02 s
+- 5-instance close (multi_source_surge): ~0.29 s
+- 30-iter open/close cycle: 0 fatals, RSS growth 0.6 MB iter 5→30
+
+### Original write-up
 
 **Symptom.** Iter 0 of `harness_open_close_cycle.py` against
 `examples/multi_source_surge`:
