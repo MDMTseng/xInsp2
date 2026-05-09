@@ -208,6 +208,33 @@ int main(int argc, char** argv) {
                             std::memcpy(dst + y * row, src + y * src_stride, (size_t)row);
                         h = shm_h;
                         temp_shm.push_back(shm_h);
+                    } else {
+                        // P0-E1 visibility: SHM allocation failed. The
+                        // bump-only allocator (xi_shm.hpp) doesn't reclaim
+                        // released blocks; under sustained 30 fps × 1 MB
+                        // load the 512 MB region exhausts in ~17 s and
+                        // every subsequent emit_trigger silently falls
+                        // back to a worker-local heap handle that the
+                        // host's image_data lookup can't resolve, so the
+                        // pipeline output silently degrades. Make the
+                        // failure VISIBLE while the proper free-list
+                        // allocator is being designed (audit P0-E1; see
+                        // .fl_audits/FIX_PROGRESS.md "open questions").
+                        // Throttle to first-N + every-Nth so we don't
+                        // flood the log channel.
+                        static std::atomic<uint64_t> g_shm_oom_count{0};
+                        uint64_t n_oom =
+                            g_shm_oom_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                        if (n_oom <= 5 || (n_oom % 200) == 0) {
+                            std::fprintf(stderr,
+                                "[worker:%s] SHM OOM #%llu (region exhausted; "
+                                "image %dx%dx%d not promoted, falling back to heap handle "
+                                "— host may render this frame as missing). "
+                                "See audit P0-E1; consider lowering source rate or "
+                                "switching to in-process isolation.\n",
+                                source ? source : "?", (unsigned long long)n_oom,
+                                w, hh, ch);
+                        }
                     }
                 }
             }
