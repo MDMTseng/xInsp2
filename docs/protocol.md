@@ -559,3 +559,18 @@ significantly — a 5-var pipeline with a 1-var subscription uses
 
 No heartbeat ping/pong beyond what WebSocket itself provides. Single-client
 v1 does not need session resumption.
+
+### Single-client enforcement
+
+Only one WS client may be connected at a time. While a client is
+connected, the server still calls `accept()` on incoming connections
+(so the OS SYN queue does not fill) but immediately responds with
+`HTTP/1.1 503 Service Unavailable` and `X-Xi-Reason: single-client-busy`,
+then closes the socket. Callers should treat 503 from the upgrade
+endpoint as "another client owns the backend; retry after they
+disconnect" rather than a backend health problem.
+
+Prior to FL r7 this case was not handled — a 2nd connection's SYN
+would sit in the kernel queue until Windows timed it out (~21 s),
+which surfaced to the caller as a long stall. The `accept()`-and-
+reject path replaces that with a fast, diagnosable error.

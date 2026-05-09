@@ -265,7 +265,15 @@ public:
             listen_ = INVALID_SOCK;
             return false;
         }
-        if (::listen(listen_, 1) != 0) {
+        // Backlog: although we only serve one client at a time, the OS-level
+        // listen backlog buffers SYNs that arrive while we're between accept()
+        // calls (e.g. select() yet to fire, or poll() blocked in read_pending).
+        // backlog=1 caused FL r7 P1: under sustained malformed input, fresh
+        // probe connections received WSAECONNREFUSED for 1-2 s every 50-200
+        // iters because the kernel had nowhere to queue the new SYN. SOMAXCONN
+        // costs nothing extra on Windows (clamped internally) and gives us
+        // headroom for transient bursts.
+        if (::listen(listen_, SOMAXCONN) != 0) {
             CLOSESOCK(listen_);
             listen_ = INVALID_SOCK;
             return false;
@@ -294,7 +302,12 @@ public:
         fd_set rfds;
         FD_ZERO(&rfds);
         socket_t maxfd = 0;
-        if (listen_ != INVALID_SOCK && client_ == INVALID_SOCK) {
+        // Always watch listen_ — even with a client connected. A 2nd client's
+        // SYN that the kernel queued must reach accept() promptly; otherwise
+        // it sits in the SYN queue until the OS times it out (~21 s on
+        // Windows), which the caller perceives as connection-refused-after-
+        // long-stall. We accept-and-reject immediately below.
+        if (listen_ != INVALID_SOCK) {
             FD_SET(listen_, &rfds);
             maxfd = std::max(maxfd, listen_);
         }
@@ -310,15 +323,30 @@ public:
         int n = ::select((int)(maxfd + 1), &rfds, nullptr, nullptr, &tv);
         if (n <= 0) return;
 
-        if (listen_ != INVALID_SOCK && FD_ISSET(listen_, &rfds) && client_ == INVALID_SOCK) {
+        if (listen_ != INVALID_SOCK && FD_ISSET(listen_, &rfds)) {
             sockaddr_in peer{};
             socklen_t peerlen = sizeof(peer);
             socket_t s = ::accept(listen_, reinterpret_cast<sockaddr*>(&peer), &peerlen);
             if (s != INVALID_SOCK) {
-                if (do_handshake(s)) {
-                    client_ = s;
-                    if (on_open) on_open();
+                if (client_ == INVALID_SOCK) {
+                    if (do_handshake(s)) {
+                        client_ = s;
+                        if (on_open) on_open();
+                    } else {
+                        CLOSESOCK(s);
+                    }
                 } else {
+                    // We're already serving a client. Reject the 2nd
+                    // connection immediately with HTTP 503 so the caller
+                    // gets a clean error instead of a SYN-timeout. Drained
+                    // every poll cycle so the kernel SYN queue stays empty.
+                    static const char busy[] =
+                        "HTTP/1.1 503 Service Unavailable\r\n"
+                        "Content-Length: 0\r\n"
+                        "Connection: close\r\n"
+                        "X-Xi-Reason: single-client-busy\r\n"
+                        "\r\n";
+                    ::send(s, busy, (int)sizeof(busy) - 1, 0);
                     CLOSESOCK(s);
                 }
             }

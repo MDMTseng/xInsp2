@@ -42,24 +42,37 @@ already has the respawn machinery (see line ~560 in the same file)
 for the case where a buggy plugin crashes its worker — the EOF case
 should follow the same path.
 
-## P1
+## P1 — RESOLVED 2026-05-09
 
 ### WS accept loop briefly refuses connections under sustained malformed input
 
-Symptom: every ~50–200 iters of harness #1, opening a fresh WS
-connection (for the liveness probe) returns `WSAECONNREFUSED` for
-1–2 seconds, then succeeds. `proc.poll()` shows the backend alive
-the whole time.
+Original symptom: every ~50–200 iters of harness #1, opening a fresh
+WS connection (for the liveness probe) returned `WSAECONNREFUSED` for
+1–2 seconds, then succeeded.
 
-Suspect: the WS server's accept loop is single-threaded (or yields
-poorly) and gets behind serving an existing connection that we're
-spamming with malformed payloads. Worth a deeper look — under real
-production load with multiple clients, the side effect is "new
-clients can't reach the backend for a few seconds."
+**Root cause** (different from the original "accept loop is slow"
+theory): the WS server is single-client by design. While one client
+is connected, `select()` was not even watching `listen_`, so a 2nd
+connection's SYN sat in the kernel queue until Windows SYN-retry
+timeout (~21 s). With `listen(1)` the kernel rejected most SYNs fast
+(the WSAECONNREFUSED the harness saw); with a longer backlog it would
+have manifested as a true 21 s stall.
 
-Working theory only — needs profiling. Mitigated in the harness by
-moving the liveness probe from every-50-iters to every-200-iters;
-the false-positive rate drops but doesn't go to zero.
+The harness was also at fault: it kept the main fuzz WS open while
+opening a separate liveness probe, which the server's single-client
+contract rules out.
+
+**Backend fix** (`backend/include/xi/xi_ws_server.hpp`): always include
+`listen_` in the select set; on `accept()` while `client_` is set,
+send back `HTTP/1.1 503 Service Unavailable` with
+`X-Xi-Reason: single-client-busy` and close. Documented in
+`docs/protocol.md` § Single-client enforcement.
+
+**Harness fix** (`harness_ws_cmd.py`): close the main fuzz WS before
+the liveness probe, reopen after.
+
+After both fixes: 1500-iter run completes with 0 findings; all 7
+liveness probes pong cleanly.
 
 ## Friction items (not bugs, just rough edges that slowed the harness)
 
