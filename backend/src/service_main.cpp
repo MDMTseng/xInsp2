@@ -649,7 +649,7 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
         // Script path — read from DLL thunks
         std::vector<char> sbuf(256 * 1024);
         int n = s.snapshot(sbuf.data(), (int)sbuf.size());
-        if (n < 0) { sbuf.resize((size_t)(-n) + 1024);
+        if (n < 0) { sbuf.resize((size_t)(-(int64_t)n) + 1024);
                      n = s.snapshot(sbuf.data(), (int)sbuf.size()); }
         if (n <= 0) return;
 
@@ -1148,7 +1148,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             if (!g_script.snapshot) return "[]";
             std::vector<char> buf(256 * 1024);
             int n = g_script.snapshot(buf.data(), (int)buf.size());
-            if (n < 0) { buf.resize((size_t)(-n) + 1024);
+            if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
                          n = g_script.snapshot(buf.data(), (int)buf.size()); }
             return n > 0 ? std::string(buf.data(), (size_t)n) : std::string("[]");
         };
@@ -1382,7 +1382,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             if (g_script.ok() && g_script.get_state) {
                 std::vector<char> buf(256 * 1024);
                 int n = g_script.get_state(buf.data(), (int)buf.size());
-                if (n < 0) { buf.resize((size_t)(-n) + 1024);
+                if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
                              n = g_script.get_state(buf.data(), (int)buf.size()); }
                 if (n > 0) g_persistent_state_json.assign(buf.data(), (size_t)n);
                 g_persistent_state_schema = g_script.state_schema_version
@@ -1858,12 +1858,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 std::vector<char> buf(64 * 1024);
                 if (g_script.list_instances) {
                     int n = g_script.list_instances(buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-n) + 1024); n = g_script.list_instances(buf.data(), (int)buf.size()); }
+                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_script.list_instances(buf.data(), (int)buf.size()); }
                     if (n > 0) inst_json.assign(buf.data(), (size_t)n);
                 }
                 if (g_script.list_params) {
                     int n = g_script.list_params(buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-n) + 1024); n = g_script.list_params(buf.data(), (int)buf.size()); }
+                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_script.list_params(buf.data(), (int)buf.size()); }
                     if (n > 0) params_json.assign(buf.data(), (size_t)n);
                 }
             }
@@ -1964,7 +1964,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     std::vector<char> rsp(256 * 1024);
                     int n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
                                                        rsp.data(), (int)rsp.size());
-                    if (n < 0) { rsp.resize((size_t)(-n) + 1024);
+                    if (n < 0) { rsp.resize((size_t)(-(int64_t)n) + 1024);
                                  n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
                                                                 rsp.data(), (int)rsp.size()); }
                     if (n >= 0) send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));

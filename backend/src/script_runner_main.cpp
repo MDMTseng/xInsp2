@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
                 std::vector<char> vbuf(64 * 1024);
                 int n = snap ? snap(vbuf.data(), (int)vbuf.size()) : 0;
                 if (n < 0) {
-                    vbuf.resize((size_t)(-n) + 1024);
+                    vbuf.resize((size_t)(-(int64_t)n) + 1024);
                     n = snap(vbuf.data(), (int)vbuf.size());
                 }
                 ipc::Writer w;
