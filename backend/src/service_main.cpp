@@ -978,6 +978,11 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
                     have_ev = true;
                 }
             }
+            // A-P1-1: notify any producer that's waiting on
+            // overflow:"block" (queue.size() == depth). Without this
+            // the producer can stall forever — workers only ran
+            // notify_one on push, not on pop. Wake one slot per pop.
+            g_ev_cv.notify_one();
             if (!have_ev) continue;
             // Stamp the dequeue moment so the script can decompose
             // end-to-end latency into queue-wait vs inspect-time. Same
@@ -1782,6 +1787,22 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Stop any existing pool before starting a new one.
         if (!g_worker_threads.empty() || g_timer_thread.joinable()) {
             stop_dispatch_pool_();
+        }
+
+        // A-P1-2: drain any events that arrived between the previous
+        // cmd:stop and now (e.g. an in-flight emit_trigger that beat
+        // clear_sink to the lock). Without this, the new run's first
+        // batch of inspects fires on stale images from before the
+        // user even called cmd:start, with cross-run image-handle
+        // refs that the new sink would otherwise leak.
+        {
+            std::lock_guard<std::mutex> lk(g_ev_mu);
+            for (auto& ev : g_ev_queue) {
+                for (auto& [src, h] : ev.images) {
+                    xi::ImagePool::instance().release(h);
+                }
+            }
+            g_ev_queue.clear();
         }
 
         g_continuous_fps = fps;
@@ -3224,6 +3245,33 @@ int main(int argc, char** argv) {
     };
     srv.on_close = [&] {
         std::fprintf(stderr, "[xinsp2] client disconnected\n");
+        // E-P1-2: a fresh client should get a fresh server view.
+        // Without these clears the next driver to reconnect inherits
+        // the prior session's subscription set, history ring, error
+        // ring, and "isolation_dead already reported" memo. None of
+        // that is visible from the new client's perspective and at
+        // best confuses, at worst hides regressions (an instance that
+        // dies AGAIN under the new client would silently be unreported
+        // because the dedup set still contains its name).
+        {
+            std::lock_guard<std::mutex> lk(g_sub_mu);
+            g_sub_all = true;
+            g_sub_names.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_hist_mu);
+            g_history.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_recent_errors_mu);
+            g_recent_errors.clear();
+        }
+        // E-P1-1: clear the dedup set so a re-dying instance is
+        // re-reported to the next client.
+        {
+            std::lock_guard<std::mutex> lk(g_iso_dead_mu);
+            g_iso_dead_reported.clear();
+        }
     };
     srv.on_text = [&](std::string_view s) {
         handle_command(srv, s);

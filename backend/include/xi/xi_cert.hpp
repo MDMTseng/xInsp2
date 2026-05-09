@@ -67,7 +67,18 @@ inline int64_t dll_size_of(const std::filesystem::path& p) {
 inline std::string iso8601_now() {
     auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
+    // D-P1-3: std::gmtime returns a pointer to a static-storage tm
+    // shared across all callers — racy when two threads cert plugins
+    // concurrently. The thread-safe variant differs by platform.
+#ifdef _WIN32
+    struct tm tm_buf;
+    if (gmtime_s(&tm_buf, &t) != 0) return "1970-01-01T00:00:00Z";
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_buf);
+#else
+    struct tm tm_buf;
+    if (!gmtime_r(&t, &tm_buf)) return "1970-01-01T00:00:00Z";
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_buf);
+#endif
     return buf;
 }
 
