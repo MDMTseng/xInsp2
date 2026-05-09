@@ -57,6 +57,45 @@
 
 namespace xi {
 
+// Append a JSON-quoted, escaped form of `s` to `out`. Closes audit
+// D-P1-1: project / plugin / instance names embedded in JSON output
+// were previously concatenated raw, so a single `"` (or any control
+// char) in the name corrupted project.json / plugin metadata. The
+// escape covers the minimal RFC 8259 requirements (\" \\ control
+// chars as \uXXXX). Same shape as xp::json_escape_into in
+// xi_protocol.hpp; duplicated here so this header doesn't pull in
+// the protocol parser as a transitive dep.
+inline void pm_json_escape(std::string& out, const std::string& s) {
+    out.push_back('"');
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char b[8];
+                    std::snprintf(b, sizeof(b), "\\u%04x",
+                                  (unsigned)(unsigned char)c);
+                    out += b;
+                } else {
+                    out.push_back(c);
+                }
+        }
+    }
+    out.push_back('"');
+}
+// Convenience: returns a fresh quoted+escaped string.
+inline std::string pm_json_quote(const std::string& s) {
+    std::string out;
+    pm_json_escape(out, s);
+    return out;
+}
+
 // Plugin ABI compatibility check. Reads the plugin DLL's
 // xi_plugin_abi_version() export and compares against the host's
 // XI_ABI_VERSION. Pre-versioning plugins (no export) are accepted as
@@ -1524,32 +1563,32 @@ public:
 
     std::string to_json() {
         std::lock_guard<std::mutex> lk(mu_);
-        std::string out = "{\"name\":\"" + project_.name + "\"";
-        out += ",\"script\":\"" + std::filesystem::path(project_.script_path).filename().string() + "\"";
+        std::string out = "{\"name\":";
+        pm_json_escape(out, project_.name);
+        out += ",\"script\":";
+        pm_json_escape(out, std::filesystem::path(project_.script_path).filename().string());
         out += ",\"instances\":[";
         int i = 0;
         for (auto& [k, v] : project_.instances) {
             if (i++) out += ",";
-            out += "{\"name\":\"" + v.name + "\",\"plugin\":\"" + v.plugin_name + "\"}";
+            out += "{\"name\":";  pm_json_escape(out, v.name);
+            out += ",\"plugin\":"; pm_json_escape(out, v.plugin_name);
+            out += "}";
         }
         out += "],\"plugins\":[";
         i = 0;
         for (auto& [k, v] : plugins_) {
             if (i++) out += ",";
             bool is_proj = project_plugin_origin_.count(v.name) > 0;
-            out += "{\"name\":\"" + v.name + "\",\"description\":\"" + v.description + "\"";
+            out += "{\"name\":"; pm_json_escape(out, v.name);
+            out += ",\"description\":"; pm_json_escape(out, v.description);
             out += ",\"has_ui\":" + std::string(v.has_ui ? "true" : "false");
             out += ",\"loaded\":" + std::string(v.handle ? "true" : "false");
             // origin: "project" if compiled from <project>/plugins, else "global"
             out += ",\"origin\":\"" + std::string(is_proj ? "project" : "global") + "\"";
             if (is_proj) {
-                out += ",\"source_dir\":\"";
-                // escape backslashes for JSON
-                for (char c : project_plugin_origin_[v.name]) {
-                    if (c == '\\' || c == '"') out += '\\';
-                    out += c;
-                }
-                out += "\"";
+                out += ",\"source_dir\":";
+                pm_json_escape(out, project_plugin_origin_[v.name]);
             }
             // Optional `manifest` block from plugin.json — passed through
             // verbatim. Clients (AI agents, doc tools) parse the body
@@ -1841,27 +1880,35 @@ private:
     void save_project_locked() {
         auto pj = std::filesystem::path(project_.folder_path) / "project.json";
         std::string out = "{\n";
-        out += "  \"name\": \""   + project_.name + "\",\n";
-        out += "  \"script\": \"" + std::filesystem::path(project_.script_path).filename().string() + "\",\n";
+        out += "  \"name\": "; pm_json_escape(out, project_.name); out += ",\n";
+        out += "  \"script\": ";
+        pm_json_escape(out, std::filesystem::path(project_.script_path).filename().string());
+        out += ",\n";
         out += "  \"trigger_policy\": " + trigger_policy_json_locked() + ",\n";
-        // Preserve `parallelism` block. Earlier versions only wrote
-        // name / script / trigger_policy / instances, so any UI flow
-        // that called cmd:save_project silently dropped the user's
-        // dispatch_threads / queue_depth / overflow config. Always
-        // write the block — defaults round-trip cleanly.
         out += "  \"parallelism\": {";
         out += "\"dispatch_threads\":" + std::to_string(project_.dispatch_threads);
         out += ",\"queue_depth\":"     + std::to_string(project_.queue_depth);
-        out += ",\"overflow\":\""      + project_.overflow + "\"";
+        out += ",\"overflow\":";
+        pm_json_escape(out, project_.overflow);
         out += "},\n";
         out += "  \"instances\": [";
         int i = 0;
         for (auto& [k, v] : project_.instances) {
             if (i++) out += ",";
-            out += "\n    {\"name\": \"" + v.name + "\", \"plugin\": \"" + v.plugin_name + "\"}";
+            out += "\n    {\"name\": "; pm_json_escape(out, v.name);
+            out += ", \"plugin\": ";   pm_json_escape(out, v.plugin_name);
+            out += "}";
         }
         out += "\n  ]\n}\n";
-        xi::atomic_write(pj, out);
+        // D-P1-5: atomic_write may fail (disk full / read-only / etc.).
+        // Bubble that up — silently losing project.json was the audit
+        // finding. Caller can't really recover, but at least logs it.
+        if (!xi::atomic_write(pj, out)) {
+            std::fprintf(stderr,
+                "[xinsp2] save_project_locked: atomic_write failed for %s "
+                "(disk full / read-only?). Project state on disk may be stale.\n",
+                pj.string().c_str());
+        }
     }
 
     std::string trigger_policy_json_locked() const {
@@ -1875,22 +1922,29 @@ private:
         s += ",\"required\":[";
         for (size_t i = 0; i < project_.trigger_required.size(); ++i) {
             if (i) s += ",";
-            s += "\""; s += project_.trigger_required[i]; s += "\"";
+            pm_json_escape(s, project_.trigger_required[i]);
         }
-        s += "],\"leader\":\"";
-        s += project_.trigger_leader;
-        s += "\"}";
+        s += "],\"leader\":";
+        pm_json_escape(s, project_.trigger_leader);
+        s += "}";
         return s;
     }
 
     void save_instance_json(const InstanceInfo& ii) {
         auto path = std::filesystem::path(ii.folder_path) / "instance.json";
         std::string out = "{\n";
-        out += "  \"plugin\": \"" + ii.plugin_name + "\",\n";
+        out += "  \"plugin\": "; pm_json_escape(out, ii.plugin_name); out += ",\n";
         out += "  \"config\": ";
         out += ii.instance ? ii.instance->get_def() : "{}";
         out += "\n}\n";
-        xi::atomic_write(path, out);
+        // D-P1-5: surface atomic_write failures so the user knows their
+        // edit didn't reach disk.
+        if (!xi::atomic_write(path, out)) {
+            std::fprintf(stderr,
+                "[xinsp2] save_instance_json: atomic_write failed for %s "
+                "(disk full / read-only?). Instance config on disk may be stale.\n",
+                path.string().c_str());
+        }
     }
 };
 
