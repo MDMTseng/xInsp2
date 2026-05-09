@@ -967,9 +967,19 @@ public:
             InstanceRegistry::instance().remove(k);
             InstanceFolderRegistry::instance().clear(k);
         }
-        // Drop project plugins entirely — their DLLs were built into the
-        // closed project's build/ folder and won't be valid against a
-        // different project. Global plugins stay registered.
+        // Destroy instances FIRST — same constraint as open_project (line
+        // ~995): CAbiInstanceAdapter's destructor calls the plugin's
+        // destroy_fn, which lives in the project plugin's DLL. FreeLibrary
+        // before the adapter dies leaves the destructor calling a dangling
+        // function pointer and the backend SEGVs. Clearing project_
+        // instances explicitly here lets us choose the order; the
+        // subsequent project_ = ProjectInfo{} would only destroy them
+        // after the FreeLibrary calls below if we relied on aggregate
+        // assignment.
+        // FL r8 P1 reproducer: harness_open_close_cycle.py iter 0.
+        project_.instances.clear();
+        // Now safe to drop the previous project's plugins — adapters are
+        // gone, no live destroy_fn callers remain.
         for (auto& [pname, _] : project_plugin_origin_) {
             auto it = plugins_.find(pname);
             if (it != plugins_.end()) {
