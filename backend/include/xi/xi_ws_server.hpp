@@ -51,6 +51,7 @@
 #include "xi_sha256.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -411,10 +412,34 @@ private:
     // preserved in rx_buf_ so read_pending() can consume them on the next
     // poll cycle.
     bool do_handshake(socket_t s) {
+        // P0-D5: previously do_handshake's recv() was untimed. A
+        // slow-loris peer (1 byte per minute, never ending its HTTP
+        // header) held the WS server's poll thread hostage. The
+        // server is single-threaded so this DoS'd the entire backend.
+        // Apply a per-recv timeout via SO_RCVTIMEO + cap total
+        // handshake duration at 5 s. Closes audit P0-D5.
+        const int kHandshakeRecvTimeoutMs = 2000;
+        const int kHandshakeTotalBudgetMs = 5000;
+        {
+#ifdef _WIN32
+            DWORD recv_to = (DWORD)kHandshakeRecvTimeoutMs;
+            ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                         reinterpret_cast<const char*>(&recv_to), sizeof(recv_to));
+#else
+            timeval recv_to{};
+            recv_to.tv_sec  = kHandshakeRecvTimeoutMs / 1000;
+            recv_to.tv_usec = (kHandshakeRecvTimeoutMs % 1000) * 1000;
+            ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &recv_to, sizeof(recv_to));
+#endif
+        }
+        auto t_start = std::chrono::steady_clock::now();
+        auto deadline = t_start + std::chrono::milliseconds(kHandshakeTotalBudgetMs);
+
         std::string req;
         char buf[2048];
         size_t header_end = std::string::npos;
         for (int i = 0; i < 16; ++i) {
+            if (std::chrono::steady_clock::now() > deadline) return false;
             int n = ::recv(s, buf, (int)sizeof(buf), 0);
             if (n <= 0) return false;
             req.append(buf, buf + n);
@@ -526,6 +551,19 @@ private:
             "\r\n";
         int sent = ::send(s, resp.data(), (int)resp.size(), 0);
         if (sent != (int)resp.size()) return false;
+
+        // Clear the handshake-only recv timeout. Post-upgrade recv()
+        // is driven by select() (read_pending) so a recv-with-timeout
+        // would spuriously close idle clients; the slow-loris attack
+        // surface is handshake-only.
+#ifdef _WIN32
+        DWORD recv_to = 0;
+        ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                     reinterpret_cast<const char*>(&recv_to), sizeof(recv_to));
+#else
+        timeval recv_to{};
+        ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &recv_to, sizeof(recv_to));
+#endif
 
         // Preserve anything we accidentally slurped past \r\n\r\n.
         size_t body_start = header_end + 4;

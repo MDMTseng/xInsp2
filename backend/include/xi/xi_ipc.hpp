@@ -147,7 +147,14 @@ public:
     // the same handle queue behind each other. With overlapped, R
     // and W can proceed concurrently — which the always-on reader
     // thread in ProcessInstanceAdapter relies on.
-    static Pipe accept_one(const std::string& name) {
+    // P0-C1: previously waited INFINITE on the OVERLAPPED event, which
+    // hung the host forever if the worker process crashed between
+    // CreateProcess (host side) and CreateFile (worker side). Default
+    // timeout is now 10 s — comfortably above the largest realistic
+    // worker startup (DLL load + CREATE rsp), and bounded so the
+    // adapter ctor's exception path (PR #28's fix) actually runs
+    // when the worker dies during startup.
+    static Pipe accept_one(const std::string& name, int timeout_ms = 10000) {
 #ifdef _WIN32
         std::string full = R"(\\.\pipe\)" + name;
         HANDLE h = CreateNamedPipeA(
@@ -172,7 +179,20 @@ public:
         if (!ok) {
             DWORD err = GetLastError();
             if (err == ERROR_IO_PENDING) {
-                WaitForSingleObject(ov.hEvent, INFINITE);
+                DWORD wait = (timeout_ms < 0) ? INFINITE : (DWORD)timeout_ms;
+                DWORD wr = WaitForSingleObject(ov.hEvent, wait);
+                if (wr != WAIT_OBJECT_0) {
+                    // P0-C1: timeout / abandoned. Cancel pending I/O
+                    // before closing handles so kernel doesn't write
+                    // back to a freed OVERLAPPED.
+                    CancelIoEx(h, &ov);
+                    CloseHandle(ov.hEvent);
+                    CloseHandle(h);
+                    throw std::runtime_error(
+                        "ConnectNamedPipe timed out after "
+                        + std::to_string(timeout_ms)
+                        + "ms (peer never connected)");
+                }
                 DWORD got = 0;
                 ok = GetOverlappedResult(h, &ov, &got, FALSE);
             } else if (err == ERROR_PIPE_CONNECTED) {
