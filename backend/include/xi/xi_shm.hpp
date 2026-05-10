@@ -179,6 +179,24 @@ public:
             UnmapViewOfFile(peek); CloseHandle(map);
             throw std::runtime_error("region magic mismatch");
         }
+        // C-P1-1: reject mismatched layout versions. Without this, a
+        // host built from one commit and a worker built from another
+        // (different ShmBlockHeader layout, different SHM_VERSION)
+        // would silently corrupt the region — both sides write valid-
+        // looking blocks against incompatible offsets. The version
+        // check makes the mismatch fail fast at attach, so the worker
+        // exits cleanly and the host's accept_one times out (now
+        // bounded by P0-C1's timeout).
+        if (peek_hdr->version != SHM_VERSION) {
+            uint32_t got = peek_hdr->version;
+            UnmapViewOfFile(peek); CloseHandle(map);
+            throw std::runtime_error(
+                "SHM version mismatch: region is v"
+                + std::to_string(got)
+                + " but this binary expects v"
+                + std::to_string(SHM_VERSION)
+                + " (host and worker built from different commits?)");
+        }
         uint64_t sz = peek_hdr->total_size;
         UnmapViewOfFile(peek);
 
