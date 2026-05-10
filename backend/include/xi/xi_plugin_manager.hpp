@@ -579,6 +579,37 @@ public:
             ii.instance.reset();   // dtor calls xi_plugin_destroy
         }
 
+        // B-P1-4: any error-return after step 1 must put the instances
+        // back into the dict using the OLD (still-loaded) DLL — the
+        // alternative is leaving project_.instances[name].instance
+        // null and subsequent calls silently no-op. The compile-
+        // failure branch already does this; lift it into a lambda so
+        // every other early-return path does too.
+        auto restore_against_old = [&]() {
+            auto pi_it = plugins_.find(plugin_name);
+            if (pi_it == plugins_.end()) return;
+            auto& pi_old = pi_it->second;
+            if (!pi_old.c_factory && !pi_old.factory) return;
+            static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+            for (auto& p : pending) {
+                std::shared_ptr<InstanceBase> inst;
+                if (pi_old.c_factory) {
+                    void* raw = pi_old.c_factory(&host, p.name.c_str());
+                    if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
+                        p.name, plugin_name, pi_old.handle, raw);
+                } else if (pi_old.factory) {
+                    auto* raw = pi_old.factory(p.name.c_str());
+                    if (raw) inst.reset(raw);
+                }
+                if (!inst) continue;
+                if (!p.def_json.empty()) inst->set_def(p.def_json);
+                project_.instances[p.name].instance = inst;
+                InstanceRegistry::instance().add(inst);
+                attach_trigger_bridge(inst.get(), p.name);
+                r.reattached_instances.push_back(p.name);
+            }
+        };
+
         // 2. Compile fresh into the same plugin folder. We don't drop
         //    the old DLL until the new one is ready, so a compile
         //    failure leaves the project in its previous working state.
@@ -598,6 +629,7 @@ public:
         else                                     walk(plugin_dir);
         if (sources.empty()) {
             r.error = "no .cpp sources in " + plugin_dir.string();
+            restore_against_old();   // B-P1-4
             return r;
         }
         std::vector<std::string> includes;
@@ -660,6 +692,8 @@ public:
         auto pi_it = plugins_.find(plugin_name);
         if (pi_it == plugins_.end()) {
             r.error = "internal: plugin entry vanished mid-recompile";
+            // B-P1-4: nothing to restore against (old plugin entry
+            // gone), but the bookkeeping for `r` is still correct.
             return r;
         }
         auto& pi = pi_it->second;
@@ -669,17 +703,29 @@ public:
             pi.factory   = nullptr;
             pi.c_factory = nullptr;
         }
+        // After the FreeLibrary above, restore_against_old() can no
+        // longer save us — the old DLL is gone. The remaining error
+        // returns below leave instances null deliberately; that's
+        // strictly worse than not freeing the old DLL, but keeping
+        // the old DLL in memory while the user just asked for a
+        // recompile is also wrong (subsequent calls would land in the
+        // old code, contradicting the user's intent). Document the
+        // tradeoff via a clear "rebuild the project" error message
+        // rather than silently no-op'ing.
         pi.dll_name    = std::filesystem::path(cres.dll_path).filename().string();
         pi.folder_path = std::filesystem::path(cres.dll_path).parent_path().string();
         pi.handle = LoadLibraryA(cres.dll_path.c_str());
         if (!pi.handle) {
-            r.error = "LoadLibrary failed on freshly-built DLL";
+            r.error = "LoadLibrary failed on freshly-built DLL — instances "
+                      "for this plugin are gone; reopen the project to "
+                      "recover";
             return r;
         }
         {
             std::string err;
             if (!plugin_abi_compatible(pi.handle, plugin_name, &err)) {
-                r.error = err;
+                r.error = err + " — instances for this plugin are gone; "
+                                "reopen the project to recover";
                 FreeLibrary(pi.handle);
                 pi.handle = nullptr;
                 return r;
@@ -694,7 +740,9 @@ public:
                 GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
         }
         if (!pi.c_factory && !pi.factory) {
-            r.error = "factory '" + pi.factory_symbol + "' not exported in new DLL";
+            r.error = "factory '" + pi.factory_symbol + "' not exported in new DLL"
+                      " — instances for this plugin are gone; reopen the "
+                      "project to recover";
             return r;
         }
 
@@ -1402,27 +1450,50 @@ public:
                         attach_trigger_bridge(ii.instance.get(), ii.name);
                     }
                     if (!created) {
+                        // B-P1-2: factory failed → adapter wasn't created,
+                        // but InstanceFolderRegistry::set ran a few lines
+                        // up. Clear the folder-registry entry so a stale
+                        // reference doesn't outlive this open_project.
+                        InstanceFolderRegistry::instance().clear(inst_name);
                         last_open_warnings_.push_back(
                             {inst_name, *plugin, "factory returned null"});
                         std::fprintf(stderr,
                             "[xinsp2] skip instance '%s' (%s): factory returned null\n",
                             inst_name.c_str(), plugin->c_str());
+                    } else {
+                        // Only persist the InstanceInfo in project_.instances
+                        // when we actually have a live adapter. Skip-bad
+                        // entries shouldn't become "phantom" entries that
+                        // close_project then iterates over.
+                        project_.instances[ii.name] = std::move(ii);
                     }
                 } else {
+                    // B-P1-2: same gap as the factory-null branch above —
+                    // InstanceFolderRegistry::set wasn't called yet here
+                    // (we only set it after pit was found), but log+continue
+                    // shape stays consistent.
                     last_open_warnings_.push_back(
                         {inst_name, *plugin, "plugin not loaded / not found"});
                     std::fprintf(stderr,
                         "[xinsp2] skip instance '%s': plugin '%s' not loaded\n",
                         inst_name.c_str(), plugin->c_str());
                 }
-                project_.instances[ii.name] = std::move(ii);
                 } catch (const std::exception& e) {
+                    // B-P1-1: catch ran AFTER InstanceFolderRegistry::set
+                    // and (potentially) InstanceRegistry::add inside the
+                    // try block, but didn't undo either. Stale entries
+                    // leaked until the NEXT open_project's bulk clear.
+                    // Symmetric cleanup here:
+                    InstanceFolderRegistry::instance().clear(inst_name);
+                    InstanceRegistry::instance().remove(inst_name);
                     last_open_warnings_.push_back(
                         {inst_name, "", std::string("exception: ") + e.what()});
                     std::fprintf(stderr,
                         "[xinsp2] skip instance '%s': %s\n",
                         inst_name.c_str(), e.what());
                 } catch (...) {
+                    InstanceFolderRegistry::instance().clear(inst_name);
+                    InstanceRegistry::instance().remove(inst_name);
                     last_open_warnings_.push_back(
                         {inst_name, "", "unknown exception during load"});
                     std::fprintf(stderr,
