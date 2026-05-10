@@ -65,9 +65,69 @@ namespace xi {
 // validation cleanly. Generation is per-region (set at create time).
 constexpr uint8_t SHM_HANDLE_TAG = 0xA5;
 
-// Layout of byte 0 of the SHM region. Cache-line padded so the bump
-// pointer doesn't share a line with metadata.
+// Compile-time cap on number of size-class buckets. Runtime config can
+// declare anywhere from 1 to N_BUCKETS_MAX. Cap is small so per-bucket
+// arrays (free_head[], a2_free_count[]) fit in a single cache line.
+constexpr int N_BUCKETS_MAX = 8;
+
+// Tier identifiers for ShmBlockHeader::tier_origin.
+//   A1 = instance-private static pool (Phase D)
+//   A2 = shared size-class free-list (Phase B)
+//   A3 = bump fallback (existing path)
+// A2 is the default for blocks alloc'd without an explicit owner_id.
+constexpr uint8_t TIER_A1 = 0;
+constexpr uint8_t TIER_A2 = 1;
+constexpr uint8_t TIER_A3 = 2;
+
+// Project-level allocator configuration. Read from project.json's
+// `shm` block at open_project; passed to ShmRegion::create; persisted
+// in ShmRegionHeader so the worker process reads identical values
+// when it attaches.
+//
+// All fields are optional in project.json; defaults below applied
+// per-key. Workers don't get to override — host is the source of
+// truth.
+struct ShmConfig {
+    uint64_t region_size_bytes        = 512ull * 1024 * 1024;
+    uint64_t promote_threshold_bytes  = 16ull  * 1024 * 1024;
+    uint64_t bucket_sizes_bytes[N_BUCKETS_MAX] = {
+        16ull  * 1024 * 1024,   //  16 MB
+        64ull  * 1024 * 1024,   //  64 MB
+        256ull * 1024 * 1024,   // 256 MB
+        0, 0, 0, 0, 0
+    };
+    int32_t  n_buckets                  = 3;
+    int32_t  max_in_flight_per_instance = 3;
+};
+
+// Cache-line-aligned counter block for production observability.
+// Lives inside ShmRegionHeader. All fields are atomic so host /
+// workers / monitoring tools can read without locking. Values are
+// monotonic except a2_free_count[] which is the current outstanding-
+// free count per bucket.
+struct alignas(64) ShmMetrics {
+    std::atomic<uint64_t> a1_acquire_total;        // Tier 1 hits
+    std::atomic<uint64_t> a2_acquire_total;        // Tier 2 hits (free-list pop)
+    std::atomic<uint64_t> a2_bump_inflate_total;   // Tier 2 free-list miss → bump as bucket-sized
+    std::atomic<uint64_t> a3_bump_total;           // Tier 3 raw bump fallback (size > all buckets)
+    std::atomic<uint64_t> alloc_failed_total;      // Region full → INVALID returned
+    std::atomic<int32_t>  a2_free_count[N_BUCKETS_MAX];  // current depth of each bucket's free-list
+    uint32_t              _pad[14];                // pad to 128 B (2 cache lines)
+};
+static_assert(sizeof(ShmMetrics) == 128, "ShmMetrics must be 128 bytes");
+
+// Layout of byte 0 of the SHM region. The header is sized so the
+// payload starts on a 64-byte boundary regardless of which fields
+// land on which cache line.
+//
+// Layout v2 adds: ShmConfig (read-only, set at create), free_head[]
+// (Phase B uses), ShmMetrics (Phase E uses). Phases B/E read/write
+// these; Phase A only initialises them to zero so the layout exists.
+//
+// SHM_VERSION bumped to 2; cross-version handshake (PR #50) catches
+// host/worker built from different commits.
 struct alignas(64) ShmRegionHeader {
+    // --- cache line 1: identification + bump state -----------------
     uint32_t                  magic;          // 'XSHM' = 0x4D485358
     uint32_t                  version;        // bump on layout change
     uint64_t                  total_size;     // bytes
@@ -75,27 +135,57 @@ struct alignas(64) ShmRegionHeader {
     std::atomic<uint64_t>     bump_offset;    // next free, cross-proc atomic
     std::atomic<uint32_t>     block_count;
     uint8_t                   tag;            // baked into every handle
-    uint8_t                   _pad[63 - sizeof(std::atomic<uint64_t>)
-                                        - sizeof(std::atomic<uint32_t>)
-                                        - sizeof(uint64_t)*2 - sizeof(uint32_t)*2 - 1];
+    uint8_t                   _pad_a[3];
+    uint32_t                  _pad_b[5];      // pad to 64
+
+    // --- cache line 2: ShmConfig snapshot (read-only after create) -
+    uint64_t                  cfg_promote_threshold_bytes;
+    int32_t                   cfg_n_buckets;
+    int32_t                   cfg_max_in_flight_per_instance;
+    uint64_t                  cfg_bucket_sizes_bytes[N_BUCKETS_MAX]; // 64 B
+    uint32_t                  _pad_c[2];                              // pad to 128
+
+    // --- cache lines 3-4: A2 free-list heads (Phase B) -------------
+    // Encoded as (tag : u16, offset : u48). offset==0 means empty.
+    // ABA defense: tag monotonically incremented per push.
+    std::atomic<uint64_t>     free_head[N_BUCKETS_MAX];               // 64 B (1 cache line)
+    uint8_t                   _pad_d[64];                             // reserve cache line for A1 future
+
+    // --- cache lines 5-6: metrics (Phase E) ------------------------
+    ShmMetrics                metrics;                                 // 128 B
 };
+static_assert(sizeof(ShmRegionHeader) % 64 == 0,
+              "ShmRegionHeader must be a whole number of cache lines");
 
 // Per-block metadata sitting in front of the payload.
+//
+// Layout v2 (still 64 bytes; new fields carved out of _pad):
+//   stride            — image row pitch in bytes (aligned to kRowAlign)
+//   bucket_index      — cached bucket index for O(1) release dispatch
+//   tier_origin       — TIER_A1 / A2 / A3 (sets release destination)
+//   owner_instance_id — non-zero only for Tier 1 blocks
+//   next_free_offset  — populated when block is on a free-list
 struct alignas(64) ShmBlockHeader {
-    uint32_t              magic;     // 'XBLK' = 0x4B4C4258
-    uint32_t              kind;      // 0=image, 1=buffer
+    uint32_t              magic;             // 'XBLK' = 0x4B4C4258
+    uint32_t              kind;              // 0=image, 1=buffer
     int32_t               width;
     int32_t               height;
     int32_t               channels;
-    int32_t               payload_size;  // bytes
+    int32_t               payload_size;      // bytes (raw payload, not including header)
+    int32_t               stride;            // image row pitch; 0 for buffers
+    int32_t               bucket_index;      // -1 if not a bucket-allocated block (legacy / future)
+    uint8_t               tier_origin;       // TIER_A1 / A2 / A3
+    uint8_t               _pad_a[3];
+    int32_t               owner_instance_id; // 0 for shared (A2/A3) blocks
+    uint64_t              next_free_offset;  // free-list link when refcount=0
     std::atomic<int32_t>  refcount;
-    uint32_t              _pad[8];   // pad to 64 bytes
+    uint32_t              _reserved[3];      // pad to 64 bytes
 };
 static_assert(sizeof(ShmBlockHeader) == 64, "BlockHeader must be 64 bytes");
 
 constexpr uint32_t SHM_REGION_MAGIC = 0x4D485358; // 'XSHM' little-endian
 constexpr uint32_t SHM_BLOCK_MAGIC  = 0x4B4C4258; // 'XBLK' little-endian
-constexpr uint32_t SHM_VERSION      = 1;
+constexpr uint32_t SHM_VERSION      = 2;          // bumped from 1 in Phase A
 
 // Opaque RAII handle to one mapped SHM region.
 class ShmRegion {
@@ -107,14 +197,26 @@ public:
         Buffer = 1,
     };
 
-    // Create a fresh region, sized for `total_bytes` (rounded to page).
-    // Throws on failure. The OS object lives until every mapping closes.
+    // Create a fresh region with a ShmConfig (Phase A). Old single-
+    // argument signature is kept as an inline shim so existing callers
+    // build clean while we roll out config plumbing.
     static ShmRegion create(const std::string& name, uint64_t total_bytes) {
+        ShmConfig cfg;
+        cfg.region_size_bytes = total_bytes;
+        return create(name, cfg);
+    }
+
+    // Create a fresh region from a ShmConfig. Region size comes from
+    // cfg.region_size_bytes (rounded to page granularity). Bucket
+    // sizes / promote threshold / max_in_flight are persisted in the
+    // header so the worker `attach()` reads identical values.
+    // Throws on failure. The OS object lives until every mapping closes.
+    static ShmRegion create(const std::string& name, const ShmConfig& cfg) {
 #ifdef _WIN32
         // Round up to a page boundary so we don't waste tail bytes.
         SYSTEM_INFO si; GetSystemInfo(&si);
         uint64_t pg = si.dwAllocationGranularity;
-        uint64_t sz = ((total_bytes + pg - 1) / pg) * pg;
+        uint64_t sz = ((cfg.region_size_bytes + pg - 1) / pg) * pg;
 
         HANDLE map = CreateFileMappingA(
             INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
@@ -153,9 +255,20 @@ public:
         h->bump_offset.store(h->payload_start, std::memory_order_release);
         h->block_count.store(0, std::memory_order_relaxed);
         h->tag           = SHM_HANDLE_TAG;
+
+        // Persist ShmConfig so worker's attach() reads consistent
+        // values. Worker MUST NOT override these — host is source of
+        // truth. Bucket / metric arrays were memset to 0 above; only
+        // the configured ones get touched in subsequent phases.
+        h->cfg_promote_threshold_bytes    = cfg.promote_threshold_bytes;
+        h->cfg_n_buckets                  = cfg.n_buckets;
+        h->cfg_max_in_flight_per_instance = cfg.max_in_flight_per_instance;
+        for (int i = 0; i < N_BUCKETS_MAX; ++i) {
+            h->cfg_bucket_sizes_bytes[i] = cfg.bucket_sizes_bytes[i];
+        }
         return r;
 #else
-        (void)name; (void)total_bytes;
+        (void)name; (void)cfg;
         throw std::runtime_error("xi_shm only implemented for Windows in this spike");
 #endif
     }
@@ -256,17 +369,38 @@ public:
     // would then write w*h*ch bytes, scribbling past the block end
     // into the next block's payload. Reject anything that doesn't
     // fit in int32 at the API boundary.
-    uint64_t alloc_image(int32_t w, int32_t h, int32_t ch) {
+    //
+    // Phase A: optional `owner_id` parameter; non-zero binds the
+    // block to a Tier 1 instance pool (enforced in Phase D).
+    // Default 0 = shared (Tier 2 / 3). Today (Phase A only),
+    // owner_id is recorded in the header but doesn't change which
+    // pool the block comes from — bump-only behaviour preserved.
+    uint64_t alloc_image(int32_t w, int32_t h, int32_t ch,
+                         int32_t owner_id = 0) {
         if (w <= 0 || h <= 0 || ch <= 0) return INVALID_HANDLE;
         const int64_t pixels = int64_t(w) * int64_t(h) * int64_t(ch);
         if (pixels <= 0 || pixels > INT32_MAX) return INVALID_HANDLE;
-        return alloc_(Kind::Image, w, h, ch, (int32_t)pixels);
+        // Phase A placeholder: stride := w*ch (no row alignment yet).
+        // Phase B bumps to align_up(w*ch, kRowAlign).
+        int32_t stride = w * ch;
+        return alloc_(Kind::Image, w, h, ch, (int32_t)pixels,
+                      stride, owner_id);
     }
 
     // Allocate an opaque byte buffer (e.g. ML weights, big metadata).
-    uint64_t alloc_buffer(int32_t size_bytes) {
+    uint64_t alloc_buffer(int32_t size_bytes,
+                          int32_t owner_id = 0) {
         if (size_bytes <= 0) return INVALID_HANDLE;
-        return alloc_(Kind::Buffer, 0, 0, 0, size_bytes);
+        return alloc_(Kind::Buffer, 0, 0, 0, size_bytes,
+                      /*stride=*/0, owner_id);
+    }
+
+    // Read-only view of a block's header fields. Used by callers that
+    // need to know stride / tier_origin / owner_instance_id (e.g.
+    // image_data wrappers, telemetry, Phase B/D dispatch).
+    // Returns nullptr if the handle is invalid.
+    const ShmBlockHeader* block_header(uint64_t handle) const {
+        return block_(handle);
     }
 
     // Increment the refcount. Caller is responsible for matching with
@@ -335,7 +469,10 @@ private:
         return b;
     }
 
-    uint64_t alloc_(Kind k, int32_t w, int32_t h, int32_t ch, int32_t payload_size) {
+    uint64_t alloc_(Kind k, int32_t w, int32_t h, int32_t ch,
+                    int32_t payload_size,
+                    int32_t stride        = 0,
+                    int32_t owner_id      = 0) {
         if (!base_) return INVALID_HANDLE;
         auto* hdr = header();
         // Round up so each block's payload starts cache-aligned too.
@@ -352,12 +489,22 @@ private:
         }
         auto* blk = reinterpret_cast<ShmBlockHeader*>((uint8_t*)base_ + prev);
         std::memset(blk, 0, sizeof(*blk));
-        blk->magic        = SHM_BLOCK_MAGIC;
-        blk->kind         = (uint32_t)k;
-        blk->width        = w;
-        blk->height       = h;
-        blk->channels     = ch;
-        blk->payload_size = payload_size;
+        blk->magic             = SHM_BLOCK_MAGIC;
+        blk->kind              = (uint32_t)k;
+        blk->width             = w;
+        blk->height            = h;
+        blk->channels          = ch;
+        blk->payload_size      = payload_size;
+        blk->stride            = stride;
+        // Phase A: every alloc_() goes through bump (no free-list yet),
+        // so origin is "A2 bump-inflated" — the closest tier label
+        // before Phase B introduces the actual size-class free-list.
+        // Phase B will set tier_origin = TIER_A2 for free-list blocks
+        // and TIER_A3 for true bump fallback.
+        blk->bucket_index      = -1;
+        blk->tier_origin       = TIER_A2;
+        blk->owner_instance_id = owner_id;
+        blk->next_free_offset  = 0;
         blk->refcount.store(1, std::memory_order_release);
         hdr->block_count.fetch_add(1, std::memory_order_relaxed);
         return ((uint64_t)hdr->tag << 56) | prev;
