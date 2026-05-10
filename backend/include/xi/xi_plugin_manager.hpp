@@ -624,18 +624,32 @@ public:
             // Re-instantiate against the OLD DLL so we don't leave the
             // project broken. Old DLL is still loaded since we never
             // FreeLibrary'd it.
+            //
+            // P0-D4: previously only handled the c_factory branch; an
+            // old-ABI plugin (using the legacy `factory` C++ symbol)
+            // had its instances destroyed in step 1 but never
+            // re-attached. The instances dict entries were left with
+            // null `instance`; subsequent calls silently no-op.
+            // Handle BOTH old- and new-ABI factory shapes here.
             auto pi_it = plugins_.find(plugin_name);
-            if (pi_it != plugins_.end() && pi_it->second.c_factory) {
+            if (pi_it != plugins_.end()
+                && (pi_it->second.c_factory || pi_it->second.factory)) {
                 static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
                 for (auto& p : pending) {
-                    void* raw = pi_it->second.c_factory(&host, p.name.c_str());
-                    if (!raw) continue;
-                    auto adapter = std::make_shared<CAbiInstanceAdapter>(
-                        p.name, plugin_name, pi_it->second.handle, raw);
-                    if (!p.def_json.empty()) adapter->set_def(p.def_json);
-                    project_.instances[p.name].instance = adapter;
-                    InstanceRegistry::instance().add(adapter);
-                    attach_trigger_bridge(adapter.get(), p.name);
+                    std::shared_ptr<InstanceBase> inst;
+                    if (pi_it->second.c_factory) {
+                        void* raw = pi_it->second.c_factory(&host, p.name.c_str());
+                        if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
+                            p.name, plugin_name, pi_it->second.handle, raw);
+                    } else if (pi_it->second.factory) {
+                        auto* raw = pi_it->second.factory(p.name.c_str());
+                        if (raw) inst.reset(raw);
+                    }
+                    if (!inst) continue;
+                    if (!p.def_json.empty()) inst->set_def(p.def_json);
+                    project_.instances[p.name].instance = inst;
+                    InstanceRegistry::instance().add(inst);
+                    attach_trigger_bridge(inst.get(), p.name);
                     r.reattached_instances.push_back(p.name);
                 }
             }
@@ -1208,6 +1222,23 @@ public:
                     if (std::filesystem::exists(dll_path)) {
                         pi2.handle = LoadLibraryA(dll_path.string().c_str());
                         if (pi2.handle) {
+                            // P0-D3: ABI compatibility check was missing
+                            // on this code path. A stale plugin DLL built
+                            // against a future ABI loaded silently and
+                            // got called with the new ABI signatures —
+                            // memory corruption risk. Mirror the load_plugin
+                            // path's check.
+                            std::string err;
+                            if (!plugin_abi_compatible(pi2.handle, *plugin, &err)) {
+                                FreeLibrary(pi2.handle);
+                                pi2.handle = nullptr;
+                                last_open_warnings_.push_back(
+                                    {inst_name, *plugin, "plugin ABI mismatch: " + err});
+                                std::fprintf(stderr,
+                                    "[xinsp2] skip instance '%s': %s\n",
+                                    inst_name.c_str(), err.c_str());
+                                continue;
+                            }
                             auto has_destroy = GetProcAddress(pi2.handle, "xi_plugin_destroy") != nullptr;
                             if (has_destroy)
                                 pi2.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
@@ -1215,6 +1246,26 @@ public:
                             else
                                 pi2.factory = reinterpret_cast<PluginInfo::FactoryFn>(
                                     GetProcAddress(pi2.handle, pi2.factory_symbol.c_str()));
+                            // P0-D3 (cont.): if neither factory symbol
+                            // resolves, the DLL is loaded but unusable.
+                            // Previously left in place with handle set
+                            // and factory=null; subsequent open_project
+                            // attempts found a stale entry. FreeLibrary
+                            // and clear handle so the entry stays in a
+                            // clean "not loaded" state.
+                            if (!pi2.factory && !pi2.c_factory) {
+                                FreeLibrary(pi2.handle);
+                                pi2.handle = nullptr;
+                                last_open_warnings_.push_back(
+                                    {inst_name, *plugin,
+                                     "plugin DLL has no factory symbol "
+                                     + pi2.factory_symbol});
+                                std::fprintf(stderr,
+                                    "[xinsp2] skip instance '%s': no factory '%s'\n",
+                                    inst_name.c_str(),
+                                    pi2.factory_symbol.c_str());
+                                continue;
+                            }
                         }
                     }
                 }
