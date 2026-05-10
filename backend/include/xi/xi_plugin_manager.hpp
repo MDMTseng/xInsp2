@@ -1782,49 +1782,66 @@ private:
         return pi;
     }
 
+    // D-P1-2: top-level top-key extraction. Previously implemented as a
+    // substring search which matched the key text anywhere — including
+    // inside another value's string content. A plugin description
+    // containing `"plugin": "evil"` would cause downstream code to load
+    // `evil` instead of the actual plugin field. cJSON-based parsing
+    // closes that hole; only top-level object keys are honoured.
+    //
+    // Returns nullopt on parse failure / missing key / wrong type
+    // (matches the pre-fix contract for "treat as missing"). Numbers
+    // declared as JSON numbers are accepted via stringification so
+    // legitimate `"call_timeout_ms": 5000` works without a quoted
+    // string (closes the audit's secondary observation that the old
+    // helper expected quotes for numeric fields).
     static std::optional<std::string> extract_string(const std::string& json,
                                                       const std::string& key) {
-        auto pos = json.find("\"" + key + "\"");
-        if (pos == std::string::npos) return std::nullopt;
-        pos = json.find(':', pos);
-        if (pos == std::string::npos) return std::nullopt;
-        pos++;
-        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
-        if (pos >= json.size() || json[pos] != '"') return std::nullopt;
-        pos++; // skip opening quote
-        auto end = json.find('"', pos);
-        if (end == std::string::npos) return std::nullopt;
-        return json.substr(pos, end - pos);
+        cJSON* root = cJSON_Parse(json.c_str());
+        if (!root) return std::nullopt;
+        std::optional<std::string> out;
+        cJSON* k = cJSON_GetObjectItem(root, key.c_str());
+        if (k) {
+            if (cJSON_IsString(k) && k->valuestring) {
+                out = std::string(k->valuestring);
+            } else if (cJSON_IsNumber(k)) {
+                // Prefer integer formatting if the value is integral
+                // — many call sites stoi() the result.
+                double v = k->valuedouble;
+                if (v == (double)(long long)v) {
+                    out = std::to_string((long long)v);
+                } else {
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "%.17g", v);
+                    out = std::string(buf);
+                }
+            } else if (cJSON_IsBool(k)) {
+                out = std::string(cJSON_IsTrue(k) ? "true" : "false");
+            }
+        }
+        cJSON_Delete(root);
+        return out;
     }
 
+    // Extract the raw JSON text of a top-level value (object, array,
+    // string, scalar) at `key`. Used for opaque blocks like `manifest`
+    // and `config` that the caller wants to forward verbatim.
     static bool detail_find_key(const std::string& json, const std::string& key,
                                  std::string& out) {
-        auto pos = json.find("\"" + key + "\":");
-        if (pos == std::string::npos) return false;
-        pos += key.size() + 3;
-        while (pos < json.size() && json[pos] == ' ') pos++;
-        // Extract value (object, array, string, or scalar)
-        const char* p = json.data() + pos;
-        const char* end = json.data() + json.size();
-        const char* start = p;
-        if (*p == '{' || *p == '[') {
-            char open = *p, close = (open == '{') ? '}' : ']';
-            int depth = 0;
-            while (p < end) {
-                if (*p == '"') { p++; while (p < end && *p != '"') { if (*p == '\\') p++; p++; } }
-                if (*p == open) depth++;
-                if (*p == close) { depth--; if (depth == 0) { p++; break; } }
-                p++;
+        cJSON* root = cJSON_Parse(json.c_str());
+        if (!root) return false;
+        bool found = false;
+        cJSON* k = cJSON_GetObjectItem(root, key.c_str());
+        if (k) {
+            char* printed = cJSON_PrintUnformatted(k);
+            if (printed) {
+                out.assign(printed);
+                std::free(printed);
+                found = true;
             }
-        } else if (*p == '"') {
-            p++;
-            while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
-            p++;
-        } else {
-            while (p < end && *p != ',' && *p != '}' && *p != ']') p++;
         }
-        out.assign(start, p);
-        return true;
+        cJSON_Delete(root);
+        return found;
     }
 
     // FL r6 P2-3: validate an instance's `config` JSON against the
