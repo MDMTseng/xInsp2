@@ -3194,18 +3194,33 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[xinsp2] plugins_dir=%s\n",  g_plugins_dir.c_str());
 
     // Create the SHM buffer pool exactly once, name it after our PID so
-    // worker processes can find it via OpenFileMapping. ~512 MB is a
-    // reasonable spike default; production would size from config or
-    // image volume. Failing to create just leaves shm_create_image
-    // returning 0 — plugins fall back to heap.
+    // worker processes can find it via OpenFileMapping. Default 512 MB;
+    // sysadmin can raise via XINSP2_SHM_REGION_MB env var (Phase A —
+    // project-level config in project.json `shm.buckets_mb` etc. is
+    // stored in the region header by the cmd:open_project handler;
+    // Phase B reads them when bucket logic actually engages).
+    // Failing to create just leaves shm_create_image returning 0 —
+    // plugins fall back to heap.
     static std::unique_ptr<xi::ShmRegion> g_shm_region;
     char shm_name[64];
     std::snprintf(shm_name, sizeof(shm_name), "xinsp2-shm-%lu",
                   (unsigned long)GetCurrentProcessId());
     g_shm_name = shm_name;
+    xi::ShmConfig shm_cfg;  // defaults: 512 MB, [16,64,256] MB buckets, 16 MB threshold
+    if (const char* env = std::getenv("XINSP2_SHM_REGION_MB"); env && *env) {
+        try {
+            uint64_t mb = std::stoull(env);
+            if (mb > 0 && mb <= 65536) {  // sanity cap at 64 GB
+                shm_cfg.region_size_bytes = mb * 1024ull * 1024ull;
+                std::fprintf(stderr,
+                    "[xinsp2] XINSP2_SHM_REGION_MB=%llu → region size %llu MB\n",
+                    (unsigned long long)mb, (unsigned long long)mb);
+            }
+        } catch (...) { /* ignore malformed; use default */ }
+    }
     try {
         g_shm_region = std::make_unique<xi::ShmRegion>(
-            xi::ShmRegion::create(shm_name, 512ull * 1024 * 1024));
+            xi::ShmRegion::create(shm_name, shm_cfg));
         xi::ImagePool::set_shm_region(g_shm_region.get());
         std::fprintf(stderr, "[xinsp2] shm region '%s' size=%lluMB\n",
                      shm_name,
