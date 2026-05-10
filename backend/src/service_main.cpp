@@ -2397,6 +2397,38 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         out += "]";
         send_rsp_ok(srv, id, out);
+    } else if (name == "shm_metrics") {
+        // Phase E: SHM allocator counters. Snapshot is atomic per-
+        // field but not synchronised across fields — values are
+        // self-consistent at the moment of read but the snapshot may
+        // capture mid-flux. Production monitoring polls this every
+        // few seconds; alarm rules live on the client side.
+        auto* region = xi::ImagePool::shm_region_singleton();
+        if (!region) {
+            send_rsp_err(srv, id, "shm region not initialised");
+            return;
+        }
+        auto snap = region->metrics_snapshot();
+        std::string data = "{";
+        data += "\"a1_acquire_total\":"      + std::to_string(snap.a1_acquire_total);
+        data += ",\"a2_acquire_total\":"     + std::to_string(snap.a2_acquire_total);
+        data += ",\"a2_bump_inflate_total\":" + std::to_string(snap.a2_bump_inflate_total);
+        data += ",\"a3_bump_total\":"        + std::to_string(snap.a3_bump_total);
+        data += ",\"alloc_failed_total\":"   + std::to_string(snap.alloc_failed_total);
+        data += ",\"region_total_size\":"    + std::to_string(snap.region_total_size);
+        data += ",\"region_used_bytes\":"    + std::to_string(snap.region_used_bytes);
+        data += ",\"region_block_count\":"   + std::to_string(snap.region_block_count);
+        data += ",\"promote_threshold_bytes\":" + std::to_string(snap.promote_threshold_bytes);
+        data += ",\"n_buckets\":"            + std::to_string(snap.n_buckets);
+        data += ",\"buckets\":[";
+        for (int i = 0; i < snap.n_buckets; ++i) {
+            if (i) data += ",";
+            data += "{\"size_bytes\":" + std::to_string(snap.bucket_sizes_bytes[i]);
+            data += ",\"a2_free_count\":" + std::to_string(snap.a2_free_count[i]);
+            data += "}";
+        }
+        data += "]}";
+        send_rsp_ok(srv, id, data);
     } else if (name == "image_pool_stats") {
         // Per-owner ImagePool footprint. Owner IDs alone are
         // meaningless to humans — we look them up against the

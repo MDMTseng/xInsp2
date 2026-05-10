@@ -473,6 +473,53 @@ public:
 
     bool is_valid_handle(uint64_t handle) const { return block_(handle) != nullptr; }
 
+    // Phase E (telemetry): snapshot of allocator counters. All fields
+    // monotonic except `a2_free_count[]` which is "current depth of
+    // bucket's free-list". Reads are atomic but not synchronised
+    // across all fields — values are individually consistent but the
+    // snapshot may capture the system mid-flux. Good enough for
+    // monitoring; not for invariant assertion.
+    struct MetricsSnapshot {
+        uint64_t a1_acquire_total      = 0;
+        uint64_t a2_acquire_total      = 0;
+        uint64_t a2_bump_inflate_total = 0;
+        uint64_t a3_bump_total         = 0;
+        uint64_t alloc_failed_total    = 0;
+        int32_t  a2_free_count[N_BUCKETS_MAX] = {};
+        // Echo current ShmConfig so caller can correlate counters
+        // with the active bucket layout (defaults vary across
+        // backends if XINSP2_SHM_REGION_MB or future project.json
+        // overrides are in play).
+        int32_t  n_buckets             = 0;
+        uint64_t bucket_sizes_bytes[N_BUCKETS_MAX] = {};
+        uint64_t promote_threshold_bytes = 0;
+        uint64_t region_total_size       = 0;
+        uint64_t region_used_bytes       = 0;
+        uint32_t region_block_count      = 0;
+    };
+    MetricsSnapshot metrics_snapshot() const {
+        MetricsSnapshot s;
+        if (!base_) return s;
+        const auto* h = header();
+        const auto& m = h->metrics;
+        s.a1_acquire_total      = m.a1_acquire_total.load(std::memory_order_relaxed);
+        s.a2_acquire_total      = m.a2_acquire_total.load(std::memory_order_relaxed);
+        s.a2_bump_inflate_total = m.a2_bump_inflate_total.load(std::memory_order_relaxed);
+        s.a3_bump_total         = m.a3_bump_total.load(std::memory_order_relaxed);
+        s.alloc_failed_total    = m.alloc_failed_total.load(std::memory_order_relaxed);
+        for (int i = 0; i < N_BUCKETS_MAX; ++i) {
+            s.a2_free_count[i] = m.a2_free_count[i].load(std::memory_order_relaxed);
+            s.bucket_sizes_bytes[i] = h->cfg_bucket_sizes_bytes[i];
+        }
+        s.n_buckets               = h->cfg_n_buckets;
+        s.promote_threshold_bytes = h->cfg_promote_threshold_bytes;
+        s.region_total_size       = h->total_size;
+        s.region_used_bytes       = h->bump_offset.load(std::memory_order_acquire)
+                                  - h->payload_start;
+        s.region_block_count      = h->block_count.load(std::memory_order_acquire);
+        return s;
+    }
+
 private:
     ShmRegionHeader* header() {
         return reinterpret_cast<ShmRegionHeader*>(base_);
