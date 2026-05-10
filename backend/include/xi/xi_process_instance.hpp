@@ -223,6 +223,9 @@ public:
         // Empty input (image_count == 0) is legal — source plugins
         // receive a json-only Record. Empty output is also legal —
         // sink plugins return only json.
+        // B-P1-7: serialise on process_mu_ for the duration; protects
+        // out_keys_/out_images_/out_json_ from concurrent overwrite.
+        std::lock_guard<std::mutex> _process_lk(process_mu_);
         try {
             ipc::Writer w;
             uint32_t n_in = (in && in->images) ? (uint32_t)in->image_count : 0;
@@ -863,6 +866,17 @@ private:
     // Per-call output storage. The xi_record_image array's `key` field
     // is `const char*` borrowing into out_keys_ — vector reallocation
     // would invalidate the pointers, so we reserve before populating.
+    //
+    // B-P1-7: these members are not thread-safe under concurrent
+    // process_via_rpc calls on the same adapter — caller would observe
+    // torn out_images_/out_keys_/out_json_ if two dispatcher workers
+    // race on the same instance. process_mu_ serialises the function's
+    // body so callers see consistent output. Today the dispatcher pool
+    // doesn't fan out N concurrent process() calls to the same adapter
+    // (events are popped by ONE worker and dispatched whole), but task
+    // #71 (burst parallelism) explicitly intends to parallelise — this
+    // mutex pre-empts the race that change would expose.
+    std::mutex                   process_mu_;
     std::vector<xi_record_image> out_images_;
     std::vector<std::string>     out_keys_;
     std::string                  out_json_;
