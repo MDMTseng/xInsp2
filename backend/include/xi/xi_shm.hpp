@@ -90,13 +90,21 @@ constexpr uint8_t TIER_A3 = 2;
 struct ShmConfig {
     uint64_t region_size_bytes        = 512ull * 1024 * 1024;
     uint64_t promote_threshold_bytes  = 16ull  * 1024 * 1024;
+    // Default buckets cover dev / test / small (256K, 1M) plus
+    // production (16M / 64M / 256M for 5/20/50 MP color cameras).
+    // Small buckets sit idle on production deployments that never
+    // allocate < 16 MB images (a few KB of dormant free-list head
+    // entries). Override via project.json `shm.buckets_mb` to drop
+    // the small ones if measured profile shows they're unused.
     uint64_t bucket_sizes_bytes[N_BUCKETS_MAX] = {
-        16ull  * 1024 * 1024,   //  16 MB
-        64ull  * 1024 * 1024,   //  64 MB
-        256ull * 1024 * 1024,   // 256 MB
-        0, 0, 0, 0, 0
+        256ull * 1024,          // 256 KB — small frames (320×240×1 = 75 KB)
+        1ull   * 1024 * 1024,   //   1 MB — 1 MP grayscale, 640×480×3
+        16ull  * 1024 * 1024,   //  16 MB — 5 MP color (15 MB)
+        64ull  * 1024 * 1024,   //  64 MB — 20 MP color (60 MB), 4K×3
+        256ull * 1024 * 1024,   // 256 MB — 50 MP color (150 MB)
+        0, 0, 0
     };
-    int32_t  n_buckets                  = 3;
+    int32_t  n_buckets                  = 5;
     int32_t  max_in_flight_per_instance = 3;
 };
 
@@ -378,13 +386,15 @@ public:
     uint64_t alloc_image(int32_t w, int32_t h, int32_t ch,
                          int32_t owner_id = 0) {
         if (w <= 0 || h <= 0 || ch <= 0) return INVALID_HANDLE;
-        const int64_t pixels = int64_t(w) * int64_t(h) * int64_t(ch);
+        // Phase B: row-stride aligned to kRowAlign for SIMD / cache /
+        // GPU coalescing. Payload size is stride*h, not w*ch*h, so
+        // each row starts on a 64-byte boundary.
+        const int64_t row_bytes = int64_t(w) * int64_t(ch);
+        const int64_t stride    = align_up_(row_bytes, kRowAlign);
+        const int64_t pixels    = stride * int64_t(h);
         if (pixels <= 0 || pixels > INT32_MAX) return INVALID_HANDLE;
-        // Phase A placeholder: stride := w*ch (no row alignment yet).
-        // Phase B bumps to align_up(w*ch, kRowAlign).
-        int32_t stride = w * ch;
         return alloc_(Kind::Image, w, h, ch, (int32_t)pixels,
-                      stride, owner_id);
+                      (int32_t)stride, owner_id);
     }
 
     // Allocate an opaque byte buffer (e.g. ML weights, big metadata).
@@ -412,13 +422,28 @@ public:
     }
 
     // Decrement refcount. Returns the new refcount (0 means caller
-    // dropped the last reference). Memory is not reclaimed in the
-    // spike — the bump allocator never moves backwards.
+    // dropped the last reference). Phase B: when refcount reaches 0
+    // and the block is Tier 2 (size-class allocated), push back to
+    // the bucket's free-list. Tier 3 (raw bump fallback): no-op
+    // (block stays allocated until region reset). Tier 1 (instance
+    // private pool, Phase D): push back to instance pool — for now
+    // (Phase B), Tier 1 blocks aren't created, so no path here.
     int32_t release(uint64_t handle) {
         auto* b = block_(handle);
         if (!b) return -1;
         int32_t prev = b->refcount.fetch_sub(1, std::memory_order_acq_rel);
-        return prev - 1;
+        int32_t new_count = prev - 1;
+        if (new_count == 0
+                && b->tier_origin == TIER_A2
+                && b->bucket_index >= 0
+                && !freelist_disabled_()) {
+            uint64_t off = handle & 0x00FFFFFFFFFFFFFFull;
+            push_free_list_(b->bucket_index, off);
+            auto* hdr = header();
+            hdr->metrics.a2_free_count[b->bucket_index].fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        return new_count;
     }
 
     int32_t refcount(uint64_t handle) const {
@@ -469,25 +494,70 @@ private:
         return b;
     }
 
+    // Phase B: tiered allocator entry point.
+    // Strategy:
+    //   1. Find size-class bucket via bucket_index_(payload_size).
+    //   2. If bucket >= 0 (size fits in some bucket):
+    //        a. Try CAS-pop from bucket's free-list (Tier 2 hit).
+    //        b. On miss, bump-allocate a bucket-sized chunk (Tier 2
+    //           bump-inflate — counted separately for telemetry).
+    //   3. If bucket < 0 (size exceeds all buckets), bump-allocate
+    //      raw payload size (Tier 3 fallback).
+    //   4. On bump fail (region exhausted) → INVALID, alloc_failed counter.
+    //
+    // bucket_index, tier_origin, owner_instance_id are stamped into the
+    // header so release() can dispatch back to the right pool in O(1).
     uint64_t alloc_(Kind k, int32_t w, int32_t h, int32_t ch,
                     int32_t payload_size,
                     int32_t stride        = 0,
                     int32_t owner_id      = 0) {
         if (!base_) return INVALID_HANDLE;
         auto* hdr = header();
-        // Round up so each block's payload starts cache-aligned too.
-        uint64_t total = sizeof(ShmBlockHeader) + (uint64_t)payload_size;
-        total = ((total + 63) / 64) * 64;
 
-        // CAS-bump the offset.
-        uint64_t prev = hdr->bump_offset.load(std::memory_order_relaxed);
-        for (;;) {
-            uint64_t next = prev + total;
-            if (next > total_size_) return INVALID_HANDLE;
-            if (hdr->bump_offset.compare_exchange_weak(prev, next,
-                    std::memory_order_acq_rel, std::memory_order_relaxed)) break;
+        int     bucket = bucket_index_(payload_size);
+        uint8_t tier;
+        uint64_t offset = 0;
+        bool freelist_off = freelist_disabled_();
+
+        if (bucket >= 0) {
+            // Bucket-fit: try free-list first.
+            uint64_t bucket_size = hdr->cfg_bucket_sizes_bytes[bucket];
+            if (!freelist_off) {
+                offset = pop_free_list_(bucket);
+                if (offset != 0) {
+                    tier = TIER_A2;
+                    hdr->metrics.a2_acquire_total.fetch_add(
+                        1, std::memory_order_relaxed);
+                    hdr->metrics.a2_free_count[bucket].fetch_sub(
+                        1, std::memory_order_relaxed);
+                }
+            }
+            if (offset == 0) {
+                // Free-list miss → bump as bucket-sized.
+                offset = bump_allocate_(bucket_size);
+                if (offset == 0) {
+                    hdr->metrics.alloc_failed_total.fetch_add(
+                        1, std::memory_order_relaxed);
+                    return INVALID_HANDLE;
+                }
+                tier = TIER_A2;
+                hdr->metrics.a2_bump_inflate_total.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+        } else {
+            // Size exceeds all configured buckets → A3 raw bump.
+            offset = bump_allocate_((uint64_t)payload_size);
+            if (offset == 0) {
+                hdr->metrics.alloc_failed_total.fetch_add(
+                    1, std::memory_order_relaxed);
+                return INVALID_HANDLE;
+            }
+            tier = TIER_A3;
+            hdr->metrics.a3_bump_total.fetch_add(
+                1, std::memory_order_relaxed);
         }
-        auto* blk = reinterpret_cast<ShmBlockHeader*>((uint8_t*)base_ + prev);
+
+        auto* blk = reinterpret_cast<ShmBlockHeader*>((uint8_t*)base_ + offset);
         std::memset(blk, 0, sizeof(*blk));
         blk->magic             = SHM_BLOCK_MAGIC;
         blk->kind              = (uint32_t)k;
@@ -496,18 +566,124 @@ private:
         blk->channels          = ch;
         blk->payload_size      = payload_size;
         blk->stride            = stride;
-        // Phase A: every alloc_() goes through bump (no free-list yet),
-        // so origin is "A2 bump-inflated" — the closest tier label
-        // before Phase B introduces the actual size-class free-list.
-        // Phase B will set tier_origin = TIER_A2 for free-list blocks
-        // and TIER_A3 for true bump fallback.
-        blk->bucket_index      = -1;
-        blk->tier_origin       = TIER_A2;
+        blk->bucket_index      = bucket;
+        blk->tier_origin       = tier;
         blk->owner_instance_id = owner_id;
         blk->next_free_offset  = 0;
         blk->refcount.store(1, std::memory_order_release);
         hdr->block_count.fetch_add(1, std::memory_order_relaxed);
-        return ((uint64_t)hdr->tag << 56) | prev;
+        return ((uint64_t)hdr->tag << 56) | offset;
+    }
+
+    // ---- Phase B helpers ------------------------------------------
+
+    // align up `n` to the nearest multiple of `align` (must be power of 2).
+    static uint64_t align_up_(uint64_t n, uint64_t align) {
+        return (n + align - 1) & ~(align - 1);
+    }
+
+    // Row alignment for image stride. 64 bytes covers AVX-512 plus
+    // typical GPU coalescing.
+    static constexpr int32_t kRowAlign = 64;
+
+    // Find the smallest configured bucket size >= `size`. Returns -1
+    // when the request exceeds every configured bucket (caller falls
+    // back to Tier 3 raw bump).
+    int bucket_index_(int32_t size) const {
+        const auto* hdr = header();
+        int n = hdr->cfg_n_buckets;
+        if (n <= 0 || n > N_BUCKETS_MAX) return -1;
+        for (int i = 0; i < n; ++i) {
+            if ((uint64_t)size <= hdr->cfg_bucket_sizes_bytes[i]) return i;
+        }
+        return -1;
+    }
+
+    // CAS-bump the global region offset by `total_with_header` bytes
+    // (already cache-line padded by caller). Returns the offset of the
+    // new block, or 0 on region exhaustion.
+    uint64_t bump_allocate_(uint64_t payload_bytes) {
+        auto* hdr = header();
+        uint64_t total = sizeof(ShmBlockHeader) + payload_bytes;
+        total = align_up_(total, 64);
+        uint64_t prev = hdr->bump_offset.load(std::memory_order_relaxed);
+        for (;;) {
+            uint64_t next = prev + total;
+            if (next > total_size_) return 0;
+            if (hdr->bump_offset.compare_exchange_weak(
+                    prev, next,
+                    std::memory_order_acq_rel,
+                    std::memory_order_relaxed)) {
+                return prev;
+            }
+        }
+    }
+
+    // CAS-push `offset` onto bucket's free-list head. ABA defense via
+    // 16-bit tag in the head's upper bits (monotonically incremented
+    // on every push/pop).
+    void push_free_list_(int bucket, uint64_t offset) {
+        auto* hdr = header();
+        auto& head_atomic = hdr->free_head[bucket];
+        auto* blk = reinterpret_cast<ShmBlockHeader*>(
+            (uint8_t*)base_ + offset);
+        uint64_t head = head_atomic.load(std::memory_order_relaxed);
+        for (;;) {
+            uint64_t cur_offset = head & kHeadOffsetMask;
+            uint16_t tag        = (uint16_t)(head >> kHeadTagShift);
+            blk->next_free_offset = cur_offset;
+            uint64_t new_head =
+                ((uint64_t)(tag + 1) << kHeadTagShift) |
+                (offset & kHeadOffsetMask);
+            if (head_atomic.compare_exchange_weak(
+                    head, new_head,
+                    std::memory_order_acq_rel,
+                    std::memory_order_relaxed)) {
+                return;
+            }
+        }
+    }
+
+    // CAS-pop from bucket's free-list head. Returns 0 if empty.
+    uint64_t pop_free_list_(int bucket) {
+        auto* hdr = header();
+        auto& head_atomic = hdr->free_head[bucket];
+        uint64_t head = head_atomic.load(std::memory_order_acquire);
+        for (;;) {
+            uint64_t cur_offset = head & kHeadOffsetMask;
+            if (cur_offset == 0) return 0;
+            uint16_t tag = (uint16_t)(head >> kHeadTagShift);
+            auto* blk = reinterpret_cast<ShmBlockHeader*>(
+                (uint8_t*)base_ + cur_offset);
+            uint64_t next = blk->next_free_offset;
+            uint64_t new_head =
+                ((uint64_t)(tag + 1) << kHeadTagShift) |
+                (next & kHeadOffsetMask);
+            if (head_atomic.compare_exchange_weak(
+                    head, new_head,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return cur_offset;
+            }
+        }
+    }
+
+    // Free-list head encoding:
+    //   bits [0..47]   = block offset (0 = empty list)
+    //   bits [48..63]  = ABA tag (monotonic)
+    static constexpr uint64_t kHeadOffsetMask = (1ull << 48) - 1;
+    static constexpr int      kHeadTagShift   = 48;
+
+    // Escape hatch — set XINSP2_SHM_NO_FREELIST=1 to disable free-list
+    // (forces bump-allocate path). For diagnostics if Phase B has a
+    // production-impacting bug; doesn't affect existing block layouts.
+    // Cached on first call to avoid getenv on every alloc/release.
+    static bool freelist_disabled_() {
+        static const bool v = []{
+            const char* e = std::getenv("XINSP2_SHM_NO_FREELIST");
+            return e && *e == '1';
+        }();
+        return v;
     }
 
     void close_() {

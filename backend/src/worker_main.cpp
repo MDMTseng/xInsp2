@@ -253,20 +253,28 @@ int main(int argc, char** argv) {
             w.bytes(rec.key ? rec.key : "", rec.key ? std::strlen(rec.key) : 0);
             w.u64(rec.handle);
         }
+        bool send_ok = false;
         try {
             std::lock_guard<std::mutex> lk(g_pipe_write_mu);
             ipc::send_frame(*g_pipe_for_async, /*seq=*/0,
                             ipc::RPC_EMIT_TRIGGER,
                             w.buf().data(), (uint32_t)w.buf().size());
+            send_ok = true;
         } catch (const std::exception& e) {
             std::fprintf(stderr,
                 "[worker] emit_trigger send failed for '%s': %s\n",
                 source ? source : "?", e.what());
         }
-        // Release the temp SHM handles — we only needed them to ferry
-        // the bytes; the bus addrefs each handle on emit, the original
-        // refcount==1 we're holding can drop.
-        for (auto h : temp_shm) g_host_for_async.image_release(h);
+        // Phase C (audit C-P1-6, ownership transfer protocol):
+        // On send success, send_frame transferred ownership of the
+        // temp SHM blocks to the host — we MUST NOT release here, or
+        // free-list reclaim would race with host's TriggerBus::emit.
+        // On send failure, the host never received the handles, so we
+        // own them and must release to compensate (otherwise the SHM
+        // blocks leak forever).
+        if (!send_ok) {
+            for (auto h : temp_shm) g_host_for_async.image_release(h);
+        }
     };
 
     // Connect to the backend's pipe. Backend should already have the
