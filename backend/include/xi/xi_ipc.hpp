@@ -322,16 +322,37 @@ struct Frame {
 // Sanity bound for incoming frame payloads. Anything bigger is either
 // a programming bug or a hostile peer trying to OOM the receiver via
 // uint32-max len. Production might raise this for huge JSON blobs;
-// 16 MB is comfortable for the current RPC surface.
+// 16 MB is comfortable for the current RPC surface (PROCESS replies
+// can carry inline image bytes and JSON output, both bounded by the
+// scripts that produce them).
 constexpr uint32_t MAX_PAYLOAD_BYTES = 16u * 1024 * 1024;
+
+// C-P1-7: tighter caps for non-PROCESS frame types. A hostile worker
+// could otherwise send 16 MB of error-message text in RPC_TYPE_ERROR
+// (or 16 MB in any other reply that the protocol expects to be small)
+// to amplify a DoS. PROCESS replies still need the big cap because
+// they carry inline image bytes; everything else fits comfortably in
+// 1 MB. See xi_protocol.hpp for the RPC_* type registry.
+constexpr uint32_t MAX_CONTROL_PAYLOAD_BYTES = 1u * 1024 * 1024;
+
+inline uint32_t cap_for_type_(uint32_t type) {
+    // Strip the reply bit; per-type cap is direction-symmetric.
+    uint32_t base = type & ~RPC_REPLY_BIT;
+    return (base == RPC_PROCESS) ? MAX_PAYLOAD_BYTES
+                                  : MAX_CONTROL_PAYLOAD_BYTES;
+}
 
 inline Frame recv_frame(Pipe& p) {
     FrameHeader h;
     p.read_exact(&h, sizeof(h));
     if (h.magic != FRAME_MAGIC)
         throw std::runtime_error("frame magic mismatch");
-    if (h.len > MAX_PAYLOAD_BYTES)
-        throw std::runtime_error("frame payload too large: " + std::to_string(h.len));
+    uint32_t cap = cap_for_type_(h.type);
+    if (h.len > cap)
+        throw std::runtime_error("frame payload too large for type "
+                                 + std::to_string(h.type)
+                                 + ": " + std::to_string(h.len)
+                                 + " > " + std::to_string(cap));
     Frame f;
     f.seq = h.seq;
     f.type = h.type;
