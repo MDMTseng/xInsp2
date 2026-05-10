@@ -244,18 +244,39 @@ public:
     // op against a concurrent op on the same handle. CancelIoEx
     // cancels the pending read; the cancelled op completes with
     // ERROR_OPERATION_ABORTED → throw → caller treats as EOF.
+    //
+    // E-P1-4: previously CreateEventA + CloseHandle per chunk. At
+    // 60 fps with 1-RPC-per-frame plus emit_trigger replies that's
+    // hundreds of handle cycles per second; over weeks of uptime
+    // the kernel's allocator fragments. Use a thread_local persistent
+    // event — one CreateEventA per pipe-using thread for its lifetime.
+    // Reset between uses so we never see a stale-signalled event.
+    static HANDLE& tls_overlapped_event_() {
+        thread_local HANDLE h = []{
+            HANDLE x = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+            // Best effort — if CreateEventA fails the per-call path
+            // below falls back to a fresh event.
+            return x;
+        }();
+        return h;
+    }
+
     void read_exact(void* buf, size_t n) {
         uint8_t* p = (uint8_t*)buf;
+        HANDLE& evt = tls_overlapped_event_();
         while (n) {
             OVERLAPPED ov{};
-            ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+            HANDLE evt_use = evt ? evt
+                                 : CreateEventA(nullptr, TRUE, FALSE, nullptr);
+            ResetEvent(evt_use);
+            ov.hEvent = evt_use;
             DWORD got = 0;
             BOOL ok = ReadFile(h_, p, (DWORD)n, &got, &ov);
             if (!ok && GetLastError() == ERROR_IO_PENDING) {
                 WaitForSingleObject(ov.hEvent, INFINITE);
                 ok = GetOverlappedResult(h_, &ov, &got, FALSE);
             }
-            CloseHandle(ov.hEvent);
+            if (evt_use != evt) CloseHandle(evt_use);  // fallback path only
             if (!ok || got == 0)
                 throw std::runtime_error("pipe read EOF");
             p += got; n -= got;
@@ -264,16 +285,20 @@ public:
 
     void write_all(const void* buf, size_t n) {
         const uint8_t* p = (const uint8_t*)buf;
+        HANDLE& evt = tls_overlapped_event_();
         while (n) {
             OVERLAPPED ov{};
-            ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+            HANDLE evt_use = evt ? evt
+                                 : CreateEventA(nullptr, TRUE, FALSE, nullptr);
+            ResetEvent(evt_use);
+            ov.hEvent = evt_use;
             DWORD wrote = 0;
             BOOL ok = WriteFile(h_, p, (DWORD)n, &wrote, &ov);
             if (!ok && GetLastError() == ERROR_IO_PENDING) {
                 WaitForSingleObject(ov.hEvent, INFINITE);
                 ok = GetOverlappedResult(h_, &ov, &wrote, FALSE);
             }
-            CloseHandle(ov.hEvent);
+            if (evt_use != evt) CloseHandle(evt_use);
             if (!ok || wrote == 0)
                 throw std::runtime_error("pipe write failed");
             p += wrote; n -= wrote;
