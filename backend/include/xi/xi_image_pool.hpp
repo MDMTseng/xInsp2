@@ -144,12 +144,36 @@ public:
     }
 
     void addref(xi_image_handle h) {
+        // Phase E hot-fix: dispatch SHM handles to the SHM region.
+        // Previously only the host_api->image_addref lambda did this;
+        // direct callers of ImagePool::instance().addref() (e.g. the
+        // trigger bus's observer-copy path) silently no-op'd on SHM
+        // handles because lookup(h) treats h as a heap-pool slot
+        // index and finds nothing.
+        if (is_shm_handle(h)) {
+            if (auto* r = shm_region_singleton()) r->addref(h);
+            return;
+        }
         if (auto* e = lookup(h)) {
             e->refcount.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
     void release(xi_image_handle h) {
+        // Phase E hot-fix: dispatch SHM handles to the SHM region.
+        // Same root cause as addref above. Without this fix, every
+        // cross-process emit_trigger leaks its SHM block — host's
+        // dispatcher release / drop_oldest path called us with a
+        // SHM handle, we treated it as a slot index, the slot
+        // lookup failed, and the SHM refcount never decremented.
+        // Pre-Phase-B this was hidden by bump-only never reusing
+        // slots; with Phase B's reclaiming allocator the leak is
+        // instantly visible (region grows monotonically). Fix the
+        // dispatch instead of patching every direct call site.
+        if (is_shm_handle(h)) {
+            if (auto* r = shm_region_singleton()) r->release(h);
+            return;
+        }
         uint32_t idx = (uint32_t)(h & SLOT_MASK);
         if (idx >= SLOT_COUNT) return;
         PoolEntry* e = slots_[idx].entry.load(std::memory_order_acquire);

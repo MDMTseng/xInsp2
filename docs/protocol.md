@@ -238,6 +238,50 @@ followed by an asynchronous `vars` message and zero or more binary previews.
 script gets an empty string. Combine with `xi::imread()` to load a
 file frame on demand without a custom source plugin.
 
+### `shm_metrics`
+
+`args: {}` → `data: { ...counters... }`. Snapshot of the SHM
+allocator's current state. All `*_total` counters are monotonic
+since backend startup.
+
+```json
+{
+  "type": "rsp", "id": 17, "ok": true,
+  "data": {
+    "a1_acquire_total":      0,
+    "a2_acquire_total":      18432,
+    "a2_bump_inflate_total": 12,
+    "a3_bump_total":         0,
+    "alloc_failed_total":    0,
+    "region_total_size":     536870912,
+    "region_used_bytes":     50331648,
+    "region_block_count":    96,
+    "promote_threshold_bytes": 16777216,
+    "n_buckets":             5,
+    "buckets": [
+      { "size_bytes": 262144,    "a2_free_count": 4 },
+      { "size_bytes": 1048576,   "a2_free_count": 2 },
+      { "size_bytes": 16777216,  "a2_free_count": 1 },
+      { "size_bytes": 67108864,  "a2_free_count": 0 },
+      { "size_bytes": 268435456, "a2_free_count": 0 }
+    ]
+  }
+}
+```
+
+Field semantics:
+- `a1_acquire_total` — Tier 1 (instance-private pool) hits.
+- `a2_acquire_total` — Tier 2 (shared free-list) pops.
+- `a2_bump_inflate_total` — free-list miss; bumped a fresh bucket-sized chunk.
+- `a3_bump_total` — request size > all configured buckets; raw bump.
+- `alloc_failed_total` — region full; allocator returned INVALID.
+- `buckets[].a2_free_count` — current depth of each bucket's free-list.
+
+Production alarm rules:
+- `a3_bump_total > 0`        → bucket layout doesn't cover workload; raise
+- `alloc_failed_total > 0`   → region full; increase `XINSP2_SHM_REGION_MB`
+- `a2_free_count[i] / N < 0.2` → bucket near exhaustion
+
 ### `start` / `stop`
 `start args: { "fps": int (default 10) }` → `data: { "started": true,
 "dispatch_threads": int }` (the int reflects the project's
