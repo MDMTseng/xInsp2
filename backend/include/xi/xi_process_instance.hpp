@@ -626,9 +626,16 @@ private:
                 imgs.push_back(rec);
             }
             xi_trigger_id tid{tid_hi, tid_lo};
-            TriggerBus::instance().emit(source, tid, ts_us,
-                                         imgs.empty() ? nullptr : imgs.data(),
-                                         (int32_t)imgs.size());
+            // Phase C (audit C-P1-6): wire frame transferred ownership
+            // from worker — bus does NOT addref again. Avoids the
+            // refcount=0 window between worker release and host addref
+            // that would let Phase B's free-list reclaim the slot
+            // mid-flight. Worker side reciprocates by NOT releasing
+            // after send_frame.
+            TriggerBus::instance().emit_with_transfer(
+                source, tid, ts_us,
+                imgs.empty() ? nullptr : imgs.data(),
+                (int32_t)imgs.size());
             break;
         }
         default:
