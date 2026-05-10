@@ -429,8 +429,20 @@ private:
     // `reader_dead_` so future do_call_locked_ throws fast (lets
     // call_() proceed to try_respawn_locked_).
     void start_reader_() {
-        stopping_       = false;
-        reader_dead_    = false;
+        // P0-C3: reset reader-state flags under inflight_mu_ so a
+        // concurrent observer (e.g. a do_call_locked_ that just entered
+        // and is about to read reader_dead_) doesn't see torn or
+        // stale-but-cleared values. In practice both callers of
+        // start_reader_() (ctor + try_respawn_locked_) hold mu_ which
+        // serialises against do_call_locked_, so this is hardening
+        // against future paths that might not. reader_err_ stays
+        // outside the lock — it's only written by the reader thread
+        // post-start, never raced.
+        {
+            std::lock_guard<std::mutex> lk(inflight_mu_);
+            stopping_    = false;
+            reader_dead_ = false;
+        }
         reader_err_.clear();
         reader_ = std::thread([this] { run_reader_(); });
     }
