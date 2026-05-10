@@ -483,6 +483,48 @@ inline CompileResult compile(const CompileRequest& req) {
     if (rc == 0 && std::filesystem::exists(out_dll)) {
         r.ok = true;
         r.dll_path = out_dll.string();
+
+        // Audit P0-E2 (Q2 decision: delete-on-success): on a clean
+        // compile, prune older `<stem>_v<N>.{dll,lib,obj,log,exp,pdb}`
+        // siblings of the same source. ~5 GB/day at typical dev
+        // cadence accumulates to 150 GB after 30 days; keeping just
+        // the latest fixes that.
+        //
+        // We keep:
+        //  - the just-written ver (current `ver`)
+        //  - any file whose <stem>_v prefix doesn't match (defensive
+        //    — different scripts share the build dir)
+        //
+        // Failed deletes (e.g. AV scanner has the file open, or
+        // FreeLibrary hasn't released a previous .dll yet) are
+        // ignored — they'll get cleaned up on the next compile.
+        std::error_code prune_ec;
+        std::string prefix = stem + "_v";
+        auto out_dir = std::filesystem::path(req.output_dir);
+        if (std::filesystem::exists(out_dir, prune_ec)) {
+            for (auto& entry : std::filesystem::directory_iterator(
+                     out_dir, std::filesystem::directory_options::skip_permission_denied, prune_ec)) {
+                if (prune_ec) break;
+                if (!entry.is_regular_file(prune_ec)) continue;
+                auto fname = entry.path().filename().string();
+                // Only consider files matching `<stem>_v<digits>.<ext>`
+                if (fname.size() <= prefix.size()) continue;
+                if (fname.compare(0, prefix.size(), prefix) != 0) continue;
+                size_t after_v = prefix.size();
+                size_t dot     = fname.find('.', after_v);
+                if (dot == std::string::npos || dot == after_v) continue;
+                // Extract version number
+                int file_ver = -1;
+                try {
+                    file_ver = std::stoi(fname.substr(after_v, dot - after_v));
+                } catch (...) { continue; }
+                if (file_ver == ver) continue;  // keep current
+                std::error_code rm_ec;
+                std::filesystem::remove(entry.path(), rm_ec);
+                // Best-effort: ignore rm_ec (AV lock, etc.) — next
+                // compile will retry.
+            }
+        }
     }
     r.diagnostics = parse_diagnostics(r.build_log);
     return r;
