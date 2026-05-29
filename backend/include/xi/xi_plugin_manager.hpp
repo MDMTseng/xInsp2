@@ -1233,6 +1233,7 @@ public:
         // (last_open_warnings_ already cleared above before plugin compile.)
         auto inst_dir = std::filesystem::path(folder) / "instances";
         bool warned_no_iso_env = false;
+        bool warned_iso_deprecated_ = false;
         if (std::filesystem::exists(inst_dir)) {
             for (auto& entry : std::filesystem::directory_iterator(inst_dir)) {
                 if (!entry.is_directory()) continue;
@@ -1337,24 +1338,31 @@ public:
                     // value `"process"` keeps working as an explicit
                     // declaration of the default.
                     //
-                    // If the isolation env isn't configured (the
-                    // xinsp-worker.exe / SHM region weren't wired up at
-                    // backend startup), every instance falls back to
-                    // in-proc with a single warning per project open.
+                    // Architecture pivot (2026-05): process isolation is
+                    // being removed in favour of a single in-process
+                    // compute core + frontend supervisor. A dead plugin
+                    // means a dead pipeline regardless of isolation, so
+                    // per-plugin sandboxing bought nothing but the SHM /
+                    // worker-process complexity. Every instance now runs
+                    // in-process. `isolation:"process"` is accepted but
+                    // ignored with a one-time deprecation warning so old
+                    // project.json files keep loading. The
+                    // ProcessInstanceAdapter path below is dead code
+                    // pending Stage-2 removal.
                     auto iso = extract_string(ic, "isolation");
+                    bool want_isolated = false;
+                    // Kept declared so the dead ProcessInstanceAdapter
+                    // block below still compiles until Stage-2 removal.
                     bool isolation_env_ok = !worker_exe_.empty() && !shm_name_.empty();
-                    bool want_isolated;
-                    if (!iso) {
-                        want_isolated = isolation_env_ok;
-                    } else if (*iso == "in_process" || *iso == "none") {
-                        want_isolated = false;
-                    } else if (*iso == "process") {
-                        want_isolated = true;
-                    } else {
-                        std::fprintf(stderr,
-                            "[xinsp2] instance '%s' has unknown isolation value '%s' — using default (process)\n",
-                            ii.name.c_str(), iso->c_str());
-                        want_isolated = isolation_env_ok;
+                    (void)isolation_env_ok;
+                    if (iso && *iso == "process") {
+                        if (!warned_iso_deprecated_) {
+                            std::fprintf(stderr,
+                                "[xinsp2] isolation:\"process\" is deprecated and ignored — "
+                                "all plugins run in-process now (single compute core). "
+                                "Remove the field from instance.json to silence this.\n");
+                            warned_iso_deprecated_ = true;
+                        }
                     }
 
                     // Optional per-instance IPC call timeout. Honoured only
