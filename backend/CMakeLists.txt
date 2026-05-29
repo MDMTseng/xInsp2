@@ -151,6 +151,12 @@ add_executable(test_sha256 tests/test_sha256.cpp)
 target_link_libraries(test_sha256 PRIVATE xi_core)
 add_test(NAME sha256 COMMAND test_sha256)
 
+# SafeStateSink unit (FE safe-state seam). Header-only under test; links xi_core
+# only for the include path. See docs/design/fe-be-split-test-plan.md §1.
+add_executable(test_safe_state tests/test_safe_state.cpp)
+target_link_libraries(test_safe_state PRIVATE xi_core)
+add_test(NAME safe_state COMMAND test_safe_state)
+
 add_executable(xinsp_backend
     src/service_main.cpp
     src/stb_impl.cpp

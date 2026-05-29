@@ -361,9 +361,18 @@ static int run_supervisor(const FeConfig& c) {
             // Still alive — probe the port.
             if (port_open(c.port)) {
                 probe_fails = 0;
-                if (in_safe_state && !healthy_announced) {
+                // Clear the line's safe state once the inspector is confirmed
+                // accepting — but only if we'd previously driven it safe (a
+                // crash/respawn). Never clear optimistically (safety property
+                // SP4): a fresh start was never "safe" to begin with.
+                if (in_safe_state) {
                     sink->clear_safe_state();
                     in_safe_state = false;
+                }
+                // Announce liveness once per backend instance so a healthy line
+                // has a positive "inspector up" signal in the log, not just
+                // silence. (Without this a never-crashed start logged nothing.)
+                if (!healthy_announced) {
                     healthy_announced = true;
                     std::fprintf(stderr, "[xinsp-fe] backend healthy (port %d up)\n", c.port);
                 }
