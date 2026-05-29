@@ -34,3 +34,7 @@ examples/*/_results_*.json
 examples/*/driver_log.json
 # FL agent progress telemetry (per memory: feedback_agent_progress_brief)
 .fl_progress/
+
+# FL run_all aggregator artifacts (regenerated each run)
+examples/*/_run_all.log
+examples/*/_run_all_summary.json
