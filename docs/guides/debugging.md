@@ -65,8 +65,28 @@ Most likely **stack overflow** (unbounded recursion in the script) or
 - Check the auto-respawn — extension restarts the backend within ~2s.
 - Check `crash_reports/` for a JSON report + minidump:
   - `crash_reports/<timestamp>.json` — exception code, faulting module,
-    last cmd, last script.
+    and a `context` block (the faulting thread's `last_cmd` /
+    `last_script` / `last_instance` / `last_plugin` / `last_phase` /
+    `last_run_id` / `last_frame`).
+  - A `threads` array lists EVERY dispatch thread's breadcrumb at
+    crash time (not just the faulting one), each tagged
+    `faulting: true|false`. Under `dispatch_threads > 1` this tells
+    you which of the N concurrent inspects actually faulted and what
+    the others were doing — the single-global breadcrumb used to
+    blame whichever thread wrote last.
+  - `last_phase` ∈ {`reset`, `inspect`, `done`} pinpoints the inspect
+    lifecycle stage.
   - `crash_reports/<timestamp>.dmp` — minidump for WinDbg / VS.
+    Captured with DataSegs + ThreadInfo + IndirectlyReferenced +
+    UnloadedModules so the dump is self-contained (globals like the
+    breadcrumb table and `recent_errors` ring are inside it; a
+    just-FreeLibrary'd plugin still appears in the module list).
+
+**Symbolicating the script frame.** Inspect scripts compile with
+`/O2 /Z7` + linker `/DEBUG`, emitting a versioned `inspect_vN.pdb`
+beside the DLL in `%TEMP%/xinsp2/script_build/`. WinDbg / VS resolve
+the script's stack frames to file:line as long as that PDB is still
+present (the `_vN` retention keeps the PDB paired with the live DLL).
 
 The extension toasts a "Backend recovered after crash in `<module>`"
 message naming the offending DLL.

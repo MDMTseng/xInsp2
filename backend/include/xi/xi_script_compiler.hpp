@@ -335,13 +335,22 @@ inline CompileResult compile(const CompileRequest& req) {
     // the diagnostic language. VSLANG=1033 == LCID for en-US.
     cmd += "set VSLANG=1033 && ";
     // Mode-dependent codegen flags:
-    //   Script        → /O2 (Release) — main inspection loop wants speed
+    //   Script        → /O2 /Z7 — Release perf + symbolicated crash stacks.
+    //                   The inspect script is where most crashes originate
+    //                   (user logic calling plugins); without debug info a
+    //                   minidump shows `inspect_vN.dll+0x1234` with no line
+    //                   info. /Z7 embeds debug info in the .obj (no separate
+    //                   compiler vcNNN.pdb to collide across parallel
+    //                   compiles); the linker /DEBUG below then emits one
+    //                   versioned program PDB matched to the DLL. /Z7 does
+    //                   NOT disable /O2, so runtime perf is unchanged.
+    //                   (Crash-diagnosability work, 2026-05.)
     //   PluginDev     → /Od /Zi /RTC1 — debugger-friendly, fast iteration
     //   PluginExport  → /O2 /Zi — Release perf + keep PDB for crash blame
     const char* opt_flags =
         (req.mode == CompileMode::PluginDev) ? "/Od /Zi /RTC1"
       : (req.mode == CompileMode::PluginExport) ? "/O2 /Zi"
-      : "/O2";
+      : "/O2 /Z7";
     cmd += "cl.exe /nologo /std:c++20 /LD /EHsc /MD ";
     cmd += opt_flags;
     cmd += " /utf-8 /W3";
@@ -384,6 +393,15 @@ inline CompileResult compile(const CompileRequest& req) {
         cmd += " \"" + s + "\"";
     }
     cmd += " /link /IMPLIB:\"" + (std::filesystem::path(req.output_dir) / (versioned_stem + ".lib")).string() + "\"";
+    // Emit a versioned program PDB matched to this DLL so crash
+    // minidumps resolve script frames to file:line. /DEBUG makes the
+    // linker write the debug directory into the DLL pointing at this
+    // PDB (GUID+age matched). Versioned name → _vN retention keeps it
+    // paired with the live DLL; no shared vc*.pdb contention.
+    // PluginDev/PluginExport already carry /Zi; adding /DEBUG here is
+    // harmless for them and required for the Script (/Z7) path.
+    cmd += " /DEBUG /PDB:\"" + (std::filesystem::path(req.output_dir)
+                               / (versioned_stem + ".pdb")).string() + "\"";
     // Link against pre-built cjson.lib (needed by xi_record.hpp / xi_plugin_handle.hpp)
     auto cjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cjson.lib";
     if (std::filesystem::exists(cjson_lib)) {

@@ -267,19 +267,55 @@ static std::mutex              g_run_mu;
 // a human-readable report alongside the minidump. Pure POD + plain
 // strncpy so the filter is signal-safe (no allocations, no locks).
 struct CrashContext {
+    uint32_t thread_id     = 0;  // owning thread (0 = slot free)
     char last_cmd[64]      {};   // last cmd handled
     char last_script[260]  {};   // last loaded script DLL path
     char last_instance[64] {};   // last instance whose plugin we called
     char last_plugin[64]   {};   // plugin name backing it
+    char last_phase[32]    {};   // inspect lifecycle phase (reset/inspect/...)
     int  last_run_id       = 0;
     int  last_frame        = 0;
 };
-static CrashContext g_crash_ctx;
+
+// Per-thread crash breadcrumbs. A single global was racy under
+// dispatch_threads > 1 — N concurrent inspects all wrote the same
+// struct, so a crash dump could blame the wrong thread's plugin.
+// Each thread claims a fixed slot (keyed by thread id) on first use;
+// slots are static so they never dangle when a dispatch thread exits
+// (its tid just stays recorded until reused). The crash handler walks
+// all claimed slots and flags the one matching the faulting thread.
+static constexpr int kMaxCrashSlots = 64;
+static CrashContext            g_crash_slots[kMaxCrashSlots];
+static std::atomic<uint32_t>   g_crash_slot_tid[kMaxCrashSlots];
+
+static CrashContext& crash_ctx() {
+    static thread_local int t_idx = -1;
+    if (t_idx >= 0) return g_crash_slots[t_idx];
+    uint32_t tid = (uint32_t)GetCurrentThreadId();
+    for (int i = 0; i < kMaxCrashSlots; ++i) {
+        uint32_t expected = 0;
+        if (g_crash_slot_tid[i].compare_exchange_strong(
+                expected, tid, std::memory_order_acq_rel)) {
+            t_idx = i;
+            g_crash_slots[i].thread_id = tid;
+            return g_crash_slots[i];
+        }
+    }
+    // Slots exhausted (>64 live threads ever) — fall back to slot 0.
+    // Racy but never null; bounded to a pathological thread count.
+    return g_crash_slots[0];
+}
 
 inline void crash_set(char* dst, size_t n, const char* src) {
     if (!dst || !src) return;
     std::strncpy(dst, src, n - 1);
     dst[n - 1] = 0;
+}
+
+// Convenience for setting the current thread's inspect phase.
+inline void crash_set_phase(const char* phase) {
+    auto& c = crash_ctx();
+    crash_set(c.last_phase, sizeof(c.last_phase), phase);
 }
 
 // Watchdog (P2.4). When > 0, inspect() calls have this many ms of wall-
@@ -817,6 +853,16 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         HANDLE prev = g_inspect_thread_handle.exchange(nullptr);
         if (prev) CloseHandle(prev);
     };
+    // Stamp this dispatch thread's crash breadcrumb so a fault inside
+    // the inspect (the most common crash site) names the run + phase
+    // for THIS thread, not whatever the last thread to touch the
+    // global wrote. frame_hint doubles as the per-thread frame marker.
+    {
+        auto& c = crash_ctx();
+        c.last_run_id = (int)run_id;
+        c.last_frame  = frame_hint;
+        crash_set(c.last_cmd, sizeof(c.last_cmd), "inspect");
+    }
     try {
         // Tag any image_create calls inside the script's inspect (and
         // any plugin process_fn it transitively calls that didn't set
@@ -824,8 +870,11 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         // sweep-on-unload + per-instance sweep-on-destroy together
         // catch the leaked-handle case from both directions.
         xi::ImagePool::OwnerGuard sg(s.owner_id);
+        crash_set_phase("reset");
         if (s.reset) s.reset();
+        crash_set_phase("inspect");
         s.inspect(frame_hint);
+        crash_set_phase("done");
         disarm();
     } catch (const seh_exception& e) {
         disarm();
@@ -1494,9 +1543,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 send_rsp_err(srv, id, err);
                 return;
             }
-            crash_set(g_crash_ctx.last_script, sizeof(g_crash_ctx.last_script),
+            crash_set(crash_ctx().last_script, sizeof(crash_ctx().last_script),
                       res.dll_path.c_str());
-            crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd),
+            crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd),
                       "compile_and_load");
             // Wire xi::use() callbacks so the script can call back into backend.
             // host_api lets the script allocate/read images in the BACKEND pool —
@@ -1762,8 +1811,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // poll loop. Serialised on g_run_mu so 8 quick `cmd:run` calls
         // produce vars/history entries in run_id order.
         // SEH translator must be installed inside the thread.
-        crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "run");
-        g_crash_ctx.last_run_id = (int)run_id;
+        crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "run");
+        crash_ctx().last_run_id = (int)run_id;
         std::thread([&srv, run_id, frame_path = std::move(frame_path)]() {
             _set_se_translator(seh_translator);
             std::lock_guard<std::mutex> lk(g_run_mu);
@@ -2034,10 +2083,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     } else if (name == "exchange_instance") {
         // Crash-blame: capture which instance/plugin we're about to talk to.
         if (auto in = xp::get_string_field(parsed->args_json, "name")) {
-            crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "exchange_instance");
-            crash_set(g_crash_ctx.last_instance, sizeof(g_crash_ctx.last_instance), in->c_str());
+            crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "exchange_instance");
+            crash_set(crash_ctx().last_instance, sizeof(crash_ctx().last_instance), in->c_str());
             if (auto inst = xi::InstanceRegistry::instance().find(*in)) {
-                crash_set(g_crash_ctx.last_plugin, sizeof(g_crash_ctx.last_plugin),
+                crash_set(crash_ctx().last_plugin, sizeof(crash_ctx().last_plugin),
                           inst->plugin_name().c_str());
             }
         }
@@ -2205,8 +2254,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
         auto source = xp::get_string_field(parsed->args_json, "source");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "process_instance");
-        crash_set(g_crash_ctx.last_instance, sizeof(g_crash_ctx.last_instance), iname->c_str());
+        crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "process_instance");
+        crash_set(crash_ctx().last_instance, sizeof(crash_ctx().last_instance), iname->c_str());
 
         // Find the plugin instance
         auto inst = xi::InstanceRegistry::instance().find(*iname);
@@ -2983,8 +3032,26 @@ static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
         mei.ThreadId          = GetCurrentThreadId();
         mei.ExceptionPointers = info;
         mei.ClientPointers    = FALSE;
+        // Richer than MiniDumpNormal so the dump is self-contained for
+        // post-mortem of an in-process compute-core crash:
+        //   WithDataSegs              — globals (breadcrumb table,
+        //                               recent_errors ring) land in the dump
+        //   WithThreadInfo            — per-thread times / teb
+        //   WithIndirectlyReferenced  — pointee memory of stack locals
+        //                               (e.g. the TriggerEvent being inspected)
+        //   WithUnloadedModules       — a just-FreeLibrary'd plugin still
+        //                               shows in the module list for blame
+        // Deliberately NOT WithFullMemory — large image buffers would
+        // bloat the dump to GBs; the above captures the forensic state
+        // without the bulk.
+        auto dump_type = (MINIDUMP_TYPE)(
+            MiniDumpNormal
+            | MiniDumpWithDataSegs
+            | MiniDumpWithThreadInfo
+            | MiniDumpWithIndirectlyReferencedMemory
+            | MiniDumpWithUnloadedModules);
         MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
-                          MiniDumpNormal, &mei, nullptr, nullptr);
+                          dump_type, &mei, nullptr, nullptr);
         CloseHandle(h);
     }
 
@@ -3009,14 +3076,46 @@ static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
     out += ",\"address\":"; out += addrbuf;
     out += ",\"module\":"; crash_json_escape(out, blamed.c_str());
     out += "}";
-    out += ",\"context\":{";
-    out += "\"last_cmd\":";    crash_json_escape(out, g_crash_ctx.last_cmd);
-    out += ",\"last_script\":"; crash_json_escape(out, g_crash_ctx.last_script);
-    out += ",\"last_instance\":"; crash_json_escape(out, g_crash_ctx.last_instance);
-    out += ",\"last_plugin\":"; crash_json_escape(out, g_crash_ctx.last_plugin);
-    out += ",\"last_run_id\":" + std::to_string(g_crash_ctx.last_run_id);
-    out += ",\"last_frame\":"  + std::to_string(g_crash_ctx.last_frame);
-    out += "}";
+    // `context` = the faulting thread's breadcrumb (the handler runs on
+    // the faulting thread, so crash_ctx() is its slot). Back-compat
+    // with the existing report reader which expects this object.
+    uint32_t fault_tid = (uint32_t)GetCurrentThreadId();
+    {
+        auto& c = crash_ctx();
+        out += ",\"context\":{";
+        out += "\"last_cmd\":";      crash_json_escape(out, c.last_cmd);
+        out += ",\"last_script\":";  crash_json_escape(out, c.last_script);
+        out += ",\"last_instance\":";crash_json_escape(out, c.last_instance);
+        out += ",\"last_plugin\":";  crash_json_escape(out, c.last_plugin);
+        out += ",\"last_phase\":";   crash_json_escape(out, c.last_phase);
+        out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
+        out += ",\"last_frame\":"  + std::to_string(c.last_frame);
+        out += "}";
+    }
+    // `threads` = every claimed breadcrumb slot, so a multi-dispatch
+    // crash shows what ALL concurrent inspects were doing, not just
+    // the faulting one. `faulting:true` flags the culprit.
+    out += ",\"threads\":[";
+    {
+        bool first = true;
+        for (int i = 0; i < kMaxCrashSlots; ++i) {
+            uint32_t tid = g_crash_slot_tid[i].load(std::memory_order_acquire);
+            if (tid == 0) continue;
+            auto& c = g_crash_slots[i];
+            if (!first) out += ",";
+            first = false;
+            out += "{\"thread_id\":" + std::to_string(tid);
+            out += ",\"faulting\":" + std::string(tid == fault_tid ? "true" : "false");
+            out += ",\"last_cmd\":";     crash_json_escape(out, c.last_cmd);
+            out += ",\"last_instance\":";crash_json_escape(out, c.last_instance);
+            out += ",\"last_plugin\":";  crash_json_escape(out, c.last_plugin);
+            out += ",\"last_phase\":";   crash_json_escape(out, c.last_phase);
+            out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
+            out += ",\"last_frame\":"  + std::to_string(c.last_frame);
+            out += "}";
+        }
+    }
+    out += "]";
     out += ",\"minidump\":";
     crash_json_escape(out, (std::string(stem) + ".dmp").c_str());
     out += "}\n";
@@ -3062,7 +3161,7 @@ static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
         "[xinsp2] std::terminate (thread %lu): %s — %s\n",
         (unsigned long)GetCurrentThreadId(), tname, what);
     std::fflush(stderr);
-    crash_set(g_crash_ctx.last_cmd, sizeof(g_crash_ctx.last_cmd), "terminate");
+    crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "terminate");
     // 0xE0000002 — distinct from --test-crash's 0xE0000001 so blame_module
     // and exception_name still tag it as MS_C++ish; the json_path will
     // record this code so the next-startup report distinguishes the
