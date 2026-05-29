@@ -456,6 +456,28 @@ static std::string parse_auth_secret(int argc, char** argv) {
     return secret;
 }
 
+// --project=<dir> / --script=<path> : headless autostart. When --project is set,
+// main() drives open_project -> compile_and_load -> (optional) start at boot, so
+// the backend runs a line without any WS client (the xinsp-fe supervisor only
+// manages the process). Returns empty if the flag is absent.
+static std::string parse_str_flag(int argc, char** argv, const char* flag) {
+    std::string eq = std::string(flag) + "=";
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a = argv[i];
+        if (a.rfind(eq, 0) == 0) return std::string(a.substr(eq.size()));
+        if (a == flag && i + 1 < argc) return argv[i + 1];
+    }
+    return {};
+}
+
+// --autostart-fps=<N>  (default 0 = don't auto-start continuous mode; just
+// open+compile and wait for a client / triggers).
+static int parse_autostart_fps(int argc, char** argv) {
+    std::string v = parse_str_flag(argc, argv, "--autostart-fps");
+    if (v.empty()) return 0;
+    try { int n = std::stoi(v); return n < 0 ? 0 : n; } catch (...) { return 0; }
+}
+
 // Repeatable: --plugins-dir=/some/path  (or --plugins-dir /some/path).
 // Also reads XINSP2_EXTRA_PLUGIN_DIRS, semicolon- or path-separator-delimited.
 static std::vector<std::string> parse_extra_plugin_dirs(int argc, char** argv) {
@@ -2998,6 +3020,9 @@ int main(int argc, char** argv) {
                 "  --auth=SECRET        require Bearer SECRET in handshake\n"
                 "  --plugins-dir=DIR    extra plugin folder (repeatable)\n"
                 "  --watchdog=MS        terminate inspect after MS ms (default 0 = off)\n"
+                "  --project=DIR        headless autostart: open this project at boot\n"
+                "  --script=PATH        script to compile for --project (default: project.json's)\n"
+                "  --autostart-fps=N    with --project, start continuous mode at N fps (0 = off)\n"
                 "  --version, -v        print version and exit\n"
                 "  --help, -h           this help\n",
                 XINSP2_VERSION);
@@ -3219,6 +3244,44 @@ int main(int argc, char** argv) {
                  host.c_str(), port,
                  secret.empty() ? "" : " (auth required)");
     std::fflush(stderr);
+
+    // Headless autostart (--project). Drives the same WS command handlers a
+    // client would call — open_project, then compile_and_load, then (optional)
+    // start — by synthesizing wire-format frames and feeding handle_command.
+    // No client need ever connect: reply sends are no-ops while srv has no
+    // client (xi_ws_server send_frame returns false at INVALID_SOCK). The WS
+    // port stays open so an operator HMI / the VS Code extension can attach
+    // live. Used by xinsp-fe.exe to run a line headlessly.
+    if (std::string project = parse_str_flag(argc, argv, "--project"); !project.empty()) {
+        std::string script = parse_str_flag(argc, argv, "--script");
+        int autostart_fps  = parse_autostart_fps(argc, argv);
+
+        std::fprintf(stderr, "[xinsp2] autostart: open_project %s\n", project.c_str());
+        handle_command(srv,
+            "{\"type\":\"cmd\",\"id\":1,\"name\":\"open_project\",\"args\":{\"path\":"
+            + xp::json_escape(project) + "}}");
+
+        // Default the script to the project.json's resolved script_path.
+        if (script.empty()) script = g_plugin_mgr.project().script_path;
+        if (script.empty()) {
+            std::fprintf(stderr,
+                "[xinsp2] autostart: no script (project has none and --script not given); "
+                "open only\n");
+        } else {
+            std::fprintf(stderr, "[xinsp2] autostart: compile_and_load %s\n", script.c_str());
+            handle_command(srv,
+                "{\"type\":\"cmd\",\"id\":2,\"name\":\"compile_and_load\",\"args\":{\"path\":"
+                + xp::json_escape(script) + "}}");
+
+            if (autostart_fps > 0) {
+                std::fprintf(stderr, "[xinsp2] autostart: start %d fps\n", autostart_fps);
+                handle_command(srv,
+                    "{\"type\":\"cmd\",\"id\":3,\"name\":\"start\",\"args\":{\"fps\":"
+                    + std::to_string(autostart_fps) + "}}");
+            }
+        }
+        std::fflush(stderr);
+    }
 
     while (!g_should_exit.load() && srv.is_running()) {
         srv.poll(100);

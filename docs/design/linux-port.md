@@ -50,6 +50,7 @@ the port itself; it's a record so we know what to expect.
 | `backend/include/xi/xi_seh.hpp` | `_set_se_translator` + `__try`/`__except` | `sigaction(SIGSEGV / SIGFPE / SIGBUS)` + `sigsetjmp`/`siglongjmp`. Or wire Google Breakpad. |
 | `backend/include/xi/xi_script_compiler.hpp` | `cl.exe` + `vcvars64.bat` + `cmd /C` | `g++` or `clang++` direct spawn; rewrite the diagnostic parser for gcc / clang error format. |
 | Crash forensics in `backend/src/service_main.cpp` | `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` + `EnumProcessModules` + `AddVectoredExceptionHandler` | Google Breakpad or manual `sigaction` + core-file generation; `dl_iterate_phdr` for module-blame addresses. |
+| `backend/src/fe_main.cpp` (the `xinsp-fe` supervisor) | `CreateProcessA` + `WaitForSingleObject`, Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), `SetConsoleCtrlHandler`, Winsock TCP probe | `posix_spawn`/`fork`+`execv`; `waitpid`/`pidfd`; `prctl(PR_SET_PDEATHSIG)` for the kill-on-parent-death guarantee; `sigaction(SIGINT/SIGTERM)`; POSIX `connect` probe. The whole Win32 path is already gated `#ifdef _WIN32` with a `TODO(linux)` stub `main()`; `xi_safe_state.hpp` + the crash-log parsing are portable. |
 
 ### Hard — different semantics (re-design)
 

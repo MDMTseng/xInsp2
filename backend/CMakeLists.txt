@@ -182,6 +182,24 @@ target_compile_definitions(xinsp_runner PRIVATE
     XINSP2_VERSION="${XINSP2_VERSION}"
     XINSP2_COMMIT="${XINSP2_COMMIT}")
 
+# Frontend supervisor. Spawns + monitors xinsp-backend.exe, drives the line to a
+# safe state on backend death, respawns it (rate-limited). Links NEITHER xi_core
+# NOR OpenCV — it only needs the portable xi_safe_state.hpp header + cJSON + the
+# Win32 process/socket APIs, so it carries no accelerator-DLL dependency and is
+# excluded from _xinsp_deploy_dlls below.
+add_executable(xinsp_fe src/fe_main.cpp)
+target_link_libraries(xinsp_fe PRIVATE cjson)
+target_include_directories(xinsp_fe PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
+if(WIN32)
+    target_link_libraries(xinsp_fe PRIVATE Ws2_32)
+endif()
+set_target_properties(xinsp_fe PROPERTIES OUTPUT_NAME "xinsp-fe")
+target_compile_definitions(xinsp_fe PRIVATE
+    XINSP2_VERSION="${XINSP2_VERSION}"
+    XINSP2_COMMIT="${XINSP2_COMMIT}")
+
 # JPEG-encoder benchmark — quantifies the IPP/OpenCV/stb dispatch.
 # Not run as a test (no pass/fail); invoke manually for numbers.
 add_executable(bench_jpeg tests/bench_jpeg.cpp src/stb_impl.cpp)

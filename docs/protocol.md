@@ -609,3 +609,27 @@ Prior to FL r7 this case was not handled — a 2nd connection's SYN
 would sit in the kernel queue until Windows timed it out (~21 s),
 which surfaced to the caller as a long stall. The `accept()`-and-
 reject path replaces that with a fast, diagnosable error.
+
+## Backend command-line flags
+
+`xinsp-backend.exe` is normally launched by a supervisor (the VS Code
+extension, or `xinsp-fe.exe` on a line — see
+[`design/fe-be-split.md`](./design/fe-be-split.md)). Key flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--port=N` | 7823 | WebSocket port |
+| `--host=ADDR` | 127.0.0.1 | bind address (`0.0.0.0` for remote; pair with `--auth`) |
+| `--auth=SECRET` | — | require `Bearer SECRET` in the WS handshake |
+| `--plugins-dir=DIR` | — | extra plugin folder (repeatable) |
+| `--watchdog=MS` | 0 (off) | terminate an inspect that exceeds MS ms |
+| `--project=DIR` | — | **headless autostart**: `open_project` this folder at boot |
+| `--script=PATH` | project.json's `script` | script to `compile_and_load` for `--project` |
+| `--autostart-fps=N` | 0 (off) | with `--project`, `start` continuous mode at N fps |
+
+The `--project` autostart drives the same `open_project → compile_and_load →
+start` commands a client would send, by synthesizing them internally after the
+WS port binds. No client need ever connect (reply frames are no-ops with no
+client), and the port stays open so an operator HMI / the extension can attach
+live. This lets `xinsp-fe.exe` run a line at the process level without a C++ WS
+client.

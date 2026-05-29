@@ -146,6 +146,12 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   net: it arms a plugin to crash the backend from a raw (unmanaged)
   thread, then asserts the minidump + crash report survive with the
   dispatch thread's `last_phase="inspect"` breadcrumb intact.
+  `examples/fe_supervisor/` is the next layer up: it runs the
+  `xinsp-fe.exe` supervisor against an auto-crashing project and asserts
+  the FE detects each death, drives the line to a safe state (with crash
+  forensics from the backend log), respawns rate-limited, hits the cap,
+  stays safe, and leaves no orphaned backend. (Windows-only; skips on
+  non-`nt`.)
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

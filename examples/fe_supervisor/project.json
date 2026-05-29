@@ -1,0 +1,6 @@
+{
+  "name": "fe_supervisor",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

@@ -186,10 +186,14 @@ See [`testing.md`](./testing.md) for the full breakdown. Summary:
 
 Priorities depend on real usage feedback. Candidate work:
 
-- **FE/BE split boundary** (Task #94) — design the frontend supervisor
-  over the in-process backend compute core (needs camera + PLC
-  decisions). This is the architecture that replaced process
-  isolation.
+- **FE/BE split boundary** (Task #94) — **skeleton shipped.** The frontend
+  supervisor `xinsp-fe.exe` spawns/monitors the in-process backend compute
+  core, drives the line to a safe state on backend death (via the
+  `SafeStateSink` seam — logging stub now, real PLC transport later), and
+  respawns it rate-limited. Cameras are BE plugins; the BE gains
+  `--project/--script/--autostart-fps` to run headlessly. See
+  [`design/fe-be-split.md`](./design/fe-be-split.md). Phase 2: deep WS
+  heartbeat, FE status channel, real PLC transports.
 - **Multi-client broadcast (S6)** — opens the door to operator dashboards.
 - **History UI scrubber (finish S4)** — currently backend-only.
 - **Per-component reference docs** — see [`docs/reference/`](./reference/).
