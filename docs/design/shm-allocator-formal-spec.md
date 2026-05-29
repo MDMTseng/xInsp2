@@ -1,5 +1,7 @@
 # Cross-process refcounted SHM allocator — formal specification
 
+> **SUPERSEDED / REMOVED 2026-05** — the SHM allocator was removed with the FE/BE in-process split. Retained for historical reference.
+
 Status: design / unimplemented
 Last revised: 2026-05-10
 Tracks audit findings: P0-E1, C-P1-6, C-P1-7 (partial), and a

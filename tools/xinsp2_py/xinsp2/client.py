@@ -441,36 +441,6 @@ class Client:
 
     # ---- observability -----------------------------------------------
 
-    def shm_metrics(self) -> dict:
-        """SHM allocator counters snapshot.
-
-        Returns a dict with monotonic acquire/bump/fail counters,
-        per-bucket free-list depth, and the active ShmConfig:
-
-            {
-                "a1_acquire_total":      <int>,  # Tier 1 hits
-                "a2_acquire_total":      <int>,  # Tier 2 free-list pops
-                "a2_bump_inflate_total": <int>,  # Tier 2 free-list miss → bump as bucket-sized
-                "a3_bump_total":         <int>,  # Tier 3 raw bump (size > all buckets)
-                "alloc_failed_total":    <int>,  # region full → INVALID returned
-                "region_total_size":     <int>,
-                "region_used_bytes":     <int>,
-                "region_block_count":    <int>,
-                "promote_threshold_bytes": <int>,
-                "n_buckets":             <int>,
-                "buckets": [
-                    {"size_bytes": ..., "a2_free_count": ...},
-                    ...
-                ],
-            }
-
-        Use to spot allocation patterns / production alarms:
-        - `a3_bump_total > 0`              → bucket layout doesn't cover workload
-        - `alloc_failed_total > 0`         → region full; raise XINSP2_SHM_REGION_MB
-        - `a2_free_count[i] / depth < 0.2` → bucket nearly exhausted
-        """
-        return self.call("shm_metrics")
-
     def image_pool_stats(self) -> dict:
         """Per-owner ImagePool footprint. Use to spot leaks: a
         plugin/script whose handle count keeps climbing across runs is

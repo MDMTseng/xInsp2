@@ -6,7 +6,7 @@ backend is built to keep running through plugin / script crashes, so
 
 ---
 
-## Levels of crash isolation (in-proc, master)
+## Levels of crash isolation
 
 ```
    user script DLL                     plugin DLL
@@ -36,10 +36,6 @@ What's NOT caught:
   silently; eventually crashes somewhere unrelated.
 - **Plugin worker thread without `xi::spawn_worker`** — translator is
   per-thread; a raw `std::thread` segfault is uncaught.
-
-For the strictest isolation (separate process), see the
-`shm-process-isolation` spike branch — `instance.json: "isolation":
-"process"` opts an instance into its own process.
 
 ---
 
@@ -119,8 +115,6 @@ via `cmd:set_watchdog_ms` or per-project). Default 10000 ms.
 Fix by:
 - Adding loop bounds in your plugin / op.
 - Bumping the watchdog if the operation legitimately takes longer.
-- (`shm-process-isolation` spike) Marking the instance
-  `"isolation": "process"` so a hang only kills the worker process.
 
 ---
 
@@ -189,6 +183,3 @@ DLL). To break in your code:
 
 Plugins built in-project use `CompileMode::PluginDev` (`/Od /Zi
 /RTC1`), so debug symbols are accurate.
-
-For SHM spike workers: attach to `xinsp-worker.exe` or
-`xinsp-script-runner.exe` instead — they run as separate processes.

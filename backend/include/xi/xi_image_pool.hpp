@@ -30,7 +30,6 @@
 #include "xi_abi.h"
 #include "xi_image.hpp"
 #include "xi_instance_folders.hpp"
-#include "xi_shm.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -144,36 +143,12 @@ public:
     }
 
     void addref(xi_image_handle h) {
-        // Phase E hot-fix: dispatch SHM handles to the SHM region.
-        // Previously only the host_api->image_addref lambda did this;
-        // direct callers of ImagePool::instance().addref() (e.g. the
-        // trigger bus's observer-copy path) silently no-op'd on SHM
-        // handles because lookup(h) treats h as a heap-pool slot
-        // index and finds nothing.
-        if (is_shm_handle(h)) {
-            if (auto* r = shm_region_singleton()) r->addref(h);
-            return;
-        }
         if (auto* e = lookup(h)) {
             e->refcount.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
     void release(xi_image_handle h) {
-        // Phase E hot-fix: dispatch SHM handles to the SHM region.
-        // Same root cause as addref above. Without this fix, every
-        // cross-process emit_trigger leaks its SHM block — host's
-        // dispatcher release / drop_oldest path called us with a
-        // SHM handle, we treated it as a slot index, the slot
-        // lookup failed, and the SHM refcount never decremented.
-        // Pre-Phase-B this was hidden by bump-only never reusing
-        // slots; with Phase B's reclaiming allocator the leak is
-        // instantly visible (region grows monotonically). Fix the
-        // dispatch instead of patching every direct call site.
-        if (is_shm_handle(h)) {
-            if (auto* r = shm_region_singleton()) r->release(h);
-            return;
-        }
         uint32_t idx = (uint32_t)(h & SLOT_MASK);
         if (idx >= SLOT_COUNT) return;
         PoolEntry* e = slots_[idx].entry.load(std::memory_order_acquire);
@@ -309,18 +284,6 @@ public:
         return out;
     }
 
-    // ---- SHM bridge (unchanged contract) -----------------------------
-
-    static ShmRegion*& shm_region_singleton() {
-        static ShmRegion* s = nullptr;
-        return s;
-    }
-    static void set_shm_region(ShmRegion* r) { shm_region_singleton() = r; }
-
-    static bool is_shm_handle(xi_image_handle h) {
-        return ((h >> 56) & 0xFF) == 0xA5;
-    }
-
     // ---- host_api factory --------------------------------------------
 
     static xi_host_api make_host_api() {
@@ -328,35 +291,21 @@ public:
         api.image_create   = [](int32_t w, int32_t h, int32_t ch) -> xi_image_handle {
             return ImagePool::instance().create(w, h, ch);
         };
-        api.image_addref   = [](xi_image_handle h) {
-            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); if (r) r->addref(h); }
-            else                    ImagePool::instance().addref(h);
-        };
-        api.image_release  = [](xi_image_handle h) {
-            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); if (r) r->release(h); }
-            else                    ImagePool::instance().release(h);
-        };
+        api.image_addref   = [](xi_image_handle h) { ImagePool::instance().addref(h); };
+        api.image_release  = [](xi_image_handle h) { ImagePool::instance().release(h); };
         api.image_data     = [](xi_image_handle h) -> uint8_t* {
-            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); return r ? r->data(h) : nullptr; }
             return ImagePool::instance().data(h);
         };
         api.image_width    = [](xi_image_handle h) -> int32_t {
-            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); return r ? r->width(h) : 0; }
             return ImagePool::instance().width(h);
         };
         api.image_height   = [](xi_image_handle h) -> int32_t {
-            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); return r ? r->height(h) : 0; }
             return ImagePool::instance().height(h);
         };
         api.image_channels = [](xi_image_handle h) -> int32_t {
-            if (is_shm_handle(h)) { auto* r = shm_region_singleton(); return r ? r->channels(h) : 0; }
             return ImagePool::instance().channels(h);
         };
         api.image_stride   = [](xi_image_handle h) -> int32_t {
-            if (is_shm_handle(h)) {
-                auto* r = shm_region_singleton();
-                return r ? r->width(h) * r->channels(h) : 0;
-            }
             return ImagePool::instance().stride(h);
         };
         api.log            = [](int32_t level, const char* msg) {
@@ -373,23 +322,15 @@ public:
             return n;
         };
         api.emit_trigger = nullptr;
-        api.shm_create_image = [](int32_t w, int32_t h, int32_t ch) -> xi_image_handle {
-            auto* r = shm_region_singleton();
-            return r ? r->alloc_image(w, h, ch) : 0;
-        };
-        api.shm_alloc_buffer = [](int32_t size_bytes) -> xi_image_handle {
-            auto* r = shm_region_singleton();
-            return r ? r->alloc_buffer(size_bytes) : 0;
-        };
-        api.shm_addref  = [](xi_image_handle h) {
-            auto* r = shm_region_singleton(); if (r) r->addref(h);
-        };
-        api.shm_release = [](xi_image_handle h) {
-            auto* r = shm_region_singleton(); if (r) r->release(h);
-        };
-        api.shm_is_shm_handle = [](xi_image_handle h) -> int32_t {
-            return is_shm_handle(h) ? 1 : 0;
-        };
+        // SHM removed 2026-05 (FE/BE in-process split): no shared-memory
+        // region exists. Per the ABI contract these stay null and plugins
+        // fall back to image_create / the host ImagePool (zero-copy via
+        // pointers within the single backend process).
+        api.shm_create_image  = nullptr;
+        api.shm_alloc_buffer  = nullptr;
+        api.shm_addref        = nullptr;
+        api.shm_release       = nullptr;
+        api.shm_is_shm_handle = nullptr;
         api.read_image_file = read_image_file_fn();
         return api;
     }

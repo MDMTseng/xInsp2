@@ -1,5 +1,7 @@
 # IPC + SHM (cross-process isolation)
 
+> **REMOVED 2026-05.** Process isolation + the SHM mesh (worker / script-runner / shared-memory region) were removed in favour of a single in-process compute core under a frontend (FE) supervisor. A dead plugin means a dead pipeline regardless of isolation, so per-plugin sandboxing bought only complexity; crash diagnosability (minidumps + per-thread breadcrumbs + PDB symbolication, see `guides/debugging.md`) is the replacement. **This document is retained for historical reference only — none of the components below exist in the current build.**
+
 > **Status: shipping; opt-in.** The full mesh (worker / runner / SHM /
 > respawn) is merged from `shm-process-isolation` and exercised by 9
 > backend tests. Activation is per-instance: set

@@ -38,7 +38,7 @@ own folder, config, and identity.
 └── instances/
     ├── cam0/
     │   ├── instance.json     ← { "plugin": "mock_camera",
-    │   │                          "isolation": "process"?,
+    │   │                          "isolation": ...?  (deprecated, ignored),
     │   │                          "config": { ... } }
     │   └── (whatever the plugin chose to write here)
     └── det0/
@@ -63,11 +63,9 @@ anything bigger than `instance.json`'s small config blob.
    - Read `instance.json`. Field `plugin` names the type.
    - Look up the plugin in the registered set (scanned earlier from
      `plugins_dir` + extra dirs).
-   - If `instance.json` has `"isolation": "process"` AND the worker env
-     is configured, build a `ProcessInstanceAdapter` (plugin runs in
-     `xinsp-worker.exe`, method calls go over IPC, pixel data via SHM).
-     Falls back to in-proc with a warning if the worker env is missing.
-   - Otherwise (default): in-proc — `xi_plugin_create(host_api, instance_name)`.
+   - Build the in-process adapter — `xi_plugin_create(host_api, instance_name)`.
+     (A legacy `"isolation"` field, if present, is accepted but ignored
+     with a one-time deprecation warning; everything runs in-process.)
    - Apply persisted `config` via `xi_plugin_set_def`.
    - Register in `InstanceRegistry`.
 4. **Skip-bad-instance**: any failure (broken JSON, missing plugin,
@@ -151,95 +149,40 @@ public:
 };
 ```
 
-Two adapters wrap the C ABI:
-- `CAbiInstanceAdapter` — same-process: holds the `void*` instance
-  pointer and the function pointers resolved from the DLL.
-- `ProcessInstanceAdapter` — cross-process (spike branch): proxies
-  every call over a named pipe to a `xinsp-worker.exe` instance,
-  with auto-respawn + per-call timeout.
+One adapter wraps the C ABI:
+- `CAbiInstanceAdapter` — in-process: holds the `void*` instance
+  pointer and the function pointers resolved from the DLL. This is the
+  only adapter path; all instances run in the backend's address space.
 
 ---
 
 ## isolation modes
 
-**Default: process.** A new instance with no `isolation` field in its
-`instance.json` runs in its own `xinsp-worker.exe`. Method calls
-(`set_def` / `exchange` / `get_def` / `process`) proxy over a named
-pipe, pixel data shares zero-copy via SHM.
+**All instances run in-process.** The backend is a single in-process
+compute core (BE) under a frontend (FE) supervisor; every plugin —
+cameras included — is called directly through the in-process
+`CAbiInstanceAdapter`, zero-copy via pointers. There is no worker
+process, no IPC, and no shared-memory region.
 
-Crash recovery is two-layered:
+The earlier process-isolation + SHM mesh was removed 2026-05. The
+rationale: a dead plugin means a dead pipeline regardless of
+isolation, so per-plugin sandboxing bought only complexity. Crash
+diagnosability (minidumps + per-thread breadcrumbs + PDB
+symbolication, see `guides/debugging.md`) is the replacement safety
+net.
 
-1. **In-worker SEH catch.** The worker process wraps every `process()`
-   call in `_set_se_translator`. An access violation / null deref /
-   divide-by-zero / similar SEH inside the plugin is caught and
-   replied to over the pipe as a per-call error — the worker process
-   keeps running, the next call goes straight through, no IPC
-   re-handshake. Backend logs `[xinsp2] use_process('<name>')
-   isolated: plugin crashed: <reason>`; the script side gets a Record
-   with `error` set to the same string.
-
-2. **Process-level respawn.** If something kills the worker process
-   itself (an async `std::abort`, the OS OOM-killer, the SEH wrapper
-   itself faulting), `ProcessInstanceAdapter` re-spawns a fresh
-   worker (rate-limited 3 per 60 s) and replays the last `set_def`
-   so the new worker has the same state. After 3 respawns inside the
-   window the adapter gives up: `is_dead()` returns true, future
-   calls error out, and a one-shot `event:isolation_dead` is emitted
-   to clients.
-
-In normal use (sane plugins, occasional bugs caught during
-development) layer 1 handles everything and you never see the
-respawn path fire.
-
-If the backend was started without an isolation environment (no
-`xinsp-worker.exe` next to it, or SHM region creation failed) every
-default-isolated instance falls back to in-proc with one warning per
-project open.
-
-**Opt out with `"isolation": "in_process"`** (or `"none"`) when you
-want the plugin to share the backend's address space — typically:
-
-- you're actively debugging a plugin and want a single stack to step
-  through,
-- the per-call IPC latency matters (ns-scale function calls instead of
-  µs-scale named-pipe round trips), or
-- the plugin needs to share statics with backend / other plugins
-  (uncommon by design — a plugin is supposed to be a self-contained
-  function with its own UI config).
-
-The legacy value `"isolation": "process"` keeps working as an explicit
-declaration of the default.
+**The `"isolation"` field is deprecated.** Old `instance.json` files
+that carry `"isolation"` (any of `"process"` / `"in_process"` /
+`"none"`) still load — the field is accepted but ignored, emitting a
+one-time deprecation warning. It is documented only so you know old
+projects keep working; new projects should omit it.
 
 ```json
 {
   "plugin": "shape_match",
-  "isolation": "in_process",
-  "call_timeout_ms": 60000,
   "config": { ... }
 }
 ```
-
-`call_timeout_ms` (optional, isolated instances only) bounds how long
-a single IPC call (`process` / `exchange` / `set_def` / `get_def`)
-may block before the adapter cancels it via `CancelIoEx` and treats
-the worker as crashed. Default 30 s — bump it for plugins with slow
-operations (long-exposure cameras, heavy ML inference, big template
-matches) so the watchdog doesn't trip during normal work.
-
-Worker-side conveniences (so plugin authors don't need to know which
-mode they're running in):
-
-- `xi::Plugin::pool_image(w, h, c)` (and the `xi::Image::create_in_pool`
-  it wraps) automatically allocates from the SHM region in the worker
-  process, so cv:: writes land directly in shared memory and the
-  cross-ABI return is `addref`-only — no heap-to-shm copy at the
-  boundary.
-- Plugins that still allocate output via the legacy `xi::Image{w,h,c}`
-  ctor (heap) get their pixels auto-promoted to SHM by `worker_main`
-  before the reply.
-- The output image's key (`record.image("mask", img)` → `"mask"`) is
-  preserved across the IPC boundary, so scripts calling
-  `record.get_image("mask")` work the same in-proc and isolated.
 
 ### `instance.json` schema
 
@@ -249,8 +192,7 @@ Recognised top-level keys (anything else is ignored, no error):
 |---|---|---|---|
 | `plugin` | string | yes | Name of the plugin this instance is bound to. |
 | `config` | object | no | Passed verbatim to `Plugin::set_def(json)` after construction. |
-| `isolation` | string | no | `"process"` (default) / `"in_process"` (opt out) / `"none"` (alias for `in_process`). |
-| `call_timeout_ms` | int | no | Per-call IPC timeout for isolated instances, in ms. |
+| `isolation` | string | no | **Deprecated, ignored.** Accepted for backward compatibility (any value) with a one-time deprecation warning; all instances run in-process. |
 
 `config` is **not** required to be the same shape as `Plugin::get_def()`'s
 return. Plugins commonly include read-only telemetry in `get_def()`
@@ -269,24 +211,6 @@ defaults silently. See `docs/reference/plugin-abi.md` "Plugin
 manifest" for the four warning kinds (`unknown_config_key`,
 `type_mismatch`, `out_of_range`, `not_in_enum`). Plugins without a
 `manifest.params` block skip validation entirely.
-
-A spawned `xinsp-worker.exe`:
-- Attaches the backend's SHM region (so image handles dereference to
-  the same physical pages → zero-copy `process()`).
-- Loads the plugin DLL on its side.
-- Services RPC over a named pipe.
-- An SEH inside `process()` is caught by the worker's own translator
-  and replied to as a per-call error (worker process stays up).
-- Only if the worker process itself dies (OOM kill, async std::abort,
-  SEH wrapper itself faulting) does the adapter respawn it (rate-
-  limited 3/60s, last `set_def` replayed).
-- A hung `process()` is bounded by the per-call timeout
-  (default 30s) → `CancelIoEx` watchdog → forced respawn.
-
-The isolation choice is per-instance, not per-project — you can mix
-isolated and in-proc instances in the same project. Useful for
-sandboxing one suspect / third-party plugin without paying RPC
-overhead on the rest.
 
 ---
 

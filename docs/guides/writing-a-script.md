@@ -503,9 +503,9 @@ When in doubt, leave `dispatch_threads` at 1.
   gone after `unload_script`. Use `xi::state()` for persistence.
 - **Stack overflow / heap corruption** still crashes the process —
   SEH translation handles segfaults / div0 / array overrun, not
-  unbounded recursion or write-past-buffer-end. The
-  `shm-process-isolation` spike provides a separate-process script
-  runner for the strictest cases.
+  unbounded recursion or write-past-buffer-end. The script runs
+  in-process; on a hard crash the backend auto-respawns and writes a
+  crash report + minidump (see [`debugging.md`](./debugging.md)).
 - **`xi::Param<T>` declared inside `xi_inspect_entry`** — won't be
   registered. They must be at file scope.
 

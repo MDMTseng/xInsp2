@@ -40,7 +40,6 @@
 #include <xi/xi_trigger_recorder.hpp>
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
-#include <xi/xi_script_process_adapter.hpp>
 #include <xi/xi_source.hpp>
 #include <xi/xi_ws_server.hpp>
 
@@ -63,11 +62,6 @@ static std::atomic<int64_t> g_run_id{0};
 // Loaded user script state. When null, cmd:run returns an error.
 static xi::script::LoadedScript g_script;
 
-// Optional cross-process isolation for the user script. Populated by the
-// cmd:script_isolated_run handler on first call when XINSP2_ISOLATE_SCRIPT
-// is set; demonstrates the path without disrupting the in-proc run flow.
-static std::unique_ptr<xi::script::ScriptProcessAdapter> g_script_iso_adapter;
-static std::string g_shm_name;   // populated in main(), used by the iso adapter
 static std::mutex               g_script_mu;
 
 // Persistent cross-frame state — survives DLL reloads.
@@ -97,11 +91,6 @@ static std::unordered_map<std::string, std::string> g_param_cache;
 using xi::seh_exception;
 using xi::seh_translator;
 
-// Forward decl — definition near g_srv_for_bp / g_iso_dead_*. Emits a
-// log + isolation_dead event the first time we see an instance gone
-// permanently dead (worker respawn cap hit), silent on later calls.
-static void report_isolation_dead_once(const char* instance, const char* what);
-
 static int use_process_cb(const char* name,
                           const char* input_json,
                           const xi_record_image* input_images, int input_image_count,
@@ -109,82 +98,7 @@ static int use_process_cb(const char* name,
     auto inst = xi::InstanceRegistry::instance().find(name);
     if (!inst) return -1;
 
-    // Isolated (separate-process) adapters: forward over IPC. Worker
-    // can only deref SHM-backed handles (not backend-local pool ones),
-    // so any input handle that isn't already SHM gets promoted here:
-    // allocate a SHM slot, memcpy the pixels in, send THAT handle. We
-    // hold the temp SHM ref until the RPC returns and then release it.
-    // (Output direction is symmetric — worker_main.cpp does the same
-    // on the way back.)
-    if (auto* p = dynamic_cast<xi::ProcessInstanceAdapter*>(inst.get())) {
-        static xi_host_api host = xi::ImagePool::make_host_api();
-        std::vector<xi_record_image> promoted_imgs;
-        std::vector<xi_image_handle> temp_shm;
-        promoted_imgs.reserve((size_t)input_image_count);
-        for (int i = 0; i < input_image_count; ++i) {
-            const auto& img = input_images[i];
-            xi_image_handle h = img.handle;
-            if (h && !host.shm_is_shm_handle(h)) {
-                int w  = host.image_width(h);
-                int hh = host.image_height(h);
-                int ch = host.image_channels(h);
-                int s  = host.image_stride(h);
-                const uint8_t* src = host.image_data(h);
-                if (src && w > 0 && hh > 0 && ch > 0) {
-                    xi_image_handle shm_h = host.shm_create_image(w, hh, ch);
-                    if (shm_h) {
-                        uint8_t* dst = host.image_data(shm_h);
-                        int row_bytes = w * ch;
-                        int src_stride = s > 0 ? s : row_bytes;
-                        for (int y = 0; y < hh; ++y)
-                            std::memcpy(dst + y * row_bytes,
-                                        src + y * src_stride,
-                                        (size_t)row_bytes);
-                        h = shm_h;
-                        temp_shm.push_back(shm_h);
-                    }
-                }
-            }
-            xi_record_image rec{};
-            rec.key    = img.key;
-            rec.handle = h;
-            promoted_imgs.push_back(rec);
-        }
-        xi_record in_rec;
-        in_rec.images      = promoted_imgs.empty() ? nullptr : promoted_imgs.data();
-        in_rec.image_count = (int)promoted_imgs.size();
-        in_rec.json        = input_json;
-        std::string err;
-        bool ok = p->process_via_rpc(&in_rec, output, &err);
-        // Release the temporary SHM handles regardless of outcome —
-        // the worker has already read what it needs.
-        for (auto h : temp_shm) host.image_release(h);
-        if (!ok) {
-            std::fprintf(stderr, "[xinsp2] use_process('%s') isolated: %s\n",
-                         name, err.c_str());
-            if (p->is_dead()) report_isolation_dead_once(name, err.c_str());
-            // Surface the error to the script side. Without this the
-            // script's `xi::use(...).process(...)` returns an empty
-            // Record and a crashed plugin is observationally identical
-            // to one that returned nothing on purpose. Populate
-            // `output->json` with `{"error": "<message>"}` so the
-            // script can do `out["error"].as_string(...)` to detect
-            // and react. Storage is thread_local so the json pointer
-            // stays valid until the next call on this thread.
-            static thread_local std::string err_json_storage;
-            err_json_storage.clear();
-            err_json_storage += "{\"error\":";
-            xp::json_escape_into(err_json_storage, err);
-            err_json_storage += "}";
-            output->images      = nullptr;
-            output->image_count = 0;
-            output->image_capacity = 0;
-            output->json        = const_cast<char*>(err_json_storage.c_str());
-            return 0;
-        }
-        return output->image_count;
-    }
-
+    // All plugins run in-process (process isolation removed 2026-05).
     // Check if it's a C ABI adapter with process_fn
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (adapter && adapter->process_fn()) {
@@ -358,37 +272,6 @@ static std::condition_variable g_bp_cv;
 static bool                    g_bp_paused = false;
 static std::string             g_bp_last_label;
 static xi::ws::Server*         g_srv_for_bp = nullptr;   // set in main
-
-// Fail-loud channel for ProcessInstanceAdapter "worker dead" state.
-// Once an isolated instance hits the 3-respawns/60s cap and goes
-// permanently dead, the adapter returns silent defaults forever
-// ({}, false, etc). Without this, a script keeps iterating against a
-// no-op detector and downstream pipeline output silently drifts.
-//
-// We emit one `log` (level=error) and one `event` per dead instance
-// — the first time use_process_cb / use_exchange_cb sees it dead.
-// Subsequent calls stay silent so the log doesn't flood.
-static std::mutex                       g_iso_dead_mu;
-static std::unordered_set<std::string>  g_iso_dead_reported;
-static void report_isolation_dead_once(const char* instance, const char* what) {
-    if (!g_srv_for_bp) return;
-    {
-        std::lock_guard<std::mutex> lk(g_iso_dead_mu);
-        if (!g_iso_dead_reported.insert(instance).second) return;
-    }
-    std::string msg = std::string("isolated instance '") + instance
-                    + "' is permanently dead (worker respawn cap hit) — "
-                    + (what && *what ? what : "no further detail")
-                    + ". Subsequent calls will return safe defaults.";
-    xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
-    g_srv_for_bp->send_text(lm.to_json());
-    std::string ev = std::string("{\"type\":\"event\",\"name\":\"isolation_dead\","
-                                  "\"data\":{\"instance\":");
-    xp::json_escape_into(ev, instance);
-    ev += "}}";
-    g_srv_for_bp->send_text(ev);
-    std::fprintf(stderr, "[xinsp2] %s\n", msg.c_str());
-}
 
 // ---- Trigger access (script callbacks) ---------------------------------
 // Set by the worker thread (or run_one_inspection) before invoking the
@@ -1674,117 +1557,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         (void)quiesce_dispatch_for_lifecycle_op_("unload_script");
         std::lock_guard<std::mutex> lk(g_script_mu);
         xi::script::unload_script(g_script);
-        // Tear down isolated runner if one was spawned for this script.
-        g_script_iso_adapter.reset();
         // Drop the param replay cache — there's no live script to
         // replay into, and a future load_project / compile_and_load
         // is free to start clean.
         g_param_cache.clear();
         send_rsp_ok(srv, id);
-    } else if (name == "script_isolated_run") {
-        // Phase 3.8 wire-up: run xi_inspect_entry inside xinsp-script-runner.exe
-        // so a buggy / segfaulting / hanging user script doesn't take the
-        // backend down. Lazy-spawns the runner on first call. The runner
-        // attaches the same SHM region, and use_*/exchange/grab callbacks
-        // route back here via Session::set_handler so the script can still
-        // talk to the in-proc instance registry transparently.
-        //
-        // Args: { "frame": <int> } (default 0)
-        // Reply: { "vars": <json string> }
-        std::lock_guard<std::mutex> lk(g_script_mu);
-        if (!g_script.ok()) {
-            send_rsp_err(srv, id, "no script loaded");
-            return;
-        }
-        // Lazy spawn — keeps the cost out of compile_and_load.
-        if (!g_script_iso_adapter) {
-            auto runner_exe = std::filesystem::path(get_exe_dir()) / "xinsp-script-runner.exe";
-            if (!std::filesystem::exists(runner_exe)) {
-                send_rsp_err(srv, id, "xinsp-script-runner.exe not found alongside backend");
-                return;
-            }
-            if (g_shm_name.empty()) {
-                send_rsp_err(srv, id, "shm region not initialised");
-                return;
-            }
-            auto adapter = std::make_unique<xi::script::ScriptProcessAdapter>();
-            std::string err;
-            if (!adapter->start(runner_exe, g_script.path, g_shm_name, err)) {
-                send_rsp_err(srv, id, "spawn failed: " + err);
-                return;
-            }
-            // Route the runner's callbacks back into our existing
-            // in-proc handlers — same logic the in-proc script DLL
-            // would hit, just reached via IPC.
-            adapter->set_handler([](uint32_t type,
-                                    const std::vector<uint8_t>& payload)
-                                 -> std::vector<uint8_t> {
-                if (type == xi::ipc::RPC_USE_PROCESS) {
-                    xi::ipc::Reader r(payload);
-                    std::string instance_name = r.str();
-                    uint64_t in_h = r.u64();
-                    auto json_bytes = r.bytes();
-                    std::string in_json(json_bytes.begin(), json_bytes.end());
-                    xi_record_image in_img{ "frame", in_h };
-                    xi_record_out out_rec{};
-                    int n = use_process_cb(instance_name.c_str(), in_json.c_str(),
-                                            &in_img, 1, &out_rec);
-                    xi::ipc::Writer w;
-                    w.u64((n > 0 && out_rec.image_count > 0)
-                          ? out_rec.images[0].handle : 0);
-                    const char* j = out_rec.json ? out_rec.json : "{}";
-                    w.bytes(j, std::strlen(j));
-                    return w.buf();
-                }
-                if (type == xi::ipc::RPC_USE_EXCHANGE) {
-                    xi::ipc::Reader r(payload);
-                    std::string instance_name = r.str();
-                    std::string cmd = r.str();
-                    std::vector<char> rsp(64 * 1024);
-                    int n = use_exchange_cb(instance_name.c_str(), cmd.c_str(),
-                                             rsp.data(), (int)rsp.size());
-                    xi::ipc::Writer w;
-                    if (n > 0) w.bytes(rsp.data(), (size_t)n);
-                    else       w.bytes("", 0);
-                    return w.buf();
-                }
-                if (type == xi::ipc::RPC_USE_GRAB) {
-                    xi::ipc::Reader r(payload);
-                    std::string instance_name = r.str();
-                    int32_t timeout_ms = (int32_t)r.u32();
-                    xi_image_handle h = use_grab_cb(instance_name.c_str(), timeout_ms);
-                    xi::ipc::Writer w; w.u64(h);
-                    return w.buf();
-                }
-                throw std::runtime_error("unhandled rpc type "
-                                          + std::to_string(type));
-            });
-            g_script_iso_adapter = std::move(adapter);
-            std::fprintf(stderr, "[xinsp2] script isolated runner spawned\n");
-        }
-
-        // Parse "frame" out of the args. Tiny so cJSON is overkill —
-        // a manual scan is fine.
-        int frame = 0;
-        {
-            const std::string& a = parsed->args_json;
-            auto p = a.find("\"frame\"");
-            if (p != std::string::npos) {
-                auto colon = a.find(':', p);
-                if (colon != std::string::npos)
-                    try { frame = std::stoi(a.substr(colon + 1)); } catch (...) {}
-            }
-        }
-
-        std::string vars_json, err;
-        if (!g_script_iso_adapter->inspect_and_snapshot(frame, vars_json, err)) {
-            send_rsp_err(srv, id, "inspect failed: " + err);
-            return;
-        }
-        std::string data = "{\"vars\":";
-        xp::json_escape_into(data, vars_json);
-        data += "}";
-        send_rsp_ok(srv, id, data);
     } else if (name == "run") {
         if (g_continuous.load()) {
             send_rsp_err(srv, id, "cannot run while continuous mode is active — stop first");
@@ -2446,38 +2223,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         out += "]";
         send_rsp_ok(srv, id, out);
-    } else if (name == "shm_metrics") {
-        // Phase E: SHM allocator counters. Snapshot is atomic per-
-        // field but not synchronised across fields — values are
-        // self-consistent at the moment of read but the snapshot may
-        // capture mid-flux. Production monitoring polls this every
-        // few seconds; alarm rules live on the client side.
-        auto* region = xi::ImagePool::shm_region_singleton();
-        if (!region) {
-            send_rsp_err(srv, id, "shm region not initialised");
-            return;
-        }
-        auto snap = region->metrics_snapshot();
-        std::string data = "{";
-        data += "\"a1_acquire_total\":"      + std::to_string(snap.a1_acquire_total);
-        data += ",\"a2_acquire_total\":"     + std::to_string(snap.a2_acquire_total);
-        data += ",\"a2_bump_inflate_total\":" + std::to_string(snap.a2_bump_inflate_total);
-        data += ",\"a3_bump_total\":"        + std::to_string(snap.a3_bump_total);
-        data += ",\"alloc_failed_total\":"   + std::to_string(snap.alloc_failed_total);
-        data += ",\"region_total_size\":"    + std::to_string(snap.region_total_size);
-        data += ",\"region_used_bytes\":"    + std::to_string(snap.region_used_bytes);
-        data += ",\"region_block_count\":"   + std::to_string(snap.region_block_count);
-        data += ",\"promote_threshold_bytes\":" + std::to_string(snap.promote_threshold_bytes);
-        data += ",\"n_buckets\":"            + std::to_string(snap.n_buckets);
-        data += ",\"buckets\":[";
-        for (int i = 0; i < snap.n_buckets; ++i) {
-            if (i) data += ",";
-            data += "{\"size_bytes\":" + std::to_string(snap.bucket_sizes_bytes[i]);
-            data += ",\"a2_free_count\":" + std::to_string(snap.a2_free_count[i]);
-            data += "}";
-        }
-        data += "]}";
-        send_rsp_ok(srv, id, data);
     } else if (name == "image_pool_stats") {
         // Per-owner ImagePool footprint. Owner IDs alone are
         // meaningless to humans — we look them up against the
@@ -3324,55 +3069,10 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[xinsp2] work_dir=%s\n",    g_work_dir.c_str());
     std::fprintf(stderr, "[xinsp2] plugins_dir=%s\n",  g_plugins_dir.c_str());
 
-    // Create the SHM buffer pool exactly once, name it after our PID so
-    // worker processes can find it via OpenFileMapping. Default 512 MB;
-    // sysadmin can raise via XINSP2_SHM_REGION_MB env var (Phase A —
-    // project-level config in project.json `shm.buckets_mb` etc. is
-    // stored in the region header by the cmd:open_project handler;
-    // Phase B reads them when bucket logic actually engages).
-    // Failing to create just leaves shm_create_image returning 0 —
-    // plugins fall back to heap.
-    static std::unique_ptr<xi::ShmRegion> g_shm_region;
-    char shm_name[64];
-    std::snprintf(shm_name, sizeof(shm_name), "xinsp2-shm-%lu",
-                  (unsigned long)GetCurrentProcessId());
-    g_shm_name = shm_name;
-    xi::ShmConfig shm_cfg;  // defaults: 512 MB, [16,64,256] MB buckets, 16 MB threshold
-    if (const char* env = std::getenv("XINSP2_SHM_REGION_MB"); env && *env) {
-        try {
-            uint64_t mb = std::stoull(env);
-            if (mb > 0 && mb <= 65536) {  // sanity cap at 64 GB
-                shm_cfg.region_size_bytes = mb * 1024ull * 1024ull;
-                std::fprintf(stderr,
-                    "[xinsp2] XINSP2_SHM_REGION_MB=%llu → region size %llu MB\n",
-                    (unsigned long long)mb, (unsigned long long)mb);
-            }
-        } catch (...) { /* ignore malformed; use default */ }
-    }
-    try {
-        g_shm_region = std::make_unique<xi::ShmRegion>(
-            xi::ShmRegion::create(shm_name, shm_cfg));
-        xi::ImagePool::set_shm_region(g_shm_region.get());
-        std::fprintf(stderr, "[xinsp2] shm region '%s' size=%lluMB\n",
-                     shm_name,
-                     (unsigned long long)(g_shm_region->total_size() / (1024 * 1024)));
-
-        // Hand the worker exe path + SHM name to the PluginManager so
-        // it can spawn isolated workers when an instance asks for it.
-        // Worker exe lives next to xinsp-backend.exe.
-        auto worker_exe = std::filesystem::path(get_exe_dir()) / "xinsp-worker.exe";
-        if (std::filesystem::exists(worker_exe)) {
-            g_plugin_mgr.set_isolation_env(worker_exe, shm_name);
-            std::fprintf(stderr, "[xinsp2] isolation env: worker=%s\n",
-                         worker_exe.string().c_str());
-        } else {
-            std::fprintf(stderr, "[xinsp2] xinsp-worker.exe not found — "
-                                 "isolation:process disabled\n");
-        }
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "[xinsp2] shm region create failed: %s "
-                              "(plugins will use heap pool only)\n", e.what());
-    }
+    // Process isolation + SHM removed 2026-05: all plugins run
+    // in-process and share the host ImagePool directly (zero-copy via
+    // pointers, no cross-process marshalling). No worker process, no
+    // shared-memory region to set up.
 
     // Hand the same compile environment that xi::script::compile uses
     // to the plugin manager — project plugins (compiled when a project
@@ -3414,10 +3114,6 @@ int main(int argc, char** argv) {
         }
         // E-P1-1: clear the dedup set so a re-dying instance is
         // re-reported to the next client.
-        {
-            std::lock_guard<std::mutex> lk(g_iso_dead_mu);
-            g_iso_dead_reported.clear();
-        }
     };
     srv.on_text = [&](std::string_view s) {
         handle_command(srv, s);

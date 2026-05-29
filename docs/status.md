@@ -24,11 +24,10 @@ xInsp2 ships as a single-machine inspection-authoring environment:
 - **SDK** — scaffold + cmake helpers + tests for plugin authors who
   want to ship distributable plugins.
 
-Master holds **9 shipped plugins** and ships the cross-process
-isolation mesh as an **opt-in** (merged from the
-`shm-process-isolation` spike). Set `"isolation": "process"` per
-instance, or call `cmd:script_isolated_run` for scripts. Default-on is
-tracked work — see *Process isolation* below.
+Master holds **9 shipped plugins**. Process isolation + the SHM mesh
+were **removed 2026-05** in favour of a single in-process compute core
+(BE) under a frontend (FE) supervisor — all plugins (cameras included)
+run in-process, zero-copy via pointers. See *Process isolation* below.
 
 ---
 
@@ -104,46 +103,29 @@ tracked work — see *Process isolation* below.
 
 ---
 
-## Process isolation (merged, opt-in)
+## Process isolation — REMOVED 2026-05
 
-Merged from the `shm-process-isolation` spike. All 9 SHM/IPC tests
-green. Default is in-proc; per-instance opt-in via
-`"isolation": "process"`.
+The cross-process isolation mesh (worker / script-runner / shared-
+memory region) was removed. The project pivoted to a single in-process
+model: a frontend (FE) supervisor over a backend (BE) compute core
+that calls ALL plugins — cameras included — directly in-process,
+zero-copy via pointers. No SHM, no worker processes.
 
-- `xi_shm.hpp` — Windows `CreateFileMapping`-backed buffer pool with
-  cross-process atomic refcount and bump allocator (512 MB region per
-  backend).
-- `host_api` extensions: `shm_create_image` / `shm_alloc_buffer` /
-  `shm_addref` / `shm_release` / `shm_is_shm_handle` (binary-compatible
-  append — pre-isolation plugin DLLs still load).
-- `xinsp-worker.exe` — hosts ONE plugin instance in its own process.
-  Method calls go over a named pipe; pixel data rides SHM (zero-copy).
-- `xinsp-script-runner.exe` — analogous host for user scripts.
-- `ProcessInstanceAdapter` + `ScriptProcessAdapter` — host-side handles
-  with auto-respawn (rate-limited 3/60s) and per-call timeout via
-  `CancelIoEx` watchdog.
-- **Always-on reader thread** (Task #74 / PR #19 follow-up) — each
-  `ProcessInstanceAdapter` runs a dedicated thread that owns the pipe's
-  read side. Replies for in-flight RPCs fulfil per-seq promises;
-  `seq=0` async frames (`RPC_EMIT_TRIGGER`) dispatch straight to
-  `TriggerBus` whether or not a backend→worker call is in flight.
-  This unblocks `"isolation":"process"` for source plugins; previously
-  triggers piled up unread until the next backend RPC. Exercised by
-  `examples/cross_proc_trigger/`.
-- **Worker-side conveniences merged with the spike**:
-    - heap-pool → SHM auto-copy in `worker_main` so plugins that use
-      `xi::Image{...}` (the common case) work cross-process without
-      knowing they're isolated.
-    - Output image key preserved across the IPC boundary (e.g.
-      `record.image("mask", img)` still surfaces as `"mask"` to the
-      script, not as a fixed `"out"`).
-- **Default**: in-proc for both plugin instances and scripts.
-  Per-instance `"isolation": "process"` opts plugins in;
-  `cmd:script_isolated_run` opts scripts in.
-- **Default-on tracked**: needs broader real-plugin testing
-  (multi-image outputs, plugins that store image handles in their
-  JSON, error / hot-reload paths) plus folding script isolation into
-  `cmd:run` while preserving previews / history / watchdog.
+Rationale: a dead plugin means a dead pipeline regardless of
+isolation, so per-plugin sandboxing only added complexity. Crash
+diagnosability (minidumps + per-thread breadcrumbs + PDB
+symbolication, see `guides/debugging.md`) is the replacement safety
+net.
+
+Removed with it: `xi_shm.hpp` and the host_api `shm_*` extensions
+(the fields remain declared in the ABI struct for binary
+compatibility but are always `nullptr`; plugins fall back to
+`image_create`), `xinsp-worker.exe` / `xinsp-script-runner.exe`, the
+`ProcessInstanceAdapter` / `ScriptProcessAdapter`, the `shm_metrics`
+and `script_isolated_run` commands, and the `event:isolation_dead`.
+The `instance.json` `"isolation"` field is now accepted but ignored
+with a one-time deprecation warning, so old projects still load.
+`docs/reference/ipc-shm.md` is retained for historical reference only.
 
 ---
 
@@ -152,8 +134,8 @@ green. Default is in-proc; per-instance opt-in via
 See [`testing.md`](./testing.md) for the full breakdown. Summary:
 
 - ~50 C++ unit tests across `xi_core`, `protocol`, `record`, `ops`,
-  `image_pool`, `diagnostics`, plus Phase-3 SHM/IPC tests on the spike
-  branch (~9 more).
+  `image_pool`, `diagnostics`. (The Phase-3 SHM/IPC test set was
+  deleted with the process-isolation removal.)
 - ~30 Node integration tests under `vscode-extension/test/`.
 - E2E suites driven by `@vscode/test-electron`: full pipeline,
   multi-camera, record/replay, user journey, project-plugin journey,
@@ -177,9 +159,9 @@ See [`testing.md`](./testing.md) for the full breakdown. Summary:
 - **Per-instance folders.** Each instance owns `<project>/instances/<name>/`.
 - **Trigger bus is opt-in.** Legacy `ImageSource` plugins continue to
   work unchanged.
-- **Process isolation: opt-in.** Set `"isolation":"process"` per
-  instance or call `cmd:script_isolated_run` for scripts. Default-on
-  is gated on broader plugin coverage + script-side preview wiring.
+- **Single in-process compute core.** Process isolation + SHM were
+  removed 2026-05; FE supervisor over an in-process BE that calls all
+  plugins directly. Crash diagnosability replaces sandboxing.
 
 ---
 
@@ -204,15 +186,10 @@ See [`testing.md`](./testing.md) for the full breakdown. Summary:
 
 Priorities depend on real usage feedback. Candidate work:
 
-- **Process-isolation default-on.**
-    - Instance side: needs real-plugin coverage beyond the 9 spike
-      tests — multi-image Records, plugin-side handle storage in JSON,
-      hot-reload semantics, fallback / fail-loud policy.
-    - Script side: refactor `cmd:run` to host the script in
-      `xinsp-script-runner.exe` while preserving binary previews,
-      history, watchdog, breakpoint, continuous mode. The runner +
-      `ScriptProcessAdapter` exist — the work is wiring snapshot vars
-      + SHM-resolved gids back through `emit_vars_and_previews`.
+- **FE/BE split boundary** (Task #94) — design the frontend supervisor
+  over the in-process backend compute core (needs camera + PLC
+  decisions). This is the architecture that replaced process
+  isolation.
 - **Multi-client broadcast (S6)** — opens the door to operator dashboards.
 - **History UI scrubber (finish S4)** — currently backend-only.
 - **Per-component reference docs** — see [`docs/reference/`](./reference/).

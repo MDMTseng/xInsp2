@@ -118,7 +118,6 @@ Out-of-band notifications that don't fit the above.
 { "type": "event", "name": "run_finished", "data": { "run_id": 17, "ms": 42 } }
 { "type": "event", "name": "run_error", "data": { "run_id": 17, "what": "..." } }
 { "type": "event", "name": "script_reloaded", "data": { "path": "..." } }
-{ "type": "event", "name": "isolation_dead", "data": { "instance": "cam0" } }
 { "type": "event", "name": "state_dropped", "data": { "old_schema": 1, "new_schema": 2 } }
 { "type": "event", "name": "compile_started", "data": { "path": "..." } }
 { "type": "event", "name": "compile_finished", "data": { "path": "...", "ok": true } }
@@ -131,13 +130,6 @@ wall-clock duration). `run_error.data` is `{run_id, what}` and fires
 INSTEAD of `run_finished` when the inspect throws (C++ exception or
 SEH). Drivers waiting for run completion should listen for
 `run_finished` OR `run_error` — exactly one fires per run.
-
-`isolation_dead` fires once per instance the first time
-`use_process` / `use_exchange` sees an isolated instance gone
-permanently dead (worker respawn cap hit; subsequent calls would
-return safe defaults silently). Pair with the `log` (level=error)
-message that lands in the same beat. Reset by reopening the project
-or removing/recreating the instance.
 
 `compile_started` / `compile_finished` bracket the `cmd:compile_and_load`
 operation. `compile_started` fires immediately before cl.exe is invoked
@@ -238,50 +230,6 @@ followed by an asynchronous `vars` message and zero or more binary previews.
 script gets an empty string. Combine with `xi::imread()` to load a
 file frame on demand without a custom source plugin.
 
-### `shm_metrics`
-
-`args: {}` → `data: { ...counters... }`. Snapshot of the SHM
-allocator's current state. All `*_total` counters are monotonic
-since backend startup.
-
-```json
-{
-  "type": "rsp", "id": 17, "ok": true,
-  "data": {
-    "a1_acquire_total":      0,
-    "a2_acquire_total":      18432,
-    "a2_bump_inflate_total": 12,
-    "a3_bump_total":         0,
-    "alloc_failed_total":    0,
-    "region_total_size":     536870912,
-    "region_used_bytes":     50331648,
-    "region_block_count":    96,
-    "promote_threshold_bytes": 16777216,
-    "n_buckets":             5,
-    "buckets": [
-      { "size_bytes": 262144,    "a2_free_count": 4 },
-      { "size_bytes": 1048576,   "a2_free_count": 2 },
-      { "size_bytes": 16777216,  "a2_free_count": 1 },
-      { "size_bytes": 67108864,  "a2_free_count": 0 },
-      { "size_bytes": 268435456, "a2_free_count": 0 }
-    ]
-  }
-}
-```
-
-Field semantics:
-- `a1_acquire_total` — Tier 1 (instance-private pool) hits.
-- `a2_acquire_total` — Tier 2 (shared free-list) pops.
-- `a2_bump_inflate_total` — free-list miss; bumped a fresh bucket-sized chunk.
-- `a3_bump_total` — request size > all configured buckets; raw bump.
-- `alloc_failed_total` — region full; allocator returned INVALID.
-- `buckets[].a2_free_count` — current depth of each bucket's free-list.
-
-Production alarm rules:
-- `a3_bump_total > 0`        → bucket layout doesn't cover workload; raise
-- `alloc_failed_total > 0`   → region full; increase `XINSP2_SHM_REGION_MB`
-- `a2_free_count[i] / N < 0.2` → bucket near exhaustion
-
 ### `start` / `stop`
 `start args: { "fps": int (default 10) }` → `data: { "started": true,
 "dispatch_threads": int }` (the int reflects the project's
@@ -295,7 +243,7 @@ Continuous mode runs a single worker thread inside the backend. Each
 tick comes from one of two sources:
 
 - The trigger bus dispatches one inspect call per complete trigger
-  (see `instance-model.md` "isolation modes" / trigger sections).
+  (see `instance-model.md` trigger sections).
 - A wall-clock timer at the requested fps fires a fallback dispatch
   even when no trigger is queued. Scripts that read trigger images
   must guard `xi::current_trigger().is_active()` because timer-only
@@ -444,8 +392,8 @@ Backend automatically `release_all_for(owner)` sweeps:
 - on `CAbiInstanceAdapter` destruction (instance destroyed)
 - on `unload_script` (compile_and_load reload)
 
-Process-isolated instances and SHM-backed handles are NOT counted
-here — they live in the worker's local pool / SHM region.
+All instances and scripts run in-process, so every handle is counted
+here — there is a single host ImagePool.
 
 ### `set_param`
 `args: { "name": "sigma", "value": 3.5 }` → `ok: true`

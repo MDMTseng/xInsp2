@@ -1,5 +1,7 @@
 # Tier1 + A2 hybrid — Implementation plan
 
+> **SUPERSEDED / REMOVED 2026-05** — the SHM allocator was removed with the FE/BE in-process split. Retained for historical reference.
+
 Companion to `shm-allocator-formal-spec.md`. Decomposes the spec into
 ~50 concrete impl steps grouped into 7 PR-sized phases. Each step is
 small enough to commit individually if needed.

@@ -96,8 +96,7 @@ node <xinsp2>\sdk\scaffold.mjs C:\dev\my_plugins\foo
 ```
 
 (For the unified `--template easy|medium|expert` flag, use the
-`shm-process-isolation` branch's scaffold which renders from
-`sdk/templates/`.)
+scaffold variant that renders from `sdk/templates/`.)
 
 ### 2. Build
 
@@ -206,49 +205,28 @@ Call `host->emit_trigger(name, tid, ts, images, count)` from a worker
 thread. The backend's TriggerBus correlates by `tid`. See the Expert
 template for a working synthetic source.
 
-**Source plugins must opt out of process isolation.** Cross-process
-emit_trigger isn't implemented yet — the worker's bus is a different
-singleton from the backend's, so emits from an isolated worker would
-go nowhere. Add `"isolation": "in_process"` to the source instance's
-`instance.json`:
-
-```json
-{ "plugin": "my_camera", "isolation": "in_process", "config": { ... } }
-```
-
-If you forget, the worker's stub `emit_trigger` logs a warning to
-backend stderr (`emit_trigger from isolated worker is a no-op`) and
-the bus stays empty. Track of the cross-process feature: future
-work, alongside burst-frame parallelism.
+All plugins run in-process (cameras included), so `emit_trigger`
+always reaches the real backend TriggerBus — no special config is
+needed for source plugins. (A legacy `"isolation"` field in
+`instance.json` is accepted but ignored with a one-time deprecation
+warning; see
+[`docs/reference/instance-model.md`](../reference/instance-model.md).)
 
 **Crash isolation?**
-Plugin instances default to running in their own `xinsp-worker.exe`
-(see [`docs/reference/instance-model.md`](../reference/instance-model.md)
-"isolation modes"). Two layers protect the backend:
+All plugins run in-process — a plugin crash CAN take the backend down
+with it. The protections are:
 
-1. The worker has an SEH wrapper around `process()`. An access
-   violation, null deref, divide-by-zero, etc. inside the plugin is
-   caught and replied to over the IPC pipe as a per-call error — the
-   worker process keeps running, the next call goes straight through.
-2. If something kills the worker process itself (an asynchronous
-   `std::abort`, the OS OOM-killing it, the SEH wrapper itself
-   crashing), `ProcessInstanceAdapter` auto-respawns it (rate-limited
-   3 per 60 s) and replays the last `set_def` so state survives.
+1. An SEH wrapper around every `process()` call. An access violation,
+   null deref, divide-by-zero, etc. inside the plugin is caught and
+   surfaced as a per-call error — the backend keeps running.
+2. What SEH can't catch (stack overflow, heap corruption) crashes the
+   backend; the extension auto-respawns it and a crash report +
+   minidump is written for diagnosis. See
+   [`docs/guides/debugging.md`](./debugging.md).
 
-On the script / Python SDK side, a crashed `process()` returns a
-Record with an `error` field set to the underlying exception text:
-
-```cpp
-auto out = xi::use("det").process(input);
-if (!out["error"].as_string("").empty()) {
-    // worker reported a crash this call — handle and continue
-}
-```
-
-If you want the legacy in-process behaviour (debugger easier, lower
-per-call latency, but a plugin crash WILL take the backend down with
-it) opt out per instance with `"isolation": "in_process"` in
-`instance.json`.
+Process isolation + SHM were removed 2026-05; crash diagnosability
+(minidumps + per-thread breadcrumbs + PDB symbolication) is the
+replacement safety net.
 
 **My plugin won't load.** Check:
 1. Backend stderr — usually says exactly which symbol failed to

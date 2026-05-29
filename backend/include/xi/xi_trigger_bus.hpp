@@ -153,61 +153,32 @@ public:
               const xi_record_image* images,
               int image_count)
     {
-        if (image_count <= 0 || !images) return;
-        if (ts_us == 0) ts_us = now_us();
-        xi_trigger_id tid = xi_trigger_id_is_null(tid_in) ? make_trigger_id() : tid_in;
-
-        emit_impl_(source, tid_in, ts_us, images, image_count,
-                   /*caller_transferred_ownership=*/false);
+        emit_impl_(source, tid_in, ts_us, images, image_count);
     }
 
-    // Phase C (audit C-P1-6): ownership-transfer variant. Used by the
-    // cross-process worker→host emit_trigger path where the wire
-    // frame already carries the sender's ref. The bus does NOT addref
-    // — it takes the ref directly. With Phase B's reclaiming free-
-    // list, this avoids the refcount=0 window between worker release
-    // and host addref where another alloc could reuse the slot.
+    // Internal implementation behind emit(). Marked public so the inline
+    // call site above can invoke it without function-call overhead in
+    // Release; effectively private — external callers go through emit().
     //
-    // In-process callers (host_api->emit_trigger, trigger_bridge,
-    // recorder replay) must use the regular emit() — they still own
-    // their refs and release after the call returns.
-    void emit_with_transfer(const std::string& source,
-                            xi_trigger_id tid_in,
-                            int64_t ts_us,
-                            const xi_record_image* images,
-                            int image_count) {
-        if (image_count <= 0 || !images) return;
-        emit_impl_(source, tid_in, ts_us, images, image_count,
-                   /*caller_transferred_ownership=*/true);
-    }
-
-    // Internal implementation shared by emit / emit_with_transfer.
-    // Marked public so the inline call sites above can invoke it
-    // without further function-call overhead in Release; effectively
-    // private — external callers should always go through emit() or
-    // emit_with_transfer().
+    // All callers are in-process (host_api->emit_trigger, trigger_bridge,
+    // recorder replay): they own their refs and release after emit()
+    // returns, so the bus addrefs each handle to own its own independent
+    // ref. (The cross-process ownership-transfer variant was removed with
+    // SHM in 2026-05; nothing transfers refs over a wire anymore.)
     void emit_impl_(const std::string& source,
                     xi_trigger_id tid_in,
                     int64_t ts_us,
                     const xi_record_image* images,
-                    int image_count,
-                    bool caller_transferred_ownership)
+                    int image_count)
     {
         if (image_count <= 0 || !images) return;
         if (ts_us == 0) ts_us = now_us();
         xi_trigger_id tid = xi_trigger_id_is_null(tid_in) ? make_trigger_id() : tid_in;
 
-        // For non-transfer callers (in-proc) we addref each handle so
-        // the bus owns its own ref independent of the caller's ref;
-        // caller is expected to release after emit() returns.
-        // For transfer callers (cross-proc worker frame), the wire
-        // already conferred the ref — we just take it.
         std::vector<std::pair<std::string, xi_image_handle>> entries;
         entries.reserve(image_count);
         for (int i = 0; i < image_count; ++i) {
-            if (!caller_transferred_ownership) {
-                ImagePool::instance().addref(images[i].handle);
-            }
+            ImagePool::instance().addref(images[i].handle);
             // Use multi-image keys as "<source>/<key>" so a source can
             // publish several named images (e.g. "raw" + "depth"). For the
             // common single-image case the key collapses to source name.

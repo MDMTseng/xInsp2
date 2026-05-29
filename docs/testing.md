@@ -16,9 +16,6 @@ vscode-extension/test/
   └── e2e/              ← VS Code Extension Host suites (@vscode/test-electron)
 ```
 
-Master + spike branches share the layout. Tests on the
-`shm-process-isolation` spike branch are listed separately below.
-
 ---
 
 ## C++ unit tests (master)
@@ -110,22 +107,6 @@ capture screenshots via `Win32 PrintWindow` for human spot-checks.
 
 ---
 
-## Spike-only tests (`shm-process-isolation` branch)
-
-| Binary | Coverage |
-|---|---|
-| `test_xi_shm` | cross-process SHM region: parent+child attach, byte-match, refcount |
-| `test_worker` | `xinsp-worker.exe` end-to-end with test_doubler plugin |
-| `test_isolated_instance` | `open_project` with `isolation:"process"` opt-in |
-| `test_worker_respawn` | auto-respawn on worker death + rate-limit cap |
-| `test_worker_timeout` | per-call `CancelIoEx` watchdog + dead state |
-| `test_script_runner` | `xinsp-script-runner.exe` + bidirectional RPC |
-| `test_script_process_adapter` | `ScriptProcessAdapter` lifecycle + handler |
-| `test_script_runner_respawn` | script runner auto-respawn |
-| `test_shm_ipc_edges` | DoS hardening, OOM, bogus handles, attach errors |
-
----
-
 ## Performance baseline (1920×1080 RGB)
 
 Numbers from a recent sweep. Drift if you change ops / encoders.
@@ -155,11 +136,12 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
 
 ## Known limitations / gaps
 
-- **Plugin / script crashes still kill the backend** on the default
-  in-proc path. Process isolation is shipped but opt-in:
-  `instance.json: "isolation": "process"` for plugins,
-  `cmd:script_isolated_run` for scripts. Default-on is tracked work.
-  See `docs/reference/ipc-shm.md`.
+- **Plugin / script crashes kill the backend.** Process isolation +
+  SHM were removed 2026-05; all plugins and scripts run in-process.
+  The replacement safety net is crash diagnosability (minidumps +
+  per-thread breadcrumbs + PDB symbolication, see
+  `docs/guides/debugging.md`). `docs/reference/ipc-shm.md` documents
+  the removed mesh for historical reference only.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

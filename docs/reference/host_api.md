@@ -36,10 +36,13 @@ typedef struct xi_host_api {
 The struct is **append-only**. Older plugin DLLs that don't read the
 new tail fields stay binary-compatible.
 
-> The `shm-process-isolation` spike branch appends `shm_create_image` /
-> `shm_alloc_buffer` / `shm_addref` / `shm_release` /
-> `shm_is_shm_handle` for opt-in cross-process zero-copy. Documented in
-> `reference/ipc-shm.md` on that branch.
+> The `shm_create_image` / `shm_alloc_buffer` / `shm_addref` /
+> `shm_release` / `shm_is_shm_handle` fields remain declared in the ABI
+> struct for binary compatibility, but in the current single-process
+> build the host always sets them to `nullptr`. Plugins that call them
+> must null-check and fall back to `image_create` (which is what they
+> do). The SHM cross-process path itself was removed 2026-05; see
+> `reference/ipc-shm.md` (historical).
 
 ---
 
@@ -156,14 +159,8 @@ inspection event per complete trigger.
 `emit_trigger` is null on hosts older than the trigger bus addition;
 plugins should null-check.
 
-**Isolation gotcha**: when a source-plugin instance runs under the
-current default `"isolation": "process"`, the worker gets a stub
-`emit_trigger` that logs a warning and no-ops — emits can't reach
-the backend's TriggerBus because the bus is a singleton in the
-backend's address space, not the worker's. Source-plugin instances
-must therefore set `"isolation": "in_process"` in their
-`instance.json`. Cross-process emit_trigger is queued as future
-work.
+All plugins run in-process, so `emit_trigger` always reaches the real
+backend TriggerBus — there is no worker stub.
 
 For threading safety inside source plugins, use `xi::spawn_worker`
 (see `xi/xi_thread.hpp`) — it installs the SEH translator on the
