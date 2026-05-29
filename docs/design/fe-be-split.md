@@ -114,6 +114,10 @@ respawned, hit the cap, stayed safe, and left no orphan.
 `examples/plugin_crash_forensics/` covers the BE-side minidump/breadcrumb the FE
 relies on.
 
+The full test plan — unit / integration / e2e / safety-property coverage, what
+exists today vs the priority gaps — is in
+[`fe-be-split-test-plan.md`](./fe-be-split-test-plan.md).
+
 ## Phase 2 (not built)
 
 - C++ WS client + deep heartbeat (detect a hang while the port stays open).
