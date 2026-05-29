@@ -3261,12 +3261,27 @@ int main(int argc, char** argv) {
             "{\"type\":\"cmd\",\"id\":1,\"name\":\"open_project\",\"args\":{\"path\":"
             + xp::json_escape(project) + "}}");
 
-        // Default the script to the project.json's resolved script_path.
-        if (script.empty()) script = g_plugin_mgr.project().script_path;
-        if (script.empty()) {
+        // Resolve the script path:
+        //  - explicit --script: relative paths are relative to the PROJECT dir
+        //    (the script lives with the project, not the backend's cwd);
+        //  - otherwise the project.json's resolved script_path.
+        // Note open_project ALWAYS populates script_path (it falls back to
+        // "<folder>/inspection.cpp" when project.json has no "script"), so a
+        // truly script-less project resolves to a path that may not exist on
+        // disk. Treat a missing script FILE as open-only rather than firing a
+        // doomed compile — lets a project that's configured (instances only,
+        // script authored later in the IDE) autostart cleanly.
+        if (!script.empty()) {
+            std::filesystem::path sp(script);
+            if (sp.is_relative()) sp = std::filesystem::path(project) / sp;
+            script = sp.string();
+        } else {
+            script = g_plugin_mgr.project().script_path;
+        }
+        if (script.empty() || !std::filesystem::exists(script)) {
             std::fprintf(stderr,
-                "[xinsp2] autostart: no script (project has none and --script not given); "
-                "open only\n");
+                "[xinsp2] autostart: no script file (%s); open only\n",
+                script.empty() ? "none given" : script.c_str());
         } else {
             std::fprintf(stderr, "[xinsp2] autostart: compile_and_load %s\n", script.c_str());
             handle_command(srv,
@@ -3280,6 +3295,13 @@ int main(int argc, char** argv) {
                     + std::to_string(autostart_fps) + "}}");
             }
         }
+        // Readiness marker. The WS port binds in srv.start() ABOVE, but the
+        // open/compile/start sequence runs synchronously here before the accept
+        // loop — so for several seconds the port is "up" (TCP connect succeeds)
+        // while the backend isn't yet serving. A supervisor / operator HMI / a
+        // test can wait for THIS line to know the line is actually ready, not
+        // merely listening. (port-up != ready.)
+        std::fprintf(stderr, "[xinsp2] autostart: ready\n");
         std::fflush(stderr);
     }
 

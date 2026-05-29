@@ -1,0 +1,6 @@
+{
+  "name": "qa_fault_badscript",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

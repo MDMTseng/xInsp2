@@ -1,0 +1,6 @@
+{
+  "name": "qa_fault_heal",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

@@ -1,0 +1,7 @@
+[backend] booting on port 7910
+[backend] autostart: open_project
+[backend] autostart: compile_and_load
+[backend] backend healthy (port 7910 up)
+[backend] FATAL: unhandled exception on dispatch thread
+[backend] writing crash report — minidump: C:\Temp\xinsp2\crashdumps\xinsp-backend-4242-20260530T101500.dmp
+[backend] process exiting rc=0xC0000005

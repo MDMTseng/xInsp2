@@ -1,0 +1,6 @@
+{
+  "name": "qa_race_crashburst",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

@@ -157,6 +157,21 @@ add_executable(test_safe_state tests/test_safe_state.cpp)
 target_link_libraries(test_safe_state PRIVATE xi_core)
 add_test(NAME safe_state COMMAND test_safe_state)
 
+# QA team-loop units (FE/BE split hardening). See docs/design/fe-test-rounds/.
+# qa_fault/qa_race pin the respawn cap + sliding-window math; qa_edge pins the
+# crash-report parser (xi_crash_report.hpp) against crafted fixtures.
+add_executable(test_qa_fault tests/test_qa_fault.cpp)
+target_link_libraries(test_qa_fault PRIVATE xi_core)
+add_test(NAME qa_fault COMMAND test_qa_fault)
+
+add_executable(test_qa_race tests/test_qa_race.cpp)
+target_link_libraries(test_qa_race PRIVATE xi_core)
+add_test(NAME qa_race COMMAND test_qa_race)
+
+add_executable(test_qa_edge tests/test_qa_edge.cpp)
+target_link_libraries(test_qa_edge PRIVATE xi_core cjson)
+add_test(NAME qa_edge COMMAND test_qa_edge)
+
 add_executable(xinsp_backend
     src/service_main.cpp
     src/stb_impl.cpp

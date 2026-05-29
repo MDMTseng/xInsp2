@@ -18,6 +18,7 @@
 // portable. TODO(linux) markers below; see docs/design/linux-port.md.
 //
 #include <xi/xi_safe_state.hpp>
+#include <xi/xi_crash_report.hpp>   // xi::enrich_from_crash_report (unit-tested)
 
 #include <algorithm>
 #include <atomic>
@@ -164,61 +165,10 @@ static int64_t now_ms() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-// ----------------------------------------------------------------------------
-// Crash report — parse the BE's own log for the absolute minidump path it
-// printed, then read the sibling .json. This is the proven approach from
-// plugin_crash_forensics/driver.py: do NOT guess %TEMP%/xinsp2/crashdumps,
-// because a sandboxed/per-tool TEMP isn't inherited by the BE we spawned.
-// ----------------------------------------------------------------------------
-static void enrich_from_crash_report(const std::string& be_log, xi::SafeStateEvent& ev) {
-    std::ifstream f(be_log);
-    if (!f) return;
-    std::stringstream ss; ss << f.rdbuf();
-    std::string text = ss.str();
-
-    // BE prints: "... — minidump: C:\...\xinsp-backend-<pid>-<ts>.dmp"
-    std::regex re(R"(minidump:\s*(.+?\.dmp))");
-    std::string dmp;
-    for (std::sregex_iterator it(text.begin(), text.end(), re), end; it != end; ++it)
-        dmp = (*it)[1].str();   // keep the last match
-    if (dmp.empty()) return;
-    // Trim trailing whitespace/CR.
-    while (!dmp.empty() && (dmp.back() == '\r' || dmp.back() == '\n' || dmp.back() == ' '))
-        dmp.pop_back();
-
-    fs::path json_path = fs::path(dmp).replace_extension(".json");
-    ev.report_path = json_path.string();
-    std::ifstream jf(json_path);
-    if (!jf) return;
-    std::stringstream js; js << jf.rdbuf();
-    cJSON* root = cJSON_Parse(js.str().c_str());
-    if (!root) return;
-    if (cJSON* exc = cJSON_GetObjectItem(root, "exception")) {
-        if (cJSON* nm = cJSON_GetObjectItem(exc, "name"); cJSON_IsString(nm))
-            ev.exception_name = nm->valuestring;
-        if (cJSON* md = cJSON_GetObjectItem(exc, "module"); cJSON_IsString(md))
-            ev.faulting_module = md->valuestring;
-    }
-    if (cJSON* ctx = cJSON_GetObjectItem(root, "context")) {
-        if (cJSON* ph = cJSON_GetObjectItem(ctx, "last_phase"); cJSON_IsString(ph))
-            ev.last_phase = ph->valuestring;
-    }
-    // If context didn't name a phase (crash on an unmanaged thread), fall back
-    // to the most informative thread breadcrumb in threads[].
-    if (ev.last_phase.empty()) {
-        if (cJSON* th = cJSON_GetObjectItem(root, "threads"); cJSON_IsArray(th)) {
-            cJSON* t = nullptr;
-            cJSON_ArrayForEach(t, th) {
-                cJSON* ph = cJSON_GetObjectItem(t, "last_phase");
-                if (cJSON_IsString(ph) && ph->valuestring && ph->valuestring[0]) {
-                    ev.last_phase = ph->valuestring;
-                    if (std::string(ph->valuestring) == "inspect") break;  // prefer inspect
-                }
-            }
-        }
-    }
-    cJSON_Delete(root);
-}
+// Crash-report parsing (read the BE's log for the minidump path it printed,
+// then the sibling .json) lives in xi/xi_crash_report.hpp as
+// xi::enrich_from_crash_report — extracted so it can be unit-tested
+// (backend/tests/test_qa_edge.cpp) against crafted fixtures. The FE just calls it.
 
 #ifdef _WIN32
 // ----------------------------------------------------------------------------
@@ -399,7 +349,7 @@ static int run_supervisor(const FeConfig& c) {
         ev.reason     = death_reason;
         ev.backend_rc = (int)exit_code;
         ev.ts_ms      = now_ms();
-        enrich_from_crash_report(c.be_log, ev);
+        xi::enrich_from_crash_report(c.be_log, ev);
         sink->enter_safe_state(ev);
         in_safe_state = true;
 
@@ -416,7 +366,7 @@ static int run_supervisor(const FeConfig& c) {
             stuck.faulting_module = ev.faulting_module;
             stuck.report_path     = ev.report_path;
             sink->enter_safe_state(stuck);
-            std::fprintf(stderr, "[xinsp-fe] respawn limit (%d in %ds) exceeded — staying in "
+            std::fprintf(stderr, "[xinsp-fe] respawn limit (%d in %ds) exceeded - staying in "
                          "safe state; manual restart required\n", c.respawn_max, c.respawn_window_s);
             rc = 2;
             break;
@@ -442,7 +392,7 @@ static int run_supervisor(const FeConfig& c) {
 
 static void print_help() {
     std::printf(
-        "xinsp-fe — xInsp2 frontend supervisor\n"
+        "xinsp-fe - xInsp2 frontend supervisor\n"
         "\n"
         "Spawns + monitors xinsp-backend.exe, drives the line to a safe state on\n"
         "backend death, and respawns it (rate-limited).\n"

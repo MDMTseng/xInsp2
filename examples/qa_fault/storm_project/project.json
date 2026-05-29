@@ -1,0 +1,6 @@
+{
+  "name": "qa_fault_storm",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

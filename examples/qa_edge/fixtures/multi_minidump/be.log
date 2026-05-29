@@ -1,0 +1,6 @@
+[backend] crash #1 — minidump: C:\Temp\xinsp2\crashdumps\xinsp-backend-1111-stale.dmp
+[xinsp-fe] respawning backend (1/5 in window) after 1500ms
+[backend] crash #2 — minidump: C:\Temp\xinsp2\crashdumps\xinsp-backend-2222-stale.dmp
+[xinsp-fe] respawning backend (2/5 in window) after 1500ms
+[backend] crash #3 (most recent) — minidump: C:\Temp\xinsp2\crashdumps\xinsp-backend-3333-latest.dmp
+[backend] process exiting rc=0xC0000005

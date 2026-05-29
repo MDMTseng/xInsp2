@@ -44,3 +44,9 @@ examples/*/backend.log
 examples/*/backend.log.err
 examples/*/fe*.log
 examples/*/be*.log
+
+# QA team loop scratch countdown
+tmp/qa_countdown.txt
+
+# heal-test runtime marker (qa_fault) — recreated each run
+examples/**/.crashed_once.marker

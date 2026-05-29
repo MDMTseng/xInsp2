@@ -1,0 +1,4 @@
+[backend] booting
+[backend] FATAL: access violation on an unmanaged (raw std::thread) — SEH translator not installed there
+[backend] writing crash report — minidump: C:\Temp\xinsp2\crashdumps\xinsp-backend-7777-fallback.dmp
+[backend] process exiting rc=0xC0000005

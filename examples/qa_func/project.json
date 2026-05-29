@@ -1,0 +1,6 @@
+{
+  "name": "qa_func",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

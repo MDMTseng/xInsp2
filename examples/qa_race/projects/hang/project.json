@@ -1,0 +1,6 @@
+{
+  "name": "qa_race_hang",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

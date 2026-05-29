@@ -1,0 +1,6 @@
+[backend] booting on port 7910
+[backend] autostart: open_project
+[backend] autostart: compile_and_load
+[backend] backend healthy (port 7910 up)
+[backend] supervisor requested shutdown
+[backend] process exiting rc=0

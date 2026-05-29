@@ -1,0 +1,4 @@
+[backend] FATAL: unhandled exception
+[backend] writing crash report — minidump: C:\Temp\xinsp2\crashdumps\xinsp-backend-9999-corrupt.dmp
+[backend] WARNING: crash report writer was itself interrupted; .json may be truncated
+[backend] process exiting rc=0xC0000005

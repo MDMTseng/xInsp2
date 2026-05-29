@@ -1,0 +1,3 @@
+[xinsp-fe] supervisor up: backend=C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\backend\build\Release\xinsp-backend.exe port=7910 project=C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\examples\fe_supervisor_healthy fps=5 sink=log
+[xinsp-fe] BE log -> C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\examples\qa_edge\qe_o1.fe.be.log
+[xinsp-fe] backend up pid=3424

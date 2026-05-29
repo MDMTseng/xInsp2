@@ -1,0 +1,9 @@
+[xinsp2] script-side accelerators: opencv=C:\opencv\opencv\build  turbojpeg=C:\libjpeg-turbo64  ipp=C:\Intel\ipp\2026.0.0
+[xinsp2] scanned 6 plugins from C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\plugins
+[xinsp2] include_dir=C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\backend\include
+[xinsp2] work_dir=C:\Users\TRS001\AppData\Local\Temp\xinsp2
+[xinsp2] plugins_dir=C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\plugins
+[xinsp2] listening on ws://127.0.0.1:7911
+[xinsp2] autostart: open_project C:\Users\TRS001\Documents\workspace\xInsp\xInsp2\examples\qa_edge
+[xinsp2] autostart: no script file (none given); open only
+[xinsp2] autostart: ready

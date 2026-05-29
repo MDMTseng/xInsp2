@@ -1,0 +1,7 @@
+{
+  "project": "C:\\Users\\TRS001\\Documents\\workspace\\xInsp\\xInsp2\\examples\\qa_func",
+  "script": "inspect.cpp",
+  "autostart_fps": 8,
+  "be_log": "C:\\Users\\TRS001\\Documents\\workspace\\xInsp\\xInsp2\\examples\\qa_func\\_fe_cfg\\beA.log",
+  "port": 7855
+}

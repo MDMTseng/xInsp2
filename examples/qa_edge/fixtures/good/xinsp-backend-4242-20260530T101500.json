@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "pid": 4242,
+  "exception": {
+    "name": "ACCESS_VIOLATION",
+    "code": "0xC0000005",
+    "module": "plugin_v0.dll",
+    "address": "0x00007ffded120000"
+  },
+  "context": {
+    "last_phase": "inspect"
+  },
+  "threads": [
+    { "tid": 4243, "last_phase": "inspect", "last_cmd": "run" },
+    { "tid": 4244, "last_phase": "idle", "last_cmd": "" }
+  ]
+}
