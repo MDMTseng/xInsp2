@@ -38,3 +38,7 @@ examples/*/driver_log.json
 # FL run_all aggregator artifacts (regenerated each run)
 examples/*/_run_all.log
 examples/*/_run_all_summary.json
+
+# Per-example backend stdout/stderr logs (regenerated each run)
+examples/*/backend.log
+examples/*/backend.log.err

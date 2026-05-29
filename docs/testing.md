@@ -142,9 +142,10 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   per-thread breadcrumbs + PDB symbolication, see
   `docs/guides/debugging.md`). `docs/reference/ipc-shm.md` documents
   the removed mesh for historical reference only.
-- **Linux** build path untested (Windows-first WS server, SEH usage,
-  `cl.exe` compile driver).
-- **Multi-client server** deliberately deferred to S6.
+  `examples/plugin_crash_forensics/` is the regression that proves the
+  net: it arms a plugin to crash the backend from a raw (unmanaged)
+  thread, then asserts the minidump + crash report survive with the
+  dispatch thread's `last_phase="inspect"` breadcrumb intact.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

@@ -1,0 +1,6 @@
+{
+  "name": "plugin_crash_forensics",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}
