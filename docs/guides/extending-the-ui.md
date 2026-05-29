@@ -177,10 +177,35 @@ const cfg = vscode.workspace.getConfiguration('xinsp2');
 const port = cfg.get<number>('backendPort', 7823);
 ```
 
-Existing settings: `backendPort`, `autoStartBackend`,
+Existing settings: `backendPort`, `autoStartBackend`, `backendMode`,
 `extraPluginDirs`, `remoteUrl`, `authSecret`, `autoRespawn`,
 `sdkPath`. Look at how each is read in `extension.ts` for the right
 pattern.
+
+---
+
+## Backend ownership: managed vs attach
+
+The extension can either **own** the backend process or **attach** to one
+owned by the `xinsp-fe.exe` supervisor (the production frontend — see
+[`../design/fe-be-split.md`](../design/fe-be-split.md)). This is the
+`xinsp2.backendMode` setting:
+
+- **`managed`** — the extension spawns the backend and respawns it on crash
+  (rate-limited 5/min). The dev inner-loop default behavior.
+- **`attach`** — a backend is already running (FE-owned on a line). The
+  extension connects read/operator-only: it **never** spawns or respawns, and
+  `xinsp2.restartBackend` just reconnects (the FE owns the process). On a
+  dropped connection the health status bar shows `$(shield) xInsp2 · safe`,
+  signalling the FE is recovering the backend and the line is in its safe
+  state.
+- **`auto`** (default) — `isPortOpen(port)` decides: attach if a backend is
+  already listening, else managed.
+
+When adding lifecycle UI (anything that spawns/kills/restarts the backend),
+**guard it with `attachMode`** so it can't fight the FE supervisor. The
+respawn path (`_spawnAndWatch`) is only wired in managed mode; the status-bar
+text and the crash messaging branch on `attachMode` too.
 
 ---
 

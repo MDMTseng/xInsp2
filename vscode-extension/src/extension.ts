@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as net from 'net';
 import { spawn, ChildProcess } from 'child_process';
 import { WsClient } from './wsClient';
 import { InstanceTreeProvider } from './instanceTree';
@@ -26,6 +27,31 @@ let lastProjectFolder: string | null = null;
 // Set inside activate(); used by xinsp2.restartBackend so manual restarts
 // reuse the auto-respawn-aware spawn helper.
 let spawnAndWatchHandle: (() => void) | null = null;
+// True when a supervisor outside the extension (xinsp-fe.exe on a line) owns
+// the backend process. In attach mode the extension connects read/operator-only
+// and never spawns or respawns — lifecycle + safe-state belong to the FE.
+let attachMode = false;
+
+// Quick "is something already accepting on this local port?" probe. Used to
+// resolve backendMode:"auto" — if a backend (FE-managed or otherwise) is
+// already up, attach to it instead of spawning a competing one.
+function isPortOpen(port: number, timeoutMs = 400): Promise<boolean> {
+    return new Promise((resolve) => {
+        const sock = new net.Socket();
+        let done = false;
+        const finish = (open: boolean) => {
+            if (done) return;
+            done = true;
+            try { sock.destroy(); } catch { /* ignore */ }
+            resolve(open);
+        };
+        sock.setTimeout(timeoutMs);
+        sock.once('connect', () => finish(true));
+        sock.once('timeout', () => finish(false));
+        sock.once('error', () => finish(false));
+        sock.connect(port, '127.0.0.1');
+    });
+}
 
 // Effective auto-respawn flag, computed as:
 //   project.json's `auto_respawn` (when a project is open and field set)
@@ -288,9 +314,15 @@ export function activate(context: vscode.ExtensionContext) {
     const extraPluginDirs = config.get<string[]>('extraPluginDirs', []);
     const remoteUrl = (config.get<string>('remoteUrl', '') || '').trim();
     const authSecret = (config.get<string>('authSecret', '') || '').trim();
+    // Backend ownership mode (see docs/design/fe-be-split.md):
+    //   managed — extension spawns + respawns the backend (dev inner-loop).
+    //   attach  — a supervisor (xinsp-fe.exe) owns it; connect read-only, never spawn.
+    //   auto    — attach if a backend is already on the port, else managed.
+    const backendMode = (config.get<string>('backendMode', 'auto') || 'auto').trim();
     // Remote mode: skip spawning a local backend, connect to the given URL.
     // Combine with authSecret to drive a backend started with --auth.
     const isRemote = remoteUrl.length > 0;
+    attachMode = backendMode === 'attach';   // 'auto' may flip this after a port probe
     const wsUrl = isRemote ? remoteUrl : `ws://127.0.0.1:${port}`;
     const output = vscode.window.createOutputChannel('xInsp2');
 
@@ -353,9 +385,18 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(healthStatus);
     const updateHealthStatus = (connected: boolean) => {
         if (connected) {
-            healthStatus.text = '$(zap) xInsp2';
-            healthStatus.tooltip = 'xInsp2 backend connected. Click to restart.';
+            healthStatus.text = attachMode ? '$(plug) xInsp2 · attached' : '$(zap) xInsp2';
+            healthStatus.tooltip = attachMode
+                ? 'Attached to a backend managed by the xinsp-fe supervisor.'
+                : 'xInsp2 backend connected. Click to restart.';
             healthStatus.backgroundColor = undefined;
+        } else if (attachMode) {
+            // In attach mode the FE owns recovery; a dropped connection means
+            // the backend is down and the line is in its safe state.
+            healthStatus.text = '$(shield) xInsp2 · safe';
+            healthStatus.tooltip = 'Backend down — the xinsp-fe supervisor is recovering it; '
+                + 'the line is in its safe state. The extension does not manage this backend.';
+            healthStatus.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         } else {
             healthStatus.text = '$(debug-disconnect) xInsp2 · offline';
             healthStatus.tooltip = 'xInsp2 backend is not reachable. Click to restart.';
@@ -567,6 +608,12 @@ export function activate(context: vscode.ExtensionContext) {
         treeProvider.setProjectOpen(false);
         lastConnected = false;
         setViewBadge(false, 0, 0);
+        if (attachMode) {
+            // The FE owns recovery; make clear the extension isn't going to
+            // respawn and that the line is safe in the meantime.
+            vscode.window.setStatusBarMessage(
+                'xInsp2: backend down — xinsp-fe supervisor recovering (line in safe state)', 6000);
+        }
     });
 
     client.on('json', (msg: any) => {
@@ -1545,6 +1592,16 @@ void xi_inspect_entry(int frame) {
     // resume after the auto-respawn rate-limit has tripped).
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.restartBackend', async () => {
+            if (attachMode) {
+                // The extension doesn't own this backend — the xinsp-fe
+                // supervisor does. Reconnect, but don't spawn/kill.
+                vscode.window.showInformationMessage(
+                    'This backend is managed by the xinsp-fe supervisor — restart it there. '
+                    + 'Reconnecting…');
+                output.appendLine('[xinsp2] attach mode: restart requested — reconnecting only (FE owns the process)');
+                setTimeout(() => client!.connect(), 200);
+                return;
+            }
             // Reset the rate-limit so the user gets a fresh budget.
             recentRespawnsMs.length = 0;
             // Suppress the imminent-exit handler so it doesn't double-spawn.
@@ -2027,12 +2084,31 @@ void xi_inspect_entry(int frame) {
 
     // --- Start backend ---
 
+    // Resolve attach-vs-managed, then connect/spawn. Wrapped in an async IIFE
+    // because backendMode:"auto" needs a port probe; the rest of activate()
+    // (cleanup, return) runs synchronously below.
+    void (async () => {
     if (isRemote) {
         // Remote mode: never spawn locally; just connect. autoStart is
         // ignored (docs note this).
         output.appendLine(`[xinsp2] connecting to remote ${wsUrl}`);
         client!.connect();
-    } else if (autoStart) {
+        return;
+    }
+    if (backendMode === 'auto') {
+        attachMode = await isPortOpen(port);
+        output.appendLine(`[xinsp2] backendMode=auto → ${attachMode
+            ? 'attach (a backend is already on the port)' : 'managed (no backend found)'}`);
+    }
+    if (attachMode) {
+        // A supervisor (xinsp-fe.exe) owns the backend. Connect read/operator-
+        // only; never spawn or respawn — that's the FE's job.
+        output.appendLine(`[xinsp2] attach mode: connecting to supervisor-managed backend at ${wsUrl}`);
+        updateHealthStatus(false);
+        client!.connect();
+        return;
+    }
+    if (autoStart) {
         // Single function used by both initial spawn and auto-respawn.
         // Hoisted to the activate() closure so xinsp2.restartBackend
         // below can reuse it (gives identical respawn behaviour after
@@ -2095,6 +2171,7 @@ void xi_inspect_entry(int frame) {
     } else {
         client.connect();
     }
+    })();
 
     // Cleanup
     context.subscriptions.push({

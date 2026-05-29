@@ -387,6 +387,17 @@
           "default": true,
           "description": "Auto-start xinsp-backend.exe on activation (ignored when xinsp2.remoteUrl is set)"
         },
+        "xinsp2.backendMode": {
+          "type": "string",
+          "enum": ["auto", "managed", "attach"],
+          "default": "auto",
+          "enumDescriptions": [
+            "Attach if a backend is already on the port, otherwise spawn one (managed).",
+            "The extension spawns + respawns the backend itself (dev inner-loop).",
+            "A supervisor (xinsp-fe.exe) owns the backend; connect read/operator-only and never spawn or respawn."
+          ],
+          "description": "Who owns the backend process. On a production line the xinsp-fe supervisor owns it (use 'attach'); for local development use 'managed'. 'auto' picks based on whether a backend is already listening. See docs/design/fe-be-split.md."
+        },
         "xinsp2.autoRespawn": {
           "type": "boolean",
           "default": true,
