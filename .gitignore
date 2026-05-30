@@ -54,3 +54,10 @@ examples/**/.crashed_once.marker
 # QA driver runtime logs (agent-named; not fixtures)
 examples/qa_edge/qe_*.log
 examples/**/_fe_cfg/
+
+# object_count_puzzle generated artifacts (regenerate via generate_puzzle.py)
+examples/object_count_puzzle/frames/
+examples/object_count_puzzle/ground_truth.json
+examples/object_count_puzzle/predictions.json
+examples/object_count_puzzle/detections_overlay.png
+examples/*/*.scratch.log
