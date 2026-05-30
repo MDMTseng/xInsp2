@@ -1,0 +1,4 @@
+{
+  "plugin": "crash_then_heal",
+  "config": { "crash_count": 2 }
+}

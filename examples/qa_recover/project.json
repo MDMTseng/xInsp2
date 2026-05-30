@@ -1,0 +1,6 @@
+{
+  "name": "qa_recover",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

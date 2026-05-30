@@ -1,0 +1,16 @@
+{
+  "name": "crash_then_heal",
+  "description": "Crashes the backend its first `crash_count` starts (raw std::thread null-deref, uncatchable, exactly like raw_thread_crash), tracking the count in a file that survives respawns (XI_QA_RECOVER_MARKER). Once the threshold is reached it returns normally forever, so the backend stays up and the FE supervisor clears the safe state. Used by examples/qa_recover to prove the recover-and-clear transition (FE-E5 / SP4) the always-crashing fe_supervisor can't.",
+  "dll": "crash_then_heal.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [],
+    "inputs": [],
+    "outputs": [
+      { "name": "count",     "kind": "number", "doc": "Frames processed on the healed path." },
+      { "name": "recovered", "kind": "number", "doc": "1 once the plugin has stopped crashing." }
+    ],
+    "exchange": []
+  }
+}

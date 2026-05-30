@@ -33,6 +33,7 @@ Run all: `ctest --test-dir backend/build -C Release`
 | `test_safe_state` | FE `SafeStateSink`: reason→string, factory fallthrough, log formatting + `ts=`, empty-field placeholders, overflow/null safety |
 | `test_qa_fault` / `test_qa_race` | FE respawn sliding-window + cap arithmetic; forensics carried on the cap event |
 | `test_qa_edge` | FE crash-report parser (`xi_crash_report.hpp`): good / threads[] fallback / no-minidump / corrupt / last-wins, against crafted fixtures |
+| `test_qa_stress` | Phase G stress/fuzz of the respawn-cap + safe-state core: degenerate caps, exact reset boundary, recover-then-recur, a 200k-step equivalence fuzz vs a reference model, high-volume bounded emission |
 
 All exit with `ALL TESTS PASSED`.
 
@@ -166,6 +167,15 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   reaches the PLC, then kills the gateway and asserts the FE drives
   `CommsLost` safe-state, respawns it, the backend survives, the link is
   restored, and nothing orphans.
+- **Phase G stress + race** (#92; see
+  `docs/design/fe-be-split-test-plan.md` "Phase G"). Beyond the `test_qa_stress`
+  unit above: `examples/qa_recover/` proves the **recover-and-clear** transition
+  (a backend that crashes a few times then heals → FE `CLEAR SAFE STATE`, never
+  hits the cap — the `crash_then_heal` plugin counts crashes in a
+  respawn-surviving marker), and `examples/qa_soak/` is a **healthy full-stack
+  soak** (FE+BE+gateway): sustained normal operation trips no false safe-state,
+  respawns nothing, keeps the heartbeat advancing and the PLC link up, then shuts
+  down clean. Windows-only; skip on non-`nt`.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

@@ -93,7 +93,7 @@ FE log + process/port state). FE-E1 exists; the rest are **[TODO]**.
 | FE-E3 **[TODO]** ⭐ | **orphan guarantee** | hard-`taskkill` the FE (not Ctrl-C) → Job Object `KILL_ON_JOB_CLOSE` reaps the BE; no `xinsp-backend` on the port afterward |
 | FE-E4a **[DONE]** | boot hang | BE bound but never reaches `autostart: ready` within `--boot-timeout-ms` → `enter_safe_state(BootTimeout)` → respawn → cap. `examples/qa_race/driver_boot_hang.py` (uses the BE `--hang-before-ready` hook). |
 | FE-E4b **[DONE]** | serve-time wedge | BE alive + port accepting but the serving loop stalled. The BE writes a heartbeat (`--heartbeat-file`) from its poll loop; the FE respawns on staleness (`--heartbeat-stale-ms`). `examples/qa_race/driver_serve_wedge.py` (uses the BE `--hang-after-ready` hook). A WS ping was rejected: it collides with the single-client server. |
-| FE-E5 **[TODO]** ⭐ | **recover-and-clear transition** | project that crashes once then runs healthy after respawn → exactly one `ENTER`, then `CLEAR SAFE STATE`, then stable; FE keeps running (no cap) |
+| FE-E5 **[DONE]** ⭐ | **recover-and-clear transition** | project that crashes a few times then runs healthy after respawn → `ENTER` per crash, then `CLEAR SAFE STATE`, then stable; FE keeps running (no cap). `examples/qa_recover/` (the `crash_then_heal` plugin counts crashes in a respawn-surviving marker file, then heals). |
 | FE-E6 **[TODO]** | backend exe missing | `--backend=<bad>` → `CreateProcess` fails → `enter_safe_state(BackendExit)` + FE exits rc=1 |
 | FE-E7 **[DONE via FE-E1]** | forensics from `threads[]` fallback | safe-state line carries `phase=inspect` even though the crash is on an unmanaged thread (empty `context`) |
 | FE-E8 **[DONE]** | respawn cap counts consecutive failures | a SLOW crash-loop still caps (deaths needn't be close together); only a sustained-healthy period (`respawn_reset_ms`) resets the count. Unit: `test_qa_fault` QF-U3/U4, `test_qa_race` RACE-U1b. |
@@ -163,21 +163,42 @@ run on both.
 |---|---|
 | BE crash forensics (minidump + report) | ✅ `plugin_crash_forensics` |
 | FE crash-storm → safe-state/respawn/cap/orphan | ✅ `fe_supervisor` (FE-E1) |
-| C++ unit `ctest` regression | ✅ 7/7 |
+| C++ unit `ctest` regression | ✅ 12/12 |
 | `SafeStateSink` unit + crash-parser unit | ❌ SS-U*, CR-U* |
 | **FE happy path / clean shutdown** | ❌ FE-E2 |
 | **FE orphan-kill guarantee** | ❌ FE-E3 |
-| **FE recover-and-clear transition** | ❌ FE-E5 |
+| **FE recover-and-clear transition** | ✅ `qa_recover` (FE-E5) |
 | Autostart negative cases (bad dir/script/no-script) | ❌ AS-I4/5/6 |
 | Extension attach mode decision (managed/attach/auto) | ✅ `backend_mode.test.mjs` |
 | Compile-broken line not reported healthy (gap #1) | ✅ `qa_fault/driver_fe_degraded.py` (BE `autostart: degraded` → FE safe) |
 | Respawn cap/window math (real fn, not a copy) | ✅ `xi_respawn_policy.hpp` unit-tested by `test_qa_fault`/`test_qa_race` |
 | Boot hang (FE-E4a) | ✅ `qa_race/driver_boot_hang.py` |
 | Serve-time wedge (FE-E4b) | ✅ `qa_race/driver_serve_wedge.py` (heartbeat) |
-| extension-host e2e, soak/leak, Linux | ❌ infra |
+| Policy-core stress/fuzz (degenerate caps, reset boundary, equivalence fuzz) | ✅ `test_qa_stress` (Phase G) |
+| Full-stack healthy soak (no false safe-state, heartbeat advancing, link up) | ✅ `qa_soak` (Phase G) |
+| extension-host e2e, leak, Linux | ❌ infra |
 
 **Build next, in order:** (1) FE-E2 happy path + FE-E3 orphan — the two
 highest-value safety holes; (2) `test_safe_state` (SS-U*) — cheap, fast, guards
 the contract; (3) AS-I4/5/6 autostart negatives — a bad project on a line must
 degrade safely; (4) EX-N2/N3 attach guard; (5) extract the crash parser +
 CR-U*; (6) FE-E4/E5 timing paths.
+
+---
+
+## Phase G — stress + race (#92)
+
+The original Phase G targeted the SHM allocator (removed 2026-05); reframed here
+for the FE-supervisor / in-process-BE / out-of-process-gateway architecture.
+Three layers, fast + deterministic enough to keep in the regular suite:
+
+| ID | Layer | What it hammers |
+|---|---|---|
+| **G.1** | C++ unit `test_qa_stress` (ctest) | The safety core under conditions a long run actually produces: degenerate caps (`max=0/1`), the **exact** reset boundary (`healthy_for_ms == reset_ms`), full recover-then-recur cycles, a **200k-step equivalence fuzz** of `RespawnTracker` against a reference model (4 seeds × 5 caps), and high-volume safe-state emission (oversized/attacker-shaped fields stay bounded + well-formed). Pure, fixed-seed, no spawn, no wall-clock → not flaky. |
+| **G.2** | `examples/qa_recover/` | The **recover-and-clear** transition (FE-E5 / SP4) the always-crashing `fe_supervisor` can't reach: `crash_then_heal` crashes the BE its first N starts (counted in a respawn-surviving marker), then heals → FE logs `CLEAR SAFE STATE`, never hits the cap. |
+| **G.3** | `examples/qa_soak/` | A **healthy** full-stack soak (FE+BE+gateway): sustained normal operation must trip **no** false safe-state, respawn nothing, keep the heartbeat advancing (~1 Hz serving beat), and hold the PLC link up — then shut down clean with no orphan. `QA_SOAK_S` controls duration. |
+
+**Acceptance:** `ctest` green incl. `qa_stress`; `qa_recover` + `qa_soak` PASS.
+Follow-ups (still ❌ infra): handle/FD-leak accounting across many respawns, an
+adversarial-log fuzz for the crash parser at scale, and a CI gate that runs the
+example drivers on every FE/gateway-touching change.
