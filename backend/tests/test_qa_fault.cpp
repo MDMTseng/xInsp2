@@ -9,16 +9,15 @@
 // decision as fast, portable, pure logic so a refactor of the window math is
 // caught in ctest before the integration run.
 //
-// We mirror fe_main.cpp's exact algorithm:
-//   on each death:
-//     prune timestamps older than window from `respawns`
-//     if (respawns.size() >= max)  -> RespawnLimitExceeded, stop
-//     else                          -> push(now), respawn
+// This now tests the REAL decision function fe_main.cpp uses
+// (xi::respawn_should_trip in xi/xi_respawn_policy.hpp), not a copy — so a
+// refactor of the window math is caught here, not just end-to-end.
 //
-#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
+
+#include <xi/xi_respawn_policy.hpp>
 
 static int g_failures = 0;
 #define CHECK(cond)                                                            \
@@ -29,17 +28,11 @@ static int g_failures = 0;
         }                                                                      \
     } while (0)
 
-// One death's worth of cap arithmetic — a faithful copy of the fe_main.cpp body.
-// Returns true if this death TRIPPED the cap (RespawnLimitExceeded), false if it
-// resulted in a respawn.
+// Thin alias so the existing cases read unchanged; delegates to the production
+// function. true == this death TRIPPED the cap (stay safe); false == respawn.
 static bool on_death(std::vector<int64_t>& respawns, int64_t now,
                      int window_ms, int max) {
-    respawns.erase(std::remove_if(respawns.begin(), respawns.end(),
-                   [&](int64_t ts) { return now - ts > window_ms; }),
-                   respawns.end());
-    if ((int)respawns.size() >= max) return true;   // stay safe, don't respawn
-    respawns.push_back(now);
-    return false;
+    return xi::respawn_should_trip(respawns, now, window_ms, max);
 }
 
 int main() {

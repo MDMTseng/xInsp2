@@ -18,7 +18,8 @@
 // portable. TODO(linux) markers below; see docs/design/linux-port.md.
 //
 #include <xi/xi_safe_state.hpp>
-#include <xi/xi_crash_report.hpp>   // xi::enrich_from_crash_report (unit-tested)
+#include <xi/xi_crash_report.hpp>     // xi::enrich_from_crash_report (unit-tested)
+#include <xi/xi_respawn_policy.hpp>   // xi::respawn_should_trip (unit-tested)
 
 #include <algorithm>
 #include <atomic>
@@ -344,6 +345,17 @@ static int run_supervisor(const FeConfig& c) {
             if (!ready_seen) {
                 if (port && log_contains(c.be_log, "autostart: ready")) {
                     ready_seen = true;   // fall through to healthy handling
+                } else if (log_contains(c.be_log, "autostart: degraded")) {
+                    // The BE opened + bound its port but its script failed to
+                    // compile/load — it's listening but cannot inspect. Don't
+                    // wait out the boot timeout; treat it as a failed boot now.
+                    std::fprintf(stderr, "[xinsp-fe] backend reported autostart degraded "
+                                 "(script did not load); killing for respawn\n");
+                    death_reason = xi::SafeStateReason::BootTimeout;
+                    TerminateProcess(sp.pi.hProcess, 1);
+                    WaitForSingleObject(sp.pi.hProcess, 5000);
+                    GetExitCodeProcess(sp.pi.hProcess, &exit_code);
+                    break;
                 } else if (c.boot_timeout_ms > 0 && now_ms() - spawn_ms > c.boot_timeout_ms) {
                     std::fprintf(stderr, "[xinsp-fe] backend did not reach 'autostart: ready' "
                                  "within %d ms (boot hang); killing for respawn\n",
@@ -403,12 +415,9 @@ static int run_supervisor(const FeConfig& c) {
         sink->enter_safe_state(ev);
         in_safe_state = true;
 
-        // ---- rate-limited respawn ----
-        int64_t t = now_ms();
-        int64_t window = (int64_t)c.respawn_window_s * 1000;
-        respawns.erase(std::remove_if(respawns.begin(), respawns.end(),
-                       [&](int64_t ts){ return t - ts > window; }), respawns.end());
-        if ((int)respawns.size() >= c.respawn_max) {
+        // ---- rate-limited respawn (xi::respawn_should_trip — unit-tested) ----
+        if (xi::respawn_should_trip(respawns, now_ms(),
+                                    c.respawn_window_s * 1000, c.respawn_max)) {
             xi::SafeStateEvent stuck;
             stuck.reason = xi::SafeStateReason::RespawnLimitExceeded;
             stuck.ts_ms  = now_ms();
@@ -421,7 +430,6 @@ static int run_supervisor(const FeConfig& c) {
             rc = 2;
             break;
         }
-        respawns.push_back(t);
         std::fprintf(stderr, "[xinsp-fe] respawning backend (%d/%d in window) after %dms\n",
                      (int)respawns.size(), c.respawn_max, c.respawn_backoff_ms);
         Sleep((DWORD)c.respawn_backoff_ms);

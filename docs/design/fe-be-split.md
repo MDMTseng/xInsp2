@@ -79,9 +79,12 @@ an operator HMI / the VS Code extension can still attach live.
   failures while the process is alive. A **boot-readiness gate** withholds
   "healthy" until the BE log shows `autostart: ready` — the port binds before
   the synchronous open/compile, so port-up ≠ serving; a BE that hangs before
-  ready within `--boot-timeout-ms` is driven `BootTimeout` → respawn. (A
-  serve-time wedge — port still accepting but commands stalled — needs a deep WS
-  heartbeat and stays Phase 2.)
+  ready within `--boot-timeout-ms` is driven `BootTimeout` → respawn. A BE whose
+  script **fails to compile** logs `autostart: degraded` and withholds the
+  `ready` marker, so the FE drives it safe rather than trusting port-up — a
+  non-inspecting line is never reported healthy. (A serve-time wedge — port
+  still accepting but commands stalled — needs a deep WS heartbeat and stays
+  Phase 2.)
 - **On death — forensics**: the FE parses `be.log` for the last
   `minidump: <path>.dmp` line the BE printed, reads the sibling `.json`, and
   pulls `exception.name`, `exception.module`, and the dispatch-thread

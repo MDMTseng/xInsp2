@@ -3285,6 +3285,7 @@ int main(int argc, char** argv) {
         } else {
             script = g_plugin_mgr.project().script_path;
         }
+        bool degraded = false;
         if (script.empty() || !std::filesystem::exists(script)) {
             std::fprintf(stderr,
                 "[xinsp2] autostart: no script file (%s); open only\n",
@@ -3295,7 +3296,19 @@ int main(int argc, char** argv) {
                 "{\"type\":\"cmd\",\"id\":2,\"name\":\"compile_and_load\",\"args\":{\"path\":"
                 + xp::json_escape(script) + "}}");
 
-            if (autostart_fps > 0) {
+            // A script was expected — confirm it actually loaded. If the compile
+            // failed, the WS port is still up (an operator can attach + fix), but
+            // the line CANNOT inspect. Mark it degraded and do NOT emit the
+            // "ready" health signal, so the FE supervisor treats a non-inspecting
+            // line as unhealthy instead of silently "healthy". (Otherwise a
+            // compile-broken project would look fine to the FE the moment its
+            // port bound.)
+            if (!g_script.ok()) {
+                degraded = true;
+                std::fprintf(stderr,
+                    "[xinsp2] autostart: degraded — script failed to compile/load; "
+                    "line will NOT inspect (port stays up for an operator to recompile)\n");
+            } else if (autostart_fps > 0) {
                 std::fprintf(stderr, "[xinsp2] autostart: start %d fps\n", autostart_fps);
                 handle_command(srv,
                     "{\"type\":\"cmd\",\"id\":3,\"name\":\"start\",\"args\":{\"fps\":"
@@ -3322,7 +3335,10 @@ int main(int argc, char** argv) {
         // while the backend isn't yet serving. A supervisor / operator HMI / a
         // test can wait for THIS line to know the line is actually ready, not
         // merely listening. (port-up != ready.)
-        std::fprintf(stderr, "[xinsp2] autostart: ready\n");
+        // Only signal "ready" when the line can actually inspect. A degraded
+        // (compile-failed) boot deliberately withholds it — the FE then sees no
+        // health signal and drives the line safe rather than trusting port-up.
+        if (!degraded) std::fprintf(stderr, "[xinsp2] autostart: ready\n");
         std::fflush(stderr);
     }
 

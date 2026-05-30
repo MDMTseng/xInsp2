@@ -169,8 +169,11 @@ run on both.
 | **FE orphan-kill guarantee** | ❌ FE-E3 |
 | **FE recover-and-clear transition** | ❌ FE-E5 |
 | Autostart negative cases (bad dir/script/no-script) | ❌ AS-I4/5/6 |
-| Extension attach mode (no double-supervise) | ❌ EX-N* |
-| `PortUnresponsive` (hang) path | ❌ FE-E4 |
+| Extension attach mode decision (managed/attach/auto) | ✅ `backend_mode.test.mjs` |
+| Compile-broken line not reported healthy (gap #1) | ✅ `qa_fault/driver_fe_degraded.py` (BE `autostart: degraded` → FE safe) |
+| Respawn cap/window math (real fn, not a copy) | ✅ `xi_respawn_policy.hpp` unit-tested by `test_qa_fault`/`test_qa_race` |
+| Boot hang (FE-E4a) | ✅ `qa_race/driver_boot_hang.py` |
+| Serve-time wedge (FE-E4b), extension-host e2e, soak/leak, Linux | ❌ Phase 2 / infra |
 
 **Build next, in order:** (1) FE-E2 happy path + FE-E3 orphan — the two
 highest-value safety holes; (2) `test_safe_state` (SS-U*) — cheap, fast, guards

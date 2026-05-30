@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <xi/xi_safe_state.hpp>
+#include <xi/xi_respawn_policy.hpp>
 
 static int g_failures = 0;
 #define CHECK(cond)                                                            \
@@ -28,18 +29,13 @@ static int g_failures = 0;
         }                                                                      \
     } while (0)
 
-// Faithful copy of fe_main.cpp's respawn decision. Returns true if a respawn is
-// permitted at time t (and records it); false if the cap is exceeded (caller
-// would drive RespawnLimitExceeded and stay safe). Mirrors the prune-then-check
-// order exactly.
+// Delegates to the REAL decision (xi::respawn_should_trip, the function
+// fe_main.cpp calls). Returns true if a respawn is permitted at time t (and
+// records it); false if the cap is exceeded (caller would drive
+// RespawnLimitExceeded and stay safe). `respawn_allowed == !should_trip`.
 static bool respawn_allowed(std::vector<int64_t>& respawns, int64_t t,
                             int window_s, int respawn_max) {
-    int64_t window = (int64_t)window_s * 1000;
-    respawns.erase(std::remove_if(respawns.begin(), respawns.end(),
-                   [&](int64_t ts){ return t - ts > window; }), respawns.end());
-    if ((int)respawns.size() >= respawn_max) return false;  // cap -> stay safe
-    respawns.push_back(t);
-    return true;
+    return !xi::respawn_should_trip(respawns, t, window_s * 1000, respawn_max);
 }
 
 int main() {
