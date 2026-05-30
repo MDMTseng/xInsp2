@@ -264,6 +264,10 @@ static void* g_trigger_leader_fn_   = nullptr;
 // Signature: void(const char* label).
 static void* g_breakpoint_fn_       = nullptr;
 
+// Status callback. Host sets this so xi::status(text) publishes the script's
+// latest status string to the host status registry. Signature: void(const char*).
+static void* g_status_fn_           = nullptr;
+
 // Per-run context. Set by the host before each xi_inspect_entry call,
 // cleared after. Currently just the optional `frame_path` arg from
 // cmd:run; future per-run fields (run_id, request id, etc.) join here.
@@ -314,6 +318,12 @@ XI_SCRIPT_EXPORT void xi_script_set_trigger_leader_callback(void* leader_fn) {
 // Scripts that don't include xi_breakpoint.hpp leave this null.
 XI_SCRIPT_EXPORT void xi_script_set_breakpoint_callback(void* fn) {
     g_breakpoint_fn_ = fn;
+}
+
+// Optional: install a status callback for xi::status(text). Scripts that don't
+// include xi_status.hpp leave this null.
+XI_SCRIPT_EXPORT void xi_script_set_status_callback(void* fn) {
+    g_status_fn_ = fn;
 }
 
 // Per-run context setter (called by host before each xi_inspect_entry,

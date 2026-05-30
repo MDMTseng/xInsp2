@@ -584,6 +584,27 @@ significantly — a 5-var pipeline with a 1-var subscription uses
 
 ---
 
+## Status channel
+
+Components publish a short, sticky "what am I doing right now" string (distinct
+from `VAR` per-inspection *values* and from the `log`/`recent_errors` *event
+stream* — status is one last-value string per component, overwritten in place).
+
+- A script calls `xi::status("waiting for trigger")` (include `<xi/xi_status.hpp>`).
+  The host stores it under the key `@script`.
+- `cmd:status` → `data: { "<source>": { "text": "...", "ts_ms": N, "seq": N }, ... }`
+  — a snapshot of every component's latest status.
+- `event: status` → `data: { "source": "...", "text": "...", "seq": N }` — pushed
+  best-effort when a status changes.
+
+**Delivery guarantee:** the backend *retains* the latest value (last-write-wins),
+so a client should call `cmd:status` on **every (re)connect** to re-sync — that
+snapshot-over-retained-state is what guarantees the latest status always arrives,
+even across disconnects and backend respawns. The `status` event is only a
+low-latency accelerator between snapshots (identical repeats are coalesced, so it
+doesn't spam). The latest status is also mirrored into the crash breadcrumb, so it
+appears as `last_status` in the crash report if the backend dies.
+
 ## Connection lifecycle
 
 1. Client connects to `ws://host:PORT/`.

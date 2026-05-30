@@ -448,6 +448,17 @@ class Client:
         """
         return self.call("image_pool_stats")
 
+    def status(self) -> dict:
+        """Snapshot of every component's latest sticky status string.
+
+        Returns a dict keyed by source ("@script" for the inspection script,
+        else the instance name) -> {"text", "ts_ms", "seq"}. This is the
+        delivery guarantee: call it on every (re)connect to re-sync the latest
+        status, since the backend retains it last-write-wins. The `status`
+        event is a best-effort live accelerator between snapshots.
+        """
+        return self.call("status")
+
     def recent_errors(self, since_ms: int | None = None) -> list[dict]:
         """Errors captured by the cross-channel ring (rsp / log / event).
 

@@ -19,6 +19,8 @@
 #include <deque>
 #include <exception>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <typeinfo>
 #include <sstream>
 #include <string>
@@ -187,6 +189,7 @@ struct CrashContext {
     char last_instance[64] {};   // last instance whose plugin we called
     char last_plugin[64]   {};   // plugin name backing it
     char last_phase[32]    {};   // inspect lifecycle phase (reset/inspect/...)
+    char last_status[96]   {};   // last xi::status()/set_status text on this thread
     int  last_run_id       = 0;
     int  last_frame        = 0;
 };
@@ -367,6 +370,52 @@ static void breakpoint_cb(const char* label) {
     g_bp_paused     = true;
     g_bp_last_label = safe;
     g_bp_cv.wait(lk, []{ return !g_bp_paused; });
+}
+
+// ---- Status registry -------------------------------------------------------
+// Sticky last-value status per component: instance name, or "@script" for the
+// inspection script. Served to the UI via cmd:status (the delivery GUARANTEE —
+// clients re-pull on every connect) + a best-effort `status` push event, and
+// mirrored into the per-thread crash breadcrumb so the LAST status survives a
+// crash into the report.
+struct StatusEntry { std::string text; int64_t ts_ms = 0; uint64_t seq = 0; };
+static std::mutex                         g_status_mu;
+static std::map<std::string, StatusEntry> g_status;
+static std::atomic<uint64_t>              g_status_seq{0};
+
+static int64_t status_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// Update the latest status for `who`. Coalesces no-op repeats (same text) so a
+// component setting the same string every frame doesn't spam events. Always
+// mirrors into this thread's crash breadcrumb; pushes a best-effort event.
+static void set_status_internal(const std::string& who, const char* text) {
+    std::string t = text ? text : "";
+    crash_set(crash_ctx().last_status, sizeof(crash_ctx().last_status), t.c_str());
+    uint64_t seq;
+    {
+        std::lock_guard<std::mutex> lk(g_status_mu);
+        auto it = g_status.find(who);
+        if (it != g_status.end() && it->second.text == t) return;  // coalesce
+        seq = ++g_status_seq;
+        g_status[who] = StatusEntry{t, status_now_ms(), seq};
+    }
+    if (g_srv_for_bp) {
+        std::string msg = "{\"type\":\"event\",\"name\":\"status\",\"data\":{\"source\":";
+        xp::json_escape_into(msg, who);
+        msg += ",\"text\":";
+        xp::json_escape_into(msg, t);
+        msg += ",\"seq\":" + std::to_string(seq) + "}}";
+        g_srv_for_bp->send_text(msg);
+    }
+}
+
+// Installed into the script DLL (xi_script_set_status_callback) so xi::status()
+// in user scripts publishes under "@script".
+static void status_cb(const char* text) {
+    set_status_internal("@script", text);
 }
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
@@ -1491,6 +1540,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             if (g_script.set_breakpoint_callback) {
                 g_script.set_breakpoint_callback((void*)breakpoint_cb);
             }
+            // Status callback. Scripts without xi_status.hpp leave this null
+            // and xi::status() is a no-op.
+            if (g_script.set_status_callback) {
+                g_script.set_status_callback((void*)status_cb);
+            }
             // Replay any param values the user set on the previous
             // DLL. The new DLL's xi::Param<T> file-scope ctors run on
             // load and seed registry slots with default values; we
@@ -2252,6 +2306,26 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         out += "]";
         send_rsp_ok(srv, id, out);
+    } else if (name == "status") {
+        // Snapshot of every component's latest sticky status. Clients call this
+        // on EVERY (re)connect — that re-pull over the retained map is what
+        // guarantees the latest status always arrives, even across reconnects
+        // and backend respawns; the `status` push event is just a low-latency
+        // accelerator between snapshots.
+        std::string out = "{";
+        {
+            std::lock_guard<std::mutex> lk(g_status_mu);
+            int n = 0;
+            for (auto& [who, e] : g_status) {
+                if (n++) out += ",";
+                xp::json_escape_into(out, who);
+                out += ":{\"text\":"; xp::json_escape_into(out, e.text);
+                out += ",\"ts_ms\":" + std::to_string(e.ts_ms);
+                out += ",\"seq\":" + std::to_string(e.seq) + "}";
+            }
+        }
+        out += "}";
+        send_rsp_ok(srv, id, out);
     } else if (name == "image_pool_stats") {
         // Per-owner ImagePool footprint. Owner IDs alone are
         // meaningless to humans — we look them up against the
@@ -2862,6 +2936,7 @@ static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
         out += ",\"last_instance\":";crash_json_escape(out, c.last_instance);
         out += ",\"last_plugin\":";  crash_json_escape(out, c.last_plugin);
         out += ",\"last_phase\":";   crash_json_escape(out, c.last_phase);
+        out += ",\"last_status\":";  crash_json_escape(out, c.last_status);
         out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
         out += ",\"last_frame\":"  + std::to_string(c.last_frame);
         out += "}";
@@ -2884,6 +2959,7 @@ static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
             out += ",\"last_instance\":";crash_json_escape(out, c.last_instance);
             out += ",\"last_plugin\":";  crash_json_escape(out, c.last_plugin);
             out += ",\"last_phase\":";   crash_json_escape(out, c.last_phase);
+            out += ",\"last_status\":";  crash_json_escape(out, c.last_status);
             out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
             out += ",\"last_frame\":"  + std::to_string(c.last_frame);
             out += "}";
