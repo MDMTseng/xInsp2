@@ -3240,6 +3240,11 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[xinsp2] watchdog enabled: %d ms per inspect\n", g_watchdog_ms.load());
     }
     g_srv_for_bp = &srv;   // S3: breakpoint_cb emits events through it
+    // Route plugin host_api->set_status into the status registry. Non-capturing
+    // so it converts to the StatusSinkFn function pointer.
+    xi::status_sink() = [](const char* who, const char* text) {
+        set_status_internal((who && *who) ? who : "@plugin", text);
+    };
     // P2.4 watchdog. Always-on monitor thread; only acts when
     // g_inspect_deadline_ms > 0 (set by run_one_inspection when
     // g_watchdog_ms > 0). On trip: TerminateThread the inspect thread,

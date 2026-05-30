@@ -592,6 +592,9 @@ stream* — status is one last-value string per component, overwritten in place)
 
 - A script calls `xi::status("waiting for trigger")` (include `<xi/xi_status.hpp>`).
   The host stores it under the key `@script`.
+- A plugin calls `status("grabbing")` (the `xi::Plugin::status` helper, or the
+  `host_api->set_status(source, text)` C ABI). The host keys it by the instance
+  name (e.g. `cam0`). ABI-additive — older plugins/hosts simply don't use it.
 - `cmd:status` → `data: { "<source>": { "text": "...", "ts_ms": N, "seq": N }, ... }`
   — a snapshot of every component's latest status.
 - `event: status` → `data: { "source": "...", "text": "...", "seq": N }` — pushed

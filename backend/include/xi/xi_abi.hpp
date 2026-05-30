@@ -171,6 +171,13 @@ public:
         return "";
     }
 
+    // Publish this instance's latest status string (host keeps it last-value
+    // and serves it via cmd:status). No-op on an older host. Keep it short and
+    // human: status("grabbing"), status("model loaded, 3 ROIs").
+    void status(const std::string& text) const {
+        if (host_ && host_->set_status) host_->set_status(name_.c_str(), text.c_str());
+    }
+
     // Override these in your plugin:
     virtual Record process(const Record& input) { (void)input; return {}; }
     virtual std::string exchange(const std::string& cmd_json) { (void)cmd_json; return "{}"; }

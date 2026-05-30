@@ -50,3 +50,7 @@ tmp/qa_countdown.txt
 
 # heal-test runtime marker (qa_fault) — recreated each run
 examples/**/.crashed_once.marker
+
+# QA driver runtime logs (agent-named; not fixtures)
+examples/qa_edge/qe_*.log
+examples/**/_fe_cfg/

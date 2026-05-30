@@ -76,11 +76,18 @@ def main() -> int:
                 if sc.get("seq", 0) < 1:
                     failures.append("@script seq not set")
                 seq1 = sc.get("seq")
-                # coalescing: same text again -> seq unchanged
+                # coalescing: identical @script text again -> its seq unchanged
                 c.run(timeout=30)
                 seq2 = c.status().get("@script", {}).get("seq")
                 if seq2 != seq1:
-                    failures.append(f"coalescing failed: seq changed on identical status ({seq1}->{seq2})")
+                    failures.append(f"coalescing failed: @script seq changed on identical status ({seq1}->{seq2})")
+            # plugin per-instance status: the "rep" instance reported via
+            # xi::Plugin::status() -> host_api set_status, auto-tagged "rep".
+            rep = s.get("rep")
+            if not rep:
+                failures.append("no 'rep' (per-instance plugin) status after run")
+            elif "processed" not in rep.get("text", ""):
+                failures.append(f"rep status text unexpected: {rep.get('text')!r}")
 
         # ---- session 2 (reconnect): THE GUARANTEE — latest re-pulled ----
         with Client(url=WS_URL, timeout=30.0) as c2:

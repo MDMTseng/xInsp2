@@ -178,6 +178,15 @@ typedef struct xi_host_api {
      * The returned handle has refcount 1; the caller is responsible
      * for image_release when done. */
     xi_image_handle (*read_image_file)(const char* path);
+
+    /* --------------------------------------------------------------- */
+    /* Publish a short sticky status string for this component (ABI-
+     * additive; plugins built against an older header just never call
+     * it, and an older host leaves it null — always null-check).
+     *   source: the instance name (host attributes null/empty to "@plugin").
+     *   text:   short human status, e.g. "grabbing" / "model loaded".
+     * The host keeps the LATEST per source and serves it via cmd:status. */
+    void            (*set_status)(const char* source, const char* text);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */

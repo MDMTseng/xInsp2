@@ -30,6 +30,7 @@
 #include "xi_abi.h"
 #include "xi_image.hpp"
 #include "xi_instance_folders.hpp"
+#include "xi_status_sink.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -332,6 +333,11 @@ public:
         api.shm_release       = nullptr;
         api.shm_is_shm_handle = nullptr;
         api.read_image_file = read_image_file_fn();
+        // Routes to the backend's status registry via the installed sink
+        // (xi_status_sink.hpp); no-op when no sink is installed (headless).
+        api.set_status = [](const char* source, const char* text) {
+            if (auto fn = xi::status_sink()) fn(source, text);
+        };
         return api;
     }
 
