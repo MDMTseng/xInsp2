@@ -221,6 +221,20 @@ target_compile_definitions(xinsp_fe PRIVATE
     XINSP2_VERSION="${XINSP2_VERSION}"
     XINSP2_COMMIT="${XINSP2_COMMIT}")
 
+# Comms gateway — out-of-process PLC I/O (see docs/design/comms-gateway.md).
+# Links only cJSON + Winsock (schema-agnostic relay; no xi_core/OpenCV), so no
+# accelerator-DLL dependency.
+add_executable(xinsp_comms src/comms_main.cpp)
+target_link_libraries(xinsp_comms PRIVATE cjson)
+target_include_directories(xinsp_comms PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
+if(WIN32)
+    target_link_libraries(xinsp_comms PRIVATE Ws2_32)
+endif()
+set_target_properties(xinsp_comms PROPERTIES OUTPUT_NAME "xinsp-comms")
+target_compile_definitions(xinsp_comms PRIVATE
+    XINSP2_VERSION="${XINSP2_VERSION}"
+    XINSP2_COMMIT="${XINSP2_COMMIT}")
+
 # JPEG-encoder benchmark — quantifies the IPP/OpenCV/stb dispatch.
 # Not run as a test (no pass/fail); invoke manually for numbers.
 add_executable(bench_jpeg tests/bench_jpeg.cpp src/stb_impl.cpp)

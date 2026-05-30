@@ -64,3 +64,4 @@ examples/*/*.scratch.log
 
 # FE heartbeat files (runtime)
 examples/*/*.hb
+examples/*/gw.log
