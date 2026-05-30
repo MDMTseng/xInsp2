@@ -28,6 +28,7 @@ namespace xi {
 enum class SafeStateReason {
     BackendExit,            // BE process exited (crash or unexpected exit)
     PortUnresponsive,       // BE process alive but WS port stopped accepting
+    BootTimeout,            // BE alive + port bound but never reached "ready" in time
     RespawnLimitExceeded,   // too many crashes in the window; giving up, staying safe
     SupervisorShutdown,     // the FE itself is shutting down (intended)
 };
@@ -36,6 +37,7 @@ inline const char* to_string(SafeStateReason r) {
     switch (r) {
         case SafeStateReason::BackendExit:          return "BackendExit";
         case SafeStateReason::PortUnresponsive:     return "PortUnresponsive";
+        case SafeStateReason::BootTimeout:          return "BootTimeout";
         case SafeStateReason::RespawnLimitExceeded: return "RespawnLimitExceeded";
         case SafeStateReason::SupervisorShutdown:   return "SupervisorShutdown";
     }
@@ -76,12 +78,16 @@ public:
     explicit LoggingSafeStateSink(std::FILE* log = nullptr) : log_(log) {}
 
     void enter_safe_state(const SafeStateEvent& ev) override {
-        emit("ENTER SAFE STATE reason=%s rc=0x%08X module=%s phase=%s report=%s",
+        // ts= (wall-clock epoch-ms the FE decided to go safe) goes at the END so
+        // the "ENTER SAFE STATE reason=..." prefix stays stable for log scrapers;
+        // a safety transition log needs a timestamp for post-incident forensics.
+        emit("ENTER SAFE STATE reason=%s rc=0x%08X module=%s phase=%s report=%s ts=%lld",
              to_string(ev.reason),
              static_cast<unsigned>(ev.backend_rc),
              ev.faulting_module.empty() ? "-" : ev.faulting_module.c_str(),
              ev.last_phase.empty()      ? "-" : ev.last_phase.c_str(),
-             ev.report_path.empty()     ? "-" : ev.report_path.c_str());
+             ev.report_path.empty()     ? "-" : ev.report_path.c_str(),
+             static_cast<long long>(ev.ts_ms));
     }
 
     void clear_safe_state() override {

@@ -63,6 +63,15 @@ struct FeConfig {
     // Liveness probe.
     int         probe_interval_ms  = 1000;
     int         probe_fail_max     = 5;   // consecutive failures (proc alive) -> unresponsive
+    // Boot-readiness gate: when running a --project, the BE binds its port then
+    // open/compiles for several seconds before serving (port-up != ready). The
+    // FE waits for the "autostart: ready" marker in be.log before declaring the
+    // line healthy; if the BE is alive but never reaches ready within this
+    // budget it's a boot hang -> safe-state + respawn. 0 disables the gate.
+    int         boot_timeout_ms    = 60000;
+    // Extra args appended verbatim to the spawned backend's command line
+    // (--be-arg=..., repeatable). Lets an operator pass BE flags through the FE.
+    std::vector<std::string> be_args;
 };
 
 static std::string arg_value(int argc, char** argv, const char* flag) {
@@ -149,10 +158,13 @@ static FeConfig load_config(int argc, char** argv) {
     if (auto v = arg_value(argc, argv, "--autostart-fps");  !v.empty()) try { c.autostart_fps = std::stoi(v); } catch (...) {}
     if (auto v = arg_value(argc, argv, "--safe-state");     !v.empty()) c.safe_state_type = v;
     if (auto v = arg_value(argc, argv, "--be-log");         !v.empty()) c.be_log = v;
+    if (auto v = arg_value(argc, argv, "--boot-timeout-ms"); !v.empty()) try { c.boot_timeout_ms = std::stoi(v); } catch (...) {}
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a.rfind("--plugins-dir=", 0) == 0) c.plugins_dirs.push_back(a.substr(14));
         else if (a == "--plugins-dir" && i + 1 < argc) c.plugins_dirs.push_back(argv[++i]);
+        else if (a.rfind("--be-arg=", 0) == 0) c.be_args.push_back(a.substr(9));
+        else if (a == "--be-arg" && i + 1 < argc) c.be_args.push_back(argv[++i]);
     }
 
     if (c.backend_exe.empty()) c.backend_exe = discover_backend_exe();
@@ -163,6 +175,15 @@ static FeConfig load_config(int argc, char** argv) {
 static int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// Cheap substring scan of the BE log (used by the boot-readiness gate to spot
+// the "autostart: ready" marker). Reads the whole small log each call.
+static bool log_contains(const std::string& path, const char* needle) {
+    std::ifstream f(path);
+    if (!f) return false;
+    std::stringstream ss; ss << f.rdbuf();
+    return ss.str().find(needle) != std::string::npos;
 }
 
 // Crash-report parsing (read the BE's log for the minidump path it printed,
@@ -223,6 +244,7 @@ static std::string build_cmdline(const FeConfig& c) {
     if (!c.script.empty())  cl += " --script=\"" + c.script + "\"";
     if (c.autostart_fps > 0) cl += " --autostart-fps=" + std::to_string(c.autostart_fps);
     for (auto& d : c.plugins_dirs) cl += " --plugins-dir=\"" + d + "\"";
+    for (auto& a : c.be_args)      cl += " " + a;   // verbatim passthrough
     return cl;
 }
 
@@ -296,8 +318,12 @@ static int run_supervisor(const FeConfig& c) {
         std::fprintf(stderr, "[xinsp-fe] backend up pid=%lu\n", sp.pi.dwProcessId);
 
         // ---- monitor this instance ----
-        int  probe_fails = 0;
-        bool healthy_announced = false;
+        int   probe_fails = 0;
+        bool  healthy_announced = false;
+        // Boot-readiness gate: until the BE reaches "autostart: ready", port-up
+        // only means "bound", not "serving". No project -> nothing to wait for.
+        bool    ready_seen = c.project.empty();
+        int64_t spawn_ms   = now_ms();
         DWORD exit_code = 0;
         xi::SafeStateReason death_reason = xi::SafeStateReason::BackendExit;
         for (;;) {
@@ -308,8 +334,32 @@ static int run_supervisor(const FeConfig& c) {
                 break;
             }
             if (g_stop.load()) break;
-            // Still alive — probe the port.
-            if (port_open(c.port)) {
+            bool port = port_open(c.port);
+
+            // Boot gate: the BE binds its port then open/compiles synchronously
+            // for seconds before serving. A connect probe can't tell "booting"
+            // from "serving" (both accept TCP). Wait for the readiness marker;
+            // if the BE is alive but never reaches it in time, that's a boot
+            // hang — go safe + respawn rather than reporting a false "healthy".
+            if (!ready_seen) {
+                if (port && log_contains(c.be_log, "autostart: ready")) {
+                    ready_seen = true;   // fall through to healthy handling
+                } else if (c.boot_timeout_ms > 0 && now_ms() - spawn_ms > c.boot_timeout_ms) {
+                    std::fprintf(stderr, "[xinsp-fe] backend did not reach 'autostart: ready' "
+                                 "within %d ms (boot hang); killing for respawn\n",
+                                 c.boot_timeout_ms);
+                    death_reason = xi::SafeStateReason::BootTimeout;
+                    TerminateProcess(sp.pi.hProcess, 1);
+                    WaitForSingleObject(sp.pi.hProcess, 5000);
+                    GetExitCodeProcess(sp.pi.hProcess, &exit_code);
+                    break;
+                } else {
+                    continue;   // still booting — don't declare healthy or count fails
+                }
+            }
+
+            // Ready (or no gate) — normal liveness handling.
+            if (port) {
                 probe_fails = 0;
                 // Clear the line's safe state once the inspector is confirmed
                 // accepting — but only if we'd previously driven it safe (a
@@ -406,6 +456,9 @@ static void print_help() {
         "  --plugins-dir=DIR    extra plugin folder (repeatable)\n"
         "  --safe-state=TYPE    safe-state sink (default 'log')\n"
         "  --be-log=PATH        where to capture the backend's stdout/stderr\n"
+        "  --boot-timeout-ms=N  boot-hang budget: go safe+respawn if the backend\n"
+        "                       never reaches 'ready' in N ms (default 60000; 0=off)\n"
+        "  --be-arg=ARG         extra arg appended to the backend command (repeatable)\n"
         "  --config=PATH        fe.json config (CLI flags override it)\n"
         "  --help, -h           this help\n");
 }

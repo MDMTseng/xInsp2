@@ -470,6 +470,13 @@ static std::string parse_str_flag(int argc, char** argv, const char* flag) {
     return {};
 }
 
+// Presence check for a bare flag (e.g. --hang-before-ready).
+static bool has_flag(int argc, char** argv, const char* flag) {
+    for (int i = 1; i < argc; ++i)
+        if (std::string_view(argv[i]) == flag) return true;
+    return false;
+}
+
 // --autostart-fps=<N>  (default 0 = don't auto-start continuous mode; just
 // open+compile and wait for a client / triggers).
 static int parse_autostart_fps(int argc, char** argv) {
@@ -3295,6 +3302,20 @@ int main(int argc, char** argv) {
                     + std::to_string(autostart_fps) + "}}");
             }
         }
+        // Debug hook (test-only): simulate a backend that hangs DURING boot —
+        // alive, port bound, but never reaches "ready". Used by the FE
+        // boot-timeout test (examples/qa_race/driver_boot_hang.py). Placed
+        // before the readiness marker so the FE's boot gate trips.
+        if (has_flag(argc, argv, "--hang-before-ready")) {
+            std::fprintf(stderr, "[xinsp2] autostart: --hang-before-ready (debug) — "
+                                 "hanging before ready\n");
+            std::fflush(stderr);
+            while (!g_should_exit.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            return 0;
+        }
+
         // Readiness marker. The WS port binds in srv.start() ABOVE, but the
         // open/compile/start sequence runs synchronously here before the accept
         // loop — so for several seconds the port is "up" (TCP connect succeeds)

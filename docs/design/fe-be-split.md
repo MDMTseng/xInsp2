@@ -76,8 +76,12 @@ an operator HMI / the VS Code extension can still attach live.
 - **Monitor**: `WaitForSingleObject` on the process + a shallow TCP `connect`
   probe of the WS port between waits. The probe drives `clear_safe_state` on a
   healthy resume; `PortUnresponsive` is flagged only after N consecutive probe
-  failures while the process is alive (avoids false positives during a long
-  compile/inspect). A deep WS-ping heartbeat is Phase 2.
+  failures while the process is alive. A **boot-readiness gate** withholds
+  "healthy" until the BE log shows `autostart: ready` — the port binds before
+  the synchronous open/compile, so port-up ≠ serving; a BE that hangs before
+  ready within `--boot-timeout-ms` is driven `BootTimeout` → respawn. (A
+  serve-time wedge — port still accepting but commands stalled — needs a deep WS
+  heartbeat and stays Phase 2.)
 - **On death — forensics**: the FE parses `be.log` for the last
   `minidump: <path>.dmp` line the BE printed, reads the sibling `.json`, and
   pulls `exception.name`, `exception.module`, and the dispatch-thread

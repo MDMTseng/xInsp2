@@ -51,6 +51,7 @@ int main() {
     {
         CHECK(std::string(xi::to_string(SafeStateReason::BackendExit)) == "BackendExit");
         CHECK(std::string(xi::to_string(SafeStateReason::PortUnresponsive)) == "PortUnresponsive");
+        CHECK(std::string(xi::to_string(SafeStateReason::BootTimeout)) == "BootTimeout");
         CHECK(std::string(xi::to_string(SafeStateReason::RespawnLimitExceeded)) == "RespawnLimitExceeded");
         CHECK(std::string(xi::to_string(SafeStateReason::SupervisorShutdown)) == "SupervisorShutdown");
         // Out-of-range value → "Unknown" (defensive default in the switch).
@@ -76,8 +77,10 @@ int main() {
         ev.faulting_module = "plugin_v0.dll";
         ev.last_phase      = "inspect";
         ev.report_path     = "C:\\tmp\\report.json";
+        ev.ts_ms           = 1748599200123LL;
         std::string s = capture([&](xi::LoggingSafeStateSink& k){ k.enter_safe_state(ev); });
         CHECK(contains(s, "ENTER SAFE STATE"));
+        CHECK(contains(s, "ts=1748599200123"));   // SS-U8: timestamp surfaced for forensics
         CHECK(contains(s, "reason=BackendExit"));
         CHECK(contains(s, "rc=0xC0000005"));
         CHECK(contains(s, "module=plugin_v0.dll"));

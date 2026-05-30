@@ -91,7 +91,8 @@ FE log + process/port state). FE-E1 exists; the rest are **[TODO]**.
 | FE-E1 **[DONE]** | crash-storm safety loop | death detected → `enter_safe_state` w/ forensics → respawn → cap → stays safe → no orphan (existing `driver.py`) |
 | FE-E2 **[TODO]** ⭐ | **happy path** (the critical missing positive) | healthy project: BE boots, FE logs `backend healthy` + `CLEAR SAFE STATE`, runs ≥10 s with **zero** `ENTER SAFE STATE`, Ctrl-C → clean exit, no orphan |
 | FE-E3 **[TODO]** ⭐ | **orphan guarantee** | hard-`taskkill` the FE (not Ctrl-C) → Job Object `KILL_ON_JOB_CLOSE` reaps the BE; no `xinsp-backend` on the port afterward |
-| FE-E4 **[TODO]** | `PortUnresponsive` path | BE alive but accept loop wedged (a hang plugin under a long `--watchdog`) → N consecutive probe fails → FE `TerminateProcess` + respawn with `reason=PortUnresponsive` |
+| FE-E4a **[DONE]** | boot hang | BE bound but never reaches `autostart: ready` within `--boot-timeout-ms` → `enter_safe_state(BootTimeout)` → respawn → cap. `examples/qa_race/driver_boot_hang.py` (uses the BE `--hang-before-ready` hook). |
+| FE-E4b **[Phase 2]** | serve-time wedge | BE alive + port still accepting but commands stall — the shallow connect probe *cannot* see this; needs a WS handshake/ping heartbeat. `driver_fe4.py` documents the trigger and stays a stub. |
 | FE-E5 **[TODO]** ⭐ | **recover-and-clear transition** | project that crashes once then runs healthy after respawn → exactly one `ENTER`, then `CLEAR SAFE STATE`, then stable; FE keeps running (no cap) |
 | FE-E6 **[TODO]** | backend exe missing | `--backend=<bad>` → `CreateProcess` fails → `enter_safe_state(BackendExit)` + FE exits rc=1 |
 | FE-E7 **[DONE via FE-E1]** | forensics from `threads[]` fallback | safe-state line carries `phase=inspect` even though the crash is on an unmanaged thread (empty `context`) |
