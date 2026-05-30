@@ -29,6 +29,7 @@ enum class SafeStateReason {
     BackendExit,            // BE process exited (crash or unexpected exit)
     PortUnresponsive,       // BE process alive but WS port stopped accepting
     BootTimeout,            // BE alive + port bound but never reached "ready" in time
+    CommsLost,              // the comms gateway died — the line lost its PLC link
     RespawnLimitExceeded,   // too many crashes in the window; giving up, staying safe
     SupervisorShutdown,     // the FE itself is shutting down (intended)
 };
@@ -38,6 +39,7 @@ inline const char* to_string(SafeStateReason r) {
         case SafeStateReason::BackendExit:          return "BackendExit";
         case SafeStateReason::PortUnresponsive:     return "PortUnresponsive";
         case SafeStateReason::BootTimeout:          return "BootTimeout";
+        case SafeStateReason::CommsLost:            return "CommsLost";
         case SafeStateReason::RespawnLimitExceeded: return "RespawnLimitExceeded";
         case SafeStateReason::SupervisorShutdown:   return "SupervisorShutdown";
     }

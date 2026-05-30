@@ -156,6 +156,16 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   forensics from the backend log), respawns rate-limited, hits the cap,
   stays safe, and leaves no orphaned backend. (Windows-only; skips on
   non-`nt`.)
+- **Comms gateway** (out-of-process PLC I/O; see
+  `docs/design/comms-gateway.md`). Three regressions, Windows-only:
+  `examples/comms_gateway/` — the `xinsp-comms` relay round-trip + dead-man
+  (backend crash → gateway fires the registered emergency payload to the PLC);
+  `examples/comms_script/` — the backend-side `xi::comms` client end-to-end
+  (script ↔ PLC sim through the gateway); `examples/fe_comms/` — `xinsp-fe.exe`
+  supervising the gateway as a sibling of the backend: asserts the script
+  reaches the PLC, then kills the gateway and asserts the FE drives
+  `CommsLost` safe-state, respawns it, the backend survives, the link is
+  restored, and nothing orphans.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

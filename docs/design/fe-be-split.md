@@ -112,6 +112,13 @@ an operator HMI / the VS Code extension can still attach live.
   the FE drives `RespawnLimitExceeded` and **stays safe** for a manual restart.
 - **Shutdown**: a console-ctrl handler closes the Job Object (killing the BE) and
   drives `SupervisorShutdown`.
+- **Comms gateway** (optional): with `--comms-plc=tcp:|udp:HOST:PORT` the FE also
+  spawns + supervises the out-of-process `xinsp-comms` gateway (PLC I/O) as a
+  sibling child in the same Job Object, on its own `RespawnTracker`. Gateway death
+  → `CommsLost` safe-state + rate-limited respawn, independent of the BE (a BE
+  respawn doesn't drop the PLC link, and a gateway crash doesn't kill the BE). The
+  FE withholds `CLEAR` until both the gateway is back and the BE is serving. Full
+  design + dead-man semantics in [`comms-gateway.md`](./comms-gateway.md).
 
 ## VS Code extension: managed vs attach
 

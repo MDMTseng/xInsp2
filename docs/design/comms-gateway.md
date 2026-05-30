@@ -1,7 +1,9 @@
 # Comms gateway — out-of-process I/O plugins
 
-> **Status: design (not built).** Forward-looking; captures the boundary and
-> protocol before any code, same as [`fe-be-split.md`](./fe-be-split.md).
+> **Status: built (Increments 1–3).** The `xinsp-comms` gateway, the backend-side
+> `xi::comms` client, and FE supervision of the gateway all ship and are
+> regression-tested (`examples/comms_gateway/`, `comms_script/`, `fe_comms/`).
+> Remaining follow-ups are noted inline (msgpack framing, multi-PLC fan-out).
 
 ## Why
 
@@ -93,8 +95,18 @@ freely. (msgpack framing later — same follow-up as the PLC sink.)
 backend connects with `--comms-port=N`, holds the gateway client + a background
 reader buffering inbound, and installs the host callbacks into the script DLL
 (same pattern as `xi::status`). Tested end-to-end in `examples/comms_script/`
-(script↔PLC round trip + link state). Still to build: the FE supervising the
-gateway as a sibling of the backend (Increment 3).
+(script↔PLC round trip + link state).
+
+**Built (Increment 3):** the FE supervises the gateway as a sibling of the
+backend. `xinsp-fe --comms-plc=tcp:|udp:HOST:PORT` spawns `xinsp-comms` into the
+same Job Object as the backend (kill-on-close → no orphan), passes the backend
+`--comms-port` (default `--port + 1`), and supervises the gateway on its own
+`RespawnTracker`, independent of backend respawns. Gateway death → the FE logs
+`comms gateway exited`, drives an `ENTER SAFE STATE reason=CommsLost`, and
+respawns it rate-limited (latches comms-lost at the cap); the FE won't `CLEAR`
+the line until the gateway is back up *and* the backend is serving. Flags:
+`--comms-plc` / `--comms-port` / `--comms-exe` (auto-discovered) / `--comms-log`,
+also as `fe.json` keys. Proven end-to-end in `examples/fe_comms/`.
 
 ## Supervision & failure semantics
 

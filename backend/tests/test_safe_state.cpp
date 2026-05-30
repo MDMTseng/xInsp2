@@ -52,6 +52,7 @@ int main() {
         CHECK(std::string(xi::to_string(SafeStateReason::BackendExit)) == "BackendExit");
         CHECK(std::string(xi::to_string(SafeStateReason::PortUnresponsive)) == "PortUnresponsive");
         CHECK(std::string(xi::to_string(SafeStateReason::BootTimeout)) == "BootTimeout");
+        CHECK(std::string(xi::to_string(SafeStateReason::CommsLost)) == "CommsLost");
         CHECK(std::string(xi::to_string(SafeStateReason::RespawnLimitExceeded)) == "RespawnLimitExceeded");
         CHECK(std::string(xi::to_string(SafeStateReason::SupervisorShutdown)) == "SupervisorShutdown");
         // Out-of-range value → "Unknown" (defensive default in the switch).

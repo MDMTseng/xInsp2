@@ -194,6 +194,16 @@ Priorities depend on real usage feedback. Candidate work:
   `--project/--script/--autostart-fps` to run headlessly. See
   [`design/fe-be-split.md`](./design/fe-be-split.md). Phase 2: deep WS
   heartbeat, FE status channel, real PLC transports.
+- **Comms gateway** — **shipped (Increments 1–3).** Out-of-process PLC I/O:
+  the `xinsp-comms` gateway owns the (volatile, un-hardened) PLC socket so its
+  crash/hang risk is isolated from the in-process backend. The backend talks to
+  it via `xi::comms` (`send`/`poll`/`up`/`set_deadman`) over a loopback socket;
+  on a backend crash the gateway fires the backend's registered emergency
+  payload to the PLC (dead-man). The FE spawns + supervises the gateway as a
+  sibling child (`--comms-plc=tcp:|udp:HOST:PORT`), driving `CommsLost`
+  safe-state + rate-limited respawn on gateway death. See
+  [`design/comms-gateway.md`](./design/comms-gateway.md). Follow-ups: msgpack
+  framing, multi-PLC fan-out.
 - **Multi-client broadcast (S6)** — opens the door to operator dashboards.
 - **History UI scrubber (finish S4)** — currently backend-only.
 - **Per-component reference docs** — see [`docs/reference/`](./reference/).
