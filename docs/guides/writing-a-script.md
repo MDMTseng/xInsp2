@@ -175,13 +175,23 @@ image, and Record (recursive tree).
 `VAR(string_literal, ...)` — backed by `std::string`. There's no
 lifetime bug: the macro copies into a `std::string` value.
 
-> **Gotcha — `VAR(name, ...)` declares a local.** The macro expands to
-> roughly `auto name = expr; <ship to viewer>`, so `name` becomes a
-> real variable in the enclosing scope. You **cannot** `VAR(gray, ...)`
-> if `gray` is already declared earlier — you'll get a redeclaration
-> error from the compiler. Either inline the expression as the second
-> arg (`VAR(gray, toGray(img))`) so the VAR macro is its own
-> declaration, or use a fresh name.
+> **`VAR(name, ...)` declares a local; use `EMIT(name)` to surface an
+> existing one.** `VAR` expands to roughly `auto name = expr; <ship to
+> viewer>`, so `name` becomes a real variable in the enclosing scope —
+> you **cannot** `VAR(count, count)` to surface a value you already
+> computed (it redefines `count`; cl.exe fires C2374). For that, use
+> **`EMIT(name)`**, which ships an existing in-scope variable without
+> declaring anything:
+>
+> ```cpp
+> int count = blobs.size();
+> EMIT(count);          // surfaces `count` — no redeclaration
+> EMIT(frame);          // works on parameters too
+> ```
+>
+> Rule of thumb: `VAR` to **declare and surface** in one line; `EMIT` to
+> **surface something you already have**. (`EMIT_RAW` skips JPEG preview,
+> like `VAR_RAW`.)
 
 ## Reading a frame from disk
 

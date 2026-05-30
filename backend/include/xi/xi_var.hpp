@@ -203,17 +203,27 @@ private:
 //
 // The value is evaluated exactly once. `name` is available after the macro.
 //
-// COLLISION FOOTGUN: because the macro introduces a local binding for
-// `name`, you cannot do `VAR(foo, foo)` to surface a pre-existing local
-// `foo` — cl.exe will fire C2374 (redefinition) with no hint that the
-// VAR macro is at fault. Either inline the expression
-// (`VAR(foo, computeFoo())`) or rename one of the two. Documented in
-// docs/guides/writing-a-script.md, "Gotcha — VAR(name, ...) declares
-// a local."
+// VAR introduces a local binding for `name`, so it CANNOT surface a value you
+// already have a variable for: `VAR(count, count)` expands to `auto count =
+// …count…` and cl.exe fires C2374 (redefinition) pointing at the macro, with no
+// hint VAR is the cause. To surface a PRE-EXISTING in-scope value, use EMIT
+// (below) — it declares nothing:
+//
+//     int count = blobs.size();
+//     EMIT(count);                 // surfaces `count`; no redefinition
+//
+// Use VAR to declare-and-surface in one step; use EMIT to surface something you
+// already have. (See docs/guides/writing-a-script.md.)
 #define VAR(name, expr)                                                        \
     auto name = ::xi::ValueStore::current().track(#name, (expr))
 
 #define VAR_RAW(name, expr)                                                    \
     auto name = ::xi::ValueStore::current().track(#name "!raw", (expr))
+
+// Surface an EXISTING in-scope variable under its own name WITHOUT declaring a
+// new binding — the collision-free way to do what `VAR(foo, foo)` can't. Expands
+// to a void-discarded expression statement, so it's safe anywhere VAR is.
+#define EMIT(name)     (void)::xi::ValueStore::current().track(#name, (name))
+#define EMIT_RAW(name) (void)::xi::ValueStore::current().track(#name "!raw", (name))
 
 } // namespace xi
