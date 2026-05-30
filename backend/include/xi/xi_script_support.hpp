@@ -268,6 +268,12 @@ static void* g_breakpoint_fn_       = nullptr;
 // latest status string to the host status registry. Signature: void(const char*).
 static void* g_status_fn_           = nullptr;
 
+// Comms callbacks. Host sets these so xi::comms::* reach the comms gateway.
+static void* g_comms_send_fn_       = nullptr;   // int(const char*)
+static void* g_comms_poll_fn_       = nullptr;   // int(char*, int)
+static void* g_comms_up_fn_         = nullptr;   // int()
+static void* g_comms_deadman_fn_    = nullptr;   // void(const char*)
+
 // Per-run context. Set by the host before each xi_inspect_entry call,
 // cleared after. Currently just the optional `frame_path` arg from
 // cmd:run; future per-run fields (run_id, request id, etc.) join here.
@@ -324,6 +330,16 @@ XI_SCRIPT_EXPORT void xi_script_set_breakpoint_callback(void* fn) {
 // include xi_status.hpp leave this null.
 XI_SCRIPT_EXPORT void xi_script_set_status_callback(void* fn) {
     g_status_fn_ = fn;
+}
+
+// Optional: install comms-gateway callbacks for xi::comms::*. Scripts that don't
+// include xi_comms.hpp leave these null.
+XI_SCRIPT_EXPORT void xi_script_set_comms_callbacks(
+    void* send_fn, void* poll_fn, void* up_fn, void* deadman_fn) {
+    g_comms_send_fn_    = send_fn;
+    g_comms_poll_fn_    = poll_fn;
+    g_comms_up_fn_      = up_fn;
+    g_comms_deadman_fn_ = deadman_fn;
 }
 
 // Per-run context setter (called by host before each xi_inspect_entry,

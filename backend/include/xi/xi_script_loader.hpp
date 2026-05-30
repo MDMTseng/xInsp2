@@ -67,6 +67,8 @@ struct LoadedScript {
     SetBreakpointCallbackFn set_breakpoint_callback = nullptr;
     using SetStatusCallbackFn = void (*)(void* fn);
     SetStatusCallbackFn set_status_callback = nullptr;
+    using SetCommsCallbacksFn = void (*)(void* send, void* poll, void* up, void* deadman);
+    SetCommsCallbacksFn set_comms_callbacks = nullptr;
     SetRunContextFn    set_run_context  = nullptr;
     SetGlobalCancelFn  set_global_cancel = nullptr;
     StateSchemaVersionFn state_schema_version = nullptr;
@@ -105,6 +107,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_trigger_leader_callback = reinterpret_cast<LoadedScript::SetTriggerLeaderCallbackFn>(GetProcAddress(h, "xi_script_set_trigger_leader_callback"));
     out.set_breakpoint_callback = reinterpret_cast<LoadedScript::SetBreakpointCallbackFn>(GetProcAddress(h, "xi_script_set_breakpoint_callback"));
     out.set_status_callback = reinterpret_cast<LoadedScript::SetStatusCallbackFn>(GetProcAddress(h, "xi_script_set_status_callback"));
+    out.set_comms_callbacks = reinterpret_cast<LoadedScript::SetCommsCallbacksFn>(GetProcAddress(h, "xi_script_set_comms_callbacks"));
     out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
     out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
     out.state_schema_version = reinterpret_cast<LoadedScript::StateSchemaVersionFn>(GetProcAddress(h, "xi_script_state_schema_version"));

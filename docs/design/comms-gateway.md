@@ -87,10 +87,14 @@ freely. (msgpack framing later — same follow-up as the PLC sink.)
   `{"event":"plc_in","line":"<verbatim from PLC>"}` (async) ;
   `{"event":"plc_up","up":true|false}` (link state)
 
-**Built (Increment 1):** `xinsp-comms.exe` — the relay + dead-man, with TCP
-auto-reconnect. Tested in `examples/comms_gateway/` (round-trip + dead-man fires
-on crash-drop, not on clean `bye`). Still to build: the backend-side `xi::io`
-handle (`send`/`poll`/`up`, non-blocking) and the FE supervising the gateway.
+**Built:** `xinsp-comms.exe` — the relay + dead-man, TCP auto-reconnect
+(`examples/comms_gateway/`). And the backend-side **`xi::comms`** API
+(`xi_comms.hpp`: `send` / `poll` non-blocking / `up` / `set_deadman`): the
+backend connects with `--comms-port=N`, holds the gateway client + a background
+reader buffering inbound, and installs the host callbacks into the script DLL
+(same pattern as `xi::status`). Tested end-to-end in `examples/comms_script/`
+(script↔PLC round trip + link state). Still to build: the FE supervising the
+gateway as a sibling of the backend (Increment 3).
 
 ## Supervision & failure semantics
 

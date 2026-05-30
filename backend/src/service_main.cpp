@@ -418,6 +418,118 @@ static void status_cb(const char* text) {
     set_status_internal("@script", text);
 }
 
+// ---- Comms gateway client --------------------------------------------------
+// Connects to the out-of-process comms gateway (xinsp-comms) over loopback and
+// backs the script's xi::comms::* API. The gateway owns the PLC link; we just
+// relay newline-JSON ops and buffer PLC-originated lines for poll(). A
+// background reader thread keeps the inbox + link state current. See
+// docs/design/comms-gateway.md.
+class GatewayClient {
+public:
+    bool connect(int port) {
+        // Winsock may not be up yet (we connect before srv.start()); WSAStartup
+        // is refcounted, so an extra call here is safe.
+        WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
+        for (int attempt = 0; attempt < 15; ++attempt) {   // tolerate FE spawn race
+            SOCKET s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (s != INVALID_SOCKET) {
+                sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons((u_short)port);
+                InetPtonA(AF_INET, "127.0.0.1", &a.sin_addr);
+                if (::connect(s, (sockaddr*)&a, sizeof(a)) == 0) {
+                    sock_ = s; run_ = true;
+                    reader_ = std::thread([this] { reader_loop(); });
+                    return true;
+                }
+                closesocket(s);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        return false;
+    }
+    void stop() {
+        run_ = false;
+        if (sock_ != INVALID_SOCKET) { shutdown(sock_, 2); closesocket(sock_); sock_ = INVALID_SOCKET; }
+        if (reader_.joinable()) reader_.join();
+    }
+    bool send_line(const std::string& line) {   // op:send
+        std::string m = "{\"op\":\"send\",\"line\":";
+        xp::json_escape_into(m, line); m += "}";
+        return write_(m);
+    }
+    void set_deadman(const std::string& line) {
+        std::string m = "{\"op\":\"set_deadman\",\"line\":";
+        xp::json_escape_into(m, line); m += "}";
+        write_(m);
+    }
+    void say_bye() { write_("{\"op\":\"bye\"}"); }
+    bool up() const { return up_.load(std::memory_order_relaxed); }
+    // Drain buffered PLC-originated lines, newline-joined, into buf; return bytes.
+    int drain(char* buf, int buflen) {
+        std::lock_guard<std::mutex> lk(in_mu_);
+        int used = 0;
+        while (!inbox_.empty()) {
+            const std::string& l = inbox_.front();
+            int need = (int)l.size() + 1;
+            if (used + need > buflen) break;
+            std::memcpy(buf + used, l.data(), l.size());
+            used += (int)l.size();
+            buf[used++] = '\n';
+            inbox_.pop_front();
+        }
+        return used;
+    }
+private:
+    bool write_(const std::string& msg) {
+        if (sock_ == INVALID_SOCKET) return false;
+        std::string out = msg; out.push_back('\n');
+        std::lock_guard<std::mutex> lk(send_mu_);
+        return ::send(sock_, out.data(), (int)out.size(), 0) == (int)out.size();
+    }
+    void reader_loop() {
+        std::string buf;
+        char tmp[4096];
+        while (run_.load()) {
+            int r = ::recv(sock_, tmp, sizeof(tmp), 0);
+            if (r <= 0) { up_ = false; break; }
+            buf.append(tmp, r);
+            size_t pos;
+            while ((pos = buf.find('\n')) != std::string::npos) {
+                std::string line = buf.substr(0, pos); buf.erase(0, pos + 1);
+                if (line.empty()) continue;
+                cJSON* root = cJSON_Parse(line.c_str());
+                if (!root) continue;
+                cJSON* ev = cJSON_GetObjectItem(root, "event");
+                if (cJSON_IsString(ev)) {
+                    if (std::strcmp(ev->valuestring, "plc_in") == 0) {
+                        if (cJSON* l = cJSON_GetObjectItem(root, "line"); cJSON_IsString(l)) {
+                            std::lock_guard<std::mutex> lk(in_mu_);
+                            if (inbox_.size() < 4096) inbox_.emplace_back(l->valuestring);
+                        }
+                    } else if (std::strcmp(ev->valuestring, "plc_up") == 0) {
+                        cJSON* u = cJSON_GetObjectItem(root, "up");
+                        up_ = cJSON_IsTrue(u);
+                    }
+                }
+                cJSON_Delete(root);
+            }
+        }
+    }
+    SOCKET                   sock_ = INVALID_SOCKET;
+    std::thread              reader_;
+    std::atomic<bool>        run_{false};
+    std::atomic<bool>        up_{false};
+    std::mutex               in_mu_;
+    std::deque<std::string>  inbox_;
+    std::mutex               send_mu_;
+};
+
+static GatewayClient* g_gateway = nullptr;   // non-null when --comms-port is set
+
+static int  comms_send_cb(const char* line) { return (g_gateway && g_gateway->send_line(line ? line : "")) ? 1 : 0; }
+static int  comms_poll_cb(char* buf, int n) { return g_gateway ? g_gateway->drain(buf, n) : 0; }
+static int  comms_up_cb()                   { return (g_gateway && g_gateway->up()) ? 1 : 0; }
+static void comms_deadman_cb(const char* line) { if (g_gateway) g_gateway->set_deadman(line ? line : ""); }
+
 // Forward-declare: runs one inspection cycle and emits vars+previews.
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
 // frame_path (optional) is plumbed to the script via
@@ -1544,6 +1656,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // and xi::status() is a no-op.
             if (g_script.set_status_callback) {
                 g_script.set_status_callback((void*)status_cb);
+            }
+            // Comms-gateway callbacks for xi::comms::* (no-op without xi_comms.hpp).
+            if (g_script.set_comms_callbacks) {
+                g_script.set_comms_callbacks((void*)comms_send_cb, (void*)comms_poll_cb,
+                                             (void*)comms_up_cb, (void*)comms_deadman_cb);
             }
             // Replay any param values the user set on the previous
             // DLL. The new DLL's xi::Param<T> file-scope ctors run on
@@ -3106,6 +3223,7 @@ int main(int argc, char** argv) {
                 "  --project=DIR        headless autostart: open this project at boot\n"
                 "  --script=PATH        script to compile for --project (default: project.json's)\n"
                 "  --autostart-fps=N    with --project, start continuous mode at N fps (0 = off)\n"
+                "  --comms-port=N       connect to the comms gateway on loopback N (xi::comms)\n"
                 "  --version, -v        print version and exit\n"
                 "  --help, -h           this help\n",
                 XINSP2_VERSION);
@@ -3245,6 +3363,21 @@ int main(int argc, char** argv) {
     xi::status_sink() = [](const char* who, const char* text) {
         set_status_internal((who && *who) ? who : "@plugin", text);
     };
+
+    // --comms-port=N: connect to the out-of-process comms gateway (xinsp-comms)
+    // on loopback so scripts can use xi::comms::* for PLC I/O. Tolerates the FE
+    // spawn race (retries). Stays null if not configured -> xi::comms is no-op.
+    static GatewayClient g_gw_instance;
+    if (std::string cp = parse_str_flag(argc, argv, "--comms-port"); !cp.empty()) {
+        int port = 0; try { port = std::stoi(cp); } catch (...) {}
+        if (port > 0 && g_gw_instance.connect(port)) {
+            g_gateway = &g_gw_instance;
+            std::fprintf(stderr, "[xinsp2] comms gateway connected (loopback:%d)\n", port);
+        } else {
+            std::fprintf(stderr, "[xinsp2] comms gateway NOT connected (port %s) — "
+                         "xi::comms will be inert\n", cp.c_str());
+        }
+    }
     // P2.4 watchdog. Always-on monitor thread; only acts when
     // g_inspect_deadline_ms > 0 (set by run_one_inspection when
     // g_watchdog_ms > 0). On trip: TerminateThread the inspect thread,
@@ -3463,6 +3596,9 @@ int main(int argc, char** argv) {
     srv.stop();
     g_watchdog_run = false;
     if (g_watchdog_thread.joinable()) g_watchdog_thread.join();
+    // Clean shutdown: tell the gateway "bye" so it disarms the dead-man (this is
+    // an intended exit, not a crash) before disconnecting.
+    if (g_gateway) { g_gateway->say_bye(); g_gateway->stop(); g_gateway = nullptr; }
     std::fprintf(stderr, "[xinsp2] shutdown complete\n");
     return 0;
 }
