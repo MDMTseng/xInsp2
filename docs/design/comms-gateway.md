@@ -51,32 +51,46 @@ gateway needs only a socket — no SHM, no hardened ABI.
 - The **FE** is the supervisor: it spawns + monitors **BE and gateway as sibling
   children**, respawning each with the existing `RespawnTracker` policy.
 
-## The safe-state boundary (important)
+## Safe-state: the gateway is the dead-man (primary), with layered fallbacks
 
-Safe-state is the last-resort safety command; its delivery must **not** depend on
-the iterable gateway being up. So:
-- **Safe-state stays the FE's direct, hardened path** — the `PlcSafeStateSink`
-  we already built (`--safe-state=udp:/tcp:`). Tiny, reviewed, doesn't change.
-- The gateway carries the **evolving bidirectional inspection I/O**, which is what
-  we don't want to harden yet.
-- **Gateway down is itself a safe-state trigger**: if the line can't reach the
-  PLC, it's unsafe → the FE drives safe-state (via the direct sink) and respawns
-  the gateway. (Belt-and-suspenders: the direct sink is also the fallback route
-  for the safe-state command if one ever wanted to send it through the gateway.)
+The gateway **owns the PLC connection**, so it's the natural thing to tell the PLC
+to go safe when the backend dies — and it detects that loss instantly, via its
+own loopback connection to the backend dropping. This is a clean dead-man chain:
+
+- **Backend registers an emergency payload** up front: `{"op":"set_deadman","line":"<emergency line to the PLC>"}`.
+  The PLC-specific schema stays the backend's; the gateway just holds the line.
+- **Backend crashes** → its loopback connection to the gateway drops **without a
+  `bye`** → the gateway immediately sends the registered payload to the PLC for
+  emergency handling. A clean shutdown sends `{"op":"bye"}` first, which disarms
+  the dead-man (no false trip).
+- **Gateway crashes** → the PLC sees *its own* TCP connection drop → the PLC can
+  dead-man on its own (link-loss = unsafe).
+- **FE crashes** → the Job Object reaps the backend + gateway → all connections
+  drop → PLC dead-man.
+
+So the safety signal is layered: explicit payload on a clean-detectable backend
+crash, and TCP link-loss as the backstop at every level above. The FE's direct
+`PlcSafeStateSink` (`--safe-state=tcp:/udp:`) remains as a **redundant/operator
+path** (and for backends run without a gateway); the gateway dead-man is the
+primary, lowest-latency route because it sits on the same loopback that dies with
+the backend.
 
 ## Local protocol (BE/FE ↔ gateway)
 
-Loopback TCP on a configurable port (reuses our socket code; the gateway already
-speaks TCP/UDP). Newline-delimited JSON for v1 (msgpack later — same follow-up as
-the PLC sink). Two message directions:
-- **Request/response** (client→gateway): `{"id":N,"op":"send","payload":{...}}`
-  → `{"id":N,"ok":true}` / `{"id":N,"ok":false,"err":"..."}`. `id` matches replies.
-- **Async inbound** (gateway→client, no id): `{"event":"plc_in","payload":{...}}`
-  — PLC-originated data pushed to the BE (e.g. a trigger).
+Loopback TCP on a configurable port (`--listen`), newline-delimited JSON. The
+gateway is **schema-agnostic about the PLC payload** — it relays opaque `line`
+strings and only parses the small control envelope, so the PLC wire can evolve
+freely. (msgpack framing later — same follow-up as the PLC sink.)
+- client → gateway: `{"id":N,"op":"send","line":"<verbatim to PLC>"}`,
+  `{"op":"set_deadman","line":"<emergency line>"}`, `{"op":"bye"}`, `{"op":"ping"}`
+- gateway → client: `{"id":N,"ok":true|false[,"err":...]}` ;
+  `{"event":"plc_in","line":"<verbatim from PLC>"}` (async) ;
+  `{"event":"plc_up","up":true|false}` (link state)
 
-Framing + the op set are the main things to pin down when we build; the schema of
-`payload` is the PLC's, kept out of the core (same isolation as the PLC sink's
-`build_*`).
+**Built (Increment 1):** `xinsp-comms.exe` — the relay + dead-man, with TCP
+auto-reconnect. Tested in `examples/comms_gateway/` (round-trip + dead-man fires
+on crash-drop, not on clean `bye`). Still to build: the backend-side `xi::io`
+handle (`send`/`poll`/`up`, non-blocking) and the FE supervising the gateway.
 
 ## Supervision & failure semantics
 

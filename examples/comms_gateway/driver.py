@@ -103,6 +103,46 @@ def main() -> int:
             m = json.loads(ev)
             if m.get("event") != "plc_in" or "trigger" not in m.get("line", ""):
                 failures.append(f"plc_in payload wrong: {ev}")
+        client.close()
+
+        def drain_plc(budget=1.5):
+            """Collect any PLC-bound datagrams within budget."""
+            got = []
+            plc.settimeout(budget)
+            end = time.time() + budget
+            while time.time() < end:
+                try:
+                    d, _ = plc.recvfrom(4096)
+                    got.append(d.decode("utf-8", "replace").strip())
+                except socket.timeout:
+                    break
+            return got
+
+        # DEAD-MAN FIRES: arm an emergency payload, then drop WITHOUT "bye"
+        # (simulating a backend crash) -> the PLC must receive the payload.
+        c2 = socket.create_connection(("127.0.0.1", GW_PORT), timeout=2)
+        c2.sendall(b'{"id":1,"op":"set_deadman","line":"EMERGENCY_STOP"}\n')
+        if not read_lines(c2, '"ok":true'):
+            failures.append("set_deadman not acked")
+        c2.close()                       # abrupt drop, no bye = "crash"
+        fired = drain_plc()
+        print(f"[plc-sim] after crash-drop: {fired}")
+        if "EMERGENCY_STOP" not in fired:
+            failures.append("dead-man did NOT fire to the PLC on a no-bye drop")
+
+        # CLEAN BYE: arm, say "bye", then drop -> the PLC must NOT receive it.
+        c3 = socket.create_connection(("127.0.0.1", GW_PORT), timeout=2)
+        c3.sendall(b'{"id":1,"op":"set_deadman","line":"SHOULD_NOT_FIRE"}\n')
+        read_lines(c3, '"ok":true')
+        c3.sendall(b'{"id":2,"op":"bye"}\n')
+        read_lines(c3, '"ok":true')
+        c3.close()
+        after_bye = drain_plc()
+        print(f"[plc-sim] after clean bye: {after_bye}")
+        if "SHOULD_NOT_FIRE" in after_bye:
+            failures.append("dead-man fired after a clean 'bye' (must not)")
+    except SystemExit:
+        pass
     finally:
         if client:
             try: client.close()
@@ -119,7 +159,8 @@ def main() -> int:
             print(f"  - {f}")
     else:
         print("VERDICT: PASS")
-        print("  client->PLC relayed + acked; PLC->client delivered as plc_in.")
+        print("  client->PLC relayed + acked; PLC->client as plc_in;")
+        print("  dead-man fires to PLC on crash-drop, NOT on clean bye.")
     return 1 if failures else 0
 
 

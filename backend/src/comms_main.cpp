@@ -11,13 +11,23 @@
 // without touching the gateway.
 //
 //   client -> gateway : {"id":N,"op":"send","line":"<verbatim to PLC>"}
+//                       {"id":N,"op":"set_deadman","line":"<emergency line to PLC>"}
+//                       {"id":N,"op":"bye"}                               (clean shutdown)
 //                       {"id":N,"op":"ping"}
 //   gateway -> client : {"id":N,"ok":true}  /  {"id":N,"ok":false,"err":"..."}
 //                       {"event":"plc_in","line":"<verbatim from PLC>"}   (async)
 //                       {"event":"plc_up","up":true|false}                (link state)
 //
+// DEAD-MAN SAFETY: the gateway owns the PLC link, so it is the thing that tells
+// the PLC to go safe when the backend dies. The backend registers an emergency
+// payload via "set_deadman"; if the backend's connection drops WITHOUT a "bye"
+// (i.e. it crashed), the gateway immediately sends that payload to the PLC for
+// emergency handling. (And if the gateway itself dies, the PLC sees its own
+// connection drop and can dead-man on its own.) The schema of the emergency
+// payload stays the backend's — the gateway just relays the registered line.
+//
 // Isolation is the point: if this process crashes/hangs it takes only itself
-// down — the FE respawns it and drives safe-state. Win32/Winsock; TODO(linux).
+// down. Win32/Winsock; TODO(linux).
 //
 #include <algorithm>
 #include <cstdio>
@@ -185,6 +195,8 @@ int main(int argc, char** argv) {
 
     SOCKET client = INVALID_SOCKET;
     LineReader client_lr, plc_lr;
+    std::string deadman;          // emergency line to send to the PLC if the
+    bool        client_said_bye = false;   // backend drops without a clean "bye"
 
     for (;;) {
         fd_set rfds; FD_ZERO(&rfds);
@@ -207,6 +219,7 @@ int main(int argc, char** argv) {
             if (s != INVALID_SOCKET) {
                 if (client != INVALID_SOCKET) closesocket(client);  // single client
                 client = s; client_lr.buf.clear();
+                deadman.clear(); client_said_bye = false;   // each backend re-arms its own
                 std::fprintf(stderr, "[xinsp-comms] client connected\n");
                 send_line(client, plc.up ? "{\"event\":\"plc_up\",\"up\":true}"
                                          : "{\"event\":\"plc_up\",\"up\":false}");
@@ -217,8 +230,18 @@ int main(int argc, char** argv) {
             char buf[4096];
             int r = ::recv(client, buf, sizeof(buf), 0);
             if (r <= 0) {
-                std::fprintf(stderr, "[xinsp-comms] client disconnected\n");
+                // Backend gone. If it didn't say "bye" it CRASHED — fire the
+                // registered emergency payload to the PLC so it can go safe.
+                if (!client_said_bye && !deadman.empty() && plc.up) {
+                    std::fprintf(stderr, "[xinsp-comms] backend lost without bye -> "
+                                 "sending dead-man payload to PLC\n");
+                    plc_send(plc, deadman);
+                } else {
+                    std::fprintf(stderr, "[xinsp-comms] client disconnected%s\n",
+                                 client_said_bye ? " (clean)" : "");
+                }
                 closesocket(client); client = INVALID_SOCKET;
+                deadman.clear(); client_said_bye = false;
             } else {
                 client_lr.feed(buf, r, [&](const std::string& line) {
                     cJSON* root = cJSON_Parse(line.c_str());
@@ -239,6 +262,12 @@ int main(int argc, char** argv) {
                     if (op == "send") {
                         if (!plc.up) reply(false, "plc link down");
                         else { plc_send(plc, payload); reply(true, nullptr); }
+                    } else if (op == "set_deadman") {
+                        deadman = payload;          // armed; fired if the client drops w/o bye
+                        reply(true, nullptr);
+                    } else if (op == "bye") {
+                        client_said_bye = true;     // clean shutdown — don't fire the dead-man
+                        reply(true, nullptr);
                     } else if (op == "ping") {
                         reply(true, nullptr);
                     } else {

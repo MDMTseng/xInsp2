@@ -12,11 +12,22 @@ python driver.py
 
 ## Protocol (newline-delimited JSON; gateway is schema-agnostic about the PLC payload)
 ```
-client -> gateway : {"id":N,"op":"send","line":"<verbatim to PLC>"}   {"id":N,"op":"ping"}
+client -> gateway : {"id":N,"op":"send","line":"<verbatim to PLC>"}
+                    {"id":N,"op":"set_deadman","line":"<emergency line>"}  (fire on crash-drop)
+                    {"id":N,"op":"bye"}                                    (clean shutdown; disarm)
+                    {"id":N,"op":"ping"}
 gateway -> client : {"id":N,"ok":true} / {"id":N,"ok":false,"err":"..."}
                     {"event":"plc_in","line":"<verbatim from PLC>"}    (async)
                     {"event":"plc_up","up":true|false}                 (PLC link state)
 ```
+
+## Dead-man safety
+The backend registers an emergency payload via `set_deadman`. If its connection
+to the gateway drops **without a `bye`** (i.e. the backend crashed), the gateway
+sends that payload to the PLC immediately so it can do emergency handling — the
+gateway owns the PLC link, so it's the natural place to fire it. (If the gateway
+itself dies, the PLC sees its TCP connection drop and dead-mans on its own.)
+The test covers both: fires on crash-drop, silent after a clean `bye`.
 
 ## Run the gateway directly
 ```
