@@ -474,10 +474,15 @@ inline CompileResult compile(const CompileRequest& req) {
     if (!is_valid_utf8(r.build_log) && !r.build_log.empty()) {
         bool converted = false;
         int n_in = (int)r.build_log.size();
-        int wlen = MultiByteToWideChar(CP_ACP, 0, r.build_log.data(), n_in, nullptr, 0);
+        // cl.exe / link.exe write diagnostics with the OEM (console) code page,
+        // NOT the ANSI code page. They're equal on some locales (CP950 on
+        // zh-TW) but differ on others (en-US: ACP 1252 vs OEM 437), where using
+        // CP_ACP would corrupt non-ASCII text. Convert from OEM.
+        const UINT diag_cp = GetOEMCP();
+        int wlen = MultiByteToWideChar(diag_cp, 0, r.build_log.data(), n_in, nullptr, 0);
         if (wlen > 0) {
             std::wstring w((size_t)wlen, L'\0');
-            if (MultiByteToWideChar(CP_ACP, 0, r.build_log.data(), n_in, w.data(), wlen) == wlen) {
+            if (MultiByteToWideChar(diag_cp, 0, r.build_log.data(), n_in, w.data(), wlen) == wlen) {
                 int u8len = WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, nullptr, 0, nullptr, nullptr);
                 if (u8len > 0) {
                     std::string u8((size_t)u8len, '\0');
