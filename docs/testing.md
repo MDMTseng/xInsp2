@@ -30,6 +30,9 @@ Run all: `ctest --test-dir backend/build -C Release`
 | `test_image_pool` | 16-shard refcounted pool; concurrent create/release/data; 20 MP allocation |
 | `test_ops` | `toGray` / `threshold` / `boxBlur` / `gaussian` / `sobel` / open / close / `adaptiveThreshold` / `canny` / `findContours` (boundary) / `findFilledRegions` / `matchTemplateSSD` / stats |
 | `test_diagnostics` | cl.exe / link.exe diagnostic parser (error / warning / fatal / note shapes) |
+| `test_safe_state` | FE `SafeStateSink`: reason→string, factory fallthrough, log formatting + `ts=`, empty-field placeholders, overflow/null safety |
+| `test_qa_fault` / `test_qa_race` | FE respawn sliding-window + cap arithmetic; forensics carried on the cap event |
+| `test_qa_edge` | FE crash-report parser (`xi_crash_report.hpp`): good / threads[] fallback / no-minidump / corrupt / last-wins, against crafted fixtures |
 
 All exit with `ALL TESTS PASSED`.
 
@@ -42,6 +45,7 @@ Run all: `cd vscode-extension && node --test test/*.test.mjs`
 | Suite | Coverage |
 |---|---|
 | `protocol.test.mjs` | TS protocol mirror parses C++ fixtures |
+| `backend_mode.test.mjs` | `resolveBackendMode` managed/attach/auto decision (FE/BE ownership) |
 | `ws_basic.test.mjs` | ping / version / hello / shutdown / unknown |
 | `ws_run_vars.test.mjs` | run → vars round-trip with image gid |
 | `ws_preview.test.mjs` | binary preview frame format |

@@ -11,6 +11,7 @@ import { PREVIEW_HEADER_SIZE } from './protocol';
 import { TEMPLATE_CHOICES, TemplateId, locateSdkRoot, renderPluginFiles }
     from './projectPluginTemplates';
 import { ImageViewerPanel } from './imageViewerPanel';
+import { resolveBackendMode } from './backendMode.mjs';
 
 let backend: ChildProcess | null = null;
 // Auto-respawn state. `intendedRunning` is true while the extension wants
@@ -2095,8 +2096,10 @@ void xi_inspect_entry(int frame) {
         client!.connect();
         return;
     }
+    // Resolve managed vs attach (probe the port only when 'auto' needs it).
+    const probedOpen = backendMode === 'auto' ? await isPortOpen(port) : false;
+    attachMode = resolveBackendMode(backendMode, probedOpen) === 'attach';
     if (backendMode === 'auto') {
-        attachMode = await isPortOpen(port);
         output.appendLine(`[xinsp2] backendMode=auto → ${attachMode
             ? 'attach (a backend is already on the port)' : 'managed (no backend found)'}`);
     }
