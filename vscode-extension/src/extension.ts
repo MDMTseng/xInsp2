@@ -451,6 +451,11 @@ export function activate(context: vscode.ExtensionContext) {
     const treeProvider = new InstanceTreeProvider();
     const instancesView = vscode.window.createTreeView('xinsp2.instances', { treeDataProvider: treeProvider });
 
+    // Live component status (cmd:status snapshot on connect + `status` events).
+    // Retained map; re-synced on every (re)connect so the latest always shows.
+    const statusMap: Record<string, string> = {};
+    const refreshStatuses = () => treeProvider.setStatuses({ ...statusMap });
+
     const pluginTreeProvider = new PluginTreeProvider();
     pluginTreeProvider.setRemovableFolders(extraPluginDirs);
     const pluginsView = vscode.window.createTreeView('xinsp2.plugins', { treeDataProvider: pluginTreeProvider });
@@ -545,6 +550,16 @@ export function activate(context: vscode.ExtensionContext) {
                 setCtx('hasPlugins', r.data.length > 0);
             }
         }).catch(() => {});
+        // Snapshot every component's latest status on (re)connect — this re-pull
+        // over the backend's retained map is the delivery guarantee (the
+        // `status` event below is just a live accelerator). Reset first so a
+        // stale entry from a previous backend doesn't linger.
+        for (const k of Object.keys(statusMap)) delete statusMap[k];
+        sendCmd('status').then((r: any) => {
+            const data = r?.data || {};
+            for (const src of Object.keys(data)) statusMap[src] = data[src]?.text ?? '';
+            refreshStatuses();
+        }).catch(() => {});
         // Surface any unread crash reports from previous sessions. The
         // notification names the faulty module so the user knows whether
         // their script, a plugin, or the backend itself was at fault.
@@ -620,6 +635,13 @@ export function activate(context: vscode.ExtensionContext) {
     client.on('json', (msg: any) => {
         if (msg.type === 'event' && msg.name === 'hello') {
             output.appendLine(`[xinsp2] backend v${msg.data?.version}`);
+        } else if (msg.type === 'event' && msg.name === 'status') {
+            // Live status delta — accelerator between the connect snapshots.
+            const src = msg.data?.source;
+            if (typeof src === 'string') {
+                statusMap[src] = msg.data?.text ?? '';
+                refreshStatuses();
+            }
         } else if (msg.type === 'rsp') {
             // Responses are dispatched via pending map (simple approach).
             const handler = pendingRsp.get(msg.id);

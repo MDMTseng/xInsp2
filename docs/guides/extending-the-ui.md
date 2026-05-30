@@ -209,6 +209,22 @@ text and the crash messaging branch on `attachMode` too.
 
 ---
 
+## Component status (the status channel)
+
+Each plugin instance and the script can publish a sticky status string
+(`xi::status(...)` / `xi::Plugin::status(...)`; see
+[`../protocol.md`](../protocol.md) "Status channel"). The extension renders it:
+the instance tree shows `<plugin> · <status>` per instance and the live script
+status on the `inspection.cpp` item (`InstanceTreeProvider.setStatuses`).
+
+Wiring (in `extension.ts`): a retained `statusMap` is **re-pulled via
+`cmd:status` on every `client.on('open')`** (the delivery guarantee), and the
+`status` event updates it live. If you add another status consumer (e.g. a
+status-bar element), feed it from the same `statusMap` and `refreshStatuses()`
+so it survives reconnects — don't rely on the event alone.
+
+---
+
 ## Status bar items
 
 Two patterns:

@@ -26,10 +26,18 @@ export class InstanceTreeProvider implements vscode.TreeDataProvider<TreeItem> {
     private instances: InstanceItem[] = [];
     private params: ParamItem[] = [];
     private hasProject = false;
+    // Latest sticky status per source ("@script" or instance name), from
+    // cmd:status (on connect) + the `status` event. See docs/protocol.md.
+    private statuses: Record<string, string> = {};
 
     update(instances: InstanceItem[], params: ParamItem[]): void {
         this.instances = instances;
         this.params = params;
+        this._onDidChange.fire();
+    }
+
+    setStatuses(statuses: Record<string, string>): void {
+        this.statuses = statuses || {};
         this._onDidChange.fire();
     }
 
@@ -43,7 +51,9 @@ export class InstanceTreeProvider implements vscode.TreeDataProvider<TreeItem> {
             const ti = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
             ti.iconPath = new vscode.ThemeIcon('file-code');
             ti.contextValue = 'script';
-            ti.tooltip = 'Open inspection.cpp';
+            const st = this.statuses['@script'];
+            ti.description = st || undefined;            // live script status
+            ti.tooltip = st ? `Status: ${st}\nOpen inspection.cpp` : 'Open inspection.cpp';
             ti.command = { command: 'xinsp2.openScript', title: 'Open Inspection Script' };
             return ti;
         }
@@ -54,7 +64,10 @@ export class InstanceTreeProvider implements vscode.TreeDataProvider<TreeItem> {
         }
         if (element.kind === 'instance') {
             const ti = new vscode.TreeItem(element.data.name, vscode.TreeItemCollapsibleState.None);
-            ti.description = element.data.plugin;
+            const st = this.statuses[element.data.name];
+            // "<plugin> · <status>" so the live status shows next to the plugin.
+            ti.description = st ? `${element.data.plugin} · ${st}` : element.data.plugin;
+            ti.tooltip = st ? `${element.data.plugin}\nStatus: ${st}` : element.data.plugin;
             ti.iconPath = new vscode.ThemeIcon('symbol-class');
             ti.contextValue = 'instance';
             ti.command = {
