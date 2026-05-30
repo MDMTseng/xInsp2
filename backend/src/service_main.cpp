@@ -3344,56 +3344,59 @@ int main(int argc, char** argv) {
         std::string script = parse_str_flag(argc, argv, "--script");
         int autostart_fps  = parse_autostart_fps(argc, argv);
 
-        std::fprintf(stderr, "[xinsp2] autostart: open_project %s\n", project.c_str());
-        handle_command(srv,
-            "{\"type\":\"cmd\",\"id\":1,\"name\":\"open_project\",\"args\":{\"path\":"
-            + xp::json_escape(project) + "}}");
-
-        // Resolve the script path:
-        //  - explicit --script: relative paths are relative to the PROJECT dir
-        //    (the script lives with the project, not the backend's cwd);
-        //  - otherwise the project.json's resolved script_path.
-        // Note open_project ALWAYS populates script_path (it falls back to
-        // "<folder>/inspection.cpp" when project.json has no "script"), so a
-        // truly script-less project resolves to a path that may not exist on
-        // disk. Treat a missing script FILE as open-only rather than firing a
-        // doomed compile — lets a project that's configured (instances only,
-        // script authored later in the IDE) autostart cleanly.
-        if (!script.empty()) {
-            std::filesystem::path sp(script);
-            if (sp.is_relative()) sp = std::filesystem::path(project) / sp;
-            script = sp.string();
-        } else {
-            script = g_plugin_mgr.project().script_path;
-        }
         bool degraded = false;
-        if (script.empty() || !std::filesystem::exists(script)) {
-            std::fprintf(stderr,
-                "[xinsp2] autostart: no script file (%s); open only\n",
-                script.empty() ? "none given" : script.c_str());
+        // Validate the project BEFORE opening. A nonexistent / project.json-less
+        // dir can't inspect, so don't let it reach "ready" and be reported
+        // healthy (an operator typo would otherwise yield a green, blind line).
+        std::error_code proj_ec;
+        if (!std::filesystem::exists(std::filesystem::path(project) / "project.json", proj_ec)) {
+            std::fprintf(stderr, "[xinsp2] autostart: degraded - no project.json at %s; "
+                         "cannot run (not reporting ready)\n", project.c_str());
+            degraded = true;
         } else {
-            std::fprintf(stderr, "[xinsp2] autostart: compile_and_load %s\n", script.c_str());
+            std::fprintf(stderr, "[xinsp2] autostart: open_project %s\n", project.c_str());
             handle_command(srv,
-                "{\"type\":\"cmd\",\"id\":2,\"name\":\"compile_and_load\",\"args\":{\"path\":"
-                + xp::json_escape(script) + "}}");
+                "{\"type\":\"cmd\",\"id\":1,\"name\":\"open_project\",\"args\":{\"path\":"
+                + xp::json_escape(project) + "}}");
 
-            // A script was expected — confirm it actually loaded. If the compile
-            // failed, the WS port is still up (an operator can attach + fix), but
-            // the line CANNOT inspect. Mark it degraded and do NOT emit the
-            // "ready" health signal, so the FE supervisor treats a non-inspecting
-            // line as unhealthy instead of silently "healthy". (Otherwise a
-            // compile-broken project would look fine to the FE the moment its
-            // port bound.)
-            if (!g_script.ok()) {
-                degraded = true;
+            // Resolve the script path: an explicit --script relative path is
+            // relative to the PROJECT dir; otherwise project.json's script_path.
+            // open_project ALWAYS populates script_path (falls back to
+            // "<folder>/inspection.cpp"), so a script-less project resolves to a
+            // path that may not exist — treat a missing script FILE as open-only
+            // rather than firing a doomed compile.
+            if (!script.empty()) {
+                std::filesystem::path sp(script);
+                if (sp.is_relative()) sp = std::filesystem::path(project) / sp;
+                script = sp.string();
+            } else {
+                script = g_plugin_mgr.project().script_path;
+            }
+            if (script.empty() || !std::filesystem::exists(script)) {
                 std::fprintf(stderr,
-                    "[xinsp2] autostart: degraded — script failed to compile/load; "
-                    "line will NOT inspect (port stays up for an operator to recompile)\n");
-            } else if (autostart_fps > 0) {
-                std::fprintf(stderr, "[xinsp2] autostart: start %d fps\n", autostart_fps);
+                    "[xinsp2] autostart: no script file (%s); open only\n",
+                    script.empty() ? "none given" : script.c_str());
+            } else {
+                std::fprintf(stderr, "[xinsp2] autostart: compile_and_load %s\n", script.c_str());
                 handle_command(srv,
-                    "{\"type\":\"cmd\",\"id\":3,\"name\":\"start\",\"args\":{\"fps\":"
-                    + std::to_string(autostart_fps) + "}}");
+                    "{\"type\":\"cmd\",\"id\":2,\"name\":\"compile_and_load\",\"args\":{\"path\":"
+                    + xp::json_escape(script) + "}}");
+
+                // Confirm the script actually loaded. A failed compile leaves the
+                // port up (operator can attach + fix) but the line CANNOT inspect,
+                // so mark degraded and withhold "ready" — the FE then treats a
+                // non-inspecting line as unhealthy instead of silently "healthy".
+                if (!g_script.ok()) {
+                    degraded = true;
+                    std::fprintf(stderr,
+                        "[xinsp2] autostart: degraded - script failed to compile/load; "
+                        "line will NOT inspect (port stays up for an operator to recompile)\n");
+                } else if (autostart_fps > 0) {
+                    std::fprintf(stderr, "[xinsp2] autostart: start %d fps\n", autostart_fps);
+                    handle_command(srv,
+                        "{\"type\":\"cmd\",\"id\":3,\"name\":\"start\",\"args\":{\"fps\":"
+                        + std::to_string(autostart_fps) + "}}");
+                }
             }
         }
         // Debug hook (test-only): simulate a backend that hangs DURING boot —

@@ -348,6 +348,21 @@ public:
                         "X-Xi-Reason: single-client-busy\r\n"
                         "\r\n";
                     ::send(s, busy, (int)sizeof(busy) - 1, 0);
+                    // Graceful close so the 503 actually reaches the caller (it
+                    // needs it to tell "busy" from "backend down"). closesocket()
+                    // with unread inbound data RSTs, discarding the 503. So:
+                    // half-close (FIN after the 503), then read until the peer
+                    // closes its end (recv == 0) — bounded by a recv timeout so a
+                    // misbehaving 2nd connector can't stall the poll loop.
+                    // shutdown arg 1 == SD_SEND (Win32) == SHUT_WR (POSIX).
+                    ::shutdown(s, 1);
+#ifdef _WIN32
+                    DWORD rto = 400;  // ms
+                    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rto, sizeof(rto));
+                    char drain[1024];
+                    while (::recv(s, drain, (int)sizeof(drain), 0) > 0) { /* until peer FIN/timeout */ }
+#endif
+                    // TODO(linux): SO_RCVTIMEO via struct timeval, same drain.
                     CLOSESOCK(s);
                 }
             }

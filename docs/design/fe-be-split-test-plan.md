@@ -96,7 +96,7 @@ FE log + process/port state). FE-E1 exists; the rest are **[TODO]**.
 | FE-E5 **[TODO]** ⭐ | **recover-and-clear transition** | project that crashes once then runs healthy after respawn → exactly one `ENTER`, then `CLEAR SAFE STATE`, then stable; FE keeps running (no cap) |
 | FE-E6 **[TODO]** | backend exe missing | `--backend=<bad>` → `CreateProcess` fails → `enter_safe_state(BackendExit)` + FE exits rc=1 |
 | FE-E7 **[DONE via FE-E1]** | forensics from `threads[]` fallback | safe-state line carries `phase=inspect` even though the crash is on an unmanaged thread (empty `context`) |
-| FE-E8 **[MANUAL/slow]** | respawn window prunes | crashes spaced >60 s apart never trip the cap (sliding window) |
+| FE-E8 **[DONE]** | respawn cap counts consecutive failures | a SLOW crash-loop still caps (deaths needn't be close together); only a sustained-healthy period (`respawn_reset_ms`) resets the count. Unit: `test_qa_fault` QF-U3/U4, `test_qa_race` RACE-U1b. |
 | FE-E9 **[TODO]** | `fe.json` config + CLI override | flags honoured from `fe.json`; a CLI flag overrides the same key |
 | FE-E10 **[TODO]** | `--help` | exits 0, prints usage, spawns nothing |
 

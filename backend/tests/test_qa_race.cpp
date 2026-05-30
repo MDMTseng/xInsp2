@@ -29,61 +29,44 @@ static int g_failures = 0;
         }                                                                      \
     } while (0)
 
-// Delegates to the REAL decision (xi::respawn_should_trip, the function
-// fe_main.cpp calls). Returns true if a respawn is permitted at time t (and
-// records it); false if the cap is exceeded (caller would drive
-// RespawnLimitExceeded and stay safe). `respawn_allowed == !should_trip`.
-static bool respawn_allowed(std::vector<int64_t>& respawns, int64_t t,
-                            int window_s, int respawn_max) {
-    return !xi::respawn_should_trip(respawns, t, window_s * 1000, respawn_max);
-}
+// `allowed == !note_death`: a respawn is permitted until the cap is exceeded.
+static bool allowed(xi::RespawnTracker& rt, int cap) { return !rt.note_death(cap); }
 
 int main() {
     using xi::SafeStateReason;
     using xi::SafeStateEvent;
+    const int CAP = 5;
+    const int64_t RESET = 30'000;
 
-    // RACE-U1a: 5 deaths inside a 60s window -> the 6th trips the cap.
+    // RACE-U1a: 6 consecutive deaths -> 5 respawns, the 6th caps.
     {
-        std::vector<int64_t> r;
-        const int window_s = 60, cap = 5;
-        int64_t t = 1'000'000;
-        int allowed = 0, denied = 0;
-        // Six rapid deaths, 1.5s apart (well inside the 60s window).
-        for (int i = 0; i < 6; ++i) {
-            if (respawn_allowed(r, t, window_s, cap)) ++allowed; else ++denied;
-            t += 1500;
-        }
-        CHECK(allowed == 5);   // exactly cap respawns permitted
-        CHECK(denied == 1);    // the 6th death stays safe (RespawnLimitExceeded)
+        xi::RespawnTracker r;
+        int a = 0, d = 0;
+        for (int i = 0; i < 6; ++i) { if (allowed(r, CAP)) ++a; else ++d; }
+        CHECK(a == 5);
+        CHECK(d == 1);
     }
 
-    // RACE-U1b (mirrors FE-E8): deaths spaced > window apart never trip the cap.
+    // RACE-U1b (the FIX, replaces the old "slow drip never caps"): a SLOW
+    // crash-loop with only brief healthy spells between deaths STILL caps.
+    // Spacing is irrelevant — only a sustained-healthy period resets the count.
     {
-        std::vector<int64_t> r;
-        const int window_s = 60, cap = 5;
-        int64_t t = 1'000'000;
-        int allowed = 0, denied = 0;
+        xi::RespawnTracker r;
+        int a = 0, d = 0;
         for (int i = 0; i < 10; ++i) {
-            if (respawn_allowed(r, t, window_s, cap)) ++allowed; else ++denied;
-            t += 61'000;  // 61s apart -> previous death always pruned first
+            r.note_healthy(5'000, RESET);   // 5s healthy < reset -> no reset
+            if (allowed(r, CAP)) ++a; else ++d;
         }
-        CHECK(allowed == 10);  // every respawn permitted; window never fills
-        CHECK(denied == 0);
-        CHECK((int)r.size() <= 1);  // window holds at most the current death
+        CHECK(a == 5);     // capped at exactly the cap
+        CHECK(d > 0);      // and it DID latch safe (the old policy never did)
     }
 
-    // RACE-U1c: a burst that exceeds the cap is capped at exactly respawn_max
-    // respawns regardless of how many deaths arrive (the BURST property).
+    // RACE-U1c: burst — capped at exactly CAP respawns no matter the death rate.
     {
-        std::vector<int64_t> r;
-        const int window_s = 60, cap = 5;
-        int64_t t = 2'000'000;
-        int allowed = 0;
-        for (int i = 0; i < 50; ++i) {       // 50 near-instant deaths
-            if (respawn_allowed(r, t, window_s, cap)) ++allowed;
-            t += 10;                          // 10ms apart — faster than backoff
-        }
-        CHECK(allowed == cap);  // never more than the cap, no matter the rate
+        xi::RespawnTracker r;
+        int a = 0;
+        for (int i = 0; i < 50; ++i) if (allowed(r, CAP)) ++a;
+        CHECK(a == CAP);
     }
 
     // RACE-U2: the cap event carries forward the prior BackendExit forensics

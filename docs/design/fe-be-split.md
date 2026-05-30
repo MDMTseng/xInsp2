@@ -95,10 +95,13 @@ an operator HMI / the VS Code extension can still attach live.
   `context.last_phase` / `threads[]` breadcrumb into the `SafeStateEvent`. (It
   parses the log rather than scanning `%TEMP%/xinsp2/crashdumps` because a
   sandboxed/per-tool `TEMP` isn't inherited by the spawned BE.)
-- **Respawn**: sliding 60s window, cap 5, 1.5s backoff (mirrors the VS Code
-  extension's existing supervisor). On exceeding the cap the FE drives
-  `RespawnLimitExceeded` and **stays safe**, awaiting a manual restart — it does
-  not spin.
+- **Respawn**: latch safe after `respawn_max` (5) **consecutive** failures, 1.5s
+  backoff. The counter resets only once the backend has been continuously
+  healthy for `respawn_reset_ms` (30s) — a genuine recovery. This catches a
+  recurring fault whether its deaths are fast OR slow; an earlier sliding-time-
+  window cap had a hole (a slow crash-loop whose deaths landed farther apart than
+  window/max never accumulated `max`, so the line thrashed forever). On the cap
+  the FE drives `RespawnLimitExceeded` and **stays safe** for a manual restart.
 - **Shutdown**: a console-ctrl handler closes the Job Object (killing the BE) and
   drives `SupervisorShutdown`.
 

@@ -19,7 +19,7 @@
 //
 #include <xi/xi_safe_state.hpp>
 #include <xi/xi_crash_report.hpp>     // xi::enrich_from_crash_report (unit-tested)
-#include <xi/xi_respawn_policy.hpp>   // xi::respawn_should_trip (unit-tested)
+#include <xi/xi_respawn_policy.hpp>   // xi::RespawnTracker (unit-tested)
 
 #include <algorithm>
 #include <atomic>
@@ -57,10 +57,12 @@ struct FeConfig {
     std::vector<std::string> plugins_dirs;
     std::string safe_state_type = "log";
     std::string be_log;            // where the BE's stdout/stderr is captured
-    // Respawn policy — mirrors the VS Code extension (extension.ts).
-    int         respawn_window_s   = 60;
+    // Respawn policy: latch safe after `respawn_max` CONSECUTIVE failures; the
+    // counter resets once the backend stays healthy for `respawn_reset_ms`
+    // (genuine recovery). Catches fast AND slow crash-loops.
     int         respawn_max        = 5;
     int         respawn_backoff_ms = 1500;
+    int         respawn_reset_ms   = 30000;
     // Liveness probe.
     int         probe_interval_ms  = 1000;
     int         probe_fail_max     = 5;   // consecutive failures (proc alive) -> unresponsive
@@ -146,7 +148,7 @@ static FeConfig load_config(int argc, char** argv) {
             str("safe_state", c.safe_state_type);
             str("be_log", c.be_log);
             num("respawn_max", c.respawn_max);
-            num("respawn_window_s", c.respawn_window_s);
+            num("respawn_reset_ms", c.respawn_reset_ms);
             num("respawn_backoff_ms", c.respawn_backoff_ms);
             if (cJSON* pd = cJSON_GetObjectItem(root, "plugins_dirs"); cJSON_IsArray(pd)) {
                 cJSON* it = nullptr;
@@ -324,7 +326,7 @@ static int run_supervisor(const FeConfig& c) {
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jl, sizeof(jl));
     }
 
-    std::vector<int64_t> respawns;   // ms timestamps, sliding window
+    xi::RespawnTracker resp;         // consecutive-failure cap (latches safe)
     bool in_safe_state = false;
     int  rc = 0;
 
@@ -350,6 +352,7 @@ static int run_supervisor(const FeConfig& c) {
         long long hb_last_val = -2;
         int64_t   hb_last_change_ms = 0;
         bool      hb_armed = false;
+        int64_t   healthy_since = 0;   // when this instance first went healthy
         DWORD exit_code = 0;
         xi::SafeStateReason death_reason = xi::SafeStateReason::BackendExit;
         for (;;) {
@@ -413,6 +416,10 @@ static int run_supervisor(const FeConfig& c) {
                     healthy_announced = true;
                     std::fprintf(stderr, "[xinsp-fe] backend healthy (port %d up)\n", c.port);
                 }
+                // Recovery: once this instance has been healthy continuously for
+                // respawn_reset_ms, forget prior failures (the line recovered).
+                if (healthy_since == 0) healthy_since = now_ms();
+                resp.note_healthy(now_ms() - healthy_since, c.respawn_reset_ms);
                 // Serve-time wedge: the heartbeat counter must keep advancing
                 // while serving. If it stalls while the port still accepts, the
                 // serving loop is wedged (a connect probe can't see this).
@@ -459,9 +466,10 @@ static int run_supervisor(const FeConfig& c) {
         sink->enter_safe_state(ev);
         in_safe_state = true;
 
-        // ---- rate-limited respawn (xi::respawn_should_trip — unit-tested) ----
-        if (xi::respawn_should_trip(respawns, now_ms(),
-                                    c.respawn_window_s * 1000, c.respawn_max)) {
+        // ---- respawn unless too many CONSECUTIVE failures (xi::RespawnTracker) ----
+        // Counts deaths without a sustained-healthy recovery — so a recurring
+        // fault latches safe whether its deaths are fast or slow.
+        if (resp.note_death(c.respawn_max)) {
             xi::SafeStateEvent stuck;
             stuck.reason = xi::SafeStateReason::RespawnLimitExceeded;
             stuck.ts_ms  = now_ms();
@@ -469,13 +477,14 @@ static int run_supervisor(const FeConfig& c) {
             stuck.faulting_module = ev.faulting_module;
             stuck.report_path     = ev.report_path;
             sink->enter_safe_state(stuck);
-            std::fprintf(stderr, "[xinsp-fe] respawn limit (%d in %ds) exceeded - staying in "
-                         "safe state; manual restart required\n", c.respawn_max, c.respawn_window_s);
+            std::fprintf(stderr, "[xinsp-fe] respawn limit (%d consecutive failures without "
+                         "%ds sustained-healthy) exceeded - staying safe; manual restart required\n",
+                         c.respawn_max, c.respawn_reset_ms / 1000);
             rc = 2;
             break;
         }
-        std::fprintf(stderr, "[xinsp-fe] respawning backend (%d/%d in window) after %dms\n",
-                     (int)respawns.size(), c.respawn_max, c.respawn_backoff_ms);
+        std::fprintf(stderr, "[xinsp-fe] respawning backend (failure %d/%d) after %dms\n",
+                     resp.consecutive, c.respawn_max, c.respawn_backoff_ms);
         Sleep((DWORD)c.respawn_backoff_ms);
     }
 

@@ -28,26 +28,19 @@ static int g_failures = 0;
         }                                                                      \
     } while (0)
 
-// Thin alias so the existing cases read unchanged; delegates to the production
-// function. true == this death TRIPPED the cap (stay safe); false == respawn.
-static bool on_death(std::vector<int64_t>& respawns, int64_t now,
-                     int window_ms, int max) {
-    return xi::respawn_should_trip(respawns, now, window_ms, max);
-}
-
 int main() {
-    const int WINDOW = 60'000;  // 60 s, the FE default
-    const int MAX    = 5;       // FeConfig::respawn_max
+    const int MAX = 5;            // FeConfig::respawn_max
+    const int64_t RESET = 30'000; // FeConfig::respawn_reset_ms
 
     // QF-U1: a continuous storm trips the cap on death #(max+1), with exactly
-    // `max` respawns first. This is the ledger driver_respawn_accounting checks.
+    // `max` respawns first. (driver_respawn_accounting checks the same ledger.)
     {
-        std::vector<int64_t> respawns;
+        xi::RespawnTracker r;
         int respawned = 0, deaths = 0;
         bool capped = false;
-        for (int64_t t = 0; t < 100'000; t += 1500) {   // 1.5 s apart, all within 60 s
+        for (int i = 0; i < 100; ++i) {
             ++deaths;
-            if (on_death(respawns, t, WINDOW, MAX)) { capped = true; break; }
+            if (r.note_death(MAX)) { capped = true; break; }
             ++respawned;
         }
         CHECK(capped);
@@ -55,42 +48,35 @@ int main() {
         CHECK(deaths == MAX + 1);      // tripped on the 6th death
     }
 
-    // QF-U2: the FIRST max deaths never trip the cap (boundary: size==max-1 ok).
+    // QF-U2: boundary — the first max deaths respawn, the (max+1)th trips.
     {
-        std::vector<int64_t> respawns;
-        for (int i = 0; i < MAX; ++i)
-            CHECK(on_death(respawns, (int64_t)i * 1000, WINDOW, MAX) == false);
-        CHECK((int)respawns.size() == MAX);
-        // The next death (the (max+1)th) trips it.
-        CHECK(on_death(respawns, (int64_t)MAX * 1000, WINDOW, MAX) == true);
+        xi::RespawnTracker r;
+        for (int i = 0; i < MAX; ++i) CHECK(r.note_death(MAX) == false);
+        CHECK(r.note_death(MAX) == true);
     }
 
-    // QF-U3: sliding window — deaths spaced > window apart never accumulate, so
-    // the cap is never tripped (mirrors FE-E8: a slow drip is not a storm).
+    // QF-U3 (the FIX): a SLOW crash-loop still caps. Deaths accumulate no matter
+    // how far apart, because only a SUSTAINED-healthy period resets the counter —
+    // a brief healthy spell between deaths does not. (The old time-window cap
+    // missed this and thrashed forever.)
     {
-        std::vector<int64_t> respawns;
+        xi::RespawnTracker r;
         bool capped = false;
-        int64_t t = 0;
         for (int i = 0; i < 20; ++i) {
-            if (on_death(respawns, t, WINDOW, MAX)) { capped = true; break; }
-            t += WINDOW + 5000;        // each death is >60 s after the previous
+            r.note_healthy(5'000, RESET);   // only 5s healthy (< reset) -> no reset
+            if (r.note_death(MAX)) { capped = true; break; }
         }
-        CHECK(!capped);
-        // Pruning keeps the live set tiny: only the just-pushed one survives.
-        CHECK((int)respawns.size() == 1);
+        CHECK(capped);
     }
 
-    // QF-U4: a burst that trips, but old entries age out — pruning lets the
-    // window "recover" so a later isolated death respawns rather than caps.
+    // QF-U4: a SUSTAINED-healthy period (>= reset) means the line recovered, so
+    // prior failures are forgotten and a later death respawns rather than caps.
     {
-        std::vector<int64_t> respawns;
-        // Fill the window to the brim (max-1 respawns + the cap on the next).
-        for (int i = 0; i < MAX; ++i) on_death(respawns, (int64_t)i * 100, WINDOW, MAX);
-        CHECK((int)respawns.size() == MAX);
-        // A death long after the window: all old entries prune, this one respawns.
-        bool capped = on_death(respawns, (int64_t)MAX * 100 + WINDOW + 1, WINDOW, MAX);
-        CHECK(!capped);
-        CHECK((int)respawns.size() == 1);
+        xi::RespawnTracker r;
+        for (int i = 0; i < MAX; ++i) CHECK(r.note_death(MAX) == false);  // at the brink
+        r.note_healthy(RESET, RESET);       // recovered
+        CHECK(r.consecutive == 0);
+        CHECK(r.note_death(MAX) == false);  // fresh death respawns, doesn't cap
     }
 
     if (g_failures == 0) {
