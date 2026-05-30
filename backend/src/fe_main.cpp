@@ -70,6 +70,12 @@ struct FeConfig {
     // line healthy; if the BE is alive but never reaches ready within this
     // budget it's a boot hang -> safe-state + respawn. 0 disables the gate.
     int         boot_timeout_ms    = 60000;
+    // Serve-time liveness: the backend writes a monotonic counter to this file
+    // from its serving loop; if it stops advancing while the process is alive
+    // and the port still accepts, the backend is wedged (bound but not serving)
+    // -> safe-state + respawn. Default derived from be_log; 0 stale = off.
+    std::string heartbeat_file;
+    int         heartbeat_stale_ms = 8000;
     // Extra args appended verbatim to the spawned backend's command line
     // (--be-arg=..., repeatable). Lets an operator pass BE flags through the FE.
     std::vector<std::string> be_args;
@@ -160,6 +166,8 @@ static FeConfig load_config(int argc, char** argv) {
     if (auto v = arg_value(argc, argv, "--safe-state");     !v.empty()) c.safe_state_type = v;
     if (auto v = arg_value(argc, argv, "--be-log");         !v.empty()) c.be_log = v;
     if (auto v = arg_value(argc, argv, "--boot-timeout-ms"); !v.empty()) try { c.boot_timeout_ms = std::stoi(v); } catch (...) {}
+    if (auto v = arg_value(argc, argv, "--heartbeat-file");  !v.empty()) c.heartbeat_file = v;
+    if (auto v = arg_value(argc, argv, "--heartbeat-stale-ms"); !v.empty()) try { c.heartbeat_stale_ms = std::stoi(v); } catch (...) {}
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a.rfind("--plugins-dir=", 0) == 0) c.plugins_dirs.push_back(a.substr(14));
@@ -170,6 +178,7 @@ static FeConfig load_config(int argc, char** argv) {
 
     if (c.backend_exe.empty()) c.backend_exe = discover_backend_exe();
     if (c.be_log.empty())      c.be_log = (fs::temp_directory_path() / "xinsp2-fe-be.log").string();
+    if (c.heartbeat_file.empty()) c.heartbeat_file = c.be_log + ".hb";
     return c;
 }
 
@@ -185,6 +194,16 @@ static bool log_contains(const std::string& path, const char* needle) {
     if (!f) return false;
     std::stringstream ss; ss << f.rdbuf();
     return ss.str().find(needle) != std::string::npos;
+}
+
+// Read the backend's heartbeat counter; -1 if the file is missing/unparseable
+// (treated as "no advance" by the staleness check).
+static long long read_heartbeat(const std::string& path) {
+    std::ifstream f(path);
+    if (!f) return -1;
+    long long v = -1;
+    f >> v;
+    return f ? v : -1;
 }
 
 // Crash-report parsing (read the BE's log for the minidump path it printed,
@@ -245,6 +264,8 @@ static std::string build_cmdline(const FeConfig& c) {
     if (!c.script.empty())  cl += " --script=\"" + c.script + "\"";
     if (c.autostart_fps > 0) cl += " --autostart-fps=" + std::to_string(c.autostart_fps);
     for (auto& d : c.plugins_dirs) cl += " --plugins-dir=\"" + d + "\"";
+    if (c.heartbeat_stale_ms > 0 && !c.heartbeat_file.empty())
+        cl += " --heartbeat-file=\"" + c.heartbeat_file + "\"";
     for (auto& a : c.be_args)      cl += " " + a;   // verbatim passthrough
     return cl;
 }
@@ -325,6 +346,10 @@ static int run_supervisor(const FeConfig& c) {
         // only means "bound", not "serving". No project -> nothing to wait for.
         bool    ready_seen = c.project.empty();
         int64_t spawn_ms   = now_ms();
+        // Serve-time heartbeat tracking (this instance).
+        long long hb_last_val = -2;
+        int64_t   hb_last_change_ms = 0;
+        bool      hb_armed = false;
         DWORD exit_code = 0;
         xi::SafeStateReason death_reason = xi::SafeStateReason::BackendExit;
         for (;;) {
@@ -387,6 +412,25 @@ static int run_supervisor(const FeConfig& c) {
                 if (!healthy_announced) {
                     healthy_announced = true;
                     std::fprintf(stderr, "[xinsp-fe] backend healthy (port %d up)\n", c.port);
+                }
+                // Serve-time wedge: the heartbeat counter must keep advancing
+                // while serving. If it stalls while the port still accepts, the
+                // serving loop is wedged (a connect probe can't see this).
+                if (c.heartbeat_stale_ms > 0) {
+                    long long hb = read_heartbeat(c.heartbeat_file);
+                    int64_t now = now_ms();
+                    if (!hb_armed) { hb_armed = true; hb_last_val = hb; hb_last_change_ms = now; }
+                    else if (hb != hb_last_val) { hb_last_val = hb; hb_last_change_ms = now; }
+                    else if (now - hb_last_change_ms > c.heartbeat_stale_ms) {
+                        std::fprintf(stderr, "[xinsp-fe] backend heartbeat stale for >%d ms "
+                                     "(serving loop wedged); killing for respawn\n",
+                                     c.heartbeat_stale_ms);
+                        death_reason = xi::SafeStateReason::PortUnresponsive;
+                        TerminateProcess(sp.pi.hProcess, 1);
+                        WaitForSingleObject(sp.pi.hProcess, 5000);
+                        GetExitCodeProcess(sp.pi.hProcess, &exit_code);
+                        break;
+                    }
                 }
             } else if (++probe_fails >= c.probe_fail_max) {
                 std::fprintf(stderr, "[xinsp-fe] backend unresponsive (%d failed probes); "
@@ -466,6 +510,8 @@ static void print_help() {
         "  --be-log=PATH        where to capture the backend's stdout/stderr\n"
         "  --boot-timeout-ms=N  boot-hang budget: go safe+respawn if the backend\n"
         "                       never reaches 'ready' in N ms (default 60000; 0=off)\n"
+        "  --heartbeat-stale-ms=N  serve-time wedge budget: respawn if the backend\n"
+        "                       heartbeat stalls N ms while listening (default 8000; 0=off)\n"
         "  --be-arg=ARG         extra arg appended to the backend command (repeatable)\n"
         "  --config=PATH        fe.json config (CLI flags override it)\n"
         "  --help, -h           this help\n");

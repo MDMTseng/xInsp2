@@ -82,9 +82,13 @@ an operator HMI / the VS Code extension can still attach live.
   ready within `--boot-timeout-ms` is driven `BootTimeout` → respawn. A BE whose
   script **fails to compile** logs `autostart: degraded` and withholds the
   `ready` marker, so the FE drives it safe rather than trusting port-up — a
-  non-inspecting line is never reported healthy. (A serve-time wedge — port
-  still accepting but commands stalled — needs a deep WS heartbeat and stays
-  Phase 2.)
+  non-inspecting line is never reported healthy.
+- **Serve-time wedge** (port still accepting but the serving loop stalled mid-
+  command): the BE writes a monotonic **heartbeat** (`--heartbeat-file`) from
+  its poll loop; if it stalls longer than `--heartbeat-stale-ms` while the port
+  still accepts, the FE drives `PortUnresponsive` → respawn. A WS ping would
+  collide with the BE's single-client server when an operator holds the
+  connection, so the heartbeat-file is the mechanism.
 - **On death — forensics**: the FE parses `be.log` for the last
   `minidump: <path>.dmp` line the BE printed, reads the sibling `.json`, and
   pulls `exception.name`, `exception.module`, and the dispatch-thread

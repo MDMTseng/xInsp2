@@ -3423,8 +3423,38 @@ int main(int argc, char** argv) {
         std::fflush(stderr);
     }
 
+    // Liveness heartbeat: a monotonic counter written from the SERVING loop.
+    // If a synchronous WS handler wedges srv.poll(), the counter stops advancing
+    // while the port still accepts TCP — a "bound but not serving" state a
+    // connect probe can't see. The FE watches this file (--heartbeat-file) and
+    // respawns on staleness. No-op when the flag is unset.
+    std::string hb_path = parse_str_flag(argc, argv, "--heartbeat-file");
+    uint64_t hb_counter = 0;
+    auto write_heartbeat = [&] {
+        if (hb_path.empty()) return;
+        if (FILE* f = std::fopen(hb_path.c_str(), "wb")) {
+            std::fprintf(f, "%llu", (unsigned long long)++hb_counter);
+            std::fclose(f);
+        }
+    };
+    write_heartbeat();   // initial beat so the FE sees liveness promptly
+
+    // Debug hook (test-only): wedge the serving loop AFTER ready — port stays
+    // bound + accepting but the heartbeat goes stale, so the FE detects a
+    // serve-time wedge. Drives examples/qa_race/driver_serve_wedge.py.
+    if (has_flag(argc, argv, "--hang-after-ready")) {
+        std::fprintf(stderr, "[xinsp2] --hang-after-ready (debug) — wedging the serving loop\n");
+        std::fflush(stderr);
+        while (!g_should_exit.load()) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        return 0;
+    }
+
+    int64_t hb_last_ms = 0;
     while (!g_should_exit.load() && srv.is_running()) {
         srv.poll(100);
+        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now - hb_last_ms >= 1000) { write_heartbeat(); hb_last_ms = now; }
     }
 
     srv.stop();
