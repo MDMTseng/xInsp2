@@ -61,3 +61,6 @@ examples/object_count_puzzle/ground_truth.json
 examples/object_count_puzzle/predictions.json
 examples/object_count_puzzle/detections_overlay.png
 examples/*/*.scratch.log
+
+# FE heartbeat files (runtime)
+examples/*/*.hb

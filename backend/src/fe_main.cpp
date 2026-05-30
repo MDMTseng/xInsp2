@@ -20,6 +20,7 @@
 #include <xi/xi_safe_state.hpp>
 #include <xi/xi_crash_report.hpp>     // xi::enrich_from_crash_report (unit-tested)
 #include <xi/xi_respawn_policy.hpp>   // xi::RespawnTracker (unit-tested)
+#include <xi/xi_safe_state_plc.hpp>   // xi::make_plc_sink (tcp:/udp: safe-state)
 
 #include <algorithm>
 #include <atomic>
@@ -312,8 +313,11 @@ static int run_supervisor(const FeConfig& c) {
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
 
-    // Sink logs to stderr itself; pass null so it doesn't double-print.
-    auto sink = xi::make_safe_state_sink(c.safe_state_type, nullptr);
+    // PLC safe-state sink if --safe-state is a "tcp:HOST:PORT"/"udp:HOST:PORT"
+    // spec; otherwise the logging stub. The PLC sink also logs to stderr, so
+    // pass null to avoid double-printing.
+    std::unique_ptr<xi::SafeStateSink> sink = xi::make_plc_sink(c.safe_state_type, nullptr);
+    if (!sink) sink = xi::make_safe_state_sink(c.safe_state_type, nullptr);
     std::fprintf(stderr, "[xinsp-fe] supervisor up: backend=%s port=%d project=%s fps=%d sink=%s\n",
                  c.backend_exe.c_str(), c.port, c.project.c_str(), c.autostart_fps, sink->name());
     std::fprintf(stderr, "[xinsp-fe] BE log -> %s\n", c.be_log.c_str());
@@ -515,7 +519,8 @@ static void print_help() {
         "  --script=PATH        script to compile (default: project.json's)\n"
         "  --autostart-fps=N    continuous fps for the backend (default 10; 0=off)\n"
         "  --plugins-dir=DIR    extra plugin folder (repeatable)\n"
-        "  --safe-state=TYPE    safe-state sink (default 'log')\n"
+        "  --safe-state=SPEC    safe-state sink: 'log' (default), or a PLC endpoint\n"
+        "                       'tcp:HOST:PORT' / 'udp:HOST:PORT' (newline JSON)\n"
         "  --be-log=PATH        where to capture the backend's stdout/stderr\n"
         "  --boot-timeout-ms=N  boot-hang budget: go safe+respawn if the backend\n"
         "                       never reaches 'ready' in N ms (default 60000; 0=off)\n"

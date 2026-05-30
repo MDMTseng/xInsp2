@@ -44,12 +44,20 @@ struct SafeStateEvent { reason; backend_rc; exception_name; faulting_module; las
 class SafeStateSink { void enter_safe_state(const SafeStateEvent&); void clear_safe_state(); const char* name(); };
 ```
 
-`make_safe_state_sink(type)` picks an implementation. Today the only concrete
-sink is **`LoggingSafeStateSink`** — a stub that records the transition to the FE
-log. A real PLC transport (Modbus coil, OPC-UA node, digital-out) is **Phase 2**:
-it implements `SafeStateSink` and slots into the factory; nothing else in the FE
-changes. This keeps the "what commands the line" decision out of the supervisor
-loop until the hardware is known.
+`--safe-state=SPEC` picks the sink:
+- **`log`** (default) — `LoggingSafeStateSink`, records the transition to the FE log.
+- **`tcp:HOST:PORT` / `udp:HOST:PORT`** — `PlcSafeStateSink`
+  (`xi_safe_state_plc.hpp`): sends a newline-delimited JSON command to the PLC on
+  enter/clear, carrying the crash forensics. UDP repeats the safety-critical
+  `enter` (best-effort loss tolerance); TCP does a short-timeout per-message
+  connect (a down PLC can't stall the monitor thread). Message schema is isolated
+  in `build_enter()/build_clear()` — adapt the keys to your PLC:
+  `{"src":"xinsp-fe","event":"safe_state","state":"enter","reason":...,"rc":...,"module":...,"phase":...,"ts_ms":...}`.
+
+Adding another transport (Modbus coil, OPC-UA node, digital-out) is just another
+`SafeStateSink` behind the factory; nothing else in the FE changes. **MessagePack**
+framing is a follow-up (needs a vendored encoder). Verified by
+`examples/plc_safe_state/` (a UDP PLC simulator receives the command on a crash).
 
 ## Backend headless autostart
 
@@ -137,6 +145,7 @@ exists today vs the priority gaps — is in
 - C++ WS client + deep heartbeat (detect a hang while the port stays open).
 - An FE **status channel** (local endpoint / status file) so the extension shows
   the FE's *true* safe-state + respawn budget instead of inferring from a WS drop.
-- Real PLC transports behind `SafeStateSink` (Modbus / OPC-UA / digital-out).
+- More PLC transports behind `SafeStateSink` (Modbus / OPC-UA / digital-out) +
+  MessagePack framing. (TCP/UDP JSON already shipped — see above.)
 - Operator HMI; multi-BE / multi-line orchestration.
 - Linux supervisor implementation (`posix_spawn`/`fork`, `PR_SET_PDEATHSIG`).
