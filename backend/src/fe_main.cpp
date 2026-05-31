@@ -89,6 +89,11 @@ struct FeConfig {
     int         comms_port = 0;   // loopback BE<->gateway port (0 => port+1)
     std::string comms_exe;    // xinsp-comms path (auto-discover if empty)
     std::string comms_log;    // where the gateway's stdout/stderr is captured
+    // Working copy: pass --working-copy to the backend so it edits a
+    // <project>/.xinsp_work scratch. On a crash respawn the same flag is passed
+    // and the backend resumes the scratch (settings survive). See
+    // docs/guides/project-working-copy.md.
+    bool        working_copy = false;
 };
 
 static std::string arg_value(int argc, char** argv, const char* flag) {
@@ -157,6 +162,8 @@ static FeConfig load_config(int argc, char** argv) {
             num("comms_port", c.comms_port);
             str("comms_exe", c.comms_exe);
             str("comms_log", c.comms_log);
+            if (cJSON* wc = cJSON_GetObjectItem(root, "working_copy"); cJSON_IsBool(wc))
+                c.working_copy = cJSON_IsTrue(wc);
             num("respawn_max", c.respawn_max);
             num("respawn_reset_ms", c.respawn_reset_ms);
             num("respawn_backoff_ms", c.respawn_backoff_ms);
@@ -184,6 +191,7 @@ static FeConfig load_config(int argc, char** argv) {
     if (auto v = arg_value(argc, argv, "--comms-port");  !v.empty()) try { c.comms_port = std::stoi(v); } catch (...) {}
     if (auto v = arg_value(argc, argv, "--comms-exe");   !v.empty()) c.comms_exe = v;
     if (auto v = arg_value(argc, argv, "--comms-log");   !v.empty()) c.comms_log = v;
+    if (has_flag(argc, argv, "--working-copy")) c.working_copy = true;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a.rfind("--plugins-dir=", 0) == 0) c.plugins_dirs.push_back(a.substr(14));
@@ -291,6 +299,7 @@ static std::string build_cmdline(const FeConfig& c) {
         cl += " --heartbeat-file=\"" + c.heartbeat_file + "\"";
     // When a gateway is configured, tell the BE where to reach it (loopback).
     if (!c.comms_plc.empty()) cl += " --comms-port=" + std::to_string(c.comms_port);
+    if (c.working_copy)       cl += " --working-copy";
     for (auto& a : c.be_args)      cl += " " + a;   // verbatim passthrough
     return cl;
 }
@@ -683,6 +692,8 @@ static void print_help() {
         "                       (default: --port + 1)\n"
         "  --comms-exe=PATH     xinsp-comms.exe (default: auto-discover)\n"
         "  --comms-log=PATH     where to capture the gateway's stdout/stderr\n"
+        "  --working-copy       backend edits a <project>/.xinsp_work scratch;\n"
+        "                       a crash respawn resumes it (settings survive)\n"
         "  --config=PATH        fe.json config (CLI flags override it)\n"
         "  --help, -h           this help\n");
 }

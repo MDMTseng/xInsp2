@@ -199,8 +199,10 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   an on-disk `kv` instance: seed → edits isolated to the scratch (canonical
   untouched) → **crash** (hard-kill) + restart resumes the scratch (uncommitted
   edits survive) → commit pushes to the canonical project → discard reverts to
-  the committed state. See `docs/guides/project-working-copy.md`. Windows-only;
-  skip on non-`nt`.
+  the committed state. `driver_fe.py` adds the FE layer: the supervisor forwards
+  `--working-copy`, and a hard-kill of the backend → FE respawn resumes the
+  scratch with the uncommitted edit intact. See
+  `docs/guides/project-working-copy.md`. Windows-only; skip on non-`nt`.
 - **Result ordering** — `examples/qa_result_order/` proves
   `parallelism.result_order: "arrival"`. The same uneven-timing script runs
   under both modes with `dispatch_threads=4`: **completion** reorders (out-of-order

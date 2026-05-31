@@ -112,6 +112,10 @@ an operator HMI / the VS Code extension can still attach live.
   the FE drives `RespawnLimitExceeded` and **stays safe** for a manual restart.
 - **Shutdown**: a console-ctrl handler closes the Job Object (killing the BE) and
   drives `SupervisorShutdown`.
+- **Working copy** (optional): `--working-copy` (or `fe.json` `"working_copy"`)
+  is forwarded to every backend the FE spawns — including respawns — so the BE
+  edits a `<project>/.xinsp_work` scratch and a crash respawn **resumes** it
+  (in-progress settings survive). See [`../guides/project-working-copy.md`](../guides/project-working-copy.md).
 - **Comms gateway** (optional): with `--comms-plc=tcp:|udp:HOST:PORT` the FE also
   spawns + supervises the out-of-process `xinsp-comms` gateway (PLC I/O) as a
   sibling child in the same Job Object, on its own `RespawnTracker`. Gateway death

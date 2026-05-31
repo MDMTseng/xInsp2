@@ -1,7 +1,7 @@
 # Project working copy (transactional edits + crash-durable)
 
-> **Status: BE core shipped (Increment 1).** FE auto-resume (Inc 2) and the VS
-> Code "Save Project / Discard" UI (Inc 3) build on this.
+> **Status: BE core + FE auto-resume shipped (Increments 1–2).** The VS Code
+> "Save Project / Discard" UI (Inc 3) builds on this.
 
 When a project is opened in **working-copy mode**, the backend operates on a
 scratch copy at `<project>/.xinsp_work` instead of the project itself. Every
@@ -49,7 +49,11 @@ xinsp-backend --port=7823 --project=C:\line\proj --working-copy --autostart-fps=
 On a crash, the FE supervisor respawns the backend with the **same** flags; the
 `.xinsp_work` scratch still exists, so the backend resumes the last in-progress
 settings rather than reverting to the pristine project — settings survive the
-crash. (FE wiring of the flag is Increment 2.)
+crash. The FE forwards `--working-copy` (CLI or `fe.json` `"working_copy": true`)
+to every backend it spawns, including respawns. Proven by
+`examples/qa_working_copy/driver_fe.py` (FE seeds the scratch, an edit is saved,
+the backend is hard-killed, the FE respawns it and the backend resumes the
+scratch with the uncommitted edit intact).
 
 ## Notes & current limits
 
