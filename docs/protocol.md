@@ -424,6 +424,20 @@ values, but **do NOT recompile the inspection script** — call
 N project-local plugins compile each plugin under `cl.exe` and can
 take 30–120 s; clients should pass a long timeout for this command.
 
+**Working-copy mode.** `open_project` accepts `"working_copy": true`: the
+backend then operates on a `<project>/.xinsp_work` scratch copy (resume if
+present, else seed from the canonical project), so edits are transactional and
+crash-durable. The reply data then carries `"working_copy": true`,
+`"canonical_path"`, and `"working_dir"`. Two paired commands:
+- `commit_working_copy` `args: {}` → mirror the scratch back onto the canonical
+  project (add + overwrite + delete-removed). Reply `{ "committed": true, "canonical": "<dir>" }`.
+- `discard_working_copy` `args: {}` → delete the scratch, re-seed from canonical,
+  reopen. Reply is the project JSON (same shape as `open_project`).
+
+See [`guides/project-working-copy.md`](./guides/project-working-copy.md). The
+headless `--working-copy` flag opts autostart into the same mode (so an FE
+respawn after a crash resumes the scratch).
+
 ### `recompile_project_plugin`
 
 Hot-rebuilds a single project-local plugin. The extension's file watcher
@@ -659,6 +673,7 @@ extension, or `xinsp-fe.exe` on a line — see
 | `--project=DIR` | — | **headless autostart**: `open_project` this folder at boot |
 | `--script=PATH` | project.json's `script` | script to `compile_and_load` for `--project` |
 | `--autostart-fps=N` | 0 (off) | with `--project`, `start` continuous mode at N fps |
+| `--working-copy` | off | open via a `<project>/.xinsp_work` scratch (transactional; resumes on crash respawn) — see [working-copy guide](./guides/project-working-copy.md) |
 
 The `--project` autostart drives the same `open_project → compile_and_load →
 start` commands a client would send, by synthesizing them internally after the

@@ -193,6 +193,14 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   `TerminateThread` a worker (which would leak the per-instance lock). The N=1
   path + WS contract is covered by `vscode-extension/test/runWatchdog.mjs`.
   Windows-only; skip on non-`nt`.
+- **Project working copy** — `examples/qa_working_copy/` proves the
+  transactional `<project>/.xinsp_work` scratch (`open_project working_copy:true`
+  + `commit_working_copy` / `discard_working_copy`). Drives the full lifecycle on
+  an on-disk `kv` instance: seed → edits isolated to the scratch (canonical
+  untouched) → **crash** (hard-kill) + restart resumes the scratch (uncommitted
+  edits survive) → commit pushes to the canonical project → discard reverts to
+  the committed state. See `docs/guides/project-working-copy.md`. Windows-only;
+  skip on non-`nt`.
 - **Result ordering** — `examples/qa_result_order/` proves
   `parallelism.result_order: "arrival"`. The same uneven-timing script runs
   under both modes with `dispatch_threads=4`: **completion** reorders (out-of-order

@@ -1159,8 +1159,71 @@ public:
         project_ = ProjectInfo{};
     }
 
-    bool open_project(const std::string& folder) {
+    // ---- working copy (transactional edits at <project>/.xinsp_work) --------
+    static constexpr const char* kWorkingCopyDir = ".xinsp_work";
+
+    // The canonical project dir when a working copy is active; empty otherwise.
+    const std::string& canonical_path() const { return canonical_path_; }
+    bool has_working_copy() const { return !canonical_path_.empty(); }
+
+    // Commit: mirror the working copy back onto the canonical project (adds +
+    // overwrites + deletes removed files), so the on-disk project reflects every
+    // edit made this session. No-op error if no working copy is active.
+    bool commit_working_copy() {
         std::lock_guard<std::mutex> lk(mu_);
+        if (canonical_path_.empty()) return false;
+        mirror_tree_(project_.folder_path, canonical_path_);
+        std::fprintf(stderr, "[xinsp2] working copy: committed to %s\n",
+                     canonical_path_.c_str());
+        return true;
+    }
+
+    // Discard: blow away the working copy and re-seed it from the canonical
+    // project, then reopen. Returns false if no working copy is active.
+    bool reopen_fresh_working_copy() {
+        std::string canon;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (canonical_path_.empty()) return false;
+            canon = canonical_path_;
+        }
+        // close_project()/open_project() each take mu_ — don't hold it here.
+        close_project();
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(canon) / kWorkingCopyDir, ec);
+        return open_project(canon, /*working_copy=*/true);   // re-seeds from canonical
+    }
+
+    bool open_project(const std::string& folder_arg, bool working_copy = false) {
+        std::lock_guard<std::mutex> lk(mu_);
+
+        // Working-copy mode: operate on a scratch copy at <project>/.xinsp_work
+        // so edits never touch the canonical project until an explicit commit
+        // (and survive a backend crash — the scratch is on disk). Resume an
+        // existing scratch (crash recovery / unsaved session); otherwise seed it
+        // from the canonical project. `folder` is then rebased to the scratch so
+        // ALL downstream logic (compile, instances, saves) uses the working copy.
+        std::string folder = folder_arg;
+        canonical_path_.clear();
+        if (working_copy) {
+            std::filesystem::path canon = folder_arg;
+            if (!std::filesystem::exists(canon / "project.json")) return false;
+            std::filesystem::path scratch = canon / kWorkingCopyDir;
+            if (!std::filesystem::exists(scratch / "project.json")) {
+                std::error_code ec;
+                std::filesystem::remove_all(scratch, ec);   // clear any partial seed
+                copy_tree_excluding_(canon, scratch);
+                std::fprintf(stderr, "[xinsp2] working copy: seeded %s from project\n",
+                             scratch.string().c_str());
+            } else {
+                std::fprintf(stderr, "[xinsp2] working copy: resuming existing %s\n",
+                             scratch.string().c_str());
+            }
+            ensure_gitignore_(canon, std::string(kWorkingCopyDir) + "/");
+            canonical_path_ = canon.string();
+            folder = scratch.string();
+        }
+
         auto pj = std::filesystem::path(folder) / "project.json";
         if (!std::filesystem::exists(pj)) return false;
 
@@ -1754,7 +1817,15 @@ public:
             }
             out += "}";
         }
-        out += "]}";
+        out += "]";
+        // Working-copy status so the UI can target the scratch dir for editing
+        // and surface a "save project" affordance.
+        out += ",\"working_copy\":" + std::string(canonical_path_.empty() ? "false" : "true");
+        if (!canonical_path_.empty()) {
+            out += ",\"canonical_path\":"; pm_json_escape(out, canonical_path_);
+            out += ",\"working_dir\":";    pm_json_escape(out, project_.folder_path);
+        }
+        out += "}";
         return out;
     }
 
@@ -1781,6 +1852,79 @@ private:
     // global plugins directory — flagged so the UI can label them and so
     // we don't re-scan their dll mtime against the global cert.
     std::unordered_map<std::string, std::string> project_plugin_origin_;
+    // Canonical project dir when a working copy is active (project_.folder_path
+    // then points at <canonical>/.xinsp_work). Empty = no working copy.
+    std::string canonical_path_;
+
+    // True if a path component should be skipped when seeding/mirroring the
+    // working copy: the scratch dir itself, VCS metadata, and regenerated build
+    // output (recompiled on open, no point copying — and committing it back
+    // would clobber the canonical build with the scratch's).
+    static bool wc_excluded_(const std::filesystem::path& rel) {
+        for (const auto& part : rel) {
+            std::string s = part.string();
+            if (s == kWorkingCopyDir || s == ".git" || s == "build") return true;
+        }
+        return false;
+    }
+
+    // Recursively copy `src` -> `dst`, skipping wc_excluded_ paths. Used to seed
+    // a fresh working copy from the canonical project.
+    static void copy_tree_excluding_(const std::filesystem::path& src,
+                                     const std::filesystem::path& dst) {
+        std::error_code ec;
+        std::filesystem::create_directories(dst, ec);
+        for (auto it = std::filesystem::recursive_directory_iterator(
+                 src, std::filesystem::directory_options::skip_permission_denied, ec);
+             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+            auto rel = std::filesystem::relative(it->path(), src, ec);
+            if (ec || rel.empty()) continue;
+            if (wc_excluded_(rel)) { if (it->is_directory()) it.disable_recursion_pending(); continue; }
+            auto target = dst / rel;
+            if (it->is_directory()) {
+                std::filesystem::create_directories(target, ec);
+            } else {
+                std::filesystem::create_directories(target.parent_path(), ec);
+                std::filesystem::copy_file(it->path(), target,
+                    std::filesystem::copy_options::overwrite_existing, ec);
+            }
+        }
+    }
+
+    // Mirror `src` (working copy) onto `dst` (canonical): copy/overwrite every
+    // file, then delete files/dirs in `dst` that aren't in `src` — so removals
+    // (e.g. a deleted instance) propagate. Excluded paths are left untouched on
+    // both sides (the canonical .git stays; build/ is regenerated).
+    static void mirror_tree_(const std::filesystem::path& src,
+                             const std::filesystem::path& dst) {
+        std::error_code ec;
+        copy_tree_excluding_(src, dst);   // adds + overwrites
+        // Prune: remove dst entries with no src counterpart.
+        std::vector<std::filesystem::path> to_remove;
+        for (auto it = std::filesystem::recursive_directory_iterator(
+                 dst, std::filesystem::directory_options::skip_permission_denied, ec);
+             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+            auto rel = std::filesystem::relative(it->path(), dst, ec);
+            if (ec || rel.empty()) continue;
+            if (wc_excluded_(rel)) { if (it->is_directory()) it.disable_recursion_pending(); continue; }
+            if (!std::filesystem::exists(src / rel)) to_remove.push_back(it->path());
+        }
+        for (auto& p : to_remove) std::filesystem::remove_all(p, ec);
+    }
+
+    // Append `line` to <dir>/.gitignore if not already present (so the scratch
+    // dir isn't accidentally committed). Best-effort; ignores I/O errors.
+    static void ensure_gitignore_(const std::filesystem::path& dir,
+                                  const std::string& line) {
+        auto gi = dir / ".gitignore";
+        std::string content;
+        { std::ifstream f(gi); std::stringstream ss; ss << f.rdbuf(); content = ss.str(); }
+        if (content.find(line) != std::string::npos) return;
+        std::ofstream f(gi, std::ios::app);
+        if (!f) return;
+        if (!content.empty() && content.back() != '\n') f << "\n";
+        f << line << "\n";
+    }
 
     // Loose "is this boolean manifest key true?" check, matching the existing
     // has_ui substring style. Tolerates `"key":true` and `"key": true`.
@@ -2116,6 +2260,10 @@ private:
         auto path = std::filesystem::path(ii.folder_path) / "instance.json";
         std::string out = "{\n";
         out += "  \"plugin\": "; pm_json_escape(out, ii.plugin_name); out += ",\n";
+        // Preserve the per-instance concurrency cap across saves (else a UI save
+        // would silently drop a hand-set max_concurrency).
+        if (ii.max_concurrency > 0)
+            out += "  \"max_concurrency\": " + std::to_string(ii.max_concurrency) + ",\n";
         out += "  \"config\": ";
         out += ii.instance ? ii.instance->get_def() : "{}";
         out += "\n}\n";

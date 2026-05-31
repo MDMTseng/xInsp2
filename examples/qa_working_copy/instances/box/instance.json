@@ -1,0 +1,4 @@
+{
+  "plugin": "kv",
+  "config": { "value": "original" }
+}

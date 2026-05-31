@@ -2214,6 +2214,32 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "failed to write " + *path);
         }
+    } else if (name == "commit_working_copy") {
+        // Mirror the <project>/.xinsp_work scratch back onto the canonical
+        // project — the UI "Save Project" action. Persist any live instance
+        // configs to the scratch first so the commit captures them.
+        for (auto& [iname, _] : g_plugin_mgr.project().instances) {
+            g_plugin_mgr.save_instance(iname);
+        }
+        if (g_plugin_mgr.commit_working_copy()) {
+            send_rsp_ok(srv, id, "{\"committed\":true,\"canonical\":" +
+                        ([]{ std::string s; xp::json_escape_into(s, g_plugin_mgr.canonical_path()); return s; }()) + "}");
+        } else {
+            send_rsp_err(srv, id, "no working copy active (open with working_copy:true)");
+        }
+    } else if (name == "discard_working_copy") {
+        // Blow away the scratch + re-seed from canonical, then reopen. Same
+        // teardown constraint as open_project — drain the dispatch pool first.
+        if (!g_plugin_mgr.has_working_copy()) {
+            send_rsp_err(srv, id, "no working copy active");
+            return;
+        }
+        (void)quiesce_dispatch_for_lifecycle_op_("discard_working_copy");
+        if (g_plugin_mgr.reopen_fresh_working_copy()) {
+            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+        } else {
+            send_rsp_err(srv, id, "discard failed");
+        }
     } else if (name == "load_project") {
         auto path = xp::get_string_field(parsed->args_json, "path");
         if (!path) { send_rsp_err(srv, id, "missing path"); return; }
@@ -2625,8 +2651,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // the previous project's instances and FreeLibrary's its
         // plugin DLLs; if a worker is mid-inspect into a now-freed
         // plugin function we SEGV.
+        // working_copy: operate on a <project>/.xinsp_work scratch copy
+        // (resume if present, else seed) so edits are transactional + crash-
+        // durable. Default false = legacy in-place behaviour.
+        bool working_copy = parsed->args_json.find("\"working_copy\":true") != std::string::npos
+                          || parsed->args_json.find("\"working_copy\": true") != std::string::npos;
         (void)quiesce_dispatch_for_lifecycle_op_("open_project");
-        if (g_plugin_mgr.open_project(*folder)) {
+        if (g_plugin_mgr.open_project(*folder, working_copy)) {
             auto& proj = g_plugin_mgr.project();
             int inst_count = (int)proj.instances.size();
             std::fprintf(stderr, "[xinsp2] project opened: %s (%d instances)\n",
@@ -3302,6 +3333,8 @@ int main(int argc, char** argv) {
                 "  --project=DIR        headless autostart: open this project at boot\n"
                 "  --script=PATH        script to compile for --project (default: project.json's)\n"
                 "  --autostart-fps=N    with --project, start continuous mode at N fps (0 = off)\n"
+                "  --working-copy       edit a <project>/.xinsp_work scratch copy (transactional;\n"
+                "                       resumes on crash respawn). commit_working_copy to save\n"
                 "  --comms-port=N       connect to the comms gateway on loopback N (xi::comms)\n"
                 "  --version, -v        print version and exit\n"
                 "  --help, -h           this help\n",
@@ -3545,6 +3578,11 @@ int main(int argc, char** argv) {
     if (std::string project = parse_str_flag(argc, argv, "--project"); !project.empty()) {
         std::string script = parse_str_flag(argc, argv, "--script");
         int autostart_fps  = parse_autostart_fps(argc, argv);
+        // --working-copy: open via a <project>/.xinsp_work scratch. On a crash
+        // respawn the FE passes the same flag; the scratch still exists, so the
+        // backend resumes the last in-progress settings instead of reverting to
+        // the pristine project. See docs/guides/project-working-copy.md.
+        bool working_copy = has_flag(argc, argv, "--working-copy");
 
         bool degraded = false;
         // Validate the project BEFORE opening. A nonexistent / project.json-less
@@ -3556,10 +3594,12 @@ int main(int argc, char** argv) {
                          "cannot run (not reporting ready)\n", project.c_str());
             degraded = true;
         } else {
-            std::fprintf(stderr, "[xinsp2] autostart: open_project %s\n", project.c_str());
+            std::fprintf(stderr, "[xinsp2] autostart: open_project %s%s\n", project.c_str(),
+                         working_copy ? " (working copy)" : "");
             handle_command(srv,
                 "{\"type\":\"cmd\",\"id\":1,\"name\":\"open_project\",\"args\":{\"path\":"
-                + xp::json_escape(project) + "}}");
+                + xp::json_escape(project)
+                + (working_copy ? ",\"working_copy\":true" : "") + "}}");
 
             // Resolve the script path: an explicit --script relative path is
             // relative to the PROJECT dir; otherwise project.json's script_path.

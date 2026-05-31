@@ -21,6 +21,7 @@ Task-shaped — pick the verb that matches what you're doing.
 | [`guides/writing-a-script.md`](./guides/writing-a-script.md) | You're writing the inspection script for a project. Lifecycle + every primitive (`xi::use` / `xi::Param` / `VAR` / `xi::Record` / `xi::async` / `xi::state` / `xi::breakpoint` / triggers). |
 | [`guides/debugging.md`](./guides/debugging.md) | Something crashed. What's caught, what isn't, how to read crash reports, how to attach a debugger. |
 | [`guides/extending-the-ui.md`](./guides/extending-the-ui.md) | You're adding a command / tree item / webview / status bar element to the VS Code extension. Maps every common task to an existing example. |
+| [`guides/project-working-copy.md`](./guides/project-working-copy.md) | Transactional project edits: open on a `.xinsp_work` scratch, commit/discard, crash-durable resume. |
 
 ## Reference (`reference/`)
 

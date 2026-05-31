@@ -1,0 +1,13 @@
+{
+  "name": "kv",
+  "description": "Stores one string 'value' via get_def/set_def — fixture for the working-copy persistence test.",
+  "dll": "kv.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [ { "name": "value", "kind": "string", "doc": "The stored value." } ],
+    "inputs": [],
+    "outputs": [ { "name": "value", "kind": "string" } ],
+    "exchange": []
+  }
+}

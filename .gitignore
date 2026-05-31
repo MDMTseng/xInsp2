@@ -47,6 +47,10 @@ examples/**/fe*.log
 examples/**/be*.log
 examples/**/gw.log
 
+# Transactional project working copies (BE scratch; regenerated on open).
+.xinsp_work/
+**/.xinsp_work/
+
 # QA team loop scratch countdown
 tmp/qa_countdown.txt
 
