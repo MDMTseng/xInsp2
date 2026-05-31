@@ -234,17 +234,48 @@ inline void crash_set_phase(const char* phase) {
 }
 
 // Watchdog (P2.4). When > 0, inspect() calls have this many ms of wall-
-// clock budget; exceeding it terminates the executing thread and marks
-// the script as broken. Default 0 = disabled (back-compat). Set via
+// clock budget. Default 0 = disabled (back-compat). Set via
 // cmd:set_watchdog_ms or --watchdog=N.
+//
+// Per-worker deadlines: the parallel dispatch pool (parallelism.dispatch_threads
+// > 1) runs N inspects at once, so the watchdog tracks a SLOT per in-flight
+// inspect (each arms a free slot on entry, clears it on exit). The monitor scans
+// all slots. On a deadline breach it first asks the script to cancel cooperatively
+// (a GLOBAL flag — under N>1 this aborts every in-flight frame, which is the
+// intended "something's wedged, bail this round" signal); if the script ignores
+// that for the grace window, the process is unrecoverable (a forced thread kill
+// would leak the per-instance lock + risk heap corruption), so the backend
+// exits and the FE supervisor respawns a clean one. See docs/guides/writing-a-
+// script.md (Parallel dispatch) + design/fe-be-split.md.
 static std::atomic<int>        g_watchdog_ms{0};
-// State accessed from both the dispatch thread (writer) and the
-// watchdog thread (reader). Set BEFORE inspect, cleared AFTER.
-static std::atomic<int64_t>    g_inspect_deadline_ms{0};
-static std::atomic<HANDLE>     g_inspect_thread_handle{nullptr};
+static constexpr int           WD_SLOTS = 64;     // max concurrent in-flight inspects tracked
+// Per-slot inspect deadline (steady_clock epoch-ms); 0 = free. Written by the
+// dispatch/run thread that owns the slot, read by the watchdog thread.
+static std::atomic<int64_t>    g_wd_deadlines[WD_SLOTS];
 static std::atomic<int>        g_watchdog_trips{0};
 static std::thread             g_watchdog_thread;
 static std::atomic<bool>       g_watchdog_run{false};
+static const int               WATCHDOG_EXIT_CODE = 0x5744;  // 'WD' — backend self-exit on a hard trip
+
+// Claim a free watchdog slot for `deadline` (steady-clock epoch-ms). Returns the
+// slot index, or -1 if all slots are busy (then this inspect runs unwatched —
+// only possible with >64 concurrent inspects, far beyond any real pool).
+static int wd_arm(int64_t deadline) {
+    for (int i = 0; i < WD_SLOTS; ++i) {
+        int64_t expect = 0;
+        if (g_wd_deadlines[i].compare_exchange_strong(expect, deadline)) return i;
+    }
+    return -1;
+}
+static void wd_disarm(int slot) { if (slot >= 0) g_wd_deadlines[slot].store(0); }
+// True if any slot's deadline is in the past (an inspect overran its budget).
+static bool wd_any_overran(int64_t now_ms) {
+    for (int i = 0; i < WD_SLOTS; ++i) {
+        int64_t dl = g_wd_deadlines[i].load();
+        if (dl != 0 && now_ms >= dl) return true;
+    }
+    return false;
+}
 
 // Preview subscription (S1). Default: send every image VAR's JPEG after
 // a run (back-compat). Client sets a name allow-list via cmd:subscribe
@@ -892,38 +923,22 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
     emit_run_event("run_started");
 
     auto t0 = std::chrono::steady_clock::now();
-    // Arm watchdog: store deadline + current thread handle. Cleared in
-    // the post-inspect path below regardless of throw.
-    //
-    // Watchdog state is single-slot (one deadline + one thread handle)
-    // and can only track ONE inspect at a time. Skip it under
-    // multi-dispatch (N > 1) — long-running inspects there have no
-    // single-thread protection. A future enhancement could carry
-    // per-thread watchdog state.
-    HANDLE self_h = nullptr;
+    // Arm the watchdog: claim a per-inspect slot holding this inspect's
+    // deadline. Works for any dispatch_threads (N slots), unlike the old
+    // single-slot scheme that had to skip N>1. Cleared in the post-inspect
+    // path below regardless of throw. No thread handle is kept — a hard trip
+    // exits the process (FE respawns) rather than TerminateThread'ing a worker
+    // (which would leak the per-instance lock + risk heap corruption).
+    int wd_slot = -1;
     int wd_ms = g_watchdog_ms.load();
-    int n_disp = g_plugin_mgr.project().dispatch_threads;
-    if (wd_ms > 0 && n_disp <= 1) {
-        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
-                        GetCurrentProcess(), &self_h, 0, FALSE,
-                        DUPLICATE_SAME_ACCESS);
-        g_inspect_thread_handle.store(self_h);
-        // D-P1-10: deadline must use steady_clock, not system_clock.
-        // An NTP backward step (or DST jump if the host is misconfigured
-        // to use TZ-aware clocks) would either skip every armed deadline
-        // (clock jumps forward → premature trip on healthy script) or
-        // never trip (clock jumps back → permanent hang, watchdog
-        // useless). steady_clock is monotonic.
+    if (wd_ms > 0) {
+        // D-P1-10: deadline must use steady_clock (monotonic) — a system_clock
+        // NTP/DST jump would skip every deadline or hang the watchdog forever.
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wd_ms);
-        g_inspect_deadline_ms.store(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline.time_since_epoch()).count());
+        wd_slot = wd_arm(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             deadline.time_since_epoch()).count());
     }
-    auto disarm = [&]() {
-        g_inspect_deadline_ms.store(0);
-        HANDLE prev = g_inspect_thread_handle.exchange(nullptr);
-        if (prev) CloseHandle(prev);
-    };
+    auto disarm = [&]() { wd_disarm(wd_slot); wd_slot = -1; };
     // Stamp this dispatch thread's crash breadcrumb so a fault inside
     // the inspect (the most common crash site) names the run + phase
     // for THIS thread, not whatever the last thread to touch the
@@ -1396,7 +1411,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         std::string out = "{\"ms\":" + std::to_string(g_watchdog_ms.load());
         out += ",\"trips\":" + std::to_string(g_watchdog_trips.load());
         out += ",\"armed\":";
-        out += (g_inspect_deadline_ms.load() > 0 ? "true" : "false");
+        // armed == at least one inspect slot is currently in flight.
+        bool armed = false;
+        for (int i = 0; i < WD_SLOTS; ++i) if (g_wd_deadlines[i].load() != 0) { armed = true; break; }
+        out += (armed ? "true" : "false");
         out += "}";
         send_rsp_ok(srv, id, out);
     } else if (name == "resume") {
@@ -1781,10 +1799,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":0})", (long long)run_id);
         send_rsp_ok(srv, id, buf);
 
-        // Run inspection on a detached thread so the watchdog can
-        // TerminateThread the runaway script without killing the WS
-        // poll loop. Serialised on g_run_mu so 8 quick `cmd:run` calls
-        // produce vars/history entries in run_id order.
+        // Run inspection on a detached thread so a long inspect doesn't block
+        // the WS poll loop (and so the watchdog can observe its deadline slot).
+        // Serialised on g_run_mu so 8 quick `cmd:run` calls produce
+        // vars/history entries in run_id order.
         // SEH translator must be installed inside the thread.
         crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "run");
         crash_ctx().last_run_id = (int)run_id;
@@ -1851,23 +1869,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         spawn_dispatch_pool_(&srv, interval_ms, n_threads);
 
-        // Surface the watchdog-disabled-under-N>1 caveat (see
-        // run_one_inspection() — single-slot watchdog state can only
-        // protect one inspect at a time, so it's bypassed for N>1).
-        // Without this log line, a driver running with N=8 has no
-        // signal that switching from N=1 traded crash-isolation for
-        // throughput. FL r6 friction P1-3.
-        if (n_threads > 1 && g_watchdog_ms.load() > 0) {
-            xp::LogMsg lm;
-            lm.level = "warn";
-            lm.msg   = std::string("dispatch_threads=")
-                     + std::to_string(n_threads)
-                     + " — script watchdog disabled under N>1 "
-                       "(single-slot deadline state). Long-running "
-                       "ops should poll xi::cancellation_requested(). "
-                       "See docs/guides/writing-a-script.md.";
-            srv.send_text(lm.to_json());
-        }
+        // The watchdog now tracks a per-inspect slot, so it protects every
+        // worker under N>1 (no longer bypassed). On a hard trip the backend
+        // exits for the FE to respawn; under N>1 the cooperative-cancel phase
+        // is global (aborts all in-flight frames that round). See
+        // run_one_inspection() + docs/guides/writing-a-script.md.
 
         char buf[64];
         std::snprintf(buf, sizeof(buf),
@@ -3217,7 +3223,8 @@ int main(int argc, char** argv) {
                 "  --host=ADDR          bind address (default 127.0.0.1; use 0.0.0.0 for remote)\n"
                 "  --auth=SECRET        require Bearer SECRET in handshake\n"
                 "  --plugins-dir=DIR    extra plugin folder (repeatable)\n"
-                "  --watchdog=MS        terminate inspect after MS ms (default 0 = off)\n"
+                "  --watchdog=MS        per-inspect budget: cooperative-cancel, then exit\n"
+                "                       for FE respawn if ignored (default 0 = off)\n"
                 "  --project=DIR        headless autostart: open this project at boot\n"
                 "  --script=PATH        script to compile for --project (default: project.json's)\n"
                 "  --autostart-fps=N    with --project, start continuous mode at N fps (0 = off)\n"
@@ -3376,45 +3383,40 @@ int main(int argc, char** argv) {
                          "xi::comms will be inert\n", cp.c_str());
         }
     }
-    // P2.4 watchdog. Always-on monitor thread; only acts when
-    // g_inspect_deadline_ms > 0 (set by run_one_inspection when
-    // g_watchdog_ms > 0). On trip: TerminateThread the inspect thread,
-    // bump trip counter, emit a log event. Resources leak (TerminateThread
-    // is unsafe by design), but the alternative is an unkillable hang.
+    // P2.4 watchdog. Always-on monitor thread; acts when any in-flight inspect
+    // (wd_arm slot) overruns its deadline. Two-phase, now per-worker-aware:
+    //   Phase 1 — cooperative: set the script's GLOBAL cancel flag; xi::ops poll
+    //     xi::cancellation_requested() and bail. 1000 ms grace (big ops — 20 MP
+    //     gaussian, matchTemplate, contour walks — need a few hundred ms to
+    //     finish their current chunk; 100 ms tripped healthy scripts). Under N>1
+    //     the flag is global, so it aborts every in-flight frame this round —
+    //     the intended "something's wedged, bail" signal; healthy workers re-run
+    //     next tick.
+    //   Phase 2 — hard trip: if any slot is STILL overrun after the grace, the
+    //     script ignored cooperative cancel. We do NOT TerminateThread — a kill
+    //     mid process() would leak the per-instance lock (deadlocking that
+    //     instance) and risk heap corruption. The process is unrecoverable, so
+    //     the backend EXITS; the FE supervisor respawns a clean one (and drives
+    //     the line safe). Run without an FE => backend stays down by design.
     g_watchdog_run = true;
     g_watchdog_thread = std::thread([&srv]() {
+        auto now_ms = [] {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        };
         while (g_watchdog_run.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            int64_t dl = g_inspect_deadline_ms.load();
-            if (dl == 0) continue;
-            // D-P1-10: comparison MUST use the same clock as the
-            // deadline writer (run_one_inspection). Now both use
-            // steady_clock.
-            int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (now < dl) continue;
+            if (!wd_any_overran(now_ms())) continue;
 
-            // Two-phase trip:
-            //   Phase 1: signal cooperative cancel via the script DLL's
-            //     g_global_cancel_flag. Long-running ops in xi::ops
-            //     poll xi::cancellation_requested() and exit early.
-            //     Give them a 1000 ms grace window — big ops (gaussian
-            //     on 20 MP, matchTemplate, contour walks) need a few
-            //     hundred ms to finish their current chunk; 100 ms was
-            //     too tight and made cooperative cancel fail more
-            //     often than necessary.
-            //   Phase 2: if the inspect still hasn't returned (deadline
-            //     still armed), fall back to TerminateThread. That's
-            //     the unsafe primitive — only used when cooperative
-            //     cancel didn't take.
+            // Phase 1: cooperative cancel + grace.
             {
                 std::lock_guard<std::mutex> lk(g_script_mu);
                 if (g_script.set_global_cancel) g_script.set_global_cancel(1);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-            // Re-check deadline. If clear, the script cooperated.
-            if (g_inspect_deadline_ms.load() == 0) {
+            // Did every overrun inspect return (slot freed / re-armed fresh)?
+            if (!wd_any_overran(now_ms())) {
                 {
                     std::lock_guard<std::mutex> lk(g_script_mu);
                     if (g_script.set_global_cancel) g_script.set_global_cancel(0);
@@ -3429,26 +3431,21 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            HANDLE h = g_inspect_thread_handle.exchange(nullptr);
-            g_inspect_deadline_ms.store(0);
-            // Clear the cancel flag now that we're going for the
-            // hammer — the next inspect should start clean.
-            {
-                std::lock_guard<std::mutex> lk(g_script_mu);
-                if (g_script.set_global_cancel) g_script.set_global_cancel(0);
-            }
-            if (!h) continue;
-            #pragma warning(push)
-            #pragma warning(disable: 6258)   // TerminateThread is intentional
-            TerminateThread(h, 1);
-            #pragma warning(pop)
-            CloseHandle(h);
-            int n = ++g_watchdog_trips;
-            std::fprintf(stderr, "[xinsp2] watchdog tripped (#%d) — terminated runaway inspect\n", n);
+            // Phase 2: hard trip — exit for FE respawn (see header above).
+            ++g_watchdog_trips;
+            std::fprintf(stderr,
+                "[xinsp2] watchdog HARD trip - inspect exceeded %dms and ignored "
+                "cooperative cancel; exiting for supervisor respawn (rc=0x%04X)\n",
+                g_watchdog_ms.load(), WATCHDOG_EXIT_CODE);
             emit_error_log(srv,
-                "watchdog tripped — inspect exceeded "
+                "watchdog HARD trip — inspect exceeded "
                 + std::to_string(g_watchdog_ms.load())
-                + "ms; cooperative cancel did not take, thread terminated");
+                + "ms and ignored cooperative cancel; backend exiting for respawn");
+            std::fflush(stderr);
+            std::fflush(stdout);
+            // _Exit: skip static destructors / atexit — a wedged worker may hold
+            // locks those would block on. The FE sees the exit and respawns.
+            std::_Exit(WATCHDOG_EXIT_CODE);
         }
     });
     if (!srv.start(port)) {

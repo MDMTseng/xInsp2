@@ -184,6 +184,13 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   the **`reentrant: true`** one runs concurrently (max concurrency ≥ 2). Guards
   against a regression that lets two workers into a non-reentrant instance at
   once. Windows-only (plugin compile); skip on non-`nt`.
+- **Per-worker watchdog** — `examples/qa_watchdog/` proves the inspect watchdog
+  now fires under `dispatch_threads > 1` (it tracks a deadline slot per worker,
+  not one global slot) and that a hard trip (script ignores cooperative cancel)
+  makes the backend **exit** with `0x5744` for the FE to respawn — rather than
+  `TerminateThread` a worker (which would leak the per-instance lock). The N=1
+  path + WS contract is covered by `vscode-extension/test/runWatchdog.mjs`.
+  Windows-only; skip on non-`nt`.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

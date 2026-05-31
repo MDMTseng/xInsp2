@@ -508,8 +508,14 @@ either way; the lock only serializes a single non-reentrant instance.
 - **Reentrant plugins** (those that opted in above) must themselves be
   thread-safe: cv:: ops on pool-backed Images are mostly fine; member
   counters / caches are not — guard them with atomics or a mutex.
-- **Watchdog is disabled** under N > 1 (single-slot atomics can't
-  track multiple in-flight inspects).
+- **Watchdog now covers every worker** (it tracks a deadline slot per
+  in-flight inspect, not a single slot). On a deadline breach it asks the
+  script to cancel cooperatively — but that flag is **global**, so under
+  N > 1 it aborts *every* in-flight frame that round (healthy workers just
+  re-run next tick). If the script ignores cooperative cancel, the backend
+  **exits** so the FE supervisor respawns a clean one — it does **not**
+  force-kill a worker (that would leak the per-instance lock). Long ops
+  should poll `xi::cancellation_requested()` so a cooperative cancel takes.
 - **`vars` events** arrive on the wire interleaved across run_ids.
   Order them client-side by `run_id` if order matters.
 - **`xi::Param<T>`** reads are atomic and safe.

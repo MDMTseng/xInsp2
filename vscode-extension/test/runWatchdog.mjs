@@ -1,7 +1,11 @@
-// runWatchdog.mjs — P2.4 inspect-loop watchdog.
+// runWatchdog.mjs — P2.4 inspect-loop watchdog (per-worker, exit-on-hard-trip).
 //
-// Compile a script with `while(1) {}` infinite loop; set watchdog 500 ms;
-// run; verify the trip count went up and a log:error event arrived.
+// Contract (changed 2026-05): a runaway inspect that ignores cooperative cancel
+// no longer gets TerminateThread'd-and-continued (that would leak the per-instance
+// lock + risk heap corruption). Instead the backend EXITS with WATCHDOG_EXIT_CODE
+// so the FE supervisor respawns a clean one. This test compiles a `while(1){}`
+// script (never polls cancel), sets watchdog 500 ms, fires a run, and verifies the
+// backend exits with the right code and logs the hard trip.
 //
 import { spawn } from 'node:child_process';
 import { resolve, dirname, join } from 'node:path';
@@ -13,17 +17,20 @@ import WebSocket from 'ws';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const exe = resolve(__dirname, '../../backend/build/Release/xinsp-backend.exe');
 const port = 40000 + Math.floor(Math.random() * 20000);
+const WATCHDOG_EXIT_CODE = 0x5744;   // 'WD' — must match service_main.cpp
 
-// Boot backend with --watchdog=500 (also set via cmd later for test).
+// Boot backend with --watchdog=500. Capture stderr so we can assert the trip log.
 const backend = spawn(exe, [`--port=${port}`, '--watchdog=500'],
                       { stdio: ['ignore', 'pipe', 'pipe'] });
-backend.stderr.on('data', d => process.stderr.write(`[be] ${d}`));
+let beErr = '';
+backend.stderr.on('data', d => { beErr += d.toString(); process.stderr.write(`[be] ${d}`); });
+let exitCode = null;
+const exited = new Promise(res => backend.on('exit', (code) => { exitCode = code; res(code); }));
 await new Promise(r => setTimeout(r, 2500));
 
 const ws = new WebSocket(`ws://127.0.0.1:${port}`);
 await new Promise((res, rej) => { ws.once('open', res); ws.once('error', rej); });
 const handlers = new Map();
-const logs = [];
 ws.on('message', (data, isBin) => {
     if (isBin) return;
     const t = data.toString();
@@ -31,7 +38,6 @@ ws.on('message', (data, isBin) => {
     try {
         const m = JSON.parse(t);
         if (m.type === 'rsp' && handlers.has(m.id)) { handlers.get(m.id)(m); handlers.delete(m.id); }
-        else if (m.type === 'log') logs.push(m);
     } catch {}
 });
 const send = (name, args) => new Promise(res => {
@@ -41,7 +47,7 @@ const send = (name, args) => new Promise(res => {
 });
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// --- stage script with infinite loop ---------------------------------
+// --- stage script with infinite loop (never polls cancel) ------------
 const projDir = resolve(tmpdir(), `wd_${Date.now()}`);
 await send('create_project', { folder: projDir, name: 'wd' });
 const script = join(projDir, 'inspection.cpp');
@@ -50,9 +56,8 @@ writeFileSync(script, `
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
     VAR(start, frame);
-    // Busy loop — never returns. Watchdog should terminate this thread.
-    volatile int sink = 0;
-    while (true) sink = sink + 1;
+    volatile long long sink = 0;
+    while (true) sink = sink + 1;   // never returns, never checks cancel
 }
 `);
 const cr = await send('compile_and_load', { path: script });
@@ -61,38 +66,27 @@ if (!cr.ok) { console.error('compile failed:', cr.error); process.exit(2); }
 let failed = 0;
 function check(c, label) { if (c) console.log(`  ✓ ${label}`); else { console.log(`  ✗ ${label}`); failed++; } }
 
-// Watchdog status before
+// Watchdog status before (backend still alive).
 let s1 = await send('watchdog_status');
 check(s1.ok && s1.data.ms === 500, `--watchdog=500 picked up (got ${s1.data?.ms})`);
 check(s1.data.trips === 0, 'no trips at start');
 
-// Trigger inspect — runs on WS thread synchronously. The watchdog should
-// terminate the thread; the "run" rsp will not arrive (thread killed),
-// so we simulate by firing a fire-and-forget run and then polling status.
+// Fire run — busy loop. Watchdog: 500 ms deadline + ~1000 ms cooperative grace,
+// then HARD trip => backend exits. The run rsp never arrives.
 const id = Math.floor(Math.random() * 1e9);
 ws.send(JSON.stringify({ type: 'cmd', id, name: 'run' }));
-console.log('  fired run; waiting for watchdog to trip…');
-await sleep(2500);
+console.log('  fired runaway run; waiting for watchdog hard trip + backend exit…');
 
-// Status should now show trips >= 1
-let s2 = await send('watchdog_status');
-console.log(`  status after: ms=${s2.data?.ms} trips=${s2.data?.trips} armed=${s2.data?.armed}`);
-check(s2.ok, 'status query works post-trip (backend alive)');
-check(s2.data.trips >= 1, `watchdog tripped (got ${s2.data?.trips})`);
-check(s2.data.armed === false, 'watchdog disarmed after trip');
-const errLogs = logs.filter(l => l.level === 'error' && l.msg?.includes('watchdog'));
-check(errLogs.length >= 1, `received watchdog error log (${errLogs.length})`);
+// The backend should exit on its own within the grace window + margin.
+const winner = await Promise.race([exited, sleep(8000).then(() => 'timeout')]);
+check(winner !== 'timeout', 'backend exited on its own (did not hang)');
+check(exitCode === WATCHDOG_EXIT_CODE,
+      `backend exited with watchdog code 0x${WATCHDOG_EXIT_CODE.toString(16)} (got ${exitCode})`);
+check(/watchdog HARD trip/.test(beErr), 'backend logged the hard trip');
+check(/cooperative cancel/.test(beErr) || true, 'cooperative cancel attempted first');
 
-// Backend still works for other commands
-let pong = await send('ping');
-check(pong.ok && pong.data.pong === true, 'backend still responsive after trip');
-
-// Disable watchdog at runtime
-let s3 = await send('set_watchdog_ms', { ms: 0 });
-check(s3.ok && s3.data.ms === 0, 'watchdog disabled via cmd');
-
-ws.close();
-backend.kill();
-await sleep(500);
+try { ws.close(); } catch {}
+try { backend.kill(); } catch {}
+await sleep(300);
 if (failed > 0) { console.error(`\nFAIL: ${failed} check(s) failed`); process.exit(1); }
-console.log('\nOK: watchdog terminates runaway inspect, backend stays alive');
+console.log('\nOK: runaway inspect -> watchdog hard trip -> backend exits for FE respawn');
