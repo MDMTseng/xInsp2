@@ -192,6 +192,7 @@ Recognised top-level keys (anything else is ignored, no error):
 |---|---|---|---|
 | `plugin` | string | yes | Name of the plugin this instance is bound to. |
 | `config` | object | no | Passed verbatim to `Plugin::set_def(json)` after construction. |
+| `max_concurrency` | number | no | Per-instance concurrency cap under a parallel dispatch pool (`parallelism.dispatch_threads > 1`). Bounds how many workers may be inside this instance's entry points at once. Only honoured for a **reentrant** plugin (`plugin.json` `reentrant: true`); `0`/absent = unlimited. A non-reentrant plugin is always 1. See `docs/guides/writing-a-script.md` (Parallel dispatch). |
 | `isolation` | string | no | **Deprecated, ignored.** Accepted for backward compatibility (any value) with a one-time deprecation warning; all instances run in-process. |
 
 `config` is **not** required to be the same shape as `Plugin::get_def()`'s

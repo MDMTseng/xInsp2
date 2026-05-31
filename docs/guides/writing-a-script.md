@@ -511,7 +511,22 @@ is safe to call concurrently on one instance" — then it runs N-up with no
 lock. Leave it off and your plugin can never be re-entered, whatever
 `dispatch_threads` is. Parallelism still flows across *different* instances
 either way; the lock only serializes a single non-reentrant instance.
-`examples/qa_reentrancy/` proves both halves (serialized vs concurrent).
+
+**Per-instance concurrency cap.** A reentrant plugin can be bounded to *M*
+concurrent calls on a given instance via `max_concurrency` in that instance's
+`instance.json` (e.g. a reentrant detector backed by 2 GPU streams):
+
+```json
+{ "plugin": "det", "max_concurrency": 2 }
+```
+
+The host then admits at most M workers into that instance's entry points at once
+(a counting semaphore; the non-reentrant lock is just the M=1 case). `0`/absent =
+unlimited (full `dispatch_threads`-wide). Ignored for a non-reentrant plugin
+(always 1). Lets one slow/resource-bound instance run narrower than the pool
+without throttling the rest. `examples/qa_reentrancy/` proves all three:
+serialized (non-reentrant → 1), concurrent (reentrant → N), and capped
+(reentrant + `max_concurrency: 1` → 1).
 
 **Other caveats once N > 1 (your responsibility):**
 

@@ -181,9 +181,11 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   (`parallelism.dispatch_threads > 1`). Under a 4-thread pool it pokes two probe
   instances every frame and asserts the **non-reentrant** one stays serialized
   (max concurrency 1, zero overlaps — the host's per-instance lock holds) while
-  the **`reentrant: true`** one runs concurrently (max concurrency ≥ 2). Guards
-  against a regression that lets two workers into a non-reentrant instance at
-  once. Windows-only (plugin compile); skip on non-`nt`.
+  the **`reentrant: true`** one runs concurrently (max concurrency ≥ 2), and a
+  third reentrant instance with `instance.json` **`max_concurrency: 1`** is held
+  back to 1 (per-instance concurrency cap). Guards against a regression that lets
+  two workers into a non-reentrant (or capped) instance at once. Windows-only
+  (plugin compile); skip on non-`nt`.
 - **Per-worker watchdog** — `examples/qa_watchdog/` proves the inspect watchdog
   now fires under `dispatch_threads > 1` (it tracks a deadline slot per worker,
   not one global slot) and that a hard trip (script ignores cooperative cancel)

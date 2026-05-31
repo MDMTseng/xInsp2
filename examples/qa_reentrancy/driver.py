@@ -6,14 +6,19 @@ parallelism.dispatch_threads). The risk: N workers re-entering the SAME stateful
 instance's process() concurrently. The safety model: a plugin is serialized
 per-instance by the host UNLESS its plugin.json declares "reentrant": true.
 
-This driver runs ONE continuous session with dispatch_threads=4 and two probe
+This driver runs ONE continuous session with dispatch_threads=4 and three probe
 instances poked every frame:
   * "serial"   -> concurrency_probe     (no reentrant flag) — must be serialized
   * "parallel" -> concurrency_probe_rt  ("reentrant": true) — runs concurrently
+  * "capped"   -> concurrency_probe_rt  (reentrant, instance.json
+                  max_concurrency=1)   — reentrant but the per-instance cap
+                  holds it to 1 (per-instance pool sizing)
 Each probe reports the max number of workers seen inside its own process() at
 once. Asserts:
   * max(maxc_serial)   == 1   AND  max(overlaps_serial) == 0   (host lock holds)
   * max(maxc_parallel) >= 2                                    (reentrant => parallel)
+  * max(maxc_capped)   == 1                                    (cap=1 limits a
+                                                                reentrant instance)
 
 A maxc_serial > 1 would mean the host let two workers into a non-reentrant
 instance at once — the exact race the model exists to prevent.
@@ -63,7 +68,7 @@ def main() -> int:
     be = subprocess.Popen([str(BE), f"--port={PORT}"], cwd=str(BE.parent),
                           stdout=blog, stderr=blog, stdin=subprocess.DEVNULL)
     failures: list[str] = []
-    maxc_serial = maxc_parallel = 0
+    maxc_serial = maxc_parallel = maxc_capped = 0
     overlaps_serial = 0
     nframes = 0
     try:
@@ -85,6 +90,7 @@ def main() -> int:
                     nframes += 1
                     maxc_serial    = max(maxc_serial,    int(items.get("maxc_serial") or 0))
                     maxc_parallel  = max(maxc_parallel,  int(items.get("maxc_parallel") or 0))
+                    maxc_capped    = max(maxc_capped,    int(items.get("maxc_capped") or 0))
                     overlaps_serial = max(overlaps_serial, int(items.get("overlaps_serial") or 0))
             try:
                 c.call("stop")
@@ -92,7 +98,8 @@ def main() -> int:
                 pass
 
         print(f"[result] frames={nframes} maxc_serial={maxc_serial} "
-              f"overlaps_serial={overlaps_serial} maxc_parallel={maxc_parallel}")
+              f"overlaps_serial={overlaps_serial} maxc_parallel={maxc_parallel} "
+              f"maxc_capped={maxc_capped}")
 
         if nframes < 10:
             failures.append(f"only {nframes} frames seen — pool/continuous mode didn't run enough")
@@ -105,6 +112,9 @@ def main() -> int:
             failures.append(f"reentrant instance only reached concurrency {maxc_parallel} "
                             f"(expected >= 2) — reentrant flag didn't enable parallelism "
                             f"(or the machine couldn't overlap; try raising FPS/COLLECT_S)")
+        if maxc_capped != 1:
+            failures.append(f"capped instance (max_concurrency=1) reached concurrency "
+                            f"{maxc_capped} (expected 1) — the per-instance cap did NOT hold")
     finally:
         try:
             import websocket
@@ -123,7 +133,8 @@ def main() -> int:
     else:
         print("VERDICT: PASS")
         print("  non-reentrant instance stayed serialized (maxc=1) under a 4-thread")
-        print("  pool; reentrant instance ran concurrently (maxc>=2). Safe by default.")
+        print("  pool; reentrant instance ran concurrently (maxc>=2); reentrant instance")
+        print("  with max_concurrency=1 was capped back to 1. Safe + sizable by default.")
     return 1 if failures else 0
 
 

@@ -10,11 +10,14 @@
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& s = xi::use("serial");
-    auto& p = xi::use("parallel");
+    auto& s = xi::use("serial");     // concurrency_probe    (not reentrant)
+    auto& p = xi::use("parallel");   // concurrency_probe_rt (reentrant, uncapped)
+    auto& c = xi::use("capped");     // concurrency_probe_rt (reentrant, max_concurrency=1)
     auto rs = s.process(xi::Record().set("frame", frame));
     auto rp = p.process(xi::Record().set("frame", frame));
+    auto rc = c.process(xi::Record().set("frame", frame));
     VAR(maxc_serial,     rs["maxc"].as_int(-1));
     VAR(overlaps_serial, rs["overlaps"].as_int(-1));
     VAR(maxc_parallel,   rp["maxc"].as_int(-1));
+    VAR(maxc_capped,     rc["maxc"].as_int(-1));
 }

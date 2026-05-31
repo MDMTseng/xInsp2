@@ -49,6 +49,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -157,10 +158,12 @@ struct PluginInfo {
 class CAbiInstanceAdapter : public InstanceBase {
 public:
     CAbiInstanceAdapter(std::string name, std::string plugin_name,
-                        HMODULE dll, void* inst, bool reentrant = false)
+                        HMODULE dll, void* inst, bool reentrant = false,
+                        int max_concurrency = 0)
         : name_(std::move(name)), plugin_name_(std::move(plugin_name)),
           dll_(dll), inst_(inst), reentrant_(reentrant),
           owner_id_(ImagePool::alloc_owner_id()) {
+        max_concurrency_ = (max_concurrency > 0 ? max_concurrency : 0);
         // Resolve function pointers
         exchange_fn_ = reinterpret_cast<xi_plugin_exchange_fn>(GetProcAddress(dll_, "xi_plugin_exchange"));
         get_def_fn_  = reinterpret_cast<xi_plugin_get_def_fn>(GetProcAddress(dll_, "xi_plugin_get_def"));
@@ -199,7 +202,7 @@ public:
     std::string get_def() const override {
         if (!get_def_fn_ || !inst_) return "{}";
         ImagePool::OwnerGuard g(owner_id_);
-        auto lk = call_guard();
+        CallScope cs(this);
         std::vector<char> buf(4096);
         int n = get_def_fn_(inst_, buf.data(), (int)buf.size());
         if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = get_def_fn_(inst_, buf.data(), (int)buf.size()); }
@@ -209,14 +212,14 @@ public:
     bool set_def(const std::string& j) override {
         if (!set_def_fn_ || !inst_) return false;
         ImagePool::OwnerGuard g(owner_id_);
-        auto lk = call_guard();
+        CallScope cs(this);
         return set_def_fn_(inst_, j.c_str()) == 0;
     }
 
     std::string exchange(const std::string& cmd_json) override {
         if (!exchange_fn_ || !inst_) return "{}";
         ImagePool::OwnerGuard g(owner_id_);
-        auto lk = call_guard();
+        CallScope cs(this);
         std::vector<char> buf(64 * 1024);
         int n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size());
         if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }
@@ -231,7 +234,7 @@ public:
     int process(const xi_record* in, xi_record_out* out) {
         if (!process_fn_ || !inst_) return -1;
         ImagePool::OwnerGuard og(owner_id_);
-        auto lk = call_guard();
+        CallScope cs(this);
         process_fn_(inst_, in, out);
         return out->image_count;
     }
@@ -241,18 +244,42 @@ public:
     bool reentrant() const { return reentrant_; }
 
 private:
-    // A lock on this instance's call mutex — but only for non-reentrant
-    // plugins. Reentrant plugins return a disengaged (no-op) lock so concurrent
-    // dispatch workers run their process() in true parallel. Serializing across
-    // process/exchange/get_def/set_def with ONE mutex also stops a config change
-    // (exchange/set_def from the WS thread) racing an in-flight process().
-    std::unique_lock<std::mutex> call_guard() const {
-        return reentrant_ ? std::unique_lock<std::mutex>()
-                          : std::unique_lock<std::mutex>(call_mu_);
-    }
+    // Effective concurrency cap across process/exchange/get_def/set_def:
+    //   non-reentrant      -> 1   (serialized; safety — ignores max_concurrency_)
+    //   reentrant + cap    -> max_concurrency_ (>=1)
+    //   reentrant + no cap -> 0   (unlimited)
+    int effective_cap_() const { return reentrant_ ? max_concurrency_ : 1; }
 
-    mutable std::mutex call_mu_;   // serializes entry points for non-reentrant plugins
+    // RAII admission control: blocks until fewer than `cap` calls are in flight
+    // on this instance, counts itself in, releases on scope exit. cap==0
+    // (unlimited) is a no-op. One counter across all entry points so a config
+    // change (exchange/set_def) can't race an in-flight process(). Replaces the
+    // old binary mutex — count-1 reproduces the non-reentrant serialization.
+    struct CallScope {
+        const CAbiInstanceAdapter* a_;
+        bool engaged_;
+        explicit CallScope(const CAbiInstanceAdapter* a) : a_(a) {
+            int cap = a_->effective_cap_();
+            engaged_ = (cap != 0);
+            if (!engaged_) return;
+            std::unique_lock<std::mutex> lk(a_->cc_mu_);
+            a_->cc_cv_.wait(lk, [&] { return a_->cur_calls_ < cap; });
+            ++a_->cur_calls_;
+        }
+        ~CallScope() {
+            if (!engaged_) return;
+            { std::lock_guard<std::mutex> lk(a_->cc_mu_); --a_->cur_calls_; }
+            a_->cc_cv_.notify_one();
+        }
+        CallScope(const CallScope&) = delete;
+        CallScope& operator=(const CallScope&) = delete;
+    };
+
+    mutable std::mutex              cc_mu_;
+    mutable std::condition_variable cc_cv_;
+    mutable int                     cur_calls_ = 0;
     bool reentrant_ = false;
+    int  max_concurrency_ = 0;     // 0 = unlimited (reentrant only)
     std::string name_;
     std::string plugin_name_;
     HMODULE dll_;
@@ -268,6 +295,7 @@ private:
 struct InstanceInfo {
     std::string          name;
     std::string          plugin_name;
+    int                  max_concurrency = 0;  // instance.json cap; 0 = unlimited (reentrant)
     std::string          folder_path;  // project/instances/<name>/
     std::shared_ptr<InstanceBase> instance;
 };
@@ -600,6 +628,7 @@ public:
             std::string name;
             std::string folder;
             std::string def_json;
+            int         max_concurrency = 0;
         };
         std::vector<Pending> pending;
         for (auto& [iname, ii] : project_.instances) {
@@ -607,6 +636,7 @@ public:
             Pending p;
             p.name   = iname;
             p.folder = ii.folder_path;
+            p.max_concurrency = ii.max_concurrency;
             if (ii.instance) p.def_json = ii.instance->get_def();
             pending.push_back(std::move(p));
         }
@@ -633,7 +663,7 @@ public:
                 if (pi_old.c_factory) {
                     void* raw = pi_old.c_factory(&host, p.name.c_str());
                     if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
-                        p.name, plugin_name, pi_old.handle, raw, pi_old.reentrant);
+                        p.name, plugin_name, pi_old.handle, raw, pi_old.reentrant, p.max_concurrency);
                 } else if (pi_old.factory) {
                     auto* raw = pi_old.factory(p.name.c_str());
                     if (raw) inst.reset(raw);
@@ -709,7 +739,7 @@ public:
                     if (pi_it->second.c_factory) {
                         void* raw = pi_it->second.c_factory(&host, p.name.c_str());
                         if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
-                            p.name, plugin_name, pi_it->second.handle, raw, pi_it->second.reentrant);
+                            p.name, plugin_name, pi_it->second.handle, raw, pi_it->second.reentrant, p.max_concurrency);
                     } else if (pi_it->second.factory) {
                         auto* raw = pi_it->second.factory(p.name.c_str());
                         if (raw) inst.reset(raw);
@@ -790,7 +820,7 @@ public:
             if (pi.c_factory) {
                 void* raw = pi.c_factory(&host, p.name.c_str());
                 if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
-                    p.name, plugin_name, pi.handle, raw, pi.reentrant);
+                    p.name, plugin_name, pi.handle, raw, pi.reentrant, p.max_concurrency);
             } else if (pi.factory) {
                 auto* raw = pi.factory(p.name.c_str());
                 if (raw) inst.reset(raw);
@@ -1307,6 +1337,15 @@ public:
                 ii.name = inst_name;
                 ii.plugin_name = *plugin;
                 ii.folder_path = entry.path().string();
+                // Optional per-instance concurrency cap (reentrant plugins only;
+                // 0/absent = unlimited). cJSON for the numeric field.
+                if (cJSON* iroot = cJSON_Parse(ic.c_str())) {
+                    if (cJSON* k = cJSON_GetObjectItem(iroot, "max_concurrency");
+                        k && cJSON_IsNumber(k) && k->valuedouble > 0) {
+                        ii.max_concurrency = (int)k->valuedouble;
+                    }
+                    cJSON_Delete(iroot);
+                }
                 // Auto-load the plugin if not yet loaded
                 auto pit = plugins_.find(*plugin);
                 if (pit != plugins_.end() && !pit->second.factory && !pit->second.c_factory) {
@@ -1409,7 +1448,7 @@ public:
                         }
                         if (raw) {
                             auto adapter = std::make_shared<CAbiInstanceAdapter>(
-                                ii.name, *plugin, pi.handle, raw, pi.reentrant);
+                                ii.name, *plugin, pi.handle, raw, pi.reentrant, ii.max_concurrency);
                             // Hand the pre-allocated owner id over to the
                             // adapter so subsequent process / exchange
                             // calls keep tagging into the same bucket.
@@ -1545,7 +1584,7 @@ public:
                 return nullptr;
             }
             auto adapter = std::make_shared<CAbiInstanceAdapter>(
-                instance_name, plugin_name, pi.handle, raw, pi.reentrant);
+                instance_name, plugin_name, pi.handle, raw, pi.reentrant, /*max_concurrency=*/0);
             adapter->adopt_owner_id(pre_owner);
             ii.instance = std::move(adapter);
         } else {
@@ -1639,7 +1678,7 @@ public:
             void* raw = pi.c_factory(&host, new_name.c_str());
             if (!raw) { InstanceFolderRegistry::instance().clear(new_name); return false; }
             ii.instance = std::make_shared<CAbiInstanceAdapter>(
-                new_name, ii.plugin_name, pi.handle, raw, pi.reentrant);
+                new_name, ii.plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency);
         } else if (pi.factory) {
             auto* raw = pi.factory(new_name.c_str());
             if (!raw) return false;
