@@ -126,6 +126,13 @@ struct PluginInfo {
     std::string dll_name;
     std::string factory_symbol;
     bool        has_ui = false;
+    // `reentrant`: the plugin declares its process()/exchange()/get_def()/
+    // set_def() are safe to call CONCURRENTLY on the same instance. When false
+    // (the default) the host serializes calls per instance with a mutex, so a
+    // parallel dispatch pool (parallelism.dispatch_threads > 1) is safe by
+    // default — only plugins that opt in get true per-instance parallelism.
+    // See docs/guides/writing-a-script.md (parallelism) + plugin-abi.md.
+    bool        reentrant = false;
     std::string folder_path;   // absolute path to plugin folder
     std::string ui_path;       // absolute path to ui/ folder (if has_ui)
     HMODULE     handle = nullptr;
@@ -150,9 +157,9 @@ struct PluginInfo {
 class CAbiInstanceAdapter : public InstanceBase {
 public:
     CAbiInstanceAdapter(std::string name, std::string plugin_name,
-                        HMODULE dll, void* inst)
+                        HMODULE dll, void* inst, bool reentrant = false)
         : name_(std::move(name)), plugin_name_(std::move(plugin_name)),
-          dll_(dll), inst_(inst),
+          dll_(dll), inst_(inst), reentrant_(reentrant),
           owner_id_(ImagePool::alloc_owner_id()) {
         // Resolve function pointers
         exchange_fn_ = reinterpret_cast<xi_plugin_exchange_fn>(GetProcAddress(dll_, "xi_plugin_exchange"));
@@ -192,6 +199,7 @@ public:
     std::string get_def() const override {
         if (!get_def_fn_ || !inst_) return "{}";
         ImagePool::OwnerGuard g(owner_id_);
+        auto lk = call_guard();
         std::vector<char> buf(4096);
         int n = get_def_fn_(inst_, buf.data(), (int)buf.size());
         if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = get_def_fn_(inst_, buf.data(), (int)buf.size()); }
@@ -201,22 +209,50 @@ public:
     bool set_def(const std::string& j) override {
         if (!set_def_fn_ || !inst_) return false;
         ImagePool::OwnerGuard g(owner_id_);
+        auto lk = call_guard();
         return set_def_fn_(inst_, j.c_str()) == 0;
     }
 
     std::string exchange(const std::string& cmd_json) override {
         if (!exchange_fn_ || !inst_) return "{}";
         ImagePool::OwnerGuard g(owner_id_);
+        auto lk = call_guard();
         std::vector<char> buf(64 * 1024);
         int n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size());
         if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
     }
 
+    // Run the plugin's process() entry point. Wraps the OwnerGuard (image-leak
+    // tagging) and, for a non-reentrant plugin, the per-instance lock so a
+    // parallel dispatch pool can't re-enter the same instance's state
+    // concurrently. Returns output->image_count, or -1 if no process fn.
+    // The caller owns the SEH try/catch boundary (use_process_cb).
+    int process(const xi_record* in, xi_record_out* out) {
+        if (!process_fn_ || !inst_) return -1;
+        ImagePool::OwnerGuard og(owner_id_);
+        auto lk = call_guard();
+        process_fn_(inst_, in, out);
+        return out->image_count;
+    }
+
     void* raw_instance() const { return inst_; }
     xi_plugin_process_fn process_fn() const { return process_fn_; }
+    bool reentrant() const { return reentrant_; }
 
 private:
+    // A lock on this instance's call mutex — but only for non-reentrant
+    // plugins. Reentrant plugins return a disengaged (no-op) lock so concurrent
+    // dispatch workers run their process() in true parallel. Serializing across
+    // process/exchange/get_def/set_def with ONE mutex also stops a config change
+    // (exchange/set_def from the WS thread) racing an in-flight process().
+    std::unique_lock<std::mutex> call_guard() const {
+        return reentrant_ ? std::unique_lock<std::mutex>()
+                          : std::unique_lock<std::mutex>(call_mu_);
+    }
+
+    mutable std::mutex call_mu_;   // serializes entry points for non-reentrant plugins
+    bool reentrant_ = false;
     std::string name_;
     std::string plugin_name_;
     HMODULE dll_;
@@ -329,6 +365,7 @@ public:
                 // fields that can legitimately change between scans.
                 existing->second.description   = info.description;
                 existing->second.has_ui        = info.has_ui;
+                existing->second.reentrant      = info.reentrant;
                 existing->second.ui_path       = info.ui_path;
                 existing->second.folder_path   = info.folder_path;
                 existing->second.manifest_json = info.manifest_json;
@@ -456,6 +493,8 @@ private:
                     if (auto f = extract_string(mc, "factory"))     pi.factory_symbol = *f;
                     pi.has_ui = (mc.find("\"has_ui\":true") != std::string::npos) ||
                                 (mc.find("\"has_ui\": true") != std::string::npos);
+                    pi.reentrant = json_flag_true(mc, "reentrant") ||
+                                   json_flag_true(mc, "thread_safe");  // documented alias
                     if (pi.has_ui) pi.ui_path = (entry.path() / "ui").string();
                     std::string mblock;
                     if (detail_find_key(mc, "manifest", mblock)) pi.manifest_json = std::move(mblock);
@@ -583,7 +622,7 @@ public:
                 if (pi_old.c_factory) {
                     void* raw = pi_old.c_factory(&host, p.name.c_str());
                     if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
-                        p.name, plugin_name, pi_old.handle, raw);
+                        p.name, plugin_name, pi_old.handle, raw, pi_old.reentrant);
                 } else if (pi_old.factory) {
                     auto* raw = pi_old.factory(p.name.c_str());
                     if (raw) inst.reset(raw);
@@ -659,7 +698,7 @@ public:
                     if (pi_it->second.c_factory) {
                         void* raw = pi_it->second.c_factory(&host, p.name.c_str());
                         if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
-                            p.name, plugin_name, pi_it->second.handle, raw);
+                            p.name, plugin_name, pi_it->second.handle, raw, pi_it->second.reentrant);
                     } else if (pi_it->second.factory) {
                         auto* raw = pi_it->second.factory(p.name.c_str());
                         if (raw) inst.reset(raw);
@@ -740,7 +779,7 @@ public:
             if (pi.c_factory) {
                 void* raw = pi.c_factory(&host, p.name.c_str());
                 if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
-                    p.name, plugin_name, pi.handle, raw);
+                    p.name, plugin_name, pi.handle, raw, pi.reentrant);
             } else if (pi.factory) {
                 auto* raw = pi.factory(p.name.c_str());
                 if (raw) inst.reset(raw);
@@ -1346,7 +1385,7 @@ public:
                         }
                         if (raw) {
                             auto adapter = std::make_shared<CAbiInstanceAdapter>(
-                                ii.name, *plugin, pi.handle, raw);
+                                ii.name, *plugin, pi.handle, raw, pi.reentrant);
                             // Hand the pre-allocated owner id over to the
                             // adapter so subsequent process / exchange
                             // calls keep tagging into the same bucket.
@@ -1482,7 +1521,7 @@ public:
                 return nullptr;
             }
             auto adapter = std::make_shared<CAbiInstanceAdapter>(
-                instance_name, plugin_name, pi.handle, raw);
+                instance_name, plugin_name, pi.handle, raw, pi.reentrant);
             adapter->adopt_owner_id(pre_owner);
             ii.instance = std::move(adapter);
         } else {
@@ -1576,7 +1615,7 @@ public:
             void* raw = pi.c_factory(&host, new_name.c_str());
             if (!raw) { InstanceFolderRegistry::instance().clear(new_name); return false; }
             ii.instance = std::make_shared<CAbiInstanceAdapter>(
-                new_name, ii.plugin_name, pi.handle, raw);
+                new_name, ii.plugin_name, pi.handle, raw, pi.reentrant);
         } else if (pi.factory) {
             auto* raw = pi.factory(new_name.c_str());
             if (!raw) return false;
@@ -1680,6 +1719,14 @@ private:
     // we don't re-scan their dll mtime against the global cert.
     std::unordered_map<std::string, std::string> project_plugin_origin_;
 
+    // Loose "is this boolean manifest key true?" check, matching the existing
+    // has_ui substring style. Tolerates `"key":true` and `"key": true`.
+    static bool json_flag_true(const std::string& s, const char* key) {
+        std::string k = std::string("\"") + key + "\"";
+        return s.find(k + ":true") != std::string::npos ||
+               s.find(k + ": true") != std::string::npos;
+    }
+
     static PluginInfo parse_manifest(const std::string& path, const std::string& folder) {
         PluginInfo pi;
         std::ifstream f(path);
@@ -1701,6 +1748,8 @@ private:
 
         pi.has_ui = (content.find("\"has_ui\":true") != std::string::npos) ||
                     (content.find("\"has_ui\": true") != std::string::npos);
+        pi.reentrant = json_flag_true(content, "reentrant") ||
+                       json_flag_true(content, "thread_safe");  // documented alias
         pi.folder_path = folder;
         if (pi.has_ui) {
             pi.ui_path = (std::filesystem::path(folder) / "ui").string();

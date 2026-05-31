@@ -321,6 +321,15 @@ Fields:
 - `has_ui` (bool, optional) — if `true`, a `ui/index.html` next to the
   manifest is served as the plugin webview when the user opens the
   instance UI.
+- `reentrant` (bool, optional, default `false`; alias `thread_safe`) —
+  declares the plugin's entry points (`process` / `exchange` / `get_def` /
+  `set_def`) are safe to call **concurrently on the same instance**. When
+  `false` (the default) the host serializes calls per instance with a mutex,
+  so a parallel dispatch pool (`parallelism.dispatch_threads > 1`, see
+  `docs/guides/writing-a-script.md`) is **safe by default**. Set `true` only
+  if your plugin is internally thread-safe (atomics / locks around any member
+  state) to get true per-instance parallel throughput. `examples/qa_reentrancy/`
+  demonstrates both modes.
 - `abi_version` (int, optional but written by `cmd:export_project_plugin`)
   — the `XI_ABI_VERSION` the plugin was compiled against. Matches the
   plugin DLL's `xi_plugin_abi_version()` export. Backends refuse

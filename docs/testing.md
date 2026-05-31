@@ -176,6 +176,14 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   soak** (FE+BE+gateway): sustained normal operation trips no false safe-state,
   respawns nothing, keeps the heartbeat advancing and the PLC link up, then shuts
   down clean. Windows-only; skip on non-`nt`.
+- **Burst-parallelism safety** — `examples/qa_reentrancy/` proves the
+  declared-reentrancy model for the parallel dispatch pool
+  (`parallelism.dispatch_threads > 1`). Under a 4-thread pool it pokes two probe
+  instances every frame and asserts the **non-reentrant** one stays serialized
+  (max concurrency 1, zero overlaps — the host's per-instance lock holds) while
+  the **`reentrant: true`** one runs concurrently (max concurrency ≥ 2). Guards
+  against a regression that lets two workers into a non-reentrant instance at
+  once. Windows-only (plugin compile); skip on non-`nt`.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

@@ -1,0 +1,7 @@
+{
+  "name": "qa_reentrancy",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": [],
+  "parallelism": { "dispatch_threads": 4, "queue_depth": 200, "overflow": "drop_oldest" }
+}

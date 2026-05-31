@@ -108,12 +108,11 @@ static int use_process_cb(const char* name,
         in_rec.images = input_images;
         in_rec.image_count = input_image_count;
         in_rec.json = input_json;
-        // Tag any image_create calls inside the plugin's process_fn
-        // with this adapter's owner_id so destruction can sweep the
-        // plugin's leaked handles.
-        xi::ImagePool::OwnerGuard og(adapter->owner_id());
+        // adapter->process() owns the owner_id tagging (image-leak sweep) AND,
+        // for a non-reentrant plugin, the per-instance lock that serializes
+        // concurrent dispatch workers. We keep the SEH try/catch boundary here.
         try {
-            adapter->process_fn()(adapter->raw_instance(), &in_rec, output);
+            return adapter->process(&in_rec, output);
         } catch (const seh_exception& e) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') crashed: 0x%08X (%s)\n",
                          name, e.code, e.what());
@@ -122,7 +121,6 @@ static int use_process_cb(const char* name,
             std::fprintf(stderr, "[xinsp2] use_process('%s') threw exception\n", name);
             return -2;
         }
-        return output->image_count;
     }
     return -1;
 }

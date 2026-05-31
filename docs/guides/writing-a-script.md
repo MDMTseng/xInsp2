@@ -481,18 +481,33 @@ If `queue_depth_high_watermark` stays pinned at the cap and
 your pipeline can keep up — bump `dispatch_threads`, optimise the
 plugin, or accept the drops.
 
-**Caveats — your responsibility once N > 1:**
+**Plugin instances are safe by default — declared reentrancy.** A plugin
+called via `xi::use("det").process(...)` from N dispatch workers would
+otherwise see N concurrent `process()` calls into the *same* instance. To
+keep `dispatch_threads > 1` safe out of the box, the host **serializes calls
+per instance with a mutex** (covering `process` / `exchange` / `get_def` /
+`set_def`, so a live config change can't race an in-flight frame). A plugin
+opts into true per-instance parallelism by declaring, in its `plugin.json`:
+
+```json
+{ "name": "det", "dll": "det.dll", "reentrant": true }
+```
+
+`reentrant: true` (alias: `thread_safe: true`) tells the host "my `process()`
+is safe to call concurrently on one instance" — then it runs N-up with no
+lock. Leave it off and your plugin can never be re-entered, whatever
+`dispatch_threads` is. Parallelism still flows across *different* instances
+either way; the lock only serializes a single non-reentrant instance.
+`examples/qa_reentrancy/` proves both halves (serialized vs concurrent).
+
+**Other caveats once N > 1 (your responsibility):**
 
 - **`xi::state()`** is a single shared dict. Concurrent reads/writes
   race. Wrap mutations in your own `std::mutex`, or design the
   pipeline so only one thread writes a given key.
-- **Plugin instances** are likewise shared. A plugin called via
-  `xi::use("det").process(...)` from N script threads has N concurrent
-  `process()` calls. Plugin author must either declare
-  `manifest.thread_safe: true` (no current effect — opt-in is just a
-  contract for now) or write reentrancy-safe code (cv:: ops on
-  pool-backed Images are mostly fine; member counters / caches are
-  not).
+- **Reentrant plugins** (those that opted in above) must themselves be
+  thread-safe: cv:: ops on pool-backed Images are mostly fine; member
+  counters / caches are not — guard them with atomics or a mutex.
 - **Watchdog is disabled** under N > 1 (single-slot atomics can't
   track multiple in-flight inspects).
 - **`vars` events** arrive on the wire interleaved across run_ids.
