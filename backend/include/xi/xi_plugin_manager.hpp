@@ -311,6 +311,17 @@ struct ProjectInfo {
     //   "block"                 — emit_trigger blocks until room is
     //                            available. Back-pressure to source.
     std::string   overflow         = "drop_oldest";
+
+    // `parallelism.result_order`: how per-frame results (vars + previews +
+    // run_finished) are ordered on the wire under N>1.
+    //   "completion" (default) — emit as each worker finishes (fastest; order
+    //                            follows finish time, client sorts by run_id).
+    //   "arrival"              — emit in frame-arrival order: a worker that
+    //                            finishes early waits its turn before emitting,
+    //                            so the wire stream matches trigger order. Costs
+    //                            a little latency; compute still runs parallel.
+    // Only meaningful when dispatch_threads > 1; ignored at N==1 (already ordered).
+    std::string   result_order     = "completion";
 };
 
 // Static compile environment for project-level plugins. Populated once at
@@ -1173,6 +1184,7 @@ public:
         project_.dispatch_threads  = 1;
         project_.queue_depth       = 100;
         project_.overflow          = "drop_oldest";
+        project_.result_order      = "completion";
         if (cJSON* root = cJSON_Parse(content.c_str())) {
             if (cJSON* tp = cJSON_GetObjectItem(root, "trigger_policy");
                 tp && cJSON_IsObject(tp)) {
@@ -1226,6 +1238,18 @@ public:
                         std::fprintf(stderr,
                             "[xinsp2] project.json parallelism.overflow "
                             "unknown value '%s' — using drop_oldest\n",
+                            s.c_str());
+                    }
+                }
+                if (cJSON* k = cJSON_GetObjectItem(par, "result_order");
+                    k && cJSON_IsString(k) && k->valuestring) {
+                    std::string s = k->valuestring;
+                    if (s == "completion" || s == "arrival") {
+                        project_.result_order = s;
+                    } else {
+                        std::fprintf(stderr,
+                            "[xinsp2] project.json parallelism.result_order "
+                            "unknown value '%s' — using completion\n",
                             s.c_str());
                     }
                 }
@@ -2007,6 +2031,8 @@ private:
         out += ",\"queue_depth\":"     + std::to_string(project_.queue_depth);
         out += ",\"overflow\":";
         pm_json_escape(out, project_.overflow);
+        out += ",\"result_order\":";
+        pm_json_escape(out, project_.result_order);
         out += "},\n";
         out += "  \"instances\": [";
         int i = 0;

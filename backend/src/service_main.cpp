@@ -171,6 +171,44 @@ static std::atomic<int>        g_continuous_fps{10};
 // that don't have a trigger source still get periodic dispatch.
 static std::vector<std::thread> g_worker_threads;
 static std::thread              g_timer_thread;
+// Result ordering (parallelism.result_order). When g_result_ordered is set at
+// cmd:start (== "arrival" && N>1), each popped event gets a gapless emit
+// sequence (g_dispatch_seq, assigned under g_ev_mu so it follows arrival order)
+// and an EmitTurn gate makes workers emit vars/previews/run_finished in that
+// order. Compute still runs fully parallel; only emission is serialized. In
+// "completion" mode g_result_ordered is false and emit_seq is -1 (emit
+// immediately, as before).
+static std::atomic<bool>       g_result_ordered{false};
+static std::atomic<int64_t>    g_dispatch_seq{0};   // next emit seq (per cmd:start)
+static std::mutex              g_emit_order_mu;
+static std::condition_variable g_emit_order_cv;
+static int64_t                 g_emit_next = 0;      // guarded by g_emit_order_mu
+
+// RAII emit-order gate. For emit_seq >= 0 (ordered mode) the ctor blocks until
+// it's this sequence's turn; the dtor advances the cursor + wakes the next
+// worker — even on an exception or an error path, so a crashed inspect can't
+// stall the stream. emit_seq < 0 (completion mode / cmd:run) is a no-op.
+struct EmitTurn {
+    int64_t seq_;
+    bool    on_;
+    explicit EmitTurn(int64_t seq) : seq_(seq), on_(seq >= 0) {
+        if (!on_) return;
+        std::unique_lock<std::mutex> lk(g_emit_order_mu);
+        g_emit_order_cv.wait(lk, [this] {
+            return g_emit_next == seq_ || !g_continuous.load();
+        });
+    }
+    ~EmitTurn() {
+        if (!on_) return;
+        {
+            std::lock_guard<std::mutex> lk(g_emit_order_mu);
+            if (g_emit_next == seq_) ++g_emit_next;   // skip if we ran early on stop
+        }
+        g_emit_order_cv.notify_all();
+    }
+    EmitTurn(const EmitTurn&) = delete;
+    EmitTurn& operator=(const EmitTurn&) = delete;
+};
 // Serialise cmd:run dispatch threads so history / vars arrive in run_id
 // order. Threads queue up here and the watchdog operates on whichever
 // one is currently inside run_one_inspection — only one at a time.
@@ -567,7 +605,8 @@ static void comms_deadman_cb(const char* line) { if (g_gateway) g_gateway->set_d
 static void run_one_inspection(xi::ws::Server& srv,
                                int frame_hint = 1,
                                int64_t run_id = 0,
-                               const std::string& frame_path = "");
+                               const std::string& frame_path = "",
+                               int64_t emit_seq = -1);
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
@@ -884,7 +923,8 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
 // The inspect call is wrapped in SEH so a script crash (null deref,
 // divide-by-zero, stack overflow) is caught without killing the backend.
 static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
-                               int64_t run_id, const std::string& frame_path) {
+                               int64_t run_id, const std::string& frame_path,
+                               int64_t emit_seq) {
     if (run_id == 0) run_id = ++g_run_id;
 
     xi::script::LoadedScript s;
@@ -949,6 +989,14 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         c.last_frame  = frame_hint;
         crash_set(c.last_cmd, sizeof(c.last_cmd), "inspect");
     }
+    // Run the inspect (in parallel under N>1). Capture success/error WITHOUT
+    // emitting yet — emission happens below under the EmitTurn gate so ordered
+    // mode (parallelism.result_order: "arrival") can serialize the wire stream
+    // by frame-arrival order. Logs (diagnostic) stay immediate; the run_error
+    // EVENT is deferred so it's ordered with run_finished and the turn always
+    // advances (an error must not stall the ordered stream).
+    bool inspect_ok = false;
+    std::string run_error_what;   // set on failure; empty on success
     try {
         // Tag any image_create calls inside the script's inspect (and
         // any plugin process_fn it transitively calls that didn't set
@@ -962,6 +1010,7 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         s.inspect(frame_hint);
         crash_set_phase("done");
         disarm();
+        inspect_ok = true;
     } catch (const seh_exception& e) {
         disarm();
         auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -971,36 +1020,37 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
                      (long long)dt_ms, e.code, e.what());
         std::fprintf(stderr, "[xinsp2] %s\n", msg);
         emit_error_log(srv, msg, run_id);
-        // run_error event: same channel as compile_finished error case;
-        // gives drivers a single subscribe-once way to detect failed
-        // runs without scraping the log channel.
-        std::string what = std::string("\"what\":");
-        xp::json_escape_into(what, std::string(msg));
-        emit_run_event("run_error", what);
-        return;
+        run_error_what = "\"what\":";
+        xp::json_escape_into(run_error_what, std::string(msg));
     } catch (const std::exception& e) {
         disarm();
         std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
         emit_error_log(srv, std::string("script exception: ") + e.what(), run_id);
-        std::string what = std::string("\"what\":");
-        xp::json_escape_into(what, std::string("script exception: ") + e.what());
-        emit_run_event("run_error", what);
-        return;
+        run_error_what = "\"what\":";
+        xp::json_escape_into(run_error_what, std::string("script exception: ") + e.what());
     } catch (...) {
         disarm();
-        emit_run_event("run_error", "\"what\":\"unknown_exception\"");
-        return;
+        run_error_what = "\"what\":\"unknown_exception\"";
     }
 
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - t0).count();
-    emit_vars_and_previews(srv, s, run_id, dt_ms);
-    emit_run_event("run_finished",
-                   "\"ms\":" + std::to_string((long long)dt_ms));
-
-    // Clear so the next run, if it doesn't carry a frame_path arg,
-    // sees an empty path instead of the stale previous one.
-    if (s.set_run_context) s.set_run_context("");
+    {
+        // Ordered mode: block until it's this frame's turn to emit. The dtor
+        // advances the cursor + wakes the next worker even if we throw here, so
+        // the stream can't deadlock. No-op for emit_seq < 0 (completion mode).
+        EmitTurn turn(emit_seq);
+        if (inspect_ok) {
+            emit_vars_and_previews(srv, s, run_id, dt_ms);
+            emit_run_event("run_finished",
+                           "\"ms\":" + std::to_string((long long)dt_ms));
+            // Clear so the next run, if it doesn't carry a frame_path arg,
+            // sees an empty path instead of the stale previous one.
+            if (s.set_run_context) s.set_run_context("");
+        } else {
+            emit_run_event("run_error", run_error_what);
+        }
+    }
 }
 
 // (trigger_worker removed — continuous mode uses a simple timer thread)
@@ -1085,22 +1135,32 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
     if (n_threads < 1) n_threads = 1;
     g_worker_threads.clear();
     g_worker_threads.reserve((size_t)n_threads);
+    // Result ordering: arrival-ordered emission only when explicitly asked AND
+    // there's actual concurrency (N>1 — N==1 is already in order). Reset the
+    // sequence cursors so each (re)start counts from 0. Covers both cmd:start
+    // and the hot-reload re-arm, since both come through here.
+    bool ordered = (g_plugin_mgr.project().result_order == "arrival") && n_threads > 1;
+    g_result_ordered.store(ordered);
+    g_dispatch_seq.store(0);
+    { std::lock_guard<std::mutex> lk(g_emit_order_mu); g_emit_next = 0; }
     std::fprintf(stderr,
-        "[xinsp2] continuous mode: %dms timer + %d dispatcher thread(s) + trigger bus\n",
-        interval_ms, n_threads);
+        "[xinsp2] continuous mode: %dms timer + %d dispatcher thread(s) + trigger bus%s\n",
+        interval_ms, n_threads, ordered ? " (arrival-ordered results)" : "");
 
     // N worker threads — each pops from g_ev_queue and dispatches.
-    // run_one_inspection allocates its own run_id from g_run_id; ordering
-    // of vars / preview frames on the wire is by run_id (not by arrival
-    // order). Watchdog state is single-slot atomics today; with N>1
-    // we leave it disabled (worker thread doesn't arm it) so multiple
-    // long-running inspects don't fight over the slot. Single-thread
-    // case (N==1) keeps the legacy watchdog path intact.
+    // run_one_inspection allocates its own run_id from g_run_id. Wire ordering
+    // of vars / preview frames is by completion time by default; in
+    // result_order:"arrival" mode each pop also claims a gapless emit sequence
+    // (eseq, under g_ev_mu so it follows arrival order) that the EmitTurn gate
+    // replays in order. The watchdog is per-worker now (each inspect arms its
+    // own slot), so N>1 is covered too.
     auto worker_body = [srv_ptr] {
         _set_se_translator(seh_translator);
         while (g_continuous.load()) {
             xi::TriggerEvent ev;
             bool have_ev = false;
+            int64_t eseq = -1;
+            int64_t rid  = 0;
             {
                 std::unique_lock<std::mutex> lk(g_ev_mu);
                 g_ev_cv.wait(lk, [] {
@@ -1111,6 +1171,12 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
                     ev = std::move(g_ev_queue.front());
                     g_ev_queue.pop_front();
                     have_ev = true;
+                    // Assign run_id AND the emit sequence under the queue lock so
+                    // both follow arrival/FIFO order exactly (run_id used to be
+                    // assigned at inspect-start, which raced under N>1). eseq is
+                    // only claimed in ordered mode.
+                    rid = ++g_run_id;
+                    if (g_result_ordered.load()) eseq = g_dispatch_seq.fetch_add(1);
                 }
             }
             // A-P1-1: notify any producer that's waiting on
@@ -1126,15 +1192,15 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
             // and no other thread has a reference until we publish via
             // g_current_trigger below.
             ev.dequeued_at_us = xi::now_us();
-            int frame_seq = (int)g_run_id.fetch_add(0);  // cheap snapshot for hint
+            int frame_seq = (int)rid;   // arrival-order frame hint (== run_id)
             if (!ev.images.empty() || ev.id.hi || ev.id.lo) {
                 g_current_trigger = &ev;
-                run_one_inspection(*srv_ptr, frame_seq);
+                run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq);
                 g_current_trigger = nullptr;
                 for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
             } else {
                 // Synthetic timer tick from g_timer_thread — no trigger.
-                run_one_inspection(*srv_ptr, frame_seq);
+                run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq);
             }
         }
     };
@@ -1159,6 +1225,7 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
 static void stop_dispatch_pool_() {
     g_continuous = false;
     g_ev_cv.notify_all();
+    g_emit_order_cv.notify_all();   // wake any worker parked in an EmitTurn
     if (g_timer_thread.joinable()) g_timer_thread.join();
     for (auto& t : g_worker_threads) {
         if (t.joinable()) t.join();

@@ -191,6 +191,11 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   `TerminateThread` a worker (which would leak the per-instance lock). The N=1
   path + WS contract is covered by `vscode-extension/test/runWatchdog.mjs`.
   Windows-only; skip on non-`nt`.
+- **Result ordering** — `examples/qa_result_order/` proves
+  `parallelism.result_order: "arrival"`. The same uneven-timing script runs
+  under both modes with `dispatch_threads=4`: **completion** reorders (out-of-order
+  `run_id`s on the wire), **arrival** emits in frame-arrival order (zero
+  inversions) while compute still runs parallel. Windows-only; skip on non-`nt`.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

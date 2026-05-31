@@ -39,11 +39,13 @@ examples/*/driver_log.json
 examples/*/_run_all.log
 examples/*/_run_all_summary.json
 
-# Per-example backend stdout/stderr logs (regenerated each run)
+# Per-example backend stdout/stderr logs (regenerated each run). The ** forms
+# cover examples with project subdirs (e.g. qa_result_order/{arrival,completion}/).
 examples/*/backend.log
 examples/*/backend.log.err
-examples/*/fe*.log
-examples/*/be*.log
+examples/**/fe*.log
+examples/**/be*.log
+examples/**/gw.log
 
 # QA team loop scratch countdown
 tmp/qa_countdown.txt

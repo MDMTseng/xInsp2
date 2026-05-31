@@ -429,7 +429,8 @@ is serial. Add to `project.json`:
   "parallelism": {
     "dispatch_threads": 4,
     "queue_depth": 100,
-    "overflow": "drop_oldest"
+    "overflow": "drop_oldest",
+    "result_order": "completion"
   }
 }
 ```
@@ -451,6 +452,18 @@ fills:
   ordering matters (archival, ML training capture).
 - **`block`**: `emit_trigger` blocks until room. Back-pressure to
   the source. Right when the source itself can throttle.
+
+`result_order` controls how per-frame results land on the wire under N > 1:
+
+- **`completion`** (default): emit as each worker finishes — lowest latency,
+  but with uneven inspect times the stream is out of frame order (sort
+  client-side by `run_id` if you care).
+- **`arrival`**: emit in frame-arrival order. A worker that finishes early
+  waits its turn before emitting, so the `vars`/preview/`run_finished` stream
+  matches trigger order and `run_id` is monotonic on the wire. Compute still
+  runs fully parallel; only emission is gated (a small latency cost). Use it
+  when a downstream consumer assumes in-order results. See
+  `examples/qa_result_order/`.
 
 Probe live state with `cmd:dispatch_stats` (Python: `c.call("dispatch_stats")`):
 
@@ -516,8 +529,9 @@ either way; the lock only serializes a single non-reentrant instance.
   **exits** so the FE supervisor respawns a clean one — it does **not**
   force-kill a worker (that would leak the per-instance lock). Long ops
   should poll `xi::cancellation_requested()` so a cooperative cancel takes.
-- **`vars` events** arrive on the wire interleaved across run_ids.
-  Order them client-side by `run_id` if order matters.
+- **`vars` events** arrive interleaved across run_ids in the default
+  `result_order: "completion"`. Set `result_order: "arrival"` (above) for an
+  in-order wire stream, or sort client-side by `run_id`.
 - **`xi::Param<T>`** reads are atomic and safe.
 - **VAR** writes go to a thread-local ValueStore — each dispatcher
   has its own.
