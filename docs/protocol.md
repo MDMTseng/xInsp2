@@ -225,6 +225,13 @@ is unavoidable (~3-5 s cold) but the run continues afterwards.
 → `data: { "run_id": <int>, "ms": <int> }`
 followed by an asynchronous `vars` message and zero or more binary previews.
 
+`cmd:run` is the **deterministic single-shot** path (UI "Run", step-through). It
+is rejected while continuous mode is active (`"cannot run while continuous mode
+is active"`) and rapid runs are serialized so their `vars`/history arrive in
+`run_id` order. Burst/throughput parallelism is the continuous-mode dispatch
+pool's job (`parallelism.dispatch_threads` + the trigger bus / fps) — `cmd:run`
+does not fan out.
+
 `frame_path` is plumbed to the script as `xi::current_frame_path()`
 (see `docs/guides/writing-a-script.md`). Empty / missing means the
 script gets an empty string. Combine with `xi::imread()` to load a
@@ -239,8 +246,10 @@ On already-running: `data: { "already": true }`.
 
 `stop args: {}` → `data: { "stopped": true }`.
 
-Continuous mode runs a single worker thread inside the backend. Each
-tick comes from one of two sources:
+Continuous mode runs `parallelism.dispatch_threads` worker threads inside
+the backend (default 1; see `docs/guides/writing-a-script.md` → Parallel
+dispatch for the pool, per-instance reentrancy, watchdog, and `result_order`).
+Each tick comes from one of two sources:
 
 - The trigger bus dispatches one inspect call per complete trigger
   (see `instance-model.md` trigger sections).

@@ -1871,6 +1871,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Serialised on g_run_mu so 8 quick `cmd:run` calls produce
         // vars/history entries in run_id order.
         // SEH translator must be installed inside the thread.
+        //
+        // cmd:run is INTENTIONALLY serial — it's the deterministic single-shot
+        // path (UI "Run", driver step-through) and is rejected outright while
+        // continuous mode is active (above). Burst/throughput parallelism is the
+        // continuous-mode dispatch pool's job (parallelism.dispatch_threads +
+        // emit_trigger / fps); fanning out cmd:run would break this run_id-order
+        // contract for no real burst gain (bursts arrive via the trigger path).
         crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "run");
         crash_ctx().last_run_id = (int)run_id;
         std::thread([&srv, run_id, frame_path = std::move(frame_path)]() {
