@@ -28,6 +28,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -53,6 +55,11 @@ struct CompileRequest {
     std::string include_dir;    // backend/include (always added)
     std::string vcvars_path;
     CompileMode mode = CompileMode::Script;
+    // Fast dev compile: /Od instead of /O2 for the Script path — much faster to
+    // COMPILE (the dev-loop bottleneck), at the cost of slower inspect runtime.
+    // Default off (optimized) so autostart/production stay /O2; the interactive
+    // compile_and_load handler turns it on unless the client asks to optimize.
+    bool fast = false;
     // OpenCV install root — REQUIRED. Plugins/scripts include
     // <opencv2/opencv.hpp> directly via xi.hpp / xi_plugin_support.hpp,
     // so the compile step needs the include + lib paths wired in.
@@ -307,6 +314,62 @@ inline std::string probe_ipp_root() {
     return {};
 }
 
+#ifdef _WIN32
+// Capture the environment vcvars64.bat sets up, ONCE per vcvars path, as a
+// CreateProcess environment block. Running vcvars64.bat costs ~1-2s and used to
+// happen on EVERY compile — the dominant dev-loop latency. We run it once, snapshot
+// `set`, and hand the block to cl.exe directly on later compiles. Returns nullptr
+// if capture failed (caller falls back to the inline vcvars path). Thread-safe.
+inline const std::vector<char>* vcvars_env_block(const std::string& vcvars) {
+    static std::mutex mu;
+    static std::map<std::string, std::vector<char>> cache;
+    std::lock_guard<std::mutex> lk(mu);
+    if (auto it = cache.find(vcvars); it != cache.end())
+        return it->second.size() > 1 ? &it->second : nullptr;
+
+    std::vector<char> block;
+    std::string cmd = "cmd /C \"\"" + vcvars + "\" >nul 2>nul && set\"";
+    if (FILE* pipe = _popen(cmd.c_str(), "r")) {
+        char line[32768];
+        bool have_vslang = false;
+        while (std::fgets(line, sizeof(line), pipe)) {
+            std::string s(line);
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+            if (s.find('=') == std::string::npos) continue;     // skip stray noise
+            if (s.rfind("VSLANG=", 0) == 0) { have_vslang = true; s = "VSLANG=1033"; }
+            block.insert(block.end(), s.begin(), s.end());
+            block.push_back('\0');
+        }
+        _pclose(pipe);
+        if (!have_vslang) {                                     // force English diags
+            static const char kV[] = "VSLANG=1033";
+            block.insert(block.end(), kV, kV + sizeof(kV) - 1);
+            block.push_back('\0');
+        }
+        block.push_back('\0');                                   // double-null terminate
+    }
+    auto& slot = (cache[vcvars] = std::move(block));
+    return slot.size() > 1 ? &slot : nullptr;
+}
+
+// Run a command line under a custom environment block; returns the process exit
+// code, or -1 if it couldn't be launched. (cl.exe is invoked via `cmd /C` so the
+// env's PATH resolves cl + the redirection works.)
+inline int run_with_env(const std::string& cmdline, const std::vector<char>& env) {
+    std::vector<char> mut(cmdline.begin(), cmdline.end());
+    mut.push_back('\0');
+    STARTUPINFOA si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessA(nullptr, mut.data(), nullptr, nullptr, FALSE, 0,
+                        (LPVOID)env.data(), nullptr, &si, &pi))
+        return -1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0; GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    return (int)code;
+}
+#endif // _WIN32
+
 } // namespace detail
 
 // Reject paths containing shell metacharacters to prevent command injection.
@@ -377,19 +440,24 @@ inline CompileResult compile(const CompileRequest& req) {
     //  /link /IMPLIB:NUL  (cl auto-generates an import lib; redirect to
     //                 intermediates dir to keep output_dir tidy)
     //
+    // Dev-loop latency: running vcvars64.bat per compile cost ~1-2s. Capture its
+    // environment once (detail::vcvars_env_block) and run cl.exe directly under it.
+    // Only when that capture fails do we fall back to the inline vcvars path.
+#ifdef _WIN32
+    const std::vector<char>* cl_env = detail::vcvars_env_block(vcvars);
+#else
+    const std::vector<char>* cl_env = nullptr;
+#endif
     std::string cmd;
     cmd += "cmd /C \"";
-    cmd += "\"" + vcvars + "\"";
-    cmd += " >nul 2>nul && ";
-    // Force English diagnostics regardless of system locale. Without
-    // this, cl.exe / link.exe emit messages in whatever language the
-    // OS UI is set to (Traditional Chinese / Japanese / German / ...)
-    // which (a) confuses agents and tools that expect English keywords
-    // for parsing, and (b) round-trips through the local code page on
-    // the way to the SDK, producing mojibake. /utf-8 is already passed
-    // below for source + execution charset, but it doesn't override
-    // the diagnostic language. VSLANG=1033 == LCID for en-US.
-    cmd += "set VSLANG=1033 && ";
+    if (!cl_env) {
+        cmd += "\"" + vcvars + "\"";
+        cmd += " >nul 2>nul && ";
+        // Force English diagnostics regardless of system locale (cl localizes to
+        // the OS UI language → mojibake / unparseable on non-en hosts). VSLANG=1033
+        // == en-US. When cl_env is used, VSLANG=1033 is baked into that block.
+        cmd += "set VSLANG=1033 && ";
+    }
     // Mode-dependent codegen flags:
     //   Script        → /O2 /Z7 — Release perf + symbolicated crash stacks.
     //                   The inspect script is where most crashes originate
@@ -406,6 +474,7 @@ inline CompileResult compile(const CompileRequest& req) {
     const char* opt_flags =
         (req.mode == CompileMode::PluginDev) ? "/Od /Zi /RTC1"
       : (req.mode == CompileMode::PluginExport) ? "/O2 /Zi"
+      : (req.mode == CompileMode::Script && req.fast) ? "/Od /Z7"   // fast dev iterate
       : "/O2 /Z7";
     cmd += "cl.exe /nologo /std:c++20 /LD /EHsc /MD ";
     cmd += opt_flags;
@@ -495,7 +564,11 @@ inline CompileResult compile(const CompileRequest& req) {
     cmd += " > \"" + log_path.string() + "\" 2>&1";
     cmd += "\"";
 
+#ifdef _WIN32
+    int rc = cl_env ? detail::run_with_env(cmd, *cl_env) : std::system(cmd.c_str());
+#else
     int rc = std::system(cmd.c_str());
+#endif
     // Sanitize the build log for the WS text frame, which must be UTF-8. On a
     // non-English Windows cl.exe emits localized diagnostics in the local code
     // page; ensure_utf8 transcodes them so they're never mojibake on the wire.

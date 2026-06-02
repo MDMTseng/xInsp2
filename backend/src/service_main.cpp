@@ -1603,6 +1603,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         req.opencv_dir      = g_opencv_dir;
         req.turbojpeg_root  = g_turbojpeg_root;
         req.ipp_root        = g_ipp_root;
+        // Fast dev compile (/Od) by default — the interactive edit→run loop wants
+        // fast COMPILE, not fast runtime. A client benchmarking / the autostart
+        // boot path passes "optimize":true to get /O2. (Both spacings, like has_ui.)
+        bool want_optimize = parsed->args_json.find("\"optimize\":true") != std::string::npos ||
+                             parsed->args_json.find("\"optimize\": true") != std::string::npos;
+        req.fast = !want_optimize;
 
         // P2-6: emit a `compile_started` event before kicking off cl.exe.
         // compile_and_load is a request/response that can take 4+ s on a
@@ -3698,9 +3704,11 @@ int main(int argc, char** argv) {
                     script.empty() ? "none given" : script.c_str());
             } else {
                 std::fprintf(stderr, "[xinsp2] autostart: compile_and_load %s\n", script.c_str());
+                // Production/headless boot wants the OPTIMIZED (/O2) build, not the
+                // interactive /Od fast-dev default.
                 handle_command(srv,
                     "{\"type\":\"cmd\",\"id\":2,\"name\":\"compile_and_load\",\"args\":{\"path\":"
-                    + xp::json_escape(script) + "}}");
+                    + xp::json_escape(script) + ",\"optimize\":true}}");
 
                 // Confirm the script actually loaded. A failed compile leaves the
                 // port up (operator can attach + fix) but the line CANNOT inspect,
