@@ -30,22 +30,25 @@
   <h2>{{NAME}} — synthetic source</h2>
   <div class="hint">Background worker emits a frame every interval. Start to begin pushing into the trigger bus.</div>
   <div class="card">
+    <!-- data-param / data-action: stable param-name / action selectors for
+         automated UI tests (h.setParam / h.action). See
+         docs/guides/plugin-ui-conventions.md. -->
     <div class="row">
       <label>Width</label>
-      <input id="w" type="number" min="1" max="8192" value="640">
+      <input id="w" data-param="width" type="number" min="1" max="8192" value="640">
       <label style="min-width:60px">Height</label>
-      <input id="h" type="number" min="1" max="8192" value="480">
+      <input id="h" data-param="height" type="number" min="1" max="8192" value="480">
     </div>
     <div class="row">
       <label>Interval ms</label>
-      <input id="iv" type="number" min="1" max="10000" value="100">
-      <button id="apply">Apply size/interval</button>
+      <input id="iv" data-param="interval_ms" type="number" min="1" max="10000" value="100">
+      <button id="apply" data-action="apply">Apply size/interval</button>
     </div>
   </div>
   <div class="card">
     <div class="row">
-      <button id="start">Start</button>
-      <button id="stop" class="stop">Stop</button>
+      <button id="start" data-action="start">Start</button>
+      <button id="stop" data-action="stop" class="stop">Stop</button>
     </div>
     <div class="stat"><span class="k">State:</span>  <span id="state" class="v stopped">stopped</span></div>
     <div class="stat"><span class="k">Frames emitted:</span> <span id="count" class="v">0</span></div>

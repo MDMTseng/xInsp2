@@ -35,22 +35,25 @@ The numeric breakdown helps you tell whether <code>min_area</code> /
   <div class="card-title">Parameters</div>
   <div class="field">
     <label>Close radius</label>
-    <input type="range" id="close" min="0" max="12" step="1">
+    <input type="range" id="close" data-param="close_radius" min="0" max="12" step="1">
     <div class="num" id="close-v">2</div>
   </div>
   <div class="field">
     <label>Min area (px)</label>
-    <input type="range" id="min" min="0" max="5000" step="10">
+    <input type="range" id="min" data-param="min_area" min="0" max="5000" step="10">
     <div class="num" id="min-v">300</div>
   </div>
   <div class="field">
     <label>Max area (px)</label>
-    <input type="range" id="max" min="100" max="20000" step="50">
+    <input type="range" id="max" data-param="max_area" min="100" max="20000" step="50">
     <div class="num" id="max-v">4000</div>
   </div>
   <div class="actions">
-    <button id="apply">Apply</button>
-    <button id="reset" class="secondary">Reset</button>
+    <!-- data-param / data-action: stable, param-name-keyed selectors for
+         automated UI tests (h.setParam / h.action), decoupled from the
+         author-chosen element ids. See docs/guides/plugin-ui-conventions.md. -->
+    <button id="apply" data-action="apply">Apply</button>
+    <button id="reset" data-action="reset" class="secondary">Reset</button>
   </div>
 </div>
 

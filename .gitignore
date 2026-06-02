@@ -47,6 +47,9 @@ examples/**/backend*.log
 examples/**/fe*.log
 examples/**/be*.log
 examples/**/gw.log
+# Plugin UI test screenshots (regenerated each run by run_ui_test.mjs)
+examples/**/tests/screenshots/
+sdk/**/tests/screenshots/
 # FE crash history + preserved dumps + status snapshot (regenerated each run)
 examples/**/crash-history.jsonl
 examples/**/crash-dumps/

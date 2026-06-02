@@ -44,6 +44,32 @@ async function makeHelpers(pluginFolder, opts = {}) {
             return r;
         },
 
+        // Copy the plugin-under-test's SOURCE into <project>/plugins/<name>/ so
+        // open_project compiles it as a TRUSTED PROJECT PLUGIN (no pre-built DLL
+        // / cert needed). Examples ship source but no built DLL, so the scan path
+        // (XINSP2_EXTRA_PLUGIN_DIRS) can't instantiate them — call this right
+        // after createProject to make addInstance work from source. Excludes
+        // build/ and tests/ (recompiled / not needed in the project copy).
+        async useProjectPlugin(projectFolder, pluginName) {
+            const name = pluginName || path.basename(pluginFolder);
+            const dest = path.join(projectFolder, 'plugins', name);
+            fs.mkdirSync(dest, { recursive: true });
+            const skip = new Set(['build', 'tests', 'node_modules', '.git']);
+            const copyTree = (s, d) => {
+                for (const e of fs.readdirSync(s, { withFileTypes: true })) {
+                    if (e.isDirectory() && skip.has(e.name)) continue;
+                    const sp = path.join(s, e.name), dp = path.join(d, e.name);
+                    if (e.isDirectory()) { fs.mkdirSync(dp, { recursive: true }); copyTree(sp, dp); }
+                    else fs.copyFileSync(sp, dp);
+                }
+            };
+            copyTree(pluginFolder, dest);
+            // Reopen so the backend rescans + compiles the project plugin.
+            await vscode.commands.executeCommand('xinsp2.openProject', projectFolder);
+            await h.sleep(300);
+            return dest;
+        },
+
         async addInstance(name, plugin) {
             const r = await vscode.commands.executeCommand('xinsp2.createInstance', name, plugin);
             if (!r || !r.ok) throw new Error(`addInstance(${name}, ${plugin}) failed: ${JSON.stringify(r)}`);
@@ -58,6 +84,15 @@ async function makeHelpers(pluginFolder, opts = {}) {
 
         click:    (instance, selector)          => api.clickInWebview(instance, selector),
         setInput: (instance, selector, value)   => api.setInputInWebview(instance, selector, value),
+
+        // Convention-based controls (docs/guides/plugin-ui-conventions.md): target
+        // by canonical PARAM NAME via [data-param="<name>"] / [data-action="<name>"]
+        // instead of author-chosen element ids — so a generic harness can drive any
+        // plugin's UI from its manifest param list without reading its HTML.
+        setParam: (instance, param, value) =>
+            api.setInputInWebview(instance, `[data-param="${param}"]`, value),
+        action:   (instance, name)         =>
+            api.clickInWebview(instance, `[data-action="${name}"]`),
 
         async sendCmd(instance, cmd) {
             const r = await api.sendCmd('exchange_instance', { name: instance, cmd });

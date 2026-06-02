@@ -2959,13 +2959,19 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         auto iname  = xp::get_string_field(parsed->args_json, "name");
         auto plugin = xp::get_string_field(parsed->args_json, "plugin");
         if (!iname || !plugin) { send_rsp_err(srv, id, "missing name or plugin"); return; }
-        // Ensure plugin is loaded
-        g_plugin_mgr.load_plugin(*plugin);
-        auto* ii = g_plugin_mgr.create_instance(*iname, *plugin);
+        // Ensure plugin is loaded — surface WHY if it can't be (missing DLL,
+        // failed cert, ABI mismatch, etc.) instead of a generic failure.
+        std::string load_err;
+        if (!g_plugin_mgr.load_plugin(*plugin, &load_err)) {
+            send_rsp_err(srv, id, load_err.empty() ? "failed to load plugin" : load_err);
+            return;
+        }
+        std::string create_err;
+        auto* ii = g_plugin_mgr.create_instance(*iname, *plugin, &create_err);
         if (ii) {
             send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         } else {
-            send_rsp_err(srv, id, "failed to create instance");
+            send_rsp_err(srv, id, create_err.empty() ? "failed to create instance" : create_err);
         }
     } else if (name == "remove_instance") {
         auto iname = xp::get_string_field(parsed->args_json, "name");

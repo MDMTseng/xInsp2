@@ -1016,26 +1016,36 @@ public:
     // BASELINE_VERSION, runs baseline tests and writes cert.json on pass.
     // A failed certification unloads the DLL and returns false — the
     // plugin cannot be instantiated until the developer fixes the issue.
-    bool load_plugin(const std::string& name) {
+    // err (optional): on failure, filled with a human-readable reason so callers
+    // (the create_instance handler) can surface WHY instead of a generic message.
+    bool load_plugin(const std::string& name, std::string* err = nullptr) {
+        auto fail = [&](std::string msg) { if (err) *err = std::move(msg); return false; };
         std::lock_guard<std::mutex> lk(mu_);
         auto it = plugins_.find(name);
-        if (it == plugins_.end()) return false;
+        if (it == plugins_.end())
+            return fail("plugin '" + name + "' not found (not in any plugins dir or the open project)");
         auto& pi = it->second;
         if (pi.handle) return true; // already loaded
 
         auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
-        if (!std::filesystem::exists(dll_path)) return false;
+        if (!std::filesystem::exists(dll_path))
+            return fail("plugin '" + name + "': built DLL not found at " + dll_path.string() +
+                        " - it has source but no compiled DLL. Open it as a project plugin "
+                        "(copy into <project>/plugins/ + open_project) to compile from source, "
+                        "or build + certify it for the scan path.");
 
         pi.handle = LoadLibraryA(dll_path.string().c_str());
-        if (!pi.handle) return false;
+        if (!pi.handle)
+            return fail("plugin '" + name + "': LoadLibrary failed for " + dll_path.string() +
+                        " (Windows error " + std::to_string(GetLastError()) + ")");
 
         {
-            std::string err;
-            if (!plugin_abi_compatible(pi.handle, name, &err)) {
-                std::fprintf(stderr, "[xinsp2] %s\n", err.c_str());
+            std::string aerr;
+            if (!plugin_abi_compatible(pi.handle, name, &aerr)) {
+                std::fprintf(stderr, "[xinsp2] %s\n", aerr.c_str());
                 FreeLibrary(pi.handle);
                 pi.handle = nullptr;
-                return false;
+                return fail(aerr);
             }
         }
 
@@ -1068,7 +1078,9 @@ public:
                     FreeLibrary(pi.handle);
                     pi.handle = nullptr;
                     pi.c_factory = nullptr;
-                    return false;
+                    return fail("plugin '" + name + "': certification failed (" +
+                                std::to_string(summary.fail_count) + " baseline test(s) failed; "
+                                "see backend log for details)");
                 }
             }
         } else {
@@ -1076,7 +1088,10 @@ public:
             pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
                 GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
         }
-        return pi.c_factory != nullptr || pi.factory != nullptr;
+        if (pi.c_factory == nullptr && pi.factory == nullptr)
+            return fail("plugin '" + name + "': factory symbol '" + pi.factory_symbol +
+                        "' not found in the DLL");
+        return true;
     }
 
     // List all discovered plugins (loaded or not).
@@ -1604,14 +1619,19 @@ public:
 
     // Create a new instance of a plugin inside the current project.
     InstanceInfo* create_instance(const std::string& instance_name,
-                                   const std::string& plugin_name) {
+                                   const std::string& plugin_name,
+                                   std::string* err = nullptr) {
+        auto fail = [&](std::string msg) -> InstanceInfo* { if (err) *err = std::move(msg); return nullptr; };
         std::lock_guard<std::mutex> lk(mu_);
-        if (project_.folder_path.empty()) return nullptr;
+        if (project_.folder_path.empty())
+            return fail("no project open — open_project before creating an instance");
 
         auto pit = plugins_.find(plugin_name);
-        if (pit == plugins_.end()) return nullptr;
+        if (pit == plugins_.end())
+            return fail("plugin '" + plugin_name + "' not loaded");
         auto& pi = pit->second;
-        if (!pi.factory && !pi.c_factory) return nullptr;
+        if (!pi.factory && !pi.c_factory)
+            return fail("plugin '" + plugin_name + "' has no factory (load_plugin failed?)");
 
         auto inst_folder = std::filesystem::path(project_.folder_path) / "instances" / instance_name;
         std::filesystem::create_directories(inst_folder);
@@ -1644,7 +1664,8 @@ public:
             if (!raw) {
                 ImagePool::instance().release_all_for(pre_owner);
                 InstanceFolderRegistry::instance().clear(instance_name);
-                return nullptr;
+                return fail("plugin '" + plugin_name + "' factory returned null "
+                            "(constructor failed/rejected the config)");
             }
             auto adapter = std::make_shared<CAbiInstanceAdapter>(
                 instance_name, plugin_name, pi.handle, raw, pi.reentrant, /*max_concurrency=*/0);
@@ -1653,7 +1674,7 @@ public:
         } else {
             // Old-style factory
             auto* raw = pi.factory(instance_name.c_str());
-            if (!raw) return nullptr;
+            if (!raw) return fail("plugin '" + plugin_name + "' factory returned null");
             ii.instance.reset(raw);
         }
         InstanceRegistry::instance().add(ii.instance);

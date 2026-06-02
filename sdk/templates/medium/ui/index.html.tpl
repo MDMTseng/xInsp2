@@ -23,7 +23,10 @@
   <div class="card">
     <div class="row">
       <label>Threshold</label>
-      <input id="thr" type="range" min="0" max="255" value="128">
+      <!-- data-param="<canonical_name>" lets automated UI tests target this
+           control by param name (h.setParam) regardless of the element id.
+           See docs/guides/plugin-ui-conventions.md. -->
+      <input id="thr" data-param="threshold" type="range" min="0" max="255" value="128">
       <span id="thrV" class="val">128</span>
     </div>
   </div>
