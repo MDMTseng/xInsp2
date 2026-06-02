@@ -58,6 +58,7 @@ inline void enrich_from_crash_report(const std::string& be_log, SafeStateEvent& 
     while (!dmp.empty() && (dmp.back() == '\r' || dmp.back() == '\n' || dmp.back() == ' '))
         dmp.pop_back();
 
+    ev.dump_path = dmp;
     std::filesystem::path json_path =
         std::filesystem::path(dmp).replace_extension(".json");
     ev.report_path = json_path.string();

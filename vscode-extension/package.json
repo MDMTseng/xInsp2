@@ -398,6 +398,11 @@
           ],
           "description": "Who owns the backend process. On a production line the xinsp-fe supervisor owns it (use 'attach'); for local development use 'managed'. 'auto' picks based on whether a backend is already listening. See docs/design/fe-be-split.md."
         },
+        "xinsp2.feStatusFile": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the xinsp-fe supervisor's status file (fe-status.json). When set (attach mode), the status bar shows the supervisor's TRUE state — recovering vs latched, the death reason, and respawn budget — instead of inferring 'down' from a WebSocket disconnect. The FE writes this next to its --be-log by default; pass the same path here. See docs/design/fe-be-split.md."
+        },
         "xinsp2.autoRespawn": {
           "type": "boolean",
           "default": true,

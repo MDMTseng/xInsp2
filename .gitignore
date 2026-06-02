@@ -46,6 +46,11 @@ examples/*/backend.log.err
 examples/**/fe*.log
 examples/**/be*.log
 examples/**/gw.log
+# FE crash history + preserved dumps + status snapshot (regenerated each run)
+examples/**/crash-history.jsonl
+examples/**/crash-dumps/
+examples/**/fe-status.json
+examples/**/fe-status.json.tmp
 
 # Transactional project working copies (BE scratch; regenerated on open).
 .xinsp_work/

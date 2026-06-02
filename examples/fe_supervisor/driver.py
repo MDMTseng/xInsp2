@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import socket
+import json
 import subprocess
 import sys
 import time
@@ -43,6 +44,8 @@ FE_EXE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-fe{EXE_SUFFIX}"
 PORT = 7839
 FE_LOG = ROOT / "fe.log"
 BE_LOG = ROOT / "be.log"
+CRASH_HISTORY = ROOT / "crash-history.jsonl"   # default lands next to --be-log
+STATUS_FILE = ROOT / "fe-status.json"          # default lands next to --be-log
 MAX_WAIT_S = 120.0
 
 
@@ -63,6 +66,11 @@ def main() -> int:
                  f"build it: cmake --build backend/build --config Release --target xinsp_fe xinsp_backend")
     if port_open():
         sys.exit(f"FAIL: something already listening on :{PORT}; pick a free port")
+
+    # The crash history is append-only (it must survive FE restarts in prod), so
+    # clear last run's file for a clean slate before this run.
+    CRASH_HISTORY.unlink(missing_ok=True)
+    STATUS_FILE.unlink(missing_ok=True)
 
     fe_log = open(FE_LOG, "wb")
     proc = subprocess.Popen(
@@ -124,6 +132,57 @@ def main() -> int:
     elif rc != 2:
         # rc 2 is the documented "respawn limit exceeded" exit; tolerate but note.
         print(f"[note] FE exit code was {rc} (expected 2 for respawn-cap path)")
+
+    # Crash history: the FE should have appended one structured JSONL record per
+    # death — the whole crash-loop story in one file, ending with cap_hit=true.
+    if not CRASH_HISTORY.exists():
+        failures.append(f"no crash-history.jsonl written ({CRASH_HISTORY})")
+    else:
+        recs = []
+        for ln in CRASH_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines():
+            ln = ln.strip()
+            if ln:
+                try:
+                    recs.append(json.loads(ln))
+                except json.JSONDecodeError as e:
+                    failures.append(f"crash-history line is not valid JSON: {e}")
+        print(f"---- crash-history.jsonl: {len(recs)} record(s) ----")
+        if not recs:
+            failures.append("crash-history.jsonl had no records")
+        else:
+            # consecutive count must increase monotonically 1..N over the run.
+            consec = [r.get("consecutive") for r in recs]
+            if consec != list(range(1, len(recs) + 1)):
+                failures.append(f"consecutive counts not 1..N: {consec}")
+            if not any(r.get("cap_hit") for r in recs):
+                failures.append("no record marked cap_hit=true (cap should have tripped)")
+            last = recs[-1]
+            if last.get("reason") != "BackendExit" or last.get("exception") != "ACCESS_VIOLATION":
+                failures.append(f"last record missing expected forensics: {last}")
+            if not last.get("dump", "").endswith(".dmp"):
+                failures.append(f"record missing minidump path: {last.get('dump')!r}")
+
+    # Status channel: the FE rewrites fe-status.json on every transition. After the
+    # cap, it should reflect a latched safe state with the death's forensics — the
+    # UI reads THIS instead of inferring "down" from a WS disconnect.
+    if not STATUS_FILE.exists():
+        failures.append(f"no fe-status.json written ({STATUS_FILE})")
+    else:
+        try:
+            st = json.loads(STATUS_FILE.read_text(encoding="utf-8", errors="ignore"))
+            print(f"---- fe-status.json ----\n  {json.dumps(st)}")
+            # End state after the cap: stopped (the FE exits) or safe, but latched.
+            if not st.get("latched"):
+                failures.append(f"status not latched after cap: {st}")
+            if st.get("reason") != "RespawnLimitExceeded":
+                failures.append(f"status reason not RespawnLimitExceeded: {st.get('reason')!r}")
+            if st.get("respawn_max") != 5:
+                failures.append(f"status respawn_max wrong: {st.get('respawn_max')!r}")
+            le = st.get("last_event") or {}
+            if le.get("exception") != "ACCESS_VIOLATION":
+                failures.append(f"status last_event missing forensics: {le}")
+        except json.JSONDecodeError as e:
+            failures.append(f"fe-status.json is not valid JSON: {e}")
 
     # No orphan: the FE's Job Object should have killed the backend on close.
     time.sleep(1.0)

@@ -384,6 +384,23 @@ export function activate(context: vscode.ExtensionContext) {
     const healthStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 101);
     healthStatus.command = 'xinsp2.restartBackend';
     context.subscriptions.push(healthStatus);
+    // Authoritative FE state, populated by the fe-status.json watcher below (attach
+    // mode only). When present it replaces the "infer down from a WS drop" guess
+    // with the supervisor's real state (recovering vs latched, reason, forensics).
+    let latestFeStatus: any = undefined;
+    const feTooltip = (s: any, lead: string): string => {
+        const lines = [lead];
+        if (s.reason) lines.push(`reason: ${s.reason}`);
+        if (typeof s.respawn_max === 'number' && s.respawn_max > 0)
+            lines.push(`respawns: ${s.consecutive ?? 0}/${s.respawn_max}`);
+        const e = s.last_event;
+        if (e && e.exception)
+            lines.push(`last crash: ${e.exception}${e.module ? ' in ' + e.module : ''}`
+                + `${e.phase ? ' @ ' + e.phase : ''}`);
+        if (s.crash_history) lines.push(`history: ${s.crash_history}`);
+        lines.push('The xinsp-fe supervisor owns this backend; the extension does not manage it.');
+        return lines.join('\n');
+    };
     const updateHealthStatus = (connected: boolean) => {
         if (connected) {
             healthStatus.text = attachMode ? '$(plug) xInsp2 · attached' : '$(zap) xInsp2';
@@ -391,9 +408,30 @@ export function activate(context: vscode.ExtensionContext) {
                 ? 'Attached to a backend managed by the xinsp-fe supervisor.'
                 : 'xInsp2 backend connected. Click to restart.';
             healthStatus.backgroundColor = undefined;
+        } else if (attachMode && latestFeStatus) {
+            // Drive the indicator from the FE's TRUE state, not the WS drop.
+            const s = latestFeStatus;
+            if (s.latched) {
+                // The FE gave up (RespawnLimitExceeded / comms gaveup) — stop
+                // implying recovery; this needs a human.
+                healthStatus.text = '$(error) xInsp2 · LATCHED';
+                healthStatus.tooltip = feTooltip(s,
+                    'Backend down and the supervisor gave up — manual restart required.');
+                healthStatus.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+            } else if (s.state === 'safe' || s.state === 'starting') {
+                const budget = (s.respawn_max > 0) ? ` (${s.consecutive ?? 0}/${s.respawn_max})` : '';
+                healthStatus.text = `$(shield) xInsp2 · safe${budget}`;
+                healthStatus.tooltip = feTooltip(s,
+                    'Backend down — the xinsp-fe supervisor is recovering it; line in safe state.');
+                healthStatus.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            } else {
+                // state "stopped" (clean) or unknown — the line is simply down.
+                healthStatus.text = '$(debug-disconnect) xInsp2 · offline';
+                healthStatus.tooltip = feTooltip(s, 'Backend stopped (supervisor not recovering).');
+                healthStatus.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            }
         } else if (attachMode) {
-            // In attach mode the FE owns recovery; a dropped connection means
-            // the backend is down and the line is in its safe state.
+            // No status file configured — fall back to inferring from the WS drop.
             healthStatus.text = '$(shield) xInsp2 · safe';
             healthStatus.tooltip = 'Backend down — the xinsp-fe supervisor is recovering it; '
                 + 'the line is in its safe state. The extension does not manage this backend.';
@@ -478,6 +516,28 @@ export function activate(context: vscode.ExtensionContext) {
     let lastInstanceCount = 0;
     let lastPluginCount = 0;
     let lastConnected = false;
+
+    // ---- FE status channel (attach mode) -----------------------------------
+    // The xinsp-fe supervisor rewrites a small fe-status.json on every transition
+    // (see docs/design/fe-be-split.md). When the path is configured we poll it and
+    // drive the health indicator from the supervisor's TRUE state instead of
+    // inferring "down" from a WS disconnect. Poll (not fs.watch): the FE writes via
+    // atomic rename, which fs.watch reports unreliably across editors; the file is
+    // tiny. Only meaningful while disconnected — a live WS is authoritative.
+    const feStatusPath = (config.get<string>('feStatusFile', '') || '').trim();
+    if (feStatusPath) {
+        output.appendLine(`[xinsp2] FE status channel: ${feStatusPath}`);
+        const fsmod = require('fs') as typeof import('fs');
+        const readFeStatus = () => {
+            try {
+                latestFeStatus = JSON.parse(fsmod.readFileSync(feStatusPath, 'utf8'));
+            } catch { /* missing / mid-write — keep the last good snapshot */ }
+            if (!lastConnected) updateHealthStatus(false);
+        };
+        readFeStatus();
+        const feIv = setInterval(readFeStatus, 1500);
+        context.subscriptions.push({ dispose: () => clearInterval(feIv) });
+    }
 
     // CodeLens for instance/param declarations
     const codeLensProvider = new InstanceCodeLensProvider();
@@ -626,9 +686,12 @@ export function activate(context: vscode.ExtensionContext) {
         setViewBadge(false, 0, 0);
         if (attachMode) {
             // The FE owns recovery; make clear the extension isn't going to
-            // respawn and that the line is safe in the meantime.
-            vscode.window.setStatusBarMessage(
-                'xInsp2: backend down — xinsp-fe supervisor recovering (line in safe state)', 6000);
+            // respawn. Word it from the FE's true state when we have it: a latched
+            // supervisor isn't "recovering" — it needs a human.
+            const msg = (latestFeStatus && latestFeStatus.latched)
+                ? `xInsp2: backend down — supervisor gave up (${latestFeStatus.reason || 'RespawnLimitExceeded'}); manual restart required`
+                : 'xInsp2: backend down — xinsp-fe supervisor recovering (line in safe state)';
+            vscode.window.setStatusBarMessage(msg, 6000);
         }
     });
 

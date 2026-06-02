@@ -56,6 +56,7 @@ struct SafeStateEvent {
     std::string     faulting_module;    // e.g. "plugin_v0.dll"
     std::string     last_phase;         // dispatch-thread breadcrumb, e.g. "inspect"
     std::string     report_path;        // path to the .json crash report, if any
+    std::string     dump_path;          // path to the .dmp minidump, if any
     int64_t         ts_ms        = 0;   // wall-clock ms when the FE decided to go safe
 };
 

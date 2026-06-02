@@ -19,6 +19,8 @@
 //
 #include <xi/xi_safe_state.hpp>
 #include <xi/xi_crash_report.hpp>     // xi::enrich_from_crash_report (unit-tested)
+#include <xi/xi_crash_history.hpp>    // xi::CrashHistory (structured BE-death JSONL)
+#include <xi/xi_fe_status.hpp>        // xi::FeStatus (live status snapshot -> JSON file)
 #include <xi/xi_respawn_policy.hpp>   // xi::RespawnTracker (unit-tested)
 #include <xi/xi_safe_state_plc.hpp>   // xi::make_plc_sink (tcp:/udp: safe-state)
 
@@ -94,6 +96,20 @@ struct FeConfig {
     // and the backend resumes the scratch (settings survive). See
     // docs/guides/project-working-copy.md.
     bool        working_copy = false;
+    // Crash history: every BE death appends one structured JSONL record (death
+    // reason, rc, parsed forensics, consecutive count, cap-hit) — the FE is the
+    // only process that survives every death, so it owns the timeline. Default
+    // lands next to be_log; empty disables. preserve_dumps copies each referenced
+    // .dmp (+ .json) into preserve_dir so a %TEMP% cleanup can't lose it.
+    // See docs/design/fe-be-split.md.
+    std::string crash_history;     // JSONL path (default: <be_log dir>/crash-history.jsonl)
+    bool        preserve_dumps = false;
+    std::string preserve_dir;      // default: <be_log dir>/crash-dumps
+    // Status channel: the FE rewrites this small JSON file (atomically) on every
+    // transition so the UI / an operator HMI can read the line's TRUE state
+    // (safe/healthy, reason, respawn budget, comms, last death) instead of
+    // inferring "down" from a WS disconnect. Default next to be_log; empty/"-" off.
+    std::string status_file;       // default: <be_log dir>/fe-status.json
 };
 
 static std::string arg_value(int argc, char** argv, const char* flag) {
@@ -162,6 +178,11 @@ static FeConfig load_config(int argc, char** argv) {
             num("comms_port", c.comms_port);
             str("comms_exe", c.comms_exe);
             str("comms_log", c.comms_log);
+            str("crash_history", c.crash_history);
+            str("preserve_dir", c.preserve_dir);
+            str("status_file", c.status_file);
+            if (cJSON* pdmp = cJSON_GetObjectItem(root, "preserve_dumps"); cJSON_IsBool(pdmp))
+                c.preserve_dumps = cJSON_IsTrue(pdmp);
             if (cJSON* wc = cJSON_GetObjectItem(root, "working_copy"); cJSON_IsBool(wc))
                 c.working_copy = cJSON_IsTrue(wc);
             num("respawn_max", c.respawn_max);
@@ -191,6 +212,12 @@ static FeConfig load_config(int argc, char** argv) {
     if (auto v = arg_value(argc, argv, "--comms-port");  !v.empty()) try { c.comms_port = std::stoi(v); } catch (...) {}
     if (auto v = arg_value(argc, argv, "--comms-exe");   !v.empty()) c.comms_exe = v;
     if (auto v = arg_value(argc, argv, "--comms-log");   !v.empty()) c.comms_log = v;
+    if (auto v = arg_value(argc, argv, "--crash-history"); !v.empty()) c.crash_history = v;
+    if (auto v = arg_value(argc, argv, "--preserve-dir");  !v.empty()) c.preserve_dir = v;
+    if (auto v = arg_value(argc, argv, "--status-file");   !v.empty()) c.status_file = v;
+    if (has_flag(argc, argv, "--no-status-file")) c.status_file = "-";  // explicit off
+    if (has_flag(argc, argv, "--preserve-dumps")) c.preserve_dumps = true;
+    if (has_flag(argc, argv, "--no-crash-history")) c.crash_history = "-";  // explicit off
     if (has_flag(argc, argv, "--working-copy")) c.working_copy = true;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -209,6 +236,20 @@ static FeConfig load_config(int argc, char** argv) {
         if (c.comms_port == 0)     c.comms_port = c.port + 1;
         if (c.comms_exe.empty())   c.comms_exe = discover_sibling_exe("xinsp-comms");
         if (c.comms_log.empty())   c.comms_log = c.be_log + ".comms";
+    }
+    // Crash history defaults next to be_log; "-" means explicitly disabled.
+    if (c.crash_history == "-") {
+        c.crash_history.clear();
+    } else if (c.crash_history.empty()) {
+        c.crash_history = (fs::path(c.be_log).parent_path() / "crash-history.jsonl").string();
+    }
+    if (c.preserve_dumps && c.preserve_dir.empty())
+        c.preserve_dir = (fs::path(c.be_log).parent_path() / "crash-dumps").string();
+    // Status file defaults next to be_log; "-" means explicitly disabled.
+    if (c.status_file == "-") {
+        c.status_file.clear();
+    } else if (c.status_file.empty()) {
+        c.status_file = (fs::path(c.be_log).parent_path() / "fe-status.json").string();
     }
     return c;
 }
@@ -247,6 +288,29 @@ static long long read_heartbeat(const std::string& path) {
 // Win32 supervisor
 // ----------------------------------------------------------------------------
 static std::atomic<bool> g_stop{false};   // set by console-ctrl handler
+
+// Write the FE status snapshot atomically: a reader (the UI) must never observe a
+// half-written file. Write a sibling .tmp then MoveFileEx-replace it (atomic on
+// the same volume). Best-effort: a failed status write must never take the
+// supervisor down. TODO(linux): write tmp + std::filesystem::rename (POSIX rename
+// atomically replaces; MoveFileEx is the Windows equivalent).
+static void publish_status(const FeConfig& c, xi::FeStatus& st) {
+    if (c.status_file.empty()) return;
+    st.ts_ms = now_ms();
+    std::string json = st.render();
+    std::string tmp  = c.status_file + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        f << json;
+        if (!f) return;
+    }
+    if (!MoveFileExA(tmp.c_str(), c.status_file.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::error_code ec;
+        fs::rename(tmp, c.status_file, ec);   // best-effort fallback
+    }
+}
 
 static BOOL WINAPI ctrl_handler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
@@ -404,6 +468,27 @@ static int run_supervisor(const FeConfig& c) {
                  c.backend_exe.c_str(), c.port, c.project.c_str(), c.autostart_fps, sink->name());
     std::fprintf(stderr, "[xinsp-fe] BE log -> %s\n", c.be_log.c_str());
 
+    // Structured crash history: one JSONL record per BE death (the FE is the only
+    // process that survives every death, so it owns the timeline). The BE writes
+    // the dumps; the FE only references them (+ optionally preserves them).
+    xi::CrashHistory history(c.crash_history, c.preserve_dir);
+    if (history.enabled()) {
+        std::fprintf(stderr, "[xinsp-fe] crash history -> %s%s\n", c.crash_history.c_str(),
+                     c.preserve_dir.empty() ? "" : (" (dumps -> " + c.preserve_dir + ")").c_str());
+    }
+
+    // Live status snapshot, republished (atomically) on every transition so the
+    // UI reads the line's TRUE state instead of inferring it from a WS drop.
+    xi::FeStatus st;
+    st.respawn_max   = c.respawn_max;
+    st.port          = c.port;
+    st.working_copy  = c.working_copy;
+    st.crash_history = c.crash_history;
+    st.state         = "starting";
+    if (!c.status_file.empty())
+        std::fprintf(stderr, "[xinsp-fe] status -> %s\n", c.status_file.c_str());
+    publish_status(c, st);
+
     // Job object: kill the BE if the FE dies, so it can never orphan.
     HANDLE job = CreateJobObjectA(nullptr, nullptr);
     if (job) {
@@ -423,9 +508,11 @@ static int run_supervisor(const FeConfig& c) {
     if (comms_enabled) {
         std::fprintf(stderr, "[xinsp-fe] comms gateway: %s plc=%s listen=%d\n",
                      c.comms_exe.c_str(), c.comms_plc.c_str(), c.comms_port);
+        st.comms_enabled = true;
         gw = spawn_gateway(c, job);
         if (gw.ok) {
             gw_healthy_since = now_ms();
+            st.comms_state = "up";
             std::fprintf(stderr, "[xinsp-fe] comms gateway up pid=%lu\n", gw.pi.dwProcessId);
         } else {
             // Can't bring the PLC link up at all -> the line is comms-lost now.
@@ -433,6 +520,9 @@ static int run_supervisor(const FeConfig& c) {
             ev.ts_ms = now_ms();
             sink->enter_safe_state(ev);
             comms_down = comms_gaveup = true;
+            st.comms_state = "gaveup";
+            st.state = "safe"; st.reason = "CommsLost"; st.set_event(ev);
+            publish_status(c, st);
         }
     }
 
@@ -446,10 +536,14 @@ static int run_supervisor(const FeConfig& c) {
             xi::SafeStateEvent ev; ev.reason = xi::SafeStateReason::BackendExit;
             ev.ts_ms = now_ms();
             sink->enter_safe_state(ev);
+            st.state = "safe"; st.reason = "BackendExit"; st.backend_pid = 0;
+            st.set_event(ev); publish_status(c, st);
             rc = 1;
             break;
         }
         std::fprintf(stderr, "[xinsp-fe] backend up pid=%lu\n", sp.pi.dwProcessId);
+        st.backend_pid = (int)sp.pi.dwProcessId;
+        publish_status(c, st);
 
         // ---- monitor this instance ----
         int   probe_fails = 0;
@@ -493,6 +587,8 @@ static int run_supervisor(const FeConfig& c) {
                     sink->enter_safe_state(ev);
                     in_safe_state = true;
                     comms_down    = true;
+                    st.state = "safe"; st.reason = "CommsLost"; st.comms_state = "down";
+                    st.set_event(ev); publish_status(c, st);
                     if (gw_resp.note_death(c.respawn_max)) {
                         xi::SafeStateEvent stuck; stuck.reason = xi::SafeStateReason::CommsLost;
                         stuck.ts_ms = now_ms();
@@ -501,6 +597,7 @@ static int run_supervisor(const FeConfig& c) {
                                      "exceeded - PLC link stays down; manual restart required\n",
                                      c.respawn_max);
                         comms_gaveup = true;   // stop trying; latch comms-lost
+                        st.comms_state = "gaveup"; publish_status(c, st);
                     } else {
                         std::fprintf(stderr, "[xinsp-fe] respawning comms gateway "
                                      "(failure %d/%d) after %dms\n",
@@ -513,6 +610,7 @@ static int run_supervisor(const FeConfig& c) {
                     gw_resp.note_healthy(now_ms() - gw_healthy_since, c.respawn_reset_ms);
                     if (comms_down) {
                         comms_down = false;   // gateway recovered; clear may proceed
+                        st.comms_state = "up"; publish_status(c, st);
                         std::fprintf(stderr, "[xinsp-fe] comms gateway back up pid=%lu\n",
                                      gw.pi.dwProcessId);
                     }
@@ -566,6 +664,8 @@ static int run_supervisor(const FeConfig& c) {
                 if (in_safe_state && !comms_down) {
                     sink->clear_safe_state();
                     in_safe_state = false;
+                    st.state = "healthy"; st.reason.clear();
+                    publish_status(c, st);
                 }
                 // Announce liveness once per backend instance so a healthy line
                 // has a positive "inspector up" signal in the log, not just
@@ -573,6 +673,11 @@ static int run_supervisor(const FeConfig& c) {
                 if (!healthy_announced) {
                     healthy_announced = true;
                     std::fprintf(stderr, "[xinsp-fe] backend healthy (port %d up)\n", c.port);
+                    // First healthy of a fresh (never-safe) start: reflect it too.
+                    if (st.state != "healthy") {
+                        st.state = "healthy"; st.reason.clear();
+                        publish_status(c, st);
+                    }
                 }
                 // Recovery: once this instance has been healthy continuously for
                 // respawn_reset_ms, forget prior failures (the line recovered).
@@ -627,7 +732,14 @@ static int run_supervisor(const FeConfig& c) {
         // ---- respawn unless too many CONSECUTIVE failures (xi::RespawnTracker) ----
         // Counts deaths without a sustained-healthy recovery — so a recurring
         // fault latches safe whether its deaths are fast or slow.
-        if (resp.note_death(c.respawn_max)) {
+        bool cap_hit = resp.note_death(c.respawn_max);
+        // Append the structured crash record now that we know the consecutive
+        // count and whether this death tripped the cap.
+        history.record(ev, resp.consecutive, cap_hit);
+        st.state = "safe"; st.reason = xi::to_string(death_reason);
+        st.consecutive = resp.consecutive; st.backend_pid = 0;
+        st.set_event(ev); publish_status(c, st);
+        if (cap_hit) {
             xi::SafeStateEvent stuck;
             stuck.reason = xi::SafeStateReason::RespawnLimitExceeded;
             stuck.ts_ms  = now_ms();
@@ -638,6 +750,8 @@ static int run_supervisor(const FeConfig& c) {
             std::fprintf(stderr, "[xinsp-fe] respawn limit (%d consecutive failures without "
                          "%ds sustained-healthy) exceeded - staying safe; manual restart required\n",
                          c.respawn_max, c.respawn_reset_ms / 1000);
+            st.latched = true; st.reason = "RespawnLimitExceeded";
+            publish_status(c, st);
             rc = 2;
             break;
         }
@@ -652,6 +766,11 @@ static int run_supervisor(const FeConfig& c) {
         xi::SafeStateEvent ev; ev.reason = xi::SafeStateReason::SupervisorShutdown;
         ev.ts_ms = now_ms();
         sink->enter_safe_state(ev);
+        // Preserve a latched reason (e.g. RespawnLimitExceeded) so the final
+        // snapshot still says WHY the line is down; only a clean stop overwrites it.
+        st.state = "stopped"; st.backend_pid = 0;
+        if (!st.latched) st.reason = "SupervisorShutdown";
+        publish_status(c, st);
     }
     // Closing the job kills the gateway too (it's in the same job); release our
     // handles to it first so nothing leaks on the way out.
@@ -694,6 +813,17 @@ static void print_help() {
         "  --comms-log=PATH     where to capture the gateway's stdout/stderr\n"
         "  --working-copy       backend edits a <project>/.xinsp_work scratch;\n"
         "                       a crash respawn resumes it (settings survive)\n"
+        "  --crash-history=PATH JSONL appended with one record per backend death\n"
+        "                       (default: <be-log dir>/crash-history.jsonl)\n"
+        "  --no-crash-history   disable the crash-history JSONL\n"
+        "  --preserve-dumps     copy each referenced minidump (+ .json) somewhere\n"
+        "                       stable so a temp-dir cleanup can't lose it\n"
+        "  --preserve-dir=DIR   where --preserve-dumps copies to\n"
+        "                       (default: <be-log dir>/crash-dumps)\n"
+        "  --status-file=PATH   JSON status snapshot the FE rewrites on every\n"
+        "                       transition (the UI reads the line's TRUE state)\n"
+        "                       (default: <be-log dir>/fe-status.json)\n"
+        "  --no-status-file     disable the status file\n"
         "  --config=PATH        fe.json config (CLI flags override it)\n"
         "  --help, -h           this help\n");
 }

@@ -103,6 +103,23 @@ an operator HMI / the VS Code extension can still attach live.
   `context.last_phase` / `threads[]` breadcrumb into the `SafeStateEvent`. (It
   parses the log rather than scanning `%TEMP%/xinsp2/crashdumps` because a
   sandboxed/per-tool `TEMP` isn't inherited by the spawned BE.)
+- **Crash history** (`xi_crash_history.hpp`): the FE is the only process that
+  survives *every* BE death, so it owns the **timeline**. Each death appends one
+  structured JSONL record to `--crash-history` (default `<be-log
+  dir>/crash-history.jsonl`): `ts_ms`, `reason`, `rc`, `exception`, `module`,
+  `phase`, the `report`/`dump` paths, the **consecutive-failure count**, and
+  whether this death **tripped the cap** (`cap_hit`). One file = the whole
+  crash-loop story at a glance, and a ready feed for an operator UI / the
+  Phase-2 FE status channel. It is **append-only** (history must survive FE
+  restarts), so each run is a fresh `consecutive:1..N` sequence.
+  **Division of labor:** the *BE* writes the minidumps (it is the crashing
+  process — `dbghelp` lives there; the FE never writes dumps and stays
+  dependency-light). The FE only *references* them. `--preserve-dumps`
+  (→ `--preserve-dir`, default `<be-log dir>/crash-dumps`) additionally copies
+  each referenced `.dmp` (+ sibling `.json`) somewhere stable so a temp-dir
+  cleanup or a crash-loop overwrite can't lose it. `--no-crash-history` turns
+  the JSONL off. The line builder is pure + unit-tested (`test_qa_edge.cpp`
+  CH-U*); the end-to-end path is asserted by `examples/fe_supervisor/`.
 - **Respawn**: latch safe after `respawn_max` (5) **consecutive** failures, 1.5s
   backoff. The counter resets only once the backend has been continuously
   healthy for `respawn_reset_ms` (30s) — a genuine recovery. This catches a
@@ -124,6 +141,46 @@ an operator HMI / the VS Code extension can still attach live.
   FE withholds `CLEAR` until both the gateway is back and the BE is serving. Full
   design + dead-man semantics in [`comms-gateway.md`](./comms-gateway.md).
 
+## Status channel — the FE's authoritative state for the UI
+
+The FE has no WS client/server (it stays dependency-light). So a UI in **attach**
+mode used to infer "backend down → line safe" purely from a WebSocket
+*disconnect* — which can't tell a transient respawn from a latched
+`RespawnLimitExceeded`, can't show the death reason or the respawn budget, and is
+blind to the comms gateway.
+
+The FE instead **publishes its true state to a small JSON status file**
+(`--status-file`, default `<be-log dir>/fe-status.json`), rewritten **atomically**
+(tmp + `MoveFileEx` replace) on every transition. A file — not a socket — keeps
+the FE thin and mirrors the BE's heartbeat-file pattern; it's the live-snapshot
+sibling of the append-only `crash-history.jsonl` timeline. `xi_fe_status.hpp`
+holds the pure renderer (unit-tested, `test_qa_edge.cpp` FS-U*); the atomic swap
+lives in `fe_main.cpp`.
+
+```json
+{ "schema":1, "state":"safe", "reason":"RespawnLimitExceeded", "latched":true,
+  "consecutive":6, "respawn_max":5, "backend_pid":0, "port":7823,
+  "working_copy":false, "comms":{"enabled":false,"state":""},
+  "crash_history":"…/crash-history.jsonl",
+  "last_event":{"reason":"BackendExit","rc":-1073741819,
+    "exception":"ACCESS_VIOLATION","module":"plugin_v0.dll","phase":"inspect",
+    "report":"…json","dump":"…dmp","ts_ms":…} }
+```
+
+- **`state`** `starting` | `healthy` | `safe` | `stopped`. **`reason`** is the
+  safe-state reason while not healthy. **`latched`** = the FE gave up
+  (`RespawnLimitExceeded` / comms `gaveup`) and is awaiting a manual restart — the
+  signal a UI needs to stop showing "recovering…". A clean shutdown sets
+  `state:"stopped"` but **preserves** a latched reason so the last snapshot still
+  says *why* the line is down.
+- **`consecutive`/`respawn_max`** is the respawn budget; **`comms`** the gateway
+  state; **`last_event`** the most recent death's forensics; **`crash_history`**
+  points at the full timeline. `--no-status-file` disables it.
+
+A UI reads/watches this file directly (it shares the filesystem in the managed/
+local case; a remote BE is out of scope, same as the working copy). The WS
+disconnect remains a *secondary* "BE not serving" hint.
+
 ## VS Code extension: managed vs attach
 
 The extension is itself a supervisor in dev (it spawns + respawns the BE). To
@@ -136,14 +193,18 @@ avoid two supervisors fighting over one BE, it has a backend **mode**
 - **`auto`** (default) — attach if the port is already open, else managed.
 
 In attach mode the extension surfaces a safe-state status and reworded crash
-messaging, and its respawn path is disabled. See
-[`../guides/extending-the-ui.md`](../guides/extending-the-ui.md).
+messaging, and its respawn path is disabled. Point `xinsp2.feStatusFile` at the
+FE's `fe-status.json` and the status bar reads the supervisor's **true** state
+(recovering `safe (n/max)` vs `LATCHED` with forensics) instead of inferring it
+from the WS drop. See [`../guides/extending-the-ui.md`](../guides/extending-the-ui.md).
 
 ## Verified by
 
 `examples/fe_supervisor/` — arms a plugin to crash the BE on the first inspect
 under autostart, then asserts the FE drove safe-state with crash forensics,
-respawned, hit the cap, stayed safe, and left no orphan.
+respawned, hit the cap, stayed safe, and left no orphan — plus that the
+`crash-history.jsonl` timeline and the `fe-status.json` snapshot (latched safe,
+reason, forensics) were written correctly.
 `examples/plugin_crash_forensics/` covers the BE-side minidump/breadcrumb the FE
 relies on.
 
@@ -154,8 +215,6 @@ exists today vs the priority gaps — is in
 ## Phase 2 (not built)
 
 - C++ WS client + deep heartbeat (detect a hang while the port stays open).
-- An FE **status channel** (local endpoint / status file) so the extension shows
-  the FE's *true* safe-state + respawn budget instead of inferring from a WS drop.
 - More PLC transports behind `SafeStateSink` (Modbus / OPC-UA / digital-out) +
   MessagePack framing. (TCP/UDP JSON already shipped — see above.)
 - Operator HMI; multi-BE / multi-line orchestration.

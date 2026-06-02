@@ -32,7 +32,7 @@ Run all: `ctest --test-dir backend/build -C Release`
 | `test_diagnostics` | cl.exe / link.exe diagnostic parser (error / warning / fatal / note shapes) |
 | `test_safe_state` | FE `SafeStateSink`: reason→string, factory fallthrough, log formatting + `ts=`, empty-field placeholders, overflow/null safety |
 | `test_qa_fault` / `test_qa_race` | FE respawn sliding-window + cap arithmetic; forensics carried on the cap event |
-| `test_qa_edge` | FE crash-report parser (`xi_crash_report.hpp`): good / threads[] fallback / no-minidump / corrupt / last-wins, against crafted fixtures |
+| `test_qa_edge` | FE crash-report parser (`xi_crash_report.hpp`): good / threads[] fallback / no-minidump / corrupt / last-wins, against crafted fixtures; crash-history JSONL builder (`xi_crash_history.hpp` CH-U*): field coverage, Windows-path backslash escaping, control-char escaping, empty-event totality; FE status renderer (`xi_fe_status.hpp` FS-U*): healthy/latched snapshots, comms object, last_event forensics, path escaping |
 | `test_qa_stress` | Phase G stress/fuzz of the respawn-cap + safe-state core: degenerate caps, exact reset boundary, recover-then-recur, a 200k-step equivalence fuzz vs a reference model, high-volume bounded emission |
 
 All exit with `ALL TESTS PASSED`.
@@ -155,8 +155,13 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   `xinsp-fe.exe` supervisor against an auto-crashing project and asserts
   the FE detects each death, drives the line to a safe state (with crash
   forensics from the backend log), respawns rate-limited, hits the cap,
-  stays safe, and leaves no orphaned backend. (Windows-only; skips on
-  non-`nt`.)
+  stays safe, and leaves no orphaned backend. It also asserts the FE's
+  **crash-history** JSONL (`xi_crash_history.hpp`): one record per death,
+  `consecutive` counting up 1..N, the final death marked `cap_hit=true`,
+  forensics + minidump path on each; and the FE **status channel**
+  (`xi_fe_status.hpp` → `fe-status.json`): a latched safe state carrying the
+  death reason + forensics, the value a UI reads instead of inferring "down"
+  from a WS disconnect. (Windows-only; skips on non-`nt`.)
 - **Comms gateway** (out-of-process PLC I/O; see
   `docs/design/comms-gateway.md`). Three regressions, Windows-only:
   `examples/comms_gateway/` — the `xinsp-comms` relay round-trip + dead-man

@@ -22,6 +22,8 @@
 #include <string>
 
 #include <xi/xi_crash_report.hpp>
+#include <xi/xi_crash_history.hpp>
+#include <xi/xi_fe_status.hpp>
 #include <xi/xi_safe_state.hpp>
 
 namespace fs = std::filesystem;
@@ -196,6 +198,93 @@ int main() {
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "be.log").string(), ev));
         CHECK(!ev.report_path.empty());
         CHECK(fs::path(ev.report_path).extension() == ".json");
+    }
+
+    // ---- crash_history_line (pure JSONL builder) ----------------------------
+    // CH-U1: a fully-populated event -> all fields present; a Windows path's
+    // backslashes are JSON-escaped (\\), the count + cap flag are unquoted.
+    {
+        SafeStateEvent ev;
+        ev.reason          = xi::SafeStateReason::BackendExit;
+        ev.backend_rc      = (int)0xC0000005;
+        ev.exception_name  = "ACCESS_VIOLATION";
+        ev.faulting_module = "plugin_v0.dll";
+        ev.last_phase      = "inspect";
+        ev.dump_path       = R"(C:\tmp\xinsp2\crashdumps\be-1.dmp)";
+        ev.report_path     = R"(C:\tmp\xinsp2\crashdumps\be-1.json)";
+        ev.ts_ms           = 1717200000000LL;
+        std::string line = xi::crash_history_line(ev, /*consecutive=*/3, /*cap_hit=*/false);
+        CHECK(line.front() == '{' && line.back() == '}');
+        CHECK(line.find("\"reason\":\"BackendExit\"") != std::string::npos);
+        CHECK(line.find("\"exception\":\"ACCESS_VIOLATION\"") != std::string::npos);
+        CHECK(line.find("\"module\":\"plugin_v0.dll\"") != std::string::npos);
+        CHECK(line.find("\"phase\":\"inspect\"") != std::string::npos);
+        CHECK(line.find("\"consecutive\":3") != std::string::npos);
+        CHECK(line.find("\"cap_hit\":false") != std::string::npos);
+        CHECK(line.find("\"ts_ms\":1717200000000") != std::string::npos);
+        // backslashes escaped, no raw single backslash before a drive letter
+        CHECK(line.find(R"(C:\\tmp\\xinsp2)") != std::string::npos);
+        CHECK(line.find("\"dump\":\"") != std::string::npos);
+    }
+
+    // CH-U2: empty/default event still yields valid JSON with empty strings and
+    // cap_hit=true honored. No throw on empties.
+    {
+        SafeStateEvent ev;  // defaults: reason=BackendExit, all strings empty
+        std::string line = xi::crash_history_line(ev, /*consecutive=*/6, /*cap_hit=*/true);
+        CHECK(line.find("\"exception\":\"\"") != std::string::npos);
+        CHECK(line.find("\"module\":\"\"") != std::string::npos);
+        CHECK(line.find("\"dump\":\"\"") != std::string::npos);
+        CHECK(line.find("\"cap_hit\":true") != std::string::npos);
+        CHECK(line.find("\"consecutive\":6") != std::string::npos);
+    }
+
+    // CH-U3: control chars + quotes in a field are escaped (defensive — phase is
+    // attacker-adjacent only via a corrupt report, but the builder must be total).
+    {
+        SafeStateEvent ev;
+        ev.last_phase = "a\"b\tc\nd";
+        std::string line = xi::crash_history_line(ev, 1, false);
+        CHECK(line.find(R"(\"b\tc\nd)") != std::string::npos);  // " \t \n all escaped
+    }
+
+    // ---- FeStatus::render (pure status snapshot -> JSON) --------------------
+    // FS-U1: healthy snapshot, no last_event -> "last_event":null, comms object.
+    {
+        xi::FeStatus st;
+        st.state = "healthy"; st.port = 7823; st.respawn_max = 5;
+        st.backend_pid = 4242; st.consecutive = 0; st.ts_ms = 123;
+        st.comms_enabled = true; st.comms_state = "up";
+        std::string j = st.render();
+        CHECK(j.find("\"state\":\"healthy\"") != std::string::npos);
+        CHECK(j.find("\"reason\":\"\"") != std::string::npos);
+        CHECK(j.find("\"latched\":false") != std::string::npos);
+        CHECK(j.find("\"backend_pid\":4242") != std::string::npos);
+        CHECK(j.find("\"comms\":{\"enabled\":true,\"state\":\"up\"}") != std::string::npos);
+        CHECK(j.find("\"last_event\":null") != std::string::npos);
+    }
+
+    // FS-U2: latched safe-state with forensics -> last_event object carries the
+    // reason/exception/dump; latched=true; reason surfaced at top level.
+    {
+        xi::FeStatus st;
+        st.state = "safe"; st.reason = "RespawnLimitExceeded"; st.latched = true;
+        st.consecutive = 6; st.respawn_max = 5;
+        xi::SafeStateEvent e;
+        e.reason = xi::SafeStateReason::BackendExit;
+        e.backend_rc = (int)0xC0000005;
+        e.exception_name = "ACCESS_VIOLATION";
+        e.faulting_module = "plugin_v0.dll";
+        e.last_phase = "inspect";
+        e.dump_path = R"(C:\t\be.dmp)";
+        st.set_event(e);
+        std::string j = st.render();
+        CHECK(j.find("\"latched\":true") != std::string::npos);
+        CHECK(j.find("\"reason\":\"RespawnLimitExceeded\"") != std::string::npos);
+        CHECK(j.find("\"consecutive\":6") != std::string::npos);
+        CHECK(j.find("\"last_event\":{") != std::string::npos);
+        CHECK(j.find("\"exception\":\"ACCESS_VIOLATION\"") != std::string::npos);
+        CHECK(j.find(R"("dump":"C:\\t\\be.dmp")") != std::string::npos);  // path escaped
     }
 
     // Cleanup scratch dirs (best-effort).

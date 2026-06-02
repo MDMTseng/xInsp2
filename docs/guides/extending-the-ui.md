@@ -178,7 +178,7 @@ const port = cfg.get<number>('backendPort', 7823);
 ```
 
 Existing settings: `backendPort`, `autoStartBackend`, `backendMode`,
-`extraPluginDirs`, `remoteUrl`, `authSecret`, `autoRespawn`,
+`feStatusFile`, `extraPluginDirs`, `remoteUrl`, `authSecret`, `autoRespawn`,
 `sdkPath`. Look at how each is read in `extension.ts` for the right
 pattern.
 
@@ -201,6 +201,21 @@ owned by the `xinsp-fe.exe` supervisor (the production frontend — see
   state.
 - **`auto`** (default) — `isPortOpen(port)` decides: attach if a backend is
   already listening, else managed.
+
+**FE status channel (`xinsp2.feStatusFile`).** Inferring "down → safe" from a
+WS disconnect can't tell a transient respawn from a latched
+`RespawnLimitExceeded`. Point this setting at the supervisor's `fe-status.json`
+(the FE writes it next to its `--be-log`; see
+[`../design/fe-be-split.md`](../design/fe-be-split.md)) and the extension polls
+it (1.5s) to drive the health indicator from the FE's **true** state:
+- `safe (n/max)` — recovering, with the respawn budget (warning background);
+- `$(error) xInsp2 · LATCHED` — the FE gave up; the tooltip carries the reason +
+  last-crash forensics and the disconnect toast switches from "recovering" to
+  "manual restart required" (error background);
+- `offline` — cleanly stopped.
+The live WS connection stays authoritative while connected; the file only drives
+the indicator while disconnected. No file configured → falls back to the
+disconnect-inference behavior above.
 
 When adding lifecycle UI (anything that spawns/kills/restarts the backend),
 **guard it with `attachMode`** so it can't fight the FE supervisor. The
