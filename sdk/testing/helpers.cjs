@@ -76,10 +76,29 @@ async function makeHelpers(pluginFolder, opts = {}) {
             return r;
         },
 
+        // Poll an async predicate until it returns truthy or the budget elapses.
+        // Returns true on success, false on timeout — lets tests await a real
+        // condition instead of a blind sleep (UI-3: reduces load-dependent flake).
+        async waitFor(predicate, { timeoutMs = 5000, intervalMs = 100 } = {}) {
+            const deadline = Date.now() + timeoutMs;
+            for (;;) {
+                try { if (await predicate()) return true; } catch { /* keep polling */ }
+                if (Date.now() >= deadline) return false;
+                await h.sleep(intervalMs);
+            }
+        },
+
         async openUI(name, plugin) {
             await vscode.commands.executeCommand('xinsp2.openInstanceUI', name, plugin);
-            // Let the webview mount and ask for initial status
-            await h.sleep(1500);
+            // Wait on a real readiness signal — the instance answering get_status —
+            // rather than a fixed sleep. The slow, load-dependent part is the
+            // backend compiling/creating the instance; poll that out, then a short
+            // settle for the webview DOM to mount before the test drives it.
+            await h.waitFor(async () => {
+                await h.getStatus(name);
+                return h.lastStatus !== null;
+            }, { timeoutMs: 8000, intervalMs: 150 });
+            await h.sleep(400);
         },
 
         click:    (instance, selector)          => api.clickInWebview(instance, selector),

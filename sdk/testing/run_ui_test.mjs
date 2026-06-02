@@ -27,6 +27,14 @@ if (!existsSync(resolve(pluginFolder, 'tests', 'test_ui.cjs'))) {
     process.exit(2);
 }
 
+// Lint the UI for the data-param/data-action automation conventions (non-fatal —
+// surfaces missing hooks before the slow VS Code launch).
+try {
+    const { execFileSync } = await import('node:child_process');
+    const lint = fileURLToPath(new URL('./lint_plugin_ui.mjs', import.meta.url));
+    execFileSync(process.execPath, [lint, pluginFolder], { stdio: 'inherit' });
+} catch { /* advisory only; never block the test run */ }
+
 // ----- find XINSP2_ROOT -------------------------------------------------
 
 function isXInsp2Root(p) {

@@ -165,6 +165,9 @@ static std::atomic<bool>       g_continuous{false};
 // reload completes — without it, mid-run hot-reload would silently
 // halt the stream.
 static std::atomic<int>        g_continuous_fps{10};
+// Reserve stack headroom (def near write_minidump) so the crash filter can dump
+// after a script STACK_OVERFLOW; called at the top of each inspect-running thread.
+static void reserve_fault_stack();
 // Worker thread pool. project.json `parallelism.dispatch_threads: N`
 // controls the size; default 1 (current behaviour). All workers pull
 // from the same g_ev_queue. A separate timer thread (`g_timer_thread`)
@@ -1156,6 +1159,7 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
     // replays in order. The watchdog is per-worker now (each inspect arms its
     // own slot), so N>1 is covered too.
     auto worker_body = [srv_ptr] {
+        reserve_fault_stack();   // BUG 2: dump survives a script stack overflow
         _set_se_translator(seh_translator);
         while (g_continuous.load()) {
             xi::TriggerEvent ev;
@@ -1882,6 +1886,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "run");
         crash_ctx().last_run_id = (int)run_id;
         std::thread([&srv, run_id, frame_path = std::move(frame_path)]() {
+            reserve_fault_stack();   // BUG 2: dump survives a script stack overflow
             _set_se_translator(seh_translator);
             std::lock_guard<std::mutex> lk(g_run_mu);
             run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
@@ -3087,6 +3092,17 @@ static const char* exception_name(DWORD code) {
     }
 }
 
+// Reserve stack headroom so the unhandled-exception filter (write_minidump) can
+// still run after a STACK_OVERFLOW — otherwise the filter has no stack left and
+// the process dies with NO minidump/sidecar (robustness BUG 2). Call once at the
+// top of every thread that runs untrusted inspect/plugin code.
+static void reserve_fault_stack() {
+#ifdef _WIN32
+    ULONG guarantee = 128 * 1024;  // 128 KB — room for the filter + MiniDumpWriteDump
+    SetThreadStackGuarantee(&guarantee);
+#endif
+}
+
 // Top-level unhandled-exception filter. Writes a minidump under
 // %TEMP%/xinsp2/crashdumps PLUS a sibling .json crash report containing
 // exception kind, faulting module, and the last activity context. The
@@ -3343,6 +3359,7 @@ int main(int argc, char** argv) {
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     _set_invalid_parameter_handler(on_invalid_parameter);
     _set_purecall_handler(on_purecall);
+    reserve_fault_stack();   // BUG 2: let the filter dump on a main-thread stack overflow
     // Tell Windows not to silently kill us on heap corruption — we want
     // to see crashpad's report instead. (HeapEnableTerminationOnCorruption
     // is opt-IN; HeapDisableCoalesceOnFree is unrelated. The default in
@@ -3362,6 +3379,14 @@ int main(int argc, char** argv) {
         if (std::string_view(argv[i]) == "--test-abort") {
             std::abort();
             return 99;  // unreachable
+        }
+        // --test-stackoverflow: exercise the stack-overflow path (robustness BUG 2)
+        // — with reserve_fault_stack() the filter must still write a dump+sidecar.
+        if (std::string_view(argv[i]) == "--test-stackoverflow") {
+            reserve_fault_stack();
+            // Unbounded recursion with a volatile sink the optimizer can't elide.
+            struct Boom { static int go(volatile int x) { return x + go(x + 1) + go(x + 2); } };
+            return Boom::go(1);  // unreachable — overflows the stack
         }
     }
 

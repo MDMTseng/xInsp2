@@ -1293,6 +1293,10 @@ public:
         project_.queue_depth       = 100;
         project_.overflow          = "drop_oldest";
         project_.result_order      = "completion";
+        // Was the top-level project.json itself well-formed? A malformed file
+        // (truncated / garbage) used to load "successfully" with all defaults and
+        // no signal to the user — surface it as an open warning below.
+        bool project_json_malformed = false;
         if (cJSON* root = cJSON_Parse(content.c_str())) {
             if (cJSON* tp = cJSON_GetObjectItem(root, "trigger_policy");
                 tp && cJSON_IsObject(tp)) {
@@ -1363,6 +1367,8 @@ public:
                 }
             }
             cJSON_Delete(root);
+        } else {
+            project_json_malformed = true;
         }
         TriggerBus::instance().set_policy(
             project_.trigger_policy, project_.trigger_required,
@@ -1374,6 +1380,12 @@ public:
         // last_open_warnings_ is reset here so compile failures + bad
         // instances both end up in the same surfaced list.
         last_open_warnings_.clear();
+        if (project_json_malformed) {
+            last_open_warnings_.push_back({"", "",
+                "project.json is not valid JSON - loaded with defaults "
+                "(check for a syntax error or truncation)"});
+            std::fprintf(stderr, "[xinsp2] project.json malformed - loaded with defaults\n");
+        }
         int proj_plugins = compile_project_plugins_locked(folder);
         if (proj_plugins > 0) {
             std::fprintf(stderr, "[xinsp2] %d project plugin(s) built\n", proj_plugins);

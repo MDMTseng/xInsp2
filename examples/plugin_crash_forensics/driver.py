@@ -269,6 +269,36 @@ def main() -> int:
     except subprocess.TimeoutExpired:
         failures.append("--test-abort hung (did not exit within 30s)")
 
+    # ---- Phase 3: stack-overflow path (robustness BUG 2) -----------------
+    # A STACK_OVERFLOW leaves the unhandled-exception filter no stack to run on,
+    # so it used to die with no dump. reserve_fault_stack() (SetThreadStackGuarantee)
+    # gives the filter headroom — assert a STACK_OVERFLOW report now appears.
+    so_log = ROOT / "backend_stackoverflow.log"
+    try:
+        with open(so_log, "w", encoding="utf-8") as lf:
+            sp = subprocess.run([str(BACKEND_EXE), "--test-stackoverflow"],
+                                stdout=lf, stderr=subprocess.STDOUT, timeout=30)
+        print(f"--test-stackoverflow exited rc={sp.returncode}")
+        rep = find_crash_report(so_log)
+        if rep is None:
+            failures.append("stack overflow produced NO crash report (BUG 2 not fixed)")
+        else:
+            rpt_path, dmp_path = rep
+            try:
+                report = json.loads(rpt_path.read_text(encoding="utf-8"))
+            except Exception as e:  # noqa: BLE001
+                report = {}
+                failures.append(f"stackoverflow crash report unreadable: {e}")
+            exc = report.get("exception", {})
+            summary["stackoverflow"] = {"exception": exc, "dmp": dmp_path.name}
+            print(f"stackoverflow crash report {rpt_path.name}: exception={exc}")
+            if exc.get("name") != "STACK_OVERFLOW":
+                failures.append(f"report exception.name != STACK_OVERFLOW: {exc.get('name')!r}")
+            if not dmp_path.exists() or dmp_path.stat().st_size < 1024:
+                failures.append(f"stackoverflow minidump missing/too small: {dmp_path}")
+    except subprocess.TimeoutExpired:
+        failures.append("--test-stackoverflow hung (did not exit within 30s)")
+
     print("\n" + "=" * 48)
     if failures:
         print("VERDICT: FAIL")
@@ -278,7 +308,7 @@ def main() -> int:
         print("VERDICT: PASS")
         print("  uncatchable plugin crash -> backend died -> minidump +")
         print("  crash report with surviving inspect-phase breadcrumb;")
-        print("  CRT abort() path also produces a CXX_ABORT crash report.")
+        print("  CRT abort() -> CXX_ABORT report; stack overflow -> STACK_OVERFLOW report.")
     (ROOT / "_results_crash_forensics.json").write_text(
         json.dumps({"pass": not failures, "failures": failures, "summary": summary},
                    indent=2), encoding="utf-8")

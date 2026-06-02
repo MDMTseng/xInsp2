@@ -31,6 +31,7 @@ shapes.
 
 | Reference | Subject |
 |---|---|
+| [`reference/image-io.md`](./reference/image-io.md) | `xi::Image` / `xi::imread` / OpenCV interop (`as_cv_mat`, `from_cv_mat`), the RGB-not-BGR gotcha, and what `VAR` can track |
 | [`reference/host_api.md`](./reference/host_api.md) | The `xi_host_api` function table the host hands to every plugin |
 | [`reference/plugin-abi.md`](./reference/plugin-abi.md) | The C exports a plugin DLL must provide; `XI_PLUGIN_IMPL` macro |
 | [`reference/instance-model.md`](./reference/instance-model.md) | How instances are loaded, persisted, registered, destroyed; `instance.json` schema; isolation modes |

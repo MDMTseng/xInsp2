@@ -178,4 +178,21 @@ private:
     xi_image_handle          pool_handle_ = XI_IMAGE_NULL;
 };
 
+// Copy a cv::Mat into an OWNING xi::Image — the inverse of Image::as_cv_mat().
+// Use this to VAR / record / return an intermediate cv::Mat (e.g. a threshold
+// mask or a background-subtraction response) without worrying about the Mat
+// outliving the Image: the bytes are copied into the Image's own buffer.
+//
+// Supports 8-bit 1/3/4-channel mats; a non-continuous (ROI / sub-mat) is cloned
+// first so rows are packed. Returns an empty Image for an empty or non-8-bit mat
+// (convert depth first, e.g. `m.convertTo(tmp, CV_8U)`), so callers can check
+// .empty() rather than getting a malformed image.
+inline Image from_cv_mat(const cv::Mat& m) {
+    if (m.empty() || m.depth() != CV_8U) return Image{};
+    int c = m.channels();
+    if (c != 1 && c != 3 && c != 4) return Image{};
+    cv::Mat src = m.isContinuous() ? m : m.clone();
+    return Image(src.cols, src.rows, c, src.data);
+}
+
 } // namespace xi

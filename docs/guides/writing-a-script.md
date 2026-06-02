@@ -175,6 +175,12 @@ image, and Record (recursive tree).
 `VAR(string_literal, ...)` — backed by `std::string`. There's no
 lifetime bug: the macro copies into a `std::string` value.
 
+To surface an intermediate **`cv::Mat`** (a mask, a response image), wrap it with
+**`xi::from_cv_mat(m)`** — it copies into an owning `xi::Image` so there's no
+lifetime trap: `VAR(mask, xi::from_cv_mat(mask_mat));`. See
+[`../reference/image-io.md`](../reference/image-io.md) for `xi::Image` / `imread`
+/ `as_cv_mat` / `from_cv_mat` and the RGB-not-BGR gotcha.
+
 > **`VAR(name, ...)` declares a local; use `EMIT(name)` to surface an
 > existing one.** `VAR` expands to roughly `auto name = expr; <ship to
 > viewer>`, so `name` becomes a real variable in the enclosing scope —
