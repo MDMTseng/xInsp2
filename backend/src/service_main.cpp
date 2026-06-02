@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -3069,6 +3070,13 @@ static const char* exception_name(DWORD code) {
         case EXCEPTION_IN_PAGE_ERROR:           return "IN_PAGE_ERROR";
         case EXCEPTION_NONCONTINUABLE_EXCEPTION:return "NONCONTINUABLE";
         case 0xE06D7363:                        return "MS_C++_EXCEPTION";
+        // Synthetic codes we RaiseException with so write_minidump runs for
+        // CRT death paths that bypass SEH (terminate/abort/fastfail family).
+        case 0xE0000001:                        return "TEST_CRASH";
+        case 0xE0000002:                        return "CXX_TERMINATE";
+        case 0xE0000003:                        return "CXX_ABORT";
+        case 0xE0000004:                        return "CRT_INVALID_PARAMETER";
+        case 0xE0000005:                        return "CXX_PURE_CALL";
         default:                                return "UNKNOWN";
     }
 }
@@ -3246,6 +3254,30 @@ static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
     std::abort();   // unreachable; quiets [[noreturn]]
 }
 
+// CRT abort()/fastfail family — std::abort(), a failed C `assert`, a CRT
+// invalid-parameter trip, or a pure-virtual call all terminate the process via
+// __fastfail (0xC0000409), which bypasses BOTH SetUnhandledExceptionFilter
+// (write_minidump) AND std::set_terminate (on_terminate). Without a handler a
+// script that calls abort() kills the backend leaving NO minidump / .json
+// sidecar — defeating cmd:crash_reports AND the FE crash-history / status
+// channel (their forensics come from that sidecar). We intercept each entry
+// point and re-raise a NONCONTINUABLE exception so write_minidump runs with a
+// real thread context (same trick as on_terminate). Robustness BUG 1, found by
+// the robustness-fuzzer dogfood; see docs/design/fe-be-split.md crash story.
+[[noreturn]] static void raise_for_dump(const char* cause, DWORD code) noexcept {
+    crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), cause);
+    std::fprintf(stderr, "[xinsp2] CRT fatal (%s) — writing crash report\n", cause);
+    std::fflush(stderr);
+    RaiseException(code, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    std::abort();   // unreachable; quiets [[noreturn]]
+}
+static void on_sigabrt(int) { raise_for_dump("abort", 0xE0000003); }
+static void on_invalid_parameter(const wchar_t*, const wchar_t*, const wchar_t*,
+                                 unsigned int, uintptr_t) {
+    raise_for_dump("invalid_parameter", 0xE0000004);
+}
+static void on_purecall() { raise_for_dump("purecall", 0xE0000005); }
+
 // Vectored exception handler — runs BEFORE SEH translators, before
 // any per-thread try/__except. Logs first-chance exceptions that
 // might get swallowed silently. Returning EXCEPTION_CONTINUE_SEARCH
@@ -3296,6 +3328,15 @@ int main(int argc, char** argv) {
     // ones that get suppressed somewhere downstream. Diagnostic only;
     // doesn't change the exception's normal handling path.
     AddVectoredExceptionHandler(/*first=*/1, veh_logger);
+    // CRT fastfail family (abort / failed assert / invalid-parameter / pure
+    // call) bypasses the three handlers above. Catch each so a crash report is
+    // ALWAYS written (robustness BUG 1). SIGABRT must have a handler installed
+    // BEFORE any abort(); _set_abort_behavior clears the popup + the Watson/
+    // fastfail report so our handler is the path that runs.
+    std::signal(SIGABRT, on_sigabrt);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    _set_invalid_parameter_handler(on_invalid_parameter);
+    _set_purecall_handler(on_purecall);
     // Tell Windows not to silently kill us on heap corruption — we want
     // to see crashpad's report instead. (HeapEnableTerminationOnCorruption
     // is opt-IN; HeapDisableCoalesceOnFree is unrelated. The default in
@@ -3308,6 +3349,12 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--test-crash") {
             RaiseException(0xE0000001, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+            return 99;  // unreachable
+        }
+        // --test-abort: exercise the CRT abort() path (robustness BUG 1) — must
+        // produce the same minidump + .json sidecar as a real exception crash.
+        if (std::string_view(argv[i]) == "--test-abort") {
+            std::abort();
             return 99;  // unreachable
         }
     }

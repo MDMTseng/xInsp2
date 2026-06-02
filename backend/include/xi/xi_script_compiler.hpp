@@ -82,6 +82,62 @@ struct CompileResult {
     std::vector<Diagnostic> diagnostics;
 };
 
+// True if `s` is well-formed UTF-8. Portable (no Win32). Used to decide whether
+// compiler diagnostics need transcoding before they go on the (UTF-8) wire.
+inline bool is_valid_utf8(const std::string& s) {
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        int extra;
+        if      (c < 0x80) extra = 0;
+        else if ((c >> 5) == 0x06) extra = 1;
+        else if ((c >> 4) == 0x0E) extra = 2;
+        else if ((c >> 3) == 0x1E) extra = 3;
+        else return false;
+        if (i + (size_t)extra >= n) return false;
+        for (int k = 1; k <= extra; ++k)
+            if ((((unsigned char)s[i + k]) >> 6) != 0x02) return false;
+        i += (size_t)extra + 1;
+    }
+    return true;
+}
+
+// Guarantee `s` is valid UTF-8 for the WS text frame. cl.exe / link.exe localize
+// diagnostics to the OS UI language and emit them in the local code page (CP950
+// zh-TW, CP932 ja-JP, CP1252 en-US, ...) even with /utf-8 + VSLANG=1033 (the
+// latter no-ops when the en-US compiler language pack isn't installed). Raw
+// CP950 bytes on a UTF-8 wire are mojibake — useless to a UI or an AI agent.
+// Strategy: already-valid UTF-8 is returned unchanged; otherwise convert via the
+// OEM code page (what cl writes to a redirected handle — equals ACP on zh-TW but
+// differs on en-US, so OEM not ACP). Last resort: strip non-ASCII to '?' so the
+// result is ALWAYS valid UTF-8. This is the invariant test_diagnostics locks in.
+inline std::string ensure_utf8(std::string s) {
+#ifdef _WIN32
+    if (s.empty() || is_valid_utf8(s)) return s;
+    bool converted = false;
+    int n_in = (int)s.size();
+    const UINT diag_cp = GetOEMCP();
+    int wlen = MultiByteToWideChar(diag_cp, 0, s.data(), n_in, nullptr, 0);
+    if (wlen > 0) {
+        std::wstring w((size_t)wlen, L'\0');
+        if (MultiByteToWideChar(diag_cp, 0, s.data(), n_in, w.data(), wlen) == wlen) {
+            int u8len = WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, nullptr, 0, nullptr, nullptr);
+            if (u8len > 0) {
+                std::string u8((size_t)u8len, '\0');
+                if (WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, u8.data(), u8len, nullptr, nullptr) == u8len) {
+                    s = std::move(u8);
+                    converted = true;
+                }
+            }
+        }
+    }
+    if (!converted)
+        for (auto& c : s)
+            if (static_cast<unsigned char>(c) >= 0x80) c = '?';
+#endif
+    return s;
+}
+
 // Parse cl.exe / link.exe output into structured diagnostics. The format
 // is one of:
 //   foo.cpp(42,15): error C2065: 'x': undeclared identifier
@@ -440,68 +496,11 @@ inline CompileResult compile(const CompileRequest& req) {
     cmd += "\"";
 
     int rc = std::system(cmd.c_str());
-    r.build_log = detail::read_file(log_path.string());
-    // Sanitize build log for the WS text frame, which must be UTF-8.
-    // cl.exe / link.exe emit diagnostics in the system code page (CP950
-    // on zh-TW Windows, CP932 on ja-JP, CP1252 on en-US, etc.). Even
-    // with /utf-8 passed for source + execution charset, message text
-    // localized for non-English locales lands in the local ACP. The
-    // result is mojibake on the wire and a useless friction-log entry
-    // for AI agents trying to act on the diagnostic.
-    //
-    // Strategy: if the log is already valid UTF-8 (English locale, or
-    // VSLANG=1033 took effect), leave it alone. Otherwise convert from
-    // the active code page → wide → UTF-8. Only if BOTH steps fail do
-    // we fall back to the old strip-non-ASCII-to-? heuristic.
-#ifdef _WIN32
-    auto is_valid_utf8 = [](const std::string& s) {
-        size_t i = 0, n = s.size();
-        while (i < n) {
-            unsigned char c = (unsigned char)s[i];
-            int extra;
-            if      (c < 0x80) extra = 0;
-            else if ((c >> 5) == 0x06) extra = 1;
-            else if ((c >> 4) == 0x0E) extra = 2;
-            else if ((c >> 3) == 0x1E) extra = 3;
-            else return false;
-            if (i + (size_t)extra >= n) return false;
-            for (int k = 1; k <= extra; ++k)
-                if ((((unsigned char)s[i + k]) >> 6) != 0x02) return false;
-            i += (size_t)extra + 1;
-        }
-        return true;
-    };
-    if (!is_valid_utf8(r.build_log) && !r.build_log.empty()) {
-        bool converted = false;
-        int n_in = (int)r.build_log.size();
-        // cl.exe / link.exe write diagnostics with the OEM (console) code page,
-        // NOT the ANSI code page. They're equal on some locales (CP950 on
-        // zh-TW) but differ on others (en-US: ACP 1252 vs OEM 437), where using
-        // CP_ACP would corrupt non-ASCII text. Convert from OEM.
-        const UINT diag_cp = GetOEMCP();
-        int wlen = MultiByteToWideChar(diag_cp, 0, r.build_log.data(), n_in, nullptr, 0);
-        if (wlen > 0) {
-            std::wstring w((size_t)wlen, L'\0');
-            if (MultiByteToWideChar(diag_cp, 0, r.build_log.data(), n_in, w.data(), wlen) == wlen) {
-                int u8len = WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, nullptr, 0, nullptr, nullptr);
-                if (u8len > 0) {
-                    std::string u8((size_t)u8len, '\0');
-                    if (WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, u8.data(), u8len, nullptr, nullptr) == u8len) {
-                        r.build_log = std::move(u8);
-                        converted = true;
-                    }
-                }
-            }
-        }
-        if (!converted) {
-            for (auto& c : r.build_log)
-                if (static_cast<unsigned char>(c) >= 0x80) c = '?';
-        }
-    }
-#else
-    // TODO(linux): cl.exe path doesn't apply; build log will already be
-    // UTF-8 from gcc/clang in typical setups. Leave as-is.
-#endif
+    // Sanitize the build log for the WS text frame, which must be UTF-8. On a
+    // non-English Windows cl.exe emits localized diagnostics in the local code
+    // page; ensure_utf8 transcodes them so they're never mojibake on the wire.
+    // (TODO(linux): gcc/clang emit UTF-8 already; ensure_utf8 is a no-op there.)
+    r.build_log = ensure_utf8(detail::read_file(log_path.string()));
 
     if (rc == 0 && std::filesystem::exists(out_dll)) {
         r.ok = true;

@@ -233,6 +233,42 @@ def main() -> int:
     finally:
         safe_kill(proc)
 
+    # ---- Phase 2: CRT abort() path (robustness BUG 1) --------------------
+    # std::abort() / a CRT fastfail bypasses SetUnhandledExceptionFilter AND
+    # std::set_terminate, so it used to kill the backend with NO minidump /
+    # .json sidecar — defeating crash_reports + the FE crash-history. The
+    # SIGABRT/invalid-parameter/purecall handlers must now produce the same
+    # forensic artifacts. Drive it with --test-abort and assert the report.
+    abort_log = ROOT / "backend_abort.log"
+    try:
+        with open(abort_log, "w", encoding="utf-8") as lf:
+            ap = subprocess.run([str(BACKEND_EXE), "--test-abort"],
+                                stdout=lf, stderr=subprocess.STDOUT, timeout=30)
+        print(f"--test-abort exited rc={ap.returncode}")
+        rep = find_crash_report(abort_log)
+        if rep is None:
+            failures.append("abort() produced NO crash report (BUG 1 not fixed)")
+        else:
+            rpt_path, dmp_path = rep
+            try:
+                report = json.loads(rpt_path.read_text(encoding="utf-8"))
+            except Exception as e:  # noqa: BLE001
+                report = {}
+                failures.append(f"abort crash report unreadable: {e}")
+            exc = report.get("exception", {})
+            ctx = report.get("context", {})
+            summary["abort"] = {"exception": exc, "context": ctx,
+                                "dmp": dmp_path.name}
+            print(f"abort crash report {rpt_path.name}: exception={exc} ctx_cmd={ctx.get('last_cmd')}")
+            if exc.get("name") != "CXX_ABORT":
+                failures.append(f"abort report exception.name != CXX_ABORT: {exc.get('name')!r}")
+            if ctx.get("last_cmd") != "abort":
+                failures.append(f"abort report context.last_cmd != 'abort': {ctx.get('last_cmd')!r}")
+            if not dmp_path.exists() or dmp_path.stat().st_size < 1024:
+                failures.append(f"abort minidump missing/too small: {dmp_path}")
+    except subprocess.TimeoutExpired:
+        failures.append("--test-abort hung (did not exit within 30s)")
+
     print("\n" + "=" * 48)
     if failures:
         print("VERDICT: FAIL")
@@ -241,7 +277,8 @@ def main() -> int:
     else:
         print("VERDICT: PASS")
         print("  uncatchable plugin crash -> backend died -> minidump +")
-        print("  crash report with surviving inspect-phase breadcrumb.")
+        print("  crash report with surviving inspect-phase breadcrumb;")
+        print("  CRT abort() path also produces a CXX_ABORT crash report.")
     (ROOT / "_results_crash_forensics.json").write_text(
         json.dumps({"pass": not failures, "failures": failures, "summary": summary},
                    indent=2), encoding="utf-8")

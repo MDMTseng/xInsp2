@@ -106,6 +106,39 @@ int main() {
         CHECK(d.empty());
     }
 
+    // ---- ensure_utf8: compiler diagnostics must NEVER be mojibake on the wire.
+    // Regression for the friction the dogfood agent hit (cl.exe emits localized
+    // diagnostics in the local code page; raw CP950/CP932 bytes on a UTF-8 frame
+    // are garbage). The invariant ensure_utf8 guarantees, machine-independent:
+    // the result is ALWAYS valid UTF-8 (whatever the host code page).
+    {
+        using xi::script::ensure_utf8;
+        using xi::script::is_valid_utf8;
+
+        // ASCII passes through unchanged.
+        std::string ascii = "C:\\proj\\inspection.cpp(2): error C2059: syntax error: 'return'";
+        CHECK(ensure_utf8(ascii) == ascii);
+        CHECK(is_valid_utf8(ensure_utf8(ascii)));
+
+        // Already-UTF-8 (English locale / working VSLANG) passes through unchanged.
+        std::string utf8 = "error C2059: \xE8\xAA\x9E\xE6\xB3\x95 error";  // "語法" in UTF-8
+        CHECK(is_valid_utf8(utf8));
+        CHECK(ensure_utf8(utf8) == utf8);
+
+        // Raw CP950 bytes (語法錯誤 = BB 79 AA 6B BF 79 BB 7E) are NOT valid UTF-8;
+        // ensure_utf8 must transcode so the output is valid UTF-8 either way.
+        std::string cp950 = "error C2059: \xBB\x79\xAA\x6B\xBF\x79\xBB\x7E: 'return'";
+        CHECK(!is_valid_utf8(cp950));
+        std::string fixed = ensure_utf8(cp950);
+        CHECK(is_valid_utf8(fixed));   // the core invariant — no mojibake escapes
+        // The ASCII skeleton (error code, quotes) survives intact.
+        CHECK(fixed.find("error C2059:") != std::string::npos);
+        CHECK(fixed.find("'return'") != std::string::npos);
+
+        // Empty stays empty.
+        CHECK(ensure_utf8("").empty());
+    }
+
     if (g_failures == 0) {
         std::fprintf(stderr, "test_diagnostics: ALL PASS\n");
         return 0;
