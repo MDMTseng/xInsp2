@@ -1,0 +1,4 @@
+{
+  "plugin": "local_image_source",
+  "config": { "dir": "" }
+}

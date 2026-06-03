@@ -1,0 +1,7 @@
+{
+  "name": "local_image_source",
+  "description": "Load images from a local folder; pick one in the webui (thumbnail grid) to issue it as a trigger.",
+  "dll": "local_image_source.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

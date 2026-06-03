@@ -1,0 +1,6 @@
+{
+  "name": "image_sources",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}
