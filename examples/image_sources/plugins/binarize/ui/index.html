@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body { font-family: var(--vscode-font-family, system-ui); color: var(--vscode-foreground, #ccc);
+         background: var(--vscode-sideBar-background, #1e1e1e); padding: 16px; font-size: 13px; }
+  h2 { margin: 0 0 4px; font-size: 15px; }
+  .hint { color: #888; font-size: 12px; margin-bottom: 14px; }
+  .field { display: grid; grid-template-columns: 90px 1fr 50px; gap: 10px; align-items: center; }
+  .field label { color:#888; }
+  input[type=range] { width: 100%; }
+  .num { font-family: monospace; text-align: right; }
+  .stat { display:flex; gap:10px; margin-top:14px; font-size:12px; }
+  .stat .k { color:#888; } .stat .v { font-family: monospace; }
+</style></head>
+<body>
+  <h2>Binarize</h2>
+  <div class="hint">Drag the threshold, then <b>replay</b> a cached frame (or issue a
+    new one) to see the binary result update. Param changes are applied on the next pass.</div>
+  <div class="field">
+    <label>Threshold</label>
+    <input type="range" id="thr" data-param="threshold" min="0" max="255" step="1">
+    <div class="num" id="thr-v">128</div>
+  </div>
+  <div class="stat">
+    <span class="k">Last foreground %</span><span class="v" id="fg">—</span>
+    <span class="k">Passes</span><span class="v" id="n">0</span>
+  </div>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    const send = (cmd) => vscode.postMessage({ type: 'exchange', cmd });
+    const $ = id => document.getElementById(id);
+    let pending = false;
+    $('thr').addEventListener('input', () => {
+      $('thr-v').textContent = $('thr').value;
+      if (pending) return; pending = true;
+      send({ command: 'set_threshold', value: parseInt($('thr').value) });
+      setTimeout(() => pending = false, 60);
+    });
+    window.addEventListener('message', (e) => {
+      const m = e.data; if (!m || m.type !== 'status') return;
+      if (typeof m.threshold === 'number' && document.activeElement !== $('thr')) {
+        $('thr').value = m.threshold; $('thr-v').textContent = m.threshold;
+      }
+      if (typeof m.last_fg_pct === 'number') $('fg').textContent = (m.last_fg_pct * 100).toFixed(1) + '%';
+      if (typeof m.processed === 'number') $('n').textContent = m.processed;
+    });
+    send({ command: 'get_status' });
+  </script>
+</body></html>

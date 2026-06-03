@@ -27,7 +27,15 @@ void xi_inspect_entry(int /*frame*/) {
     VAR(loaded, true);
     VAR(width, img.width);
     VAR(height, img.height);
-    VAR(preview, img);   // surfaced as an image preview in the UI
+    VAR(input, img);     // the raw input, surfaced as a preview
+
+    // Binarize it. The threshold is tuned in the binarize instance's webui (a
+    // plugin-internal param); the new value shows up here on the next pass —
+    // replay a cached frame after tweaking the slider to see it update.
+    auto bin = xi::use("binarize")
+                   .process(xi::Record().image("frame", img))
+                   .get_image("binary");
+    if (!bin.empty()) VAR(binary, bin);
 
     // Feed the cache so this frame can be replayed later from its webui — but NOT
     // when this pass IS a cache replay (would just re-store the same frame).

@@ -1,0 +1,7 @@
+{
+  "name": "binarize",
+  "description": "Threshold an image to black/white. Tune the threshold in the webui; replay a cached frame to see the new result.",
+  "dll": "binarize.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}
