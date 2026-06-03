@@ -368,6 +368,50 @@ inline int run_with_env(const std::string& cmdline, const std::vector<char>& env
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
     return (int)code;
 }
+
+// Build (once, cached by a flag+exe signature) a precompiled header for the
+// OpenCV umbrella <opencv2/opencv.hpp> — by far the heaviest front-end parse in a
+// script compile. The umbrella is force-included FIRST (the /Yu boundary) and the
+// xi headers re-include it harmlessly (include-guarded). We deliberately PCH only
+// OpenCV, NOT xi.hpp: xi.hpp pulls xi_io.hpp which references the mutable file-
+// statics defined in xi_script_support.hpp, so PCH-ing through it would split that
+// state across TUs and silently break xi::use()/triggers at runtime.
+//
+// Best-effort: returns {} on ANY failure (capture, compile error) so the caller
+// falls back to a normal compile — PCH never breaks the build, only speeds it.
+struct PchResult { std::string pch, obj; };
+inline PchResult ensure_pch(const std::string& output_dir, const std::string& flags,
+                            const char* through, const std::vector<char>* env,
+                            const std::string& vcvars) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = fs::path(output_dir) / ".pch";
+    fs::create_directories(dir, ec);
+    fs::path pch = dir / "umbrella.pch", obj = dir / "umbrella.obj",
+             sigf = dir / "umbrella.sig", stub = dir / "umbrella.cpp",
+             plog = dir / "umbrella.log";
+    // Invalidate when the flags OR the backend binary change (a framework rebuild
+    // may change the headers without changing the flags).
+    std::string sig = std::string(through) + "|" + flags;
+    char exe[MAX_PATH]; DWORD en = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    if (en) { auto t = fs::last_write_time(fs::path(std::string(exe, en)), ec);
+              if (!ec) sig += "|" + std::to_string(t.time_since_epoch().count()); }
+    {
+        std::ifstream sf(sigf); std::stringstream s; s << sf.rdbuf();
+        if (s.str() == sig && fs::exists(pch) && fs::exists(obj))
+            return { pch.string(), obj.string() };
+    }
+    { std::ofstream o(stub); o << "#include <" << through << ">\n"; }
+    std::string cmd = "cmd /C \"";
+    if (!env) cmd += "\"" + vcvars + "\" >nul 2>nul && set VSLANG=1033 && ";
+    cmd += "cl.exe " + flags + " /c /Yc\"" + through + "\" /Fp\"" + pch.string()
+         + "\" /Fo\"" + obj.string() + "\" \"" + stub.string() + "\""
+         + " > \"" + plog.string() + "\" 2>&1\"";
+    int rc = env ? run_with_env(cmd, *env) : std::system(cmd.c_str());
+    if (rc != 0 || !fs::exists(pch) || !fs::exists(obj)) return {};
+    { std::ofstream o(sigf); o << sig; }
+    return { pch.string(), obj.string() };
+}
 #endif // _WIN32
 
 } // namespace detail
@@ -476,40 +520,49 @@ inline CompileResult compile(const CompileRequest& req) {
       : (req.mode == CompileMode::PluginExport) ? "/O2 /Zi"
       : (req.mode == CompileMode::Script && req.fast) ? "/Od /Z7"   // fast dev iterate
       : "/O2 /Z7";
-    cmd += "cl.exe /nologo /std:c++20 /LD /EHsc /MD ";
-    cmd += opt_flags;
-    cmd += " /utf-8 /W3";
-    cmd += " /I\"" + req.include_dir + "\"";
-    // Also include the vendor dir (cJSON, stb, etc.) — sibling of include/
-    auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";
-    if (std::filesystem::exists(vendor_dir)) {
-        cmd += " /I\"" + vendor_dir.string() + "\"";
-    }
-    // Extra include dirs from project config
-    for (auto& d : req.include_dirs) {
-        cmd += " /I\"" + d + "\"";
-    }
-    // Force-include the right convenience header for the kind of DLL.
-    // Script gets the inspect_entry plumbing; plugin gets the C ABI
-    // export macros so the user only writes a plain class.
-    if (req.mode == CompileMode::Script) {
-        cmd += " /FIxi/xi_script_support.hpp";
-    } else {
-        cmd += " /FIxi/xi_plugin_support.hpp";
-    }
     // OpenCV is mandatory: xi.hpp / xi_plugin_support.hpp pull in
     // <opencv2/opencv.hpp> for cv:: image operators.
     if (req.opencv_dir.empty()) {
-        CompileResult r;
-        r.ok = false;
-        r.build_log = "OpenCV not configured (set OpenCV_DIR or install to a default location); xInsp2 requires OpenCV for image operators";
-        return r;
+        CompileResult rr;
+        rr.ok = false;
+        rr.build_log = "OpenCV not configured (set OpenCV_DIR or install to a default location); xInsp2 requires OpenCV for image operators";
+        return rr;
     }
-    cmd += " /I\"" + req.opencv_dir + "\\include\"";
+    // Shared front-end flags (codegen + ALL include/define flags) — assembled once
+    // so the PCH is built with byte-identical flags to the consuming compile.
+    std::string front = std::string("/nologo /std:c++20 /EHsc /MD ") + opt_flags + " /utf-8 /W3";
+    front += " /I\"" + req.include_dir + "\"";
+    // vendor dir (cJSON, stb, etc.) — sibling of include/
+    auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";
+    if (std::filesystem::exists(vendor_dir)) front += " /I\"" + vendor_dir.string() + "\"";
+    for (auto& d : req.include_dirs) front += " /I\"" + d + "\"";   // project extra includes
+    front += " /I\"" + req.opencv_dir + "\\include\"";
     if (!req.turbojpeg_root.empty()) {
-        cmd += " /D XINSP2_HAS_TURBOJPEG=1";
-        cmd += " /I\"" + req.turbojpeg_root + "\\include\"";
+        front += " /D XINSP2_HAS_TURBOJPEG=1";
+        front += " /I\"" + req.turbojpeg_root + "\\include\"";
     }
+
+    // Precompiled header for the OpenCV umbrella — the dominant parse cost. Best-
+    // effort (ensure_pch returns {} on any failure → plain compile). Script only:
+    // the plugin path force-includes a different support header.
+    std::string pch_obj;
+#ifdef _WIN32
+    if (req.mode == CompileMode::Script) {
+        auto p = detail::ensure_pch(req.output_dir, front, "opencv2/opencv.hpp", cl_env, vcvars);
+        if (!p.pch.empty()) {
+            // /FI the umbrella FIRST (the /Yu boundary); xi headers re-include it
+            // harmlessly (include-guarded). Then the script support header.
+            front += " /FIopencv2/opencv.hpp /Yu\"opencv2/opencv.hpp\" /Fp\"" + p.pch + "\"";
+            pch_obj = p.obj;
+        }
+    }
+#endif
+
+    cmd += "cl.exe /LD " + front;
+    // Force-include the convenience header AFTER the PCH boundary. Script gets the
+    // inspect_entry plumbing; plugin gets the C ABI export macros.
+    if (req.mode == CompileMode::Script) cmd += " /FIxi/xi_script_support.hpp";
+    else                                 cmd += " /FIxi/xi_plugin_support.hpp";
     cmd += " /Fo\"" + req.output_dir + "\\\\\"";
     cmd += " /Fe\"" + out_dll.string() + "\"";
     cmd += " \"" + req.source_path + "\"";
@@ -532,6 +585,8 @@ inline CompileResult compile(const CompileRequest& req) {
     if (std::filesystem::exists(cjson_lib)) {
         cmd += " \"" + cjson_lib.string() + "\"";
     }
+    // The PCH's own object (from /Yc) must be linked when consuming via /Yu.
+    if (!pch_obj.empty()) cmd += " \"" + pch_obj + "\"";
     // Accelerator import libs — match the /D defines added above.
     if (!req.opencv_dir.empty()) {
         // Pre-built OpenCV ships opencv_world<ver>.lib at x64/vc16/lib.
