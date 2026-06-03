@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body { font-family: var(--vscode-font-family, system-ui); color: var(--vscode-foreground, #ccc);
+         background: var(--vscode-sideBar-background, #1e1e1e); padding: 14px; font-size: 13px; }
+  h2 { margin: 0 0 4px; font-size: 15px; }
+  .hint { color: #888; font-size: 12px; margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  button { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff);
+           border: none; padding: 5px 12px; border-radius: 3px; font-size: 12px; cursor: pointer; }
+  button.secondary { background: var(--vscode-button-secondaryBackground, #3a3d41); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, 148px); gap: 10px; }
+  .cell { cursor: pointer; border: 1px solid rgba(255,255,255,0.08); border-radius: 5px;
+          padding: 4px; background: var(--vscode-editor-background); transition: border-color .1s; }
+  .cell:hover { border-color: var(--vscode-focusBorder, #0e639c); }
+  .cell img { width: 140px; display: block; border-radius: 3px; background:#000; }
+  .cap { font-family: monospace; font-size: 11px; color:#aaa; margin-top: 4px; }
+  .empty { color:#888; font-style: italic; padding: 20px 0; }
+  .meta { color:#4caf50; font-size:12px; margin-bottom:10px; min-height: 16px; }
+</style></head>
+<body>
+  <h2>Cached image source</h2>
+  <div class="hint">Recent images that flowed through this cache. Click one to
+    <b>replay</b> it (re-run the pipeline on that frame, no new acquisition).</div>
+  <div class="row">
+    <button id="refresh" data-action="refresh" class="secondary">Refresh</button>
+    <button id="clear" data-action="clear" class="secondary">Clear</button>
+  </div>
+  <div class="meta" id="meta"></div>
+  <div class="grid" id="grid"></div>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    const send = (cmd) => vscode.postMessage({ type: 'exchange', cmd });
+    const $ = id => document.getElementById(id);
+    $('refresh').onclick = () => send({ command: 'get_status' });
+    $('clear').onclick   = () => send({ command: 'clear' });
+
+    function render(s) {
+      $('meta').textContent = `${s.count}/${s.capacity} cached · ${s.replayed || 0} replays`;
+      const grid = $('grid');
+      grid.innerHTML = '';
+      const frames = s.frames || [];
+      if (!frames.length) { grid.innerHTML = '<div class="empty">cache is empty — run a pass to fill it</div>'; return; }
+      // newest first
+      frames.slice().reverse().forEach((f, ri) => {
+        const i = frames.length - 1 - ri;     // original index for replay
+        const cell = document.createElement('div');
+        cell.className = 'cell';
+        cell.title = `slot ${f.slot}  ${f.w}x${f.h} — click to replay`;
+        cell.innerHTML = (f.thumb ? `<img src="${f.thumb}">` : '') +
+                         `<div class="cap">#${f.slot} · ${f.w}x${f.h}</div>`;
+        cell.onclick = () => send({ command: 'replay', index: i });
+        grid.appendChild(cell);
+      });
+    }
+    window.addEventListener('message', (e) => {
+      const m = e.data; if (m && m.type === 'status') render(m);
+    });
+    send({ command: 'get_status' });
+  </script>
+</body></html>

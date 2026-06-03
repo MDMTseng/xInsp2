@@ -1,0 +1,7 @@
+{
+  "name": "cached_image_source",
+  "description": "Caches images fed through it (a ring of N); the webui shows them as a thumbnail grid and replays the one you click as a fresh trigger.",
+  "dll": "cached_image_source.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

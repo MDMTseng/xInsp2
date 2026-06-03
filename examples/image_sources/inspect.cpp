@@ -28,4 +28,9 @@ void xi_inspect_entry(int /*frame*/) {
     VAR(width, img.width);
     VAR(height, img.height);
     VAR(preview, img);   // surfaced as an image preview in the UI
+
+    // Feed the cache so this frame can be replayed later from its webui — but NOT
+    // when this pass IS a cache replay (would just re-store the same frame).
+    if (src != "cache")
+        xi::use("cache").process(xi::Record().image("frame", img));
 }

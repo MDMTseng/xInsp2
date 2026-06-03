@@ -43,16 +43,28 @@ def main() -> int:
         print("open_project (compiles local_image_source plugin)")
         c.open_project(str(ROOT), timeout=300)
 
-        def exch(cmd: dict) -> dict:
-            r = c.call("exchange_instance", {"name": "local", "cmd": cmd})
-            data = r if isinstance(r, dict) else {}
+        def exch(name: str, cmd: dict) -> dict:
+            r = c.call("exchange_instance", {"name": name, "cmd": cmd})
             try:
-                return json.loads(data) if isinstance(data, str) else (data or {})
+                return json.loads(r) if isinstance(r, str) else (r or {})
             except Exception:
                 return {}
 
+        def wait_pass(expect_src: str, timeout: float = 10.0) -> dict | None:
+            # Drain vars until a pass with loaded=true and source==expect_src.
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                v = c.next_vars(timeout=2)
+                if v is None:
+                    continue
+                items = {it["name"]: it for it in v.get("items", v.get("vars", []))}
+                if items.get("loaded", {}).get("value") is True and \
+                   expect_src in str(items.get("source", {}).get("value")):
+                    return items
+            return None
+
         # Point the source at the frames folder (what "Set folder" does in the UI).
-        st = exch({"command": "set_dir", "value": str(FRAMES)})
+        st = exch("local", {"command": "set_dir", "value": str(FRAMES)})
         files = st.get("files", [])
         print(f"  dir={st.get('dir')}  files={st.get('count')}")
         if not files:
@@ -71,36 +83,37 @@ def main() -> int:
         while c.next_vars(timeout=0.2) is not None:
             pass
 
-        print("issue index 0 (== clicking the first thumbnail)")
-        exch({"command": "issue", "index": 0})
-
-        # Drain vars until we see the issued pass (loaded=true from source 'local').
-        got = None
-        deadline = time.time() + 10
-        seen = 0
-        while time.time() < deadline:
-            v = c.next_vars(timeout=2)
-            if v is None:
-                continue
-            seen += 1
-            raw = v.get("items", v.get("vars", []))   # continuous vars msg uses "items"
-            items = {it["name"]: it for it in raw}
-            src = items.get("source", {}).get("value")
-            ld  = items.get("loaded", {}).get("value")
-            if ld is True:
-                got = items
-                break
+        # --- local source: issue a file -> a pass runs on it (which feeds the cache) ---
+        print("LOCAL: issue index 0 (== clicking the first thumbnail)")
+        exch("local", {"command": "issue", "index": 0})
+        got = wait_pass("local")
         if got is None:
-            failures.append("issued image never produced a pass with loaded=true")
+            failures.append("local issue never produced a pass (source=local, loaded=true)")
         else:
-            src = got.get("source", {}).get("value")
             w = got.get("width", {}).get("value")
-            h = got.get("height", {}).get("value")
-            print(f"  pass ran: source={src} {w}x{h} trigger_id={got.get('trigger_id',{}).get('value','')[:12]}…")
-            if "local" not in str(src):
-                failures.append(f"pass source not 'local': {src!r}")
+            print(f"  pass ran: source=local {w}x{got.get('height',{}).get('value')} "
+                  f"tid={got.get('trigger_id',{}).get('value','')[:12]}")
             if not (isinstance(w, (int, float)) and w > 0):
                 failures.append(f"bad width: {w!r}")
+
+        # --- cached source: the pass above fed it; check + replay from the cache ---
+        time.sleep(0.3)
+        cs = exch("cache", {"command": "get_status"})
+        frames = cs.get("frames", [])
+        cwt = sum(1 for f in frames if (f.get("thumb") or "").startswith("data:image/jpeg;base64,"))
+        print(f"CACHE: {cs.get('count')} cached, {cwt} thumbnails")
+        if not frames:
+            failures.append("cache captured nothing after a pass")
+        else:
+            print("CACHE: replay index 0 (== clicking a cached thumbnail)")
+            exch("cache", {"command": "replay", "index": 0})
+            rep = wait_pass("cache")
+            if rep is None:
+                failures.append("cache replay never produced a pass (source=cache, loaded=true)")
+            else:
+                print(f"  replay ran: source=cache {rep.get('width',{}).get('value')}x"
+                      f"{rep.get('height',{}).get('value')} "
+                      f"tid={rep.get('trigger_id',{}).get('value','')[:12]}")
         try: c.close()
         except Exception: pass
     finally:
@@ -115,7 +128,8 @@ def main() -> int:
         for f in failures: print("  -", f)
     else:
         print("VERDICT: PASS")
-        print("  local images listed with thumbnails; issuing one ran a pass on it.")
+        print("  local: thumbnails listed, issuing one ran a pass;")
+        print("  cache: captured that pass, replaying it ran another pass.")
     return 1 if failures else 0
 
 

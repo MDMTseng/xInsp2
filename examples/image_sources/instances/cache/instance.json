@@ -1,0 +1,4 @@
+{
+  "plugin": "cached_image_source",
+  "config": { "capacity": 12 }
+}
