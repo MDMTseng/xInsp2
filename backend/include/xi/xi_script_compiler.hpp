@@ -50,7 +50,8 @@ enum class CompileMode {
 struct CompileRequest {
     std::string source_path;               // primary .cpp (used for DLL name)
     std::vector<std::string> extra_sources; // additional .cpp files
-    std::vector<std::string> include_dirs;  // extra include dirs
+    std::vector<std::string> include_dirs;  // extra include dirs (project.json "include_dirs")
+    std::vector<std::string> link_libs;     // extra import libs to link (project.json "link_libs")
     std::string output_dir;
     std::string include_dir;    // backend/include (always added)
     std::string vcvars_path;
@@ -616,6 +617,10 @@ inline CompileResult compile(const CompileRequest& req) {
             if (std::filesystem::exists(p)) cmd += " \"" + p.string() + "\"";
         }
     }
+    // User-declared import libs (project.json "link_libs"). Already resolved to
+    // absolute paths by the caller. Lets a script/plugin link an external SDK
+    // without a full-path #pragma comment(lib) in the source.
+    for (auto& l : req.link_libs) cmd += " \"" + l + "\"";
     cmd += " > \"" + log_path.string() + "\" 2>&1";
     cmd += "\"";
 

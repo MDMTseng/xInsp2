@@ -77,7 +77,16 @@ struct LoadedScript {
 };
 
 inline bool load_script(const std::string& dll_path, LoadedScript& out, std::string& err) {
-    HMODULE h = LoadLibraryA(dll_path.c_str());
+    // LOAD_LIBRARY_SEARCH_DEFAULT_DIRS keeps the app dir (OpenCV/turbojpeg/IPP are
+    // deployed beside xinsp-backend.exe) + System32; LOAD_LIBRARY_SEARCH_USER_DIRS
+    // honours the project folder the host added via AddDllDirectory, so a script's
+    // statically-linked external dependency DLL can live in the project folder.
+    // (CWD/PATH are dropped — same trade as the plugin loader; deps belong in the
+    // app dir or the project folder, not on a wandering PATH.)
+    // TODO(linux): dlopen + RPATH/$ORIGIN; no LOAD_LIBRARY_SEARCH analogue.
+    HMODULE h = LoadLibraryExA(dll_path.c_str(), nullptr,
+                               LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                               LOAD_LIBRARY_SEARCH_USER_DIRS);
     if (!h) {
         DWORD e = GetLastError();
         err = "LoadLibrary failed (" + std::to_string(e) + ") for " + dll_path;

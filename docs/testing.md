@@ -178,6 +178,11 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   silently gets the first's version), an absolute-path load stays distinct, and
   distinct file names are the fix. Builds the two dep versions with `cl` (vcvars
   located via `toolchain_health`) and asserts all three outcomes.
+  `examples/script_external_dll/` — a user **script** using an external DLL:
+  proves `project.json` `include_dirs` + `link_libs` feed the script compile and
+  that the dependency DLL is found at runtime from the project folder (on the DLL
+  search path). Builds a tiny `extmath.dll`, compiles+loads the script, asserts
+  `ext_add(2,3)==5`.
 - **Phase G stress + race** (#92; see
   `docs/design/fe-be-split-test-plan.md` "Phase G"). Beyond the `test_qa_stress`
   unit above: `examples/qa_recover/` proves the **recover-and-clear** transition

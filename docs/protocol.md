@@ -483,6 +483,14 @@ the backend overwrites only files carrying that stamp, so a hand-written config 
 never clobbered (delete the stamp to take manual ownership). Both files embed
 machine-specific absolute paths and are git-ignored under `examples/`.
 
+**External script dependencies.** `project.json` may carry two optional arrays
+that feed the script compile: `"include_dirs"` (extra `cl /I` paths) and
+`"link_libs"` (extra import libs to link). Relative entries resolve against the
+project folder. The matching dependency DLL is found at runtime because the
+backend adds the project folder to the process DLL search path. See
+[`guides/writing-a-script.md`](./guides/writing-a-script.md) → "Using an external
+library / DLL" and [`examples/script_external_dll`](../examples/script_external_dll).
+
 **Working-copy mode.** `open_project` accepts `"working_copy": true`: the
 backend then operates on a `<project>/.xinsp_work` scratch copy (resume if
 present, else seed from the canonical project), so edits are transactional and

@@ -571,6 +571,42 @@ When in doubt, leave `dispatch_threads` at 1.
 
 ---
 
+## Using an external library / DLL
+
+Two ways to pull a third-party SDK into a script:
+
+**Best for anything reusable — wrap it in a plugin.** Plugins can ship their
+dependency DLLs in their own folder and get a config UI; the script just
+`xi::use()`s them. See [`adding-a-plugin.md`](./adding-a-plugin.md).
+
+**Directly in the script — declare it in `project.json`:**
+
+```jsonc
+{
+  "name": "my_project",
+  "script": "inspect.cpp",
+  "include_dirs": ["include", "C:/abs/sdk/include"],  // extra cl /I (relative = from project)
+  "link_libs":    ["deps/foo.lib"]                     // import libs to link (relative = from project)
+}
+```
+
+Then `#include <foo.h>` and call into it. At runtime the dependency DLL
+(`foo.dll`) must be found: the backend puts the **project folder** on the DLL
+search path, so dropping `foo.dll` in the project folder works (it's also fine
+next to `xinsp-backend.exe`). Relative `include_dirs`/`link_libs` resolve against
+the project folder. Worked end-to-end example:
+[`examples/script_external_dll`](../../examples/script_external_dll).
+
+> Why the project folder and not next to the script: the compiled script DLL
+> lives in a temp build dir, loaded with `LOAD_LIBRARY_SEARCH_USER_DIRS` so only
+> the app dir + System32 + the project folder are searched (CWD/PATH are not).
+
+If you'd rather not touch `project.json`, you can also `LoadLibraryEx` the DLL
+yourself by absolute path inside the script and `GetProcAddress` — that keys on
+the full path and sidesteps search rules entirely.
+
+---
+
 ## Common pitfalls
 
 - **Forgetting `XI_SCRIPT_EXPORT`** on `xi_inspect_entry`. The host's

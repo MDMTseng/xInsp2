@@ -919,6 +919,62 @@ static bool write_toolchain_override_(const std::string& folder, const std::stri
     return ok;
 }
 
+// ---- script external dependencies (project.json include_dirs / link_libs) ----
+//
+// A user script (inspect.cpp) may need an external SDK. Unlike a plugin (which
+// ships deps in its own folder), the script DLL lives in TEMP/script_build, so we
+// give the script two project-level hooks:
+//   "include_dirs": ["deps/include", "C:/abs/include"]  -> extra cl /I
+//   "link_libs":    ["deps/foo.lib"]                     -> import libs to link
+// Relative entries resolve against the project folder. The matching runtime DLL
+// search of the project folder is set up in set_project_dll_search_ (below).
+static void read_script_deps_(const std::string& folder,
+                              std::vector<std::string>& include_dirs,
+                              std::vector<std::string>& link_libs) {
+    if (folder.empty()) return;
+    namespace fs = std::filesystem;
+    std::ifstream in((fs::path(folder) / "project.json").string());
+    if (!in) return;
+    std::stringstream ss; ss << in.rdbuf();
+    cJSON* root = cJSON_Parse(ss.str().c_str());
+    if (!root) return;
+    auto resolve = [&](const char* s) -> std::string {
+        fs::path p(s);
+        if (p.is_absolute()) return p.string();
+        std::error_code ec;
+        return (fs::path(folder) / p).lexically_normal().string();
+    };
+    auto pull = [&](const char* key, std::vector<std::string>& out) {
+        cJSON* arr = cJSON_GetObjectItem(root, key);
+        if (!arr || !cJSON_IsArray(arr)) return;
+        cJSON* it = nullptr;
+        cJSON_ArrayForEach(it, arr)
+            if (cJSON_IsString(it) && it->valuestring && *it->valuestring)
+                out.push_back(resolve(it->valuestring));
+    };
+    pull("include_dirs", include_dirs);
+    pull("link_libs", link_libs);
+    cJSON_Delete(root);
+}
+
+// Put the open project's folder on the process DLL search path so a script's
+// statically-linked external dependency DLL can live in the project folder. The
+// script loader (xi_script_loader.hpp) loads with LOAD_LIBRARY_SEARCH_USER_DIRS,
+// which honours dirs added via AddDllDirectory. Re-pointed on each open_project.
+// TODO(linux): equivalent is building the script .so with -Wl,-rpath plus
+// dlopen; AddDllDirectory has no portable analogue.
+static DLL_DIRECTORY_COOKIE g_proj_dll_dir = nullptr;
+static void set_project_dll_search_(const std::string& folder) {
+    if (g_proj_dll_dir) { RemoveDllDirectory(g_proj_dll_dir); g_proj_dll_dir = nullptr; }
+    if (folder.empty()) return;
+    int wn = MultiByteToWideChar(CP_UTF8, 0, folder.c_str(), -1, nullptr, 0);
+    if (wn <= 0) return;
+    std::wstring w((size_t)wn, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, folder.c_str(), -1, w.data(), wn);
+    if (!w.empty() && w.back() == L'\0') w.pop_back();
+    g_proj_dll_dir = AddDllDirectory(w.c_str());
+}
+
 // Plugin manager (global)
 static xi::PluginManager g_plugin_mgr;
 
@@ -1930,6 +1986,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         req.turbojpeg_root  = g_turbojpeg_root;
         req.ipp_root        = g_ipp_root;
         req.vcvars_path     = g_tc_vcvars;   // empty = compiler auto-finds vcvars64.bat
+        // Project-declared external deps (project.json include_dirs / link_libs).
+        read_script_deps_(g_project_folder, req.include_dirs, req.link_libs);
         // Fast dev compile (/Od) by default — the interactive edit→run loop wants
         // fast COMPILE, not fast runtime. A client benchmarking / the autostart
         // boot path passes "optimize":true to get /O2. (Both spacings, like has_ui.)
@@ -3024,6 +3082,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // IntelliSense config below both pick up the user's path fixes.
             g_project_folder = *folder;
             resolve_toolchain_(*folder);
+            // Put the project folder on the DLL search path so a script's
+            // statically-linked external dep DLL can live in the project folder.
+            set_project_dll_search_(*folder);
             // Drop a c_cpp_properties.json into the project the user actually
             // edits (the canonical *folder, not any .xinsp_work scratch) so the
             // C/C++ extension resolves xi/* + OpenCV and go-to-definition works
