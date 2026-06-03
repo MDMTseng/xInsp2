@@ -344,6 +344,19 @@ export function activate(context: vscode.ExtensionContext) {
     const wsUrl = isRemote ? remoteUrl : `ws://127.0.0.1:${port}`;
     const output = vscode.window.createOutputChannel('xInsp2');
 
+    // If the opened workspace folder IS an xInsp2 project (has project.json),
+    // remember it so the connect handler auto-opens AND auto-compiles it —
+    // "open the folder -> it just runs", no manual Open Project / Compile Script.
+    {
+        const fs0 = require('fs');
+        for (const wf of vscode.workspace.workspaceFolders ?? []) {
+            if (fs0.existsSync(path.join(wf.uri.fsPath, 'project.json'))) {
+                lastProjectFolder = wf.uri.fsPath;
+                break;
+            }
+        }
+    }
+
     // Diagnostics from compile_and_load — drives Problems panel + squiggles.
     // Cleared and rebuilt on each compile (success or failure).
     const diagnostics = vscode.languages.createDiagnosticCollection('xinsp2');
@@ -683,6 +696,23 @@ export function activate(context: vscode.ExtensionContext) {
                     treeProvider.setProjectOpen(true);
                     updateProjectStatus();
                     vscode.window.setStatusBarMessage('xInsp2: project restored', 3000);
+                    // Auto-compile the project's script so the pipeline is LIVE
+                    // (and the trigger sink installed) without a manual Compile —
+                    // otherwise issuing/replaying a frame does nothing.
+                    try {
+                        const fsx = require('fs');
+                        const pj = JSON.parse(fsx.readFileSync(path.join(lastProjectFolder!, 'project.json'), 'utf8'));
+                        const scr = pj.script || 'inspection.cpp';
+                        const scrPath = path.join(lastProjectFolder!, scr);
+                        if (fsx.existsSync(scrPath)) {
+                            output.appendLine(`[xinsp2] auto-compiling project script ${scr}`);
+                            sendCmd('compile_and_load', { path: scrPath })
+                                .then(() => output.appendLine('[xinsp2] project script loaded — ready to run'))
+                                .catch((e: any) => output.appendLine(`[xinsp2] auto-compile failed: ${e?.message || e}`));
+                        }
+                    } catch (e: any) {
+                        output.appendLine(`[xinsp2] auto-compile skipped: ${e?.message || e}`);
+                    }
                 } else {
                     output.appendLine(`[xinsp2] could not restore project: ${r?.error || 'unknown'}`);
                 }
