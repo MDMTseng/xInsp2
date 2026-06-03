@@ -180,9 +180,13 @@ private:
             p = p.parent_path();
         }
 
-        // Try each path
+        // Try each path. LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR lets a plugin ship its
+        // dependency DLLs in its own folder (DEFAULT_DIRS keeps app dir + System32);
+        // see load_project_plugins in xi_plugin_manager.hpp for the full rationale.
         for (auto& dll_path : search_paths) {
-            dll_ = LoadLibraryA(dll_path.c_str());
+            dll_ = LoadLibraryExA(dll_path.c_str(), nullptr,
+                                  LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                                  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
             if (dll_) break;
         }
         if (!dll_) return false;

@@ -543,7 +543,19 @@ private:
                 // user's own project, not third-party code, so we trust
                 // the source. (Export will run cert.)
                 auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
-                pi.handle = LoadLibraryA(dll_path.string().c_str());
+                // LoadLibraryEx with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR so the
+                // plugin's OWN folder is searched for its dependency DLLs — a
+                // plugin can ship extra .dll deps right next to its plugin DLL.
+                // DEFAULT_DIRS keeps the app dir (where OpenCV/turbojpeg/IPP are
+                // deployed) + System32 + AddDllDirectory dirs in the search set;
+                // it deliberately drops CWD/PATH (avoids accidental hijack).
+                // NOTE: same-named DLLs still collide across plugins — Windows
+                // keeps one module per base name per process (see adding-a-plugin.md).
+                // TODO(linux): dlopen resolves deps via RPATH/$ORIGIN + LD_LIBRARY_PATH;
+                // build plugin .so with -Wl,-rpath,$ORIGIN for the same "deps beside me".
+                pi.handle = LoadLibraryExA(dll_path.string().c_str(), nullptr,
+                                           LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                                           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
                 if (!pi.handle) {
                     last_open_warnings_.push_back(
                         {pname, pname, "DLL built but LoadLibrary failed"});
@@ -781,7 +793,11 @@ public:
         // rather than silently no-op'ing.
         pi.dll_name    = std::filesystem::path(cres.dll_path).filename().string();
         pi.folder_path = std::filesystem::path(cres.dll_path).parent_path().string();
-        pi.handle = LoadLibraryA(cres.dll_path.c_str());
+        // Search the plugin's own folder for its dependency DLLs (see the
+        // matching call in load_project_plugins above for the rationale).
+        pi.handle = LoadLibraryExA(cres.dll_path.c_str(), nullptr,
+                                   LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
         if (!pi.handle) {
             r.error = "LoadLibrary failed on freshly-built DLL — instances "
                       "for this plugin are gone; reopen the project to "

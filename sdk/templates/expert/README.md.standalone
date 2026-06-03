@@ -16,6 +16,26 @@ cmake --build . --config Release
 The DLL lands at `build/{{NAME}}.dll`. Drop into a project's `plugins/{{NAME}}/` folder
 or any backend's global plugins directory.
 
+## Dependencies (extra DLLs)
+
+If this plugin links a third-party DLL (beyond OpenCV — the backend already ships
+OpenCV next to its exe), **put that DLL inside this plugin's folder**, next to
+`{{NAME}}.dll`. The backend loads plugins with
+`LoadLibraryEx(..., LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR)`, so a plugin's own folder is
+searched for its dependency DLLs. (The backend's app dir + System32 are still
+searched; CWD and PATH are not.)
+
+> ⚠️ **One process, one DLL per name.** Every plugin loads into the *same* backend
+> process, and Windows keeps a single module per DLL **base name** per process. So
+> two plugins that need *different versions of the same-named DLL* (e.g. both want
+> `foo.dll`, one v1.2 and one v3.1) will collide — whichever loads first wins and
+> the other silently gets the wrong version. To coexist, the two dependencies must
+> have **different file names**, and each plugin must be *linked against* that
+> specific name (renaming a prebuilt DLL is not enough — the import name is baked in
+> at link time). True same-name side-by-side versioning needs process isolation,
+> which xInsp2 does not provide (plugins run in-process for speed). When unsure,
+> statically link the dependency or pin one shared version.
+
 ## Files
 
 | File | Purpose |

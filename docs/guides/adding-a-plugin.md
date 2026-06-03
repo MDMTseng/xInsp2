@@ -228,6 +228,18 @@ Process isolation + SHM were removed 2026-05; crash diagnosability
 (minidumps + per-thread breadcrumbs + PDB symbolication) is the
 replacement safety net.
 
+**Can I ship extra dependency DLLs with my plugin?**
+Yes — drop them inside the plugin folder, next to `<name>.dll`. The backend
+loads plugins with `LoadLibraryEx(..., LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR)`, so a
+plugin's own folder is searched for its dependency DLLs (the backend's app dir —
+where OpenCV/turbojpeg/IPP live — and System32 are still searched; CWD and PATH
+are not). **But** because all plugins share one process, Windows keeps a single
+module per DLL *base name*: two plugins needing different versions of the same
+`foo.dll` will collide (first one wins). Give such dependencies distinct file
+names (and link each plugin against its specific name), statically link, or pin a
+shared version. Same-name side-by-side versioning would need process isolation,
+which xInsp2 doesn't provide. The generated plugin README spells this out.
+
 **My plugin won't load.** Check:
 1. Backend stderr — usually says exactly which symbol failed to
    resolve.
