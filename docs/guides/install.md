@@ -13,6 +13,25 @@ For the prebuilt end-user zip, see the [README "Install — end users"](../../RE
 
 ---
 
+## 0. One-click (recommended)
+
+From a checkout, run the setup script — it installs the required toolchain
+(MSVC Build Tools + OpenCV) into the locations the backend probes, and finishes
+with a health check. Re-runnable; skips anything already present.
+
+```powershell
+# elevated PowerShell (VS Build Tools install needs admin)
+powershell -ExecutionPolicy Bypass -File tools\setup-windows.ps1 -IncludeOptional
+```
+
+`-IncludeOptional` also installs libjpeg-turbo. Intel IPP has no winget package —
+install it manually (it's auto-detected under `C:\Intel\ipp\<ver>`). Other flags:
+`-SkipVS`, `-SkipOpenCV`, `-OpenCvVersion <x.y.z>`.
+
+Prefer to do it by hand (or understand what it installs)? The manual steps follow.
+
+---
+
 ## 1. Required (two things — nothing works without these)
 
 ### ① MSVC C++ toolchain — Visual Studio Build Tools 2022
