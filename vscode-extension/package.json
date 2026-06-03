@@ -225,13 +225,18 @@
     "viewsWelcome": [
       {
         "view": "xinsp2.instances",
+        "contents": "$(loading~spin) Starting xInsp2…\n\nSpawning the backend, opening the project, and compiling the script. This takes a moment on first run.",
+        "when": "xinsp2.busy"
+      },
+      {
+        "view": "xinsp2.instances",
         "contents": "The xInsp2 backend isn't running.\n\nThe extension starts it automatically on activation. Check the Output panel for errors, or restart it manually.\n[Restart Backend](command:xinsp2.restartBackend)",
-        "when": "!xinsp2.connected"
+        "when": "!xinsp2.connected && !xinsp2.busy"
       },
       {
         "view": "xinsp2.instances",
         "contents": "No project open yet.\n[Try a Sample Project](command:xinsp2.createSampleProject)\n\nOr start from scratch:\n[Create New Project](command:xinsp2.createProject)\n[Open Existing Project](command:xinsp2.openProject)\n[Open Recent…](command:xinsp2.openRecent)\n\n[Read Getting Started](command:xinsp2.openGettingStarted)",
-        "when": "xinsp2.connected && !xinsp2.hasProject"
+        "when": "xinsp2.connected && !xinsp2.hasProject && !xinsp2.busy"
       },
       {
         "view": "xinsp2.plugins",

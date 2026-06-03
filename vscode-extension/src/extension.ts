@@ -420,6 +420,9 @@ export function activate(context: vscode.ExtensionContext) {
     setCtx('running', false);
     setCtx('hasPlugins', false);
     setCtx('hasInstances', false);
+    // 'busy' = we're auto-opening/compiling a recognized project. While true the
+    // panel shows a "Starting…" message instead of the create/open welcome.
+    setCtx('busy', looksLikeXinspProject);
 
     // Backend health indicator (leftmost). Toggles between connected + disconnected.
     const healthStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 101);
@@ -696,6 +699,7 @@ export function activate(context: vscode.ExtensionContext) {
         // they were. Skipped on the very first connect (lastProjectFolder
         // is still null) and after a clean closeProject (set to null).
         if (lastProjectFolder) {
+            setCtx('busy', true);   // opening + compiling → show "Starting…", not the welcome
             output.appendLine(`[xinsp2] restoring project: ${lastProjectFolder}`);
             sendCmd('open_project', { folder: lastProjectFolder }).then((r: any) => {
                 if (r?.ok) {
@@ -718,16 +722,20 @@ export function activate(context: vscode.ExtensionContext) {
                         if (fsx.existsSync(scrPath)) {
                             output.appendLine(`[xinsp2] auto-compiling project script ${scr}`);
                             sendCmd('compile_and_load', { path: scrPath })
-                                .then(() => output.appendLine('[xinsp2] project script loaded — ready to run'))
-                                .catch((e: any) => output.appendLine(`[xinsp2] auto-compile failed: ${e?.message || e}`));
+                                .then(() => { output.appendLine('[xinsp2] project script loaded — ready to run'); setCtx('busy', false); })
+                                .catch((e: any) => { output.appendLine(`[xinsp2] auto-compile failed: ${e?.message || e}`); setCtx('busy', false); });
+                        } else {
+                            setCtx('busy', false);   // no script to compile — ready
                         }
                     } catch (e: any) {
                         output.appendLine(`[xinsp2] auto-compile skipped: ${e?.message || e}`);
+                        setCtx('busy', false);
                     }
                 } else {
                     output.appendLine(`[xinsp2] could not restore project: ${r?.error || 'unknown'}`);
+                    setCtx('busy', false);
                 }
-            }).catch((e) => output.appendLine(`[xinsp2] restore error: ${e?.message || e}`));
+            }).catch((e) => { output.appendLine(`[xinsp2] restore error: ${e?.message || e}`); setCtx('busy', false); });
         }
     });
 
@@ -736,6 +744,7 @@ export function activate(context: vscode.ExtensionContext) {
         setCtx('connected', false);
         setCtx('hasProject', false);
         setCtx('hasInstances', false);
+        setCtx('busy', false);   // not loading anymore (avoids a stuck "Starting…")
         currentProjectName = undefined;
         currentProjectPath = undefined;
         updateProjectStatus();
