@@ -424,6 +424,18 @@ values, but **do NOT recompile the inspection script** — call
 N project-local plugins compile each plugin under `cl.exe` and can
 take 30–120 s; clients should pass a long timeout for this command.
 
+**IntelliSense config (side effect).** On a successful `open_project`, the
+backend writes a `.vscode/c_cpp_properties.json` into the *canonical* project
+folder (the one the user edits, not any `.xinsp_work` scratch). It mirrors the
+exact include set, C++ standard, and force-included support header the script
+compiler uses, so the Microsoft C/C++ extension resolves `<xi/...>` and OpenCV
+headers — go-to-definition works and there are no false red squiggles. It also
+drops a `.vscode/extensions.json` recommending `ms-vscode.cpptools` (only if one
+isn't already present). The generated file is stamped `"_generated_by": "xinsp2"`;
+the backend overwrites only files carrying that stamp, so a hand-written config is
+never clobbered (delete the stamp to take manual ownership). Both files embed
+machine-specific absolute paths and are git-ignored under `examples/`.
+
 **Working-copy mode.** `open_project` accepts `"working_copy": true`: the
 backend then operates on a `<project>/.xinsp_work` scratch copy (resume if
 present, else seed from the canonical project), so edits are transactional and
