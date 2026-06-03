@@ -172,6 +172,12 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   reaches the PLC, then kills the gateway and asserts the FE drives
   `CommsLost` safe-state, respawns it, the backend survives, the link is
   restored, and nothing orphans.
+  `examples/dll_version_clash/` — two plugins each depending on a different
+  version of a same-named DLL, in one process. Proves the loader rules: a
+  **by-name** (static-import) dependency collides on base name (second plugin
+  silently gets the first's version), an absolute-path load stays distinct, and
+  distinct file names are the fix. Builds the two dep versions with `cl` (vcvars
+  located via `toolchain_health`) and asserts all three outcomes.
 - **Phase G stress + race** (#92; see
   `docs/design/fe-be-split-test-plan.md` "Phase G"). Beyond the `test_qa_stress`
   unit above: `examples/qa_recover/` proves the **recover-and-clear** transition

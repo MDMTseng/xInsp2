@@ -28,13 +28,16 @@ searched; CWD and PATH are not.)
 > ⚠️ **One process, one DLL per name.** Every plugin loads into the *same* backend
 > process, and Windows keeps a single module per DLL **base name** per process. So
 > two plugins that need *different versions of the same-named DLL* (e.g. both want
-> `foo.dll`, one v1.2 and one v3.1) will collide — whichever loads first wins and
-> the other silently gets the wrong version. To coexist, the two dependencies must
-> have **different file names**, and each plugin must be *linked against* that
-> specific name (renaming a prebuilt DLL is not enough — the import name is baked in
-> at link time). True same-name side-by-side versioning needs process isolation,
-> which xInsp2 does not provide (plugins run in-process for speed). When unsure,
-> statically link the dependency or pin one shared version.
+> `foo.dll`, one v1.2 and one v3.1) collide — whichever loads first wins and the
+> other silently gets the wrong version. This bites dependencies resolved **by
+> name** (i.e. a normal static import / linking `foo.lib`); a dependency you load
+> yourself **by absolute path** keys on the full path and does *not* clash. To make
+> two static deps coexist, give them **different file names** and link each plugin
+> against its own name (renaming a prebuilt DLL isn't enough — the import name is
+> baked in at link time), static-link, or pin one shared version. True same-name
+> side-by-side versioning of a static import needs process isolation, which xInsp2
+> doesn't provide (plugins run in-process for speed). Demo + proof:
+> `examples/dll_version_clash`.
 
 ## Files
 

@@ -1,0 +1,4 @@
+{
+  "name": "dll_version_clash",
+  "script": "inspect.cpp"
+}

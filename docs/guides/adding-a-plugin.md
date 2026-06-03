@@ -234,11 +234,15 @@ loads plugins with `LoadLibraryEx(..., LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR)`, so a
 plugin's own folder is searched for its dependency DLLs (the backend's app dir —
 where OpenCV/turbojpeg/IPP live — and System32 are still searched; CWD and PATH
 are not). **But** because all plugins share one process, Windows keeps a single
-module per DLL *base name*: two plugins needing different versions of the same
-`foo.dll` will collide (first one wins). Give such dependencies distinct file
-names (and link each plugin against its specific name), statically link, or pin a
-shared version. Same-name side-by-side versioning would need process isolation,
-which xInsp2 doesn't provide. The generated plugin README spells this out.
+module per DLL *base name* — and that bites dependencies resolved **by name**
+(a normal static import / linking `foo.lib`): two plugins needing different
+versions of the same `foo.dll` collide, first one wins, the other silently runs
+the wrong version. (A dependency you load yourself **by absolute path** keys on
+the full path and does *not* clash.) Fix: give static deps distinct file names
+(and link each plugin against its own name), static-link, or pin a shared
+version. Same-name side-by-side versioning of a static import would need process
+isolation, which xInsp2 doesn't provide. The `examples/dll_version_clash`
+experiment proves all three cases; the generated plugin README summarises them.
 
 **My plugin won't load.** Check:
 1. Backend stderr — usually says exactly which symbol failed to
