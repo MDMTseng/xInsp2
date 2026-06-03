@@ -50,7 +50,7 @@ content moves into the relevant reference / guide.
 | [`design/fe-be-split-test-plan.md`](./design/fe-be-split-test-plan.md) | Test plan for the FE/BE split: unit / integration / e2e / safety-property coverage, regression gates, and the priority gaps to close. |
 | [`design/comms-gateway.md`](./design/comms-gateway.md) | Design (not built): out-of-process comms/I/O plugins — a standalone "comms gateway" process for the evolving PLC interface, isolated from the FE and BE; the safe-state boundary stays direct. |
 | [`design/interactive-tool-registry.md`](./design/interactive-tool-registry.md) | How plugins that need GUI setup (shape-model template editing, ROI mask drawing) hook into a shared image-viewer panel without reimplementing pan/zoom/draw plumbing. |
-| [`design/linux-port.md`](./design/linux-port.md) | Windows-only logic inventory + the going-forward rule that new code stays cross-platform-friendly. Not scheduled. |
+| [`design/linux-port.md`](./design/linux-port.md) | Cross-platform port (Linux / ARM / macOS): Windows-only inventory, effort + phasing estimates, ARM/macOS deltas, the runtime-compile / AOT-bundle strategy, and the going-forward rule that new code stays cross-platform-friendly. Not scheduled. |
 
 ## Archive (`archive/`)
 

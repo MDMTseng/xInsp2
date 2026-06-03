@@ -1,8 +1,18 @@
-# Linux port — inventory + going-forward rule
+# Cross-platform port (Linux / ARM / macOS) — inventory, effort + going-forward rule
 
 > **Status: NOT scheduled.** This is a parking lot for "things that
-> need to change when we eventually port to Linux" so we don't lose
-> track of them, plus a rule for new code to follow now.
+> need to change when we eventually port off Windows" so we don't lose
+> track of them, plus a rule for new code to follow now. The actual port
+> is done later, on the target platform.
+>
+> **TL;DR (assessment 2026-06-04).** Moderate, not scary. Only ~15 of 53
+> backend files touch Win32 and ~14 sites are already `#ifdef _WIN32`-gated;
+> the OS coupling is concentrated, not smeared. A working **Linux x64**
+> headless backend (build + load + clang compile + core trigger loop) is
+> ~2–3 weeks; **ARM Linux** adds ~2–4 days; **macOS** adds ~1–2 weeks. The
+> only genuinely hard items are crash-forensics parity and the watchdog
+> redesign. See "Effort + phasing", "ARM & macOS deltas", and "The
+> runtime-compile constraint" sections below for the full picture.
 
 ---
 
@@ -108,6 +118,68 @@ worker / script-runner / shared-memory layer — previously the hardest,
 most Win-API-coupled part of the backend — no longer exists. The
 remaining Win-coupling is the smaller surface in the tables above
 (`dlopen`, sockets, SEH, the compile driver, crash forensics).
+
+---
+
+## Effort + phasing
+
+Sizing (single competent dev, native build on the target — not cross-compile).
+Numbers are for getting each layer *working + smoke-tested*, not hardened.
+
+| Phase | Scope | Estimate |
+|---|---|---|
+| **0. Build green** | CMake on Linux, swap the Easy-tier API shims (sockets, `dlopen`, atomic-io, `_strdup`/`MAX_PATH`/wstring). Backend links + boots, WS answers `ping`. | 2–4 days |
+| **1. Core loop** | `xi_script_compiler` → `clang++`/`g++` spawn + gcc/clang diagnostic parser; load the compiled `.so` (`dlopen`); a trigger runs one `inspect()`; plugins load. This is the heart — once green, the framework "works" headless. | 1–1.5 weeks |
+| **2. Supervisor + comms** | `fe_main.cpp` → `posix_spawn`/`pidfd`/`PR_SET_PDEATHSIG` + signal handlers + POSIX TCP probe; `comms_main.cpp` sockets. FE drives safe-state on BE death. | 3–5 days |
+| **3. Crash forensics** | `xi_seh` → `sigaction`+`siglongjmp` for the per-call net; process-level dumps via **Breakpad/Crashpad** (covers Linux+mac+ARM at once) or, as a stop-gap, core-file + `dladdr` module blame. | 3 days (stop-gap) → 2 weeks (Breakpad) |
+| **4. Watchdog** | Redesign — see Hard table. Cooperative checkpoint in the script ABI, or `SIGUSR1`→`siglongjmp` out of the inspect thread. Genuinely a design task, not a port. | 2–4 days design+impl |
+| **ARM Linux delta** | Drop IPP (x86-only); confirm OpenCV ARM build + NEON; native or cross toolchain. Otherwise identical POSIX to x64. | +2–4 days |
+| **macOS delta** | `.dylib` is ~free via `dlopen`; Mach-exception crash handling (Breakpad covers it); `dladdr` blame; **codesign + notarize** for distribution. | +1–2 weeks |
+
+**Reading:** Linux x64 headless + dev-loop + stop-gap crash ≈ **2–3 weeks**.
+\+ ARM ≈ a few days. + macOS ≈ 1–2 weeks. Full Breakpad parity + watchdog
+redesign across all three: add ~2–3 weeks on top. The VS Code extension and
+Python SDK are already portable (minus the PowerShell screenshot e2e bits in the
+"Outside the backend" table) — effectively free.
+
+## ARM & macOS deltas (beyond the Linux tables)
+
+- **ARM (Linux or macOS).** Pure-C++ `xi_*` code is arch-neutral. The one real
+  change: **Intel IPP is x86/x64 only — drop it on ARM** (the `XINSP2_HAS_IPP`
+  path) and lean on OpenCV's own NEON-accelerated ops. libjpeg-turbo has NEON, so
+  the turbojpeg path is fine. Make sure the OpenCV you link/ship is an ARM build.
+- **macOS.** `dlopen` loads `.dylib` natively (the loader layer is nearly free).
+  Default compiler is clang (friendlier for the compile-driver abstraction than
+  juggling MSVC). The cost centres are (a) **crash handling via Mach exception
+  ports** (don't hand-roll — use Crashpad), (b) no `/proc`, so module-blame uses
+  `dladdr`, and (c) **code signing + notarization** to distribute outside a dev
+  box — an Apple Developer account and a non-trivial packaging step, more
+  bureaucracy than engineering.
+- **Linux x64 ↔ ARM Linux** are essentially the same POSIX target; the delta is
+  just IPP + the OpenCV/toolchain arch. Treat x64 as the reference port and ARM
+  as a build-matrix variant, not a separate effort.
+
+## The runtime-compile constraint + AOT bundle strategy
+
+The single fact that dominates deployment: xInsp2's value (HDevelop-style
+iteration) comes from **compiling the inspection script + project plugins at
+runtime**. So every machine that *opens/edits* a project needs a working C++
+toolchain + OpenCV dev headers present — this is not a "ship one binary" port.
+
+- **Upside on Linux/mac:** installing the toolchain is *easier* than Windows MSVC
+  (`apt install g++` / `xcode-select` / `brew`). The `toolchain_health` command +
+  a `setup-linux.sh` / `setup-macos.sh` (mirroring `tools/setup-windows.ps1`) port
+  over directly. The per-project `c_cpp_properties.json` generation should emit a
+  `linux-clang-x64` / `linux-gcc-arm64` IntelliSense config instead of
+  `windows-msvc-x64` (already flagged `TODO(linux)` in `service_main.cpp`).
+- **Locked / embedded ARM devices** usually should NOT carry a compiler. The lever:
+  add an **AOT / pre-compiled bundle mode** — compile the script + plugins to
+  `.so` once on a dev/CI box, ship the binaries, and have the device *load only,
+  never compile*. This is the cross-platform generalisation of the existing
+  "locked production line ships pre-compiled DLLs" note, and it roughly halves the
+  embedded-deployment burden (no toolchain, no OpenCV headers, smaller image). Worth
+  designing the bundle format (a manifest + `.so` set + cert) before the port so
+  the loader path is built for it from day one.
 
 ## See also
 
