@@ -97,8 +97,9 @@ Key design choices:
 - **TriggerBus.** 128-bit trigger ids; three correlation policies
   (`Any` / `AllRequired` / `LeaderFollowers`) for hardware-synced
   multi-camera capture.
-- **Dependency-free host.** Only cJSON + stb_image_write vendored;
-  OpenCV / IPP are optional behind `XINSP2_HAS_*`.
+- **Lean host.** Only cJSON + stb_image vendored. **OpenCV is required**
+  (image ops + every script/plugin force-includes it); libjpeg-turbo and
+  IPP are optional accelerators behind `XINSP2_HAS_*`.
 
 ---
 
@@ -126,8 +127,14 @@ VS Code settings:
 
 - `xinsp2.backendExe` = `C:\xinsp2\bin\xinsp-backend.exe`
 
-That's it. No CMake, no MSVC, no Node required to **use** xInsp2 —
-only to write/build new plugins.
+No CMake or Node is needed just to **run** xInsp2. Note, however, that
+the backend compiles the inspection script (and project-local plugins)
+on the fly with `cl.exe`, so the **MSVC C++ toolchain and OpenCV must be
+present at runtime** unless you ship pre-compiled script/plugin DLLs for a
+locked production line. See [`docs/guides/install.md`](docs/guides/install.md)
+for the full per-machine setup, and the in-editor **Project Settings → C++
+Toolchain** panel to verify a machine has everything (it warns on missing or
+wrong paths and lets you pin per-project overrides).
 
 ---
 
@@ -253,12 +260,15 @@ If you want to modify the framework itself (not just write plugins):
 ### Prerequisites
 
 - Windows 10/11 (Linux build path WIP)
-- CMake ≥ 3.16, MSVC 2019+ (or clang-cl)
+- **MSVC 2019+** with the *Desktop development with C++* workload (or clang-cl) — `cl.exe` + `vcvars64.bat` + Windows SDK
+- **OpenCV 4.x** at `C:\opencv\opencv\build` (or set `OpenCV_DIR`) — **required** (`find_package(OpenCV REQUIRED)`; every script/plugin force-includes `<opencv2/opencv.hpp>`)
+- CMake ≥ 3.16
 - Node.js 18+ (extension build + tests)
 - **Optional accelerators** (auto-detected; install any you want):
-  - **OpenCV 4.x** at `C:\opencv\opencv\build` — default ops backend
   - **libjpeg-turbo** at `C:\libjpeg-turbo64` — fast JPEG encode (`winget install libjpeg-turbo.libjpeg-turbo.VC`)
   - **Intel IPP 2026+** at `C:\Intel\ipp\<ver>` — image-op SIMD acceleration
+
+See [`docs/guides/install.md`](docs/guides/install.md) for step-by-step new-machine setup.
 
 ### Build
 

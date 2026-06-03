@@ -17,6 +17,7 @@ Task-shaped — pick the verb that matches what you're doing.
 
 | Guide | When to read |
 |---|---|
+| [`guides/install.md`](./guides/install.md) | You're setting up a new Windows machine to build/run xInsp2. What's required (MSVC + OpenCV), what's optional (turbojpeg/IPP), and the in-editor C++ Toolchain health check + per-project path overrides. |
 | [`guides/adding-a-plugin.md`](./guides/adding-a-plugin.md) | You want to add a camera / detector / saver / op. Both in-project (fast iteration) and standalone (distributable) paths covered. |
 | [`guides/writing-a-script.md`](./guides/writing-a-script.md) | You're writing the inspection script for a project. Lifecycle + every primitive (`xi::use` / `xi::Param` / `VAR` / `xi::Record` / `xi::async` / `xi::state` / `xi::breakpoint` / triggers). |
 | [`guides/debugging.md`](./guides/debugging.md) | Something crashed. What's caught, what isn't, how to read crash reports, how to attach a debugger. |

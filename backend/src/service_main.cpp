@@ -622,6 +622,16 @@ static std::string g_plugins_dir;
 static std::string g_opencv_dir;
 static std::string g_turbojpeg_root;
 static std::string g_ipp_root;
+// vcvars64.bat override (empty = let the compiler auto-find via auto_find_vcvars).
+static std::string g_tc_vcvars;
+// Canonical folder of the currently-open project (the one the user edits — NOT
+// any .xinsp_work scratch). Set on open_project; used to read/write the
+// per-project "toolchain" override block in its project.json.
+static std::string g_project_folder;
+// The xi include dir derived from the exe location at startup. Kept separate from
+// g_include_dir so a project override can point elsewhere yet we can always fall
+// back to the shipped headers.
+static std::string g_include_dir_default;
 
 // IntelliSense config generation. The C/C++ extension (Microsoft) has no way to
 // know our compile flags — inspect.cpp / plugin .cpp are compiled by the backend,
@@ -718,6 +728,195 @@ static void write_cpp_intellisense_config_(const std::string& project_folder) {
         std::ofstream eo(ext.string(), std::ios::binary | std::ios::trunc);
         if (eo) eo << "{\n  \"recommendations\": [\"ms-vscode.cpptools\"]\n}\n";
     }
+}
+
+// ---- C++ toolchain health + per-project override -----------------------------
+//
+// A project may pin toolchain paths in its project.json "toolchain" block:
+//   "toolchain": {
+//     "include_dir":     "...",   // xi headers (defaults to the shipped set)
+//     "opencv_dir":      "...",   // OpenCV install root
+//     "turbojpeg_root":  "...",   // libjpeg-turbo root (optional accelerator)
+//     "ipp_root":        "...",   // Intel IPP root      (optional accelerator)
+//     "vcvars":          "..."    // path to vcvars64.bat (else auto-found)
+//   }
+// Resolution priority per component: project override > env var > built-in probe
+// (which itself checks env then default candidates). This lets a user fix a
+// wrong/missing path from the VS Code config UI without touching global
+// environment. The same resolved values feed BOTH the compiler and the
+// generated c_cpp_properties.json, so IntelliSense can never drift from the build.
+struct TcComponent {
+    std::string key;       // stable id: "include" | "opencv" | "turbojpeg" | "ipp" | "vcvars"
+    std::string label;     // human label
+    std::string ov_key;    // project.json toolchain field name
+    std::string env_var;   // env var that also sets it ("" = none)
+    std::string sentinel;  // relative file proving the dir is real ("" = path is a file)
+    std::string path;      // resolved path (may be empty)
+    std::string source;    // "override" | "env" | "default" | "none"
+    bool exists = false;   // sentinel (or the file itself, for vcvars) present
+    bool optional = false; // optional accelerator → missing is info, not error
+};
+
+// Read one string field from the "toolchain" object of <folder>/project.json.
+static std::string read_toolchain_override_(const std::string& folder, const char* field) {
+    if (folder.empty()) return {};
+    std::ifstream in((std::filesystem::path(folder) / "project.json").string());
+    if (!in) return {};
+    std::stringstream ss; ss << in.rdbuf();
+    std::string out;
+    if (cJSON* root = cJSON_Parse(ss.str().c_str())) {
+        if (cJSON* tc = cJSON_GetObjectItem(root, "toolchain"); tc && cJSON_IsObject(tc))
+            if (cJSON* k = cJSON_GetObjectItem(tc, field); k && cJSON_IsString(k) && k->valuestring)
+                out = k->valuestring;
+        cJSON_Delete(root);
+    }
+    return out;
+}
+
+static bool tc_sentinel_ok_(const TcComponent& c) {
+    if (c.path.empty()) return false;
+    std::error_code ec;
+    if (c.sentinel.empty())  // vcvars: the path IS the file
+        return std::filesystem::exists(c.path, ec);
+    return std::filesystem::exists(std::filesystem::path(c.path) / c.sentinel, ec);
+}
+
+// Build the live component list for `folder` (the open project; "" = no project,
+// startup defaults only). `path` comes straight from override/probe so it's always
+// accurate; `source` is best-effort labelling for the UI.
+static std::vector<TcComponent> resolve_toolchain_components_(const std::string& folder) {
+    using namespace xi::script::detail;
+    std::vector<TcComponent> v(5);
+    v[0] = { "include",   "xi headers",        "include_dir",    "",               "xi/xi.hpp",                  "", "", false, false };
+    v[1] = { "opencv",    "OpenCV",            "opencv_dir",     "OpenCV_DIR",     "include/opencv2/core.hpp",   "", "", false, false };
+    v[2] = { "turbojpeg", "libjpeg-turbo",     "turbojpeg_root", "TURBOJPEG_ROOT", "include/turbojpeg.h",        "", "", false, true  };
+    v[3] = { "ipp",       "Intel IPP",         "ipp_root",       "IPP_ROOT",       "include/ippi.h",             "", "", false, true  };
+    v[4] = { "vcvars",    "MSVC (vcvars64)",   "vcvars",         "",               "",                           "", "", false, false };
+
+    for (auto& c : v) {
+        std::string ov = read_toolchain_override_(folder, c.ov_key.c_str());
+        if (!ov.empty()) { c.path = ov; c.source = "override"; }
+        else {
+            // Built-in probe (already honours env then default candidates).
+            std::string probed;
+            if      (c.key == "include")   probed = g_include_dir_default;
+            else if (c.key == "opencv")    probed = probe_opencv_dir();
+            else if (c.key == "turbojpeg") probed = probe_turbojpeg_root();
+            else if (c.key == "ipp")       probed = probe_ipp_root();
+            else if (c.key == "vcvars")    probed = auto_find_vcvars();
+            c.path = probed;
+            const char* e = c.env_var.empty() ? nullptr : std::getenv(c.env_var.c_str());
+            if (!c.path.empty() && e && *e)   c.source = "env";
+            else if (!c.path.empty())         c.source = "default";
+            else                              c.source = "none";
+        }
+        c.exists = tc_sentinel_ok_(c);
+    }
+    return v;
+}
+
+// Apply a project's toolchain resolution to the global compiler paths. Called on
+// open_project and after set_toolchain_override so the next compile + the
+// generated IntelliSense config both pick up the override immediately.
+static void resolve_toolchain_(const std::string& folder) {
+    auto comps = resolve_toolchain_components_(folder);
+    for (auto& c : comps) {
+        if      (c.key == "include")   { if (c.source == "override") g_include_dir = c.path; else g_include_dir = g_include_dir_default; }
+        else if (c.key == "opencv")    g_opencv_dir     = c.path;
+        else if (c.key == "turbojpeg") g_turbojpeg_root = c.path;
+        else if (c.key == "ipp")       g_ipp_root       = c.path;
+        else if (c.key == "vcvars")    g_tc_vcvars      = (c.source == "override") ? c.path : std::string();
+    }
+    std::fprintf(stderr, "[xinsp2] toolchain resolved: opencv=%s turbojpeg=%s ipp=%s vcvars=%s\n",
+                 g_opencv_dir.empty() ? "none" : g_opencv_dir.c_str(),
+                 g_turbojpeg_root.empty() ? "none" : g_turbojpeg_root.c_str(),
+                 g_ipp_root.empty() ? "none" : g_ipp_root.c_str(),
+                 g_tc_vcvars.empty() ? "auto" : g_tc_vcvars.c_str());
+}
+
+// Render the health report as JSON for the toolchain_health command / UI.
+static std::string toolchain_health_json_(const std::string& folder) {
+    auto comps = resolve_toolchain_components_(folder);
+    bool all_ok = true;
+    std::string out = "{\"components\":[";
+    for (size_t i = 0; i < comps.size(); ++i) {
+        auto& c = comps[i];
+        // ok rules: an explicit override that doesn't resolve is always an error
+        // (the user pointed us somewhere wrong); a required component must exist;
+        // an optional one that's simply absent is fine.
+        bool ok;
+        if (c.source == "override") ok = c.exists;
+        else if (!c.optional)       ok = c.exists;
+        else                        ok = true;
+        if (!ok) all_ok = false;
+
+        std::string hint;
+        if (c.source == "override" && !c.exists)
+            hint = c.sentinel.empty() ? "overridden path does not exist"
+                                      : ("expected " + c.sentinel + " under this folder");
+        else if (!c.exists && !c.optional)
+            hint = c.key == "vcvars" ? "vcvars64.bat not found — install VS Build Tools (Desktop C++ workload)"
+                                     : ("not found — set " + (c.env_var.empty() ? std::string("an override") : c.env_var) + " or fix the path");
+        else if (!c.exists && c.optional)
+            hint = "optional accelerator, not installed";
+
+        if (i) out += ",";
+        out += "{\"key\":";       xp::json_escape_into(out, c.key);
+        out += ",\"label\":";     xp::json_escape_into(out, c.label);
+        out += ",\"path\":";      xp::json_escape_into(out, c.path);
+        out += ",\"source\":";    xp::json_escape_into(out, c.source);
+        out += ",\"env_var\":";   xp::json_escape_into(out, c.env_var);
+        out += ",\"ov_key\":";    xp::json_escape_into(out, c.ov_key);
+        out += ",\"exists\":";    out += c.exists ? "true" : "false";
+        out += ",\"optional\":";  out += c.optional ? "true" : "false";
+        out += ",\"ok\":";        out += ok ? "true" : "false";
+        out += ",\"hint\":";      xp::json_escape_into(out, hint);
+        out += "}";
+    }
+    out += "],\"all_ok\":";
+    out += all_ok ? "true" : "false";
+    out += ",\"project\":";
+    xp::json_escape_into(out, folder);
+    out += "}";
+    return out;
+}
+
+// Merge one override into the canonical project.json "toolchain" block. Empty
+// value clears that key (revert to env/probe). Returns false (with `err`) if the
+// project.json can't be read/parsed/written.
+static bool write_toolchain_override_(const std::string& folder, const std::string& field,
+                                      const std::string& value, std::string& err) {
+    namespace fs = std::filesystem;
+    if (folder.empty()) { err = "no project open"; return false; }
+    fs::path pj = fs::path(folder) / "project.json";
+    std::ifstream in(pj.string());
+    if (!in) { err = "cannot read project.json"; return false; }
+    std::stringstream ss; ss << in.rdbuf();
+    in.close();
+    cJSON* root = cJSON_Parse(ss.str().c_str());
+    if (!root) { err = "project.json is not valid JSON"; return false; }
+    cJSON* tc = cJSON_GetObjectItem(root, "toolchain");
+    if (!tc || !cJSON_IsObject(tc)) {
+        cJSON_DeleteItemFromObject(root, "toolchain");  // drop any non-object
+        tc = cJSON_AddObjectToObject(root, "toolchain");
+    }
+    if (value.empty()) cJSON_DeleteItemFromObject(tc, field.c_str());
+    else {
+        cJSON_DeleteItemFromObject(tc, field.c_str());
+        cJSON_AddStringToObject(tc, field.c_str(), value.c_str());
+    }
+    // Drop an emptied toolchain object so we don't leave "toolchain":{} noise.
+    if (cJSON_GetArraySize(tc) == 0) cJSON_DeleteItemFromObject(root, "toolchain");
+    char* printed = cJSON_Print(root);
+    bool ok = false;
+    if (printed) {
+        std::ofstream o(pj.string(), std::ios::binary | std::ios::trunc);
+        if (o) { o << printed << "\n"; ok = true; }
+        else err = "cannot write project.json";
+        cJSON_free(printed);
+    } else err = "failed to serialize project.json";
+    cJSON_Delete(root);
+    return ok;
 }
 
 // Plugin manager (global)
@@ -1730,6 +1929,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         req.opencv_dir      = g_opencv_dir;
         req.turbojpeg_root  = g_turbojpeg_root;
         req.ipp_root        = g_ipp_root;
+        req.vcvars_path     = g_tc_vcvars;   // empty = compiler auto-finds vcvars64.bat
         // Fast dev compile (/Od) by default — the interactive edit→run loop wants
         // fast COMPILE, not fast runtime. A client benchmarking / the autostart
         // boot path passes "optimize":true to get /O2. (Both spacings, like has_ui.)
@@ -2819,6 +3019,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 lm.msg = s;
                 srv.send_text(lm.to_json());
             }
+            // Remember the canonical folder + apply any per-project toolchain
+            // override (project.json "toolchain" block) so the compiler and the
+            // IntelliSense config below both pick up the user's path fixes.
+            g_project_folder = *folder;
+            resolve_toolchain_(*folder);
             // Drop a c_cpp_properties.json into the project the user actually
             // edits (the canonical *folder, not any .xinsp_work scratch) so the
             // C/C++ extension resolves xi/* + OpenCV and go-to-definition works
@@ -3156,6 +3361,41 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "no UI for plugin: " + *plugin);
         }
+    } else if (name == "toolchain_health") {
+        // C++ toolchain health check for the open project. Reports each
+        // component's resolved path + source (override/env/default/none) +
+        // whether it exists, so the config UI can warn on missing/wrong paths.
+        send_rsp_ok(srv, id, toolchain_health_json_(g_project_folder));
+    } else if (name == "set_toolchain_override") {
+        // Pin (or clear) one toolchain path in the project's project.json
+        // "toolchain" block. args: { key: "opencv"|"turbojpeg"|"ipp"|"vcvars"|
+        // "include", path: "<dir-or-file>" }  (empty path clears the override).
+        // Takes effect on the next compile; we also re-resolve + regenerate the
+        // IntelliSense config immediately so the editor updates.
+        auto key  = xp::get_string_field(parsed->args_json, "key");
+        auto path = xp::get_string_field(parsed->args_json, "path");
+        if (!key) { send_rsp_err(srv, id, "missing key"); return; }
+        // map UI key -> project.json field name
+        std::string field;
+        if      (*key == "include")   field = "include_dir";
+        else if (*key == "opencv")    field = "opencv_dir";
+        else if (*key == "turbojpeg") field = "turbojpeg_root";
+        else if (*key == "ipp")       field = "ipp_root";
+        else if (*key == "vcvars")    field = "vcvars";
+        else { send_rsp_err(srv, id, "unknown toolchain key: " + *key); return; }
+        std::string err;
+        if (!write_toolchain_override_(g_project_folder, field, path ? *path : std::string(), err)) {
+            send_rsp_err(srv, id, "set_toolchain_override failed: " + err);
+            return;
+        }
+        // Re-resolve globals + refresh the generated IntelliSense config so both
+        // the next compile and the editor reflect the change without a reopen.
+        resolve_toolchain_(g_project_folder);
+        write_cpp_intellisense_config_(g_project_folder);
+        std::string data = "{\"applied\":true,\"recompile_needed\":true,\"health\":";
+        data += toolchain_health_json_(g_project_folder);
+        data += "}";
+        send_rsp_ok(srv, id, data);
     } else {
         send_rsp_err(srv, id, std::string("unknown command: ") + name);
     }
@@ -3575,6 +3815,9 @@ int main(int argc, char** argv) {
             // Fallback: next to the exe.
             g_include_dir = (std::filesystem::path(get_exe_dir()) / "include").string();
         }
+        // Remember the shipped headers as the default a project override falls
+        // back to (see resolve_toolchain_).
+        g_include_dir_default = g_include_dir;
     }
     g_work_dir = (std::filesystem::temp_directory_path() / "xinsp2").string();
     std::filesystem::create_directories(g_work_dir);

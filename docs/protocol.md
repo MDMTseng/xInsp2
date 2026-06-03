@@ -321,6 +321,53 @@ this ring is the workaround.
 `ts_ms >= since_ms`. Use the `ts_ms` of the last-known error from a
 previous poll to fetch incrementally.
 
+### `toolchain_health`
+
+`args: {}` → reports the C++ build toolchain for the open project. Each
+component is resolved with priority **project override → environment variable →
+built-in probe**, and the same resolved paths feed both the compiler and the
+generated `c_cpp_properties.json` (so IntelliSense can't drift from the build).
+
+```jsonc
+{ "all_ok": true, "project": "<dir>", "components": [
+  { "key": "include",   "label": "xi headers",      "ov_key": "include_dir",
+    "env_var": "",            "path": "...", "source": "default",
+    "exists": true, "optional": false, "ok": true,  "hint": "" },
+  { "key": "opencv",    "label": "OpenCV",           "ov_key": "opencv_dir",
+    "env_var": "OpenCV_DIR",  "path": "...", "source": "env",     "ok": true, ... },
+  { "key": "turbojpeg", "label": "libjpeg-turbo",    "ov_key": "turbojpeg_root",
+    "env_var": "TURBOJPEG_ROOT", "optional": true, ... },
+  { "key": "ipp",       "label": "Intel IPP",        "ov_key": "ipp_root",
+    "env_var": "IPP_ROOT",       "optional": true, ... },
+  { "key": "vcvars",    "label": "MSVC (vcvars64)",  "ov_key": "vcvars",
+    "env_var": "",            "path": ".../vcvars64.bat", ... }
+]}
+```
+
+- `source`: `"override"` (pinned in `project.json`), `"env"`, `"default"` (built-in
+  candidate), or `"none"` (unresolved).
+- `ok`: an explicit override that doesn't resolve is always `false`; a **required**
+  component (`include`/`opencv`/`vcvars`) must exist; an **optional** accelerator
+  that's simply absent is `ok: true`.
+- `hint`: human-readable fix when `ok` is false (or "optional, not installed").
+
+### `set_toolchain_override`
+
+`args: { "key": "include"|"opencv"|"turbojpeg"|"ipp"|"vcvars", "path": "<dir-or-file>" }`
+→ pins (or, with an empty `path`, clears) one path in the canonical
+`project.json` `"toolchain"` block:
+
+```json
+{ "toolchain": { "opencv_dir": "D:/libs/opencv/build",
+                 "vcvars": "D:/VS/VC/Auxiliary/Build/vcvars64.bat" } }
+```
+
+The backend re-resolves the globals and regenerates `c_cpp_properties.json`
+immediately, then replies `{ "applied": true, "recompile_needed": true,
+"health": <toolchain_health> }`. The change takes effect on the next
+`compile_and_load`. Surfaced in the editor under **Project Settings → C++
+Toolchain** (see [`guides/install.md`](./guides/install.md) §5).
+
 Reply (`data` is an array, newest last):
 
 ```json

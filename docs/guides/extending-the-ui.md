@@ -106,6 +106,15 @@ For plugin webviews specifically: the existing flow at
 `exchange_instance` command. Plugin authors don't need to know about
 WS; they just write their HTML to talk via that channel.
 
+For a worked example of a webview that does a **WS round-trip plus a native
+dialog**, see the **C++ Toolchain** section in `xinsp2.openProjectSettings`
+(`renderProjectSettingsHtml`): the webview posts `tc_refresh` / `tc_set`, the
+extension answers with `toolchain_health` over WS, drives
+`vscode.window.showOpenDialog` for path picking, writes the choice via
+`set_toolchain_override`, and posts the refreshed `tc_health` back. See
+[`install.md`](./install.md) §5 + [`../protocol.md`](../protocol.md) →
+`toolchain_health`.
+
 ---
 
 ## Adding a webview "thing the script will use" — the inline image viewer

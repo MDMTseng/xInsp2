@@ -109,6 +109,20 @@ function renderProjectSettingsHtml(s: any): string {
     .saved { color: var(--vscode-charts-green); margin-left: 8px; opacity: 0; transition: opacity 0.3s; }
     .saved.show { opacity: 1; }
     .policy-deps { margin-top: 8px; padding-left: 20px; }
+    .tc-row { display: grid; grid-template-columns: 18px 150px 1fr auto; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid var(--vscode-panel-border); }
+    .tc-row:first-child { border-top: none; }
+    .tc-badge { font-size: 1.1em; line-height: 1; }
+    .tc-ok   { color: var(--vscode-charts-green); }
+    .tc-warn { color: var(--vscode-charts-red); }
+    .tc-na   { color: var(--vscode-descriptionForeground); }
+    .tc-label { font-weight: 600; }
+    .tc-label em { font-weight: 400; color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+    .tc-path { word-break: break-all; font-size: 0.88em; color: var(--vscode-descriptionForeground); }
+    .tc-path .tc-src { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 8px; font-size: 0.78em; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+    .tc-hint { grid-column: 2 / 4; font-size: 0.82em; color: var(--vscode-charts-red); margin-top: -2px; }
+    .tc-hint.muted { color: var(--vscode-descriptionForeground); }
+    .tc-actions { display: flex; gap: 6px; }
+    .tc-actions button { padding: 3px 9px; font-size: 0.85em; }
 </style></head>
 <body>
 <h1>${esc(s.name)} <span class="folder">— ${esc(s.folder)}</span></h1>
@@ -151,6 +165,14 @@ function renderProjectSettingsHtml(s: any): string {
     <div class="hint">Window = how long to keep partial events around before dropping.</div>
 </section>
 
+<section>
+    <h2>C++ Toolchain</h2>
+    <div id="tc-rows" class="hint">Checking toolchain…</div>
+    <div class="hint">Resolved per project: <b>override</b> (saved here) → environment variable → built-in probe.
+      Required items (xi headers, OpenCV, MSVC) warn in red if missing; libjpeg-turbo and IPP are optional accelerators.
+      "Set path…" pins the path into this project's <code>project.json</code>; recompile to apply.</div>
+</section>
+
 <div class="row-buttons">
     <button id="save">Save</button>
     <span id="saved" class="saved">✓ saved</span>
@@ -158,6 +180,37 @@ function renderProjectSettingsHtml(s: any): string {
 
 <script>
 const vscode = acquireVsCodeApi();
+// ---- C++ toolchain health ----
+function renderToolchain(h) {
+    const box = document.getElementById('tc-rows');
+    if (!h || !Array.isArray(h.components)) { box.textContent = 'Toolchain status unavailable.'; return; }
+    box.innerHTML = '';
+    for (const c of h.components) {
+        const row = document.createElement('div'); row.className = 'tc-row';
+        const naOptional = c.optional && !c.exists && c.source !== 'override';
+        const badge = document.createElement('span');
+        badge.className = 'tc-badge ' + (c.ok ? (naOptional ? 'tc-na' : 'tc-ok') : 'tc-warn');
+        badge.textContent = c.ok ? (naOptional ? '○' : '●') : '▲';
+        const label = document.createElement('span'); label.className = 'tc-label';
+        label.innerHTML = c.label + (c.optional ? ' <em>(optional)</em>' : '');
+        const pathSpan = document.createElement('span'); pathSpan.className = 'tc-path';
+        pathSpan.textContent = c.path || '(not set)';
+        if (c.path) { const s = document.createElement('span'); s.className = 'tc-src'; s.textContent = c.source; pathSpan.appendChild(s); }
+        const actions = document.createElement('span'); actions.className = 'tc-actions';
+        const setBtn = document.createElement('button'); setBtn.textContent = 'Set path…';
+        setBtn.onclick = () => vscode.postMessage({ type: 'tc_set', key: c.key, isFile: c.key === 'vcvars' });
+        actions.appendChild(setBtn);
+        if (c.source === 'override') {
+            const clr = document.createElement('button'); clr.textContent = 'Clear'; clr.className = 'secondary';
+            clr.onclick = () => vscode.postMessage({ type: 'tc_clear', key: c.key });
+            actions.appendChild(clr);
+        }
+        row.append(badge, label, pathSpan, actions);
+        box.appendChild(row);
+        if (c.hint) { const hint = document.createElement('div'); hint.className = 'tc-hint' + (c.ok ? ' muted' : ''); hint.textContent = c.hint; box.appendChild(hint); }
+    }
+}
+vscode.postMessage({ type: 'tc_refresh' });
 function collect() {
     const reqs = Array.from(document.querySelectorAll('[data-required]'))
         .filter(e => e.checked).map(e => e.dataset.required);
@@ -182,6 +235,8 @@ window.addEventListener('message', e => {
         const el = document.getElementById('saved');
         el.classList.add('show');
         setTimeout(() => el.classList.remove('show'), 1500);
+    } else if (e.data?.type === 'tc_health') {
+        renderToolchain(e.data.data);
     }
 });
 </script>
@@ -1440,6 +1495,37 @@ export function activate(context: vscode.ExtensionContext) {
                 );
                 settingsPanel.onDidDispose(() => { settingsPanel = undefined; });
                 settingsPanel.webview.onDidReceiveMessage(async (msg: any) => {
+                    // ---- C++ toolchain health round-trips ----
+                    if (msg.type === 'tc_refresh') {
+                        const h = await sendCmd('toolchain_health');
+                        settingsPanel?.webview.postMessage({ type: 'tc_health', data: h?.data });
+                        return;
+                    }
+                    if (msg.type === 'tc_set' || msg.type === 'tc_clear') {
+                        let newPath = '';
+                        if (msg.type === 'tc_set') {
+                            const isFile = !!msg.isFile;   // vcvars64.bat is a file; the rest are folders
+                            const uris = await vscode.window.showOpenDialog({
+                                canSelectFolders: !isFile, canSelectFiles: isFile, canSelectMany: false,
+                                openLabel: isFile ? 'Use this vcvars64.bat' : 'Use this folder',
+                                title: `Pick the ${msg.key} ${isFile ? 'batch file' : 'install folder'}`,
+                            });
+                            if (!uris || !uris.length) return;   // cancelled
+                            newPath = uris[0].fsPath;
+                        }
+                        const r = await sendCmd('set_toolchain_override', { key: msg.key, path: newPath });
+                        if (!r?.ok) {
+                            vscode.window.showErrorMessage(`xInsp2: ${r?.error || 'failed to set toolchain path'}`);
+                            return;
+                        }
+                        settingsPanel?.webview.postMessage({ type: 'tc_health', data: r.data?.health });
+                        // The change applies on the next compile — offer it now.
+                        vscode.window.showInformationMessage(
+                            `xInsp2: ${msg.key} path ${msg.type === 'tc_clear' ? 'cleared' : 'updated'}. Recompile to apply.`,
+                            'Recompile now',
+                        ).then(pick => { if (pick === 'Recompile now') vscode.commands.executeCommand('xinsp2.compile'); });
+                        return;
+                    }
                     if (msg.type !== 'save') return;
                     const next = msg.data || {};
                     // Merge into existing pj — don't drop unknown fields the
