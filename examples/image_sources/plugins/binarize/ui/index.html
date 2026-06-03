@@ -9,21 +9,33 @@
   .field label { color:#888; }
   input[type=range] { width: 100%; }
   .num { font-family: monospace; text-align: right; }
-  .stat { display:flex; gap:10px; margin-top:14px; font-size:12px; }
+  .stat { display:flex; gap:14px; margin:12px 0; font-size:12px; }
   .stat .k { color:#888; } .stat .v { font-family: monospace; }
+  .cmp { display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:8px; }
+  .pane { border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:6px;
+          background: var(--vscode-editor-background); }
+  .pane .cap { font-size:11px; color:#888; text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
+  .pane img { width:100%; display:block; border-radius:3px; background:#000; }
+  .pane .empty { color:#666; font-style:italic; padding:24px 0; text-align:center; }
 </style></head>
 <body>
   <h2>Binarize</h2>
-  <div class="hint">Drag the threshold, then <b>replay</b> a cached frame (or issue a
-    new one) to see the binary result update. Param changes are applied on the next pass.</div>
+  <div class="hint">Drag the threshold — the output re-computes live on the last input.
+    (Issue/replay a frame from the source plugins to feed a new input.)</div>
   <div class="field">
     <label>Threshold</label>
     <input type="range" id="thr" data-param="threshold" min="0" max="255" step="1">
     <div class="num" id="thr-v">128</div>
   </div>
   <div class="stat">
-    <span class="k">Last foreground %</span><span class="v" id="fg">—</span>
+    <span class="k">Foreground</span><span class="v" id="fg">—</span>
     <span class="k">Passes</span><span class="v" id="n">0</span>
+  </div>
+  <div class="cmp">
+    <div class="pane"><div class="cap">Input</div>
+      <div id="in"><div class="empty">no input yet</div></div></div>
+    <div class="pane"><div class="cap">Output (binary)</div>
+      <div id="out"><div class="empty">no output yet</div></div></div>
   </div>
 
   <script>
@@ -35,8 +47,11 @@
       $('thr-v').textContent = $('thr').value;
       if (pending) return; pending = true;
       send({ command: 'set_threshold', value: parseInt($('thr').value) });
-      setTimeout(() => pending = false, 60);
+      setTimeout(() => pending = false, 50);
     });
+    const setPane = (id, uri) => {
+      $(id).innerHTML = uri ? `<img src="${uri}">` : `<div class="empty">no ${id==='in'?'input':'output'} yet</div>`;
+    };
     window.addEventListener('message', (e) => {
       const m = e.data; if (!m || m.type !== 'status') return;
       if (typeof m.threshold === 'number' && document.activeElement !== $('thr')) {
@@ -44,6 +59,8 @@
       }
       if (typeof m.last_fg_pct === 'number') $('fg').textContent = (m.last_fg_pct * 100).toFixed(1) + '%';
       if (typeof m.processed === 'number') $('n').textContent = m.processed;
+      if ('input_thumb'  in m) setPane('in',  m.input_thumb);
+      if ('output_thumb' in m) setPane('out', m.output_thumb);
     });
     send({ command: 'get_status' });
   </script>

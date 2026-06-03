@@ -1238,6 +1238,36 @@ static void stop_dispatch_pool_() {
     g_worker_threads.clear();
 }
 
+// Trigger-driven dispatch WITHOUT continuous mode: a source emitting a trigger
+// (e.g. a webui "issue"/"replay" click) runs exactly ONE inspect on it. The emit
+// usually arrives on the WS thread (inside a plugin's exchange), so we run the
+// inspect on a detached thread, not inline. Serialized by g_run_mu; the
+// thread_local g_current_trigger makes this thread's inspect see this event.
+static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
+    auto evp = std::make_shared<xi::TriggerEvent>(std::move(ev));
+    std::thread([srv, evp]() {
+        reserve_fault_stack();
+        _set_se_translator(seh_translator);
+        std::lock_guard<std::mutex> lk(g_run_mu);
+        g_current_trigger = evp.get();
+        run_one_inspection(*srv, /*frame_hint=*/0, /*run_id=*/0, "", /*emit_seq=*/-1);
+        g_current_trigger = nullptr;
+        for (auto& [src, h] : evp->images) xi::ImagePool::instance().release(h);
+    }).detach();
+}
+
+// Install the bus sink so triggers always dispatch: in continuous mode they feed
+// the worker-pool queue; otherwise each trigger runs a single-shot inspect. This
+// is installed on every compile_and_load so "issue"/"replay" works WITHOUT needing
+// cmd:start — the trigger-driven model (continuous is just an optional free-running
+// timer on top).
+static void install_trigger_sink_(xi::ws::Server* srv) {
+    xi::TriggerBus::instance().set_sink([srv](xi::TriggerEvent ev) {
+        if (g_continuous.load()) (void)enqueue_event_(std::move(ev));
+        else                     dispatch_one_shot_(srv, std::move(ev));
+    });
+}
+
 // Quiesce the dispatcher + timer + breakpoint park before any handler
 // that's about to touch the script DLL or project plugin DLLs (audit
 // P0-AB-1..5). Returns the prior continuous state so the caller can
@@ -1821,15 +1851,16 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // cl.exe gap inside the reload is unavoidable; what we don't
         // want is the run staying dead afterwards and forcing the
         // caller to know they need to re-issue cmd:start.
+        // Install the trigger sink so a source's emit_trigger runs an inspect
+        // even when NOT continuous (single-shot) — issue/replay works without
+        // cmd:start. Continuous mode (below) just adds the free-running timer.
+        install_trigger_sink_(&srv);
         if (was_continuous) {
             int fps = prior_continuous_fps > 0 ? prior_continuous_fps : 10;
             g_continuous_fps = fps;
             g_continuous = true;
             int interval_ms = 1000 / std::max(fps, 1);
             int n_threads = g_plugin_mgr.project().dispatch_threads;
-            xi::TriggerBus::instance().set_sink([](xi::TriggerEvent ev) {
-                (void)enqueue_event_(std::move(ev));
-            });
             spawn_dispatch_pool_(&srv, interval_ms, n_threads);
             std::fprintf(stderr,
                 "[xinsp2] continuous mode resumed after reload (%d threads)\n",
@@ -1945,14 +1976,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         int n_threads = g_plugin_mgr.project().dispatch_threads;
         if (n_threads < 1) n_threads = 1;
 
-        // Bus-driven dispatch: events arrive via TriggerBus sink → enqueued
-        // → workers pop and run inspect with that trigger as current.
-        // Timer thread emits synthetic events on schedule for scripts
-        // without trigger sources.
-        xi::TriggerBus::instance().set_sink([](xi::TriggerEvent ev) {
-            (void)enqueue_event_(std::move(ev));
-        });
-
+        // Bus-driven dispatch: with g_continuous now true the sink enqueues to
+        // the worker pool (single-shot otherwise). Timer thread emits synthetic
+        // events on schedule for scripts without trigger sources.
+        install_trigger_sink_(&srv);
         spawn_dispatch_pool_(&srv, interval_ms, n_threads);
 
         // The watchdog now tracks a per-inspect slot, so it protects every

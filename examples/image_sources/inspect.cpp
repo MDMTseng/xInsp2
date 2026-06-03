@@ -22,23 +22,25 @@ void xi_inspect_entry(int /*frame*/) {
     VAR(source, src);
     VAR(trigger_id, t.id_string());
 
+    // The input image arrives ON the trigger from whichever source issued this
+    // pass — `local` (a file click) or `cache` (a replay). One read, either way.
     auto img = t.image(src);
     if (img.empty()) { VAR(loaded, false); return; }
     VAR(loaded, true);
     VAR(width, img.width);
     VAR(height, img.height);
-    VAR(input, img);     // the raw input, surfaced as a preview
+    VAR(input, img);     // raw input, surfaced as a preview
 
-    // Binarize it. The threshold is tuned in the binarize instance's webui (a
-    // plugin-internal param); the new value shows up here on the next pass —
-    // replay a cached frame after tweaking the slider to see it update.
+    // 1. Capture the input into the cache FIRST (so it can be replayed later) —
+    //    but NOT when this pass already IS a cache replay (would re-store it).
+    if (src != "cache")
+        xi::use("cache").process(xi::Record().image("frame", img));
+
+    // 2. Then binarize. The threshold is a binarize-instance param tuned in its
+    //    webui; the new value takes effect on the next pass — replay a cached
+    //    frame after moving the slider to see the result update.
     auto bin = xi::use("binarize")
                    .process(xi::Record().image("frame", img))
                    .get_image("binary");
     if (!bin.empty()) VAR(binary, bin);
-
-    // Feed the cache so this frame can be replayed later from its webui — but NOT
-    // when this pass IS a cache replay (would just re-store the same frame).
-    if (src != "cache")
-        xi::use("cache").process(xi::Record().image("frame", img));
 }

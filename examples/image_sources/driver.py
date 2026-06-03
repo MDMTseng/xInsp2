@@ -77,11 +77,9 @@ def main() -> int:
 
         print("compile_and_load inspect.cpp")
         c.compile_and_load(str(ROOT / "inspect.cpp"), timeout=300)
-        c.call("start", {"fps": 4})   # continuous: workers run; emitted triggers dispatch
-        time.sleep(0.5)
-        # Drain any synthetic ticks already queued so we start clean.
-        while c.next_vars(timeout=0.2) is not None:
-            pass
+        # NOTE: no cmd:start — issuing/replaying a trigger runs a single pass on
+        # its own (trigger-driven dispatch). Continuous mode is NOT required.
+        time.sleep(0.3)
 
         # --- local source: issue a file -> a pass runs on it (which feeds the cache) ---
         print("LOCAL: issue index 0 (== clicking the first thumbnail)")
