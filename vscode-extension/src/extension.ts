@@ -344,16 +344,27 @@ export function activate(context: vscode.ExtensionContext) {
     const wsUrl = isRemote ? remoteUrl : `ws://127.0.0.1:${port}`;
     const output = vscode.window.createOutputChannel('xInsp2');
 
-    // If the opened workspace folder IS an xInsp2 project (has project.json),
-    // remember it so the connect handler auto-opens AND auto-compiles it —
-    // "open the folder -> it just runs", no manual Open Project / Compile Script.
+    // PlatformIO-style project recognition: if the opened workspace folder IS an
+    // xInsp2 project (a project.json that looks like ours — has script/instances/
+    // params), remember it so the connect handler auto-opens AND auto-compiles it
+    // ("open the folder -> it just runs"). A generic project.json (e.g. a Node
+    // package) is ignored, so we don't spawn a backend for unrelated folders.
+    let looksLikeXinspProject = false;
+    let unrelatedProjectJson = false;   // a project.json that is NOT ours
     {
         const fs0 = require('fs');
         for (const wf of vscode.workspace.workspaceFolders ?? []) {
-            if (fs0.existsSync(path.join(wf.uri.fsPath, 'project.json'))) {
-                lastProjectFolder = wf.uri.fsPath;
-                break;
-            }
+            const pj = path.join(wf.uri.fsPath, 'project.json');
+            if (!fs0.existsSync(pj)) continue;
+            try {
+                const o = JSON.parse(fs0.readFileSync(pj, 'utf8'));
+                if (Array.isArray(o.instances) || Array.isArray(o.params) || typeof o.script === 'string') {
+                    lastProjectFolder = wf.uri.fsPath;
+                    looksLikeXinspProject = true;
+                    break;
+                }
+                unrelatedProjectJson = true;   // parses but isn't an xInsp2 project
+            } catch { unrelatedProjectJson = true; /* unparseable — not ours */ }
         }
     }
 
@@ -2244,7 +2255,10 @@ void xi_inspect_entry(int frame) {
         client!.connect();
         return;
     }
-    if (autoStart) {
+    // Don't spawn a backend for a folder whose project.json isn't ours (the
+    // extension may have activated via workspaceContains:project.json). Still
+    // spawn for a real xInsp2 project, or an empty folder (create-new via the view).
+    if (autoStart && (looksLikeXinspProject || !unrelatedProjectJson)) {
         // Managed mode: bump to the next free port from the configured base so
         // multiple projects each spawn their own backend without colliding. Point
         // the client at it before we spawn + connect, and reflect it in the UI.
