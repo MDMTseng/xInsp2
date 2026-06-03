@@ -380,7 +380,7 @@
         "xinsp2.backendPort": {
           "type": "number",
           "default": 7823,
-          "description": "WebSocket port for the xInsp2 backend (local mode only)"
+          "description": "Starting WebSocket port for the xInsp2 backend. In managed mode the extension bumps to the next free port from here, so multiple projects each get their own backend without colliding."
         },
         "xinsp2.autoStartBackend": {
           "type": "boolean",
@@ -389,14 +389,14 @@
         },
         "xinsp2.backendMode": {
           "type": "string",
-          "enum": ["auto", "managed", "attach"],
-          "default": "auto",
+          "enum": ["managed", "auto", "attach"],
+          "default": "managed",
           "enumDescriptions": [
+            "The extension spawns + respawns the backend itself, on its own free port (dev default; each project window is independent).",
             "Attach if a backend is already on the port, otherwise spawn one (managed).",
-            "The extension spawns + respawns the backend itself (dev inner-loop).",
             "A supervisor (xinsp-fe.exe) owns the backend; connect read/operator-only and never spawn or respawn."
           ],
-          "description": "Who owns the backend process. On a production line the xinsp-fe supervisor owns it (use 'attach'); for local development use 'managed'. 'auto' picks based on whether a backend is already listening. See docs/design/fe-be-split.md."
+          "description": "Who owns the backend process. Default 'managed': the extension spawns its own backend on a free port (from backendPort), so multiple projects run side by side. Use 'attach' on a production line where xinsp-fe.exe owns it. See docs/design/fe-be-split.md."
         },
         "xinsp2.feStatusFile": {
           "type": "string",

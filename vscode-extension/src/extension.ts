@@ -33,6 +33,11 @@ let spawnAndWatchHandle: (() => void) | null = null;
 // and never spawns or respawns — lifecycle + safe-state belong to the FE.
 let attachMode = false;
 
+// The port this window's backend actually ended up on (managed mode auto-assigns
+// a free one). 0 until resolved. Shown in the status bar so multiple project
+// windows are distinguishable.
+let backendPortInUse = 0;
+
 // Quick "is something already accepting on this local port?" probe. Used to
 // resolve backendMode:"auto" — if a backend (FE-managed or otherwise) is
 // already up, attach to it instead of spawning a competing one.
@@ -52,6 +57,16 @@ function isPortOpen(port: number, timeoutMs = 400): Promise<boolean> {
         sock.once('error', () => finish(false));
         sock.connect(port, '127.0.0.1');
     });
+}
+
+// Find a free TCP port at or above `base` (probes base, base+1, …). Used in
+// managed mode so each VS Code window spawns its own backend on its own port —
+// multiple projects can run side by side without colliding on a fixed port.
+async function findFreePort(base: number, span = 64): Promise<number> {
+    for (let p = base; p < base + span; p++) {
+        if (!(await isPortOpen(p, 250))) return p;
+    }
+    return base;   // fallback: let the spawn fail loudly rather than loop forever
 }
 
 // Effective auto-respawn flag, computed as:
@@ -310,7 +325,9 @@ function findBackendExe(context: vscode.ExtensionContext): string {
 
 export function activate(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('xinsp2');
-    const port = config.get<number>('backendPort', 7823);
+    // The configured port is the STARTING port; in managed mode the extension
+    // bumps to the next free one so multiple projects each get their own backend.
+    let port = config.get<number>('backendPort', 7823);
     const autoStart = config.get<boolean>('autoStartBackend', true);
     const extraPluginDirs = config.get<string[]>('extraPluginDirs', []);
     const remoteUrl = (config.get<string>('remoteUrl', '') || '').trim();
@@ -319,7 +336,7 @@ export function activate(context: vscode.ExtensionContext) {
     //   managed — extension spawns + respawns the backend (dev inner-loop).
     //   attach  — a supervisor (xinsp-fe.exe) owns it; connect read-only, never spawn.
     //   auto    — attach if a backend is already on the port, else managed.
-    const backendMode = (config.get<string>('backendMode', 'auto') || 'auto').trim();
+    const backendMode = (config.get<string>('backendMode', 'managed') || 'managed').trim();
     // Remote mode: skip spawning a local backend, connect to the given URL.
     // Combine with authSecret to drive a backend started with --auth.
     const isRemote = remoteUrl.length > 0;
@@ -401,12 +418,13 @@ export function activate(context: vscode.ExtensionContext) {
         lines.push('The xinsp-fe supervisor owns this backend; the extension does not manage it.');
         return lines.join('\n');
     };
+    const portTag = () => (backendPortInUse ? ` :${backendPortInUse}` : '');
     const updateHealthStatus = (connected: boolean) => {
         if (connected) {
-            healthStatus.text = attachMode ? '$(plug) xInsp2 · attached' : '$(zap) xInsp2';
+            healthStatus.text = attachMode ? '$(plug) xInsp2 · attached' : ('$(zap) xInsp2' + portTag());
             healthStatus.tooltip = attachMode
                 ? 'Attached to a backend managed by the xinsp-fe supervisor.'
-                : 'xInsp2 backend connected. Click to restart.';
+                : `xInsp2 backend connected${backendPortInUse ? ' on port ' + backendPortInUse : ''}. Click to restart.`;
             healthStatus.backgroundColor = undefined;
         } else if (attachMode && latestFeStatus) {
             // Drive the indicator from the FE's TRUE state, not the WS drop.
@@ -2197,6 +2215,14 @@ void xi_inspect_entry(int frame) {
         return;
     }
     if (autoStart) {
+        // Managed mode: bump to the next free port from the configured base so
+        // multiple projects each spawn their own backend without colliding. Point
+        // the client at it before we spawn + connect, and reflect it in the UI.
+        port = await findFreePort(port);
+        client!.setUrl(`ws://127.0.0.1:${port}`);
+        backendPortInUse = port;
+        updateHealthStatus(false);
+        output.appendLine(`[xinsp2] managed: backend on free port ${port}`);
         // Single function used by both initial spawn and auto-respawn.
         // Hoisted to the activate() closure so xinsp2.restartBackend
         // below can reuse it (gives identical respawn behaviour after

@@ -23,6 +23,11 @@ export class WsClient extends EventEmitter {
         this.authSecret = opts.authSecret;
     }
 
+    // Update the target URL before connect() — used when the extension resolves a
+    // free backend port at spawn time (managed mode auto-port).
+    setUrl(url: string): void { this.url = url; }
+    getUrl(): string { return this.url; }
+
     connect(): void {
         if (this.closed) return;
         const headers = this.authSecret
