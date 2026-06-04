@@ -132,22 +132,33 @@ function makeDivider(path, i, col, box, els, fr) {
   return div;
 }
 
-// A tabs/pages node: a tab strip + the active tab's content. RUN mode switches
-// tabs; compose mode also adds (+) / removes (✕) / renames (dbl-click) tabs.
+// A tabs/pages node: a tab strip + ALL tab bodies mounted at once. Switching a
+// tab only toggles visibility (display:none) — it never destroys the inactive
+// pages, so their cards keep their accumulated state + live data while hidden.
 function renderTabs(node, path) {
-  const active = Math.min(node.active || 0, node.tabs.length - 1);
+  let active = Math.min(node.active || 0, node.tabs.length - 1);
   const wrap = document.createElement("div");
   wrap.style.cssText = "display:flex;flex-direction:column;min-width:0;min-height:0;width:100%;height:100%";
   const strip = document.createElement("div");
   strip.style.cssText = "display:flex;gap:2px;flex:0 0 auto;align-items:center;padding:2px 2px 0;overflow:auto";
+  const bodyHost = document.createElement("div");
+  bodyHost.style.cssText = "flex:1 1 0;min-width:0;min-height:0;position:relative";
+
+  const tabEls = [], bodies = [];
+  const restyle = () => {
+    tabEls.forEach((t, k) => { const on = k === active;
+      t.style.background = on ? "#1e1e1e" : "#121212"; t.style.color = on ? "#ddd" : "#888"; });
+    bodies.forEach((b, k) => { b.style.display = k === active ? "" : "none"; });
+  };
+  const show = (i) => { if (i === active) return; active = i; layout = setActive(layout, path, i); restyle(); };
+
   node.tabs.forEach((tb, i) => {
-    const on = i === active;
     const tab = document.createElement("div");
     tab.style.cssText = "display:flex;align-items:center;gap:5px;padding:4px 11px;cursor:pointer;border-radius:6px 6px 0 0;" +
-      `background:${on ? "#1e1e1e" : "#121212"};color:${on ? "#ddd" : "#888"};border:1px solid #333;border-bottom:none;font:12px system-ui,sans-serif`;
+      "border:1px solid #333;border-bottom:none;font:12px system-ui,sans-serif";
     const label = document.createElement("span"); label.textContent = tb.name || `Page ${i + 1}`;
     tab.appendChild(label);
-    tab.onclick = () => { if (i !== active) { layout = setActive(layout, path, i); reRender(); } };
+    tab.onclick = () => show(i);
     if (mode === "compose") {
       label.title = "double-click to rename";
       label.ondblclick = (e) => { e.stopPropagation(); const nn = prompt("Tab name", tb.name || ""); if (nn != null) { layout = renameTab(layout, path, i, nn); reRender(); } };
@@ -157,18 +168,21 @@ function renderTabs(node, path) {
         tab.appendChild(x);
       }
     }
-    strip.appendChild(tab);
+    tabEls.push(tab); strip.appendChild(tab);
+
+    const body = renderNode(tb.child, [...path, i]);  // all bodies rendered + fed
+    body.style.cssText += ";position:absolute;inset:0;min-width:0;min-height:0;border:1px solid #333;border-radius:0 6px 6px 6px;overflow:hidden";
+    bodies.push(body); bodyHost.appendChild(body);
   });
+
   if (mode === "compose") {
     const add = document.createElement("button"); add.textContent = "+"; add.title = "add tab";
     add.style.cssText = "margin-left:4px;padding:2px 9px;cursor:pointer";
     add.onclick = () => { layout = addTab(layout, path); reRender(); };
     strip.appendChild(add);
   }
-  wrap.appendChild(strip);
-  const body = renderNode(node.tabs[active].child, [...path, active]);
-  body.style.cssText += ";flex:1 1 0;min-width:0;min-height:0;border:1px solid #333;border-radius:0 6px 6px 6px;overflow:hidden";
-  wrap.appendChild(body);
+  restyle();
+  wrap.append(strip, bodyHost);
   return wrap;
 }
 
