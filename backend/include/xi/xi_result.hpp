@@ -9,8 +9,10 @@
 //   = 0            NA / none  — no verdict applicable (the default if unset)
 //   -1 … -989999   NG class   — ng1, ng2, …          (xi::ng(n))
 //   <= -990000     RESERVED for framework system-fails (dropped / crashed / …);
-//                  a user code in this band is clamped to -1 + flagged, so user
-//                  scripts can never squat the framework enum.
+//                  a user code in this band is NOT silently accepted — the host
+//                  records it as NA (0) and emits a warning naming the offending
+//                  code, so the framework enum stays the framework's and the
+//                  mistake is visible (not hidden behind a fake ng1).
 //
 // This is NOT a VAR (a run emits many debug/inspection values) — it's the single
 // verdict record MES / PLC / the HMI verdict-yield cards consume.
@@ -42,8 +44,9 @@ using ResultFn = void (*)(int code, const char* msg);
 inline void result(int code, const char* msg) {
     auto fn = reinterpret_cast<ResultFn>(g_result_fn_);
     if (!fn) return;
-    // Keep the framework enum band off-limits to user code.
-    if (code <= kResultSystemBand) code = -1;
+    // Pass the raw code through — the host is the trust boundary. It rejects the
+    // reserved band (<= kResultSystemBand) with a visible warning rather than a
+    // silent clamp, so a mistake isn't hidden behind a fake verdict.
     fn(code, msg ? msg : "");
 }
 

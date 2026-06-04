@@ -504,9 +504,31 @@ enum : int {
 struct RunResult { int code = 0; std::string msg; bool set = false; };
 static thread_local RunResult g_run_result;
 
+// Lowest user-usable result code; anything <= this is the framework system-fail
+// band (mirrors xi::kResultSystemBand in xi_result.hpp).
+static constexpr int kResultSystemBand = -990000;
+
 // Installed into the script DLL (xi_script_set_result_callback) so xi::result()
-// records the one per-run verdict.
+// records the one per-run verdict. The host is the trust boundary: a user code in
+// the reserved system band is NOT accepted as-is — it's recorded as NA (0) with a
+// visible warning + the offending code preserved in the message, so the mistake
+// surfaces instead of masquerading as a real verdict.
 static void result_cb(int code, const char* msg) {
+    if (code <= kResultSystemBand) {
+        if (g_srv_for_bp) {
+            xp::LogMsg lm;
+            lm.level = "warn";
+            lm.msg = "xi::result(" + std::to_string(code) + ") uses a reserved system "
+                     "code (<= -990000); the valid ng range is -1..-989999. Recorded as "
+                     "NA (0) — fix the script's result code.";
+            g_srv_for_bp->send_text(lm.to_json());
+        }
+        g_run_result.code = 0;   // NA, not a fake ng1
+        g_run_result.msg = "[invalid result code " + std::to_string(code) + ", reserved band] ";
+        g_run_result.msg += (msg ? msg : "");
+        g_run_result.set = true;
+        return;
+    }
     g_run_result.code = code;
     g_run_result.msg.assign(msg ? msg : "");
     g_run_result.set = true;

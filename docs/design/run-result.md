@@ -25,6 +25,12 @@ framework-generated failures so they never collide with user codes:
 | `-1 … -989999` | **NG** class: `ng1`, `ng2`, … (user reject reasons) | script (`RESULT`) |
 | `≤ -990000` | **SYSTEM fail** (framework-generated; an enum, can be many) | the framework |
 
+A user `xi::result` code in the reserved band (`≤ -990000`) is **not** silently
+accepted: the host records the run as NA (`0`), emits a `warn` log naming the
+offending code, and preserves it in the result message (`"[invalid result code
+-999001, reserved band] …"`). So the framework enum stays the framework's *and*
+the script bug is visible — it doesn't masquerade as a real `ng1`.
+
 Reserving `≤ -990000` answers "a system enum can have multiple framework fails":
 
 ```cpp

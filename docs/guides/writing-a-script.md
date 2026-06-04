@@ -228,8 +228,10 @@ void xi_inspect_entry(int frame) {
 
 Code convention: **sign = verdict, magnitude = sub-class** — `>0` ok-class,
 `0` NA/none, `-1…` ng-class. The band `<= -990000` is **reserved** for framework
-system-fails (a dropped frame is auto-emitted as `XI_SYS_DROPPED`); a user code in
-that band is clamped to `-1`. The host emits a `run_result` event per run (and one
+system-fails (a dropped frame is auto-emitted as `XI_SYS_DROPPED`); if a script
+passes a code in that band the host records the run as NA (`0`) and **logs a
+warning naming the bad code** (it doesn't silently fake a verdict). The host emits
+a `run_result` event per run (and one
 per *dropped* trigger, so the stream has no gaps). Full spec + the system enum:
 [`../design/run-result.md`](../design/run-result.md).
 

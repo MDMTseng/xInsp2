@@ -70,15 +70,20 @@ def main() -> int:
         assert c, "no connect"
         c.call("open_project", {"path": str(ROOT)})
         c.compile_and_load(str(ROOT / "inspect.cpp"), timeout=300)
-        codes = []
+        codes, msgs = [], []
         for _ in range(4):
             data = c.call("run", {})
             rid = data["run_id"]
-            rr = wait_run_result(c, rid)
-            codes.append(rr.get("code") if rr else None)
-        print(f"Test 1 verdict codes: {codes}  (expect [0, 1, -2, -1])")
-        if codes != [0, 1, -2, -1]:
-            fails.append(f"1: run_result codes {codes} != [0, 1, -2, -1]")
+            rr = wait_run_result(c, rid) or {}
+            codes.append(rr.get("code"))
+            msgs.append(rr.get("msg", ""))
+        # 4th run passes a reserved system code (-999001) -> host records NA (0) +
+        # warns + keeps the offending code in the message (not a silent fake ng1).
+        print(f"Test 1 verdict codes: {codes}  (expect [0, 1, -2, 0])")
+        if codes != [0, 1, -2, 0]:
+            fails.append(f"1: run_result codes {codes} != [0, 1, -2, 0]")
+        if "-999001" not in msgs[3] or "reserved" not in msgs[3]:
+            fails.append(f"1: reserved-code run msg should name the bad code, got {msgs[3]!r}")
         c.call("close_project"); c.close()
     except Exception as e:
         fails.append(f"1: {e}")
