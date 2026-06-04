@@ -23,7 +23,10 @@ The data plumbing already exists (see "What we reuse"), so this layer is mostly 
 
 - **HMI is a standalone browser SPA**, the single WS client of the (FE-supervised)
   backend. Zero-install; runs in a kiosk browser.
-- **The composer lives in the SPA** (WYSIWYG drag/drop), with two modes:
+- **The composer lives in the SPA** as a **recursive split-pane** layout (not
+  free drag/drop): you click a pane to split it vertically/horizontally or assign
+  a card, and drag the dividers to resize. A binary split-tree — no overlap, fills
+  the screen, simplest interaction, best fit for a fixed kiosk. Two modes:
   **Compose** (edit) and **Run** (operator, read-only). Layout persists to
   `dashboard.json` in the project.
 - **The inspection script is the single source of truth for data.** The script
@@ -170,24 +173,33 @@ cards + overlays contributed by the project's plugins.
 
 ## `dashboard.json` (project root)
 
+A **recursive split-pane tree**. A node is either a **split**
+(`{split:"row"|"col", ratio, a, b}` — `row` = side-by-side, `col` = stacked;
+`ratio` is child `a`'s fraction) or a **leaf** (`{card:{type,bind,config,overlays}}`).
+No coordinates, no overlap; the tree fills the screen.
+
 ```jsonc
 {
-  "grid": { "cols": 12, "rowHeight": 40 },
-  "cards": [
-    { "id": "v",  "type": "verdict", "x": 0, "y": 0, "w": 3, "h": 3,
-      "bind": { "var": "verdict" }, "config": { "title": "Result" } },
-    { "id": "im", "type": "image",   "x": 3, "y": 0, "w": 6, "h": 8,
-      "bind": { "var": "result" },
-      "overlays": [ { "renderer": "blob_detector", "var": "overlay_blobs" } ] },
-    { "id": "sp", "type": "spc",     "x": 9, "y": 0, "w": 3, "h": 4,
-      "bind": { "var": "fg_pct" }, "config": { "window": 100, "ucl": 0.6, "lcl": 0.4 } }
-  ]
+  "title": "Line 1",
+  "layout": {
+    "split": "col", "ratio": 0.7,
+    "a": {
+      "split": "row", "ratio": 0.25,
+      "a": { "card": { "type": "verdict", "bind": { "var": "verdict" } } },
+      "b": { "card": { "type": "image", "bind": { "var": "result" },
+                       "overlays": [ { "renderer": "blob_detector", "var": "overlay_blobs" } ] } }
+    },
+    "b": { "card": { "type": "spc", "bind": { "var": "fg_pct" },
+                     "config": { "window": 100, "ucl": 0.6, "lcl": 0.4 } } }
+  }
 }
 ```
 
-- **Compose mode** in the SPA edits this WYSIWYG and writes it back via a new WS
-  command `save_dashboard` (or through the VS Code extension's fs access).
-- **Run mode** loads it read-only.
+- **Run mode** renders the tree read-only (dividers fixed by `ratio`).
+- **Compose mode** edits it: click a pane to split `row`/`col` or assign a card,
+  drag dividers to adjust `ratio`, then writes back via a new WS command
+  `save_dashboard` (or through the VS Code extension's fs access). Preset layouts
+  (1-up / 2-up / 2×2 / main+side) are just starting trees.
 
 ## Standalone package export
 

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>xInsp2 HMI</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; height: 100vh; display: flex; flex-direction: column;
+           background: #141414; color: #ddd; font: 14px/1.4 system-ui, sans-serif; }
+    header { display: flex; align-items: center; gap: 12px; padding: 6px 12px;
+             background: #1b1b1b; border-bottom: 1px solid #333; }
+    header h1 { font-size: 14px; font-weight: 600; margin: 0; color: #bbb; }
+    #conn { margin-left: auto; font-size: 12px; padding: 2px 10px; border-radius: 10px;
+            background: #444; color: #fff; }
+    #err { color: #f88; font-size: 12px; }
+    #grid { flex: 1; display: grid; gap: 8px; padding: 10px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>xInsp2 — Production HMI</h1>
+    <span id="err"></span>
+    <span id="conn">connecting…</span>
+  </header>
+  <div id="grid"></div>
+  <script type="module" src="./app.mjs"></script>
+</body>
+</html>

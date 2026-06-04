@@ -72,6 +72,9 @@ examples/**/_build*.bat
 # absolute include paths, so it is per-machine and must not be committed).
 examples/**/.vscode/c_cpp_properties.json
 examples/**/.vscode/extensions.json
+hmi/**/.vscode/c_cpp_properties.json
+hmi/**/.vscode/extensions.json
+hmi/**/backend*.log
 
 # QA team loop scratch countdown
 tmp/qa_countdown.txt

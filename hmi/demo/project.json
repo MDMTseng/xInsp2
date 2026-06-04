@@ -1,0 +1,4 @@
+{
+  "name": "hmi_demo",
+  "script": "inspect.cpp"
+}
