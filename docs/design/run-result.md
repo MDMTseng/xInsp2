@@ -78,8 +78,10 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 
 ## Flow + relationships
 
-- The Result rides on `run_finished` (or a dedicated `result` message) carrying the
-  core + provenance fields.
+- The Result rides a **dedicated `run_result` event** (decided — *not* folded into
+  `run_finished`), so a **dropped** trigger — which has no run / no `run_finished` —
+  emits the same shape. `run_finished` stays lifecycle/timing only.
+  `{"type":"event","name":"run_result","result":{code,msg,run_id,ms,source,group}}`.
 - **HMI**: a `verdict` card binds `code` (sign → green/red; `≤ -990000` → a distinct
   "system" colour); `yield` excludes/【buckets system fails; a **Pareto** card ranks
   by `code`/`message`. Ties into [`production-hmi.md`](./production-hmi.md).
@@ -90,11 +92,46 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 
 ## Increment plan
 
-- **v1** — `RESULT(code,msg)` API + `xi::Result{code,message,run_id,ts,cycle_ms,
-  source,group}` on `run_finished`; framework synthesis of `XI_SYS_DROPPED` (drop
-  path) + `XI_SYS_NO_VERDICT` (ran, none set); HMI verdict/yield read `code`.
-- **v1.1** — `XI_SYS_CRASHED` / `XI_SYS_TIMEOUT`; Pareto card; `na_reason` text.
-- **Later** — `part_id` / `recipe` / `defects` traceability fields; MES export.
+### Phase 1 — per-run Result (the core; low-risk, standalone value)
+1. **Script API** — `xi_result.hpp` (new), mirrors `xi_status.hpp`'s host-callback
+   pattern: `xi::result(code, msg="")`, `xi::ok(n=1,m="")` (→ `+n`), `xi::ng(n=1,m="")`
+   (→ `-n`). The header **rejects the system band**: a user `code <= -990000` is
+   clamped to `-1` + logged (user code can't squat the framework enum).
+2. **Script support** — `g_result_fn_` + `xi_script_set_result_callback(void*)` in
+   `xi_script_support.hpp` (alongside the existing `set_status_callback`).
+3. **Host** (`service_main.cpp`) — `thread_local RunResult{code=0,msg,set=false}`
+   (per-lane, like `g_run_frame_path_`); reset before each inspect; result callback
+   writes it. After a successful inspect that set nothing → stays `0` (NA) for
+   back-compat (**`XI_SYS_NO_VERDICT` is a v1.1 opt-in**, not the v1 default — so
+   existing scripts that never call `RESULT` aren't flooded). Emit a **dedicated
+   `run_result` event** inside the `EmitTurn` (after vars/previews, before
+   `run_finished`).
+4. **Drop path** — `enqueue_to_lane_` / legacy overflow emits a `run_result` with
+   `XI_SYS_DROPPED` (+ trigger_id/source/group, no run_id) at the drop site →
+   one Result per trigger, no gaps.
+5. **HMI** — `protocol.mjs` decodes `run_result`; verdict card reads `code` (sign →
+   colour; `<= -990000` → system colour); yield uses sign. Minimal wiring.
+6. **comms** — *no comms code in v1*; a script can already forward via
+   `xi::comms.send(...)`. Gateway directly consuming `run_result` = v1.1.
+7. **Test + docs** — `examples/qa_run_result/` (ok/ng/unset → assert
+   `run_result.code`; a `queue_depth:1` flooded project → assert `XI_SYS_DROPPED`);
+   update `writing-a-script.md` (`VAR` vs `RESULT`).
+
+### Phase 2 — per-group result_order (touches the parallel emit path; separate commit)
+- `DispatchGroup.result_order` (default `"completion"`; `"arrival"` = ordered).
+- **Generalise `EmitTurn`** so the gate targets either the global cursor (legacy
+  pool) or a **per-`GroupLane`** one (`emit_seq_next` / `emit_cursor` / `emit_mu` /
+  `emit_cv`). Lane assigns `emit_seq` at dequeue under `lane->mu` (arrival order);
+  the worker wraps `run_result`+`run_finished` in a lane-scoped `EmitTurn`. Compute
+  stays fully parallel; only emission serialises, per group. Stop/drop advances the
+  cursor (reuse the existing skip-on-stop logic) so an ordered stream can't wedge.
+- Test: `qa_dispatch_groups` Test E — an `arrival` group, deliberately out-of-order
+  worker timing → assert `run_result` `run_id` is monotonic.
+
+### Later
+- `XI_SYS_CRASHED` / `XI_SYS_TIMEOUT` synthesis; `na_reason` text; Pareto card.
+- `part_id` / `recipe` / `defects` traceability fields; MES export; gateway
+  consuming `run_result` directly.
 
 ## See also
 - [`production-hmi.md`](./production-hmi.md) — verdict / yield / Pareto cards.
