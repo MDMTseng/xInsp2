@@ -16,7 +16,7 @@ const WS_URL = qs.get("ws") ||
   `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 const DASH = qs.get("dashboard") || "./dashboard.json";
 
-const state = { run_id: -1, vars: {}, images: {}, run_ms: null, status: null };
+const state = { run_id: -1, vars: {}, images: {}, run_ms: null, status: null, result: null };
 let cards = [];
 let raf = 0;
 
@@ -270,6 +270,9 @@ function connect() {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
       if (m.type === "vars") { const { run_id, items } = parseVars(m); state.run_id = run_id; state.vars = items; scheduleRender(); }
       else if (m.type === "event" && m.name === "run_finished" && m.data) { if (typeof m.data.ms === "number") state.run_ms = m.data.ms; }
+      // The one per-run verdict (see docs/design/run-result.md). Carries its own
+      // run_id (absent on a dropped frame) so cards can count distinct runs.
+      else if (m.type === "event" && m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
       else if (m.type === "event" && (m.name === "safe_state" || m.name === "status")) { state.status = m.data; scheduleRender(); }
     } else {
       try { const f = decodePreviewFrame(ev.data); state.images[f.gid] = f.dataUrl; scheduleRender(); } catch (e) { console.error(e); }

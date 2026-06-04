@@ -7,11 +7,11 @@
         "dir": "col", "weights": [3, 1],
         "children": [
           { "dir": "row", "weights": [2, 5, 2], "children": [
-            { "card": { "type": "verdict", "bind": { "var": "verdict" }, "config": { "title": "Result" } } },
+            { "card": { "type": "verdict", "bind": { "result": true }, "config": { "title": "Result" } } },
             { "card": { "type": "image", "bind": { "var": "result" }, "config": { "title": "Inspection" } } },
             { "dir": "col", "weights": [1, 1], "children": [
               { "card": { "type": "spc", "bind": { "var": "fg_pct" }, "config": { "title": "fg_pct (SPC)", "window": 120, "ucl": 0.6, "lcl": 0.4 } } },
-              { "card": { "type": "yield", "bind": { "var": "verdict" }, "config": { "title": "Yield", "warn": 90 } } }
+              { "card": { "type": "yield", "bind": { "result": true }, "config": { "title": "Yield", "warn": 90 } } }
             ] }
           ] },
           { "dir": "row", "weights": [1, 1], "children": [
@@ -24,7 +24,7 @@
         "dir": "row", "weights": [3, 1],
         "children": [
           { "card": { "type": "spc", "bind": { "var": "fg_pct" }, "config": { "title": "fg_pct (long window)", "window": 300, "ucl": 0.6, "lcl": 0.4 } } },
-          { "card": { "type": "yield", "bind": { "var": "verdict" }, "config": { "title": "Yield" } } }
+          { "card": { "type": "yield", "bind": { "result": true }, "config": { "title": "Yield" } } }
         ]
       } }
     ]

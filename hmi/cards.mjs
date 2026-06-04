@@ -25,16 +25,39 @@ function shell(el, title) {
 const titleOf = (el, fallback) => (el.config && el.config.title) || (el.binding && el.binding.var) || fallback;
 const val = (st, b) => (b && st.vars[b.var] ? st.vars[b.var].value : undefined);
 
+// Interpret a run_result code into a verdict bucket (see docs/design/run-result.md):
+// >0 ok-class, 0 NA, -1..-989999 ng-class, <=-990000 framework system-fail.
+function classifyResult(code) {
+  if (code == null)        return { kind: "none", label: "—",  color: "#bbb"  };
+  if (code <= -990000)     return { kind: "sys",  label: "SYS", color: "#c084fc" };
+  if (code > 0)            return { kind: "ok",   label: code > 1 ? `OK${code}` : "OK", color: "#3ad17a" };
+  if (code < 0)            return { kind: "ng",   label: code < -1 ? `NG${-code}` : "NG", color: "#ff5b5b" };
+  return                          { kind: "na",   label: "NA",  color: "#ffb454" };  // 0
+}
+// A card consumes the run_result stream when bound `{result:true}` or left unbound.
+const usesResult = (b) => !b || b.result === true || !b.var;
+
 // ---- verdict: big OK/NG tile ------------------------------------------------
 class VerdictCard extends HTMLElement {
   connectedCallback() { this.body = shell(this, titleOf(this, "Verdict"));
-    this.body.style.cssText = "display:flex;align-items:center;justify-content:center;font-weight:800;font-size:clamp(20px,7vw,72px)"; }
+    this.body.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center";
+    this.big = document.createElement("div"); this.big.style.cssText = "font-weight:800;font-size:clamp(20px,7vw,72px);line-height:1";
+    this.sub = document.createElement("div"); this.sub.style.cssText = "font-size:12px;color:#888;max-width:96%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+    this.body.append(this.big, this.sub); }
   feed(st) {
-    const v = val(st, this.binding);
+    const b = this.binding || {};
+    if (usesResult(b)) {                       // run_result mode (the per-run verdict)
+      const r = st.result, c = classifyResult(r ? r.code : null);
+      this.big.textContent = c.label; this.big.style.color = c.color;
+      this.sub.textContent = r && r.msg ? r.msg : "";
+      return;
+    }
+    const v = val(st, b);                       // legacy: bound to a bool/string var
     const ok = v === true || v === "OK" || v === "ok" || v === "PASS";
     const ng = v === false || v === "NG" || v === "ng" || v === "FAIL";
-    this.body.textContent = v === undefined ? "—" : (ok ? "OK" : ng ? "NG" : String(v));
-    this.body.style.color = ok ? "#3ad17a" : ng ? "#ff5b5b" : "#ccc";
+    this.big.textContent = v === undefined ? "—" : (ok ? "OK" : ng ? "NG" : String(v));
+    this.big.style.color = ok ? "#3ad17a" : ng ? "#ff5b5b" : "#ccc";
+    this.sub.textContent = "";
   }
 }
 
@@ -114,11 +137,19 @@ class YieldCard extends HTMLElement {
     this.sub = document.createElement("div"); this.sub.style.cssText = "font-size:12px;color:#888";
     this.body.append(this.big, this.sub); }
   feed(st) {
-    if (st.run_id !== this.last) { this.last = st.run_id; const v = val(st, this.binding);
+    const b = this.binding || {};
+    if (usesResult(b)) {                        // count from run_result (inspected runs)
+      const r = st.result;
+      if (r && r.run_id != null && r.run_id !== this.last) { this.last = r.run_id;
+        const c = classifyResult(r.code);
+        if (c.kind === "ok") this.ok++; else if (c.kind === "ng") this.ng++;
+        else if (c.kind === "na") this.na = (this.na || 0) + 1; }
+    } else if (st.run_id !== this.last) {        // legacy: bound to a bool/string var
+      this.last = st.run_id; const v = val(st, b);
       if (v !== undefined) { const ok = v === true || v === "OK" || v === "ok" || v === "PASS"; ok ? this.ok++ : this.ng++; } }
     const n = this.ok + this.ng, pct = n ? (100 * this.ok / n) : 0;
     this.big.textContent = `${pct.toFixed(1)}%`; this.big.style.color = pct >= (this.config?.warn ?? 95) ? "#3ad17a" : "#ffb454";
-    this.sub.textContent = `OK ${this.ok} / NG ${this.ng}`;
+    this.sub.textContent = `OK ${this.ok} / NG ${this.ng}` + (this.na ? ` · NA ${this.na}` : "");
   }
 }
 

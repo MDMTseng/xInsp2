@@ -120,10 +120,10 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 4. **Drop path** — `enqueue_to_lane_` / legacy overflow emits a `run_result` with
    `XI_SYS_DROPPED` (+ trigger_id/source/group, no run_id) at the drop site →
    one Result per trigger, no gaps.
-5. **HMI** — the `run_result` event ships on the same WS stream the HMI already
-   consumes; binding the verdict / yield cards to `code` (sign → colour;
-   `<= -990000` → system colour) is a small **follow-up** in `hmi/` (cards exist;
-   they just need to read the new event).
+5. **HMI** ✅ shipped — `app.mjs` decodes the `run_result` event into `state.result`;
+   the **verdict** card shows the code's bucket (OK / NG / NA / SYS colour) + the
+   message line, and the **yield** card counts OK/NG/NA from it. A card opts in with
+   `bind:{result:true}` (or no `var`); the demo dashboard + `hmi/demo` use it.
 6. **comms** — *no comms code in v1*; a script can already forward via
    `xi::comms.send(...)`. Gateway directly consuming `run_result` = v1.1.
 7. **Test + docs** — `examples/qa_run_result/` (ok/ng/unset → assert

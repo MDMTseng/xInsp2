@@ -5,6 +5,7 @@
 //
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_result.hpp>
 #include <cmath>
 #include <string>
 
@@ -16,6 +17,12 @@ void xi_inspect_entry(int frame) {
 
     const bool ok = (m > 0.4 && m < 0.6);
     VAR(verdict, std::string(ok ? "OK" : "NG"));
+
+    // The one per-run verdict the HMI verdict/yield cards consume. Two distinct
+    // ng sub-codes so the verdict card's message line shows *why* it failed.
+    if (ok)            xi::ok(1, "fg in band");
+    else if (m <= 0.4) xi::ng(1, "fg too low");
+    else               xi::ng(2, "fg too high");
 
     // Synthetic image: a dot orbiting on a dark field, coloured by the verdict.
     cv::Mat bgr(240, 320, CV_8UC3, cv::Scalar(24, 24, 24));
