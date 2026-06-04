@@ -175,40 +175,48 @@ static void reserve_fault_stack();
 // that don't have a trigger source still get periodic dispatch.
 static std::vector<std::thread> g_worker_threads;
 static std::thread              g_timer_thread;
-// Result ordering (parallelism.result_order). When g_result_ordered is set at
-// cmd:start (== "arrival" && N>1), each popped event gets a gapless emit
-// sequence (g_dispatch_seq, assigned under g_ev_mu so it follows arrival order)
-// and an EmitTurn gate makes workers emit vars/previews/run_finished in that
-// order. Compute still runs fully parallel; only emission is serialized. In
-// "completion" mode g_result_ordered is false and emit_seq is -1 (emit
-// immediately, as before).
+// Result ordering (parallelism.result_order / per-group result_order). When
+// ordered, each popped event gets a gapless emit sequence (assigned at dequeue
+// under the queue lock so it follows arrival order) and an EmitTurn gate makes
+// workers emit run_result/vars/run_finished in that order. Compute still runs
+// fully parallel; only emission is serialized. In "completion" mode emit_seq is
+// -1 (emit immediately, as before).
+//
+// An EmitGate is the cursor+lock+cv for one ordered stream. The legacy single
+// pool uses g_global_gate; each dispatch-group lane owns its own (so groups don't
+// serialize against each other — only within a group). Non-movable (holds a
+// mutex/cv), so always referenced by pointer.
+struct EmitGate {
+    std::mutex              mu;
+    std::condition_variable cv;
+    int64_t                 next = 0;   // guarded by mu
+};
 static std::atomic<bool>       g_result_ordered{false};
-static std::atomic<int64_t>    g_dispatch_seq{0};   // next emit seq (per cmd:start)
-static std::mutex              g_emit_order_mu;
-static std::condition_variable g_emit_order_cv;
-static int64_t                 g_emit_next = 0;      // guarded by g_emit_order_mu
+static std::atomic<int64_t>    g_dispatch_seq{0};   // legacy pool's next emit seq (per cmd:start)
+static EmitGate                g_global_gate;        // legacy single-pool ordered emission
 
 // RAII emit-order gate. For emit_seq >= 0 (ordered mode) the ctor blocks until
-// it's this sequence's turn; the dtor advances the cursor + wakes the next
-// worker — even on an exception or an error path, so a crashed inspect can't
+// it's this sequence's turn on `gate`; the dtor advances the cursor + wakes the
+// next worker — even on an exception or an error path, so a crashed inspect can't
 // stall the stream. emit_seq < 0 (completion mode / cmd:run) is a no-op.
 struct EmitTurn {
-    int64_t seq_;
-    bool    on_;
-    explicit EmitTurn(int64_t seq) : seq_(seq), on_(seq >= 0) {
+    EmitGate* g_;
+    int64_t   seq_;
+    bool      on_;
+    EmitTurn(EmitGate* gate, int64_t seq) : g_(gate), seq_(seq), on_(gate && seq >= 0) {
         if (!on_) return;
-        std::unique_lock<std::mutex> lk(g_emit_order_mu);
-        g_emit_order_cv.wait(lk, [this] {
-            return g_emit_next == seq_ || !g_continuous.load();
+        std::unique_lock<std::mutex> lk(g_->mu);
+        g_->cv.wait(lk, [this] {
+            return g_->next == seq_ || !g_continuous.load();
         });
     }
     ~EmitTurn() {
         if (!on_) return;
         {
-            std::lock_guard<std::mutex> lk(g_emit_order_mu);
-            if (g_emit_next == seq_) ++g_emit_next;   // skip if we ran early on stop
+            std::lock_guard<std::mutex> lk(g_->mu);
+            if (g_->next == seq_) ++g_->next;   // skip if we ran early on stop
         }
-        g_emit_order_cv.notify_all();
+        g_->cv.notify_all();
     }
     EmitTurn(const EmitTurn&) = delete;
     EmitTurn& operator=(const EmitTurn&) = delete;
@@ -674,7 +682,8 @@ static void run_one_inspection(xi::ws::Server& srv,
                                int frame_hint = 1,
                                int64_t run_id = 0,
                                const std::string& frame_path = "",
-                               int64_t emit_seq = -1);
+                               int64_t emit_seq = -1,
+                               EmitGate* gate = &g_global_gate);
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
@@ -1344,7 +1353,7 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
 // divide-by-zero, stack overflow) is caught without killing the backend.
 static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
                                int64_t run_id, const std::string& frame_path,
-                               int64_t emit_seq) {
+                               int64_t emit_seq, EmitGate* gate) {
     if (run_id == 0) run_id = ++g_run_id;
 
     xi::script::LoadedScript s;
@@ -1467,7 +1476,7 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         // Ordered mode: block until it's this frame's turn to emit. The dtor
         // advances the cursor + wakes the next worker even if we throw here, so
         // the stream can't deadlock. No-op for emit_seq < 0 (completion mode).
-        EmitTurn turn(emit_seq);
+        EmitTurn turn(gate, emit_seq);
         if (inspect_ok) {
             emit_vars_and_previews(srv, s, run_id, dt_ms);
             // One Result per run: whatever the script set (default 0 = NA if it
@@ -1586,7 +1595,7 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
     bool ordered = (g_plugin_mgr.project().result_order == "arrival") && n_threads > 1;
     g_result_ordered.store(ordered);
     g_dispatch_seq.store(0);
-    { std::lock_guard<std::mutex> lk(g_emit_order_mu); g_emit_next = 0; }
+    { std::lock_guard<std::mutex> lk(g_global_gate.mu); g_global_gate.next = 0; }
     std::fprintf(stderr,
         "[xinsp2] continuous mode: %dms timer + %d dispatcher thread(s) + trigger bus%s\n",
         interval_ms, n_threads, ordered ? " (arrival-ordered results)" : "");
@@ -1681,6 +1690,13 @@ struct GroupLane {
     std::atomic<uint64_t>          running{0};
     std::atomic<uint64_t>          dropped{0};
     std::atomic<uint64_t>          high_watermark{0};
+    // Per-group result ordering (result_order: "arrival"). `ordered` is set at
+    // spawn (arrival && max_parallel>1). Each dequeue claims a gapless seq from
+    // seq_next under mu (so it follows arrival order); `gate` replays emission in
+    // that order — independent of other groups' gates.
+    bool                           ordered{false};
+    std::atomic<int64_t>           seq_next{0};
+    EmitGate                       gate;
 };
 // Lanes are shared_ptr + guarded by g_lanes_mu so a producer (an emit thread /
 // the timer) that grabbed a lane can't have it destroyed under it by a concurrent
@@ -1768,18 +1784,29 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
     for (auto& lp : g_lanes) {
         std::shared_ptr<GroupLane> lane = lp;   // workers hold a ref → lane outlives them
         int n = lane->cfg.max_parallel < 1 ? 1 : lane->cfg.max_parallel;
+        // Arrival-ordered emission only when asked AND there's real concurrency
+        // (n==1 is already in order). Reset the per-lane cursors per (re)start.
+        lane->ordered = (lane->cfg.result_order == "arrival") && n > 1;
+        lane->seq_next.store(0);
+        { std::lock_guard<std::mutex> lk(lane->gate.mu); lane->gate.next = 0; }
         for (int i = 0; i < n; ++i) {
             lane->workers.emplace_back([srv_ptr, lane] {
                 reserve_fault_stack();
                 _set_se_translator(seh_translator);
                 set_os_thread_priority_(lane->cfg.thread_priority);
                 while (g_continuous.load()) {
-                    xi::TriggerEvent ev; bool have = false; int64_t rid = 0;
+                    xi::TriggerEvent ev; bool have = false; int64_t rid = 0; int64_t eseq = -1;
                     {
                         std::unique_lock<std::mutex> lk(lane->mu);
                         lane->cv.wait(lk, [lane] { return !lane->q.empty() || !g_continuous.load(); });
                         if (!g_continuous.load()) break;
-                        if (!lane->q.empty()) { ev = std::move(lane->q.front()); lane->q.pop_front(); have = true; rid = ++g_run_id; }
+                        if (!lane->q.empty()) {
+                            ev = std::move(lane->q.front()); lane->q.pop_front(); have = true; rid = ++g_run_id;
+                            // Claim the emit seq under the queue lock → follows dequeue
+                            // (== FIFO arrival) order. Only dequeued events get a seq, so
+                            // dropped frames leave no gap in the gate's sequence.
+                            if (lane->ordered) eseq = lane->seq_next.fetch_add(1);
+                        }
                     }
                     lane->cv.notify_one();   // wake a producer parked on overflow:block
                     if (!have) continue;
@@ -1788,11 +1815,11 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                     int frame_seq = (int)rid;
                     if (!ev.images.empty() || ev.id.hi || ev.id.lo) {
                         g_current_trigger = &ev;
-                        run_one_inspection(*srv_ptr, frame_seq, rid, "", /*emit_seq=*/-1);
+                        run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq, &lane->gate);
                         g_current_trigger = nullptr;
                         for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
                     } else {
-                        run_one_inspection(*srv_ptr, frame_seq, rid, "", -1);
+                        run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq, &lane->gate);
                     }
                     lane->running.fetch_sub(1);
                 }
@@ -1833,13 +1860,17 @@ static void stop_group_pool_() {
 static void stop_dispatch_pool_() {
     g_continuous = false;
     g_ev_cv.notify_all();
-    g_emit_order_cv.notify_all();   // wake any worker parked in an EmitTurn
+    g_global_gate.cv.notify_all();   // wake any legacy-pool worker parked in an EmitTurn
     // Wake grouped workers + any producer (incl. the timer) parked in a lane's
-    // overflow:block BEFORE joining the timer, or the join deadlocks.
+    // overflow:block BEFORE joining the timer, or the join deadlocks. Also wake
+    // anyone parked in a per-lane EmitTurn (ordered mode).
     {
         std::vector<std::shared_ptr<GroupLane>> lanes;
         { std::lock_guard<std::mutex> lk(g_lanes_mu); lanes = g_lanes; }
-        for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
+        for (auto& lp : lanes) {
+            { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
+            { std::lock_guard<std::mutex> lk(lp->gate.mu); lp->gate.cv.notify_all(); }
+        }
     }
     if (g_timer_thread.joinable()) g_timer_thread.join();
     for (auto& t : g_worker_threads) {

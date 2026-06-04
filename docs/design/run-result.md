@@ -1,9 +1,9 @@
 # Per-run result — status code + message (design)
 
-> **Status: Phase 1 shipped; Phase 2 designed.** 2026-06-05.
+> **Status: Phase 1 + Phase 2 shipped.** 2026-06-05.
 > Phase 1 (`RESULT` API + `run_result` event + `XI_SYS_DROPPED` at the drop site)
-> is built + regression-tested (`examples/qa_run_result/`). Phase 2 (per-group
-> `result_order`) is the plan below.
+> and Phase 2 (per-group `result_order` via a per-lane `EmitGate`) are both built +
+> regression-tested (`examples/qa_run_result/` + `qa_dispatch_groups` Test E).
 
 ## Goal
 
@@ -130,16 +130,21 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
    `run_result.code`; a `queue_depth:1` flooded project → assert `XI_SYS_DROPPED`);
    update `writing-a-script.md` (`VAR` vs `RESULT`).
 
-### Phase 2 — per-group result_order (touches the parallel emit path; separate commit)
-- `DispatchGroup.result_order` (default `"completion"`; `"arrival"` = ordered).
-- **Generalise `EmitTurn`** so the gate targets either the global cursor (legacy
-  pool) or a **per-`GroupLane`** one (`emit_seq_next` / `emit_cursor` / `emit_mu` /
-  `emit_cv`). Lane assigns `emit_seq` at dequeue under `lane->mu` (arrival order);
-  the worker wraps `run_result`+`run_finished` in a lane-scoped `EmitTurn`. Compute
-  stays fully parallel; only emission serialises, per group. Stop/drop advances the
-  cursor (reuse the existing skip-on-stop logic) so an ordered stream can't wedge.
-- Test: `qa_dispatch_groups` Test E — an `arrival` group, deliberately out-of-order
-  worker timing → assert `run_result` `run_id` is monotonic.
+### Phase 2 — per-group result_order ✅ shipped
+- `DispatchGroup.result_order` (default `"completion"`; `"arrival"` = ordered),
+  parsed + validated (unknown value → warn + completion).
+- `EmitTurn` was generalised to an `EmitGate{mu,cv,next}` it points at — the legacy
+  pool uses one global gate (`g_global_gate`); each `GroupLane` owns its own
+  (`GroupLane::gate` + `seq_next`). The lane claims `emit_seq` at dequeue under
+  `lane->mu` (arrival order) and wraps `run_result`+`run_finished` in a lane-scoped
+  `EmitTurn`. Compute stays fully parallel; only emission serialises, per group.
+  Dropped frames never get a seq (no gap); stop wakes every gate so it can't wedge.
+- **Caveat:** dropped-frame `run_result`s (`XI_SYS_DROPPED`) are emitted at the drop
+  site, *not* through the gate — so in arrival mode they may interleave out of order
+  with the inspected stream. The ordering guarantee covers *inspected* runs' results.
+- Regression: `qa_dispatch_groups` Test E — arrival group (max_parallel 3 +
+  anti-correlated sleep) → 0 `run_id` inversions, while a completion control shows
+  many (the workload genuinely scrambles).
 
 ### Later
 - `XI_SYS_CRASHED` / `XI_SYS_TIMEOUT` synthesis; `na_reason` text; Pareto card.

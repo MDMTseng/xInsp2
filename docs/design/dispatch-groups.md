@@ -147,9 +147,17 @@ source is the natural owner of "how urgent is my stream".
 
 ## Result ordering with groups
 
-Today `result_order` is **global**: `arrival` mode gates emission by one dispatch
-sequence so the `vars` / `run_finished` stream is in frame-arrival order. With
-groups that global order **breaks the whole point**:
+> **Per-group `result_order` shipped.** Each lane owns its own emit-sequence gate
+> (`EmitGate`); `result_order: "arrival"` on a group serialises *that group's*
+> emission by frame-arrival order without touching any other group. The legacy
+> single pool keeps its one global gate, unchanged. Regression: `qa_dispatch_groups`
+> Test E (arrival → 0 run_id inversions; a completion control proves the workload
+> scrambles). What's still pending: the `group` wire tag on `vars`/`run_finished`
+> (only `run_result` carries `group` today) — see item 2 below.
+
+The legacy `result_order` is **global**: `arrival` mode gates emission by one
+dispatch sequence so the `vars` / `run_finished` stream is in frame-arrival order.
+With groups that single global order **breaks the whole point**:
 
 - The critical group's output would be gated waiting for a *lagging best-effort
   frame's* turn — i.e. the low group could stall high's output ordering.
@@ -158,11 +166,13 @@ groups that global order **breaks the whole point**:
 
 So ordering becomes **per-group**, not global:
 
-1. **`result_order` is per-group** — each group has its own `arrival`/`completion`
-   setting and its **own emit-sequence gate**. A slow `low` group can never delay
+1. **`result_order` is per-group** ✅ shipped — each group has its own
+   `arrival`/`completion` setting and its **own emit-sequence gate** (`GroupLane::gate`,
+   seq claimed at dequeue under the lane lock). A slow `low` group can never delay
    `high`'s in-order emission.
 2. **Every emitted message carries its `group`** (+ a per-group sequence) —
-   `vars`, `run_started`, `run_finished` gain a `group` field. A consumer treats
+   `run_result` already carries `group`; `vars` / `run_started` / `run_finished`
+   gaining a `group` field is the remaining piece. A consumer treats
    **each group as its own ordered substream**; cross-group interleave on the wire
    is *by design* (different priority/cadence — there is no global order to keep).
    `run_id` may stay globally unique, but "in order" is a per-group guarantee.
@@ -212,11 +222,14 @@ intentional cross-group interleave the consumer demultiplexes by `group`.
   blindly the first lane); parse-time warnings for duplicate group names (skipped),
   unknown `thread_priority`/`overflow`, and a `default_group` naming no real group.
   Covered by `qa_dispatch_groups` tests B (clamp) + D (warnings).
-- **v1.1 — deferred follow-ups.** Per-group `result_order` (arrival) + the `group`
-  wire tag on `vars`/`run_*` (today grouped mode emits completion order, untagged);
-  `min_interval_ms` rate limit; the full load-separation regression (a self-emitting
-  source per group proving a saturated `low` never delays `high` — needs a ticker
-  source plugin).
+- **v1.1 — per-group `result_order`** ✅ shipped. Each `GroupLane` owns an
+  `EmitGate`; `result_order: "arrival"` (+ `max_parallel>1`) serialises that group's
+  emission by frame-arrival order, independent of other groups. The legacy single
+  pool keeps its one global gate. Regression: `qa_dispatch_groups` Test E.
+- **Deferred follow-ups.** The `group` wire tag on `vars`/`run_started`/`run_finished`
+  (only `run_result` carries `group` today); `min_interval_ms` rate limit; the full
+  load-separation regression (a self-emitting source per group proving a saturated
+  `low` never delays `high` — needs a ticker source plugin).
 - **Later (only if ever needed)** — a shared-pool / oversubscribed mode with a real
   priority queue. Out of scope: group-owned threads already meet the goal and
   threads are cheap, so there's no shared pool to schedule.

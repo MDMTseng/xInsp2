@@ -364,6 +364,7 @@ struct ProjectInfo {
         std::string thread_priority = "normal";   // "high" | "normal" | "low" (OS)
         int         queue_depth     = 100;
         std::string overflow        = "drop_oldest";
+        std::string result_order    = "completion"; // "completion" | "arrival" (per-group)
     };
     std::vector<DispatchGroup> groups;            // empty = legacy single pool
     std::string                default_group;     // group for untagged triggers
@@ -1437,6 +1438,13 @@ public:
                             if (grp.overflow != "drop_oldest" && grp.overflow != "drop_newest" && grp.overflow != "block") {
                                 warn(grp.name, "unknown overflow '" + grp.overflow + "' — using drop_oldest");
                                 grp.overflow = "drop_oldest";
+                            }
+                        }
+                        if (cJSON* k = cJSON_GetObjectItem(g, "result_order"); k && cJSON_IsString(k) && k->valuestring) {
+                            grp.result_order = k->valuestring;
+                            if (grp.result_order != "completion" && grp.result_order != "arrival") {
+                                warn(grp.name, "unknown result_order '" + grp.result_order + "' — using completion");
+                                grp.result_order = "completion";
                             }
                         }
                         project_.groups.push_back(std::move(grp));

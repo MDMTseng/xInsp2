@@ -175,6 +175,57 @@ def main() -> int:
         try: proc4.wait(5)
         except Exception: proc4.kill()
 
+    # --- Test E: per-group result_order:"arrival" serialises emission by arrival ---
+    # A group with max_parallel 3 + an anti-correlated sleep (even run_ids slow,
+    # odd fast) makes completions scramble. In "arrival" mode the gate must still
+    # emit run_result in run_id order (0 inversions); a "completion" control proves
+    # the workload really does scramble (so arrival's 0 isn't vacuous).
+    SLOW_VAR = ("#include <xi/xi.hpp>\n#include <thread>\n#include <chrono>\n"
+                "XI_SCRIPT_EXPORT void xi_inspect_entry(int frame){ VAR(frame_n,frame);"
+                " std::this_thread::sleep_for(std::chrono::milliseconds(frame%2==0?60:8)); }\n")
+
+    def order_run(sub, result_order, port):
+        d = make_proj(sub, {"default_group": "main", "groups": [
+            {"name": "main", "max_parallel": 3, "queue_depth": 500, "result_order": result_order}]})
+        (d / "inspect.cpp").write_text(SLOW_VAR, encoding="utf-8")
+        p = spawn(port, sub + "_iso")
+        ids = []
+        try:
+            cc = connect(port)
+            if cc:
+                cc.call("open_project", {"path": str(d)})
+                cc.compile_and_load(str(d / "inspect.cpp"), timeout=300)
+                cc.call("start", {"fps": 50})
+                end = time.time() + 3.0
+                while time.time() < end:
+                    try:
+                        ev = cc._inbox_events.get(timeout=max(0.05, end - time.time()))
+                    except Exception:
+                        break
+                    if ev.get("name") == "run_result":
+                        rid = ev.get("data", {}).get("run_id")
+                        if rid is not None:
+                            ids.append(rid)
+                cc.call("stop"); cc.close()
+        finally:
+            p.terminate()
+            try: p.wait(5)
+            except Exception: p.kill()
+        inv = sum(1 for i in range(len(ids) - 1) if ids[i] > ids[i + 1])
+        return len(ids), inv
+
+    n_arr, inv_arr = order_run("xi_dg_orderE", "arrival", PORT + 4)
+    n_cmp, inv_cmp = order_run("xi_dg_orderC", "completion", PORT + 5)
+    print(f"Test E arrival: {n_arr} run_results, {inv_arr} inversions; "
+          f"completion control: {n_cmp} run_results, {inv_cmp} inversions")
+    if n_arr < 20:
+        fails.append(f"E: too few run_results ({n_arr}) to judge ordering")
+    if inv_arr != 0:
+        fails.append(f"E: arrival mode had {inv_arr} run_id inversions (expected 0)")
+    if inv_cmp == 0:
+        print("  (note: completion control showed no inversions — workload didn't "
+              "scramble this run; arrival assertion is therefore weaker)")
+
     print("VERDICT:", "PASS" if not fails else "FAIL: " + "; ".join(fails))
     return 0 if not fails else 1
 
