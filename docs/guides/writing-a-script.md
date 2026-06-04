@@ -505,6 +505,14 @@ Probe live state with `cmd:dispatch_stats` (Python: `c.call("dispatch_stats")`):
 > so `after - before` will go negative across run boundaries. Snapshot
 > AFTER stop and treat the values as the per-run total.
 
+**Priority lanes (dispatch groups).** For "critical work must stay fast,
+best-effort may lag", give `parallelism.groups` instead of a single pool: each
+group owns its own `max_parallel` worker threads at its OS `thread_priority`, and
+a source's triggers route to the group named in its `instance.json` `"group"`. A
+saturated low-priority group can't steal the critical group's threads or CPU.
+`dispatch_stats` then includes a per-group breakdown. See
+[`../design/dispatch-groups.md`](../design/dispatch-groups.md).
+
 If `queue_depth_high_watermark` stays pinned at the cap and
 `dropped_oldest` keeps growing, your source is producing faster than
 your pipeline can keep up — bump `dispatch_threads`, optimise the

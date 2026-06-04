@@ -1578,16 +1578,136 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
     });
 }
 
+// ---- Dispatch groups: per-group worker lanes (gated on parallelism.groups) ----
+// Each group owns its own queue + max_parallel worker threads at its OS
+// thread_priority, draining only its own queue. Only active when the project
+// declares groups; otherwise the legacy single pool above is used UNCHANGED.
+// Result ordering is per-lane completion order in v1 (per-group arrival + the
+// `group` wire tag are follow-ups). See docs/design/dispatch-groups.md.
+struct GroupLane {
+    xi::ProjectInfo::DispatchGroup cfg;
+    std::deque<xi::TriggerEvent>   q;
+    std::mutex                     mu;
+    std::condition_variable        cv;
+    std::vector<std::thread>       workers;
+    std::atomic<uint64_t>          running{0};
+    std::atomic<uint64_t>          dropped{0};
+    std::atomic<uint64_t>          high_watermark{0};
+};
+static std::vector<std::unique_ptr<GroupLane>> g_lanes;
+static bool grouping_enabled_() { return !g_plugin_mgr.project().groups.empty(); }
+
+static void set_os_thread_priority_(const std::string& p) {
+#ifdef _WIN32
+    int pr = THREAD_PRIORITY_NORMAL;
+    if      (p == "high") pr = THREAD_PRIORITY_ABOVE_NORMAL;
+    else if (p == "low")  pr = THREAD_PRIORITY_BELOW_NORMAL;
+    SetThreadPriority(GetCurrentThread(), pr);
+#else
+    (void)p;   // TODO(linux): pthread_setschedprio / nice
+#endif
+}
+
+static GroupLane* lane_for_(const std::string& group) {
+    for (auto& l : g_lanes) if (l->cfg.name == group) return l.get();
+    return g_lanes.empty() ? nullptr : g_lanes.front().get();   // unknown group → first lane
+}
+
+// Per-lane enqueue with that lane's queue_depth/overflow (mirrors enqueue_event_).
+static bool enqueue_to_lane_(xi::TriggerEvent ev) {
+    GroupLane* lane = lane_for_(ev.group);
+    if (!lane) { for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); return false; }
+    int depth = lane->cfg.queue_depth < 1 ? 1 : lane->cfg.queue_depth;
+    const std::string& ov = lane->cfg.overflow;
+    std::unique_lock<std::mutex> lk(lane->mu);
+    if ((int)lane->q.size() < depth) {
+        lane->q.push_back(std::move(ev));
+        uint64_t ns = lane->q.size(), prev = lane->high_watermark.load(std::memory_order_relaxed);
+        while (ns > prev && !lane->high_watermark.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
+        lane->cv.notify_one(); return true;
+    }
+    if (ov == "drop_newest") { ++lane->dropped; for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); return false; }
+    if (ov == "block") {
+        lane->cv.wait(lk, [&] { return (int)lane->q.size() < depth || !g_continuous.load(); });
+        if (!g_continuous.load()) { for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); return false; }
+        lane->q.push_back(std::move(ev)); lane->cv.notify_one(); return true;
+    }
+    auto& front = lane->q.front();   // drop_oldest
+    for (auto& [s, h] : front.images) xi::ImagePool::instance().release(h);
+    lane->q.pop_front(); lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped; return true;
+}
+
+static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
+    g_lanes.clear();
+    for (auto& gc : g_plugin_mgr.project().groups) {
+        auto lane = std::make_unique<GroupLane>(); lane->cfg = gc; g_lanes.push_back(std::move(lane));
+    }
+    std::fprintf(stderr, "[xinsp2] continuous mode (grouped): %zu group(s), %dms timer\n",
+                 g_lanes.size(), interval_ms);
+    for (auto& lp : g_lanes) {
+        GroupLane* lane = lp.get();
+        int n = lane->cfg.max_parallel < 1 ? 1 : lane->cfg.max_parallel;
+        for (int i = 0; i < n; ++i) {
+            lane->workers.emplace_back([srv_ptr, lane] {
+                reserve_fault_stack();
+                _set_se_translator(seh_translator);
+                set_os_thread_priority_(lane->cfg.thread_priority);
+                while (g_continuous.load()) {
+                    xi::TriggerEvent ev; bool have = false; int64_t rid = 0;
+                    {
+                        std::unique_lock<std::mutex> lk(lane->mu);
+                        lane->cv.wait(lk, [lane] { return !lane->q.empty() || !g_continuous.load(); });
+                        if (!g_continuous.load()) break;
+                        if (!lane->q.empty()) { ev = std::move(lane->q.front()); lane->q.pop_front(); have = true; rid = ++g_run_id; }
+                    }
+                    lane->cv.notify_one();   // wake a producer parked on overflow:block
+                    if (!have) continue;
+                    ev.dequeued_at_us = xi::now_us();
+                    lane->running.fetch_add(1);
+                    int frame_seq = (int)rid;
+                    if (!ev.images.empty() || ev.id.hi || ev.id.lo) {
+                        g_current_trigger = &ev;
+                        run_one_inspection(*srv_ptr, frame_seq, rid, "", /*emit_seq=*/-1);
+                        g_current_trigger = nullptr;
+                        for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
+                    } else {
+                        run_one_inspection(*srv_ptr, frame_seq, rid, "", -1);
+                    }
+                    lane->running.fetch_sub(1);
+                }
+            });
+        }
+    }
+    // Timer ticks feed the default group's lane.
+    g_timer_thread = std::thread([interval_ms] {
+        const std::string dg = g_plugin_mgr.project().default_group;
+        while (g_continuous.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+            if (!g_continuous.load()) break;
+            xi::TriggerEvent ev; ev.group = dg;
+            (void)enqueue_to_lane_(std::move(ev));
+        }
+    });
+}
+
+static void stop_group_pool_() {
+    for (auto& lp : g_lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
+    for (auto& lp : g_lanes) for (auto& t : lp->workers) if (t.joinable()) t.join();
+    g_lanes.clear();
+}
+
 // Stop the pool + timer. Safe to call if nothing was spawned.
 static void stop_dispatch_pool_() {
     g_continuous = false;
     g_ev_cv.notify_all();
     g_emit_order_cv.notify_all();   // wake any worker parked in an EmitTurn
+    for (auto& lp : g_lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }  // wake grouped workers
     if (g_timer_thread.joinable()) g_timer_thread.join();
     for (auto& t : g_worker_threads) {
         if (t.joinable()) t.join();
     }
     g_worker_threads.clear();
+    stop_group_pool_();
 }
 
 // Trigger-driven dispatch WITHOUT continuous mode: a source emitting a trigger
@@ -1615,8 +1735,25 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
 // timer on top).
 static void install_trigger_sink_(xi::ws::Server* srv) {
     xi::TriggerBus::instance().set_sink([srv](xi::TriggerEvent ev) {
-        if (g_continuous.load()) (void)enqueue_event_(std::move(ev));
-        else                     dispatch_one_shot_(srv, std::move(ev));
+        if (g_continuous.load()) {
+            if (grouping_enabled_()) {
+                // Route by the emitting source instance's "group" (default_group
+                // if the source is untagged or unknown / synthetic timer tick).
+                std::string g;
+                if (!ev.leader_source.empty()) {
+                    auto& insts = g_plugin_mgr.project().instances;
+                    auto it = insts.find(ev.leader_source);
+                    if (it != insts.end()) g = it->second.group;
+                }
+                if (g.empty()) g = g_plugin_mgr.project().default_group;
+                ev.group = g;
+                (void)enqueue_to_lane_(std::move(ev));
+            } else {
+                (void)enqueue_event_(std::move(ev));
+            }
+        } else {
+            dispatch_one_shot_(srv, std::move(ev));
+        }
     });
 }
 
@@ -2216,7 +2353,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             g_continuous = true;
             int interval_ms = 1000 / std::max(fps, 1);
             int n_threads = g_plugin_mgr.project().dispatch_threads;
-            spawn_dispatch_pool_(&srv, interval_ms, n_threads);
+            if (grouping_enabled_()) spawn_group_pool_(&srv, interval_ms);
+            else                     spawn_dispatch_pool_(&srv, interval_ms, n_threads);
             std::fprintf(stderr,
                 "[xinsp2] continuous mode resumed after reload (%d threads)\n",
                 n_threads);
@@ -2335,7 +2473,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // the worker pool (single-shot otherwise). Timer thread emits synthetic
         // events on schedule for scripts without trigger sources.
         install_trigger_sink_(&srv);
-        spawn_dispatch_pool_(&srv, interval_ms, n_threads);
+        if (grouping_enabled_()) spawn_group_pool_(&srv, interval_ms);
+        else                     spawn_dispatch_pool_(&srv, interval_ms, n_threads);
 
         // The watchdog now tracks a per-inspect slot, so it protects every
         // worker under N>1 (no longer bypassed). On a hard trip the backend
@@ -3264,6 +3403,24 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         data += ",\"dispatch_threads\":" + std::to_string(g_plugin_mgr.project().dispatch_threads);
         data += ",\"dropped_oldest\":" + std::to_string(g_dropped_oldest.load());
         data += ",\"dropped_newest\":" + std::to_string(g_dropped_newest.load());
+        // Per-group lanes (only when dispatch groups are active).
+        if (!g_lanes.empty()) {
+            data += ",\"groups\":[";
+            for (size_t i = 0; i < g_lanes.size(); ++i) {
+                auto& l = *g_lanes[i];
+                size_t lq; { std::lock_guard<std::mutex> lk(l.mu); lq = l.q.size(); }
+                if (i) data += ",";
+                data += "{\"name\":"; xp::json_escape_into(data, l.cfg.name);
+                data += ",\"max_parallel\":" + std::to_string(l.cfg.max_parallel);
+                data += ",\"thread_priority\":\"" + l.cfg.thread_priority + "\"";
+                data += ",\"queue_now\":" + std::to_string(lq);
+                data += ",\"running\":" + std::to_string(l.running.load());
+                data += ",\"high_watermark\":" + std::to_string(l.high_watermark.load());
+                data += ",\"dropped\":" + std::to_string(l.dropped.load());
+                data += "}";
+            }
+            data += "]";
+        }
         data += "}";
         send_rsp_ok(srv, id, data);
     } else if (name == "open_project_warnings") {

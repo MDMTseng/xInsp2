@@ -1,0 +1,11 @@
+{
+  "name": "qa_dispatch_groups",
+  "script": "inspect.cpp",
+  "parallelism": {
+    "default_group": "high",
+    "groups": [
+      { "name": "high", "max_parallel": 2, "thread_priority": "normal", "queue_depth": 8,  "overflow": "drop_oldest" },
+      { "name": "low",  "max_parallel": 1, "thread_priority": "low",    "queue_depth": 50, "overflow": "drop_oldest" }
+    ]
+  }
+}

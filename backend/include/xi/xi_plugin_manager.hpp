@@ -297,6 +297,7 @@ struct InstanceInfo {
     std::string          plugin_name;
     int                  max_concurrency = 0;  // instance.json cap; 0 = unlimited (reentrant)
     std::string          folder_path;  // project/instances/<name>/
+    std::string          group;        // instance.json "group" → dispatch group for this source's triggers ("" = default)
     std::shared_ptr<InstanceBase> instance;
 };
 
@@ -350,6 +351,27 @@ struct ProjectInfo {
     //                            a little latency; compute still runs parallel.
     // Only meaningful when dispatch_threads > 1; ignored at N==1 (already ordered).
     std::string   result_order     = "completion";
+
+    // ---- Dispatch groups (priority + concurrency lanes) --------------------
+    // Optional. When `parallelism.groups` is present, each group owns its own
+    // worker threads (`max_parallel`) at its OS `thread_priority` + its own queue;
+    // a trigger is routed by the emitting source instance's "group". When ABSENT,
+    // the legacy single pool above (dispatch_threads/queue_depth/overflow) is used
+    // unchanged. See docs/design/dispatch-groups.md.
+    struct DispatchGroup {
+        std::string name;
+        int         max_parallel    = 1;          // worker threads this group owns
+        std::string thread_priority = "normal";   // "high" | "normal" | "low" (OS)
+        int         queue_depth     = 100;
+        std::string overflow        = "drop_oldest";
+    };
+    std::vector<DispatchGroup> groups;            // empty = legacy single pool
+    std::string                default_group;     // group for untagged triggers
+
+    const DispatchGroup* find_group(const std::string& n) const {
+        for (auto& g : groups) if (g.name == n) return &g;
+        return nullptr;
+    }
 };
 
 // Static compile environment for project-level plugins. Populated once at
@@ -1309,6 +1331,8 @@ public:
         project_.queue_depth       = 100;
         project_.overflow          = "drop_oldest";
         project_.result_order      = "completion";
+        project_.groups.clear();
+        project_.default_group.clear();
         // Was the top-level project.json itself well-formed? A malformed file
         // (truncated / garbage) used to load "successfully" with all defaults and
         // no signal to the user — surface it as an open warning below.
@@ -1381,6 +1405,25 @@ public:
                             s.c_str());
                     }
                 }
+                // parallelism.groups + default_group (optional; empty = legacy pool)
+                if (cJSON* arr = cJSON_GetObjectItem(par, "groups"); arr && cJSON_IsArray(arr)) {
+                    cJSON* g = nullptr;
+                    cJSON_ArrayForEach(g, arr) {
+                        if (!cJSON_IsObject(g)) continue;
+                        ProjectInfo::DispatchGroup grp;
+                        if (cJSON* k = cJSON_GetObjectItem(g, "name"); k && cJSON_IsString(k) && k->valuestring) grp.name = k->valuestring;
+                        if (grp.name.empty()) continue;
+                        if (cJSON* k = cJSON_GetObjectItem(g, "max_parallel"); k && cJSON_IsNumber(k)) grp.max_parallel = std::max(1, (int)k->valuedouble);
+                        if (cJSON* k = cJSON_GetObjectItem(g, "thread_priority"); k && cJSON_IsString(k) && k->valuestring) grp.thread_priority = k->valuestring;
+                        if (cJSON* k = cJSON_GetObjectItem(g, "queue_depth"); k && cJSON_IsNumber(k)) grp.queue_depth = std::max(1, (int)k->valuedouble);
+                        if (cJSON* k = cJSON_GetObjectItem(g, "overflow"); k && cJSON_IsString(k) && k->valuestring) grp.overflow = k->valuestring;
+                        project_.groups.push_back(std::move(grp));
+                    }
+                    if (cJSON* k = cJSON_GetObjectItem(par, "default_group"); k && cJSON_IsString(k) && k->valuestring)
+                        project_.default_group = k->valuestring;
+                    if (project_.default_group.empty() && !project_.groups.empty())
+                        project_.default_group = project_.groups.front().name;
+                }
             }
             cJSON_Delete(root);
         } else {
@@ -1443,6 +1486,7 @@ public:
                 ii.name = inst_name;
                 ii.plugin_name = *plugin;
                 ii.folder_path = entry.path().string();
+                if (auto g = extract_string(ic, "group")) ii.group = *g;   // dispatch group for this source's triggers
                 // Optional per-instance concurrency cap (reentrant plugins only;
                 // 0/absent = unlimited). cJSON for the numeric field.
                 if (cJSON* iroot = cJSON_Parse(ic.c_str())) {

@@ -1,7 +1,8 @@
 # Dispatch groups — priority + concurrency for trigger work (design)
 
-> **Status: design, not scheduled.** Captures the agreed model so it can be built
-> in increments. Assessment date 2026-06-04.
+> **Status: v1 implemented (gated lane dispatcher).** The core model below is
+> built and gated on `parallelism.groups`; legacy (no groups) is unchanged. See
+> the Increment plan for what shipped vs what's deferred. Assessment 2026-06-04.
 
 ## The problem
 
@@ -196,14 +197,20 @@ intentional cross-group interleave the consumer demultiplexes by `group`.
 
 ## Increment plan
 
-- **v1 (the whole feature)** — `TriggerEvent.group`, one queue per group, each group
-  spawns its own `max_parallel` workers at its `thread_priority`, config parsing +
-  the default 2-group set + legacy single-group fallback, `instance.json` `"group"`,
-  `min_interval_ms` rate limit, `dispatch_stats` per group, regression test
-  (`examples/qa_dispatch_groups/`: a saturated `low` group never delays `high`).
+- **v1 — shipped.** `TriggerEvent.group`; one queue + own `max_parallel` workers
+  per group at its `thread_priority` (Win32 `SetThreadPriority`, `TODO(linux)`);
+  `parallelism.groups` + `default_group` parsing with legacy single-group fallback;
+  `instance.json` `"group"` routing (by the emitting source's `leader_source`);
+  per-group `dispatch_stats`; gated so no-groups projects are byte-identical to
+  before. Smoke + gating test: `examples/qa_dispatch_groups/`.
+- **v1.1 — deferred follow-ups.** Per-group `result_order` (arrival) + the `group`
+  wire tag on `vars`/`run_*` (today grouped mode emits completion order, untagged);
+  `min_interval_ms` rate limit; the full load-separation regression (a self-emitting
+  source per group proving a saturated `low` never delays `high` — needs a ticker
+  source plugin).
 - **Later (only if ever needed)** — a shared-pool / oversubscribed mode with a real
-  priority queue. Explicitly out of scope: group-owned threads already meet the goal
-  and threads are cheap, so there's no shared pool to schedule.
+  priority queue. Out of scope: group-owned threads already meet the goal and
+  threads are cheap, so there's no shared pool to schedule.
 
 ## Tests
 

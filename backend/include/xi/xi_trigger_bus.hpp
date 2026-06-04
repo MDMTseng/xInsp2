@@ -57,6 +57,10 @@ struct TriggerEvent {
     std::unordered_map<std::string, xi_image_handle> images;
     // Best-effort metadata: which source first published this tid.
     std::string    leader_source;
+    // Dispatch group (priority/concurrency lane). Stamped by the dispatcher sink
+    // from the emitting source instance's "group" (default_group if untagged).
+    // Empty in the legacy single-pool path. See docs/design/dispatch-groups.md.
+    std::string    group;
 };
 
 enum class TriggerPolicy {
