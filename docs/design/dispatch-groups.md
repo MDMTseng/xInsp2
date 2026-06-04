@@ -18,8 +18,10 @@ priority, so the critical group is never starved by the best-effort group.
 
 If the worker pool is sized **`dispatch_threads ≥ Σ(group.max_parallel)`**, then
 every group always has a free worker slot when its trigger arrives (bounded only
-by its own `max_parallel`). **Groups are then decoupled at the dispatch layer** —
-no group ever waits for another's slot. What remains is pure **compute-resource
+by its own `max_parallel`). We get this **for free by giving each group its own
+threads** (total = `Σ max_parallel`) — so it's a structural guarantee, not a knob
+you can mis-set. **Groups are then decoupled at the dispatch layer** — no group
+ever waits for another's slot. What remains is pure **compute-resource
 occupancy**, and the OS handles that:
 
 - **OS thread priority does real preemption on the CPU.** Run the low-priority
@@ -30,8 +32,8 @@ occupancy**, and the OS handles that:
 - **`max_parallel` bounds each group's footprint** so a bursty best-effort group
   can't spawn 100 concurrent inspects and thrash memory/cores.
 
-So in the decoupled regime the "scheduler" is trivial: each group has its own
-slots + FIFO; there is **no cross-group priority queue**.
+So the "scheduler" is trivial: each group owns its threads + a FIFO queue; there
+is **no shared pool and no cross-group priority queue**.
 
 ### Residual coupling (the decoupling is not total)
 
@@ -45,34 +47,48 @@ couples them:
 2. **Shared ImagePool / memory bandwidth / disk-I/O** — a heavy group can pressure
    these; thread priority doesn't arbitrate memory bandwidth.
 
-## Two modes
+## One model: group-owned worker threads
 
-- **Decoupled (default, v1).** `dispatch_threads ≥ Σ max_parallel`. Per-group
-  `max_parallel` + `thread_priority` (+ optional rate/queue). No priority queue.
-  Satisfies the "critical must stay fast, best-effort may lag" need.
-  **There is no separate `priority` field here** — with no cross-group slot
-  contention, a queue-level priority would never have an effect. Group priority is
-  fully expressed by **`thread_priority`** (who wins the CPU when cores are scarce)
-  + **`max_parallel`** (how much parallel capacity / how many cores a group may
-  use). The default high(4)/low(1, below-normal) already encodes the priority
-  difference without any integer rank.
-- **Oversubscribed (advanced, opt-in / v2).** `dispatch_threads < Σ max_parallel`
-  to cap total threads — groups now compete for a smaller shared pool, so we add a
-  real **priority queue** (a freed worker takes the highest-priority group that has
-  queued work and is under its cap) + worker reservation + anti-starvation
-  (`weight` / aging). Only needed when you deliberately under-provision threads.
+There is **one** model, not two: **each group spawns its own `max_parallel`
+worker threads**, sets them to its `thread_priority` at spawn, and those workers
+pull only from that group's queue. Consequences:
+
+- **No shared pool, no cross-group scheduler, no `priority` integer.** Groups never
+  contend for a worker slot (each owns its own), so "which group gets the next
+  freed slot" never arises. The only thing that arbitrates is the **OS thread
+  priority** on the CPU cores.
+- **"Threads sufficient" is structural, not a setting.** Total worker threads =
+  `Σ group.max_parallel`, derived. You can't mis-size it; there's no
+  `dispatch_threads` to under-provision.
+- **Deterministic per-group capacity.** `high` always has exactly its 4 workers,
+  even when `low` is idle. We deliberately *don't* let `high` borrow `low`'s idle
+  thread — strict partitioning gives the critical path predictable latency, which
+  matters more than squeezing extra throughput. (Borrowing would reintroduce a
+  shared pool + scheduler; not worth it.)
+- **Group priority = `thread_priority` + `max_parallel`.** `thread_priority` decides
+  who wins a core when cores are scarce; `max_parallel` is how many cores a group
+  may use at once. The default high(4, normal) / low(1, below-normal) encodes the
+  priority difference with no integer rank.
+- **Legacy = one implicit group.** A project with no `groups` is exactly one group
+  owning `dispatch_threads` workers — today's behaviour, same code path.
+
+> Cost: a group with `max_parallel: N` always holds N threads even when idle (a
+> blocked worker costs ~a stack, no CPU). Fine for a handful of priority classes
+> (critical / best-effort); if you ever needed dozens of groups, a shared pool +
+> scheduler would be more thread-efficient — but that's not the use case.
 
 ## Group parameters
 
-| Param | Mode | Meaning |
-|---|---|---|
-| `name` | both | group id; triggers carry it |
-| `max_parallel` | both | max concurrent inspects for this group (footprint cap; in decoupled mode, its slot reservation) |
-| `thread_priority` | both | OS thread priority of this group's workers: `high` / `normal` / `low` (→ `THREAD_PRIORITY_ABOVE_NORMAL` / `NORMAL` / `BELOW_NORMAL`) |
-| `queue_depth` + `overflow` | both | per-group buffering (`drop_oldest` for live, `block`/deep for archival) |
-| `min_interval_ms` | both | rate limit: dispatch this group at most once per N ms; surplus triggers coalesce → keep latest (the *deliberate* way to "reduce frequency", vs sleeping a worker) |
-| `priority` | oversubscribed | integer; which group a freed shared slot goes to first |
-| `weight` / `max_age_ms` | oversubscribed (v2) | anti-starvation share; drop a trigger queued longer than N ms |
+| Param | Meaning |
+|---|---|
+| `name` | group id; triggers carry it |
+| `max_parallel` | number of worker threads this group owns = max concurrent inspects |
+| `thread_priority` | OS thread priority of this group's workers: `high` / `normal` / `low` (→ `THREAD_PRIORITY_ABOVE_NORMAL` / `NORMAL` / `BELOW_NORMAL`) |
+| `queue_depth` + `overflow` | per-group buffering (`drop_oldest` for live, `block`/deep for archival) |
+| `min_interval_ms` | rate limit: dispatch this group at most once per N ms; surplus triggers coalesce → keep latest (the *deliberate* way to "reduce frequency", vs sleeping a worker) |
+
+There is intentionally **no** `priority` / `weight` / oversubscription knob — those
+only exist to arbitrate a *shared* pool, which this model doesn't have.
 
 ### Why not just `sleep()` in a low-priority inspect?
 
@@ -95,7 +111,6 @@ Two groups out of the box (what the scaffold ships / the recommended start):
 
 ```jsonc
 "parallelism": {
-  "dispatch_threads": 5,            // == 4 + 1, so both groups are fully decoupled
   "default_group": "high",
   "groups": [
     { "name": "high", "max_parallel": 4, "thread_priority": "normal",
@@ -106,14 +121,15 @@ Two groups out of the box (what the scaffold ships / the recommended start):
 }
 ```
 
-- **high**: up to 4 concurrent inspects, normal OS priority — the critical path.
-- **low**: 1 concurrent inspect, below-normal OS priority — best-effort; can lag,
-  yields the CPU to `high` when cores are scarce, never steals high's slots.
-- `dispatch_threads` 5 = 4 + 1 → decoupled (no priority queue needed).
+- **high**: owns 4 worker threads at normal OS priority — the critical path.
+- **low**: owns 1 worker thread at below-normal OS priority — best-effort; can lag,
+  yields the CPU to `high` when cores are scarce, never touches high's threads.
+- Total worker threads = 4 + 1 = 5, **derived** (no `dispatch_threads` knob).
 
 **Backward compatibility:** if `parallelism.groups` is absent, the dispatcher
-stays exactly as today — one implicit group sized by `dispatch_threads`. Grouping
-is opt-in; existing projects are unaffected.
+stays exactly as today — **one implicit group** owning `dispatch_threads` workers
+(legacy `dispatch_threads`/`queue_depth`/`overflow` map onto that single group).
+Grouping is opt-in; existing projects are unaffected.
 
 ## Assigning a trigger to a group
 
@@ -132,27 +148,29 @@ source is the natural owner of "how urgent is my stream".
 
 - `TriggerEvent` (`xi_trigger_bus.hpp`) += `std::string group`. Source sets it from
   its instance config; the bus stamps `default_group` if empty.
-- Replace the single `g_ev_queue` with **per-group queues** + per-group running
-  counter + `max_parallel`. `enqueue_event_` routes by group and applies that
-  group's `queue_depth`/`overflow`/`min_interval_ms`.
-- Worker loop: pop from the worker's own group (decoupled mode each worker is
-  pinned to a group sized to its `max_parallel`); set the thread's OS priority once
-  at spawn from `thread_priority`. (Oversubscribed mode: a shared worker picks the
-  highest-`priority` eligible group — that path is v2.)
+- Replace the single `g_ev_queue` with **one queue per group** + a per-group
+  running counter. `enqueue_event_` routes by group and applies that group's
+  `queue_depth`/`overflow`/`min_interval_ms`.
+- Each group spawns its own `max_parallel` workers; **each worker is pinned to its
+  group's queue** and its OS priority is set once at spawn from `thread_priority`.
+  No shared pool, no cross-group pick.
 - `PluginManager`/project parsing: read `parallelism.groups` + `default_group`;
-  default to the single-group legacy path when absent.
+  when absent, synthesize one implicit group from legacy
+  `dispatch_threads`/`queue_depth`/`overflow` (single code path).
 - Surface per-group depth/running in `dispatch_stats`.
 - `// TODO(linux):` thread priority via `pthread_setschedparam` / `nice`;
   `SetThreadPriority` is the Windows path (gate `#ifdef _WIN32`).
 
 ## Increment plan
 
-- **v1** — `TriggerEvent.group`, per-group queues + `max_parallel` + worker OS
-  `thread_priority`, config parsing + the default 2-group set, `instance.json`
-  `"group"`, `dispatch_stats` per group, regression test (`examples/qa_dispatch_groups/`:
-  prove a saturated `low` group never delays `high`). Decoupled mode only.
-- **v2** — oversubscribed priority queue + reservation + `weight`/aging
-  anti-starvation + `max_age_ms`.
+- **v1 (the whole feature)** — `TriggerEvent.group`, one queue per group, each group
+  spawns its own `max_parallel` workers at its `thread_priority`, config parsing +
+  the default 2-group set + legacy single-group fallback, `instance.json` `"group"`,
+  `min_interval_ms` rate limit, `dispatch_stats` per group, regression test
+  (`examples/qa_dispatch_groups/`: a saturated `low` group never delays `high`).
+- **Later (only if ever needed)** — a shared-pool / oversubscribed mode with a real
+  priority queue. Explicitly out of scope: group-owned threads already meet the goal
+  and threads are cheap, so there's no shared pool to schedule.
 
 ## Tests
 
