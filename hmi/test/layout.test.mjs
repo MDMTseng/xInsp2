@@ -4,7 +4,8 @@ import assert from "node:assert";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { isLeaf, isSplit, eachLeaf, countLeaves, clampRatio, validate } from "../layout.mjs";
+import { isLeaf, isSplit, eachLeaf, countLeaves, clampRatio, validate,
+         getNode, splitLeaf, setCard, setRatio, removeLeaf, emptyCard } from "../layout.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 let pass = 0;
@@ -50,6 +51,39 @@ t("shipped dashboard.json is a valid layout tree", () => {
   assert.ok(dash.layout, "has a layout tree");
   assert.deepEqual(validate(dash.layout), []);
   assert.ok(countLeaves(dash.layout) >= 5);
+});
+
+t("getNode walks a/b path", () => {
+  assert.equal(getNode(tree, []).split, "col");
+  assert.equal(getNode(tree, ["a", "a"]).card.type, "verdict");
+  assert.equal(getNode(tree, ["b"]).card.type, "spc");
+});
+
+t("splitLeaf is immutable + inserts a split with old leaf as a", () => {
+  const out = splitLeaf(tree, ["b"], "row");
+  assert.ok(isSplit(getNode(out, ["b"])));
+  assert.equal(getNode(out, ["b", "a"]).card.type, "spc");      // old leaf preserved
+  assert.equal(getNode(out, ["b", "b"]).card.type, emptyCard().type); // fresh pane
+  assert.ok(isLeaf(tree.b), "original tree unchanged");
+});
+
+t("setCard replaces a leaf's card", () => {
+  const out = setCard(tree, ["b"], { type: "image", bind: { var: "result" } });
+  assert.equal(getNode(out, ["b"]).card.type, "image");
+  assert.equal(getNode(tree, ["b"]).card.type, "spc");          // immutable
+});
+
+t("setRatio clamps + targets the split", () => {
+  assert.equal(getNode(setRatio(tree, [], 0.95), []).ratio, 0.9);
+  assert.equal(getNode(setRatio(tree, ["a"], 0.42), ["a"]).ratio, 0.42);
+});
+
+t("removeLeaf collapses parent split to the sibling", () => {
+  const out = removeLeaf(tree, ["a", "a"]);   // drop verdict -> a becomes the image leaf
+  assert.equal(getNode(out, ["a"]).card.type, "image");
+  assert.equal(countLeaves(out), 2);
+  // removing the only pane yields a fresh empty leaf
+  assert.ok(isLeaf(removeLeaf({ card: { type: "verdict" } }, [])));
 });
 
 console.log(`\n${pass} passed`);

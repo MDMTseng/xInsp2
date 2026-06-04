@@ -4,7 +4,8 @@
 //
 import { parseVars, decodePreviewFrame } from "./protocol.mjs";
 import { CARDS } from "./cards.mjs";
-import { isLeaf, isSplit, clampRatio, validate } from "./layout.mjs";
+import { isLeaf, isSplit, clampRatio, validate,
+         getNode, splitLeaf, setCard, setRatio, removeLeaf } from "./layout.mjs";
 
 const qs = new URLSearchParams(location.search);
 // Default to a same-origin /ws (served by serve.mjs's proxy) so one HTTP tunnel
@@ -63,18 +64,87 @@ function renderCard(card) {
   return el;
 }
 
-// Recursively render a layout node into a filling element (RUN mode: dividers
-// are fixed; drag-to-resize + split editing come with Compose mode in v1.1).
-function renderNode(node) {
-  if (isLeaf(node)) return renderCard(node.card);
+// ---- the live layout tree + mode (run | compose) ---------------------------
+let layout = null;
+let mode = qs.get("mode") === "compose" ? "compose" : "run";
+
+// Compose overlay for a leaf: the live card behind a toolbar (type / var / title
+// + split / remove). Edits mutate `layout` via the pure ops in layout.mjs.
+function renderLeafCompose(card, path) {
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "position:relative;min-width:0;min-height:0;overflow:hidden;border:1px dashed #5a5a5a;border-radius:6px";
+  const cardEl = renderCard(card);
+  cardEl.style.cssText += ";position:absolute;inset:0;pointer-events:none;opacity:.8";
+  wrap.appendChild(cardEl);
+
+  const bar = document.createElement("div");
+  bar.style.cssText = "position:absolute;top:0;left:0;right:0;z-index:2;display:flex;flex-wrap:wrap;gap:4px;" +
+    "align-items:center;padding:4px;background:#000a;font:11px system-ui,sans-serif";
+  const sel = document.createElement("select");
+  for (const k of Object.keys(CARDS)) { const o = document.createElement("option"); o.value = o.textContent = k; if (k === card.type) o.selected = true; sel.appendChild(o); }
+  sel.onchange = () => editCard(path, { type: sel.value });
+  const inp = (ph, val, w) => { const i = document.createElement("input"); i.placeholder = ph; i.value = val || ""; i.size = w; i.style.cssText = "background:#222;color:#ddd;border:1px solid #444;border-radius:3px;padding:1px 4px;font:11px system-ui"; return i; };
+  const varIn = inp("var", card.bind && card.bind.var, 6);
+  varIn.onchange = () => editCard(path, { bind: { ...card.bind, var: varIn.value || undefined } });
+  const titleIn = inp("title", card.config && card.config.title, 7);
+  titleIn.onchange = () => editCard(path, { config: { ...card.config, title: titleIn.value } });
+  const btn = (t, fn, tip) => { const b = document.createElement("button"); b.textContent = t; b.title = tip || ""; b.style.cssText = "padding:1px 7px;cursor:pointer"; b.onclick = fn; return b; };
+  bar.append(sel, varIn, titleIn,
+    btn("⬌", () => { layout = splitLeaf(layout, path, "row"); reRender(); }, "split left/right"),
+    btn("⬍", () => { layout = splitLeaf(layout, path, "col"); reRender(); }, "split top/bottom"),
+    btn("✕", () => { layout = removeLeaf(layout, path); reRender(); }, "remove pane"));
+  wrap.appendChild(bar);
+  return wrap;
+}
+function editCard(path, patch) {
+  const cur = getNode(layout, path).card;
+  layout = setCard(layout, path, { ...cur, ...patch });
+  reRender();
+}
+
+// Recursively render a layout node. In compose mode leaves get a toolbar and
+// dividers are draggable; in run mode dividers are fixed.
+function renderNode(node, path = []) {
+  if (isLeaf(node)) return mode === "compose" ? renderLeafCompose(node.card, path) : renderCard(node.card);
   if (!isSplit(node)) { const e = document.createElement("div"); e.textContent = "bad layout node"; e.style.color = "#f88"; return e; }
+  const col = node.split === "col";
   const box = document.createElement("div");
-  box.style.cssText = `display:flex;flex-direction:${node.split === "col" ? "column" : "row"};min-width:0;min-height:0;width:100%;height:100%;gap:8px`;
+  box.style.cssText = `display:flex;flex-direction:${col ? "column" : "row"};min-width:0;min-height:0;width:100%;height:100%`;
   const r = clampRatio(node.ratio);
-  const a = renderNode(node.a); a.style.flex = `${r} 1 0`;
-  const b = renderNode(node.b); b.style.flex = `${1 - r} 1 0`;
-  box.append(a, b);
+  const a = renderNode(node.a, [...path, "a"]); a.style.flex = `${r} 1 0`;
+  const b = renderNode(node.b, [...path, "b"]); b.style.flex = `${1 - r} 1 0`;
+  const div = document.createElement("div");
+  div.style.cssText = `flex:0 0 ${mode === "compose" ? 7 : 8}px;background:${mode === "compose" ? "#3a6ea5" : "#222"};` +
+    (mode === "compose" ? `cursor:${col ? "row-resize" : "col-resize"}` : "pointer-events:none");
+  if (mode === "compose") {
+    div.onmousedown = (e) => {
+      e.preventDefault();
+      const rect = box.getBoundingClientRect();
+      const move = (ev) => {
+        const f = col ? (ev.clientY - rect.top) / rect.height : (ev.clientX - rect.left) / rect.width;
+        const rr = Math.min(0.9, Math.max(0.1, f)); a.style.flex = `${rr} 1 0`; b.style.flex = `${1 - rr} 1 0`; div._r = rr;
+      };
+      const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); if (div._r != null) { layout = setRatio(layout, path, div._r); reRender(); } };
+      document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
+    };
+  }
+  box.append(a, div, b);
   return box;
+}
+
+function reRender() {
+  const root = document.getElementById("grid");
+  root.style.cssText += ";display:flex;min-width:0;min-height:0";
+  cards = [];
+  root.replaceChildren();
+  if (!layout) return;
+  const problems = validate(layout);
+  document.getElementById("err").textContent = problems.length ? problems.join("; ") : "";
+  const el = renderNode(layout, []); el.style.flex = "1 1 0"; el.style.minWidth = "0"; el.style.minHeight = "0";
+  root.appendChild(el);
+  if (modeBtn) modeBtn.textContent = mode === "compose" ? "▶ Run" : "✎ Compose";
+  if (exportWrap) exportWrap.style.display = mode === "compose" ? "flex" : "none";
+  scheduleRender();
 }
 
 async function buildLayout() {
@@ -82,15 +152,31 @@ async function buildLayout() {
   try { dash = await (await fetch(DASH, { cache: "no-store" })).json(); }
   catch (e) { document.getElementById("err").textContent = `Could not load ${DASH}: ${e}`; return; }
   document.title = (dash.title || "xInsp2 HMI");
-  const root = document.getElementById("grid");
-  root.style.cssText += ";display:flex;min-width:0;min-height:0";
-  cards = [];
-  const problems = dash.layout ? validate(dash.layout) : ["dashboard has no 'layout' tree"];
-  if (problems.length) { document.getElementById("err").textContent = problems.join("; "); }
-  root.replaceChildren();
-  if (dash.layout) { const el = renderNode(dash.layout); el.style.flex = "1 1 0"; root.appendChild(el); }
-  scheduleRender();
+  layout = dash.layout || null;
+  reRender();
 }
+
+// ---- header controls: mode toggle + export (compose) -----------------------
+let modeBtn = null, exportWrap = null;
+function buildControls() {
+  const hdr = document.querySelector("header"); if (!hdr) return;
+  const conn = document.getElementById("conn");
+  const mkBtn = (t) => { const b = document.createElement("button"); b.textContent = t; b.style.cssText = "padding:3px 10px;cursor:pointer;font:12px system-ui"; return b; };
+  modeBtn = mkBtn("✎ Compose");
+  modeBtn.onclick = () => { mode = mode === "run" ? "compose" : "run"; reRender(); };
+  exportWrap = document.createElement("span");
+  exportWrap.style.cssText = "display:none;gap:6px";
+  const dump = () => JSON.stringify({ title: document.title, layout }, null, 2);
+  const copyBtn = mkBtn("Copy JSON");
+  copyBtn.onclick = async () => { try { await navigator.clipboard.writeText(dump()); copyBtn.textContent = "Copied ✓"; setTimeout(() => copyBtn.textContent = "Copy JSON", 1200); } catch { dlog("clipboard blocked — use Download"); } };
+  const dlBtn = mkBtn("Download");
+  dlBtn.onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([dump()], { type: "application/json" })); a.download = "dashboard.json"; a.click(); URL.revokeObjectURL(a.href); };
+  exportWrap.append(copyBtn, dlBtn);
+  const group = document.createElement("span"); group.style.cssText = "display:flex;gap:6px;align-items:center;margin-left:auto";
+  group.append(modeBtn, exportWrap);
+  hdr.insertBefore(group, conn);
+}
+buildControls();
 
 function connect() {
   setConn("connecting…", "#7a6a1e");
