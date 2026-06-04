@@ -50,6 +50,12 @@ couples them:
 - **Decoupled (default, v1).** `dispatch_threads ≥ Σ max_parallel`. Per-group
   `max_parallel` + `thread_priority` (+ optional rate/queue). No priority queue.
   Satisfies the "critical must stay fast, best-effort may lag" need.
+  **There is no separate `priority` field here** — with no cross-group slot
+  contention, a queue-level priority would never have an effect. Group priority is
+  fully expressed by **`thread_priority`** (who wins the CPU when cores are scarce)
+  + **`max_parallel`** (how much parallel capacity / how many cores a group may
+  use). The default high(4)/low(1, below-normal) already encodes the priority
+  difference without any integer rank.
 - **Oversubscribed (advanced, opt-in / v2).** `dispatch_threads < Σ max_parallel`
   to cap total threads — groups now compete for a smaller shared pool, so we add a
   real **priority queue** (a freed worker takes the highest-priority group that has
