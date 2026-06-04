@@ -4,8 +4,9 @@
 //
 import { parseVars, decodePreviewFrame } from "./protocol.mjs";
 import { CARDS } from "./cards.mjs";
-import { isLeaf, isSplit, clampRatio, validate,
-         getNode, splitLeaf, setCard, setRatio, removeLeaf } from "./layout.mjs";
+import { isLeaf, isSplit, isTabs, weightsOf, validate,
+         getNode, addSibling, setCard, setWeights, removePane,
+         wrapInTabs, addTab, removeTab, renameTab, setActive } from "./layout.mjs";
 
 const qs = new URLSearchParams(location.search);
 // Default to a same-origin /ws (served by serve.mjs's proxy) so one HTTP tunnel
@@ -90,9 +91,10 @@ function renderLeafCompose(card, path) {
   titleIn.onchange = () => editCard(path, { config: { ...card.config, title: titleIn.value } });
   const btn = (t, fn, tip) => { const b = document.createElement("button"); b.textContent = t; b.title = tip || ""; b.style.cssText = "padding:1px 7px;cursor:pointer"; b.onclick = fn; return b; };
   bar.append(sel, varIn, titleIn,
-    btn("⬌", () => { layout = splitLeaf(layout, path, "row"); reRender(); }, "split left/right"),
-    btn("⬍", () => { layout = splitLeaf(layout, path, "col"); reRender(); }, "split top/bottom"),
-    btn("✕", () => { layout = removeLeaf(layout, path); reRender(); }, "remove pane"));
+    btn("+⬌", () => { layout = addSibling(layout, path, "row"); reRender(); }, "add pane to the right"),
+    btn("+⬍", () => { layout = addSibling(layout, path, "col"); reRender(); }, "add pane below"),
+    btn("⊞", () => { layout = wrapInTabs(layout, path); reRender(); }, "wrap this pane in tabs"),
+    btn("✕", () => { layout = removePane(layout, path); reRender(); }, "remove pane"));
   wrap.appendChild(bar);
   return wrap;
 }
@@ -102,33 +104,92 @@ function editCard(path, patch) {
   reRender();
 }
 
-// Recursively render a layout node. In compose mode leaves get a toolbar and
-// dividers are draggable; in run mode dividers are fixed.
-function renderNode(node, path = []) {
-  if (isLeaf(node)) return mode === "compose" ? renderLeafCompose(node.card, path) : renderCard(node.card);
-  if (!isSplit(node)) { const e = document.createElement("div"); e.textContent = "bad layout node"; e.style.color = "#f88"; return e; }
-  const col = node.split === "col";
-  const box = document.createElement("div");
-  box.style.cssText = `display:flex;flex-direction:${col ? "column" : "row"};min-width:0;min-height:0;width:100%;height:100%`;
-  const r = clampRatio(node.ratio);
-  const a = renderNode(node.a, [...path, "a"]); a.style.flex = `${r} 1 0`;
-  const b = renderNode(node.b, [...path, "b"]); b.style.flex = `${1 - r} 1 0`;
+// A draggable divider between panes i and i+1 of an N-ary split. Dragging shifts
+// the boundary between just those two panes (their combined size is preserved).
+function makeDivider(path, i, col, box, els, fr) {
   const div = document.createElement("div");
   div.style.cssText = `flex:0 0 ${mode === "compose" ? 7 : 8}px;background:${mode === "compose" ? "#3a6ea5" : "#222"};` +
     (mode === "compose" ? `cursor:${col ? "row-resize" : "col-resize"}` : "pointer-events:none");
-  if (mode === "compose") {
-    div.onmousedown = (e) => {
-      e.preventDefault();
-      const rect = box.getBoundingClientRect();
-      const move = (ev) => {
-        const f = col ? (ev.clientY - rect.top) / rect.height : (ev.clientX - rect.left) / rect.width;
-        const rr = Math.min(0.9, Math.max(0.1, f)); a.style.flex = `${rr} 1 0`; b.style.flex = `${1 - rr} 1 0`; div._r = rr;
-      };
-      const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); if (div._r != null) { layout = setRatio(layout, path, div._r); reRender(); } };
-      document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
+  if (mode !== "compose") return div;
+  div.onmousedown = (e) => {
+    e.preventDefault();
+    const rect = box.getBoundingClientRect();
+    let before = 0; for (let k = 0; k < i; k++) before += fr[k];
+    const pair = fr[i] + fr[i + 1];
+    const cur = fr.slice();
+    const move = (ev) => {
+      const f = col ? (ev.clientY - rect.top) / rect.height : (ev.clientX - rect.left) / rect.width;
+      const a = Math.min(before + pair - 0.05, Math.max(before + 0.05, f)) - before; // new fr[i]
+      cur[i] = a; cur[i + 1] = pair - a;
+      els[i].style.flex = `${cur[i]} 1 0`; els[i + 1].style.flex = `${cur[i + 1]} 1 0`;
+      div._w = cur.slice();
     };
+    const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); if (div._w) { layout = setWeights(layout, path, div._w); reRender(); } };
+    document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
+  };
+  return div;
+}
+
+// A tabs/pages node: a tab strip + the active tab's content. RUN mode switches
+// tabs; compose mode also adds (+) / removes (✕) / renames (dbl-click) tabs.
+function renderTabs(node, path) {
+  const active = Math.min(node.active || 0, node.tabs.length - 1);
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "display:flex;flex-direction:column;min-width:0;min-height:0;width:100%;height:100%";
+  const strip = document.createElement("div");
+  strip.style.cssText = "display:flex;gap:2px;flex:0 0 auto;align-items:center;padding:2px 2px 0;overflow:auto";
+  node.tabs.forEach((tb, i) => {
+    const on = i === active;
+    const tab = document.createElement("div");
+    tab.style.cssText = "display:flex;align-items:center;gap:5px;padding:4px 11px;cursor:pointer;border-radius:6px 6px 0 0;" +
+      `background:${on ? "#1e1e1e" : "#121212"};color:${on ? "#ddd" : "#888"};border:1px solid #333;border-bottom:none;font:12px system-ui,sans-serif`;
+    const label = document.createElement("span"); label.textContent = tb.name || `Page ${i + 1}`;
+    tab.appendChild(label);
+    tab.onclick = () => { if (i !== active) { layout = setActive(layout, path, i); reRender(); } };
+    if (mode === "compose") {
+      label.title = "double-click to rename";
+      label.ondblclick = (e) => { e.stopPropagation(); const nn = prompt("Tab name", tb.name || ""); if (nn != null) { layout = renameTab(layout, path, i, nn); reRender(); } };
+      if (node.tabs.length > 1) {
+        const x = document.createElement("span"); x.textContent = "✕"; x.title = "remove tab"; x.style.cssText = "opacity:.55;font-size:10px";
+        x.onclick = (e) => { e.stopPropagation(); layout = removeTab(layout, path, i); reRender(); };
+        tab.appendChild(x);
+      }
+    }
+    strip.appendChild(tab);
+  });
+  if (mode === "compose") {
+    const add = document.createElement("button"); add.textContent = "+"; add.title = "add tab";
+    add.style.cssText = "margin-left:4px;padding:2px 9px;cursor:pointer";
+    add.onclick = () => { layout = addTab(layout, path); reRender(); };
+    strip.appendChild(add);
   }
-  box.append(a, div, b);
+  wrap.appendChild(strip);
+  const body = renderNode(node.tabs[active].child, [...path, active]);
+  body.style.cssText += ";flex:1 1 0;min-width:0;min-height:0;border:1px solid #333;border-radius:0 6px 6px 6px;overflow:hidden";
+  wrap.appendChild(body);
+  return wrap;
+}
+
+// Recursively render a layout node. A split lays out its N children along `dir`,
+// sized by weights, with a divider between each adjacent pair. In compose mode
+// leaves get a toolbar and dividers are draggable; in run mode dividers are fixed.
+function renderNode(node, path = []) {
+  if (isLeaf(node)) return mode === "compose" ? renderLeafCompose(node.card, path) : renderCard(node.card);
+  if (isTabs(node)) return renderTabs(node, path);
+  if (!isSplit(node)) { const e = document.createElement("div"); e.textContent = "bad layout node"; e.style.color = "#f88"; return e; }
+  const col = node.dir === "col";
+  const box = document.createElement("div");
+  box.style.cssText = `display:flex;flex-direction:${col ? "column" : "row"};min-width:0;min-height:0;width:100%;height:100%`;
+  const fr = weightsOf(node);
+  const els = node.children.map((c, i) => {
+    const el = renderNode(c, [...path, i]);
+    el.style.flex = `${fr[i]} 1 0`; el.style.minWidth = "0"; el.style.minHeight = "0";
+    return el;
+  });
+  els.forEach((el, i) => {
+    box.appendChild(el);
+    if (i < els.length - 1) box.appendChild(makeDivider(path, i, col, box, els, fr));
+  });
   return box;
 }
 

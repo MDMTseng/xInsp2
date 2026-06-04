@@ -173,33 +173,45 @@ cards + overlays contributed by the project's plugins.
 
 ## `dashboard.json` (project root)
 
-A **recursive split-pane tree**. A node is either a **split**
-(`{split:"row"|"col", ratio, a, b}` — `row` = side-by-side, `col` = stacked;
-`ratio` is child `a`'s fraction) or a **leaf** (`{card:{type,bind,config,overlays}}`).
-No coordinates, no overlap; the tree fills the screen.
+A **recursive layout tree** with three node kinds (all nest freely; no
+coordinates, no overlap — the tree fills the screen):
+
+- **leaf** — `{ card: { type, bind, config, overlays } }`
+- **split** — `{ dir: "row"|"col", children: [node, …], weights?: [w, …] }`
+  N panes along `dir` (`row` = side-by-side, `col` = stacked), each sized by its
+  weight / sum(weights). `weights` is optional (defaults to equal).
+- **tabs** — `{ tabs: [ { name, child: node }, … ], active?: index }`
+  shows one child at a time behind a tab strip (top-level pages, or a tabbed pane).
 
 ```jsonc
 {
   "title": "Line 1",
   "layout": {
-    "split": "col", "ratio": 0.7,
-    "a": {
-      "split": "row", "ratio": 0.25,
-      "a": { "card": { "type": "verdict", "bind": { "var": "verdict" } } },
-      "b": { "card": { "type": "image", "bind": { "var": "result" },
-                       "overlays": [ { "renderer": "blob_detector", "var": "overlay_blobs" } ] } }
-    },
-    "b": { "card": { "type": "spc", "bind": { "var": "fg_pct" },
-                     "config": { "window": 100, "ucl": 0.6, "lcl": 0.4 } } }
+    "active": 0,
+    "tabs": [
+      { "name": "Overview", "child": {
+        "dir": "col", "weights": [3, 1],
+        "children": [
+          { "dir": "row", "weights": [2, 5, 2], "children": [
+            { "card": { "type": "verdict", "bind": { "var": "verdict" } } },
+            { "card": { "type": "image", "bind": { "var": "result" },
+                        "overlays": [ { "renderer": "blob_detector", "var": "overlay_blobs" } ] } },
+            { "card": { "type": "spc", "bind": { "var": "fg_pct" },
+                        "config": { "window": 100, "ucl": 0.6, "lcl": 0.4 } } }
+          ] }
+        ]
+      } },
+      { "name": "Trends", "child": { "card": { "type": "spc", "bind": { "var": "fg_pct" } } } }
+    ]
   }
 }
 ```
 
-- **Run mode** renders the tree read-only (dividers fixed by `ratio`).
-- **Compose mode** edits it: click a pane to split `row`/`col` or assign a card,
-  drag dividers to adjust `ratio`, then writes back via a new WS command
-  `save_dashboard` (or through the VS Code extension's fs access). Preset layouts
-  (1-up / 2-up / 2×2 / main+side) are just starting trees.
+- **Run mode** renders read-only (split weights fixed; clicking a tab switches it).
+- **Compose mode** edits it: add panes (`+⬌`/`+⬍`, N per split), drag dividers to
+  set each weight, wrap a pane in tabs (`⊞`, add/remove/rename tabs), pick a card +
+  its `var`/title. Exports the JSON (Copy/Download today; a backend `save_dashboard`
+  command lands in v1.2). Preset layouts are just starting trees.
 
 ## Standalone package export
 

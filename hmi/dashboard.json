@@ -1,24 +1,32 @@
 {
   "title": "xInsp2 HMI — demo",
   "layout": {
-    "split": "col", "ratio": 0.72,
-    "a": {
-      "split": "row", "ratio": 0.22,
-      "a": { "card": { "type": "verdict", "bind": { "var": "verdict" }, "config": { "title": "Result" } } },
-      "b": {
-        "split": "row", "ratio": 0.68,
-        "a": { "card": { "type": "image", "bind": { "var": "result" }, "config": { "title": "Inspection" } } },
-        "b": {
-          "split": "col", "ratio": 0.5,
-          "a": { "card": { "type": "spc", "bind": { "var": "fg_pct" }, "config": { "title": "fg_pct (SPC)", "window": 120, "ucl": 0.6, "lcl": 0.4 } } },
-          "b": { "card": { "type": "yield", "bind": { "var": "verdict" }, "config": { "title": "Yield", "warn": 90 } } }
-        }
-      }
-    },
-    "b": {
-      "split": "row", "ratio": 0.5,
-      "a": { "card": { "type": "throughput", "config": { "title": "Throughput" } } },
-      "b": { "card": { "type": "value", "bind": { "var": "fg_pct" }, "config": { "title": "fg_pct", "decimals": 3 } } }
-    }
+    "active": 0,
+    "tabs": [
+      { "name": "Overview", "child": {
+        "dir": "col", "weights": [3, 1],
+        "children": [
+          { "dir": "row", "weights": [2, 5, 2], "children": [
+            { "card": { "type": "verdict", "bind": { "var": "verdict" }, "config": { "title": "Result" } } },
+            { "card": { "type": "image", "bind": { "var": "result" }, "config": { "title": "Inspection" } } },
+            { "dir": "col", "weights": [1, 1], "children": [
+              { "card": { "type": "spc", "bind": { "var": "fg_pct" }, "config": { "title": "fg_pct (SPC)", "window": 120, "ucl": 0.6, "lcl": 0.4 } } },
+              { "card": { "type": "yield", "bind": { "var": "verdict" }, "config": { "title": "Yield", "warn": 90 } } }
+            ] }
+          ] },
+          { "dir": "row", "weights": [1, 1], "children": [
+            { "card": { "type": "throughput", "config": { "title": "Throughput" } } },
+            { "card": { "type": "value", "bind": { "var": "fg_pct" }, "config": { "title": "fg_pct", "decimals": 3 } } }
+          ] }
+        ]
+      } },
+      { "name": "Trends", "child": {
+        "dir": "row", "weights": [3, 1],
+        "children": [
+          { "card": { "type": "spc", "bind": { "var": "fg_pct" }, "config": { "title": "fg_pct (long window)", "window": 300, "ucl": 0.6, "lcl": 0.4 } } },
+          { "card": { "type": "yield", "bind": { "var": "verdict" }, "config": { "title": "Yield" } } }
+        ]
+      } }
+    ]
   }
 }

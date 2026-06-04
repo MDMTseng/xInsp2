@@ -49,9 +49,13 @@ test:  node hmi/test/protocol.test.mjs && node hmi/test/layout.test.mjs
 - **v1.0:** RUN mode — render a split-pane `dashboard.json` against a live
   backend; the six built-in cards; bind-to-var.
 - **v1.1 (this):** Compose mode — toggle **✎ Compose** in the header, then per
-  pane: split ⬌/⬍, pick card type, set its `var` + title, drag the blue dividers
-  to resize. **Copy JSON** / **Download** exports the edited `dashboard.json`.
-  (Open with `?mode=compose` to start in edit mode.) Cards stay live while editing.
+  pane: **+⬌ / +⬍** add a pane (an N-pane row/column, each weight set by dragging
+  the blue dividers), **⊞** wrap the pane in **tabs/pages** (add `+` / remove `✕` /
+  rename by double-click, switch by clicking), pick card type, set its `var` +
+  title, **✕** remove. **Copy JSON** / **Download** exports the edited
+  `dashboard.json` (`?mode=compose` starts in edit mode). Cards stay live while
+  editing. The layout tree has three node kinds: `{card}`, `{dir,children,weights}`,
+  `{tabs:[{name,child}],active}` — all nest freely.
 - **Next (v1.2+):** persist via a backend `save_dashboard` (today you Copy/Download
   the JSON and drop it in the project), vector overlay layers, plugin-shipped
   cards/overlays, single-file build + the AOT production package. See the design doc.
