@@ -203,6 +203,15 @@ intentional cross-group interleave the consumer demultiplexes by `group`.
   `instance.json` `"group"` routing (by the emitting source's `leader_source`);
   per-group `dispatch_stats`; gated so no-groups projects are byte-identical to
   before. Smoke + gating test: `examples/qa_dispatch_groups/`.
+- **v1 hardening (post multi-agent review).** Fixed: lane-lifetime UAF + the
+  overflow:block wait UAF (lanes are now `shared_ptr` guarded by `g_lanes_mu`;
+  producers hold a ref and re-check `g_continuous` after taking the lane lock);
+  image-handle leak on stop (lanes are drained before destruction, mirroring the
+  legacy `g_ev_queue` drain); `max_parallel` clamped to [1,32] + `queue_depth` to
+  [1,10000]; `lane_for_` unknown-group fallback goes to `default_group` (not
+  blindly the first lane); parse-time warnings for duplicate group names (skipped),
+  unknown `thread_priority`/`overflow`, and a `default_group` naming no real group.
+  Covered by `qa_dispatch_groups` tests B (clamp) + D (warnings).
 - **v1.1 — deferred follow-ups.** Per-group `result_order` (arrival) + the `group`
   wire tag on `vars`/`run_*` (today grouped mode emits completion order, untagged);
   `min_interval_ms` rate limit; the full load-separation regression (a self-emitting

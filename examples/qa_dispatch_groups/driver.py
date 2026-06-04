@@ -113,6 +113,68 @@ def main() -> int:
             try: proc2.wait(5)
             except Exception: proc2.kill()
 
+    # --- helper: write a temp project with a given parallelism block ---
+    import json, shutil
+    def make_proj(sub, parallelism):
+        d = Path(os.environ["LOCALAPPDATA"]) / "Temp" / sub
+        if d.exists(): shutil.rmtree(d)
+        d.mkdir(parents=True)
+        (d / "inspect.cpp").write_text((ROOT / "inspect.cpp").read_text(encoding="utf-8"), encoding="utf-8")
+        json.dump({"name": sub, "script": "inspect.cpp", "parallelism": parallelism},
+                  open(d / "project.json", "w", encoding="utf-8"))
+        return d
+
+    # --- Test B: max_parallel is clamped to 32 (#4) ---
+    pB = make_proj("xi_dg_clampB", {"default_group": "main",
+                                    "groups": [{"name": "main", "max_parallel": 1000000}]})
+    proc3 = spawn(PORT + 2, "xi_dg_clamp_iso")
+    try:
+        c3 = connect(PORT + 2)
+        if c3:
+            c3.call("open_project", {"path": str(pB)})
+            c3.compile_and_load(str(pB / "inspect.cpp"), timeout=300)
+            c3.call("start", {"fps": 5})   # spawns the lane (clamped) so dispatch_stats shows it
+            g = (c3.call("dispatch_stats").get("groups") or [{}])[0]
+            print(f"Test B clamp: main max_parallel = {g.get('max_parallel')}")
+            if g.get("max_parallel") != 32:
+                fails.append(f"B: max_parallel not clamped to 32 (got {g.get('max_parallel')})")
+            c3.call("stop"); c3.close()
+    except Exception as e: fails.append(f"B: {e}")
+    finally:
+        proc3.terminate()
+        try: proc3.wait(5)
+        except Exception: proc3.kill()
+
+    # --- Test D: validation warnings (#6/#7) via open_project_warnings ---
+    pD = make_proj("xi_dg_warnD", {"default_group": "missing", "groups": [
+        {"name": "dup", "max_parallel": 2},
+        {"name": "dup", "max_parallel": 4},
+        {"name": "weird", "thread_priority": "bogus", "overflow": "nope"},
+    ]})
+    proc4 = spawn(PORT + 3, "xi_dg_warn_iso")
+    try:
+        c4 = connect(PORT + 3)
+        if c4:
+            c4.call("open_project", {"path": str(pD)})
+            warns = (c4.call("open_project_warnings").get("warnings") or [])
+            blob = " ".join((w.get("reason", "") + " " + w.get("instance", "")).lower() for w in warns)
+            print(f"Test D warnings: {len(warns)} — {[w.get('reason','')[:40] for w in warns]}")
+            for needle in ("duplicate", "default_group", "thread_priority", "overflow"):
+                if needle not in blob:
+                    fails.append(f"D: expected a '{needle}' warning, none found")
+            # the dup group must yield exactly one 'dup' lane (2nd skipped at parse)
+            c4.compile_and_load(str(pD / "inspect.cpp"), timeout=300)
+            c4.call("start", {"fps": 5})
+            g2 = c4.call("dispatch_stats").get("groups") or []
+            if sum(1 for g in g2 if g.get("name") == "dup") != 1:
+                fails.append("D: duplicate group name produced != 1 lane")
+            c4.call("stop"); c4.close()
+    except Exception as e: fails.append(f"D: {e}")
+    finally:
+        proc4.terminate()
+        try: proc4.wait(5)
+        except Exception: proc4.kill()
+
     print("VERDICT:", "PASS" if not fails else "FAIL: " + "; ".join(fails))
     return 0 if not fails else 1
 

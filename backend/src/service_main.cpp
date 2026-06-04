@@ -1594,7 +1594,12 @@ struct GroupLane {
     std::atomic<uint64_t>          dropped{0};
     std::atomic<uint64_t>          high_watermark{0};
 };
-static std::vector<std::unique_ptr<GroupLane>> g_lanes;
+// Lanes are shared_ptr + guarded by g_lanes_mu so a producer (an emit thread /
+// the timer) that grabbed a lane can't have it destroyed under it by a concurrent
+// stop_group_pool_ — the shared_ptr keeps the GroupLane (its mutex/cv) alive until
+// the producer is done. Fixes the lane-lifetime UAF found in v1 hardening.
+static std::vector<std::shared_ptr<GroupLane>> g_lanes;
+static std::mutex                              g_lanes_mu;
 static bool grouping_enabled_() { return !g_plugin_mgr.project().groups.empty(); }
 
 static void set_os_thread_priority_(const std::string& p) {
@@ -1608,18 +1613,30 @@ static void set_os_thread_priority_(const std::string& p) {
 #endif
 }
 
-static GroupLane* lane_for_(const std::string& group) {
-    for (auto& l : g_lanes) if (l->cfg.name == group) return l.get();
-    return g_lanes.empty() ? nullptr : g_lanes.front().get();   // unknown group → first lane
+// Resolve a group name to its lane (holding g_lanes_mu). Unknown/typo'd group →
+// the default_group lane, then the first lane — never silently the front (#5).
+// Returns a shared_ptr so the caller keeps the lane alive past a concurrent stop.
+static std::shared_ptr<GroupLane> lane_for_(const std::string& group) {
+    std::lock_guard<std::mutex> lk(g_lanes_mu);
+    if (g_lanes.empty()) return nullptr;
+    for (auto& l : g_lanes) if (l->cfg.name == group) return l;
+    const std::string& dg = g_plugin_mgr.project().default_group;
+    if (!dg.empty()) for (auto& l : g_lanes) if (l->cfg.name == dg) return l;
+    return g_lanes.front();
 }
 
 // Per-lane enqueue with that lane's queue_depth/overflow (mirrors enqueue_event_).
 static bool enqueue_to_lane_(xi::TriggerEvent ev) {
-    GroupLane* lane = lane_for_(ev.group);
-    if (!lane) { for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); return false; }
+    auto rel = [&] { for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); };
+    if (!g_continuous.load()) { rel(); return false; }
+    std::shared_ptr<GroupLane> lane = lane_for_(ev.group);
+    if (!lane) { rel(); return false; }
     int depth = lane->cfg.queue_depth < 1 ? 1 : lane->cfg.queue_depth;
     const std::string& ov = lane->cfg.overflow;
     std::unique_lock<std::mutex> lk(lane->mu);
+    // Re-check after taking the lane lock: a concurrent stop may have flipped
+    // g_continuous + drained; don't push a now-orphaned event (would leak).
+    if (!g_continuous.load()) { rel(); return false; }
     if ((int)lane->q.size() < depth) {
         lane->q.push_back(std::move(ev));
         uint64_t ns = lane->q.size(), prev = lane->high_watermark.load(std::memory_order_relaxed);
@@ -1638,14 +1655,17 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
 }
 
 static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
-    g_lanes.clear();
-    for (auto& gc : g_plugin_mgr.project().groups) {
-        auto lane = std::make_unique<GroupLane>(); lane->cfg = gc; g_lanes.push_back(std::move(lane));
+    {
+        std::lock_guard<std::mutex> lk(g_lanes_mu);
+        g_lanes.clear();
+        for (auto& gc : g_plugin_mgr.project().groups) {
+            auto lane = std::make_shared<GroupLane>(); lane->cfg = gc; g_lanes.push_back(std::move(lane));
+        }
     }
     std::fprintf(stderr, "[xinsp2] continuous mode (grouped): %zu group(s), %dms timer\n",
                  g_lanes.size(), interval_ms);
     for (auto& lp : g_lanes) {
-        GroupLane* lane = lp.get();
+        std::shared_ptr<GroupLane> lane = lp;   // workers hold a ref → lane outlives them
         int n = lane->cfg.max_parallel < 1 ? 1 : lane->cfg.max_parallel;
         for (int i = 0; i < n; ++i) {
             lane->workers.emplace_back([srv_ptr, lane] {
@@ -1691,9 +1711,21 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
 }
 
 static void stop_group_pool_() {
-    for (auto& lp : g_lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
-    for (auto& lp : g_lanes) for (auto& t : lp->workers) if (t.joinable()) t.join();
-    g_lanes.clear();
+    // Snapshot the lanes (under the lock) so producers can keep routing into the
+    // shared_ptrs while we tear down; new enqueues already bail on !g_continuous.
+    std::vector<std::shared_ptr<GroupLane>> lanes;
+    { std::lock_guard<std::mutex> lk(g_lanes_mu); lanes = g_lanes; }
+    for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
+    for (auto& lp : lanes) for (auto& t : lp->workers) if (t.joinable()) t.join();
+    // Workers are gone + g_continuous is false → drain leftover queued events and
+    // release their image handles before the lanes are dropped (mirrors the legacy
+    // g_ev_queue drain; preserves release-before-FreeLibrary). (#3 leak fix.)
+    for (auto& lp : lanes) {
+        std::lock_guard<std::mutex> lk(lp->mu);
+        for (auto& ev : lp->q) for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
+        lp->q.clear();
+    }
+    { std::lock_guard<std::mutex> lk(g_lanes_mu); g_lanes.clear(); }
 }
 
 // Stop the pool + timer. Safe to call if nothing was spawned.
@@ -1701,7 +1733,13 @@ static void stop_dispatch_pool_() {
     g_continuous = false;
     g_ev_cv.notify_all();
     g_emit_order_cv.notify_all();   // wake any worker parked in an EmitTurn
-    for (auto& lp : g_lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }  // wake grouped workers
+    // Wake grouped workers + any producer (incl. the timer) parked in a lane's
+    // overflow:block BEFORE joining the timer, or the join deadlocks.
+    {
+        std::vector<std::shared_ptr<GroupLane>> lanes;
+        { std::lock_guard<std::mutex> lk(g_lanes_mu); lanes = g_lanes; }
+        for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
+    }
     if (g_timer_thread.joinable()) g_timer_thread.join();
     for (auto& t : g_worker_threads) {
         if (t.joinable()) t.join();
@@ -3403,11 +3441,14 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         data += ",\"dispatch_threads\":" + std::to_string(g_plugin_mgr.project().dispatch_threads);
         data += ",\"dropped_oldest\":" + std::to_string(g_dropped_oldest.load());
         data += ",\"dropped_newest\":" + std::to_string(g_dropped_newest.load());
-        // Per-group lanes (only when dispatch groups are active).
-        if (!g_lanes.empty()) {
+        // Per-group lanes (only when dispatch groups are active). Snapshot the
+        // lane list under g_lanes_mu so a concurrent stop can't free them mid-read.
+        std::vector<std::shared_ptr<GroupLane>> lanes;
+        { std::lock_guard<std::mutex> lk(g_lanes_mu); lanes = g_lanes; }
+        if (!lanes.empty()) {
             data += ",\"groups\":[";
-            for (size_t i = 0; i < g_lanes.size(); ++i) {
-                auto& l = *g_lanes[i];
+            for (size_t i = 0; i < lanes.size(); ++i) {
+                auto& l = *lanes[i];
                 size_t lq; { std::lock_guard<std::mutex> lk(l.mu); lq = l.q.size(); }
                 if (i) data += ",";
                 data += "{\"name\":"; xp::json_escape_into(data, l.cfg.name);

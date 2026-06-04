@@ -1333,6 +1333,9 @@ public:
         project_.result_order      = "completion";
         project_.groups.clear();
         project_.default_group.clear();
+        // Reset surfaced warnings here (before the project.json parse) so group
+        // parse warnings, compile failures, and bad instances all accumulate.
+        last_open_warnings_.clear();
         // Was the top-level project.json itself well-formed? A malformed file
         // (truncated / garbage) used to load "successfully" with all defaults and
         // no signal to the user — surface it as an open warning below.
@@ -1407,22 +1410,44 @@ public:
                 }
                 // parallelism.groups + default_group (optional; empty = legacy pool)
                 if (cJSON* arr = cJSON_GetObjectItem(par, "groups"); arr && cJSON_IsArray(arr)) {
+                    auto warn = [&](const std::string& who, const std::string& msg) {
+                        last_open_warnings_.push_back({who, "", msg});
+                        std::fprintf(stderr, "[xinsp2] parallelism.groups: %s — %s\n", who.c_str(), msg.c_str());
+                    };
                     cJSON* g = nullptr;
                     cJSON_ArrayForEach(g, arr) {
                         if (!cJSON_IsObject(g)) continue;
                         ProjectInfo::DispatchGroup grp;
                         if (cJSON* k = cJSON_GetObjectItem(g, "name"); k && cJSON_IsString(k) && k->valuestring) grp.name = k->valuestring;
-                        if (grp.name.empty()) continue;
-                        if (cJSON* k = cJSON_GetObjectItem(g, "max_parallel"); k && cJSON_IsNumber(k)) grp.max_parallel = std::max(1, (int)k->valuedouble);
-                        if (cJSON* k = cJSON_GetObjectItem(g, "thread_priority"); k && cJSON_IsString(k) && k->valuestring) grp.thread_priority = k->valuestring;
-                        if (cJSON* k = cJSON_GetObjectItem(g, "queue_depth"); k && cJSON_IsNumber(k)) grp.queue_depth = std::max(1, (int)k->valuedouble);
-                        if (cJSON* k = cJSON_GetObjectItem(g, "overflow"); k && cJSON_IsString(k) && k->valuestring) grp.overflow = k->valuestring;
+                        if (grp.name.empty()) { warn("(unnamed)", "group missing 'name' — skipped"); continue; }
+                        if (project_.find_group(grp.name)) { warn(grp.name, "duplicate group name — skipped"); continue; }  // #7
+                        if (cJSON* k = cJSON_GetObjectItem(g, "max_parallel"); k && cJSON_IsNumber(k))
+                            grp.max_parallel = std::min(32, std::max(1, (int)k->valuedouble));   // #4 clamp [1,32]
+                        if (cJSON* k = cJSON_GetObjectItem(g, "thread_priority"); k && cJSON_IsString(k) && k->valuestring) {
+                            grp.thread_priority = k->valuestring;
+                            if (grp.thread_priority != "high" && grp.thread_priority != "normal" && grp.thread_priority != "low") {
+                                warn(grp.name, "unknown thread_priority '" + grp.thread_priority + "' — using normal");
+                                grp.thread_priority = "normal";
+                            }
+                        }
+                        if (cJSON* k = cJSON_GetObjectItem(g, "queue_depth"); k && cJSON_IsNumber(k))
+                            grp.queue_depth = std::min(10000, std::max(1, (int)k->valuedouble));
+                        if (cJSON* k = cJSON_GetObjectItem(g, "overflow"); k && cJSON_IsString(k) && k->valuestring) {
+                            grp.overflow = k->valuestring;
+                            if (grp.overflow != "drop_oldest" && grp.overflow != "drop_newest" && grp.overflow != "block") {
+                                warn(grp.name, "unknown overflow '" + grp.overflow + "' — using drop_oldest");
+                                grp.overflow = "drop_oldest";
+                            }
+                        }
                         project_.groups.push_back(std::move(grp));
                     }
                     if (cJSON* k = cJSON_GetObjectItem(par, "default_group"); k && cJSON_IsString(k) && k->valuestring)
                         project_.default_group = k->valuestring;
                     if (project_.default_group.empty() && !project_.groups.empty())
                         project_.default_group = project_.groups.front().name;
+                    if (!project_.default_group.empty() && !project_.find_group(project_.default_group))  // #6
+                        warn(project_.default_group, "default_group names no declared group — falling back to '" +
+                             (project_.groups.empty() ? std::string("(none)") : project_.groups.front().name) + "'");
                 }
             }
             cJSON_Delete(root);
@@ -1436,9 +1461,8 @@ public:
         // Compile project-local plugins BEFORE instances are loaded — the
         // instance loop below resolves plugin name → loaded DLL, and we
         // want project plugins to win over global ones with the same name.
-        // last_open_warnings_ is reset here so compile failures + bad
-        // instances both end up in the same surfaced list.
-        last_open_warnings_.clear();
+        // (last_open_warnings_ was reset at the top of open_project so group-parse
+        // warnings, compile failures, and bad instances all accumulate together.)
         if (project_json_malformed) {
             last_open_warnings_.push_back({"", "",
                 "project.json is not valid JSON - loaded with defaults "
