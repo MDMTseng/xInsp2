@@ -209,6 +209,30 @@ lifetime trap: `VAR(mask, xi::from_cv_mat(mask_mat));`. See
 > **surface something you already have**. (`EMIT_RAW` skips JPEG preview,
 > like `VAR_RAW`.)
 
+## `xi::result(code, msg)` — the one per-run verdict
+
+`VAR` ships *many* per-run inspection values (debug detail). `xi::result` ships the
+**single verdict record** for the run — the thing MES / PLC / the HMI verdict-yield
+cards consume. Exactly one Result per run (last write wins); a run that calls no
+`xi::result` defaults to `0` (NA).
+
+```cpp
+#include <xi/xi_result.hpp>
+
+void xi_inspect_entry(int frame) {
+    if (chip > 0.3)      xi::ng(2, "edge chip > 0.3mm");   // code -2  (ng2)
+    else if (smudge)     xi::ng(1, "surface smudge");      // code -1  (ng1)
+    else                 xi::ok(1, "clean");               // code +1  (ok1)
+}
+```
+
+Code convention: **sign = verdict, magnitude = sub-class** — `>0` ok-class,
+`0` NA/none, `-1…` ng-class. The band `<= -990000` is **reserved** for framework
+system-fails (a dropped frame is auto-emitted as `XI_SYS_DROPPED`); a user code in
+that band is clamped to `-1`. The host emits a `run_result` event per run (and one
+per *dropped* trigger, so the stream has no gaps). Full spec + the system enum:
+[`../design/run-result.md`](../design/run-result.md).
+
 ## Reading a frame from disk
 
 The host can hand the script a `frame_path` per `cmd:run` (the Python

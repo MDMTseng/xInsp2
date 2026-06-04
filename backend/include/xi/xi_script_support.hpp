@@ -268,6 +268,10 @@ static void* g_breakpoint_fn_       = nullptr;
 // latest status string to the host status registry. Signature: void(const char*).
 static void* g_status_fn_           = nullptr;
 
+// Result callback. Host sets this so xi::result(code,msg) records the one per-run
+// verdict. Signature: void(int code, const char* msg).
+static void* g_result_fn_           = nullptr;
+
 // Comms callbacks. Host sets these so xi::comms::* reach the comms gateway.
 static void* g_comms_send_fn_       = nullptr;   // int(const char*)
 static void* g_comms_poll_fn_       = nullptr;   // int(char*, int)
@@ -330,6 +334,12 @@ XI_SCRIPT_EXPORT void xi_script_set_breakpoint_callback(void* fn) {
 // include xi_status.hpp leave this null.
 XI_SCRIPT_EXPORT void xi_script_set_status_callback(void* fn) {
     g_status_fn_ = fn;
+}
+
+// Optional: install a result callback for xi::result(code,msg). Scripts that
+// don't include xi_result.hpp leave this null.
+XI_SCRIPT_EXPORT void xi_script_set_result_callback(void* fn) {
+    g_result_fn_ = fn;
 }
 
 // Optional: install comms-gateway callbacks for xi::comms::*. Scripts that don't

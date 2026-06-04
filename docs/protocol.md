@@ -117,6 +117,7 @@ Out-of-band notifications that don't fit the above.
 { "type": "event", "name": "run_started", "data": { "run_id": 17 } }
 { "type": "event", "name": "run_finished", "data": { "run_id": 17, "ms": 42 } }
 { "type": "event", "name": "run_error", "data": { "run_id": 17, "what": "..." } }
+{ "type": "event", "name": "run_result", "data": { "code": -2, "msg": "edge chip", "run_id": 17, "ms": 42, "source": "cam0", "group": "high" } }
 { "type": "event", "name": "script_reloaded", "data": { "path": "..." } }
 { "type": "event", "name": "state_dropped", "data": { "old_schema": 1, "new_schema": 2 } }
 { "type": "event", "name": "compile_started", "data": { "path": "..." } }
@@ -130,6 +131,14 @@ wall-clock duration). `run_error.data` is `{run_id, what}` and fires
 INSTEAD of `run_finished` when the inspect throws (C++ exception or
 SEH). Drivers waiting for run completion should listen for
 `run_finished` OR `run_error` — exactly one fires per run.
+
+`run_result` carries the run's **one verdict** (script-set via `xi::result`, or
+`0` = NA if unset): `{code, msg, run_id, ms[, source, group]}`. Code convention:
+`>0` ok-class, `0` NA, `-1…` ng-class, `<= -990000` framework system-fail enum.
+It fires once per run (after vars, before `run_finished`) **and** once per
+**dropped** trigger (queue overflow → `code: -999001` `XI_SYS_DROPPED`, with no
+`run_id`/`ms`) — so a consumer sees one Result per trigger with no gaps. See
+[`design/run-result.md`](./design/run-result.md).
 
 `compile_started` / `compile_finished` bracket the `cmd:compile_and_load`
 operation. `compile_started` fires immediately before cl.exe is invoked

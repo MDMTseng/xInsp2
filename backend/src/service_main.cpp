@@ -489,6 +489,48 @@ static void status_cb(const char* text) {
     set_status_internal("@script", text);
 }
 
+// ---- Per-run Result (run_result event) --------------------------------------
+// One Result per trigger: a signed status code + message. See
+// docs/design/run-result.md. Framework system-fail enum lives in a reserved band
+// (<= -990000) the user API (xi::result) refuses to set.
+enum : int {
+    XI_SYS_DROPPED    = -999001,  // overflow: event dropped before it could run
+    XI_SYS_NO_VERDICT = -999005,  // ran but script set no RESULT (v1.1 opt-in; unused in v1)
+};
+
+// The current run's result, written by the script via xi::result(code,msg)
+// through result_cb. thread_local so parallel lanes don't clobber each other
+// (same as g_run_frame_path_). Reset at the top of each inspect.
+struct RunResult { int code = 0; std::string msg; bool set = false; };
+static thread_local RunResult g_run_result;
+
+// Installed into the script DLL (xi_script_set_result_callback) so xi::result()
+// records the one per-run verdict.
+static void result_cb(int code, const char* msg) {
+    g_run_result.code = code;
+    g_run_result.msg.assign(msg ? msg : "");
+    g_run_result.set = true;
+}
+
+// Emit a `run_result` wire event. Fields ride directly in the event data (same
+// envelope shape as run_finished). Used by the inspect path (run_id >= 0) and the
+// drop path (run_id < 0 → omitted; code = XI_SYS_DROPPED). ms < 0 omits "ms".
+static void emit_run_result(xi::ws::Server& srv, int code, const std::string& msg,
+                            int64_t run_id, int64_t ms,
+                            const std::string& source, const std::string& group) {
+    std::string data = "{\"code\":" + std::to_string(code) + ",\"msg\":";
+    xp::json_escape_into(data, msg);
+    if (run_id >= 0) data += ",\"run_id\":" + std::to_string((long long)run_id);
+    if (ms >= 0)     data += ",\"ms\":" + std::to_string((long long)ms);
+    if (!source.empty()) { data += ",\"source\":"; xp::json_escape_into(data, source); }
+    if (!group.empty())  { data += ",\"group\":";  xp::json_escape_into(data, group); }
+    data += "}";
+    xp::Event ev;
+    ev.name = "run_result";
+    ev.data_json = data;
+    srv.send_text(ev.to_json());
+}
+
 // ---- Comms gateway client --------------------------------------------------
 // Connects to the out-of-process comms gateway (xinsp-comms) over loopback and
 // backs the script's xi::comms::* API. The gateway owns the PLC link; we just
@@ -1303,6 +1345,14 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
     // not the previous value.
     if (s.set_run_context) s.set_run_context(frame_path.c_str());
 
+    // Per-run Result: reset to NA before the script runs, and snapshot the
+    // source/group provenance from this thread's trigger (thread_local, valid
+    // for the duration of the inspect). The script sets the result via
+    // xi::result() → result_cb → g_run_result; we emit it below in the gate.
+    g_run_result = RunResult{};
+    std::string rr_source, rr_group;
+    if (g_current_trigger) { rr_source = g_current_trigger->leader_source; rr_group = g_current_trigger->group; }
+
     // F-P1-1: bracket the inspect with run_started / run_finished /
     // run_error events so SDK callers can observe lifecycle outside the
     // synchronous rsp path. Documented in docs/protocol.md.
@@ -1398,12 +1448,20 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         EmitTurn turn(emit_seq);
         if (inspect_ok) {
             emit_vars_and_previews(srv, s, run_id, dt_ms);
+            // One Result per run: whatever the script set (default 0 = NA if it
+            // called no xi::result), emitted before run_finished so consumers
+            // can pair them. Ordered with the rest of the stream by the gate.
+            emit_run_result(srv, g_run_result.code, g_run_result.msg,
+                            run_id, dt_ms, rr_source, rr_group);
             emit_run_event("run_finished",
                            "\"ms\":" + std::to_string((long long)dt_ms));
             // Clear so the next run, if it doesn't carry a frame_path arg,
             // sees an empty path instead of the stale previous one.
             if (s.set_run_context) s.set_run_context("");
         } else {
+            // Inspect failed (crash/throw) — still emit one Result so the stream
+            // has no gap. v1: NA (0). v1.1 upgrades this to XI_SYS_CRASHED/TIMEOUT.
+            emit_run_result(srv, 0, "inspect error", run_id, dt_ms, rr_source, rr_group);
             emit_run_event("run_error", run_error_what);
         }
     }
@@ -1450,7 +1508,11 @@ static bool enqueue_event_(xi::TriggerEvent ev) {
         ++g_dropped_newest;
         // Caller's `ev` destructs as fn returns; release any image
         // refs it carries.
+        std::string ds = ev.leader_source, dg = ev.group;   // the dropped (new) event
         for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
+        lk.unlock();
+        if (g_srv_for_bp)   // one Result per trigger: the dropped frame is NA
+            emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", -1, -1, ds, dg);
         return false;
     }
     if (overflow == "block") {
@@ -1469,11 +1531,15 @@ static bool enqueue_event_(xi::TriggerEvent ev) {
     }
     // Default: drop_oldest.
     auto& front = g_ev_queue.front();
+    std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
     for (auto& [src, h] : front.images) xi::ImagePool::instance().release(h);
     g_ev_queue.pop_front();
     g_ev_queue.push_back(std::move(ev));
     g_ev_cv.notify_one();
     ++g_dropped_oldest;
+    lk.unlock();
+    if (g_srv_for_bp)   // one Result per trigger: the dropped frame is NA
+        emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", -1, -1, ds, dg);
     return true;
 }
 
@@ -1643,15 +1709,28 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         while (ns > prev && !lane->high_watermark.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
         lane->cv.notify_one(); return true;
     }
-    if (ov == "drop_newest") { ++lane->dropped; for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); return false; }
+    if (ov == "drop_newest") {
+        ++lane->dropped;
+        std::string ds = ev.leader_source, dg = ev.group;   // the dropped (new) event
+        for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
+        lk.unlock();
+        if (g_srv_for_bp)
+            emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", -1, -1, ds, dg);
+        return false;
+    }
     if (ov == "block") {
         lane->cv.wait(lk, [&] { return (int)lane->q.size() < depth || !g_continuous.load(); });
         if (!g_continuous.load()) { for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); return false; }
         lane->q.push_back(std::move(ev)); lane->cv.notify_one(); return true;
     }
     auto& front = lane->q.front();   // drop_oldest
+    std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
     for (auto& [s, h] : front.images) xi::ImagePool::instance().release(h);
-    lane->q.pop_front(); lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped; return true;
+    lane->q.pop_front(); lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped;
+    lk.unlock();
+    if (g_srv_for_bp)
+        emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", -1, -1, ds, dg);
+    return true;
 }
 
 static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
@@ -2310,6 +2389,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // and xi::status() is a no-op.
             if (g_script.set_status_callback) {
                 g_script.set_status_callback((void*)status_cb);
+            }
+            // Result callback. Scripts without xi_result.hpp leave this null
+            // and xi::result() is a no-op (run_result then defaults to NA).
+            if (g_script.set_result_callback) {
+                g_script.set_result_callback((void*)result_cb);
             }
             // Comms-gateway callbacks for xi::comms::* (no-op without xi_comms.hpp).
             if (g_script.set_comms_callbacks) {

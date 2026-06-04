@@ -1,0 +1,4 @@
+{
+  "name": "qa_run_result",
+  "script": "inspect.cpp"
+}

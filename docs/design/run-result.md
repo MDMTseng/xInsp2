@@ -1,6 +1,9 @@
 # Per-run result — status code + message (design)
 
-> **Status: design, not scheduled.** Captures the agreed shape. 2026-06-05.
+> **Status: Phase 1 shipped; Phase 2 designed.** 2026-06-05.
+> Phase 1 (`RESULT` API + `run_result` event + `XI_SYS_DROPPED` at the drop site)
+> is built + regression-tested (`examples/qa_run_result/`). Phase 2 (per-group
+> `result_order`) is the plan below.
 
 ## Goal
 
@@ -81,7 +84,9 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 - The Result rides a **dedicated `run_result` event** (decided — *not* folded into
   `run_finished`), so a **dropped** trigger — which has no run / no `run_finished` —
   emits the same shape. `run_finished` stays lifecycle/timing only.
-  `{"type":"event","name":"run_result","result":{code,msg,run_id,ms,source,group}}`.
+  `{"type":"event","name":"run_result","data":{"code":C,"msg":"…","run_id":R,"ms":D,"source":S,"group":G}}`
+  (fields ride directly in the event `data`, same envelope as `run_finished`;
+  `run_id`/`ms` are omitted on a dropped frame).
 - **HMI**: a `verdict` card binds `code` (sign → green/red; `≤ -990000` → a distinct
   "system" colour); `yield` excludes/【buckets system fails; a **Pareto** card ranks
   by `code`/`message`. Ties into [`production-hmi.md`](./production-hmi.md).
@@ -92,7 +97,7 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 
 ## Increment plan
 
-### Phase 1 — per-run Result (the core; low-risk, standalone value)
+### Phase 1 — per-run Result ✅ shipped
 1. **Script API** — `xi_result.hpp` (new), mirrors `xi_status.hpp`'s host-callback
    pattern: `xi::result(code, msg="")`, `xi::ok(n=1,m="")` (→ `+n`), `xi::ng(n=1,m="")`
    (→ `-n`). The header **rejects the system band**: a user `code <= -990000` is
@@ -109,8 +114,10 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 4. **Drop path** — `enqueue_to_lane_` / legacy overflow emits a `run_result` with
    `XI_SYS_DROPPED` (+ trigger_id/source/group, no run_id) at the drop site →
    one Result per trigger, no gaps.
-5. **HMI** — `protocol.mjs` decodes `run_result`; verdict card reads `code` (sign →
-   colour; `<= -990000` → system colour); yield uses sign. Minimal wiring.
+5. **HMI** — the `run_result` event ships on the same WS stream the HMI already
+   consumes; binding the verdict / yield cards to `code` (sign → colour;
+   `<= -990000` → system colour) is a small **follow-up** in `hmi/` (cards exist;
+   they just need to read the new event).
 6. **comms** — *no comms code in v1*; a script can already forward via
    `xi::comms.send(...)`. Gateway directly consuming `run_result` = v1.1.
 7. **Test + docs** — `examples/qa_run_result/` (ok/ng/unset → assert
