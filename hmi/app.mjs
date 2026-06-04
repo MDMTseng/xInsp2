@@ -108,11 +108,13 @@ function editCard(path, patch) {
 // the boundary between just those two panes (their combined size is preserved).
 function makeDivider(path, i, col, box, els, fr) {
   const div = document.createElement("div");
-  div.style.cssText = `flex:0 0 ${mode === "compose" ? 7 : 8}px;background:${mode === "compose" ? "#3a6ea5" : "#222"};` +
-    (mode === "compose" ? `cursor:${col ? "row-resize" : "col-resize"}` : "pointer-events:none");
+  div.style.cssText = `flex:0 0 ${mode === "compose" ? 9 : 8}px;background:${mode === "compose" ? "#3a6ea5" : "#222"};` +
+    (mode === "compose" ? `touch-action:none;cursor:${col ? "row-resize" : "col-resize"}` : "pointer-events:none");
   if (mode !== "compose") return div;
-  div.onmousedown = (e) => {
+  // Pointer events cover mouse + touch + pen (so divider-drag works on a phone).
+  div.onpointerdown = (e) => {
     e.preventDefault();
+    try { div.setPointerCapture(e.pointerId); } catch {}
     const rect = box.getBoundingClientRect();
     let before = 0; for (let k = 0; k < i; k++) before += fr[k];
     const pair = fr[i] + fr[i + 1];
@@ -124,8 +126,8 @@ function makeDivider(path, i, col, box, els, fr) {
       els[i].style.flex = `${cur[i]} 1 0`; els[i + 1].style.flex = `${cur[i + 1]} 1 0`;
       div._w = cur.slice();
     };
-    const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); if (div._w) { layout = setWeights(layout, path, div._w); reRender(); } };
-    document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
+    const up = () => { document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up); if (div._w) { layout = setWeights(layout, path, div._w); reRender(); } };
+    document.addEventListener("pointermove", move); document.addEventListener("pointerup", up);
   };
   return div;
 }
