@@ -164,6 +164,26 @@ collection).
 
 ---
 
+## Decorating + linking script symbols (`xi::use("…")`)
+
+Two related features share one scanner (`scanUses` + the `USE_RE` regex over
+`xi::use("name")` / `xi::use<T>("name")`) and the `instanceMap` (name→plugin,
+refreshed from each `instances` message):
+
+- **Instance highlighting** — two `TextEditorDecorationType`s colour the instance
+  name: known instances (in `instanceMap`) one way, unknown/typo'd names in
+  `errorForeground` (catches typos). Refreshed on active-editor / text change and
+  on the `instances` message. Decorations are the simplest route for colour you
+  control; reach for semantic tokens only if you need theme-grammar integration.
+- **Ctrl/⌘+click → webui** — a `DocumentLinkProvider` for `cpp` turns each known
+  instance name into a link whose target is a `command:` URI
+  (`command:xinsp2.openInstanceUI?<json-args>`). Clicking runs the command;
+  `openInstanceUI` resolves the plugin from `instanceMap` when only the instance
+  name is passed. `command:` URIs in `DocumentLink`s execute directly (no
+  `isTrusted` dance needed, unlike markdown links).
+
+---
+
 ## Hooking into project lifecycle events
 
 `extension.ts` keeps `lastProjectFolder` updated on `cmd:open_project` /

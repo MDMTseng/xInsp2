@@ -615,6 +615,64 @@ export function activate(context: vscode.ExtensionContext) {
     }
     let lastInstanceCount = 0;
     let lastPluginCount = 0;
+    // instance name -> plugin name, kept fresh from the `instances` message. Used
+    // to colour xi::use("…") references in the script and to resolve the plugin
+    // when Ctrl/⌘+clicking an instance to open its webui.
+    const instanceMap = new Map<string, string>();
+
+    // ---- xi::use("…") helpers (instance highlight + Ctrl-click → webui) ------
+    // group 1 = everything up to & including the opening quote; group 2 = the name.
+    const USE_RE = /(xi::use\s*(?:<[^>]*>)?\s*\(\s*")([^"]+)"/g;
+    function scanUses(doc: vscode.TextDocument): { name: string; range: vscode.Range }[] {
+        const text = doc.getText(), out: { name: string; range: vscode.Range }[] = [];
+        for (let m; (m = USE_RE.exec(text)); ) {
+            const start = m.index + m[1].length;
+            out.push({ name: m[2], range: new vscode.Range(doc.positionAt(start), doc.positionAt(start + m[2].length)) });
+        }
+        return out;
+    }
+    const knownDeco = vscode.window.createTextEditorDecorationType({
+        color: new vscode.ThemeColor('charts.green'), fontWeight: 'bold',
+        textDecoration: 'underline dotted',
+    });
+    const unknownDeco = vscode.window.createTextEditorDecorationType({
+        color: new vscode.ThemeColor('errorForeground'),
+        textDecoration: 'underline wavy var(--vscode-errorForeground)',
+    });
+    function refreshInstanceDecorations(editor?: vscode.TextEditor) {
+        const ed = editor ?? vscode.window.activeTextEditor;
+        if (!ed || ed.document.languageId !== 'cpp') return;
+        const known: vscode.Range[] = [], unknown: vscode.Range[] = [];
+        const haveList = instanceMap.size > 0;
+        for (const u of scanUses(ed.document)) {
+            (!haveList || instanceMap.has(u.name) ? known : unknown).push(u.range);
+        }
+        ed.setDecorations(knownDeco, known);
+        ed.setDecorations(unknownDeco, unknown);
+    }
+    let decoTimer: any;
+    context.subscriptions.push(
+        knownDeco, unknownDeco,
+        // Ctrl/⌘+click an instance name in xi::use("…") → open its webui.
+        vscode.languages.registerDocumentLinkProvider({ language: 'cpp' }, {
+            provideDocumentLinks(doc) {
+                return scanUses(doc)
+                    .filter((u) => instanceMap.has(u.name))
+                    .map((u) => {
+                        const link = new vscode.DocumentLink(u.range,
+                            vscode.Uri.parse(`command:xinsp2.openInstanceUI?${encodeURIComponent(JSON.stringify([u.name]))}`));
+                        link.tooltip = `Open “${u.name}” webui (Ctrl/⌘+click)`;
+                        return link;
+                    });
+            },
+        }),
+        vscode.window.onDidChangeActiveTextEditor((ed) => refreshInstanceDecorations(ed)),
+        vscode.workspace.onDidChangeTextDocument((e) => {
+            const ed = vscode.window.activeTextEditor;
+            if (ed && e.document === ed.document) { clearTimeout(decoTimer); decoTimer = setTimeout(() => refreshInstanceDecorations(), 200); }
+        }),
+    );
+    refreshInstanceDecorations();
     let lastConnected = false;
 
     // ---- FE status channel (attach mode) -----------------------------------
@@ -839,6 +897,10 @@ export function activate(context: vscode.ExtensionContext) {
             viewerProvider.postVars(msg);
         } else if (msg.type === 'instances') {
             treeProvider.update(msg.instances ?? [], msg.params ?? []);
+            // Keep the name->plugin map + script highlighting in sync.
+            instanceMap.clear();
+            for (const i of (msg.instances ?? [])) if (i.name && i.plugin) instanceMap.set(i.name, i.plugin);
+            refreshInstanceDecorations();
             setCtx('hasInstances', (msg.instances?.length ?? 0) > 0);
             lastInstanceCount = (msg.instances?.length ?? 0);
             setViewBadge(lastConnected, lastInstanceCount, lastPluginCount);
@@ -1992,6 +2054,9 @@ void xi_inspect_entry(int frame) {
                 instanceName = arg1.label ?? arg1.name;
                 pluginName = arg1.description ?? arg1.plugin;
             }
+            // Ctrl/⌘+click from the script passes only the instance name — resolve
+            // its plugin from the live instance map.
+            if (instanceName && !pluginName) pluginName = instanceMap.get(instanceName);
             if (!instanceName || !pluginName) return;
 
             // Check if panel already open
