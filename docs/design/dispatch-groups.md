@@ -144,6 +144,35 @@ The backend resolves source→group on `emit_trigger` (untagged → `default_gro
 Chosen over a project-level source→group map or an `emit_trigger` arg because the
 source is the natural owner of "how urgent is my stream".
 
+## Result ordering with groups
+
+Today `result_order` is **global**: `arrival` mode gates emission by one dispatch
+sequence so the `vars` / `run_finished` stream is in frame-arrival order. With
+groups that global order **breaks the whole point**:
+
+- The critical group's output would be gated waiting for a *lagging best-effort
+  frame's* turn — i.e. the low group could stall high's output ordering.
+- Multiple groups emit onto the one WS stream, so results **interleave** and a
+  consumer can't tell which group a `vars` message came from.
+
+So ordering becomes **per-group**, not global:
+
+1. **`result_order` is per-group** — each group has its own `arrival`/`completion`
+   setting and its **own emit-sequence gate**. A slow `low` group can never delay
+   `high`'s in-order emission.
+2. **Every emitted message carries its `group`** (+ a per-group sequence) —
+   `vars`, `run_started`, `run_finished` gain a `group` field. A consumer treats
+   **each group as its own ordered substream**; cross-group interleave on the wire
+   is *by design* (different priority/cadence — there is no global order to keep).
+   `run_id` may stay globally unique, but "in order" is a per-group guarantee.
+3. **Consumer caveat (HMI):** one script can emit the **same var name** under
+   different groups (e.g. the same `verdict`), so a naive consumer would let `low`
+   clobber `high`. Key results by **`(group, name)`** (or branch the script so var
+   names differ per source). The HMI should namespace its `state.vars` by group.
+
+There is no "global single output order" anymore — only per-group order plus an
+intentional cross-group interleave the consumer demultiplexes by `group`.
+
 ## Implementation sketch
 
 - `TriggerEvent` (`xi_trigger_bus.hpp`) += `std::string group`. Source sets it from
@@ -154,6 +183,10 @@ source is the natural owner of "how urgent is my stream".
 - Each group spawns its own `max_parallel` workers; **each worker is pinned to its
   group's queue** and its OS priority is set once at spawn from `thread_priority`.
   No shared pool, no cross-group pick.
+- Result ordering is **per-group**: each group keeps its own emit-sequence (the
+  current single `g_dispatch_seq`/`g_result_ordered` become per-group state), and
+  `vars`/`run_started`/`run_finished` carry a `group` field so consumers can
+  demultiplex. Legacy single-group keeps today's exact behaviour.
 - `PluginManager`/project parsing: read `parallelism.groups` + `default_group`;
   when absent, synthesize one implicit group from legacy
   `dispatch_threads`/`queue_depth`/`overflow` (single code path).
@@ -178,8 +211,12 @@ source is the natural owner of "how urgent is my stream".
   `high`-group latency (the headline guarantee) — measure high's p99 with low idle
   vs saturated.
 - `min_interval_ms` caps a group's dispatch rate; surplus coalesces to latest.
+- **Per-group ordering**: with each group in `arrival` mode, each group's `vars`
+  stream is in-order *within the group* even when another group lags; the `group`
+  tag lets a consumer separate the substreams; a saturated `low` group does not
+  perturb `high`'s emission order.
 - Untagged triggers land in `default_group`; legacy projects (no `groups`) behave
-  identically to today.
+  identically to today (global ordering preserved for the single implicit group).
 - Cross-platform: thread-priority set is gated; the rest is portable.
 
 ## See also
