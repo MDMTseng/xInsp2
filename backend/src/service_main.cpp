@@ -1703,6 +1703,10 @@ struct GroupLane {
     bool                           ordered{false};
     std::atomic<int64_t>           seq_next{0};
     EmitGate                       gate;
+    // Rate limit (min_interval_ms): the next steady-clock-us a dispatch may START.
+    // Workers CAS-claim a slot ≥ this and sleep to it, so dispatch starts are ≥
+    // min_interval apart across the lane (surplus events coalesce via drop_oldest).
+    std::atomic<int64_t>           next_allowed_us{0};
 };
 // Lanes are shared_ptr + guarded by g_lanes_mu so a producer (an emit thread /
 // the timer) that grabbed a lane can't have it destroyed under it by a concurrent
@@ -1827,6 +1831,7 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
         // (n==1 is already in order). Reset the per-lane cursors per (re)start.
         lane->ordered = (lane->cfg.result_order == "arrival") && n > 1;
         lane->seq_next.store(0);
+        lane->next_allowed_us.store(0);
         { std::lock_guard<std::mutex> lk(lane->gate.mu); lane->gate.next = 0; }
         for (int i = 0; i < n; ++i) {
             lane->workers.emplace_back([srv_ptr, lane, wi = i] {
@@ -1854,6 +1859,17 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                     }
                     lane->cv.notify_one();   // wake a producer parked on overflow:block
                     if (!have) continue;
+                    // Rate limit: CAS-claim a dispatch slot ≥ min_interval after the
+                    // lane's previous one, then sleep to it. Surplus events meanwhile
+                    // pile in the queue and coalesce via drop_oldest (latest wins).
+                    if (lane->cfg.min_interval_ms > 0) {
+                        int64_t iv = (int64_t)lane->cfg.min_interval_ms * 1000;
+                        int64_t now = xi::now_us(), prev = lane->next_allowed_us.load(std::memory_order_relaxed), slot;
+                        do { slot = prev > now ? prev : now; }
+                        while (!lane->next_allowed_us.compare_exchange_weak(prev, slot + iv, std::memory_order_acq_rel));
+                        for (int64_t w = slot - xi::now_us(); w > 0 && g_continuous.load(); w = slot - xi::now_us())
+                            std::this_thread::sleep_for(std::chrono::microseconds(w > 20000 ? 20000 : w));
+                    }
                     ev.dequeued_at_us = xi::now_us();
                     lane->running.fetch_add(1);
                     int frame_seq = (int)rid;
@@ -3650,6 +3666,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 data += "{\"name\":"; xp::json_escape_into(data, l.cfg.name);
                 data += ",\"max_parallel\":" + std::to_string(l.cfg.max_parallel);
                 data += ",\"thread_priority\":\"" + l.cfg.thread_priority + "\"";
+                data += ",\"min_interval_ms\":" + std::to_string(l.cfg.min_interval_ms);
                 data += ",\"queue_now\":" + std::to_string(lq);
                 data += ",\"running\":" + std::to_string(l.running.load());
                 data += ",\"high_watermark\":" + std::to_string(l.high_watermark.load());

@@ -365,6 +365,7 @@ struct ProjectInfo {
         int         queue_depth     = 100;
         std::string overflow        = "drop_oldest";
         std::string result_order    = "completion"; // "completion" | "arrival" (per-group)
+        int         min_interval_ms = 0;             // 0 = unlimited; else min spacing between dispatch starts (rate cap)
         // CPU affinity (OS). Empty = unbound (default — OS schedules freely). Each
         // inner vector is a core-set MASK (a worker may run on ANY of those cores,
         // not pinned to one). Sizes: 0 = unbound; 1 = all workers share that mask;
@@ -1454,6 +1455,8 @@ public:
                                 grp.result_order = "completion";
                             }
                         }
+                        if (cJSON* k = cJSON_GetObjectItem(g, "min_interval_ms"); k && cJSON_IsNumber(k))
+                            grp.min_interval_ms = std::min(3600000, std::max(0, (int)k->valuedouble));
                         // cpu_affinity: flat [0,1,..] = one shared mask; nested
                         // [[..],[..]] = per-worker masks. Empty/invalid → unbound.
                         if (cJSON* k = cJSON_GetObjectItem(g, "cpu_affinity"); k && cJSON_IsArray(k)) {

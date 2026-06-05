@@ -287,8 +287,13 @@ intentional cross-group interleave the consumer demultiplexes by `group`.
   unbound). `examples/qa_cpu_affinity/` verifies via `GetCurrentProcessorNumber`
   that a `[2,3,4,5]`-bound group only ever ran on cores 2-5 (and used >1 of them —
   a real mask, not a pin), while the unbound group spread across other cores.
+- **`min_interval_ms` rate limit** ✅ shipped — a group caps its dispatch rate to
+  one start per `min_interval_ms` (workers CAS-claim a slot ≥ that spacing and sleep
+  to it; surplus coalesces via `drop_oldest`). `examples/qa_min_interval/`: a steady
+  20/s into a `min_interval_ms:100` group is processed at ~10/s (cap), dropping the
+  surplus, while an uncapped group runs full-rate.
 - **Deferred follow-ups.** The `group` wire tag on `vars`/`run_started`/`run_finished`
-  (only `run_result` carries `group` today); `min_interval_ms` rate limit; the
+  (only `run_result` carries `group` today); the
   *latency* half of load-separation (assert a saturated `low` doesn't raise `high`'s
   p99 — qa_two_group_paths proves routing/cadence, not yet a latency bound).
 - **Later (only if ever needed)** — a shared-pool / oversubscribed mode with a real
