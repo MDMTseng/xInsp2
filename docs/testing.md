@@ -224,6 +224,19 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   under both modes with `dispatch_threads=4`: **completion** reorders (out-of-order
   `run_id`s on the wire), **arrival** emits in frame-arrival order (zero
   inversions) while compute still runs parallel. Windows-only; skip on non-`nt`.
+- **Dispatch groups (per-group lanes)** — Windows-only regressions for the
+  `parallelism.groups` model (see `docs/design/dispatch-groups.md` cheat-sheet):
+  `qa_dispatch_groups` (gating + clamp + warnings), `qa_two_group_paths` (two
+  sources route to two lanes, zero cross-routing), `qa_group_parallelism` (peak
+  running == `max_parallel`, 1/2/4, + arrival ordering), `qa_group_stress` (8
+  groups × 4 workers, 20/s burst, near-saturation), `qa_cpu_affinity` (a bound
+  group only runs on its core mask), `qa_min_interval` (rate cap 20/s→10/s).
+- **Per-run Result** — `examples/qa_run_result/` proves the `run_result` event
+  (verdict code + message, dropped→`XI_SYS_DROPPED`, reserved-band warning).
+- **local_image_source auto mode** — `examples/qa_local_auto/` proves the reused
+  "local" source self-emitting a folder on a timer (auto-update).
+- **ImagePool throughput** — `backend/tests/bench_image_pool` (manual, not a
+  ctest): create/release cost; its header records why buffer reuse isn't worth it.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

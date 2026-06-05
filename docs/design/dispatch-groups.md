@@ -300,6 +300,32 @@ intentional cross-group interleave the consumer demultiplexes by `group`.
   priority queue. Out of scope: group-owned threads already meet the goal and
   threads are cheap, so there's no shared pool to schedule.
 
+## Tuning cheat-sheet
+
+All the dispatch / thread performance knobs in one place (per-group unless noted),
+with the regression that proves each:
+
+| Knob | Where | What it does | Regression |
+|---|---|---|---|
+| `max_parallel` | group | worker threads the group owns (true concurrency) | `qa_group_parallelism` (peak running == cap) |
+| `thread_priority` | group | OS priority `high`/`normal`/`low` (who gets preempted) | — |
+| `cpu_affinity` | group | multi-core mask (`[0,1,2,3]` or per-worker `[[..],[..]]`); default unbound | `qa_cpu_affinity` (only ran on its cores) |
+| `min_interval_ms` | group | rate cap; surplus coalesces to latest via `drop_oldest` | `qa_min_interval` (20/s → 10/s) |
+| `result_order` | group | `arrival` = emit in frame order (per-group gate) vs `completion` | `qa_group_parallelism`/`qa_group_stress` (0 inversions) |
+| `queue_depth` + `overflow` | group | backpressure: `drop_oldest`/`drop_newest`/`block` | `qa_dispatch_groups` |
+| trigger-only (`cmd:start fps:0`) | run | continuous, sources drive, **no synthetic timer** (keeps it off the default group) | `qa_two_group_paths` etc. (started fps:0) |
+| `--priority=CLASS` | process | whole-backend OS priority class (Win) | — |
+| timer res 1ms + oversubscribe warn | process | tight sleeps; warns if Σ workers > cores | — |
+
+Two-path routing isolation (`qa_two_group_paths`) + the 8-group stress
+(`qa_group_stress`, near-saturation) show groups are independent — an overloaded
+group drops/queues *only in itself* and never perturbs the others.
+
+**Not done on purpose:** ImagePool buffer reuse — `bench_image_pool` measured the
+pool at ~295 ns/create (millions/s) with real-frame cost dominated by unavoidable
+memset/page-faults, so reuse is invisible at our dispatch rates; not worth
+reworking a lock-free structure. Re-measure above ~100K images/s.
+
 ## Tests
 
 - A `low` group running long inspects at its `max_parallel` does **not** raise
