@@ -267,6 +267,13 @@ Both mirror `project.json` `"runtime": { "timer_fps", "process_priority" }`, whi
 the backend applies on `open_project`; the VS Code Project Settings UI sends these
 commands on change and persists to `runtime`.
 
+`get_dashboard args: { "name"?: string }` → `data: { found, name, dashboard }`.
+Serves the project's HMI dashboard: `<project>/dashboard.json` (or
+`dashboard.<name>.json` when `name` is given), embedded verbatim. So the HMI only
+ever needs the BE's WS URL — it asks the BE for its dashboard + all data, with no
+filesystem coupling. `name` is token-guarded (no path traversal); a missing file →
+`found:false` (the HMI then keeps its static fallback).
+
 Continuous mode runs `parallelism.dispatch_threads` worker threads inside
 the backend (default 1; see `docs/guides/writing-a-script.md` → Parallel
 dispatch for the pool, per-instance reentrancy, watchdog, and `result_order`).

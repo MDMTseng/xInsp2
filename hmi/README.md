@@ -40,6 +40,13 @@ index.html?ws=ws://<host>:<port>/&dashboard=./dashboard.json
 image) and emits them as `VAR`s. Cards just **bind to a var name** — no logic in
 the HMI. To change a verdict rule, change the script.
 
+**Dashboard source:** on connect the HMI asks the backend for the *project's*
+dashboard (`cmd:get_dashboard` → `<project>/dashboard.json`, or
+`dashboard.<name>.json` via `?board=<name>`). If the project has one it wins; if
+not, the HMI falls back to the static `?dashboard=…`/`dashboard.json` it was served.
+So in production the HMI needs **only the BE WS URL** — it pulls the dashboard *and*
+the data from the backend, no filesystem coupling.
+
 ```
 test:  node hmi/test/protocol.test.mjs && node hmi/test/layout.test.mjs
 ```

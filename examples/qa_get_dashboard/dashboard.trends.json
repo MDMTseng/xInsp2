@@ -1,0 +1,1 @@
+{ "title": "Line A — trends", "layout": { "card": { "type": "spc", "bind": { "var": "x" } } } }

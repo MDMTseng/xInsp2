@@ -224,14 +224,20 @@ function reRender() {
   scheduleRender();
 }
 
-async function buildLayout() {
-  let dash;
-  try { dash = await (await fetch(DASH, { cache: "no-store" })).json(); }
-  catch (e) { document.getElementById("err").textContent = `Could not load ${DASH}: ${e}`; return; }
+// Apply a dashboard object ({title, layout}) — used by both the static fetch
+// (fallback) and the BE's get_dashboard reply (the project's own dashboard).
+function applyDash(dash) {
+  if (!dash || !dash.layout) return;
   document.title = (dash.title || "xInsp2 HMI");
-  layout = dash.layout || null;
+  layout = dash.layout;
   reRender();
 }
+async function buildLayout() {
+  try { applyDash(await (await fetch(DASH, { cache: "no-store" })).json()); }
+  catch (e) { document.getElementById("err").textContent = `Could not load ${DASH}: ${e}`; }
+}
+// Optional ?board=<name> selects the project's dashboard.<name>.json (BE-served).
+const BOARD = qs.get("board") || "";
 
 // ---- header controls: mode toggle + export (compose) -----------------------
 let modeBtn = null, exportWrap = null;
@@ -264,14 +270,20 @@ function connect() {
   ws.binaryType = "arraybuffer";
   // Poll dispatch_stats so the groups card can show live per-group concurrency.
   // Cheap, so just poll whenever connected (the rsp is ignored if no groups card).
-  let statsTimer = 0, cmdId = 1;
+  let statsTimer = 0, cmdId = 1, dashCmdId = -1;
   const startStatsPoll = () => {
     if (statsTimer) return;
     statsTimer = setInterval(() => {
       if (ws.readyState === 1) ws.send(JSON.stringify({ type: "cmd", id: ++cmdId, name: "dispatch_stats", args: {} }));
     }, 150);
   };
-  ws.onopen = () => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); };
+  // Ask the BE for the PROJECT's dashboard so the HMI only needs the WS URL (no
+  // filesystem coupling). If the project has one it overrides the static fetch.
+  const requestDashboard = () => {
+    dashCmdId = ++cmdId;
+    ws.send(JSON.stringify({ type: "cmd", id: dashCmdId, name: "get_dashboard", args: BOARD ? { name: BOARD } : {} }));
+  };
+  ws.onopen = () => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); };
   ws.onclose = (e) => { dlog(`WS CLOSE code=${e.code} reason=${e.reason || "-"} clean=${e.wasClean}`); if (statsTimer) { clearInterval(statsTimer); statsTimer = 0; } setConn("● disconnected", "#6a1e1e"); setTimeout(connect, 1500); };
   ws.onerror = () => { dlog("WS ERROR event"); ws.close(); };
   ws.onmessage = (ev) => {
@@ -285,6 +297,11 @@ function connect() {
       else if (m.type === "event" && (m.name === "safe_state" || m.name === "status")) { state.status = m.data; scheduleRender(); }
       // dispatch_stats reply → feed the groups card.
       else if (m.type === "rsp" && m.data && Array.isArray(m.data.groups)) { state.groups = m.data.groups; scheduleRender(); }
+      // get_dashboard reply → the project's own dashboard wins over the static one.
+      else if (m.type === "rsp" && m.id === dashCmdId) {
+        if (m.data?.found && m.data.dashboard) { dlog("dashboard from BE (project)"); applyDash(m.data.dashboard); }
+        else dlog("BE has no project dashboard — keeping static");
+      }
     } else {
       try { const f = decodePreviewFrame(ev.data); state.images[f.gid] = f.dataUrl; scheduleRender(); } catch (e) { console.error(e); }
     }

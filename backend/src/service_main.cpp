@@ -3915,6 +3915,26 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "no UI for plugin: " + *plugin);
         }
+    } else if (name == "get_dashboard") {
+        // Serve the project's HMI dashboard so the HMI only ever needs the BE WS
+        // URL (no filesystem coupling). Reads <project>/dashboard[.<name>].json.
+        // args: { name?: string }. data: { found, name, dashboard:<verbatim JSON> }.
+        auto nm = xp::get_string_field(parsed->args_json, "name");
+        std::string fname = (nm && !nm->empty()) ? ("dashboard." + *nm + ".json") : "dashboard.json";
+        // Guard the name against path escapes (only a simple token allowed).
+        bool bad = fname.find("..") != std::string::npos || fname.find('/') != std::string::npos
+                || fname.find('\\') != std::string::npos;
+        std::string content;
+        bool found = false;
+        if (!bad && !g_project_folder.empty()) {
+            std::ifstream f(std::filesystem::path(g_project_folder) / fname, std::ios::binary);
+            if (f) { std::ostringstream ss; ss << f.rdbuf(); content = ss.str(); found = !content.empty(); }
+        }
+        std::string out = "{\"found\":" + std::string(found ? "true" : "false") + ",\"name\":";
+        xp::json_escape_into(out, (nm && !nm->empty()) ? *nm : "");
+        if (found) out += ",\"dashboard\":" + content;   // verbatim file (already JSON)
+        out += "}";
+        send_rsp_ok(srv, id, out);
     } else if (name == "toolchain_health") {
         // C++ toolchain health check for the open project. Reports each
         // component's resolved path + source (override/env/default/none) +

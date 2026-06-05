@@ -1,0 +1,1 @@
+{ "name": "qa_get_dashboard", "script": "inspect.cpp" }

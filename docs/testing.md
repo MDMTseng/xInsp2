@@ -237,6 +237,9 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   (verdict code + message, dropped→`XI_SYS_DROPPED`, reserved-band warning).
 - **local_image_source auto mode** — `examples/qa_local_auto/` proves the reused
   "local" source self-emitting a folder on a timer (auto-update).
+- **BE-served dashboard** — `examples/qa_get_dashboard/` proves `cmd:get_dashboard`
+  serves `<project>/dashboard[.<name>].json` (missing → found:false; path traversal
+  blocked) so the HMI needs only the WS URL.
 - **ImagePool throughput** — `backend/tests/bench_image_pool` (manual, not a
   ctest): create/release cost; its header records why buffer reuse isn't worth it.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
