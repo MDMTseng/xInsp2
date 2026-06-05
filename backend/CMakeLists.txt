@@ -147,6 +147,13 @@ if(NOT MSVC)
 endif()
 add_test(NAME image_pool_stress COMMAND test_image_pool_stress)
 
+# Throughput micro-benchmark (not a ctest — run manually to measure alloc cost).
+add_executable(bench_image_pool tests/bench_image_pool.cpp)
+target_link_libraries(bench_image_pool PRIVATE xi_core cjson)
+if(NOT MSVC)
+    target_link_libraries(bench_image_pool PRIVATE pthread)
+endif()
+
 add_executable(test_sha256 tests/test_sha256.cpp)
 target_link_libraries(test_sha256 PRIVATE xi_core)
 add_test(NAME sha256 COMMAND test_sha256)

@@ -1,0 +1,79 @@
+//
+// bench_image_pool.cpp — measure ImagePool create/release throughput so we can
+// decide whether the per-lifecycle PoolEntry+pixels allocation (release deletes
+// the buffer; create news a fresh one) is worth turning into a buffer pool.
+//
+// Reports ns/create and creates/sec for a typical 320x240x3 image, single- and
+// multi-threaded (the multi-threaded number is what high-parallelism dispatch
+// would hit — allocator + lock-free slot-list contention). Not a correctness
+// test; prints numbers + always exits 0.
+//
+// FINDING (2026-06, 20-core Win box) — buffer-reuse is NOT worth it:
+//   - pure pool+alloc overhead (16x16): ~295 ns/create = ~3.4M/s single, still
+//     ~1.8M/s under 16 threads (negative scaling = atomic/alloc contention, but
+//     the aggregate dwarfs any real dispatch rate);
+//   - a 230 KB frame: ~6.5 us/create (155K/s single, 740K/s @16thr) — dominated by
+//     the memset / first-touch PAGE FAULTS, not malloc bookkeeping;
+//   - a 1.3 MB frame: ~310 us/create — pure memory bandwidth.
+//   At realistic rates (hundreds–low-thousands of inspects/s) the pool is <1% CPU.
+//   Reuse would only save malloc + first-touch faults (the memset happens anyway),
+//   invisible at our scale — not worth the risk of reworking a lock-free structure.
+//   Re-run this if a future workload pushes >100K images/s.
+//
+#include <xi/xi_image_pool.hpp>
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <thread>
+#include <vector>
+
+using clk = std::chrono::steady_clock;
+
+static double run(int W, int H, int C, int threads, long iters_per_thread) {
+    auto& pool = xi::ImagePool::instance();
+    std::atomic<bool> go{false};
+    std::vector<std::thread> ts;
+    auto t0 = clk::now();   // reassigned after the barrier
+    std::atomic<long> done{0};
+    for (int t = 0; t < threads; ++t) {
+        ts.emplace_back([&] {
+            while (!go.load(std::memory_order_acquire)) {}
+            for (long i = 0; i < iters_per_thread; ++i) {
+                xi_image_handle h = pool.create(W, H, C);
+                if (h) {
+                    uint8_t* p = pool.data(h);
+                    if (p) std::memset(p, (int)(i & 0xff), (size_t)W * H * C);  // touch the buffer
+                    pool.release(h);
+                }
+            }
+            done.fetch_add(1, std::memory_order_relaxed);
+        });
+    }
+    t0 = clk::now();
+    go.store(true, std::memory_order_release);
+    for (auto& th : ts) th.join();
+    double secs = std::chrono::duration<double>(clk::now() - t0).count();
+    long total = (long)threads * iters_per_thread;
+    double per_sec = total / secs;
+    double ns = secs * 1e9 / total;
+    std::printf("  %4dx%-4d c%d  threads=%2d  %10.0f creates/s  %7.1f ns/create  (%ld in %.3fs)\n",
+                W, H, C, threads, per_sec, ns, total, secs);
+    std::fflush(stdout);
+    return per_sec;
+}
+
+int main() {
+    std::printf("ImagePool create/release throughput (memset full buffer each iter):\n");
+    std::fflush(stdout);
+    run(320, 240, 3, 1, 5000);   // warm up
+    std::printf("--- 320x240x3 (~230 KB, a typical CV frame) ---\n");
+    for (int t : {1, 2, 4, 8, 16}) run(320, 240, 3, t, 20000);
+    std::printf("--- 1280x1024x1 (~1.3 MB) ---\n");
+    for (int t : {1, 4, 8}) run(1280, 1024, 1, t, 5000);
+    std::printf("--- 16x16x1 (tiny — isolates pool/slot+alloc overhead from buffer size) ---\n");
+    for (int t : {1, 8, 16}) run(16, 16, 1, t, 300000);
+    return 0;
+}
