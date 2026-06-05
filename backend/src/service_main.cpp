@@ -1254,18 +1254,24 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
                                     xi::script::LoadedScript& s,
                                     int64_t run_id, int64_t dt_ms) {
     if (s.ok() && s.snapshot) {
-        // Script path — read from DLL thunks
-        std::vector<char> sbuf(256 * 1024);
+        // Script path — read from DLL thunks. Buffers are thread_local + reused
+        // (grow-on-demand, never shrink) so a hot run loop doesn't allocate a fresh
+        // 256 KB snapshot vector + a vars-message string every run — same reasoning
+        // as the preview buffers below. thread_local = safe under parallel workers.
+        static thread_local std::vector<char> sbuf(256 * 1024);
+        if (sbuf.size() < 256 * 1024) sbuf.resize(256 * 1024);
         int n = s.snapshot(sbuf.data(), (int)sbuf.size());
         if (n < 0) { sbuf.resize((size_t)(-(int64_t)n) + 1024);
                      n = s.snapshot(sbuf.data(), (int)sbuf.size()); }
         if (n <= 0) return;
 
-        // vars text message
-        std::string vars_msg = "{\"type\":\"vars\",\"run_id\":";
+        // vars text message (reused string — clear() keeps the capacity)
+        static thread_local std::string vars_msg;
+        vars_msg.clear();
+        vars_msg += "{\"type\":\"vars\",\"run_id\":";
         vars_msg += std::to_string(run_id);
         vars_msg += ",\"items\":";
-        vars_msg += std::string(sbuf.data(), (size_t)n);
+        vars_msg.append(sbuf.data(), (size_t)n);
         vars_msg += "}";
         srv.send_text(vars_msg);
 
