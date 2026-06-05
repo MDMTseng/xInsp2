@@ -21,6 +21,9 @@ export interface SettingsState {
         }>;
     };
     instance_groups: Record<string, string>;   // instance name -> group ("" = default)
+    // project.json "runtime" — operational knobs that apply live (set via backend
+    // commands on change) and persist on Save.
+    runtime: { process_priority: string; timer_fps: number };
 }
 
 export function renderProjectSettingsHtml(s: SettingsState): string {
@@ -40,6 +43,11 @@ export function renderProjectSettingsHtml(s: SettingsState): string {
     const parJson = JSON.stringify(s.parallelism || { default_group: '', groups: [] });
     const sourcesJson = JSON.stringify(s.sources || []);
     const instGroupsJson = JSON.stringify(s.instance_groups || {});
+    const rt = s.runtime || { process_priority: '', timer_fps: -1 };
+    const rtJson = JSON.stringify(rt);
+    const prioOpt = (v: string) =>
+        ['', 'below', 'normal', 'above', 'high', 'realtime'].map(o =>
+            `<option value="${o}" ${o === (rt.process_priority || '') ? 'selected' : ''}>${o || '(unchanged)'}${o === 'realtime' ? ' ⚠' : ''}</option>`).join('');
     return `<!doctype html><html><head><meta charset="utf-8">
 <style>
     body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px 20px; max-width: 760px; }
@@ -138,6 +146,12 @@ export function renderProjectSettingsHtml(s: SettingsState): string {
     <label class="field" style="margin-top:8px"><span>Default group</span><select id="par-default"></select></label>
     <div class="subhead">Source → group (instance.json)</div>
     <div id="inst-groups" class="inst-grid"></div>
+    <div class="subhead">Runtime — applies live (no restart)</div>
+    <label class="field"><span>Process priority</span><select id="rt-priority">${prioOpt('')}</select></label>
+    <label class="field"><span>Timer fps</span><input id="rt-timer" type="number" min="0" max="240" value="${esc(rt.timer_fps >= 0 ? rt.timer_fps : '')}" placeholder="(default 10)"/></label>
+    <div class="hint">Timer fps = synthetic-tick rate; <b>0 = trigger-only</b> (your sources drive, no heartbeat).
+      Process priority = the backend process vs the rest of the machine; <code>realtime</code> can starve the OS.
+      Both apply <b>immediately</b> on change and save into <code>project.json</code> <code>runtime</code>.</div>
 </section>
 
 <section>
@@ -238,6 +252,16 @@ document.getElementById('par-add').addEventListener('click', () => {
 document.getElementById('par-default').addEventListener('change', e => { par.default_group = e.target.value; });
 renderGroups(); renderDefault(); renderInstGroups();
 
+// Runtime knobs — apply live (backend command) on change, persist on Save.
+const RT = ${rtJson};
+const rtPri = document.getElementById('rt-priority');
+const rtTimer = document.getElementById('rt-timer');
+rtPri.addEventListener('change', () => vscode.postMessage({ type: 'rt_priority', value: rtPri.value }));
+rtTimer.addEventListener('change', () => {
+    const v = rtTimer.value.trim();
+    if (v !== '') vscode.postMessage({ type: 'rt_timer_fps', value: parseInt(v, 10) });
+});
+
 // ===== C++ toolchain health (unchanged) =====
 function renderToolchain(h) {
     const box = document.getElementById('tc-rows');
@@ -290,6 +314,10 @@ function collect() {
         },
         parallelism,
         instance_groups: inst,
+        runtime: {
+            process_priority: rtPri.value,
+            timer_fps: rtTimer.value.trim() === '' ? -1 : parseInt(rtTimer.value, 10),
+        },
     };
 }
 document.getElementById('save').addEventListener('click', () => {

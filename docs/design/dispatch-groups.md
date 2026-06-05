@@ -316,9 +316,13 @@ in the VS Code **Project Settings** webview → *Dispatch / Parallelism* (group 
 | `min_interval_ms` | group | rate cap; surplus coalesces to latest via `drop_oldest` | `qa_min_interval` (20/s → 10/s) |
 | `result_order` | group | `arrival` = emit in frame order (per-group gate) vs `completion` | `qa_group_parallelism`/`qa_group_stress` (0 inversions) |
 | `queue_depth` + `overflow` | group | backpressure: `drop_oldest`/`drop_newest`/`block` | `qa_dispatch_groups` |
-| trigger-only (`cmd:start fps:0`) | run | continuous, sources drive, **no synthetic timer** (keeps it off the default group) | `qa_two_group_paths` etc. (started fps:0) |
-| `--priority=CLASS` | process | whole-backend OS priority class (Win) | — |
+| `runtime.timer_fps` (= trigger-only when 0) | project + live | synthetic-tick rate; `0` = sources drive, no timer (keeps it off the default group). Live via `cmd:set_timer_fps` | `qa_runtime_settings` + `qa_two_group_paths` |
+| `runtime.process_priority` | project + live | whole-backend OS priority class (Win): high/above/normal/below/realtime. Live via `cmd:set_process_priority` | `qa_runtime_settings` |
 | timer res 1ms + oversubscribe warn | process | tight sleeps; warns if Σ workers > cores | — |
+
+The last two live in `project.json`'s `runtime` block and are also editable in the
+Project Settings UI's *Runtime — applies live* row (change → backend command +
+saved). `--priority=CLASS` / `--autostart-fps=-1` are the equivalent startup flags.
 
 Two-path routing isolation (`qa_two_group_paths`) + the 8-group stress
 (`qa_group_stress`, near-saturation) show groups are independent — an overloaded

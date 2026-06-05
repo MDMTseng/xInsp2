@@ -259,6 +259,14 @@ default group. (`--autostart-fps=-1` does the same headlessly.)
 
 `stop args: {}` → `data: { "stopped": true }`.
 
+`set_timer_fps args: { "fps": int }` → `data: { "fps", "interval_ms" }`. Retunes the
+synthetic-tick rate **live** while continuous mode runs; `fps <= 0` = trigger-only
+(no ticks, sources drive). `set_process_priority args: { "class": "high"|"above"|
+"normal"|"below"|"realtime" }` → sets the backend's OS process priority live (Win).
+Both mirror `project.json` `"runtime": { "timer_fps", "process_priority" }`, which
+the backend applies on `open_project`; the VS Code Project Settings UI sends these
+commands on change and persists to `runtime`.
+
 Continuous mode runs `parallelism.dispatch_threads` worker threads inside
 the backend (default 1; see `docs/guides/writing-a-script.md` → Parallel
 dispatch for the pool, per-instance reentrancy, watchdog, and `result_order`).

@@ -165,6 +165,11 @@ static std::atomic<bool>       g_continuous{false};
 // reload completes — without it, mid-run hot-reload would silently
 // halt the stream.
 static std::atomic<int>        g_continuous_fps{10};
+// Live timer-tick interval (ms). The continuous timer thread reads this every
+// loop, so the synthetic-tick rate can be retuned WHILE RUNNING (cmd:set_timer_fps)
+// — 0 = trigger-only (no ticks). Seeded from cmd:start's fps / project.json
+// runtime.timer_fps. Default 100 (10fps) matches the historical default.
+static std::atomic<int>        g_timer_interval_ms{100};
 // Reserve stack headroom (def near write_minidump) so the crash filter can dump
 // after a script STACK_OVERFLOW; called at the top of each inspect-running thread.
 static void reserve_fault_stack();
@@ -1673,18 +1678,22 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
         g_worker_threads.emplace_back(worker_body);
     }
 
-    // Timer thread: every interval_ms push a synthetic empty event so scripts
-    // without trigger sources still tick. interval_ms <= 0 => trigger-only mode:
-    // no timer at all, the project's sources are the sole dispatch driver.
-    if (interval_ms > 0) {
-        g_timer_thread = std::thread([interval_ms] {
-            while (g_continuous.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
-                if (!g_continuous.load()) break;
-                (void)enqueue_event_(xi::TriggerEvent{});
-            }
-        });
-    }
+    // Timer thread: pushes a synthetic empty event every g_timer_interval_ms so
+    // scripts without trigger sources still tick. Always spawned; it reads the
+    // LIVE interval each loop, so the rate is retunable mid-run (cmd:set_timer_fps)
+    // and 0 = trigger-only (idle-poll, no ticks). (void)interval_ms — the seed is
+    // set into g_timer_interval_ms by the caller before spawn.
+    (void)interval_ms;
+    g_timer_thread = std::thread([] {
+        while (g_continuous.load()) {
+            int iv = g_timer_interval_ms.load();
+            if (iv <= 0) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(iv));
+            if (!g_continuous.load()) break;
+            if (g_timer_interval_ms.load() <= 0) continue;   // turned off during the sleep
+            (void)enqueue_event_(xi::TriggerEvent{});
+        }
+    });
 }
 
 // ---- Dispatch groups: per-group worker lanes (gated on parallelism.groups) ----
@@ -1748,6 +1757,26 @@ static void set_os_thread_affinity_(const std::vector<int>& cores) {
     if (want) SetThreadAffinityMask(GetCurrentThread(), want);
 #else
     (void)cores;   // TODO(linux): cpu_set_t + pthread_setaffinity_np / sched_setaffinity
+#endif
+}
+
+// Set the backend PROCESS priority class (Win). Returns true if applied. Used at
+// startup (--priority) and live (cmd:set_process_priority). "" = leave unchanged.
+static bool apply_process_priority_(const std::string& cls) {
+    if (cls.empty()) return false;
+#ifdef _WIN32
+    DWORD c = 0;
+    if      (cls == "high")     c = HIGH_PRIORITY_CLASS;
+    else if (cls == "above")    c = ABOVE_NORMAL_PRIORITY_CLASS;
+    else if (cls == "normal")   c = NORMAL_PRIORITY_CLASS;
+    else if (cls == "below")    c = BELOW_NORMAL_PRIORITY_CLASS;
+    else if (cls == "realtime") c = REALTIME_PRIORITY_CLASS;
+    else return false;
+    SetPriorityClass(GetCurrentProcess(), c);
+    std::fprintf(stderr, "[xinsp2] process priority = %s\n", cls.c_str());
+    return true;
+#else
+    (void)cls; return false;   // TODO(linux): setpriority/sched_setscheduler
 #endif
 }
 
@@ -1892,20 +1921,22 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
             });
         }
     }
-    // Timer ticks feed the default group's lane. interval_ms <= 0 => trigger-only:
-    // no timer, so the default group isn't loaded with synthetic ticks (the sources
-    // are the sole driver).
-    if (interval_ms > 0) {
-        g_timer_thread = std::thread([interval_ms] {
-            const std::string dg = g_plugin_mgr.project().default_group;
-            while (g_continuous.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
-                if (!g_continuous.load()) break;
-                xi::TriggerEvent ev; ev.group = dg;
-                (void)enqueue_to_lane_(std::move(ev));
-            }
-        });
-    }
+    // Timer ticks feed the default group's lane. Always spawned; reads the LIVE
+    // g_timer_interval_ms each loop so the rate is retunable mid-run and 0 =
+    // trigger-only (the default group isn't loaded with synthetic ticks).
+    (void)interval_ms;
+    g_timer_thread = std::thread([] {
+        const std::string dg = g_plugin_mgr.project().default_group;
+        while (g_continuous.load()) {
+            int iv = g_timer_interval_ms.load();
+            if (iv <= 0) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(iv));
+            if (!g_continuous.load()) break;
+            if (g_timer_interval_ms.load() <= 0) continue;
+            xi::TriggerEvent ev; ev.group = dg;
+            (void)enqueue_to_lane_(std::move(ev));
+        }
+    });
 }
 
 static void stop_group_pool_() {
@@ -2237,6 +2268,27 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         g_watchdog_ms = ms;
         std::string out = "{\"ms\":" + std::to_string(ms);
         out += ",\"trips\":" + std::to_string(g_watchdog_trips.load()) + "}";
+        send_rsp_ok(srv, id, out);
+    } else if (name == "set_process_priority") {
+        // Live process priority (Win). class: high|above|normal|below|realtime.
+        // Mirrors --priority / project.json runtime.process_priority.
+        auto c = xp::get_string_field(parsed->args_json, "class");
+        std::string cls = c ? *c : "";
+        if (apply_process_priority_(cls)) {
+            send_rsp_ok(srv, id, "{\"process_priority\":\"" + cls + "\"}");
+        } else {
+            send_rsp_err(srv, id, "bad priority class (high|above|normal|below|realtime)");
+        }
+    } else if (name == "set_timer_fps") {
+        // Live synthetic-tick rate. fps <= 0 = trigger-only (no ticks). Takes
+        // effect on the next timer loop while continuous mode is running; persisted
+        // by the UI to project.json runtime.timer_fps.
+        auto f = xp::get_number_field(parsed->args_json, "fps");
+        int fps = f ? (int)*f : 0;
+        int iv = fps > 0 ? 1000 / fps : 0;
+        g_timer_interval_ms.store(iv);
+        std::string out = "{\"fps\":" + std::to_string(fps) +
+                          ",\"interval_ms\":" + std::to_string(iv) + "}";
         send_rsp_ok(srv, id, out);
     } else if (name == "watchdog_status") {
         std::string out = "{\"ms\":" + std::to_string(g_watchdog_ms.load());
@@ -2683,10 +2735,16 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // start continuous (spawn the lanes) but run NO synthetic timer tick — the
         // project's sources are the only dispatch driver. (Avoids loading the
         // default group with timer ticks; see docs/design/dispatch-groups.md.)
+        // An EXPLICIT fps arg seeds the live timer rate; if absent, keep whatever
+        // g_timer_interval_ms already holds (project.json runtime.timer_fps, a prior
+        // set_timer_fps, or the default 10fps) — so a project's saved timer pref
+        // isn't clobbered by a bare start.
         int  fps = 10;
         bool trigger_only = false;
+        bool fps_explicit = false;
         auto fps_val = xp::get_number_field(parsed->args_json, "fps");
         if (fps_val) {
+            fps_explicit = true;
             if (*fps_val > 0) fps = (int)*fps_val;
             else trigger_only = true;
         }
@@ -2720,8 +2778,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         g_dropped_newest = 0;
         g_queue_high_watermark = 0;
 
-        // interval_ms <= 0 → spawn_*_pool_ skips the timer thread (trigger-only).
-        int interval_ms = trigger_only ? 0 : 1000 / std::max(fps, 1);
+        // Seed the live timer rate (0 = trigger-only). Only when fps was explicit;
+        // otherwise keep the existing g_timer_interval_ms (runtime/prior/default).
+        if (fps_explicit) g_timer_interval_ms.store(trigger_only ? 0 : 1000 / std::max(fps, 1));
+        int interval_ms = g_timer_interval_ms.load();
         int n_threads = g_plugin_mgr.project().dispatch_threads;
         if (n_threads < 1) n_threads = 1;
 
@@ -3451,6 +3511,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             int inst_count = (int)proj.instances.size();
             std::fprintf(stderr, "[xinsp2] project opened: %s (%d instances)\n",
                          proj.name.c_str(), inst_count);
+            // Apply project.json "runtime" knobs. process_priority is live now;
+            // timer_fps seeds the live timer rate (0 = trigger-only) for when
+            // continuous mode runs.
+            apply_process_priority_(proj.runtime_priority);
+            if (proj.runtime_timer_fps >= 0)
+                g_timer_interval_ms.store(proj.runtime_timer_fps > 0 ? 1000 / proj.runtime_timer_fps : 0);
             for (auto& [k, v] : proj.instances) {
                 std::fprintf(stderr, "[xinsp2]   instance: %s (%s)\n",
                              k.c_str(), v.plugin_name.c_str());
@@ -4296,19 +4362,12 @@ int main(int argc, char** argv) {
         if (auto fn = (UINT(WINAPI*)(UINT))GetProcAddress(w, "timeBeginPeriod")) fn(1);
     }
     // --priority=<class>: bump the whole backend's process priority (for a
-    // dedicated inspection PC). Default = leave as-is. "realtime" can starve the
-    // OS — use with care.
+    // dedicated inspection PC). Default = leave as-is. Also settable live via
+    // cmd:set_process_priority / project.json runtime.process_priority.
     if (std::string pri = parse_str_flag(argc, argv, "--priority"); !pri.empty()) {
-        DWORD cls = 0;
-        if      (pri == "high")     cls = HIGH_PRIORITY_CLASS;
-        else if (pri == "above")    cls = ABOVE_NORMAL_PRIORITY_CLASS;
-        else if (pri == "normal")   cls = NORMAL_PRIORITY_CLASS;
-        else if (pri == "below")    cls = BELOW_NORMAL_PRIORITY_CLASS;
-        else if (pri == "realtime") cls = REALTIME_PRIORITY_CLASS;
-        if (cls) { SetPriorityClass(GetCurrentProcess(), cls);
-            std::fprintf(stderr, "[xinsp2] process priority = %s\n", pri.c_str()); }
-        else std::fprintf(stderr,
-            "[xinsp2] unknown --priority '%s' (high|above|normal|below|realtime)\n", pri.c_str());
+        if (!apply_process_priority_(pri))
+            std::fprintf(stderr,
+                "[xinsp2] unknown --priority '%s' (high|above|normal|below|realtime)\n", pri.c_str());
     }
 #else
     // TODO(linux): clock_nanosleep is already high-res; setpriority(PRIO_PROCESS)

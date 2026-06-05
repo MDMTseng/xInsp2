@@ -377,6 +377,11 @@ struct ProjectInfo {
     std::vector<DispatchGroup> groups;            // empty = legacy single pool
     std::string                default_group;     // group for untagged triggers
 
+    // project.json "runtime" block — operational knobs that are also live-settable
+    // (cmd:set_process_priority / set_timer_fps). Applied by the backend on open.
+    std::string                runtime_priority;  // "" = leave OS priority as-is
+    int                        runtime_timer_fps = -1;   // <0 = unset; 0 = trigger-only; >0 = fps
+
     const DispatchGroup* find_group(const std::string& n) const {
         for (auto& g : groups) if (g.name == n) return &g;
         return nullptr;
@@ -1342,6 +1347,8 @@ public:
         project_.result_order      = "completion";
         project_.groups.clear();
         project_.default_group.clear();
+        project_.runtime_priority.clear();
+        project_.runtime_timer_fps = -1;
         // Reset surfaced warnings here (before the project.json parse) so group
         // parse warnings, compile failures, and bad instances all accumulate.
         last_open_warnings_.clear();
@@ -1375,6 +1382,14 @@ public:
                         }
                     }
                 }
+            }
+            // runtime block — operational knobs (also live-settable). process_priority
+            // applied on open; timer_fps seeds the live timer rate.
+            if (cJSON* rt = cJSON_GetObjectItem(root, "runtime"); rt && cJSON_IsObject(rt)) {
+                if (cJSON* k = cJSON_GetObjectItem(rt, "process_priority"); k && cJSON_IsString(k) && k->valuestring)
+                    project_.runtime_priority = k->valuestring;
+                if (cJSON* k = cJSON_GetObjectItem(rt, "timer_fps"); k && cJSON_IsNumber(k))
+                    project_.runtime_timer_fps = (int)k->valuedouble;
             }
             // parallelism block.
             if (cJSON* par = cJSON_GetObjectItem(root, "parallelism");

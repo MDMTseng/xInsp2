@@ -1,0 +1,5 @@
+{
+  "name": "qa_runtime_settings",
+  "script": "inspect.cpp",
+  "runtime": { "timer_fps": 8, "process_priority": "normal" }
+}

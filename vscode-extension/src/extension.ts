@@ -1434,6 +1434,21 @@ export function activate(context: vscode.ExtensionContext) {
                         ).then(pick => { if (pick === 'Recompile now') vscode.commands.executeCommand('xinsp2.compile'); });
                         return;
                     }
+                    // ---- runtime knobs apply live ----
+                    if (msg.type === 'rt_priority') {
+                        if (msg.value) {
+                            const r = await sendCmd('set_process_priority', { class: msg.value });
+                            if (r?.ok) vscode.window.setStatusBarMessage(`xInsp2: process priority → ${msg.value}`, 2500);
+                            else vscode.window.showErrorMessage(`xInsp2: ${r?.error || 'bad priority class'}`);
+                        }
+                        return;
+                    }
+                    if (msg.type === 'rt_timer_fps') {
+                        const r = await sendCmd('set_timer_fps', { fps: msg.value });
+                        if (r?.ok) vscode.window.setStatusBarMessage(
+                            `xInsp2: timer → ${msg.value <= 0 ? 'trigger-only' : msg.value + ' fps'}`, 2500);
+                        return;
+                    }
                     if (msg.type !== 'save') return;
                     const next = msg.data || {};
                     // Merge into existing pj — don't drop unknown fields the
@@ -1454,6 +1469,15 @@ export function activate(context: vscode.ExtensionContext) {
                     } else if (cur.parallelism) {
                         delete cur.parallelism.groups; delete cur.parallelism.default_group;
                         if (Object.keys(cur.parallelism).length === 0) delete cur.parallelism;
+                    }
+                    // Runtime knobs (apply-live; persist here too).
+                    if (next.runtime) {
+                        const rt: any = { ...(cur.runtime || {}) };
+                        if (next.runtime.process_priority) rt.process_priority = next.runtime.process_priority;
+                        else delete rt.process_priority;
+                        if (typeof next.runtime.timer_fps === 'number' && next.runtime.timer_fps >= 0) rt.timer_fps = next.runtime.timer_fps;
+                        else delete rt.timer_fps;
+                        if (Object.keys(rt).length) cur.runtime = rt; else delete cur.runtime;
                     }
                     fs.writeFileSync(projFile, JSON.stringify(cur, null, 2) + '\n', 'utf8');
                     output.appendLine('[xinsp2] project.json saved');
@@ -1506,6 +1530,10 @@ export function activate(context: vscode.ExtensionContext) {
                     groups:        Array.isArray(par.groups) ? par.groups : [],
                 },
                 instance_groups: instanceGroups,
+                runtime: {
+                    process_priority: typeof pj.runtime?.process_priority === 'string' ? pj.runtime.process_priority : '',
+                    timer_fps:        typeof pj.runtime?.timer_fps === 'number' ? pj.runtime.timer_fps : -1,
+                },
                 sources,
             };
             settingsPanel.webview.html = renderProjectSettingsHtml(state);
