@@ -303,7 +303,10 @@ intentional cross-group interleave the consumer demultiplexes by `group`.
 ## Tuning cheat-sheet
 
 All the dispatch / thread performance knobs in one place (per-group unless noted),
-with the regression that proves each:
+with the regression that proves each. All the project-file ones are also editable
+in the VS Code **Project Settings** webview → *Dispatch / Parallelism* (group cards
++ default-group + a Source→group picker; Save writes `project.json` + each
+`instance.json`):
 
 | Knob | Where | What it does | Regression |
 |---|---|---|---|
