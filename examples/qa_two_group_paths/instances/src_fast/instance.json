@@ -1,0 +1,6 @@
+{
+  "plugin": "frame_source",
+  "isolation": "in_process",
+  "group": "fast",
+  "config": { "fps": 40 }
+}

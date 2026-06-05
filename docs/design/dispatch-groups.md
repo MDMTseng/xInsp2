@@ -226,10 +226,17 @@ intentional cross-group interleave the consumer demultiplexes by `group`.
   `EmitGate`; `result_order: "arrival"` (+ `max_parallel>1`) serialises that group's
   emission by frame-arrival order, independent of other groups. The legacy single
   pool keeps its one global gate. Regression: `qa_dispatch_groups` Test E.
+- **Two-path routing regression** ✅ shipped — `examples/qa_two_group_paths/` runs
+  two `frame_source` instances tagged (via `instance.json "group"`) into different
+  lanes (`src_fast`→fast 40fps/3thr, `src_slow`→slow 8fps/1thr) and proves the
+  dispatcher routes each by the *emitting* instance's group: zero cross-routing
+  (each lane only ever carries its own source) and each path runs at its own cadence
+  (~119 vs ~24 results / 3s). This is the self-emitting-source case the
+  load-separation test needed.
 - **Deferred follow-ups.** The `group` wire tag on `vars`/`run_started`/`run_finished`
-  (only `run_result` carries `group` today); `min_interval_ms` rate limit; the full
-  load-separation regression (a self-emitting source per group proving a saturated
-  `low` never delays `high` — needs a ticker source plugin).
+  (only `run_result` carries `group` today); `min_interval_ms` rate limit; the
+  *latency* half of load-separation (assert a saturated `low` doesn't raise `high`'s
+  p99 — qa_two_group_paths proves routing/cadence, not yet a latency bound).
 - **Later (only if ever needed)** — a shared-pool / oversubscribed mode with a real
   priority queue. Out of scope: group-owned threads already meet the goal and
   threads are cheap, so there's no shared pool to schedule.
