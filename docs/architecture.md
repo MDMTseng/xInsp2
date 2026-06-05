@@ -18,9 +18,10 @@ contents below.
 >   [`guides/adding-a-plugin.md`](./guides/adding-a-plugin.md).
 > - **Interactive image viewer** (pan + cursor zoom + Pick tools) — see
 >   [`guides/extending-the-ui.md`](./guides/extending-the-ui.md).
-> - **Cross-process isolation spike** (SHM + worker / script-runner exes)
->   — currently on the `shm-process-isolation` branch; see
->   [`status.md`](./status.md) for state.
+> - **Cross-process isolation (SHM + worker / script-runner exes) was REMOVED in
+>   2026-05.** All plugins + scripts now run in-process in the backend; a hard
+>   crash takes the BE down and the FE supervisor is the safety net. See
+>   [`design/fe-be-split.md`](./design/fe-be-split.md) and [`status.md`](./status.md).
 
 ---
 

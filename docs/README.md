@@ -68,6 +68,9 @@ Historical snapshots — kept for context, not for planning.
 |---|---|
 | [`archive/newdeal-M0.md`](./archive/newdeal-M0.md) | Original M0 architectural vision; useful for understanding why specific choices were made |
 | [`archive/test-audit-2026-04-15.md`](./archive/test-audit-2026-04-15.md) | A snapshot of bug-coverage gaps as of mid-April 2026; resolved findings logged in commit history |
+| `archive/architecture-review-2026-04-28.md` (+ `-3-`, `-deep-`) | Three 2026-04-28 architecture-review snapshots, taken **before** the FE/BE split + process-isolation removal. Many findings are superseded; kept for the rationale trail. Not current. |
+| `archive/fe-test-rounds/` | QA-round execution scratch notes (May–June 2026). The living tests are `examples/qa_*/` + `backend/tests/`; see [`testing.md`](./testing.md). |
+| `archive/shm-allocator-formal-spec.md`, `archive/shm-tier1-a2-impl-plan.md` | Specs of the SHM image allocator that was **removed 2026-05** (plugins now run in-process). Historical only — see [`design/fe-be-split.md`](./design/fe-be-split.md). |
 
 ## Adjacent
 

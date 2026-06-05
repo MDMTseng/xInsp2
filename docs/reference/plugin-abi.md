@@ -176,10 +176,10 @@ the pool on the way out. That copy is structurally unavoidable until
 operators are rewritten to write directly into pool slots via
 `host->image_create()`; it's a future-work item, not a bug.
 
-Cross-process isolation goes through the worker's SHM region rather
-than the in-process pool, but the same handle-based contract applies
-— the worker's RPC layer transfers handles, not bytes. See
-`xi_process_instance.hpp::process_via_rpc`.
+(Historical: cross-process isolation once routed images through a worker's SHM
+region with the same handle-based contract. **That path was removed in 2026-05** —
+all plugins now run in-process in the backend via the single handle-based pool. See
+[`../design/fe-be-split.md`](../design/fe-be-split.md).)
 
 ### `xi_plugin_exchange`
 

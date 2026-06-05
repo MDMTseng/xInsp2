@@ -1,5 +1,12 @@
 # FE/BE split — test plan
 
+> **Status: mostly implemented.** The `[TODO]` marks below are a historical
+> planning snapshot; the *living* tests are the regressions under
+> `examples/fe_supervisor*/`, `examples/qa_func/`, `examples/qa_race/`,
+> `backend/tests/test_safe_state.cpp`, and the rest — run them via
+> `python tools/run_qa.py` / `ctest`, and see [`../testing.md`](../testing.md) for
+> what each proves. Treat this doc as the original plan, not a current checklist.
+
 Companion to [`fe-be-split.md`](./fe-be-split.md). Covers the frontend
 supervisor (`xinsp-fe.exe`), the `SafeStateSink` seam, the backend headless
 autostart CLI, and the VS Code `backendMode` — plus the backend crash forensics

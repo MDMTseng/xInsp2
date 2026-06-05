@@ -1,7 +1,10 @@
-# Production HMI + standalone package export — design (v1 draft)
+# Production HMI + standalone package export — design
 
-> **Status: design, not scheduled.** Captures the agreed shape so we can build it
-> in increments later. Assessment date 2026-06-04.
+> **Status: v1 shipped.** The RUN-mode SPA + compose + cards + the AOT export
+> bundle are built (`hmi/`, `tools/export_bundle.py`; see
+> [`deployment.md`](./deployment.md) and [`../../hmi/README.md`](../../hmi/README.md)).
+> Phase 2 (multi-client, deeper compose polish) is not scheduled. This doc keeps
+> the design rationale. Assessment date 2026-06-04.
 
 ## The gap
 
