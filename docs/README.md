@@ -2,6 +2,10 @@
 
 This is the doc tree's index. Pick the entry closest to your task.
 
+> **New to the project? Start with [`getting-started.md`](./getting-started.md)** —
+> the mental model, the architecture in one picture, a build-and-run-on-day-one
+> path, and a guided index into everything below. ~30 minutes.
+
 ## Top-level
 
 | File | Purpose |

@@ -8,6 +8,10 @@ C++, edited in VS Code, wired over WebSockets.**
 > trigger correlation, record/replay, remote backend, and a headless
 > production runner.
 
+> 🚀 **New to the project?** Read **[`docs/getting-started.md`](docs/getting-started.md)**
+> first — the mental model, the architecture in one picture, build-and-run on day
+> one, and a guided index into all the docs.
+
 ---
 
 ## The model
