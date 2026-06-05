@@ -53,6 +53,7 @@ the port itself; it's a record so we know what to expect.
 | `_strdup` / `_dupenv_s` / `_set_se_translator` | MSVC | `strdup` / `getenv` / signal handler |
 | `MAX_PATH`, `WCHAR`, `wstring` paths | Win32 | `std::filesystem` already portable; drop wide-char conversions |
 | `service_main.cpp` `set_os_thread_priority_` / `set_os_thread_affinity_` (dispatch-group worker tuning) | `SetThreadPriority` / `SetThreadAffinityMask` + `GetProcessAffinityMask` / `GetCurrentProcessorNumber` | `pthread_setschedprio`/`nice`; `pthread_setaffinity_np` + `cpu_set_t` / `sched_getcpu`. Both already `#ifdef _WIN32` + `TODO(linux)`. |
+| `service_main.cpp` `main()` perf knobs (timer res + `--priority`) | `winmm timeBeginPeriod(1)` (runtime-loaded); `SetPriorityClass` | Linux `nanosleep`/`clock_nanosleep` already high-res (no-op); `setpriority(PRIO_PROCESS)` / `sched_setscheduler`. Already `#ifdef _WIN32` + `TODO(linux)`. |
 
 ### Medium — rewrite a module (1-3 days each)
 

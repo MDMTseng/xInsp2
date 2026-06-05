@@ -1576,6 +1576,8 @@ static bool enqueue_event_(xi::TriggerEvent ev) {
     return true;
 }
 
+static void warn_oversubscribe_(int total_workers);   // defined below (group section)
+
 // Spawn the dispatcher pool + timer thread for cmd:start / hot-reload
 // resume. `n_threads` comes from project.dispatch_threads (default 1).
 // The timer thread pushes a synthetic empty trigger event at the
@@ -1588,6 +1590,7 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
                                  int interval_ms,
                                  int n_threads) {
     if (n_threads < 1) n_threads = 1;
+    warn_oversubscribe_(n_threads);
     g_worker_threads.clear();
     g_worker_threads.reserve((size_t)n_threads);
     // Result ordering: arrival-ordered emission only when explicitly asked AND
@@ -1738,6 +1741,19 @@ static void set_os_thread_affinity_(const std::vector<int>& cores) {
 #endif
 }
 
+// Warn (once per start) if the total dispatch worker count exceeds the core count.
+// Oversubscription causes context-switch thrash that usually slows inspects — a
+// dedicated inspection PC should keep Σ max_parallel ≤ cores (minus a couple for
+// the FE supervisor / comms gateway / OS).
+static void warn_oversubscribe_(int total_workers) {
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw > 0 && total_workers > (int)hw)
+        std::fprintf(stderr,
+            "[xinsp2] WARNING: %d dispatch worker threads on %u cores (oversubscribed) — "
+            "context-switch thrash may slow inspects; lower max_parallel or add cores\n",
+            total_workers, hw);
+}
+
 // Resolve a group name to its lane (holding g_lanes_mu). Unknown/typo'd group →
 // the default_group lane, then the first lane — never silently the front (#5).
 // Returns a shared_ptr so the caller keeps the lane alive past a concurrent stop.
@@ -1802,6 +1818,8 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
     }
     std::fprintf(stderr, "[xinsp2] continuous mode (grouped): %zu group(s), %dms timer\n",
                  g_lanes.size(), interval_ms);
+    { int total = 0; for (auto& lp : g_lanes) total += (lp->cfg.max_parallel < 1 ? 1 : lp->cfg.max_parallel);
+      warn_oversubscribe_(total); }
     for (auto& lp : g_lanes) {
         std::shared_ptr<GroupLane> lane = lp;   // workers hold a ref → lane outlives them
         int n = lane->cfg.max_parallel < 1 ? 1 : lane->cfg.max_parallel;
@@ -4236,6 +4254,7 @@ int main(int argc, char** argv) {
                 "  --working-copy       edit a <project>/.xinsp_work scratch copy (transactional;\n"
                 "                       resumes on crash respawn). commit_working_copy to save\n"
                 "  --comms-port=N       connect to the comms gateway on loopback N (xi::comms)\n"
+                "  --priority=CLASS     process priority: high|above|normal|below|realtime (Win)\n"
                 "  --version, -v        print version and exit\n"
                 "  --help, -h           this help\n",
                 XINSP2_VERSION);
@@ -4244,6 +4263,34 @@ int main(int argc, char** argv) {
     }
 
     int port = parse_port(argc, argv);
+
+    // ---- thread/process performance knobs --------------------------------------
+#ifdef _WIN32
+    // Raise the OS timer resolution to 1ms (default ~15.6ms) so timer-tick fps,
+    // sleeps, and CV waits are tight. winmm.timeBeginPeriod via runtime-load so we
+    // don't add a link dependency. Process-wide; the paired timeEndPeriod is optional.
+    if (HMODULE w = LoadLibraryA("winmm.dll")) {
+        if (auto fn = (UINT(WINAPI*)(UINT))GetProcAddress(w, "timeBeginPeriod")) fn(1);
+    }
+    // --priority=<class>: bump the whole backend's process priority (for a
+    // dedicated inspection PC). Default = leave as-is. "realtime" can starve the
+    // OS — use with care.
+    if (std::string pri = parse_str_flag(argc, argv, "--priority"); !pri.empty()) {
+        DWORD cls = 0;
+        if      (pri == "high")     cls = HIGH_PRIORITY_CLASS;
+        else if (pri == "above")    cls = ABOVE_NORMAL_PRIORITY_CLASS;
+        else if (pri == "normal")   cls = NORMAL_PRIORITY_CLASS;
+        else if (pri == "below")    cls = BELOW_NORMAL_PRIORITY_CLASS;
+        else if (pri == "realtime") cls = REALTIME_PRIORITY_CLASS;
+        if (cls) { SetPriorityClass(GetCurrentProcess(), cls);
+            std::fprintf(stderr, "[xinsp2] process priority = %s\n", pri.c_str()); }
+        else std::fprintf(stderr,
+            "[xinsp2] unknown --priority '%s' (high|above|normal|below|realtime)\n", pri.c_str());
+    }
+#else
+    // TODO(linux): clock_nanosleep is already high-res; setpriority(PRIO_PROCESS)
+    // / sched_setscheduler for --priority.
+#endif
 
     // Derive include dir for the script compiler. In a normal dev tree the
     // backend .exe is at backend/build/Release, and headers are at
