@@ -1,0 +1,113 @@
+{
+  "name": "qa_group_stress",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "parallelism": {
+    "default_group": "g0",
+    "groups": [
+      {
+        "name": "g0",
+        "max_parallel": 4,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      },
+      {
+        "name": "g1",
+        "max_parallel": 4,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      },
+      {
+        "name": "g2",
+        "max_parallel": 4,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      },
+      {
+        "name": "g3",
+        "max_parallel": 4,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      },
+      {
+        "name": "g4",
+        "max_parallel": 4,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      },
+      {
+        "name": "g5",
+        "max_parallel": 4,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      },
+      {
+        "name": "g6",
+        "max_parallel": 4,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      },
+      {
+        "name": "g7",
+        "max_parallel": 4,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      }
+    ]
+  },
+  "instances": [
+    {
+      "name": "src_g0",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "src_g1",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "src_g2",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "src_g3",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "src_g4",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "src_g5",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "src_g6",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "src_g7",
+      "plugin": "burst_source"
+    }
+  ]
+}
