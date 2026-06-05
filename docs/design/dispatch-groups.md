@@ -233,6 +233,13 @@ intentional cross-group interleave the consumer demultiplexes by `group`.
   (each lane only ever carries its own source) and each path runs at its own cadence
   (~119 vs ~24 results / 3s). This is the self-emitting-source case the
   load-separation test needed.
+- **Per-group max_parallel regression** ✅ shipped — `examples/qa_group_parallelism/`
+  uses a `burst_source` per group that fires 3× the group's worker count every
+  second (instantaneous surge); each inspect sleeps a random 50-100ms so work
+  overlaps. Polling `dispatch_stats.running` shows each group's peak in-flight
+  reaches *exactly* its `max_parallel` (p1→1, p2→2, p4→4) and never exceeds it, with
+  throughput scaling 1:2:4 — i.e. each group's lanes really do run in parallel up to
+  its cap, independently of the other groups.
 - **Deferred follow-ups.** The `group` wire tag on `vars`/`run_started`/`run_finished`
   (only `run_result` carries `group` today); `min_interval_ms` rate limit; the
   *latency* half of load-separation (assert a saturated `low` doesn't raise `high`'s

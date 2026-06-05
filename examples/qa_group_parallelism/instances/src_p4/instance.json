@@ -1,0 +1,1 @@
+{ "plugin": "burst_source", "isolation": "in_process", "group": "p4", "config": { "burst": 12, "period_ms": 1000 } }
