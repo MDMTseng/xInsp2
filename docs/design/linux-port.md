@@ -52,6 +52,7 @@ the port itself; it's a record so we know what to expect.
 | `backend/include/xi/xi_script_loader.hpp` / `xi_plugin_manager.hpp` | `LoadLibraryA` / `GetProcAddress` / `FreeLibrary` | `dlopen` / `dlsym` / `dlclose` |
 | `_strdup` / `_dupenv_s` / `_set_se_translator` | MSVC | `strdup` / `getenv` / signal handler |
 | `MAX_PATH`, `WCHAR`, `wstring` paths | Win32 | `std::filesystem` already portable; drop wide-char conversions |
+| `service_main.cpp` `set_os_thread_priority_` / `set_os_thread_affinity_` (dispatch-group worker tuning) | `SetThreadPriority` / `SetThreadAffinityMask` + `GetProcessAffinityMask` / `GetCurrentProcessorNumber` | `pthread_setschedprio`/`nice`; `pthread_setaffinity_np` + `cpu_set_t` / `sched_getcpu`. Both already `#ifdef _WIN32` + `TODO(linux)`. |
 
 ### Medium — rewrite a module (1-3 days each)
 

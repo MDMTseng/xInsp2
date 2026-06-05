@@ -1720,6 +1720,24 @@ static void set_os_thread_priority_(const std::string& p) {
 #endif
 }
 
+// Pin the current thread to a set of cores (a MASK — the thread may run on ANY of
+// them, not just one). Empty `cores` = leave unbound. Bogus core ids are dropped
+// (intersected with the process's allowed mask) so a bad config can't wipe the
+// affinity to nothing.
+static void set_os_thread_affinity_(const std::vector<int>& cores) {
+    if (cores.empty()) return;
+#ifdef _WIN32
+    DWORD_PTR want = 0;
+    for (int c : cores) if (c >= 0 && c < 64) want |= (DWORD_PTR(1) << c);  // 64-bit mask (≤64 cores; >64 = processor groups, TODO)
+    if (!want) return;
+    DWORD_PTR procMask = 0, sysMask = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &procMask, &sysMask)) want &= procMask;
+    if (want) SetThreadAffinityMask(GetCurrentThread(), want);
+#else
+    (void)cores;   // TODO(linux): cpu_set_t + pthread_setaffinity_np / sched_setaffinity
+#endif
+}
+
 // Resolve a group name to its lane (holding g_lanes_mu). Unknown/typo'd group →
 // the default_group lane, then the first lane — never silently the front (#5).
 // Returns a shared_ptr so the caller keeps the lane alive past a concurrent stop.
@@ -1793,10 +1811,15 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
         lane->seq_next.store(0);
         { std::lock_guard<std::mutex> lk(lane->gate.mu); lane->gate.next = 0; }
         for (int i = 0; i < n; ++i) {
-            lane->workers.emplace_back([srv_ptr, lane] {
+            lane->workers.emplace_back([srv_ptr, lane, wi = i] {
                 reserve_fault_stack();
                 _set_se_translator(seh_translator);
                 set_os_thread_priority_(lane->cfg.thread_priority);
+                // CPU affinity (empty = unbound). One mask → all workers share it;
+                // N masks → worker wi uses set[wi % N]. Each mask may be multi-core.
+                const auto& aff = lane->cfg.cpu_affinity;
+                if (!aff.empty())
+                    set_os_thread_affinity_(aff.size() == 1 ? aff[0] : aff[(size_t)wi % aff.size()]);
                 while (g_continuous.load()) {
                     xi::TriggerEvent ev; bool have = false; int64_t rid = 0; int64_t eseq = -1;
                     {
@@ -3613,7 +3636,17 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 data += ",\"running\":" + std::to_string(l.running.load());
                 data += ",\"high_watermark\":" + std::to_string(l.high_watermark.load());
                 data += ",\"dropped\":" + std::to_string(l.dropped.load());
-                data += "}";
+                data += ",\"cpu_affinity\":[";   // [] = unbound; else the per-worker mask sets
+                for (size_t si = 0; si < l.cfg.cpu_affinity.size(); ++si) {
+                    if (si) data += ",";
+                    data += "[";
+                    for (size_t ci = 0; ci < l.cfg.cpu_affinity[si].size(); ++ci) {
+                        if (ci) data += ",";
+                        data += std::to_string(l.cfg.cpu_affinity[si][ci]);
+                    }
+                    data += "]";
+                }
+                data += "]}";
             }
             data += "]";
         }

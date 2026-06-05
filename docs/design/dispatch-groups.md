@@ -127,6 +127,29 @@ Two groups out of the box (what the scaffold ships / the recommended start):
   yields the CPU to `high` when cores are scarce, never touches high's threads.
 - Total worker threads = 4 + 1 = 5, **derived** (no `dispatch_threads` knob).
 
+### Optional per-group `cpu_affinity`
+
+A group may pin its workers to a set of cores. Default (absent) = **unbound** (the
+OS schedules freely — recommended unless you have a specific reason). The value is
+a **mask**, not a single core — a worker may run on *any* core in its set:
+
+```jsonc
+{ "name": "critical", "max_parallel": 4, "thread_priority": "high",
+  "cpu_affinity": [0,1,2,3] }          // all 4 workers may use cores 0-3
+```
+
+- `[0,1,2,3]` — one shared mask: every worker in the group may run on any of 0-3.
+- `[[0,1],[2,3]]` — per-worker masks: worker 0 → {0,1}, worker 1 → {2,3}, … (still
+  multi-core each). Fewer masks than workers → wraps (`set[i % N]`).
+- `[3]` — pin to a single core (the special case).
+
+Bogus core ids are intersected with the process's allowed mask (a bad config can't
+wipe affinity to nothing). `> 64` cores needs Windows processor groups — TODO.
+Win32 `SetThreadAffinityMask`; `// TODO(linux)` `pthread_setaffinity_np`.
+**Caveat:** affinity is a sharp tool — pinning more threads than cores, or fighting
+the scheduler, usually *hurts*. Use it to isolate a critical group on dedicated
+cores (and keep other groups off them), not as a default.
+
 **Backward compatibility:** if `parallelism.groups` is absent, the dispatcher
 stays exactly as today — **one implicit group** owning `dispatch_threads` workers
 (legacy `dispatch_threads`/`queue_depth`/`overflow` map onto that single group).
@@ -260,6 +283,10 @@ intentional cross-group interleave the consumer demultiplexes by `group`.
   `result_order:"arrival"`, and the driver asserts **0 run_id inversions per group**
   — so parallelism and ordered emission hold *together* under the same bursty load
   (4 concurrent out-of-order completions still emit in arrival order).
+- **Per-group `cpu_affinity`** ✅ shipped — multi-core mask per group (default
+  unbound). `examples/qa_cpu_affinity/` verifies via `GetCurrentProcessorNumber`
+  that a `[2,3,4,5]`-bound group only ever ran on cores 2-5 (and used >1 of them —
+  a real mask, not a pin), while the unbound group spread across other cores.
 - **Deferred follow-ups.** The `group` wire tag on `vars`/`run_started`/`run_finished`
   (only `run_result` carries `group` today); `min_interval_ms` rate limit; the
   *latency* half of load-separation (assert a saturated `low` doesn't raise `high`'s

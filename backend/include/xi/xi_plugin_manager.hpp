@@ -365,6 +365,13 @@ struct ProjectInfo {
         int         queue_depth     = 100;
         std::string overflow        = "drop_oldest";
         std::string result_order    = "completion"; // "completion" | "arrival" (per-group)
+        // CPU affinity (OS). Empty = unbound (default — OS schedules freely). Each
+        // inner vector is a core-set MASK (a worker may run on ANY of those cores,
+        // not pinned to one). Sizes: 0 = unbound; 1 = all workers share that mask;
+        // N = worker i uses set[i % N]. Parsed from "cpu_affinity":
+        //   [0,1,2,3]      → one shared mask {0,1,2,3}
+        //   [[0,1],[2,3]]  → per-worker masks
+        std::vector<std::vector<int>> cpu_affinity;
     };
     std::vector<DispatchGroup> groups;            // empty = legacy single pool
     std::string                default_group;     // group for untagged triggers
@@ -1445,6 +1452,30 @@ public:
                             if (grp.result_order != "completion" && grp.result_order != "arrival") {
                                 warn(grp.name, "unknown result_order '" + grp.result_order + "' — using completion");
                                 grp.result_order = "completion";
+                            }
+                        }
+                        // cpu_affinity: flat [0,1,..] = one shared mask; nested
+                        // [[..],[..]] = per-worker masks. Empty/invalid → unbound.
+                        if (cJSON* k = cJSON_GetObjectItem(g, "cpu_affinity"); k && cJSON_IsArray(k)) {
+                            auto parse_set = [&](cJSON* arr) {
+                                std::vector<int> s;
+                                cJSON* e = nullptr;
+                                cJSON_ArrayForEach(e, arr) {
+                                    if (!cJSON_IsNumber(e)) continue;
+                                    int c = (int)e->valuedouble;
+                                    if (c >= 0 && c < 1024) s.push_back(c);
+                                    else warn(grp.name, "cpu_affinity core " + std::to_string(c) + " out of range — ignored");
+                                }
+                                return s;
+                            };
+                            cJSON* first = cJSON_GetArrayItem(k, 0);
+                            if (first && cJSON_IsArray(first)) {          // nested: per-worker
+                                cJSON* row = nullptr;
+                                cJSON_ArrayForEach(row, k)
+                                    if (cJSON_IsArray(row)) { auto s = parse_set(row); if (!s.empty()) grp.cpu_affinity.push_back(std::move(s)); }
+                            } else {                                       // flat: one shared mask
+                                auto s = parse_set(k);
+                                if (!s.empty()) grp.cpu_affinity.push_back(std::move(s));
                             }
                         }
                         project_.groups.push_back(std::move(grp));
