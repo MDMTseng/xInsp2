@@ -252,6 +252,15 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
 
 ---
 
+## Running the `examples/qa_*` suite
+
+`python tools/run_qa.py [filter]` runs every `examples/qa_*/driver.py`
+sequentially, aggregates `VERDICT: PASS|FAIL|SKIP`, and exits non-zero on any
+failure (CI-gate usable). `python tools/run_qa.py group` runs only the
+folder-name matches; `--list` lists without running; `--timeout=N` caps each.
+Tests run one at a time (each spawns its own backend on its own port and some
+share project-plugin DLL paths). Windows-first; drivers SKIP on non-`nt`.
+
 ## How to add a new test
 
 1. **C++ unit** → `backend/tests/test_<name>.cpp` + add to

@@ -4709,9 +4709,12 @@ int main(int argc, char** argv) {
                 } else if (autostart_fps != 0) {
                     // >0 = timer at N fps; <0 = trigger-only (no timer). The fps
                     // value passes through to cmd:start, which treats <=0 as
-                    // trigger-only.
-                    std::fprintf(stderr, "[xinsp2] autostart: start (fps=%d%s)\n",
-                                 autostart_fps, autostart_fps < 0 ? ", trigger-only" : "");
+                    // trigger-only. (Keep the ">0" wording as "start N fps" — qa_func
+                    // FE-E9 pins that line.)
+                    if (autostart_fps > 0)
+                        std::fprintf(stderr, "[xinsp2] autostart: start %d fps\n", autostart_fps);
+                    else
+                        std::fprintf(stderr, "[xinsp2] autostart: start (trigger-only, no timer)\n");
                     handle_command(srv,
                         "{\"type\":\"cmd\",\"id\":3,\"name\":\"start\",\"args\":{\"fps\":"
                         + std::to_string(autostart_fps) + "}}");
