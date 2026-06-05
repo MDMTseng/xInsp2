@@ -157,6 +157,29 @@ static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
 }
 
 // ---- Trigger loop state ----
+//
+// CONTINUOUS RUN HAS TWO DRIVERS — don't confuse them:
+//
+//   1. TRIGGERS (the real driver). Image sources emit_trigger() → the bus/lanes
+//      run inspect() per frame. This is the production path: a source (camera,
+//      PLC-trigger bridge, or any self-emitting plugin like burst_source /
+//      frame_source / local_image_source) decides WHEN an inspection happens. A
+//      run without a source/trigger is, semantically, meaningless.
+//
+//   2. The SYNTHETIC TIMER TICK (a convenience). A timer thread injects an EMPTY
+//      trigger every g_timer_interval_ms so a SOURCE-LESS script still ticks (the
+//      dev edit→run loop, the no-camera HMI demo). It's NOT a real inspection
+//      driver — there's no image/trigger behind it; xi::current_trigger() is
+//      inactive. Set it to 0 (cmd:start {fps:0} / --autostart-fps=-1 /
+//      runtime.timer_fps:0) for TRIGGER-ONLY, which is what any source-driven
+//      project should use. If you need periodic runs WITH meaning, write a source
+//      plugin that emits on a timer (that's the supported way) rather than relying
+//      on this empty tick.
+//
+// Kept because it's harmless and handy for source-less bring-up; just remember
+// when reading/writing tests: fps>0 = "tick a source-less script", fps<=0 =
+// "sources are the only driver".
+//
 // When running in continuous mode (cmd: start), a worker thread waits for
 // trigger signals from image sources and calls inspect() for each frame.
 static std::atomic<bool>       g_continuous{false};
@@ -2748,10 +2771,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // start continuous (spawn the lanes) but run NO synthetic timer tick — the
         // project's sources are the only dispatch driver. (Avoids loading the
         // default group with timer ticks; see docs/design/dispatch-groups.md.)
-        // An EXPLICIT fps arg seeds the live timer rate; if absent, keep whatever
+        // fps here is the SYNTHETIC-TIMER-TICK rate, NOT a real inspection driver —
+        // see "CONTINUOUS RUN HAS TWO DRIVERS" at the top of this file. fps>0 ticks
+        // a source-less script; fps<=0 = trigger-only (sources drive, the normal
+        // case). An EXPLICIT fps seeds the live timer rate; if absent, keep whatever
         // g_timer_interval_ms already holds (project.json runtime.timer_fps, a prior
-        // set_timer_fps, or the default 10fps) — so a project's saved timer pref
-        // isn't clobbered by a bare start.
+        // set_timer_fps, or the default 10fps) — so a project's saved pref isn't
+        // clobbered by a bare start.
         int  fps = 10;
         bool trigger_only = false;
         bool fps_explicit = false;

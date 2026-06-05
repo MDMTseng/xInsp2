@@ -252,10 +252,15 @@ file frame on demand without a custom source plugin.
 `parallelism.dispatch_threads`, default 1; included so callers can
 verify the pool size that just came up).
 On already-running: `data: { "already": true }`.
-**`fps <= 0` = trigger-only**: continuous mode starts (lanes spawn, sources
-route) but **no synthetic timer tick** runs — the project's sources are the sole
-dispatch driver. Use it for source-driven projects so the timer doesn't load the
-default group. (`--autostart-fps=-1` does the same headlessly.)
+**Continuous mode has two drivers — don't conflate them.** The real driver is
+**triggers**: image sources `emit_trigger()` and the bus/lanes run `inspect()` per
+frame (a run with no source/trigger is meaningless). `fps > 0` additionally runs a
+**synthetic timer tick** — an *empty* trigger every `1000/fps` ms — purely so a
+**source-less** script still ticks (dev edit→run loop, the no-camera HMI demo);
+`xi::current_trigger()` is inactive for those ticks. **`fps <= 0` = trigger-only**:
+lanes spawn + sources route, **no timer** — what any source-driven project should
+use (`--autostart-fps=-1` headlessly). For *meaningful* periodic runs, write a
+source plugin that emits on a timer rather than relying on the empty tick.
 
 `stop args: {}` → `data: { "stopped": true }`.
 
