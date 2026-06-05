@@ -60,7 +60,7 @@ def main() -> int:
         assert c, "no connect"
         c.call("open_project", {"path": str(ROOT)})       # compiles frame_source too
         c.compile_and_load(str(ROOT / "inspect.cpp"), timeout=300)
-        c.call("start", {"fps": 2})                        # low timer; the sources self-drive
+        c.call("start", {"fps": 0})                        # trigger-only: no timer, the sources self-drive
 
         # Collect run_result events for a few seconds, bucketed by group.
         by_group_src = defaultdict(lambda: defaultdict(int))   # group -> source(msg) -> count

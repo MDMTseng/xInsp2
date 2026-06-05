@@ -145,6 +145,24 @@ The backend resolves source→group on `emit_trigger` (untagged → `default_gro
 Chosen over a project-level source→group map or an `emit_trigger` arg because the
 source is the natural owner of "how urgent is my stream".
 
+### The synthetic timer tick loads the default group
+
+Continuous mode also runs a **timer thread** that emits a synthetic empty tick at
+the `cmd:start` fps so source-less scripts still dispatch. That tick is *untagged*,
+so it routes to `default_group` — i.e. the default group carries `fps` extra
+dispatches/sec on top of any real source assigned to it. Near saturation this is
+enough to tip *only the default group* into backlog + drops while the others stay
+healthy (a real observation: 8 groups each fed 20/s at ~21.6/s capacity — the
+default group, also taking the timer, was the one that piled up). This is the
+per-group isolation working (the overload stays contained), but it means: **don't
+put a near-saturated source on the default group**, give the default group
+headroom, or run **trigger-only**.
+
+**Trigger-only mode:** `cmd:start {"fps": 0}` (or `--autostart-fps=-1`) starts
+continuous mode — lanes spawn, sources route — with **no timer thread at all**. Use
+it whenever the project has its own sources and you don't want synthetic ticks
+skewing the default group. `fps > 0` keeps the legacy timer.
+
 ## Result ordering with groups
 
 > **Per-group `result_order` shipped.** Each lane owns its own emit-sequence gate

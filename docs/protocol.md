@@ -252,6 +252,10 @@ file frame on demand without a custom source plugin.
 `parallelism.dispatch_threads`, default 1; included so callers can
 verify the pool size that just came up).
 On already-running: `data: { "already": true }`.
+**`fps <= 0` = trigger-only**: continuous mode starts (lanes spawn, sources
+route) but **no synthetic timer tick** runs — the project's sources are the sole
+dispatch driver. Use it for source-driven projects so the timer doesn't load the
+default group. (`--autostart-fps=-1` does the same headlessly.)
 
 `stop args: {}` → `data: { "stopped": true }`.
 
@@ -748,7 +752,7 @@ extension, or `xinsp-fe.exe` on a line — see
 | `--watchdog=MS` | 0 (off) | terminate an inspect that exceeds MS ms |
 | `--project=DIR` | — | **headless autostart**: `open_project` this folder at boot |
 | `--script=PATH` | project.json's `script` | script to `compile_and_load` for `--project` |
-| `--autostart-fps=N` | 0 (off) | with `--project`, `start` continuous mode at N fps |
+| `--autostart-fps=N` | 0 (off) | with `--project`, `start` continuous mode at N fps; **N<0 = trigger-only** (start, no timer) |
 | `--working-copy` | off | open via a `<project>/.xinsp_work` scratch (transactional; resumes on crash respawn) — see [working-copy guide](./guides/project-working-copy.md) |
 
 The `--project` autostart drives the same `open_project → compile_and_load →

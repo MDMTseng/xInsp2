@@ -61,7 +61,7 @@ def main() -> int:
         assert c, "no connect"
         c.call("open_project", {"path": str(ROOT)})
         c.compile_and_load(str(ROOT / "inspect.cpp"), timeout=300)
-        c.call("start", {"fps": 2})
+        c.call("start", {"fps": 0})   # trigger-only: no timer, the burst_sources drive it
 
         peak = defaultdict(int)
         drop_seen = defaultdict(int)

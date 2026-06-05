@@ -1136,11 +1136,13 @@ static bool has_flag(int argc, char** argv, const char* flag) {
 }
 
 // --autostart-fps=<N>  (default 0 = don't auto-start continuous mode; just
-// open+compile and wait for a client / triggers).
+// open+compile and wait for a client / triggers). N < 0 = autostart in
+// TRIGGER-ONLY mode (continuous on, lanes spawned, no synthetic timer tick —
+// the project's sources drive everything).
 static int parse_autostart_fps(int argc, char** argv) {
     std::string v = parse_str_flag(argc, argv, "--autostart-fps");
     if (v.empty()) return 0;
-    try { int n = std::stoi(v); return n < 0 ? 0 : n; } catch (...) { return 0; }
+    try { return std::stoi(v); } catch (...) { return 0; }
 }
 
 // Repeatable: --plugins-dir=/some/path  (or --plugins-dir /some/path).
@@ -1662,17 +1664,18 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
         g_worker_threads.emplace_back(worker_body);
     }
 
-    // Timer thread: every interval_ms push a synthetic empty event so
-    // scripts without trigger sources still tick. Goes through the
-    // queue-policy helper so synthetic events also get dropped under
-    // backpressure rather than infinitely accumulating.
-    g_timer_thread = std::thread([interval_ms] {
-        while (g_continuous.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
-            if (!g_continuous.load()) break;
-            (void)enqueue_event_(xi::TriggerEvent{});
-        }
-    });
+    // Timer thread: every interval_ms push a synthetic empty event so scripts
+    // without trigger sources still tick. interval_ms <= 0 => trigger-only mode:
+    // no timer at all, the project's sources are the sole dispatch driver.
+    if (interval_ms > 0) {
+        g_timer_thread = std::thread([interval_ms] {
+            while (g_continuous.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+                if (!g_continuous.load()) break;
+                (void)enqueue_event_(xi::TriggerEvent{});
+            }
+        });
+    }
 }
 
 // ---- Dispatch groups: per-group worker lanes (gated on parallelism.groups) ----
@@ -1826,16 +1829,20 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
             });
         }
     }
-    // Timer ticks feed the default group's lane.
-    g_timer_thread = std::thread([interval_ms] {
-        const std::string dg = g_plugin_mgr.project().default_group;
-        while (g_continuous.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
-            if (!g_continuous.load()) break;
-            xi::TriggerEvent ev; ev.group = dg;
-            (void)enqueue_to_lane_(std::move(ev));
-        }
-    });
+    // Timer ticks feed the default group's lane. interval_ms <= 0 => trigger-only:
+    // no timer, so the default group isn't loaded with synthetic ticks (the sources
+    // are the sole driver).
+    if (interval_ms > 0) {
+        g_timer_thread = std::thread([interval_ms] {
+            const std::string dg = g_plugin_mgr.project().default_group;
+            while (g_continuous.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+                if (!g_continuous.load()) break;
+                xi::TriggerEvent ev; ev.group = dg;
+                (void)enqueue_to_lane_(std::move(ev));
+            }
+        });
+    }
 }
 
 static void stop_group_pool_() {
@@ -2523,10 +2530,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // cmd:start. Continuous mode (below) just adds the free-running timer.
         install_trigger_sink_(&srv);
         if (was_continuous) {
-            int fps = prior_continuous_fps > 0 ? prior_continuous_fps : 10;
+            // Preserve trigger-only mode across the reload: g_continuous_fps == 0
+            // means no timer (sources drive it), so resume the same way.
+            bool trig_only = prior_continuous_fps <= 0;
+            int fps = trig_only ? 0 : prior_continuous_fps;
             g_continuous_fps = fps;
             g_continuous = true;
-            int interval_ms = 1000 / std::max(fps, 1);
+            int interval_ms = trig_only ? 0 : 1000 / std::max(fps, 1);
             int n_threads = g_plugin_mgr.project().dispatch_threads;
             if (grouping_enabled_()) spawn_group_pool_(&srv, interval_ms);
             else                     spawn_dispatch_pool_(&srv, interval_ms, n_threads);
@@ -2606,10 +2616,17 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             return;
         }
 
-        // Parse optional fps from args (default 10)
-        int fps = 10;
+        // Parse optional fps from args (default 10). fps <= 0 means TRIGGER-ONLY:
+        // start continuous (spawn the lanes) but run NO synthetic timer tick — the
+        // project's sources are the only dispatch driver. (Avoids loading the
+        // default group with timer ticks; see docs/design/dispatch-groups.md.)
+        int  fps = 10;
+        bool trigger_only = false;
         auto fps_val = xp::get_number_field(parsed->args_json, "fps");
-        if (fps_val && *fps_val > 0) fps = (int)*fps_val;
+        if (fps_val) {
+            if (*fps_val > 0) fps = (int)*fps_val;
+            else trigger_only = true;
+        }
 
         // Stop any existing pool before starting a new one.
         if (!g_worker_threads.empty() || g_timer_thread.joinable()) {
@@ -2632,7 +2649,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             g_ev_queue.clear();
         }
 
-        g_continuous_fps = fps;
+        g_continuous_fps = trigger_only ? 0 : fps;
         g_continuous = true;
         // Reset queue stats so each cmd:start gets a fresh observation
         // window. Keeps `dispatch_stats` per-run comparable.
@@ -2640,7 +2657,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         g_dropped_newest = 0;
         g_queue_high_watermark = 0;
 
-        int interval_ms = 1000 / std::max(fps, 1);
+        // interval_ms <= 0 → spawn_*_pool_ skips the timer thread (trigger-only).
+        int interval_ms = trigger_only ? 0 : 1000 / std::max(fps, 1);
         int n_threads = g_plugin_mgr.project().dispatch_threads;
         if (n_threads < 1) n_threads = 1;
 
@@ -4487,8 +4505,12 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr,
                         "[xinsp2] autostart: degraded - script failed to compile/load; "
                         "line will NOT inspect (port stays up for an operator to recompile)\n");
-                } else if (autostart_fps > 0) {
-                    std::fprintf(stderr, "[xinsp2] autostart: start %d fps\n", autostart_fps);
+                } else if (autostart_fps != 0) {
+                    // >0 = timer at N fps; <0 = trigger-only (no timer). The fps
+                    // value passes through to cmd:start, which treats <=0 as
+                    // trigger-only.
+                    std::fprintf(stderr, "[xinsp2] autostart: start (fps=%d%s)\n",
+                                 autostart_fps, autostart_fps < 0 ? ", trigger-only" : "");
                     handle_command(srv,
                         "{\"type\":\"cmd\",\"id\":3,\"name\":\"start\",\"args\":{\"fps\":"
                         + std::to_string(autostart_fps) + "}}");

@@ -62,7 +62,7 @@ def main() -> int:
         assert c, "no connect"
         c.call("open_project", {"path": str(ROOT)})       # compiles burst_source too
         c.compile_and_load(str(ROOT / "inspect.cpp"), timeout=300)
-        c.call("start", {"fps": 2})
+        c.call("start", {"fps": 0})   # trigger-only: no timer, the burst_sources drive it
 
         # Poll the live per-lane `running` count for ~6s (covers several 1Hz bursts).
         # Drain run_result events as they STREAM IN for per-group throughput /
