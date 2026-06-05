@@ -16,7 +16,7 @@ const WS_URL = qs.get("ws") ||
   `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 const DASH = qs.get("dashboard") || "./dashboard.json";
 
-const state = { run_id: -1, vars: {}, images: {}, run_ms: null, status: null, result: null };
+const state = { run_id: -1, vars: {}, images: {}, run_ms: null, status: null, result: null, groups: [] };
 let cards = [];
 let raf = 0;
 
@@ -262,8 +262,17 @@ function connect() {
   try { ws = new WebSocket(WS_URL); }
   catch (e) { dlog(`WS constructor threw: ${e}`); setConn("● bad url", "#6a1e1e"); return; }
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); };
-  ws.onclose = (e) => { dlog(`WS CLOSE code=${e.code} reason=${e.reason || "-"} clean=${e.wasClean}`); setConn("● disconnected", "#6a1e1e"); setTimeout(connect, 1500); };
+  // Poll dispatch_stats so the groups card can show live per-group concurrency.
+  // Cheap, so just poll whenever connected (the rsp is ignored if no groups card).
+  let statsTimer = 0, cmdId = 1;
+  const startStatsPoll = () => {
+    if (statsTimer) return;
+    statsTimer = setInterval(() => {
+      if (ws.readyState === 1) ws.send(JSON.stringify({ type: "cmd", id: ++cmdId, name: "dispatch_stats", args: {} }));
+    }, 150);
+  };
+  ws.onopen = () => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); };
+  ws.onclose = (e) => { dlog(`WS CLOSE code=${e.code} reason=${e.reason || "-"} clean=${e.wasClean}`); if (statsTimer) { clearInterval(statsTimer); statsTimer = 0; } setConn("● disconnected", "#6a1e1e"); setTimeout(connect, 1500); };
   ws.onerror = () => { dlog("WS ERROR event"); ws.close(); };
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
@@ -274,6 +283,8 @@ function connect() {
       // run_id (absent on a dropped frame) so cards can count distinct runs.
       else if (m.type === "event" && m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
       else if (m.type === "event" && (m.name === "safe_state" || m.name === "status")) { state.status = m.data; scheduleRender(); }
+      // dispatch_stats reply → feed the groups card.
+      else if (m.type === "rsp" && m.data && Array.isArray(m.data.groups)) { state.groups = m.data.groups; scheduleRender(); }
     } else {
       try { const f = decodePreviewFrame(ev.data); state.images[f.gid] = f.dataUrl; scheduleRender(); } catch (e) { console.error(e); }
     }

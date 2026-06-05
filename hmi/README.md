@@ -32,7 +32,7 @@ index.html?ws=ws://<host>:<port>/&dashboard=./dashboard.json
 | `app.mjs` | WS host — connect, decode the stream, lay out the grid, `feed()` cards |
 | `protocol.mjs` | pure decoders (vars message + 20-byte preview frame header) — unit-tested |
 | `layout.mjs` | the recursive split-pane tree (pure: classify / traverse / validate) — unit-tested |
-| `cards.mjs` | built-in cards as web components: `verdict` `value` `image` `spc` `throughput` `yield` |
+| `cards.mjs` | built-in cards as web components: `verdict` `value` `image` `spc` `throughput` `yield` `groups` |
 | `dashboard.json` | the layout: a **split-pane tree** of `{split:"row"\|"col",ratio,a,b}` nodes with `{card:{type,bind,config}}` leaves |
 | `demo/` | a source-less project whose script emits a synthetic live stream |
 

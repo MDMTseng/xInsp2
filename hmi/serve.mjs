@@ -22,7 +22,11 @@ const REPO = dirname(HMI);
 const require = createRequire(pathToFileURL(join(REPO, "vscode-extension", "package.json")));
 const { WebSocketServer, WebSocket } = require("ws");
 const BACKEND = join(REPO, "backend", "build", "Release", "xinsp-backend.exe");
-const DEMO = join(HMI, "demo");
+// Project to run headless. Defaults to hmi/demo; override with PROJECT=<path>
+// (absolute, or relative to the repo root) to drive a different dashboard.
+const DEMO = process.env.PROJECT
+  ? (process.env.PROJECT.match(/^([a-zA-Z]:|\/|\\)/) ? process.env.PROJECT : join(REPO, process.env.PROJECT))
+  : join(HMI, "demo");
 const PORT = +(process.env.PORT || 8770);
 const WS_PORT = +(process.env.WS_PORT || 7872);
 const FPS = +(process.env.FPS || 5);
@@ -70,7 +74,7 @@ server.on("upgrade", (req, sock, head) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`[serve] HMI on http://127.0.0.1:${PORT}/  (page + /ws proxy -> ${BE_URL}, project=hmi/demo @${FPS}fps)`);
+  console.log(`[serve] HMI on http://127.0.0.1:${PORT}/  (page + /ws proxy -> ${BE_URL}, project=${DEMO} @${FPS}fps)`);
   console.log(`[serve] tunnel this one port; the page uses a same-origin /ws.`);
 });
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { try { be.kill(); } catch {} process.exit(0); });

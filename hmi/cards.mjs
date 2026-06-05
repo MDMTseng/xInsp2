@@ -153,8 +153,46 @@ class YieldCard extends HTMLElement {
   }
 }
 
+// ---- groups: live dispatch-group concurrency monitor ------------------------
+// Reads st.groups (the dispatch_stats breakdown the host polls). One row per
+// group: a bar of `max_parallel` cells with `running` lit, plus queue / dropped
+// / peak. Makes per-group parallelism visible (each lane fills to its cap).
+class GroupsCard extends HTMLElement {
+  connectedCallback() { this.body = shell(this, this.config?.title || "Dispatch groups");
+    this.body.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:10px;overflow:auto";
+    this.peak = {}; this.rows = {}; }
+  feed(st) {
+    const groups = st.groups || [];
+    if (!groups.length) { this.body.textContent = "no dispatch groups (legacy single pool)"; this.body.style.color = "#888"; return; }
+    for (const g of groups) {
+      const mp = g.max_parallel || 1, run = g.running || 0;
+      this.peak[g.name] = Math.max(this.peak[g.name] || 0, run);
+      let row = this.rows[g.name];
+      if (!row) {
+        row = document.createElement("div"); row.style.cssText = "display:flex;flex-direction:column;gap:3px";
+        const head = document.createElement("div"); head.style.cssText = "display:flex;justify-content:space-between;font-size:12px";
+        const name = document.createElement("span"); name.style.fontWeight = "600";
+        const meta = document.createElement("span"); meta.style.color = "#888";
+        head.append(name, meta);
+        const bar = document.createElement("div"); bar.style.cssText = "display:flex;gap:3px;height:18px";
+        row.append(head, bar); this.body.appendChild(row);
+        this.rows[g.name] = row = { row, name, meta, bar, cells: [] };
+      }
+      row.name.textContent = `${g.name}  ${run}/${mp}`;
+      row.name.style.color = run >= mp ? "#3ad17a" : run > 0 ? "#9ad" : "#bbb";
+      row.meta.textContent = `q ${g.queue_now ?? 0} · drop ${g.dropped ?? 0} · peak ${this.peak[g.name]}`;
+      if (row.cells.length !== mp) {                  // (re)build the cell strip
+        row.bar.replaceChildren(); row.cells = [];
+        for (let i = 0; i < mp; i++) { const c = document.createElement("div");
+          c.style.cssText = "flex:1 1 0;border-radius:3px;border:1px solid #333;min-width:6px"; row.bar.appendChild(c); row.cells.push(c); }
+      }
+      row.cells.forEach((c, i) => { c.style.background = i < run ? "#3ad17a" : "#1a1a1a"; });
+    }
+  }
+}
+
 export const CARDS = {
   verdict: VerdictCard, value: ValueCard, image: ImageCard,
-  spc: SpcCard, throughput: ThroughputCard, yield: YieldCard,
+  spc: SpcCard, throughput: ThroughputCard, yield: YieldCard, groups: GroupsCard,
 };
 for (const [k, C] of Object.entries(CARDS)) customElements.define(`xi-card-${k}`, C);

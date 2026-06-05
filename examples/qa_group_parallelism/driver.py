@@ -10,7 +10,10 @@ random 50-100ms so the work overlaps. The driver polls dispatch_stats `running`
     in parallel: p1->1, p2->2, p4->4);
   - `running` NEVER exceeds max_parallel (the cap holds);
   - routing is clean (each lane only ran its own source) and every group made
-    progress.
+    progress;
+  - the groups are result_order:"arrival", so each group's run_ids arrive
+    monotonically (0 inversions) even with up to max_parallel out-of-order
+    completions — parallelism and ordered emission verified together.
 
 Run:  python examples/qa_group_parallelism/driver.py   (Windows; backend built)
 """
@@ -73,8 +76,12 @@ def main() -> int:
             time.sleep(0.01)
 
         c.call("stop")
-        # Drain run_result events for per-group throughput + routing.
+        # Drain run_result events for per-group throughput + routing + ORDER. The
+        # groups are result_order:"arrival", so each group's run_ids must arrive
+        # monotonically increasing even though up to max_parallel inspects (with
+        # random 50-100ms sleeps) complete out of order.
         by_group_src = defaultdict(lambda: defaultdict(int))
+        seq_by_group = defaultdict(list)
         while True:
             try: ev = c._inbox_events.get_nowait()
             except Exception: break
@@ -82,13 +89,17 @@ def main() -> int:
                 d = ev.get("data", {})
                 if d.get("code") == 1:
                     by_group_src[d.get("group")][d.get("msg")] += 1
+                    if d.get("run_id") is not None:
+                        seq_by_group[d.get("group")].append(d["run_id"])
         c.call("close_project"); c.close()
 
         print("peak running per group:", {k: peak.get(k, 0) for k in EXPECT})
         for g, want in EXPECT.items():
             got = peak.get(g, 0)
+            seq = seq_by_group.get(g, [])
+            inversions = sum(1 for i in range(len(seq) - 1) if seq[i] > seq[i + 1])
             print(f"  {g}: peak {got} / max_parallel {want}, "
-                  f"results {dict(by_group_src.get(g, {}))}")
+                  f"results {dict(by_group_src.get(g, {}))}, run_id inversions {inversions}")
             if got != want:
                 fails.append(f"{g}: peak running {got} != max_parallel {want}")
             srcs = set(by_group_src.get(g, {}))
@@ -97,6 +108,10 @@ def main() -> int:
                 fails.append(f"{g}: foreign source(s) {srcs - {expect_src}}")
             if not by_group_src.get(g):
                 fails.append(f"{g}: produced no results")
+            # result_order:"arrival" → run_ids must be monotonic per group even
+            # though up to max_parallel inspects complete out of order.
+            if inversions != 0:
+                fails.append(f"{g}: {inversions} run_id inversions under arrival ordering")
         if cap_violation:
             fails.append(f"cap exceeded: {cap_violation[:3]}")
     except Exception as e:

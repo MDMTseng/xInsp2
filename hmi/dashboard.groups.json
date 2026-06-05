@@ -1,0 +1,14 @@
+{
+  "title": "xInsp2 HMI — dispatch groups",
+  "layout": {
+    "dir": "col", "weights": [3, 1],
+    "children": [
+      { "card": { "type": "groups", "config": { "title": "Dispatch groups — live running / max_parallel" } } },
+      { "dir": "row", "weights": [1, 1, 1], "children": [
+        { "card": { "type": "verdict", "bind": { "result": true }, "config": { "title": "Last result" } } },
+        { "card": { "type": "yield",   "bind": { "result": true }, "config": { "title": "Yield", "warn": 90 } } },
+        { "card": { "type": "throughput", "config": { "title": "Throughput" } } }
+      ] }
+    ]
+  }
+}

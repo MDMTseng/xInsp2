@@ -5,9 +5,9 @@
   "parallelism": {
     "default_group": "p1",
     "groups": [
-      { "name": "p1", "max_parallel": 1, "thread_priority": "normal", "queue_depth": 200, "overflow": "drop_oldest" },
-      { "name": "p2", "max_parallel": 2, "thread_priority": "normal", "queue_depth": 200, "overflow": "drop_oldest" },
-      { "name": "p4", "max_parallel": 4, "thread_priority": "normal", "queue_depth": 200, "overflow": "drop_oldest" }
+      { "name": "p1", "max_parallel": 1, "thread_priority": "normal", "queue_depth": 200, "overflow": "drop_oldest", "result_order": "arrival" },
+      { "name": "p2", "max_parallel": 2, "thread_priority": "normal", "queue_depth": 200, "overflow": "drop_oldest", "result_order": "arrival" },
+      { "name": "p4", "max_parallel": 4, "thread_priority": "normal", "queue_depth": 200, "overflow": "drop_oldest", "result_order": "arrival" }
     ]
   },
   "instances": [
