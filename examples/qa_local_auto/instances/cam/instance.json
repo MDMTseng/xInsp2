@@ -1,0 +1,7 @@
+{
+  "plugin": "local_image_source",
+  "config": {
+    "dir": "examples/object_count_solve/frames",
+    "auto_ms": 300
+  }
+}
