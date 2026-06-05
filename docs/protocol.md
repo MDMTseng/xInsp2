@@ -770,6 +770,7 @@ extension, or `xinsp-fe.exe` on a line — see
 | `--autostart-fps=N` | 0 (off) | with `--project`, `start` continuous mode at N fps; **N<0 = trigger-only** (start, no timer) |
 | `--working-copy` | off | open via a `<project>/.xinsp_work` scratch (transactional; resumes on crash respawn) — see [working-copy guide](./guides/project-working-copy.md) |
 | `--priority=CLASS` | (unchanged) | process priority class (Win): `high`/`above`/`normal`/`below`/`realtime`. `realtime` can starve the OS — use with care |
+| `--aot` | off | prebuilt bundle: load existing plugin/script DLLs, **never invoke the compiler** (a `.dll` `script` path loads directly; plugins load the newest `build/*.dll`). See [`design/deployment.md`](./design/deployment.md) export bundle |
 
 Performance notes: on Windows the backend raises the OS timer resolution to **1 ms**
 (`timeBeginPeriod(1)`) at startup so sleeps / timer-tick fps / CV waits are tight,

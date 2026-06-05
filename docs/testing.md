@@ -240,6 +240,10 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
 - **BE-served dashboard** — `examples/qa_get_dashboard/` proves `cmd:get_dashboard`
   serves `<project>/dashboard[.<name>].json` (missing → found:false; path traversal
   blocked) so the HMI needs only the WS URL.
+- **Export bundle (AOT, no toolchain)** — `examples/qa_export_bundle/` exports a
+  project via `tools/export_bundle.py`, then runs the bundle backend with `--aot`
+  and a **stripped PATH** (no `cl.exe`) and still inspects — proving prebuilt
+  plugin/script DLLs load with no compiler on the target.
 - **ImagePool throughput** — `backend/tests/bench_image_pool` (manual, not a
   ctest): create/release cost; its header records why buffer reuse isn't worth it.
 - **Linux** build path untested (Windows-first WS server, SEH usage,

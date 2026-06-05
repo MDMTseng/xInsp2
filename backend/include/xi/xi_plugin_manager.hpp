@@ -398,6 +398,7 @@ struct CompileEnv {
     std::string opencv_dir;
     std::string turbojpeg_root;
     std::string ipp_root;
+    bool        aot = false;   // AOT bundle: load prebuilt plugin DLLs, don't compile
 };
 
 class PluginManager {
@@ -528,17 +529,37 @@ private:
                 req.ipp_root       = compile_env_.ipp_root;
                 req.mode           = xi::script::CompileMode::PluginDev;
 
-                std::fprintf(stderr,
-                    "[xinsp2] compiling project plugin '%s' (%zu source%s)...\n",
-                    pname.c_str(), sources.size(), sources.size() == 1 ? "" : "s");
-                auto res = xi::script::compile(req);
-                if (!res.ok) {
-                    last_open_warnings_.push_back(
-                        {pname, pname, "compile failed (see Output for details)"});
+                xi::script::CompileResult res;
+                if (compile_env_.aot) {
+                    // AOT bundle: load the newest prebuilt DLL in build/ — no cl.exe.
+                    std::filesystem::path build_dir = entry.path() / "build", newest;
+                    std::filesystem::file_time_type best{};
+                    if (std::filesystem::exists(build_dir))
+                        for (auto& f : std::filesystem::directory_iterator(build_dir))
+                            if (f.is_regular_file() && f.path().extension() == ".dll") {
+                                auto t = std::filesystem::last_write_time(f);
+                                if (newest.empty() || t > best) { best = t; newest = f.path(); }
+                            }
+                    if (newest.empty()) {
+                        last_open_warnings_.push_back({pname, pname, "AOT: no prebuilt DLL in build/ (export first)"});
+                        std::fprintf(stderr, "[xinsp2] AOT: plugin '%s' has no prebuilt DLL — skipped\n", pname.c_str());
+                        continue;
+                    }
+                    res.ok = true; res.dll_path = newest.string();
+                    std::fprintf(stderr, "[xinsp2] AOT: loading prebuilt plugin '%s': %s\n", pname.c_str(), res.dll_path.c_str());
+                } else {
                     std::fprintf(stderr,
-                        "[xinsp2] project plugin '%s' compile FAILED:\n%s\n",
-                        pname.c_str(), res.build_log.c_str());
-                    continue;
+                        "[xinsp2] compiling project plugin '%s' (%zu source%s)...\n",
+                        pname.c_str(), sources.size(), sources.size() == 1 ? "" : "s");
+                    res = xi::script::compile(req);
+                    if (!res.ok) {
+                        last_open_warnings_.push_back(
+                            {pname, pname, "compile failed (see Output for details)"});
+                        std::fprintf(stderr,
+                            "[xinsp2] project plugin '%s' compile FAILED:\n%s\n",
+                            pname.c_str(), res.build_log.c_str());
+                        continue;
+                    }
                 }
 
                 // Drop any prior version of this same project plugin

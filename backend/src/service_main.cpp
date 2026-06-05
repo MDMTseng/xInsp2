@@ -2407,6 +2407,18 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload (will resume)\n");
         }
 
+        // AOT / no-toolchain bundle: a `.dll` path is loaded DIRECTLY (no cl.exe).
+        // Resolve relative to the project folder. Otherwise compile the .cpp.
+        bool prebuilt = src->size() > 4 &&
+            (src->compare(src->size() - 4, 4, ".dll") == 0 || src->compare(src->size() - 4, 4, ".DLL") == 0);
+        xi::script::CompileResult res;
+        if (prebuilt) {
+            std::filesystem::path p(*src);
+            if (p.is_relative() && !g_project_folder.empty()) p = std::filesystem::path(g_project_folder) / p;
+            res.ok = true;
+            res.dll_path = p.string();
+            std::fprintf(stderr, "[xinsp2] AOT: loading prebuilt script DLL (no compile): %s\n", res.dll_path.c_str());
+        } else {
         xi::script::CompileRequest req;
         req.source_path     = *src;
         req.output_dir      = (std::filesystem::path(g_work_dir) / "script_build").string();
@@ -2439,7 +2451,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             srv.send_text(ev.to_json());
         }
 
-        auto res = xi::script::compile(req);
+        res = xi::script::compile(req);
 
         // Pair the started event with a finished event so drivers can
         // bracket the operation. Carries `ok` and a short summary so a
@@ -2456,6 +2468,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             ev.data_json = data;
             srv.send_text(ev.to_json());
         }
+        }  // end else (compile path)
 
         // Serialize diagnostics for both error & success paths so the
         // extension can drive Problems panel / squiggles either way.
@@ -4364,6 +4377,7 @@ int main(int argc, char** argv) {
                 "                       resumes on crash respawn). commit_working_copy to save\n"
                 "  --comms-port=N       connect to the comms gateway on loopback N (xi::comms)\n"
                 "  --priority=CLASS     process priority: high|above|normal|below|realtime (Win)\n"
+                "  --aot                prebuilt bundle: load existing plugin/script DLLs, no compiler\n"
                 "  --version, -v        print version and exit\n"
                 "  --help, -h           this help\n",
                 XINSP2_VERSION);
@@ -4472,6 +4486,11 @@ int main(int argc, char** argv) {
     env.opencv_dir     = g_opencv_dir;
     env.turbojpeg_root = g_turbojpeg_root;
     env.ipp_root       = g_ipp_root;
+    // --aot: this is a prebuilt bundle — load existing plugin DLLs instead of
+    // compiling (no cl.exe on the target). The autostart script should point at a
+    // .dll too (compile_and_load loads a .dll directly).
+    env.aot = has_flag(argc, argv, "--aot");
+    if (env.aot) std::fprintf(stderr, "[xinsp2] AOT mode: loading prebuilt plugin/script DLLs (no compiler)\n");
     g_plugin_mgr.set_compile_env(env);
 
     xi::ws::Server srv;
