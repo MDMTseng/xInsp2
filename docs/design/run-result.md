@@ -139,9 +139,12 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
   `lane->mu` (arrival order) and wraps `run_result`+`run_finished` in a lane-scoped
   `EmitTurn`. Compute stays fully parallel; only emission serialises, per group.
   Dropped frames never get a seq (no gap); stop wakes every gate so it can't wedge.
-- **Caveat:** dropped-frame `run_result`s (`XI_SYS_DROPPED`) are emitted at the drop
-  site, *not* through the gate — so in arrival mode they may interleave out of order
-  with the inspected stream. The ordering guarantee covers *inspected* runs' results.
+- **Caveats** (arrival mode): (a) dropped-frame `run_result`s (`XI_SYS_DROPPED`) are
+  emitted at the drop site, *not* through the gate, so they may interleave out of
+  order with the inspected stream — the guarantee covers *inspected* runs. (b) At
+  `cmd:stop` the gate releases every in-flight worker out of turn (so stop can't
+  deadlock), so the final ~`max_parallel` emits per group can be unordered. Ordering
+  holds during steady-state operation, not across the stop boundary.
 - Regression: `qa_dispatch_groups` Test E — arrival group (max_parallel 3 +
   anti-correlated sleep) → 0 `run_id` inversions, while a completion control shows
   many (the workload genuinely scrambles).

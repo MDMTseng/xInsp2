@@ -65,32 +65,38 @@ def main() -> int:
         c.call("start", {"fps": 2})
 
         # Poll the live per-lane `running` count for ~6s (covers several 1Hz bursts).
+        # Drain run_result events as they STREAM IN for per-group throughput /
+        # routing / ORDER. The groups are result_order:"arrival", so each group's
+        # run_ids must arrive monotonically even though up to max_parallel inspects
+        # complete out of order. (Collect DURING the run, not after stop: cmd:stop
+        # releases in-flight workers out of turn so stop can't deadlock, which would
+        # reorder the final ~max_parallel emits — that tail is excluded here.)
         peak = defaultdict(int)
         cap_violation = []
+        by_group_src = defaultdict(lambda: defaultdict(int))
+        seq_by_group = defaultdict(list)
+
+        def drain_events():
+            while True:
+                try: ev = c._inbox_events.get_nowait()
+                except Exception: break
+                if ev.get("name") == "run_result":
+                    d = ev.get("data", {})
+                    if d.get("code") == 1:
+                        by_group_src[d.get("group")][d.get("msg")] += 1
+                        if d.get("run_id") is not None:
+                            seq_by_group[d.get("group")].append(d["run_id"])
+
         end = time.time() + 6.0
         while time.time() < end:
             for g in (c.call("dispatch_stats").get("groups") or []):
                 nm, r, mp = g["name"], g.get("running", 0), g.get("max_parallel")
                 if r > peak[nm]: peak[nm] = r
                 if mp is not None and r > mp: cap_violation.append((nm, r, mp))
+            drain_events()
             time.sleep(0.01)
 
         c.call("stop")
-        # Drain run_result events for per-group throughput + routing + ORDER. The
-        # groups are result_order:"arrival", so each group's run_ids must arrive
-        # monotonically increasing even though up to max_parallel inspects (with
-        # random 50-100ms sleeps) complete out of order.
-        by_group_src = defaultdict(lambda: defaultdict(int))
-        seq_by_group = defaultdict(list)
-        while True:
-            try: ev = c._inbox_events.get_nowait()
-            except Exception: break
-            if ev.get("name") == "run_result":
-                d = ev.get("data", {})
-                if d.get("code") == 1:
-                    by_group_src[d.get("group")][d.get("msg")] += 1
-                    if d.get("run_id") is not None:
-                        seq_by_group[d.get("group")].append(d["run_id"])
         c.call("close_project"); c.close()
 
         print("peak running per group:", {k: peak.get(k, 0) for k in EXPECT})
