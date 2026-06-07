@@ -24,6 +24,7 @@
 //   clear: {"src":"xinsp-fe","event":"safe_state","state":"clear","ts_ms":1780...}
 //
 #include <xi/xi_safe_state.hpp>
+#include <xi/xi_clock.hpp>
 
 #include <chrono>
 #include <cstdio>
@@ -53,10 +54,7 @@ inline void plc_json_escape(std::string& out, const std::string& s) {
     }
     out.push_back('"');
 }
-inline int64_t plc_now_ms() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-}
+inline int64_t plc_now_ms() { return xi::wall_ms(); }   // wall: PLC event ts
 }  // namespace detail
 
 class PlcSafeStateSink : public SafeStateSink {

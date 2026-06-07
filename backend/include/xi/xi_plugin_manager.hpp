@@ -40,6 +40,7 @@
 #include "xi_cert.hpp"
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
+#include "xi_pm_json.hpp"      // pm_json_escape / pm_json_quote (extracted leaf)
 #include "xi_script_compiler.hpp"
 #include "xi_source.hpp"
 #include "xi_trigger_bus.hpp"
@@ -57,44 +58,7 @@
 
 namespace xi {
 
-// Append a JSON-quoted, escaped form of `s` to `out`. Closes audit
-// D-P1-1: project / plugin / instance names embedded in JSON output
-// were previously concatenated raw, so a single `"` (or any control
-// char) in the name corrupted project.json / plugin metadata. The
-// escape covers the minimal RFC 8259 requirements (\" \\ control
-// chars as \uXXXX). Same shape as xp::json_escape_into in
-// xi_protocol.hpp; duplicated here so this header doesn't pull in
-// the protocol parser as a transitive dep.
-inline void pm_json_escape(std::string& out, const std::string& s) {
-    out.push_back('"');
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            case '\b': out += "\\b";  break;
-            case '\f': out += "\\f";  break;
-            default:
-                if ((unsigned char)c < 0x20) {
-                    char b[8];
-                    std::snprintf(b, sizeof(b), "\\u%04x",
-                                  (unsigned)(unsigned char)c);
-                    out += b;
-                } else {
-                    out.push_back(c);
-                }
-        }
-    }
-    out.push_back('"');
-}
-// Convenience: returns a fresh quoted+escaped string.
-inline std::string pm_json_quote(const std::string& s) {
-    std::string out;
-    pm_json_escape(out, s);
-    return out;
-}
+// (pm_json_escape / pm_json_quote moved to xi_pm_json.hpp)
 
 // Plugin ABI compatibility check. Reads the plugin DLL's
 // xi_plugin_abi_version() export and compares against the host's

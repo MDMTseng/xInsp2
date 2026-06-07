@@ -18,6 +18,7 @@
 //
 
 #include "xi_abi.h"
+#include "xi_clock.hpp"
 #include "xi_record.hpp"
 #include "xi_image.hpp"
 
@@ -48,11 +49,11 @@ namespace xi {
 // ODR conflict when both headers land in the same TU.
 #ifndef XI_NOW_US_DEFINED
 #define XI_NOW_US_DEFINED
-inline int64_t now_us() {
-    auto now = std::chrono::system_clock::now();
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-        now.time_since_epoch()).count();
-}
+// Thin compat aliases over the canonical clock (xi_clock.hpp). Both now_us and
+// steady_now_us are defined together so the guard can't leave one undefined
+// depending on header include order.
+inline int64_t now_us()        { return xi::wall_us(); }
+inline int64_t steady_now_us() { return xi::mono_us(); }
 #endif
 
 // Function pointer types for the callbacks

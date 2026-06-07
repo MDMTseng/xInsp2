@@ -17,6 +17,7 @@
 // probe are Win32. The SafeStateSink seam, config/crash-log parsing stay
 // portable. TODO(linux) markers below; see docs/design/linux-port.md.
 //
+#include <xi/xi_clock.hpp>            // xi::wall_ms / xi::mono_ms (single clock home)
 #include <xi/xi_safe_state.hpp>
 #include <xi/xi_crash_report.hpp>     // xi::enrich_from_crash_report (unit-tested)
 #include <xi/xi_crash_history.hpp>    // xi::CrashHistory (structured BE-death JSONL)
@@ -263,20 +264,12 @@ static FeConfig load_config(int argc, char** argv) {
     return c;
 }
 
-// Wall clock — for human-facing timestamps that go into status / crash JSON.
-static int64_t now_ms() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-}
-// Monotonic clock — for the supervisor's deadlines/intervals (boot timeout,
-// heartbeat staleness, healthy-for, respawn windows). These must not jump on an
-// NTP/DST wall-clock correction (a forward jump would falsely trip a boot/
-// heartbeat timeout and kill+respawn a healthy backend; a backward jump would
-// stop them ever firing). Never subtract one clock from the other.
-static int64_t steady_ms() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-}
+// Wall clock — human-facing timestamps (status / crash JSON). Monotonic clock —
+// the supervisor's deadlines/intervals (boot timeout, heartbeat staleness,
+// healthy-for, respawn windows) which must not jump on an NTP/DST correction.
+// See xi_clock.hpp for the contract. Thin aliases keep the call sites readable.
+static int64_t now_ms()    { return xi::wall_ms(); }
+static int64_t steady_ms() { return xi::mono_ms(); }
 
 // Cheap substring scan of the BE log (used by the boot-readiness gate to spot
 // the "autostart: ready" marker). Reads the whole small log each call.

@@ -498,10 +498,7 @@ static std::mutex                         g_status_mu;
 static std::map<std::string, StatusEntry> g_status;
 static std::atomic<uint64_t>              g_status_seq{0};
 
-static int64_t status_now_ms() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-}
+static int64_t status_now_ms() { return xi::wall_ms(); }   // wall: status ts
 
 // Update the latest status for `who`. Coalesces no-op repeats (same text) so a
 // component setting the same string every frame doesn't spam events. Always
@@ -1208,10 +1205,7 @@ static std::vector<std::string> parse_extra_plugin_dirs(int argc, char** argv) {
     return dirs;
 }
 
-static double now_seconds() {
-    using namespace std::chrono;
-    return duration<double>(system_clock::now().time_since_epoch()).count();
-}
+static double now_seconds() { return xi::wall_us() / 1e6; }   // wall: pong ts
 
 static void send_rsp_ok(xi::ws::Server& srv, int64_t id, std::string data_json = "") {
     xp::Rsp r;
@@ -1241,10 +1235,7 @@ static std::mutex                     g_recent_errors_mu;
 static std::deque<RecentError>        g_recent_errors;
 static constexpr size_t               kRecentErrorsCap = 64;
 
-static int64_t now_ms_() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-}
+static int64_t now_ms_() { return xi::wall_ms(); }   // wall: RecentError / history ts
 
 static void push_recent_error(std::string source, std::string message,
                               int64_t cmd_id = 0, int64_t run_id = 0) {

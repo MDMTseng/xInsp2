@@ -26,6 +26,7 @@
 //
 
 #include "xi_abi.h"
+#include "xi_clock.hpp"
 #include "xi_image_pool.hpp"
 
 #include <atomic>
@@ -79,19 +80,10 @@ enum class TriggerPolicy {
 
 #ifndef XI_NOW_US_DEFINED
 #define XI_NOW_US_DEFINED
-inline int64_t now_us() {
-    auto now = std::chrono::system_clock::now();
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-        now.time_since_epoch()).count();
-}
-// Monotonic microseconds — for DEADLINES / INTERVALS / RATE math, which must not
-// jump on an NTP/DST wall-clock correction. Use now_us() (wall) only for
-// human-facing or cross-source timestamps. (Unrelated epoch from now_us(); never
-// subtract one clock from the other.)
-inline int64_t steady_now_us() {
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-}
+// Thin compat aliases over the canonical clock (xi_clock.hpp). now_us() = wall,
+// steady_now_us() = monotonic; see xi_clock.hpp for the wall-vs-mono contract.
+inline int64_t now_us()        { return xi::wall_us(); }
+inline int64_t steady_now_us() { return xi::mono_us(); }
 #endif
 
 inline xi_trigger_id make_trigger_id() {
