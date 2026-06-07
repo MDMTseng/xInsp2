@@ -394,16 +394,21 @@ struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hp
     int32_t       is_active;
     int32_t       _pad;             // align dequeued_at_us to 8 bytes
     int64_t       dequeued_at_us;   // worker-stamped on dequeue from its lane
+    int64_t       seq;              // per-run FIFO arrival id (== arrival_id): a
+                                    // dense monotonic order a plugin can use to
+                                    // serialize side effects (e.g. PLC sends)
+                                    // despite parallel dispatch. 0 = none.
 };
 
 static void trigger_info_cb(CurrentTriggerInfoC* out) {
     if (!out) return;
-    if (!g_current_trigger) { *out = {{0,0}, 0, 0, 0, 0}; return; }
+    if (!g_current_trigger) { *out = {{0,0}, 0, 0, 0, 0, 0}; return; }
     out->id             = g_current_trigger->id;
     out->timestamp_us   = g_current_trigger->timestamp_us;
     out->is_active      = 1;
     out->_pad           = 0;
     out->dequeued_at_us = g_current_trigger->dequeued_at_us;
+    out->seq            = g_current_trigger->arrival_id;
 }
 
 static xi_image_handle trigger_image_cb(const char* source) {
