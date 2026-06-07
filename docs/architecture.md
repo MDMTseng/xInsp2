@@ -709,7 +709,11 @@ node test/runPipeline.mjs
 | `xi_abi.h` | C ABI types (stable across compilers) |
 | `xi_abi.hpp` | C++ wrapper (`Plugin`, `HostImage`, `XI_PLUGIN_IMPL`) |
 | `xi_image_pool.hpp` | Sharded refcounted image pool (16 shards) |
-| `xi_plugin_manager.hpp` | Plugin discovery, loading, project/instance management, `CAbiInstanceAdapter` |
+| `xi_plugin_manager.hpp` | `PluginManager` — plugin discovery, project/instance lifecycle, working-copy commits (umbrella; includes the leaves below) |
+| `xi_cabi_adapter.hpp` | `CAbiInstanceAdapter`, `PluginInfo`, `plugin_abi_compatible()` — per-plugin DLL load + instance wrapping |
+| `xi_project_model.hpp` | Project data model: `ProjectInfo` (+ `DispatchGroup`), `InstanceInfo`, `CompileEnv`, `OpenWarning` |
+| `xi_pm_parse.hpp` | Stateless JSON helpers: `parse_manifest`, `extract_string`, `validate_config_against_manifest` |
+| `xi_pm_json.hpp` | JSON-output escaping for project/plugin metadata (`pm_json_escape`/`pm_json_quote`) |
 | `xi_script.hpp` | Script ABI contract |
 | `xi_script_support.hpp` | Auto-generated thunks + state/use callbacks |
 | `xi_script_compiler.hpp` | MSVC compile driver (multi-file, vendor includes, cjson linking) |
