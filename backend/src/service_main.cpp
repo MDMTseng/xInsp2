@@ -1851,6 +1851,31 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
     }).detach();
 }
 
+// SINGLE SOURCE OF TRUTH for process-exit teardown. Called from BOTH the
+// cmd:shutdown handler and the main() epilogue (which covers exits that didn't go
+// through cmd:shutdown). Previously this sequence was hand-copied in both places
+// and had drifted — the epilogue copy was missing reset() and never stopped the
+// dispatch pool — which is exactly the class of teardown bug the audit rounds
+// kept hitting. Run it once, in this fixed order:
+//   1. stop every emit SOURCE first (dispatch pool, replay, in-flight detached
+//      run) so no inspect emits after this point,
+//   2. drop the bus sink/observer + release bus-held image handles,
+//   3. unload the script under its lock (its module deleter runs while the
+//      ImagePool is still alive),
+//   4. drop the srv pointer LAST (after every emitter is quiesced).
+// Idempotent: safe to call twice (the shutdown handler runs it, then the epilogue
+// runs it again as the loop unwinds).
+static void controlled_shutdown_teardown_() {
+    if (g_continuous.load()) stop_dispatch_pool_();   // joins workers + timer + drains lanes
+    xi::TriggerRecorder::instance().cancel_replay();  // joins the replay thread
+    { std::lock_guard<std::mutex> rl(g_run_mu); }     // wait out an in-flight cmd:run / one-shot
+    xi::TriggerBus::instance().clear_sink();
+    xi::TriggerBus::instance().clear_observer();
+    xi::TriggerBus::instance().reset();               // release pending_/follower_latest_ handles
+    { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
+    g_srv_for_bp = nullptr;                            // last: every emitter is quiesced now
+}
+
 // Install the bus sink so triggers always dispatch: in continuous mode they feed
 // the worker-pool queue; otherwise each trigger runs a single-shot inspect. This
 // is installed on every compile_and_load so "issue"/"replay" works WITHOUT needing
@@ -2227,22 +2252,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         send_rsp_ok(srv, id, R"({"all":false,"count":0})");
     } else if (name == "shutdown") {
-        // Stop continuous mode first to avoid use-after-free on srv
-        if (g_continuous.load()) {
-            stop_dispatch_pool_();
-        }
         // Controlled teardown while everything is still alive, so nothing runs a
         // bus emit / module_lifetime deleter against a half-destroyed process at
-        // static-destruction time: drop the bus sink (it captures `srv`) + its
-        // cached handles, stop pointing the breakpoint/status path at `srv`, wait
-        // out any in-flight detached run, and unload the script under its lock.
-        xi::TriggerRecorder::instance().cancel_replay();
-        xi::TriggerBus::instance().clear_sink();
-        xi::TriggerBus::instance().clear_observer();
-        xi::TriggerBus::instance().reset();
-        { std::lock_guard<std::mutex> rl(g_run_mu); }   // wait out an in-flight cmd:run
-        { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
-        g_srv_for_bp = nullptr;
+        // static-destruction time. Single source of truth (see the function).
+        controlled_shutdown_teardown_();
         send_rsp_ok(srv, id);
         g_should_exit = true;
     } else if (name == "compile_and_load") {
@@ -4683,19 +4696,16 @@ int main(int argc, char** argv) {
         if (now - hb_last_ms >= 1000) { write_heartbeat(); hb_last_ms = now; }
     }
 
-    srv.stop();
     g_watchdog_run = false;
-    if (g_watchdog_thread.joinable()) g_watchdog_thread.join();
+    if (g_watchdog_thread.joinable()) g_watchdog_thread.join();   // join before teardown nulls srv
     // Controlled teardown before `srv` (a main() local captured by the bus sink +
     // g_srv_for_bp) leaves scope, and while the ImagePool/TriggerBus singletons
     // are still alive — covers exits that didn't go through cmd:shutdown (e.g.
-    // g_should_exit flipped elsewhere). Idempotent with the shutdown handler.
-    xi::TriggerRecorder::instance().cancel_replay();
-    g_srv_for_bp = nullptr;
-    xi::TriggerBus::instance().clear_sink();
-    xi::TriggerBus::instance().clear_observer();
-    { std::lock_guard<std::mutex> rl(g_run_mu); }   // wait out an in-flight cmd:run
-    { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
+    // g_should_exit flipped elsewhere). Single source of truth; idempotent with
+    // the shutdown handler. Runs BEFORE srv.stop() so the pool's workers are
+    // joined (no emit) before the server goes away.
+    controlled_shutdown_teardown_();
+    srv.stop();
     // Clean shutdown: tell the gateway "bye" so it disarms the dead-man (this is
     // an intended exit, not a crash) before disconnecting.
     if (g_gateway) { g_gateway->say_bye(); g_gateway->stop(); g_gateway = nullptr; }
