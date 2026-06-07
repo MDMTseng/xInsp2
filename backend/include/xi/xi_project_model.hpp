@@ -101,6 +101,16 @@ struct ProjectInfo {
     }
 };
 
+// A non-fatal diagnostic produced while opening a project: a referenced
+// plugin missing, an instance.json that didn't parse, a config value that
+// failed validation against its manifest. Collected (not thrown) so the
+// backend can open as much of the project as possible and report the rest.
+struct OpenWarning {
+    std::string instance;   // folder name; "" if we couldn't determine it
+    std::string plugin;     // referenced plugin (may be empty/unknown)
+    std::string reason;     // human-readable
+};
+
 // Static compile environment for project-level plugins. Populated once at
 // backend startup so PluginManager doesn't need to know about service-main
 // globals; mirrors the fields service_main feeds into xi::script::compile
