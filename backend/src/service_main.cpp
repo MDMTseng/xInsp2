@@ -2577,8 +2577,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             g_continuous_fps = fps;
             g_continuous = true;
             int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(fps, 1));
-            int n_threads = g_plugin_mgr.project().dispatch_threads;
-            (void)n_threads;
             spawn_group_pool_(&srv, interval_ms);
             std::fprintf(stderr,
                 "[xinsp2] continuous mode resumed after reload\n");
@@ -2690,14 +2688,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // otherwise keep the existing g_timer_interval_ms (runtime/prior/default).
         if (fps_explicit) g_timer_interval_ms.store(trigger_only ? 0 : std::max(1, 1000 / std::max(fps, 1)));
         int interval_ms = g_timer_interval_ms.load();
-        int n_threads = g_plugin_mgr.project().dispatch_threads;
-        if (n_threads < 1) n_threads = 1;
 
         // Bus-driven dispatch: with g_continuous now true the sink enqueues to
         // the worker pool (single-shot otherwise). Timer thread emits synthetic
         // events on schedule for scripts without trigger sources.
         install_trigger_sink_(&srv);
-        (void)n_threads;
         spawn_group_pool_(&srv, interval_ms);
 
         // The watchdog now tracks a per-inspect slot, so it protects every
@@ -2706,6 +2701,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // is global (aborts all in-flight frames that round). See
         // run_one_inspection() + docs/guides/writing-a-script.md.
 
+        int n_threads = std::max(1, g_plugin_mgr.project().dispatch_threads);
         char buf[64];
         std::snprintf(buf, sizeof(buf),
                       R"({"started":true,"dispatch_threads":%d})", n_threads);

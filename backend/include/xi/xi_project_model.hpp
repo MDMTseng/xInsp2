@@ -32,7 +32,6 @@ struct ProjectInfo {
     std::string name;
     std::string folder_path;
     std::string script_path;
-    std::vector<std::string> plugin_names;  // which plugins are used
     std::unordered_map<std::string, InstanceInfo> instances;
 
     // Trigger bus policy persisted per project. Default is Any (every

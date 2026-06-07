@@ -155,15 +155,7 @@ private:
                 // Collect .cpp sources: prefer src/ if present, else root.
                 std::vector<std::string> sources;
                 auto src_dir = entry.path() / "src";
-                auto walk = [&](const std::filesystem::path& dir) {
-                    for (auto& f : std::filesystem::directory_iterator(dir)) {
-                        if (!f.is_regular_file()) continue;
-                        auto ext = f.path().extension().string();
-                        if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
-                            sources.push_back(f.path().string());
-                        }
-                    }
-                };
+                auto walk = [&](const std::filesystem::path& dir) { collect_cpp_sources(dir, sources); };
                 if (std::filesystem::exists(src_dir)) walk(src_dir);
                 else                                  walk(entry.path());
                 if (sources.empty()) {
@@ -391,7 +383,7 @@ public:
             if (pi_it == plugins_.end()) return;
             auto& pi_old = pi_it->second;
             if (!pi_old.c_factory && !pi_old.factory) return;
-            static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+            xi_host_api& host = default_host_api();
             for (auto& p : pending) {
                 std::shared_ptr<InstanceBase> inst;
                 if (pi_old.c_factory) {
@@ -416,15 +408,7 @@ public:
         //    failure leaves the project in its previous working state.
         auto plugin_dir = std::filesystem::path(source_dir);
         std::vector<std::string> sources;
-        auto walk = [&](const std::filesystem::path& dir) {
-            for (auto& f : std::filesystem::directory_iterator(dir)) {
-                if (!f.is_regular_file()) continue;
-                auto ext = f.path().extension().string();
-                if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
-                    sources.push_back(f.path().string());
-                }
-            }
-        };
+        auto walk = [&](const std::filesystem::path& dir) { collect_cpp_sources(dir, sources); };
         auto src_subdir = plugin_dir / "src";
         if (std::filesystem::exists(src_subdir)) walk(src_subdir);
         else                                     walk(plugin_dir);
@@ -467,7 +451,7 @@ public:
             auto pi_it = plugins_.find(plugin_name);
             if (pi_it != plugins_.end()
                 && (pi_it->second.c_factory || pi_it->second.factory)) {
-                static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+                xi_host_api& host = default_host_api();
                 for (auto& p : pending) {
                     std::shared_ptr<InstanceBase> inst;
                     if (pi_it->second.c_factory) {
@@ -552,7 +536,7 @@ public:
         }
 
         // 4. Re-instantiate every preserved instance using the new factory.
-        static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+        xi_host_api& host = default_host_api();
         for (auto& p : pending) {
             std::shared_ptr<InstanceBase> inst;
             if (pi.c_factory) {
@@ -612,15 +596,7 @@ public:
 
         // Re-collect sources (mirror of compile_project_plugins_locked).
         std::vector<std::string> sources;
-        auto walk = [&](const std::filesystem::path& dir) {
-            for (auto& f : std::filesystem::directory_iterator(dir)) {
-                if (!f.is_regular_file()) continue;
-                auto ext = f.path().extension().string();
-                if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
-                    sources.push_back(f.path().string());
-                }
-            }
-        };
+        auto walk = [&](const std::filesystem::path& dir) { collect_cpp_sources(dir, sources); };
         auto src_subdir = src_dir / "src";
         if (std::filesystem::exists(src_subdir)) walk(src_subdir);
         else                                     walk(src_dir);
@@ -1380,7 +1356,7 @@ public:
                     }
 
                     if (!created && pi.c_factory) {
-                        static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+                        xi_host_api& host = default_host_api();
                         // Pre-allocate the owner id and install a guard
                         // around the ctor itself so any host->image_create
                         // calls inside xi_plugin_create are tagged. If
@@ -1522,7 +1498,7 @@ public:
             // id so any host->image_create called from inside the
             // plugin's ctor is tagged. Sweep on null return / throw
             // so a half-initialised plugin doesn't leak handles.
-            static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+            xi_host_api& host = default_host_api();
             ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
             void* raw = nullptr;
             try {
@@ -1630,7 +1606,7 @@ public:
         ii.folder_path = new_folder.string();
         InstanceFolderRegistry::instance().set(new_name, ii.folder_path);
         if (pi.c_factory) {
-            static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+            xi_host_api& host = default_host_api();
             void* raw = pi.c_factory(&host, new_name.c_str());
             if (!raw) { InstanceFolderRegistry::instance().clear(new_name); return false; }
             ii.instance = std::make_shared<CAbiInstanceAdapter>(
@@ -1744,6 +1720,28 @@ private:
     // Canonical project dir when a working copy is active (project_.folder_path
     // then points at <canonical>/.xinsp_work). Empty = no working copy.
     std::string canonical_path_;
+
+    // Shared host_api for in-process C-ABI plugin factory calls (image-pool host
+    // + trigger hook). One process-wide instance: every factory site used to
+    // declare its own byte-identical function-local static — this dedups them.
+    // Cold path (instance create / recompile / rename), so the single shared
+    // static is fine and costs nothing extra.
+    static xi_host_api& default_host_api() {
+        static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+        return host;
+    }
+
+    // Collect .cpp/.cc/.cxx source files directly under `dir` (non-recursive)
+    // into `out`. Dedups the identical source-walk lambda that lived in
+    // compile / recompile / export. Cold path (compile time).
+    static void collect_cpp_sources(const std::filesystem::path& dir,
+                                    std::vector<std::string>& out) {
+        for (auto& f : std::filesystem::directory_iterator(dir)) {
+            if (!f.is_regular_file()) continue;
+            auto ext = f.path().extension().string();
+            if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") out.push_back(f.path().string());
+        }
+    }
 
     // True if a path component should be skipped when seeding/mirroring the
     // working copy: the scratch dir itself, VCS metadata, and regenerated build
