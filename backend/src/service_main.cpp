@@ -33,6 +33,7 @@
 #include <cJSON.h>
 #include <xi/xi.hpp>
 #include <xi/xi_image.hpp>
+#include <xi/xi_cli_args.hpp>
 #include <xi/xi_jpeg.hpp>
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_comms_gateway.hpp>
@@ -972,126 +973,11 @@ static void set_project_dll_search_(const std::string& folder) {
 // Plugin manager (global)
 static xi::PluginManager g_plugin_mgr;
 
-static std::string get_exe_dir() {
-    char buf[MAX_PATH];
-    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    std::filesystem::path p(std::string(buf, n));
-    return p.parent_path().string();
-}
-
-
 static std::atomic<bool> g_should_exit{false};
 
-static int parse_port(int argc, char** argv) {
-    int port = 7823;
-    for (int i = 1; i < argc; ++i) {
-        std::string_view a = argv[i];
-        if (a.rfind("--port=", 0) == 0) {
-            try { port = std::stoi(std::string(a.substr(7))); } catch (...) {}
-        } else if (a == "--port" && i + 1 < argc) {
-            try { port = std::stoi(argv[++i]); } catch (...) {}
-        }
-    }
-    return port;
-}
-
-// --host=<addr>  (default 127.0.0.1). Pass 0.0.0.0 for remote-reachable.
-static std::string parse_host(int argc, char** argv) {
-    std::string host = "127.0.0.1";
-    for (int i = 1; i < argc; ++i) {
-        std::string_view a = argv[i];
-        if (a.rfind("--host=", 0) == 0) host = std::string(a.substr(7));
-        else if (a == "--host" && i + 1 < argc) host = argv[++i];
-    }
-    if (const char* env = std::getenv("XINSP2_HOST"); env && *env) host = env;
-    return host;
-}
-
-// --watchdog=<ms>  (default 0 = disabled). When non-zero, every inspect()
-// call has this many ms of wall-clock budget before the watchdog
-// terminates the runaway thread.
-static int parse_watchdog_ms(int argc, char** argv) {
-    int ms = 0;
-    for (int i = 1; i < argc; ++i) {
-        std::string_view a = argv[i];
-        if (a.rfind("--watchdog=", 0) == 0) { try { ms = std::stoi(std::string(a.substr(11))); } catch (...) {} }
-        else if (a == "--watchdog" && i + 1 < argc) { try { ms = std::stoi(argv[++i]); } catch (...) {} }
-    }
-    if (ms < 0) ms = 0;
-    if (ms > 600000) ms = 600000;
-    return ms;
-}
-
-// --auth=<secret>  (default empty = no auth required).
-// Also XINSP2_AUTH env var (preferred on shared servers — no argv leak to ps).
-static std::string parse_auth_secret(int argc, char** argv) {
-    std::string secret;
-    for (int i = 1; i < argc; ++i) {
-        std::string_view a = argv[i];
-        if (a.rfind("--auth=", 0) == 0) secret = std::string(a.substr(7));
-        else if (a == "--auth" && i + 1 < argc) secret = argv[++i];
-    }
-    if (const char* env = std::getenv("XINSP2_AUTH"); env && *env) secret = env;
-    return secret;
-}
-
-// --project=<dir> / --script=<path> : headless autostart. When --project is set,
-// main() drives open_project -> compile_and_load -> (optional) start at boot, so
-// the backend runs a line without any WS client (the xinsp-fe supervisor only
-// manages the process). Returns empty if the flag is absent.
-static std::string parse_str_flag(int argc, char** argv, const char* flag) {
-    std::string eq = std::string(flag) + "=";
-    for (int i = 1; i < argc; ++i) {
-        std::string_view a = argv[i];
-        if (a.rfind(eq, 0) == 0) return std::string(a.substr(eq.size()));
-        if (a == flag && i + 1 < argc) return argv[i + 1];
-    }
-    return {};
-}
-
-// Presence check for a bare flag (e.g. --hang-before-ready).
-static bool has_flag(int argc, char** argv, const char* flag) {
-    for (int i = 1; i < argc; ++i)
-        if (std::string_view(argv[i]) == flag) return true;
-    return false;
-}
-
-// --autostart-fps=<N>  (default 0 = don't auto-start continuous mode; just
-// open+compile and wait for a client / triggers). N < 0 = autostart in
-// TRIGGER-ONLY mode (continuous on, lanes spawned, no synthetic timer tick —
-// the project's sources drive everything).
-static int parse_autostart_fps(int argc, char** argv) {
-    std::string v = parse_str_flag(argc, argv, "--autostart-fps");
-    if (v.empty()) return 0;
-    try { return std::stoi(v); } catch (...) { return 0; }
-}
-
-// Repeatable: --plugins-dir=/some/path  (or --plugins-dir /some/path).
-// Also reads XINSP2_EXTRA_PLUGIN_DIRS, semicolon- or path-separator-delimited.
-static std::vector<std::string> parse_extra_plugin_dirs(int argc, char** argv) {
-    std::vector<std::string> dirs;
-    for (int i = 1; i < argc; ++i) {
-        std::string_view a = argv[i];
-        if (a.rfind("--plugins-dir=", 0) == 0) {
-            dirs.emplace_back(std::string(a.substr(14)));
-        } else if (a == "--plugins-dir" && i + 1 < argc) {
-            dirs.emplace_back(argv[++i]);
-        }
-    }
-    if (const char* env = std::getenv("XINSP2_EXTRA_PLUGIN_DIRS")) {
-        std::string s(env);
-        size_t start = 0;
-        while (start <= s.size()) {
-            size_t end = s.find_first_of(";,", start);
-            if (end == std::string::npos) end = s.size();
-            std::string item = s.substr(start, end - start);
-            if (!item.empty()) dirs.push_back(std::move(item));
-            if (end == s.size()) break;
-            start = end + 1;
-        }
-    }
-    return dirs;
-}
+// CLI/env arg parsing (get_exe_dir / parse_port / parse_host / parse_watchdog_ms
+// / parse_auth_secret / parse_str_flag / has_flag / parse_autostart_fps /
+// parse_extra_plugin_dirs) moved to xi/xi_cli_args.hpp (namespace xi::cli).
 
 static double now_seconds() { return xi::wall_us() / 1e6; }   // wall: pong ts
 
@@ -4189,7 +4075,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    int port = parse_port(argc, argv);
+    int port = xi::cli::parse_port(argc, argv);
 
     // ---- thread/process performance knobs --------------------------------------
 #ifdef _WIN32
@@ -4202,7 +4088,7 @@ int main(int argc, char** argv) {
     // --priority=<class>: bump the whole backend's process priority (for a
     // dedicated inspection PC). Default = leave as-is. Also settable live via
     // cmd:set_process_priority / project.json runtime.process_priority.
-    if (std::string pri = parse_str_flag(argc, argv, "--priority"); !pri.empty()) {
+    if (std::string pri = xi::cli::parse_str_flag(argc, argv, "--priority"); !pri.empty()) {
         if (!apply_process_priority_(pri))
             std::fprintf(stderr,
                 "[xinsp2] unknown --priority '%s' (high|above|normal|below|realtime)\n", pri.c_str());
@@ -4216,7 +4102,7 @@ int main(int argc, char** argv) {
     // backend .exe is at backend/build/Release, and headers are at
     // backend/include. Walk up until we find xi/xi.hpp.
     {
-        std::filesystem::path p = get_exe_dir();
+        std::filesystem::path p = xi::cli::get_exe_dir();
         for (int i = 0; i < 6; ++i) {
             if (std::filesystem::exists(p / "include" / "xi" / "xi.hpp")) {
                 g_include_dir = (p / "include").string();
@@ -4227,7 +4113,7 @@ int main(int argc, char** argv) {
         }
         if (g_include_dir.empty()) {
             // Fallback: next to the exe.
-            g_include_dir = (std::filesystem::path(get_exe_dir()) / "include").string();
+            g_include_dir = (std::filesystem::path(xi::cli::get_exe_dir()) / "include").string();
         }
         // Remember the shipped headers as the default a project override falls
         // back to (see resolve_toolchain_).
@@ -4248,7 +4134,7 @@ int main(int argc, char** argv) {
 
     // Find and scan plugins directory (sibling of backend/)
     {
-        std::filesystem::path p = get_exe_dir();
+        std::filesystem::path p = xi::cli::get_exe_dir();
         for (int i = 0; i < 6; ++i) {
             if (std::filesystem::exists(p / "plugins")) {
                 g_plugins_dir = (p / "plugins").string();
@@ -4264,7 +4150,7 @@ int main(int argc, char** argv) {
     }
     // Additional plugin folders from --plugins-dir / XINSP2_EXTRA_PLUGIN_DIRS.
     // Lets external SDKs keep their plugin DLLs in place — no copy needed.
-    for (auto& dir : parse_extra_plugin_dirs(argc, argv)) {
+    for (auto& dir : xi::cli::parse_extra_plugin_dirs(argc, argv)) {
         if (!std::filesystem::exists(dir)) {
             std::fprintf(stderr, "[xinsp2] extra plugin dir not found: %s\n", dir.c_str());
             continue;
@@ -4293,7 +4179,7 @@ int main(int argc, char** argv) {
     // --aot: this is a prebuilt bundle — load existing plugin DLLs instead of
     // compiling (no cl.exe on the target). The autostart script should point at a
     // .dll too (compile_and_load loads a .dll directly).
-    env.aot = has_flag(argc, argv, "--aot");
+    env.aot = xi::cli::has_flag(argc, argv, "--aot");
     if (env.aot) std::fprintf(stderr, "[xinsp2] AOT mode: loading prebuilt plugin/script DLLs (no compiler)\n");
     g_plugin_mgr.set_compile_env(env);
 
@@ -4341,12 +4227,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[xinsp2] unexpected binary frame: %zu bytes\n", n);
     };
 
-    std::string host   = parse_host(argc, argv);
-    std::string secret = parse_auth_secret(argc, argv);
+    std::string host   = xi::cli::parse_host(argc, argv);
+    std::string secret = xi::cli::parse_auth_secret(argc, argv);
     srv.set_bind_host(host);
     if (!secret.empty()) srv.set_auth_secret(secret);
 
-    g_watchdog_ms = parse_watchdog_ms(argc, argv);
+    g_watchdog_ms = xi::cli::parse_watchdog_ms(argc, argv);
     if (g_watchdog_ms.load() > 0) {
         std::fprintf(stderr, "[xinsp2] watchdog enabled: %d ms per inspect\n", g_watchdog_ms.load());
     }
@@ -4361,7 +4247,7 @@ int main(int argc, char** argv) {
     // on loopback so scripts can use xi::comms::* for PLC I/O. Tolerates the FE
     // spawn race (retries). Stays null if not configured -> xi::comms is no-op.
     static xi::GatewayClient g_gw_instance;
-    if (std::string cp = parse_str_flag(argc, argv, "--comms-port"); !cp.empty()) {
+    if (std::string cp = xi::cli::parse_str_flag(argc, argv, "--comms-port"); !cp.empty()) {
         int port = 0; try { port = std::stoi(cp); } catch (...) {}
         if (port > 0 && g_gw_instance.connect(port)) {
             g_gateway = &g_gw_instance;
@@ -4456,14 +4342,14 @@ int main(int argc, char** argv) {
     // client (xi_ws_server send_frame returns false at INVALID_SOCK). The WS
     // port stays open so an operator HMI / the VS Code extension can attach
     // live. Used by xinsp-fe.exe to run a line headlessly.
-    if (std::string project = parse_str_flag(argc, argv, "--project"); !project.empty()) {
-        std::string script = parse_str_flag(argc, argv, "--script");
-        int autostart_fps  = parse_autostart_fps(argc, argv);
+    if (std::string project = xi::cli::parse_str_flag(argc, argv, "--project"); !project.empty()) {
+        std::string script = xi::cli::parse_str_flag(argc, argv, "--script");
+        int autostart_fps  = xi::cli::parse_autostart_fps(argc, argv);
         // --working-copy: open via a <project>/.xinsp_work scratch. On a crash
         // respawn the FE passes the same flag; the scratch still exists, so the
         // backend resumes the last in-progress settings instead of reverting to
         // the pristine project. See docs/guides/project-working-copy.md.
-        bool working_copy = has_flag(argc, argv, "--working-copy");
+        bool working_copy = xi::cli::has_flag(argc, argv, "--working-copy");
 
         bool degraded = false;
         // Validate the project BEFORE opening. A nonexistent / project.json-less
@@ -4535,7 +4421,7 @@ int main(int argc, char** argv) {
         // alive, port bound, but never reaches "ready". Used by the FE
         // boot-timeout test (examples/qa_race/driver_boot_hang.py). Placed
         // before the readiness marker so the FE's boot gate trips.
-        if (has_flag(argc, argv, "--hang-before-ready")) {
+        if (xi::cli::has_flag(argc, argv, "--hang-before-ready")) {
             std::fprintf(stderr, "[xinsp2] autostart: --hang-before-ready (debug) — "
                                  "hanging before ready\n");
             std::fflush(stderr);
@@ -4563,7 +4449,7 @@ int main(int argc, char** argv) {
     // while the port still accepts TCP — a "bound but not serving" state a
     // connect probe can't see. The FE watches this file (--heartbeat-file) and
     // respawns on staleness. No-op when the flag is unset.
-    std::string hb_path = parse_str_flag(argc, argv, "--heartbeat-file");
+    std::string hb_path = xi::cli::parse_str_flag(argc, argv, "--heartbeat-file");
     uint64_t hb_counter = 0;
     auto write_heartbeat = [&] {
         if (hb_path.empty()) return;
@@ -4577,7 +4463,7 @@ int main(int argc, char** argv) {
     // Debug hook (test-only): wedge the serving loop AFTER ready — port stays
     // bound + accepting but the heartbeat goes stale, so the FE detects a
     // serve-time wedge. Drives examples/qa_race/driver_serve_wedge.py.
-    if (has_flag(argc, argv, "--hang-after-ready")) {
+    if (xi::cli::has_flag(argc, argv, "--hang-after-ready")) {
         std::fprintf(stderr, "[xinsp2] --hang-after-ready (debug) — wedging the serving loop\n");
         std::fflush(stderr);
         while (!g_should_exit.load()) std::this_thread::sleep_for(std::chrono::milliseconds(200));
