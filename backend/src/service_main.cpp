@@ -196,32 +196,25 @@ static std::atomic<int>        g_timer_interval_ms{100};
 // Reserve stack headroom (def near write_minidump) so the crash filter can dump
 // after a script STACK_OVERFLOW; called at the top of each inspect-running thread.
 static void reserve_fault_stack();
-// Worker thread pool. project.json `parallelism.dispatch_threads: N`
-// controls the size; default 1 (current behaviour). All workers pull
-// from the same g_ev_queue. A separate timer thread (`g_timer_thread`)
-// pushes a synthetic empty event at the configured fps so scripts
-// that don't have a trigger source still get periodic dispatch.
-static std::vector<std::thread> g_worker_threads;
+// Synthetic-tick timer thread (`g_timer_thread`): pushes an empty event at the
+// configured fps so scripts without a trigger source still get periodic
+// dispatch. The worker threads themselves are per-lane (see GroupLane).
 static std::thread              g_timer_thread;
 // Result ordering (parallelism.result_order / per-group result_order). When
 // ordered, each popped event gets a gapless emit sequence (assigned at dequeue
-// under the queue lock so it follows arrival order) and an EmitTurn gate makes
+// under the lane lock so it follows arrival order) and an EmitTurn gate makes
 // workers emit run_result/vars/run_finished in that order. Compute still runs
 // fully parallel; only emission is serialized. In "completion" mode emit_seq is
-// -1 (emit immediately, as before).
+// -1 (emit immediately).
 //
-// An EmitGate is the cursor+lock+cv for one ordered stream. The legacy single
-// pool uses g_global_gate; each dispatch-group lane owns its own (so groups don't
-// serialize against each other — only within a group). Non-movable (holds a
-// mutex/cv), so always referenced by pointer.
+// An EmitGate is the cursor+lock+cv for one ordered stream — each dispatch lane
+// owns its own (so groups don't serialize against each other, only within a
+// group). Non-movable (holds a mutex/cv), so always referenced by pointer.
 struct EmitGate {
     std::mutex              mu;
     std::condition_variable cv;
     int64_t                 next = 0;   // guarded by mu
 };
-static std::atomic<bool>       g_result_ordered{false};
-static std::atomic<int64_t>    g_dispatch_seq{0};   // legacy pool's next emit seq (per cmd:start)
-static EmitGate                g_global_gate;        // legacy single-pool ordered emission
 
 // RAII emit-order gate. For emit_seq >= 0 (ordered mode) the ctor blocks until
 // it's this sequence's turn on `gate`; the dtor advances the cursor + wakes the
@@ -393,18 +386,12 @@ static std::atomic<xi::ws::Server*> g_srv_for_bp{nullptr};   // set in main
 // dispatch threads can each have their own current trigger.
 static thread_local const xi::TriggerEvent* g_current_trigger = nullptr;
 
-// Bus event queue feeding the continuous-mode worker. Bus sink pushes
-// events here; worker pops, dispatches, releases handles.
-static std::deque<xi::TriggerEvent> g_ev_queue;
-static std::mutex                   g_ev_mu;
-static std::condition_variable      g_ev_cv;
-
 struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hpp)
     xi_trigger_id id;
     int64_t       timestamp_us;
     int32_t       is_active;
     int32_t       _pad;             // align dequeued_at_us to 8 bytes
-    int64_t       dequeued_at_us;   // worker-stamped on pop from g_ev_queue
+    int64_t       dequeued_at_us;   // worker-stamped on dequeue from its lane
 };
 
 static void trigger_info_cb(CurrentTriggerInfoC* out) {
@@ -716,7 +703,8 @@ static void run_one_inspection(xi::ws::Server& srv,
                                int64_t run_id = 0,
                                const std::string& frame_path = "",
                                int64_t emit_seq = -1,
-                               EmitGate* gate = &g_global_gate);
+                               EmitGate* gate = nullptr);  // null = no ordering gate
+                                                           // (one-shot/cmd:run pass emit_seq=-1)
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
@@ -1535,208 +1523,6 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
 
 // (trigger_worker removed — continuous mode uses a simple timer thread)
 
-// Counters for queue overflow logging — incremented by enqueue_event_
-// when an event has to be dropped because the dispatch queue is full.
-// Logged via the WS log channel periodically so callers can see
-// pressure without scraping stderr.
-static std::atomic<uint64_t> g_dropped_oldest{0};
-static std::atomic<uint64_t> g_dropped_newest{0};
-// Observed peak queue depth since cmd:start. Useful for tuning —
-// sweep1 with N=1 / queue=32 might pin at 32; sweep2 with N=4 might
-// peak at 3. Reset on cmd:start.
-static std::atomic<uint64_t> g_queue_high_watermark{0};
-
-// Apply the project's queue policy and push (or drop) the event. Caller
-// owns the event by value. Caller must NOT hold g_ev_mu — this fn
-// takes it. Returns true if pushed, false if dropped or rejected.
-//
-// queue_depth and overflow read once per call from the project info
-// (cheap atomics not worth it; they only change on open_project).
-static bool enqueue_event_(xi::TriggerEvent ev) {
-    int depth = g_plugin_mgr.project().queue_depth;
-    if (depth < 1) depth = 1;
-    const std::string& overflow = g_plugin_mgr.project().overflow;
-
-    std::unique_lock<std::mutex> lk(g_ev_mu);
-    if ((int)g_ev_queue.size() < depth) {
-        ev.arrival_id = ++g_run_id;   // arrival/run id in push (== FIFO) order
-        g_ev_queue.push_back(std::move(ev));
-        // Update high watermark (post-push depth).
-        uint64_t now_size = g_ev_queue.size();
-        uint64_t prev = g_queue_high_watermark.load(std::memory_order_relaxed);
-        while (now_size > prev &&
-               !g_queue_high_watermark.compare_exchange_weak(prev, now_size,
-                                                              std::memory_order_relaxed)) {}
-        g_ev_cv.notify_one();
-        return true;
-    }
-    // Queue full.
-    if (overflow == "drop_newest") {
-        ++g_dropped_newest;
-        // Caller's `ev` destructs as fn returns; release any image
-        // refs it carries.
-        int64_t aid = ++g_run_id;   // arrival slot of the dropped (new) frame
-        std::string ds = ev.leader_source, dg = ev.group;   // the dropped (new) event
-        for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
-        lk.unlock();
-        // One Result per trigger: the dropped frame is NA. Emitted out-of-band
-        // (NOT through the arrival-order gate — that would stall the acquiring
-        // source); the run_id lets a consumer order it against run results.
-        if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
-            emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", aid, -1, ds, dg);
-        return false;
-    }
-    if (overflow == "block") {
-        // Wait until at least one slot frees up. Bounded by g_continuous
-        // so cmd:stop wakes us.
-        g_ev_cv.wait(lk, [depth] {
-            return (int)g_ev_queue.size() < depth || !g_continuous.load();
-        });
-        if (!g_continuous.load()) {
-            for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
-            return false;
-        }
-        ev.arrival_id = ++g_run_id;   // claimed at commit (after the block wait)
-        g_ev_queue.push_back(std::move(ev));
-        g_ev_cv.notify_one();
-        return true;
-    }
-    // Default: drop_oldest.
-    auto& front = g_ev_queue.front();
-    int64_t dropped_aid = front.arrival_id;   // the dropped (oldest) frame's slot
-    std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
-    for (auto& [src, h] : front.images) xi::ImagePool::instance().release(h);
-    g_ev_queue.pop_front();
-    ev.arrival_id = ++g_run_id;   // the kept (new) frame's slot
-    g_ev_queue.push_back(std::move(ev));
-    g_ev_cv.notify_one();
-    ++g_dropped_oldest;
-    lk.unlock();
-    // Out-of-band NA marker for the dropped oldest frame; its run_id is the slot
-    // it already held, so a consumer can place it correctly without the gate.
-    if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
-        emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);
-    return true;
-}
-
-static void warn_oversubscribe_(int total_workers);   // defined below (group section)
-
-// Spawn the dispatcher pool + timer thread for cmd:start / hot-reload
-// resume. `n_threads` comes from project.dispatch_threads (default 1).
-// The timer thread pushes a synthetic empty trigger event at the
-// requested fps so scripts without a real trigger source still see
-// periodic dispatch. All N workers pull from the same g_ev_queue.
-//
-// Caller must have already set g_continuous = true and installed a
-// TriggerBus sink that pushes into g_ev_queue.
-static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
-                                 int interval_ms,
-                                 int n_threads) {
-    if (n_threads < 1) n_threads = 1;
-    warn_oversubscribe_(n_threads);
-    g_worker_threads.clear();
-    g_worker_threads.reserve((size_t)n_threads);
-    // Result ordering: arrival-ordered emission only when explicitly asked AND
-    // there's actual concurrency (N>1 — N==1 is already in order). Reset the
-    // sequence cursors so each (re)start counts from 0. Covers both cmd:start
-    // and the hot-reload re-arm, since both come through here.
-    bool ordered = (g_plugin_mgr.project().result_order == "arrival") && n_threads > 1;
-    g_result_ordered.store(ordered);
-    g_dispatch_seq.store(0);
-    { std::lock_guard<std::mutex> lk(g_global_gate.mu); g_global_gate.next = 0; }
-    std::fprintf(stderr,
-        "[xinsp2] continuous mode: %dms timer + %d dispatcher thread(s) + trigger bus%s\n",
-        interval_ms, n_threads, ordered ? " (arrival-ordered results)" : "");
-
-    // N worker threads — each pops from g_ev_queue and dispatches.
-    // run_one_inspection allocates its own run_id from g_run_id. Wire ordering
-    // of vars / preview frames is by completion time by default; in
-    // result_order:"arrival" mode each pop also claims a gapless emit sequence
-    // (eseq, under g_ev_mu so it follows arrival order) that the EmitTurn gate
-    // replays in order. The watchdog is per-worker now (each inspect arms its
-    // own slot), so N>1 is covered too.
-    auto worker_body = [srv_ptr] {
-        reserve_fault_stack();   // BUG 2: dump survives a script stack overflow
-        _set_se_translator(seh_translator);
-        while (g_continuous.load()) {
-            xi::TriggerEvent ev;
-            bool have_ev = false;
-            int64_t eseq = -1;
-            int64_t rid  = 0;
-            {
-                std::unique_lock<std::mutex> lk(g_ev_mu);
-                g_ev_cv.wait(lk, [] {
-                    return !g_ev_queue.empty() || !g_continuous.load();
-                });
-                if (!g_continuous.load()) break;
-                if (!g_ev_queue.empty()) {
-                    ev = std::move(g_ev_queue.front());
-                    g_ev_queue.pop_front();
-                    have_ev = true;
-                    // run_id was claimed at ENQUEUE (push == FIFO order) so kept
-                    // and dropped frames share one consistent arrival sequence;
-                    // read it back here (fallback for any path that didn't set
-                    // it). The emit seq (gate ordering) is still claimed at
-                    // dequeue, ordered mode only — drops leave no gate gap.
-                    rid = ev.arrival_id ? ev.arrival_id : ++g_run_id;
-                    if (g_result_ordered.load()) eseq = g_dispatch_seq.fetch_add(1);
-                }
-            }
-            // A-P1-1: notify any producer that's waiting on
-            // overflow:"block" (queue.size() == depth). Without this
-            // the producer can stall forever — workers only ran
-            // notify_one on push, not on pop. Wake one slot per pop.
-            g_ev_cv.notify_one();
-            if (!have_ev) continue;
-            // Stamp the dequeue moment so the script can decompose
-            // end-to-end latency into queue-wait vs inspect-time. Same
-            // clock as ev.timestamp_us (xi::now_us() == system_clock us).
-            // Done outside g_ev_mu — the field is owned by `ev` now,
-            // and no other thread has a reference until we publish via
-            // g_current_trigger below.
-            ev.dequeued_at_us = xi::now_us();
-            int frame_seq = (int)rid;   // arrival-order frame hint (== run_id)
-            if (!ev.images.empty() || ev.id.hi || ev.id.lo) {
-                g_current_trigger = &ev;
-                run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq);
-                g_current_trigger = nullptr;
-                for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
-            } else {
-                // Synthetic timer tick from g_timer_thread — no trigger.
-                run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq);
-            }
-        }
-    };
-    for (int i = 0; i < n_threads; ++i) {
-        g_worker_threads.emplace_back(worker_body);
-    }
-
-    // Timer thread: pushes a synthetic empty event every g_timer_interval_ms so
-    // scripts without trigger sources still tick. Always spawned; it reads the
-    // LIVE interval each loop, so the rate is retunable mid-run (cmd:set_timer_fps)
-    // and 0 = trigger-only (idle-poll, no ticks). (void)interval_ms — the seed is
-    // set into g_timer_interval_ms by the caller before spawn.
-    (void)interval_ms;
-    g_timer_thread = std::thread([] {
-        while (g_continuous.load()) {
-            int iv = g_timer_interval_ms.load();
-            if (iv <= 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                // Time-driven eviction even in trigger-only mode: a partial
-                // multi-source correlation left when a source goes quiet must
-                // release its handles without waiting for the next emit.
-                xi::TriggerBus::instance().evict_stale();
-                continue;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(iv));
-            if (!g_continuous.load()) break;
-            xi::TriggerBus::instance().evict_stale();
-            if (g_timer_interval_ms.load() <= 0) continue;   // turned off during the sleep
-            (void)enqueue_event_(xi::TriggerEvent{});
-        }
-    });
-}
-
 // ---- Dispatch groups: per-group worker lanes (gated on parallelism.groups) ----
 // Each group owns its own queue + max_parallel worker threads at its OS
 // thread_priority, draining only its own queue. Only active when the project
@@ -1770,7 +1556,6 @@ struct GroupLane {
 // the producer is done. Fixes the lane-lifetime UAF found in v1 hardening.
 static std::vector<std::shared_ptr<GroupLane>> g_lanes;
 static std::mutex                              g_lanes_mu;
-static bool grouping_enabled_() { return !g_plugin_mgr.project().groups.empty(); }
 
 static void set_os_thread_priority_(const std::string& p) {
 #ifdef _WIN32
@@ -1846,7 +1631,7 @@ static std::shared_ptr<GroupLane> lane_for_(const std::string& group) {
     return g_lanes.front();
 }
 
-// Per-lane enqueue with that lane's queue_depth/overflow (mirrors enqueue_event_).
+// Per-lane enqueue with that lane's queue_depth/overflow policy.
 static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     auto rel = [&] { for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); };
     if (!g_continuous.load()) { rel(); return false; }
@@ -1900,6 +1685,22 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
         g_lanes.clear();
         for (auto& gc : g_plugin_mgr.project().groups) {
             auto lane = std::make_shared<GroupLane>(); lane->cfg = gc; g_lanes.push_back(std::move(lane));
+        }
+        if (g_lanes.empty()) {
+            // No explicit groups: synthesize ONE default lane from the project's
+            // parallelism settings, so every project runs on the unified lane
+            // path (the legacy single pool is gone). name "" matches an untagged
+            // event's empty group via lane_for_(); the timer tick also targets
+            // default_group (== "" here) -> this lane.
+            const auto& p = g_plugin_mgr.project();
+            xi::ProjectInfo::DispatchGroup def;
+            def.name         = "";
+            def.max_parallel = p.dispatch_threads < 1 ? 1 : p.dispatch_threads;
+            def.queue_depth  = p.queue_depth;
+            def.overflow     = p.overflow;
+            def.result_order = p.result_order;
+            auto lane = std::make_shared<GroupLane>(); lane->cfg = def;
+            g_lanes.push_back(std::move(lane));
         }
     }
     std::fprintf(stderr, "[xinsp2] continuous mode (grouped): %zu group(s), %dms timer\n",
@@ -2004,8 +1805,8 @@ static void stop_group_pool_() {
     for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
     for (auto& lp : lanes) for (auto& t : lp->workers) if (t.joinable()) t.join();
     // Workers are gone + g_continuous is false → drain leftover queued events and
-    // release their image handles before the lanes are dropped (mirrors the legacy
-    // g_ev_queue drain; preserves release-before-FreeLibrary). (#3 leak fix.)
+    // release their image handles before the lanes are dropped (release-before-
+    // FreeLibrary; #3 leak fix).
     for (auto& lp : lanes) {
         std::lock_guard<std::mutex> lk(lp->mu);
         for (auto& ev : lp->q) for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
@@ -2017,9 +1818,7 @@ static void stop_group_pool_() {
 // Stop the pool + timer. Safe to call if nothing was spawned.
 static void stop_dispatch_pool_() {
     g_continuous = false;
-    g_ev_cv.notify_all();
-    g_global_gate.cv.notify_all();   // wake any legacy-pool worker parked in an EmitTurn
-    // Wake grouped workers + any producer (incl. the timer) parked in a lane's
+    // Wake the lane workers + any producer (incl. the timer) parked in a lane's
     // overflow:block BEFORE joining the timer, or the join deadlocks. Also wake
     // anyone parked in a per-lane EmitTurn (ordered mode).
     {
@@ -2031,10 +1830,6 @@ static void stop_dispatch_pool_() {
         }
     }
     if (g_timer_thread.joinable()) g_timer_thread.join();
-    for (auto& t : g_worker_threads) {
-        if (t.joinable()) t.join();
-    }
-    g_worker_threads.clear();
     stop_group_pool_();
 }
 
@@ -2064,21 +1859,19 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
 static void install_trigger_sink_(xi::ws::Server* srv) {
     xi::TriggerBus::instance().set_sink([srv](xi::TriggerEvent ev) {
         if (g_continuous.load()) {
-            if (grouping_enabled_()) {
-                // Route by the emitting source instance's "group" (default_group
-                // if the source is untagged or unknown / synthetic timer tick).
-                std::string g;
-                if (!ev.leader_source.empty()) {
-                    auto& insts = g_plugin_mgr.project().instances;
-                    auto it = insts.find(ev.leader_source);
-                    if (it != insts.end()) g = it->second.group;
-                }
-                if (g.empty()) g = g_plugin_mgr.project().default_group;
-                ev.group = g;
-                (void)enqueue_to_lane_(std::move(ev));
-            } else {
-                (void)enqueue_event_(std::move(ev));
+            // Route by the emitting source instance's "group" (default_group if
+            // the source is untagged/unknown, or the synthetic timer tick). A
+            // project with no explicit groups resolves to the synthesized default
+            // lane (group "") — see spawn_group_pool_.
+            std::string g;
+            if (!ev.leader_source.empty()) {
+                auto& insts = g_plugin_mgr.project().instances;
+                auto it = insts.find(ev.leader_source);
+                if (it != insts.end()) g = it->second.group;
             }
+            if (g.empty()) g = g_plugin_mgr.project().default_group;
+            ev.group = g;
+            (void)enqueue_to_lane_(std::move(ev));
         } else {
             dispatch_one_shot_(srv, std::move(ev));
         }
@@ -2122,19 +1915,8 @@ static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name)
             "[xinsp2] stopped continuous mode for %s (will resume if op succeeds)\n",
             op_name);
     }
-    // Drain any events still in g_ev_queue; they reference plugin
-    // images whose handles must be released before the plugin DLL is
-    // unloaded, otherwise the eventual ImagePool sweep races with
-    // FreeLibrary.
-    {
-        std::lock_guard<std::mutex> lk(g_ev_mu);
-        for (auto& ev : g_ev_queue) {
-            for (auto& [src, h] : ev.images) {
-                xi::ImagePool::instance().release(h);
-            }
-        }
-        g_ev_queue.clear();
-    }
+    // (Lane queues are drained + their image handles released inside
+    // stop_dispatch_pool_ -> stop_group_pool_ above, before the DLLs unload.)
     // Wait out any in-flight detached cmd:run / one-shot inspect: they hold
     // g_run_mu for the whole inspect and call into plugin/script DLLs this
     // lifecycle op is about to FreeLibrary. New runs can't start meanwhile —
@@ -2783,11 +2565,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             g_continuous = true;
             int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(fps, 1));
             int n_threads = g_plugin_mgr.project().dispatch_threads;
-            if (grouping_enabled_()) spawn_group_pool_(&srv, interval_ms);
-            else                     spawn_dispatch_pool_(&srv, interval_ms, n_threads);
+            (void)n_threads;
+            spawn_group_pool_(&srv, interval_ms);
             std::fprintf(stderr,
-                "[xinsp2] continuous mode resumed after reload (%d threads)\n",
-                n_threads);
+                "[xinsp2] continuous mode resumed after reload\n");
         }
 
         // Return success with dll path + diagnostics (warnings only on
@@ -2882,34 +2663,15 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             else trigger_only = true;
         }
 
-        // Stop any existing pool before starting a new one.
-        if (!g_worker_threads.empty() || g_timer_thread.joinable()) {
+        // Stop any existing pool before starting a new one. (A-P1-2: any events
+        // that arrived since the last stop are drained + their handles released
+        // inside stop_group_pool_, so the new run never fires on stale images.)
+        if (g_timer_thread.joinable()) {
             stop_dispatch_pool_();
-        }
-
-        // A-P1-2: drain any events that arrived between the previous
-        // cmd:stop and now (e.g. an in-flight emit_trigger that beat
-        // clear_sink to the lock). Without this, the new run's first
-        // batch of inspects fires on stale images from before the
-        // user even called cmd:start, with cross-run image-handle
-        // refs that the new sink would otherwise leak.
-        {
-            std::lock_guard<std::mutex> lk(g_ev_mu);
-            for (auto& ev : g_ev_queue) {
-                for (auto& [src, h] : ev.images) {
-                    xi::ImagePool::instance().release(h);
-                }
-            }
-            g_ev_queue.clear();
         }
 
         g_continuous_fps = trigger_only ? 0 : fps;
         g_continuous = true;
-        // Reset queue stats so each cmd:start gets a fresh observation
-        // window. Keeps `dispatch_stats` per-run comparable.
-        g_dropped_oldest = 0;
-        g_dropped_newest = 0;
-        g_queue_high_watermark = 0;
 
         // Seed the live timer rate (0 = trigger-only). Only when fps was explicit;
         // otherwise keep the existing g_timer_interval_ms (runtime/prior/default).
@@ -2922,8 +2684,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // the worker pool (single-shot otherwise). Timer thread emits synthetic
         // events on schedule for scripts without trigger sources.
         install_trigger_sink_(&srv);
-        if (grouping_enabled_()) spawn_group_pool_(&srv, interval_ms);
-        else                     spawn_dispatch_pool_(&srv, interval_ms, n_threads);
+        (void)n_threads;
+        spawn_group_pool_(&srv, interval_ms);
 
         // The watchdog now tracks a per-inspect slot, so it protects every
         // worker under N>1 (no longer bypassed). On a hard trip the backend
@@ -2937,26 +2699,16 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         send_rsp_ok(srv, id, buf);
     } else if (name == "stop") {
         g_continuous = false;
-        g_ev_cv.notify_all();           // wake bus-driven worker
-        // Force-release any breakpoint parking the worker — otherwise
-        // join below would deadlock. breakpoint_cb also checks
-        // g_continuous, so subsequent breakpoints in the same inspect()
-        // no-op immediately.
+        // Force-release any breakpoint parking the worker — otherwise the join
+        // below would deadlock. breakpoint_cb also checks g_continuous, so
+        // subsequent breakpoints in the same inspect() no-op immediately.
         {
             std::lock_guard<std::mutex> lk(g_bp_mu);
             g_bp_paused = false;
         }
         g_bp_cv.notify_all();
         xi::TriggerBus::instance().clear_sink();
-        stop_dispatch_pool_();
-        // Drain any in-flight events that arrived between sink-clear and join.
-        {
-            std::lock_guard<std::mutex> lk(g_ev_mu);
-            for (auto& ev : g_ev_queue) {
-                for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
-            }
-            g_ev_queue.clear();
-        }
+        stop_dispatch_pool_();   // joins lanes + drains their queues (handles released)
         send_rsp_ok(srv, id, R"({"stopped":true})");
     } else if (name == "list_params") {
         // If a script is loaded, delegate to its own registry thunk so we
@@ -3867,19 +3619,24 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // smaller than BEFORE — don't subtract. See docs/protocol.md
         // `dispatch_stats` for the public contract.
         std::string data;
-        size_t qsz;
-        { std::lock_guard<std::mutex> lk(g_ev_mu); qsz = g_ev_queue.size(); }
-        data  = "{\"queue_depth_now\":" + std::to_string(qsz);
-        data += ",\"queue_depth_cap\":" + std::to_string(g_plugin_mgr.project().queue_depth);
-        data += ",\"queue_depth_high_watermark\":" + std::to_string(g_queue_high_watermark.load());
-        data += ",\"overflow\":\"" + g_plugin_mgr.project().overflow + "\"";
-        data += ",\"dispatch_threads\":" + std::to_string(g_plugin_mgr.project().dispatch_threads);
-        data += ",\"dropped_oldest\":" + std::to_string(g_dropped_oldest.load());
-        data += ",\"dropped_newest\":" + std::to_string(g_dropped_newest.load());
-        // Per-group lanes (only when dispatch groups are active). Snapshot the
-        // lane list under g_lanes_mu so a concurrent stop can't free them mid-read.
+        // Snapshot the lanes under g_lanes_mu so a concurrent stop can't free
+        // them mid-read. A no-groups project has one synthesized default lane, so
+        // the top-level totals are aggregates across all lanes (unified dispatch).
         std::vector<std::shared_ptr<GroupLane>> lanes;
         { std::lock_guard<std::mutex> lk(g_lanes_mu); lanes = g_lanes; }
+        size_t qsz = 0; uint64_t hw = 0, dropped = 0;
+        for (auto& lp : lanes) {
+            { std::lock_guard<std::mutex> lk(lp->mu); qsz += lp->q.size(); }
+            hw += lp->high_watermark.load();
+            dropped += lp->dropped.load();
+        }
+        data  = "{\"queue_depth_now\":" + std::to_string(qsz);
+        data += ",\"queue_depth_cap\":" + std::to_string(g_plugin_mgr.project().queue_depth);
+        data += ",\"queue_depth_high_watermark\":" + std::to_string(hw);
+        data += ",\"overflow\":\"" + g_plugin_mgr.project().overflow + "\"";
+        data += ",\"dispatch_threads\":" + std::to_string(g_plugin_mgr.project().dispatch_threads);
+        data += ",\"dropped\":" + std::to_string(dropped);
+        // Per-group lanes (always ≥1: the default lane when no groups declared).
         if (!lanes.empty()) {
             data += ",\"groups\":[";
             for (size_t i = 0; i < lanes.size(); ++i) {
