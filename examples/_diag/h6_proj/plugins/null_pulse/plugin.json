@@ -1,0 +1,1 @@
+{ "name": "null_pulse", "dll": "null_pulse.dll", "factory": "xi_plugin_create", "has_ui": false }

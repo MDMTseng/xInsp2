@@ -419,10 +419,14 @@ inline PchResult ensure_pch(const std::string& output_dir, const std::string& fl
 
 // Reject paths containing shell metacharacters to prevent command injection.
 // These characters are illegal in Windows filenames anyway (except & and %).
+// The double-quote is rejected too: the compile runs as `cmd /C "... cl ...
+// \"<arg>\" ..."`, so an embedded `"` lets a value close its quoted arg and
+// splice in `& <cmd>`. Quotes never appear in a legitimate path/lib name.
 inline bool is_safe_path(const std::string& p) {
     for (char c : p) {
         if (c == '&' || c == '|' || c == '>' || c == '<' ||
-            c == '^' || c == '%' || c == '!' || c == '`') {
+            c == '^' || c == '%' || c == '!' || c == '`' ||
+            c == '"') {
             return false;
         }
     }
@@ -445,11 +449,26 @@ inline CompileResult compile(const CompileRequest& req) {
     if (!check(req.include_dir, "include_dir")) return r;
     for (auto& s : req.extra_sources) { if (!check(s, "extra_source")) return r; }
     for (auto& d : req.include_dirs) { if (!check(d, "include_dir")) return r; }
+    // Link + toolchain inputs ALSO land on the cl.exe command line: link_libs
+    // at the link step, and the toolchain roots into /I flags + the vcvars
+    // prefix. They come from project.json just like the paths above, so they
+    // need the same injection guard. (Root cause of the link_libs command
+    // injection: these were omitted from the validation set.)
+    for (auto& l : req.link_libs) { if (!check(l, "link_lib")) return r; }
+    if (!check(req.opencv_dir,     "opencv_dir"))     return r;
+    if (!check(req.turbojpeg_root, "turbojpeg_root")) return r;
+    if (!check(req.ipp_root,       "ipp_root"))       return r;
+    if (!check(req.vcvars_path,    "vcvars_path"))    return r;
 
     std::filesystem::create_directories(req.output_dir);
 
     std::string vcvars = req.vcvars_path;
     if (vcvars.empty()) vcvars = detail::auto_find_vcvars();
+    // Re-check the FINAL vcvars value: the configured field was validated above,
+    // but on the empty-path branch it's replaced by auto_find_vcvars() (derived
+    // from env vars like VSINSTALLDIR), which then lands in the `cmd /C "..."`
+    // string — so it needs the same injection guard.
+    if (!check(vcvars, "vcvars")) return r;
     if (vcvars.empty()) {
         r.build_log = "vcvars64.bat not found — install VS Build Tools "
                       "or pass an explicit vcvars_path.";
@@ -474,7 +493,19 @@ inline CompileResult compile(const CompileRequest& req) {
     //
     //  /std:c++20   — match backend
     //  /LD          — build a DLL
-    //  /EHsc        — standard exception semantics
+    //  /EHa         — async exception semantics. REQUIRED, not cosmetic: the
+    //                 host runs every plugin/script call under
+    //                 _set_se_translator (xi_seh.hpp), which turns an SEH fault
+    //                 (access violation, /0, …) into a C++ seh_exception that
+    //                 the backend's try/catch absorbs. MSVC only emits the
+    //                 unwind funclets that make that translation sound — and
+    //                 that run local dtors as the exception propagates out —
+    //                 under /EHa. Under /EHsc the catch in the /EHa host still
+    //                 fires (backend survives), but RAII in the faulting
+    //                 plugin/script frame is SKIPPED, leaking e.g. the
+    //                 pool_image it held (1 ImagePool slot per absorbed crash).
+    //                 Must match the backend EXE's /EHa (CMakeLists.txt) and the
+    //                 "Requires /EHa" contract in docs/architecture.md.
     //  /MD          — multithreaded DLL runtime (matches stb/xi_core)
     //  /O2          — optimize
     //  /I<dir>      — xi headers
@@ -531,7 +562,7 @@ inline CompileResult compile(const CompileRequest& req) {
     }
     // Shared front-end flags (codegen + ALL include/define flags) — assembled once
     // so the PCH is built with byte-identical flags to the consuming compile.
-    std::string front = std::string("/nologo /std:c++20 /EHsc /MD ") + opt_flags + " /utf-8 /W3";
+    std::string front = std::string("/nologo /std:c++20 /EHa /MD ") + opt_flags + " /utf-8 /W3";
     front += " /I\"" + req.include_dir + "\"";
     // vendor dir (cJSON, stb, etc.) — sibling of include/
     auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";

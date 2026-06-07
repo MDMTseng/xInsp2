@@ -195,6 +195,15 @@ skewing the default group. `fps > 0` keeps the legacy timer.
 > Test E (arrival → 0 run_id inversions; a completion control proves the workload
 > scrambles). What's still pending: the `group` wire tag on `vars`/`run_finished`
 > (only `run_result` carries `group` today) — see item 2 below.
+>
+> **Drop markers carry a `run_id`.** A queue-overflow `XI_SYS_DROPPED` run_result
+> is emitted out-of-band (NOT through the arrival gate — gating it would stall the
+> acquiring source, defeating the very drop policy that shed the frame). Instead
+> every arriving frame is assigned its `run_id` at **enqueue** (push == FIFO
+> order), so kept and dropped frames share one consistent arrival sequence and a
+> dropped frame's marker carries the `run_id` of the slot it held — letting a
+> consumer order drop notifications against the gated run-result stream without
+> the producer ever blocking.
 
 The legacy `result_order` is **global**: `arrival` mode gates emission by one
 dispatch sequence so the `vars` / `run_finished` stream is in frame-arrival order.

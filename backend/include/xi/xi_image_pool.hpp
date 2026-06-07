@@ -40,6 +40,14 @@
 
 namespace xi {
 
+// True while the ImagePool singleton is alive. Namespace-scope (constant-
+// initialised, trivial dtor) so it is valid before the singleton is constructed
+// and remains readable after it is destroyed at process exit — letting late
+// teardown paths (e.g. a deferred LoadedScript module_lifetime deleter that runs
+// during static destruction) skip pool access once the pool is gone instead of
+// touching a destroyed Meyers singleton (UB).
+inline std::atomic<bool> g_image_pool_alive{false};
+
 // Per-creator identity. Lets the pool sweep all handles allocated on
 // behalf of a given plugin instance / script when that owner dies
 // (instance destroyed, worker process exited, script unloaded). An
@@ -67,8 +75,11 @@ public:
 
     static ImagePool& instance() {
         static ImagePool pool;
+        g_image_pool_alive.store(true, std::memory_order_release);
         return pool;
     }
+
+    ~ImagePool() { g_image_pool_alive.store(false, std::memory_order_release); }
 
     // ---- core lookup -------------------------------------------------
 

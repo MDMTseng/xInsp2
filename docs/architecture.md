@@ -496,7 +496,15 @@ try {
 | C++ throw | std::runtime_error | ✅ | ✅ |
 | Stack overflow | 0xC00000FD | ❌ needs guard thread | — |
 
-Requires `/EHa` compiler flag (async exception handling).
+Requires the `/EHa` compiler flag (async exception handling) — on the backend
+EXE **and** on every compiled script/plugin DLL. The translator + `try/catch`
+above live in the `/EHa` backend, so a fault is always caught and the backend
+survives regardless. But MSVC only emits the unwind funclets that run local
+destructors as the SEH-turned-C++ exception propagates *out through the faulting
+frame* under `/EHa`; built with the default `/EHsc`, RAII in that frame is
+skipped — e.g. a `pool_image` the plugin held leaks one ImagePool slot per
+absorbed crash. The in-tree compiler (`xi_script_compiler.hpp`) and the
+standalone plugin CMake (`sdk/cmake/xinsp2_plugin.cmake`) both pass `/EHa`.
 
 ---
 
@@ -772,6 +780,15 @@ void (*emit_trigger)(const char* source_name,
 
 Pass `XI_TRIGGER_NULL` to ask the host to allocate a fresh id. The bus
 addrefs each handle internally; the caller may release immediately.
+
+> **NULL tid cannot correlate.** A fresh id is minted *per emit*, so a source
+> that emits `XI_TRIGGER_NULL` works only under `Any`. Under `AllRequired` /
+> `LeaderFollowers` its emits never share an id with peers, so the event never
+> completes — a silently dead pipeline. The bus now warns once per source when it
+> sees a NULL tid under a correlating policy. Sources meant for multi-source sync
+> must emit a **shared** id derived from the acquisition (frame/line index, a
+> hardware pulse counter, etc.) — see `synced_cam` in `examples/stereo_sync` for
+> the pattern (`tid.lo = frame_seq`).
 
 ### Policies (`xi_trigger_bus.hpp`)
 

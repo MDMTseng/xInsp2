@@ -76,7 +76,12 @@ Per-item fields:
 
 - `name` (string, required)
 - `kind` (string, required) — one of `image`, `number`, `boolean`, `string`, `json`, `custom`
-- `value` (any) — inline value, present for non-image kinds
+- `value` (any) — inline value, present for non-image kinds. A non-finite
+  `number` (NaN / ±Inf) is emitted as the JSON **string** `"NaN"` / `"Infinity"`
+  / `"-Infinity"` (JSON has no non-finite numbers; emitting a bare `nan` would be
+  invalid JSON and drop the whole frame). The same sentinel convention applies to
+  non-finite doubles in a `Record` — they round-trip back to the non-finite value
+  via `get_double`/`as_double` instead of silently reading as `0.0`.
 - `gid` (int) — present for `image` kind; matches a subsequent binary preview frame
 - `raw` (bool) — `true` if the image is transmitted uncompressed (BMP), `false` for JPEG
 
@@ -216,7 +221,19 @@ Stable set for v1. Arguments are listed under each entry.
 Invokes the C++ compiler (see M5), loads the resulting .dll, runs any global
 constructors (which populate the registries). On compile failure the rsp
 is `ok: false` with `error: "compile failed"` and `data.diagnostics` carrying
-the structured cl.exe error array.
+the structured cl.exe error array. **A failure is non-destructive**: the new DLL
+is loaded into a temporary and only swapped in on success, so a compile error —
+or a DLL that compiles but fails to load — leaves the previously-working script
+(and the client's subscriptions / history) intact rather than wedging to a null
+script.
+
+A `path` ending in `.dll` is loaded directly as a prebuilt AOT script DLL (no
+compile step); any other path is compiled. Both are **contained to the open
+project folder**: a prebuilt `.dll` must resolve inside it (an absolute/UNC
+out-of-tree path is refused — loading it would run arbitrary DllMain / static-
+init code in-process), and every path / link-lib / toolchain string sourced from
+`project.json` that reaches the cl.exe command line is rejected if it contains
+shell metacharacters or a double-quote (command-injection guard).
 
 Hot-reload semantics: across the call, the backend (a) saves and restores
 `xi::state()` JSON (drops it on schema mismatch via `state_dropped`
@@ -224,7 +241,10 @@ event), (b) replays every `cmd:set_param` value the user pushed into
 the previous DLL into the new one, (c) if `cmd:start` was active,
 captures the fps + auto-resumes a fresh worker after the new DLL is
 ready (rsp gets `"resumed_continuous": true`). The cl.exe rebuild gap
-is unavoidable (~3-5 s cold) but the run continues afterwards.
+is unavoidable (~3-5 s cold) but the run continues afterwards. A reload that
+lands while an inspect is still in flight (e.g. a detached `cmd:run`) is safe:
+the old script DLL stays mapped (refcounted) until that inspect returns, so it
+never executes from an unloaded module.
 
 ### `unload_script`
 `args: {}` → `ok: true`. Also clears the param replay cache.

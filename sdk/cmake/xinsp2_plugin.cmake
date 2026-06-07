@@ -30,7 +30,15 @@ set(XINSP2_VENDOR  ${XINSP2_ROOT}/backend/vendor)
 set(XINSP2_CJSON   ${XINSP2_VENDOR}/cJSON.c)
 
 if(MSVC)
-    add_compile_options(/W3 /utf-8)
+    # /EHa (async exceptions) is REQUIRED, not cosmetic: the host runs every
+    # plugin call under _set_se_translator (xi_seh.hpp), turning an SEH fault
+    # into a C++ exception it absorbs. MSVC only emits the unwind funclets that
+    # make that translation sound — and that run local dtors during unwind —
+    # under /EHa. Under the default /EHsc the host catch still fires but RAII in
+    # the faulting plugin frame is skipped, leaking its pool_image handles
+    # (1 ImagePool slot per absorbed crash). Matches the backend EXE and the
+    # in-tree compiler (xi_script_compiler.hpp) + docs/architecture.md.
+    add_compile_options(/W3 /utf-8 /EHa)
 endif()
 
 # OpenCV: mandatory. xInsp2 headers (xi.hpp / xi_plugin_support.hpp)

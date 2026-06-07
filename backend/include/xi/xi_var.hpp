@@ -29,6 +29,7 @@
 
 #include <any>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -85,6 +86,18 @@ struct VarTraits<T, std::enable_if_t<std::is_arithmetic_v<T> && !std::is_same_v<
     static constexpr VarKind kind = VarKind::Number;
     static void fill(VarEntry& e, T v) {
         e.kind        = VarKind::Number;
+        if constexpr (std::is_floating_point_v<T>) {
+            // std::to_string(NaN/Inf) yields "nan"/"inf" — invalid JSON that
+            // corrupts the ENTIRE vars message (the client's parse fails, the
+            // frame is dropped). Emit a quoted sentinel instead: valid JSON,
+            // stays visibly non-finite rather than silently vanishing. (v != v
+            // is the NaN test; matches Record's non-finite handling.)
+            if (v != v || v > std::numeric_limits<T>::max() || v < std::numeric_limits<T>::lowest()) {
+                const char* s = (v != v) ? "NaN" : (v > 0 ? "Infinity" : "-Infinity");
+                e.inline_json = std::string("\"") + s + "\"";
+                return;
+            }
+        }
         e.inline_json = std::to_string(v);
     }
 };

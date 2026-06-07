@@ -91,6 +91,9 @@ struct FeConfig {
     int         comms_port = 0;   // loopback BE<->gateway port (0 => port+1)
     std::string comms_exe;    // xinsp-comms path (auto-discover if empty)
     std::string comms_log;    // where the gateway's stdout/stderr is captured
+    std::string comms_heartbeat_file;  // gateway liveness counter; FE watches it
+                                       // for a hang (alive but wedged). Default
+                                       // comms_log + ".hb". Uses heartbeat_stale_ms.
     // Working copy: pass --working-copy to the backend so it edits a
     // <project>/.xinsp_work scratch. On a crash respawn the same flag is passed
     // and the backend resumes the scratch (settings survive). See
@@ -236,6 +239,7 @@ static FeConfig load_config(int argc, char** argv) {
         if (c.comms_port == 0)     c.comms_port = c.port + 1;
         if (c.comms_exe.empty())   c.comms_exe = discover_sibling_exe("xinsp-comms");
         if (c.comms_log.empty())   c.comms_log = c.be_log + ".comms";
+        if (c.comms_heartbeat_file.empty()) c.comms_heartbeat_file = c.comms_log + ".hb";
     }
     // Crash history defaults next to be_log; "-" means explicitly disabled.
     if (c.crash_history == "-") {
@@ -431,6 +435,8 @@ static Gateway spawn_gateway(const FeConfig& c, HANDLE job) {
     std::string cl = "\"" + c.comms_exe + "\""
                    + " --plc=" + c.comms_plc
                    + " --listen=" + std::to_string(c.comms_port);
+    if (c.heartbeat_stale_ms > 0 && !c.comms_heartbeat_file.empty())
+        cl += " --heartbeat-file=\"" + c.comms_heartbeat_file + "\"";
     std::vector<char> mut(cl.begin(), cl.end()); mut.push_back('\0');
 
     fs::path wd = fs::path(c.comms_exe).parent_path();
@@ -505,6 +511,10 @@ static int run_supervisor(const FeConfig& c) {
     int64_t gw_healthy_since = 0;
     bool    comms_down  = false;      // gateway is dead/respawning -> hold the clear
     bool    comms_gaveup = false;     // gateway respawn cap hit -> latched comms-lost
+    // Gateway hang detection (alive but wedged): watch its heartbeat counter.
+    long long gw_hb_last_val = -2;
+    int64_t   gw_hb_last_change_ms = 0;
+    bool      gw_hb_armed = false;
     if (comms_enabled) {
         std::fprintf(stderr, "[xinsp-fe] comms gateway: %s plc=%s listen=%d\n",
                      c.comms_exe.c_str(), c.comms_plc.c_str(), c.comms_port);
@@ -605,6 +615,7 @@ static int run_supervisor(const FeConfig& c) {
                         Sleep((DWORD)c.respawn_backoff_ms);
                         gw = spawn_gateway(c, job);
                         gw_healthy_since = gw.ok ? now_ms() : 0;
+                        gw_hb_armed = false;   // fresh gateway restarts its counter
                     }
                 } else if (gw.ok) {
                     gw_resp.note_healthy(now_ms() - gw_healthy_since, c.respawn_reset_ms);
@@ -613,6 +624,23 @@ static int run_supervisor(const FeConfig& c) {
                         st.comms_state = "up"; publish_status(c, st);
                         std::fprintf(stderr, "[xinsp-fe] comms gateway back up pid=%lu\n",
                                      gw.pi.dwProcessId);
+                    }
+                    // Hang detection: the gateway's heartbeat must keep advancing.
+                    // If it stalls while the process is still alive, the relay loop
+                    // is wedged (alive != serving). Kill it; the next iteration's
+                    // exit check runs the same safe-state + respawn path as a crash.
+                    if (c.heartbeat_stale_ms > 0 && !c.comms_heartbeat_file.empty()) {
+                        long long hb = read_heartbeat(c.comms_heartbeat_file);
+                        int64_t now = now_ms();
+                        if (!gw_hb_armed) { gw_hb_armed = true; gw_hb_last_val = hb; gw_hb_last_change_ms = now; }
+                        else if (hb != gw_hb_last_val) { gw_hb_last_val = hb; gw_hb_last_change_ms = now; }
+                        else if (now - gw_hb_last_change_ms > c.heartbeat_stale_ms) {
+                            std::fprintf(stderr, "[xinsp-fe] comms gateway heartbeat stale for "
+                                         ">%d ms (gateway wedged); killing for respawn\n",
+                                         c.heartbeat_stale_ms);
+                            TerminateProcess(gw.pi.hProcess, 1);
+                            gw_hb_armed = false;   // re-arm against the respawned gateway
+                        }
                     }
                 }
             }

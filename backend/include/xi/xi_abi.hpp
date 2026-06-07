@@ -19,7 +19,7 @@
 //       xi::Record process(const xi::Record& input) override {
 //           auto src  = input.get_image("frame");
 //           auto gray = xi::Image::create_in_pool(host(), src.width, src.height, 1);
-//           cv::cvtColor(src.as_cv_mat(), gray.as_cv_mat(), cv::COLOR_BGR2GRAY);
+//           cv::cvtColor(src.as_cv_mat(), gray.as_cv_mat(), cv::COLOR_RGB2GRAY);
 //           return xi::Record().image("gray", gray).set("done", true);
 //       }
 //   };

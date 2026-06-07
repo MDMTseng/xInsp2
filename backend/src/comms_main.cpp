@@ -30,6 +30,7 @@
 // down. Win32/Winsock; TODO(linux).
 //
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -159,6 +160,8 @@ int main(int argc, char** argv) {
             "Usage: xinsp-comms --plc=tcp:HOST:PORT|udp:HOST:PORT [--listen=PORT]\n"
             "  --plc=SPEC      PLC endpoint (tcp: or udp:)\n"
             "  --listen=PORT   loopback port for the backend client (default 7900)\n"
+            "  --heartbeat-file=PATH  write a monotonic liveness counter each loop\n"
+            "                  turn so the FE can detect a hang (not just an exit)\n"
             "  --help, -h      this help\n");
         return 0;
     }
@@ -176,6 +179,13 @@ int main(int argc, char** argv) {
       try { plc.port = std::stoi(rest.substr(c + 1)); } catch (...) { return 2; } }
     int listen_port = 7900;
     if (auto v = arg_value(argc, argv, "--listen"); !v.empty()) try { listen_port = std::stoi(v); } catch (...) {}
+    std::string hb_path = arg_value(argc, argv, "--heartbeat-file");
+    // Debug hook (test-only): after N ms, wedge the relay loop — process stays
+    // alive and the PLC socket stays open, but the heartbeat stalls, so the FE
+    // must detect the hang (not just an exit). Drives the H3 regression.
+    long long hang_after_ms = 0;
+    if (auto v = arg_value(argc, argv, "--hang-after-ms"); !v.empty())
+        try { hang_after_ms = std::stoll(v); } catch (...) {}
 
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
 
@@ -193,12 +203,50 @@ int main(int argc, char** argv) {
     plc_open(plc);   // best-effort; retried in the loop if down
     std::fprintf(stderr, "[xinsp-comms] plc %s\n", plc.up ? "connected" : "down (will retry)");
 
+    // Liveness heartbeat: a monotonic counter written once per select-loop
+    // iteration. The FE watches this (--heartbeat-file) to detect a HANG — the
+    // gateway process alive but its relay loop wedged (a stuck plc_open /
+    // getaddrinfo, say), which a process-exit check cannot see. No-op if unset.
+    uint64_t hb_counter = 0;
+    auto write_heartbeat = [&] {
+        if (hb_path.empty()) return;
+        if (FILE* f = std::fopen(hb_path.c_str(), "wb")) {
+            std::fprintf(f, "%llu", (unsigned long long)++hb_counter);
+            std::fclose(f);
+        }
+    };
+    write_heartbeat();   // initial beat so the FE sees liveness promptly
+
     SOCKET client = INVALID_SOCKET;
     LineReader client_lr, plc_lr;
     std::string deadman;          // emergency line to send to the PLC if the
     bool        client_said_bye = false;   // backend drops without a clean "bye"
+    ULONGLONG   pending_deadman_tick = 0;        // when the latch was set (for expiry)
+    const long long kDeadmanLatchMaxMs = 30000;  // drop an unflushed latch after 30 s
+    std::string pending_deadman;  // dead-man latched because the PLC link was
+                                  // down at crash time; flushed on the next
+                                  // successful PLC (re)connect so the safe-state
+                                  // command is never silently dropped.
 
+    ULONGLONG start_tick = GetTickCount64();
     for (;;) {
+        if (hang_after_ms > 0 &&
+            (long long)(GetTickCount64() - start_tick) > hang_after_ms) {
+            Sleep(200);   // debug wedge: alive + PLC socket open, but no beat
+            continue;
+        }
+        write_heartbeat();   // beat each loop turn; stalls if the relay wedges
+        // Expire a dead-man latch the PLC never returned to receive: asserting a
+        // safe-state many seconds stale is misleading, and the FE safe-state +
+        // PLC link-loss backstops cover the gap. Logged, never a silent drop.
+        if (!pending_deadman.empty() &&
+            (long long)(GetTickCount64() - pending_deadman_tick) > kDeadmanLatchMaxMs) {
+            std::fprintf(stderr, "[xinsp-comms] WARNING: dead-man latch expired unflushed "
+                         "after %lld ms (PLC never reconnected); dropping it\n",
+                         kDeadmanLatchMaxMs);
+            pending_deadman.clear();
+            pending_deadman_tick = 0;
+        }
         fd_set rfds; FD_ZERO(&rfds);
         FD_SET(lsock, &rfds);
         SOCKET maxfd = lsock;
@@ -209,8 +257,20 @@ int main(int argc, char** argv) {
 
         // Retry a down TCP PLC link ~every second.
         if (!plc.up && !plc.udp) {
-            if (plc_open(plc) && client != INVALID_SOCKET)
-                send_line(client, "{\"event\":\"plc_up\",\"up\":true}");
+            if (plc_open(plc)) {
+                if (client != INVALID_SOCKET)
+                    send_line(client, "{\"event\":\"plc_up\",\"up\":true}");
+                // Flush a dead-man that was latched while the PLC was down (a
+                // backend crashed during a PLC reconnect window). Without this
+                // the safe-state command would be lost forever.
+                if (!pending_deadman.empty()) {
+                    std::fprintf(stderr, "[xinsp-comms] PLC reconnected -> "
+                                 "flushing latched dead-man payload\n");
+                    plc_send(plc, pending_deadman);
+                    pending_deadman.clear();
+                    pending_deadman_tick = 0;
+                }
+            }
         }
         if (n <= 0) continue;
 
@@ -230,12 +290,27 @@ int main(int argc, char** argv) {
             char buf[4096];
             int r = ::recv(client, buf, sizeof(buf), 0);
             if (r <= 0) {
-                // Backend gone. If it didn't say "bye" it CRASHED — fire the
+                // Backend gone. If it didn't say "bye" it CRASHED — get the
                 // registered emergency payload to the PLC so it can go safe.
-                if (!client_said_bye && !deadman.empty() && plc.up) {
-                    std::fprintf(stderr, "[xinsp-comms] backend lost without bye -> "
-                                 "sending dead-man payload to PLC\n");
-                    plc_send(plc, deadman);
+                if (!client_said_bye && !deadman.empty()) {
+                    if (plc.up) {
+                        std::fprintf(stderr, "[xinsp-comms] backend lost without bye -> "
+                                     "sending dead-man payload to PLC\n");
+                        plc_send(plc, deadman);
+                    } else {
+                        // PLC link is DOWN at crash time. Latch the payload and
+                        // flush it on the next reconnect rather than dropping the
+                        // safe-state command (it has no other path out, and the
+                        // crash that most needs the dead-man coincided with a PLC
+                        // blip).
+                        if (!pending_deadman.empty())
+                            std::fprintf(stderr, "[xinsp-comms] WARNING: overwriting an unflushed "
+                                         "dead-man latch with a newer crash payload\n");
+                        std::fprintf(stderr, "[xinsp-comms] backend lost without bye but PLC "
+                                     "link down -> dead-man latched for reconnect\n");
+                        pending_deadman = deadman;
+                        pending_deadman_tick = GetTickCount64();
+                    }
                 } else {
                     std::fprintf(stderr, "[xinsp-comms] client disconnected%s\n",
                                  client_said_bye ? " (clean)" : "");
@@ -264,6 +339,15 @@ int main(int argc, char** argv) {
                         else { plc_send(plc, payload); reply(true, nullptr); }
                     } else if (op == "set_deadman") {
                         deadman = payload;          // armed; fired if the client drops w/o bye
+                        // A new (healthy) backend arming its own dead-man supersedes a
+                        // stale latch from a previous crashed process — don't later
+                        // assert an old safe-state at the PLC under a healthy line.
+                        if (!pending_deadman.empty()) {
+                            std::fprintf(stderr, "[xinsp-comms] new client armed dead-man; "
+                                         "dropping a stale pending latch from a prior process\n");
+                            pending_deadman.clear();
+                            pending_deadman_tick = 0;
+                        }
                         reply(true, nullptr);
                     } else if (op == "bye") {
                         client_said_bye = true;     // clean shutdown — don't fire the dead-man

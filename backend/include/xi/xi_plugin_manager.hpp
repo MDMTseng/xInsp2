@@ -1249,6 +1249,11 @@ public:
 
     // ---- working copy (transactional edits at <project>/.xinsp_work) --------
     static constexpr const char* kWorkingCopyDir = ".xinsp_work";
+    // Commit-in-progress journal marker. Written at the canonical root before a
+    // commit's mirror starts and removed after it completes. If it survives (a
+    // crash/power-loss mid-commit left the canonical tree torn), the next
+    // open_project rolls the commit forward from the intact scratch.
+    static constexpr const char* kCommitMarker = ".xinsp_commit_pending";
 
     // The canonical project dir when a working copy is active; empty otherwise.
     const std::string& canonical_path() const { return canonical_path_; }
@@ -1260,7 +1265,15 @@ public:
     bool commit_working_copy() {
         std::lock_guard<std::mutex> lk(mu_);
         if (canonical_path_.empty()) return false;
+        // Journal the commit so an interruption (crash/power loss mid-mirror) is
+        // detectable + recoverable. The scratch is never modified by the mirror,
+        // so it stays a complete snapshot; mirror_tree_ is idempotent, so the
+        // next open_project can roll a partial commit forward from it.
+        std::error_code ec;
+        std::filesystem::path marker = std::filesystem::path(canonical_path_) / kCommitMarker;
+        { std::ofstream mf(marker); mf << "commit in progress\n"; }
         mirror_tree_(project_.folder_path, canonical_path_);
+        std::filesystem::remove(marker, ec);   // commit complete -> clear journal
         std::fprintf(stderr, "[xinsp2] working copy: committed to %s\n",
                      canonical_path_.c_str());
         return true;
@@ -1284,6 +1297,26 @@ public:
 
     bool open_project(const std::string& folder_arg, bool working_copy = false) {
         std::lock_guard<std::mutex> lk(mu_);
+
+        // Roll forward an interrupted working-copy commit before touching
+        // anything: if the canonical carries the commit-pending marker, a prior
+        // commit was cut short (crash/power loss) and the canonical tree may be
+        // torn. The scratch is a complete, untouched snapshot, so re-running the
+        // (idempotent) mirror finishes the commit and heals the canonical.
+        {
+            std::filesystem::path canon = folder_arg;
+            std::filesystem::path marker = canon / kCommitMarker;
+            std::filesystem::path scratch = canon / kWorkingCopyDir;
+            std::error_code ec;
+            if (std::filesystem::exists(marker) &&
+                std::filesystem::exists(scratch / "project.json")) {
+                std::fprintf(stderr, "[xinsp2] working copy: completing interrupted "
+                             "commit from %s (canonical may be torn)\n",
+                             scratch.string().c_str());
+                mirror_tree_(scratch, canon);
+                std::filesystem::remove(marker, ec);
+            }
+        }
 
         // Working-copy mode: operate on a scratch copy at <project>/.xinsp_work
         // so edits never touch the canonical project until an explicit commit
@@ -2058,7 +2091,8 @@ private:
     static bool wc_excluded_(const std::filesystem::path& rel) {
         for (const auto& part : rel) {
             std::string s = part.string();
-            if (s == kWorkingCopyDir || s == ".git" || s == "build") return true;
+            if (s == kWorkingCopyDir || s == ".git" || s == "build" ||
+                s == kCommitMarker) return true;
         }
         return false;
     }

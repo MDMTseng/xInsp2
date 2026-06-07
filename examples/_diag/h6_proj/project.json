@@ -1,0 +1,9 @@
+{
+  "name": "h6_nulltid",
+  "script": "inspect.cpp",
+  "trigger_policy": {"policy":"all_required","window_ms":1000,"required":["pa","pb"],"leader":""},
+  "instances": [
+    {"name": "pa", "plugin": "null_pulse"},
+    {"name": "pb", "plugin": "null_pulse"}
+  ]
+}

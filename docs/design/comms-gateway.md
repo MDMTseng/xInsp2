@@ -51,7 +51,13 @@ gateway needs only a socket — no SHM, no hardened ABI.
   handle that just forwards over the loopback socket (e.g. `xi::io.send(obj)` /
   `xi::io.poll()`; exact API TBD).
 - The **FE** is the supervisor: it spawns + monitors **BE and gateway as sibling
-  children**, respawning each with the existing `RespawnTracker` policy.
+  children**, respawning each with the existing `RespawnTracker` policy. It
+  watches the gateway for a **hang**, not just an exit: the gateway writes a
+  monotonic heartbeat counter (`--heartbeat-file`) each relay-loop turn, and the
+  FE trips on staleness (`heartbeat_stale_ms`, the same mechanism it uses for the
+  BE) — so a gateway that's alive but wedged (a stuck `plc_open`/`getaddrinfo`,
+  say, with its sockets still open) is killed + respawned + driven safe, rather
+  than silently leaving the PLC asserted with no I/O flowing.
 
 ## Safe-state: the gateway is the dead-man (primary), with layered fallbacks
 
@@ -64,7 +70,16 @@ own loopback connection to the backend dropping. This is a clean dead-man chain:
 - **Backend crashes** → its loopback connection to the gateway drops **without a
   `bye`** → the gateway immediately sends the registered payload to the PLC for
   emergency handling. A clean shutdown sends `{"op":"bye"}` first, which disarms
-  the dead-man (no false trip).
+  the dead-man (no false trip). **If the PLC link is down at that moment** (a
+  transient reconnect window), the gateway *latches* the payload and flushes it
+  on the next successful PLC reconnect instead of dropping it — the crash that
+  most needs the dead-man is exactly the one likely to coincide with a PLC blip,
+  and the safe-state command has no other path out. The latch is bounded: it
+  **expires after 30 s** if the PLC never reconnects (logged, not silent — a
+  safe-state that stale is misleading to assert, and the FE safe-state + PLC
+  link-loss backstops cover the gap), and a **new healthy backend that arms its
+  own dead-man supersedes** a stale latch from a prior crashed process (so the
+  PLC isn't driven safe under a recovered line on a late reconnect).
 - **Gateway crashes** → the PLC sees *its own* TCP connection drop → the PLC can
   dead-man on its own (link-loss = unsafe).
 - **FE crashes** → the Job Object reaps the backend + gateway → all connections

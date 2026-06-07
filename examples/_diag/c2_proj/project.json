@@ -1,0 +1,4 @@
+{
+  "name": "c2_reload_race",
+  "script": "inspect.cpp"
+}

@@ -32,6 +32,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -53,6 +54,13 @@ struct TriggerEvent {
     // inspect_us = xi::now_us() - dequeued_at_us. Zero until the
     // worker stamps it; observer/recorder copies see 0.
     int64_t        dequeued_at_us = 0;
+    // Arrival/run id, assigned by the backend dispatcher when the frame is
+    // committed to a dispatch queue (in push order == FIFO dequeue order). The
+    // worker uses it as the run_id; a dropped frame's marker carries it too, so
+    // a consumer can order drop notifications relative to run results even though
+    // markers are emitted out-of-band (not through the arrival-order gate, which
+    // would stall the acquiring source). 0 until the dispatcher assigns it.
+    int64_t        arrival_id = 0;
     // Source name → image handle. Caller must release each handle after use.
     std::unordered_map<std::string, xi_image_handle> images;
     // Best-effort metadata: which source first published this tid.
@@ -199,6 +207,24 @@ public:
 
         {
             std::lock_guard<std::mutex> lk(mu_);
+            // Correlation needs a stable trigger id SHARED across sources. A
+            // source that emits XI_TRIGGER_NULL gets a freshly minted unique id
+            // per emit (above), so under AllRequired / LeaderFollowers it can
+            // never match its peers and the event never completes. Warn once per
+            // source instead of leaving a silently-dead pipeline. (Any policy is
+            // fine with NULL — each emit is its own one-shot event.)
+            if (xi_trigger_id_is_null(tid_in) &&
+                (policy_ == TriggerPolicy::AllRequired ||
+                 policy_ == TriggerPolicy::LeaderFollowers) &&
+                null_tid_warned_.insert(source).second) {
+                std::fprintf(stderr,
+                    "[xinsp2] WARNING: source '%s' emitted a NULL trigger id under the %s "
+                    "policy; each emit gets a unique id, so it cannot correlate with other "
+                    "sources (the event will never complete). The source must emit a shared "
+                    "trigger id (e.g. frame/line index) for multi-source sync.\n",
+                    source.c_str(),
+                    policy_ == TriggerPolicy::AllRequired ? "all_required" : "leader_followers");
+            }
             switch (policy_) {
             case TriggerPolicy::Any: {
                 // Build a one-shot event and fire it immediately.
@@ -309,6 +335,10 @@ public:
         pending_.clear();
         for (auto& [n, h] : follower_latest_) ImagePool::instance().release(h);
         follower_latest_.clear();
+        // Script reload / fresh start: let NULL-tid-under-correlating-policy
+        // warnings fire again for the new run instead of being suppressed by a
+        // prior run's set.
+        null_tid_warned_.clear();
     }
 
 private:
@@ -373,6 +403,9 @@ private:
     int                                         window_ms_ = 100;
     std::unordered_map<xi_trigger_id, Pending, TidHash, TidEq> pending_;
     std::unordered_map<std::string, xi_image_handle> follower_latest_;
+    // Sources already warned about emitting a NULL trigger id under a correlating
+    // policy (so the warning fires once per source, not every frame).
+    std::unordered_set<std::string>             null_tid_warned_;
 };
 
 // Wire emit_trigger on a host_api struct produced by ImagePool::make_host_api().

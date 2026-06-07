@@ -20,13 +20,33 @@
 #include "xi_image.hpp"
 #include "cJSON.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
 #include <type_traits>
 
 namespace xi {
+
+// Non-finite doubles can't be represented in JSON — cJSON serialises NaN/Inf as
+// the literal `null`, which then reads back as the caller's default (typically
+// 0.0), silently turning an invalid measurement into a plausible zero. We store
+// them as explicit string sentinels instead; these helpers convert both ways so
+// a non-finite value survives the Record↔JSON round-trip and stays visible.
+inline const char* nonfinite_to_str(double v) {
+    if (std::isnan(v)) return "NaN";
+    return v > 0 ? "Infinity" : "-Infinity";
+}
+inline bool nonfinite_from_str(const char* s, double& out) {
+    if (!s) return false;
+    if (std::strcmp(s, "NaN") == 0)       { out = std::numeric_limits<double>::quiet_NaN(); return true; }
+    if (std::strcmp(s, "Infinity") == 0)  { out = std::numeric_limits<double>::infinity();  return true; }
+    if (std::strcmp(s, "-Infinity") == 0) { out = -std::numeric_limits<double>::infinity(); return true; }
+    return false;
+}
 
 // Minimal JSON string escape — kept local so this header stays independent
 // of xi_protocol.hpp. Emits the value already wrapped in quotes.
@@ -111,13 +131,14 @@ public:
     }
     Record& set(const std::string& key, double v) {
         cJSON_DeleteItemFromObject(json_, key.c_str());
-        cJSON_AddNumberToObject(json_, key.c_str(), v);
+        if (!std::isfinite(v))
+            cJSON_AddStringToObject(json_, key.c_str(), nonfinite_to_str(v));
+        else
+            cJSON_AddNumberToObject(json_, key.c_str(), v);
         return *this;
     }
     Record& set(const std::string& key, float v) {
-        cJSON_DeleteItemFromObject(json_, key.c_str());
-        cJSON_AddNumberToObject(json_, key.c_str(), (double)v);
-        return *this;
+        return set(key, (double)v);
     }
     Record& set(const std::string& key, bool v) {
         cJSON_DeleteItemFromObject(json_, key.c_str());
@@ -203,7 +224,11 @@ public:
 
         // Terminal reads with defaults
         int         as_int(int def = 0)                       const { return (node_ && cJSON_IsNumber(node_)) ? node_->valueint : def; }
-        double      as_double(double def = 0.0)               const { return (node_ && cJSON_IsNumber(node_)) ? node_->valuedouble : def; }
+        double      as_double(double def = 0.0)               const {
+            if (node_ && cJSON_IsNumber(node_)) return node_->valuedouble;
+            if (node_ && cJSON_IsString(node_)) { double v; if (nonfinite_from_str(node_->valuestring, v)) return v; }
+            return def;
+        }
         bool        as_bool(bool def = false)                  const { return node_ ? cJSON_IsTrue(node_) : def; }
         std::string as_string(const std::string& def = "")    const { return (node_ && cJSON_IsString(node_)) ? node_->valuestring : def; }
 
@@ -294,6 +319,9 @@ public:
 
     // --- Data getters (with defaults) ---
 
+    // NOTE: cJSON stores numbers as double and clamps `valueint` to the int
+    // range — a value above 2^31 read here SATURATES at INT_MAX (no error). For
+    // counts/ids that may exceed 2^31 use get_double and cast to int64_t.
     int get_int(const std::string& key, int def = 0) const {
         cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
         return (item && cJSON_IsNumber(item)) ? item->valueint : def;
@@ -301,7 +329,9 @@ public:
 
     double get_double(const std::string& key, double def = 0.0) const {
         cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
-        return (item && cJSON_IsNumber(item)) ? item->valuedouble : def;
+        if (item && cJSON_IsNumber(item)) return item->valuedouble;
+        if (item && cJSON_IsString(item)) { double v; if (nonfinite_from_str(item->valuestring, v)) return v; }
+        return def;
     }
 
     bool get_bool(const std::string& key, bool def = false) const {

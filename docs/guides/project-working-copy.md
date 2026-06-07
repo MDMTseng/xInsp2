@@ -27,7 +27,7 @@ aren't lost.
 | Action | Command | Effect |
 |---|---|---|
 | **Open** | `open_project { "path": DIR, "working_copy": true }` | If `.xinsp_work` exists → **resume** it (crash recovery / unsaved session). Else → **seed** it from the canonical project. The BE then runs entirely on the scratch. |
-| **Save Project** | `commit_working_copy` | Mirror the scratch back onto the canonical project — adds, overwrites, **and deletes** files removed in the scratch (so e.g. a deleted instance propagates). |
+| **Save Project** | `commit_working_copy` | Drains the dispatch pool first (same as `discard`/`open` — the mirror touches files continuous workers are reading), then mirrors the scratch back onto the canonical project — adds, overwrites, **and deletes** files removed in the scratch (so e.g. a deleted instance propagates). The commit is journalled: a `.xinsp_commit_pending` marker is written at the canonical root before the mirror and removed after. If a crash/power-loss interrupts the mirror (leaving the canonical torn), the marker survives, and the next `open_project` rolls the commit **forward** — the scratch is never modified by a commit, so it's a complete snapshot, and the mirror is idempotent, so re-running it heals the canonical. |
 | **Discard changes** | `discard_working_copy` | Delete the scratch, re-seed from the canonical project, reopen. Throws away uncommitted edits. |
 
 `open_project`'s response carries `"working_copy": true`, `"canonical_path"`, and

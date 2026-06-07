@@ -1560,6 +1560,7 @@ static bool enqueue_event_(xi::TriggerEvent ev) {
 
     std::unique_lock<std::mutex> lk(g_ev_mu);
     if ((int)g_ev_queue.size() < depth) {
+        ev.arrival_id = ++g_run_id;   // arrival/run id in push (== FIFO) order
         g_ev_queue.push_back(std::move(ev));
         // Update high watermark (post-push depth).
         uint64_t now_size = g_ev_queue.size();
@@ -1575,11 +1576,15 @@ static bool enqueue_event_(xi::TriggerEvent ev) {
         ++g_dropped_newest;
         // Caller's `ev` destructs as fn returns; release any image
         // refs it carries.
+        int64_t aid = ++g_run_id;   // arrival slot of the dropped (new) frame
         std::string ds = ev.leader_source, dg = ev.group;   // the dropped (new) event
         for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
         lk.unlock();
-        if (g_srv_for_bp)   // one Result per trigger: the dropped frame is NA
-            emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", -1, -1, ds, dg);
+        // One Result per trigger: the dropped frame is NA. Emitted out-of-band
+        // (NOT through the arrival-order gate — that would stall the acquiring
+        // source); the run_id lets a consumer order it against run results.
+        if (g_srv_for_bp)
+            emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", aid, -1, ds, dg);
         return false;
     }
     if (overflow == "block") {
@@ -1592,21 +1597,26 @@ static bool enqueue_event_(xi::TriggerEvent ev) {
             for (auto& [src, h] : ev.images) xi::ImagePool::instance().release(h);
             return false;
         }
+        ev.arrival_id = ++g_run_id;   // claimed at commit (after the block wait)
         g_ev_queue.push_back(std::move(ev));
         g_ev_cv.notify_one();
         return true;
     }
     // Default: drop_oldest.
     auto& front = g_ev_queue.front();
+    int64_t dropped_aid = front.arrival_id;   // the dropped (oldest) frame's slot
     std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
     for (auto& [src, h] : front.images) xi::ImagePool::instance().release(h);
     g_ev_queue.pop_front();
+    ev.arrival_id = ++g_run_id;   // the kept (new) frame's slot
     g_ev_queue.push_back(std::move(ev));
     g_ev_cv.notify_one();
     ++g_dropped_oldest;
     lk.unlock();
-    if (g_srv_for_bp)   // one Result per trigger: the dropped frame is NA
-        emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", -1, -1, ds, dg);
+    // Out-of-band NA marker for the dropped oldest frame; its run_id is the slot
+    // it already held, so a consumer can place it correctly without the gate.
+    if (g_srv_for_bp)
+        emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);
     return true;
 }
 
@@ -1664,11 +1674,12 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
                     ev = std::move(g_ev_queue.front());
                     g_ev_queue.pop_front();
                     have_ev = true;
-                    // Assign run_id AND the emit sequence under the queue lock so
-                    // both follow arrival/FIFO order exactly (run_id used to be
-                    // assigned at inspect-start, which raced under N>1). eseq is
-                    // only claimed in ordered mode.
-                    rid = ++g_run_id;
+                    // run_id was claimed at ENQUEUE (push == FIFO order) so kept
+                    // and dropped frames share one consistent arrival sequence;
+                    // read it back here (fallback for any path that didn't set
+                    // it). The emit seq (gate ordering) is still claimed at
+                    // dequeue, ordered mode only — drops leave no gate gap.
+                    rid = ev.arrival_id ? ev.arrival_id : ++g_run_id;
                     if (g_result_ordered.load()) eseq = g_dispatch_seq.fetch_add(1);
                 }
             }
@@ -1841,6 +1852,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     // g_continuous + drained; don't push a now-orphaned event (would leak).
     if (!g_continuous.load()) { rel(); return false; }
     if ((int)lane->q.size() < depth) {
+        ev.arrival_id = ++g_run_id;   // arrival/run id in push (== FIFO) order
         lane->q.push_back(std::move(ev));
         uint64_t ns = lane->q.size(), prev = lane->high_watermark.load(std::memory_order_relaxed);
         while (ns > prev && !lane->high_watermark.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
@@ -1848,25 +1860,30 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     }
     if (ov == "drop_newest") {
         ++lane->dropped;
+        int64_t aid = ++g_run_id;   // arrival slot of the dropped (new) frame
         std::string ds = ev.leader_source, dg = ev.group;   // the dropped (new) event
         for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
         lk.unlock();
+        // Out-of-band NA marker (not gated — gating would stall the source); the
+        // run_id lets a consumer order it against this lane's run results.
         if (g_srv_for_bp)
-            emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", -1, -1, ds, dg);
+            emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", aid, -1, ds, dg);
         return false;
     }
     if (ov == "block") {
         lane->cv.wait(lk, [&] { return (int)lane->q.size() < depth || !g_continuous.load(); });
         if (!g_continuous.load()) { for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); return false; }
+        ev.arrival_id = ++g_run_id;   // claimed at commit (after the block wait)
         lane->q.push_back(std::move(ev)); lane->cv.notify_one(); return true;
     }
     auto& front = lane->q.front();   // drop_oldest
+    int64_t dropped_aid = front.arrival_id;   // the dropped (oldest) frame's slot
     std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
     for (auto& [s, h] : front.images) xi::ImagePool::instance().release(h);
-    lane->q.pop_front(); lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped;
+    lane->q.pop_front(); ev.arrival_id = ++g_run_id; lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped;
     lk.unlock();
     if (g_srv_for_bp)
-        emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", -1, -1, ds, dg);
+        emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);
     return true;
 }
 
@@ -1908,10 +1925,12 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                         lane->cv.wait(lk, [lane] { return !lane->q.empty() || !g_continuous.load(); });
                         if (!g_continuous.load()) break;
                         if (!lane->q.empty()) {
-                            ev = std::move(lane->q.front()); lane->q.pop_front(); have = true; rid = ++g_run_id;
-                            // Claim the emit seq under the queue lock → follows dequeue
-                            // (== FIFO arrival) order. Only dequeued events get a seq, so
-                            // dropped frames leave no gap in the gate's sequence.
+                            ev = std::move(lane->q.front()); lane->q.pop_front(); have = true;
+                            // run_id was claimed at ENQUEUE (push == FIFO order) so kept
+                            // and dropped frames share one arrival sequence; read it back
+                            // (fallback if unset). The emit seq (gate ordering) is still
+                            // claimed here (ordered mode) — drops leave no gate gap.
+                            rid = ev.arrival_id ? ev.arrival_id : ++g_run_id;
                             if (lane->ordered) eseq = lane->seq_next.fetch_add(1);
                         }
                     }
@@ -2097,6 +2116,12 @@ static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name)
         }
         g_ev_queue.clear();
     }
+    // Wait out any in-flight detached cmd:run / one-shot inspect: they hold
+    // g_run_mu for the whole inspect and call into plugin/script DLLs this
+    // lifecycle op is about to FreeLibrary. New runs can't start meanwhile —
+    // cmd:run/one-shot dispatch is on this same (poll) thread. Acquire+release
+    // is enough: it blocks until the running inspect releases g_run_mu.
+    { std::lock_guard<std::mutex> lk(g_run_mu); }
     return g;
 }
 
@@ -2403,6 +2428,17 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (g_continuous.load()) {
             stop_dispatch_pool_();
         }
+        // Controlled teardown while everything is still alive, so nothing runs a
+        // bus emit / module_lifetime deleter against a half-destroyed process at
+        // static-destruction time: drop the bus sink (it captures `srv`) + its
+        // cached handles, stop pointing the breakpoint/status path at `srv`, wait
+        // out any in-flight detached run, and unload the script under its lock.
+        xi::TriggerBus::instance().clear_sink();
+        xi::TriggerBus::instance().clear_observer();
+        xi::TriggerBus::instance().reset();
+        { std::lock_guard<std::mutex> rl(g_run_mu); }   // wait out an in-flight cmd:run
+        { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
+        g_srv_for_bp = nullptr;
         send_rsp_ok(srv, id);
         g_should_exit = true;
     } else if (name == "compile_and_load") {
@@ -2438,8 +2474,31 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (prebuilt) {
             std::filesystem::path p(*src);
             if (p.is_relative() && !g_project_folder.empty()) p = std::filesystem::path(g_project_folder) / p;
+            // Containment: a prebuilt DLL MUST resolve inside the open project
+            // folder. Without this an absolute/UNC `.dll` path loads an
+            // arbitrary DLL — its DllMain / static initializers execute
+            // in-process — and the WS port is unauthenticated by default.
+            // Legitimate AOT bundles ship the DLL inside the project and
+            // reference it relatively (already resolved above), so this only
+            // rejects out-of-tree paths.
+            std::error_code ec1, ec2;
+            auto canon_dll  = std::filesystem::weakly_canonical(p, ec1);
+            auto canon_proj = g_project_folder.empty()
+                ? std::filesystem::path{}
+                : std::filesystem::weakly_canonical(std::filesystem::path(g_project_folder), ec2);
+            bool contained = !canon_proj.empty() && !ec1 && !ec2;
+            if (contained) {
+                auto rel = canon_dll.lexically_relative(canon_proj);
+                contained = !rel.empty() && *rel.begin() != "..";
+            }
+            if (!contained) {
+                std::fprintf(stderr, "[xinsp2] refused out-of-tree prebuilt DLL: %s\n", p.string().c_str());
+                send_rsp_err(srv, id,
+                    "prebuilt DLL must be inside the project folder (out-of-tree path refused)");
+                return;
+            }
             res.ok = true;
-            res.dll_path = p.string();
+            res.dll_path = canon_dll.string();
             std::fprintf(stderr, "[xinsp2] AOT: loading prebuilt script DLL (no compile): %s\n", res.dll_path.c_str());
         } else {
         xi::script::CompileRequest req;
@@ -2529,9 +2588,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         {
             std::lock_guard<std::mutex> lk(g_script_mu);
-            // Save persistent state before unloading old DLL.
-            // Stamp the OLD DLL's schema version alongside so restore
-            // into the new DLL can detect a shape mismatch.
+            // Load the NEW DLL into a temporary first; only swap it in on
+            // success. A failed load (bad DLL, missing export) then leaves the
+            // previously-working script — and the client's subscriptions /
+            // history — intact, instead of unloading the old one and wedging to
+            // a null script. (temp-load-then-swap.)
+            xi::script::LoadedScript next;
+            std::string err;
+            if (!xi::script::load_script(res.dll_path, next, err)) {
+                send_rsp_err(srv, id, err);
+                return;   // old g_script untouched
+            }
+            // Save persistent state from the OLD DLL before swapping it out.
+            // Stamp the OLD DLL's schema version alongside so restore into the
+            // new DLL can detect a shape mismatch.
             if (g_script.ok() && g_script.get_state) {
                 std::vector<char> buf(256 * 1024);
                 int n = g_script.get_state(buf.data(), (int)buf.size());
@@ -2542,10 +2612,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                                           ? g_script.state_schema_version()
                                           : 0;
             }
-            xi::script::unload_script(g_script);
-            // Reset cross-script transient state — the new DLL may
-            // expose a different VAR set, so old subscription names and
-            // historical run snapshots no longer match cleanly.
+            // Swap: move-assign drops the old module's last ref — its deleter
+            // does the owner-sweep + FreeLibrary once any in-flight inspect that
+            // snapshotted it returns.
+            g_script = std::move(next);
+            // Reset cross-script transient state — the new DLL may expose a
+            // different VAR set, so old subscription names and historical run
+            // snapshots no longer match cleanly. (Only after a successful swap.)
             {
                 std::lock_guard<std::mutex> sl(g_sub_mu);
                 g_sub_all = true;
@@ -2554,11 +2627,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             {
                 std::lock_guard<std::mutex> hl(g_hist_mu);
                 g_history.clear();
-            }
-            std::string err;
-            if (!xi::script::load_script(res.dll_path, g_script, err)) {
-                send_rsp_err(srv, id, err);
-                return;
             }
             crash_set(crash_ctx().last_script, sizeof(crash_ctx().last_script),
                       res.dll_path.c_str());
@@ -3106,6 +3174,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Mirror the <project>/.xinsp_work scratch back onto the canonical
         // project — the UI "Save Project" action. Persist any live instance
         // configs to the scratch first so the commit captures them.
+        // Drain the dispatch pool first (same constraint as discard_working_copy
+        // / open_project): the commit reads instance configs + does a filesystem
+        // mirror (add/overwrite/delete) on the scratch that continuous workers
+        // are concurrently reading/writing.
+        (void)quiesce_dispatch_for_lifecycle_op_("commit_working_copy");
         for (auto& [iname, _] : g_plugin_mgr.project().instances) {
             g_plugin_mgr.save_instance(iname);
         }
@@ -3545,6 +3618,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         bool working_copy = parsed->args_json.find("\"working_copy\":true") != std::string::npos
                           || parsed->args_json.find("\"working_copy\": true") != std::string::npos;
         (void)quiesce_dispatch_for_lifecycle_op_("open_project");
+        // Drop stale bus state from any previously-open project (releases cached
+        // handles + the old sink) before tearing it down + opening the new one.
+        xi::TriggerBus::instance().clear_sink();
+        xi::TriggerBus::instance().clear_observer();
+        xi::TriggerBus::instance().reset();
         if (g_plugin_mgr.open_project(*folder, working_copy)) {
             auto& proj = g_plugin_mgr.project();
             int inst_count = (int)proj.instances.size();
@@ -3601,6 +3679,14 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // dispatcher-still-running case the dispatcher pool hit when
         // close_project is sent during continuous mode.)
         (void)quiesce_dispatch_for_lifecycle_op_("close_project");
+        // Drop the bus's captured sink (it points at `srv`) and release any
+        // handles cached in pending_/follower_latest_ BEFORE the plugin DLLs are
+        // unloaded — otherwise those handles (created via the bridge with
+        // owner=0) leak across every open→emit→close cycle and the stale sink
+        // can fire into a torn-down project.
+        xi::TriggerBus::instance().clear_sink();
+        xi::TriggerBus::instance().clear_observer();
+        xi::TriggerBus::instance().reset();
         g_plugin_mgr.close_project();
         send_rsp_ok(srv, id, "{\"closed\":true}");
     } else if (name == "export_project_plugin") {
@@ -4547,6 +4633,12 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lk(g_recent_errors_mu);
             g_recent_errors.clear();
         }
+        // Release any breakpoint-parked worker: the client that would have sent
+        // `resume` is gone, so an in-continuous-mode inspect parked on
+        // g_bp_cv would stay wedged and the reconnecting client has no signal to
+        // recover it. Mirror the stop/quiesce release.
+        { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
+        g_bp_cv.notify_all();
         // E-P1-1: clear the dedup set so a re-dying instance is
         // re-reported to the next client.
     };
@@ -4811,6 +4903,15 @@ int main(int argc, char** argv) {
     srv.stop();
     g_watchdog_run = false;
     if (g_watchdog_thread.joinable()) g_watchdog_thread.join();
+    // Controlled teardown before `srv` (a main() local captured by the bus sink +
+    // g_srv_for_bp) leaves scope, and while the ImagePool/TriggerBus singletons
+    // are still alive — covers exits that didn't go through cmd:shutdown (e.g.
+    // g_should_exit flipped elsewhere). Idempotent with the shutdown handler.
+    g_srv_for_bp = nullptr;
+    xi::TriggerBus::instance().clear_sink();
+    xi::TriggerBus::instance().clear_observer();
+    { std::lock_guard<std::mutex> rl(g_run_mu); }   // wait out an in-flight cmd:run
+    { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
     // Clean shutdown: tell the gateway "bye" so it disarms the dead-man (this is
     // an intended exit, not a crash) before disconnecting.
     if (g_gateway) { g_gateway->say_bye(); g_gateway->stop(); g_gateway = nullptr; }
