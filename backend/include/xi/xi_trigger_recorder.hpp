@@ -117,13 +117,28 @@ public:
         if (!std::filesystem::exists(manifest_path)) return false;
         auto events = load_manifest(folder);
         if (events.empty()) return false;
+        if (replay_thread_.joinable()) replay_thread_.join();   // reap a finished prior run
+        replay_cancel_.store(false);
         replaying_ = true;
         replay_thread_ = std::thread([this, folder, events, speed] {
             play_(folder, events, speed);
             replaying_ = false;
         });
-        replay_thread_.detach();
+        // NOT detached: a lifecycle op (open/close/reload/shutdown) must be able
+        // to cancel + JOIN this thread before plugin DLLs are unloaded, else the
+        // replay keeps emitting into the bus -> dispatch -> a freed plugin -> UAF.
         return true;
+    }
+
+    // Stop an in-flight replay and join its thread. Safe to call when not
+    // replaying. Called by the dispatch quiesce + shutdown so replay can't drive
+    // the pipeline while a project is being torn down.
+    void cancel_replay() {
+        replay_cancel_.store(true);
+        std::thread t;
+        { std::lock_guard<std::mutex> lk(mu_); t = std::move(replay_thread_); }
+        if (t.joinable()) t.join();
+        replaying_.store(false);
     }
 
     bool is_replaying() const { return replaying_.load(); }
@@ -133,6 +148,7 @@ private:
     std::string                folder_;
     std::atomic<bool>          recording_{false};
     std::atomic<bool>          replaying_{false};
+    std::atomic<bool>          replay_cancel_{false};   // signals play_ to stop early
     std::vector<RecordedEvent> events_;
     int64_t                    started_at_us_ = 0;
     std::thread                replay_thread_;
@@ -251,11 +267,18 @@ private:
     void play_(const std::string& folder, std::vector<RecordedEvent> events, double speed) {
         int64_t prev_ts = events.front().timestamp_us;
         for (auto& e : events) {
-            // Wait for the original cadence (if speed > 0)
+            if (replay_cancel_.load()) break;
+            // Wait for the original cadence (if speed > 0), chunked so a
+            // cancel_replay() during a long inter-frame gap is responsive.
             if (speed > 0 && e.timestamp_us > prev_ts) {
                 int64_t delta_us = (int64_t)((e.timestamp_us - prev_ts) / speed);
-                std::this_thread::sleep_for(std::chrono::microseconds(delta_us));
+                while (delta_us > 0 && !replay_cancel_.load()) {
+                    int64_t chunk = delta_us < 20000 ? delta_us : 20000;
+                    std::this_thread::sleep_for(std::chrono::microseconds(chunk));
+                    delta_us -= chunk;
+                }
             }
+            if (replay_cancel_.load()) break;
             prev_ts = e.timestamp_us;
 
             // Load all frames + group by source. Each recorded image's

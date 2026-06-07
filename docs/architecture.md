@@ -795,7 +795,7 @@ addrefs each handle internally; the caller may release immediately.
 | Policy | Behaviour |
 |--------|-----------|
 | `Any` | Fire on every emit. Default; back-compat with pre-trigger plugins. |
-| `AllRequired` | Wait until every source in `required_sources` has emitted for that tid. Drop incomplete tids after `window_ms`. |
+| `AllRequired` | Wait until every source in `required_sources` has emitted for that tid. Drop incomplete tids after `window_ms` — measured on a monotonic clock and swept on a periodic tick (not only on the next emit), so a partial set left when a source goes quiet still releases its image handles. |
 | `LeaderFollowers` | Fire on leader emit; attach followers' latest frames (best-effort). |
 
 Configured via `cmd: set_trigger_policy`. Persisted in `project.json`

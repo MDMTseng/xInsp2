@@ -80,7 +80,12 @@ struct FeConfig {
     // and the port still accepts, the backend is wedged (bound but not serving)
     // -> safe-state + respawn. Default derived from be_log; 0 stale = off.
     std::string heartbeat_file;
-    int         heartbeat_stale_ms = 8000;
+    // 15 s, not 8 s: a mid-run compile_and_load blocks the backend's serving loop
+    // (cl.exe is synchronous, 3-5 s warm and can exceed 8 s on a cold toolchain),
+    // which legitimately stalls the heartbeat. The window must be safely above
+    // one cold compile so a real recompile isn't mistaken for a serving wedge; a
+    // genuine wedge is still caught, just ~7 s later.
+    int         heartbeat_stale_ms = 15000;
     // Extra args appended verbatim to the spawned backend's command line
     // (--be-arg=..., repeatable). Lets an operator pass BE flags through the FE.
     std::vector<std::string> be_args;
@@ -258,9 +263,19 @@ static FeConfig load_config(int argc, char** argv) {
     return c;
 }
 
+// Wall clock — for human-facing timestamps that go into status / crash JSON.
 static int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+// Monotonic clock — for the supervisor's deadlines/intervals (boot timeout,
+// heartbeat staleness, healthy-for, respawn windows). These must not jump on an
+// NTP/DST wall-clock correction (a forward jump would falsely trip a boot/
+// heartbeat timeout and kill+respawn a healthy backend; a backward jump would
+// stop them ever firing). Never subtract one clock from the other.
+static int64_t steady_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 // Cheap substring scan of the BE log (used by the boot-readiness gate to spot
@@ -521,7 +536,7 @@ static int run_supervisor(const FeConfig& c) {
         st.comms_enabled = true;
         gw = spawn_gateway(c, job);
         if (gw.ok) {
-            gw_healthy_since = now_ms();
+            gw_healthy_since = steady_ms();
             st.comms_state = "up";
             std::fprintf(stderr, "[xinsp-fe] comms gateway up pid=%lu\n", gw.pi.dwProcessId);
         } else {
@@ -561,7 +576,7 @@ static int run_supervisor(const FeConfig& c) {
         // Boot-readiness gate: until the BE reaches "autostart: ready", port-up
         // only means "bound", not "serving". No project -> nothing to wait for.
         bool    ready_seen = c.project.empty();
-        int64_t spawn_ms   = now_ms();
+        int64_t spawn_ms   = steady_ms();
         // Serve-time heartbeat tracking (this instance).
         long long hb_last_val = -2;
         int64_t   hb_last_change_ms = 0;
@@ -614,11 +629,11 @@ static int run_supervisor(const FeConfig& c) {
                                      gw_resp.consecutive, c.respawn_max, c.respawn_backoff_ms);
                         Sleep((DWORD)c.respawn_backoff_ms);
                         gw = spawn_gateway(c, job);
-                        gw_healthy_since = gw.ok ? now_ms() : 0;
+                        gw_healthy_since = gw.ok ? steady_ms() : 0;
                         gw_hb_armed = false;   // fresh gateway restarts its counter
                     }
                 } else if (gw.ok) {
-                    gw_resp.note_healthy(now_ms() - gw_healthy_since, c.respawn_reset_ms);
+                    gw_resp.note_healthy(steady_ms() - gw_healthy_since, c.respawn_reset_ms);
                     if (comms_down) {
                         comms_down = false;   // gateway recovered; clear may proceed
                         st.comms_state = "up"; publish_status(c, st);
@@ -631,7 +646,7 @@ static int run_supervisor(const FeConfig& c) {
                     // exit check runs the same safe-state + respawn path as a crash.
                     if (c.heartbeat_stale_ms > 0 && !c.comms_heartbeat_file.empty()) {
                         long long hb = read_heartbeat(c.comms_heartbeat_file);
-                        int64_t now = now_ms();
+                        int64_t now = steady_ms();
                         if (!gw_hb_armed) { gw_hb_armed = true; gw_hb_last_val = hb; gw_hb_last_change_ms = now; }
                         else if (hb != gw_hb_last_val) { gw_hb_last_val = hb; gw_hb_last_change_ms = now; }
                         else if (now - gw_hb_last_change_ms > c.heartbeat_stale_ms) {
@@ -666,7 +681,7 @@ static int run_supervisor(const FeConfig& c) {
                     WaitForSingleObject(sp.pi.hProcess, 5000);
                     GetExitCodeProcess(sp.pi.hProcess, &exit_code);
                     break;
-                } else if (c.boot_timeout_ms > 0 && now_ms() - spawn_ms > c.boot_timeout_ms) {
+                } else if (c.boot_timeout_ms > 0 && steady_ms() - spawn_ms > c.boot_timeout_ms) {
                     std::fprintf(stderr, "[xinsp-fe] backend did not reach 'autostart: ready' "
                                  "within %d ms (boot hang); killing for respawn\n",
                                  c.boot_timeout_ms);
@@ -709,14 +724,14 @@ static int run_supervisor(const FeConfig& c) {
                 }
                 // Recovery: once this instance has been healthy continuously for
                 // respawn_reset_ms, forget prior failures (the line recovered).
-                if (healthy_since == 0) healthy_since = now_ms();
-                resp.note_healthy(now_ms() - healthy_since, c.respawn_reset_ms);
+                if (healthy_since == 0) healthy_since = steady_ms();
+                resp.note_healthy(steady_ms() - healthy_since, c.respawn_reset_ms);
                 // Serve-time wedge: the heartbeat counter must keep advancing
                 // while serving. If it stalls while the port still accepts, the
                 // serving loop is wedged (a connect probe can't see this).
                 if (c.heartbeat_stale_ms > 0) {
                     long long hb = read_heartbeat(c.heartbeat_file);
-                    int64_t now = now_ms();
+                    int64_t now = steady_ms();
                     if (!hb_armed) { hb_armed = true; hb_last_val = hb; hb_last_change_ms = now; }
                     else if (hb != hb_last_val) { hb_last_val = hb; hb_last_change_ms = now; }
                     else if (now - hb_last_change_ms > c.heartbeat_stale_ms) {
@@ -829,7 +844,7 @@ static void print_help() {
         "  --boot-timeout-ms=N  boot-hang budget: go safe+respawn if the backend\n"
         "                       never reaches 'ready' in N ms (default 60000; 0=off)\n"
         "  --heartbeat-stale-ms=N  serve-time wedge budget: respawn if the backend\n"
-        "                       heartbeat stalls N ms while listening (default 8000; 0=off)\n"
+        "                       heartbeat stalls N ms while listening (default 15000; 0=off)\n"
         "  --be-arg=ARG         extra arg appended to the backend command (repeatable)\n"
         "  --comms-plc=SPEC     run an out-of-process comms gateway (xinsp-comms) for\n"
         "                       PLC I/O: 'tcp:HOST:PORT' / 'udp:HOST:PORT'. The FE\n"

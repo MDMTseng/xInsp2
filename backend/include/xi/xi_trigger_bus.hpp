@@ -84,6 +84,14 @@ inline int64_t now_us() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
         now.time_since_epoch()).count();
 }
+// Monotonic microseconds — for DEADLINES / INTERVALS / RATE math, which must not
+// jump on an NTP/DST wall-clock correction. Use now_us() (wall) only for
+// human-facing or cross-source timestamps. (Unrelated epoch from now_us(); never
+// subtract one clock from the other.)
+inline int64_t steady_now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 #endif
 
 inline xi_trigger_id make_trigger_id() {
@@ -243,7 +251,12 @@ public:
                     p.event.id = tid;
                     p.event.timestamp_us = ts_us;
                     p.event.leader_source = source;
-                    p.first_seen_us = now_us();
+                    p.first_seen_us = steady_now_us();   // steady: window must not move on a wall jump
+                } else if (ts_us < p.event.timestamp_us) {
+                    // timestamp_us is the EARLIEST source timestamp (TriggerEvent
+                    // doc); take the min as later sources append, so the script's
+                    // queue_wait_us math isn't skewed by which source arrived first.
+                    p.event.timestamp_us = ts_us;
                 }
                 for (auto& [n, h] : entries) {
                     auto it = p.event.images.find(n);
@@ -341,6 +354,15 @@ public:
         null_tid_warned_.clear();
     }
 
+    // Time-driven eviction of stale partial correlations. Eviction also runs
+    // inside emit_impl_, but that only fires while events keep arriving — call
+    // this from a periodic tick so a partial set left when a source goes quiet
+    // releases its held image handles instead of pinning them indefinitely.
+    void evict_stale() {
+        std::lock_guard<std::mutex> lk(mu_);
+        evict_stale_locked();
+    }
+
 private:
     struct Pending {
         TriggerEvent                       event;
@@ -381,7 +403,7 @@ private:
 
     void evict_stale_locked() {
         if (window_ms_ <= 0) return;
-        int64_t cutoff = now_us() - (int64_t)window_ms_ * 1000;
+        int64_t cutoff = steady_now_us() - (int64_t)window_ms_ * 1000;
         for (auto it = pending_.begin(); it != pending_.end();) {
             if (it->second.first_seen_us < cutoff) {
                 for (auto& [src, h] : it->second.event.images) {

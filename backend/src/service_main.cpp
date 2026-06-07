@@ -381,7 +381,10 @@ static std::mutex              g_bp_mu;
 static std::condition_variable g_bp_cv;
 static bool                    g_bp_paused = false;
 static std::string             g_bp_last_label;
-static xi::ws::Server*         g_srv_for_bp = nullptr;   // set in main
+// Atomic so emit/status/breakpoint paths (which may run on plugin/replay/worker
+// threads) can load it once and the shutdown null-out can't tear a read. A
+// pointer load is a plain mov on x86-64 — no hot-path cost.
+static std::atomic<xi::ws::Server*> g_srv_for_bp{nullptr};   // set in main
 
 // ---- Trigger access (script callbacks) ---------------------------------
 // Set by the worker thread (or run_one_inspection) before invoking the
@@ -465,18 +468,23 @@ static void breakpoint_cb(const char* label) {
     // `cmd: run` would deadlock the WS thread, and stop/unload would
     // have to re-release after every inspect iteration. Breakpoints
     // are a continuous-mode feature.
-    if (!g_srv_for_bp || !g_continuous.load()) return;
+    auto* srv = g_srv_for_bp.load(std::memory_order_acquire);
+    if (!srv || !g_continuous.load()) return;
     std::string safe = label ? label : "";
     // Build event JSON with escaped label.
     std::string msg = "{\"type\":\"event\",\"name\":\"breakpoint\",\"data\":{\"label\":";
     xp::json_escape_into(msg, safe);
     msg += "}}";
-    g_srv_for_bp->send_text(msg);
+    srv->send_text(msg);
 
     std::unique_lock<std::mutex> lk(g_bp_mu);
     g_bp_paused     = true;
     g_bp_last_label = safe;
-    g_bp_cv.wait(lk, []{ return !g_bp_paused; });
+    // Also wake on !g_continuous: a stop/quiesce can flip g_continuous and fire
+    // its g_bp_paused=false+notify in the window between the early check above and
+    // this wait. Without the extra predicate term that notify is missed and the
+    // worker parks forever -> stop_dispatch_pool_'s join hangs the backend.
+    g_bp_cv.wait(lk, []{ return !g_bp_paused || !g_continuous.load(); });
 }
 
 // ---- Status registry -------------------------------------------------------
@@ -509,13 +517,13 @@ static void set_status_internal(const std::string& who, const char* text) {
         seq = ++g_status_seq;
         g_status[who] = StatusEntry{t, status_now_ms(), seq};
     }
-    if (g_srv_for_bp) {
+    if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire)) {
         std::string msg = "{\"type\":\"event\",\"name\":\"status\",\"data\":{\"source\":";
         xp::json_escape_into(msg, who);
         msg += ",\"text\":";
         xp::json_escape_into(msg, t);
         msg += ",\"seq\":" + std::to_string(seq) + "}}";
-        g_srv_for_bp->send_text(msg);
+        srv->send_text(msg);
     }
 }
 
@@ -551,13 +559,13 @@ static constexpr int kResultSystemBand = -990000;
 // surfaces instead of masquerading as a real verdict.
 static void result_cb(int code, const char* msg) {
     if (code <= kResultSystemBand) {
-        if (g_srv_for_bp) {
+        if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire)) {
             xp::LogMsg lm;
             lm.level = "warn";
             lm.msg = "xi::result(" + std::to_string(code) + ") uses a reserved system "
                      "code (<= -990000); the valid ng range is -1..-989999. Recorded as "
                      "NA (0) — fix the script's result code.";
-            g_srv_for_bp->send_text(lm.to_json());
+            srv->send_text(lm.to_json());
         }
         g_run_result.code = 0;   // NA, not a fake ng1
         g_run_result.msg = "[invalid result code " + std::to_string(code) + ", reserved band] ";
@@ -1583,8 +1591,8 @@ static bool enqueue_event_(xi::TriggerEvent ev) {
         // One Result per trigger: the dropped frame is NA. Emitted out-of-band
         // (NOT through the arrival-order gate — that would stall the acquiring
         // source); the run_id lets a consumer order it against run results.
-        if (g_srv_for_bp)
-            emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", aid, -1, ds, dg);
+        if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
+            emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", aid, -1, ds, dg);
         return false;
     }
     if (overflow == "block") {
@@ -1615,8 +1623,8 @@ static bool enqueue_event_(xi::TriggerEvent ev) {
     lk.unlock();
     // Out-of-band NA marker for the dropped oldest frame; its run_id is the slot
     // it already held, so a consumer can place it correctly without the gate.
-    if (g_srv_for_bp)
-        emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);
+    if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
+        emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);
     return true;
 }
 
@@ -1721,9 +1729,17 @@ static void spawn_dispatch_pool_(xi::ws::Server* srv_ptr,
     g_timer_thread = std::thread([] {
         while (g_continuous.load()) {
             int iv = g_timer_interval_ms.load();
-            if (iv <= 0) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue; }
+            if (iv <= 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                // Time-driven eviction even in trigger-only mode: a partial
+                // multi-source correlation left when a source goes quiet must
+                // release its handles without waiting for the next emit.
+                xi::TriggerBus::instance().evict_stale();
+                continue;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(iv));
             if (!g_continuous.load()) break;
+            xi::TriggerBus::instance().evict_stale();
             if (g_timer_interval_ms.load() <= 0) continue;   // turned off during the sleep
             (void)enqueue_event_(xi::TriggerEvent{});
         }
@@ -1866,8 +1882,8 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         lk.unlock();
         // Out-of-band NA marker (not gated — gating would stall the source); the
         // run_id lets a consumer order it against this lane's run results.
-        if (g_srv_for_bp)
-            emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", aid, -1, ds, dg);
+        if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
+            emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", aid, -1, ds, dg);
         return false;
     }
     if (ov == "block") {
@@ -1882,8 +1898,8 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     for (auto& [s, h] : front.images) xi::ImagePool::instance().release(h);
     lane->q.pop_front(); ev.arrival_id = ++g_run_id; lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped;
     lk.unlock();
-    if (g_srv_for_bp)
-        emit_run_result(*g_srv_for_bp, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);
+    if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
+        emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);
     return true;
 }
 
@@ -1940,11 +1956,14 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                     // lane's previous one, then sleep to it. Surplus events meanwhile
                     // pile in the queue and coalesce via drop_oldest (latest wins).
                     if (lane->cfg.min_interval_ms > 0) {
+                        // steady clock: a wall-clock (NTP/DST) jump must not stall
+                        // the lane for the duration of the jump. next_allowed_us
+                        // holds steady-us (reset to 0 at lane start).
                         int64_t iv = (int64_t)lane->cfg.min_interval_ms * 1000;
-                        int64_t now = xi::now_us(), prev = lane->next_allowed_us.load(std::memory_order_relaxed), slot;
+                        int64_t now = xi::steady_now_us(), prev = lane->next_allowed_us.load(std::memory_order_relaxed), slot;
                         do { slot = prev > now ? prev : now; }
                         while (!lane->next_allowed_us.compare_exchange_weak(prev, slot + iv, std::memory_order_acq_rel));
-                        for (int64_t w = slot - xi::now_us(); w > 0 && g_continuous.load(); w = slot - xi::now_us())
+                        for (int64_t w = slot - xi::steady_now_us(); w > 0 && g_continuous.load(); w = slot - xi::steady_now_us())
                             std::this_thread::sleep_for(std::chrono::microseconds(w > 20000 ? 20000 : w));
                     }
                     ev.dequeued_at_us = xi::now_us();
@@ -1971,9 +1990,14 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
         const std::string dg = g_plugin_mgr.project().default_group;
         while (g_continuous.load()) {
             int iv = g_timer_interval_ms.load();
-            if (iv <= 0) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue; }
+            if (iv <= 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                xi::TriggerBus::instance().evict_stale();
+                continue;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(iv));
             if (!g_continuous.load()) break;
+            xi::TriggerBus::instance().evict_stale();
             if (g_timer_interval_ms.load() <= 0) continue;
             xi::TriggerEvent ev; ev.group = dg;
             (void)enqueue_to_lane_(std::move(ev));
@@ -2091,6 +2115,10 @@ struct DispatchPoolGuard {
 
 static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name) {
     DispatchPoolGuard g;
+    // Cancel + join any in-flight recording replay first: it's a dispatch driver
+    // that bypasses the pool, and would otherwise keep emitting into the bus
+    // (-> inspect -> a plugin DLL this op is about to unload) = UAF.
+    xi::TriggerRecorder::instance().cancel_replay();
     if (g_continuous.load()) {
         g.was_continuous = true;
         g.prior_fps = g_continuous_fps.load();
@@ -2333,7 +2361,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // by the UI to project.json runtime.timer_fps.
         auto f = xp::get_number_field(parsed->args_json, "fps");
         int fps = f ? (int)*f : 0;
-        int iv = fps > 0 ? 1000 / fps : 0;
+        // max(1,..) so a high fps (>1000) doesn't round to 0, which the timer
+        // loop reads as "off" (the opposite of what was asked). fps<=0 = off.
+        int iv = fps > 0 ? std::max(1, 1000 / fps) : 0;
         g_timer_interval_ms.store(iv);
         std::string out = "{\"fps\":" + std::to_string(fps) +
                           ",\"interval_ms\":" + std::to_string(iv) + "}";
@@ -2433,6 +2463,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // static-destruction time: drop the bus sink (it captures `srv`) + its
         // cached handles, stop pointing the breakpoint/status path at `srv`, wait
         // out any in-flight detached run, and unload the script under its lock.
+        xi::TriggerRecorder::instance().cancel_replay();
         xi::TriggerBus::instance().clear_sink();
         xi::TriggerBus::instance().clear_observer();
         xi::TriggerBus::instance().reset();
@@ -2587,6 +2618,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
 
         {
+            // Wait out any in-flight detached cmd:run before swapping the script
+            // DLL (it holds g_run_mu for the whole inspect and runs from the old
+            // module). Order is g_run_mu -> g_script_mu, matching the run path.
+            std::lock_guard<std::mutex> rl(g_run_mu);
             std::lock_guard<std::mutex> lk(g_script_mu);
             // Load the NEW DLL into a temporary first; only swap it in on
             // success. A failed load (bad DLL, missing export) then leaves the
@@ -2755,7 +2790,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             int fps = trig_only ? 0 : prior_continuous_fps;
             g_continuous_fps = fps;
             g_continuous = true;
-            int interval_ms = trig_only ? 0 : 1000 / std::max(fps, 1);
+            int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(fps, 1));
             int n_threads = g_plugin_mgr.project().dispatch_threads;
             if (grouping_enabled_()) spawn_group_pool_(&srv, interval_ms);
             else                     spawn_dispatch_pool_(&srv, interval_ms, n_threads);
@@ -2887,7 +2922,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         // Seed the live timer rate (0 = trigger-only). Only when fps was explicit;
         // otherwise keep the existing g_timer_interval_ms (runtime/prior/default).
-        if (fps_explicit) g_timer_interval_ms.store(trigger_only ? 0 : 1000 / std::max(fps, 1));
+        if (fps_explicit) g_timer_interval_ms.store(trigger_only ? 0 : std::max(1, 1000 / std::max(fps, 1)));
         int interval_ms = g_timer_interval_ms.load();
         int n_threads = g_plugin_mgr.project().dispatch_threads;
         if (n_threads < 1) n_threads = 1;
@@ -3633,7 +3668,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // continuous mode runs.
             apply_process_priority_(proj.runtime_priority);
             if (proj.runtime_timer_fps >= 0)
-                g_timer_interval_ms.store(proj.runtime_timer_fps > 0 ? 1000 / proj.runtime_timer_fps : 0);
+                g_timer_interval_ms.store(proj.runtime_timer_fps > 0 ? std::max(1, 1000 / proj.runtime_timer_fps) : 0);
             for (auto& [k, v] : proj.instances) {
                 std::fprintf(stderr, "[xinsp2]   instance: %s (%s)\n",
                              k.c_str(), v.plugin_name.c_str());
@@ -4907,6 +4942,7 @@ int main(int argc, char** argv) {
     // g_srv_for_bp) leaves scope, and while the ImagePool/TriggerBus singletons
     // are still alive — covers exits that didn't go through cmd:shutdown (e.g.
     // g_should_exit flipped elsewhere). Idempotent with the shutdown handler.
+    xi::TriggerRecorder::instance().cancel_replay();
     g_srv_for_bp = nullptr;
     xi::TriggerBus::instance().clear_sink();
     xi::TriggerBus::instance().clear_observer();
