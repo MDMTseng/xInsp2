@@ -415,9 +415,9 @@ generated `c_cpp_properties.json` (so IntelliSense can't drift from the build).
                  "vcvars": "D:/VS/VC/Auxiliary/Build/vcvars64.bat" } }
 ```
 
-The backend re-resolves the globals and regenerates `c_cpp_properties.json`
-immediately, then replies `{ "applied": true, "recompile_needed": true,
-"health": <toolchain_health> }`. The change takes effect on the next
+The backend re-resolves the globals immediately, then replies `{ "applied": true,
+"recompile_needed": true, "health": <toolchain_health> }` — the VS Code extension
+refreshes `c_cpp_properties.json` from that health. The change takes effect on the next
 `compile_and_load`. Surfaced in the editor under **Project Settings → C++
 Toolchain** (see [`guides/install.md`](./guides/install.md) §5).
 
@@ -524,17 +524,15 @@ values, but **do NOT recompile the inspection script** — call
 N project-local plugins compile each plugin under `cl.exe` and can
 take 30–120 s; clients should pass a long timeout for this command.
 
-**IntelliSense config (side effect).** On a successful `open_project`, the
-backend writes a `.vscode/c_cpp_properties.json` into the *canonical* project
-folder (the one the user edits, not any `.xinsp_work` scratch). It mirrors the
-exact include set, C++ standard, and force-included support header the script
-compiler uses, so the Microsoft C/C++ extension resolves `<xi/...>` and OpenCV
-headers — go-to-definition works and there are no false red squiggles. It also
-drops a `.vscode/extensions.json` recommending `ms-vscode.cpptools` (only if one
-isn't already present). The generated file is stamped `"_generated_by": "xinsp2"`;
-the backend overwrites only files carrying that stamp, so a hand-written config is
-never clobbered (delete the stamp to take manual ownership). Both files embed
-machine-specific absolute paths and are git-ignored under `examples/`.
+**IntelliSense config.** The `.vscode/c_cpp_properties.json` that lets the
+Microsoft C/C++ extension resolve `<xi/...>` and OpenCV is written by the **VS
+Code extension** (NOT the backend core): on open it reads the resolved compile
+paths from the backend via `toolchain_health` and mirrors the exact include set,
+C++ standard, and force-included support header into the *canonical* project
+folder, plus a `.vscode/extensions.json` recommending `ms-vscode.cpptools`. The
+generated file is stamped `"_generated_by": "xinsp2"` and only files carrying that
+stamp are overwritten (delete the stamp to take manual ownership). Both files
+embed machine-specific absolute paths and are git-ignored under `examples/`.
 
 **External script dependencies.** `project.json` may carry two optional arrays
 that feed the script compile: `"include_dirs"` (extra `cl /I` paths) and

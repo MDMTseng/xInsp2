@@ -7,9 +7,11 @@ backend's `cl.exe` driver and hot-reloaded on save.
 This guide walks through the surface area an inspection author actually
 uses, with pointers into the deeper reference for each piece.
 
-> **Editor IntelliSense.** Opening a project (via the VS Code extension or any
-> `open_project` call) makes the backend write a `.vscode/c_cpp_properties.json`
-> into the project folder that matches the compiler's real include set. With the
+> **Editor IntelliSense.** Opening a project in the VS Code extension writes a
+> `.vscode/c_cpp_properties.json` into the project folder that matches the
+> compiler's real include set (the extension reads the resolved paths from the
+> backend via `cmd:toolchain_health` — the backend core no longer touches
+> `.vscode`). With the
 > Microsoft C/C++ extension installed, `<xi/...>` and OpenCV headers resolve,
 > `VAR`/`EMIT`/`XI_SCRIPT_EXPORT` are known (the script support header is
 > force-included), and go-to-definition works with no false errors. The file is
