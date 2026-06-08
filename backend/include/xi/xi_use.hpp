@@ -75,9 +75,6 @@ struct CurrentTriggerInfo {
                                     // off g_ev_queue (same clock as timestamp_us).
                                     // queue_wait_us = dequeued_at_us - timestamp_us
                                     // inspect_us    = now_us()       - dequeued_at_us
-    int64_t       seq = 0;          // per-run FIFO arrival id: dense monotonic
-                                    // order for serializing side effects (e.g.
-                                    // ordered PLC sends) under parallel dispatch
 };
 using TriggerInfoFn    = void (*)(CurrentTriggerInfo* out);
 using TriggerImageFn   = xi_image_handle (*)(const char* source);
@@ -129,12 +126,6 @@ public:
     // before this field was introduced, or synthetic timer ticks with
     // no trigger). Always check is_active() first.
     int64_t       dequeued_at_us() const { ensure(); return info_.dequeued_at_us; }
-
-    // Per-run FIFO arrival id: a dense, monotonically-increasing order assigned
-    // when this event was queued. Use it to serialize a plugin's side effects
-    // (e.g. ordered PLC sends) under parallel dispatch — buffer by seq and flush
-    // in order. 0 if no trigger is active.
-    int64_t       seq() const { ensure(); return info_.seq; }
 
     std::string id_string() const {
         ensure();
