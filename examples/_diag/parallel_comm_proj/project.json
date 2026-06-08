@@ -1,0 +1,12 @@
+{
+  "name": "parallel_comm",
+  "script": "inspect.cpp",
+  "parallelism": {
+    "queue_depth": 100,
+    "groups": [ { "name": "work", "max_parallel": 4, "queue_depth": 100 } ]
+  },
+  "instances": [
+    { "name": "src",  "plugin": "src",  "group": "work" },
+    { "name": "comm", "plugin": "comm" }
+  ]
+}

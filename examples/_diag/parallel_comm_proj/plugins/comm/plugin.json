@@ -1,0 +1,1 @@
+{ "name": "comm", "dll": "comm.dll", "factory": "xi_plugin_create", "has_ui": false }
