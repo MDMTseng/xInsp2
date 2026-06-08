@@ -50,7 +50,7 @@ extern "C" {
 /* Current version history:                                           */
 /*   1 — initial frozen surface (image pool, trigger bus, SHM, host  */
 /*       api with read_image_file).                                  */
-/*   2 — + emit_resource (pull-by-id resource store). Additive at the */
+/*   2 — + emit_resource (emit/fetch resource store). Additive at the */
 /*       struct tail, so v1 plugins keep working unchanged.          */
 /* ------------------------------------------------------------------ */
 #define XI_ABI_VERSION 2
@@ -191,21 +191,21 @@ typedef struct xi_host_api {
     void            (*set_status)(const char* source, const char* text);
 
     /* --------------------------------------------------------------- */
-    /* Pull-by-id resource store (v2). Backs the id/pull dispatch model:
+    /* emit/fetch resource store (v2). Backs the emit/fetch dispatch model:
      * an emitter STAGES a frame — named images + cJSON metadata — under
-     * an opaque string res_id; a consumer PULLS it later by res_id. The
+     * an opaque string res_id; a consumer FETCHES it later by res_id. The
      * host keeps a bounded per-emitter ring. ABI-additive: plugins built
      * against an older header never call it; an older host leaves it null
      * (always null-check before use).
      *
      *   emitter_name: the staging instance's name.
-     *   res_id:       opaque id (may be a UUID); the pull key + replay key.
+     *   res_id:       opaque id (may be a UUID); the fetch + replay key.
      *                 Ordering for downstream serialization rides as a
      *                 `seq` field inside `cjson`, not here.
      *   images:       frame(s) to stage; the store addrefs each handle, so
      *                 the caller may release them right after this returns.
      *   cjson:        metadata blob (may be null/empty).
-     * (The get_resource pull entry is added alongside the use() proxy.) */
+     * (The fetch_resource entry is added alongside the use() proxy.) */
     void            (*emit_resource)(const char* emitter_name, const char* res_id,
                                      const xi_record_image* images, int32_t image_count,
                                      const char* cjson);
@@ -215,20 +215,20 @@ typedef struct xi_host_api {
      * exists (the L bytes were written iff L <= cjson_buflen — otherwise
      * nothing is written; resize to L and retry); -1 means res_id is not
      * staged for this emitter. Does NOT touch image refcounts. */
-    int32_t         (*get_resource)(const char* emitter_name, const char* res_id,
+    int32_t         (*fetch_resource)(const char* emitter_name, const char* res_id,
                                     char* cjson_buf, int32_t cjson_buflen);
 
     /* Pull one staged image by key. Returns an addref'd handle (caller
      * image_release when done) or XI_IMAGE_NULL if the resource or key is
      * absent. Lazy: a consumer fetches only the images it needs. */
-    xi_image_handle (*get_resource_image)(const char* emitter_name, const char* res_id,
+    xi_image_handle (*fetch_image)(const char* emitter_name, const char* res_id,
                                           const char* key);
 
-    /* Drive one inspection for a staged resource (pull-by-id dispatch). The
+    /* Drive one inspection for a staged resource (emit/fetch dispatch). The
      * emitter calls this AFTER emit_resource to signal "run res_id now"; the
      * host routes an id-only event into the emitter's lane (by its group),
      * bypassing trigger-bus correlation. The script reads the id back via
-     * xi::current_trigger().id_string() and pulls with xi::use(emitter).get(id).
+     * xi::current_trigger().id_string() and fetches with xi::use(emitter).fetch(id).
      *   res_id:       128-bit id carried as the run's trigger id; its hex form
      *                 (id_string) is the res_id key used for emit_resource.
      *   timestamp_us: capture time (0 = host's current time).

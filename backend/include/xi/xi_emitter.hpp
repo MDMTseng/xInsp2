@@ -1,6 +1,6 @@
 #pragma once
 //
-// xi_emitter.hpp — the emitter helper for the pull-by-id dispatch model. Wraps
+// xi_emitter.hpp — the emitter helper for the emit/fetch dispatch model. Wraps
 // the 5-step boilerplate a source plugin would otherwise hand-roll (mint res_id,
 // assign a contiguous seq, stage images + metadata, emit_resource, emit_dispatch)
 // behind a small stateful object, and gets the seq-contiguity contract right so

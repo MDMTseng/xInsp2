@@ -5,7 +5,7 @@
 XI_SCRIPT_EXPORT void xi_inspect_entry(int) {
     auto t = xi::current_trigger();
     std::string res_id = t.id_string();
-    auto r = xi::use("src").get(res_id);
+    auto r = xi::use("src").fetch(res_id);
     VAR(ok, r.ok() ? 1 : 0);
     VAR(data, r.data());
     auto img = r.image("img");

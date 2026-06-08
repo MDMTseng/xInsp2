@@ -44,7 +44,7 @@
 #include "xi_pm_json.hpp"      // pm_json_escape / pm_json_quote (extracted leaf)
 #include "xi_pm_parse.hpp"     // parse_manifest / extract_string / validate_config_against_manifest
 #include "xi_project_model.hpp" // ProjectInfo / InstanceInfo / CompileEnv / OpenWarning (data model)
-#include "xi_resource_store.hpp" // install_resource_hooks (pull-by-id emit_resource)
+#include "xi_resource_store.hpp" // install_resource_hooks (emit/fetch: emit_resource)
 #include "xi_safe_state.hpp"   // install_safe_state_hook (set_safe_state)
 #include "xi_script_compiler.hpp"
 #include "xi_source.hpp"

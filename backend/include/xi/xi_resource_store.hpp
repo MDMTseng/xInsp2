@@ -1,17 +1,17 @@
 #pragma once
 //
 // xi_resource_store.hpp — host-provided per-emitter resource ring backing the
-// pull-by-id dispatch model (see docs/design/emitter-pull-model).
+// emit/fetch dispatch model (see docs/design/emitter-fetch-model).
 //
 // An emitter STAGES a frame — named images + cJSON metadata — under an opaque
-// string res_id via emit(); a consumer later PULLS it by res_id via get(). The
+// string res_id via emit(); a consumer later FETCHES it by res_id via fetch(). The
 // store is the "ring building block" the design hands emitters so each one
 // doesn't reimplement buffering: it keeps a bounded ring of the most recent
 // res_ids per emitter name and evicts the oldest past capacity.
 //
 // Image-handle lifetime (same discipline as the trigger bus): emit() ADDREFS
 // each handle it retains (callers may release immediately after). Eviction,
-// overwrite, and clear() RELEASE them. get() ADDREFS handles handed to the
+// overwrite, and clear() RELEASE them. fetch() ADDREFS handles handed to the
 // caller (caller releases). So the store never frees a handle out from under a
 // live consumer, and never leaks one.
 //
@@ -69,27 +69,8 @@ public:
         while (ring.size() > cap_) { release_(ring.front()); ring.pop_front(); }
     }
 
-    // Pull a staged frame by res_id. Addrefs handles into out_images (caller
-    // releases via image_release) and copies the cJSON; false if not found.
-    bool get(const std::string& name, const std::string& res_id,
-             ImageList& out_images, std::string& out_cjson) {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto rit = rings_.find(name);
-        if (rit == rings_.end()) return false;
-        for (auto& e : rit->second) {
-            if (e.res_id != res_id) continue;
-            for (auto& im : e.images) {
-                ImagePool::instance().addref(im.second);
-                out_images.push_back(im);
-            }
-            out_cjson = e.cjson;
-            return true;
-        }
-        return false;
-    }
-
-    // Existence + metadata only (no image addref). Backs host get_resource.
-    bool get_meta(const std::string& name, const std::string& res_id,
+    // Existence + metadata only (no image addref). Backs host fetch_resource.
+    bool fetch_meta(const std::string& name, const std::string& res_id,
                   std::string& out_cjson) {
         std::lock_guard<std::mutex> lk(mu_);
         auto rit = rings_.find(name);
@@ -99,9 +80,9 @@ public:
         return false;
     }
 
-    // Pull one image by key (addref'd; caller releases). NULL if absent. Backs
-    // host get_resource_image — lazy single-image fetch.
-    xi_image_handle get_image(const std::string& name, const std::string& res_id,
+    // Fetch one image by key (addref'd; caller releases). NULL if absent. Backs
+    // host fetch_image — lazy single-image fetch.
+    xi_image_handle fetch_image(const std::string& name, const std::string& res_id,
                               const std::string& key) {
         std::lock_guard<std::mutex> lk(mu_);
         auto rit = rings_.find(name);
@@ -163,19 +144,19 @@ inline void install_resource_hooks(xi_host_api& api) {
                                        image_count < 0 ? 0 : image_count,
                                        cjson ? cjson : "");
     };
-    api.get_resource = [](const char* emitter_name, const char* res_id,
+    api.fetch_resource = [](const char* emitter_name, const char* res_id,
                           char* cjson_buf, int32_t cjson_buflen) -> int32_t {
         if (!emitter_name || !res_id) return -1;
         std::string cj;
-        if (!ResourceStore::instance().get_meta(emitter_name, res_id, cj)) return -1;
+        if (!ResourceStore::instance().fetch_meta(emitter_name, res_id, cj)) return -1;
         int32_t L = (int32_t)cj.size();
         if (cjson_buf && L <= cjson_buflen) std::memcpy(cjson_buf, cj.data(), (size_t)L);
         return L;   // L > buflen: caller resizes to L and retries
     };
-    api.get_resource_image = [](const char* emitter_name, const char* res_id,
+    api.fetch_image = [](const char* emitter_name, const char* res_id,
                                 const char* key) -> xi_image_handle {
         if (!emitter_name || !res_id) return XI_IMAGE_NULL;
-        return ResourceStore::instance().get_image(emitter_name, res_id, key ? key : "");
+        return ResourceStore::instance().fetch_image(emitter_name, res_id, key ? key : "");
     };
     api.emit_dispatch = [](const char* emitter_name, xi_trigger_id res_id,
                            int64_t timestamp_us) -> int32_t {

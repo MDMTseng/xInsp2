@@ -23,7 +23,7 @@ XI_SCRIPT_EXPORT void xi_inspect_entry(int) {
     std::string src = t.primary_source();
     std::string id  = t.id_string();
     if (src == "collector") {
-        auto r = xi::use("collector").get(id);
+        auto r = xi::use("collector").fetch(id);
         int frame = jint(r.data(), "frame", -1);
         std::this_thread::sleep_for(std::chrono::milliseconds(std::rand() % 30));
         std::string cmd = "{\"op\":\"send\",\"stream\":\"S\",\"seq\":" + std::to_string(frame)
@@ -31,7 +31,7 @@ XI_SCRIPT_EXPORT void xi_inspect_entry(int) {
         xi::use("comm").exchange(cmd);
         VAR(inspected, frame);
     } else {
-        auto r = xi::use(src).get(id);
+        auto r = xi::use(src).fetch(id);
         int frame = jint(r.data(), "frame", -1);
         std::string cmd = "{\"op\":\"accept\",\"cam\":\"" + src + "\",\"res_id\":\"" + id
                         + "\",\"frame\":" + std::to_string(frame) + "}";

@@ -11,7 +11,7 @@
 #include <thread>
 XI_SCRIPT_EXPORT void xi_inspect_entry(int) {
     auto t = xi::current_trigger();
-    auto r = xi::use("src").get(t.id_string());
+    auto r = xi::use("src").fetch(t.id_string());
     int seq = -1;
     if (cJSON* j = cJSON_Parse(r.data().c_str())) {
         cJSON* s = cJSON_GetObjectItem(j, "seq");

@@ -1370,12 +1370,12 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     return true;
 }
 
-// Pull-by-id enqueue (Phase B): BACK-PRESSURE, not overflow. Unlike
+// emit/fetch enqueue (Phase B): BACK-PRESSURE, not overflow. Unlike
 // enqueue_to_lane_ (the bus path, which applies drop_oldest/newest/block), this
 // REJECTS when the lane is full and lets the caller (emit_dispatch -> the
 // emitter) decide. The id-only event owns no images, so a reject leaks nothing.
 // Returns true if enqueued, false if full / not running. This is where core
-// overflow stops being core policy for the pull model.
+// overflow stops being core policy for the emit/fetch model.
 static bool enqueue_dispatch_(xi::TriggerEvent ev) {
     if (!g_continuous.load()) return false;
     std::shared_ptr<GroupLane> lane = lane_for_(ev.group);
@@ -1613,9 +1613,9 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
         }
     });
 
-    // Pull-by-id dispatch (Phase B): emit_dispatch routes here, bypassing the
+    // emit/fetch dispatch (Phase B): emit_dispatch routes here, bypassing the
     // bus's per-tid correlation. Build an id-only event (no images — the script
-    // pulls them by res_id via xi::use().get()), route by the emitter's group,
+    // fetches them by res_id via xi::use().fetch()), route by the emitter's group,
     // and run it through the lane / one-shot path. Returns whether the run was
     // accepted: the lane uses BACK-PRESSURE (reject when full), never a silent
     // drop — that's what keeps a downstream seq stream gap-free (the emitter
