@@ -1,0 +1,1 @@
+{ "name": "collector", "dll": "collector.dll", "factory": "xi_plugin_create", "has_ui": false }

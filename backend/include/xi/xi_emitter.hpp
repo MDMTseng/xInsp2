@@ -79,7 +79,10 @@ public:
             release_staged_();
             return false;
         }
-        xi_trigger_id tid{0, seq_};
+        // res_id carrier: lo = seq+1 so the very first frame (seq 0) is never the
+        // all-zero XI_TRIGGER_NULL sentinel (which means "host, mint me an id").
+        // The downstream ordering seq (in dataInfo below) stays 0-based.
+        xi_trigger_id tid{0, seq_ + 1};
         char idbuf[40];
         std::snprintf(idbuf, sizeof(idbuf), "%016llx%016llx",
                       (unsigned long long)tid.hi, (unsigned long long)tid.lo);
