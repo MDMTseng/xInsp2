@@ -223,6 +223,17 @@ typedef struct xi_host_api {
      * absent. Lazy: a consumer fetches only the images it needs. */
     xi_image_handle (*get_resource_image)(const char* emitter_name, const char* res_id,
                                           const char* key);
+
+    /* Drive one inspection for a staged resource (pull-by-id dispatch). The
+     * emitter calls this AFTER emit_resource to signal "run res_id now"; the
+     * host routes an id-only event into the emitter's lane (by its group),
+     * bypassing trigger-bus correlation. The script reads the id back via
+     * xi::current_trigger().id_string() and pulls with xi::use(emitter).get(id).
+     *   res_id:       128-bit id carried as the run's trigger id; its hex form
+     *                 (id_string) is the res_id key used for emit_resource.
+     *   timestamp_us: capture time (0 = host's current time). */
+    void            (*emit_dispatch)(const char* emitter_name, xi_trigger_id res_id,
+                                     int64_t timestamp_us);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */

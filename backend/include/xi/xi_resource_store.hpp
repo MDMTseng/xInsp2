@@ -25,6 +25,7 @@
 
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -140,9 +141,18 @@ private:
     std::unordered_map<std::string, std::deque<Entry>> rings_;
 };
 
+// Dispatch sink: emit_dispatch routes through this so the lane-routing logic
+// (group resolution + enqueue), which lives in the backend's service_main, stays
+// out of this leaf header — mirrors how TriggerBus's sink is wired. service_main
+// installs it via set_dispatch_sink; until then emit_dispatch is a no-op (e.g.
+// the headless runner that has no lane pool).
+using DispatchSink = std::function<void(const std::string& emitter,
+                                        xi_trigger_id res_id, int64_t timestamp_us)>;
+inline DispatchSink& dispatch_sink_() { static DispatchSink s; return s; }
+inline void set_dispatch_sink(DispatchSink s) { dispatch_sink_() = std::move(s); }
+
 // Wire the resource-store host hooks into a host_api table. Called alongside
-// install_trigger_hook wherever a plugin/script host_api is built. (emit only
-// for now; the get_resource C-ABI pull is added with the use() proxy in A-2.)
+// install_trigger_hook wherever a plugin/script host_api is built.
 inline void install_resource_hooks(xi_host_api& api) {
     api.emit_resource = [](const char* emitter_name, const char* res_id,
                            const xi_record_image* images, int32_t image_count,
@@ -165,6 +175,12 @@ inline void install_resource_hooks(xi_host_api& api) {
                                 const char* key) -> xi_image_handle {
         if (!emitter_name || !res_id) return XI_IMAGE_NULL;
         return ResourceStore::instance().get_image(emitter_name, res_id, key ? key : "");
+    };
+    api.emit_dispatch = [](const char* emitter_name, xi_trigger_id res_id,
+                           int64_t timestamp_us) {
+        if (!emitter_name) return;
+        auto& sink = dispatch_sink_();
+        if (sink) sink(emitter_name, res_id, timestamp_us);
     };
 }
 

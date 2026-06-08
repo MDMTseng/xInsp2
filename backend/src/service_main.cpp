@@ -1687,6 +1687,26 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
             dispatch_one_shot_(srv, std::move(ev));
         }
     });
+
+    // Pull-by-id dispatch (Phase B): emit_dispatch routes here, bypassing the
+    // bus's per-tid correlation. Build an id-only event (no images — the script
+    // pulls them by res_id via xi::use().get()), route by the emitter's group,
+    // and run it through the same lane / one-shot path as a bus event.
+    xi::set_dispatch_sink([srv](const std::string& emitter, xi_trigger_id res_id,
+                                int64_t ts_us) {
+        xi::TriggerEvent ev;
+        ev.id            = res_id;
+        ev.timestamp_us  = ts_us ? ts_us : xi::wall_us();
+        ev.leader_source = emitter;            // result source + group routing key
+        std::string g;
+        auto& insts = g_plugin_mgr.project().instances;
+        auto it = insts.find(emitter);
+        if (it != insts.end()) g = it->second.group;
+        if (g.empty()) g = g_plugin_mgr.project().default_group;
+        ev.group = g;
+        if (g_continuous.load()) (void)enqueue_to_lane_(std::move(ev));
+        else                     dispatch_one_shot_(srv, std::move(ev));
+    });
 }
 
 // Quiesce the dispatcher + timer + breakpoint park before any handler

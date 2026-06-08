@@ -1,0 +1,1 @@
+{ "name": "disp_src", "dll": "disp_src.dll", "factory": "xi_plugin_create", "has_ui": false }
