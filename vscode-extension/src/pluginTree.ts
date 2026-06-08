@@ -13,6 +13,9 @@ export interface PluginInfo {
     // source_dir is set only when origin === "project".
     origin?: 'project' | 'global';
     source_dir?: string;
+    // Free-form schema block from plugin.json's `manifest` (params / inputs /
+    // outputs / exchange). The backend embeds it verbatim in list_plugins.
+    manifest?: any;
 }
 
 type Node =

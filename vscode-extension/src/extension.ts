@@ -211,6 +211,73 @@ function findBackendExe(context: vscode.ExtensionContext): string {
     return 'xinsp-backend.exe';
 }
 
+// Render a plugin's I/O contract (from its plugin.json `manifest` block) as a
+// hover. Everything substantive goes in fenced code blocks so the user can
+// SELECT + COPY the names/types straight out of the popup — a view-only hover is
+// useless when you're trying to type a key. Free-form/partial manifests degrade
+// gracefully.
+function renderPluginHover(instanceName: string, pluginName: string, manifest: any): vscode.MarkdownString {
+    const md = new vscode.MarkdownString();
+    md.appendMarkdown(`**${instanceName}** · plugin \`${pluginName}\`\n\n`);
+
+    if (!manifest || typeof manifest !== 'object') {
+        md.appendMarkdown(
+            `_No \`manifest\` schema declared in this plugin's \`plugin.json\`._\n\n` +
+            `Add an \`inputs\` / \`outputs\` / \`params\` block to surface its I/O contract here.`,
+        );
+        return md;
+    }
+
+    // Align columns into a monospace table for the code block.
+    const fmt = (arr: any[], cols: (it: any) => string[]): string => {
+        const rows = arr.map(cols);
+        const w: number[] = [];
+        for (const r of rows) r.forEach((c, i) => { w[i] = Math.max(w[i] || 0, c.length); });
+        return rows.map(r => r.map((c, i) => c.padEnd(w[i])).join('  ').replace(/\s+$/, '')).join('\n');
+    };
+    const kindOf = (it: any) => String(it.kind ?? it.type ?? '');
+    const trunc  = (s: any, n = 72) => { const t = String(s ?? ''); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+
+    const inputs  = Array.isArray(manifest.inputs)  ? manifest.inputs  : [];
+    const outputs = Array.isArray(manifest.outputs) ? manifest.outputs : [];
+    const params  = Array.isArray(manifest.params)  ? manifest.params  : [];
+
+    if (inputs.length) {
+        md.appendMarkdown(`**Inputs**`);
+        md.appendCodeblock(fmt(inputs, (it) => [
+            String(it.name ?? '?'),
+            kindOf(it) + ((it.optional === true || it.required === false) ? ' (optional)' : ''),
+            trunc(it.doc),
+        ]), 'text');
+    }
+    if (outputs.length) {
+        md.appendMarkdown(`**Outputs**`);
+        md.appendCodeblock(fmt(outputs, (it) => [
+            String(it.name ?? '?'),
+            kindOf(it),
+            trunc(it.doc),
+        ]), 'text');
+    }
+    if (params.length) {
+        md.appendMarkdown(`**Params**`);
+        md.appendCodeblock(fmt(params, (it) => {
+            const range = Array.isArray(it.enum) ? `{${it.enum.join('|')}}`
+                        : (it.min !== undefined || it.max !== undefined) ? `[${it.min ?? ''}..${it.max ?? ''}]`
+                        : '';
+            return [
+                String(it.name ?? '?'),
+                String(it.type ?? ''),
+                it.default !== undefined ? `= ${JSON.stringify(it.default)}` : '',
+                range,
+            ];
+        }), 'text');
+    }
+    if (!inputs.length && !outputs.length && !params.length) {
+        md.appendMarkdown(`_Manifest present but no inputs / outputs / params declared._`);
+    }
+    return md;
+}
+
 export function activate(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('xinsp2');
     // The configured port is the STARTING port; in managed mode the extension
@@ -452,6 +519,38 @@ export function activate(context: vscode.ExtensionContext) {
     // to colour xi::use("…") references in the script and to resolve the plugin
     // when Ctrl/⌘+clicking an instance to open its webui.
     const instanceMap = new Map<string, string>();
+    // pluginName -> manifest object (the free-form schema from plugin.json's
+    // `manifest` block: params / inputs / outputs / exchange). Fed from
+    // list_plugins; used by the hover provider to show a plugin's I/O contract.
+    const pluginManifests = new Map<string, any>();
+    function cachePluginManifests(plugins: any[]) {
+        for (const p of plugins || []) {
+            if (p?.name && p.manifest !== undefined) pluginManifests.set(p.name, p.manifest);
+        }
+    }
+
+    // Hover over the "name" in xi::use("name") in a script → show that instance's
+    // plugin I/O contract (inputs/outputs/params from the plugin manifest), with
+    // copyable code blocks. Falls through to the default C++ hover when the name
+    // isn't a known instance or no project is open.
+    context.subscriptions.push(
+        vscode.languages.registerHoverProvider({ language: 'cpp', scheme: 'file' }, {
+            provideHover(document, position) {
+                const line = document.lineAt(position.line).text;
+                const re = /\buse\s*\(\s*"([^"]+)"\s*\)/g;
+                let m: RegExpExecArray | null;
+                while ((m = re.exec(line)) !== null) {
+                    const start = m.index, end = m.index + m[0].length;
+                    if (position.character < start || position.character > end) continue;
+                    const plugin = instanceMap.get(m[1]);
+                    if (!plugin) return undefined;   // unknown instance → default hover
+                    const md = renderPluginHover(m[1], plugin, pluginManifests.get(plugin));
+                    return new vscode.Hover(md, new vscode.Range(position.line, start, position.line, end));
+                }
+                return undefined;
+            },
+        }),
+    );
 
     // ---- xi::use("…") helpers (instance highlight + Ctrl-click → webui) ------
     // group 1 = everything up to & including the opening quote; group 2 = the name.
@@ -752,6 +851,7 @@ export function activate(context: vscode.ExtensionContext) {
             sendCmd('list_plugins').then((r: any) => {
                 if (r?.ok && Array.isArray(r.data)) {
                     pluginTreeProvider.update(r.data as PluginInfo[], uses);
+                    cachePluginManifests(r.data);   // for the use("…") hover I/O contract
                     setCtx('hasPlugins', r.data.length > 0);
                 }
             }).catch(() => {});
