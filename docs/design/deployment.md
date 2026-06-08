@@ -11,11 +11,11 @@
 OS boot / login
   └─ Windows Service (SCM) or Task Scheduler / a Job object        ← OS owns the root
         └─ xinsp-fe.exe        (the ONLY root; supervisor + safe-state driver)
-              ├─ spawn xinsp-backend.exe --project=<DIR> --autostart-fps=N|-1
-              │       └─ BE self-opens the project → compiles/loads → start (continuous)
-              └─ spawn xinsp-comms.exe   --plc=<addr> --listen=<port>
-        FE holds BE + gateway in a Job Object (no orphans), monitors, respawns,
-        and drives PLC safe-state on a backend death.
+              └─ spawn xinsp-backend.exe --project=<DIR> --autostart-fps=N|-1
+                      └─ BE self-opens the project → compiles/loads → start (continuous)
+        FE holds the BE in a Job Object (no orphans), monitors, respawns, and
+        drives PLC safe-state on a backend death (forwarding a plugin-registered
+        payload via host->set_safe_state). PLC I/O is otherwise a plugin concern.
 
 [separate, NON-critical]  operator panel
   └─ kiosk browser (msedge/chrome --kiosk --app=<url>) or an Electron shell
@@ -75,7 +75,7 @@ reachable — and still inspects).
 
 ```
 <out>/
-  bin/        xinsp-fe.exe, xinsp-backend.exe, xinsp-comms.exe + all runtime DLLs
+  bin/        xinsp-fe.exe, xinsp-backend.exe + all runtime DLLs
               (OpenCV, accelerators, the VC++ redist DLLs)
   project/    project.json, instances/, plugins/<p>/{plugin.json, *.dll prebuilt},
               inspect.cpp + the PREBUILT script DLL, dashboard.json

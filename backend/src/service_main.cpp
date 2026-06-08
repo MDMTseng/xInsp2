@@ -36,7 +36,6 @@
 #include <xi/xi_cli_args.hpp>
 #include <xi/xi_jpeg.hpp>
 #include <xi/xi_protocol.hpp>
-#include <xi/xi_comms_gateway.hpp>
 #include <xi/xi_cert.hpp>
 #include <xi/xi_plugin_manager.hpp>
 #include <xi/xi_project.hpp>
@@ -583,16 +582,11 @@ static void emit_run_result(xi::ws::Server& srv, int code, const std::string& ms
     srv.send_text(ev.to_json());
 }
 
-// ---- Comms gateway client --------------------------------------------------
-// GatewayClient moved to xi/xi_comms_gateway.hpp (self-contained Winsock client
-// to xinsp-comms). The g_gateway pointer + the xi::comms callbacks that drive it
-// stay here. See docs/design/comms-gateway.md.
-static xi::GatewayClient* g_gateway = nullptr;   // non-null when --comms-port is set
-
-static int  comms_send_cb(const char* line) { return (g_gateway && g_gateway->send_line(line ? line : "")) ? 1 : 0; }
-static int  comms_poll_cb(char* buf, int n) { return g_gateway ? g_gateway->drain(buf, n) : 0; }
-static int  comms_up_cb()                   { return (g_gateway && g_gateway->up()) ? 1 : 0; }
-static void comms_deadman_cb(const char* line) { if (g_gateway) g_gateway->set_deadman(line ? line : ""); }
+// ---- Comms ------------------------------------------------------------------
+// The out-of-process comms gateway + the xi::comms script API were removed: PLC
+// I/O is now a plugin concern (a comm plugin owns the socket), and the BE-crash
+// case is covered by host->set_safe_state + the FE's safe-state sink. See
+// docs/design/comms-gateway.md.
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
@@ -2325,11 +2319,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // and xi::result() is a no-op (run_result then defaults to NA).
             if (g_script.set_result_callback) {
                 g_script.set_result_callback((void*)result_cb);
-            }
-            // Comms-gateway callbacks for xi::comms::* (no-op without xi_comms.hpp).
-            if (g_script.set_comms_callbacks) {
-                g_script.set_comms_callbacks((void*)comms_send_cb, (void*)comms_poll_cb,
-                                             (void*)comms_up_cb, (void*)comms_deadman_cb);
             }
             // Replay any param values the user set on the previous
             // DLL. The new DLL's xi::Param<T> file-scope ctors run on
@@ -4110,7 +4099,6 @@ int main(int argc, char** argv) {
                 "  --autostart-fps=N    with --project, start continuous mode at N fps (0 = off)\n"
                 "  --working-copy       edit a <project>/.xinsp_work scratch copy (transactional;\n"
                 "                       resumes on crash respawn). commit_working_copy to save\n"
-                "  --comms-port=N       connect to the comms gateway on loopback N (xi::comms)\n"
                 "  --priority=CLASS     process priority: high|above|normal|below|realtime (Win)\n"
                 "  --aot                prebuilt bundle: load existing plugin/script DLLs, no compiler\n"
                 "  --version, -v        print version and exit\n"
@@ -4299,20 +4287,6 @@ int main(int argc, char** argv) {
         set_status_internal((who && *who) ? who : "@plugin", text);
     };
 
-    // --comms-port=N: connect to the out-of-process comms gateway (xinsp-comms)
-    // on loopback so scripts can use xi::comms::* for PLC I/O. Tolerates the FE
-    // spawn race (retries). Stays null if not configured -> xi::comms is no-op.
-    static xi::GatewayClient g_gw_instance;
-    if (std::string cp = xi::cli::parse_str_flag(argc, argv, "--comms-port"); !cp.empty()) {
-        int port = 0; try { port = std::stoi(cp); } catch (...) {}
-        if (port > 0 && g_gw_instance.connect(port)) {
-            g_gateway = &g_gw_instance;
-            std::fprintf(stderr, "[xinsp2] comms gateway connected (loopback:%d)\n", port);
-        } else {
-            std::fprintf(stderr, "[xinsp2] comms gateway NOT connected (port %s) — "
-                         "xi::comms will be inert\n", cp.c_str());
-        }
-    }
     // P2.4 watchdog. Always-on monitor thread; acts when any in-flight inspect
     // (wd_arm slot) overruns its deadline. Two-phase, now per-worker-aware:
     //   Phase 1 — cooperative: set the script's GLOBAL cancel flag; xi::ops poll
@@ -4544,9 +4518,6 @@ int main(int argc, char** argv) {
     // joined (no emit) before the server goes away.
     controlled_shutdown_teardown_();
     srv.stop();
-    // Clean shutdown: tell the gateway "bye" so it disarms the dead-man (this is
-    // an intended exit, not a crash) before disconnecting.
-    if (g_gateway) { g_gateway->say_bye(); g_gateway->stop(); g_gateway = nullptr; }
     std::fprintf(stderr, "[xinsp2] shutdown complete\n");
     return 0;
 }

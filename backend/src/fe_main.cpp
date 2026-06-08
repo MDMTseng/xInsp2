@@ -90,16 +90,8 @@ struct FeConfig {
     // Extra args appended verbatim to the spawned backend's command line
     // (--be-arg=..., repeatable). Lets an operator pass BE flags through the FE.
     std::vector<std::string> be_args;
-    // Comms gateway (out-of-process PLC I/O). If comms_plc is set the FE spawns
-    // + supervises xinsp-comms alongside the backend and passes the backend
-    // --comms-port. See docs/design/comms-gateway.md.
-    std::string comms_plc;    // PLC spec for the gateway: tcp:HOST:PORT / udp:HOST:PORT
-    int         comms_port = 0;   // loopback BE<->gateway port (0 => port+1)
-    std::string comms_exe;    // xinsp-comms path (auto-discover if empty)
-    std::string comms_log;    // where the gateway's stdout/stderr is captured
-    std::string comms_heartbeat_file;  // gateway liveness counter; FE watches it
-                                       // for a hang (alive but wedged). Default
-                                       // comms_log + ".hb". Uses heartbeat_stale_ms.
+    // (Comms gateway removed — PLC I/O is a plugin concern now; the BE-crash case
+    // is covered by host->set_safe_state + the FE's safe-state sink below.)
     // Working copy: pass --working-copy to the backend so it edits a
     // <project>/.xinsp_work scratch. On a crash respawn the same flag is passed
     // and the backend resumes the scratch (settings survive). See
@@ -183,10 +175,6 @@ static FeConfig load_config(int argc, char** argv) {
             num("autostart_fps", c.autostart_fps);
             str("safe_state", c.safe_state_type);
             str("be_log", c.be_log);
-            str("comms_plc", c.comms_plc);
-            num("comms_port", c.comms_port);
-            str("comms_exe", c.comms_exe);
-            str("comms_log", c.comms_log);
             str("crash_history", c.crash_history);
             str("preserve_dir", c.preserve_dir);
             str("status_file", c.status_file);
@@ -217,10 +205,6 @@ static FeConfig load_config(int argc, char** argv) {
     if (auto v = arg_value(argc, argv, "--boot-timeout-ms"); !v.empty()) try { c.boot_timeout_ms = std::stoi(v); } catch (...) {}
     if (auto v = arg_value(argc, argv, "--heartbeat-file");  !v.empty()) c.heartbeat_file = v;
     if (auto v = arg_value(argc, argv, "--heartbeat-stale-ms"); !v.empty()) try { c.heartbeat_stale_ms = std::stoi(v); } catch (...) {}
-    if (auto v = arg_value(argc, argv, "--comms-plc");   !v.empty()) c.comms_plc = v;
-    if (auto v = arg_value(argc, argv, "--comms-port");  !v.empty()) try { c.comms_port = std::stoi(v); } catch (...) {}
-    if (auto v = arg_value(argc, argv, "--comms-exe");   !v.empty()) c.comms_exe = v;
-    if (auto v = arg_value(argc, argv, "--comms-log");   !v.empty()) c.comms_log = v;
     if (auto v = arg_value(argc, argv, "--crash-history"); !v.empty()) c.crash_history = v;
     if (auto v = arg_value(argc, argv, "--preserve-dir");  !v.empty()) c.preserve_dir = v;
     if (auto v = arg_value(argc, argv, "--status-file");   !v.empty()) c.status_file = v;
@@ -239,14 +223,6 @@ static FeConfig load_config(int argc, char** argv) {
     if (c.backend_exe.empty()) c.backend_exe = discover_backend_exe();
     if (c.be_log.empty())      c.be_log = (fs::temp_directory_path() / "xinsp2-fe-be.log").string();
     if (c.heartbeat_file.empty()) c.heartbeat_file = c.be_log + ".hb";
-    // Gateway defaults only matter when a PLC spec was given. The BE<->gateway
-    // loopback port defaults to port+1; the exe is auto-discovered next to the FE.
-    if (!c.comms_plc.empty()) {
-        if (c.comms_port == 0)     c.comms_port = c.port + 1;
-        if (c.comms_exe.empty())   c.comms_exe = discover_sibling_exe("xinsp-comms");
-        if (c.comms_log.empty())   c.comms_log = c.be_log + ".comms";
-        if (c.comms_heartbeat_file.empty()) c.comms_heartbeat_file = c.comms_log + ".hb";
-    }
     // Crash history defaults next to be_log; "-" means explicitly disabled.
     if (c.crash_history == "-") {
         c.crash_history.clear();
@@ -373,8 +349,6 @@ static std::string build_cmdline(const FeConfig& c) {
     for (auto& d : c.plugins_dirs) cl += " --plugins-dir=\"" + d + "\"";
     if (c.heartbeat_stale_ms > 0 && !c.heartbeat_file.empty())
         cl += " --heartbeat-file=\"" + c.heartbeat_file + "\"";
-    // When a gateway is configured, tell the BE where to reach it (loopback).
-    if (!c.comms_plc.empty()) cl += " --comms-port=" + std::to_string(c.comms_port);
     if (c.working_copy)       cl += " --working-copy";
     for (auto& a : c.be_args)      cl += " " + a;   // verbatim passthrough
     return cl;
@@ -414,59 +388,6 @@ static Spawned spawn_backend(const FeConfig& c, HANDLE job) {
     if (job) AssignProcessToJobObject(job, sp.pi.hProcess);
     ResumeThread(sp.pi.hThread);
     return sp;
-}
-
-// The comms gateway (xinsp-comms) is a sibling child of the FE: it owns the PLC
-// socket so its crash/hang risk is isolated from the BE compute core. Spawned
-// into the same Job Object as the BE (kill-on-close => no orphan), supervised on
-// its own RespawnTracker, independent of BE respawns. See docs/design/comms-gateway.md.
-struct Gateway {
-    PROCESS_INFORMATION pi{};
-    HANDLE log = INVALID_HANDLE_VALUE;
-    bool   ok = false;
-};
-
-static Gateway spawn_gateway(const FeConfig& c, HANDLE job) {
-    Gateway g;
-    SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
-    g.log = CreateFileA(c.comms_log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
-                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-
-    STARTUPINFOA si{}; si.cb = sizeof(si);
-    if (g.log != INVALID_HANDLE_VALUE) {
-        si.dwFlags |= STARTF_USESTDHANDLES;
-        si.hStdOutput = g.log;
-        si.hStdError  = g.log;
-        si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
-    }
-
-    std::string cl = "\"" + c.comms_exe + "\""
-                   + " --plc=" + c.comms_plc
-                   + " --listen=" + std::to_string(c.comms_port);
-    if (c.heartbeat_stale_ms > 0 && !c.comms_heartbeat_file.empty())
-        cl += " --heartbeat-file=\"" + c.comms_heartbeat_file + "\"";
-    std::vector<char> mut(cl.begin(), cl.end()); mut.push_back('\0');
-
-    fs::path wd = fs::path(c.comms_exe).parent_path();
-    g.ok = CreateProcessA(c.comms_exe.c_str(), mut.data(), nullptr, nullptr,
-                          /*bInheritHandles=*/TRUE, CREATE_SUSPENDED,
-                          nullptr, wd.string().c_str(), &si, &g.pi) != 0;
-    if (!g.ok) {
-        std::fprintf(stderr, "[xinsp-fe] CreateProcess (comms) failed (%lu): %s\n",
-                     GetLastError(), c.comms_exe.c_str());
-        if (g.log != INVALID_HANDLE_VALUE) CloseHandle(g.log);
-        return g;
-    }
-    if (job) AssignProcessToJobObject(job, g.pi.hProcess);
-    ResumeThread(g.pi.hThread);
-    return g;
-}
-
-static void close_gateway(Gateway& g) {
-    if (g.pi.hThread)  { CloseHandle(g.pi.hThread);  g.pi.hThread  = nullptr; }
-    if (g.pi.hProcess) { CloseHandle(g.pi.hProcess); g.pi.hProcess = nullptr; }
-    if (g.log != INVALID_HANDLE_VALUE) { CloseHandle(g.log); g.log = INVALID_HANDLE_VALUE; }
-    g.ok = false;
 }
 
 static int run_supervisor(const FeConfig& c) {
@@ -511,41 +432,8 @@ static int run_supervisor(const FeConfig& c) {
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jl, sizeof(jl));
     }
 
-    // Comms gateway: spawn it BEFORE the backend so the BE's loopback client
-    // (--comms-port) has something to connect to (the BE client also retries).
-    const bool comms_enabled = !c.comms_plc.empty();
-    Gateway gw;
-    xi::RespawnTracker gw_resp;       // gateway's own consecutive-failure cap
-    int64_t gw_healthy_since = 0;
-    bool    comms_down  = false;      // gateway is dead/respawning -> hold the clear
-    bool    comms_gaveup = false;     // gateway respawn cap hit -> latched comms-lost
-    // Gateway hang detection (alive but wedged): watch its heartbeat counter.
-    long long gw_hb_last_val = -2;
-    int64_t   gw_hb_last_change_ms = 0;
-    bool      gw_hb_armed = false;
-    if (comms_enabled) {
-        std::fprintf(stderr, "[xinsp-fe] comms gateway: %s plc=%s listen=%d\n",
-                     c.comms_exe.c_str(), c.comms_plc.c_str(), c.comms_port);
-        st.comms_enabled = true;
-        gw = spawn_gateway(c, job);
-        if (gw.ok) {
-            gw_healthy_since = steady_ms();
-            st.comms_state = "up";
-            std::fprintf(stderr, "[xinsp-fe] comms gateway up pid=%lu\n", gw.pi.dwProcessId);
-        } else {
-            // Can't bring the PLC link up at all -> the line is comms-lost now.
-            xi::SafeStateEvent ev; ev.reason = xi::SafeStateReason::CommsLost;
-            ev.ts_ms = now_ms();
-            sink->enter_safe_state(ev);
-            comms_down = comms_gaveup = true;
-            st.comms_state = "gaveup";
-            st.state = "safe"; st.reason = "CommsLost"; st.set_event(ev);
-            publish_status(c, st);
-        }
-    }
-
     xi::RespawnTracker resp;         // consecutive-failure cap (latches safe)
-    bool in_safe_state = comms_down; // a failed gateway boot already drove safe
+    bool in_safe_state = false;
     int  rc = 0;
 
     while (!g_stop.load()) {
@@ -585,73 +473,6 @@ static int run_supervisor(const FeConfig& c) {
                 break;
             }
             if (g_stop.load()) break;
-
-            // ---- supervise the comms gateway (independent of the BE instance) ----
-            // The gateway has its own lifecycle: a BE crash/respawn must not drop
-            // the PLC link, and a gateway crash must not kill the BE. We poll it
-            // here (non-blocking) on the same cadence as the port probe.
-            if (comms_enabled && !comms_gaveup) {
-                if (gw.ok && WaitForSingleObject(gw.pi.hProcess, 0) == WAIT_OBJECT_0) {
-                    DWORD gwrc = 0; GetExitCodeProcess(gw.pi.hProcess, &gwrc);
-                    std::fprintf(stderr, "[xinsp-fe] comms gateway exited (rc=0x%08X); "
-                                 "line lost its PLC link\n", gwrc);
-                    close_gateway(gw);
-                    // Going safe is the gateway's own dead-man job primarily (it
-                    // fires the BE's registered payload / the PLC sees the TCP
-                    // drop); the FE's CommsLost is the redundant operator-visible
-                    // path. See docs/design/comms-gateway.md.
-                    xi::SafeStateEvent ev; ev.reason = xi::SafeStateReason::CommsLost;
-                    ev.backend_rc = (int)gwrc; ev.ts_ms = now_ms();
-                    sink->enter_safe_state(ev);
-                    in_safe_state = true;
-                    comms_down    = true;
-                    st.state = "safe"; st.reason = "CommsLost"; st.comms_state = "down";
-                    st.set_event(ev); publish_status(c, st);
-                    if (gw_resp.note_death(c.respawn_max)) {
-                        xi::SafeStateEvent stuck; stuck.reason = xi::SafeStateReason::CommsLost;
-                        stuck.ts_ms = now_ms();
-                        sink->enter_safe_state(stuck);
-                        std::fprintf(stderr, "[xinsp-fe] comms gateway respawn limit (%d) "
-                                     "exceeded - PLC link stays down; manual restart required\n",
-                                     c.respawn_max);
-                        comms_gaveup = true;   // stop trying; latch comms-lost
-                        st.comms_state = "gaveup"; publish_status(c, st);
-                    } else {
-                        std::fprintf(stderr, "[xinsp-fe] respawning comms gateway "
-                                     "(failure %d/%d) after %dms\n",
-                                     gw_resp.consecutive, c.respawn_max, c.respawn_backoff_ms);
-                        Sleep((DWORD)c.respawn_backoff_ms);
-                        gw = spawn_gateway(c, job);
-                        gw_healthy_since = gw.ok ? steady_ms() : 0;
-                        gw_hb_armed = false;   // fresh gateway restarts its counter
-                    }
-                } else if (gw.ok) {
-                    gw_resp.note_healthy(steady_ms() - gw_healthy_since, c.respawn_reset_ms);
-                    if (comms_down) {
-                        comms_down = false;   // gateway recovered; clear may proceed
-                        st.comms_state = "up"; publish_status(c, st);
-                        std::fprintf(stderr, "[xinsp-fe] comms gateway back up pid=%lu\n",
-                                     gw.pi.dwProcessId);
-                    }
-                    // Hang detection: the gateway's heartbeat must keep advancing.
-                    // If it stalls while the process is still alive, the relay loop
-                    // is wedged (alive != serving). Kill it; the next iteration's
-                    // exit check runs the same safe-state + respawn path as a crash.
-                    if (c.heartbeat_stale_ms > 0 && !c.comms_heartbeat_file.empty()) {
-                        long long hb = read_heartbeat(c.comms_heartbeat_file);
-                        int64_t now = steady_ms();
-                        if (!gw_hb_armed) { gw_hb_armed = true; gw_hb_last_val = hb; gw_hb_last_change_ms = now; }
-                        else if (hb != gw_hb_last_val) { gw_hb_last_val = hb; gw_hb_last_change_ms = now; }
-                        else if (now - gw_hb_last_change_ms > c.heartbeat_stale_ms) {
-                            std::fprintf(stderr, "[xinsp-fe] comms gateway heartbeat stale for "
-                                         ">%d ms (gateway wedged); killing for respawn\n",
-                                         c.heartbeat_stale_ms);
-                            TerminateProcess(gw.pi.hProcess, 1);
-                            gw_hb_armed = false;   // re-arm against the respawned gateway
-                        }
-                    }
-                }
-            }
 
             bool port = port_open(c.port);
 
@@ -694,10 +515,8 @@ static int run_supervisor(const FeConfig& c) {
                 // Clear the line's safe state once the inspector is confirmed
                 // accepting — but only if we'd previously driven it safe (a
                 // crash/respawn). Never clear optimistically (safety property
-                // SP4): a fresh start was never "safe" to begin with. And never
-                // clear while the comms gateway is still down (the line genuinely
-                // can't reach the PLC) — wait for the gateway to recover too.
-                if (in_safe_state && !comms_down) {
+                // SP4): a fresh start was never "safe" to begin with.
+                if (in_safe_state) {
                     sink->clear_safe_state();
                     in_safe_state = false;
                     st.state = "healthy"; st.reason.clear();
@@ -821,9 +640,6 @@ static int run_supervisor(const FeConfig& c) {
         if (!st.latched) st.reason = "SupervisorShutdown";
         publish_status(c, st);
     }
-    // Closing the job kills the gateway too (it's in the same job); release our
-    // handles to it first so nothing leaks on the way out.
-    if (comms_enabled) close_gateway(gw);
     if (job) CloseHandle(job);
     WSACleanup();
     return rc;
@@ -852,14 +668,6 @@ static void print_help() {
         "  --heartbeat-stale-ms=N  serve-time wedge budget: respawn if the backend\n"
         "                       heartbeat stalls N ms while listening (default 15000; 0=off)\n"
         "  --be-arg=ARG         extra arg appended to the backend command (repeatable)\n"
-        "  --comms-plc=SPEC     run an out-of-process comms gateway (xinsp-comms) for\n"
-        "                       PLC I/O: 'tcp:HOST:PORT' / 'udp:HOST:PORT'. The FE\n"
-        "                       supervises it alongside the backend; gateway death\n"
-        "                       -> CommsLost safe-state + rate-limited respawn\n"
-        "  --comms-port=N       loopback port the backend uses to reach the gateway\n"
-        "                       (default: --port + 1)\n"
-        "  --comms-exe=PATH     xinsp-comms.exe (default: auto-discover)\n"
-        "  --comms-log=PATH     where to capture the gateway's stdout/stderr\n"
         "  --working-copy       backend edits a <project>/.xinsp_work scratch;\n"
         "                       a crash respawn resumes it (settings survive)\n"
         "  --crash-history=PATH JSONL appended with one record per backend death\n"

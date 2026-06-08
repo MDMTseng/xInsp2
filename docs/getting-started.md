@@ -53,33 +53,32 @@ The full glossary is at the bottom (§9).
 
 ```
                  ┌────────────────────────── one machine ──────────────────────────┐
-   PLC / line ◄──┤  xinsp-comms.exe ──loopback──┐                                    │
-   (dead-man)    │   (PLC gateway, isolated)     │                                   │
-                 │                               ▼                                   │
                  │  xinsp-fe.exe ──spawns──►  xinsp-backend.exe  ──WS(:7823)──► HMI   │
-                 │  (supervisor,              (compute core:        (browser SPA,     │
-                 │   safe-state,               trigger bus +         viewer only)     │
+   PLC / line ◄──┤  (supervisor,              (compute core:        (browser SPA,     │
+   (safe-state)  │   safe-state,               trigger bus +         viewer only)     │
                  │   respawn; ROOT)            dispatch groups +                      │
-                 │      └──spawns comms        the script + plugins,                  │
+                 │                             the script + plugins,                  │
                  │                             all in-process)                        │
                  └───────────────────────────────────────────────────────────────────┘
+
+   PLC I/O is a plugin concern (a comm plugin owns the socket); the FE forwards a
+   plugin-registered payload to the PLC on a backend crash (safe-state).
 
    Dev box: the VS Code extension plays the FE's role (spawns/attaches the BE),
             plus the edit→compile→run loop, instance/plugin trees, and webviews.
 ```
 
-Three executables + two front-ends:
+Two executables + two front-ends:
 
 - **`xinsp-backend.exe` (BE)** — the compute core. Opens a project, compiles the
   script + plugins, runs continuous dispatch, serves a **WebSocket** API. All
   plugins run *in-process* (a hard plugin crash takes the BE down — that's the
   accepted trade for zero-copy speed; the FE is the safety net).
 - **`xinsp-fe.exe` (FE)** — the **supervisor / root** in production. Spawns +
-  monitors the BE and the comms gateway, drives **safe-state** on a backend death,
-  rate-limited respawn. See [`design/fe-be-split.md`](./design/fe-be-split.md).
-- **`xinsp-comms.exe`** — the **PLC gateway**, a separate isolated process so the
-  volatile/crash-prone PLC I/O can't take down the BE; carries the dead-man.
-  See [`design/comms-gateway.md`](./design/comms-gateway.md).
+  monitors the BE, drives **safe-state** on a backend death (forwarding a
+  plugin-registered PLC payload via `host->set_safe_state`), rate-limited respawn.
+  See [`design/fe-be-split.md`](./design/fe-be-split.md). PLC I/O itself is a
+  plugin — see [`design/comms-gateway.md`](./design/comms-gateway.md).
 - **VS Code extension** (`vscode-extension/`) — the dev front-end: spawn/attach the
   BE, edit→run, instance/plugin trees, viewer, Project Settings webview.
 - **HMI** (`hmi/`) — the production operator panel: a static browser SPA, WS client
@@ -104,7 +103,7 @@ Who-may-crash, who-knows-the-project-folder, and the production boot order are i
    `Record`), computes a verdict, and emits:
    - `VAR(...)` / `EMIT(...)` — per-run inspection values (debug/detail),
    - `xi::result(code, msg)` — the **one verdict** (run-result),
-   - optionally forwards to the PLC via the comms gateway.
+   - optionally forwards to the PLC via a comm plugin (`xi::use("comm")...`).
 5. Emission is gated per group (`result_order:"arrival"` keeps the stream in frame
    order even under parallel compute).
 6. The **HMI** (WS client) renders the vars + verdict; the **PLC** gets the verdict
@@ -127,7 +126,7 @@ is the one-click installer.
 cmake --build backend/build --config Release
 ```
 (Outputs land in `backend/build/Release/`: `xinsp-backend.exe`, `xinsp-fe.exe`,
-`xinsp-comms.exe`, the test exes, + the runtime DLLs.)
+the test exes, + the runtime DLLs.)
 
 **Run a project the fast way (VS Code):** open the repo in VS Code with the
 xInsp2 extension, open a project under `examples/`, hit compile/run. The extension
@@ -224,8 +223,8 @@ top (globals + the "CONTINUOUS RUN HAS TWO DRIVERS" comment) to orient.
 
 ## 9. Glossary
 
-- **BE / FE / comms** — `xinsp-backend.exe` (compute) / `xinsp-fe.exe` (supervisor)
-  / `xinsp-comms.exe` (PLC gateway).
+- **BE / FE** — `xinsp-backend.exe` (compute) / `xinsp-fe.exe` (supervisor). PLC
+  I/O is a plugin; the FE forwards a plugin-registered payload to the PLC on crash.
 - **trigger / trigger id** — an event from a source; the id is the correlation key
   (e.g. the turntable index / frame sequence).
 - **trigger_policy** — `any` / `all_required` / `leader_followers` + a window: how

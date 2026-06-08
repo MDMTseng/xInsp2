@@ -162,16 +162,14 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   (`xi_fe_status.hpp` → `fe-status.json`): a latched safe state carrying the
   death reason + forensics, the value a UI reads instead of inferring "down"
   from a WS disconnect. (Windows-only; skips on non-`nt`.)
-- **Comms gateway** (out-of-process PLC I/O; see
-  `docs/design/comms-gateway.md`). Three regressions, Windows-only:
-  `examples/comms_gateway/` — the `xinsp-comms` relay round-trip + dead-man
-  (backend crash → gateway fires the registered emergency payload to the PLC);
-  `examples/comms_script/` — the backend-side `xi::comms` client end-to-end
-  (script ↔ PLC sim through the gateway); `examples/fe_comms/` — `xinsp-fe.exe`
-  supervising the gateway as a sibling of the backend: asserts the script
-  reaches the PLC, then kills the gateway and asserts the FE drives
-  `CommsLost` safe-state, respawns it, the backend survives, the link is
-  restored, and nothing orphans.
+- **PLC comms as a plugin** (the `xinsp-comms` gateway + `xi::comms` were removed;
+  see `docs/design/comms-gateway.md`). The reorder + crash-payload model is covered
+  by smokes under `examples/_diag/`: `comm_smoke.py` (sort-comm reorder),
+  `parallel_comm_smoke.py` (reorder under a real 4-thread lane), `compose_smoke.py`
+  (camera → collector → comm end to end), and `safestate_smoke.py` (a plugin
+  registers an emergency payload via `host->set_safe_state`, crashes, and the FE
+  forwards it to the PLC). `examples/plc_safe_state/` still exercises the FE PLC
+  safe-state sink directly.
   `examples/dll_version_clash/` — two plugins each depending on a different
   version of a same-named DLL, in one process. Proves the loader rules: a
   **by-name** (static-import) dependency collides on base name (second plugin
@@ -188,10 +186,8 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   unit above: `examples/qa_recover/` proves the **recover-and-clear** transition
   (a backend that crashes a few times then heals → FE `CLEAR SAFE STATE`, never
   hits the cap — the `crash_then_heal` plugin counts crashes in a
-  respawn-surviving marker), and `examples/qa_soak/` is a **healthy full-stack
-  soak** (FE+BE+gateway): sustained normal operation trips no false safe-state,
-  respawns nothing, keeps the heartbeat advancing and the PLC link up, then shuts
-  down clean. Windows-only; skip on non-`nt`.
+  respawn-surviving marker). (The `qa_soak` full-stack FE+BE+gateway soak was
+  retired with the comms gateway.)
 - **Burst-parallelism safety** — `examples/qa_reentrancy/` proves the
   declared-reentrancy model for the parallel dispatch pool
   (`parallelism.dispatch_threads > 1`). Under a 4-thread pool it pokes two probe
