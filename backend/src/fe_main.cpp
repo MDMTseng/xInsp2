@@ -762,6 +762,19 @@ static int run_supervisor(const FeConfig& c) {
         ev.backend_rc = (int)exit_code;
         ev.ts_ms      = now_ms();
         xi::enrich_from_crash_report(c.be_log, ev);
+        // Pull in any plugin-registered emergency payload: host->set_safe_state
+        // wrote it (atomically) to <project>/.xinsp_safestate. The FE outlives the
+        // BE, so this is how the app's "if I crash, tell the PLC THIS" survives.
+        if (!c.project.empty()) {
+            std::error_code ec;
+            auto pf = std::filesystem::path(c.project) / ".xinsp_safestate";
+            if (std::filesystem::exists(pf, ec)) {
+                std::ifstream f(pf, std::ios::binary);
+                std::string s((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+                if (!s.empty()) ev.custom_payload = std::move(s);
+            }
+        }
         sink->enter_safe_state(ev);
         in_safe_state = true;
 

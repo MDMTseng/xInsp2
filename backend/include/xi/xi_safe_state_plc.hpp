@@ -91,6 +91,9 @@ private:
         s += ",\"rc\":"; s += rc;
         s += ",\"module\":"; detail::plc_json_escape(s, ev.faulting_module);
         s += ",\"phase\":";  detail::plc_json_escape(s, ev.last_phase);
+        if (!ev.custom_payload.empty()) {
+            s += ",\"payload\":"; detail::plc_json_escape(s, ev.custom_payload);
+        }
         s += ",\"ts_ms\":" + std::to_string(ev.ts_ms ? ev.ts_ms : detail::plc_now_ms());
         s += "}\n";
         return s;

@@ -1,0 +1,1 @@
+{ "name": "crasher", "dll": "crasher.dll", "factory": "xi_plugin_create", "has_ui": false }

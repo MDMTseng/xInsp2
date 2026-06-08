@@ -45,6 +45,7 @@
 #include "xi_pm_parse.hpp"     // parse_manifest / extract_string / validate_config_against_manifest
 #include "xi_project_model.hpp" // ProjectInfo / InstanceInfo / CompileEnv / OpenWarning (data model)
 #include "xi_resource_store.hpp" // install_resource_hooks (pull-by-id emit_resource)
+#include "xi_safe_state.hpp"   // install_safe_state_hook (set_safe_state)
 #include "xi_script_compiler.hpp"
 #include "xi_source.hpp"
 #include "xi_trigger_bus.hpp"
@@ -1728,7 +1729,7 @@ private:
     // Cold path (instance create / recompile / rename), so the single shared
     // static is fine and costs nothing extra.
     static xi_host_api& default_host_api() {
-        static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); install_resource_hooks(a); return a; }();
+        static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); install_resource_hooks(a); install_safe_state_hook(a); return a; }();
         return host;
     }
 

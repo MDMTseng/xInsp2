@@ -211,6 +211,7 @@ int main(int argc, char** argv) {
     auto host_api = xi::ImagePool::make_host_api();
     xi::install_trigger_hook(host_api);
     xi::install_resource_hooks(host_api);
+    xi::install_safe_state_hook(host_api);
 
     // Restore instances (plugins + configs) from project.json.
     if (!pm.open_project(args.project_dir)) {

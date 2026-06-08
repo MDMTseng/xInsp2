@@ -239,6 +239,15 @@ typedef struct xi_host_api {
      * stream gap-free. */
     int32_t         (*emit_dispatch)(const char* emitter_name, xi_trigger_id res_id,
                                      int64_t timestamp_us);
+
+    /* Register an emergency PLC payload for the BE-crash case. The host persists
+     * it (atomically) to a file the supervising xinsp-fe watches; if THIS backend
+     * dies, the FE — which survives the crash and owns the PLC safe-state sink —
+     * forwards the payload to the PLC. This is how a comms plugin keeps the
+     * "BE crashed -> tell the PLC" guarantee without living out-of-process.
+     * Call again to update; pass "" to clear. Null/no-op if unsupported (e.g.
+     * the headless runner with no FE). */
+    void            (*set_safe_state)(const char* payload);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */

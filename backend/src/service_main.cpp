@@ -2289,7 +2289,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // plugins only see that pool via their own host_api, so script-side
             // ImagePool handles would be invisible to them.
             if (g_script.set_use_callbacks) {
-                static xi_host_api use_host = []{ auto a = xi::ImagePool::make_host_api(); xi::install_trigger_hook(a); xi::install_resource_hooks(a); return a; }();
+                static xi_host_api use_host = []{ auto a = xi::ImagePool::make_host_api(); xi::install_trigger_hook(a); xi::install_resource_hooks(a); xi::install_safe_state_hook(a); return a; }();
                 g_script.set_use_callbacks(
                     (void*)use_process_cb,
                     (void*)use_exchange_cb,
@@ -4227,6 +4227,17 @@ int main(int argc, char** argv) {
     env.aot = xi::cli::has_flag(argc, argv, "--aot");
     if (env.aot) std::fprintf(stderr, "[xinsp2] AOT mode: loading prebuilt plugin/script DLLs (no compiler)\n");
     g_plugin_mgr.set_compile_env(env);
+
+    // Persist a plugin's registered safe-state payload (host->set_safe_state) to
+    // a file the supervising FE watches, so on a BE crash the FE forwards it to
+    // the PLC. Convention path: <project>/.xinsp_safestate (the FE computes the
+    // same). Empty payload clears it. No project open -> nothing to watch.
+    xi::set_safe_state_writer([](const std::string& payload) {
+        if (g_project_folder.empty()) return;
+        auto p = std::filesystem::path(g_project_folder) / ".xinsp_safestate";
+        if (payload.empty()) { std::error_code ec; std::filesystem::remove(p, ec); return; }
+        xi::atomic_write(p, payload);
+    });
 
     xi::ws::Server srv;
     srv.on_open  = [&] {

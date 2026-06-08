@@ -16,13 +16,34 @@
 // Deliberately portable: only <string>/<memory>/<cstdint>/<cstdio>, no Win32 and
 // no OpenCV, so it compiles unchanged on Linux (see docs/design/linux-port.md).
 //
+#include "xi_abi.h"     // xi_host_api (for install_safe_state_hook)
+
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 
 namespace xi {
+
+// Safe-state payload writer: host->set_safe_state routes through this so the
+// actual persistence (an atomic write to the FE-watched file) lives in the
+// backend's service_main, keeping this header portable (no Win32 / atomic_io
+// here). service_main installs it; until then set_safe_state is a no-op (e.g.
+// the headless runner). See install_safe_state_hook.
+using SafeStateWriter = std::function<void(const std::string& payload)>;
+inline SafeStateWriter& safe_state_writer_() { static SafeStateWriter w; return w; }
+inline void set_safe_state_writer(SafeStateWriter w) { safe_state_writer_() = std::move(w); }
+
+// Wire host->set_safe_state on a host_api table (alongside install_trigger_hook /
+// install_resource_hooks). The payload is forwarded to the installed writer.
+inline void install_safe_state_hook(xi_host_api& api) {
+    api.set_safe_state = [](const char* payload) {
+        auto& w = safe_state_writer_();
+        if (w) w(payload ? payload : "");
+    };
+}
 
 // Why the FE is asking the line to go (or leave) safe.
 enum class SafeStateReason {
@@ -57,6 +78,10 @@ struct SafeStateEvent {
     std::string     last_phase;         // dispatch-thread breadcrumb, e.g. "inspect"
     std::string     report_path;        // path to the .json crash report, if any
     std::string     dump_path;          // path to the .dmp minidump, if any
+    std::string     custom_payload;     // app-supplied emergency line: a plugin
+                                        // registered it via host->set_safe_state;
+                                        // the FE reads it on BE death and forwards
+                                        // it to the PLC. Empty if none registered.
     int64_t         ts_ms        = 0;   // wall-clock ms when the FE decided to go safe
 };
 
