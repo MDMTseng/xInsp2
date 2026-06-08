@@ -39,7 +39,7 @@ def main() -> int:
         print("\n==== DISPATCH SMOKE ====")
         print("vars:", vals)
         passed = (vals.get("ok") == 1 and vals.get("w") == 5 and vals.get("h") == 2
-                  and '"seq"' in str(vals.get("data", "")))
+                  and '"seq":0' in str(vals.get("data", "")).replace(" ", ""))
         print("VERDICT:", "PASS" if passed else "FAIL")
         if not passed:
             print(read_log(log)[-800:])

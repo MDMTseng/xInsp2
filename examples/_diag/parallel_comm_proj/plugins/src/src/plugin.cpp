@@ -1,11 +1,11 @@
-// Burst emitter for the parallel-comm reorder test: on exchange {"n":N} it
-// stages N frames (emit_resource, each carrying {"seq":i}) and dispatches each
-// (emit_dispatch) into the source's lane. With the lane at max_parallel=4 and a
-// random sleep in the script, the frames COMPLETE out of order; the comm plugin
-// must restore seq order downstream.
+// Burst emitter for the parallel-comm reorder test — now via xi::Emitter (the
+// pull-model emitter helper) instead of hand-rolled emit_resource/emit_dispatch.
+// On exchange {"n":N} it emits N frames; the Emitter mints res_id + a contiguous
+// seq and stages {"seq":i} into each frame's dataInfo automatically. emit()
+// returns false on back-pressure (here the queue is large, so all go through).
 #include <xi/xi.hpp>
+#include <xi/xi_emitter.hpp>
 #include <cJSON.h>
-#include <cstdint>
 #include <cstdio>
 #include <string>
 class Src : public xi::Plugin {
@@ -18,23 +18,17 @@ public:
             if (cJSON_IsNumber(nn)) n = (int)nn->valuedouble;
             cJSON_Delete(j);
         }
+        em_.bind(host(), name());
         int emitted = 0;
         for (int i = 0; i < n; ++i) {
-            xi_trigger_id tid{0, (uint64_t)i};
-            char idbuf[40];
-            std::snprintf(idbuf, sizeof(idbuf), "%016llx%016llx",
-                          (unsigned long long)tid.hi, (unsigned long long)tid.lo);
-            xi::Image img = pool_image(1, 1, 1);
-            xi_record_image rec{}; rec.key = "img"; rec.handle = img.pool_handle();
-            std::string meta = "{\"seq\":" + std::to_string(i) + "}";
-            if (host() && host()->emit_resource)
-                host()->emit_resource(name().c_str(), idbuf, &rec, 1, meta.c_str());
-            if (host() && host()->emit_dispatch
-                && host()->emit_dispatch(name().c_str(), tid, 0)) ++emitted;
+            em_.image("img", pool_image(1, 1, 1));   // temporary — Emitter addrefs it
+            if (em_.emit()) ++emitted;               // seq auto: 0,1,2,...
         }
         char buf[48];
         std::snprintf(buf, sizeof(buf), "{\"emitted\":%d}", emitted);
         return buf;
     }
+private:
+    xi::Emitter em_;
 };
 XI_PLUGIN_IMPL(Src)
