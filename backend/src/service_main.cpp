@@ -1465,6 +1465,26 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     return true;
 }
 
+// Pull-by-id enqueue (Phase B): BACK-PRESSURE, not overflow. Unlike
+// enqueue_to_lane_ (the bus path, which applies drop_oldest/newest/block), this
+// REJECTS when the lane is full and lets the caller (emit_dispatch -> the
+// emitter) decide. The id-only event owns no images, so a reject leaks nothing.
+// Returns true if enqueued, false if full / not running. This is where core
+// overflow stops being core policy for the pull model.
+static bool enqueue_dispatch_(xi::TriggerEvent ev) {
+    if (!g_continuous.load()) return false;
+    std::shared_ptr<GroupLane> lane = lane_for_(ev.group);
+    if (!lane) return false;
+    int depth = lane->cfg.queue_depth < 1 ? 1 : lane->cfg.queue_depth;
+    std::unique_lock<std::mutex> lk(lane->mu);
+    if (!g_continuous.load()) return false;
+    if ((int)lane->q.size() >= depth) return false;   // full -> back-pressure
+    ev.arrival_id = ++g_run_id;
+    lane->q.push_back(std::move(ev));
+    lane->cv.notify_one();
+    return true;
+}
+
 static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
     {
         std::lock_guard<std::mutex> lk(g_lanes_mu);
@@ -1691,9 +1711,13 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
     // Pull-by-id dispatch (Phase B): emit_dispatch routes here, bypassing the
     // bus's per-tid correlation. Build an id-only event (no images — the script
     // pulls them by res_id via xi::use().get()), route by the emitter's group,
-    // and run it through the same lane / one-shot path as a bus event.
+    // and run it through the lane / one-shot path. Returns whether the run was
+    // accepted: the lane uses BACK-PRESSURE (reject when full), never a silent
+    // drop — that's what keeps a downstream seq stream gap-free (the emitter
+    // decides what to do on a reject, dropping at the source before it burns a
+    // seq). See enqueue_dispatch_.
     xi::set_dispatch_sink([srv](const std::string& emitter, xi_trigger_id res_id,
-                                int64_t ts_us) {
+                                int64_t ts_us) -> bool {
         xi::TriggerEvent ev;
         ev.id            = res_id;
         ev.timestamp_us  = ts_us ? ts_us : xi::wall_us();
@@ -1704,8 +1728,9 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
         if (it != insts.end()) g = it->second.group;
         if (g.empty()) g = g_plugin_mgr.project().default_group;
         ev.group = g;
-        if (g_continuous.load()) (void)enqueue_to_lane_(std::move(ev));
-        else                     dispatch_one_shot_(srv, std::move(ev));
+        if (g_continuous.load()) return enqueue_dispatch_(std::move(ev));
+        dispatch_one_shot_(srv, std::move(ev));
+        return true;
     });
 }
 

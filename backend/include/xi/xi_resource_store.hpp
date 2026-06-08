@@ -145,8 +145,9 @@ private:
 // (group resolution + enqueue), which lives in the backend's service_main, stays
 // out of this leaf header — mirrors how TriggerBus's sink is wired. service_main
 // installs it via set_dispatch_sink; until then emit_dispatch is a no-op (e.g.
-// the headless runner that has no lane pool).
-using DispatchSink = std::function<void(const std::string& emitter,
+// the headless runner that has no lane pool). Returns true if the run was
+// accepted, false on back-pressure (lane full / not running).
+using DispatchSink = std::function<bool(const std::string& emitter,
                                         xi_trigger_id res_id, int64_t timestamp_us)>;
 inline DispatchSink& dispatch_sink_() { static DispatchSink s; return s; }
 inline void set_dispatch_sink(DispatchSink s) { dispatch_sink_() = std::move(s); }
@@ -177,10 +178,10 @@ inline void install_resource_hooks(xi_host_api& api) {
         return ResourceStore::instance().get_image(emitter_name, res_id, key ? key : "");
     };
     api.emit_dispatch = [](const char* emitter_name, xi_trigger_id res_id,
-                           int64_t timestamp_us) {
-        if (!emitter_name) return;
+                           int64_t timestamp_us) -> int32_t {
+        if (!emitter_name) return 0;
         auto& sink = dispatch_sink_();
-        if (sink) sink(emitter_name, res_id, timestamp_us);
+        return (sink && sink(emitter_name, res_id, timestamp_us)) ? 1 : 0;
     };
 }
 

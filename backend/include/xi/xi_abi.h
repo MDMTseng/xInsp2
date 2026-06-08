@@ -231,8 +231,13 @@ typedef struct xi_host_api {
      * xi::current_trigger().id_string() and pulls with xi::use(emitter).get(id).
      *   res_id:       128-bit id carried as the run's trigger id; its hex form
      *                 (id_string) is the res_id key used for emit_resource.
-     *   timestamp_us: capture time (0 = host's current time). */
-    void            (*emit_dispatch)(const char* emitter_name, xi_trigger_id res_id,
+     *   timestamp_us: capture time (0 = host's current time).
+     * Returns 1 if the run was accepted (enqueued / dispatched), 0 if the lane
+     * was full or dispatch isn't running. The lane does NOT silently drop — on a
+     * 0 the EMITTER owns the back-pressure choice (skip this frame at the source
+     * before burning a seq, or retry), which is what keeps a downstream seq
+     * stream gap-free. */
+    int32_t         (*emit_dispatch)(const char* emitter_name, xi_trigger_id res_id,
                                      int64_t timestamp_us);
 } xi_host_api;
 
