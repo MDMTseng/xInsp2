@@ -2244,7 +2244,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // plugins only see that pool via their own host_api, so script-side
             // ImagePool handles would be invisible to them.
             if (g_script.set_use_callbacks) {
-                static xi_host_api use_host = []{ auto a = xi::ImagePool::make_host_api(); xi::install_trigger_hook(a); return a; }();
+                static xi_host_api use_host = []{ auto a = xi::ImagePool::make_host_api(); xi::install_trigger_hook(a); xi::install_resource_hooks(a); return a; }();
                 g_script.set_use_callbacks(
                     (void*)use_process_cb,
                     (void*)use_exchange_cb,

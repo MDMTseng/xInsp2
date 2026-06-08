@@ -50,8 +50,10 @@ extern "C" {
 /* Current version history:                                           */
 /*   1 — initial frozen surface (image pool, trigger bus, SHM, host  */
 /*       api with read_image_file).                                  */
+/*   2 — + emit_resource (pull-by-id resource store). Additive at the */
+/*       struct tail, so v1 plugins keep working unchanged.          */
 /* ------------------------------------------------------------------ */
-#define XI_ABI_VERSION 1
+#define XI_ABI_VERSION 2
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -187,6 +189,26 @@ typedef struct xi_host_api {
      *   text:   short human status, e.g. "grabbing" / "model loaded".
      * The host keeps the LATEST per source and serves it via cmd:status. */
     void            (*set_status)(const char* source, const char* text);
+
+    /* --------------------------------------------------------------- */
+    /* Pull-by-id resource store (v2). Backs the id/pull dispatch model:
+     * an emitter STAGES a frame — named images + cJSON metadata — under
+     * an opaque string res_id; a consumer PULLS it later by res_id. The
+     * host keeps a bounded per-emitter ring. ABI-additive: plugins built
+     * against an older header never call it; an older host leaves it null
+     * (always null-check before use).
+     *
+     *   emitter_name: the staging instance's name.
+     *   res_id:       opaque id (may be a UUID); the pull key + replay key.
+     *                 Ordering for downstream serialization rides as a
+     *                 `seq` field inside `cjson`, not here.
+     *   images:       frame(s) to stage; the store addrefs each handle, so
+     *                 the caller may release them right after this returns.
+     *   cjson:        metadata blob (may be null/empty).
+     * (The get_resource pull entry is added alongside the use() proxy.) */
+    void            (*emit_resource)(const char* emitter_name, const char* res_id,
+                                     const xi_record_image* images, int32_t image_count,
+                                     const char* cjson);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */
