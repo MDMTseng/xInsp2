@@ -209,6 +209,20 @@ typedef struct xi_host_api {
     void            (*emit_resource)(const char* emitter_name, const char* res_id,
                                      const xi_record_image* images, int32_t image_count,
                                      const char* cjson);
+
+    /* Pull a staged resource's metadata by res_id. Writes the cJSON into
+     * cjson_buf and returns its byte length L: L >= 0 means the resource
+     * exists (the L bytes were written iff L <= cjson_buflen — otherwise
+     * nothing is written; resize to L and retry); -1 means res_id is not
+     * staged for this emitter. Does NOT touch image refcounts. */
+    int32_t         (*get_resource)(const char* emitter_name, const char* res_id,
+                                    char* cjson_buf, int32_t cjson_buflen);
+
+    /* Pull one staged image by key. Returns an addref'd handle (caller
+     * image_release when done) or XI_IMAGE_NULL if the resource or key is
+     * absent. Lazy: a consumer fetches only the images it needs. */
+    xi_image_handle (*get_resource_image)(const char* emitter_name, const char* res_id,
+                                          const char* key);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */

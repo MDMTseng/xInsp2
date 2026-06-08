@@ -1,0 +1,1 @@
+{ "name": "res_src", "dll": "res_src.dll", "factory": "xi_plugin_create", "has_ui": false }

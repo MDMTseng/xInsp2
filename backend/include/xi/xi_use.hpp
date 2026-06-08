@@ -237,6 +237,44 @@ private:
 inline Trigger current_trigger() { return Trigger{}; }
 
 // Proxy object returned by xi::use()
+// xi::Resource — a pulled view of a frame an emitter staged under a res_id
+// (pull-by-id dispatch model). Returned by xi::use("emitter").get(res_id).
+// Metadata (dataInfo cJSON) is fetched eagerly; images are pulled lazily by
+// key, so a consumer only pays for the images it actually reads.
+//
+//   auto r = xi::use("cam").get(res_id);
+//   if (r.ok()) {
+//       Image left = r.image("cam_left");
+//       int seq = /* parse r.data() for "seq" */;
+//   }
+class Resource {
+public:
+    Resource() = default;
+    Resource(std::string emitter, std::string res_id, std::string data, bool ok)
+        : emitter_(std::move(emitter)), res_id_(std::move(res_id)),
+          data_(std::move(data)), ok_(ok) {}
+
+    bool ok() const { return ok_; }                    // res_id was staged
+    const std::string& data() const { return data_; }  // dataInfo cJSON ("" if none)
+
+    // Lazily pull one named image as a zero-copy pool view. Empty if the
+    // resource or key is absent. Default key "" = the single-image convention.
+    Image image(const std::string& key = "") const {
+        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
+        if (!ok_ || !host || !host->get_resource_image) return {};
+        xi_image_handle h = host->get_resource_image(emitter_.c_str(),
+                                                     res_id_.c_str(), key.c_str());
+        if (h == XI_IMAGE_NULL) return {};
+        Image img = Image::adopt_pool_handle(host, h);
+        host->image_release(h);
+        return img;
+    }
+
+private:
+    std::string emitter_, res_id_, data_;
+    bool ok_ = false;
+};
+
 class UseProxy {
 public:
     explicit UseProxy(const std::string& name) : name_(name) {}
@@ -327,6 +365,26 @@ public:
         Image img = Image::adopt_pool_handle(host, h);
         host->image_release(h);
         return img;
+    }
+
+    // Pull a frame this emitter staged under res_id (pull-by-id model). Returns
+    // a Resource view: .ok() if present, .data() the metadata cJSON, .image(key)
+    // for each staged image. Empty/not-ok if res_id isn't staged (or the host
+    // predates the resource store). See docs/design/emitter-pull-model.
+    Resource get(const std::string& res_id) const {
+        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
+        if (!host || !host->get_resource) return {};
+        std::vector<char> buf(4096);
+        int32_t n = host->get_resource(name_.c_str(), res_id.c_str(),
+                                       buf.data(), (int32_t)buf.size());
+        if (n < 0) return Resource(name_, res_id, "", false);   // not staged
+        if (n > (int32_t)buf.size()) {                          // grow + retry
+            buf.resize((size_t)n);
+            n = host->get_resource(name_.c_str(), res_id.c_str(),
+                                   buf.data(), (int32_t)buf.size());
+            if (n < 0) return Resource(name_, res_id, "", false);
+        }
+        return Resource(name_, res_id, std::string(buf.data(), (size_t)n), true);
     }
 
     const std::string& name() const { return name_; }

@@ -23,6 +23,7 @@
 #include "xi_abi.h"
 #include "xi_image_pool.hpp"
 
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -86,6 +87,36 @@ public:
         return false;
     }
 
+    // Existence + metadata only (no image addref). Backs host get_resource.
+    bool get_meta(const std::string& name, const std::string& res_id,
+                  std::string& out_cjson) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto rit = rings_.find(name);
+        if (rit == rings_.end()) return false;
+        for (auto& e : rit->second)
+            if (e.res_id == res_id) { out_cjson = e.cjson; return true; }
+        return false;
+    }
+
+    // Pull one image by key (addref'd; caller releases). NULL if absent. Backs
+    // host get_resource_image — lazy single-image fetch.
+    xi_image_handle get_image(const std::string& name, const std::string& res_id,
+                              const std::string& key) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto rit = rings_.find(name);
+        if (rit == rings_.end()) return XI_IMAGE_NULL;
+        for (auto& e : rit->second) {
+            if (e.res_id != res_id) continue;
+            for (auto& im : e.images)
+                if (im.first == key) {
+                    ImagePool::instance().addref(im.second);
+                    return im.second;
+                }
+            return XI_IMAGE_NULL;
+        }
+        return XI_IMAGE_NULL;
+    }
+
     // Release everything (e.g. on project close / shutdown).
     void clear() {
         std::lock_guard<std::mutex> lk(mu_);
@@ -120,6 +151,20 @@ inline void install_resource_hooks(xi_host_api& api) {
         ResourceStore::instance().emit(emitter_name, res_id, images,
                                        image_count < 0 ? 0 : image_count,
                                        cjson ? cjson : "");
+    };
+    api.get_resource = [](const char* emitter_name, const char* res_id,
+                          char* cjson_buf, int32_t cjson_buflen) -> int32_t {
+        if (!emitter_name || !res_id) return -1;
+        std::string cj;
+        if (!ResourceStore::instance().get_meta(emitter_name, res_id, cj)) return -1;
+        int32_t L = (int32_t)cj.size();
+        if (cjson_buf && L <= cjson_buflen) std::memcpy(cjson_buf, cj.data(), (size_t)L);
+        return L;   // L > buflen: caller resizes to L and retries
+    };
+    api.get_resource_image = [](const char* emitter_name, const char* res_id,
+                                const char* key) -> xi_image_handle {
+        if (!emitter_name || !res_id) return XI_IMAGE_NULL;
+        return ResourceStore::instance().get_image(emitter_name, res_id, key ? key : "");
     };
 }
 
