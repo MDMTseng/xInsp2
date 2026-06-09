@@ -42,7 +42,7 @@ namespace xi::script {
 //   - whether the produced DLL is intended to be exported as a standalone
 //     plugin (Export mode = Release + PDB stripped + cert pre-baked)
 enum class CompileMode {
-    Script,         // user inspection.cpp — Release, /O2, force-include script support
+    Script,         // user inspect.cpp — Release, /O2, force-include script support
     PluginDev,      // project-local plugin during development — Debug, /Zi /Od
     PluginExport,   // export-ready build — Release, /O2, /Zi (PDB beside DLL for crash blame)
 };

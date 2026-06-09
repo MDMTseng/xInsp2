@@ -65,7 +65,7 @@ plugin from your inspection script:
 - Plugins tree → right-click your plugin → **Create Instance** (or use
   the `+` button in the Instances tree). Pick a name (e.g. `det0`).
 - Open the instance UI (gear icon next to the instance) → tune fields.
-- In your `inspection.cpp`:
+- In your `inspect.cpp`:
   ```cpp
   auto out = xi::use<MyClass>("det0").process(input);
   ```

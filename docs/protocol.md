@@ -213,7 +213,7 @@ Stable set for v1. Arguments are listed under each entry.
 `args: {}` → `ok: true` then the backend closes the socket and exits.
 
 ### `compile_and_load`
-`args: { "path": "C:/.../inspection.cpp" }`
+`args: { "path": "C:/.../inspect.cpp" }`
 → `data: { "dll": "C:/.../inspect_v3.dll",
            "diagnostics": [...],
            "resumed_continuous": true (optional) }`

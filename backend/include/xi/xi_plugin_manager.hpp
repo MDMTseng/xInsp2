@@ -838,13 +838,13 @@ public:
         }
         project_.name = name;
         project_.folder_path = folder;
-        project_.script_path = (std::filesystem::path(folder) / "inspection.cpp").string();
+        project_.script_path = (std::filesystem::path(folder) / "inspect.cpp").string();
         project_.instances.clear();
 
         // Write initial project.json
         save_project_locked();
 
-        // Create a starter inspection.cpp if it doesn't exist
+        // Create a starter inspect.cpp if it doesn't exist
         if (!std::filesystem::exists(project_.script_path)) {
             std::string body =
                 "// " + name + " — inspection script\n"
@@ -1026,7 +1026,7 @@ public:
         if (name_opt) project_.name = *name_opt;
         auto script_opt = extract_string(content, "script");
         if (script_opt) project_.script_path = (std::filesystem::path(folder) / *script_opt).string();
-        else            project_.script_path = (std::filesystem::path(folder) / "inspection.cpp").string();
+        else            project_.script_path = (std::filesystem::path(folder) / "inspect.cpp").string();
 
         // Parse trigger_policy block (optional; older project.json files
         // have none and we default to Any). Use cJSON instead of

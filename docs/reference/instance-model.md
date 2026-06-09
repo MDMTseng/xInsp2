@@ -29,12 +29,12 @@ own folder, config, and identity.
 ├── project.json
 │   {
 │     "name": "...",
-│     "script": "inspection.cpp",
+│     "script": "inspect.cpp",
 │     "auto_respawn": true,
 │     "watchdog_ms": 10000,
 │     "trigger_policy": { ... }
 │   }
-├── inspection.cpp
+├── inspect.cpp
 └── instances/
     ├── cam0/
     │   ├── instance.json     ← { "plugin": "mock_camera",

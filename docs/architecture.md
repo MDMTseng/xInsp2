@@ -603,7 +603,7 @@ GID ranges: 100-7999 inspection vars, 8000-8999 process_instance, 9000-9999 conf
 ```
 my_project/
   project.json                 project config (name, script, instances)
-  inspection.cpp               user script (or multiple .cpp)
+  inspect.cpp                  user script (or multiple .cpp)
   instances/
     cam0/
       instance.json            {"plugin":"mock_camera","config":{...}}

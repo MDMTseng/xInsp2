@@ -102,7 +102,7 @@ static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
 struct Args {
     std::string project_dir;
     std::string output = "report.json";
-    std::string script_override;       // --script=path; else project/inspection.cpp
+    std::string script_override;       // --script=path; else project/inspect.cpp
     std::vector<std::string> extra_plugins;
     int         frames = 10;
     bool        help = false;
@@ -140,7 +140,7 @@ static void print_usage() {
         "Options:\n"
         "  --frames=N         number of inspect() calls (default: 10)\n"
         "  --output=PATH      JSON report path (default: report.json)\n"
-        "  --script=PATH      override inspection source (default: <proj>/inspection.cpp)\n"
+        "  --script=PATH      override inspection source (default: <proj>/inspect.cpp)\n"
         "  --plugins-dir=DIR  extra plugin folder (repeatable)\n"
         "  -h, --help         show this help\n");
 }
@@ -223,7 +223,7 @@ int main(int argc, char** argv) {
 
     // Compile the inspection script.
     std::string script_path = args.script_override.empty()
-        ? (fs::path(args.project_dir) / "inspection.cpp").string()
+        ? (fs::path(args.project_dir) / "inspect.cpp").string()
         : args.script_override;
     if (!fs::exists(script_path)) {
         std::fprintf(stderr, "[runner] script not found: %s\n", script_path.c_str());
