@@ -108,7 +108,27 @@ capture screenshots via `Win32 PrintWindow` for human spot-checks.
 | `full_pipeline.cjs` | `runE2E.mjs` |
 | `json_source_ui.cjs` | `runJsonSourceUI.mjs` |
 | `ux_states.cjs` | `runUxStates.mjs` |
+| `hover_contract.cjs` | `runHoverContract.mjs` |
+| `webui_screenshot.cjs` | `runWebuiScreenshot.mjs` |
+| `pipeline_graph.cjs` | `runPipelineGraph.mjs` |
 | `journey_helpers.cjs` | shared utilities (`editAndSave`, `makeShooter`, etc.) |
+
+`hover_contract.cjs` opens `examples/blob_tracker`, lets the managed
+backend connect, and asserts that hovering `xi::use("det")` resolves to the
+plugin's copyable Inputs/Outputs/Params contract (read-only — it never
+recompiles the plugin, so it can run alongside a backend that already has
+`blob_centroid_detector.dll` loaded).
+
+`webui_screenshot.cjs` opens the same project, runs `xinsp2.openInstanceUI`
+for the `det` instance, asserts the webview panel tab actually opened (via
+`vscode.window.tabGroups`), and PrintWindow's the dev-host into
+`screenshot/webui_*.png` for a human spot-check. Also read-only.
+
+`pipeline_graph.cjs` covers the stage-1 pipeline graph: asserts
+`extractPipelineNodes()` finds the script's `xi::use("…")` instances (with
+plugin + manifest I/O counts), opens the `xinsp2.openPipelineGraph` webview,
+and screenshots it. Nodes only — clicking a node opens its webui; data-flow
+edges are a future runtime-trace stage and aren't asserted.
 
 ---
 

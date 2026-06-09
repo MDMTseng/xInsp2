@@ -121,6 +121,15 @@ module.exports = {
         if (suite === 'image_viewer_journey') {
             return require('./image_viewer_journey.cjs').run();
         }
+        if (suite === 'hover_contract') {
+            return require('./hover_contract.cjs').run();
+        }
+        if (suite === 'webui_screenshot') {
+            return require('./webui_screenshot.cjs').run();
+        }
+        if (suite === 'pipeline_graph') {
+            return require('./pipeline_graph.cjs').run();
+        }
         return run();
     }
 };
