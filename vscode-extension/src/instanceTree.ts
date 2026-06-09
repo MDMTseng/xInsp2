@@ -41,8 +41,13 @@ export class InstanceTreeProvider implements vscode.TreeDataProvider<TreeItem> {
         this._onDidChange.fire();
     }
 
-    setProjectOpen(open: boolean) {
+    // scriptName is the project's actual script filename (from project.json),
+    // shown as the "Script" tree node + its tooltip. Defaults preserve the old
+    // label when a caller doesn't pass one.
+    private scriptName = 'inspect.cpp';
+    setProjectOpen(open: boolean, scriptName?: string) {
         this.hasProject = open;
+        if (scriptName) this.scriptName = scriptName;
         this._onDidChange.fire();
     }
 
@@ -53,7 +58,7 @@ export class InstanceTreeProvider implements vscode.TreeDataProvider<TreeItem> {
             ti.contextValue = 'script';
             const st = this.statuses['@script'];
             ti.description = st || undefined;            // live script status
-            ti.tooltip = st ? `Status: ${st}\nOpen inspection.cpp` : 'Open inspection.cpp';
+            ti.tooltip = st ? `Status: ${st}\nOpen ${this.scriptName}` : `Open ${this.scriptName}`;
             ti.command = { command: 'xinsp2.openScript', title: 'Open Inspection Script' };
             return ti;
         }
@@ -89,7 +94,7 @@ export class InstanceTreeProvider implements vscode.TreeDataProvider<TreeItem> {
     getChildren(element?: TreeItem): TreeItem[] {
         if (!element) {
             const items: TreeItem[] = [];
-            if (this.hasProject) items.push({ kind: 'script', label: 'inspection.cpp' });
+            if (this.hasProject) items.push({ kind: 'script', label: this.scriptName });
             if (this.instances.length) items.push({ kind: 'header', label: 'Instances' });
             if (this.params.length)    items.push({ kind: 'header', label: 'Params' });
             return items;

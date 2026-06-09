@@ -23,6 +23,11 @@
         "icon": "$(play)"
       },
       {
+        "command": "xinsp2.openPipelineGraph",
+        "title": "xInsp2: Open Pipeline Graph",
+        "icon": "$(type-hierarchy)"
+      },
+      {
         "command": "xinsp2.compile",
         "title": "xInsp2: Compile Script",
         "icon": "$(gear)"
@@ -282,6 +287,11 @@
           "group": "navigation@4"
         },
         {
+          "command": "xinsp2.openPipelineGraph",
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
+          "group": "navigation@3"
+        },
+        {
           "command": "xinsp2.closeProject",
           "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
           "group": "navigation@5"
@@ -305,12 +315,12 @@
       "editor/title": [
         {
           "command": "xinsp2.compile",
-          "when": "resourceFilename == inspection.cpp && xinsp2.connected",
+          "when": "xinsp2.isActiveScript && xinsp2.connected",
           "group": "navigation@1"
         },
         {
           "command": "xinsp2.run",
-          "when": "resourceFilename == inspection.cpp && xinsp2.connected && xinsp2.hasProject",
+          "when": "xinsp2.isActiveScript && xinsp2.connected && xinsp2.hasProject",
           "group": "navigation@2"
         }
       ],

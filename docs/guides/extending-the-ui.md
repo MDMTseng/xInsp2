@@ -56,6 +56,11 @@ backend; the UI is downstream of WS state.
      `"contributes" → "menus" → "view/item/context"` keyed on
      `viewItem == <yourContextValue>`.
    - **Editor title**: `"contributes" → "menus" → "editor/title"`.
+     Gate buttons that act on the inspection script with the
+     `xinsp2.isActiveScript` context key (true when the active editor is the
+     open project's script, resolved from `project.json`'s `script` field) —
+     **not** a hardcoded `resourceFilename == inspection.cpp`, which breaks
+     for projects that name their script anything else.
    - **Status bar**: `vscode.window.createStatusBarItem(...)` from
      `extension.ts`.
 
@@ -259,7 +264,8 @@ Each plugin instance and the script can publish a sticky status string
 (`xi::status(...)` / `xi::Plugin::status(...)`; see
 [`../protocol.md`](../protocol.md) "Status channel"). The extension renders it:
 the instance tree shows `<plugin> · <status>` per instance and the live script
-status on the `inspection.cpp` item (`InstanceTreeProvider.setStatuses`).
+status on the script item (`InstanceTreeProvider.setStatuses`; the item's
+label follows the project's `script` name).
 
 Wiring (in `extension.ts`): a retained `statusMap` is **re-pulled via
 `cmd:status` on every `client.on('open')`** (the delivery guarantee), and the

@@ -22,6 +22,10 @@ let intendedRunning = false;
 // Sliding window of recent respawn timestamps (ms epoch) for rate limit.
 const recentRespawnsMs: number[] = [];
 const MAX_RESPAWNS_PER_MINUTE = 5;
+// Default inspection-script filename when a project.json doesn't name one.
+// The script name is normally read from project.json's `script` field; this is
+// only the fallback. Single source of truth so the convention lives in one place.
+const DEFAULT_SCRIPT_NAME = 'inspect.cpp';
 // Last project we know was opened. Set by handlers below; replayed on
 // every successful (re)connect so a respawned backend lands the user
 // back on their working tree.
@@ -375,6 +379,7 @@ export function activate(context: vscode.ExtensionContext) {
     setCtx('running', false);
     setCtx('hasPlugins', false);
     setCtx('hasInstances', false);
+    setCtx('isActiveScript', false);  // active editor == open project's script?
     // 'busy' = we're auto-opening/compiling a recognized project. While true the
     // panel shows a "Starting…" message instead of the create/open welcome.
     setCtx('busy', looksLikeXinspProject);
@@ -451,6 +456,54 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(projectStatus);
     let currentProjectName: string | undefined;
     let currentProjectPath: string | undefined;
+    // Absolute path of the open project's inspection script (from project.json's
+    // `script` field — NOT a hardcoded filename, since projects pick their own).
+    // Drives the editor-toolbar Compile/Run buttons via the xinsp2.isActiveScript
+    // context key, so those buttons follow the real script whatever it's named.
+    let currentScriptPath: string | undefined;
+    // Resolve <folder>/<project.json script> to an absolute path. Falls back to
+    // the DEFAULT_SCRIPT_NAME convention when project.json is missing/lacks it.
+    const resolveScriptPath = (folder: string): string => {
+        let scr = DEFAULT_SCRIPT_NAME;
+        try {
+            const pj = JSON.parse(require('fs').readFileSync(
+                path.join(folder, 'project.json'), 'utf8'));
+            if (typeof pj.script === 'string' && pj.script) scr = pj.script;
+        } catch { /* use default */ }
+        return path.join(folder, scr);
+    };
+    const SCRIPT_SRC_EXTS = ['.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.h'];
+    // Is `fsPath` part of the open project's SCRIPT side — i.e. the script itself
+    // OR a sibling C/C++ file whose name is prefixed with the script's stem +"_"
+    // (e.g. inspect.cpp → inspect_lane_a.hpp). Multi-file scripts split via
+    // HEADERS #included into the one script TU (separate .cpp TUs can't link the
+    // use()/thunk globals — see docs/guides/writing-a-script.md). The stem prefix
+    // makes the association explicit, so saving an unrelated header dropped in the
+    // folder does NOT trigger a script recompile, and plugin sources (different
+    // folder) never match.
+    const isProjectScriptFile = (fsPath: string): boolean => {
+        if (!currentScriptPath || !fsPath) return false;
+        const rp  = path.resolve(fsPath).toLowerCase();
+        const scr = path.resolve(currentScriptPath).toLowerCase();
+        if (rp === scr) return true;                               // the script itself
+        if (path.dirname(rp) !== path.dirname(scr)) return false;  // siblings only
+        if (!SCRIPT_SRC_EXTS.includes(path.extname(rp))) return false;
+        const stem = path.basename(scr, path.extname(scr));        // "inspect"
+        return path.basename(rp).startsWith(stem + '_');           // "inspect_*"
+    };
+    // The editor-title Compile/Run buttons gate on this: true while the active
+    // editor is the script OR one of its #included project files, so the buttons
+    // stay available when you're editing a lane file, not just inspect.cpp.
+    const refreshActiveScriptCtx = () => {
+        const active = vscode.window.activeTextEditor?.document.uri.fsPath;
+        setCtx('isActiveScript', !!active && isProjectScriptFile(active));
+    };
+    const setCurrentProject = (folder: string | undefined, name: string | undefined) => {
+        currentProjectPath = folder;
+        currentProjectName = name;
+        currentScriptPath = folder ? resolveScriptPath(folder) : undefined;
+        refreshActiveScriptCtx();
+    };
     const updateProjectStatus = () => {
         if (currentProjectName) {
             projectStatus.text = `$(folder-active) xInsp2: ${currentProjectName}`;
@@ -537,15 +590,22 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerHoverProvider({ language: 'cpp', scheme: 'file' }, {
             provideHover(document, position) {
                 const line = document.lineAt(position.line).text;
-                const re = /\buse\s*\(\s*"([^"]+)"\s*\)/g;
+                const re = /\buse\s*(?:<[^>]*>)?\s*\(\s*"([^"]+)"\s*\)/g;
                 let m: RegExpExecArray | null;
                 while ((m = re.exec(line)) !== null) {
                     const start = m.index, end = m.index + m[0].length;
                     if (position.character < start || position.character > end) continue;
-                    const plugin = instanceMap.get(m[1]);
-                    if (!plugin) return undefined;   // unknown instance → default hover
-                    const md = renderPluginHover(m[1], plugin, pluginManifests.get(plugin));
-                    return new vscode.Hover(md, new vscode.Range(position.line, start, position.line, end));
+                    const name = m[1];
+                    const plugin = instanceMap.get(name);
+                    output.appendLine(`[hover] use("${name}") plugin=${plugin ?? '(unknown)'} manifest=${plugin && pluginManifests.has(plugin) ? 'yes' : 'no'}`);
+                    const range = new vscode.Range(position.line, start, position.line, end);
+                    if (!plugin) {
+                        const md = new vscode.MarkdownString(
+                            `**${name}** — not a known instance yet.\n\n` +
+                            `Open the project + connect the backend so its plugin contract loads here.`);
+                        return new vscode.Hover(md, range);
+                    }
+                    return new vscode.Hover(renderPluginHover(name, plugin, pluginManifests.get(plugin)), range);
                 }
                 return undefined;
             },
@@ -563,6 +623,116 @@ export function activate(context: vscode.ExtensionContext) {
         }
         return out;
     }
+    // ---- Pipeline graph (stage 1: nodes from use() scan, click → webui) -----
+    // Collect the script's instance nodes in first-appearance order across the
+    // script + its inspect_* sibling files. STAGE 1 IS NODES ONLY — edges (data
+    // flow) need a runtime trace and aren't inferred statically (the script's
+    // wiring is imperative C++: data is pulled out of Records, computed on, and
+    // fed back in, so a byte-accurate dataflow can't be parsed out). Clicking a
+    // node opens that instance's webui — the primary goal here.
+    type PipelineNode = { name: string; plugin?: string; inputs: number; outputs: number; known: boolean };
+    function extractPipelineNodes(): PipelineNode[] {
+        const fsmod = require('fs') as typeof import('fs');
+        const texts: string[] = [];
+        if (currentScriptPath) {
+            // Script first (so its use() order leads), then inspect_* siblings.
+            try { texts.push(fsmod.readFileSync(currentScriptPath, 'utf8')); } catch {}
+            const dir  = path.dirname(currentScriptPath);
+            const stem = path.basename(currentScriptPath, path.extname(currentScriptPath)).toLowerCase();
+            try {
+                for (const f of fsmod.readdirSync(dir).sort()) {
+                    const ext = path.extname(f).toLowerCase();
+                    if (!f.toLowerCase().startsWith(stem + '_') || !SCRIPT_SRC_EXTS.includes(ext)) continue;
+                    try { texts.push(fsmod.readFileSync(path.join(dir, f), 'utf8')); } catch {}
+                }
+            } catch {}
+        }
+        if (!texts.length) {
+            const ed = vscode.window.activeTextEditor;
+            if (ed?.document.languageId === 'cpp') texts.push(ed.document.getText());
+        }
+        const seen = new Set<string>();
+        const nodes: PipelineNode[] = [];
+        const re = new RegExp(USE_RE.source, 'g');   // fresh state; don't clobber USE_RE
+        for (const text of texts) {
+            for (let m; (m = re.exec(text)); ) {
+                const name = m[2];
+                if (seen.has(name)) continue;
+                seen.add(name);
+                const plugin = instanceMap.get(name);
+                const manifest = plugin ? pluginManifests.get(plugin) : undefined;
+                nodes.push({
+                    name, plugin,
+                    inputs:  Array.isArray(manifest?.inputs)  ? manifest.inputs.length  : 0,
+                    outputs: Array.isArray(manifest?.outputs) ? manifest.outputs.length : 0,
+                    known: !!plugin,
+                });
+            }
+        }
+        return nodes;
+    }
+
+    let pipelineGraphPanel: vscode.WebviewPanel | undefined;
+    function renderPipelineGraphHtml(nodes: PipelineNode[]): string {
+        const esc = (s: string) => s.replace(/[&<>"]/g, c =>
+            ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+        const cards = nodes.map(n => `
+      <div class="node ${n.known ? '' : 'unknown'}" data-name="${esc(n.name)}" data-plugin="${esc(n.plugin || '')}">
+        <div class="nm">${esc(n.name)}</div>
+        <div class="pl">${n.plugin ? esc(n.plugin) : '(not a known instance)'}</div>
+        ${n.known ? `<div class="io">${n.inputs} in · ${n.outputs} out</div>` : ''}
+      </div>`).join('\n<div class="seq">↓</div>\n');
+        return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+      body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
+             background: var(--vscode-editor-background); padding: 16px; }
+      .hint { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 16px; }
+      .col { display: flex; flex-direction: column; align-items: center; }
+      .node { min-width: 220px; border: 1px solid var(--vscode-widget-border, #8884);
+              border-radius: 8px; padding: 10px 16px; cursor: pointer; text-align: center;
+              background: var(--vscode-editorWidget-background); }
+      .node:hover { border-color: var(--vscode-focusBorder); }
+      .node.unknown { opacity: 0.6; border-style: dashed; }
+      .nm { font-weight: 600; }
+      .pl { color: var(--vscode-descriptionForeground); font-size: 12px; margin-top: 2px; }
+      .io { color: var(--vscode-descriptionForeground); font-size: 11px; margin-top: 4px; }
+      .seq { color: var(--vscode-descriptionForeground); margin: 2px 0; }
+      .empty { color: var(--vscode-descriptionForeground); }
+    </style></head><body>
+      <div class="hint">Instances used by the script, in source order. Click a node to open its webui.
+        <br>(Stage 1: nodes only — data-flow edges come from a future runtime trace.)</div>
+      <div class="col">
+        ${nodes.length ? cards : '<div class="empty">No xi::use("…") instances found in the script.</div>'}
+      </div>
+      <script>
+        const vscode = acquireVsCodeApi();
+        for (const el of document.querySelectorAll('.node')) {
+          el.addEventListener('click', () => vscode.postMessage({
+            type: 'openUI', name: el.dataset.name, plugin: el.dataset.plugin }));
+        }
+      </script>
+    </body></html>`;
+    }
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.openPipelineGraph', () => {
+            const nodes = extractPipelineNodes();
+            if (!pipelineGraphPanel) {
+                pipelineGraphPanel = vscode.window.createWebviewPanel(
+                    'xinsp2.pipelineGraph', 'Pipeline Graph',
+                    vscode.ViewColumn.Beside, { enableScripts: true });
+                pipelineGraphPanel.onDidDispose(() => { pipelineGraphPanel = undefined; });
+                pipelineGraphPanel.webview.onDidReceiveMessage((msg: any) => {
+                    if (msg?.type === 'openUI' && msg.name) {
+                        const plugin = msg.plugin || instanceMap.get(msg.name);
+                        vscode.commands.executeCommand('xinsp2.openInstanceUI', msg.name, plugin);
+                    }
+                });
+            }
+            pipelineGraphPanel.webview.html = renderPipelineGraphHtml(nodes);
+            pipelineGraphPanel.reveal(vscode.ViewColumn.Beside);
+        }),
+    );
+
     const knownDeco = vscode.window.createTextEditorDecorationType({
         color: new vscode.ThemeColor('charts.green'), fontWeight: 'bold',
         textDecoration: 'underline dotted',
@@ -598,7 +768,10 @@ export function activate(context: vscode.ExtensionContext) {
                     });
             },
         }),
-        vscode.window.onDidChangeActiveTextEditor((ed) => refreshInstanceDecorations(ed)),
+        vscode.window.onDidChangeActiveTextEditor((ed) => {
+            refreshInstanceDecorations(ed);
+            refreshActiveScriptCtx();   // editor-title Compile/Run track the script
+        }),
         vscode.workspace.onDidChangeTextDocument((e) => {
             const ed = vscode.window.activeTextEditor;
             if (ed && e.document === ed.document) { clearTimeout(decoTimer); decoTimer = setTimeout(() => refreshInstanceDecorations(), 200); }
@@ -749,11 +922,10 @@ export function activate(context: vscode.ExtensionContext) {
             sendCmd('open_project', { folder: lastProjectFolder }).then((r: any) => {
                 if (r?.ok) {
                     setCtx('hasProject', true);
-                    currentProjectName = r.data?.name || path.basename(lastProjectFolder!);
-                    currentProjectPath = lastProjectFolder!;
+                    setCurrentProject(lastProjectFolder!, r.data?.name || path.basename(lastProjectFolder!));
                     setCtx('hasInstances', (r.data?.instances?.length ?? 0) > 0);
                     sendCmd('list_instances');
-                    treeProvider.setProjectOpen(true);
+                    treeProvider.setProjectOpen(true, currentScriptPath ? path.basename(currentScriptPath) : undefined);
                     updateProjectStatus();
                     vscode.window.setStatusBarMessage('xInsp2: project restored', 3000);
                     // Auto-compile the project's script so the pipeline is LIVE
@@ -762,7 +934,7 @@ export function activate(context: vscode.ExtensionContext) {
                     try {
                         const fsx = require('fs');
                         const pj = JSON.parse(fsx.readFileSync(path.join(lastProjectFolder!, 'project.json'), 'utf8'));
-                        const scr = pj.script || 'inspection.cpp';
+                        const scr = pj.script || DEFAULT_SCRIPT_NAME;
                         const scrPath = path.join(lastProjectFolder!, scr);
                         if (fsx.existsSync(scrPath)) {
                             output.appendLine(`[xinsp2] auto-compiling project script ${scr}`);
@@ -790,8 +962,7 @@ export function activate(context: vscode.ExtensionContext) {
         setCtx('hasProject', false);
         setCtx('hasInstances', false);
         setCtx('busy', false);   // not loading anymore (avoids a stuck "Starting…")
-        currentProjectName = undefined;
-        currentProjectPath = undefined;
+        setCurrentProject(undefined, undefined);
         updateProjectStatus();
         updateHealthStatus(false);
         treeProvider.setProjectOpen(false);
@@ -1335,8 +1506,7 @@ export function activate(context: vscode.ExtensionContext) {
                 setCtx('hasProject', true);
                 setCtx('hasInstances', false);
                 addRecent(folder, name);
-                currentProjectName = name;
-                currentProjectPath = folder;
+                setCurrentProject(folder, name);
                 lastProjectFolder = folder;          // for auto-respawn replay
                 recomputeAutoRespawn();
                 updateProjectStatus();
@@ -1362,8 +1532,7 @@ export function activate(context: vscode.ExtensionContext) {
                 setCtx('hasProject', true);
                 const n = rsp.data?.name || path.basename(folder);
                 addRecent(folder, n);
-                currentProjectName = n;
-                currentProjectPath = folder;
+                setCurrentProject(folder, n);
                 lastProjectFolder = folder;          // for auto-respawn replay
                 recomputeAutoRespawn();
                 updateProjectStatus();
@@ -1381,7 +1550,7 @@ export function activate(context: vscode.ExtensionContext) {
     // hooks above and the explicit xinsp2.openScript command.
     function openScriptIfExists(folder: string) {
         const fs = require('fs');
-        const candidate = path.join(folder, 'inspection.cpp');
+        const candidate = resolveScriptPath(folder);
         if (fs.existsSync(candidate)) {
             vscode.workspace.openTextDocument(candidate).then(doc => {
                 vscode.window.showTextDocument(doc, { preserveFocus: true, preview: false });
@@ -1680,7 +1849,7 @@ export function activate(context: vscode.ExtensionContext) {
             const par = pj.parallelism || {};
             const state = {
                 name:         pj.name || path.basename(projDir),
-                script:       pj.script || 'inspection.cpp',
+                script:       pj.script || DEFAULT_SCRIPT_NAME,
                 folder:       projDir,
                 auto_respawn: pj.auto_respawn !== false,    // default true
                 watchdog_ms:  typeof pj.watchdog_ms === 'number' ? pj.watchdog_ms : 0,
@@ -1713,8 +1882,7 @@ export function activate(context: vscode.ExtensionContext) {
             if (rsp?.ok) {
                 setCtx('hasProject', false);
                 setCtx('hasInstances', false);
-                currentProjectName = undefined;
-                currentProjectPath = undefined;
+                setCurrentProject(undefined, undefined);
                 lastProjectFolder = null;            // user closed; don't replay on respawn
                 updateProjectStatus();
                 treeProvider.update([], []);
@@ -1898,8 +2066,8 @@ export function activate(context: vscode.ExtensionContext) {
                         p + '0', p);
                 }
             }
-            // Seed a working inspection.cpp that uses whichever instances we created.
-            const scriptPath = path.join(sampleDir, 'inspection.cpp');
+            // Seed a working script that uses whichever instances we created.
+            const scriptPath = path.join(sampleDir, DEFAULT_SCRIPT_NAME);
             const hasCam = plugins.some(x => x.name === 'mock_camera');
             const hasDet = plugins.some(x => x.name === 'blob_analysis');
             if (hasCam && hasDet) {
@@ -2262,6 +2430,21 @@ void xi_inspect_entry(int frame) {
     const testAPI = {
         sendCmd,
         get connected() { return client?.connected ?? false; },
+        // The open project's resolved script path (from project.json's `script`,
+        // not a hardcoded filename) + whether the active editor IS that script.
+        // Backs the editor-title Compile/Run gating (xinsp2.isActiveScript).
+        get scriptPath() { return currentScriptPath; },
+        get activeIsScript() {
+            const active = vscode.window.activeTextEditor?.document.uri.fsPath;
+            return !!active && !!currentScriptPath &&
+                path.resolve(active).toLowerCase() === path.resolve(currentScriptPath).toLowerCase();
+        },
+        // Drives both the editor Compile/Run gate and the save→recompile trigger:
+        // is this path the script or one of its #included project files (and not a
+        // plugin source)? Path-based — does not stat the file.
+        isProjectScriptFile: (p: string) => isProjectScriptFile(p),
+        // Pipeline graph (stage 1) node list — script instances in source order.
+        extractPipelineNodes: () => extractPipelineNodes(),
         waitConnected: async (timeoutMs = 10000) => {
             const t0 = Date.now();
             while (!client?.connected && Date.now() - t0 < timeoutMs) {
@@ -2371,14 +2554,24 @@ void xi_inspect_entry(int frame) {
     );
 
     // --- Auto-compile on save (S2) ---
+    // Recompiles the SCRIPT when its source side changes. The script is one TU,
+    // so a saved lane file / helper header (#included into inspect.cpp) rebuilds
+    // the whole script — we compile currentScriptPath, not the saved file (a
+    // header isn't independently compilable). Plugin sources are handled by the
+    // separate recompile_project_plugin watcher below and skipped here.
     context.subscriptions.push(
         vscode.workspace.onDidSaveTextDocument(async (doc) => {
-            if (!doc.fileName.endsWith('.cpp')) return;
             if (!client?.connected) return;
-            output.appendLine(`[xinsp2] auto-compile: ${doc.fileName}`);
+            if (!isProjectScriptFile(doc.fileName)) return;
+            // Compile the script itself — whether the user saved inspect.cpp or a
+            // file it pulls in.
+            const compilePath = currentScriptPath || doc.fileName;
+            output.appendLine(`[xinsp2] auto-compile: ${doc.fileName} → script ${compilePath}`);
             try {
-                const rsp = await sendCmd('compile_and_load', { path: doc.fileName });
-                applyDiagnostics(rsp.data?.diagnostics, doc.fileName);
+                const rsp = await sendCmd('compile_and_load', { path: compilePath });
+                // Diagnostics carry their own file (cl.exe reports the header for
+                // an error in an #included lane file); fall back to the script.
+                applyDiagnostics(rsp.data?.diagnostics, compilePath);
                 if (rsp.ok) {
                     output.appendLine('[xinsp2] auto-compile ok');
                     vscode.window.setStatusBarMessage('xInsp2: recompiled', 2000);
