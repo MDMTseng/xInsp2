@@ -95,6 +95,44 @@ static std::unordered_map<std::string, std::string> g_param_cache;
 using xi::seh_exception;
 using xi::seh_translator;
 
+// ---- Pipeline graph capture (stage 2) ----------------------------------
+// OFF by default → zero hot-path cost. When enabled (cmd:graph_capture), each
+// xi::use().process() call records one entry; cmd:graph_snapshot reconstructs
+// dataflow EDGES by image-handle identity: if instance A's output image handle
+// is later fed as instance B's input, that's an A→B edge. "Last producer wins"
+// so a recycled pool slot attributes to its most recent writer.
+//
+// What this does NOT see: data the script pulls out of a Record into a plain
+// C++ / cv::Mat var, computes on, and feeds back — once it leaves a Record its
+// provenance is gone (taint-tracking through OpenCV is infeasible). So image
+// edges are accurate; scalar/cJSON flow through script math is not traced.
+// TODO(linux): plain STL — already portable.
+struct GraphCall {
+    std::string              instance;
+    std::vector<uint64_t>    in_handles, out_handles;
+    std::vector<std::string> in_keys,    out_keys;
+};
+static std::atomic<bool>      g_graph_capture{false};
+static std::mutex             g_graph_mu;
+static std::vector<GraphCall> g_graph_calls;   // guarded by g_graph_mu
+
+static void graph_record_call_(const char* name,
+                               const xi_record_image* in_imgs, int in_n,
+                               const xi_record_out* out) {
+    GraphCall call;
+    call.instance = name ? name : "";
+    for (int i = 0; i < in_n; ++i) {
+        call.in_handles.push_back((uint64_t)in_imgs[i].handle);
+        call.in_keys.push_back(in_imgs[i].key ? in_imgs[i].key : "");
+    }
+    for (int i = 0; i < out->image_count; ++i) {
+        call.out_handles.push_back((uint64_t)out->images[i].handle);
+        call.out_keys.push_back(out->images[i].key ? out->images[i].key : "");
+    }
+    std::lock_guard<std::mutex> lk(g_graph_mu);
+    g_graph_calls.push_back(std::move(call));
+}
+
 static int use_process_cb(const char* name,
                           const char* input_json,
                           const xi_record_image* input_images, int input_image_count,
@@ -114,7 +152,13 @@ static int use_process_cb(const char* name,
         // for a non-reentrant plugin, the per-instance lock that serializes
         // concurrent dispatch workers. We keep the SEH try/catch boundary here.
         try {
-            return adapter->process(&in_rec, output);
+            int rc = adapter->process(&in_rec, output);
+            // Graph capture (off by default): record this call's image handles
+            // for dataflow-edge reconstruction. Handles are still valid here —
+            // the script side adopts/releases the outputs after we return.
+            if (rc >= 0 && g_graph_capture.load(std::memory_order_relaxed))
+                graph_record_call_(name, input_images, input_image_count, output);
+            return rc;
         } catch (const seh_exception& e) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') crashed: 0x%08X (%s)\n",
                          name, e.code, e.what());
@@ -1976,6 +2020,53 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             g_history.clear();
         }
         send_rsp_ok(srv, id, "{\"cleared\":" + std::to_string(cleared) + "}");
+    } else if (name == "graph_capture") {
+        // Toggle pipeline-graph dataflow capture (stage 2). Default off → no
+        // hot-path cost. Enabling clears any prior recording.
+        bool enable = parsed->args_json.find("\"enable\":true")  != std::string::npos ||
+                      parsed->args_json.find("\"enable\": true") != std::string::npos;
+        { std::lock_guard<std::mutex> lk(g_graph_mu); g_graph_calls.clear(); }
+        g_graph_capture.store(enable, std::memory_order_relaxed);
+        send_rsp_ok(srv, id, std::string("{\"capturing\":") + (enable ? "true" : "false") + "}");
+    } else if (name == "graph_snapshot") {
+        // Reconstruct dataflow EDGES from the recorded calls by image-handle
+        // identity (A's output handle later used as B's input → A→B). "Last
+        // producer wins" so a recycled pool slot attributes to its most recent
+        // writer. Returns the instances that actually ran + the edges.
+        std::vector<GraphCall> calls;
+        { std::lock_guard<std::mutex> lk(g_graph_mu); calls = g_graph_calls; }
+        std::unordered_map<uint64_t, std::pair<std::string, std::string>> producer;
+        std::map<std::pair<std::string, std::string>, std::unordered_set<std::string>> edges;
+        std::vector<std::string> ran; std::unordered_set<std::string> ran_seen;
+        for (auto& c : calls) {
+            if (ran_seen.insert(c.instance).second) ran.push_back(c.instance);
+            for (size_t i = 0; i < c.in_handles.size(); ++i) {
+                auto it = producer.find(c.in_handles[i]);
+                if (it != producer.end() && it->second.first != c.instance)
+                    edges[{ it->second.first, c.instance }].insert(it->second.second);
+            }
+            for (size_t i = 0; i < c.out_handles.size(); ++i)
+                producer[c.out_handles[i]] = { c.instance, c.out_keys[i] };
+        }
+        std::string out = "{\"capturing\":";
+        out += g_graph_capture.load(std::memory_order_relaxed) ? "true" : "false";
+        out += ",\"ran\":[";
+        for (size_t i = 0; i < ran.size(); ++i) {
+            if (i) out += ",";
+            out += xp::json_escape(ran[i]);          // json_escape() already wraps in quotes
+        }
+        out += "],\"edges\":[";
+        bool first = true;
+        for (auto& [ft, keys] : edges) {
+            if (!first) out += ","; first = false;
+            out += "{\"from\":" + xp::json_escape(ft.first) +
+                   ",\"to\":"   + xp::json_escape(ft.second) + ",\"keys\":[";
+            bool k1 = true;
+            for (auto& k : keys) { if (!k1) out += ","; k1 = false; out += xp::json_escape(k); }
+            out += "]}";
+        }
+        out += "]}";
+        send_rsp_ok(srv, id, out);
     } else if (name == "set_history_depth") {
         auto d = xp::get_number_field(parsed->args_json, "depth");
         if (!d) { send_rsp_err(srv, id, "missing depth"); return; }
