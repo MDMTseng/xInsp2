@@ -630,12 +630,16 @@ export function activate(context: vscode.ExtensionContext) {
     // wiring is imperative C++: data is pulled out of Records, computed on, and
     // fed back in, so a byte-accurate dataflow can't be parsed out). Clicking a
     // node opens that instance's webui — the primary goal here.
-    type PipelineNode = { name: string; plugin?: string; inputs: number; outputs: number; known: boolean };
-    function extractPipelineNodes(): PipelineNode[] {
+    type PipelineNode = { kind: 'node'; name: string; plugin?: string; inputs: number; outputs: number; known: boolean };
+    type PipelineVar  = { kind: 'var'; name: string };
+    type PipelineItem = PipelineNode | PipelineVar;
+
+    // Read the script + its inspect_* sibling files (script first). Falls back to
+    // the active cpp editor when no project is open.
+    function gatherScriptTexts(): string[] {
         const fsmod = require('fs') as typeof import('fs');
         const texts: string[] = [];
         if (currentScriptPath) {
-            // Script first (so its use() order leads), then inspect_* siblings.
             try { texts.push(fsmod.readFileSync(currentScriptPath, 'utf8')); } catch {}
             const dir  = path.dirname(currentScriptPath);
             const stem = path.basename(currentScriptPath, path.extname(currentScriptPath)).toLowerCase();
@@ -651,38 +655,59 @@ export function activate(context: vscode.ExtensionContext) {
             const ed = vscode.window.activeTextEditor;
             if (ed?.document.languageId === 'cpp') texts.push(ed.document.getText());
         }
-        const seen = new Set<string>();
-        const nodes: PipelineNode[] = [];
-        const re = new RegExp(USE_RE.source, 'g');   // fresh state; don't clobber USE_RE
-        for (const text of texts) {
-            for (let m; (m = re.exec(text)); ) {
-                const name = m[2];
-                if (seen.has(name)) continue;
-                seen.add(name);
-                const plugin = instanceMap.get(name);
-                const manifest = plugin ? pluginManifests.get(plugin) : undefined;
-                nodes.push({
-                    name, plugin,
-                    inputs:  Array.isArray(manifest?.inputs)  ? manifest.inputs.length  : 0,
-                    outputs: Array.isArray(manifest?.outputs) ? manifest.outputs.length : 0,
-                    known: !!plugin,
-                });
+        return texts;
+    }
+
+    // Ordered graph elements in SOURCE order: plugin nodes (use("…")) interleaved
+    // with the VAR()/EMIT() names the script surfaces between them. The VAR chips
+    // ARE the script glue — the compute the composition layer does between plugin
+    // stages, which can't be a plugin and isn't a traceable dataflow edge. Showing
+    // them by source position is honest (no faked provenance) and useful.
+    function extractPipelineItems(): PipelineItem[] {
+        const useRe = new RegExp(USE_RE.source, 'g');                    // m[2] = instance name
+        const varRe = /\b(?:VAR|VAR_RAW|EMIT|EMIT_RAW)\s*\(\s*([A-Za-z_]\w*)/g;
+        const items: PipelineItem[] = [];
+        const seenNode = new Set<string>(), seenVar = new Set<string>();
+        for (const text of gatherScriptTexts()) {
+            const hits: { idx: number; kind: 'node' | 'var'; name: string }[] = [];
+            for (let m; (m = useRe.exec(text)); ) hits.push({ idx: m.index, kind: 'node', name: m[2] });
+            for (let m; (m = varRe.exec(text)); ) hits.push({ idx: m.index, kind: 'var', name: m[1] });
+            hits.sort((a, b) => a.idx - b.idx);
+            for (const h of hits) {
+                if (h.kind === 'node') {
+                    if (seenNode.has(h.name)) continue; seenNode.add(h.name);
+                    const plugin = instanceMap.get(h.name);
+                    const manifest = plugin ? pluginManifests.get(plugin) : undefined;
+                    items.push({ kind: 'node', name: h.name, plugin,
+                        inputs:  Array.isArray(manifest?.inputs)  ? manifest.inputs.length  : 0,
+                        outputs: Array.isArray(manifest?.outputs) ? manifest.outputs.length : 0,
+                        known: !!plugin });
+                } else {
+                    if (seenVar.has(h.name)) continue; seenVar.add(h.name);
+                    items.push({ kind: 'var', name: h.name });
+                }
             }
         }
-        return nodes;
+        return items;
+    }
+    // Nodes only (back-compat for callers that just want the instances).
+    function extractPipelineNodes(): PipelineNode[] {
+        return extractPipelineItems().filter((i): i is PipelineNode => i.kind === 'node');
     }
 
     let pipelineGraphPanel: vscode.WebviewPanel | undefined;
     type GraphEdge = { from: string; to: string; keys?: string[] };
-    function renderPipelineGraphHtml(nodes: PipelineNode[], edges: GraphEdge[] = []): string {
+    function renderPipelineGraphHtml(items: PipelineItem[], edges: GraphEdge[] = []): string {
         const esc = (s: string) => s.replace(/[&<>"]/g, c =>
             ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
-        const cards = nodes.map(n => `
-      <div class="node ${n.known ? '' : 'unknown'}" data-name="${esc(n.name)}" data-plugin="${esc(n.plugin || '')}">
-        <div class="nm">${esc(n.name)}</div>
-        <div class="pl">${n.plugin ? esc(n.plugin) : '(not a known instance)'}</div>
-        ${n.known ? `<div class="io">${n.inputs} in · ${n.outputs} out</div>` : ''}
-      </div>`).join('\n<div class="seq">↓</div>\n');
+        const cards = items.map(it => it.kind === 'var'
+            ? `<div class="var">VAR ${esc(it.name)}</div>`
+            : `
+      <div class="node ${it.known ? '' : 'unknown'}" data-name="${esc(it.name)}" data-plugin="${esc(it.plugin || '')}">
+        <div class="nm">${esc(it.name)}</div>
+        <div class="pl">${it.plugin ? esc(it.plugin) : '(not a known instance)'}</div>
+        ${it.known ? `<div class="io">${it.inputs} in · ${it.outputs} out</div>` : ''}
+      </div>`).join('\n');
         const hasEdges = edges.length > 0;
         return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
       body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
@@ -697,7 +722,10 @@ export function activate(context: vscode.ExtensionContext) {
       .nm { font-weight: 600; }
       .pl { color: var(--vscode-descriptionForeground); font-size: 12px; margin-top: 2px; }
       .io { color: var(--vscode-descriptionForeground); font-size: 11px; margin-top: 4px; }
-      .seq { color: var(--vscode-descriptionForeground); margin: 2px 0; visibility: ${hasEdges ? 'hidden' : 'visible'}; }
+      .col > * { margin: 4px 0; }
+      .var { font-size: 11px; color: var(--vscode-descriptionForeground);
+             border: 1px dashed var(--vscode-widget-border, #8884); border-radius: 10px;
+             padding: 1px 8px; opacity: 0.8; }
       .empty { color: var(--vscode-descriptionForeground); }
       .bar { margin-bottom: 12px; }
       button { font: inherit; padding: 4px 10px; cursor: pointer;
@@ -708,15 +736,16 @@ export function activate(context: vscode.ExtensionContext) {
       .elabel { fill: var(--vscode-descriptionForeground); font-size: 10px; }
       .eline { stroke: var(--vscode-charts-blue, #4daafc); stroke-width: 1.5; fill: none; }
     </style></head><body>
-      <div class="hint">Instances used by the script, in source order. Click a node to open its webui.
+      <div class="hint">Plugin nodes (click → webui) interleaved with the VAR chips the
+        script computes between them, in source order.
         <br>${hasEdges
-          ? 'Arrows = observed image dataflow (last capture). Scalar/JSON flow through script code is not traced.'
-          : 'Nodes only. Click <b>Capture dataflow</b> to run once and overlay image-dataflow edges.'}</div>
+          ? 'Arrows = observed image dataflow (last capture). Scalar/JSON flow through the VAR glue is not traced.'
+          : 'Click <b>Capture dataflow</b> to run once and overlay image-dataflow edges.'}</div>
       <div class="bar"><button id="cap">⟳ Capture dataflow</button></div>
       <div id="wrap">
         <svg id="edges"></svg>
         <div class="col">
-          ${nodes.length ? cards : '<div class="empty">No xi::use("…") instances found in the script.</div>'}
+          ${items.length ? cards : '<div class="empty">No xi::use("…") instances found in the script.</div>'}
         </div>
       </div>
       <script>
@@ -762,13 +791,33 @@ export function activate(context: vscode.ExtensionContext) {
     // edges. OFF by default in the backend, so this enables → runs → snapshots →
     // disables. framePath is optional (frame-driven projects need it; source /
     // continuous projects don't).
+    // First image file under <project>/frames — a sample frame so the capture
+    // button works for frame-driven projects (imread current_frame_path) without
+    // the user wiring one up.
+    function firstProjectFrame(): string | undefined {
+        if (!currentProjectPath) return undefined;
+        try {
+            const fsmod = require('fs') as typeof import('fs');
+            const dir = path.join(currentProjectPath, 'frames');
+            const f = fsmod.readdirSync(dir).filter(x => /\.(png|jpe?g|bmp|tiff?)$/i.test(x)).sort()[0];
+            if (f) return path.join(dir, f).split('\\').join('/');
+        } catch { /* no frames dir */ }
+        return undefined;
+    }
     async function captureGraphEdges(framePath?: string): Promise<{ ran: string[]; edges: GraphEdge[] }> {
         await sendCmd('graph_capture', { enable: true });
         try {
-            await sendCmd('run', framePath ? { frame_path: framePath } : undefined);
-            // cmd:run returns immediately (ms:0) and inspects on a detached thread;
-            // give it a beat to finish before snapshotting.
-            await new Promise(r => setTimeout(r, 700));
+            if (g_continuous) {
+                // Source / continuous-driven: frames are already flowing — just
+                // observe a window of live dispatches, don't issue our own run.
+                await new Promise(r => setTimeout(r, 900));
+            } else {
+                // Single-shot: run once. cmd:run returns immediately (ms:0) and
+                // inspects on a detached thread, so wait before snapshotting.
+                const fp = framePath || firstProjectFrame();
+                await sendCmd('run', fp ? { frame_path: fp } : undefined);
+                await new Promise(r => setTimeout(r, 700));
+            }
             const snap = await sendCmd('graph_snapshot');
             return { ran: snap?.data?.ran ?? [], edges: snap?.data?.edges ?? [] };
         } finally {
@@ -778,7 +827,6 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.openPipelineGraph', () => {
-            const nodes = extractPipelineNodes();
             if (!pipelineGraphPanel) {
                 pipelineGraphPanel = vscode.window.createWebviewPanel(
                     'xinsp2.pipelineGraph', 'Pipeline Graph',
@@ -793,11 +841,11 @@ export function activate(context: vscode.ExtensionContext) {
                         try { edges = (await captureGraphEdges()).edges; }
                         catch (e: any) { output.appendLine(`[graph] capture failed: ${e?.message || e}`); }
                         if (pipelineGraphPanel)
-                            pipelineGraphPanel.webview.html = renderPipelineGraphHtml(extractPipelineNodes(), edges);
+                            pipelineGraphPanel.webview.html = renderPipelineGraphHtml(extractPipelineItems(), edges);
                     }
                 });
             }
-            pipelineGraphPanel.webview.html = renderPipelineGraphHtml(nodes);
+            pipelineGraphPanel.webview.html = renderPipelineGraphHtml(extractPipelineItems());
             pipelineGraphPanel.reveal(vscode.ViewColumn.Beside);
         }),
     );
@@ -2514,10 +2562,13 @@ void xi_inspect_entry(int frame) {
         isProjectScriptFile: (p: string) => isProjectScriptFile(p),
         // Pipeline graph (stage 1) node list — script instances in source order.
         extractPipelineNodes: () => extractPipelineNodes(),
+        // Ordered nodes + VAR chips (the script glue between plugin stages).
+        extractPipelineItems: () => extractPipelineItems(),
         // Pipeline graph (stage 2) — run once with capture, return reconstructed edges.
         captureGraphEdges: (framePath?: string) => captureGraphEdges(framePath),
-        renderPipelineGraphHtml: (nodes: PipelineNode[], edges?: GraphEdge[]) =>
-            renderPipelineGraphHtml(nodes, edges),
+        firstProjectFrame: () => firstProjectFrame(),
+        renderPipelineGraphHtml: (items: PipelineItem[], edges?: GraphEdge[]) =>
+            renderPipelineGraphHtml(items, edges),
         waitConnected: async (timeoutMs = 10000) => {
             const t0 = Date.now();
             while (!client?.connected && Date.now() - t0 < timeoutMs) {

@@ -19,6 +19,7 @@ const { sleep, makeShooter, clearOldShots } = require('./journey_helpers.cjs');
 
 const REPO    = path.resolve(__dirname, '..', '..', '..');
 const PROJECT = path.join(REPO, 'examples', 'blob_tracker');
+const SCRIPT_PATH = path.join(PROJECT, 'inspect.cpp').split('\\').join('/');
 
 const screenshotDir = path.join(REPO, 'screenshot');
 const shot = makeShooter(screenshotDir, 'pipeline_graph');
@@ -60,6 +61,24 @@ async function run() {
     assert.ok(det.known, 'det is a known instance');
     assert.ok(det.inputs >= 1 && det.outputs >= 1, 'det carries I/O counts from its manifest');
     console.log(`  ✓ extractPipelineNodes: det (${det.plugin}) ${det.inputs} in · ${det.outputs} out`);
+
+    // #1 — VAR chips (the script glue) are interleaved with plugin nodes.
+    const items = api.extractPipelineItems();
+    const varItems = items.filter(i => i.kind === 'var');
+    assert.ok(items.some(i => i.kind === 'node' && i.name === 'det'), 'det node in items');
+    assert.ok(varItems.length >= 3, `script VAR chips surface (got ${varItems.length})`);
+    console.log(`  ✓ pipeline items interleave ${varItems.length} VAR chips (e.g. ${varItems.slice(0,3).map(v=>v.name).join(', ')})`);
+
+    // #2 — capture with NO explicit frame: auto-picks a sample from <project>/frames,
+    // so a frame-driven project's button actually runs det.process. Ensure the
+    // script is actually loaded first (openProject auto-compiles async).
+    const cr = await api.sendCmd('compile_and_load', { path: SCRIPT_PATH });
+    assert.ok(cr.ok, 'script compiled');
+    console.log('  firstProjectFrame:', api.firstProjectFrame());
+    const cap = await api.captureGraphEdges();
+    console.log('  captured (auto-frame):', JSON.stringify(cap));
+    assert.ok(cap.ran.includes('det'), 'auto-picked sample frame made det actually run');
+    console.log('  ✓ capture auto-picked a sample frame (det ran)');
 
     // 2) Open the graph webview.
     await vscode.commands.executeCommand('xinsp2.openPipelineGraph');

@@ -130,6 +130,10 @@ for the `det` instance, asserts the webview panel tab actually opened (via
 plugin + manifest I/O counts), opens the `xinsp2.openPipelineGraph` webview,
 and screenshots it. Nodes only — clicking a node opens its webui.
 
+`pipeline_graph.cjs` also covers the VAR "script-glue" chips interleaved with
+plugin nodes by source order, and the capture button's sample-frame auto-pick
+(`<project>/frames`) so a frame-driven project's capture actually runs.
+
 `graph_capture.cjs` covers the stage-2 dataflow edges: builds a temp project
 with two chained `blob_centroid_detector` instances, captures one run with
 dataflow recording on (`captureGraphEdges`), and asserts the reconstructed
