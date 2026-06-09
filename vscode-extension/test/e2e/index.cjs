@@ -130,6 +130,9 @@ module.exports = {
         if (suite === 'pipeline_graph') {
             return require('./pipeline_graph.cjs').run();
         }
+        if (suite === 'graph_capture') {
+            return require('./graph_capture.cjs').run();
+        }
         return run();
     }
 };

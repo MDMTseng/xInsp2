@@ -673,7 +673,8 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     let pipelineGraphPanel: vscode.WebviewPanel | undefined;
-    function renderPipelineGraphHtml(nodes: PipelineNode[]): string {
+    type GraphEdge = { from: string; to: string; keys?: string[] };
+    function renderPipelineGraphHtml(nodes: PipelineNode[], edges: GraphEdge[] = []): string {
         const esc = (s: string) => s.replace(/[&<>"]/g, c =>
             ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
         const cards = nodes.map(n => `
@@ -682,6 +683,7 @@ export function activate(context: vscode.ExtensionContext) {
         <div class="pl">${n.plugin ? esc(n.plugin) : '(not a known instance)'}</div>
         ${n.known ? `<div class="io">${n.inputs} in · ${n.outputs} out</div>` : ''}
       </div>`).join('\n<div class="seq">↓</div>\n');
+        const hasEdges = edges.length > 0;
         return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
       body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
              background: var(--vscode-editor-background); padding: 16px; }
@@ -695,22 +697,83 @@ export function activate(context: vscode.ExtensionContext) {
       .nm { font-weight: 600; }
       .pl { color: var(--vscode-descriptionForeground); font-size: 12px; margin-top: 2px; }
       .io { color: var(--vscode-descriptionForeground); font-size: 11px; margin-top: 4px; }
-      .seq { color: var(--vscode-descriptionForeground); margin: 2px 0; }
+      .seq { color: var(--vscode-descriptionForeground); margin: 2px 0; visibility: ${hasEdges ? 'hidden' : 'visible'}; }
       .empty { color: var(--vscode-descriptionForeground); }
+      .bar { margin-bottom: 12px; }
+      button { font: inherit; padding: 4px 10px; cursor: pointer;
+               background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+               border: none; border-radius: 4px; }
+      #wrap { position: relative; }
+      #edges { position: absolute; inset: 0; pointer-events: none; z-index: -1; }
+      .elabel { fill: var(--vscode-descriptionForeground); font-size: 10px; }
+      .eline { stroke: var(--vscode-charts-blue, #4daafc); stroke-width: 1.5; fill: none; }
     </style></head><body>
       <div class="hint">Instances used by the script, in source order. Click a node to open its webui.
-        <br>(Stage 1: nodes only — data-flow edges come from a future runtime trace.)</div>
-      <div class="col">
-        ${nodes.length ? cards : '<div class="empty">No xi::use("…") instances found in the script.</div>'}
+        <br>${hasEdges
+          ? 'Arrows = observed image dataflow (last capture). Scalar/JSON flow through script code is not traced.'
+          : 'Nodes only. Click <b>Capture dataflow</b> to run once and overlay image-dataflow edges.'}</div>
+      <div class="bar"><button id="cap">⟳ Capture dataflow</button></div>
+      <div id="wrap">
+        <svg id="edges"></svg>
+        <div class="col">
+          ${nodes.length ? cards : '<div class="empty">No xi::use("…") instances found in the script.</div>'}
+        </div>
       </div>
       <script>
         const vscode = acquireVsCodeApi();
+        const EDGES = ${JSON.stringify(edges)};
         for (const el of document.querySelectorAll('.node')) {
           el.addEventListener('click', () => vscode.postMessage({
             type: 'openUI', name: el.dataset.name, plugin: el.dataset.plugin }));
         }
+        document.getElementById('cap').addEventListener('click', () => {
+          document.getElementById('cap').textContent = '⟳ Capturing…';
+          vscode.postMessage({ type: 'capture' });
+        });
+        // Draw edges as SVG connectors between node centers (positions measured
+        // after layout, so it's robust to wrapping/spacing).
+        function draw() {
+          const svg = document.getElementById('edges');
+          const wrap = document.getElementById('wrap').getBoundingClientRect();
+          const at = (name) => {
+            const el = document.querySelector('.node[data-name="' + name + '"]');
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            return { x: r.left - wrap.left + r.width / 2, top: r.top - wrap.top, bot: r.bottom - wrap.top };
+          };
+          let html = '';
+          for (const e of EDGES) {
+            const a = at(e.from), b = at(e.to); if (!a || !b) continue;
+            const y1 = a.bot, y2 = b.top, mx = (a.x + b.x) / 2, my = (y1 + y2) / 2;
+            html += '<path class="eline" marker-end="url(#arr)" d="M ' + a.x + ' ' + y1 +
+                    ' C ' + a.x + ' ' + my + ' ' + b.x + ' ' + my + ' ' + b.x + ' ' + y2 + '"/>';
+            const lbl = (e.keys || []).join(', ');
+            if (lbl) html += '<text class="elabel" x="' + (mx + 6) + '" y="' + my + '">' + lbl + '</text>';
+          }
+          svg.innerHTML = '<defs><marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">' +
+                          '<path d="M0,0 L6,3 L0,6 Z" fill="var(--vscode-charts-blue,#4daafc)"/></marker></defs>' + html;
+        }
+        draw(); window.addEventListener('resize', draw);
       </script>
     </body></html>`;
+    }
+
+    // Run one inspection with dataflow capture on, then return the reconstructed
+    // edges. OFF by default in the backend, so this enables → runs → snapshots →
+    // disables. framePath is optional (frame-driven projects need it; source /
+    // continuous projects don't).
+    async function captureGraphEdges(framePath?: string): Promise<{ ran: string[]; edges: GraphEdge[] }> {
+        await sendCmd('graph_capture', { enable: true });
+        try {
+            await sendCmd('run', framePath ? { frame_path: framePath } : undefined);
+            // cmd:run returns immediately (ms:0) and inspects on a detached thread;
+            // give it a beat to finish before snapshotting.
+            await new Promise(r => setTimeout(r, 700));
+            const snap = await sendCmd('graph_snapshot');
+            return { ran: snap?.data?.ran ?? [], edges: snap?.data?.edges ?? [] };
+        } finally {
+            await sendCmd('graph_capture', { enable: false });
+        }
     }
 
     context.subscriptions.push(
@@ -721,10 +784,16 @@ export function activate(context: vscode.ExtensionContext) {
                     'xinsp2.pipelineGraph', 'Pipeline Graph',
                     vscode.ViewColumn.Beside, { enableScripts: true });
                 pipelineGraphPanel.onDidDispose(() => { pipelineGraphPanel = undefined; });
-                pipelineGraphPanel.webview.onDidReceiveMessage((msg: any) => {
+                pipelineGraphPanel.webview.onDidReceiveMessage(async (msg: any) => {
                     if (msg?.type === 'openUI' && msg.name) {
                         const plugin = msg.plugin || instanceMap.get(msg.name);
                         vscode.commands.executeCommand('xinsp2.openInstanceUI', msg.name, plugin);
+                    } else if (msg?.type === 'capture') {
+                        let edges: GraphEdge[] = [];
+                        try { edges = (await captureGraphEdges()).edges; }
+                        catch (e: any) { output.appendLine(`[graph] capture failed: ${e?.message || e}`); }
+                        if (pipelineGraphPanel)
+                            pipelineGraphPanel.webview.html = renderPipelineGraphHtml(extractPipelineNodes(), edges);
                     }
                 });
             }
@@ -2445,6 +2514,10 @@ void xi_inspect_entry(int frame) {
         isProjectScriptFile: (p: string) => isProjectScriptFile(p),
         // Pipeline graph (stage 1) node list — script instances in source order.
         extractPipelineNodes: () => extractPipelineNodes(),
+        // Pipeline graph (stage 2) — run once with capture, return reconstructed edges.
+        captureGraphEdges: (framePath?: string) => captureGraphEdges(framePath),
+        renderPipelineGraphHtml: (nodes: PipelineNode[], edges?: GraphEdge[]) =>
+            renderPipelineGraphHtml(nodes, edges),
         waitConnected: async (timeoutMs = 10000) => {
             const t0 = Date.now();
             while (!client?.connected && Date.now() - t0 < timeoutMs) {

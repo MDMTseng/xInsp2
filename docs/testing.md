@@ -111,6 +111,7 @@ capture screenshots via `Win32 PrintWindow` for human spot-checks.
 | `hover_contract.cjs` | `runHoverContract.mjs` |
 | `webui_screenshot.cjs` | `runWebuiScreenshot.mjs` |
 | `pipeline_graph.cjs` | `runPipelineGraph.mjs` |
+| `graph_capture.cjs` | `runGraphCapture.mjs` |
 | `journey_helpers.cjs` | shared utilities (`editAndSave`, `makeShooter`, etc.) |
 
 `hover_contract.cjs` opens `examples/blob_tracker`, lets the managed
@@ -127,8 +128,14 @@ for the `det` instance, asserts the webview panel tab actually opened (via
 `pipeline_graph.cjs` covers the stage-1 pipeline graph: asserts
 `extractPipelineNodes()` finds the script's `xi::use("…")` instances (with
 plugin + manifest I/O counts), opens the `xinsp2.openPipelineGraph` webview,
-and screenshots it. Nodes only — clicking a node opens its webui; data-flow
-edges are a future runtime-trace stage and aren't asserted.
+and screenshots it. Nodes only — clicking a node opens its webui.
+
+`graph_capture.cjs` covers the stage-2 dataflow edges: builds a temp project
+with two chained `blob_centroid_detector` instances, captures one run with
+dataflow recording on (`captureGraphEdges`), and asserts the reconstructed
+a→b edge (via the `cleaned` image) plus that `renderPipelineGraphHtml` emits
+the SVG connector. The backend half is also covered headless by
+`ws_graph_capture.test.mjs`. Capture is OFF by default (no hot-path cost).
 
 ---
 
