@@ -112,6 +112,7 @@ capture screenshots via `Win32 PrintWindow` for human spot-checks.
 | `webui_screenshot.cjs` | `runWebuiScreenshot.mjs` |
 | `pipeline_graph.cjs` | `runPipelineGraph.mjs` |
 | `graph_capture.cjs` | `runGraphCapture.mjs` |
+| `graph_multi.cjs` | `runGraphMulti.mjs` |
 | `journey_helpers.cjs` | shared utilities (`editAndSave`, `makeShooter`, etc.) |
 
 `hover_contract.cjs` opens `examples/blob_tracker`, lets the managed
@@ -140,6 +141,10 @@ dataflow recording on (`captureGraphEdges`), and asserts the reconstructed
 a→b edge (via the `cleaned` image) plus that `renderPipelineGraphHtml` emits
 the SVG connector. The backend half is also covered headless by
 `ws_graph_capture.test.mjs`. Capture is OFF by default (no hot-path cost).
+
+`graph_multi.cjs` is a 3-node connected pipeline (a→b→c, chained by the
+`cleaned` image): it captures, repaints the open graph panel with edges
+(`captureAndRenderGraph`), and screenshots the connection lines.
 
 ---
 

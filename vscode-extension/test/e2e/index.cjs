@@ -133,6 +133,9 @@ module.exports = {
         if (suite === 'graph_capture') {
             return require('./graph_capture.cjs').run();
         }
+        if (suite === 'graph_multi') {
+            return require('./graph_multi.cjs').run();
+        }
         return run();
     }
 };

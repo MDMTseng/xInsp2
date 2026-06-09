@@ -732,7 +732,7 @@ export function activate(context: vscode.ExtensionContext) {
                background: var(--vscode-button-background); color: var(--vscode-button-foreground);
                border: none; border-radius: 4px; }
       #wrap { position: relative; }
-      #edges { position: absolute; inset: 0; pointer-events: none; z-index: -1; }
+      #edges { position: absolute; inset: 0; pointer-events: none; z-index: 5; overflow: visible; }
       .elabel { fill: var(--vscode-descriptionForeground); font-size: 10px; }
       .eline { stroke: var(--vscode-charts-blue, #4daafc); stroke-width: 1.5; fill: none; }
     </style></head><body>
@@ -825,6 +825,17 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }
 
+    // Capture a dataflow run and repaint the open graph panel with the edges
+    // (what the webview's "⟳ Capture dataflow" button does). Returns the edges.
+    async function captureAndRenderGraph(): Promise<GraphEdge[]> {
+        let edges: GraphEdge[] = [];
+        try { edges = (await captureGraphEdges()).edges; }
+        catch (e: any) { output.appendLine(`[graph] capture failed: ${e?.message || e}`); }
+        if (pipelineGraphPanel)
+            pipelineGraphPanel.webview.html = renderPipelineGraphHtml(extractPipelineItems(), edges);
+        return edges;
+    }
+
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.openPipelineGraph', () => {
             if (!pipelineGraphPanel) {
@@ -837,11 +848,7 @@ export function activate(context: vscode.ExtensionContext) {
                         const plugin = msg.plugin || instanceMap.get(msg.name);
                         vscode.commands.executeCommand('xinsp2.openInstanceUI', msg.name, plugin);
                     } else if (msg?.type === 'capture') {
-                        let edges: GraphEdge[] = [];
-                        try { edges = (await captureGraphEdges()).edges; }
-                        catch (e: any) { output.appendLine(`[graph] capture failed: ${e?.message || e}`); }
-                        if (pipelineGraphPanel)
-                            pipelineGraphPanel.webview.html = renderPipelineGraphHtml(extractPipelineItems(), edges);
+                        await captureAndRenderGraph();
                     }
                 });
             }
@@ -2566,6 +2573,7 @@ void xi_inspect_entry(int frame) {
         extractPipelineItems: () => extractPipelineItems(),
         // Pipeline graph (stage 2) — run once with capture, return reconstructed edges.
         captureGraphEdges: (framePath?: string) => captureGraphEdges(framePath),
+        captureAndRenderGraph: () => captureAndRenderGraph(),
         firstProjectFrame: () => firstProjectFrame(),
         renderPipelineGraphHtml: (items: PipelineItem[], edges?: GraphEdge[]) =>
             renderPipelineGraphHtml(items, edges),
