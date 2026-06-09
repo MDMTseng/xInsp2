@@ -828,6 +828,14 @@ static bool write_toolchain_override_(const std::string& folder, const std::stri
 //   "link_libs":    ["deps/foo.lib"]                     -> import libs to link
 // Relative entries resolve against the project folder. The matching runtime DLL
 // search of the project folder is set up in set_project_dll_search_ (below).
+//
+// NOTE: there is deliberately no "sources" (extra .cpp TUs) hook for scripts.
+// The script-support thunks + xi::use()/VAR/state callback globals are bound
+// per-TU (xi_use.hpp's `extern` resolves to xi_script_support.hpp's `static`
+// only within the force-included primary TU), so a second .cpp TU can't call
+// use()/VAR. Multi-file scripts split via headers #included into the one TU —
+// see docs/guides/writing-a-script.md. (Plugins, which export a C ABI, use
+// extra_sources; scripts can't follow that model for this reason.)
 static void read_script_deps_(const std::string& folder,
                               std::vector<std::string>& include_dirs,
                               std::vector<std::string>& link_libs) {
@@ -4310,7 +4318,7 @@ int main(int argc, char** argv) {
             // Resolve the script path: an explicit --script relative path is
             // relative to the PROJECT dir; otherwise project.json's script_path.
             // open_project ALWAYS populates script_path (falls back to
-            // "<folder>/inspection.cpp"), so a script-less project resolves to a
+            // "<folder>/inspect.cpp"), so a script-less project resolves to a
             // path that may not exist — treat a missing script FILE as open-only
             // rather than firing a doomed compile.
             if (!script.empty()) {

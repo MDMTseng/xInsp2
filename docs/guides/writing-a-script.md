@@ -607,6 +607,58 @@ When in doubt, leave `dispatch_threads` at 1.
 
 ---
 
+## Splitting a script across files
+
+When a script grows — e.g. one block of logic per lane — split it into multiple
+**headers** and `#include` them into `inspect.cpp`. Everything works in those
+headers exactly as inline: `VAR()`, `xi::use()`, `xi::status()`, `state()`. See
+[`examples/multi_file_script`](../../examples/multi_file_script).
+
+**Naming convention:** the script-side files share the script's stem — the
+primary `inspect.cpp` plus `inspect_*.hpp` siblings in the same folder. The
+extension associates files by that prefix, so saving any `inspect_*.hpp`
+recompiles the whole script (and an unrelated header dropped in the folder
+doesn't). If your script is named `foo.cpp`, the prefix is `foo_`.
+
+```
+my_project/
+  inspect.cpp           // #include "inspect_lane_a.hpp" + "inspect_lane_b.hpp"; calls them
+  inspect_lane_a.hpp    // inline run_lane_a(int frame) { VAR(...); xi::use("..."); }
+  inspect_lane_b.hpp    // inline run_lane_b(int frame) { ... }
+```
+
+```cpp
+// inspect.cpp
+#include <xi/xi.hpp>
+#include <xi/xi_use.hpp>
+#include "inspect_lane_a.hpp"
+#include "inspect_lane_b.hpp"
+
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int frame) {
+    run_lane_a(frame);
+    run_lane_b(frame);
+}
+```
+
+Saving **any** `inspect*` file recompiles the whole script, and hover / `VAR`
+preview / `xi::use("…")` underlines work in every one of them.
+
+**Why headers, not separate `.cpp` files?** A script compiles as a single
+translation unit. The script-support thunks and the `xi::use()` callback globals
+are force-included into that one TU; `xi_use.hpp` reaches them with `extern`
+declarations that only resolve **within** that TU. A second `.cpp` would fail to
+link (unresolved `xi::use()` globals) — or, if you force-included the support
+header into it too, duplicate the exported thunks. Headers `#include`d into the
+one TU sidestep both. (Plugins are different — they export a C ABI and *do* use
+multiple `.cpp` files; a script can't follow that model for this reason.)
+
+A header that genuinely is a *reusable processing stage* (its own params, state,
+UI) wants to be a **plugin**, not a script header — see the discussion in
+[`adding-a-plugin.md`](./adding-a-plugin.md).
+
+---
+
 ## Using an external library / DLL
 
 Two ways to pull a third-party SDK into a script:

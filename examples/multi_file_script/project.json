@@ -1,0 +1,6 @@
+{
+  "name": "multi_file_script",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}
