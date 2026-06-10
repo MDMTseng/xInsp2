@@ -15,46 +15,12 @@ const { sleep, makeShooter, clearOldShots } = require('./journey_helpers.cjs');
 
 const slash = (s) => s.split('\\').join('/');
 const REPO  = path.resolve(__dirname, '..', '..', '..');
-const BLOB  = path.join(REPO, 'examples', 'blob_tracker');
-const FRAME = slash(path.join(BLOB, 'frames', 'frame_00.png'));
+// The committed, openable example — this e2e doubles as its verification.
+const PROJECT = path.join(REPO, 'examples', 'graph_demo');
+const FRAME   = slash(path.join(PROJECT, 'frames', 'frame_00.png'));
 
 const screenshotDir = path.join(REPO, 'screenshot');
 const shot = makeShooter(screenshotDir, 'graph_multi');
-
-const INST = JSON.stringify({ plugin: 'blob_centroid_detector', config: { blur_radius: 2 } });
-const SCRIPT = `#include <xi/xi.hpp>
-#include <xi/xi_use.hpp>
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int){
-  xi::Image frame = xi::imread(xi::current_frame_path());
-  if (frame.empty()) return;
-  auto a = xi::use("a");
-  auto b = xi::use("b");
-  auto c = xi::use("c");
-  auto ao = a.process(xi::Record().image("src", frame));
-  VAR(a_count, ao["count"].as_int(0));
-  auto bo = b.process(xi::Record().image("src", ao.get_image("cleaned")));
-  VAR(b_count, bo["count"].as_int(0));
-  auto co = c.process(xi::Record().image("src", bo.get_image("cleaned")));
-  VAR(c_count, co["count"].as_int(0));
-}`;
-
-function makeProject() {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xi_multi_'));
-    fs.cpSync(path.join(BLOB, 'plugins', 'blob_centroid_detector'),
-              path.join(dir, 'plugins', 'blob_centroid_detector'), { recursive: true });
-    fs.writeFileSync(path.join(dir, 'project.json'),
-        JSON.stringify({ name: 'graph_multi', script: 'inspect.cpp', params: [], instances: [] }));
-    fs.writeFileSync(path.join(dir, 'inspect.cpp'), SCRIPT);
-    // A frames/ dir so the capture button's sample-frame auto-pick works.
-    fs.mkdirSync(path.join(dir, 'frames'), { recursive: true });
-    fs.copyFileSync(path.join(BLOB, 'frames', 'frame_00.png'), path.join(dir, 'frames', 'frame_00.png'));
-    for (const n of ['a', 'b', 'c']) {
-        fs.mkdirSync(path.join(dir, 'instances', n), { recursive: true });
-        fs.writeFileSync(path.join(dir, 'instances', n, 'instance.json'), INST);
-    }
-    return dir;
-}
 
 async function run() {
     console.log('\n=== GRAPH MULTI (connected pipeline) ===\n');
@@ -65,10 +31,9 @@ async function run() {
     assert.ok(await api.waitConnected(20000), 'backend must connect');
     clearOldShots(screenshotDir, 'graph_multi');
 
-    const dir = makeProject();
-    const opened = await vscode.commands.executeCommand('xinsp2.openProject', slash(dir));
+    const opened = await vscode.commands.executeCommand('xinsp2.openProject', slash(PROJECT));
     assert.ok(opened && opened.ok !== false, 'open_project ok');
-    const cr = await api.sendCmd('compile_and_load', { path: slash(path.join(dir, 'inspect.cpp')) });
+    const cr = await api.sendCmd('compile_and_load', { path: slash(path.join(PROJECT, 'inspect.cpp')) });
     assert.ok(cr.ok, 'compile ok');
     await api.sendCmd('list_instances');
     await sleep(1500);

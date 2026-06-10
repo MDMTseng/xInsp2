@@ -1,0 +1,6 @@
+{
+  "name": "graph_demo",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}
