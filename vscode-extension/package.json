@@ -322,6 +322,11 @@
           "command": "xinsp2.run",
           "when": "xinsp2.isActiveScript && xinsp2.connected && xinsp2.hasProject",
           "group": "navigation@2"
+        },
+        {
+          "command": "xinsp2.openPipelineGraph",
+          "when": "xinsp2.isActiveScript && xinsp2.connected && xinsp2.hasProject",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [

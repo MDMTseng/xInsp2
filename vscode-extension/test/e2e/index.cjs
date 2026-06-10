@@ -136,6 +136,9 @@ module.exports = {
         if (suite === 'graph_multi') {
             return require('./graph_multi.cjs').run();
         }
+        if (suite === 'show_icon') {
+            return require('./show_icon.cjs').run();
+        }
         return run();
     }
 };
