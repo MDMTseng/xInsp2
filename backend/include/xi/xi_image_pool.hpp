@@ -8,10 +8,12 @@
 // access, so a thread killed by `TerminateThread` mid-call never
 // orphans a lock that future ops would block on.
 //
-// Handle layout (heap pool — top byte 0; SHM handles use 0xA5 there):
+// Handle layout:
 //   bits 0-15   slot index   (65 536 slots)
 //   bits 16-55  generation   (1 trillion reuses per slot)
-//   bits 56-63  reserved 0   (kept distinct from SHM's 0xA5 tag)
+//   bits 56-63  reserved 0   (formerly the SHM-region discriminator tag;
+//                              kept zero in all heap-pool handles for
+//                              binary-ABI compatibility with xi_abi.h)
 //
 // Generation defends against ABA: a slot reused after release is
 // stamped with the next generation, so a stale handle (held by a

@@ -7,7 +7,9 @@
 // see docs/design/fe-be-split.md). Before this, the UI inferred "backend down ->
 // line safe" purely from a WebSocket *disconnect*, which can't distinguish a
 // transient respawn from a latched RespawnLimitExceeded, can't show the death
-// reason or respawn budget, and says nothing about the comms gateway.
+// reason or respawn budget, and says nothing about the comms gateway (the
+// gateway was removed 2026-05; the comms fields in FeStatus are inert/reserved
+// for wire-format stability — see comms_enabled / comms_state below).
 //
 // The FE instead publishes its true state to a small JSON **status file** that it
 // rewrites (atomically) on every transition. A reader polls/watches the file. A
@@ -42,9 +44,12 @@ struct FeStatus {
     int         backend_pid  = 0;    // current BE pid (0 if none)
     int         port         = 0;
     bool        working_copy = false;
-    // Comms gateway (only meaningful when enabled).
+    // INERT/reserved wire-compat fields — the out-of-process comms gateway was
+    // removed 2026-05. The FE never sets these; they are always false/"" at runtime.
+    // Retained byte-for-byte in render() for JSON wire-format stability (the VS Code
+    // extension may parse the "comms" object; test_qa_edge.cpp:257 exercises them).
     bool        comms_enabled = false;
-    std::string comms_state;         // "up" | "down" | "gaveup" | "" (disabled)
+    std::string comms_state;         // always "" now; was "up"|"down"|"gaveup" (disabled)
     // The most recent death's forensics (empty until the first death).
     bool           has_last_event = false;
     SafeStateEvent last_event;

@@ -23,10 +23,12 @@ null-check and fall back to `image_create` (which is what they do). The
 `"isolation"` field in `instance.json` is accepted but ignored with a one-time
 deprecation warning.
 
-A few vestiges of the mesh still sit in `xi_image.hpp` — `worker_mode_flag()` /
+The former vestiges in `xi_image.hpp` — `worker_mode_flag()` /
 `is_worker_mode()` / `set_worker_mode()` and the `shm_create_image` branch in
-`Image::create_in_pool` — but they're dead: `set_worker_mode(true)` has no
-callers, so the branch is never taken. (Cleanup pending.)
+`Image::create_in_pool` — were removed in 2026-06. `Image::create_in_pool` now
+calls `host->image_create` unconditionally (in-process ImagePool path only).
+The `shm_*` ABI fields remain declared in `xi_abi.h` and null-wired in
+`make_host_api()` for binary compatibility, but no code path reaches them.
 
 Crash containment is provided by per-thread minidumps, crash breadcrumbs, and
 PDB symbolication instead of process isolation — see

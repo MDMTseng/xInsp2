@@ -48,8 +48,9 @@ extern "C" {
 /* newer ABI than the host provides.                                  */
 /*                                                                    */
 /* Current version history:                                           */
-/*   1 — initial frozen surface (image pool, trigger bus, SHM, host  */
-/*       api with read_image_file).                                  */
+/*   1 — initial frozen surface (image pool, trigger bus, SHM [fields  */
+/*       retained for layout stability; SHM removed 2026-05, always  */
+/*       null on current hosts], host api with read_image_file).     */
 /*   2 — + emit_resource (emit/fetch resource store). Additive at the */
 /*       struct tail, so v1 plugins keep working unchanged.          */
 /* ------------------------------------------------------------------ */
@@ -146,29 +147,31 @@ typedef struct xi_host_api {
                          int32_t image_count);
 
     /* --------------------------------------------------------------- */
-    /* SHM zero-copy buffer pool (opt-in, added in v2 of the host API) */
+    /* SHM zero-copy buffer pool — RETAINED FOR ABI STABILITY ONLY.   */
+    /* SHM and the out-of-process comms gateway were removed 2026-05.  */
+    /* ALL five function pointers below are NULL on current hosts and  */
+    /* will remain NULL until/unless SHM is re-introduced. Plugins     */
+    /* MUST null-check before calling (as the original contract         */
+    /* already required). Fields are kept in place — removing them     */
+    /* would shift every subsequent function pointer and break binary   */
+    /* compatibility with plugins compiled against ABI v1/v2.          */
+    /*                                                                  */
+    /* Historical note: these were intended to allow a worker process   */
+    /* or different plugin to deref image buffers without a memcpy.     */
+    /* The opt-in design (null == unavailable) means existing code      */
+    /* that already null-checks continues to work with no change.       */
+    /*                                                                  */
+    /*   size_bytes for shm_alloc_buffer: opaque byte buffer (e.g.     */
+    /*     ML weights, big metadata). image_data() returns the start.  */
+    /*                                                                  */
+    /* Refcount semantics (when non-null) match image_addref/release.   */
     /* --------------------------------------------------------------- */
-    /* Plugins / scripts call these when they want to allocate an image
-     * or buffer that the OTHER side (a worker process, the host, a
-     * different plugin) can deref WITHOUT a memcpy. Returned handle
-     * lives in the same uint64 namespace as image_handle, so all the
-     * existing image_data / image_width / ... functions also work on
-     * SHM-backed handles transparently.
-     *
-     * If shm_create_image is null, the host has no SHM region (older
-     * host or feature disabled). Callers should fall back to
-     * image_create in that case.
-     *
-     *   size_bytes for shm_alloc_buffer: an opaque byte buffer (e.g.
-     *     ML weights, big metadata). image_data() returns the start.
-     *
-     * Refcount semantics match image_addref / image_release.
-     */
     xi_image_handle (*shm_create_image)(int32_t w, int32_t h, int32_t channels);
     xi_image_handle (*shm_alloc_buffer)(int32_t size_bytes);
     void            (*shm_addref)(xi_image_handle h);
     void            (*shm_release)(xi_image_handle h);
-    /* Returns 1 if the handle came from the SHM region, 0 if heap. */
+    /* Returns 1 if the handle came from the SHM region, 0 if heap.   */
+    /* Always returns 0 on current hosts (shm_is_shm_handle is null).  */
     int32_t         (*shm_is_shm_handle)(xi_image_handle h);
 
     /* --------------------------------------------------------------- */

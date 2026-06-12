@@ -50,7 +50,9 @@ enum class SafeStateReason {
     BackendExit,            // BE process exited (crash or unexpected exit)
     PortUnresponsive,       // BE process alive but WS port stopped accepting
     BootTimeout,            // BE alive + port bound but never reached "ready" in time
-    CommsLost,              // the comms gateway died — the line lost its PLC link
+    CommsLost,              // INERT/reserved — the comms gateway was removed 2026-05;
+                            // nothing emits this value today. Retained for ABI stability
+                            // (referenced by to_string, test_qa_stress.cpp, test_safe_state.cpp).
     RespawnLimitExceeded,   // too many crashes in the window; giving up, staying safe
     SupervisorShutdown,     // the FE itself is shutting down (intended)
 };

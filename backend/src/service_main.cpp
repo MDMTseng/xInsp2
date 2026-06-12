@@ -949,7 +949,7 @@ static void send_rsp_ok(xi::ws::Server& srv, int64_t id, std::string data_json =
 // Ring buffer of recent error messages so an AI / scripted client can
 // correlate a synchronous cmd with any side-channel errors that might
 // have raced in (run-thread crashes, log-level=error from background
-// activity, isolation_dead events, etc). Three error channels exist
+// activity, etc). Three error channels exist
 // in the protocol — rsp.error (sync), `event` (async), `log`
 // level=error (async) — and the WS spec doesn't carry cmd_id /
 // run_id on the async two. Until that's fixed protocol-wide, this
@@ -1352,7 +1352,7 @@ static bool apply_process_priority_(const std::string& cls) {
 // Warn (once per start) if the total dispatch worker count exceeds the core count.
 // Oversubscription causes context-switch thrash that usually slows inspects — a
 // dedicated inspection PC should keep Σ max_parallel ≤ cores (minus a couple for
-// the FE supervisor / comms gateway / OS).
+// the FE supervisor / OS).
 static void warn_oversubscribe_(int total_workers) {
     unsigned hw = std::thread::hardware_concurrency();
     if (hw > 0 && total_workers > (int)hw)
@@ -3083,7 +3083,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         send_rsp_ok(srv, id, out);
     } else if (name == "recent_errors") {
         // Return error events captured by the cross-channel ring
-        // (rsp.error / log level=error / event:isolation_dead etc).
+        // (rsp.error / log level=error / async event etc).
         // Optional `since_ms` arg filters out older entries — useful
         // for "any errors since I sent my last cmd?" polling.
         auto since_opt = xp::get_number_field(parsed->args_json, "since_ms");
@@ -3148,9 +3148,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             if (auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(ii.instance.get())) {
                 labels[a->owner_id()] = "instance:" + ii.name + " (" + ii.plugin_name + ")";
             }
-            // ProcessInstanceAdapter owns handles in the worker's pool,
-            // not the host's — they don't show up here. SHM-backed
-            // handles also don't show up in the host ImagePool stats.
+            // All instances are in-process CAbiInstanceAdapters now;
+            // process-isolation + SHM were removed 2026-05.
         }
 
         auto label_for = [&](xi::ImagePoolOwnerId o) -> std::string {
@@ -4245,11 +4244,8 @@ int main(int argc, char** argv) {
         // E-P1-2: a fresh client should get a fresh server view.
         // Without these clears the next driver to reconnect inherits
         // the prior session's subscription set, history ring, error
-        // ring, and "isolation_dead already reported" memo. None of
-        // that is visible from the new client's perspective and at
-        // best confuses, at worst hides regressions (an instance that
-        // dies AGAIN under the new client would silently be unreported
-        // because the dedup set still contains its name).
+        // ring. None of that is visible from the new client's perspective
+        // and at best confuses, at worst hides regressions.
         {
             std::lock_guard<std::mutex> lk(g_sub_mu);
             g_sub_all = true;
@@ -4269,8 +4265,8 @@ int main(int argc, char** argv) {
         // recover it. Mirror the stop/quiesce release.
         { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
         g_bp_cv.notify_all();
-        // E-P1-1: clear the dedup set so a re-dying instance is
-        // re-reported to the next client.
+        // (E-P1-1: the per-instance-death dedup set was removed with
+        // process isolation in 2026-05; no set to clear here.)
     };
     srv.on_text = [&](std::string_view s) {
         handle_command(srv, s);

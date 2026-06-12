@@ -25,11 +25,11 @@ Constructors:
 - `Image(w, h, c)` — fresh zero-filled buffer.
 - `Image(w, h, c, const uint8_t* data)` — **copies** `data` into a fresh buffer.
 - `Image::create_in_pool(host, w, h, c)` — (plugins) zero-copy pool-backed buffer
-  for *producing* an image to return; bytes land straight in the host ImagePool.
-  `xi_image.hpp` still carries a dead `is_worker_mode()` / `shm_create_image`
-  branch (vestige of the SHM mesh removed 2026-05) — it's never taken, since
-  `is_worker_mode()` is always false and `shm_create_image` is always `nullptr`,
-  so the only live path is `host->image_create`. (Cleanup pending.)
+  for *producing* an image to return; bytes land straight in the host in-process
+  ImagePool via `host->image_create`. The former SHM / worker-mode branch
+  (`is_worker_mode()` / `host->shm_create_image`) was removed in 2026-06; only
+  the in-process path remains. The `shm_*` ABI fields in `xi_abi.h` are retained
+  null-wired for binary compatibility but are never called.
 - `Image::adopt_pool_handle(host, handle)` — zero-copy view over a host handle.
 
 ## Loading: `xi::imread`

@@ -108,7 +108,7 @@ struct FeConfig {
     std::string preserve_dir;      // default: <be_log dir>/crash-dumps
     // Status channel: the FE rewrites this small JSON file (atomically) on every
     // transition so the UI / an operator HMI can read the line's TRUE state
-    // (safe/healthy, reason, respawn budget, comms, last death) instead of
+    // (safe/healthy, reason, respawn budget, last death) instead of
     // inferring "down" from a WS disconnect. Default next to be_log; empty/"-" off.
     std::string status_file;       // default: <be_log dir>/fe-status.json
 };

@@ -14,9 +14,9 @@
 // scripts.
 //
 // Storage: an Image holds a `shared_ptr<uint8_t>` over its first byte.
-// The buffer can be backed by either a heap vector (when ops allocate
-// new output) or by a refcounted handle in the host's ImagePool / SHM
-// region (zero-copy view). The two cases are indistinguishable through
+// The buffer is backed by either a heap vector (when ops allocate new
+// output) or by a refcounted handle in the host's in-process ImagePool
+// (zero-copy view). The two cases are indistinguishable through
 // `data()` / `size()` / `stride()`, so operator code is unaffected.
 // `record_to_c` / `UseProxy::process` shortcut the pool-backed case to
 // addref instead of memcpy on the way across the ABI boundary, which
@@ -35,24 +35,6 @@
 #include <vector>
 
 namespace xi {
-
-// Set to `true` by xinsp-worker / xinsp-script-runner at startup, after
-// attaching the backend's SHM region. `Image::create_in_pool` (and
-// therefore `Plugin::pool_image`) checks this and uses
-// `host->shm_create_image` instead of `host->image_create` when set,
-// so plugin output lands directly in SHM and can be read by the
-// backend without a heap-to-shm promote copy. The flag is process-
-// global, set once at init, never thereafter.
-inline std::atomic<bool>& worker_mode_flag() {
-    static std::atomic<bool> v{false};
-    return v;
-}
-inline bool is_worker_mode() {
-    return worker_mode_flag().load(std::memory_order_relaxed);
-}
-inline void set_worker_mode(bool v) {
-    worker_mode_flag().store(v, std::memory_order_relaxed);
-}
 
 struct Image {
     int width    = 0;
@@ -84,43 +66,33 @@ struct Image {
         }
     }
 
-    // Allocate a fresh slot in the host's ImagePool and return a
-    // pool-backed Image whose `data()` points directly at that slot.
+    // Allocate a fresh slot in the host's in-process ImagePool and return
+    // a pool-backed Image whose `data()` points directly at that slot.
     // Plugins use this when they need to *produce* a new image — the
     // bytes get written straight into the pool, so the cross-ABI return
     // path (record_to_c) can short-circuit to addref instead of doing
     // a heap-to-pool memcpy.
     //
-    // In-process: allocates from the host's main ImagePool via
-    // `host->image_create`. The handle is usable directly by the backend
-    // (and any other in-proc plugin / the script).
+    // Allocates from the host's ImagePool via `host->image_create`. The
+    // handle is usable directly by the backend and any other in-process
+    // plugin or script.
     //
-    // Worker / script-runner process (`xi::is_worker_mode()` set true
-    // by the worker / script-runner main at startup): allocates in the
-    // shared SHM region via `host->shm_create_image` instead. The
-    // backend reads the same bytes via the same handle — no
-    // heap-to-shm promote copy at RPC reply time. Plugin code is the
-    // same either way; the helper picks the right pool.
-    //
-    // Refcount accounting: image_create / shm_create_image return
-    // refcount=1; adopt_pool_handle adds one (=2); we release once
-    // (=1), owned by the returned Image's shared_ptr deleter.
+    // Refcount accounting: image_create returns refcount=1;
+    // adopt_pool_handle adds one (=2); we release once (=1), owned by
+    // the returned Image's shared_ptr deleter.
     static Image create_in_pool(const xi_host_api* host, int w, int h, int c) {
         if (!host || w <= 0 || h <= 0 || c <= 0) return Image{};
-        xi_image_handle hndl = (is_worker_mode() && host->shm_create_image)
-            ? host->shm_create_image(w, h, c)
-            : host->image_create(w, h, c);
+        xi_image_handle hndl = host->image_create(w, h, c);
         if (!hndl) return Image{};
         Image img = adopt_pool_handle(host, hndl);
         host->image_release(hndl);
         return img;
     }
 
-    // Zero-copy view over a refcounted host pool handle. Bumps refcount
-    // on construction; releases on the last copy's destruction. The
-    // returned Image's `data()` points directly at pool memory — no
-    // bytes copied. Works for both in-process pool handles and SHM
-    // handles (host_api routes addref / release correctly for both).
+    // Zero-copy view over a refcounted in-process host pool handle. Bumps
+    // refcount on construction; releases on the last copy's destruction.
+    // The returned Image's `data()` points directly at pool memory — no
+    // bytes copied.
     static Image adopt_pool_handle(const xi_host_api* host, xi_image_handle h) {
         Image img;
         if (!host || !h) return img;
