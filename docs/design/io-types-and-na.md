@@ -68,6 +68,16 @@ double w = roi["w"];                 // read via implicit conversion
 Don't `auto`-capture the proxy (`auto w = roi["w"]`) — like a `std::vector<bool>`
 reference it aliases the node; bind to a concrete type (`double w = …`).
 
+**OpenCV math.** `xi/xi_types_cv.hpp` (opt-in — the only xi header that pulls
+OpenCV, so `xi_types.hpp` stays dependency-free) bridges the small vectors into
+`cv::`:
+
+```cpp
+xi::Vec3 v = ...;
+cv::Vec3d r  = M33 * xi::to_cv(v);   // matrix/vector math in OpenCV
+xi::Vec3 v2  = xi::from_cv(r);       // back to a nominal value
+```
+
 ### 1. Nominal types — names over a generic Record
 
 A small set of **nominal type wrappers** — `Number`, `Point`, `Vec2/3/4`, `Line`,
