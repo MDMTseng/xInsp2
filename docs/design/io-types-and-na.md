@@ -115,7 +115,9 @@ pieces.
    short-circuit, `xi::require`. Independently useful: every pipeline gets clean
    failure propagation. *(in progress)*
 2. **`xi_types.hpp`** — the nominal type wrappers (lightweight handles) + their
-   schema-less accessors.
+   schema-less accessors. *(done)* `Typed` base + `Number / Point / Pose / Line /
+   Arc / Roi`; each a shared-Record handle with `record()`, `is_na()`,
+   `na_reason()`, a typed `::na(reason)`, field ctors, and schema-less accessors.
 3. **`io.hpp` pattern + a fixturing demo** — `extract()` / `build()` facades, a
    matcher → line_fit pose-aligned example, manifest `kind` aligned to the type
    names.
