@@ -5,9 +5,9 @@
 > track of them, plus a rule for new code to follow now. The actual port
 > is done later, on the target platform.
 >
-> **TL;DR (assessment 2026-06-04).** Moderate, not scary. Only ~15 of 53
-> backend files touch Win32 and ~14 sites are already `#ifdef _WIN32`-gated;
-> the OS coupling is concentrated, not smeared. A working **Linux x64**
+> **TL;DR.** Moderate, not scary. Only a minority of backend files touch Win32
+> (roughly a third), and most of those are already `#ifdef _WIN32`-gated; the OS
+> coupling is concentrated, not smeared. A working **Linux x64**
 > headless backend (build + load + clang compile + core trigger loop) is
 > ~2–3 weeks; **ARM Linux** adds ~2–4 days; **macOS** adds ~1–2 weeks. The
 > only genuinely hard items are crash-forensics parity and the watchdog

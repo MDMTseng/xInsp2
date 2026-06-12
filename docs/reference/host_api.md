@@ -74,7 +74,7 @@ still has them `nullptr`. Either way, plugins null-check before calling.
 | Field group | Status |
 |---|---|
 | `image_create` … `image_stride`, `log`, `instance_folder` | Wired in `make_host_api()` |
-| `emit_trigger` | `nullptr` in `make_host_api()`; wired by the trigger-bus setup in `service_main.cpp` |
+| `emit_trigger` | `nullptr` in `make_host_api()`; wired by `install_trigger_hook()` in `PluginManager::default_host_api()` |
 | `shm_*` (five fields) | Hard-wired `nullptr` — SHM removed 2026-05; plugins must null-check |
 | `read_image_file` | Wired via `install_read_image_file()` before plugins load |
 | `set_status` | Wired — routes to the status registry via `xi::status_sink()` |

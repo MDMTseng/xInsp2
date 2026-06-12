@@ -16,9 +16,11 @@ push.
 - **VS Code** if you're going to touch the extension (you can build the
   backend without it).
 
+- **OpenCV 4.x** — **required** (`find_package(OpenCV REQUIRED)`; every
+  script/plugin force-includes `<opencv2/opencv.hpp>`). Auto-detected at common
+  Windows install paths.
+
 Optional accelerators (auto-detected at configure time):
-- **OpenCV 4.x** — default ops backend below IPP. Auto-detected at
-  common Windows install paths.
 - **Intel IPP** — fastest image ops + JPEG. Set `XINSP2_HAS_IPP=ON` and
   `IPP_ROOT`.
 - **libjpeg-turbo** — fastest JPEG encoder. Set
@@ -64,7 +66,7 @@ how to add new tests.
 - **Feature work** on a topic branch off master (`feature/foo`,
   `fix/bar`, `spike/baz`).
 - **Spikes** that need to evolve over many commits get their own branch
-  (e.g. `shm-process-isolation`); merge when the team agrees the
+  (e.g. `refactor/emitter-pull-model`); merge when the team agrees the
   approach has earned its place.
 - **Force-push** only on personal feature branches; never on `master`.
 

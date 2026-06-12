@@ -186,7 +186,7 @@ ctest covers the C++ unit tests (`backend/tests/`). See [`testing.md`](./testing
 backend/
   src/           service_main.cpp (BE — the big one), fe_main.cpp (supervisor),
                  runner_main.cpp (headless runner), xi_image_io.cpp
-  include/xi/    the SDK headers (57): xi_plugin_manager, xi_trigger_bus,
+  include/xi/    the SDK headers (50+): xi_plugin_manager, xi_trigger_bus,
                  xi_image_pool, xi_script_*, xi_use, xi_result, xi_types, …
   tests/         C++ unit tests (ctest) + benchmarks
   CMakeLists.txt build (targets: xinsp_backend / xinsp_fe / xinsp_runner / tests)

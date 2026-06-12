@@ -238,12 +238,12 @@ xinsp2-prod-<project>/
 
 - **v1** — SPA shell + Compose/Run modes + grid; built-in cards (`image`,
   `verdict`, `spc`, `throughput`, `yield`, `value`); bind-to-var; single overlay
-  layer with a built-in renderer; `dashboard.json` (read). Runs against the existing
-  WS (no AOT yet — dev backend is fine for bring-up). `save_dashboard` (compose
-  write-back) is deferred to v1.1.
+  layer with a built-in renderer; `dashboard.json` (read). `save_dashboard`
+  (compose write-back) is deferred to v1.1. The AOT bundle + load-only backend
+  mode and the production package export + launcher are **shipped**
+  (`tools/export_bundle.py`, backend `--aot`; see `deployment.md`).
 - **v2** — plugin-ships-`card` + plugin-ships-`overlay`; multi-layer overlay
-  stacking; the AOT bundle format + load-only backend mode; the production package
-  export + `run.cmd` kiosk launcher.
+  stacking.
 - **v3** — history backfill on connect for SPC; alarm acknowledgement; multi-station
   / multi-project dashboards; theming.
 

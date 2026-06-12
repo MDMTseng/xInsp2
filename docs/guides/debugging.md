@@ -164,10 +164,14 @@ Useful patterns when a test is unhappy:
 
 In the extension's command palette:
 
-- **xInsp2: Show Project Warnings** — surface any instances that were
-  skipped on `open_project` (bad plugin / missing DLL / etc.).
 - **xInsp2: Restart Backend** — manual respawn if auto-respawn rate
   limit was hit.
+- **xInsp2: Rescan Plugins** — re-discover plugins after fixing a bad
+  build / missing DLL.
+
+Instances skipped on `open_project` (bad plugin / missing DLL / etc.) surface
+as a `warn` log in the Output panel (the backend also answers the
+`open_project_warnings` command with the same list).
 
 ---
 

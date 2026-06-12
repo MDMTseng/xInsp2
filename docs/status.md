@@ -141,7 +141,7 @@ See [`testing.md`](./testing.md) for the full breakdown. Summary:
   `image_pool`, `image_pool_stress`, `sha256`, `safe_state`, `qa_fault`,
   `qa_race`, `qa_edge`, `qa_stress`). (The Phase-3 SHM/IPC test set was
   deleted with the process-isolation removal.)
-- ~30 Node integration tests under `vscode-extension/test/`.
+- 26 Node integration suites under `vscode-extension/test/`.
 - E2E suites driven by `@vscode/test-electron`: full pipeline,
   multi-camera, record/replay, user journey, project-plugin journey,
   UX states. Each suite captures screenshots of the running editor.

@@ -23,6 +23,11 @@ null-check and fall back to `image_create` (which is what they do). The
 `"isolation"` field in `instance.json` is accepted but ignored with a one-time
 deprecation warning.
 
+A few vestiges of the mesh still sit in `xi_image.hpp` — `worker_mode_flag()` /
+`is_worker_mode()` / `set_worker_mode()` and the `shm_create_image` branch in
+`Image::create_in_pool` — but they're dead: `set_worker_mode(true)` has no
+callers, so the branch is never taken. (Cleanup pending.)
+
 Crash containment is provided by per-thread minidumps, crash breadcrumbs, and
 PDB symbolication instead of process isolation — see
 [`guides/debugging.md`](../guides/debugging.md).

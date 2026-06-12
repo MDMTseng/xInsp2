@@ -133,7 +133,7 @@ location:
    { name, width, height, jpegBase64 })`.
 2. For an **inline preview inside another webview**: copy the widget
    block (CSS + div + script) from
-   `vscode-extension/src/imageViewerWidget.ts`. Element id = `preview`
+   `vscode-extension/src/imageViewerPanel.ts`. Element id = `preview`
    by convention; rename if you need >1 in the same webview.
 
 Pan / zoom / coordinate math is identical. Pick tools (Point / Area)
@@ -225,15 +225,15 @@ owned by the `xinsp-fe.exe` supervisor (the production frontend — see
 [`../design/fe-be-split.md`](../design/fe-be-split.md)). This is the
 `xinsp2.backendMode` setting:
 
-- **`managed`** — the extension spawns the backend and respawns it on crash
-  (rate-limited 5/min). The dev inner-loop default behavior.
+- **`managed`** (default) — the extension spawns the backend and respawns it on
+  crash (rate-limited 5/min). The dev inner-loop default.
 - **`attach`** — a backend is already running (FE-owned on a line). The
   extension connects read/operator-only: it **never** spawns or respawns, and
   `xinsp2.restartBackend` just reconnects (the FE owns the process). On a
   dropped connection the health status bar shows `$(shield) xInsp2 · safe`,
   signalling the FE is recovering the backend and the line is in its safe
   state.
-- **`auto`** (default) — `isPortOpen(port)` decides: attach if a backend is
+- **`auto`** — `isPortOpen(port)` decides: attach if a backend is
   already listening, else managed.
 
 **FE status channel (`xinsp2.feStatusFile`).** Inferring "down → safe" from a

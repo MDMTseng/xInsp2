@@ -120,6 +120,6 @@ duplicated pan/zoom/draw plumbing makes the extraction pay off.
 - `docs/guides/extending-the-ui.md` — current image viewer test hooks
   (`xinsp2.imageViewer.runSelftest` / `applyOp`) that this design
   generalises.
-- `vscode-extension/src/imageViewerPanel.ts` — current implementation.
-- `vscode-extension/src/imageViewerWidget.ts` — shared widget already
-  used in plugin webviews; same pan/zoom math.
+- `vscode-extension/src/imageViewerPanel.ts` — current implementation; its
+  inline widget block (CSS + div + script) is the same pan/zoom math copied
+  into plugin webviews.

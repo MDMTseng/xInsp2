@@ -436,7 +436,7 @@ xInsp2/
 │   ├── reference/           ← per-API references (host_api, plugin-abi, instance-model, …)
 │   └── archive/             ← historical snapshots (M0 plan, retired audits)
 ├── backend/
-│   ├── include/xi/          ← 30+ headers (xi_abi, xi_async, xi_var, …)
+│   ├── include/xi/          ← 50+ headers (xi_abi, xi_async, xi_var, …)
 │   ├── src/
 │   │   ├── service_main.cpp ← xinsp-backend.exe (WS server)
 │   │   └── runner_main.cpp  ← xinsp-runner.exe (headless)

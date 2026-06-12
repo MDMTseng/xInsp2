@@ -40,7 +40,7 @@ process lifecycle and the line's safe state; the BE owns all compute.
 
 ```cpp
 enum class SafeStateReason { BackendExit, PortUnresponsive, BootTimeout, CommsLost /*inert: gateway removed*/, RespawnLimitExceeded, SupervisorShutdown };
-struct SafeStateEvent { reason; backend_rc; exception_name; faulting_module; last_phase; report_path; ts_ms; };
+struct SafeStateEvent { reason; backend_rc; exception_name; faulting_module; last_phase; report_path; dump_path; custom_payload; ts_ms; };
 class SafeStateSink { void enter_safe_state(const SafeStateEvent&); void clear_safe_state(); const char* name(); };
 ```
 
