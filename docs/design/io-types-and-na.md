@@ -57,10 +57,21 @@ e.roi().clone().set("w", 111);  // independent — e's roi.w stays 999
 (A separate lvalue you pass to `extract()` is taken by value — a copy — so it
 stays independent; `extract(process(...))` directly is the common zero-copy case.)
 
+**Field access.** Besides the named accessors (`roi.w()`), `operator[]` returns a
+read/write proxy that drops into arithmetic and assigns back:
+
+```cpp
+roi["x"] = roi["x"] * 0.533 + 45;   // read-modify-write (write-through)
+double w = roi["w"];                 // read via implicit conversion
+```
+
+Don't `auto`-capture the proxy (`auto w = roi["w"]`) — like a `std::vector<bool>`
+reference it aliases the node; bind to a concrete type (`double w = …`).
+
 ### 1. Nominal types — names over a generic Record
 
-A small set of **nominal type wrappers** — `Number`, `Point`, `Line`, `Arc`,
-`Pose`, `Roi` (in `xi/xi_types.hpp`) — each is *just a name* over a generic
+A small set of **nominal type wrappers** — `Number`, `Point`, `Vec2/3/4`, `Line`,
+`Arc`, `Pose`, `Roi` (in `xi/xi_types.hpp`) — each is *just a name* over a generic
 `xi::Record`. No fields are enforced; the payload is still schema-less cJSON. The
 wrapper is a lightweight handle (holds a Record), can carry schema-less accessors
 (`pose.angle()` reads `rec["angle"]`, NA if absent), and **can be NA**.

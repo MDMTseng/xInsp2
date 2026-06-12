@@ -22,6 +22,42 @@
 
 namespace xi {
 
+// A read/write proxy for one field of a cJSON object node. Returned by
+// Typed::operator[]. Reads via implicit conversion (so it drops into arithmetic),
+// writes via operator= (write-through to the node). Lives only for the
+// statement — do NOT `auto`-capture it (it aliases the node, like a
+// std::vector<bool> reference). Usage:
+//
+//   roi["x"] = roi["x"] * 0.533 + 45;   // read-modify-write
+//   double w = roi["w"];                 // read
+//
+class Field {
+public:
+    Field(cJSON* node, const char* key) : node_(node), key_(key) {}
+
+    operator double() const { return Record::Value(node_)[key_.c_str()].as_double(0); }
+    double      as_double(double d = 0)         const { return Record::Value(node_)[key_.c_str()].as_double(d); }
+    int         as_int(int d = 0)               const { return Record::Value(node_)[key_.c_str()].as_int(d); }
+    bool        as_bool(bool d = false)         const { return Record::Value(node_)[key_.c_str()].as_bool(d); }
+    std::string as_string(const std::string& d = "") const { return Record::Value(node_)[key_.c_str()].as_string(d); }
+
+    Field& operator=(double v)             { set_(cJSON_CreateNumber(v));            return *this; }
+    Field& operator=(int v)                { set_(cJSON_CreateNumber(v));            return *this; }
+    Field& operator=(bool v)               { set_(cJSON_CreateBool(v));              return *this; }
+    Field& operator=(const std::string& v) { set_(cJSON_CreateString(v.c_str()));    return *this; }
+    Field& operator=(const char* v)        { set_(cJSON_CreateString(v ? v : ""));   return *this; }
+    Field& operator=(const Field& o)       { return *this = static_cast<double>(o); }   // value copy
+
+private:
+    void set_(cJSON* item) {
+        if (!node_ || !item) { if (item) cJSON_Delete(item); return; }
+        cJSON_DeleteItemFromObject(node_, key_.c_str());
+        cJSON_AddItemToObject(node_, key_.c_str(), item);
+    }
+    cJSON*      node_;
+    std::string key_;
+};
+
 // Base: a NAME over a Record, with a SHALLOW (view) mode.
 //
 //   - OWNED  : holds its own Record (root_), node_ == root_->json(). Field ctors
@@ -67,6 +103,10 @@ public:
     Typed& set(const char* k, int v)                { set_node_(k, cJSON_CreateNumber(v)); return *this; }
     Typed& set(const char* k, bool v)               { set_node_(k, cJSON_CreateBool(v));   return *this; }
     Typed& set(const char* k, const std::string& v) { set_node_(k, cJSON_CreateString(v.c_str())); return *this; }
+
+    // Field proxy: read (implicit) + write (operator=), so e.g.
+    //   roi["x"] = roi["x"] * 0.533 + 45;
+    Field operator[](const char* key) const { return Field(node_, key); }
 
 protected:
     // A nested value as a VIEW into this one's tree (no copy). `key` is a direct
@@ -164,6 +204,35 @@ public:
     }
     double x() const { return num("x"); }  double y() const { return num("y"); }
     double w() const { return num("w"); }  double h() const { return num("h"); }
+};
+
+// Small fixed vectors — {x}, {x,y}, {x,y,z}, {x,y,z,w}. Components are also
+// reachable by name via operator[] (vec["y"] = ...).
+class Vec2 : public Typed {
+public:
+    XI_NOMINAL(Vec2)
+    Vec2(double x, double y) { set("x", x).set("y", y); }
+    double x() const { return num("x"); }
+    double y() const { return num("y"); }
+};
+
+class Vec3 : public Typed {
+public:
+    XI_NOMINAL(Vec3)
+    Vec3(double x, double y, double z) { set("x", x).set("y", y).set("z", z); }
+    double x() const { return num("x"); }
+    double y() const { return num("y"); }
+    double z() const { return num("z"); }
+};
+
+class Vec4 : public Typed {
+public:
+    XI_NOMINAL(Vec4)
+    Vec4(double x, double y, double z, double w) { set("x", x).set("y", y).set("z", z).set("w", w); }
+    double x() const { return num("x"); }
+    double y() const { return num("y"); }
+    double z() const { return num("z"); }
+    double w() const { return num("w"); }
 };
 
 } // namespace xi
