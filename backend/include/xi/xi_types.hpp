@@ -58,6 +58,16 @@ public:
     std::string src()                  const { return src_; }
     Typed&      set_src(const std::string& id) { src_ = id; return *this; }
 
+    // --- WRITE-THROUGH setters ---------------------------------------------
+    // Writes the viewed node. A VIEW writes into the SHARED tree, so it mutates
+    // the ORIGINAL it was extracted from — by design (like a NumPy view). If you
+    // don't want that, .clone() first for an independent copy. See
+    // docs/design/io-types-and-na.md.
+    Typed& set(const char* k, double v)             { set_node_(k, cJSON_CreateNumber(v)); return *this; }
+    Typed& set(const char* k, int v)                { set_node_(k, cJSON_CreateNumber(v)); return *this; }
+    Typed& set(const char* k, bool v)               { set_node_(k, cJSON_CreateBool(v));   return *this; }
+    Typed& set(const char* k, const std::string& v) { set_node_(k, cJSON_CreateString(v.c_str())); return *this; }
+
 protected:
     // A nested value as a VIEW into this one's tree (no copy). `key` is a direct
     // child name. NA-safe. Used by composite types (e.g. Feature::pose()).
@@ -69,19 +79,10 @@ protected:
         t.set_src(src_);
         return t;
     }
-    // Mutable build target — COPY-ON-WRITE. A view (or a value whose root is
-    // shared) DETACHES into a private copy before any write, so adjusting a value
-    // can never touch the original / shared data. Field ctors run on a fresh,
-    // unique owned value, so they detach nothing.
-    Record& mut() {
-        const bool owned_unique = root_ && node_ == root_->json() && root_.use_count() == 1;
-        if (!owned_unique) {
-            Record copy = (root_ && node_ == root_->json()) ? *root_
-                                                            : Record::Value(node_).as_record();
-            root_ = std::make_shared<Record>(std::move(copy));
-            node_ = root_->json();
-        }
-        return *root_;
+    void set_node_(const char* k, cJSON* item) {
+        if (!node_ || !item) { if (item) cJSON_Delete(item); return; }
+        cJSON_DeleteItemFromObject(node_, k);
+        cJSON_AddItemToObject(node_, k, item);
     }
     // Schema-less field reads off the viewed node: missing / wrong-type → default.
     double      num(const char* k, double def = 0.0)            const { return Record::Value(node_)[k].as_double(def); }
@@ -102,7 +103,9 @@ protected:
         : ::xi::Typed(std::move(root), node) {}                               \
     static Name na(const std::string& reason = "") {                          \
         return Name(::xi::Record::na(reason));                                 \
-    }
+    }                                                                          \
+    /* An independent OWNED copy — set() on it won't touch the original. */    \
+    Name clone() const { return Name(this->record()); }
 
 // --- the common machine-vision vocabulary --------------------------------
 // Field names are conventions (schema-less); accessors just read them.
@@ -110,14 +113,14 @@ protected:
 class Number : public Typed {
 public:
     XI_NOMINAL(Number)
-    explicit Number(double v) { mut().set("value", v); }
+    explicit Number(double v) { set("value", v); }
     double value(double def = 0.0) const { return num("value", def); }
 };
 
 class Point : public Typed {
 public:
     XI_NOMINAL(Point)
-    Point(double x, double y) { mut().set("x", x).set("y", y); }
+    Point(double x, double y) { set("x", x).set("y", y); }
     double x() const { return num("x"); }
     double y() const { return num("y"); }
 };
@@ -126,7 +129,7 @@ public:
 class Pose : public Typed {
 public:
     XI_NOMINAL(Pose)
-    Pose(double x, double y, double angle) { mut().set("x", x).set("y", y).set("angle", angle); }
+    Pose(double x, double y, double angle) { set("x", x).set("y", y).set("angle", angle); }
     double x()     const { return num("x"); }
     double y()     const { return num("y"); }
     double angle() const { return num("angle"); }
@@ -136,7 +139,7 @@ class Line : public Typed {
 public:
     XI_NOMINAL(Line)
     Line(double x1, double y1, double x2, double y2) {
-        mut().set("x1", x1).set("y1", y1).set("x2", x2).set("y2", y2);
+        set("x1", x1).set("y1", y1).set("x2", x2).set("y2", y2);
     }
     double x1() const { return num("x1"); }  double y1() const { return num("y1"); }
     double x2() const { return num("x2"); }  double y2() const { return num("y2"); }
@@ -146,7 +149,7 @@ class Arc : public Typed {
 public:
     XI_NOMINAL(Arc)
     Arc(double cx, double cy, double r, double a0, double a1) {
-        mut().set("cx", cx).set("cy", cy).set("r", r).set("a0", a0).set("a1", a1);
+        set("cx", cx).set("cy", cy).set("r", r).set("a0", a0).set("a1", a1);
     }
     double cx() const { return num("cx"); }  double cy() const { return num("cy"); }
     double r()  const { return num("r");  }
@@ -157,7 +160,7 @@ class Roi : public Typed {
 public:
     XI_NOMINAL(Roi)
     Roi(double x, double y, double w, double h) {
-        mut().set("x", x).set("y", y).set("w", w).set("h", h);
+        set("x", x).set("y", y).set("w", w).set("h", h);
     }
     double x() const { return num("x"); }  double y() const { return num("y"); }
     double w() const { return num("w"); }  double h() const { return num("h"); }

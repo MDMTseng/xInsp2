@@ -40,12 +40,22 @@ Record baseline; the view wrappers cut that to ~1.4× — ~3× less wrapper over
 the shared root, no copy), so it's cheaper still. The type NAME is free; the cost
 is only the cJSON the wrapping would otherwise duplicate.
 
-**Mutation safety.** Accessors are read-only, so adjusting a value never touches
-the original. The two ways to "adjust" — `record()` (an independent copy you can
-edit) or reconstruction (`Pose(p.x(), p.y(), newAngle)`) — are detached by
-construction. And the internal build target (`mut()`, used by field ctors) is
-copy-on-write: a view, or a value whose root is shared, detaches into a private
-copy before any write — so even a custom mutator can't reach the shared tree.
+**Write-through, with explicit clone.** Views are shallow, so `set()` is
+write-through *by design* (like a NumPy view): it mutates the node in the shared
+tree, so the change is seen by re-reads and flows into inputs you construct from
+the value. The extractor OWNS its source (the `process()` result is moved in), so
+"the original" you write to is the extractor's record — which is what flows
+downstream. When you DON'T want that, `.clone()` (or `record()`) first for an
+independent copy:
+
+```cpp
+auto e = synth_io::extract(syn.process(...));   // e owns the result
+e.roi().set("w", 999);          // write-through: e's roi.w is now 999
+e.roi().clone().set("w", 111);  // independent — e's roi.w stays 999
+```
+
+(A separate lvalue you pass to `extract()` is taken by value — a copy — so it
+stays independent; `extract(process(...))` directly is the common zero-copy case.)
 
 ### 1. Nominal types — names over a generic Record
 

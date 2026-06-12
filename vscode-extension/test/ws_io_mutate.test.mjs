@@ -1,8 +1,8 @@
-// ws_io_mutate.test.mjs — adjusting a value never touches the original.
+// ws_io_mutate.test.mjs — the view write-through / clone contract.
 //
-// The shallow (view) wrappers share the source tree, so this nails down the
-// safety contract: accessors are read-only, and the ways to "adjust" a value
-// (record() copy, reconstruction) are independent of the original.
+// Extracted values are SHALLOW views: set() writes through to the original by
+// design; .clone() first if you want an independent copy. See
+// docs/design/io-types-and-na.md.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,27 +21,27 @@ const SCRIPT = `#include <xi/xi.hpp>
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int){
   auto syn = xi::use("syn");
-  auto out = syn.process(synth_io::build().seed(7).threshold(0.0).build());
-  auto e   = synth_io::extract(out);
+  // The extractor OWNS the process result (moved in). Its views write through to
+  // that owned record — which is what flows downstream.
+  auto e = synth_io::extract(syn.process(synth_io::build().seed(7).threshold(0.0).build()));
+  VAR(before, e.roi().w());          // 640
 
-  xi::Roi r = e.roi();              // a VIEW into out's tree
-  VAR(orig_w, r.w());              // 640
+  // WRITE-THROUGH: set() on a view mutates the extractor's record.
+  e.roi().set("w", 999.0);
+  VAR(after_write, e.roi().w());     // 999 — a fresh view sees it
 
-  // Adjust via an independent copy (record() materialises).
-  xi::Record edited = r.record();
-  edited.set("w", 999.0);
-  VAR(edited_w, edited["w"].as_double());
+  // ...and the mutation flows into a constructed input.
+  auto in = synth_io::build().roi(e.roi()).build();
+  VAR(fed_w, in["roi.w"].as_double());  // 999
 
-  // Original output + a fresh view are unchanged.
-  VAR(out_roi_w_after, out["roi.w"].as_double());
-  VAR(view_w_after,    e.roi().w());
+  // CLONE: an independent copy — editing it does NOT touch the extractor's record.
+  e.roi().clone().set("w", 111.0);
+  VAR(after_clone, e.roi().w());     // still 999
 
-  // Reconstruct a new value — also independent of the original.
-  xi::Pose bp = e.best_pose();
-  xi::Pose adjusted(bp.x(), bp.y(), 123.0);
-  VAR(bp_angle,  bp.angle());
-  VAR(adj_angle, adjusted.angle());
-  VAR(bp_angle_after, e.best_pose().angle());
+  // record() likewise gives an independent copy.
+  xi::Record c = e.roi().record();
+  c.set("w", 222.0);
+  VAR(after_record_copy, e.roi().w()); // still 999
 }`;
 
 async function waitRsp(c, id) { for (;;) { const m = await c.nextText(); if (m.type === 'rsp' && m.id === id) return m; } }
@@ -65,13 +65,11 @@ test('adjusting an extracted value does not affect the original', async () => {
             for (;;) { const m = await c.nextText(); if (m.type === 'vars') { vars = m.items; break; } }
             const v = Object.fromEntries(vars.map(x => [x.name, x.value]));
             console.log('vars:', JSON.stringify(v));
-            assert.equal(v.orig_w, 640);
-            assert.equal(v.edited_w, 999, 'the copy was edited');
-            assert.equal(v.out_roi_w_after, 640, 'original output untouched');
-            assert.equal(v.view_w_after, 640, 'a fresh view still reads the original');
-            assert.equal(v.adj_angle, 123, 'reconstructed value has the new angle');
-            assert.equal(v.bp_angle_after, v.bp_angle, 'original best_pose angle unchanged');
-            assert.notEqual(v.adj_angle, v.bp_angle, 'adjustment is independent');
+            assert.equal(v.before, 640);
+            assert.equal(v.after_write, 999, 'set() on a view writes through to the extractor record');
+            assert.equal(v.fed_w, 999, 'the write-through flows into a constructed input');
+            assert.equal(v.after_clone, 999, 'editing a clone does NOT touch the extractor record');
+            assert.equal(v.after_record_copy, 999, 'editing a record() copy does NOT touch it either');
         });
     } finally {
         const { rmSync } = await import('node:fs');
