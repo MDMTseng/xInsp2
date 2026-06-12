@@ -10,7 +10,14 @@ export class ViewerProvider implements vscode.WebviewViewProvider {
     // shift-click / double-click into the rich Image Viewer panel.
     public readonly onMessage = new vscode.EventEmitter<any>();
 
+    // Last vars seen, kept so a viewer opened AFTER a run still shows the data
+    // (the webview asks for state with a 'ready' message when it loads).
+    private lastVars?: unknown;
+
     constructor(private extensionUri: vscode.Uri) {}
+
+    /** True once the viewer panel has been opened at least once. */
+    isResolved(): boolean { return !!this.view; }
 
     resolveWebviewView(webviewView: vscode.WebviewView): void {
         this.view = webviewView;
@@ -19,10 +26,18 @@ export class ViewerProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'webview')],
         };
         webviewView.webview.html = this.getHtml();
-        webviewView.webview.onDidReceiveMessage((m) => this.onMessage.fire(m));
+        webviewView.webview.onDidReceiveMessage((m) => {
+            // The webview signals 'ready' on load → replay the last vars so a
+            // viewer opened after the run isn't blank.
+            if (m?.type === 'ready' && this.lastVars !== undefined) {
+                webviewView.webview.postMessage({ type: 'vars', data: this.lastVars });
+            }
+            this.onMessage.fire(m);
+        });
     }
 
     postVars(vars: unknown): void {
+        this.lastVars = vars;
         this.view?.webview.postMessage({ type: 'vars', data: vars });
     }
 
@@ -99,6 +114,10 @@ window.addEventListener('message', (e) => {
     else if (msg.type === 'preview') renderPreview(msg.gid, msg.width, msg.height, msg.jpeg);
     else if (msg.type === 'highlight') highlightVar(msg.name);
 });
+
+// Ask the extension to replay the latest vars (covers "ran before the viewer
+// was opened"). Posted once the listener above is wired.
+vscode.postMessage({ type: 'ready' });
 
 function highlightVar(name) {
     document.querySelectorAll('.var-header.highlighted').forEach(el => el.classList.remove('highlighted'));

@@ -1302,6 +1302,12 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showWarningMessage('xInsp2: not connected to backend');
                 return;
             }
+            // First run: reveal the Viewer so its webview resolves and the vars
+            // (which arrive async) have somewhere to land. Only when it hasn't
+            // been opened yet, so we don't steal focus on every iteration.
+            if (!viewerProvider.isResolved()) {
+                try { await vscode.commands.executeCommand('xinsp2.viewer.focus'); } catch {}
+            }
             try {
                 const rsp = await sendCmd('run');
                 if (rsp.ok) {
