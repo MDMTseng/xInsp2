@@ -49,6 +49,13 @@ test('io_stress: rich extract/construct (nested, array, custom type, NA, provena
         assert.equal(v.out_src, 'syn', 'output stamped with instance src');
         assert.equal(v.f0_src, 'syn', 'extractor piped src onto the Feature');
 
+        // Input constructor with a TYPED value (extract → construct): the Roi was
+        // fed into the next run's constructor, which recorded its source, and it
+        // round-trips back out.
+        assert.equal(v.in2_roi_prov, 'syn', 'constructor recorded the ROI came from "syn"');
+        assert.equal(v.out2_roi_w, 640, 'the typed ROI fed into build().roi() round-trips');
+        assert.equal(typeof v.out2_count, 'number', 'second run produced its own output');
+
         // NA path — require fires, extractors stay total.
         assert.equal(v.na_is_na, true, 'no seed → NA');
         assert.match(v.na_reason, /seed/, 'NA names the missing field');

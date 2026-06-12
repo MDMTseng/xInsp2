@@ -38,6 +38,17 @@ void xi_inspect_entry(int) {
     VAR(vec_size,    (int)feats.size());
     VAR(last_score,  feats.empty() ? -1.0 : feats.back().score());
 
+    // INPUT CONSTRUCTOR with a TYPED value (extract → construct). Pull the Roi
+    // out of this run (typed, src "syn") and feed it into the next run's
+    // constructor via the typed .roi() setter — which RECORDS where it came from
+    // ($prov). This is the constructor side of the wiring, not just plain scalars.
+    xi::Roi roi0 = e.roi();
+    auto in2 = synth_io::build().seed(9).threshold(0.50).roi(roi0).build();
+    VAR(in2_roi_prov, in2.prov_of("roi"));     // "syn" — the constructor recorded the source
+    auto e2 = synth_io::extract(syn.process(in2));
+    VAR(out2_roi_w,   e2.roi().w());           // the fed ROI round-trips back (640)
+    VAR(out2_count,   e2.count());             // a different run (seed 9, threshold 0.5)
+
     // NA: no seed → require → NA, and the extractors stay total.
     auto na = syn.process(xi::Record());
     VAR(na_is_na,    na.is_na());

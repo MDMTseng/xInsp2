@@ -13,7 +13,11 @@ nested `{pose, score, edge}`), plus aggregates (`count`, `centroid`, `best`,
 - **a typed array** — `features() -> std::vector<Feature>` (lightweight handles);
 - **a custom nominal type** — `Feature` (defined in the plugin's `io.hpp`, not the
   core) with `pose()` / `score()` / `edge()` accessors;
-- **a constructor** with multiple typed inputs — `build().seed(7).threshold(0.3)`;
+- **the input constructor** — `build().seed(7).threshold(0.3)` (plain scalars),
+  AND a typed value fed in: `build().roi(e.roi())`, where `e.roi()` is a `xi::Roi`
+  pulled from a previous run — the constructor records that it came from `"syn"`
+  (`in2.prov_of("roi") == "syn"`) and the ROI round-trips back out (extract →
+  construct);
 - **provenance** — the extractor pipes the producing instance's `src` onto every
   typed value it pulls out;
 - **NA** — `process({})` with no `seed` hits `xi::require` → NA, and the
