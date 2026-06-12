@@ -1,0 +1,6 @@
+{
+  "name": "io_stress",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

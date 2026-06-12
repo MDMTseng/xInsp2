@@ -51,11 +51,12 @@ protected:
 };
 
 // Boilerplate every nominal type wants: default ctor, wrap-a-Record, typed NA.
+// Fully qualified so plugin/toolbox authors can use it in their OWN namespace.
 #define XI_NOMINAL(Name)                                       \
     Name() = default;                                          \
-    explicit Name(Record r) : Typed(std::move(r)) {}           \
+    explicit Name(::xi::Record r) : ::xi::Typed(std::move(r)) {} \
     static Name na(const std::string& reason = "") {           \
-        return Name(Record::na(reason));                       \
+        return Name(::xi::Record::na(reason));                 \
     }
 
 // --- the common machine-vision vocabulary --------------------------------
