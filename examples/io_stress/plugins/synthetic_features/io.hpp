@@ -31,15 +31,19 @@ public:
     explicit Extract(xi::Record rec) : rec_(std::move(rec)) {}
     bool is_na() const { return rec_.is_na(); }
 
-    int        count()         const { return rec_["count"].as_int(0); }
-    xi::Point  centroid()      const { return typed<xi::Point>("centroid"); }
-    xi::Roi    roi()           const { return typed<xi::Roi>("roi"); }
-    double     mean_score()    const { return rec_["summary.mean_score"].as_double(0); }
-    xi::Pose   best_pose()     const {
+    // Scalars come back as a nominal xi::Number too (carrying src), so the WHOLE
+    // output is record-class — feedable straight into another constructor.
+    xi::Number count()      const { return numbered("count"); }
+    xi::Number mean_score() const { return numbered("summary.mean_score"); }
+    xi::Number best_score() const { return numbered("best.score"); }
+    xi::Point  centroid()   const { return typed<xi::Point>("centroid"); }
+    xi::Roi    roi()        const { return typed<xi::Roi>("roi"); }
+    xi::Pose   best_pose()  const {
         if (rec_.is_na()) return xi::Pose::na(rec_.na_reason());
-        return xi::Pose(rec_.get_record("best").get_record("pose"));
+        xi::Pose p(rec_.get_record("best").get_record("pose"));
+        p.set_src(rec_.src());
+        return p;
     }
-    double     best_score()    const { return rec_["best.score"].as_double(0); }
 
     int feature_count() const { return rec_.get_array_size("features"); }
     Feature feature(int i) const {
@@ -63,6 +67,12 @@ private:
         t.set_src(rec_.src());
         return t;
     }
+    xi::Number numbered(const char* key) const {
+        if (rec_.is_na()) return xi::Number::na(rec_.na_reason());
+        xi::Number n(rec_[key].as_double(0));
+        n.set_src(rec_.src());
+        return n;
+    }
     xi::Record rec_;
 };
 inline Extract extract(const xi::Record& rec) { return Extract(rec); }
@@ -70,10 +80,14 @@ inline Extract extract(const xi::Record& rec) { return Extract(rec); }
 // --- input constructor -----------------------------------------------------
 class Build {
 public:
-    Build& seed(int s)                  { rec_.set("seed", s); return *this; }
-    Build& seed(const xi::Number& n)    { rec_.set("seed", (int)n.value()); rec_.set_prov("seed", n.src()); return *this; }
-    Build& threshold(double t)          { rec_.set("threshold", t); return *this; }
-    Build& roi(const xi::Roi& r)        { rec_.set("roi", r.record()); rec_.set_prov("roi", r.src()); return *this; }
+    // Primary API: take the record-class values extract produces (they carry
+    // their src, which the constructor records as provenance).
+    Build& seed(const xi::Number& n)      { rec_.set("seed", (int)n.value());   rec_.set_prov("seed", n.src());      return *this; }
+    Build& threshold(const xi::Number& n) { rec_.set("threshold", n.value());   rec_.set_prov("threshold", n.src()); return *this; }
+    Build& roi(const xi::Roi& r)          { rec_.set("roi", r.record());        rec_.set_prov("roi", r.src());       return *this; }
+    // Convenience for literal seeds (first stage, no upstream source).
+    Build& seed(int s)         { rec_.set("seed", s); return *this; }
+    Build& threshold(double t) { rec_.set("threshold", t); return *this; }
     xi::Record build() const { return rec_; }
 private:
     xi::Record rec_;

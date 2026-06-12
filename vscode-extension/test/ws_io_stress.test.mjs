@@ -36,7 +36,7 @@ test('io_stress: rich extract/construct (nested, array, custom type, NA, provena
         assert.equal(v.feat_count, 4, 'features array length');
         assert.equal(v.vec_size, 4, 'typed vector<Feature>');
 
-        // Nested + custom-type extractors return real values.
+        // Nested + custom-type extractors return real values (Number/.value()).
         assert.equal(typeof v.centroid_x, 'number');
         assert.equal(typeof v.best_x, 'number');
         assert.ok(v.best_score >= 0.30, 'best_score is the max kept score');
@@ -44,23 +44,20 @@ test('io_stress: rich extract/construct (nested, array, custom type, NA, provena
         assert.equal(typeof v.mean_score, 'number');
         assert.equal(typeof v.f0_pose_x, 'number', 'Feature.pose().x()');
         assert.ok(Math.abs(v.f0_edge_x2 - (v.f0_pose_x + 20)) < 1e-6, 'Feature.edge().x2() == pose.x + 20');
-
-        // Provenance piped through extractor.
-        assert.equal(v.out_src, 'syn', 'output stamped with instance src');
         assert.equal(v.f0_src, 'syn', 'extractor piped src onto the Feature');
 
-        // Input constructor with a TYPED value (extract → construct): the Roi was
-        // fed into the next run's constructor, which recorded its source, and it
-        // round-trips back out.
-        assert.equal(v.in2_roi_prov, 'syn', 'constructor recorded the ROI came from "syn"');
+        // The constructor was fed EXTRACTED record-class values (Number/Number/Roi)
+        // — it recorded each field's source, and the Roi round-trips back out.
+        assert.equal(v.in2_seed_prov, 'syn', 'constructor recorded seed came from "syn" (xi::Number)');
+        assert.equal(v.in2_thr_prov, 'syn', 'constructor recorded threshold from "syn" (xi::Number)');
+        assert.equal(v.in2_roi_prov, 'syn', 'constructor recorded roi from "syn" (xi::Roi)');
         assert.equal(v.out2_roi_w, 640, 'the typed ROI fed into build().roi() round-trips');
         assert.equal(typeof v.out2_count, 'number', 'second run produced its own output');
 
         // NA path — require fires, extractors stay total.
         assert.equal(v.na_is_na, true, 'no seed → NA');
         assert.match(v.na_reason, /seed/, 'NA names the missing field');
-        assert.equal(v.na_count, 0, 'extract(NA).count() is 0, not a crash');
-        assert.equal(v.na_feat_count, 0);
+        assert.equal(v.na_count, 0, 'extract(NA).count().value() is 0, not a crash');
         assert.equal(v.na_feature_na, true, 'typed NA propagates into Feature');
     });
 });

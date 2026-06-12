@@ -8,20 +8,22 @@ using a plugin that emits **deterministic fake data** — no image processing.
 nested `{pose, score, edge}`), plus aggregates (`count`, `centroid`, `best`,
 `summary`, `roi`). Its `io.hpp` then has to handle all of it:
 
-- **nested records** — `centroid().x()`, `best_pose().x()`, `mean_score()`
-  (path read `summary.mean_score`);
+- **the whole output is record-class** — every getter returns a nominal type
+  (`count()/mean_score() -> xi::Number`, `centroid() -> xi::Point`,
+  `roi() -> xi::Roi`, `best_pose() -> xi::Pose`, `feature() -> Feature`), each
+  carrying its `src`. Scalars are only read at the leaf with `.value()`/`.x()`.
+- **nested records + path reads** — `best_pose()` (from `best.pose`),
+  `mean_score()` (path `summary.mean_score`);
 - **a typed array** — `features() -> std::vector<Feature>` (lightweight handles);
 - **a custom nominal type** — `Feature` (defined in the plugin's `io.hpp`, not the
-  core) with `pose()` / `score()` / `edge()` accessors;
-- **the input constructor** — `build().seed(7).threshold(0.3)` (plain scalars),
-  AND a typed value fed in: `build().roi(e.roi())`, where `e.roi()` is a `xi::Roi`
-  pulled from a previous run — the constructor records that it came from `"syn"`
-  (`in2.prov_of("roi") == "syn"`) and the ROI round-trips back out (extract →
-  construct);
-- **provenance** — the extractor pipes the producing instance's `src` onto every
-  typed value it pulls out;
+  core) with `pose()` / `score()` / `edge()`;
+- **the input constructor takes record-class values, not scalars** — stage 2's
+  input is built straight from stage 1's extracted typed values:
+  `build().seed(e.count()).threshold(e.mean_score()).roi(e.roi())`. Each value
+  carries its `src`, so the constructor records every field's provenance
+  (`in2.prov_of("seed"|"threshold"|"roi") == "syn"`), and the ROI round-trips out;
 - **NA** — `process({})` with no `seed` hits `xi::require` → NA, and the
-  extractors stay total (`extract(NA).count() == 0`, `feature(0).is_na()`).
+  extractors stay total (`extract(NA).count().value() == 0`, `feature(0).is_na()`).
 
 The whole point: the payload is still schema-less cJSON; the types are only names
 in the wiring layer. Run it (no frame needed) or see
