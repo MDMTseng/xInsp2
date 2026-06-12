@@ -1,0 +1,28 @@
+{
+  "name": "line_fit",
+  "description": "Pose-aligned search line. The search line is authored in a BASELINE pose frame (config); at runtime it is transformed by the (current vs baseline) pose delta. A demo of fixturing + typed I/O wiring — see docs/design/io-types-and-na.md.",
+  "dll": "line_fit.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [
+      { "name": "baseline_x",     "type": "number", "default": 0,   "doc": "Baseline pose X (taught)." },
+      { "name": "baseline_y",     "type": "number", "default": 0,   "doc": "Baseline pose Y." },
+      { "name": "baseline_angle", "type": "number", "default": 0,   "doc": "Baseline pose angle (deg)." },
+      { "name": "line_x1",        "type": "number", "default": 10,  "doc": "Search line start X, in the baseline frame." },
+      { "name": "line_y1",        "type": "number", "default": 0,   "doc": "Search line start Y." },
+      { "name": "line_x2",        "type": "number", "default": 10,  "doc": "Search line end X." },
+      { "name": "line_y2",        "type": "number", "default": 40,  "doc": "Search line end Y." }
+    ],
+    "inputs": [
+      { "name": "current", "kind": "pose", "doc": "Current pose of the part (from the locator). REQUIRED — missing → NA." }
+    ],
+    "outputs": [
+      { "name": "line", "kind": "line", "doc": "The search line transformed from the baseline frame to the current pose." }
+    ],
+    "exchange": [
+      { "command": "set_baseline", "args": "{x,y,angle}",     "result": "current def JSON" },
+      { "command": "set_line",     "args": "{x1,y1,x2,y2}",   "result": "current def JSON" }
+    ]
+  }
+}

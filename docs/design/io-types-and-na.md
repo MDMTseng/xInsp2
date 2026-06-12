@@ -119,7 +119,9 @@ pieces.
    Arc / Roi`; each a shared-Record handle with `record()`, `is_na()`,
    `na_reason()`, a typed `::na(reason)`, field ctors, and schema-less accessors.
 3. **`io.hpp` pattern + a fixturing demo** — `extract()` / `build()` facades, a
-   matcher → line_fit pose-aligned example, manifest `kind` aligned to the type
-   names.
+   locator → line_fit pose-aligned example, manifest `kind` using the type names.
+   *(done)* See [`examples/fixturing_demo`](../../examples/fixturing_demo)
+   (extractor adapts raw centroids → `Pose`; `line_fit` validates via `require` →
+   NA; NA propagates into the typed `Line`).
 4. **Wiring UI (later)** — use the port types to connect output→input on the
    pipeline graph and to teach baselines.
