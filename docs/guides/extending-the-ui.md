@@ -59,7 +59,7 @@ backend; the UI is downstream of WS state.
      Gate buttons that act on the inspection script with the
      `xinsp2.isActiveScript` context key (true when the active editor is the
      open project's script, resolved from `project.json`'s `script` field) —
-     **not** a hardcoded `resourceFilename == inspection.cpp`, which breaks
+     **not** a hardcoded `resourceFilename == inspect.cpp`, which breaks
      for projects that name their script anything else.
    - **Status bar**: `vscode.window.createStatusBarItem(...)` from
      `extension.ts`.

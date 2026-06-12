@@ -58,7 +58,10 @@ Three primitives do all the heavy lifting:
 
 Parallelism is `xi::async(fn, args...)` + `Future<T>` with implicit
 await. Trigger-correlated multi-camera capture is
-`xi::current_trigger()`. **No node graph.** The script is the graph.
+`xi::current_trigger()`. **Script-first authoring.** A read-only
+pipeline graph view (`xinsp2.openPipelineGraph`) is available, but the
+script is the source of truth — there is no graph-based authoring
+editor.
 
 ---
 
@@ -190,7 +193,7 @@ Set the output directory + naming rule, hit **Enable**.
 
 ### 6. Write the inspection script
 
-`inspection.cpp` was created when you made the project. Edit it — same
+`inspect.cpp` was created when you made the project. Edit it — same
 buffer style as any C++ file (IntelliSense, save, format).
 
 ```cpp
@@ -215,7 +218,7 @@ void xi_inspect_entry(int frame) {
 ### 7. Compile
 
 Click the gear icon in the editor title bar (visible when on
-`inspection.cpp`). Build runs in seconds, hot-reloads the DLL.
+`inspect.cpp`). Build runs in seconds, hot-reloads the DLL.
 
 ![After compile](docs/screenshots/after_compile.png)
 
@@ -463,9 +466,9 @@ xInsp2/
 
 ## Status
 
-See [`docs/status.md`](docs/status.md) for what's shipping, what's in
-flight (process-isolation spike on `shm-process-isolation` branch), and
-the locked-in decision log.
+See [`docs/status.md`](docs/status.md) for what's shipping and the
+locked-in decision log. Process isolation + SHM were removed 2026-05;
+all plugins run in-process.
 
 ---
 

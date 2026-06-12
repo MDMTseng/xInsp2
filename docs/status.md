@@ -24,10 +24,11 @@ xInsp2 ships as a single-machine inspection-authoring environment:
 - **SDK** — scaffold + cmake helpers + tests for plugin authors who
   want to ship distributable plugins.
 
-Master holds **9 shipped plugins**. Process isolation + the SHM mesh
-were **removed 2026-05** in favour of a single in-process compute core
-(BE) under a frontend (FE) supervisor — all plugins (cameras included)
-run in-process, zero-copy via pointers. See *Process isolation* below.
+Master holds **7 shipped plugins** under `plugins/`. Process isolation +
+the SHM mesh were **removed 2026-05** in favour of a single in-process
+compute core (BE) under a frontend (FE) supervisor — all plugins
+(cameras included) run in-process, zero-copy via pointers. See
+*Process isolation* below.
 
 ---
 
@@ -98,8 +99,11 @@ run in-process, zero-copy via pointers. See *Process isolation* below.
 ### Plugins shipped (`plugins/`)
 
 `mock_camera`, `blob_analysis`, `data_output`, `json_source`,
-`record_save`, `synced_stereo`, plus three demo levels in the SDK
-(`hello`, `counter`, `invert`, `histogram`, `trigger_source`).
+`record_save`, `threshold_op`, `synced_stereo` — 7 plugins total.
+
+The SDK (`sdk/examples/`) also ships demo plugins (`hello`, `counter`,
+`invert`, `histogram`, `trigger_source`) as authoring references; these
+are SDK examples, not production plugins.
 
 ---
 
@@ -147,7 +151,10 @@ See [`testing.md`](./testing.md) for the full breakdown. Summary:
 
 - **No BPG protocol.** Everything over WS framing.
 - **No N-API.** Backend is a standalone `xinsp-backend.exe`.
-- **No graph editor.** Script-first authoring UX.
+- **No graph authoring editor.** The script is the source of truth. A
+  read-only pipeline graph view (`xinsp2.openPipelineGraph`) is
+  available for visualisation, but graph-based authoring is not
+  planned.
 - **C++ compile path via MSVC `cl.exe`**; versioned DLL naming
   (`stem_vN.dll`) for Windows lock survival. No Cling / ClangREPL.
 - **Stable C ABI for plugins.** No C++ types cross the plugin boundary.
@@ -194,16 +201,9 @@ Priorities depend on real usage feedback. Candidate work:
   `--project/--script/--autostart-fps` to run headlessly. See
   [`design/fe-be-split.md`](./design/fe-be-split.md). Phase 2: deep WS
   heartbeat, FE status channel, real PLC transports.
-- **Comms gateway** — **shipped (Increments 1–3).** Out-of-process PLC I/O:
-  the `xinsp-comms` gateway owns the (volatile, un-hardened) PLC socket so its
-  crash/hang risk is isolated from the in-process backend. The backend talks to
-  it via `xi::comms` (`send`/`poll`/`up`/`set_deadman`) over a loopback socket;
-  on a backend crash the gateway fires the backend's registered emergency
-  payload to the PLC (dead-man). The FE spawns + supervises the gateway as a
-  sibling child (`--comms-plc=tcp:|udp:HOST:PORT`), driving `CommsLost`
-  safe-state + rate-limited respawn on gateway death. See
-  [`design/comms-gateway.md`](./design/comms-gateway.md). Follow-ups: msgpack
-  framing, multi-PLC fan-out.
+- **PLC I/O** — the `xinsp-comms` gateway and `xi::comms` were removed; PLC
+  transport is now a plugin concern (use `host->set_safe_state` for the
+  emergency payload). See [`design/comms-gateway.md`](./design/comms-gateway.md).
 - **Multi-client broadcast (S6)** — opens the door to operator dashboards.
 - **History UI scrubber (finish S4)** — currently backend-only.
 - **Per-component reference docs** — see [`docs/reference/`](./reference/).

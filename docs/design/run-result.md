@@ -79,8 +79,9 @@ of seeing silence.
 ## Script API
 
 ```cpp
-RESULT(code, "message");          // e.g. RESULT(-2, "edge chip > 0.3mm")  → ng2
-// or the OK helpers: RESULT_OK("clean"), RESULT_NG(2, "edge chip")
+xi::ng(2, "edge chip > 0.3mm");   // code -2
+xi::ok(1, "clean");               // code +1
+xi::result(-2, "edge chip");      // equivalent to xi::ng(2, "edge chip")
 ```
 First-class (not a `VAR`) so the framework can: default to `0` (NA) if unset,
 reject user use of the `≤ -990000` band, and synthesize the system codes itself.
@@ -96,8 +97,8 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 - **HMI**: a `verdict` card binds `code` (sign → green/red; `≤ -990000` → a distinct
   "system" colour); `yield` excludes/【buckets system fails; a **Pareto** card ranks
   by `code`/`message`. Ties into [`production-hmi.md`](./production-hmi.md).
-- **comms / PLC**: the gateway reads the Result to decide pass / reject / rework /
-  alarm; a system fail (`≤ -990000`) maps to safe-state, not a part reject.
+- **PLC / MES**: a plugin or script can act on the Result to drive pass/reject/rework/alarm;
+  a system fail (`≤ -990000`) maps to safe-state, not a part reject.
 - **dispatch groups**: the overflow drop path is exactly where `XI_SYS_DROPPED` is
   emitted — see [`dispatch-groups.md`](./dispatch-groups.md).
 
@@ -124,8 +125,8 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
    the **verdict** card shows the code's bucket (OK / NG / NA / SYS colour) + the
    message line, and the **yield** card counts OK/NG/NA from it. A card opts in with
    `bind:{result:true}` (or no `var`); the demo dashboard + `hmi/demo` use it.
-6. **comms** — *no comms code in v1*; a script can already forward via
-   `xi::comms.send(...)`. Gateway directly consuming `run_result` = v1.1.
+6. **PLC / MES integration** — deferred; a plugin handles forwarding the result to
+   external systems. Direct gateway consumption of `run_result` is v1.1.
 7. **Test + docs** — `examples/qa_run_result/` (ok/ng/unset → assert
    `run_result.code`; a `queue_depth:1` flooded project → assert `XI_SYS_DROPPED`);
    update `writing-a-script.md` (`VAR` vs `RESULT`).

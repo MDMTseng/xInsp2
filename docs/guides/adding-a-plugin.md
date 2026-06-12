@@ -1,9 +1,10 @@
 # Adding a plugin
 
-A plugin is a C++ DLL that implements a small C ABI (`xi_plugin_create`,
-`process`, `exchange`, `get_def`, `set_def`, `xi_plugin_destroy`). The
-backend loads it at project-open time and the inspection script reaches
-it via `xi::use<T>("instance_name")`.
+A plugin is a C++ DLL that exports a small C ABI (`xi_plugin_create`,
+`xi_plugin_destroy`, `xi_plugin_process`, `xi_plugin_exchange`,
+`xi_plugin_get_def`, `xi_plugin_set_def`). The backend loads it at
+project-open time and the inspection script reaches it via
+`xi::use("instance_name")`.
 
 xInsp2 supports **two authoring paths** with the same C ABI on the
 output side. Pick by audience:

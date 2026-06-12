@@ -30,19 +30,56 @@ typedef struct xi_host_api {
                          int64_t timestamp_us,
                          const xi_record_image* images,
                          int32_t image_count);
+
+    /* SHM fields — declared for binary compat, always nullptr (removed 2026-05) */
+    xi_image_handle (*shm_create_image)(int32_t w, int32_t h, int32_t channels);
+    xi_image_handle (*shm_alloc_buffer)(int32_t size_bytes);
+    void            (*shm_addref)(xi_image_handle h);
+    void            (*shm_release)(xi_image_handle h);
+    int32_t         (*shm_is_shm_handle)(xi_image_handle h);
+
+    /* File I/O — wired in make_host_api() via install_read_image_file() */
+    xi_image_handle (*read_image_file)(const char* path);
+
+    /* Sticky status string per component — wired in make_host_api() */
+    void (*set_status)(const char* source, const char* text);
+
+    /* emit/fetch resource store (ABI v2) — wired via install_resource_hooks()
+     * in PluginManager::default_host_api(); null-check before calling from
+     * plugins that may run against an older host build */
+    void    (*emit_resource)(const char* emitter_name, const char* res_id,
+                             const xi_record_image* images, int32_t image_count,
+                             const char* cjson);
+    int32_t (*fetch_resource)(const char* emitter_name, const char* res_id,
+                              char* cjson_buf, int32_t cjson_buflen);
+    xi_image_handle (*fetch_image)(const char* emitter_name, const char* res_id,
+                                   const char* key);
+    int32_t (*emit_dispatch)(const char* emitter_name, xi_trigger_id res_id,
+                              int64_t timestamp_us);
+    void    (*set_safe_state)(const char* payload);
 } xi_host_api;
 ```
 
-The struct is **append-only**. Older plugin DLLs that don't read the
-new tail fields stay binary-compatible.
+`XI_ABI_VERSION` is **2** (defined in `xi_abi.h`). The struct is
+**append-only** — older plugin DLLs that don't read tail fields stay binary
+compatible.
 
-> The `shm_create_image` / `shm_alloc_buffer` / `shm_addref` /
-> `shm_release` / `shm_is_shm_handle` fields remain declared in the ABI
-> struct for binary compatibility, but in the current single-process
-> build the host always sets them to `nullptr`. Plugins that call them
-> must null-check and fall back to `image_create` (which is what they
-> do). The SHM cross-process path itself was removed 2026-05; see
-> `reference/ipc-shm.md` (historical).
+### Wiring status in `make_host_api()` (xi_image_pool.hpp)
+
+| Field group | Status |
+|---|---|
+| `image_create` … `image_stride`, `log`, `instance_folder` | Wired |
+| `emit_trigger` | Set to `nullptr` in `make_host_api()`; wired by the trigger-bus setup in `service_main.cpp` |
+| `shm_*` (five fields) | Hard-wired `nullptr` — SHM removed 2026-05; plugins must null-check |
+| `read_image_file` | Wired via `install_read_image_file()` before plugins load |
+| `set_status` | Wired — routes to the status registry via `xi::status_sink()` |
+| `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` | Wired via `install_resource_hooks()` in `PluginManager::default_host_api()` |
+| `set_safe_state` | Wired via `install_safe_state_hook()` in `PluginManager::default_host_api()` |
+
+> The five `shm_*` fields remain in the struct for binary compatibility but
+> are always `nullptr`. Plugins must null-check before calling them and fall
+> back to `image_create`. The SHM cross-process path was removed 2026-05;
+> see `reference/ipc-shm.md` (historical).
 
 ---
 

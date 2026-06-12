@@ -17,6 +17,7 @@
 #include "xi_types.hpp"
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>   // boundingRect for Region::bbox
 
 namespace xi {
 
@@ -44,6 +45,31 @@ inline MatN<N> from_cv(const cv::Matx<double, N, N>& m) {
     for (int r = 0; r < N; ++r)
         for (int c = 0; c < N; ++c) out.set(r, c, m(r, c));
     return out;
+}
+
+// --- Region <-> cv::Mat ---------------------------------------------------
+//
+// A Region IS a binary mask image, so the bridge is direct: to_cv hands back a
+// NON-OWNING cv::Mat over the mask's bytes (like Image::as_cv_mat — it aliases
+// the region's pixels, so the Region must outlive the Mat), and region_from_mask
+// copies a CV_8U 1-ch mask into an owning Region. area / bbox are the two reads
+// you almost always want; do everything else in OpenCV on the Mat.
+inline cv::Mat to_cv(const Region& r) { return r.mask().as_cv_mat(); }
+
+inline Region region_from_mask(const cv::Mat& m) { return Region(from_cv_mat(m)); }
+
+// Pixel count of the foreground (nonzero). 0 for an empty / NA region.
+inline double area(const Region& r) {
+    cv::Mat m = to_cv(r);
+    return m.empty() ? 0.0 : static_cast<double>(cv::countNonZero(m));
+}
+
+// Axis-aligned bounding box of the foreground, as an Roi. NA for an empty region.
+inline Roi bbox(const Region& r) {
+    cv::Mat m = to_cv(r);
+    if (m.empty()) return Roi::na("empty region");
+    cv::Rect rc = cv::boundingRect(m);
+    return Roi(rc.x, rc.y, rc.width, rc.height);
 }
 
 } // namespace xi

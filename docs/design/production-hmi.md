@@ -79,8 +79,8 @@ flowchart LR
 | Headless run + supervise | `--project --autostart-fps` + `xinsp-fe.exe` |
 | Packaging skeleton | `tools/build_release.mjs` (today: dev zip) |
 
-New backend surface is small: a `save_dashboard` command (compose-mode write-back)
-and the AOT load-only mode + bundle format.
+New backend surface is small: the AOT load-only mode + bundle format (v1); a
+`save_dashboard` command (compose write-back) is deferred to v1.1.
 
 ## Data model — script computes, HMI binds
 
@@ -214,7 +214,7 @@ coordinates, no overlap — the tree fills the screen):
 - **Compose mode** edits it: add panes (`+⬌`/`+⬍`, N per split), drag dividers to
   set each weight, wrap a pane in tabs (`⊞`, add/remove/rename tabs), pick a card +
   its `var`/title. Exports the JSON (Copy/Download today; a backend `save_dashboard`
-  command lands in v1.2). Preset layouts are just starting trees.
+  command lands in v1.1). Preset layouts are just starting trees.
 
 ## Standalone package export
 
@@ -238,8 +238,9 @@ xinsp2-prod-<project>/
 
 - **v1** — SPA shell + Compose/Run modes + grid; built-in cards (`image`,
   `verdict`, `spc`, `throughput`, `yield`, `value`); bind-to-var; single overlay
-  layer with a built-in renderer; `dashboard.json` + `save_dashboard`. Runs against
-  the existing WS (no AOT yet — dev backend is fine for bring-up).
+  layer with a built-in renderer; `dashboard.json` (read). Runs against the existing
+  WS (no AOT yet — dev backend is fine for bring-up). `save_dashboard` (compose
+  write-back) is deferred to v1.1.
 - **v2** — plugin-ships-`card` + plugin-ships-`overlay`; multi-layer overlay
   stacking; the AOT bundle format + load-only backend mode; the production package
   export + `run.cmd` kiosk launcher.

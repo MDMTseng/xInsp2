@@ -81,10 +81,47 @@ xi::Vec3 v2  = xi::from_cv(r);       // back to a nominal value
 ### 1. Nominal types — names over a generic Record
 
 A small set of **nominal type wrappers** — `Number`, `Point`, `Vec2/3/4`, `Line`,
-`Arc`, `Pose`, `Roi` (in `xi/xi_types.hpp`) — each is *just a name* over a generic
-`xi::Record`. No fields are enforced; the payload is still schema-less cJSON. The
-wrapper is a lightweight handle (holds a Record), can carry schema-less accessors
-(`pose.angle()` reads `rec["angle"]`, NA if absent), and **can be NA**.
+`Arc`, `Pose`, `Roi`, `Mat2/3/4`, `Region` (in `xi/xi_types.hpp`) — each is *just a
+name* over a generic `xi::Record`. No fields are enforced; the payload is still
+schema-less cJSON. The wrapper is a lightweight handle (holds a Record), can carry
+schema-less accessors (`pose.angle()` reads `rec["angle"]`, NA if absent), and
+**can be NA**.
+
+#### Iconic types — payload on the image channel
+
+A Record has two channels: schema-less cJSON *and* a named-image map. Most nominal
+types live in cJSON; **`Region` is the first whose data is an image** — a binary
+mask (CV_8U, 1-channel, nonzero = inside) carried under the image key `"mask"`,
+with only frame `w`/`h` mirrored into cJSON for cheap metadata reads. It's still
+"just a name over a Record"; the difference is purely *which channel* holds the
+bytes. Because the mask rides the image map it's zero-copy through the in-process
+ImagePool and drops straight into OpenCV:
+
+```cpp
+xi::Region r = ...;                  // mask in the image channel
+cv::Mat    m = xi::to_cv(r);          // non-owning view (r must outlive m)
+double     a = xi::area(r);           // countNonZero
+xi::Roi   bb = xi::bbox(r);           // boundingRect -> Roi
+xi::Region r2 = xi::region_from_mask(thresholded);   // cv::Mat -> owning Region
+```
+
+`to_cv` / `region_from_mask` / `area` / `bbox` are in the opt-in `xi_types_cv.hpp`
+(so `xi_types.hpp` stays free of imgproc); `Region::mask()` returns the raw
+`xi::Image` if you want to do everything yourself. Region is a **top-level** value
+by convention — when a constructor takes a Region as input, its `io.hpp` `build()`
+merges `r.mask()` into the target Record's image map under a known key (embedding a
+Record as a cJSON *sub-field* copies only json, not images).
+
+**Deferred — multi-region / labeled images, and the Image depth tag.** A labeled
+image (each pixel = a region id) needs a wider pixel type (`CV_32S`) than today's
+uint8 Image. The Image buffer is already depth-agnostic bytes (a `shared_ptr<uint8_t>`
++ size); what's missing is a **depth/elem-type tag** so `as_cv_mat()` can build the
+right `cv::Mat` type (`CV_MAKETYPE(depth, channels)` instead of a hard-coded
+`CV_8UC`). Adding it is additive (default `CV_8U` = today's behaviour) but touches
+the host ABI + ImagePool metadata (they must carry depth too). `Region` (binary)
+ships first; `RegionSet` / labeled images wait on that depth tag. *(Note: SHM was
+removed 2026-05, so depth only has to flow through the in-process pool, not a
+cross-process shared region.)*
 
 The name is the same vocabulary in four places:
 
@@ -185,7 +222,7 @@ pieces.
 
 1. **NA backbone** — `Record::na` / `is_na` / `na_reason`, `process()` full-NA
    short-circuit, `xi::require`. Independently useful: every pipeline gets clean
-   failure propagation. *(in progress)*
+   failure propagation. *(done)*
 2. **`xi_types.hpp`** — the nominal type wrappers (lightweight handles) + their
    schema-less accessors. *(done)* `Typed` base + `Number / Point / Pose / Line /
    Arc / Roi`; each a shared-Record handle with `record()`, `is_na()`,

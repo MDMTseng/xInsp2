@@ -201,7 +201,9 @@ metadata in-band; for JPEG we want it out-of-band for speed.
 
 ## Commands
 
-Stable set for v1. Arguments are listed under each entry.
+The backend implements ~50 commands. The core commands are documented in detail
+below; additional commands are listed at the end of this section. Arguments are
+listed under each entry.
 
 ### `ping`
 `args: {}` → `data: { "pong": true, "ts": <unix_seconds> }`
@@ -752,7 +754,7 @@ appears as `last_status` in the crash report if the backend dies.
 ## Connection lifecycle
 
 1. Client connects to `ws://host:PORT/`.
-2. Backend sends a welcome `event` with `name: "hello"` and `data: { "version": "...", "abi": 1 }`.
+2. Backend sends a welcome `event` with `name: "hello"` and `data: { "version": "...", "commit": "<git-sha>", "abi": 1 }`.
 3. Client sends `cmd: version` to double-check, then `cmd: load_project` if it has one.
 4. Client drives `compile_and_load` → `run` cycles.
 5. Either side closes the socket to end the session; backend on `cmd: shutdown` also exits its process.
@@ -774,6 +776,90 @@ Prior to FL r7 this case was not handled — a 2nd connection's SYN
 would sit in the kernel queue until Windows timed it out (~21 s),
 which surfaced to the caller as a long stall. The `accept()`-and-
 reject path replaces that with a fast, diagnosable error.
+
+### Additional implemented commands
+
+The following commands are implemented in `service_main.cpp` but not documented
+in full detail above. One-line purpose per entry; args follow the same
+`cmd`/`rsp` envelope.
+
+#### Crash diagnostics
+
+| Command | Purpose |
+|---|---|
+| `crash_reports` | Return the JSON crash reports written by previous fatal crashes (from `%TEMP%/xinsp2/crashdumps/*.json`), newest-first. |
+| `clear_crash_reports` | Delete all crash JSON files from the dump directory. Reply: `{ "removed": N }`. |
+
+#### Watchdog
+
+| Command | Purpose |
+|---|---|
+| `set_watchdog_ms` `args: { "ms": N }` | Set the per-inspect wall-clock budget in ms (0 = disabled). Reply: `{ "ms": N, "trips": N }`. |
+| `watchdog_status` | Current watchdog config and trip count. Reply: `{ "ms": N, "trips": N, "armed": bool }`. |
+
+#### Pipeline graph capture
+
+| Command | Purpose |
+|---|---|
+| `graph_capture` `args: { "enable": bool }` | Toggle dataflow edge recording (default off — no hot-path cost). Clears any prior recording on enable. Reply: `{ "capturing": bool }`. |
+| `graph_snapshot` | Reconstruct dataflow edges from the recorded calls by image-handle identity (instance A produced handle H; instance B consumed H → A→B edge). Reply: `{ "capturing": bool, "ran": ["inst", ...], "edges": [{ "from": "A", "to": "B", "keys": ["mask"] }, ...] }`. The `ran` list is in call order; `keys` lists the output-image names that crossed the edge. |
+
+#### Recording / replay
+
+| Command | Purpose |
+|---|---|
+| `recording_start` `args: { "path": "...", "max_frames"?: N }` | Start recording trigger events (image handles + metadata) to a file for deterministic replay. |
+| `recording_stop` | Stop an active recording. Reply includes `{ "path": "...", "frame_count": N }`. |
+| `recording_status` | Recording state and frame count so far. |
+| `recording_replay` `args: { "path": "...", "loop"?: bool }` | Replay a recording file into the trigger bus (or dispatch pool if continuous mode is active). |
+
+#### Params and preview (out-of-band operations)
+
+| Command | Purpose |
+|---|---|
+| `list_params` | List all registered `xi::Param` values (name, type, value, min/max if numeric). |
+| `preview_instance` `args: { "name": "cam0", "timeout_ms"?: N }` | Grab one frame from an `ImageSource` instance and return it as a binary preview (no inspect). Useful for live camera aiming without running the full pipeline. |
+| `process_instance` `args: { "name": "det0", "images": [...], "json"?: "..." }` | Call a plugin instance's `process()` directly (bypasses the script and the trigger bus). Input images are supplied as base64-encoded PNG/JPEG in the args; output images are returned the same way. Intended for unit-testing individual plugin instances from outside the script. |
+
+#### Plugin management
+
+| Command | Purpose |
+|---|---|
+| `rescan_plugins` | Rescan the global plugins directories and refresh manifests. Does not reload already-loaded plugin DLLs. |
+| `load_plugin` `args: { "name": "...", "folder"?: "..." }` | Force-load (or reload) a specific plugin by name. Typically used after `rescan_plugins` found a new plugin. |
+| `recertify_plugin` `args: { "name": "..." }` | Re-run the baseline certification tests for a plugin and update its cert file. |
+| `export_project_plugin` `args: { "name": "..." }` | Package a compiled project-local plugin (DLL + manifest) for distribution; stamps `abi_version` in the exported `plugin.json`. |
+
+#### Project and instance CRUD
+
+| Command | Purpose |
+|---|---|
+| `create_project` `args: { "path": "...", "name": "..." }` | Create a new empty project folder with a stub `project.json` and `inspect.cpp`. |
+| `close_project` | Tear down all instances, reset the trigger bus, stop recording. Does not unload script or plugin DLLs. |
+| `create_instance` `args: { "plugin": "blob_analysis", "name": "det0" }` | Add a new instance to the open project (creates folder, calls `xi_plugin_create`, writes `instance.json`). |
+| `remove_instance` `args: { "name": "det0", "purge"?: bool }` | Remove an instance from the registry and call `xi_plugin_destroy`. Default: keep the on-disk folder. Pass `"purge": true` to delete it. |
+| `rename_instance` `args: { "old": "det0", "new": "detector" }` | Rename an instance (moves its folder, updates the registry). |
+| `save_instance_config` `args: { "name": "det0" }` | Write the current `get_def()` output for one instance to `instance.json` without a full `save_project`. |
+| `get_project` | Return the open project's `project.json` content and resolved metadata. |
+| `get_plugin_ui` `args: { "name": "blob_analysis" }` | Return the plugin's `ui/index.html` content (for plugins with `has_ui: true`). Used by the VS Code extension to open the plugin webview. |
+
+#### Trigger policy
+
+| Command | Purpose |
+|---|---|
+| `set_trigger_policy` `args: { "policy": "any"\|"all_required"\|"leader_followers", ... }` | Update the project's trigger correlation policy live (without reloading the project). Changes take effect on the next trigger event. |
+
+#### Dispatch stats
+
+`dispatch_stats` is already documented above under `start` / `stop`.
+
+#### History utilities
+
+| Command | Purpose |
+|---|---|
+| `clear_history` | Empty the run-history ring immediately. Reply: `{ "cleared": N }`. |
+
+---
 
 ## Backend command-line flags
 

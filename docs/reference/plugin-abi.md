@@ -386,8 +386,12 @@ extern "C" __declspec(dllexport)
 xi::InstanceBase* xi_plugin_create(const char* instance_name);
 ```
 
-The host detects this by the absence of `xi_plugin_destroy` and falls
-back to a `xi::InstanceBase` pointer + `delete`. New plugins should
+Detection (confirmed in `xi_plugin_manager.hpp`): the loader calls
+`GetProcAddress(dll, "xi_plugin_destroy")`. **Presence** → new C ABI
+(`void* xi_plugin_create(xi_host_api*, const char*)` + `CAbiInstanceAdapter`).
+**Absence** → old C++ ABI (`InstanceBase* xi_plugin_create(const char*)`,
+used directly with `delete`). The six-export C ABI is identified by the
+presence of `xi_plugin_destroy`; the old path omits it. New plugins must
 use the C ABI / `XI_PLUGIN_IMPL` path; the C++ ABI is retained for
 back-compat only.
 

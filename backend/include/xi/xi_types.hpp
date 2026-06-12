@@ -279,4 +279,41 @@ using Mat2 = MatN<2>;
 using Mat3 = MatN<3>;
 using Mat4 = MatN<4>;
 
+// --- iconic types (payload rides the IMAGE channel, not cJSON) ------------
+//
+// Region is the first nominal type whose data is NOT cJSON: it's a binary
+// MASK image that travels on the Record's image channel (key "mask"), with
+// only light metadata (frame w/h) mirrored into json for cheap reads. It's
+// "just a name over a Record" exactly like the others — but because the
+// bytes live in images_, a Region is zero-copy through the in-process
+// ImagePool and goes straight to OpenCV via `mask().as_cv_mat()`.
+//
+// This is the BINARY case (CV_8U, 1-channel, nonzero = inside). Multi-region
+// / labeled images want a wider pixel depth (CV_32S) and wait on the Image
+// depth tag (see docs/design/io-types-and-na.md, "Image as a typed buffer").
+//
+// OpenCV-side helpers (to_cv / region_from_mask / area / bbox) live in the
+// opt-in xi_types_cv.hpp so this header stays free of imgproc.
+class Region : public Typed {
+public:
+    XI_NOMINAL(Region)
+
+    // Wrap a binary mask. The mask rides the image channel; frame width/height
+    // are mirrored into json so width()/height() don't have to touch pixels.
+    explicit Region(Image mask) {
+        const int w = mask.width, h = mask.height;
+        if (root_) root_->image(kMaskKey, std::move(mask));
+        set("w", w).set("h", h);
+    }
+    static constexpr const char* kMaskKey = "mask";
+
+    // The binary mask. Empty Image if this Region is NA or carries no mask.
+    // (A VIEW Region reads the root's mask; Region is a top-level value by
+    // convention, so that's the same thing.)
+    Image mask() const { return root_ ? root_->get_image(kMaskKey) : Image{}; }
+    int  width()  const { return i32("w"); }
+    int  height() const { return i32("h"); }
+    bool empty()  const { return mask().empty(); }
+};
+
 } // namespace xi

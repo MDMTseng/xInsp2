@@ -130,7 +130,7 @@ If the Problems panel doesn't update:
    extension hooks `onDidSaveTextDocument`; an external edit + save
    has to come through the editor.
 2. Check the Output panel for the raw cl.exe text.
-3. `Shift+Ctrl+P` → **xInsp2: Compile Script** to force a manual
+3. `Ctrl+Shift+P` → **xInsp2: Compile Script** to force a manual
    rebuild.
 
 ---

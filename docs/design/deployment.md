@@ -34,7 +34,6 @@ PLC dead-man (BE↔gateway↔PLC) is independent of whether the HMI is even runn
 |---|---|---|
 | **FE** | no (it's the root) | OS service restarts it — last-resort backstop |
 | **BE** | yes | FE catches → safe-state → rate-limited respawn |
-| **comms** | yes | FE respawns; PLC also dead-mans on its own TCP drop |
 | **HMI / kiosk** | freely | reopen the browser; inspection + safety keep running |
 
 ## Who knows the project folder
@@ -53,8 +52,7 @@ fe.json "project"  (or launcher --project)   ← single source of truth
 |---|---|---|
 | **FE** | yes (decides which project) | `fe.json` `project` / launcher `--project` |
 | **BE** | yes (the one that opens it) | FE passes `--project=<DIR>` |
-| **comms** | **no** | only `--plc` + `--listen` (PLC schema is the script's job) |
-| **HMI** | **no** | only the BE WS URL; it pulls the dashboard *and* data from BE |
+| **HMI** | **no** | only the BE WS URL; it pulls the dashboard and data from BE |
 
 The HMI's dashboard comes from the backend (`cmd:get_dashboard` →
 `<project>/dashboard.json`), so the HMI is fully decoupled from the filesystem —
@@ -80,7 +78,7 @@ reachable — and still inspects).
   project/    project.json, instances/, plugins/<p>/{plugin.json, *.dll prebuilt},
               inspect.cpp + the PREBUILT script DLL, dashboard.json
   hmi/        the static HMI artifact (index.html, *.mjs)
-  fe.json     launch config (project=./project, comms, safe-state, respawn)
+  fe.json     launch config (project=./project, safe-state, respawn)
   run.bat     starts FE pointed at fe.json
   README.txt
 ```

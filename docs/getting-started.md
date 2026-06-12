@@ -185,11 +185,11 @@ ctest covers the C++ unit tests (`backend/tests/`). See [`testing.md`](./testing
 ```
 backend/
   src/           service_main.cpp (BE — the big one), fe_main.cpp (supervisor),
-                 comms_main.cpp (gateway), runner_main.cpp, xi_image_io.cpp
-  include/xi/    the SDK headers (49): xi_plugin_manager, xi_trigger_bus,
-                 xi_image_pool, xi_script_*, xi_use, xi_result, xi_comms, …
-  tests/         C++ unit tests (ctest) + bench_image_pool
-  CMakeLists.txt build (targets: xinsp_backend / xinsp_fe / xinsp_comms / tests)
+                 runner_main.cpp (headless runner), xi_image_io.cpp
+  include/xi/    the SDK headers (57): xi_plugin_manager, xi_trigger_bus,
+                 xi_image_pool, xi_script_*, xi_use, xi_result, xi_types, …
+  tests/         C++ unit tests (ctest) + benchmarks
+  CMakeLists.txt build (targets: xinsp_backend / xinsp_fe / xinsp_runner / tests)
 hmi/             the operator SPA (app.mjs, cards.mjs, layout.mjs, protocol.mjs,
                  serve.mjs, dashboard*.json)
 vscode-extension/ the dev front-end (src/extension.ts + modules)

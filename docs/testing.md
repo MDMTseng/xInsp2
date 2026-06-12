@@ -28,7 +28,6 @@ Run all: `ctest --test-dir backend/build -C Release`
 | `test_record` | cJSON-backed `Record`; path expressions (`a.b[0].c`), image bag, default returns |
 | `test_protocol` | `parse_cmd`, `Rsp` / `VarItem` / preview header serialization; fixture parity with TS side |
 | `test_image_pool` | 16-shard refcounted pool; concurrent create/release/data; 20 MP allocation |
-| `test_ops` | `toGray` / `threshold` / `boxBlur` / `gaussian` / `sobel` / open / close / `adaptiveThreshold` / `canny` / `findContours` (boundary) / `findFilledRegions` / `matchTemplateSSD` / stats |
 | `test_diagnostics` | cl.exe / link.exe diagnostic parser (error / warning / fatal / note shapes) |
 | `test_safe_state` | FE `SafeStateSink`: reason→string, factory fallthrough, log formatting + `ts=`, empty-field placeholders, overflow/null safety |
 | `test_qa_fault` / `test_qa_race` | FE respawn sliding-window + cap arithmetic; forensics carried on the cap event |
@@ -61,6 +60,16 @@ Run all: `cd vscode-extension && node --test test/*.test.mjs`
 | `ws_adversarial.test.mjs` | malformed JSON, huge payload, rapid-fire, path injection, double-start |
 | `ws_commands.test.mjs` | start/stop, set_param, exchange_instance, etc. |
 | `ws_comprehensive.test.mjs` | compile fail, value verification, JPEG preview, project open |
+| `ws_fixturing.test.mjs` | test-fixture helpers and backend-lifecycle helpers |
+| `ws_graph_capture.test.mjs` | dataflow edge capture (headless half of graph stage-2) |
+| `ws_io_field.test.mjs` | typed I/O field extraction and NA propagation per-field |
+| `ws_io_mutate.test.mjs` | typed I/O mutation: `set_param` + `exchange_instance` wiring |
+| `ws_io_stress.test.mjs` | high-volume typed I/O round-trips under concurrency |
+| `ws_multi_file_script.test.mjs` | multi-file script headers (`#include`d `.cpp` sources) |
+| `ws_na_propagation.test.mjs` | NA backbone: NA input → NA output propagation at plugin boundary |
+| `ws_region.test.mjs` | region-typed I/O (ROI, mask, polygon) |
+| `ws_types.test.mjs` | nominal type system: named I/O types, type-compatibility checks |
+| `ws_types_cv.test.mjs` | OpenCV-typed I/O (cv::Mat wrapper types) |
 
 ---
 
@@ -89,6 +98,7 @@ cd vscode-extension && node test/runUserJourney.mjs
 | `runProjectPluginJourney` | in-project plugin create / edit / typo / fix / instance / export (12 screenshots) |
 | `runImageViewerJourney` | plugin + interactive image viewer pan/zoom/fit/1:1/tool ops (18 screenshots, scripted via `xinsp2.imageViewer.applyOp`) |
 | `runUxStates` | UX state transitions (welcome → project → instance) |
+| `runCrashDump` | backend crash → minidump + crash report survive with correct breadcrumbs |
 
 ---
 
@@ -113,6 +123,8 @@ capture screenshots via `Win32 PrintWindow` for human spot-checks.
 | `pipeline_graph.cjs` | `runPipelineGraph.mjs` |
 | `graph_capture.cjs` | `runGraphCapture.mjs` |
 | `graph_multi.cjs` | `runGraphMulti.mjs` |
+| `show_icon.cjs` | asserts the activity-bar icon renders correctly (screenshot) |
+| `viewer_run.cjs` | opens the viewer panel and asserts the rendered layout |
 | `journey_helpers.cjs` | shared utilities (`editAndSave`, `makeShooter`, etc.) |
 
 `hover_contract.cjs` opens `examples/blob_tracker`, lets the managed

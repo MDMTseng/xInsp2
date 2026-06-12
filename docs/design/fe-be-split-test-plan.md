@@ -36,36 +36,32 @@ FE status channel, real PLC transports, Linux supervisor.
 
 ---
 
-## 1. Unit — `SafeStateSink` (`test_safe_state`, new ctest binary)
+## 1. Unit — `SafeStateSink` (`test_safe_state`) **[DONE]**
 
-Pure logic; no process spawning. Use the repo's `CHECK(cond)` harness (see
-`backend/tests/test_diagnostics.cpp`), capture sink output with `tmpfile()`.
-Register in `backend/CMakeLists.txt` (`add_executable` + `add_test`), add to
-`docs/testing.md`.
-
-| ID | Proves | Pass criteria |
-|---|---|---|
-| SS-U1 | `to_string(SafeStateReason)` | each enum → exact string; out-of-range → `"Unknown"` |
-| SS-U2 | factory fallthrough | `make_safe_state_sink("log")`, `("")`, `("modbus")` all return non-null, `name()=="log"` |
-| SS-U3 | `enter_safe_state` formatting | captured line contains reason, `rc=0x%08X`, module, phase, report |
-| SS-U4 | `clear_safe_state` | captured line is the `CLEAR SAFE STATE` form |
-| SS-U5 | empty fields | empty module/phase/report render as `-` (the `?:` placeholders) |
-| SS-U6 | overflow safety | 4 KB module/report string → no crash, truncates within the 512 buf |
-| SS-U7 | null `FILE*` | `LoggingSafeStateSink(nullptr)` enter/clear → no crash (stderr-only path) |
-
-**Refactor to enable a unit:** the FE's crash-report parser
-(`enrich_from_crash_report` in `fe_main.cpp`) is currently a file-static
-function, so it can't be unit-tested in isolation. **[TODO]** extract it (and
-the `minidump:` regex) into a small portable header (e.g.
-`xi_crash_report.hpp`) and add:
+Pure logic; no process spawning. `backend/tests/test_safe_state.cpp` is built as
+a ctest target (`add_test NAME safe_state`). `xi_fe_status.hpp` renderer is
+unit-tested in `test_qa_edge.cpp` (FS-U*).
 
 | ID | Proves | Pass criteria |
 |---|---|---|
-| CR-U1 | parse a known-good report | given a fixture `be.log` + sibling `.json`, fills `exception_name`/`module`/`last_phase` |
-| CR-U2 | `context.last_phase` empty → `threads[]` fallback | picks the `inspect` breadcrumb from `threads[]` |
-| CR-U3 | no `minidump:` line in log | leaves event fields empty, `report_path` empty, no throw |
-| CR-U4 | report `.json` missing/corrupt | `report_path` set, other fields empty, no throw |
-| CR-U5 | last-match wins | multiple `minidump:` lines → uses the last (most recent crash) |
+| SS-U1 **[DONE]** | `to_string(SafeStateReason)` | each enum → exact string; out-of-range → `"Unknown"` |
+| SS-U2 **[DONE]** | factory fallthrough | `make_safe_state_sink("log")`, `("")`, `("modbus")` all return non-null, `name()=="log"` |
+| SS-U3 **[DONE]** | `enter_safe_state` formatting | captured line contains reason, `rc=0x%08X`, module, phase, report |
+| SS-U4 **[DONE]** | `clear_safe_state` | captured line is the `CLEAR SAFE STATE` form |
+| SS-U5 **[DONE]** | empty fields | empty module/phase/report render as `-` (the `?:` placeholders) |
+| SS-U6 **[DONE]** | overflow safety | 4 KB module/report string → no crash, truncates within the 512 buf |
+| SS-U7 **[DONE]** | null `FILE*` | `LoggingSafeStateSink(nullptr)` enter/clear → no crash (stderr-only path) |
+
+The FE's crash-report parser (`enrich_from_crash_report`) has been extracted into
+`xi_crash_report.hpp` (portable header) and unit-tested in `test_qa_edge.cpp`:
+
+| ID | Proves | Pass criteria |
+|---|---|---|
+| CR-U1 **[DONE]** | parse a known-good report | given a fixture `be.log` + sibling `.json`, fills `exception_name`/`module`/`last_phase` |
+| CR-U2 **[DONE]** | `context.last_phase` empty → `threads[]` fallback | picks the `inspect` breadcrumb from `threads[]` |
+| CR-U3 **[DONE]** | no `minidump:` line in log | leaves event fields empty, `report_path` empty, no throw |
+| CR-U4 **[DONE]** | report `.json` missing/corrupt | `report_path` set, other fields empty, no throw |
+| CR-U5 **[DONE]** | last-match wins | multiple `minidump:` lines → uses the last (most recent crash) |
 
 ---
 
@@ -144,7 +140,7 @@ asserting **order and timing** in the FE log.
 
 ## 6. Regression gates (must stay green on every change)
 
-- `ctest --test-dir backend/build -C Release` → 7/7 (will be 8/8 after `test_safe_state`).
+- `ctest --test-dir backend/build -C Release` → 12/12.
 - `examples/plugin_crash_forensics/driver.py` → PASS (BE forensics the FE reads).
 - `examples/fe_supervisor/driver.py` → PASS.
 - `examples/cross_proc_trigger` + `multi_source_surge` → PASS (prove plain boot, no `--project`, is unaffected).
@@ -171,7 +167,7 @@ run on both.
 | BE crash forensics (minidump + report) | ✅ `plugin_crash_forensics` |
 | FE crash-storm → safe-state/respawn/cap/orphan | ✅ `fe_supervisor` (FE-E1) |
 | C++ unit `ctest` regression | ✅ 12/12 |
-| `SafeStateSink` unit + crash-parser unit | ❌ SS-U*, CR-U* |
+| `SafeStateSink` unit (`test_safe_state` SS-U*) + crash-parser unit (CR-U* in `test_qa_edge`) | ✅ |
 | **FE happy path / clean shutdown** | ❌ FE-E2 |
 | **FE orphan-kill guarantee** | ❌ FE-E3 |
 | **FE recover-and-clear transition** | ✅ `qa_recover` (FE-E5) |
@@ -186,10 +182,8 @@ run on both.
 | extension-host e2e, leak, Linux | ❌ infra |
 
 **Build next, in order:** (1) FE-E2 happy path + FE-E3 orphan — the two
-highest-value safety holes; (2) `test_safe_state` (SS-U*) — cheap, fast, guards
-the contract; (3) AS-I4/5/6 autostart negatives — a bad project on a line must
-degrade safely; (4) EX-N2/N3 attach guard; (5) extract the crash parser +
-CR-U*; (6) FE-E4/E5 timing paths.
+highest-value safety holes; (2) AS-I4/5/6 autostart negatives — a bad project on a
+line must degrade safely; (3) EX-N2/N3 attach guard; (4) FE-E6/E9/E10 gap items.
 
 ---
 

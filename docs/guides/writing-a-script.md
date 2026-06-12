@@ -72,7 +72,7 @@ That's a full script. Three constructs do the heavy lifting:
 
 | Primitive | Purpose | Lifetime |
 |---|---|---|
-| `xi::Instance<T>` / `xi::use("name")` | Persistent stateful object (camera, template, model) | Lives across hot-reloads, persisted by host |
+| `xi::use("name")` → `xi::UseProxy&` | Proxy to a backend-managed instance (camera, model, etc.) | Instance lives across hot-reloads, persisted by host |
 | `xi::Param<T>` | Tunable scalar with UI slider | Per script DLL, restored from `project.json` on reload |
 | `VAR(name, expr)` | Tracked variable sent to viewer panel | Per `inspect_entry` invocation |
 
@@ -121,29 +121,27 @@ If you need persistence, write to `xi::state()`.
 
 ---
 
-## `xi::use<T>` — calling plugins
+## `xi::use` — calling plugins
 
-The host owns instances; the script proxies to them.
+The host owns instances; the script proxies to them via `xi::UseProxy`.
 
 ```cpp
 auto& det = xi::use("detector0");
 auto out  = det.process(xi::Record().image("gray", img).set("t", 50));
 ```
 
-For typed plugin classes (when the plugin is in the same source tree
-or you've imported a typed proxy):
+`UseProxy` exposes `process(Record)`, `exchange(string)`, and
+`grab(timeout_ms)` — which routes to the named image source's frame
+queue. `grab_wait` (blocking) is a method on `xi::ImageSource` itself
+and is not available through the script-side proxy.
 
-```cpp
-auto& det = xi::use<MyDetector>("detector0");
-det->set_def(R"({"threshold": 50})");
-```
-
-Image sources implement `xi::ImageSource` (subclass of `xi::Plugin`)
-and add `grab(timeout_ms)` / `grab_wait(timeout_ms)` for pulling frames
-synchronously.
-
-`xi::use` works seamlessly across script reloads: the proxy object
+`xi::use` works seamlessly across script reloads: the proxy
 re-resolves to the host's current instance after each load.
+
+`xi::ImageSource` is a sibling of `xi::Plugin` — both inherit from
+`xi::InstanceBase`. Scripts never construct sources directly; they call
+`xi::use("source_name").grab(ms)` to dequeue frames the source
+produces.
 
 ---
 

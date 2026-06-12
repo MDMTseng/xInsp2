@@ -133,21 +133,13 @@ an operator HMI / the VS Code extension can still attach live.
   is forwarded to every backend the FE spawns — including respawns — so the BE
   edits a `<project>/.xinsp_work` scratch and a crash respawn **resumes** it
   (in-progress settings survive). See [`../guides/project-working-copy.md`](../guides/project-working-copy.md).
-- **Comms gateway** (optional): with `--comms-plc=tcp:|udp:HOST:PORT` the FE also
-  spawns + supervises the out-of-process `xinsp-comms` gateway (PLC I/O) as a
-  sibling child in the same Job Object, on its own `RespawnTracker`. Gateway death
-  → `CommsLost` safe-state + rate-limited respawn, independent of the BE (a BE
-  respawn doesn't drop the PLC link, and a gateway crash doesn't kill the BE). The
-  FE withholds `CLEAR` until both the gateway is back and the BE is serving. Full
-  design + dead-man semantics in [`comms-gateway.md`](./comms-gateway.md).
 
 ## Status channel — the FE's authoritative state for the UI
 
 The FE has no WS client/server (it stays dependency-light). So a UI in **attach**
 mode used to infer "backend down → line safe" purely from a WebSocket
 *disconnect* — which can't tell a transient respawn from a latched
-`RespawnLimitExceeded`, can't show the death reason or the respawn budget, and is
-blind to the comms gateway.
+`RespawnLimitExceeded` and can't show the death reason or the respawn budget.
 
 The FE instead **publishes its true state to a small JSON status file**
 (`--status-file`, default `<be-log dir>/fe-status.json`), rewritten **atomically**
@@ -169,13 +161,12 @@ lives in `fe_main.cpp`.
 
 - **`state`** `starting` | `healthy` | `safe` | `stopped`. **`reason`** is the
   safe-state reason while not healthy. **`latched`** = the FE gave up
-  (`RespawnLimitExceeded` / comms `gaveup`) and is awaiting a manual restart — the
-  signal a UI needs to stop showing "recovering…". A clean shutdown sets
-  `state:"stopped"` but **preserves** a latched reason so the last snapshot still
-  says *why* the line is down.
-- **`consecutive`/`respawn_max`** is the respawn budget; **`comms`** the gateway
-  state; **`last_event`** the most recent death's forensics; **`crash_history`**
-  points at the full timeline. `--no-status-file` disables it.
+  (`RespawnLimitExceeded`) and is awaiting a manual restart — the signal a UI needs
+  to stop showing "recovering…". A clean shutdown sets `state:"stopped"` but
+  **preserves** a latched reason so the last snapshot still says *why* the line is down.
+- **`consecutive`/`respawn_max`** is the respawn budget; **`last_event`** the most
+  recent death's forensics; **`crash_history`** points at the full timeline.
+  `--no-status-file` disables it.
 
 A UI reads/watches this file directly (it shares the filesystem in the managed/
 local case; a remote BE is out of scope, same as the working copy). The WS

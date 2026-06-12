@@ -26,6 +26,9 @@ Constructors:
 - `Image(w, h, c, const uint8_t* data)` — **copies** `data` into a fresh buffer.
 - `Image::create_in_pool(host, w, h, c)` — (plugins) zero-copy pool-backed buffer
   for *producing* an image to return; bytes land straight in the host ImagePool.
+  The code contains a dead branch for `is_worker_mode()` / `shm_create_image` —
+  that SHM path was removed 2026-05 and is never taken; the only live path is
+  `host->image_create`.
 - `Image::adopt_pool_handle(host, handle)` — zero-copy view over a host handle.
 
 ## Loading: `xi::imread`

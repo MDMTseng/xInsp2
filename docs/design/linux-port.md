@@ -131,7 +131,7 @@ Numbers are for getting each layer *working + smoke-tested*, not hardened.
 |---|---|---|
 | **0. Build green** | CMake on Linux, swap the Easy-tier API shims (sockets, `dlopen`, atomic-io, `_strdup`/`MAX_PATH`/wstring). Backend links + boots, WS answers `ping`. | 2–4 days |
 | **1. Core loop** | `xi_script_compiler` → `clang++`/`g++` spawn + gcc/clang diagnostic parser; load the compiled `.so` (`dlopen`); a trigger runs one `inspect()`; plugins load. This is the heart — once green, the framework "works" headless. | 1–1.5 weeks |
-| **2. Supervisor + comms** | `fe_main.cpp` → `posix_spawn`/`pidfd`/`PR_SET_PDEATHSIG` + signal handlers + POSIX TCP probe; `comms_main.cpp` sockets. FE drives safe-state on BE death. | 3–5 days |
+| **2. Supervisor** | `fe_main.cpp` → `posix_spawn`/`pidfd`/`PR_SET_PDEATHSIG` + signal handlers + POSIX TCP probe. FE drives safe-state on BE death. | 3–5 days |
 | **3. Crash forensics** | `xi_seh` → `sigaction`+`siglongjmp` for the per-call net; process-level dumps via **Breakpad/Crashpad** (covers Linux+mac+ARM at once) or, as a stop-gap, core-file + `dladdr` module blame. | 3 days (stop-gap) → 2 weeks (Breakpad) |
 | **4. Watchdog** | Redesign — see Hard table. Cooperative checkpoint in the script ABI, or `SIGUSR1`→`siglongjmp` out of the inspect thread. Genuinely a design task, not a port. | 2–4 days design+impl |
 | **ARM Linux delta** | Drop IPP (x86-only); confirm OpenCV ARM build + NEON; native or cross toolchain. Otherwise identical POSIX to x64. | +2–4 days |

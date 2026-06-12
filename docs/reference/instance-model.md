@@ -241,7 +241,9 @@ care about policy — they just emit; the bus does the rest.
   export.
 - [`guides/adding-a-plugin.md`](../guides/adding-a-plugin.md) — the
   task-shaped tour.
-- `backend/include/xi/xi_plugin_manager.hpp` — the canonical
-  registry / loader implementation.
+- `backend/include/xi/xi_cabi_adapter.hpp` — `CAbiInstanceAdapter` (the
+  C-ABI plugin instance wrapper) and `plugin_abi_compatible()`.
+- `backend/include/xi/xi_plugin_manager.hpp` — plugin discovery, loading,
+  project lifecycle, and `PluginManager`.
 - `backend/include/xi/xi_instance.hpp` — `InstanceBase` /
   `InstanceRegistry`.

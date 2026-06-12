@@ -2,7 +2,7 @@
 
 A plugin's instance UI is plain HTML the plugin ships in `ui/index.html`, loaded
 into a VS Code webview (see [`extending-the-ui.md`](./extending-the-ui.md) for the
-host wiring and [`writing-a-plugin.md`](./writing-a-plugin.md) for the
+host wiring and [`adding-a-plugin.md`](./adding-a-plugin.md) for the
 `exchange()` contract). These conventions keep that UI **automatable** — by the
 plugin UI test harness today, and by any generic param-tuning tooling later.
 

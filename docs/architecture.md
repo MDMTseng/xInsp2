@@ -644,7 +644,7 @@ my_project/
 
 ```bash
 cd backend/build
-cmake .. -G "Visual Studio 18 2026" -A x64
+cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
 ```
 
@@ -654,7 +654,7 @@ Options: `-DXINSP2_HAS_IPP=ON`, `-DXINSP2_HAS_OPENCV=ON`
 
 ```bash
 cd plugins/build
-cmake .. -G "Visual Studio 18 2026" -A x64
+cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
 ```
 
@@ -667,25 +667,17 @@ cd vscode-extension && npm install && npm run build
 ### Tests
 
 ```bash
-# C++ unit
-backend/build/Release/test_xi_core.exe
-backend/build/Release/test_protocol.exe
+# C++ unit (all registered targets)
+ctest --test-dir backend/build -C Release
 
-# Node integration (run sequentially)
-cd vscode-extension
-for f in test/ws_*.test.mjs test/protocol.test.mjs; do
-    node --test --test-timeout=600000 "$f"
-done
-
-# Crash isolation
-node --test --test-timeout=600000 test/ws_crash.test.mjs
+# Node integration
+cd vscode-extension && node --test test/*.test.mjs
 
 # VS Code E2E with screenshots
 node test/runE2E.mjs
-
-# Full pipeline (13 screenshots)
-node test/runPipeline.mjs
 ```
+
+See [`testing.md`](./testing.md) for the full test inventory and per-suite descriptions.
 
 ---
 
@@ -693,43 +685,43 @@ node test/runPipeline.mjs
 
 ### Core headers (`backend/include/xi/`)
 
+There are 50+ headers under `backend/include/xi/`. Key ones:
+
 | File | Purpose |
 |------|---------|
-| `xi.hpp` | Umbrella include |
+| `xi.hpp` | Umbrella include (script-side) |
+| `xi_abi.h` / `xi_abi.hpp` | C ABI types + C++ wrapper (`Plugin`, `XI_PLUGIN_IMPL`) — stable across compilers |
 | `xi_async.hpp` | `Future<T>`, `xi::async()`, `ASYNC_WRAP` |
 | `xi_var.hpp` | `VAR()`, `ValueStore`, `VarTraits<T>` |
 | `xi_param.hpp` | `Param<T>`, `ParamRegistry` |
-| `xi_instance.hpp` | `Instance<T>`, `InstanceBase`, `InstanceRegistry` |
-| `xi_image.hpp` | `Image` (shared_ptr pixel buffer) |
-| `xi_record.hpp` | `Record` (cJSON, named images, `operator[]` chaining, path expressions) |
-| `xi_source.hpp` | `ImageSource`, `TestImageSource` |
-| `xi_state.hpp` | `xi::state()` — persistent cross-frame/cross-reload state |
+| `xi_image.hpp` / `xi_image_pool.hpp` | `xi::Image` pixel buffer; 16-shard refcounted pool |
+| `xi_record.hpp` | `Record` (cJSON, named images, path expressions) |
 | `xi_use.hpp` | `xi::use("name")` — proxy to backend-managed instances |
-| `xi_plugin_handle.hpp` | `PluginHandle` — direct DLL loading (use `xi::use()` instead for hot-reload safety) |
-| `xi_abi.h` | C ABI types (stable across compilers) |
-| `xi_abi.hpp` | C++ wrapper (`Plugin`, `HostImage`, `XI_PLUGIN_IMPL`) |
-| `xi_image_pool.hpp` | Sharded refcounted image pool (16 shards) |
-| `xi_plugin_manager.hpp` | `PluginManager` — plugin discovery, project/instance lifecycle, working-copy commits (umbrella; includes the leaves below) |
-| `xi_cabi_adapter.hpp` | `CAbiInstanceAdapter`, `PluginInfo`, `plugin_abi_compatible()` — per-plugin DLL load + instance wrapping |
-| `xi_project_model.hpp` | Project data model: `ProjectInfo` (+ `DispatchGroup`), `InstanceInfo`, `CompileEnv`, `OpenWarning` |
-| `xi_pm_parse.hpp` | Stateless JSON helpers: `parse_manifest`, `extract_string`, `validate_config_against_manifest` |
-| `xi_pm_json.hpp` | JSON-output escaping for project/plugin metadata (`pm_json_escape`/`pm_json_quote`) |
-| `xi_script.hpp` | Script ABI contract |
-| `xi_script_support.hpp` | Auto-generated thunks + state/use callbacks |
-| `xi_script_compiler.hpp` | MSVC compile driver (multi-file, vendor includes, cjson linking) |
-| `xi_script_loader.hpp` | DLL loader + symbol resolution |
-| `xi_protocol.hpp` | WS protocol types + JSON helpers |
+| `xi_state.hpp` | `xi::state()` — persistent cross-frame/cross-reload state |
+| `xi_plugin_manager.hpp` | `PluginManager` — discovery, lifecycle, working-copy commits |
+| `xi_script_compiler.hpp` | MSVC compile driver (multi-file, vendor includes) |
+| `xi_trigger_bus.hpp` | TriggerBus + 3 correlation policies |
+| `xi_safe_state.hpp` / `xi_fe_status.hpp` | FE safe-state sink + status channel |
 | `xi_ws_server.hpp` | Header-only WebSocket server (RFC 6455) |
-| `xi_jpeg.hpp` | JPEG encoder (IPP/OpenCV/stb dispatch by CPU vendor) |
-| `xi_project.hpp` | Project file read/write |
+| `xi_jpeg.hpp` | JPEG encoder (IPP/OpenCV/stb dispatch) |
 
-### Plugins
+Browse `backend/include/xi/` directly for the full list.
 
-| Plugin | ABI | UI | Description |
-|--------|-----|-----|-------------|
-| `mock_camera` | Old (InstanceBase*) | ✅ | Simulated camera, frame counter, FPS/resolution, live preview |
-| `blob_analysis` | New (XI_PLUGIN_IMPL) | ✅ | Threshold + contour + area/centroid/bbox, canvas overlay |
-| `data_output` | Old (InstanceBase*) | ✅ | Result persistence (stub) |
+### Plugins (`plugins/`)
+
+The full set shipped under `plugins/` — browse each directory for its
+`manifest.json` and `ui/` folder. For brief descriptions see
+[`docs/status.md`](./status.md) §"Plugins shipped".
+
+| Plugin | Description |
+|--------|-------------|
+| `mock_camera` | Simulated camera — frame counter, configurable FPS/resolution, live preview |
+| `blob_analysis` | Threshold + contour + area/centroid/bbox, canvas overlay |
+| `data_output` | Result persistence (stub) |
+| `json_source` | Emits frames loaded from JSON data files |
+| `record_save` | Saves labelled images/records to disk |
+| `threshold_op` | Standalone threshold operator (no UI) |
+| `synced_stereo` | Paired left+right frame emitter; multi-camera TriggerBus reference |
 
 ### Vendored
 
