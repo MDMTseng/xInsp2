@@ -40,6 +40,13 @@ Record baseline; the view wrappers cut that to ~1.4× — ~3× less wrapper over
 the shared root, no copy), so it's cheaper still. The type NAME is free; the cost
 is only the cJSON the wrapping would otherwise duplicate.
 
+**Mutation safety.** Accessors are read-only, so adjusting a value never touches
+the original. The two ways to "adjust" — `record()` (an independent copy you can
+edit) or reconstruction (`Pose(p.x(), p.y(), newAngle)`) — are detached by
+construction. And the internal build target (`mut()`, used by field ctors) is
+copy-on-write: a view, or a value whose root is shared, detaches into a private
+copy before any write — so even a custom mutator can't reach the shared tree.
+
 ### 1. Nominal types — names over a generic Record
 
 A small set of **nominal type wrappers** — `Number`, `Point`, `Line`, `Arc`,

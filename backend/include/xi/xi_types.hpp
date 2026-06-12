@@ -69,8 +69,20 @@ protected:
         t.set_src(src_);
         return t;
     }
-    // Build target for field ctors (only valid on OWNED values — node_ is root).
-    Record& mut() { return *root_; }
+    // Mutable build target — COPY-ON-WRITE. A view (or a value whose root is
+    // shared) DETACHES into a private copy before any write, so adjusting a value
+    // can never touch the original / shared data. Field ctors run on a fresh,
+    // unique owned value, so they detach nothing.
+    Record& mut() {
+        const bool owned_unique = root_ && node_ == root_->json() && root_.use_count() == 1;
+        if (!owned_unique) {
+            Record copy = (root_ && node_ == root_->json()) ? *root_
+                                                            : Record::Value(node_).as_record();
+            root_ = std::make_shared<Record>(std::move(copy));
+            node_ = root_->json();
+        }
+        return *root_;
+    }
     // Schema-less field reads off the viewed node: missing / wrong-type → default.
     double      num(const char* k, double def = 0.0)            const { return Record::Value(node_)[k].as_double(def); }
     int         i32(const char* k, int def = 0)                 const { return Record::Value(node_)[k].as_int(def); }
