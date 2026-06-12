@@ -2611,6 +2611,8 @@ void xi_inspect_entry(int frame) {
         // Ordered nodes + VAR chips (the script glue between plugin stages).
         extractPipelineItems: () => extractPipelineItems(),
         revealVarSite: (name: string) => revealVarSite(name),
+        viewerVarCount: () => viewerProvider.lastVarCount(),
+        viewerResolved: () => viewerProvider.isResolved(),
         // Pipeline graph (stage 2) — run once with capture, return reconstructed edges.
         captureGraphEdges: (framePath?: string) => captureGraphEdges(framePath),
         captureAndRenderGraph: () => captureAndRenderGraph(),

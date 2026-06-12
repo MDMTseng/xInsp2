@@ -139,6 +139,9 @@ module.exports = {
         if (suite === 'show_icon') {
             return require('./show_icon.cjs').run();
         }
+        if (suite === 'viewer_run') {
+            return require('./viewer_run.cjs').run();
+        }
         return run();
     }
 };

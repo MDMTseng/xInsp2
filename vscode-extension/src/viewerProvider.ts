@@ -19,6 +19,9 @@ export class ViewerProvider implements vscode.WebviewViewProvider {
     /** True once the viewer panel has been opened at least once. */
     isResolved(): boolean { return !!this.view; }
 
+    /** For tests: how many vars the viewer last buffered (-1 = none yet). */
+    lastVarCount(): number { return (this.lastVars as any)?.items?.length ?? -1; }
+
     resolveWebviewView(webviewView: vscode.WebviewView): void {
         this.view = webviewView;
         webviewView.webview.options = {
