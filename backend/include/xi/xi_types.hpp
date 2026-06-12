@@ -235,4 +235,48 @@ public:
     double w() const { return num("w"); }
 };
 
+// N×N matrix — stored row-major as a flat array under "m". Defaults to identity.
+// The point is to carry a matrix through the Record and bridge to cv::Matx for
+// the actual math (xi_types_cv.hpp: to_cv / from_cv). at()/set() are element
+// access; for real linear algebra go through OpenCV.
+template <int N>
+class MatN : public Typed {
+public:
+    MatN() { set_identity_(); }
+    explicit MatN(Record r) : Typed(std::move(r)) {}
+    MatN(std::shared_ptr<Record> root, cJSON* node) : Typed(std::move(root), node) {}
+    static MatN na(const std::string& reason = "") { return MatN(Record::na(reason)); }
+    MatN clone() const { return MatN(this->record()); }
+
+    static constexpr int dim = N;
+    double at(int r, int c) const { return elem_(r * N + c); }
+    MatN&  set(int r, int c, double v) {
+        cJSON* arr = node_ ? cJSON_GetObjectItem(node_, "m") : nullptr;
+        cJSON* e   = arr ? cJSON_GetArrayItem(arr, r * N + c) : nullptr;
+        if (e) { e->valuedouble = v; e->valueint = (int)v; }
+        return *this;
+    }
+
+private:
+    void set_data_(const double* d) {
+        cJSON* arr = cJSON_CreateArray();
+        for (int i = 0; i < N * N; ++i) cJSON_AddItemToArray(arr, cJSON_CreateNumber(d[i]));
+        cJSON_DeleteItemFromObject(node_, "m");
+        cJSON_AddItemToObject(node_, "m", arr);
+    }
+    void set_identity_() {
+        double I[N * N] = {};
+        for (int i = 0; i < N; ++i) I[i * N + i] = 1.0;
+        set_data_(I);
+    }
+    double elem_(int idx) const {
+        cJSON* arr = node_ ? cJSON_GetObjectItem(node_, "m") : nullptr;
+        cJSON* e   = arr ? cJSON_GetArrayItem(arr, idx) : nullptr;
+        return (e && cJSON_IsNumber(e)) ? e->valuedouble : 0.0;
+    }
+};
+using Mat2 = MatN<2>;
+using Mat3 = MatN<3>;
+using Mat4 = MatN<4>;
+
 } // namespace xi

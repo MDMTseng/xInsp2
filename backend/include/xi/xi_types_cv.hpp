@@ -29,4 +29,21 @@ inline Vec2 from_cv(const cv::Vec2d& c) { return Vec2(c[0], c[1]); }
 inline Vec3 from_cv(const cv::Vec3d& c) { return Vec3(c[0], c[1], c[2]); }
 inline Vec4 from_cv(const cv::Vec4d& c) { return Vec4(c[0], c[1], c[2], c[3]); }
 
+// N×N matrices <-> cv::Matx. Drop a MatN into cv:: math (M * v, M1 * M2, inv,
+// solve, ...) and convert the result back.
+template <int N>
+inline cv::Matx<double, N, N> to_cv(const MatN<N>& m) {
+    cv::Matx<double, N, N> out;
+    for (int r = 0; r < N; ++r)
+        for (int c = 0; c < N; ++c) out(r, c) = m.at(r, c);
+    return out;
+}
+template <int N>
+inline MatN<N> from_cv(const cv::Matx<double, N, N>& m) {
+    MatN<N> out;
+    for (int r = 0; r < N; ++r)
+        for (int c = 0; c < N; ++c) out.set(r, c, m(r, c));
+    return out;
+}
+
 } // namespace xi

@@ -35,6 +35,20 @@ void xi_inspect_entry(int){
   xi::Vec4 q(1.5, 2.5, 3.5, 4.5);
   xi::Vec4 q2 = xi::from_cv(xi::to_cv(q));
   VAR(q2_z, q2.z());                     // 3.5
+
+  // MatN <-> cv::Matx
+  xi::Mat3 m;                            // identity
+  VAR(m00, m.at(0,0));                   // 1
+  VAR(m01, m.at(0,1));                   // 0
+  m.set(0,0, 2).set(1,1, 3);             // scale x by 2, y by 3
+  cv::Matx33d Mx = xi::to_cv(m);
+  cv::Vec3d mr = Mx * cv::Vec3d(4, 5, 6);   // (8, 15, 6)
+  xi::Vec3 mout = xi::from_cv(mr);
+  VAR(mrx, mout.x());
+  VAR(mry, mout.y());
+  VAR(mrz, mout.z());
+  xi::Mat3 m2 = xi::from_cv(cv::Matx33d(cv::Matx33d::eye() * 7));
+  VAR(m2_11, m2.at(1,1));                // 7
 }`;
 
 async function waitRsp(c, id) { for (;;) { const m = await c.nextText(); if (m.type === 'rsp' && m.id === id) return m; } }
@@ -58,5 +72,11 @@ test('Vec <-> cv: matrix*vector, norm, round-trip', async () => {
         assert.equal(v.rz, 7, 'M * v via OpenCV, back to xi::Vec3');
         assert.equal(v.norm, 5, 'cv::norm of a converted Vec2');
         assert.equal(v.q2_z, 3.5, 'Vec4 round-trips through cv');
+        assert.equal(v.m00, 1, 'Mat3 defaults to identity');
+        assert.equal(v.m01, 0);
+        assert.equal(v.mrx, 8, 'Mat3 -> cv::Matx33d, M*v');
+        assert.equal(v.mry, 15);
+        assert.equal(v.mrz, 6);
+        assert.equal(v.m2_11, 7, 'from_cv(cv::Matx) -> Mat3');
     });
 });
