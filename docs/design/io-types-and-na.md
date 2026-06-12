@@ -27,6 +27,19 @@ and feed it as `line_fit`'s `current_pose`.
 
 Three ideas, none of which puts a schema in the core:
 
+### 0. Cost — the wrappers are shallow views
+
+`xi::Typed` is either OWNED (holds its own Record) or a VIEW (shares a parent's
+`shared_ptr<Record>` + points a `cJSON*` at a sub-node — no copy). Extractors
+hand out views, so pulling N nested values / array items costs no cJSON
+duplication; the one materialising copy is `record()`, when you embed a value
+into a constructor input. Measured (`examples/io_stress/bench.cpp`, /O2, 100×
+extract+construct over a 5-feature output): deep-copy wrappers ran 2.3× a bare-
+Record baseline; the view wrappers cut that to ~1.4× — ~3× less wrapper overhead
+(≈21 µs/iteration). In real use you `extract(process(...))` (an rvalue moved into
+the shared root, no copy), so it's cheaper still. The type NAME is free; the cost
+is only the cJSON the wrapping would otherwise duplicate.
+
 ### 1. Nominal types — names over a generic Record
 
 A small set of **nominal type wrappers** — `Number`, `Point`, `Line`, `Arc`,
