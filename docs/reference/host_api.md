@@ -64,12 +64,17 @@ typedef struct xi_host_api {
 **append-only** — older plugin DLLs that don't read tail fields stay binary
 compatible.
 
-### Wiring status in `make_host_api()` (xi_image_pool.hpp)
+### Wiring status — where each field gets set
+
+The base `make_host_api()` (xi_image_pool.hpp) wires the image/log/status/file
+fields; the ABI-v2 resource + safe-state hooks are layered on afterwards by
+`PluginManager::default_host_api()`, so a struct straight out of `make_host_api()`
+still has them `nullptr`. Either way, plugins null-check before calling.
 
 | Field group | Status |
 |---|---|
-| `image_create` … `image_stride`, `log`, `instance_folder` | Wired |
-| `emit_trigger` | Set to `nullptr` in `make_host_api()`; wired by the trigger-bus setup in `service_main.cpp` |
+| `image_create` … `image_stride`, `log`, `instance_folder` | Wired in `make_host_api()` |
+| `emit_trigger` | `nullptr` in `make_host_api()`; wired by the trigger-bus setup in `service_main.cpp` |
 | `shm_*` (five fields) | Hard-wired `nullptr` — SHM removed 2026-05; plugins must null-check |
 | `read_image_file` | Wired via `install_read_image_file()` before plugins load |
 | `set_status` | Wired — routes to the status registry via `xi::status_sink()` |

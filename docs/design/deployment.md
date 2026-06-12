@@ -2,8 +2,8 @@
 
 > How an xInsp2 line runs on a production machine: who launches what, who may
 > crash, and who knows the project folder. Pairs with
-> [`fe-be-split.md`](./fe-be-split.md) (FE supervisor) and
-> [`comms-gateway.md`](./comms-gateway.md) (PLC dead-man).
+> [`fe-be-split.md`](./fe-be-split.md) (FE supervisor). PLC I/O is a plugin
+> concern; BE-death → safe-state is the FE's job (`host->set_safe_state`).
 
 ## Boot order — FE is the root, not the HMI
 
@@ -26,7 +26,8 @@ OS boot / login
 — it must be the most resilient process. The HMI is the *least* critical layer
 (just a viewer); it must never sit in the critical path. Putting a heavy, crash-
 prone Chromium at the root would gamble the whole line on a browser shell. The
-PLC dead-man (BE↔gateway↔PLC) is independent of whether the HMI is even running.
+PLC safe-state path (BE death → FE → PLC, plugin-owned) is independent of whether
+the HMI is even running.
 
 ### Who may die
 

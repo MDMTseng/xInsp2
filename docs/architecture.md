@@ -63,7 +63,7 @@ contents below.
 │    └─ data_output.dll           │JSON │  instanceCodeLens.ts         │
 │                                 │+JPEG│  extension.ts                │
 │  Script Compiler (MSVC cl.exe)  │     │                              │
-│    └─ user's inspection.dll     │     │  Plugin UI webviews          │
+│    └─ user's inspect.dll        │     │  Plugin UI webviews          │
 │                                 │     │    ├─ mock_camera/ui/        │
 │  Image Pool (sharded, refcount) │     │    └─ blob_analysis/ui/      │
 │  SEH crash isolation            │     │                              │

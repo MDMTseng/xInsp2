@@ -68,7 +68,7 @@ plugin from your inspection script:
 - Open the instance UI (gear icon next to the instance) → tune fields.
 - In your `inspect.cpp`:
   ```cpp
-  auto out = xi::use<MyClass>("det0").process(input);
+  auto out = xi::use("det0").process(input);
   ```
 
 `xi::use` returns a proxy; `process()`, `exchange()`, `get_def()`,

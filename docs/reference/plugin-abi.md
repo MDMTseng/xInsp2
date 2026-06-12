@@ -185,7 +185,7 @@ all plugins now run in-process in the backend via the single handle-based pool. 
 
 Generic RPC channel. Used for:
 - UI button clicks (the UI panel posts JSON commands).
-- Script-side calls via `xi::use<T>("name").exchange("...")`.
+- Script-side calls via `xi::use("name").exchange("...")`.
 
 ```c
 int xi_plugin_exchange(void* inst, const char* cmd,
@@ -312,7 +312,7 @@ Every plugin folder needs a `plugin.json`:
 
 Fields:
 - `name` (string, required) — the name the host registers; what
-  scripts pass to `xi::use<>("...")` resolves the plugin against.
+  scripts pass to `xi::use("...")` resolves the plugin against.
 - `description` (string, optional) — shown in the plugins tree.
 - `dll` (string, required) — DLL filename, relative to the plugin
   folder. `<name>.dll` is the convention.

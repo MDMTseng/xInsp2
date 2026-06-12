@@ -32,7 +32,8 @@ Status legend for the gap summary at the end: ✅ covered · 🟡 partial · ❌
 | BE crash forensics (existing) | minidump + report the FE reads | `plugin_crash_forensics` (✅) |
 
 Out of scope (Phase 2, not built — no tests yet): C++ WS-client deep heartbeat,
-FE status channel, real PLC transports, Linux supervisor.
+real PLC transports, Linux supervisor. (The FE status channel is now built and
+tested — see FS-U* in `test_qa_edge`.)
 
 ---
 
@@ -190,16 +191,16 @@ line must degrade safely; (3) EX-N2/N3 attach guard; (4) FE-E6/E9/E10 gap items.
 ## Phase G — stress + race (#92)
 
 The original Phase G targeted the SHM allocator (removed 2026-05); reframed here
-for the FE-supervisor / in-process-BE / out-of-process-gateway architecture.
+for the FE-supervisor / in-process-BE architecture.
 Three layers, fast + deterministic enough to keep in the regular suite:
 
 | ID | Layer | What it hammers |
 |---|---|---|
 | **G.1** | C++ unit `test_qa_stress` (ctest) | The safety core under conditions a long run actually produces: degenerate caps (`max=0/1`), the **exact** reset boundary (`healthy_for_ms == reset_ms`), full recover-then-recur cycles, a **200k-step equivalence fuzz** of `RespawnTracker` against a reference model (4 seeds × 5 caps), and high-volume safe-state emission (oversized/attacker-shaped fields stay bounded + well-formed). Pure, fixed-seed, no spawn, no wall-clock → not flaky. |
 | **G.2** | `examples/qa_recover/` | The **recover-and-clear** transition (FE-E5 / SP4) the always-crashing `fe_supervisor` can't reach: `crash_then_heal` crashes the BE its first N starts (counted in a respawn-surviving marker), then heals → FE logs `CLEAR SAFE STATE`, never hits the cap. |
-| **G.3** | `examples/qa_soak/` | A **healthy** full-stack soak (FE+BE+gateway): sustained normal operation must trip **no** false safe-state, respawn nothing, keep the heartbeat advancing (~1 Hz serving beat), and hold the PLC link up — then shut down clean with no orphan. `QA_SOAK_S` controls duration. |
+| **G.3** | `examples/qa_soak/` | A **healthy** full-stack soak (FE+BE): sustained normal operation must trip **no** false safe-state, respawn nothing, keep the heartbeat advancing (~1 Hz serving beat) — then shut down clean with no orphan. `QA_SOAK_S` controls duration. |
 
 **Acceptance:** `ctest` green incl. `qa_stress`; `qa_recover` + `qa_soak` PASS.
 Follow-ups (still ❌ infra): handle/FD-leak accounting across many respawns, an
 adversarial-log fuzz for the crash parser at scale, and a CI gate that runs the
-example drivers on every FE/gateway-touching change.
+example drivers on every FE-touching change.

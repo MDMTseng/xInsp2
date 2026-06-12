@@ -172,7 +172,7 @@ collection).
 ## Decorating + linking script symbols (`xi::use("…")`)
 
 Two related features share one scanner (`scanUses` + the `USE_RE` regex over
-`xi::use("name")` / `xi::use<T>("name")`) and the `instanceMap` (name→plugin,
+`xi::use("name")`) and the `instanceMap` (name→plugin,
 refreshed from each `instances` message):
 
 - **Instance highlighting** — two `TextEditorDecorationType`s colour the instance

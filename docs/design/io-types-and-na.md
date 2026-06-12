@@ -1,8 +1,8 @@
 # Typed I/O wiring + NA propagation
 
 How instances connect to each other ergonomically and robustly, without adding
-a schema/type system to the core. Status: **design + phased build** (Phase 1 in
-progress).
+a schema/type system to the core. Status: **design + phased build** (Phases 1–3
+done; Phase 4 deferred).
 
 ## The problem
 
@@ -225,8 +225,9 @@ pieces.
    failure propagation. *(done)*
 2. **`xi_types.hpp`** — the nominal type wrappers (lightweight handles) + their
    schema-less accessors. *(done)* `Typed` base + `Number / Point / Pose / Line /
-   Arc / Roi`; each a shared-Record handle with `record()`, `is_na()`,
-   `na_reason()`, a typed `::na(reason)`, field ctors, and schema-less accessors.
+   Arc / Roi / Vec2-4 / Mat2-4 / Region`; each a shared-Record handle with
+   `record()`, `is_na()`, `na_reason()`, a typed `::na(reason)`, field ctors, and
+   schema-less accessors.
 3. **`io.hpp` pattern + a fixturing demo** — `extract()` / `build()` facades, a
    locator → line_fit pose-aligned example, manifest `kind` using the type names.
    *(done)* See [`examples/fixturing_demo`](../../examples/fixturing_demo)

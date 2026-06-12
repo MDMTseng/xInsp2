@@ -109,7 +109,7 @@ the port itself; it's a record so we know what to expect.
 |---|---|
 | Pure backend port (Easy + Medium tables above) | 6-10 person-days |
 | Full platform parity including e2e, extension, SDK templates | + 3-5 days |
-| Validation: re-run all 16 backend tests + e2e suites on Linux | + 2 days |
+| Validation: re-run all 12 backend ctest targets + e2e suites on Linux | + 2 days |
 | Buffer for discovery (every port has surprises) | + 30% |
 
 Roughly **2-3 weeks** for an end-to-end port if the porter knows both

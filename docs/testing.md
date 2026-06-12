@@ -28,6 +28,8 @@ Run all: `ctest --test-dir backend/build -C Release`
 | `test_record` | cJSON-backed `Record`; path expressions (`a.b[0].c`), image bag, default returns |
 | `test_protocol` | `parse_cmd`, `Rsp` / `VarItem` / preview header serialization; fixture parity with TS side |
 | `test_image_pool` | 16-shard refcounted pool; concurrent create/release/data; 20 MP allocation |
+| `test_image_pool_stress` | high-volume concurrent pool churn; refcount integrity under load |
+| `test_sha256` | SHA-256 digest vectors (plugin cert hashing) |
 | `test_diagnostics` | cl.exe / link.exe diagnostic parser (error / warning / fatal / note shapes) |
 | `test_safe_state` | FE `SafeStateSink`: reason→string, factory fallthrough, log formatting + `ts=`, empty-field placeholders, overflow/null safety |
 | `test_qa_fault` / `test_qa_race` | FE respawn sliding-window + cap arithmetic; forensics carried on the cap event |

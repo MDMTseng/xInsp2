@@ -132,7 +132,7 @@ reg.remove("cam0");
 ```
 
 Instances are stored as `shared_ptr<InstanceBase>`; the script
-proxy (`xi::use<T>("...")`) takes a copy so it survives even if a
+proxy (`xi::use("...")`) takes a copy so it survives even if a
 hot-reload or close-project happens mid-call.
 
 `InstanceBase` is a simple polymorphic interface:

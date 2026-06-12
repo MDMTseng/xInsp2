@@ -137,8 +137,9 @@ with a one-time deprecation warning, so old projects still load.
 
 See [`testing.md`](./testing.md) for the full breakdown. Summary:
 
-- ~50 C++ unit tests across `xi_core`, `protocol`, `record`, `ops`,
-  `image_pool`, `diagnostics`. (The Phase-3 SHM/IPC test set was
+- 12 backend ctest targets (`xi_core`, `protocol`, `record`, `diagnostics`,
+  `image_pool`, `image_pool_stress`, `sha256`, `safe_state`, `qa_fault`,
+  `qa_race`, `qa_edge`, `qa_stress`). (The Phase-3 SHM/IPC test set was
   deleted with the process-isolation removal.)
 - ~30 Node integration tests under `vscode-extension/test/`.
 - E2E suites driven by `@vscode/test-electron`: full pipeline,

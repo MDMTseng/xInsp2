@@ -95,7 +95,7 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
   (fields ride directly in the event `data`, same envelope as `run_finished`;
   `run_id`/`ms` are omitted on a dropped frame).
 - **HMI**: a `verdict` card binds `code` (sign → green/red; `≤ -990000` → a distinct
-  "system" colour); `yield` excludes/【buckets system fails; a **Pareto** card ranks
+  "system" colour); `yield` excludes/buckets system fails; a **Pareto** card ranks
   by `code`/`message`. Ties into [`production-hmi.md`](./production-hmi.md).
 - **PLC / MES**: a plugin or script can act on the Result to drive pass/reject/rework/alarm;
   a system fail (`≤ -990000`) maps to safe-state, not a part reject.

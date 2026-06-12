@@ -88,7 +88,7 @@ editor.
         │        └─────────────────────────┘
         │
    plugin DLLs (C ABI, cert.json'd)
-   user inspection.dll (JIT-compiled)
+   user inspect.dll (JIT-compiled)
 ```
 
 Key design choices:
@@ -454,7 +454,7 @@ xInsp2/
 
 | Layer                        | Command                                          | What it proves                                              |
 |------------------------------|--------------------------------------------------|-------------------------------------------------------------|
-| C++ unit                     | `backend/build/Release/test_xi_core.exe` (+ 4 more) | Core types & traits; ImagePool concurrency; Record paths |
+| C++ unit                     | `ctest --test-dir backend/build -C Release` (12 targets) | Core types & traits; ImagePool concurrency; Record paths |
 | WS protocol                  | `node --test vscode-extension/test/ws_*.test.mjs` | Command surface, crash recovery, fragmentation, adversarial |
 | Multi-camera correlation     | `node vscode-extension/test/runMulticam.mjs`     | `synced_stereo` pairs left+right under same tid, 17/17      |
 | Record/replay                | `node vscode-extension/test/runRecordReplay.mjs` | Observer records → replay dispatches every event, 11/11     |
