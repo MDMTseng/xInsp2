@@ -634,28 +634,54 @@ export function activate(context: vscode.ExtensionContext) {
     type PipelineVar  = { kind: 'var'; name: string };
     type PipelineItem = PipelineNode | PipelineVar;
 
-    // Read the script + its inspect_* sibling files (script first). Falls back to
-    // the active cpp editor when no project is open.
-    function gatherScriptTexts(): string[] {
+    // The script + its inspect_* sibling files (script first). Falls back to the
+    // active cpp editor when no project is open.
+    function gatherScriptFiles(): string[] {
         const fsmod = require('fs') as typeof import('fs');
-        const texts: string[] = [];
+        const files: string[] = [];
         if (currentScriptPath) {
-            try { texts.push(fsmod.readFileSync(currentScriptPath, 'utf8')); } catch {}
+            files.push(currentScriptPath);
             const dir  = path.dirname(currentScriptPath);
             const stem = path.basename(currentScriptPath, path.extname(currentScriptPath)).toLowerCase();
             try {
                 for (const f of fsmod.readdirSync(dir).sort()) {
                     const ext = path.extname(f).toLowerCase();
                     if (!f.toLowerCase().startsWith(stem + '_') || !SCRIPT_SRC_EXTS.includes(ext)) continue;
-                    try { texts.push(fsmod.readFileSync(path.join(dir, f), 'utf8')); } catch {}
+                    files.push(path.join(dir, f));
                 }
             } catch {}
+        }
+        return files;
+    }
+    function gatherScriptTexts(): string[] {
+        const fsmod = require('fs') as typeof import('fs');
+        const texts: string[] = [];
+        for (const f of gatherScriptFiles()) {
+            try { texts.push(fsmod.readFileSync(f, 'utf8')); } catch {}
         }
         if (!texts.length) {
             const ed = vscode.window.activeTextEditor;
             if (ed?.document.languageId === 'cpp') texts.push(ed.document.getText());
         }
         return texts;
+    }
+    // Open the script file where `VAR(name, …)` / `EMIT(name)` is declared and
+    // reveal it — the graph's VAR chips jump here.
+    async function revealVarSite(name: string) {
+        const fsmod = require('fs') as typeof import('fs');
+        const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp('\\b(?:VAR|VAR_RAW|EMIT|EMIT_RAW)\\s*\\(\\s*' + esc + '\\b');
+        for (const f of gatherScriptFiles()) {
+            let text = ''; try { text = fsmod.readFileSync(f, 'utf8'); } catch { continue; }
+            const m = re.exec(text);
+            if (!m) continue;
+            const doc = await vscode.workspace.openTextDocument(f);
+            const ed  = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+            const pos = doc.positionAt(m.index);
+            ed.selection = new vscode.Selection(pos, pos);
+            ed.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+            return;
+        }
     }
 
     // Ordered graph elements in SOURCE order: plugin nodes (use("…")) interleaved
@@ -701,7 +727,7 @@ export function activate(context: vscode.ExtensionContext) {
         const esc = (s: string) => s.replace(/[&<>"]/g, c =>
             ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
         const cards = items.map(it => it.kind === 'var'
-            ? `<div class="var">VAR ${esc(it.name)}</div>`
+            ? `<div class="var" data-var="${esc(it.name)}" title="Jump to VAR ${esc(it.name)} in the script">VAR ${esc(it.name)}</div>`
             : `
       <div class="node ${it.known ? '' : 'unknown'}" data-name="${esc(it.name)}" data-plugin="${esc(it.plugin || '')}">
         <div class="nm">${esc(it.name)}</div>
@@ -723,9 +749,10 @@ export function activate(context: vscode.ExtensionContext) {
       .pl { color: var(--vscode-descriptionForeground); font-size: 12px; margin-top: 2px; }
       .io { color: var(--vscode-descriptionForeground); font-size: 11px; margin-top: 4px; }
       .col > * { margin: 4px 0; }
-      .var { font-size: 11px; color: var(--vscode-descriptionForeground);
+      .var { font-size: 11px; color: var(--vscode-descriptionForeground); cursor: pointer;
              border: 1px dashed var(--vscode-widget-border, #8884); border-radius: 10px;
              padding: 1px 8px; opacity: 0.8; }
+      .var:hover { opacity: 1; border-color: var(--vscode-focusBorder); }
       .empty { color: var(--vscode-descriptionForeground); }
       .bar { margin-bottom: 12px; }
       button { font: inherit; padding: 4px 10px; cursor: pointer;
@@ -737,7 +764,7 @@ export function activate(context: vscode.ExtensionContext) {
       .eline { stroke: var(--vscode-charts-blue, #4daafc); stroke-width: 1.5; fill: none; }
     </style></head><body>
       <div class="hint">Plugin nodes (click → webui) interleaved with the VAR chips the
-        script computes between them, in source order.
+        script computes between them (click a chip → jump to its code), in source order.
         <br>${hasEdges
           ? 'Arrows = observed image dataflow (last capture). Scalar/JSON flow through the VAR glue is not traced.'
           : 'Click <b>Capture dataflow</b> to run once and overlay image-dataflow edges.'}</div>
@@ -754,6 +781,10 @@ export function activate(context: vscode.ExtensionContext) {
         for (const el of document.querySelectorAll('.node')) {
           el.addEventListener('click', () => vscode.postMessage({
             type: 'openUI', name: el.dataset.name, plugin: el.dataset.plugin }));
+        }
+        // VAR chips = script glue → jump to the code where they're declared.
+        for (const el of document.querySelectorAll('.var')) {
+          el.addEventListener('click', () => vscode.postMessage({ type: 'goto', name: el.dataset.var }));
         }
         document.getElementById('cap').addEventListener('click', () => {
           document.getElementById('cap').textContent = '⟳ Capturing…';
@@ -847,6 +878,8 @@ export function activate(context: vscode.ExtensionContext) {
                     if (msg?.type === 'openUI' && msg.name) {
                         const plugin = msg.plugin || instanceMap.get(msg.name);
                         vscode.commands.executeCommand('xinsp2.openInstanceUI', msg.name, plugin);
+                    } else if (msg?.type === 'goto' && msg.name) {
+                        revealVarSite(msg.name);
                     } else if (msg?.type === 'capture') {
                         await captureAndRenderGraph();
                     }
@@ -2571,6 +2604,7 @@ void xi_inspect_entry(int frame) {
         extractPipelineNodes: () => extractPipelineNodes(),
         // Ordered nodes + VAR chips (the script glue between plugin stages).
         extractPipelineItems: () => extractPipelineItems(),
+        revealVarSite: (name: string) => revealVarSite(name),
         // Pipeline graph (stage 2) — run once with capture, return reconstructed edges.
         captureGraphEdges: (framePath?: string) => captureGraphEdges(framePath),
         captureAndRenderGraph: () => captureAndRenderGraph(),
