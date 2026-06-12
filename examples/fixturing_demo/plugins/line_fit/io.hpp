@@ -17,7 +17,11 @@ namespace line_fit_io {
 // --- input constructor ----------------------------------------------------
 class Build {
 public:
-    Build& current(const xi::Pose& p) { rec_.set("current", p.record()); return *this; }
+    Build& current(const xi::Pose& p) {
+        rec_.set("current", p.record());
+        rec_.set_prov("current", p.src());   // constructor records where this field came from
+        return *this;
+    }
     xi::Record build() const { return rec_; }
 private:
     xi::Record rec_;

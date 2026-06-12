@@ -30,7 +30,9 @@ public:
         if (rec_.is_na()) return xi::Pose::na(rec_.na_reason());
         auto c = rec_["centroids"][i];
         if (!c.exists()) return xi::Pose::na("blob_io: no orientation at index " + std::to_string(i));
-        return xi::Pose(c["x"].as_double(0), c["y"].as_double(0), /*angle=*/0.0);
+        xi::Pose p(c["x"].as_double(0), c["y"].as_double(0), /*angle=*/0.0);
+        p.set_src(rec_.src());   // pipe provenance from the producing instance
+        return p;
     }
 
     // All located parts. Cheap: xi::Pose is a lightweight handle.

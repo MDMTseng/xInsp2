@@ -50,5 +50,11 @@ test('fixturing: extractor → constructor → plugin validate/NA, end to end', 
         assert.equal(v.na_out_na, true, 'line_fit returns NA when current is missing');
         assert.match(v.na_reason, /current/, 'NA names the missing field');
         assert.equal(v.na_line_na, true, 'NA propagated into the typed Line wrapper');
+
+        // Provenance (src id): host stamps the output, the extractor pipes it
+        // onto the pose, the constructor records the field's source.
+        assert.equal(v.loc_src, 'loc', 'host stamped the locator output with $src');
+        assert.equal(v.pose0_src, 'loc', 'extractor piped src onto the pose');
+        assert.equal(v.in_prov_current, 'loc', 'constructor recorded current came from loc');
     });
 });

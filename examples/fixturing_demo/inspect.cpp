@@ -25,16 +25,24 @@ void xi_inspect_entry(int) {
     auto loc = xi::use("loc");   // locator (blob_centroid_detector)
     auto fit = xi::use("fit");   // line_fit
 
-    // 1) Locate → typed poses.
-    auto located = blob_io::extract(loc.process(xi::Record().image("src", frame)));
+    // 1) Locate → typed poses. The host stamps the output's $src = "loc".
+    auto loc_out = loc.process(xi::Record().image("src", frame));
+    VAR(loc_src, loc_out.src());
+    auto located = blob_io::extract(loc_out);
     VAR(n_poses, located.orientation_count());
 
     // 2) Wire pose 0 into line_fit (constructor) and read back the typed Line.
+    //    The extractor piped the source onto the pose; the constructor records
+    //    where the "current" field came from ($prov), so the data lineage is
+    //    self-describing — no script parsing needed.
     xi::Pose pose0 = located.orientation(0);
-    VAR(pose0_x, pose0.x());
-    VAR(pose0_y, pose0.y());
+    VAR(pose0_x,   pose0.x());
+    VAR(pose0_y,   pose0.y());
+    VAR(pose0_src, pose0.src());
 
-    auto fit_out = fit.process(line_fit_io::build().current(pose0).build());
+    auto fit_in = line_fit_io::build().current(pose0).build();
+    VAR(in_prov_current, fit_in.prov_of("current"));
+    auto fit_out = fit.process(fit_in);
     xi::Line line = line_fit_io::extract(fit_out).line();
     VAR(fit_na,  fit_out.is_na());
     VAR(line_x1, line.x1());     // baseline line (10,0)-(10,40) shifted to pose0 (angle 0)

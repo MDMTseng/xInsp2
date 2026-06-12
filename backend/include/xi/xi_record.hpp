@@ -367,6 +367,38 @@ public:
     bool is_na() const { return has(kNaKey); }
     std::string na_reason() const { return get_string(kNaKey); }
 
+    // --- Provenance (src id) ------------------------------------------------
+    // A Record can carry WHERE it came from: the host stamps an instance's
+    // output with its name ($src), extractors pipe that onto the typed values
+    // they pull out, and constructors record which source each input field came
+    // from ($prov: field -> src). This makes the non-image data flow self-
+    // describing — the constructor (and a future graph) knows the data lineage
+    // without parsing the script. Reserved keys, like $na; harmless to plugins.
+    // See docs/design/io-types-and-na.md.
+    static constexpr const char* kSrcKey  = "$src";
+    static constexpr const char* kProvKey = "$prov";
+    Record& set_src(const std::string& id) {
+        cJSON_DeleteItemFromObject(json_, kSrcKey);
+        cJSON_AddStringToObject(json_, kSrcKey, id.c_str());
+        return *this;
+    }
+    std::string src() const { return get_string(kSrcKey); }
+    // Record that input field `field` was sourced from `src` (used by constructors).
+    Record& set_prov(const std::string& field, const std::string& src) {
+        if (src.empty()) return *this;
+        cJSON* prov = cJSON_GetObjectItem(json_, kProvKey);
+        if (!prov) { prov = cJSON_CreateObject(); cJSON_AddItemToObject(json_, kProvKey, prov); }
+        cJSON_DeleteItemFromObject(prov, field.c_str());
+        cJSON_AddStringToObject(prov, field.c_str(), src.c_str());
+        return *this;
+    }
+    std::string prov_of(const std::string& field) const {
+        cJSON* prov = cJSON_GetObjectItem(json_, kProvKey);
+        if (!prov) return "";
+        cJSON* f = cJSON_GetObjectItem(prov, field.c_str());
+        return (f && cJSON_IsString(f)) ? f->valuestring : "";
+    }
+
     // Get a nested Record (returns empty Record if not found)
     Record get_record(const std::string& key) const {
         cJSON* item = cJSON_GetObjectItem(json_, key.c_str());

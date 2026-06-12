@@ -101,6 +101,27 @@ rec.na_reason()            // "reason"
 This extends the existing run-level NA (`xi::result` code 0 = NA) down to the
 Record level so it flows *between* stages.
 
+## Provenance (src id)
+
+A Record can carry **where it came from**, so the non-image data flow is
+self-describing without parsing the script:
+
+- the host stamps an instance's output with its name (`$src`),
+- extractors **pipe** that onto the typed values they pull out (`Pose::src()`),
+- constructors **record** which source each input field came from
+  (`$prov`: field → src) — so the constructor literally knows the lineage.
+
+```cpp
+auto loc_out = loc.process(...);            // $src = "loc"
+auto pose    = blob_io::extract(loc_out).orientation(0);  // pose.src() == "loc"
+auto in      = line_fit_io::build().current(pose).build(); // in.prov_of("current") == "loc"
+```
+
+This complements the pipeline graph's image-handle edges: it's the same dataflow
+the graph couldn't trace for scalar/JSON, now carried explicitly through the
+typed wiring — a future graph can read `$prov` to draw those data edges. Reserved
+keys (`$src` / `$prov`), like `$na`; harmless to plugins.
+
 ## Teach-baseline
 
 `baseline_pose` + `line_params` are `line_fit` **config** (instance.json), not a

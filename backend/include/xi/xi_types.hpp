@@ -35,6 +35,12 @@ public:
     bool        is_na()     const { return rec_->is_na(); }
     std::string na_reason() const { return rec_->na_reason(); }
 
+    // Provenance: where this value came from. Extractors pipe the producing
+    // instance's $src onto the values they pull out, so a constructor (and a
+    // future graph) knows the data lineage. See docs/design/io-types-and-na.md.
+    std::string src()                  const { return rec_->src(); }
+    Typed&      set_src(const std::string& id) { rec_->set_src(id); return *this; }
+
 protected:
     // Schema-less field reads: missing / wrong-type / NA → the default.
     double      num(const char* k, double def = 0.0)            const { return (*rec_)[k].as_double(def); }
