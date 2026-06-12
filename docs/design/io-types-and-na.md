@@ -1,0 +1,123 @@
+# Typed I/O wiring + NA propagation
+
+How instances connect to each other ergonomically and robustly, without adding
+a schema/type system to the core. Status: **design + phased build** (Phase 1 in
+progress).
+
+## The problem
+
+The script is the composition layer (plugins can't call plugins — see
+[`../guides/writing-a-script.md`](../guides/writing-a-script.md)). Wiring one
+plugin's output into the next plugin's input is hand-written cJSON juggling, and
+every connection is a place where data might be missing — so the script fills
+with null-checks and error handling.
+
+Worked example (fixturing / pose-aligned inspection):
+
+- A `matcher` instance locates a part → outputs **N orientations** (poses).
+- A `line_fit` instance fits a line. Its search line is authored in a **baseline**
+  pose frame; at runtime it's transformed by `T = current ∘ baseline⁻¹` to the
+  **current** pose, then fit. `baseline_pose` + `line_params` are `line_fit`
+  config (taught once); only `current_pose` flows in per frame.
+
+So the per-frame wiring is: pick the right orientation out of the matcher's N,
+and feed it as `line_fit`'s `current_pose`.
+
+## The shape of the answer
+
+Three ideas, none of which puts a schema in the core:
+
+### 1. Nominal types — names over a generic Record
+
+A small set of **nominal type wrappers** — `Number`, `Point`, `Line`, `Arc`,
+`Pose`, `Roi` (in `xi/xi_types.hpp`) — each is *just a name* over a generic
+`xi::Record`. No fields are enforced; the payload is still schema-less cJSON. The
+wrapper is a lightweight handle (holds a Record), can carry schema-less accessors
+(`pose.angle()` reads `rec["angle"]`, NA if absent), and **can be NA**.
+
+The name is the same vocabulary in four places:
+
+- the return type of an **extractor**,
+- the parameter type of the next **constructor**,
+- the `kind` in the plugin **manifest** (so hover / graph / UI are type-aware),
+- and the port type the (future) wiring UI uses to decide what connects to what.
+
+The compiler stops you wiring a `Line` into a `Pose` input — but the data never
+left generic cJSON, and the `process()` ABI stays untyped (`Record` only). Types
+live purely in the wiring layer.
+
+Plugin/toolbox authors define their own nominal types in their own `io.hpp` (it's
+just source) — e.g. a toolbox's `MatchResult`. The core ships only the common
+vocabulary.
+
+### 2. Per-plugin `io.hpp` — extractor + constructor helpers
+
+Each plugin ships an `io.hpp` (header-only, alongside `plugin.json`) that the
+script `#include`s. It mirrors the manifest:
+
+```cpp
+auto e = matcher_io::extract(rec);   // a facade, one getter per output port
+e.count();                           // -> Number
+e.orientations();                    // -> std::vector<xi::Pose>   (whole array)
+e.orientation(i);                    // -> xi::Pose                (i-th, lazy)
+
+auto in = line_fit_io::build()       // a facade, one setter per input port
+            .current(e.orientation(k))
+            .baseline(/* from config */)
+            .build();                // -> xi::Record (complete)
+line_fit.process(in);
+```
+
+**Extractors and constructors are total — they never fail.** A missing field
+yields an empty / NA value, not an exception. The wiring code is a straight line:
+no null-checks, no try/catch.
+
+### 3. NA propagation — validation at the compute boundary
+
+Validation happens where the data is *used*: inside the plugin's `process()`.
+
+- If the **whole input Record is NA**, the framework short-circuits:
+  `use("x").process(na)` returns NA without running the plugin.
+- If **some fields are missing**, the plugin checks and bails to NA in one line:
+
+  ```cpp
+  if (auto na = xi::require(in, {"current", "baseline"})) return *na;
+  ```
+
+A plugin that can't proceed returns `xi::Record::na("line_fit: missing current")`
+— an **empty output carrying the reason**. The next stage's input is then NA, so
+it short-circuits too: **NA flows to the end of the pipeline** carrying its
+reason, with no defensive code in between.
+
+NA is a first-class `Record` concept, represented as a reserved `"$na"` key so it
+crosses the `process()` ABI and the WS unchanged:
+
+```cpp
+xi::Record::na("reason")   // { "$na": "reason" }, no images
+rec.is_na()                // true
+rec.na_reason()            // "reason"
+```
+
+This extends the existing run-level NA (`xi::result` code 0 = NA) down to the
+Record level so it flows *between* stages.
+
+## Teach-baseline
+
+`baseline_pose` + `line_params` are `line_fit` **config** (instance.json), not a
+per-frame input. Teaching = run `matcher`, pull the pose with the extractor, and
+store it into `line_fit`'s config via an `exchange` command. The baseline→current
+transform is the plugin's own internal job; the framework only delivers the three
+pieces.
+
+## Phases
+
+1. **NA backbone** — `Record::na` / `is_na` / `na_reason`, `process()` full-NA
+   short-circuit, `xi::require`. Independently useful: every pipeline gets clean
+   failure propagation. *(in progress)*
+2. **`xi_types.hpp`** — the nominal type wrappers (lightweight handles) + their
+   schema-less accessors.
+3. **`io.hpp` pattern + a fixturing demo** — `extract()` / `build()` facades, a
+   matcher → line_fit pose-aligned example, manifest `kind` aligned to the type
+   names.
+4. **Wiring UI (later)** — use the port types to connect output→input on the
+   pipeline graph and to teach baselines.

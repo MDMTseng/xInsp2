@@ -23,9 +23,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 
@@ -348,6 +350,23 @@ public:
         return cJSON_GetObjectItem(json_, key.c_str()) != nullptr;
     }
 
+    // --- NA (not-available) -------------------------------------------------
+    // A "poison" Record: empty output that carries a reason. Returned by a
+    // plugin that can't proceed (missing inputs, no detection, etc.). NA is
+    // marked by a reserved "$na" key so it survives the process() ABI + the WS,
+    // and it PROPAGATES: feeding an NA Record into use("x").process() short-
+    // circuits to NA without running the plugin (see xi_use.hpp), so a failure
+    // anywhere flows to the end of the pipeline with no defensive code between.
+    // See docs/design/io-types-and-na.md.
+    static constexpr const char* kNaKey = "$na";
+    static Record na(const std::string& reason = "") {
+        Record r;
+        cJSON_AddStringToObject(r.json_, kNaKey, reason.c_str());
+        return r;
+    }
+    bool is_na() const { return has(kNaKey); }
+    std::string na_reason() const { return get_string(kNaKey); }
+
     // Get a nested Record (returns empty Record if not found)
     Record get_record(const std::string& key) const {
         cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
@@ -436,5 +455,20 @@ private:
         }
     }
 };
+
+// Guard a plugin's process() against missing inputs in one line. Returns an NA
+// Record (naming the first missing field) if any required key is absent, else
+// std::nullopt. Usage at the top of a plugin's process:
+//
+//   if (auto na = xi::require(in, {"current", "baseline"})) return *na;
+//
+// (Validation lives at the compute boundary — the plugin decides what it needs;
+// see docs/design/io-types-and-na.md.)
+inline std::optional<Record> require(const Record& in,
+                                     std::initializer_list<const char*> fields) {
+    for (const char* f : fields)
+        if (!in.has(f)) return Record::na(std::string("missing field: ") + f);
+    return std::nullopt;
+}
 
 } // namespace xi

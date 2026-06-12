@@ -280,6 +280,11 @@ public:
     explicit UseProxy(const std::string& name) : name_(name) {}
 
     Record process(const Record& input) {
+        // NA propagation: a poison input short-circuits — the plugin never runs,
+        // and the NA (with its reason) flows straight through. See
+        // docs/design/io-types-and-na.md.
+        if (input.is_na()) return Record::na(input.na_reason());
+
         auto process_fn = reinterpret_cast<UseProcessFn>(g_use_process_fn_);
         auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
         if (!process_fn || !host) return {};
