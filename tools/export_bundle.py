@@ -25,7 +25,10 @@ REPO = Path(__file__).resolve().parents[1]
 RELEASE = REPO / "backend" / "build" / "Release"
 BACKEND = RELEASE / "xinsp-backend.exe"
 HMI = REPO / "hmi"
-VC_REDIST = ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll"]
+# vcomp140.dll covers scripts compiled with project.json "openmp": true (/openmp).
+# Harmless to bundle when unused; required when used.
+VC_REDIST = ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll",
+             "vcomp140.dll"]
 HMI_FILES = ["index.html", "app.mjs", "cards.mjs", "layout.mjs", "protocol.mjs"]
 
 

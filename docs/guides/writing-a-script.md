@@ -312,6 +312,55 @@ error.
 SEH-translated, so a segfault inside a parallel branch surfaces as an
 exception at the await site rather than crashing the backend.
 
+### Operator parallelism — picking a tool
+
+| You want | Use | Needs a flag? |
+|---|---|---|
+| Run several independent operators at once | `xi::async` (above) | no |
+| Parallelize one operator's inner loop | `cv::parallel_for_(cv::Range(0,h), …)` — uses OpenCV's thread pool | no |
+| Process a list of ROIs/blobs each | `std::for_each(std::execution::par, …)` (`#include <execution>`) | no |
+| Plain `#pragma omp` syntax | **OpenMP** (opt-in, below) | yes |
+
+### OpenMP (opt-in)
+
+`project.json`'s `"openmp_max_threads"` is a **single knob** that both enables
+OpenMP and caps its threads (the cap is built into the switch precisely because
+of the oversubscription risk below):
+
+| value | effect |
+|---|---|
+| `0` / absent | OFF — no `/openmp` (default; production compiles unchanged) |
+| `N` (>0) | ON, capped to **N** threads (auto `omp_set_num_threads(N)` at load) |
+| `-1` | ON, uncapped (all cores) |
+
+```jsonc
+// project.json
+{ "openmp_max_threads": 4 }
+```
+```cpp
+#include <omp.h>
+#pragma omp parallel for          // honours the cap automatically
+for (int y = 0; y < h; ++y) { /* per-row work */ }
+```
+
+The cap is applied for you at DLL load — you don't call `omp_set_num_threads()`
+(a `num_threads(...)` clause on a specific pragma still overrides it). Links
+`vcomp140.dll` (in System32; `tools/export_bundle.py` bundles it for AOT).
+
+Caveat — **oversubscription**: inspects already run in parallel across dispatch
+threads, and `cv::` ops are internally multi-threaded, so stacking OpenMP on top
+can exceed core count and *slow down*. That's why the switch is a thread cap, not
+a bool: for **CPU-bound** work set it around `cores ÷ dispatch_threads` and
+**measure** end-to-end throughput, not just single-op latency (see
+[`../design/dispatch-groups.md`](../design/dispatch-groups.md)).
+
+OpenMP is a **CPU-bound** fork-join model — sizing a thread pool to cores. For
+**IO-wait** operators (PLC / network / disk), don't reach for OpenMP: the threads
+would just block. Either set a higher count on *that* loop only with a per-pragma
+`#pragma omp parallel for num_threads(32)` (overrides the global cap), or better,
+use `xi::async` — one task per concurrent wait, not tied to core count. Keep the
+global `openmp_max_threads` sized for the CPU-bound default.
+
 ---
 
 ## `xi::state()` — persistent JSON

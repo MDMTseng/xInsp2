@@ -61,6 +61,14 @@ struct CompileRequest {
     // Default off (optimized) so autostart/production stay /O2; the interactive
     // compile_and_load handler turns it on unless the client asks to optimize.
     bool fast = false;
+    // OpenMP thread cap (opt-in via project.json "openmp_max_threads"):
+    //   0  → OFF (no /openmp) — default; production/autostart compiles unchanged.
+    //   N>0→ ON, capped to N threads (compile adds /openmp + /D XI_OMP_MAX_THREADS=N;
+    //        xi_script_support.hpp calls omp_set_num_threads(N) at DLL load).
+    //   -1 → ON, uncapped (all cores) — /openmp, no cap define.
+    // One knob = on/off AND the oversubscription ceiling. Links vcomp140.dll
+    // (in System32, no extra deploy). See docs/guides/writing-a-script.md.
+    int openmp_max_threads = 0;
     // OpenCV install root — REQUIRED. Plugins/scripts include
     // <opencv2/opencv.hpp> directly via xi.hpp / xi_plugin_support.hpp,
     // so the compile step needs the include + lib paths wired in.
@@ -563,6 +571,12 @@ inline CompileResult compile(const CompileRequest& req) {
     // Shared front-end flags (codegen + ALL include/define flags) — assembled once
     // so the PCH is built with byte-identical flags to the consuming compile.
     std::string front = std::string("/nologo /std:c++20 /EHa /MD ") + opt_flags + " /utf-8 /W3";
+    // OpenMP opt-in (project.json "openmp_max_threads" != 0). /openmp must live in
+    // `front` so the PCH is built with byte-identical codegen flags. Legacy
+    // /openmp → vcomp140.dll (System32). The numeric cap is injected as a macro
+    // on the consume compile below (NOT in front — keeps the PCH from re-keying
+    // per cap value). TODO(linux): emit -fopenmp for gcc/clang instead.
+    if (req.openmp_max_threads != 0) front += " /openmp";
     front += " /I\"" + req.include_dir + "\"";
     // vendor dir (cJSON, stb, etc.) — sibling of include/
     auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";
@@ -595,6 +609,10 @@ inline CompileResult compile(const CompileRequest& req) {
     // inspect_entry plumbing; plugin gets the C ABI export macros.
     if (req.mode == CompileMode::Script) cmd += " /FIxi/xi_script_support.hpp";
     else                                 cmd += " /FIxi/xi_plugin_support.hpp";
+    // Positive OpenMP cap → bake it as a macro the support header reads at DLL
+    // load (omp_set_num_threads). Post-PCH so the PCH isn't keyed per cap value.
+    if (req.openmp_max_threads > 0)
+        cmd += " /D XI_OMP_MAX_THREADS=" + std::to_string(req.openmp_max_threads);
     cmd += " /Fo\"" + req.output_dir + "\\\\\"";
     cmd += " /Fe\"" + out_dll.string() + "\"";
     cmd += " \"" + req.source_path + "\"";

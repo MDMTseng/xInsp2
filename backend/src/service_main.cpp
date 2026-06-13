@@ -882,7 +882,8 @@ static bool write_toolchain_override_(const std::string& folder, const std::stri
 // extra_sources; scripts can't follow that model for this reason.)
 static void read_script_deps_(const std::string& folder,
                               std::vector<std::string>& include_dirs,
-                              std::vector<std::string>& link_libs) {
+                              std::vector<std::string>& link_libs,
+                              int& openmp_max_threads) {
     if (folder.empty()) return;
     namespace fs = std::filesystem;
     std::ifstream in((fs::path(folder) / "project.json").string());
@@ -906,6 +907,10 @@ static void read_script_deps_(const std::string& folder,
     };
     pull("include_dirs", include_dirs);
     pull("link_libs", link_libs);
+    // Opt-in OpenMP for the script compile. 0/absent = off, N>0 = on capped to N,
+    // -1 = on uncapped. Adds /openmp (+ cap macro) in the compiler.
+    cJSON* omp = cJSON_GetObjectItem(root, "openmp_max_threads");
+    if (omp && cJSON_IsNumber(omp)) openmp_max_threads = omp->valueint;
     cJSON_Delete(root);
 }
 
@@ -2162,7 +2167,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         req.ipp_root        = g_ipp_root;
         req.vcvars_path     = g_tc_vcvars;   // empty = compiler auto-finds vcvars64.bat
         // Project-declared external deps (project.json include_dirs / link_libs).
-        read_script_deps_(g_project_folder, req.include_dirs, req.link_libs);
+        read_script_deps_(g_project_folder, req.include_dirs, req.link_libs, req.openmp_max_threads);
         // Fast dev compile (/Od) by default — the interactive edit→run loop wants
         // fast COMPILE, not fast runtime. A client benchmarking / the autostart
         // boot path passes "optimize":true to get /O2. (Both spacings, like has_ui.)

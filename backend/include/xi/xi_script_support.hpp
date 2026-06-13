@@ -19,6 +19,26 @@
 #include <cstring>
 #include <string>
 
+// OpenMP thread cap (opt-in via project.json "openmp_max_threads"). When the
+// backend compiles with /openmp for a positive cap it also passes
+// /D XI_OMP_MAX_THREADS=<n>; we apply it once at DLL load so the script's
+// parallel regions honour the project's ceiling — the author never has to call
+// omp_set_num_threads(). Guarded by _OPENMP so non-OpenMP builds never touch
+// <omp.h>. (A cap of -1 / "all cores" compiles with /openmp but no cap define,
+// so this is a no-op and the OpenMP default of all cores applies.)
+#ifdef _OPENMP
+#include <omp.h>
+namespace xi_script_detail {
+inline int apply_omp_thread_cap_() {
+#ifdef XI_OMP_MAX_THREADS
+    if ((XI_OMP_MAX_THREADS) > 0) omp_set_num_threads((XI_OMP_MAX_THREADS));
+#endif
+    return 0;
+}
+inline int g_omp_cap_applied_ = apply_omp_thread_cap_();  // runs at DLL load
+} // namespace xi_script_detail
+#endif
+
 #ifndef XI_SCRIPT_NO_DEFAULT_THUNKS
 
 namespace xi_script_detail {
