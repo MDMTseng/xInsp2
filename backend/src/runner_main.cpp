@@ -58,14 +58,14 @@ using xi::seh_translator;
 // --- xi::use() callbacks (minimal copy of service_main equivalents) -----
 
 static int use_process_cb(const char* name,
-                          const char* input_json,
+                          const uint8_t* input_data, int32_t input_len,
                           const xi_record_image* images, int image_count,
                           xi_record_out* output) {
     auto inst = xi::InstanceRegistry::instance().find(name);
     if (!inst) return -1;
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (adapter && adapter->process_fn()) {
-        xi_record in_rec{ images, image_count, input_json };
+        xi_record in_rec{ images, image_count, input_data, input_len };
         try {
             adapter->process_fn()(adapter->raw_instance(), &in_rec, output);
         } catch (...) { return -2; }

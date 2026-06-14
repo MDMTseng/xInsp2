@@ -261,7 +261,8 @@ typedef struct xi_host_api {
 typedef struct {
     const xi_record_image* images;
     int32_t                image_count;
-    const char*            json;    /* null-terminated JSON object string */
+    const uint8_t*         data;    /* MessagePack-encoded Record data */
+    int32_t                len;     /* byte length of `data` */
 } xi_record;
 
 /* Output record — plugin fills this during process(). */
@@ -269,7 +270,8 @@ typedef struct {
     xi_record_image* images;
     int32_t          image_count;
     int32_t          image_capacity;
-    char*            json;          /* plugin sets this (malloc'd, caller frees) */
+    const uint8_t*   data;          /* MessagePack bytes (tls-owned via record_to_c, or malloc'd) */
+    int32_t          len;
 } xi_record_out;
 
 /* Helpers for building output records */
@@ -278,7 +280,8 @@ static inline void xi_record_out_init(xi_record_out* out) {
     out->images = NULL;
     out->image_count = 0;
     out->image_capacity = 0;
-    out->json = NULL;
+    out->data = NULL;
+    out->len = 0;
 }
 
 static inline void xi_record_out_add_image(xi_record_out* out,
@@ -297,9 +300,12 @@ static inline void xi_record_out_add_image(xi_record_out* out,
     entry->handle = handle;
 }
 
-static inline void xi_record_out_set_json(xi_record_out* out, const char* json) {
-    free(out->json);
-    out->json = _strdup(json);
+static inline void xi_record_out_set_data(xi_record_out* out, const uint8_t* data, int32_t len) {
+    free((void*)out->data);
+    uint8_t* copy = (uint8_t*)malloc((size_t)len);
+    if (copy && data) memcpy(copy, data, (size_t)len);
+    out->data = copy;
+    out->len = copy ? len : 0;
 }
 
 /* Free strings the plugin allocated via the inline malloc/strdup
@@ -325,13 +331,14 @@ static inline void xi_record_out_free(xi_record_out* out) {
             free((void*)out->images[i].key);
         }
         free(out->images);
-        free(out->json);
+        free((void*)out->data);
     }
     /* image_capacity == 0: plugin-owned thread-local storage, no free. */
     out->images = NULL;
     out->image_count = 0;
     out->image_capacity = 0;
-    out->json = NULL;
+    out->data = NULL;
+    out->len = 0;
 }
 
 /* ------------------------------------------------------------------ */

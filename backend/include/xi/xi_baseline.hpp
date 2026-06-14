@@ -138,7 +138,8 @@ inline bool t_process_empty_input(const PluginSymbols& s, const xi_host_api* h, 
     if (!s.process) return true;
     void* inst = s.create(h, "baseline_0");
     if (!inst) { err = "create failed"; return false; }
-    xi_record in; in.json = "{}"; in.images = nullptr; in.image_count = 0;
+    static const uint8_t kEmptyMap = 0x80;  // MessagePack fixmap(0) = {}
+    xi_record in; in.data = &kEmptyMap; in.len = 1; in.images = nullptr; in.image_count = 0;
     xi_record_out out; xi_record_out_init(&out);
     s.process(inst, &in, &out);
     xi_record_out_free(&out);
@@ -158,7 +159,8 @@ inline bool t_concurrent_process(const PluginSymbols& s, const xi_host_api* h, s
     for (int t = 0; t < THREADS; ++t) {
         workers.emplace_back([&, t] {
             for (int i = 0; i < ITERS; ++i) {
-                xi_record in; in.json = "{}"; in.images = nullptr; in.image_count = 0;
+                static const uint8_t kEmptyMap = 0x80;  // MessagePack fixmap(0) = {}
+    xi_record in; in.data = &kEmptyMap; in.len = 1; in.images = nullptr; in.image_count = 0;
                 xi_record_out out; xi_record_out_init(&out);
                 try { s.process(inst, &in, &out); }
                 catch (...) { failures.fetch_add(1); }
@@ -193,7 +195,8 @@ inline bool t_concurrent_mixed(const PluginSymbols& s, const xi_host_api* h, std
                         char rsp[4096];
                         s.exchange(inst, R"({"command":"get_status"})", rsp, sizeof(rsp));
                     } else {
-                        xi_record in; in.json = "{}"; in.images = nullptr; in.image_count = 0;
+                        static const uint8_t kEmptyMap = 0x80;  // MessagePack fixmap(0) = {}
+    xi_record in; in.data = &kEmptyMap; in.len = 1; in.images = nullptr; in.image_count = 0;
                         xi_record_out out; xi_record_out_init(&out);
                         s.process(inst, &in, &out);
                         xi_record_out_free(&out);

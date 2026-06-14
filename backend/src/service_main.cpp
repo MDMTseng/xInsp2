@@ -134,7 +134,7 @@ static void graph_record_call_(const char* name,
 }
 
 static int use_process_cb(const char* name,
-                          const char* input_json,
+                          const uint8_t* input_data, int32_t input_len,
                           const xi_record_image* input_images, int input_image_count,
                           xi_record_out* output) {
     auto inst = xi::InstanceRegistry::instance().find(name);
@@ -147,7 +147,8 @@ static int use_process_cb(const char* name,
         xi_record in_rec;
         in_rec.images = input_images;
         in_rec.image_count = input_image_count;
-        in_rec.json = input_json;
+        in_rec.data = input_data;
+        in_rec.len = input_len;
         // adapter->process() owns the owner_id tagging (image-leak sweep) AND,
         // for a non-reentrant plugin, the per-instance lock that serializes
         // concurrent dispatch workers. We keep the SEH try/catch boundary here.
@@ -2955,10 +2956,16 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
 
         xi_record_image in_imgs[] = { {"gray", src_h} };
+        // WS command carries JSON params; the internal ABI is MessagePack — bridge.
+        cJSON* params_tree = cJSON_Parse(params_json.c_str());
+        if (!params_tree) params_tree = cJSON_CreateObject();
+        std::vector<uint8_t> in_mp = xi::cjson_to_msgpack(params_tree);
+        cJSON_Delete(params_tree);
         xi_record input_rec;
         input_rec.images = in_imgs;
         input_rec.image_count = 1;
-        input_rec.json = params_json.c_str();
+        input_rec.data = in_mp.data();
+        input_rec.len = (int32_t)in_mp.size();
 
         xi_record_out output;
         xi_record_out_init(&output);
@@ -2989,8 +2996,14 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Release input image handle (success path)
         xi::ImagePool::instance().release(src_h);
 
-        // Build response: JSON data + send output images as preview frames
-        std::string result_json = output.json ? output.json : "{}";
+        // Build response: decode the MessagePack output back to JSON for the WS.
+        std::string result_json = "{}";
+        if (output.data && output.len > 0) {
+            cJSON* o = xi::msgpack_to_cjson(output.data, (size_t)output.len);
+            char* s = cJSON_PrintUnformatted(o);
+            if (s) { result_json = s; cJSON_free(s); }
+            cJSON_Delete(o);
+        }
 
         // Add image info to result
         std::string full_json = result_json;

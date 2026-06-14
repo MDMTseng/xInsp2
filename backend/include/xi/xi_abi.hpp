@@ -30,6 +30,7 @@
 #include "xi_abi.h"
 #include "xi_image.hpp"
 #include "xi_record.hpp"
+#include "xi_msgpack.hpp"   // Record wire codec (MessagePack via CWPack)
 
 #include <cstring>
 #include <map>
@@ -257,8 +258,8 @@ protected:
 // Convert a C xi_record to a C++ Record (images become HostImages → copied to xi::Image)
 inline Record record_from_c(const xi_host_api* host, const xi_record* rec) {
     Record r;
-    if (rec->json) {
-        cJSON* parsed = cJSON_Parse(rec->json);
+    if (rec->data && rec->len > 0) {
+        cJSON* parsed = msgpack_to_cjson(rec->data, (size_t)rec->len);
         if (parsed) {
             cJSON* item = parsed->child;
             while (item) {
@@ -299,7 +300,7 @@ namespace detail {
 // thread — the backend's read happens before that.
 struct PluginOutputStorage {
     std::vector<std::string>     keys;
-    std::string                  json;
+    std::vector<uint8_t>         bytes;   // MessagePack-encoded output Record
     std::vector<xi_record_image> images;
 };
 inline PluginOutputStorage& tls_output_storage() {
@@ -320,9 +321,10 @@ inline void record_to_c(const xi_host_api* host, const Record& r, xi_record_out*
     auto& s = detail::tls_output_storage();
     s.keys.clear();
     s.images.clear();
-    s.json = r.data_json();
+    s.bytes = cjson_to_msgpack(r.json());
 
-    out->json = const_cast<char*>(s.json.c_str());
+    out->data = s.bytes.data();
+    out->len  = (int32_t)s.bytes.size();
 
     const size_t n = r.images().size();
     s.keys.reserve(n);

@@ -21,6 +21,7 @@
 #include "xi_clock.hpp"
 #include "xi_record.hpp"
 #include "xi_image.hpp"
+#include "xi_msgpack.hpp"   // Record wire codec (MessagePack via CWPack)
 
 #include <chrono>
 #include <cstring>
@@ -58,7 +59,7 @@ inline int64_t steady_now_us() { return xi::mono_us(); }
 
 // Function pointer types for the callbacks
 using UseProcessFn  = int (*)(const char* name,
-                              const char* input_json,
+                              const uint8_t* input_data, int32_t input_len,
                               const xi_record_image* input_images, int input_image_count,
                               xi_record_out* output);
 using UseExchangeFn = int (*)(const char* name, const char* cmd,
@@ -309,12 +310,12 @@ public:
             in_imgs.push_back({key.c_str(), h});
             in_handles.push_back(h);
         }
-        std::string json = input.data_json();
+        std::vector<uint8_t> in_bytes = cjson_to_msgpack(input.json());
 
         xi_record_out output;
         xi_record_out_init(&output);
 
-        process_fn(name_.c_str(), json.c_str(),
+        process_fn(name_.c_str(), in_bytes.data(), (int32_t)in_bytes.size(),
                    in_imgs.data(), (int)in_imgs.size(), &output);
 
         // Release input handles from the BACKEND pool — plugin's process()
@@ -322,8 +323,8 @@ public:
         for (auto h : in_handles) host->image_release(h);
 
         Record result;
-        if (output.json) {
-            cJSON* parsed = cJSON_Parse(output.json);
+        if (output.data && output.len > 0) {
+            cJSON* parsed = msgpack_to_cjson(output.data, (size_t)output.len);
             if (parsed) {
                 cJSON* item = parsed->child;
                 while (item) {

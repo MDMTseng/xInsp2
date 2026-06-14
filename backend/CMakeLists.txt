@@ -55,6 +55,9 @@ target_include_directories(xi_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 )
+# xi_abi.hpp / xi_use.hpp pull in xi_msgpack.hpp (CWPack) — every xi_core user
+# links it. (cjson stays listed explicitly on each target.)
+target_link_libraries(xi_core INTERFACE cwpack)
 # xi.hpp / xi_plugin_support.hpp pull in <opencv2/opencv.hpp>, so every
 # target that uses xi_core needs OpenCV's include + libs visible.
 # OpenCV is configured immediately below.

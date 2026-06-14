@@ -581,6 +581,9 @@ inline CompileResult compile(const CompileRequest& req) {
     // vendor dir (cJSON, stb, etc.) — sibling of include/
     auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";
     if (std::filesystem::exists(vendor_dir)) front += " /I\"" + vendor_dir.string() + "\"";
+    // cwpack lives in vendor/cwpack/ — xi_msgpack.hpp does #include "cwpack.h"
+    auto cwpack_inc = vendor_dir / "cwpack";
+    if (std::filesystem::exists(cwpack_inc)) front += " /I\"" + cwpack_inc.string() + "\"";
     for (auto& d : req.include_dirs) front += " /I\"" + d + "\"";   // project extra includes
     front += " /I\"" + req.opencv_dir + "\\include\"";
     if (!req.turbojpeg_root.empty()) {
@@ -634,6 +637,12 @@ inline CompileResult compile(const CompileRequest& req) {
     auto cjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cjson.lib";
     if (std::filesystem::exists(cjson_lib)) {
         cmd += " \"" + cjson_lib.string() + "\"";
+    }
+    // Link against pre-built cwpack.lib (needed by xi_msgpack.hpp — the Record
+    // wire codec pulled in via xi_abi.hpp / xi_use.hpp).
+    auto cwpack_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cwpack.lib";
+    if (std::filesystem::exists(cwpack_lib)) {
+        cmd += " \"" + cwpack_lib.string() + "\"";
     }
     // The PCH's own object (from /Yc) must be linked when consuming via /Yu.
     if (!pch_obj.empty()) cmd += " \"" + pch_obj + "\"";
