@@ -1,0 +1,4 @@
+# bench-only third-party sources — fetched on demand (see FETCH.md)
+yyjson/
+mpack/
+cwpack/

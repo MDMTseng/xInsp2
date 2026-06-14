@@ -45,6 +45,11 @@ set(TURBOJPEG_ROOT "C:/libjpeg-turbo64" CACHE PATH "libjpeg-turbo install root")
 add_library(cjson STATIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cJSON.c)
 target_include_directories(cjson PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 
+# CWPack — MessagePack codec for the Record wire (xi_msgpack.hpp). Shipped lib,
+# linked into the backend and (mirroring cjson.lib) into JIT-compiled plugins.
+add_library(cwpack STATIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cwpack/cwpack.c)
+target_include_directories(cwpack PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cwpack)
+
 add_library(xi_core INTERFACE)
 target_include_directories(xi_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -118,6 +123,10 @@ add_test(NAME xi_core COMMAND test_xi_core)
 add_executable(test_record tests/test_record.cpp)
 target_link_libraries(test_record PRIVATE xi_core cjson)
 add_test(NAME record COMMAND test_record)
+
+add_executable(test_msgpack tests/test_msgpack.cpp)
+target_link_libraries(test_msgpack PRIVATE xi_core cjson cwpack)
+add_test(NAME msgpack COMMAND test_msgpack)
 
 add_executable(test_protocol tests/test_protocol.cpp)
 target_link_libraries(test_protocol PRIVATE xi_core cjson)
@@ -256,6 +265,23 @@ if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
     target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_TURBOJPEG=1)
     target_include_directories(bench_jpeg PRIVATE ${TURBOJPEG_INCLUDE_DIR})
     target_link_libraries(bench_jpeg PRIVATE ${TURBOJPEG_LIB})
+endif()
+
+# Record serialization micro-bench: cJSON vs yyjson vs MPack vs CWPack.
+# The serde libs are bench-only third-party sources, gitignored + fetched on
+# demand (see tests/serde_vendor/FETCH.md). Target is skipped if they're absent
+# so a clean checkout still configures. Run manually, not a ctest.
+set(_serde ${CMAKE_CURRENT_SOURCE_DIR}/tests/serde_vendor)
+if(EXISTS ${_serde}/yyjson/yyjson.c AND EXISTS ${_serde}/mpack/mpack.c)
+    add_executable(bench_record
+        tests/bench_record.cpp
+        ${_serde}/yyjson/yyjson.c
+        ${_serde}/mpack/mpack.c
+        ${_serde}/cwpack/cwpack.c)
+    target_link_libraries(bench_record PRIVATE cjson)
+    target_include_directories(bench_record PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendor
+        ${_serde}/yyjson ${_serde}/mpack ${_serde}/cwpack)
 endif()
 
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
