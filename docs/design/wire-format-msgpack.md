@@ -1,8 +1,53 @@
-# Wire format = MessagePack (CWPack), RAII resources, minimize copy
+# Data layer: yyjson-only, in-process pass-by-pointer (zero serialize)
 
 How Record/Image data moves between plugins (in-process) and out to the UI,
-chosen to kill the cJSON serialization tax and minimize copies. Status:
-**design — confirm phasing before building.**
+chosen to kill the cJSON serialization tax and minimize copies.
+
+> ## DECISION (revised 2026-06-14): **yyjson-only**, supersedes the MessagePack plan below
+>
+> MessagePack via CWPack (Increments A/B, on `master`, ~21×) was explored and is
+> being **replaced**. Two CWPack pain points killed it as the in-memory model:
+> (1) array/map headers need the **count up front** — incremental build with
+> unknown N needs reserve-backpatch; (2) **in-place mutation** of a flat buffer
+> is hard (size-changing edits = memmove/rebuild). yyjson has neither problem.
+>
+> **Final design — one library, `yyjson`, replaces cJSON entirely:**
+> - **DOM**: `yyjson_mut_doc` for build (incremental, no count, mutable like a
+>   tree) + `yyjson_doc` for read (single contiguous allocation, in-situ parse).
+>   Record's API is unchanged; only its backing flips cJSON→yyjson.
+> - **In-process (script ↔ plugin): pass the yyjson doc BY POINTER — no
+>   serialize, no copy.** Reading a yyjson doc is pure `static inline` struct
+>   traversal (no malloc/free), so it is **safe across DLLs** as long as everyone
+>   includes the same vendored `yyjson.h` (same struct layout) — the cross-CRT
+>   *free* hazard that forced cJSON to serialize never applies to *reads*. Input
+>   = host-owned doc; output = plugin-TLS-owned doc; each frees its own.
+> - **Serialize (`yyjson_write` → JSON text) only at real boundaries**: WS→JS
+>   (the extension/HMI keep `JSON.parse` — no `@msgpack/msgpack`, human-readable),
+>   persistence/config, and a fallback for a foreign plugin built against a
+>   different yyjson version. So the WS-msgpack work (old option 1) is **moot**.
+> - **Memory**: a thread-local `yyjson_alc` **pool** per dispatch thread → near
+>   **zero allocation per frame** (vs cJSON's malloc-per-node churn + fragmentation).
+> - **cwpack removed** (it was a temporary 21× bridge on master); **cJSON deleted**.
+>
+> Bench (still the evidence, `backend/tests/bench_record.cpp`): N=150 round-trip
+> cJSON 1205µs / **yyjson 70µs (17×)** / CWPack 57µs. yyjson's 13µs vs CWPack is
+> noise; staying JSON + mutable + one-lib + zero-frag-with-pool wins. And
+> in-process pass-by-pointer beats *all* of them — it doesn't serialize at all.
+>
+> Migration plan + status: see [[project_wire_format_msgpack]] memory + the
+> Phasing section is superseded by: α vendor yyjson + pool wrapper · β Record DOM
+> cJSON→yyjson (Record::Value + xi_types) · γ in-process doc-pointer ABI · δ
+> service_main/xi::Json/config → yyjson · ε delete cJSON + cwpack. On branch
+> `refactor/yyjson-dom`.
+
+---
+
+_The MessagePack design below is retained as the explored-and-superseded record._
+
+## Why (measured)
+
+Record crosses every plugin boundary as a serialized blob. With everything now
+in-process (SHM/worker gone), `UseProxy::process` still does
 
 ## Why (measured)
 

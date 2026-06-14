@@ -50,6 +50,12 @@ target_include_directories(cjson PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 add_library(cwpack STATIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cwpack/cwpack.c)
 target_include_directories(cwpack PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cwpack)
 
+# yyjson — the JSON DOM + serializer that replaces cJSON (v0.12.0, pinned).
+# Mutable doc for build, immutable doc for fast read; pool allocator for
+# zero-per-frame allocation. Linked into the backend + JIT-compiled plugins.
+add_library(yyjson STATIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson/yyjson.c)
+target_include_directories(yyjson PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
 add_library(xi_core INTERFACE)
 target_include_directories(xi_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -130,6 +136,11 @@ add_test(NAME record COMMAND test_record)
 add_executable(test_msgpack tests/test_msgpack.cpp)
 target_link_libraries(test_msgpack PRIVATE xi_core cjson cwpack)
 add_test(NAME msgpack COMMAND test_msgpack)
+
+add_executable(test_yyjson tests/test_yyjson.cpp)
+target_link_libraries(test_yyjson PRIVATE yyjson)
+target_include_directories(test_yyjson PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+add_test(NAME yyjson COMMAND test_yyjson)
 
 add_executable(test_protocol tests/test_protocol.cpp)
 target_link_libraries(test_protocol PRIVATE xi_core cjson)
