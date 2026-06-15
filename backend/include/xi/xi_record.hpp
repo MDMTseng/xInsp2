@@ -26,6 +26,7 @@
 #include "xi_image.hpp"
 #include "yyjson.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -104,44 +105,76 @@ inline const yyjson_alc*& tls_doc_alc() {
 }
 
 class Record {
+private:
+    // γ-4: intrusive refcount box around an owned doc. Multiple Records can share
+    // one DocBox (copy = ref bump, zero deep-copy); a mutation copy-on-writes into
+    // a fresh sole-owned box. box_ == nullptr marks a BORROWED read-only view
+    // (from_doc_view): the doc is owned elsewhere across the ABI, never freed here.
+    struct DocBox { yyjson_mut_doc* doc; std::atomic<int> rc; };
+    static DocBox* new_box_(yyjson_mut_doc* d) { return new DocBox{ d, 1 }; }
+    void release_box_() {
+        if (box_ && box_->rc.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            if (box_->doc) yyjson_mut_doc_free(box_->doc);
+            delete box_;
+        }
+        box_ = nullptr;
+    }
+
 public:
     Record() { init_(); }
 
-    ~Record() { if (owns_doc_ && doc_) yyjson_mut_doc_free(doc_); }
+    ~Record() { release_box_(); }
 
     Record(const Record& o) : images_(o.images_) {
-        // A copy is always an independent, owned, mutable doc — even when `o` is
-        // a borrowed read-only view (reading o.root_ is safe; we allocate ours).
-        doc_  = yyjson_mut_doc_new(tls_doc_alc());
-        root_ = o.root_ ? yyjson_mut_val_mut_copy(doc_, o.root_) : yyjson_mut_obj(doc_);
-        yyjson_mut_doc_set_root(doc_, root_);
+        if (o.box_) {
+            // Share the doc — zero copy. Both copies are now FROZEN (read-only);
+            // the first mutation on either copy-on-writes into its own doc.
+            box_ = o.box_;
+            box_->rc.fetch_add(1, std::memory_order_relaxed);
+            doc_ = o.doc_; root_ = o.root_;
+            o.frozen_ = true; frozen_ = true;
+        } else {
+            // o is a borrowed view (no owned box) → make an independent owned
+            // copy (reading o.root_ is safe; we allocate our own).
+            doc_  = yyjson_mut_doc_new(tls_doc_alc());
+            root_ = o.root_ ? yyjson_mut_val_mut_copy(doc_, o.root_) : yyjson_mut_obj(doc_);
+            yyjson_mut_doc_set_root(doc_, root_);
+            box_ = new_box_(doc_);
+        }
     }
 
     Record& operator=(const Record& o) {
         if (this != &o) {
             images_ = o.images_;
-            if (owns_doc_ && doc_) yyjson_mut_doc_free(doc_);
-            doc_  = yyjson_mut_doc_new(tls_doc_alc());
-            root_ = o.root_ ? yyjson_mut_val_mut_copy(doc_, o.root_) : yyjson_mut_obj(doc_);
-            yyjson_mut_doc_set_root(doc_, root_);
-            owns_doc_ = true; frozen_ = false;
+            release_box_();
+            if (o.box_) {
+                box_ = o.box_;
+                box_->rc.fetch_add(1, std::memory_order_relaxed);
+                doc_ = o.doc_; root_ = o.root_;
+                o.frozen_ = true; frozen_ = true;
+            } else {
+                doc_  = yyjson_mut_doc_new(tls_doc_alc());
+                root_ = o.root_ ? yyjson_mut_val_mut_copy(doc_, o.root_) : yyjson_mut_obj(doc_);
+                yyjson_mut_doc_set_root(doc_, root_);
+                box_ = new_box_(doc_);
+                frozen_ = false;
+            }
         }
         return *this;
     }
 
     Record(Record&& o) noexcept
         : images_(std::move(o.images_)), doc_(o.doc_), root_(o.root_),
-          owns_doc_(o.owns_doc_), frozen_(o.frozen_) {
-        o.doc_ = nullptr; o.root_ = nullptr; o.owns_doc_ = false;
+          box_(o.box_), frozen_(o.frozen_) {
+        o.doc_ = nullptr; o.root_ = nullptr; o.box_ = nullptr;
     }
 
     Record& operator=(Record&& o) noexcept {
         if (this != &o) {
             images_ = std::move(o.images_);
-            if (owns_doc_ && doc_) yyjson_mut_doc_free(doc_);
-            doc_ = o.doc_; root_ = o.root_;
-            owns_doc_ = o.owns_doc_; frozen_ = o.frozen_;
-            o.doc_ = nullptr; o.root_ = nullptr; o.owns_doc_ = false;
+            release_box_();
+            doc_ = o.doc_; root_ = o.root_; box_ = o.box_; frozen_ = o.frozen_;
+            o.doc_ = nullptr; o.root_ = nullptr; o.box_ = nullptr;
         }
         return *this;
     }
@@ -156,34 +189,36 @@ public:
     static Record from_doc_view(yyjson_mut_doc* borrowed) {
         Record r;
         if (borrowed) {
-            if (r.owns_doc_ && r.doc_) yyjson_mut_doc_free(r.doc_);
+            r.release_box_();          // drop the fresh init_ box (frees its doc)
+            r.box_  = nullptr;         // borrowed: owned elsewhere, never freed here
             r.doc_  = borrowed;
             r.root_ = yyjson_mut_doc_get_root(borrowed);
-            r.owns_doc_ = false;
-            r.frozen_   = true;
+            r.frozen_ = true;
         }
         return r;
     }
 
-    // Release ownership of the underlying doc to the caller (ABI output handoff).
-    // After this the Record no longer owns/frees the doc; the caller adopts it.
+    // Release SOLE ownership of the underlying doc to the caller (ABI output
+    // handoff). Valid only when owns_doc() (sole owner, rc==1) — record_to_c
+    // gates on it. Drops the box WITHOUT freeing the doc; the adopter takes it.
     yyjson_mut_doc* release_doc() {
         yyjson_mut_doc* d = doc_;
-        doc_ = nullptr; root_ = nullptr; owns_doc_ = false;
+        delete box_;                   // rc==1 by contract: free the box, NOT the doc
+        box_ = nullptr; doc_ = nullptr; root_ = nullptr;
         return d;
     }
 
     // Adopt ownership of a doc handed across the ABI (caller side of the output
-    // handoff). The doc was built with the host allocator, so freeing it here
-    // (via doc->alc) is cross-DLL-safe.
+    // handoff) into a fresh refcount box. The doc was built with the host
+    // allocator, so freeing it here (via doc->alc) is cross-DLL-safe.
     static Record adopt_doc(yyjson_mut_doc* owned) {
         Record r;
         if (owned) {
-            if (r.owns_doc_ && r.doc_) yyjson_mut_doc_free(r.doc_);
+            r.release_box_();          // drop the fresh init_ box
+            r.box_  = new_box_(owned);
             r.doc_  = owned;
             r.root_ = yyjson_mut_doc_get_root(owned);
-            r.owns_doc_ = true;
-            r.frozen_   = false;
+            r.frozen_ = false;
         }
         return r;
     }
@@ -473,10 +508,11 @@ public:
     // The mutable yyjson root object (advanced; used by the ABI seam).
     yyjson_mut_val* json() const { return root_; }
     yyjson_mut_doc* doc()  const { return doc_; }
-    // γ: does this Record own its doc (vs a borrowed read-only view)? The ABI
-    // output handoff (record_to_c) only transfers ownership of an OWNED doc — a
-    // borrowed view must serialize, never hand back the caller's own doc.
-    bool owns_doc() const { return owns_doc_; }
+    // γ: is this Record the SOLE owner of its doc (rc==1, not a borrowed view,
+    // not shared)? The ABI output handoff (record_to_c) only transfers ownership
+    // when sole — a borrowed view or a SHARED (rc>1) doc must serialize instead
+    // of handing back a doc someone else still references.
+    bool owns_doc() const { return box_ && box_->rc.load(std::memory_order_acquire) == 1; }
 
     bool has_image(const std::string& key) const { return images_.count(key) > 0; }
     const Image& get_image(const std::string& key) const {
@@ -519,10 +555,11 @@ public:
         if (!idoc) return r;
         yyjson_val* iroot = yyjson_doc_get_root(idoc);
         if (iroot && yyjson_is_obj(iroot)) {
-            yyjson_mut_doc_free(r.doc_);
+            r.release_box_();          // drop the fresh init_ box (frees its doc)
             r.doc_  = yyjson_mut_doc_new(tls_doc_alc());
             r.root_ = yyjson_val_mut_copy(r.doc_, iroot);
             yyjson_mut_doc_set_root(r.doc_, r.root_);
+            r.box_  = new_box_(r.doc_);
         }
         yyjson_doc_free(idoc);
         return r;
@@ -548,36 +585,42 @@ private:
     std::map<std::string, Image> images_;
     yyjson_mut_doc* doc_  = nullptr;
     yyjson_mut_val* root_ = nullptr;
-    // γ ownership flags. owns_doc_: this Record frees doc_ on destruction
-    // (false for a borrowed view / after release_doc). frozen_: doc_ is shared/
-    // borrowed and read-only — the first mutation copy-on-writes (cow_) into a
-    // fresh owned doc. Both default to "owned, writable" so every existing
-    // construction path behaves exactly as before.
-    bool owns_doc_ = true;
-    bool frozen_   = false;
+    // γ-4 ownership. box_: the intrusive refcount box owning doc_ (shared across
+    // copies). nullptr ⇒ a BORROWED read-only view (doc owned elsewhere across
+    // the ABI; never freed here). frozen_ (mutable — set on the const source when
+    // a copy shares it): doc_ is shared/borrowed read-only → the first mutation
+    // copy-on-writes (cow_) into a fresh sole-owned doc. Defaults give every
+    // construction path a sole-owned, writable box, exactly as before.
+    DocBox*      box_ = nullptr;
+    mutable bool frozen_ = false;
 
     void init_() {
         doc_  = yyjson_mut_doc_new(tls_doc_alc());
         root_ = yyjson_mut_obj(doc_);
         yyjson_mut_doc_set_root(doc_, root_);
+        box_  = new_box_(doc_);
     }
 
-    // Copy-on-write: if the doc is frozen (a borrowed view, or—later—a shared
-    // refcounted doc), deep-copy it into a fresh OWNED doc before mutating, so
-    // we never write through someone else's tree. No-op for the common owned,
-    // unfrozen case (one predictable branch on the build path).
+    // Copy-on-write before a mutation. No-op for the common sole-owned, unfrozen
+    // case (one predictable branch). If frozen but we're the SOLE owner (sharers
+    // all released, rc==1), just unfreeze — no copy. Otherwise (shared rc>1, or a
+    // borrowed view) deep-copy into a fresh sole-owned doc so we never write
+    // through a tree someone else still reads.
     void cow_() {
         if (!frozen_) return;
+        if (box_ && box_->rc.load(std::memory_order_acquire) == 1) {
+            frozen_ = false;
+            return;
+        }
         yyjson_mut_doc* nd = yyjson_mut_doc_new(tls_doc_alc());
         yyjson_mut_val* nr = root_ ? yyjson_mut_val_mut_copy(nd, root_)
                                    : yyjson_mut_obj(nd);
         yyjson_mut_doc_set_root(nd, nr);
-        // Do NOT free doc_: it is borrowed/shared (owns_doc_ == false here, or a
-        // future shared owner still holds it).
+        release_box_();            // drop our ref on the shared box (borrowed: no-op)
+        box_  = new_box_(nd);
         doc_  = nd;
         root_ = nr;
-        owns_doc_ = true;
-        frozen_   = false;
+        frozen_ = false;
     }
 
     // Deep-copy a yyjson object value into a fresh Record (used by getters/Value).
@@ -586,6 +629,7 @@ private:
         root_ = (obj_val && yyjson_mut_is_obj(obj_val))
                   ? yyjson_mut_val_mut_copy(doc_, obj_val) : yyjson_mut_obj(doc_);
         yyjson_mut_doc_set_root(doc_, root_);
+        box_  = new_box_(doc_);
     }
 
     yyjson_mut_val* get_(const char* key) const {

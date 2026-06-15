@@ -319,6 +319,53 @@ static void test_image_in_record() {
     CHECK(pixels_ok);
 }
 
+// ---------- Test 17: γ-4 refcount share + copy-on-write ----------
+
+static void test_refcount_cow() {
+    SECTION("refcount share + COW (γ-4)");
+    xi::Record a;
+    a.set("v", 1);
+    a.set("tag", std::string("orig"));
+
+    // Copies share a's doc (zero-copy) but stay logically independent via COW.
+    xi::Record b = a;          // share
+    xi::Record c = a;          // share (rc now 3)
+    CHECK(b.get_int("v") == 1);   // shared read sees a's data
+    CHECK(c.get_string("tag") == "orig");
+
+    // Mutating one COWs it into its own doc; the others are untouched.
+    b.set("v", 2);
+    CHECK(a.get_int("v") == 1);
+    CHECK(b.get_int("v") == 2);
+    CHECK(c.get_int("v") == 1);
+
+    // Mutate the original after it was shared — it COWs too; b, c unaffected.
+    a.set("v", 9);
+    a.set("only_a", true);
+    CHECK(a.get_int("v") == 9);
+    CHECK(b.get_int("v") == 2);
+    CHECK(c.get_int("v") == 1);
+    CHECK(!b.has("only_a"));
+    CHECK(!c.has("only_a"));
+
+    // c was never mutated — still the original snapshot.
+    CHECK(c.get_int("v") == 1);
+    CHECK(c.get_string("tag") == "orig");
+
+    // Chain: assign-share then mutate.
+    xi::Record d;
+    d = c;                     // copy-assign share
+    d.set("v", 42);
+    CHECK(c.get_int("v") == 1);
+    CHECK(d.get_int("v") == 42);
+
+    // Re-mutate a COWed record (now sole owner) — should keep working.
+    b.set("v", 3);
+    b.set("v", 4);
+    CHECK(b.get_int("v") == 4);
+    CHECK(a.get_int("v") == 9);
+}
+
 // ---------- main ----------
 
 int main() {
@@ -338,6 +385,7 @@ int main() {
     test_move_semantics();        // 14
     test_as_record_deep_copy();   // 15
     test_image_in_record();       // 16
+    test_refcount_cow();          // 17
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
