@@ -131,6 +131,14 @@ target_include_directories(test_yyjson PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME yyjson COMMAND test_yyjson)
 
+# γ pooled doc allocator (xi_doc_pool.hpp) — size-class free-list + yyjson round-trip.
+add_executable(test_doc_pool tests/test_doc_pool.cpp)
+target_link_libraries(test_doc_pool PRIVATE yyjson)
+target_include_directories(test_doc_pool PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME doc_pool COMMAND test_doc_pool)
+
 add_executable(test_protocol tests/test_protocol.cpp)
 target_link_libraries(test_protocol PRIVATE xi_core)
 add_test(NAME protocol COMMAND test_protocol)
