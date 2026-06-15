@@ -45,11 +45,6 @@ set(TURBOJPEG_ROOT "C:/libjpeg-turbo64" CACHE PATH "libjpeg-turbo install root")
 add_library(cjson STATIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cJSON.c)
 target_include_directories(cjson PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 
-# CWPack — MessagePack codec for the Record wire (xi_msgpack.hpp). Shipped lib,
-# linked into the backend and (mirroring cjson.lib) into JIT-compiled plugins.
-add_library(cwpack STATIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cwpack/cwpack.c)
-target_include_directories(cwpack PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cwpack)
-
 # yyjson — the JSON DOM + serializer that replaces cJSON (v0.12.0, pinned).
 # Mutable doc for build, immutable doc for fast read; pool allocator for
 # zero-per-frame allocation. Linked into the backend + JIT-compiled plugins.
@@ -62,9 +57,8 @@ target_include_directories(xi_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 )
 # xi_record.hpp is backed by yyjson — every xi_core user links it. (cjson stays
-# listed explicitly per target while config/xi::Json still use it; cwpack is the
-# legacy msgpack wire, removed once the migration completes.)
-target_link_libraries(xi_core INTERFACE yyjson cwpack)
+# listed explicitly per target while config/xi::Json still use it.)
+target_link_libraries(xi_core INTERFACE yyjson)
 # xi.hpp / xi_plugin_support.hpp pull in <opencv2/opencv.hpp>, so every
 # target that uses xi_core needs OpenCV's include + libs visible.
 # OpenCV is configured immediately below.
@@ -133,10 +127,6 @@ add_test(NAME xi_core COMMAND test_xi_core)
 add_executable(test_record tests/test_record.cpp)
 target_link_libraries(test_record PRIVATE xi_core cjson)
 add_test(NAME record COMMAND test_record)
-
-add_executable(test_msgpack tests/test_msgpack.cpp)
-target_link_libraries(test_msgpack PRIVATE xi_core cjson cwpack)
-add_test(NAME msgpack COMMAND test_msgpack)
 
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)

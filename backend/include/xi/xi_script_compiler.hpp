@@ -581,9 +581,6 @@ inline CompileResult compile(const CompileRequest& req) {
     // vendor dir (cJSON, stb, etc.) — sibling of include/
     auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";
     if (std::filesystem::exists(vendor_dir)) front += " /I\"" + vendor_dir.string() + "\"";
-    // cwpack lives in vendor/cwpack/ — xi_msgpack.hpp does #include "cwpack.h"
-    auto cwpack_inc = vendor_dir / "cwpack";
-    if (std::filesystem::exists(cwpack_inc)) front += " /I\"" + cwpack_inc.string() + "\"";
     // yyjson lives in vendor/yyjson/ — xi_record.hpp does #include "yyjson.h"
     auto yyjson_inc = vendor_dir / "yyjson";
     if (std::filesystem::exists(yyjson_inc)) front += " /I\"" + yyjson_inc.string() + "\"";
@@ -640,12 +637,6 @@ inline CompileResult compile(const CompileRequest& req) {
     auto cjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cjson.lib";
     if (std::filesystem::exists(cjson_lib)) {
         cmd += " \"" + cjson_lib.string() + "\"";
-    }
-    // Link against pre-built cwpack.lib (needed by xi_msgpack.hpp — the Record
-    // wire codec pulled in via xi_abi.hpp / xi_use.hpp).
-    auto cwpack_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cwpack.lib";
-    if (std::filesystem::exists(cwpack_lib)) {
-        cmd += " \"" + cwpack_lib.string() + "\"";
     }
     // Link against pre-built yyjson.lib (the Record DOM/codec, via xi_record.hpp).
     auto yyjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "yyjson.lib";
