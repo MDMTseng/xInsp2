@@ -146,6 +146,9 @@ static cJSON* make_matches(int n) {
     return root;
 }
 
+// Sink to stop the optimizer from eliding the (tiny) doc-pointer handoff ops.
+static volatile uintptr_t g_sink = 0;
+
 template <class F>
 static double best_us(F&& op, int L = 2000, int R = 25) {
     using clk = std::chrono::steady_clock;
@@ -203,6 +206,19 @@ int main() {
         double tt_ser = best_us([&]{ std::string o; tight::pack(tree, o); });
         double tt_par = best_us([&]{ tight::Rd r{(const uint8_t*)tight_wire.data(), 0}; double a = 0; tight::walk(r, &a); volatile double s = a; (void)s; });
 
+        // γ in-process pass-by-pointer: the producer's yyjson_mut_doc IS handed
+        // to the consumer BY POINTER — no serialize, no parse. "serialize" is 0;
+        // the only per-call marshalling is the view setup (record_from_c /
+        // from_doc_view taking the doc + its root on input, adopt_doc on output)
+        // — a couple of pointer reads. So the whole yyjson serialize+parse
+        // round-trip above is what every in-process plugin call now avoids.
+        double dp_ser = 0.0;
+        double dp_par = best_us([&]{
+            yyjson_mut_val* r_in  = yyjson_mut_doc_get_root(yd);   // record_from_c view
+            yyjson_mut_val* r_out = yyjson_mut_doc_get_root(yd);   // adopt_doc on output
+            g_sink += (uintptr_t)r_in + (uintptr_t)r_out;
+        });
+
         std::printf("=== N=%d ===\n", N);
         std::printf("  %-12s %10s %10s %12s %8s\n", "backend", "serialize", "parse", "round-trip", "bytes");
         auto row = [](const char* nm, double s, double p, size_t b) {
@@ -213,7 +229,10 @@ int main() {
         row("MPack",        mp_ser, mp_par, mp_wire.size());
         row("CWPack",       cw_ser, cw_par, cw_wire.size());
         row("tight(msgpk)", tt_ser, tt_par, tight_wire.size());
-        std::printf("\n");
+        row("doc-ptr (γ)",  dp_ser, dp_par, yy_bytes);
+        std::printf("  ^ doc-ptr (γ, in-process): pass-by-pointer — no serialize/parse. Per in-process\n"
+                    "    plugin call this REPLACES the %.2f µs yyjson round-trip (and pre-γ's %.2f µs cJSON).\n\n",
+                    yy_ser + yy_par, cj_ser + cj_par);
 
         yyjson_mut_doc_free(yd);
         cJSON_Delete(tree);
