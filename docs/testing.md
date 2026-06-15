@@ -25,7 +25,7 @@ Run all: `ctest --test-dir backend/build -C Release`
 | Binary | Coverage |
 |---|---|
 | `test_xi_core` | `xi::async`, `xi::Var`, `xi::Param`, `xi::Instance` registries; `await_all`, `Future<void>`, ASYNC_WRAP |
-| `test_record` | cJSON-backed `Record`; path expressions (`a.b[0].c`), image bag, default returns |
+| `test_record` | yyjson-backed `Record`; path expressions (`a.b[0].c`), image bag, default returns |
 | `test_protocol` | `parse_cmd`, `Rsp` / `VarItem` / preview header serialization; fixture parity with TS side |
 | `test_image_pool` | 16-shard refcounted pool; concurrent create/release/data; 20 MP allocation |
 | `test_image_pool_stress` | high-volume concurrent pool churn; refcount integrity under load |

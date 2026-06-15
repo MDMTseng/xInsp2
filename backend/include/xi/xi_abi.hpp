@@ -340,7 +340,7 @@ namespace detail {
 // thread — the backend's read happens before that.
 struct PluginOutputStorage {
     std::vector<std::string>     keys;
-    std::vector<uint8_t>         bytes;   // MessagePack-encoded output Record
+    std::vector<uint8_t>         bytes;   // yyjson JSON bytes (fallback when the doc-pointer fast path isn't taken)
     std::vector<xi_record_image> images;
 };
 inline PluginOutputStorage& tls_output_storage() {

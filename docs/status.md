@@ -159,7 +159,7 @@ See [`testing.md`](./testing.md) for the full breakdown. Summary:
 - **C++ compile path via MSVC `cl.exe`**; versioned DLL naming
   (`stem_vN.dll`) for Windows lock survival. No Cling / ClangREPL.
 - **Stable C ABI for plugins.** No C++ types cross the plugin boundary.
-- **Dependency-free host.** Only cJSON + stb_image_write vendored;
+- **Dependency-free host.** Only yyjson + stb_image_write vendored;
   OpenCV / IPP / turbojpeg optional via `XINSP2_HAS_*`.
 - **VS Code is the IDE.** No in-house editor.
 - **Headless backend.** Any WS client can drive it.

@@ -8,7 +8,7 @@ done; Phase 4 deferred).
 
 The script is the composition layer (plugins can't call plugins — see
 [`../guides/writing-a-script.md`](../guides/writing-a-script.md)). Wiring one
-plugin's output into the next plugin's input is hand-written cJSON juggling, and
+plugin's output into the next plugin's input is hand-written JSON juggling, and
 every connection is a place where data might be missing — so the script fills
 with null-checks and error handling.
 
@@ -30,15 +30,15 @@ Three ideas, none of which puts a schema in the core:
 ### 0. Cost — the wrappers are shallow views
 
 `xi::Typed` is either OWNED (holds its own Record) or a VIEW (shares a parent's
-`shared_ptr<Record>` + points a `cJSON*` at a sub-node — no copy). Extractors
-hand out views, so pulling N nested values / array items costs no cJSON
+`shared_ptr<Record>` + points a `yyjson` value at a sub-node — no copy). Extractors
+hand out views, so pulling N nested values / array items costs no JSON
 duplication; the one materialising copy is `record()`, when you embed a value
 into a constructor input. Measured (`examples/io_stress/bench.cpp`, /O2, 100×
 extract+construct over a 5-feature output): deep-copy wrappers ran 2.3× a bare-
 Record baseline; the view wrappers cut that to ~1.4× — ~3× less wrapper overhead
 (≈21 µs/iteration). In real use you `extract(process(...))` (an rvalue moved into
 the shared root, no copy), so it's cheaper still. The type NAME is free; the cost
-is only the cJSON the wrapping would otherwise duplicate.
+is only the JSON the wrapping would otherwise duplicate.
 
 **Write-through, with explicit clone.** Views are shallow, so `set()` is
 write-through *by design* (like a NumPy view): it mutates the node in the shared
@@ -83,16 +83,16 @@ xi::Vec3 v2  = xi::from_cv(r);       // back to a nominal value
 A small set of **nominal type wrappers** — `Number`, `Point`, `Vec2/3/4`, `Line`,
 `Arc`, `Pose`, `Roi`, `Mat2/3/4`, `Region` (in `xi/xi_types.hpp`) — each is *just a
 name* over a generic `xi::Record`. No fields are enforced; the payload is still
-schema-less cJSON. The wrapper is a lightweight handle (holds a Record), can carry
+schema-less JSON. The wrapper is a lightweight handle (holds a Record), can carry
 schema-less accessors (`pose.angle()` reads `rec["angle"]`, NA if absent), and
 **can be NA**.
 
 #### Iconic types — payload on the image channel
 
-A Record has two channels: schema-less cJSON *and* a named-image map. Most nominal
-types live in cJSON; **`Region` is the first whose data is an image** — a binary
+A Record has two channels: schema-less JSON *and* a named-image map. Most nominal
+types live in JSON; **`Region` is the first whose data is an image** — a binary
 mask (CV_8U, 1-channel, nonzero = inside) carried under the image key `"mask"`,
-with only frame `w`/`h` mirrored into cJSON for cheap metadata reads. It's still
+with only frame `w`/`h` mirrored into JSON for cheap metadata reads. It's still
 "just a name over a Record"; the difference is purely *which channel* holds the
 bytes. Because the mask rides the image map it's zero-copy through the in-process
 ImagePool and drops straight into OpenCV:
@@ -110,7 +110,7 @@ xi::Region r2 = xi::region_from_mask(thresholded);   // cv::Mat -> owning Region
 `xi::Image` if you want to do everything yourself. Region is a **top-level** value
 by convention — when a constructor takes a Region as input, its `io.hpp` `build()`
 merges `r.mask()` into the target Record's image map under a known key (embedding a
-Record as a cJSON *sub-field* copies only json, not images).
+Record as a JSON *sub-field* copies only json, not images).
 
 **Deferred — multi-region / labeled images, and the Image depth tag.** A labeled
 image (each pixel = a region id) needs a wider pixel type (`CV_32S`) than today's
@@ -131,7 +131,7 @@ The name is the same vocabulary in four places:
 - and the port type the (future) wiring UI uses to decide what connects to what.
 
 The compiler stops you wiring a `Line` into a `Pose` input — but the data never
-left generic cJSON, and the `process()` ABI stays untyped (`Record` only). Types
+left generic JSON, and the `process()` ABI stays untyped (`Record` only). Types
 live purely in the wiring layer.
 
 Plugin/toolbox authors define their own nominal types in their own `io.hpp` (it's
