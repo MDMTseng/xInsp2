@@ -13,6 +13,12 @@ import {
     withBackend, compileScript, runInspection, scriptPath
 } from './helpers/client.mjs';
 
+// In continuous mode the worker streams `vars` frames that can arrive
+// before a command's `rsp` ack. Loop until we get the rsp.
+async function ackRsp(c) {
+    for (;;) { const m = await c.nextNonLog(); if (m.type === 'rsp') return m; }
+}
+
 // ---------------------------------------------------------------
 // 1. Compile failure returns error (not silent)
 // ---------------------------------------------------------------
@@ -113,7 +119,7 @@ test('shutdown during continuous mode exits cleanly', async () => {
 
         // Start continuous
         c.send({ type: 'cmd', id: 2, name: 'start', args: { fps: 10 } });
-        const sr = await c.nextNonLog();
+        const sr = await ackRsp(c);
         assert.equal(sr.ok, true);
 
         await sleep(500);
@@ -121,7 +127,7 @@ test('shutdown during continuous mode exits cleanly', async () => {
 
         // Shutdown while streaming
         c.send({ type: 'cmd', id: 3, name: 'shutdown' });
-        const sdr = await c.nextNonLog();
+        const sdr = await ackRsp(c);
         assert.equal(sdr.ok, true);
 
         // Wait for clean exit

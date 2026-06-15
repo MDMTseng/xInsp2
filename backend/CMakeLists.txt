@@ -130,7 +130,9 @@ add_test(NAME record COMMAND test_record)
 
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
-target_include_directories(test_yyjson PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+target_include_directories(test_yyjson PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME yyjson COMMAND test_yyjson)
 
 add_executable(test_protocol tests/test_protocol.cpp)

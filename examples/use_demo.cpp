@@ -40,10 +40,10 @@ void xi_inspect_entry(int frame) {
     // Wrap the cv::Mat results back as xi::Image for VAR previews. The
     // ctor does a one-shot copy into a heap buffer; for hot-path code
     // prefer Image::create_in_pool() and write cv:: output directly.
-    xi::Image gray(gray_mat.cols, gray_mat.rows, 1, gray_mat.data);
-    xi::Image binary(bin.cols, bin.rows, 1, bin.data);
-    VAR(gray, gray);
-    VAR(binary, binary);
+    xi::Image gray_img(gray_mat.cols, gray_mat.rows, 1, gray_mat.data);
+    xi::Image binary_img(bin.cols, bin.rows, 1, bin.data);
+    VAR(gray, gray_img);
+    VAR(binary, binary_img);
 
     cv::Mat labels;
     int n_labels = cv::connectedComponents(bin, labels, 8, CV_32S);

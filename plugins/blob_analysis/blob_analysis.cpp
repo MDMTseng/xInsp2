@@ -23,6 +23,7 @@
 //
 
 #include <xi/xi_abi.hpp>
+#include "cJSON.h"   // parses exchange/def commands with raw cJSON
 
 #include <algorithm>
 #include <cmath>

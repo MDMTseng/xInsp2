@@ -10,9 +10,30 @@ endif()
 set(XI_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
 set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 
-# cJSON as static lib for plugins that use Record/xi_abi
+# OpenCV — xi_image.hpp (pulled via xi_abi) includes <opencv2/core.hpp>, so every
+# plugin needs it. Auto-detect typical Windows installs if not already set.
+if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
+    foreach(_d "C:/opencv/opencv/build" "C:/opencv/build"
+               "C:/opencv/opencv/build/x64/vc16/lib")
+        if(EXISTS "${_d}/OpenCVConfig.cmake")
+            set(OpenCV_DIR "${_d}")
+        endif()
+    endforeach()
+endif()
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
+include_directories(${OpenCV_INCLUDE_DIRS})
+link_libraries(${OpenCV_LIBS})
+
+# cJSON as static lib for plugins that still use raw cJSON (e.g. json_source).
 add_library(cjson_plugin STATIC ${XI_VENDOR}/cJSON.c)
 target_include_directories(cjson_plugin PUBLIC ${XI_VENDOR})
+
+# yyjson — Record's DOM/codec. Every plugin includes xi_record (via xi_abi), so
+# link + include it for ALL plugin targets defined below (directory scope).
+add_library(yyjson_plugin STATIC ${XI_VENDOR}/yyjson/yyjson.c)
+target_include_directories(yyjson_plugin PUBLIC ${XI_VENDOR}/yyjson)
+include_directories(${XI_VENDOR}/yyjson)
+link_libraries(yyjson_plugin)
 
 # mock_camera
 add_library(mock_camera SHARED mock_camera/mock_camera.cpp)

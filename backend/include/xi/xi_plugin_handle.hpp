@@ -86,7 +86,8 @@ public:
         xi_record in_rec;
         in_rec.images = in_imgs.data();
         in_rec.image_count = (int32_t)in_imgs.size();
-        in_rec.json = json.c_str();
+        in_rec.data = (const uint8_t*)json.data();
+        in_rec.len = (int32_t)json.size();
 
         // Call
         xi_record_out out;
@@ -96,22 +97,9 @@ public:
         // Release input handles
         for (auto h : in_handles) ImagePool::instance().release(h);
 
-        // Unmarshal: C ABI output → Record
-        Record result;
-        if (out.json) {
-            cJSON* parsed = cJSON_Parse(out.json);
-            if (parsed) {
-                cJSON* item = parsed->child;
-                while (item) {
-                    if (cJSON_IsNumber(item))      result.set(item->string, item->valuedouble);
-                    else if (cJSON_IsBool(item))   result.set(item->string, cJSON_IsTrue(item) ? true : false);
-                    else if (cJSON_IsString(item)) result.set(item->string, std::string(item->valuestring));
-                    else                           result.set_raw(item->string, cJSON_Duplicate(item, true));
-                    item = item->next;
-                }
-                cJSON_Delete(parsed);
-            }
-        }
+        // Unmarshal: C ABI output (yyjson JSON bytes) → Record
+        Record result = (out.data && out.len > 0)
+            ? Record::from_json_bytes(out.data, (size_t)out.len) : Record();
         for (int i = 0; i < out.image_count; ++i) {
             result.image(out.images[i].key, ImagePool::instance().to_image(out.images[i].handle));
             ImagePool::instance().release(out.images[i].handle);

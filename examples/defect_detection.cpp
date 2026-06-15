@@ -71,7 +71,7 @@ void xi_inspect_entry(int frame) {
     int n_labels = cv::connectedComponents(cleaned, labels, 8, CV_32S);
     int blob_count = std::max(0, n_labels - 1);
 
-    cv::Scalar mean_intensity = cv::mean(gray);
+    cv::Scalar mean_scalar = cv::mean(gray);
 
     // Wrap cv::Mat results back as xi::Image for VAR previews. Each ctor
     // does one heap copy; for hot-path code use Image::create_in_pool +
@@ -83,6 +83,6 @@ void xi_inspect_entry(int frame) {
     VAR(cleaned_img, xi::Image(cleaned.cols, cleaned.rows, 1, cleaned.data));
     VAR(edges_img,   xi::Image(edges.cols,   edges.rows,   1, edges.data));
     VAR(blob_count_var,    blob_count);
-    VAR(mean_intensity,    mean_intensity[0]);
+    VAR(mean_intensity,    mean_scalar[0]);
     VAR(pass,              blob_count <= 2);
 }

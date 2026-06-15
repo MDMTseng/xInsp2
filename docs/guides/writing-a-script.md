@@ -292,9 +292,8 @@ int x  = r["roi.x"].as_int();
 auto v = r["points[0].score"].as_double();
 ```
 
-cJSON-backed; copies are cheap until you mutate (copy-on-write
-behaviour for the JSON tree). Images are refcounted via the host pool —
-no copy when passing through `process()`.
+yyjson-backed (a mutable DOM tree). Images are refcounted via the host
+pool — no copy when passing through `process()`.
 
 ---
 

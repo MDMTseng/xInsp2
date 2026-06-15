@@ -163,7 +163,7 @@ CompileRequest supports `extra_sources` and `include_dirs`.
 
 ## 3. Record
 
-The universal data container. Every plugin input/output and every complex `VAR()` uses Record. Backed by cJSON internally.
+The universal data container. Every plugin input/output and every complex `VAR()` uses Record. Backed by yyjson internally (a `yyjson_mut_doc` tree + named-image map), with a per-frame pool allocator for low-fragmentation builds.
 
 ### Building
 
@@ -695,7 +695,7 @@ There are 50+ headers under `backend/include/xi/`. Key ones:
 | `xi_var.hpp` | `VAR()`, `ValueStore`, `VarTraits<T>` |
 | `xi_param.hpp` | `Param<T>`, `ParamRegistry` |
 | `xi_image.hpp` / `xi_image_pool.hpp` | `xi::Image` pixel buffer; 16-shard refcounted pool |
-| `xi_record.hpp` | `Record` (cJSON, named images, path expressions) |
+| `xi_record.hpp` | `Record` (yyjson DOM, named images, path expressions) |
 | `xi_use.hpp` | `xi::use("name")` — proxy to backend-managed instances |
 | `xi_state.hpp` | `xi::state()` — persistent cross-frame/cross-reload state |
 | `xi_plugin_manager.hpp` | `PluginManager` — discovery, lifecycle, working-copy commits |
@@ -727,7 +727,8 @@ The full set shipped under `plugins/` — browse each directory for its
 
 | File | License | Purpose |
 |------|---------|---------|
-| `cJSON.c/h` | MIT | JSON parser for Record |
+| `yyjson/yyjson.c/h` | MIT | JSON DOM/codec backing `Record` (mutable doc + pool allocator) |
+| `cJSON.c/h` | MIT | JSON parser — legacy; remaining config-parse + a few plugins, being migrated off |
 | `stb_image_write.h` | Public domain | JPEG encoder fallback |
 
 ---

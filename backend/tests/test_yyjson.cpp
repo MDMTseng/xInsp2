@@ -2,6 +2,7 @@
 // the pool-allocator path (zero per-frame allocation). Validates yyjson works in
 // our build before it replaces cJSON as the Record DOM.
 #include "yyjson.h"
+#include "xi/xi_json.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -76,6 +77,33 @@ int main() {
         yyjson_doc* rd = yyjson_read_opts(json, len, 0, &ralc, nullptr);
         verify(rd, "pool-alloc round-trip");
         // no frees needed — everything lives in the reusable pools
+    }
+
+    // 3) xi::Json wrapper (yyjson-backed) — parse, navigate, build, dump.
+    {
+        xi::Json p = xi::Json::parse(R"({"command":"start","value":42,"nested":{"k":"v"},"arr":[1,2,3]})");
+        CHECK(p.valid(), "xi::Json parse valid");
+        CHECK(p["command"].as_string() == "start", "xi::Json string read");
+        CHECK(p["value"].as_int() == 42, "xi::Json int read");
+        CHECK(p["nested"]["k"].as_string() == "v", "xi::Json nested read");
+        CHECK(p["nested.k"].as_string() == "v", "xi::Json path read");
+        CHECK(p["arr"].size() == 3, "xi::Json array size");
+        CHECK(p["arr"][1].as_int() == 2, "xi::Json array index");
+
+        xi::Json o = xi::Json::object().set("ok", true).set("n", 5)
+                         .set("s", "hi").set("nested", xi::Json::object().set("k", "v"));
+        std::string d = o.dump();
+        CHECK(d.find("\"ok\":true") != std::string::npos, "xi::Json build bool");
+        CHECK(d.find("\"n\":5") != std::string::npos, "xi::Json build int");
+        CHECK(d.find("\"s\":\"hi\"") != std::string::npos, "xi::Json build str");
+        CHECK(d.find("\"k\":\"v\"") != std::string::npos, "xi::Json build nested");
+
+        xi::Json a = xi::Json::array(); a.push(1).push(2).push("x");
+        CHECK(a.size() == 3, "xi::Json array build size");
+        CHECK(a.dump() == "[1,2,\"x\"]", "xi::Json array dump");
+
+        int n = 0; p["arr"].for_each([&](const char*, xi::Json){ ++n; });
+        CHECK(n == 3, "xi::Json for_each array");
     }
 
     if (fails) { std::printf("%d FAIL(s)\n", fails); return 1; }

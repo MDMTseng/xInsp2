@@ -50,10 +50,10 @@ class Client {
         });
     }
     async nextNonLogText(timeoutMs = 90000) {
-        // Skip log messages (from build output etc.)
+        // Skip log/event messages (build output, instance-list events, etc.)
         for (;;) {
             const m = await this.nextText(timeoutMs);
-            if (m.type === 'log') continue;
+            if (m.type === 'log' || m.type === 'event') continue;
             return m;
         }
     }

@@ -10,6 +10,7 @@
 //
 
 #include <xi/xi_abi.hpp>
+#include "cJSON.h"   // parses def commands with raw cJSON
 #include "stb_image_write.h"
 
 #include <chrono>

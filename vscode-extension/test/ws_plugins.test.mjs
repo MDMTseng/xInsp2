@@ -91,7 +91,7 @@ test('create_project + create_instance + exchange + save', async () => {
         const cr = await c.nextNonLog();
         assert.equal(cr.ok, true, 'create_project ok');
         assert.ok(existsSync(resolve(projDir, 'project.json')));
-        assert.ok(existsSync(resolve(projDir, 'inspection.cpp')));
+        assert.ok(existsSync(resolve(projDir, 'inspect.cpp')));
 
         // Create a camera instance
         c.send({ type: 'cmd', id: 3, name: 'create_instance', args: { name: 'cam0', plugin: 'mock_camera' } });

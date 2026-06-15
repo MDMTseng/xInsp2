@@ -40,7 +40,7 @@ class Client {
         });
     }
     async nextNonLog(ms = 90000) {
-        for (;;) { const m = await this.nextText(ms); if (m.type !== 'log') return m; }
+        for (;;) { const m = await this.nextText(ms); if (m.type !== 'log' && m.type !== 'event') return m; }
     }
     close() { try { this.ws.close(); } catch {} }
 }

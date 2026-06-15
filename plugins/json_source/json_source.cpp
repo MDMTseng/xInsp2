@@ -11,6 +11,7 @@
 //
 
 #include <xi/xi_abi.hpp>
+#include "cJSON.h"   // this plugin does raw cJSON path-building internally
 
 #include <cstring>
 #include <string>
@@ -141,15 +142,11 @@ public:
             cJSON_Delete(in);
         }
 
-        xi::Record result;
-        cJSON* item = base->child;
-        while (item) {
-            if (cJSON_IsNumber(item))      result.set(item->string, item->valuedouble);
-            else if (cJSON_IsBool(item))   result.set(item->string, cJSON_IsTrue(item) ? true : false);
-            else if (cJSON_IsString(item)) result.set(item->string, std::string(item->valuestring));
-            else                           result.set_raw(item->string, cJSON_Duplicate(item, true));
-            item = item->next;
-        }
+        // Hand the built cJSON tree to a yyjson Record via a JSON round-trip.
+        char* s = cJSON_PrintUnformatted(base);
+        xi::Record result = s ? xi::Record::from_json_bytes((const uint8_t*)s, std::strlen(s))
+                              : xi::Record();
+        if (s) cJSON_free(s);
         cJSON_Delete(base);
         return result;
     }

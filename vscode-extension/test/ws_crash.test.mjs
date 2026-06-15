@@ -31,7 +31,7 @@ class Client {
         if (this.queue.length) return Promise.resolve(this.queue.shift());
         return new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('timeout')), ms); this.waiters.push({ resolve: v => { clearTimeout(t); res(v); } }); });
     }
-    async nextNonLog(ms = 90000) { for (;;) { const m = await this.next(ms); if (m.type !== 'log') return m; } }
+    async nextNonLog(ms = 90000) { for (;;) { const m = await this.next(ms); if (m.type !== 'log' && m.type !== 'event') return m; } }
     // Drain all queued messages and return log messages
     drainLogs() {
         const logs = this.queue.filter(m => m.type === 'log');

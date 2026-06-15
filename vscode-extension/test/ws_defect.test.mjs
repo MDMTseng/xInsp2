@@ -74,17 +74,17 @@ test('defect_detection.cpp compiles, runs, produces expected vars', async () => 
         console.log('vars:', names.join(', '));
 
         assert.ok(names.includes('input'),          'has input');
-        assert.ok(names.includes('gray'),           'has gray');
-        assert.ok(names.includes('blurred'),        'has blurred');
-        assert.ok(names.includes('binary'),         'has binary');
-        assert.ok(names.includes('cleaned'),        'has cleaned');
-        assert.ok(names.includes('edges'),          'has edges');
-        assert.ok(names.includes('blob_count'),     'has blob_count');
+        assert.ok(names.includes('gray_img'),        'has gray_img');
+        assert.ok(names.includes('blurred_img'),     'has blurred_img');
+        assert.ok(names.includes('binary_img'),      'has binary_img');
+        assert.ok(names.includes('cleaned_img'),     'has cleaned_img');
+        assert.ok(names.includes('edges_img'),       'has edges_img');
+        assert.ok(names.includes('blob_count_var'),  'has blob_count_var');
         assert.ok(names.includes('mean_intensity'), 'has mean_intensity');
         assert.ok(names.includes('pass'),           'has pass');
 
         // blob_count should be a number
-        const bc = vars.items.find(i => i.name === 'blob_count');
+        const bc = vars.items.find(i => i.name === 'blob_count_var');
         assert.equal(bc.kind, 'number');
         assert.ok(bc.value >= 0);
 
