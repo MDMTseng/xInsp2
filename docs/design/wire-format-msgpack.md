@@ -47,10 +47,14 @@ chosen to kill the cJSON serialization tax and minimize copies.
 > `refactor/yyjson-dom`. **α/β/δ/ε done. γ: in-process input+output doc
 > pass-by-pointer SHIPPED (γ-1 ABI v3 · γ-2 Record ownership · γ-3/3b
 > marshalling both directions · γ-5 pooled doc allocator · γ-6 bench). γ-4
-> (refcounted Record for zero-copy caching + emit/fetch doc ABI) DEFERRED to a
-> focused session — caching works today via deep-copy. Measured: a compatible
-> in-process plugin call now skips the entire serialize+parse round-trip (~75 µs/
-> direction at N=150 vs yyjson; ~1163 µs vs the original cJSON), both directions.**
+> PARTIAL: Record's doc is intrusively REFCOUNTED — copy = ref-bump + COW, so
+> same-side caching/fan-out of producer-owned Records (e.g. an image source
+> caching its own frames to re-emit) is zero-copy. Still deferred (narrow +
+> higher risk): cross-DLL retention of a BORROWED plugin input (needs a
+> refcountable doc handle across the ABI) + a doc-based emit/fetch ABI on
+> xi_resource_store. Measured: a compatible in-process plugin call now skips the
+> entire serialize+parse round-trip (~75 µs/direction at N=150 vs yyjson; ~1163 µs
+> vs the original cJSON), both directions.**
 
 ---
 
