@@ -82,12 +82,21 @@ public:
             in_handles.push_back(h);
             in_imgs.push_back({key.c_str(), h});
         }
-        std::string json = input.data_json();
         xi_record in_rec{};   // zero-init so the v3 `doc` field is null (JSON path)
         in_rec.images = in_imgs.data();
         in_rec.image_count = (int32_t)in_imgs.size();
-        in_rec.data = (const uint8_t*)json.data();
-        in_rec.len = (int32_t)json.size();
+        std::string json;   // kept alive for the call when we take the JSON path
+        if (doc_input_ok_ && input.doc()) {
+            // γ in-process fast path: hand the plugin a BORROWED read-only doc —
+            // no data_json() serialize here, no yyjson_read in the plugin. The
+            // plugin reads it as a view (and copy-on-writes if it mutates). The
+            // input Record outlives this call, so the borrow is valid throughout.
+            in_rec.doc = input.doc();
+        } else {
+            json = input.data_json();
+            in_rec.data = (const uint8_t*)json.data();
+            in_rec.len = (int32_t)json.size();
+        }
 
         // Call
         xi_record_out out;
@@ -145,6 +154,12 @@ private:
     xi_plugin_get_def_fn  get_def_fn_ = nullptr;
     xi_plugin_set_def_fn  set_def_fn_ = nullptr;
 
+    // γ: true when this DLL was built against a yyjson layout matching ours, so
+    // we may hand its process() a borrowed yyjson_mut_doc* (in-process zero-
+    // serialize input) instead of JSON bytes. False ⇒ JSON path (foreign/older
+    // plugin), which is always correct.
+    bool doc_input_ok_ = false;
+
     xi_host_api host_;
 
     bool find_and_load(const std::string& plugin_name) {
@@ -186,6 +201,14 @@ private:
         exchange_fn_ = (xi_plugin_exchange_fn)GetProcAddress(dll_, "xi_plugin_exchange");
         get_def_fn_  = (xi_plugin_get_def_fn) GetProcAddress(dll_, "xi_plugin_get_def");
         set_def_fn_  = (xi_plugin_set_def_fn) GetProcAddress(dll_, "xi_plugin_set_def");
+
+        // γ: gate the in-process doc-pointer input path on a matching yyjson
+        // layout stamp. A plugin built against the in-tree yyjson exports
+        // xi_yyjson_abi(); if it equals ours we can borrow-pass the doc. A
+        // missing export (pre-γ plugin) or a mismatch ⇒ stay on JSON.
+        if (auto abi_fn = (uint32_t(*)(void))GetProcAddress(dll_, "xi_yyjson_abi")) {
+            doc_input_ok_ = (abi_fn() == xi::yyjson_layout_stamp());
+        }
 
         if (!create_fn_ || !process_fn_) {
             FreeLibrary(dll_);

@@ -80,6 +80,18 @@ inline void append_json_escaped(std::string& out, const std::string& s) {
     out.push_back('"');
 }
 
+// yyjson layout stamp (γ). Identifies the yyjson version + the two struct sizes
+// the in-process doc-pointer path dereferences. The host passes a raw
+// yyjson_mut_doc* across the ABI ONLY when a plugin's exported xi_yyjson_abi()
+// equals the host's own stamp — so a plugin carrying a different yyjson build
+// transparently falls back to the JSON path instead of walking an incompatible
+// struct. Both the host and the XI_PLUGIN_IMPL export call this one function.
+inline uint32_t yyjson_layout_stamp() {
+    return (uint32_t)YYJSON_VERSION_HEX
+         ^ ((uint32_t)sizeof(yyjson_mut_doc) << 8)
+         ^ ((uint32_t)sizeof(yyjson_mut_val) << 18);
+}
+
 // Thread-local doc allocator (γ). When non-null, every new Record doc is built
 // from it — the host doc pool, installed by the in-process call seam — so the
 // doc is host-owned and safe to hand across the ABI (its free routes back to the

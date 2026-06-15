@@ -57,7 +57,13 @@ inline int64_t steady_now_us() { return xi::mono_us(); }
 #endif
 
 // Function pointer types for the callbacks
+// γ: `input_doc` carries the caller's borrowed yyjson_mut_doc* for the in-process
+// zero-serialize path. The host callback uses it directly when the target plugin
+// is doc-compatible, else serialises it to JSON itself — so the caller never
+// pays data_json() up front. `input_data`/`input_len` stay in the signature but
+// are null from the doc path (legacy/explicit-JSON callers may still set them).
 using UseProcessFn  = int (*)(const char* name,
+                              const void* input_doc,
                               const uint8_t* input_data, int32_t input_len,
                               const xi_record_image* input_images, int input_image_count,
                               xi_record_out* output);
@@ -309,12 +315,14 @@ public:
             in_imgs.push_back({key.c_str(), h});
             in_handles.push_back(h);
         }
-        std::string in_js = input.data_json();   // yyjson serialize
-
+        // γ: hand the host our borrowed yyjson doc — no data_json() serialize.
+        // The host uses it directly for a doc-compatible target, or serialises
+        // it there for the (rare, in-process) incompatible case.
         xi_record_out output;
         xi_record_out_init(&output);
 
-        process_fn(name_.c_str(), (const uint8_t*)in_js.data(), (int32_t)in_js.size(),
+        process_fn(name_.c_str(), (const void*)input.doc(),
+                   nullptr, 0,
                    in_imgs.data(), (int)in_imgs.size(), &output);
 
         // Release input handles from the BACKEND pool — plugin's process()

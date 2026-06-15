@@ -134,6 +134,7 @@ static void graph_record_call_(const char* name,
 }
 
 static int use_process_cb(const char* name,
+                          const void* input_doc,
                           const uint8_t* input_data, int32_t input_len,
                           const xi_record_image* input_images, int input_image_count,
                           xi_record_out* output) {
@@ -147,8 +148,24 @@ static int use_process_cb(const char* name,
         xi_record in_rec{};   // zero-init so the v3 `doc` field is null (JSON path)
         in_rec.images = input_images;
         in_rec.image_count = input_image_count;
-        in_rec.data = input_data;
-        in_rec.len = input_len;
+        // γ in-process fast path: when the target plugin shares our yyjson
+        // layout, hand it the borrowed doc directly (zero serialize / zero
+        // parse). Otherwise serialise the doc to JSON HERE (the caller skipped
+        // data_json) so a foreign/older plugin still gets valid bytes. Owns the
+        // serialized buffer for the duration of the call.
+        std::string in_js;
+        if (input_doc && adapter->doc_input_ok()) {
+            in_rec.doc = input_doc;
+        } else if (input_doc) {
+            size_t jl = 0;
+            char* js = yyjson_mut_write((yyjson_mut_doc*)input_doc, 0, &jl);
+            if (js) { in_js.assign(js, jl); free(js); }
+            in_rec.data = (const uint8_t*)in_js.data();
+            in_rec.len  = (int32_t)in_js.size();
+        } else {
+            in_rec.data = input_data;   // explicit-JSON caller (in_doc null)
+            in_rec.len  = input_len;
+        }
         // adapter->process() owns the owner_id tagging (image-leak sweep) AND,
         // for a non-reentrant plugin, the per-instance lock that serializes
         // concurrent dispatch workers. We keep the SEH try/catch boundary here.

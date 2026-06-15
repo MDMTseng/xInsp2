@@ -58,6 +58,7 @@ using xi::seh_translator;
 // --- xi::use() callbacks (minimal copy of service_main equivalents) -----
 
 static int use_process_cb(const char* name,
+                          const void* input_doc,
                           const uint8_t* input_data, int32_t input_len,
                           const xi_record_image* images, int image_count,
                           xi_record_out* output) {
@@ -65,7 +66,24 @@ static int use_process_cb(const char* name,
     if (!inst) return -1;
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (adapter && adapter->process_fn()) {
-        xi_record in_rec{ images, image_count, input_data, input_len };
+        xi_record in_rec{};
+        in_rec.images = images;
+        in_rec.image_count = image_count;
+        // γ: borrowed-doc fast path when the plugin shares our yyjson layout;
+        // otherwise serialise the doc to JSON here (the caller skipped it).
+        std::string in_js;
+        if (input_doc && adapter->doc_input_ok()) {
+            in_rec.doc = input_doc;
+        } else if (input_doc) {
+            size_t jl = 0;
+            char* js = yyjson_mut_write((yyjson_mut_doc*)input_doc, 0, &jl);
+            if (js) { in_js.assign(js, jl); free(js); }
+            in_rec.data = (const uint8_t*)in_js.data();
+            in_rec.len  = (int32_t)in_js.size();
+        } else {
+            in_rec.data = input_data;
+            in_rec.len  = input_len;
+        }
         try {
             adapter->process_fn()(adapter->raw_instance(), &in_rec, output);
         } catch (...) { return -2; }

@@ -24,6 +24,7 @@
 #include "xi_abi.h"
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
+#include "xi_record.hpp"   // γ: yyjson_layout_stamp() for the doc-pointer gate
 
 #include <condition_variable>
 #include <cstdint>
@@ -108,6 +109,10 @@ public:
         set_def_fn_  = reinterpret_cast<xi_plugin_set_def_fn>(GetProcAddress(dll_, "xi_plugin_set_def"));
         destroy_fn_  = reinterpret_cast<xi_plugin_destroy_fn>(GetProcAddress(dll_, "xi_plugin_destroy"));
         process_fn_  = reinterpret_cast<xi_plugin_process_fn>(GetProcAddress(dll_, "xi_plugin_process"));
+        // γ: may we hand this plugin a borrowed yyjson_mut_doc* (in-process zero-
+        // serialize input)? Only if it was built against our yyjson layout.
+        if (auto abi_fn = reinterpret_cast<uint32_t(*)()>(GetProcAddress(dll_, "xi_yyjson_abi")))
+            doc_input_ok_ = (abi_fn() == xi::yyjson_layout_stamp());
     }
 
     ~CAbiInstanceAdapter() override {
@@ -180,6 +185,9 @@ public:
     void* raw_instance() const { return inst_; }
     xi_plugin_process_fn process_fn() const { return process_fn_; }
     bool reentrant() const { return reentrant_; }
+    // γ: true ⇒ caller may set xi_record.doc (borrowed yyjson doc) instead of
+    // serializing to data/len. False ⇒ JSON path (foreign/older plugin).
+    bool doc_input_ok() const { return doc_input_ok_; }
 
 private:
     // Effective concurrency cap across process/exchange/get_def/set_def:
@@ -227,6 +235,7 @@ private:
     xi_plugin_set_def_fn  set_def_fn_ = nullptr;
     xi_plugin_destroy_fn  destroy_fn_ = nullptr;
     xi_plugin_process_fn  process_fn_ = nullptr;
+    bool                  doc_input_ok_ = false;
     ImagePoolOwnerId      owner_id_ = 0;
 };
 

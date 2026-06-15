@@ -256,9 +256,16 @@ protected:
 
 // Convert a C xi_record to a C++ Record (images become HostImages → copied to xi::Image)
 inline Record record_from_c(const xi_host_api* host, const xi_record* rec) {
-    Record r = (rec->data && rec->len > 0)
-                 ? Record::from_json_bytes(rec->data, (size_t)rec->len)
-                 : Record();
+    // γ in-process fast path: when the host handed us a borrowed yyjson doc
+    // (same process + matching yyjson layout, gated host-side), read it as a
+    // view — no JSON parse, no copy. The view is read-only; the plugin's first
+    // mutation copy-on-writes into its own doc, leaving the caller's untouched.
+    // Otherwise decode the JSON bytes exactly as before.
+    Record r = rec->doc
+                 ? Record::from_doc_view((yyjson_mut_doc*)rec->doc)
+                 : ((rec->data && rec->len > 0)
+                        ? Record::from_json_bytes(rec->data, (size_t)rec->len)
+                        : Record());
     for (int i = 0; i < rec->image_count; ++i) {
         // Zero-copy: wrap the handle as a refcounted view over pool
         // memory. The xi::Image addrefs the handle on adopt and releases
@@ -420,7 +427,5 @@ int xi_plugin_abi_version(void) {                                              \
 /* two struct sizes the doc-pointer path depends on. */                        \
 extern "C" __declspec(dllexport)                                               \
 uint32_t xi_yyjson_abi(void) {                                                 \
-    return (uint32_t)YYJSON_VERSION_HEX                                        \
-         ^ ((uint32_t)sizeof(yyjson_mut_doc) << 8)                            \
-         ^ ((uint32_t)sizeof(yyjson_mut_val) << 18);                          \
+    return xi::yyjson_layout_stamp();                                          \
 }
