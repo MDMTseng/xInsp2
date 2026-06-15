@@ -33,7 +33,8 @@
 #include "xi_image.hpp"
 #include "xi_instance_folders.hpp"
 #include "xi_status_sink.hpp"
-#include "xi_doc_pool.hpp"   // γ: backs host_api.doc_chunk_* (pooled doc allocator)
+#include "xi_doc_pool.hpp"      // γ: backs host_api.doc_chunk_* (pooled doc allocator)
+#include "xi_doc_registry.hpp"  // γ-4: backs host_api.doc_retain/doc_release
 
 #include <atomic>
 #include <cstdio>
@@ -360,6 +361,11 @@ public:
         api.doc_chunk_alloc   = [](size_t n) -> void* { return xi::DocChunkPool::alloc(n); };
         api.doc_chunk_realloc = [](void* p, size_t n) -> void* { return xi::DocChunkPool::realloc(p, n); };
         api.doc_chunk_free    = [](void* p) { xi::DocChunkPool::free(p); };
+        // Host doc refcount (ABI v4, γ-4) — lets a yyjson doc handed across the
+        // ABI be held by more than one side without a deep copy (the doc
+        // analogue of image_addref/image_release).
+        api.doc_retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+        api.doc_release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
         return api;
     }
 

@@ -47,14 +47,23 @@ chosen to kill the cJSON serialization tax and minimize copies.
 > `refactor/yyjson-dom`. **α/β/δ/ε done. γ: in-process input+output doc
 > pass-by-pointer SHIPPED (γ-1 ABI v3 · γ-2 Record ownership · γ-3/3b
 > marshalling both directions · γ-5 pooled doc allocator · γ-6 bench). γ-4
-> PARTIAL: Record's doc is intrusively REFCOUNTED — copy = ref-bump + COW, so
-> same-side caching/fan-out of producer-owned Records (e.g. an image source
-> caching its own frames to re-emit) is zero-copy. Still deferred (narrow +
-> higher risk): cross-DLL retention of a BORROWED plugin input (needs a
-> refcountable doc handle across the ABI) + a doc-based emit/fetch ABI on
-> xi_resource_store. Measured: a compatible in-process plugin call now skips the
-> entire serialize+parse round-trip (~75 µs/direction at N=150 vs yyjson; ~1163 µs
-> vs the original cJSON), both directions.**
+> PARTIAL→v4: Record's doc is intrusively REFCOUNTED in-process — copy = ref-bump
+> + COW, so same-side caching/fan-out of producer-owned Records (an image source
+> caching its own frames to re-emit) is zero-copy. **v4 extends the refcount
+> ACROSS the ABI** with a host-side doc registry (`doc_retain`/`doc_release`, ABI
+> v4) that mirrors `image_addref`/`release`: a doc handed across the boundary can
+> be held by more than one side without a deep copy. Two-layer model — the
+> in-process `DocBox.rc` stays for same-side sharing (hot, no ABI); the host
+> registry counts how many *sides* hold a doc, entered only when one genuinely
+> is. **v4-1 SHIPPED**: host `DocRegistry` + ABI `doc_retain`/`doc_release` +
+> `test_doc_registry`, pure addition, no path change. Next: `DocBox.host_release`
+> + `Record::share_out`/`adopt_shared` (v4-2), then zero-copy emit even while a
+> doc is cached so a held ref no longer forces serialize (v4-3). Still gated
+> behind a SPEED flag: making every per-frame INPUT doc registry-managed (so a
+> plugin can zero-copy cache its *borrowed input*) costs a per-node retain/release
+> each frame — pending a bench call (v4-4). Measured: a compatible in-process
+> plugin call skips the entire serialize+parse round-trip (~75 µs/direction at
+> N=150 vs yyjson; ~1163 µs vs the original cJSON), both directions.**
 
 ---
 

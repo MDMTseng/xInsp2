@@ -61,8 +61,15 @@ extern "C" {
 /*       on a matching yyjson layout. All additive at the tail; when  */
 /*       the doc pointer is null (older plugin / mismatch / cross-    */
 /*       process) the data/len JSON path is used exactly as in v2.    */
+/*   4 — + doc_retain/doc_release (γ-4): a host-side refcount for a   */
+/*       yyjson_mut_doc handed across the ABI, mirroring image_addref/ */
+/*       release. Lets a doc pointer be held by more than one side    */
+/*       (host adopting a doc a plugin still caches; a plugin caching  */
+/*       its borrowed input) with no deep copy. Additive at the tail; */
+/*       null on a pre-v4 host ⇒ callers fall back to the v3 deep-     */
+/*       copy / serialize behaviour unchanged.                        */
 /* ------------------------------------------------------------------ */
-#define XI_ABI_VERSION 3
+#define XI_ABI_VERSION 4
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -273,6 +280,25 @@ typedef struct xi_host_api {
     void*           (*doc_chunk_alloc)(size_t size);
     void*           (*doc_chunk_realloc)(void* ptr, size_t size);
     void            (*doc_chunk_free)(void* ptr);
+
+    /* --------------------------------------------------------------- */
+    /* In-process doc refcount (ABI v4, γ-4). Host-side reference count  */
+    /* for a yyjson_mut_doc* handed across the ABI — the doc analogue of */
+    /* image_addref/image_release. A doc shared across the boundary (the */
+    /* host adopting a doc a plugin still caches, or a plugin retaining   */
+    /* its borrowed input) is owned by the host registry; each holding    */
+    /* side keeps one ref. The doc MUST have been built with doc_chunk_*  */
+    /* (host-owned), so its free routes back via doc->alc.                */
+    /*                                                                    */
+    /*   doc_retain:  bump the refcount, creating the entry at 1 if the   */
+    /*                doc is not yet registered. Idempotent per holder.   */
+    /*   doc_release: drop one ref; when it reaches zero the host frees    */
+    /*                the doc (yyjson_mut_doc_free via doc->alc).          */
+    /*                                                                    */
+    /* Null on a pre-v4 host (always null-check): callers then fall back  */
+    /* to the v3 behaviour — deep-copy to retain, serialize to hand off.  */
+    void            (*doc_retain)(void* doc);
+    void            (*doc_release)(void* doc);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */

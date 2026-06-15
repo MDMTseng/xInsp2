@@ -139,6 +139,14 @@ target_include_directories(test_doc_pool PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME doc_pool COMMAND test_doc_pool)
 
+# γ-4 host-side doc refcount (xi_doc_registry.hpp) — retain/release/free + leak watch.
+add_executable(test_doc_registry tests/test_doc_registry.cpp)
+target_link_libraries(test_doc_registry PRIVATE yyjson)
+target_include_directories(test_doc_registry PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME doc_registry COMMAND test_doc_registry)
+
 add_executable(test_protocol tests/test_protocol.cpp)
 target_link_libraries(test_protocol PRIVATE xi_core)
 add_test(NAME protocol COMMAND test_protocol)
