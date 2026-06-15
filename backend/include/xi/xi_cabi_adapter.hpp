@@ -35,14 +35,20 @@
 
 namespace xi {
 
-// Plugin ABI compatibility check. Reads the plugin DLL's
-// xi_plugin_abi_version() export and compares against the host's
-// XI_ABI_VERSION. Pre-versioning plugins (no export) are accepted as
-// v1 with a one-shot warning logged; plugins requesting a newer ABI
-// than the host provides are refused (caller should FreeLibrary +
-// skip + record a warning).
+// Plugin ABI compatibility check. Two gates, run at load (caller FreeLibrary +
+// skip + record the warning on a false return):
+//   1. ABI VERSION — reads xi_plugin_abi_version(); a plugin requesting a newer
+//      ABI than the host provides is refused. Pre-versioning plugins (no export)
+//      are treated as v1.
+//   2. yyjson LAYOUT (γ-4) — reads xi_yyjson_abi(); if it doesn't match the
+//      host's stamp (different yyjson build/version) or is absent, the plugin can
+//      only run the slow JSON-serialize path on every dispatch. We REFUSE it by
+//      default so that perf cliff is visible, unless the manifest opted in with
+//      `"json_fallback": true` (json_fallback_opt_in) — then it loads on the JSON
+//      path with a one-shot warning.
 inline bool plugin_abi_compatible(HMODULE dll, const std::string& plugin_name,
-                                   std::string* err_msg = nullptr) {
+                                  bool json_fallback_opt_in,
+                                  std::string* err_msg = nullptr) {
     using AbiVerFn = int (*)();
     auto fn = reinterpret_cast<AbiVerFn>(GetProcAddress(dll, "xi_plugin_abi_version"));
     int v = fn ? fn() : 1;
@@ -56,6 +62,25 @@ inline bool plugin_abi_compatible(HMODULE dll, const std::string& plugin_name,
         std::fprintf(stderr,
             "[xinsp2] '%s': pre-versioning plugin (no xi_plugin_abi_version "
             "export); assuming v1\n", plugin_name.c_str());
+    }
+    // γ-4 yyjson layout gate.
+    auto yfn = reinterpret_cast<uint32_t(*)()>(GetProcAddress(dll, "xi_yyjson_abi"));
+    bool layout_ok = yfn && (yfn() == xi::yyjson_layout_stamp());
+    if (!layout_ok) {
+        if (!json_fallback_opt_in) {
+            if (err_msg) *err_msg = "plugin '" + plugin_name + "' has an incompatible "
+                "yyjson layout (" + (yfn ? "different yyjson build/version"
+                                         : "no xi_yyjson_abi export")
+                + ") — it can only run the slow JSON-serialize path, not the "
+                  "zero-copy doc path. Rebuild it against the host's vendored "
+                  "yyjson, or set \"json_fallback\": true in its plugin.json to "
+                  "allow the JSON path.";
+            return false;
+        }
+        std::fprintf(stderr,
+            "[xinsp2] '%s': yyjson layout mismatch — running on JSON fallback "
+            "(json_fallback opt-in; serializes every dispatch)\n",
+            plugin_name.c_str());
     }
     return true;
 }
@@ -73,6 +98,13 @@ struct PluginInfo {
     // default — only plugins that opt in get true per-instance parallelism.
     // See docs/guides/writing-a-script.md (parallelism) + plugin-abi.md.
     bool        reentrant = false;
+    // Opt-in (plugin.json `"json_fallback": true`): allow this plugin to load
+    // even when its yyjson layout doesn't match the host's — it then runs the
+    // slow JSON-serialize path on every dispatch instead of the zero-copy doc
+    // path. Without it, a layout mismatch (or a plugin with no xi_yyjson_abi
+    // export) is REFUSED at load so the perf cliff is never silent. See
+    // plugin_abi_compatible / docs/reference/plugin-abi.md.
+    bool        json_fallback = false;
     std::string folder_path;   // absolute path to plugin folder
     std::string ui_path;       // absolute path to ui/ folder (if has_ui)
     HMODULE     handle = nullptr;

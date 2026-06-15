@@ -68,7 +68,12 @@ chosen to kill the cJSON serialization tax and minimize copies.
 > SHARDED (16 mutexes by doc pointer) so parallel emit doesn't contend. Dropped
 > the earlier two-mode design (`out_doc_shared` signal + `release_doc`/`adopt_doc`/
 > `owns_doc`) — the refcount-at-adopt already distinguishes the cases, so emit
-> stays a single branch. 15/15 ctest + 77/77 ws. NOTE: the ABI is now v4, so a
+> stays a single branch. **No silent fallback**: a plugin whose yyjson layout
+> doesn't match the host (different yyjson build, or a hand-coded plugin with no
+> `xi_yyjson_abi` export) can only run the slow JSON path, so it is now REFUSED at
+> load with a clear error — unless its `plugin.json` opts in with
+> `"json_fallback": true` (then it loads on the JSON path with a one-shot
+> warning). 15/15 ctest + 77/77 ws. NOTE: the ABI is now v4, so a
 > project plugin recompiles to v4 and needs a v4 HOST — the **Release** backend
 > must be rebuilt (ws tests launch `build/Release`), not just Debug. Still
 > deferred behind a SPEED flag (v4-4): making every per-frame INPUT doc

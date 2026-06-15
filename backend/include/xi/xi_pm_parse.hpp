@@ -121,6 +121,7 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
                 (content.find("\"has_ui\": true") != std::string::npos);
     pi.reentrant = json_flag_true(content, "reentrant") ||
                    json_flag_true(content, "thread_safe");  // documented alias
+    pi.json_fallback = json_flag_true(content, "json_fallback");
     pi.folder_path = folder;
     if (pi.has_ui) {
         pi.ui_path = (std::filesystem::path(folder) / "ui").string();

@@ -253,6 +253,7 @@ private:
                                 (mc.find("\"has_ui\": true") != std::string::npos);
                     pi.reentrant = json_flag_true(mc, "reentrant") ||
                                    json_flag_true(mc, "thread_safe");  // documented alias
+                    pi.json_fallback = json_flag_true(mc, "json_fallback");
                     if (pi.has_ui) pi.ui_path = (entry.path() / "ui").string();
                     std::string mblock;
                     if (detail_find_key(mc, "manifest", mblock)) pi.manifest_json = std::move(mblock);
@@ -285,7 +286,7 @@ private:
                 }
                 {
                     std::string err;
-                    if (!plugin_abi_compatible(pi.handle, pname, &err)) {
+                    if (!plugin_abi_compatible(pi.handle, pname, pi.json_fallback, &err)) {
                         last_open_warnings_.push_back({pname, pname, err});
                         std::fprintf(stderr, "[xinsp2] %s\n", err.c_str());
                         FreeLibrary(pi.handle);
@@ -517,7 +518,7 @@ public:
         }
         {
             std::string err;
-            if (!plugin_abi_compatible(pi.handle, plugin_name, &err)) {
+            if (!plugin_abi_compatible(pi.handle, plugin_name, pi.json_fallback, &err)) {
                 r.error = err + " — instances for this plugin are gone; "
                                 "reopen the project to recover";
                 FreeLibrary(pi.handle);
@@ -760,7 +761,7 @@ public:
 
         {
             std::string aerr;
-            if (!plugin_abi_compatible(pi.handle, name, &aerr)) {
+            if (!plugin_abi_compatible(pi.handle, name, pi.json_fallback, &aerr)) {
                 std::fprintf(stderr, "[xinsp2] %s\n", aerr.c_str());
                 FreeLibrary(pi.handle);
                 pi.handle = nullptr;
@@ -1297,7 +1298,7 @@ public:
                             // memory corruption risk. Mirror the load_plugin
                             // path's check.
                             std::string err;
-                            if (!plugin_abi_compatible(pi2.handle, *plugin, &err)) {
+                            if (!plugin_abi_compatible(pi2.handle, *plugin, pi2.json_fallback, &err)) {
                                 FreeLibrary(pi2.handle);
                                 pi2.handle = nullptr;
                                 last_open_warnings_.push_back(

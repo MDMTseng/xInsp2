@@ -3,5 +3,6 @@
   "description": "Simulated camera — generates test images with frame counter",
   "dll": "mock_camera.dll",
   "factory": "xi_plugin_create",
-  "has_ui": true
+  "has_ui": true,
+  "json_fallback": true
 }

@@ -330,6 +330,15 @@ Fields:
   if your plugin is internally thread-safe (atomics / locks around any member
   state) to get true per-instance parallel throughput. `examples/qa_reentrancy/`
   demonstrates both modes.
+- `json_fallback` (bool, optional, default `false`) — allow this plugin to load
+  even when its **yyjson layout doesn't match the host's** — a different vendored
+  yyjson build/version, or a hand-coded plugin with no `xi_yyjson_abi` export.
+  Such a plugin can only run the slow **JSON-serialize path** on every dispatch,
+  not the zero-copy in-process doc path (γ-4). The host **REFUSES it at load by
+  default** so that per-frame perf cliff is never silent; set `"json_fallback":
+  true` to opt in (logged once at load). Plugins built with `XI_PLUGIN_IMPL`
+  against the host's vendored yyjson get the doc path automatically and never need
+  this. See `docs/design/wire-format-msgpack.md` §γ.
 - `abi_version` (int, optional but written by `cmd:export_project_plugin`)
   — the `XI_ABI_VERSION` the plugin was compiled against. Matches the
   plugin DLL's `xi_plugin_abi_version()` export. Backends refuse
