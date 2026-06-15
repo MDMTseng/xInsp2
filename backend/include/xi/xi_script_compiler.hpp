@@ -578,7 +578,7 @@ inline CompileResult compile(const CompileRequest& req) {
     // per cap value). TODO(linux): emit -fopenmp for gcc/clang instead.
     if (req.openmp_max_threads != 0) front += " /openmp";
     front += " /I\"" + req.include_dir + "\"";
-    // vendor dir (cJSON, stb, etc.) — sibling of include/
+    // vendor dir (stb, etc.) — sibling of include/
     auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";
     if (std::filesystem::exists(vendor_dir)) front += " /I\"" + vendor_dir.string() + "\"";
     // yyjson lives in vendor/yyjson/ — xi_record.hpp does #include "yyjson.h"
@@ -633,11 +633,6 @@ inline CompileResult compile(const CompileRequest& req) {
     // harmless for them and required for the Script (/Z7) path.
     cmd += " /DEBUG /PDB:\"" + (std::filesystem::path(req.output_dir)
                                / (versioned_stem + ".pdb")).string() + "\"";
-    // Link against pre-built cjson.lib (needed by xi_record.hpp / xi_plugin_handle.hpp)
-    auto cjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cjson.lib";
-    if (std::filesystem::exists(cjson_lib)) {
-        cmd += " \"" + cjson_lib.string() + "\"";
-    }
     // Link against pre-built yyjson.lib (the Record DOM/codec, via xi_record.hpp).
     auto yyjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "yyjson.lib";
     if (std::filesystem::exists(yyjson_lib)) {

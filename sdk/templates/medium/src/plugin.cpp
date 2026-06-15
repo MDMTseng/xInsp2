@@ -10,8 +10,9 @@
 // building, and xi::Image element-wise work.
 //
 
-#include <cJSON.h>     // backend ships cJSON in vendor/, also force-include path
+#include <yyjson.h>    // backend ships yyjson in vendor/yyjson, also on the force-include path
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 class {{CLASS}} {
@@ -29,19 +30,18 @@ public:
     }
 
     bool set_def(const std::string& json) {
-        // Tiny inline parse — the backend is happy to use cJSON, but
-        // for one int we keep it dependency-free so the template
-        // compiles even if the user later trims includes.
-        cJSON* root = cJSON_Parse(json.c_str());
-        if (!root) return false;
-        cJSON* t = cJSON_GetObjectItem(root, "threshold");
-        if (t && cJSON_IsNumber(t)) {
-            int v = (int)t->valuedouble;
+        // Tiny inline parse with yyjson.
+        yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
+        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+        if (!root) { yyjson_doc_free(doc); return false; }
+        yyjson_val* t = yyjson_obj_get(root, "threshold");
+        if (t && yyjson_is_num(t)) {
+            int v = (int)yyjson_get_num(t);
             if (v < 0)   v = 0;
             if (v > 255) v = 255;
             threshold_ = v;
         }
-        cJSON_Delete(root);
+        yyjson_doc_free(doc);
         return true;
     }
 
@@ -86,20 +86,21 @@ public:
     // webview.postMessage({ type: 'exchange', cmd: { command: ..., value: ... } }).
     // The extension wraps that into JSON and lands here.
     std::string exchange(const std::string& cmd) {
-        cJSON* root = cJSON_Parse(cmd.c_str());
+        yyjson_doc* doc = yyjson_read(cmd.c_str(), cmd.size(), 0);
+        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
         if (root) {
-            cJSON* c = cJSON_GetObjectItem(root, "command");
-            if (c && cJSON_IsString(c) && std::string(c->valuestring) == "set_threshold") {
-                cJSON* v = cJSON_GetObjectItem(root, "value");
-                if (v && cJSON_IsNumber(v)) {
-                    int n = (int)v->valuedouble;
+            yyjson_val* c = yyjson_obj_get(root, "command");
+            if (c && yyjson_is_str(c) && std::string(yyjson_get_str(c)) == "set_threshold") {
+                yyjson_val* v = yyjson_obj_get(root, "value");
+                if (v && yyjson_is_num(v)) {
+                    int n = (int)yyjson_get_num(v);
                     if (n < 0)   n = 0;
                     if (n > 255) n = 255;
                     threshold_ = n;
                 }
             }
-            cJSON_Delete(root);
         }
+        yyjson_doc_free(doc);
         // Return current status in a UI-friendly shape.
         return std::string("{\"threshold\":") + std::to_string(threshold_)
              + ",\"last_fg_pct\":" + std::to_string(last_fg_pct_) + "}";

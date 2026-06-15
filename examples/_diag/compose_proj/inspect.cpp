@@ -4,17 +4,18 @@
 // ordered despite the 4-thread lane completing out of order).
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
-#include <cJSON.h>
+#include <yyjson.h>
 #include <chrono>
 #include <cstdlib>
 #include <string>
 #include <thread>
 static int jint(const std::string& s, const char* k, int def) {
     int v = def;
-    if (cJSON* j = cJSON_Parse(s.c_str())) {
-        cJSON* x = cJSON_GetObjectItem(j, k);
-        if (cJSON_IsNumber(x)) v = (int)x->valuedouble;
-        cJSON_Delete(j);
+    if (yyjson_doc* j = yyjson_read(s.c_str(), s.size(), 0)) {
+        yyjson_val* root = yyjson_doc_get_root(j);
+        yyjson_val* x = yyjson_obj_get(root, k);
+        if (yyjson_is_num(x)) v = (int)yyjson_get_num(x);
+        yyjson_doc_free(j);
     }
     return v;
 }

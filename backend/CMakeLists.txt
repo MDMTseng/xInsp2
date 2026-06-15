@@ -42,9 +42,6 @@ option(XINSP2_HAS_TURBOJPEG  "Link libjpeg-turbo for direct SIMD JPEG encode" OF
 # Default install root: C:\libjpeg-turbo64 (Windows) or /opt/libjpeg-turbo (Linux)
 set(TURBOJPEG_ROOT "C:/libjpeg-turbo64" CACHE PATH "libjpeg-turbo install root")
 
-add_library(cjson STATIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cJSON.c)
-target_include_directories(cjson PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
-
 # yyjson — the JSON DOM + serializer that replaces cJSON (v0.12.0, pinned).
 # Mutable doc for build, immutable doc for fast read; pool allocator for
 # zero-per-frame allocation. Linked into the backend + JIT-compiled plugins.
@@ -56,8 +53,7 @@ target_include_directories(xi_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 )
-# xi_record.hpp is backed by yyjson — every xi_core user links it. (cjson stays
-# listed explicitly per target while config/xi::Json still use it.)
+# xi_record.hpp is backed by yyjson — every xi_core user links it.
 target_link_libraries(xi_core INTERFACE yyjson)
 # xi.hpp / xi_plugin_support.hpp pull in <opencv2/opencv.hpp>, so every
 # target that uses xi_core needs OpenCV's include + libs visible.
@@ -118,14 +114,14 @@ if(XINSP2_HAS_TURBOJPEG)
 endif()
 
 add_executable(test_xi_core tests/test_xi_core.cpp)
-target_link_libraries(test_xi_core PRIVATE xi_core cjson)
+target_link_libraries(test_xi_core PRIVATE xi_core)
 if(NOT MSVC)
     target_link_libraries(test_xi_core PRIVATE pthread)
 endif()
 add_test(NAME xi_core COMMAND test_xi_core)
 
 add_executable(test_record tests/test_record.cpp)
-target_link_libraries(test_record PRIVATE xi_core cjson)
+target_link_libraries(test_record PRIVATE xi_core)
 add_test(NAME record COMMAND test_record)
 
 add_executable(test_yyjson tests/test_yyjson.cpp)
@@ -136,11 +132,11 @@ target_include_directories(test_yyjson PRIVATE
 add_test(NAME yyjson COMMAND test_yyjson)
 
 add_executable(test_protocol tests/test_protocol.cpp)
-target_link_libraries(test_protocol PRIVATE xi_core cjson)
+target_link_libraries(test_protocol PRIVATE xi_core)
 add_test(NAME protocol COMMAND test_protocol)
 
 add_executable(test_diagnostics tests/test_diagnostics.cpp)
-target_link_libraries(test_diagnostics PRIVATE xi_core cjson)
+target_link_libraries(test_diagnostics PRIVATE xi_core)
 add_test(NAME diagnostics COMMAND test_diagnostics)
 
 # SHM / worker-process / script-runner tests removed 2026-05 with the
@@ -150,14 +146,14 @@ set_tests_properties(protocol PROPERTIES
 )
 
 add_executable(test_image_pool tests/test_image_pool.cpp)
-target_link_libraries(test_image_pool PRIVATE xi_core cjson)
+target_link_libraries(test_image_pool PRIVATE xi_core)
 if(NOT MSVC)
     target_link_libraries(test_image_pool PRIVATE pthread)
 endif()
 add_test(NAME image_pool COMMAND test_image_pool)
 
 add_executable(test_image_pool_stress tests/test_image_pool_stress.cpp)
-target_link_libraries(test_image_pool_stress PRIVATE xi_core cjson)
+target_link_libraries(test_image_pool_stress PRIVATE xi_core)
 if(NOT MSVC)
     target_link_libraries(test_image_pool_stress PRIVATE pthread)
 endif()
@@ -165,7 +161,7 @@ add_test(NAME image_pool_stress COMMAND test_image_pool_stress)
 
 # Throughput micro-benchmark (not a ctest — run manually to measure alloc cost).
 add_executable(bench_image_pool tests/bench_image_pool.cpp)
-target_link_libraries(bench_image_pool PRIVATE xi_core cjson)
+target_link_libraries(bench_image_pool PRIVATE xi_core)
 if(NOT MSVC)
     target_link_libraries(bench_image_pool PRIVATE pthread)
 endif()
@@ -192,7 +188,7 @@ target_link_libraries(test_qa_race PRIVATE xi_core)
 add_test(NAME qa_race COMMAND test_qa_race)
 
 add_executable(test_qa_edge tests/test_qa_edge.cpp)
-target_link_libraries(test_qa_edge PRIVATE xi_core cjson)
+target_link_libraries(test_qa_edge PRIVATE xi_core)
 add_test(NAME qa_edge COMMAND test_qa_edge)
 
 # Phase G (#92) stress/fuzz: hammers the respawn-cap + safe-state core with
@@ -208,7 +204,7 @@ add_executable(xinsp_backend
     src/stb_impl.cpp
     src/xi_image_io.cpp
 )
-target_link_libraries(xinsp_backend PRIVATE xi_core cjson)
+target_link_libraries(xinsp_backend PRIVATE xi_core)
 target_include_directories(xinsp_backend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 if(WIN32)
     target_link_libraries(xinsp_backend PRIVATE Ws2_32)
@@ -224,7 +220,7 @@ target_compile_definitions(xinsp_backend PRIVATE
 
 # Headless production runner. Same libs as the server; no WebSocket.
 add_executable(xinsp_runner src/runner_main.cpp src/stb_impl.cpp src/xi_image_io.cpp)
-target_link_libraries(xinsp_runner PRIVATE xi_core cjson)
+target_link_libraries(xinsp_runner PRIVATE xi_core)
 target_include_directories(xinsp_runner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 if(WIN32)
     target_link_libraries(xinsp_runner PRIVATE Ws2_32)
@@ -259,7 +255,7 @@ target_compile_definitions(xinsp_fe PRIVATE
 # JPEG-encoder benchmark — quantifies the IPP/OpenCV/stb dispatch.
 # Not run as a test (no pass/fail); invoke manually for numbers.
 add_executable(bench_jpeg tests/bench_jpeg.cpp src/stb_impl.cpp)
-target_link_libraries(bench_jpeg PRIVATE xi_core cjson)
+target_link_libraries(bench_jpeg PRIVATE xi_core)
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_IPP=1)
     target_include_directories(bench_jpeg PRIVATE ${IPP_INCLUDE_DIR})
@@ -275,20 +271,21 @@ if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
 endif()
 
 # Record serialization micro-bench: cJSON vs yyjson vs MPack vs CWPack.
-# The serde libs are bench-only third-party sources, gitignored + fetched on
-# demand (see tests/serde_vendor/FETCH.md). Target is skipped if they're absent
-# so a clean checkout still configures. Run manually, not a ctest.
+# ALL four are bench-only third-party sources now (cJSON was removed from the
+# shipped tree with the yyjson-only migration), gitignored + fetched on demand
+# (see tests/serde_vendor/FETCH.md). Target is skipped if they're absent so a
+# clean checkout still configures. Run manually, not a ctest.
 set(_serde ${CMAKE_CURRENT_SOURCE_DIR}/tests/serde_vendor)
-if(EXISTS ${_serde}/yyjson/yyjson.c AND EXISTS ${_serde}/mpack/mpack.c)
+if(EXISTS ${_serde}/yyjson/yyjson.c AND EXISTS ${_serde}/mpack/mpack.c
+   AND EXISTS ${_serde}/cjson/cJSON.c)
     add_executable(bench_record
         tests/bench_record.cpp
+        ${_serde}/cjson/cJSON.c
         ${_serde}/yyjson/yyjson.c
         ${_serde}/mpack/mpack.c
         ${_serde}/cwpack/cwpack.c)
-    target_link_libraries(bench_record PRIVATE cjson)
     target_include_directories(bench_record PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/vendor
-        ${_serde}/yyjson ${_serde}/mpack ${_serde}/cwpack)
+        ${_serde}/cjson ${_serde}/yyjson ${_serde}/mpack ${_serde}/cwpack)
 endif()
 
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)

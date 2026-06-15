@@ -69,9 +69,9 @@ std::vector<int> read_window(const xi::Record::Value& v) {
     return out;
 }
 
-cJSON* build_window(const std::vector<int>& w) {
-    cJSON* arr = cJSON_CreateArray();
-    for (int c : w) cJSON_AddItemToArray(arr, cJSON_CreateNumber(c));
+yyjson_mut_val* build_window(yyjson_mut_doc* doc, const std::vector<int>& w) {
+    yyjson_mut_val* arr = yyjson_mut_arr(doc);
+    for (int c : w) yyjson_mut_arr_add_val(arr, yyjson_mut_sint(doc, c));
     return arr;
 }
 
@@ -150,7 +150,7 @@ void xi_inspect_entry(int /*frame*/) {
 
     // 6) Persist state.
     xi::state().set("frame_seq",  frame_seq_v + 1);
-    xi::state().set_raw("window", build_window(window));
+    xi::state().set_raw("window", build_window(xi::state().doc(), window));
 
     // 7) Emit per-frame VARs.
     VAR(count,             count_v);

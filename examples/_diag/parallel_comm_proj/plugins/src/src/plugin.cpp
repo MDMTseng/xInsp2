@@ -5,18 +5,20 @@
 // returns false on back-pressure (here the queue is large, so all go through).
 #include <xi/xi.hpp>
 #include <xi/xi_emitter.hpp>
-#include <cJSON.h>
+#include <yyjson.h>
 #include <cstdio>
+#include <cstring>
 #include <string>
 class Src : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
     std::string exchange(const std::string& cmd) override {
         int n = 12;
-        if (cJSON* j = cJSON_Parse(cmd.c_str())) {
-            cJSON* nn = cJSON_GetObjectItem(j, "n");
-            if (cJSON_IsNumber(nn)) n = (int)nn->valuedouble;
-            cJSON_Delete(j);
+        if (yyjson_doc* j = yyjson_read(cmd.c_str(), cmd.size(), 0)) {
+            yyjson_val* root = yyjson_doc_get_root(j);
+            yyjson_val* nn = yyjson_obj_get(root, "n");
+            if (yyjson_is_num(nn)) n = (int)yyjson_get_num(nn);
+            yyjson_doc_free(j);
         }
         em_.bind(host(), name());
         int emitted = 0;

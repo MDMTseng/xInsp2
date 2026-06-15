@@ -727,8 +727,7 @@ The full set shipped under `plugins/` — browse each directory for its
 
 | File | License | Purpose |
 |------|---------|---------|
-| `yyjson/yyjson.c/h` | MIT | JSON DOM/codec backing `Record` (mutable doc + pool allocator) |
-| `cJSON.c/h` | MIT | JSON parser — legacy; remaining config-parse + a few plugins, being migrated off |
+| `yyjson/yyjson.c/h` | MIT | JSON DOM/codec backing `Record` + all config/cert/project/plugin parsing (mutable doc + pool allocator). The only JSON lib in the tree — cJSON was fully removed in the yyjson-only migration. |
 | `stb_image_write.h` | Public domain | JPEG encoder fallback |
 
 ---

@@ -3,7 +3,7 @@
 // ordered streams keyed by stream_id; reorders by seq; flushes in order. send()
 // is mutex-guarded because the 4 lane workers call it concurrently.
 #include <xi/xi.hpp>
-#include <cJSON.h>
+#include <yyjson.h>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -13,16 +13,17 @@ class Comm : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
     std::string exchange(const std::string& cmd) override {
-        cJSON* root = cJSON_Parse(cmd.c_str());
-        if (!root) return "{}";
+        yyjson_doc* doc = yyjson_read(cmd.c_str(), cmd.size(), 0);
+        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+        if (!root) { yyjson_doc_free(doc); return "{}"; }
         const std::string op     = jstr(root, "op");
         const std::string stream = jstr(root, "stream");
         std::string out = "{}";
         std::lock_guard<std::mutex> lk(mu_);
         Stream& s = streams_[stream];
         if (op == "send") {
-            cJSON* sj = cJSON_GetObjectItem(root, "seq");
-            uint32_t seq = (sj && cJSON_IsNumber(sj)) ? (uint32_t)sj->valuedouble : 0;
+            yyjson_val* sj = yyjson_obj_get(root, "seq");
+            uint32_t seq = (sj && yyjson_is_num(sj)) ? (uint32_t)yyjson_get_num(sj) : 0;
             if (!s.arrivals.empty()) s.arrivals += ",";
             s.arrivals += std::to_string(seq);             // order received (scrambled)
             s.buf[seq] = jstr(root, "payload");
@@ -35,13 +36,13 @@ public:
         } else if (op == "drain") {
             out = "{\"flushed\":\"" + s.flushed + "\",\"arrivals\":\"" + s.arrivals + "\"}";
         }
-        cJSON_Delete(root);
+        yyjson_doc_free(doc);
         return out;
     }
 private:
-    static std::string jstr(cJSON* o, const char* k) {
-        cJSON* v = cJSON_GetObjectItem(o, k);
-        return (v && cJSON_IsString(v) && v->valuestring) ? v->valuestring : "";
+    static std::string jstr(yyjson_val* o, const char* k) {
+        yyjson_val* v = yyjson_obj_get(o, k);
+        return (v && yyjson_is_str(v) && yyjson_get_str(v)) ? yyjson_get_str(v) : "";
     }
     struct Stream { uint32_t next = 0; std::map<uint32_t, std::string> buf;
                     std::string flushed; std::string arrivals; };

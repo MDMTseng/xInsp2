@@ -4,17 +4,18 @@
 // Instantiated twice (cam_left, cam_right).
 #include <xi/xi.hpp>
 #include <xi/xi_emitter.hpp>
-#include <cJSON.h>
+#include <yyjson.h>
 #include <string>
 class Camera : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
     std::string exchange(const std::string& cmd) override {
         int frame = 0;
-        if (cJSON* j = cJSON_Parse(cmd.c_str())) {
-            cJSON* f = cJSON_GetObjectItem(j, "frame");
-            if (cJSON_IsNumber(f)) frame = (int)f->valuedouble;
-            cJSON_Delete(j);
+        if (yyjson_doc* j = yyjson_read(cmd.c_str(), cmd.size(), 0)) {
+            yyjson_val* root = yyjson_doc_get_root(j);
+            yyjson_val* f = yyjson_obj_get(root, "frame");
+            if (yyjson_is_num(f)) frame = (int)yyjson_get_num(f);
+            yyjson_doc_free(j);
         }
         em_.bind(host(), name());
         em_.image("img", pool_image(2, 2, 1));

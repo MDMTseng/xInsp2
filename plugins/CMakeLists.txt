@@ -24,11 +24,8 @@ find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 include_directories(${OpenCV_INCLUDE_DIRS})
 link_libraries(${OpenCV_LIBS})
 
-# cJSON as static lib for plugins that still use raw cJSON (e.g. json_source).
-add_library(cjson_plugin STATIC ${XI_VENDOR}/cJSON.c)
-target_include_directories(cjson_plugin PUBLIC ${XI_VENDOR})
-
-# yyjson — Record's DOM/codec. Every plugin includes xi_record (via xi_abi), so
+# yyjson — Record's DOM/codec and the only JSON lib plugins use. Every plugin
+# includes xi_record (via xi_abi), so
 # link + include it for ALL plugin targets defined below (directory scope).
 add_library(yyjson_plugin STATIC ${XI_VENDOR}/yyjson/yyjson.c)
 target_include_directories(yyjson_plugin PUBLIC ${XI_VENDOR}/yyjson)
@@ -46,7 +43,6 @@ set_target_properties(mock_camera PROPERTIES
 # synced_stereo — emits left+right frames under one trigger ID
 add_library(synced_stereo SHARED synced_stereo/synced_stereo.cpp)
 target_include_directories(synced_stereo PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
-target_link_libraries(synced_stereo PRIVATE cjson_plugin)
 set_target_properties(synced_stereo PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/synced_stereo
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/synced_stereo
@@ -63,12 +59,10 @@ set_target_properties(data_output PROPERTIES
 # blob_analysis
 add_library(blob_analysis SHARED blob_analysis/blob_analysis.cpp)
 target_include_directories(blob_analysis PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
-target_link_libraries(blob_analysis PRIVATE cjson_plugin)
 
 # json_source
 add_library(json_source SHARED json_source/json_source.cpp)
 target_include_directories(json_source PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
-target_link_libraries(json_source PRIVATE cjson_plugin)
 set_target_properties(json_source PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/json_source
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/json_source
@@ -80,7 +74,6 @@ add_library(record_save SHARED
     ../backend/src/stb_impl.cpp
 )
 target_include_directories(record_save PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
-target_link_libraries(record_save PRIVATE cjson_plugin)
 set_target_properties(record_save PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_save
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_save

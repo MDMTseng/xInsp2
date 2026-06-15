@@ -9,7 +9,7 @@
 // pending_ needs no extra lock.
 #include <xi/xi.hpp>
 #include <xi/xi_emitter.hpp>
-#include <cJSON.h>
+#include <yyjson.h>
 #include <map>
 #include <cstdio>
 #include <string>
@@ -17,12 +17,13 @@ class Collector : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
     std::string exchange(const std::string& cmd) override {
-        cJSON* root = cJSON_Parse(cmd.c_str());
-        if (!root) return "{}";
+        yyjson_doc* doc = yyjson_read(cmd.c_str(), cmd.size(), 0);
+        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+        if (!root) { yyjson_doc_free(doc); return "{}"; }
         if (jstr(root, "op") == "accept") {
             std::string cam = jstr(root, "cam"), rid = jstr(root, "res_id");
-            cJSON* fj = cJSON_GetObjectItem(root, "frame");
-            int frame = (fj && cJSON_IsNumber(fj)) ? (int)fj->valuedouble : 0;
+            yyjson_val* fj = yyjson_obj_get(root, "frame");
+            int frame = (fj && yyjson_is_num(fj)) ? (int)yyjson_get_num(fj) : 0;
             auto& slot = pending_[frame];
             slot[cam] = rid;
             if (slot.count("cam_left") && slot.count("cam_right")) {   // pair complete
@@ -34,13 +35,13 @@ public:
                 pending_.erase(frame);
             }
         }
-        cJSON_Delete(root);
+        yyjson_doc_free(doc);
         return "{}";
     }
 private:
-    static std::string jstr(cJSON* o, const char* k) {
-        cJSON* v = cJSON_GetObjectItem(o, k);
-        return (v && cJSON_IsString(v) && v->valuestring) ? v->valuestring : "";
+    static std::string jstr(yyjson_val* o, const char* k) {
+        yyjson_val* v = yyjson_obj_get(o, k);
+        return (v && yyjson_is_str(v) && yyjson_get_str(v)) ? yyjson_get_str(v) : "";
     }
     xi::Emitter em_;
     std::map<int, std::map<std::string, std::string>> pending_;   // frame -> {cam -> res_id}

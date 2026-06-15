@@ -15,7 +15,7 @@
 //
 
 #include <xi/xi_thread.hpp>   // xi::spawn_worker
-#include <cJSON.h>            // backend ships cJSON in vendor/
+#include <yyjson.h>           // backend ships yyjson in vendor/yyjson, also on the force-include path
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -46,7 +46,7 @@ public:
     bool set_def(const std::string& json) {
         std::lock_guard<std::mutex> lk(mu_);
         // Pull simple numeric fields out by hand. (Real plugins should
-        // use cJSON; this template avoids it to stay dependency-free.)
+        // use yyjson; this template avoids it to stay dependency-free.)
         auto pull_int = [&](const char* key, int& dst, int lo, int hi) {
             std::string needle = std::string("\"") + key + "\":";
             auto p = json.find(needle);
@@ -79,27 +79,28 @@ public:
     // for ad-hoc CLI calls too.
     std::string exchange(const std::string& cmd) {
         // JSON command path (UI panel)
-        cJSON* root = cJSON_Parse(cmd.c_str());
+        yyjson_doc* doc = yyjson_read(cmd.c_str(), cmd.size(), 0);
+        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
         std::string command;
         if (root) {
-            cJSON* c = cJSON_GetObjectItem(root, "command");
-            if (c && cJSON_IsString(c)) command = c->valuestring;
+            yyjson_val* c = yyjson_obj_get(root, "command");
+            if (c && yyjson_is_str(c)) command = yyjson_get_str(c);
             if (command == "set_interval") {
-                cJSON* v = cJSON_GetObjectItem(root, "value");
-                if (v && cJSON_IsNumber(v)) {
+                yyjson_val* v = yyjson_obj_get(root, "value");
+                if (v && yyjson_is_num(v)) {
                     std::lock_guard<std::mutex> lk(mu_);
-                    int n = (int)v->valuedouble;
+                    int n = (int)yyjson_get_num(v);
                     interval_ms_ = n < 1 ? 1 : (n > 10000 ? 10000 : n);
                 }
             } else if (command == "set_size") {
-                cJSON* w = cJSON_GetObjectItem(root, "width");
-                cJSON* h = cJSON_GetObjectItem(root, "height");
+                yyjson_val* w = yyjson_obj_get(root, "width");
+                yyjson_val* h = yyjson_obj_get(root, "height");
                 std::lock_guard<std::mutex> lk(mu_);
-                if (w && cJSON_IsNumber(w)) width_  = (int)w->valuedouble;
-                if (h && cJSON_IsNumber(h)) height_ = (int)h->valuedouble;
+                if (w && yyjson_is_num(w)) width_  = (int)yyjson_get_num(w);
+                if (h && yyjson_is_num(h)) height_ = (int)yyjson_get_num(h);
             }
-            cJSON_Delete(root);
         }
+        yyjson_doc_free(doc);
         if (!command.empty()) {
             if (command == "start") start_();
             if (command == "stop")  stop_();

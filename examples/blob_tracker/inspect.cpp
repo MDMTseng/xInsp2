@@ -62,7 +62,7 @@ struct Centroid { int x, y, area; };
 
 // Build a plain JSON array of {x,y,area} from the detector's output.
 // `centroids_node` is record["centroids"] — a Record::Value pointing at
-// a cJSON array (or nothing, on error).
+// a JSON array (or nothing, on error).
 std::vector<Centroid> read_centroid_list(const xi::Record::Value& v) {
     std::vector<Centroid> out;
     int n = v.size();
@@ -83,16 +83,17 @@ std::vector<Centroid> read_state_centroids(const xi::Record::Value& v) {
     return read_centroid_list(v);
 }
 
-// Build a cJSON array of {x,y,area} from a centroid vector — used for
-// stuffing into xi::state() via set_raw().
-cJSON* build_centroid_array(const std::vector<Centroid>& cs) {
-    cJSON* arr = cJSON_CreateArray();
+// Build a JSON array of {x,y,area} from a centroid vector — used for
+// stuffing into xi::state() via set_raw(). The nodes are created in
+// `doc` so they belong to the same document the state Record owns.
+yyjson_mut_val* build_centroid_array(yyjson_mut_doc* doc, const std::vector<Centroid>& cs) {
+    yyjson_mut_val* arr = yyjson_mut_arr(doc);
     for (auto& c : cs) {
-        cJSON* o = cJSON_CreateObject();
-        cJSON_AddNumberToObject(o, "x",    c.x);
-        cJSON_AddNumberToObject(o, "y",    c.y);
-        cJSON_AddNumberToObject(o, "area", c.area);
-        cJSON_AddItemToArray(arr, o);
+        yyjson_mut_val* o = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_int(doc, o, "x",    c.x);
+        yyjson_mut_obj_add_int(doc, o, "y",    c.y);
+        yyjson_mut_obj_add_int(doc, o, "area", c.area);
+        yyjson_mut_arr_add_val(arr, o);
     }
     return arr;
 }
@@ -177,11 +178,11 @@ void xi_inspect_entry(int /*frame*/) {
     }
     crossings_so_far_v += delta_crossings_v;
 
-    // 6) Persist state for the next call. set_raw takes ownership of
-    //    the cJSON node we pass it.
+    // 6) Persist state for the next call. set_raw stores the node we
+    //    pass it, which must already belong to the state Record's doc.
     xi::state().set("frame_seq",          frame_seq_v + 1);
     xi::state().set("crossings_so_far",   crossings_so_far_v);
-    xi::state().set_raw("prev_centroids", build_centroid_array(cur));
+    xi::state().set_raw("prev_centroids", build_centroid_array(xi::state().doc(), cur));
 
     // 7) Emit per-frame VARs the driver can read. VAR(name, expr)
     //    expands to `auto name = expr;` — so we name them differently

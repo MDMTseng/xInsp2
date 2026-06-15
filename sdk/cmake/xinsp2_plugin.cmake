@@ -15,7 +15,7 @@
 #   xinsp2_add_plugin(my_plugin my_plugin.cpp)
 #
 # This module never touches anything inside the xInsp2 tree — it only
-# reads headers + cJSON.c from there. The plugin DLL is dropped right
+# reads headers + yyjson.c from there. The plugin DLL is dropped right
 # next to its plugin.json so the host can pick it up via --plugins-dir.
 
 if(NOT DEFINED XINSP2_ROOT OR NOT EXISTS "${XINSP2_ROOT}/backend/include/xi/xi_abi.hpp")
@@ -27,7 +27,7 @@ endif()
 
 set(XINSP2_INCLUDE ${XINSP2_ROOT}/backend/include)
 set(XINSP2_VENDOR  ${XINSP2_ROOT}/backend/vendor)
-set(XINSP2_CJSON   ${XINSP2_VENDOR}/cJSON.c)
+set(XINSP2_YYJSON  ${XINSP2_VENDOR}/yyjson/yyjson.c)
 
 if(MSVC)
     # /EHa (async exceptions) is REQUIRED, not cosmetic: the host runs every
@@ -59,13 +59,14 @@ find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
 
 # xinsp2_add_plugin(<target> <sources...>)
 #
-# Builds a plugin SHARED library with cJSON linked in. The output DLL is
+# Builds a plugin SHARED library with yyjson linked in. The output DLL is
 # placed next to the plugin's plugin.json so --plugins-dir can find it.
 function(xinsp2_add_plugin name)
-    add_library(${name} SHARED ${ARGN} ${XINSP2_CJSON})
+    add_library(${name} SHARED ${ARGN} ${XINSP2_YYJSON})
     target_include_directories(${name} PRIVATE
         ${XINSP2_INCLUDE}
-        ${XINSP2_VENDOR})
+        ${XINSP2_VENDOR}
+        ${XINSP2_VENDOR}/yyjson)
     set_target_properties(${name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}
         LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -78,10 +79,11 @@ endfunction()
 # Builds a developer-side test executable that links the C ABI surface
 # (no SHARED — the test loads the plugin DLL via LoadLibrary).
 function(xinsp2_add_plugin_test target_name)
-    add_executable(${target_name} ${ARGN} ${XINSP2_CJSON})
+    add_executable(${target_name} ${ARGN} ${XINSP2_YYJSON})
     target_include_directories(${target_name} PRIVATE
         ${XINSP2_INCLUDE}
-        ${XINSP2_VENDOR})
+        ${XINSP2_VENDOR}
+        ${XINSP2_VENDOR}/yyjson)
     set_target_properties(${target_name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR})
 endfunction()

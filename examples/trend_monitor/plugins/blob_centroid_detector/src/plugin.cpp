@@ -144,7 +144,7 @@ public:
            .set("close_radius",   close_r)
            .set("min_area",       min_a)
            .set("max_area",       max_a);
-        out.set_raw("centroids", cJSON_Duplicate(arr.raw(), 1));
+        out.set_raw("centroids", yyjson_mut_val_mut_copy(out.doc(), arr.raw()));
         return out;
     }
 

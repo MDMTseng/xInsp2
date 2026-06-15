@@ -301,7 +301,7 @@ public:
     Value at(const std::string& path) const { return at(path.c_str()); }
 
     // Deep-copy any Value (from any Record) into this Record under `key`.
-    // The ergonomic replacement for the old set_raw(cJSON_Duplicate(...)) idiom.
+    // The ergonomic replacement for the old set_raw(duplicate(...)) idiom.
     Record& set_value(const std::string& key, const Value& v) {
         yyjson_mut_val* src = v.raw();
         put_(key.c_str(), src ? yyjson_mut_val_mut_copy(doc_, src) : yyjson_mut_null(doc_));

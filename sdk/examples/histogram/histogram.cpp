@@ -49,7 +49,8 @@ public:
         const double var    = (sum2 / pixels) - (mean * mean);
         const double stddev = var > 0 ? std::sqrt(var) : 0;
 
-        // Build the output record. Use cJSON directly for the array field.
+        // Build the output record. Use the Record array builder for the
+        // counts[256] field.
         xi::Record out;
         out.set("pixels", pixels);
         out.set("mean",   mean);
@@ -57,9 +58,7 @@ public:
         out.set("peak_bin", peak_bin);
         out.set("peak_count", peak_count);
 
-        cJSON* arr = cJSON_CreateArray();
-        for (int i = 0; i < 256; ++i) cJSON_AddItemToArray(arr, cJSON_CreateNumber(counts[i]));
-        out.set_raw("counts", arr);
+        for (int i = 0; i < 256; ++i) out.push("counts", counts[i]);
 
         return out;
     }
