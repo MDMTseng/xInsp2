@@ -110,7 +110,8 @@ public:
         // a borrowed doc, so it answered with one), else yyjson JSON bytes. The
         // adopted doc is host-pool-backed → freed via host alc when result dies.
         Record result = out.out_doc
-            ? Record::adopt_doc((yyjson_mut_doc*)out.out_doc)
+            ? Record::adopt_shared((yyjson_mut_doc*)out.out_doc, host_.doc_release,
+                                   host_.doc_refcount && host_.doc_refcount((void*)out.out_doc) > 1)
             : ((out.data && out.len > 0)
                    ? Record::from_json_bytes(out.data, (size_t)out.len) : Record());
         for (int i = 0; i < out.image_count; ++i) {

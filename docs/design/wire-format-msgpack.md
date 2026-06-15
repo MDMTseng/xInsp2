@@ -60,12 +60,21 @@ chosen to kill the cJSON serialization tax and minimize copies.
 > `DocBox.host_release` + `Record::share_out`/`adopt_shared` — host-registry
 > refcounted cross-side share (producer enrolls + retains, consumer adopts
 > without a copy, COW/dtor route the real free through the registry); test #18.
-> Next (v4-3): wire it into emit so a doc handed off while still cached is
-> zero-copy instead of serialized. Still gated
-> behind a SPEED flag: making every per-frame INPUT doc registry-managed (so a
-> plugin can zero-copy cache its *borrowed input*) costs a per-node retain/release
-> each frame — pending a bench call (v4-4). Measured: a compatible in-process
-> plugin call skips the entire serialize+parse round-trip (~75 µs/direction at
+> **v4-3 SHIPPED (single mode)**: emit now ALWAYS `share_out`s the output doc —
+> one uniform path mirroring `image_addref`, no sole-owner-transfer special case.
+> The adopting side calls `host->doc_refcount` and adopts WRITABLE when it is the
+> sole side (the common dispatch case — zero COW, write-through intact) or FROZEN
+> when a plugin still caches the same doc (COW isolates them). `DocRegistry` is
+> SHARDED (16 mutexes by doc pointer) so parallel emit doesn't contend. Dropped
+> the earlier two-mode design (`out_doc_shared` signal + `release_doc`/`adopt_doc`/
+> `owns_doc`) — the refcount-at-adopt already distinguishes the cases, so emit
+> stays a single branch. 15/15 ctest + 77/77 ws. NOTE: the ABI is now v4, so a
+> project plugin recompiles to v4 and needs a v4 HOST — the **Release** backend
+> must be rebuilt (ws tests launch `build/Release`), not just Debug. Still
+> deferred behind a SPEED flag (v4-4): making every per-frame INPUT doc
+> registry-managed so a plugin can zero-copy cache its *borrowed input* — costs a
+> per-node retain/release each frame, pending a bench call. Measured: a compatible
+> in-process call skips the entire serialize+parse round-trip (~75 µs/direction at
 > N=150 vs yyjson; ~1163 µs vs the original cJSON), both directions.**
 
 ---

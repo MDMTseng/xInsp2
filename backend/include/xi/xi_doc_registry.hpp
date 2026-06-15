@@ -8,11 +8,13 @@
 // (yyjson_mut_doc_free, which routes chunks back via the doc's own host
 // allocator) only when the last side releases.
 //
-// Backs host_api.doc_retain / doc_release (xi_abi.h v4). This is a LOW-FREQUENCY
-// path — entered only when a doc is genuinely shared across the boundary, not
-// on every node — so a single mutex over a small map is enough; it does not
-// need ImagePool's lock-free slot array. The hot in-process path (rc==1, no
-// cross-side holder) never touches the registry.
+// Backs host_api.doc_retain / doc_release (xi_abi.h v4). This is the single,
+// uniform path for every doc that crosses the boundary — emit retains, the
+// other side adopt_shared's, each drop releases — exactly like image_addref/
+// adopt/release. To keep that uniform path cheap under parallel dispatch
+// (multiple workers emitting at once), the map is SHARDED by doc pointer: each
+// shard has its own mutex, so concurrent retains/releases on different docs
+// don't contend. A doc op is hash(ptr) → one shard → one short critical section.
 //
 // TODO(linux): std::mutex + unordered_map only — already cross-platform.
 //
@@ -20,6 +22,7 @@
 #include "yyjson.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <unordered_map>
 
@@ -36,23 +39,25 @@ public:
     // registered (the first side to share an owned doc registers it).
     void retain(yyjson_mut_doc* doc) {
         if (!doc) return;
-        std::lock_guard<std::mutex> lk(mu_);
-        ++rc_[doc];
+        Shard& sh = shard_for_(doc);
+        std::lock_guard<std::mutex> lk(sh.mu);
+        ++sh.rc[doc];
     }
 
     // Drop one ref; when the count reaches zero, free the doc. The actual
     // yyjson_mut_doc_free runs OUTSIDE the lock — it returns chunks to the
-    // thread-local DocChunkPool and there's no reason to hold the registry
-    // mutex across it.
+    // thread-local DocChunkPool and there's no reason to hold a shard mutex
+    // across it.
     void release(yyjson_mut_doc* doc) {
         if (!doc) return;
+        Shard& sh = shard_for_(doc);
         bool free_it = false;
         {
-            std::lock_guard<std::mutex> lk(mu_);
-            auto it = rc_.find(doc);
-            if (it == rc_.end()) return;   // not managed — ignore (defensive)
+            std::lock_guard<std::mutex> lk(sh.mu);
+            auto it = sh.rc.find(doc);
+            if (it == sh.rc.end()) return;   // not managed — ignore (defensive)
             if (--it->second <= 0) {
-                rc_.erase(it);
+                sh.rc.erase(it);
                 free_it = true;
             }
         }
@@ -63,20 +68,41 @@ public:
     // dereference `doc` — safe to call after the doc was freed.
     int refcount(yyjson_mut_doc* doc) const {
         if (!doc) return 0;
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = rc_.find(doc);
-        return it == rc_.end() ? 0 : it->second;
+        const Shard& sh = shard_for_(doc);
+        std::lock_guard<std::mutex> lk(sh.mu);
+        auto it = sh.rc.find(doc);
+        return it == sh.rc.end() ? 0 : it->second;
     }
 
-    // Number of distinct docs currently registered (leak watchdog for tests).
+    // Number of distinct docs currently registered across all shards (leak
+    // watchdog for tests).
     size_t live_count() const {
-        std::lock_guard<std::mutex> lk(mu_);
-        return rc_.size();
+        size_t n = 0;
+        for (const auto& sh : shards_) {
+            std::lock_guard<std::mutex> lk(sh.mu);
+            n += sh.rc.size();
+        }
+        return n;
     }
 
 private:
-    mutable std::mutex mu_;
-    std::unordered_map<yyjson_mut_doc*, int> rc_;
+    static constexpr size_t kShards = 16;   // power of two
+
+    struct Shard {
+        mutable std::mutex mu;
+        std::unordered_map<yyjson_mut_doc*, int> rc;
+    };
+    Shard shards_[kShards];
+
+    Shard& shard_for_(yyjson_mut_doc* doc) {
+        // Drop the low (alignment) bits, then mask to a shard index.
+        uintptr_t p = reinterpret_cast<uintptr_t>(doc) >> 4;
+        return shards_[p & (kShards - 1)];
+    }
+    const Shard& shard_for_(yyjson_mut_doc* doc) const {
+        uintptr_t p = reinterpret_cast<uintptr_t>(doc) >> 4;
+        return shards_[p & (kShards - 1)];
+    }
 };
 
 } // namespace xi

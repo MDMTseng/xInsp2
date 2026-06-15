@@ -367,15 +367,26 @@ inline void record_to_c(const xi_host_api* host, Record& r, xi_record_out* out,
     // no serialize. The output Record was built under HostDocAlcScope, so its
     // doc is host-pool-backed; release the ref to the caller, who adopts and
     // frees it via the host (doc->alc). Otherwise serialize to JSON as before.
-    if (want_doc && host && host->doc_chunk_alloc && r.owns_doc()) {
-        out->out_doc = r.release_doc();
+    // γ/γ-4 symmetric fast path: when the call arrived as a borrowed doc and the
+    // host owns a doc registry, hand the OUTPUT doc back by pointer (zero
+    // serialize) as a SHARED, host-refcounted doc — one uniform path, exactly
+    // mirroring image_addref. The caller adopt_shared's it, the plugin keeps any
+    // cached ref, and the doc dies with the last side. share_out returns null
+    // only when there's no owned doc to share (a borrowed input returned as-is);
+    // then, and on a pre-v4 host, we serialize to JSON as before.
+    yyjson_mut_doc* shared = nullptr;
+    if (want_doc && host && host->doc_chunk_alloc &&
+        host->doc_retain && host->doc_release &&
+        (shared = r.share_out(host->doc_retain, host->doc_release)) != nullptr) {
+        out->out_doc = shared;
         out->data = nullptr;
         out->len  = 0;
     } else {
-        std::string js = r.data_json();   // yyjson serialize
+        std::string js = r.data_json();   // yyjson serialize (borrowed view / pre-v4 host)
         s.bytes.assign(js.begin(), js.end());
         out->data = s.bytes.data();
         out->len  = (int32_t)s.bytes.size();
+        out->out_doc = nullptr;
     }
 
     const size_t n = r.images().size();

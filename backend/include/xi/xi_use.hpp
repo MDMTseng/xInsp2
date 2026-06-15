@@ -334,7 +334,8 @@ public:
         // is host-pool-backed, so freeing it when `result` dies routes through
         // the host (doc->alc) — safe across the DLL boundary.
         Record result = output.out_doc
-            ? Record::adopt_doc((yyjson_mut_doc*)output.out_doc)
+            ? Record::adopt_shared((yyjson_mut_doc*)output.out_doc, host->doc_release,
+                                   host->doc_refcount && host->doc_refcount((void*)output.out_doc) > 1)
             : ((output.data && output.len > 0)
                    ? Record::from_json_bytes(output.data, (size_t)output.len)
                    : Record());

@@ -207,31 +207,6 @@ public:
         return r;
     }
 
-    // Release SOLE ownership of the underlying doc to the caller (ABI output
-    // handoff). Valid only when owns_doc() (sole owner, rc==1) — record_to_c
-    // gates on it. Drops the box WITHOUT freeing the doc; the adopter takes it.
-    yyjson_mut_doc* release_doc() {
-        yyjson_mut_doc* d = doc_;
-        delete box_;                   // rc==1 by contract: free the box, NOT the doc
-        box_ = nullptr; doc_ = nullptr; root_ = nullptr;
-        return d;
-    }
-
-    // Adopt ownership of a doc handed across the ABI (caller side of the output
-    // handoff) into a fresh refcount box. The doc was built with the host
-    // allocator, so freeing it here (via doc->alc) is cross-DLL-safe.
-    static Record adopt_doc(yyjson_mut_doc* owned) {
-        Record r;
-        if (owned) {
-            r.release_box_();          // drop the fresh init_ box
-            r.box_  = new_box_(owned);
-            r.doc_  = owned;
-            r.root_ = yyjson_mut_doc_get_root(owned);
-            r.frozen_ = false;
-        }
-        return r;
-    }
-
     // --- γ-4 v4: cross-ABI shared doc (host-registry refcounted) -------------
     //
     // share_out: promote this Record's owned doc to one SHARED across the ABI and
@@ -254,17 +229,24 @@ public:
     }
 
     // adopt_shared: the receiving side of share_out. The producer already took a
-    // ref for us, so we just wrap the doc in a registry-managed box (frozen). The
-    // last in-process ref here calls `release` (host doc_release), dropping the
+    // ref for us, so we wrap the doc in a registry-managed box. The last
+    // in-process ref here calls `release` (host doc_release), dropping the
     // host-side refcount; the doc lives until the last SIDE releases it.
-    static Record adopt_shared(yyjson_mut_doc* doc, void (*release)(void*)) {
+    //
+    // `frozen` says whether another side still holds this doc. Pass it from the
+    // host-side refcount: false when WE are the sole side (the common dispatch
+    // case — no one else reads it, so the adopter may mutate in place, zero COW,
+    // write-through intact); true when it is genuinely shared (a plugin cached
+    // the same doc) so the first mutation copy-on-writes to keep them isolated.
+    static Record adopt_shared(yyjson_mut_doc* doc, void (*release)(void*),
+                               bool frozen = true) {
         Record r;
         if (doc && release) {
             r.release_box_();                 // drop the fresh init_ box
             r.box_  = new DocBox{ doc, 1, release };
             r.doc_  = doc;
             r.root_ = yyjson_mut_doc_get_root(doc);
-            r.frozen_ = true;
+            r.frozen_ = frozen;
         }
         return r;
     }
@@ -554,16 +536,6 @@ public:
     // The mutable yyjson root object (advanced; used by the ABI seam).
     yyjson_mut_val* json() const { return root_; }
     yyjson_mut_doc* doc()  const { return doc_; }
-    // γ: is this Record the SOLE LOCAL owner of its doc — rc==1, not a borrowed
-    // view, and NOT registry-managed (cross-ABI shared)? The ABI output handoff
-    // (record_to_c) transfers ownership only when sole-local; a borrowed view, a
-    // SHARED (rc>1) doc, or a registry-managed doc must hand off via share_out
-    // (γ-4 v4-3) or serialize instead of giving away a doc another side holds.
-    bool owns_doc() const {
-        return box_ && !box_->host_release &&
-               box_->rc.load(std::memory_order_acquire) == 1;
-    }
-
     bool has_image(const std::string& key) const { return images_.count(key) > 0; }
     const Image& get_image(const std::string& key) const {
         static const Image empty;

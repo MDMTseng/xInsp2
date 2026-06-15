@@ -61,13 +61,14 @@ extern "C" {
 /*       on a matching yyjson layout. All additive at the tail; when  */
 /*       the doc pointer is null (older plugin / mismatch / cross-    */
 /*       process) the data/len JSON path is used exactly as in v2.    */
-/*   4 — + doc_retain/doc_release (γ-4): a host-side refcount for a   */
-/*       yyjson_mut_doc handed across the ABI, mirroring image_addref/ */
-/*       release. Lets a doc pointer be held by more than one side    */
-/*       (host adopting a doc a plugin still caches; a plugin caching  */
-/*       its borrowed input) with no deep copy. Additive at the tail; */
-/*       null on a pre-v4 host ⇒ callers fall back to the v3 deep-     */
-/*       copy / serialize behaviour unchanged.                        */
+/*   4 — + doc_retain/doc_release/doc_refcount (γ-4): a host-side     */
+/*       refcount for a yyjson_mut_doc handed across the ABI,         */
+/*       mirroring image_addref/release. Lets a doc pointer be held   */
+/*       by more than one side (host adopting a doc a plugin still    */
+/*       caches; a plugin caching its borrowed input) with no deep    */
+/*       copy; doc_refcount lets the adopter learn if it is the sole  */
+/*       side. Additive at the tail; null on a pre-v4 host ⇒ callers  */
+/*       fall back to the v3 deep-copy / serialize behaviour.         */
 /* ------------------------------------------------------------------ */
 #define XI_ABI_VERSION 4
 
@@ -299,6 +300,11 @@ typedef struct xi_host_api {
     /* to the v3 behaviour — deep-copy to retain, serialize to hand off.  */
     void            (*doc_retain)(void* doc);
     void            (*doc_release)(void* doc);
+    /* Current host-side refcount for a shared doc (0 if unregistered). Lets the
+     * adopting side learn whether ANOTHER side still holds it: >1 ⇒ shared
+     * (adopt frozen, copy-on-write on mutate); <=1 ⇒ sole side (adopt writable,
+     * no COW). Null on a pre-v4 host ⇒ adopt writable (the v3 transfer behaviour). */
+    int32_t         (*doc_refcount)(void* doc);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */
@@ -325,9 +331,12 @@ typedef struct {
     int32_t          image_capacity;
     const uint8_t*   data;          /* yyjson JSON bytes (tls-owned via record_to_c, or malloc'd) — used iff out_doc == NULL */
     int32_t          len;
-    /* ABI v3 (γ): a yyjson_mut_doc* built with the host doc allocator. When
-     * non-null the caller ADOPTS it (zero copy / zero parse) and frees it via
-     * the host (doc->alc). NULL ⇒ the caller reads data/len. Never both. */
+    /* ABI v3 (γ) + v4 (γ-4): a yyjson_mut_doc* the caller ADOPTS (zero copy /
+     * zero parse), built with the host doc allocator. Handed back as a SHARED,
+     * host-refcounted doc (the caller adopt_shared's it): the plugin may keep a
+     * cached ref, and the doc lives until the LAST side doc_release's it — the
+     * doc analogue of image_addref/release. NULL ⇒ the caller reads data/len.
+     * Never both. */
     void*            out_doc;
 } xi_record_out;
 
@@ -339,7 +348,7 @@ static inline void xi_record_out_init(xi_record_out* out) {
     out->image_capacity = 0;
     out->data = NULL;
     out->len = 0;
-    out->out_doc = NULL;   /* v3: filled only on the in-process doc path */
+    out->out_doc = NULL;   /* v3/v4: filled only on the in-process doc path (adopt_shared) */
 }
 
 static inline void xi_record_out_add_image(xi_record_out* out,

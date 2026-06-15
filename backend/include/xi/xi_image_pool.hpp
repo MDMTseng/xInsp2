@@ -366,6 +366,9 @@ public:
         // analogue of image_addref/image_release).
         api.doc_retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
         api.doc_release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
+        api.doc_refcount = [](void* d) -> int32_t {
+            return (int32_t)xi::DocRegistry::instance().refcount((yyjson_mut_doc*)d);
+        };
         return api;
     }
 
