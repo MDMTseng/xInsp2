@@ -80,14 +80,27 @@ inline void append_json_escaped(std::string& out, const std::string& s) {
     out.push_back('"');
 }
 
+// Thread-local doc allocator (γ). When non-null, every new Record doc is built
+// from it — the host doc pool, installed by the in-process call seam — so the
+// doc is host-owned and safe to hand across the ABI (its free routes back to the
+// host via doc->alc). Null (the default, standalone use) ⇒ yyjson's default
+// allocator, identical to the pre-γ behaviour. yyjson copies the alc into each
+// doc, so a pointer to a transient alc is fine.
+inline const yyjson_alc*& tls_doc_alc() {
+    static thread_local const yyjson_alc* a = nullptr;
+    return a;
+}
+
 class Record {
 public:
     Record() { init_(); }
 
-    ~Record() { if (doc_) yyjson_mut_doc_free(doc_); }
+    ~Record() { if (owns_doc_ && doc_) yyjson_mut_doc_free(doc_); }
 
     Record(const Record& o) : images_(o.images_) {
-        doc_  = yyjson_mut_doc_new(nullptr);
+        // A copy is always an independent, owned, mutable doc — even when `o` is
+        // a borrowed read-only view (reading o.root_ is safe; we allocate ours).
+        doc_  = yyjson_mut_doc_new(tls_doc_alc());
         root_ = o.root_ ? yyjson_mut_val_mut_copy(doc_, o.root_) : yyjson_mut_obj(doc_);
         yyjson_mut_doc_set_root(doc_, root_);
     }
@@ -95,27 +108,72 @@ public:
     Record& operator=(const Record& o) {
         if (this != &o) {
             images_ = o.images_;
-            if (doc_) yyjson_mut_doc_free(doc_);
-            doc_  = yyjson_mut_doc_new(nullptr);
+            if (owns_doc_ && doc_) yyjson_mut_doc_free(doc_);
+            doc_  = yyjson_mut_doc_new(tls_doc_alc());
             root_ = o.root_ ? yyjson_mut_val_mut_copy(doc_, o.root_) : yyjson_mut_obj(doc_);
             yyjson_mut_doc_set_root(doc_, root_);
+            owns_doc_ = true; frozen_ = false;
         }
         return *this;
     }
 
     Record(Record&& o) noexcept
-        : images_(std::move(o.images_)), doc_(o.doc_), root_(o.root_) {
-        o.doc_ = nullptr; o.root_ = nullptr;
+        : images_(std::move(o.images_)), doc_(o.doc_), root_(o.root_),
+          owns_doc_(o.owns_doc_), frozen_(o.frozen_) {
+        o.doc_ = nullptr; o.root_ = nullptr; o.owns_doc_ = false;
     }
 
     Record& operator=(Record&& o) noexcept {
         if (this != &o) {
             images_ = std::move(o.images_);
-            if (doc_) yyjson_mut_doc_free(doc_);
+            if (owns_doc_ && doc_) yyjson_mut_doc_free(doc_);
             doc_ = o.doc_; root_ = o.root_;
-            o.doc_ = nullptr; o.root_ = nullptr;
+            owns_doc_ = o.owns_doc_; frozen_ = o.frozen_;
+            o.doc_ = nullptr; o.root_ = nullptr; o.owns_doc_ = false;
         }
         return *this;
+    }
+
+    // --- γ: borrowed read-only view over a doc owned elsewhere ---------------
+    //
+    // Wrap a yyjson_mut_doc the host handed us across the ABI (in-process zero-
+    // serialize input). The view does NOT own the doc — its dtor frees nothing —
+    // and is FROZEN: the first mutation copy-on-writes into a fresh owned doc
+    // (host-pool-allocated), leaving the borrowed doc untouched. Reads hit the
+    // borrowed nodes directly (no parse, no copy).
+    static Record from_doc_view(yyjson_mut_doc* borrowed) {
+        Record r;
+        if (borrowed) {
+            if (r.owns_doc_ && r.doc_) yyjson_mut_doc_free(r.doc_);
+            r.doc_  = borrowed;
+            r.root_ = yyjson_mut_doc_get_root(borrowed);
+            r.owns_doc_ = false;
+            r.frozen_   = true;
+        }
+        return r;
+    }
+
+    // Release ownership of the underlying doc to the caller (ABI output handoff).
+    // After this the Record no longer owns/frees the doc; the caller adopts it.
+    yyjson_mut_doc* release_doc() {
+        yyjson_mut_doc* d = doc_;
+        doc_ = nullptr; root_ = nullptr; owns_doc_ = false;
+        return d;
+    }
+
+    // Adopt ownership of a doc handed across the ABI (caller side of the output
+    // handoff). The doc was built with the host allocator, so freeing it here
+    // (via doc->alc) is cross-DLL-safe.
+    static Record adopt_doc(yyjson_mut_doc* owned) {
+        Record r;
+        if (owned) {
+            if (r.owns_doc_ && r.doc_) yyjson_mut_doc_free(r.doc_);
+            r.doc_  = owned;
+            r.root_ = yyjson_mut_doc_get_root(owned);
+            r.owns_doc_ = true;
+            r.frozen_   = false;
+        }
+        return r;
     }
 
     // --- Image builder ---
@@ -133,10 +191,12 @@ public:
               typename = std::enable_if_t<std::is_integral_v<T> &&
                                           !std::is_same_v<T, bool>>>
     Record& set(const std::string& key, T v) {
+        cow_();
         put_(key.c_str(), yyjson_mut_sint(doc_, (int64_t)v));
         return *this;
     }
     Record& set(const std::string& key, double v) {
+        cow_();
         if (!std::isfinite(v))
             put_(key.c_str(), yyjson_mut_strcpy(doc_, nonfinite_to_str(v)));
         else
@@ -145,10 +205,12 @@ public:
     }
     Record& set(const std::string& key, float v) { return set(key, (double)v); }
     Record& set(const std::string& key, bool v) {
+        cow_();
         put_(key.c_str(), yyjson_mut_bool(doc_, v));
         return *this;
     }
     Record& set(const std::string& key, const std::string& v) {
+        cow_();
         put_(key.c_str(), yyjson_mut_strcpy(doc_, v.c_str()));
         return *this;
     }
@@ -156,6 +218,7 @@ public:
 
     // Nest a sub-Record as a JSON object (deep copy into this doc).
     Record& set(const std::string& key, const Record& sub) {
+        cow_();
         yyjson_mut_val* dup = sub.root_ ? yyjson_mut_val_mut_copy(doc_, sub.root_)
                                         : yyjson_mut_obj(doc_);
         put_(key.c_str(), dup);
@@ -163,6 +226,9 @@ public:
     }
 
     // Add a raw yyjson value that ALREADY belongs to this Record's doc (advanced).
+    // NOTE: not valid on a frozen/borrowed view — `item` must come from THIS
+    // Record's (owned) doc, so callers building `item` must already have an owned
+    // doc; cow_() here would orphan an item built against the pre-COW doc.
     Record& set_raw(const std::string& key, yyjson_mut_val* item) {
         put_(key.c_str(), item);
         return *this;
@@ -170,22 +236,27 @@ public:
 
     // --- Array builders ---
     Record& push(const std::string& key, int v) {
+        cow_();
         yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), yyjson_mut_sint(doc_, v));
         return *this;
     }
     Record& push(const std::string& key, double v) {
+        cow_();
         yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), yyjson_mut_real(doc_, v));
         return *this;
     }
     Record& push(const std::string& key, bool v) {
+        cow_();
         yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), yyjson_mut_bool(doc_, v));
         return *this;
     }
     Record& push(const std::string& key, const std::string& v) {
+        cow_();
         yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), yyjson_mut_strcpy(doc_, v.c_str()));
         return *this;
     }
     Record& push(const std::string& key, const Record& sub) {
+        cow_();
         yyjson_mut_val* dup = sub.root_ ? yyjson_mut_val_mut_copy(doc_, sub.root_)
                                         : yyjson_mut_obj(doc_);
         yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), dup);
@@ -303,6 +374,7 @@ public:
     // Deep-copy any Value (from any Record) into this Record under `key`.
     // The ergonomic replacement for the old set_raw(duplicate(...)) idiom.
     Record& set_value(const std::string& key, const Value& v) {
+        cow_();
         yyjson_mut_val* src = v.raw();
         put_(key.c_str(), src ? yyjson_mut_val_mut_copy(doc_, src) : yyjson_mut_null(doc_));
         return *this;
@@ -347,6 +419,7 @@ public:
     std::string src() const { return get_string(kSrcKey); }
     Record& set_prov(const std::string& field, const std::string& src) {
         if (src.empty()) return *this;
+        cow_();
         yyjson_mut_val* prov = get_(kProvKey);
         if (!prov || !yyjson_mut_is_obj(prov)) {
             prov = yyjson_mut_obj(doc_);
@@ -431,7 +504,7 @@ public:
         yyjson_val* iroot = yyjson_doc_get_root(idoc);
         if (iroot && yyjson_is_obj(iroot)) {
             yyjson_mut_doc_free(r.doc_);
-            r.doc_  = yyjson_mut_doc_new(nullptr);
+            r.doc_  = yyjson_mut_doc_new(tls_doc_alc());
             r.root_ = yyjson_val_mut_copy(r.doc_, iroot);
             yyjson_mut_doc_set_root(r.doc_, r.root_);
         }
@@ -459,16 +532,41 @@ private:
     std::map<std::string, Image> images_;
     yyjson_mut_doc* doc_  = nullptr;
     yyjson_mut_val* root_ = nullptr;
+    // γ ownership flags. owns_doc_: this Record frees doc_ on destruction
+    // (false for a borrowed view / after release_doc). frozen_: doc_ is shared/
+    // borrowed and read-only — the first mutation copy-on-writes (cow_) into a
+    // fresh owned doc. Both default to "owned, writable" so every existing
+    // construction path behaves exactly as before.
+    bool owns_doc_ = true;
+    bool frozen_   = false;
 
     void init_() {
-        doc_  = yyjson_mut_doc_new(nullptr);
+        doc_  = yyjson_mut_doc_new(tls_doc_alc());
         root_ = yyjson_mut_obj(doc_);
         yyjson_mut_doc_set_root(doc_, root_);
     }
 
+    // Copy-on-write: if the doc is frozen (a borrowed view, or—later—a shared
+    // refcounted doc), deep-copy it into a fresh OWNED doc before mutating, so
+    // we never write through someone else's tree. No-op for the common owned,
+    // unfrozen case (one predictable branch on the build path).
+    void cow_() {
+        if (!frozen_) return;
+        yyjson_mut_doc* nd = yyjson_mut_doc_new(tls_doc_alc());
+        yyjson_mut_val* nr = root_ ? yyjson_mut_val_mut_copy(nd, root_)
+                                   : yyjson_mut_obj(nd);
+        yyjson_mut_doc_set_root(nd, nr);
+        // Do NOT free doc_: it is borrowed/shared (owns_doc_ == false here, or a
+        // future shared owner still holds it).
+        doc_  = nd;
+        root_ = nr;
+        owns_doc_ = true;
+        frozen_   = false;
+    }
+
     // Deep-copy a yyjson object value into a fresh Record (used by getters/Value).
     explicit Record(yyjson_mut_val* obj_val) {
-        doc_  = yyjson_mut_doc_new(nullptr);
+        doc_  = yyjson_mut_doc_new(tls_doc_alc());
         root_ = (obj_val && yyjson_mut_is_obj(obj_val))
                   ? yyjson_mut_val_mut_copy(doc_, obj_val) : yyjson_mut_obj(doc_);
         yyjson_mut_doc_set_root(doc_, root_);
