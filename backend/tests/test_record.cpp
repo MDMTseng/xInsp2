@@ -11,6 +11,7 @@
 #include <utility>
 
 #include <xi/xi_record.hpp>
+#include <xi/xi_doc_registry.hpp>
 #include "yyjson.h"
 
 // Minimal test harness (same pattern as test_xi_core.cpp)
@@ -366,6 +367,65 @@ static void test_refcount_cow() {
     CHECK(a.get_int("v") == 9);
 }
 
+// ---------- Test 18: γ-4 v4 cross-ABI shared doc (share_out / adopt_shared) ----------
+
+static void test_cross_abi_share() {
+    SECTION("cross-ABI share/adopt (γ-4 v4)");
+    auto& reg = xi::DocRegistry::instance();
+    auto retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+    auto release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
+    size_t base = reg.live_count();
+
+    // Producer owns a doc; share it across the (simulated) ABI boundary.
+    xi::Record producer;
+    producer.set("v", 7);
+    producer.set("tag", std::string("shared"));
+    yyjson_mut_doc* raw = producer.share_out(retain, release);
+    CHECK(raw != nullptr);
+    CHECK(reg.refcount(raw) == 2);          // producer side + consumer side
+
+    {
+        // Consumer adopts WITHOUT a copy — reads the producer's data directly.
+        xi::Record consumer = xi::Record::adopt_shared(raw, release);
+        CHECK(consumer.get_int("v") == 7);
+        CHECK(consumer.get_string("tag") == "shared");
+        CHECK(reg.refcount(raw) == 2);      // both sides alive
+
+        // Mutating the consumer COWs into its own local doc; the shared doc and
+        // the producer are untouched, and the consumer drops its registry ref.
+        consumer.set("v", 99);
+        CHECK(consumer.get_int("v") == 99);
+        CHECK(producer.get_int("v") == 7);
+        CHECK(reg.refcount(raw) == 1);      // only the producer still shares it
+    }   // consumer dtor frees its local doc; no double release on the shared doc
+
+    CHECK(reg.refcount(raw) == 1);
+    CHECK(producer.get_int("v") == 7);
+
+    // Producer drops the shared doc → last side → doc freed, registry balanced.
+    producer = xi::Record();
+    CHECK(reg.refcount(raw) == 0);
+    CHECK(reg.live_count() == base);
+
+    // A second producer that is COPIED (in-process share) before share_out still
+    // counts as ONE side in the registry.
+    xi::Record p2;
+    p2.set("n", 1);
+    xi::Record p2copy = p2;                 // in-process share (rc=2), no registry
+    yyjson_mut_doc* raw2 = p2.share_out(retain, release);
+    CHECK(reg.refcount(raw2) == 2);         // p2/p2copy side + consumer side
+    {
+        xi::Record c2 = xi::Record::adopt_shared(raw2, release);
+        CHECK(c2.get_int("n") == 1);
+    }                                       // c2 releases consumer side
+    CHECK(reg.refcount(raw2) == 1);
+    p2 = xi::Record();                      // p2copy still holds the in-process box
+    CHECK(reg.refcount(raw2) == 1);         // still one side (p2copy)
+    p2copy = xi::Record();                  // last in-process ref → side releases
+    CHECK(reg.refcount(raw2) == 0);
+    CHECK(reg.live_count() == base);
+}
+
 // ---------- main ----------
 
 int main() {
@@ -386,6 +446,7 @@ int main() {
     test_as_record_deep_copy();   // 15
     test_image_in_record();       // 16
     test_refcount_cow();          // 17
+    test_cross_abi_share();       // 18
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");

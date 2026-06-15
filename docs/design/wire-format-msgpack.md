@@ -56,9 +56,12 @@ chosen to kill the cJSON serialization tax and minimize copies.
 > in-process `DocBox.rc` stays for same-side sharing (hot, no ABI); the host
 > registry counts how many *sides* hold a doc, entered only when one genuinely
 > is. **v4-1 SHIPPED**: host `DocRegistry` + ABI `doc_retain`/`doc_release` +
-> `test_doc_registry`, pure addition, no path change. Next: `DocBox.host_release`
-> + `Record::share_out`/`adopt_shared` (v4-2), then zero-copy emit even while a
-> doc is cached so a held ref no longer forces serialize (v4-3). Still gated
+> `test_doc_registry`, pure addition, no path change. **v4-2 SHIPPED**:
+> `DocBox.host_release` + `Record::share_out`/`adopt_shared` — host-registry
+> refcounted cross-side share (producer enrolls + retains, consumer adopts
+> without a copy, COW/dtor route the real free through the registry); test #18.
+> Next (v4-3): wire it into emit so a doc handed off while still cached is
+> zero-copy instead of serialized. Still gated
 > behind a SPEED flag: making every per-frame INPUT doc registry-managed (so a
 > plugin can zero-copy cache its *borrowed input*) costs a per-node retain/release
 > each frame — pending a bench call (v4-4). Measured: a compatible in-process

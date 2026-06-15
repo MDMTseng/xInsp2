@@ -110,11 +110,20 @@ private:
     // one DocBox (copy = ref bump, zero deep-copy); a mutation copy-on-writes into
     // a fresh sole-owned box. box_ == nullptr marks a BORROWED read-only view
     // (from_doc_view): the doc is owned elsewhere across the ABI, never freed here.
-    struct DocBox { yyjson_mut_doc* doc; std::atomic<int> rc; };
-    static DocBox* new_box_(yyjson_mut_doc* d) { return new DocBox{ d, 1 }; }
+    //
+    // host_release (γ-4 v4): when non-null, this doc is REGISTRY-MANAGED — it is
+    // shared across the ABI and the host's DocRegistry holds the authoritative
+    // refcount. The last IN-PROCESS ref then frees via host_release(doc) (= host
+    // doc_release) rather than yyjson_mut_doc_free, so the doc lives until the
+    // last SIDE drops it. null ⇒ a plain locally-owned doc, freed directly.
+    struct DocBox { yyjson_mut_doc* doc; std::atomic<int> rc; void (*host_release)(void*); };
+    static DocBox* new_box_(yyjson_mut_doc* d) { return new DocBox{ d, 1, nullptr }; }
     void release_box_() {
         if (box_ && box_->rc.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            if (box_->doc) yyjson_mut_doc_free(box_->doc);
+            if (box_->doc) {
+                if (box_->host_release) box_->host_release(box_->doc); // registry decides the real free
+                else                    yyjson_mut_doc_free(box_->doc);
+            }
             delete box_;
         }
         box_ = nullptr;
@@ -219,6 +228,43 @@ public:
             r.doc_  = owned;
             r.root_ = yyjson_mut_doc_get_root(owned);
             r.frozen_ = false;
+        }
+        return r;
+    }
+
+    // --- γ-4 v4: cross-ABI shared doc (host-registry refcounted) -------------
+    //
+    // share_out: promote this Record's owned doc to one SHARED across the ABI and
+    // return the raw pointer for the other side to adopt_shared(). The doc is
+    // frozen (shared ⇒ read-only; a later mutation COWs into a fresh owned doc).
+    // On first share the producer's own box becomes registry-managed (its free
+    // now routes through the host registry) and a ref is taken for this side; one
+    // more ref is taken for the adopting side. `retain`/`release` are the host_api
+    // doc_retain/doc_release (both must be non-null). Returns null when there is
+    // no owned doc (a borrowed view / moved-from) — the caller then serializes.
+    yyjson_mut_doc* share_out(void (*retain)(void*), void (*release)(void*)) {
+        if (!box_ || !box_->doc || !retain || !release) return nullptr;
+        frozen_ = true;                       // shared ⇒ read-only from here on
+        if (!box_->host_release) {            // first cross-ABI share: enroll this side
+            retain(box_->doc);                // registry rc -> 1 (this side's ref)
+            box_->host_release = release;     // our box now frees via the registry
+        }
+        retain(box_->doc);                    // +1 for the adopting side
+        return box_->doc;
+    }
+
+    // adopt_shared: the receiving side of share_out. The producer already took a
+    // ref for us, so we just wrap the doc in a registry-managed box (frozen). The
+    // last in-process ref here calls `release` (host doc_release), dropping the
+    // host-side refcount; the doc lives until the last SIDE releases it.
+    static Record adopt_shared(yyjson_mut_doc* doc, void (*release)(void*)) {
+        Record r;
+        if (doc && release) {
+            r.release_box_();                 // drop the fresh init_ box
+            r.box_  = new DocBox{ doc, 1, release };
+            r.doc_  = doc;
+            r.root_ = yyjson_mut_doc_get_root(doc);
+            r.frozen_ = true;
         }
         return r;
     }
@@ -508,11 +554,15 @@ public:
     // The mutable yyjson root object (advanced; used by the ABI seam).
     yyjson_mut_val* json() const { return root_; }
     yyjson_mut_doc* doc()  const { return doc_; }
-    // γ: is this Record the SOLE owner of its doc (rc==1, not a borrowed view,
-    // not shared)? The ABI output handoff (record_to_c) only transfers ownership
-    // when sole — a borrowed view or a SHARED (rc>1) doc must serialize instead
-    // of handing back a doc someone else still references.
-    bool owns_doc() const { return box_ && box_->rc.load(std::memory_order_acquire) == 1; }
+    // γ: is this Record the SOLE LOCAL owner of its doc — rc==1, not a borrowed
+    // view, and NOT registry-managed (cross-ABI shared)? The ABI output handoff
+    // (record_to_c) transfers ownership only when sole-local; a borrowed view, a
+    // SHARED (rc>1) doc, or a registry-managed doc must hand off via share_out
+    // (γ-4 v4-3) or serialize instead of giving away a doc another side holds.
+    bool owns_doc() const {
+        return box_ && !box_->host_release &&
+               box_->rc.load(std::memory_order_acquire) == 1;
+    }
 
     bool has_image(const std::string& key) const { return images_.count(key) > 0; }
     const Image& get_image(const std::string& key) const {
@@ -608,7 +658,11 @@ private:
     // through a tree someone else still reads.
     void cow_() {
         if (!frozen_) return;
-        if (box_ && box_->rc.load(std::memory_order_acquire) == 1) {
+        // Sole LOCAL owner (rc==1) AND not registry-managed ⇒ unfreeze in place.
+        // A registry-managed doc must always deep-copy even at local rc==1: a
+        // local rc of 1 says nothing about OTHER sides still reading the doc.
+        if (box_ && !box_->host_release &&
+            box_->rc.load(std::memory_order_acquire) == 1) {
             frozen_ = false;
             return;
         }
