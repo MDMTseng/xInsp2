@@ -351,6 +351,15 @@ public:
         api.set_status = [](const char* source, const char* text) {
             if (auto fn = xi::status_sink()) fn(source, text);
         };
+        // Host doc allocator (ABI v3, γ) — backs the in-process yyjson doc
+        // pass-by-pointer path. v1 is plain malloc/realloc/free: it already
+        // gives the key property (a doc built through these is host-owned, so
+        // its free routes back to the host and is safe to drop from either side
+        // of the DLL boundary). Swapping in a pooled free-list later is an
+        // internal change behind these same three pointers — no ABI churn.
+        api.doc_chunk_alloc   = [](size_t n) -> void* { return std::malloc(n); };
+        api.doc_chunk_realloc = [](void* p, size_t n) -> void* { return std::realloc(p, n); };
+        api.doc_chunk_free    = [](void* p) { std::free(p); };
         return api;
     }
 

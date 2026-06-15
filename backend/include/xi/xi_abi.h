@@ -53,8 +53,16 @@ extern "C" {
 /*       null on current hosts], host api with read_image_file).     */
 /*   2 — + emit_resource (emit/fetch resource store). Additive at the */
 /*       struct tail, so v1 plugins keep working unchanged.          */
+/*   3 — + in-process doc pass-by-pointer (γ): xi_record.doc /        */
+/*       xi_record_out.out_doc carry a borrowed/host-owned           */
+/*       yyjson_mut_doc* so an in-process call skips the JSON         */
+/*       serialize round-trip; doc_chunk_* host allocator backs       */
+/*       host-owned docs; the xi_yyjson_abi() plugin export gates it  */
+/*       on a matching yyjson layout. All additive at the tail; when  */
+/*       the doc pointer is null (older plugin / mismatch / cross-    */
+/*       process) the data/len JSON path is used exactly as in v2.    */
 /* ------------------------------------------------------------------ */
-#define XI_ABI_VERSION 2
+#define XI_ABI_VERSION 3
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -251,6 +259,20 @@ typedef struct xi_host_api {
      * Call again to update; pass "" to clear. Null/no-op if unsupported (e.g.
      * the headless runner with no FE). */
     void            (*set_safe_state)(const char* payload);
+
+    /* --------------------------------------------------------------- */
+    /* In-process doc allocator (ABI v3, γ). Host-owned heap behind the */
+    /* JSON doc, so a yyjson_mut_doc built through it is host-owned and  */
+    /* its free (via doc->alc) returns to the host — mirrors            */
+    /* image_create/addref/release for pixels, making a doc pointer      */
+    /* safe to hand across the DLL boundary and free from either side.   */
+    /* The plugin wraps these into a yyjson_alc. Null on a pre-v3 host  */
+    /* (the doc path is then simply never taken — see record_to_c).      */
+    /* v1 of this is plain malloc-backed; a pooled free-list is a later  */
+    /* internal swap that needs no ABI change. */
+    void*           (*doc_chunk_alloc)(size_t size);
+    void*           (*doc_chunk_realloc)(void* ptr, size_t size);
+    void            (*doc_chunk_free)(void* ptr);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */
@@ -261,8 +283,13 @@ typedef struct xi_host_api {
 typedef struct {
     const xi_record_image* images;
     int32_t                image_count;
-    const uint8_t*         data;    /* MessagePack-encoded Record data */
+    const uint8_t*         data;    /* yyjson JSON bytes — used iff doc == NULL */
     int32_t                len;     /* byte length of `data` */
+    /* ABI v3 (γ): borrowed, READ-ONLY yyjson_mut_doc*. Non-null only for an
+     * in-process call whose plugin's xi_yyjson_abi() matches the host's; the
+     * callee reads it as a view (no parse) and must not mutate it (copy-on-
+     * write into its own doc to change anything). NULL ⇒ use data/len. */
+    const void*            doc;
 } xi_record;
 
 /* Output record — plugin fills this during process(). */
@@ -270,8 +297,12 @@ typedef struct {
     xi_record_image* images;
     int32_t          image_count;
     int32_t          image_capacity;
-    const uint8_t*   data;          /* MessagePack bytes (tls-owned via record_to_c, or malloc'd) */
+    const uint8_t*   data;          /* yyjson JSON bytes (tls-owned via record_to_c, or malloc'd) — used iff out_doc == NULL */
     int32_t          len;
+    /* ABI v3 (γ): a yyjson_mut_doc* built with the host doc allocator. When
+     * non-null the caller ADOPTS it (zero copy / zero parse) and frees it via
+     * the host (doc->alc). NULL ⇒ the caller reads data/len. Never both. */
+    void*            out_doc;
 } xi_record_out;
 
 /* Helpers for building output records */
@@ -282,6 +313,7 @@ static inline void xi_record_out_init(xi_record_out* out) {
     out->image_capacity = 0;
     out->data = NULL;
     out->len = 0;
+    out->out_doc = NULL;   /* v3: filled only on the in-process doc path */
 }
 
 static inline void xi_record_out_add_image(xi_record_out* out,
@@ -334,11 +366,15 @@ static inline void xi_record_out_free(xi_record_out* out) {
         free((void*)out->data);
     }
     /* image_capacity == 0: plugin-owned thread-local storage, no free. */
+    /* out_doc is NOT freed here: on the v3 doc path the C++ caller ADOPTS it
+     * (takes the ref) before calling this, so freeing it would be a
+     * use-after-free. Just clear the pointer. */
     out->images = NULL;
     out->image_count = 0;
     out->image_capacity = 0;
     out->data = NULL;
     out->len = 0;
+    out->out_doc = NULL;
 }
 
 /* ------------------------------------------------------------------ */

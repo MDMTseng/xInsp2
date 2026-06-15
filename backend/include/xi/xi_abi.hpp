@@ -410,4 +410,17 @@ int xi_plugin_set_def(void* inst, const char* json) {                          \
 extern "C" __declspec(dllexport)                                               \
 int xi_plugin_abi_version(void) {                                              \
     return XI_ABI_VERSION;                                                     \
+}                                                                              \
+                                                                               \
+/* yyjson layout stamp (ABI v3, γ). The host hands this plugin a raw          */ \
+/* yyjson_mut_doc* (in-process zero-serialize) ONLY if this stamp matches     */ \
+/* the host's own — so a prebuilt plugin carrying a different yyjson version  */ \
+/* /layout transparently falls back to the JSON data/len path instead of      */ \
+/* dereferencing an incompatible struct. Mixes the yyjson version with the    */ \
+/* two struct sizes the doc-pointer path depends on. */                        \
+extern "C" __declspec(dllexport)                                               \
+uint32_t xi_yyjson_abi(void) {                                                 \
+    return (uint32_t)YYJSON_VERSION_HEX                                        \
+         ^ ((uint32_t)sizeof(yyjson_mut_doc) << 8)                            \
+         ^ ((uint32_t)sizeof(yyjson_mut_val) << 18);                          \
 }

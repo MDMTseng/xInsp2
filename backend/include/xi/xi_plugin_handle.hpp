@@ -83,7 +83,7 @@ public:
             in_imgs.push_back({key.c_str(), h});
         }
         std::string json = input.data_json();
-        xi_record in_rec;
+        xi_record in_rec{};   // zero-init so the v3 `doc` field is null (JSON path)
         in_rec.images = in_imgs.data();
         in_rec.image_count = (int32_t)in_imgs.size();
         in_rec.data = (const uint8_t*)json.data();

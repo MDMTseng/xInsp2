@@ -144,7 +144,7 @@ static int use_process_cb(const char* name,
     // Check if it's a C ABI adapter with process_fn
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (adapter && adapter->process_fn()) {
-        xi_record in_rec;
+        xi_record in_rec{};   // zero-init so the v3 `doc` field is null (JSON path)
         in_rec.images = input_images;
         in_rec.image_count = input_image_count;
         in_rec.data = input_data;
@@ -2970,7 +2970,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         xi_record_image in_imgs[] = { {"gray", src_h} };
         // WS command carries JSON params; the internal ABI is also JSON now — pass through.
-        xi_record input_rec;
+        xi_record input_rec{};   // zero-init so the v3 `doc` field is null (JSON path)
         input_rec.images = in_imgs;
         input_rec.image_count = 1;
         input_rec.data = (const uint8_t*)params_json.data();
