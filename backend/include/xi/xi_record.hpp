@@ -188,62 +188,58 @@ public:
         return *this;
     }
 
-    // --- γ: borrowed read-only view over a doc owned elsewhere ---------------
-    //
-    // Wrap a yyjson_mut_doc the host handed us across the ABI (in-process zero-
-    // serialize input). The view does NOT own the doc — its dtor frees nothing —
-    // and is FROZEN: the first mutation copy-on-writes into a fresh owned doc
-    // (host-pool-allocated), leaving the borrowed doc untouched. Reads hit the
-    // borrowed nodes directly (no parse, no copy).
-    static Record from_doc_view(yyjson_mut_doc* borrowed) {
-        Record r;
-        if (borrowed) {
-            r.release_box_();          // drop the fresh init_ box (frees its doc)
-            r.box_  = nullptr;         // borrowed: owned elsewhere, never freed here
-            r.doc_  = borrowed;
-            r.root_ = yyjson_mut_doc_get_root(borrowed);
-            r.frozen_ = true;
-        }
-        return r;
-    }
-
     // --- γ-4 v4: cross-ABI shared doc (host-registry refcounted) -------------
     //
-    // share_out: promote this Record's owned doc to one SHARED across the ABI and
-    // return the raw pointer for the other side to adopt_shared(). The doc is
-    // frozen (shared ⇒ read-only; a later mutation COWs into a fresh owned doc).
-    // On first share the producer's own box becomes registry-managed (its free
-    // now routes through the host registry) and a ref is taken for this side; one
-    // more ref is taken for the adopting side. `retain`/`release` are the host_api
-    // doc_retain/doc_release (both must be non-null). Returns null when there is
-    // no owned doc (a borrowed view / moved-from) — the caller then serializes.
-    yyjson_mut_doc* share_out(void (*retain)(void*), void (*release)(void*)) {
+    // The doc analogue of an image pool handle: a doc crossing the ABI is owned by
+    // the host DocRegistry and held by refcount, NOT borrowed — so either side
+    // (producer or consumer) can cache it across frames with zero copy, and it
+    // lives until the last side releases. Both input and output use this; there is
+    // no borrowed-view special case.
+    //
+    // share_out: enroll this Record's owned doc into the host registry and return
+    // the raw pointer for the other side to adopt_shared(). The doc becomes frozen
+    // (shared ⇒ read-only; a later mutation COWs into a fresh owned doc) and its
+    // box becomes registry-managed (free routes through host doc_release). We take
+    // exactly ONE registry ref — for THIS side; the adopter takes its own in
+    // adopt_shared. So if the other side never adopts (e.g. it took the JSON
+    // path), nothing leaks. `retain`/`release` are the host_api doc_* (both must
+    // be non-null). const — it changes only refcount/freeze metadata, so it works
+    // on a borrowed input being handed straight on. Returns null when there's no
+    // owned doc (moved-from); the caller then serializes.
+    yyjson_mut_doc* share_out(void (*retain)(void*), void (*release)(void*)) const {
         if (!box_ || !box_->doc || !retain || !release) return nullptr;
         frozen_ = true;                       // shared ⇒ read-only from here on
         if (!box_->host_release) {            // first cross-ABI share: enroll this side
-            retain(box_->doc);                // registry rc -> 1 (this side's ref)
+            retain(box_->doc);                // registry rc += 1 (this side's ref)
             box_->host_release = release;     // our box now frees via the registry
         }
-        retain(box_->doc);                    // +1 for the adopting side
+        retain(box_->doc);                    // +1 RESERVED for the adopting side. This
+                                              // keeps the doc alive until adopt_shared
+                                              // consumes it — the producer's own Record
+                                              // may die BEFORE the other side adopts (e.g.
+                                              // a plugin's output Record is destroyed when
+                                              // process() returns, the host adopts after).
+                                              // If the other side never adopts (JSON path),
+                                              // the caller that took the JSON branch must
+                                              // doc_release once to balance this reserve.
         return box_->doc;
     }
 
-    // adopt_shared: the receiving side of share_out. The producer already took a
-    // ref for us, so we wrap the doc in a registry-managed box. The last
-    // in-process ref here calls `release` (host doc_release), dropping the
-    // host-side refcount; the doc lives until the last SIDE releases it.
+    // adopt_shared: the receiving side of share_out. It does NOT retain — it CONSUMES
+    // the ref share_out reserved for us, wrapping the doc in a registry-managed box;
+    // the last in-process ref here calls release (host doc_release), and the doc lives
+    // until the last SIDE releases.
     //
-    // `frozen` says whether another side still holds this doc. Pass it from the
-    // host-side refcount: false when WE are the sole side (the common dispatch
-    // case — no one else reads it, so the adopter may mutate in place, zero COW,
-    // write-through intact); true when it is genuinely shared (a plugin cached
-    // the same doc) so the first mutation copy-on-writes to keep them isolated.
+    // `frozen`: pass false when WE are the sole side (common dispatch case — no one
+    // else reads it, so mutate in place, zero COW, write-through intact); true when
+    // another side still holds it (the producer cached the same doc) so the first
+    // mutation copy-on-writes to keep them isolated.
     static Record adopt_shared(yyjson_mut_doc* doc, void (*release)(void*),
                                bool frozen = true) {
         Record r;
         if (doc && release) {
             r.release_box_();                 // drop the fresh init_ box
-            r.box_  = new DocBox{ doc, 1, release };
+            r.box_  = new DocBox{ doc, 1, release };  // consume share_out's reserved ref
             r.doc_  = doc;
             r.root_ = yyjson_mut_doc_get_root(doc);
             r.frozen_ = frozen;

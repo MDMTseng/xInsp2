@@ -307,8 +307,13 @@ inline Record record_from_c(const xi_host_api* host, const xi_record* rec) {
     // view — no JSON parse, no copy. The view is read-only; the plugin's first
     // mutation copy-on-writes into its own doc, leaving the caller's untouched.
     // Otherwise decode the JSON bytes exactly as before.
-    Record r = rec->doc
-                 ? Record::from_doc_view((yyjson_mut_doc*)rec->doc)
+    // γ-4: input doc is a registry-managed SHARED doc (the host share_out'd it and
+    // enrolled it). We adopt with our own ref so the plugin may cache it across
+    // frames zero-copy; frozen=true since the host still holds its side during the
+    // call, so the plugin's first mutation copy-on-writes. No doc ⇒ JSON / empty.
+    Record r = (rec->doc && host && host->doc_release)
+                 ? Record::adopt_shared((yyjson_mut_doc*)rec->doc,
+                                        host->doc_release, true)
                  : ((rec->data && rec->len > 0)
                         ? Record::from_json_bytes(rec->data, (size_t)rec->len)
                         : Record());

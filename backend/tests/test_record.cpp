@@ -382,14 +382,14 @@ static void test_cross_abi_share() {
     producer.set("tag", std::string("shared"));
     yyjson_mut_doc* raw = producer.share_out(retain, release);
     CHECK(raw != nullptr);
-    CHECK(reg.refcount(raw) == 2);          // producer side + consumer side
+    CHECK(reg.refcount(raw) == 2);          // share_out enrolls this side + reserves the adopter's ref
 
     {
-        // Consumer adopts WITHOUT a copy — reads the producer's data directly.
+        // Consumer adopts and CONSUMES the reserved ref (no extra retain, no copy).
         xi::Record consumer = xi::Record::adopt_shared(raw, release);
         CHECK(consumer.get_int("v") == 7);
         CHECK(consumer.get_string("tag") == "shared");
-        CHECK(reg.refcount(raw) == 2);      // both sides alive
+        CHECK(reg.refcount(raw) == 2);      // producer + consumer
 
         // Mutating the consumer COWs into its own local doc; the shared doc and
         // the producer are untouched, and the consumer drops its registry ref.
@@ -407,17 +407,18 @@ static void test_cross_abi_share() {
     CHECK(reg.refcount(raw) == 0);
     CHECK(reg.live_count() == base);
 
-    // A second producer that is COPIED (in-process share) before share_out still
-    // counts as ONE side in the registry.
+    // A producer COPIED (in-process share) before share_out still counts as ONE
+    // side in the registry (the whole local box-group = one side).
     xi::Record p2;
     p2.set("n", 1);
     xi::Record p2copy = p2;                 // in-process share (rc=2), no registry
     yyjson_mut_doc* raw2 = p2.share_out(retain, release);
-    CHECK(reg.refcount(raw2) == 2);         // p2/p2copy side + consumer side
+    CHECK(reg.refcount(raw2) == 2);         // p2/p2copy side + reserved adopter
     {
         xi::Record c2 = xi::Record::adopt_shared(raw2, release);
         CHECK(c2.get_int("n") == 1);
-    }                                       // c2 releases consumer side
+        CHECK(reg.refcount(raw2) == 2);     // c2 consumed the reserved ref
+    }                                       // c2 (unmutated) releases the consumer ref
     CHECK(reg.refcount(raw2) == 1);
     p2 = xi::Record();                      // p2copy still holds the in-process box
     CHECK(reg.refcount(raw2) == 1);         // still one side (p2copy)

@@ -87,11 +87,13 @@ public:
         in_rec.image_count = (int32_t)in_imgs.size();
         std::string json;   // kept alive for the call when we take the JSON path
         if (doc_input_ok_ && input.doc()) {
-            // γ in-process fast path: hand the plugin a BORROWED read-only doc —
-            // no data_json() serialize here, no yyjson_read in the plugin. The
-            // plugin reads it as a view (and copy-on-writes if it mutates). The
-            // input Record outlives this call, so the borrow is valid throughout.
-            in_rec.doc = input.doc();
+            // γ-4 in-process fast path: share our input doc into the host registry
+            // and hand the plugin the registry-managed pointer — no serialize. The
+            // plugin adopts it (reads as a view, COWs to mutate) and can cache it
+            // across frames zero-copy; our enroll ref lives on this input Record.
+            in_rec.doc = (host_.doc_retain && host_.doc_release)
+                ? input.share_out(host_.doc_retain, host_.doc_release)
+                : input.doc();
         } else {
             json = input.data_json();
             in_rec.data = (const uint8_t*)json.data();

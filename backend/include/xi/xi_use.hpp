@@ -315,13 +315,18 @@ public:
             in_imgs.push_back({key.c_str(), h});
             in_handles.push_back(h);
         }
-        // γ: hand the host our borrowed yyjson doc — no data_json() serialize.
-        // The host uses it directly for a doc-compatible target, or serialises
-        // it there for the (rare, in-process) incompatible case.
         xi_record_out output;
         xi_record_out_init(&output);
 
-        process_fn(name_.c_str(), (const void*)input.doc(),
+        // γ-4: share our input doc into the host registry (enroll this side) and
+        // hand the host the registry-managed pointer, so the plugin can adopt it
+        // and cache it across frames zero-copy — no serialize. For a JSON-fallback
+        // target the host serialises it there; the plugin never adopts, and our
+        // enroll ref is released when this input Record dies.
+        const void* in_doc = (host->doc_retain && host->doc_release)
+            ? (const void*)input.share_out(host->doc_retain, host->doc_release)
+            : (const void*)input.doc();
+        process_fn(name_.c_str(), in_doc,
                    nullptr, 0,
                    in_imgs.data(), (int)in_imgs.size(), &output);
 

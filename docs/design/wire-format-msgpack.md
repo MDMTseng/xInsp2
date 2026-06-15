@@ -75,12 +75,20 @@ chosen to kill the cJSON serialization tax and minimize copies.
 > `"json_fallback": true` (then it loads on the JSON path with a one-shot
 > warning). 15/15 ctest + 77/77 ws. NOTE: the ABI is now v4, so a
 > project plugin recompiles to v4 and needs a v4 HOST — the **Release** backend
-> must be rebuilt (ws tests launch `build/Release`), not just Debug. Still
-> deferred behind a SPEED flag (v4-4): making every per-frame INPUT doc
-> registry-managed so a plugin can zero-copy cache its *borrowed input* — costs a
-> per-node retain/release each frame, pending a bench call. Measured: a compatible
-> in-process call skips the entire serialize+parse round-trip (~75 µs/direction at
-> N=150 vs yyjson; ~1163 µs vs the original cJSON), both directions.**
+> must be rebuilt (ws tests launch `build/Release`), not just Debug. **v4-4 SHIPPED
+> (input symmetric)**: the INPUT doc now also goes through `share_out`/
+> `adopt_shared` (host enrolls + reserves a ref, plugin adopts), so a plugin can
+> cache its *borrowed input* across frames ZERO-COPY — the borrowed-view special
+> case (`from_doc_view`) is retired and EVERY copy/assign is a refcount bump, no
+> deep copy anywhere. Cost (chosen over deep-copy-on-cache): a per-node
+> retain/release each dispatch — noise at the ms scale of image work. Ref
+> accounting: `share_out` reserves the adopter's ref so the doc survives the
+> producer's Record dying first (a plugin's output Record is destroyed when
+> `process()` returns, before the host adopts); `adopt_shared` consumes it; a
+> JSON-fallback target releases the reserve in `use_process_cb`. 15/15 ctest +
+> 77/77 ws. Measured: a compatible in-process call skips the entire serialize+
+> parse round-trip (~75 µs/direction at N=150 vs yyjson; ~1163 µs vs the original
+> cJSON), both directions.**
 
 ---
 

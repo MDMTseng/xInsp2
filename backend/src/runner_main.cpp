@@ -80,6 +80,10 @@ static int use_process_cb(const char* name,
             if (js) { in_js.assign(js, jl); free(js); }
             in_rec.data = (const uint8_t*)in_js.data();
             in_rec.len  = (int32_t)in_js.size();
+            // γ-4: balance the ref UseProxy's share_out reserved for an adopter —
+            // this JSON-fallback target serializes instead of adopting. No-op if
+            // the doc wasn't registry-managed.
+            xi::DocRegistry::instance().release((yyjson_mut_doc*)input_doc);
         } else {
             in_rec.data = input_data;
             in_rec.len  = input_len;
