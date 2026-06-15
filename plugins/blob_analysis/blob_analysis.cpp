@@ -23,7 +23,7 @@
 //
 
 #include <xi/xi_abi.hpp>
-#include "cJSON.h"   // parses exchange/def commands with raw cJSON
+#include "yyjson.h"   // parses exchange/def commands with yyjson
 
 #include <algorithm>
 #include <cmath>
@@ -201,13 +201,14 @@ public:
 
     bool set_def(const std::string& json) override {
         xi::Record r;
-        cJSON* p = cJSON_Parse(json.c_str());
-        if (!p) return false;
-        cJSON* t = cJSON_GetObjectItem(p, "threshold"); if (t) thresh_ = t->valueint;
-        cJSON* a = cJSON_GetObjectItem(p, "min_area");  if (a) min_area_ = a->valueint;
-        cJSON* m = cJSON_GetObjectItem(p, "max_area");  if (m) max_area_ = m->valueint;
-        cJSON* i = cJSON_GetObjectItem(p, "invert");    if (i) invert_ = cJSON_IsTrue(i);
-        cJSON_Delete(p);
+        yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
+        yyjson_val* p = doc ? yyjson_doc_get_root(doc) : nullptr;
+        if (!p) { yyjson_doc_free(doc); return false; }
+        yyjson_val* t = yyjson_obj_get(p, "threshold"); if (t) thresh_ = yyjson_get_int(t);
+        yyjson_val* a = yyjson_obj_get(p, "min_area");  if (a) min_area_ = yyjson_get_int(a);
+        yyjson_val* m = yyjson_obj_get(p, "max_area");  if (m) max_area_ = yyjson_get_int(m);
+        yyjson_val* i = yyjson_obj_get(p, "invert");    if (i) invert_ = yyjson_get_bool(i);
+        yyjson_doc_free(doc);
         return true;
     }
 

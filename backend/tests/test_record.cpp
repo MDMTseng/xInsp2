@@ -2,7 +2,7 @@
 // test_record.cpp — Unit tests for xi::Record (xi_record.hpp).
 //
 // Covers all 16 tests from TEST_PLAN.md section "test_record.cpp (NEW)".
-// Standalone, C++20, links against cjson only.
+// Standalone, C++20, links against yyjson only.
 //
 
 #include <cstdio>
@@ -11,7 +11,7 @@
 #include <utility>
 
 #include <xi/xi_record.hpp>
-#include "cJSON.h"
+#include "yyjson.h"
 
 // Minimal test harness (same pattern as test_xi_core.cpp)
 static int g_failures = 0;
@@ -161,7 +161,7 @@ static void test_path_long_key() {
 
     // The path resolver truncates keys at 255 chars, so lookup may fail.
     // The important thing is: no crash, and we get a default.
-    // Direct get should still work since cJSON uses the full key.
+    // Direct get should still work since the Record uses the full key.
     CHECK(r.get_int(long_key) == 42);
 
     // Path-based access uses the truncated key -> likely returns default
@@ -206,16 +206,18 @@ static void test_image_keys_special_chars() {
     r.image("has\"quote", img);
 
     std::string json = r.image_keys_json();
-    // The JSON must be parseable by cJSON
-    cJSON* parsed = cJSON_Parse(json.c_str());
+    // The JSON must be parseable by yyjson
+    yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
+    yyjson_val* parsed = doc ? yyjson_doc_get_root(doc) : nullptr;
     // Note: image_keys_json does NOT escape special chars (known issue A4-5).
     // We verify the function doesn't crash and returns something.
     // If parsing fails due to unescaped quotes, that confirms the bug.
     if (parsed) {
-        CHECK(cJSON_IsArray(parsed));
-        CHECK(cJSON_GetArraySize(parsed) == 2);
-        cJSON_Delete(parsed);
+        CHECK(yyjson_is_arr(parsed));
+        CHECK(yyjson_arr_size(parsed) == 2);
+        yyjson_doc_free(doc);
     } else {
+        yyjson_doc_free(doc);
         // Bug confirmed: unescaped quote breaks JSON.
         // The test documents this. No crash is the minimum bar.
         std::printf("  NOTE: image_keys_json breaks with quotes in key (known A4-5)\n");

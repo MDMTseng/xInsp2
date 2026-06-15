@@ -10,7 +10,7 @@
 //
 
 #include <xi/xi_abi.hpp>
-#include "cJSON.h"   // parses def commands with raw cJSON
+#include "yyjson.h"   // parses def commands with yyjson
 #include "stb_image_write.h"
 
 #include <chrono>
@@ -68,23 +68,24 @@ public:
     }
 
     std::string exchange(const std::string& cmd) override {
-        cJSON* p = cJSON_Parse(cmd.c_str());
-        if (!p) return get_def();
-        cJSON* c = cJSON_GetObjectItem(p, "command");
-        cJSON* v = cJSON_GetObjectItem(p, "value");
-        if (c && cJSON_IsString(c)) {
-            std::string command = c->valuestring;
-            if (command == "set_output_dir" && v && cJSON_IsString(v)) {
-                output_dir_ = v->valuestring;
-            } else if (command == "set_naming_rule" && v && cJSON_IsString(v)) {
-                naming_rule_ = v->valuestring;
+        yyjson_doc* doc = yyjson_read(cmd.c_str(), cmd.size(), 0);
+        yyjson_val* p = doc ? yyjson_doc_get_root(doc) : nullptr;
+        if (!p) { yyjson_doc_free(doc); return get_def(); }
+        yyjson_val* c = yyjson_obj_get(p, "command");
+        yyjson_val* v = yyjson_obj_get(p, "value");
+        if (c && yyjson_is_str(c)) {
+            std::string command = yyjson_get_str(c);
+            if (command == "set_output_dir" && v && yyjson_is_str(v)) {
+                output_dir_ = yyjson_get_str(v);
+            } else if (command == "set_naming_rule" && v && yyjson_is_str(v)) {
+                naming_rule_ = yyjson_get_str(v);
             } else if (command == "set_enabled" && v) {
-                enabled_ = cJSON_IsTrue(v);
+                enabled_ = yyjson_get_bool(v);
             } else if (command == "reset_count") {
                 save_count_ = 0;
             }
         }
-        cJSON_Delete(p);
+        yyjson_doc_free(doc);
         return get_def();
     }
 
@@ -100,12 +101,13 @@ public:
     }
 
     bool set_def(const std::string& json) override {
-        cJSON* p = cJSON_Parse(json.c_str());
-        if (!p) return false;
-        cJSON* od = cJSON_GetObjectItem(p, "output_dir"); if (od && cJSON_IsString(od)) output_dir_ = od->valuestring;
-        cJSON* nr = cJSON_GetObjectItem(p, "naming_rule"); if (nr && cJSON_IsString(nr)) naming_rule_ = nr->valuestring;
-        cJSON* en = cJSON_GetObjectItem(p, "enabled"); if (en) enabled_ = cJSON_IsTrue(en);
-        cJSON_Delete(p);
+        yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
+        yyjson_val* p = doc ? yyjson_doc_get_root(doc) : nullptr;
+        if (!p) { yyjson_doc_free(doc); return false; }
+        yyjson_val* od = yyjson_obj_get(p, "output_dir"); if (od && yyjson_is_str(od)) output_dir_ = yyjson_get_str(od);
+        yyjson_val* nr = yyjson_obj_get(p, "naming_rule"); if (nr && yyjson_is_str(nr)) naming_rule_ = yyjson_get_str(nr);
+        yyjson_val* en = yyjson_obj_get(p, "enabled"); if (en) enabled_ = yyjson_get_bool(en);
+        yyjson_doc_free(doc);
         return true;
     }
 

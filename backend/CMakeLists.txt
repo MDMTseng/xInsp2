@@ -236,11 +236,11 @@ target_compile_definitions(xinsp_runner PRIVATE
 
 # Frontend supervisor. Spawns + monitors xinsp-backend.exe, drives the line to a
 # safe state on backend death, respawns it (rate-limited). Links NEITHER xi_core
-# NOR OpenCV — it only needs the portable xi_safe_state.hpp header + cJSON + the
+# NOR OpenCV — it only needs the portable xi_safe_state.hpp header + yyjson + the
 # Win32 process/socket APIs, so it carries no accelerator-DLL dependency and is
 # excluded from _xinsp_deploy_dlls below.
 add_executable(xinsp_fe src/fe_main.cpp)
-target_link_libraries(xinsp_fe PRIVATE cjson)
+target_link_libraries(xinsp_fe PRIVATE yyjson)
 target_include_directories(xinsp_fe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor)

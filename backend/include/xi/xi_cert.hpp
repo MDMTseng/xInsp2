@@ -23,10 +23,11 @@
 #include "xi_atomic_io.hpp"
 #include "xi_baseline.hpp"
 #include "xi_sha256.hpp"
-#include "cJSON.h"
+#include "yyjson.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -87,22 +88,24 @@ inline std::filesystem::path cert_path(const std::filesystem::path& plugin_folde
 }
 
 inline bool write(const std::filesystem::path& plugin_folder, const Cert& c) {
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "plugin_name",         c.plugin_name.c_str());
-    cJSON_AddNumberToObject(root, "cert_format_version", (double)c.cert_format_version);
-    cJSON_AddStringToObject(root, "dll_sha256",          c.dll_sha256.c_str());
-    cJSON_AddNumberToObject(root, "dll_size",            (double)c.dll_size);
-    cJSON_AddNumberToObject(root, "dll_mtime",           (double)c.dll_mtime);
-    cJSON_AddNumberToObject(root, "baseline_version",    (double)c.baseline_version);
-    cJSON_AddStringToObject(root, "certified_at",        c.certified_at.c_str());
-    cJSON_AddNumberToObject(root, "duration_ms",         c.duration_ms);
-    cJSON* arr = cJSON_CreateArray();
-    for (auto& t : c.tests_passed) cJSON_AddItemToArray(arr, cJSON_CreateString(t.c_str()));
-    cJSON_AddItemToObject(root, "tests_passed", arr);
-    char* s = cJSON_Print(root);
+    yyjson_mut_doc* d = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val* root = yyjson_mut_obj(d);
+    yyjson_mut_obj_add_strcpy(d, root, "plugin_name",         c.plugin_name.c_str());
+    yyjson_mut_obj_add_real(d, root, "cert_format_version", (double)c.cert_format_version);
+    yyjson_mut_obj_add_strcpy(d, root, "dll_sha256",          c.dll_sha256.c_str());
+    yyjson_mut_obj_add_real(d, root, "dll_size",            (double)c.dll_size);
+    yyjson_mut_obj_add_real(d, root, "dll_mtime",           (double)c.dll_mtime);
+    yyjson_mut_obj_add_real(d, root, "baseline_version",    (double)c.baseline_version);
+    yyjson_mut_obj_add_strcpy(d, root, "certified_at",        c.certified_at.c_str());
+    yyjson_mut_obj_add_real(d, root, "duration_ms",         c.duration_ms);
+    yyjson_mut_val* arr = yyjson_mut_arr(d);
+    for (auto& t : c.tests_passed) yyjson_mut_arr_add_val(arr, yyjson_mut_strcpy(d, t.c_str()));
+    yyjson_mut_obj_add_val(d, root, "tests_passed", arr);
+    yyjson_mut_doc_set_root(d, root);
+    char* s = yyjson_mut_write(d, YYJSON_WRITE_PRETTY, NULL);
     bool ok = xi::atomic_write(cert_path(plugin_folder), std::string(s ? s : ""));
     std::free(s);
-    cJSON_Delete(root);
+    yyjson_mut_doc_free(d);
     return ok;
 }
 
@@ -110,15 +113,16 @@ inline bool read(const std::filesystem::path& plugin_folder, Cert& out) {
     std::ifstream f(cert_path(plugin_folder).string());
     if (!f) return false;
     std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    cJSON* root = cJSON_Parse(content.c_str());
-    if (!root) return false;
+    yyjson_doc* doc = yyjson_read(content.c_str(), content.size(), 0);
+    yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    if (!root) { if (doc) yyjson_doc_free(doc); return false; }
     auto str = [&](const char* k, std::string& dst) {
-        cJSON* j = cJSON_GetObjectItem(root, k);
-        if (j && cJSON_IsString(j)) dst = j->valuestring;
+        yyjson_val* j = yyjson_obj_get(root, k);
+        if (j && yyjson_is_str(j)) dst = yyjson_get_str(j);
     };
     auto num = [&](const char* k, auto& dst) {
-        cJSON* j = cJSON_GetObjectItem(root, k);
-        if (j && cJSON_IsNumber(j)) dst = (decltype(dst))j->valuedouble;
+        yyjson_val* j = yyjson_obj_get(root, k);
+        if (j && yyjson_is_num(j)) dst = (std::decay_t<decltype(dst)>)yyjson_get_num(j);
     };
     str("plugin_name",         out.plugin_name);
     num("cert_format_version", out.cert_format_version);
@@ -128,7 +132,7 @@ inline bool read(const std::filesystem::path& plugin_folder, Cert& out) {
     num("baseline_version",    out.baseline_version);
     str("certified_at",        out.certified_at);
     num("duration_ms",         out.duration_ms);
-    cJSON_Delete(root);
+    yyjson_doc_free(doc);
     return true;
 }
 

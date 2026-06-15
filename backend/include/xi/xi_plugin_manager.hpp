@@ -50,6 +50,9 @@
 #include "xi_source.hpp"
 #include "xi_trigger_bus.hpp"
 
+#include "yyjson.h"
+
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -1029,7 +1032,7 @@ public:
         else            project_.script_path = (std::filesystem::path(folder) / "inspect.cpp").string();
 
         // Parse trigger_policy block (optional; older project.json files
-        // have none and we default to Any). Use cJSON instead of
+        // have none and we default to Any). Use a JSON parser instead of
         // substring search — the previous string-scan version assumed
         // `"required":[` with no whitespace and silently dropped the
         // list when a tool / human formatted the JSON with a space
@@ -1053,61 +1056,63 @@ public:
         // (truncated / garbage) used to load "successfully" with all defaults and
         // no signal to the user — surface it as an open warning below.
         bool project_json_malformed = false;
-        if (cJSON* root = cJSON_Parse(content.c_str())) {
-            if (cJSON* tp = cJSON_GetObjectItem(root, "trigger_policy");
-                tp && cJSON_IsObject(tp)) {
-                if (cJSON* k = cJSON_GetObjectItem(tp, "policy");
-                    k && cJSON_IsString(k) && k->valuestring) {
-                    std::string p = k->valuestring;
+        yyjson_doc* doc = yyjson_read(content.c_str(), content.size(), 0);
+        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+        if (root) {
+            if (yyjson_val* tp = yyjson_obj_get(root, "trigger_policy");
+                tp && yyjson_is_obj(tp)) {
+                if (yyjson_val* k = yyjson_obj_get(tp, "policy");
+                    k && yyjson_is_str(k) && yyjson_get_str(k)) {
+                    std::string p = yyjson_get_str(k);
                     if      (p == "all_required")     project_.trigger_policy = TriggerPolicy::AllRequired;
                     else if (p == "leader_followers") project_.trigger_policy = TriggerPolicy::LeaderFollowers;
                 }
-                if (cJSON* k = cJSON_GetObjectItem(tp, "leader");
-                    k && cJSON_IsString(k) && k->valuestring) {
-                    project_.trigger_leader = k->valuestring;
+                if (yyjson_val* k = yyjson_obj_get(tp, "leader");
+                    k && yyjson_is_str(k) && yyjson_get_str(k)) {
+                    project_.trigger_leader = yyjson_get_str(k);
                 }
-                if (cJSON* k = cJSON_GetObjectItem(tp, "window_ms");
-                    k && cJSON_IsNumber(k)) {
-                    project_.trigger_window_ms = (int)k->valuedouble;
+                if (yyjson_val* k = yyjson_obj_get(tp, "window_ms");
+                    k && yyjson_is_num(k)) {
+                    project_.trigger_window_ms = (int)yyjson_get_num(k);
                 }
-                if (cJSON* arr = cJSON_GetObjectItem(tp, "required");
-                    arr && cJSON_IsArray(arr)) {
-                    cJSON* it;
-                    cJSON_ArrayForEach(it, arr) {
-                        if (cJSON_IsString(it) && it->valuestring) {
-                            project_.trigger_required.emplace_back(it->valuestring);
+                if (yyjson_val* arr = yyjson_obj_get(tp, "required");
+                    arr && yyjson_is_arr(arr)) {
+                    size_t _i, _n; yyjson_val* it;
+                    yyjson_arr_foreach(arr, _i, _n, it) {
+                        if (yyjson_is_str(it) && yyjson_get_str(it)) {
+                            project_.trigger_required.emplace_back(yyjson_get_str(it));
                         }
                     }
                 }
             }
             // runtime block — operational knobs (also live-settable). process_priority
             // applied on open; timer_fps seeds the live timer rate.
-            if (cJSON* rt = cJSON_GetObjectItem(root, "runtime"); rt && cJSON_IsObject(rt)) {
-                if (cJSON* k = cJSON_GetObjectItem(rt, "process_priority"); k && cJSON_IsString(k) && k->valuestring)
-                    project_.runtime_priority = k->valuestring;
-                if (cJSON* k = cJSON_GetObjectItem(rt, "timer_fps"); k && cJSON_IsNumber(k))
-                    project_.runtime_timer_fps = (int)k->valuedouble;
+            if (yyjson_val* rt = yyjson_obj_get(root, "runtime"); rt && yyjson_is_obj(rt)) {
+                if (yyjson_val* k = yyjson_obj_get(rt, "process_priority"); k && yyjson_is_str(k) && yyjson_get_str(k))
+                    project_.runtime_priority = yyjson_get_str(k);
+                if (yyjson_val* k = yyjson_obj_get(rt, "timer_fps"); k && yyjson_is_num(k))
+                    project_.runtime_timer_fps = (int)yyjson_get_num(k);
             }
             // parallelism block.
-            if (cJSON* par = cJSON_GetObjectItem(root, "parallelism");
-                par && cJSON_IsObject(par)) {
-                if (cJSON* k = cJSON_GetObjectItem(par, "dispatch_threads");
-                    k && cJSON_IsNumber(k)) {
-                    int n = (int)k->valuedouble;
+            if (yyjson_val* par = yyjson_obj_get(root, "parallelism");
+                par && yyjson_is_obj(par)) {
+                if (yyjson_val* k = yyjson_obj_get(par, "dispatch_threads");
+                    k && yyjson_is_num(k)) {
+                    int n = (int)yyjson_get_num(k);
                     if (n < 1) n = 1;
                     if (n > 32) n = 32;  // sanity cap
                     project_.dispatch_threads = n;
                 }
-                if (cJSON* k = cJSON_GetObjectItem(par, "queue_depth");
-                    k && cJSON_IsNumber(k)) {
-                    int n = (int)k->valuedouble;
+                if (yyjson_val* k = yyjson_obj_get(par, "queue_depth");
+                    k && yyjson_is_num(k)) {
+                    int n = (int)yyjson_get_num(k);
                     if (n < 1)     n = 1;
                     if (n > 10000) n = 10000;
                     project_.queue_depth = n;
                 }
-                if (cJSON* k = cJSON_GetObjectItem(par, "overflow");
-                    k && cJSON_IsString(k) && k->valuestring) {
-                    std::string s = k->valuestring;
+                if (yyjson_val* k = yyjson_obj_get(par, "overflow");
+                    k && yyjson_is_str(k) && yyjson_get_str(k)) {
+                    std::string s = yyjson_get_str(k);
                     if (s == "drop_oldest" || s == "drop_newest" || s == "block") {
                         project_.overflow = s;
                     } else {
@@ -1117,9 +1122,9 @@ public:
                             s.c_str());
                     }
                 }
-                if (cJSON* k = cJSON_GetObjectItem(par, "result_order");
-                    k && cJSON_IsString(k) && k->valuestring) {
-                    std::string s = k->valuestring;
+                if (yyjson_val* k = yyjson_obj_get(par, "result_order");
+                    k && yyjson_is_str(k) && yyjson_get_str(k)) {
+                    std::string s = yyjson_get_str(k);
                     if (s == "completion" || s == "arrival") {
                         project_.result_order = s;
                     } else {
@@ -1130,64 +1135,64 @@ public:
                     }
                 }
                 // parallelism.groups + default_group (optional; empty = legacy pool)
-                if (cJSON* arr = cJSON_GetObjectItem(par, "groups"); arr && cJSON_IsArray(arr)) {
+                if (yyjson_val* arr = yyjson_obj_get(par, "groups"); arr && yyjson_is_arr(arr)) {
                     auto warn = [&](const std::string& who, const std::string& msg) {
                         last_open_warnings_.push_back({who, "", msg});
                         std::fprintf(stderr, "[xinsp2] parallelism.groups: %s — %s\n", who.c_str(), msg.c_str());
                     };
-                    cJSON* g = nullptr;
-                    cJSON_ArrayForEach(g, arr) {
-                        if (!cJSON_IsObject(g)) continue;
+                    size_t _gi, _gn; yyjson_val* g;
+                    yyjson_arr_foreach(arr, _gi, _gn, g) {
+                        if (!yyjson_is_obj(g)) continue;
                         ProjectInfo::DispatchGroup grp;
-                        if (cJSON* k = cJSON_GetObjectItem(g, "name"); k && cJSON_IsString(k) && k->valuestring) grp.name = k->valuestring;
+                        if (yyjson_val* k = yyjson_obj_get(g, "name"); k && yyjson_is_str(k) && yyjson_get_str(k)) grp.name = yyjson_get_str(k);
                         if (grp.name.empty()) { warn("(unnamed)", "group missing 'name' — skipped"); continue; }
                         if (project_.find_group(grp.name)) { warn(grp.name, "duplicate group name — skipped"); continue; }  // #7
-                        if (cJSON* k = cJSON_GetObjectItem(g, "max_parallel"); k && cJSON_IsNumber(k))
-                            grp.max_parallel = std::min(32, std::max(1, (int)k->valuedouble));   // #4 clamp [1,32]
-                        if (cJSON* k = cJSON_GetObjectItem(g, "thread_priority"); k && cJSON_IsString(k) && k->valuestring) {
-                            grp.thread_priority = k->valuestring;
+                        if (yyjson_val* k = yyjson_obj_get(g, "max_parallel"); k && yyjson_is_num(k))
+                            grp.max_parallel = std::min(32, std::max(1, (int)yyjson_get_num(k)));   // #4 clamp [1,32]
+                        if (yyjson_val* k = yyjson_obj_get(g, "thread_priority"); k && yyjson_is_str(k) && yyjson_get_str(k)) {
+                            grp.thread_priority = yyjson_get_str(k);
                             if (grp.thread_priority != "high" && grp.thread_priority != "normal" && grp.thread_priority != "low") {
                                 warn(grp.name, "unknown thread_priority '" + grp.thread_priority + "' — using normal");
                                 grp.thread_priority = "normal";
                             }
                         }
-                        if (cJSON* k = cJSON_GetObjectItem(g, "queue_depth"); k && cJSON_IsNumber(k))
-                            grp.queue_depth = std::min(10000, std::max(1, (int)k->valuedouble));
-                        if (cJSON* k = cJSON_GetObjectItem(g, "overflow"); k && cJSON_IsString(k) && k->valuestring) {
-                            grp.overflow = k->valuestring;
+                        if (yyjson_val* k = yyjson_obj_get(g, "queue_depth"); k && yyjson_is_num(k))
+                            grp.queue_depth = std::min(10000, std::max(1, (int)yyjson_get_num(k)));
+                        if (yyjson_val* k = yyjson_obj_get(g, "overflow"); k && yyjson_is_str(k) && yyjson_get_str(k)) {
+                            grp.overflow = yyjson_get_str(k);
                             if (grp.overflow != "drop_oldest" && grp.overflow != "drop_newest" && grp.overflow != "block") {
                                 warn(grp.name, "unknown overflow '" + grp.overflow + "' — using drop_oldest");
                                 grp.overflow = "drop_oldest";
                             }
                         }
-                        if (cJSON* k = cJSON_GetObjectItem(g, "result_order"); k && cJSON_IsString(k) && k->valuestring) {
-                            grp.result_order = k->valuestring;
+                        if (yyjson_val* k = yyjson_obj_get(g, "result_order"); k && yyjson_is_str(k) && yyjson_get_str(k)) {
+                            grp.result_order = yyjson_get_str(k);
                             if (grp.result_order != "completion" && grp.result_order != "arrival") {
                                 warn(grp.name, "unknown result_order '" + grp.result_order + "' — using completion");
                                 grp.result_order = "completion";
                             }
                         }
-                        if (cJSON* k = cJSON_GetObjectItem(g, "min_interval_ms"); k && cJSON_IsNumber(k))
-                            grp.min_interval_ms = std::min(3600000, std::max(0, (int)k->valuedouble));
+                        if (yyjson_val* k = yyjson_obj_get(g, "min_interval_ms"); k && yyjson_is_num(k))
+                            grp.min_interval_ms = std::min(3600000, std::max(0, (int)yyjson_get_num(k)));
                         // cpu_affinity: flat [0,1,..] = one shared mask; nested
                         // [[..],[..]] = per-worker masks. Empty/invalid → unbound.
-                        if (cJSON* k = cJSON_GetObjectItem(g, "cpu_affinity"); k && cJSON_IsArray(k)) {
-                            auto parse_set = [&](cJSON* arr) {
+                        if (yyjson_val* k = yyjson_obj_get(g, "cpu_affinity"); k && yyjson_is_arr(k)) {
+                            auto parse_set = [&](yyjson_val* arr) {
                                 std::vector<int> s;
-                                cJSON* e = nullptr;
-                                cJSON_ArrayForEach(e, arr) {
-                                    if (!cJSON_IsNumber(e)) continue;
-                                    int c = (int)e->valuedouble;
+                                size_t _ei, _en; yyjson_val* e;
+                                yyjson_arr_foreach(arr, _ei, _en, e) {
+                                    if (!yyjson_is_num(e)) continue;
+                                    int c = (int)yyjson_get_num(e);
                                     if (c >= 0 && c < 1024) s.push_back(c);
                                     else warn(grp.name, "cpu_affinity core " + std::to_string(c) + " out of range — ignored");
                                 }
                                 return s;
                             };
-                            cJSON* first = cJSON_GetArrayItem(k, 0);
-                            if (first && cJSON_IsArray(first)) {          // nested: per-worker
-                                cJSON* row = nullptr;
-                                cJSON_ArrayForEach(row, k)
-                                    if (cJSON_IsArray(row)) { auto s = parse_set(row); if (!s.empty()) grp.cpu_affinity.push_back(std::move(s)); }
+                            yyjson_val* first = yyjson_arr_get(k, 0);
+                            if (first && yyjson_is_arr(first)) {          // nested: per-worker
+                                size_t _ri, _rn; yyjson_val* row;
+                                yyjson_arr_foreach(k, _ri, _rn, row)
+                                    if (yyjson_is_arr(row)) { auto s = parse_set(row); if (!s.empty()) grp.cpu_affinity.push_back(std::move(s)); }
                             } else {                                       // flat: one shared mask
                                 auto s = parse_set(k);
                                 if (!s.empty()) grp.cpu_affinity.push_back(std::move(s));
@@ -1195,8 +1200,8 @@ public:
                         }
                         project_.groups.push_back(std::move(grp));
                     }
-                    if (cJSON* k = cJSON_GetObjectItem(par, "default_group"); k && cJSON_IsString(k) && k->valuestring)
-                        project_.default_group = k->valuestring;
+                    if (yyjson_val* k = yyjson_obj_get(par, "default_group"); k && yyjson_is_str(k) && yyjson_get_str(k))
+                        project_.default_group = yyjson_get_str(k);
                     if (project_.default_group.empty() && !project_.groups.empty())
                         project_.default_group = project_.groups.front().name;
                     if (!project_.default_group.empty() && !project_.find_group(project_.default_group))  // #6
@@ -1204,8 +1209,9 @@ public:
                              (project_.groups.empty() ? std::string("(none)") : project_.groups.front().name) + "'");
                 }
             }
-            cJSON_Delete(root);
+            yyjson_doc_free(doc);
         } else {
+            yyjson_doc_free(doc);
             project_json_malformed = true;
         }
         TriggerBus::instance().set_policy(
@@ -1266,13 +1272,14 @@ public:
                 ii.folder_path = entry.path().string();
                 if (auto g = extract_string(ic, "group")) ii.group = *g;   // dispatch group for this source's triggers
                 // Optional per-instance concurrency cap (reentrant plugins only;
-                // 0/absent = unlimited). cJSON for the numeric field.
-                if (cJSON* iroot = cJSON_Parse(ic.c_str())) {
-                    if (cJSON* k = cJSON_GetObjectItem(iroot, "max_concurrency");
-                        k && cJSON_IsNumber(k) && k->valuedouble > 0) {
-                        ii.max_concurrency = (int)k->valuedouble;
+                // 0/absent = unlimited). Parse JSON for the numeric field.
+                if (yyjson_doc* idoc = yyjson_read(ic.c_str(), ic.size(), 0)) {
+                    yyjson_val* iroot = yyjson_doc_get_root(idoc);
+                    if (yyjson_val* k = iroot ? yyjson_obj_get(iroot, "max_concurrency") : nullptr;
+                        k && yyjson_is_num(k) && yyjson_get_num(k) > 0) {
+                        ii.max_concurrency = (int)yyjson_get_num(k);
                     }
-                    cJSON_Delete(iroot);
+                    yyjson_doc_free(idoc);
                 }
                 // Auto-load the plugin if not yet loaded
                 auto pit = plugins_.find(*plugin);

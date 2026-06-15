@@ -11,6 +11,12 @@ import {
     withBackend, compileScript, scriptPath, randomPort, Client
 } from './helpers/client.mjs';
 
+// In continuous mode the worker streams `vars` frames that can arrive before a
+// command's `rsp` ack; loop past them to the rsp.
+async function ackRsp(c, ms = 90000) {
+    for (;;) { const m = await c.nextNonLog(ms); if (m.type === 'rsp') return m; }
+}
+
 // ---------------------------------------------------------------
 // 1. Malformed JSON — backend stays alive
 // ---------------------------------------------------------------
@@ -139,7 +145,7 @@ test('double start is handled gracefully', { timeout: 90000 }, async () => {
 
         // First start
         c.send({ type: 'cmd', id: 1, name: 'start', args: { fps: 5 } });
-        const r1 = await c.nextNonLog();
+        const r1 = await ackRsp(c);
         assert.equal(r1.ok, true, 'first start ok');
 
         await sleep(300);
@@ -147,7 +153,7 @@ test('double start is handled gracefully', { timeout: 90000 }, async () => {
 
         // Second start — should not crash
         c.send({ type: 'cmd', id: 2, name: 'start', args: { fps: 5 } });
-        const r2 = await c.nextNonLog();
+        const r2 = await ackRsp(c);
         // May return ok:true (restart) or ok:true with already:true
         // Either is acceptable as long as no crash
         assert.equal(r2.type, 'rsp', 'should get a response');
@@ -157,11 +163,11 @@ test('double start is handled gracefully', { timeout: 90000 }, async () => {
 
         // Stop and verify backend alive
         c.send({ type: 'cmd', id: 3, name: 'stop' });
-        const sr = await c.nextNonLog();
+        const sr = await ackRsp(c);
         assert.equal(sr.ok, true, 'stop ok after double start');
 
         c.send({ type: 'cmd', id: 4, name: 'ping' });
-        const pr = await c.nextNonLog();
+        const pr = await ackRsp(c);
         assert.equal(pr.ok, true, 'backend alive after double start');
     });
 });

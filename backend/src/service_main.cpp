@@ -30,7 +30,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include <cJSON.h>
+#include <yyjson.h>
 #include <xi/xi.hpp>
 #include <xi/xi_image.hpp>
 #include <xi/xi_cli_args.hpp>
@@ -105,7 +105,7 @@ using xi::seh_translator;
 // What this does NOT see: data the script pulls out of a Record into a plain
 // C++ / cv::Mat var, computes on, and feeds back — once it leaves a Record its
 // provenance is gone (taint-tracking through OpenCV is infeasible). So image
-// edges are accurate; scalar/cJSON flow through script math is not traced.
+// edges are accurate; scalar/JSON flow through script math is not traced.
 // TODO(linux): plain STL — already portable.
 struct GraphCall {
     std::string              instance;
@@ -709,11 +709,13 @@ static std::string read_toolchain_override_(const std::string& folder, const cha
     if (!in) return {};
     std::stringstream ss; ss << in.rdbuf();
     std::string out;
-    if (cJSON* root = cJSON_Parse(ss.str().c_str())) {
-        if (cJSON* tc = cJSON_GetObjectItem(root, "toolchain"); tc && cJSON_IsObject(tc))
-            if (cJSON* k = cJSON_GetObjectItem(tc, field); k && cJSON_IsString(k) && k->valuestring)
-                out = k->valuestring;
-        cJSON_Delete(root);
+    std::string s = ss.str();
+    if (yyjson_doc* doc = yyjson_read(s.c_str(), s.size(), 0)) {
+        yyjson_val* root = yyjson_doc_get_root(doc);
+        if (yyjson_val* tc = yyjson_obj_get(root, "toolchain"); tc && yyjson_is_obj(tc))
+            if (yyjson_val* k = yyjson_obj_get(tc, field); k && yyjson_is_str(k) && yyjson_get_str(k))
+                out = yyjson_get_str(k);
+        yyjson_doc_free(doc);
     }
     return out;
 }
@@ -838,29 +840,35 @@ static bool write_toolchain_override_(const std::string& folder, const std::stri
     if (!in) { err = "cannot read project.json"; return false; }
     std::stringstream ss; ss << in.rdbuf();
     in.close();
-    cJSON* root = cJSON_Parse(ss.str().c_str());
-    if (!root) { err = "project.json is not valid JSON"; return false; }
-    cJSON* tc = cJSON_GetObjectItem(root, "toolchain");
-    if (!tc || !cJSON_IsObject(tc)) {
-        cJSON_DeleteItemFromObject(root, "toolchain");  // drop any non-object
-        tc = cJSON_AddObjectToObject(root, "toolchain");
+    std::string src = ss.str();
+    yyjson_doc* idoc = yyjson_read(src.c_str(), src.size(), 0);
+    if (!idoc) { err = "project.json is not valid JSON"; return false; }
+    // yyjson read DOM is immutable — copy to a mutable doc to edit in place.
+    yyjson_mut_doc* d = yyjson_doc_mut_copy(idoc, NULL);
+    yyjson_doc_free(idoc);
+    if (!d) { err = "project.json is not valid JSON"; return false; }
+    yyjson_mut_val* root = yyjson_mut_doc_get_root(d);
+    yyjson_mut_val* tc = root ? yyjson_mut_obj_get(root, "toolchain") : nullptr;
+    if (!tc || !yyjson_mut_is_obj(tc)) {
+        yyjson_mut_obj_remove_str(root, "toolchain");  // drop any non-object
+        tc = yyjson_mut_obj_add_obj(d, root, "toolchain");
     }
-    if (value.empty()) cJSON_DeleteItemFromObject(tc, field.c_str());
+    if (value.empty()) yyjson_mut_obj_remove_str(tc, field.c_str());
     else {
-        cJSON_DeleteItemFromObject(tc, field.c_str());
-        cJSON_AddStringToObject(tc, field.c_str(), value.c_str());
+        yyjson_mut_obj_remove_str(tc, field.c_str());
+        yyjson_mut_obj_add_strcpy(d, tc, field.c_str(), value.c_str());
     }
     // Drop an emptied toolchain object so we don't leave "toolchain":{} noise.
-    if (cJSON_GetArraySize(tc) == 0) cJSON_DeleteItemFromObject(root, "toolchain");
-    char* printed = cJSON_Print(root);
+    if (yyjson_mut_obj_size(tc) == 0) yyjson_mut_obj_remove_str(root, "toolchain");
+    char* printed = yyjson_mut_write(d, YYJSON_WRITE_PRETTY, NULL);
     bool ok = false;
     if (printed) {
         std::ofstream o(pj.string(), std::ios::binary | std::ios::trunc);
         if (o) { o << printed << "\n"; ok = true; }
         else err = "cannot write project.json";
-        cJSON_free(printed);
+        free(printed);
     } else err = "failed to serialize project.json";
-    cJSON_Delete(root);
+    yyjson_mut_doc_free(d);
     return ok;
 }
 
@@ -890,8 +898,10 @@ static void read_script_deps_(const std::string& folder,
     std::ifstream in((fs::path(folder) / "project.json").string());
     if (!in) return;
     std::stringstream ss; ss << in.rdbuf();
-    cJSON* root = cJSON_Parse(ss.str().c_str());
-    if (!root) return;
+    std::string src = ss.str();
+    yyjson_doc* doc = yyjson_read(src.c_str(), src.size(), 0);
+    if (!doc) return;
+    yyjson_val* root = yyjson_doc_get_root(doc);
     auto resolve = [&](const char* s) -> std::string {
         fs::path p(s);
         if (p.is_absolute()) return p.string();
@@ -899,20 +909,22 @@ static void read_script_deps_(const std::string& folder,
         return (fs::path(folder) / p).lexically_normal().string();
     };
     auto pull = [&](const char* key, std::vector<std::string>& out) {
-        cJSON* arr = cJSON_GetObjectItem(root, key);
-        if (!arr || !cJSON_IsArray(arr)) return;
-        cJSON* it = nullptr;
-        cJSON_ArrayForEach(it, arr)
-            if (cJSON_IsString(it) && it->valuestring && *it->valuestring)
-                out.push_back(resolve(it->valuestring));
+        yyjson_val* arr = yyjson_obj_get(root, key);
+        if (!arr || !yyjson_is_arr(arr)) return;
+        size_t _i, _n; yyjson_val* it;
+        yyjson_arr_foreach(arr, _i, _n, it) {
+            const char* s = yyjson_get_str(it);
+            if (yyjson_is_str(it) && s && *s)
+                out.push_back(resolve(s));
+        }
     };
     pull("include_dirs", include_dirs);
     pull("link_libs", link_libs);
     // Opt-in OpenMP for the script compile. 0/absent = off, N>0 = on capped to N,
     // -1 = on uncapped. Adds /openmp (+ cap macro) in the compiler.
-    cJSON* omp = cJSON_GetObjectItem(root, "openmp_max_threads");
-    if (omp && cJSON_IsNumber(omp)) openmp_max_threads = omp->valueint;
-    cJSON_Delete(root);
+    yyjson_val* omp = yyjson_obj_get(root, "openmp_max_threads");
+    if (omp && yyjson_is_num(omp)) openmp_max_threads = yyjson_get_int(omp);
+    yyjson_doc_free(doc);
 }
 
 // Put the open project's folder on the process DLL search path so a script's
@@ -1772,18 +1784,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         bool want_all = parsed->args_json.find("\"all\":true") != std::string::npos;
         std::unordered_set<std::string> names;
         if (!want_all) {
-            // Parse the names array. cJSON is simpler than hand-rolled here.
-            cJSON* root = cJSON_Parse(parsed->args_json.c_str());
-            if (root) {
-                cJSON* arr = cJSON_GetObjectItem(root, "names");
-                if (cJSON_IsArray(arr)) {
-                    int n = cJSON_GetArraySize(arr);
-                    for (int i = 0; i < n; ++i) {
-                        cJSON* it = cJSON_GetArrayItem(arr, i);
-                        if (cJSON_IsString(it) && it->valuestring) names.insert(it->valuestring);
+            // Parse the names array. yyjson is simpler than hand-rolled here.
+            yyjson_doc* doc = yyjson_read(parsed->args_json.c_str(),
+                                          parsed->args_json.size(), 0);
+            if (doc) {
+                yyjson_val* root = yyjson_doc_get_root(doc);
+                yyjson_val* arr = yyjson_obj_get(root, "names");
+                if (yyjson_is_arr(arr)) {
+                    size_t _i, _n; yyjson_val* it;
+                    yyjson_arr_foreach(arr, _i, _n, it) {
+                        const char* s = yyjson_get_str(it);
+                        if (yyjson_is_str(it) && s) names.insert(s);
                     }
                 }
-                cJSON_Delete(root);
+                yyjson_doc_free(doc);
             }
         }
         {
@@ -1859,35 +1873,33 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // back runs with consistent variant state. A successful run
         // leaves the script in variant-B state; the caller restores
         // their own default with a follow-up set_param / load_project.
-        auto apply_variant = [&](cJSON* root) -> bool {
+        auto apply_variant = [&](yyjson_val* root) -> bool {
             if (!root || !g_script.ok()) return false;
-            cJSON* params = cJSON_GetObjectItem(root, "params");
-            if (cJSON_IsArray(params) && g_script.set_param) {
-                int n = cJSON_GetArraySize(params);
-                for (int i = 0; i < n; ++i) {
-                    cJSON* p = cJSON_GetArrayItem(params, i);
-                    cJSON* nm = cJSON_GetObjectItem(p, "name");
-                    cJSON* vv = cJSON_GetObjectItem(p, "value");
-                    if (!cJSON_IsString(nm) || !vv) continue;
-                    char* val = cJSON_PrintUnformatted(vv);
-                    if (val) { g_script.set_param(nm->valuestring, val); cJSON_free(val); }
+            yyjson_val* params = yyjson_obj_get(root, "params");
+            if (yyjson_is_arr(params) && g_script.set_param) {
+                size_t _i, _n; yyjson_val* p;
+                yyjson_arr_foreach(params, _i, _n, p) {
+                    yyjson_val* nm = yyjson_obj_get(p, "name");
+                    yyjson_val* vv = yyjson_obj_get(p, "value");
+                    if (!yyjson_is_str(nm) || !vv) continue;
+                    char* val = yyjson_val_write(vv, 0, NULL);
+                    if (val) { g_script.set_param(yyjson_get_str(nm), val); free(val); }
                 }
             }
-            cJSON* insts = cJSON_GetObjectItem(root, "instances");
-            if (cJSON_IsArray(insts)) {
-                int n = cJSON_GetArraySize(insts);
-                for (int i = 0; i < n; ++i) {
-                    cJSON* it = cJSON_GetArrayItem(insts, i);
-                    cJSON* nm = cJSON_GetObjectItem(it, "name");
-                    cJSON* df = cJSON_GetObjectItem(it, "def");
-                    if (!cJSON_IsString(nm) || !df) continue;
-                    char* def_str = cJSON_PrintUnformatted(df);
+            yyjson_val* insts = yyjson_obj_get(root, "instances");
+            if (yyjson_is_arr(insts)) {
+                size_t _i, _n; yyjson_val* it;
+                yyjson_arr_foreach(insts, _i, _n, it) {
+                    yyjson_val* nm = yyjson_obj_get(it, "name");
+                    yyjson_val* df = yyjson_obj_get(it, "def");
+                    if (!yyjson_is_str(nm) || !df) continue;
+                    char* def_str = yyjson_val_write(df, 0, NULL);
                     if (!def_str) continue;
-                    auto inst = xi::InstanceRegistry::instance().find(nm->valuestring);
+                    auto inst = xi::InstanceRegistry::instance().find(yyjson_get_str(nm));
                     if (inst) inst->set_def(def_str);
                     else if (g_script.set_instance_def)
-                        g_script.set_instance_def(nm->valuestring, def_str);
-                    cJSON_free(def_str);
+                        g_script.set_instance_def(yyjson_get_str(nm), def_str);
+                    free(def_str);
                 }
             }
             return true;
@@ -1904,21 +1916,23 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                          n = g_script.snapshot(buf.data(), (int)buf.size()); }
             return n > 0 ? std::string(buf.data(), (size_t)n) : std::string("[]");
         };
-        cJSON* root = cJSON_Parse(parsed->args_json.c_str());
+        yyjson_doc* doc = yyjson_read(parsed->args_json.c_str(),
+                                      parsed->args_json.size(), 0);
+        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
         if (!root) { send_rsp_err(srv, id, "invalid args JSON"); return; }
-        cJSON* a = cJSON_GetObjectItem(root, "a");
-        cJSON* b = cJSON_GetObjectItem(root, "b");
-        if (!a || !b) { cJSON_Delete(root); send_rsp_err(srv, id, "need args.a and args.b"); return; }
+        yyjson_val* a = yyjson_obj_get(root, "a");
+        yyjson_val* b = yyjson_obj_get(root, "b");
+        if (!a || !b) { yyjson_doc_free(doc); send_rsp_err(srv, id, "need args.a and args.b"); return; }
         std::string snap_a, snap_b;
         {
             std::lock_guard<std::mutex> lk(g_script_mu);
-            if (!g_script.ok()) { cJSON_Delete(root); send_rsp_err(srv, id, "no script loaded"); return; }
+            if (!g_script.ok()) { yyjson_doc_free(doc); send_rsp_err(srv, id, "no script loaded"); return; }
             apply_variant(a);
             snap_a = run_and_snapshot();
             apply_variant(b);
             snap_b = run_and_snapshot();
         }
-        cJSON_Delete(root);
+        yyjson_doc_free(doc);
         std::string out = "{\"a\":{\"vars\":";
         out += snap_a;
         out += "},\"b\":{\"vars\":";
@@ -2830,29 +2844,29 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         std::string content = xi::project::read_text(*path);
         if (content.empty()) { send_rsp_err(srv, id, "failed to read " + *path); return; }
 
-        // Use cJSON to parse the project file properly
-        cJSON* root = cJSON_Parse(content.c_str());
+        // Use yyjson to parse the project file properly
+        yyjson_doc* doc = yyjson_read(content.c_str(), content.size(), 0);
+        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
         if (!root) { send_rsp_err(srv, id, "invalid JSON in project file"); return; }
 
         // Restore params
-        cJSON* params = cJSON_GetObjectItem(root, "params");
-        if (params && cJSON_IsArray(params)) {
-            int n = cJSON_GetArraySize(params);
-            for (int i = 0; i < n; ++i) {
-                cJSON* item = cJSON_GetArrayItem(params, i);
-                cJSON* nm = cJSON_GetObjectItem(item, "name");
-                cJSON* val = cJSON_GetObjectItem(item, "value");
-                if (nm && cJSON_IsString(nm) && val) {
+        yyjson_val* params = yyjson_obj_get(root, "params");
+        if (params && yyjson_is_arr(params)) {
+            size_t _i, _n; yyjson_val* item;
+            yyjson_arr_foreach(params, _i, _n, item) {
+                yyjson_val* nm = yyjson_obj_get(item, "name");
+                yyjson_val* val = yyjson_obj_get(item, "value");
+                if (nm && yyjson_is_str(nm) && val) {
                     char vbuf[64] = {};
-                    if (cJSON_IsNumber(val))     std::snprintf(vbuf, sizeof(vbuf), "%g", val->valuedouble);
-                    else if (cJSON_IsBool(val))  std::snprintf(vbuf, sizeof(vbuf), "%s", cJSON_IsTrue(val) ? "true" : "false");
+                    if (yyjson_is_num(val))      std::snprintf(vbuf, sizeof(vbuf), "%g", yyjson_get_num(val));
+                    else if (yyjson_is_bool(val)) std::snprintf(vbuf, sizeof(vbuf), "%s", yyjson_get_bool(val) ? "true" : "false");
                     else continue;
                     // Try script params first, then backend params
                     std::lock_guard<std::mutex> lk(g_script_mu);
                     if (g_script.ok() && g_script.set_param) {
-                        g_script.set_param(nm->valuestring, vbuf);
+                        g_script.set_param(yyjson_get_str(nm), vbuf);
                     } else {
-                        auto* p = xi::ParamRegistry::instance().find(nm->valuestring);
+                        auto* p = xi::ParamRegistry::instance().find(yyjson_get_str(nm));
                         if (p) p->set_from_json(vbuf);
                     }
                 }
@@ -2860,23 +2874,22 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
 
         // Restore instance configs
-        cJSON* instances = cJSON_GetObjectItem(root, "instances");
-        if (instances && cJSON_IsArray(instances)) {
-            int n = cJSON_GetArraySize(instances);
-            for (int i = 0; i < n; ++i) {
-                cJSON* item = cJSON_GetArrayItem(instances, i);
-                cJSON* nm = cJSON_GetObjectItem(item, "name");
-                cJSON* def = cJSON_GetObjectItem(item, "def");
-                if (nm && cJSON_IsString(nm) && def) {
-                    char* def_str = cJSON_PrintUnformatted(def);
-                    auto inst = xi::InstanceRegistry::instance().find(nm->valuestring);
+        yyjson_val* instances = yyjson_obj_get(root, "instances");
+        if (instances && yyjson_is_arr(instances)) {
+            size_t _i, _n; yyjson_val* item;
+            yyjson_arr_foreach(instances, _i, _n, item) {
+                yyjson_val* nm = yyjson_obj_get(item, "name");
+                yyjson_val* def = yyjson_obj_get(item, "def");
+                if (nm && yyjson_is_str(nm) && def) {
+                    char* def_str = yyjson_val_write(def, 0, NULL);
+                    auto inst = xi::InstanceRegistry::instance().find(yyjson_get_str(nm));
                     if (inst) inst->set_def(def_str);
-                    cJSON_free(def_str);
+                    free(def_str);
                 }
             }
         }
 
-        cJSON_Delete(root);
+        yyjson_doc_free(doc);
         send_rsp_ok(srv, id);
     } else if (name == "preview_instance") {
         // Grab the latest frame from a named ImageSource instance,
@@ -3544,7 +3557,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xi::TriggerPolicy pol = xi::TriggerPolicy::Any;
         if      (pol_str && *pol_str == "all_required")     pol = xi::TriggerPolicy::AllRequired;
         else if (pol_str && *pol_str == "leader_followers") pol = xi::TriggerPolicy::LeaderFollowers;
-        // Parse `required` properly (cJSON, not substring). The old
+        // Parse `required` properly (yyjson, not substring). The old
         // substring scan looked for `"required":[` (no space) and
         // silently fell back to an empty list when the args came from
         // Python's default `json.dumps(...)` which emits `"required":
@@ -3552,17 +3565,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // project.json by save_project_locked() — silent destruction
         // of the user's policy.
         std::vector<std::string> required;
-        if (cJSON* root = cJSON_Parse(parsed->args_json.c_str())) {
-            if (cJSON* arr = cJSON_GetObjectItem(root, "required");
-                arr && cJSON_IsArray(arr)) {
-                cJSON* it;
-                cJSON_ArrayForEach(it, arr) {
-                    if (cJSON_IsString(it) && it->valuestring) {
-                        required.emplace_back(it->valuestring);
+        if (yyjson_doc* doc = yyjson_read(parsed->args_json.c_str(),
+                                          parsed->args_json.size(), 0)) {
+            yyjson_val* root = yyjson_doc_get_root(doc);
+            if (yyjson_val* arr = yyjson_obj_get(root, "required");
+                arr && yyjson_is_arr(arr)) {
+                size_t _i, _n; yyjson_val* it;
+                yyjson_arr_foreach(arr, _i, _n, it) {
+                    const char* s = yyjson_get_str(it);
+                    if (yyjson_is_str(it) && s) {
+                        required.emplace_back(s);
                     }
                 }
             }
-            cJSON_Delete(root);
+            yyjson_doc_free(doc);
         }
         auto leader = xp::get_string_field(parsed->args_json, "leader").value_or("");
         auto win    = xp::get_number_field(parsed->args_json, "window_ms").value_or(100);

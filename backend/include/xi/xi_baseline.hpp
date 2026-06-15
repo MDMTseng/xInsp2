@@ -13,7 +13,7 @@
 
 #include "xi_abi.h"
 #include "xi_image_pool.hpp"
-#include "cJSON.h"
+#include "yyjson.h"
 
 #ifdef _WIN32
   #ifndef NOMINMAX
@@ -95,9 +95,9 @@ inline bool t_get_def_returns_valid_json(const PluginSymbols& s, const xi_host_a
     int n = s.get_def(inst, buf, sizeof(buf));
     s.destroy(inst);
     if (n < 0) { err = "get_def wanted " + std::to_string(-n) + " bytes"; return false; }
-    cJSON* p = cJSON_Parse(buf);
+    yyjson_doc* p = yyjson_read(buf, std::strlen(buf), 0);
     if (!p) { err = "get_def output is not valid JSON"; return false; }
-    cJSON_Delete(p);
+    yyjson_doc_free(p);
     return true;
 }
 
@@ -128,9 +128,9 @@ inline bool t_exchange_valid_json(const PluginSymbols& s, const xi_host_api* h, 
     s.destroy(inst);
     if (n < 0) return true; // size request is fine
     if (n == 0) return true; // empty is fine
-    cJSON* p = cJSON_Parse(rsp);
+    yyjson_doc* p = yyjson_read(rsp, std::strlen(rsp), 0);
     if (!p) { err = "exchange response is not valid JSON"; return false; }
-    cJSON_Delete(p);
+    yyjson_doc_free(p);
     return true;
 }
 

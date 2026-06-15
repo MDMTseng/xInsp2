@@ -15,16 +15,17 @@
 // against crafted be.log + .json fixtures.
 //
 // Deliberately portable: only <string>/<fstream>/<sstream>/<regex>/<filesystem>
-// + cJSON (already a backend dep). No Win32, so it compiles unchanged on Linux
+// + yyjson (already a backend dep). No Win32, so it compiles unchanged on Linux
 // (see docs/design/linux-port.md). The FE simply forwards its &SafeStateEvent.
 //
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <regex>
 #include <sstream>
 #include <string>
 
-#include <cJSON.h>
+#include <yyjson.h>
 
 #include <xi/xi_safe_state.hpp>
 
@@ -65,33 +66,36 @@ inline void enrich_from_crash_report(const std::string& be_log, SafeStateEvent& 
     std::ifstream jf(json_path);
     if (!jf) return;
     std::stringstream js; js << jf.rdbuf();
-    cJSON* root = cJSON_Parse(js.str().c_str());
-    if (!root) return;
-    if (cJSON* exc = cJSON_GetObjectItem(root, "exception")) {
-        if (cJSON* nm = cJSON_GetObjectItem(exc, "name"); cJSON_IsString(nm))
-            ev.exception_name = nm->valuestring;
-        if (cJSON* md = cJSON_GetObjectItem(exc, "module"); cJSON_IsString(md))
-            ev.faulting_module = md->valuestring;
+    std::string json_text = js.str();
+    yyjson_doc* doc = yyjson_read(json_text.c_str(), json_text.size(), 0);
+    yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    if (!root) { yyjson_doc_free(doc); return; }
+    if (yyjson_val* exc = yyjson_obj_get(root, "exception")) {
+        if (yyjson_val* nm = yyjson_obj_get(exc, "name"); yyjson_is_str(nm))
+            ev.exception_name = yyjson_get_str(nm);
+        if (yyjson_val* md = yyjson_obj_get(exc, "module"); yyjson_is_str(md))
+            ev.faulting_module = yyjson_get_str(md);
     }
-    if (cJSON* ctx = cJSON_GetObjectItem(root, "context")) {
-        if (cJSON* ph = cJSON_GetObjectItem(ctx, "last_phase"); cJSON_IsString(ph))
-            ev.last_phase = ph->valuestring;
+    if (yyjson_val* ctx = yyjson_obj_get(root, "context")) {
+        if (yyjson_val* ph = yyjson_obj_get(ctx, "last_phase"); yyjson_is_str(ph))
+            ev.last_phase = yyjson_get_str(ph);
     }
     // If context didn't name a phase (crash on an unmanaged thread), fall back
     // to the most informative thread breadcrumb in threads[].
     if (ev.last_phase.empty()) {
-        if (cJSON* th = cJSON_GetObjectItem(root, "threads"); cJSON_IsArray(th)) {
-            cJSON* t = nullptr;
-            cJSON_ArrayForEach(t, th) {
-                cJSON* ph = cJSON_GetObjectItem(t, "last_phase");
-                if (cJSON_IsString(ph) && ph->valuestring && ph->valuestring[0]) {
-                    ev.last_phase = ph->valuestring;
-                    if (std::string(ph->valuestring) == "inspect") break;  // prefer inspect
+        if (yyjson_val* th = yyjson_obj_get(root, "threads"); yyjson_is_arr(th)) {
+            size_t _i, _n; yyjson_val* t;
+            yyjson_arr_foreach(th, _i, _n, t) {
+                yyjson_val* ph = yyjson_obj_get(t, "last_phase");
+                const char* phs = yyjson_get_str(ph);
+                if (yyjson_is_str(ph) && phs && phs[0]) {
+                    ev.last_phase = phs;
+                    if (std::string(phs) == "inspect") break;  // prefer inspect
                 }
             }
         }
     }
-    cJSON_Delete(root);
+    yyjson_doc_free(doc);
 }
 
 } // namespace xi

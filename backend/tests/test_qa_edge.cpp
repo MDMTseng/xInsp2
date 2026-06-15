@@ -145,7 +145,7 @@ int main() {
     }
 
     // CR-U4b: sibling .json CORRUPT (not valid JSON) -> report_path set, no throw,
-    // forensic fields empty (cJSON_Parse returns null, parser bails cleanly).
+    // forensic fields empty (yyjson_read returns null, parser bails cleanly).
     {
         fs::path d = scratch("u4b");
         fs::path dmp = d / "corrupt.dmp";

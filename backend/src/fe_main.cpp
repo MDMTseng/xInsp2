@@ -37,7 +37,7 @@
 #include <string>
 #include <vector>
 
-#include <cJSON.h>
+#include <yyjson.h>
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -159,14 +159,17 @@ static FeConfig load_config(int argc, char** argv) {
     if (!cfg_path.empty()) {
         std::ifstream f(cfg_path);
         std::stringstream ss; ss << f.rdbuf();
-        if (cJSON* root = cJSON_Parse(ss.str().c_str())) {
+        std::string cfg_text = ss.str();
+        yyjson_doc* doc = yyjson_read(cfg_text.c_str(), cfg_text.size(), 0);
+        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+        if (root) {
             auto str = [&](const char* k, std::string& dst) {
-                cJSON* v = cJSON_GetObjectItem(root, k);
-                if (cJSON_IsString(v) && v->valuestring) dst = v->valuestring;
+                yyjson_val* v = yyjson_obj_get(root, k);
+                if (yyjson_is_str(v) && yyjson_get_str(v)) dst = yyjson_get_str(v);
             };
             auto num = [&](const char* k, int& dst) {
-                cJSON* v = cJSON_GetObjectItem(root, k);
-                if (cJSON_IsNumber(v)) dst = (int)v->valuedouble;
+                yyjson_val* v = yyjson_obj_get(root, k);
+                if (yyjson_is_num(v)) dst = (int)yyjson_get_num(v);
             };
             str("backend", c.backend_exe);
             num("port", c.port);
@@ -178,20 +181,20 @@ static FeConfig load_config(int argc, char** argv) {
             str("crash_history", c.crash_history);
             str("preserve_dir", c.preserve_dir);
             str("status_file", c.status_file);
-            if (cJSON* pdmp = cJSON_GetObjectItem(root, "preserve_dumps"); cJSON_IsBool(pdmp))
-                c.preserve_dumps = cJSON_IsTrue(pdmp);
-            if (cJSON* wc = cJSON_GetObjectItem(root, "working_copy"); cJSON_IsBool(wc))
-                c.working_copy = cJSON_IsTrue(wc);
+            if (yyjson_val* pdmp = yyjson_obj_get(root, "preserve_dumps"); yyjson_is_bool(pdmp))
+                c.preserve_dumps = yyjson_get_bool(pdmp);
+            if (yyjson_val* wc = yyjson_obj_get(root, "working_copy"); yyjson_is_bool(wc))
+                c.working_copy = yyjson_get_bool(wc);
             num("respawn_max", c.respawn_max);
             num("respawn_reset_ms", c.respawn_reset_ms);
             num("respawn_backoff_ms", c.respawn_backoff_ms);
-            if (cJSON* pd = cJSON_GetObjectItem(root, "plugins_dirs"); cJSON_IsArray(pd)) {
-                cJSON* it = nullptr;
-                cJSON_ArrayForEach(it, pd)
-                    if (cJSON_IsString(it) && it->valuestring) c.plugins_dirs.push_back(it->valuestring);
+            if (yyjson_val* pd = yyjson_obj_get(root, "plugins_dirs"); yyjson_is_arr(pd)) {
+                size_t _i, _n; yyjson_val* it;
+                yyjson_arr_foreach(pd, _i, _n, it)
+                    if (yyjson_is_str(it) && yyjson_get_str(it)) c.plugins_dirs.push_back(yyjson_get_str(it));
             }
-            cJSON_Delete(root);
         }
+        yyjson_doc_free(doc);
     }
 
     // CLI overrides.

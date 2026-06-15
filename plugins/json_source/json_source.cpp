@@ -11,8 +11,9 @@
 //
 
 #include <xi/xi_abi.hpp>
-#include "cJSON.h"   // this plugin does raw cJSON path-building internally
+#include "yyjson.h"   // this plugin does raw yyjson path-building internally
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -22,10 +23,11 @@ namespace {
 //   ".a.b[2].c"  → object→object→array[idx 2]→object
 //   "[1].x"      → array[idx 1]→object
 //   "a.b.c"      → same as ".a.b.c"
-// `value` is duplicated; caller still owns it.
-bool json_set_path(cJSON* root, const char* path, const cJSON* value) {
-    if (!root || !path || !value) return false;
-    cJSON* cur = path[0] && (path[0] != '.' && path[0] != '[') ? root : root;
+// `value` is deep-copied into `doc`; caller still owns it.
+bool json_set_path(yyjson_mut_doc* doc, yyjson_mut_val* root,
+                   const char* path, yyjson_mut_val* value) {
+    if (!doc || !root || !path || !value) return false;
+    yyjson_mut_val* cur = root;
     const char* p = path;
 
     auto skip_dot = [](const char*& s) { if (*s == '.') ++s; };
@@ -60,18 +62,17 @@ bool json_set_path(cJSON* root, const char* path, const cJSON* value) {
         bool is_terminal = (*peek == 0);
 
         if (is_terminal) {
-            cJSON* dup = cJSON_Duplicate(value, 1);
+            yyjson_mut_val* dup = yyjson_mut_val_mut_copy(doc, value);
             if (!dup) return false;
             if (is_index) {
-                if (!cJSON_IsArray(cur)) { cJSON_Delete(dup); return false; }
-                int sz = cJSON_GetArraySize(cur);
-                while (sz < idx) { cJSON_AddItemToArray(cur, cJSON_CreateNull()); ++sz; }
-                if (sz == idx) cJSON_AddItemToArray(cur, dup);
-                else           cJSON_ReplaceItemInArray(cur, idx, dup);
+                if (!yyjson_mut_is_arr(cur)) return false;
+                int sz = (int)yyjson_mut_arr_size(cur);
+                while (sz < idx) { yyjson_mut_arr_append(cur, yyjson_mut_null(doc)); ++sz; }
+                if (sz == idx) yyjson_mut_arr_append(cur, dup);
+                else           yyjson_mut_arr_replace(cur, (size_t)idx, dup);
             } else {
-                if (!cJSON_IsObject(cur)) { cJSON_Delete(dup); return false; }
-                cJSON_DeleteItemFromObject(cur, key);
-                cJSON_AddItemToObject(cur, key, dup);
+                if (!yyjson_mut_is_obj(cur)) return false;
+                yyjson_mut_obj_put(cur, yyjson_mut_strcpy(doc, key), dup);
             }
             return true;
         }
@@ -82,21 +83,21 @@ bool json_set_path(cJSON* root, const char* path, const cJSON* value) {
         while (*next == '.') ++next;
         bool next_is_index = (*next == '[');
 
-        cJSON* child = nullptr;
+        yyjson_mut_val* child = nullptr;
         if (is_index) {
-            if (!cJSON_IsArray(cur)) return false;
-            int sz = cJSON_GetArraySize(cur);
+            if (!yyjson_mut_is_arr(cur)) return false;
+            int sz = (int)yyjson_mut_arr_size(cur);
             while (sz <= idx) {
-                cJSON_AddItemToArray(cur, next_is_index ? cJSON_CreateArray() : cJSON_CreateObject());
+                yyjson_mut_arr_append(cur, next_is_index ? yyjson_mut_arr(doc) : yyjson_mut_obj(doc));
                 ++sz;
             }
-            child = cJSON_GetArrayItem(cur, idx);
+            child = yyjson_mut_arr_get(cur, (size_t)idx);
         } else {
-            if (!cJSON_IsObject(cur)) return false;
-            child = cJSON_GetObjectItem(cur, key);
+            if (!yyjson_mut_is_obj(cur)) return false;
+            child = yyjson_mut_obj_get(cur, key);
             if (!child) {
-                child = next_is_index ? cJSON_CreateArray() : cJSON_CreateObject();
-                cJSON_AddItemToObject(cur, key, child);
+                child = next_is_index ? yyjson_mut_arr(doc) : yyjson_mut_obj(doc);
+                yyjson_mut_obj_add_val(doc, cur, key, child);
             }
         }
         cur = child;
@@ -105,11 +106,11 @@ bool json_set_path(cJSON* root, const char* path, const cJSON* value) {
 }
 
 // Apply one {key, value} patch to dst. Returns true if applied.
-bool apply_patch(cJSON* dst, cJSON* patch) {
-    cJSON* k = cJSON_GetObjectItem(patch, "key");
-    cJSON* v = cJSON_GetObjectItem(patch, "value");
-    if (!k || !cJSON_IsString(k) || !v) return false;
-    return json_set_path(dst, k->valuestring, v);
+bool apply_patch(yyjson_mut_doc* doc, yyjson_mut_val* dst, yyjson_mut_val* patch) {
+    yyjson_mut_val* k = yyjson_mut_obj_get(patch, "key");
+    yyjson_mut_val* v = yyjson_mut_obj_get(patch, "value");
+    if (!k || !yyjson_mut_is_str(k) || !v) return false;
+    return json_set_path(doc, dst, yyjson_mut_get_str(k), v);
 }
 
 } // namespace
@@ -124,75 +125,92 @@ public:
     //   batch:         { "patches": [ { "key": ".x", "value": 1 }, ... ] }
     // The stored JSON is not modified — only the emitted Record is.
     xi::Record process(const xi::Record& input) override {
-        cJSON* base = cJSON_Parse(stored_json_.c_str());
-        if (!base) base = cJSON_CreateObject();
+        // Parse the stored JSON into a mutable doc we can patch.
+        yyjson_doc* base_rd = yyjson_read(stored_json_.c_str(), stored_json_.size(), 0);
+        yyjson_mut_doc* doc = base_rd ? yyjson_doc_mut_copy(base_rd, NULL)
+                                      : yyjson_mut_doc_new(NULL);
+        if (base_rd) yyjson_doc_free(base_rd);
+        yyjson_mut_val* base = doc ? yyjson_mut_doc_get_root(doc) : nullptr;
+        if (!base) { base = yyjson_mut_obj(doc); yyjson_mut_doc_set_root(doc, base); }
 
         // Pull patches from input (re-parse via JSON since Record doesn't
-        // expose its cJSON* directly).
+        // expose its value directly). Mutable-copy into `doc` so patch values
+        // can be transplanted into base.
         std::string in_json = input.data_json();
-        cJSON* in = cJSON_Parse(in_json.c_str());
-        if (in) {
-            cJSON* batch = cJSON_GetObjectItem(in, "patches");
-            if (batch && cJSON_IsArray(batch)) {
-                cJSON* it = batch->child;
-                while (it) { apply_patch(base, it); it = it->next; }
-            } else if (cJSON_GetObjectItem(in, "key")) {
-                apply_patch(base, in);
+        yyjson_doc* in_rd = yyjson_read(in_json.c_str(), in_json.size(), 0);
+        yyjson_val* in_root = in_rd ? yyjson_doc_get_root(in_rd) : nullptr;
+        if (in_root) {
+            yyjson_mut_val* in = yyjson_val_mut_copy(doc, in_root);
+            yyjson_mut_val* batch = yyjson_mut_obj_get(in, "patches");
+            if (batch && yyjson_mut_is_arr(batch)) {
+                size_t _i, _n; yyjson_mut_val* it;
+                yyjson_mut_arr_foreach(batch, _i, _n, it) { apply_patch(doc, base, it); }
+            } else if (yyjson_mut_obj_get(in, "key")) {
+                apply_patch(doc, base, in);
             }
-            cJSON_Delete(in);
         }
+        if (in_rd) yyjson_doc_free(in_rd);
 
-        // Hand the built cJSON tree to a yyjson Record via a JSON round-trip.
-        char* s = cJSON_PrintUnformatted(base);
+        // Hand the built tree to a yyjson Record via a JSON round-trip.
+        char* s = doc ? yyjson_mut_write(doc, 0, NULL) : nullptr;
         xi::Record result = s ? xi::Record::from_json_bytes((const uint8_t*)s, std::strlen(s))
                               : xi::Record();
-        if (s) cJSON_free(s);
-        cJSON_Delete(base);
+        if (s) free(s);
+        if (doc) yyjson_mut_doc_free(doc);
         return result;
     }
 
     std::string exchange(const std::string& cmd) override {
-        cJSON* p = cJSON_Parse(cmd.c_str());
-        if (!p) return get_def();
-        cJSON* c = cJSON_GetObjectItem(p, "command");
-        cJSON* v = cJSON_GetObjectItem(p, "value");
-        if (c && cJSON_IsString(c)) {
-            std::string command = c->valuestring;
+        yyjson_doc* doc = yyjson_read(cmd.c_str(), cmd.size(), 0);
+        yyjson_val* p = doc ? yyjson_doc_get_root(doc) : nullptr;
+        if (!p) { yyjson_doc_free(doc); return get_def(); }
+        yyjson_val* c = yyjson_obj_get(p, "command");
+        yyjson_val* v = yyjson_obj_get(p, "value");
+        if (c && yyjson_is_str(c)) {
+            std::string command = yyjson_get_str(c);
             if (command == "set_data" && v) {
-                char* s = cJSON_PrintUnformatted(v);
-                if (s) { stored_json_.assign(s); std::free(s); }
+                char* s = yyjson_val_write(v, 0, NULL);
+                if (s) { stored_json_.assign(s); free(s); }
             } else if (command == "reset") {
                 stored_json_ = "{}";
             }
             // get_status falls through to get_def() below
         }
-        cJSON_Delete(p);
+        yyjson_doc_free(doc);
         return get_def();
     }
 
     std::string get_def() const override {
         // get_def returns wrapper { data: <stored> } so the UI knows the
         // value is the user JSON, not part of the def itself.
-        cJSON* root = cJSON_CreateObject();
-        cJSON* data = cJSON_Parse(stored_json_.c_str());
-        if (!data) data = cJSON_CreateObject();
-        cJSON_AddItemToObject(root, "data", data);
-        char* s = cJSON_PrintUnformatted(root);
+        yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val* root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+
+        yyjson_doc* data_rd = yyjson_read(stored_json_.c_str(), stored_json_.size(), 0);
+        yyjson_val* data_root = data_rd ? yyjson_doc_get_root(data_rd) : nullptr;
+        yyjson_mut_val* data = data_root ? yyjson_val_mut_copy(doc, data_root)
+                                         : yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "data", data);
+
+        char* s = yyjson_mut_write(doc, 0, NULL);
         std::string out = s ? s : "{\"data\":{}}";
-        std::free(s);
-        cJSON_Delete(root);
+        if (s) free(s);
+        if (data_rd) yyjson_doc_free(data_rd);
+        yyjson_mut_doc_free(doc);
         return out;
     }
 
     bool set_def(const std::string& json) override {
-        cJSON* root = cJSON_Parse(json.c_str());
-        if (!root) return false;
-        cJSON* data = cJSON_GetObjectItem(root, "data");
+        yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
+        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+        if (!root) { yyjson_doc_free(doc); return false; }
+        yyjson_val* data = yyjson_obj_get(root, "data");
         if (data) {
-            char* s = cJSON_PrintUnformatted(data);
-            if (s) { stored_json_.assign(s); std::free(s); }
+            char* s = yyjson_val_write(data, 0, NULL);
+            if (s) { stored_json_.assign(s); free(s); }
         }
-        cJSON_Delete(root);
+        yyjson_doc_free(doc);
         return true;
     }
 

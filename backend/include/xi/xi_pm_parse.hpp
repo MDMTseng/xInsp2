@@ -7,16 +7,17 @@
 // plugin's manifest.params (validate_config_against_manifest -> OpenWarning).
 //
 // Extracted from xi_plugin_manager.hpp: these are pure, stateless functions
-// (cJSON + std lib only, no PluginManager state, no mu_), so they belong in a
+// (yyjson + std lib only, no PluginManager state, no mu_), so they belong in a
 // leaf header the manager just calls into. Behaviour is unchanged from the
 // former static members.
 //
-#include "cJSON.h"
+#include "yyjson.h"
 #include "xi_cabi_adapter.hpp"   // PluginInfo (parse_manifest result)
 #include "xi_project_model.hpp"  // OpenWarning (validation diagnostics)
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -37,7 +38,7 @@ inline bool json_flag_true(const std::string& s, const char* key) {
 // substring search which matched the key text anywhere — including
 // inside another value's string content. A plugin description
 // containing `"plugin": "evil"` would cause downstream code to load
-// `evil` instead of the actual plugin field. cJSON-based parsing
+// `evil` instead of the actual plugin field. yyjson-based parsing
 // closes that hole; only top-level object keys are honoured.
 //
 // Returns nullopt on parse failure / missing key / wrong type
@@ -48,17 +49,18 @@ inline bool json_flag_true(const std::string& s, const char* key) {
 // helper expected quotes for numeric fields).
 inline std::optional<std::string> extract_string(const std::string& json,
                                                   const std::string& key) {
-    cJSON* root = cJSON_Parse(json.c_str());
-    if (!root) return std::nullopt;
+    yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
+    yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    if (!root) { if (doc) yyjson_doc_free(doc); return std::nullopt; }
     std::optional<std::string> out;
-    cJSON* k = cJSON_GetObjectItem(root, key.c_str());
+    yyjson_val* k = yyjson_obj_get(root, key.c_str());
     if (k) {
-        if (cJSON_IsString(k) && k->valuestring) {
-            out = std::string(k->valuestring);
-        } else if (cJSON_IsNumber(k)) {
+        if (yyjson_is_str(k) && yyjson_get_str(k)) {
+            out = std::string(yyjson_get_str(k));
+        } else if (yyjson_is_num(k)) {
             // Prefer integer formatting if the value is integral
             // — many call sites stoi() the result.
-            double v = k->valuedouble;
+            double v = yyjson_get_num(k);
             if (v == (double)(long long)v) {
                 out = std::to_string((long long)v);
             } else {
@@ -66,11 +68,11 @@ inline std::optional<std::string> extract_string(const std::string& json,
                 std::snprintf(buf, sizeof(buf), "%.17g", v);
                 out = std::string(buf);
             }
-        } else if (cJSON_IsBool(k)) {
-            out = std::string(cJSON_IsTrue(k) ? "true" : "false");
+        } else if (yyjson_is_bool(k)) {
+            out = std::string(yyjson_get_bool(k) ? "true" : "false");
         }
     }
-    cJSON_Delete(root);
+    yyjson_doc_free(doc);
     return out;
 }
 
@@ -79,19 +81,20 @@ inline std::optional<std::string> extract_string(const std::string& json,
 // and `config` that the caller wants to forward verbatim.
 inline bool detail_find_key(const std::string& json, const std::string& key,
                             std::string& out) {
-    cJSON* root = cJSON_Parse(json.c_str());
-    if (!root) return false;
+    yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
+    yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    if (!root) { if (doc) yyjson_doc_free(doc); return false; }
     bool found = false;
-    cJSON* k = cJSON_GetObjectItem(root, key.c_str());
+    yyjson_val* k = yyjson_obj_get(root, key.c_str());
     if (k) {
-        char* printed = cJSON_PrintUnformatted(k);
+        char* printed = yyjson_val_write(k, 0, NULL);
         if (printed) {
             out.assign(printed);
             std::free(printed);
             found = true;
         }
     }
-    cJSON_Delete(root);
+    yyjson_doc_free(doc);
     return found;
 }
 
@@ -142,7 +145,7 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
 // doesn't contain a `params` array, validation is skipped without
 // warnings. Plugins predating manifests stay silent.
 //
-// Pure C++ / cJSON; no platform calls. Safe to share across
+// Pure C++ / yyjson; no platform calls. Safe to share across
 // open_project() invocations.
 inline void validate_config_against_manifest(
     const std::string& instance,
@@ -152,71 +155,76 @@ inline void validate_config_against_manifest(
     std::vector<OpenWarning>& out_warnings)
 {
     if (manifest_json.empty()) return;
-    cJSON* mroot = cJSON_Parse(manifest_json.c_str());
-    if (!mroot) return;
-    cJSON* params = cJSON_GetObjectItem(mroot, "params");
-    if (!params || !cJSON_IsArray(params)) {
-        cJSON_Delete(mroot);
+    yyjson_doc* mdoc = yyjson_read(manifest_json.c_str(), manifest_json.size(), 0);
+    yyjson_val* mroot = mdoc ? yyjson_doc_get_root(mdoc) : nullptr;
+    if (!mroot) { if (mdoc) yyjson_doc_free(mdoc); return; }
+    yyjson_val* params = yyjson_obj_get(mroot, "params");
+    if (!params || !yyjson_is_arr(params)) {
+        yyjson_doc_free(mdoc);
         return;
     }
-    cJSON* croot = cJSON_Parse(config_json.c_str());
-    if (!croot || !cJSON_IsObject(croot)) {
-        if (croot) cJSON_Delete(croot);
-        cJSON_Delete(mroot);
+    yyjson_doc* cdoc = yyjson_read(config_json.c_str(), config_json.size(), 0);
+    yyjson_val* croot = cdoc ? yyjson_doc_get_root(cdoc) : nullptr;
+    if (!croot || !yyjson_is_obj(croot)) {
+        if (cdoc) yyjson_doc_free(cdoc);
+        yyjson_doc_free(mdoc);
         return;
     }
 
     // Build a quick name -> param-decl index. The manifest is small
     // (a few params) so a linear scan would also be fine.
-    std::unordered_map<std::string, cJSON*> by_name;
-    cJSON* it = nullptr;
-    cJSON_ArrayForEach(it, params) {
-        if (!cJSON_IsObject(it)) continue;
-        cJSON* nm = cJSON_GetObjectItem(it, "name");
-        if (nm && cJSON_IsString(nm) && nm->valuestring) {
-            by_name[nm->valuestring] = it;
+    std::unordered_map<std::string, yyjson_val*> by_name;
+    {
+        size_t _i, _n; yyjson_val* it;
+        yyjson_arr_foreach(params, _i, _n, it) {
+            if (!yyjson_is_obj(it)) continue;
+            yyjson_val* nm = yyjson_obj_get(it, "name");
+            if (nm && yyjson_is_str(nm) && yyjson_get_str(nm)) {
+                by_name[yyjson_get_str(nm)] = it;
+            }
         }
     }
 
-    auto type_of_default = [](cJSON* decl) -> const char* {
+    auto type_of_default = [](yyjson_val* decl) -> const char* {
         // Prefer explicit "type" if declared; else infer from the
         // "default" value's JSON type. Returns one of:
         // "int", "float", "bool", "string", "" (unknown).
-        if (cJSON* t = cJSON_GetObjectItem(decl, "type");
-            t && cJSON_IsString(t) && t->valuestring) {
-            return t->valuestring;
+        if (yyjson_val* t = yyjson_obj_get(decl, "type");
+            t && yyjson_is_str(t) && yyjson_get_str(t)) {
+            return yyjson_get_str(t);
         }
-        cJSON* d = cJSON_GetObjectItem(decl, "default");
+        yyjson_val* d = yyjson_obj_get(decl, "default");
         if (!d) return "";
-        if (cJSON_IsBool(d))   return "bool";
-        if (cJSON_IsString(d)) return "string";
-        if (cJSON_IsNumber(d)) {
+        if (yyjson_is_bool(d))   return "bool";
+        if (yyjson_is_str(d)) return "string";
+        if (yyjson_is_num(d)) {
             // Best-effort split of int vs float based on the literal.
-            double v = d->valuedouble;
+            double v = yyjson_get_num(d);
             if (v == (double)(long long)v) return "int";
             return "float";
         }
         return "";
     };
 
-    auto value_matches_type = [](cJSON* v, const std::string& t) -> bool {
+    auto value_matches_type = [](yyjson_val* v, const std::string& t) -> bool {
         if (t == "int" || t == "float" || t == "number") {
-            return cJSON_IsNumber(v) != 0;
+            return yyjson_is_num(v) != 0;
         }
         if (t == "bool" || t == "boolean") {
-            return cJSON_IsBool(v) != 0;
+            return yyjson_is_bool(v) != 0;
         }
         if (t == "string") {
-            return cJSON_IsString(v) != 0;
+            return yyjson_is_str(v) != 0;
         }
         // Unknown type tag — don't false-positive.
         return true;
     };
 
-    cJSON* cv = nullptr;
-    cJSON_ArrayForEach(cv, croot) {
-        if (!cv->string) continue;
-        const std::string key = cv->string;
+    size_t _ci, _cn; yyjson_val *ckey, *cv;
+    yyjson_obj_foreach(croot, _ci, _cn, ckey, cv) {
+        const char* ckeystr = yyjson_get_str(ckey);
+        if (!ckeystr) continue;
+        const std::string key = ckeystr;
         auto pit = by_name.find(key);
         if (pit == by_name.end()) {
             out_warnings.push_back({
@@ -226,7 +234,7 @@ inline void validate_config_against_manifest(
             });
             continue;
         }
-        cJSON* decl = pit->second;
+        yyjson_val* decl = pit->second;
         std::string declared_type = type_of_default(decl);
         if (!declared_type.empty() &&
             !value_matches_type(cv, declared_type)) {
@@ -240,43 +248,43 @@ inline void validate_config_against_manifest(
         }
 
         // Numeric range check (min / max).
-        if (cJSON_IsNumber(cv)) {
-            double v = cv->valuedouble;
-            cJSON* mn = cJSON_GetObjectItem(decl, "min");
-            cJSON* mx = cJSON_GetObjectItem(decl, "max");
-            if (mn && cJSON_IsNumber(mn) && v < mn->valuedouble) {
+        if (yyjson_is_num(cv)) {
+            double v = yyjson_get_num(cv);
+            yyjson_val* mn = yyjson_obj_get(decl, "min");
+            yyjson_val* mx = yyjson_obj_get(decl, "max");
+            if (mn && yyjson_is_num(mn) && v < yyjson_get_num(mn)) {
                 out_warnings.push_back({
                     instance, plugin,
                     "out_of_range: config['" + key + "'] = " +
                     std::to_string(v) + " is below declared min " +
-                    std::to_string(mn->valuedouble)
+                    std::to_string(yyjson_get_num(mn))
                 });
             }
-            if (mx && cJSON_IsNumber(mx) && v > mx->valuedouble) {
+            if (mx && yyjson_is_num(mx) && v > yyjson_get_num(mx)) {
                 out_warnings.push_back({
                     instance, plugin,
                     "out_of_range: config['" + key + "'] = " +
                     std::to_string(v) + " is above declared max " +
-                    std::to_string(mx->valuedouble)
+                    std::to_string(yyjson_get_num(mx))
                 });
             }
         }
 
         // Enum check for strings — declared as a JSON array under
         // "enum". Membership is exact-string.
-        if (cJSON_IsString(cv) && cv->valuestring) {
-            cJSON* en = cJSON_GetObjectItem(decl, "enum");
-            if (en && cJSON_IsArray(en)) {
+        if (yyjson_is_str(cv) && yyjson_get_str(cv)) {
+            yyjson_val* en = yyjson_obj_get(decl, "enum");
+            if (en && yyjson_is_arr(en)) {
                 bool found = false;
                 std::string allowed;
-                cJSON* eit = nullptr;
-                cJSON_ArrayForEach(eit, en) {
-                    if (cJSON_IsString(eit) && eit->valuestring) {
+                size_t _ei, _en2; yyjson_val* eit;
+                yyjson_arr_foreach(en, _ei, _en2, eit) {
+                    if (yyjson_is_str(eit) && yyjson_get_str(eit)) {
                         if (!allowed.empty()) allowed += ", ";
                         allowed += "'";
-                        allowed += eit->valuestring;
+                        allowed += yyjson_get_str(eit);
                         allowed += "'";
-                        if (std::string(eit->valuestring) == cv->valuestring) {
+                        if (std::string(yyjson_get_str(eit)) == yyjson_get_str(cv)) {
                             found = true;
                         }
                     }
@@ -285,7 +293,7 @@ inline void validate_config_against_manifest(
                     out_warnings.push_back({
                         instance, plugin,
                         "not_in_enum: config['" + key + "'] = '" +
-                        cv->valuestring + "' is not in declared enum {" +
+                        yyjson_get_str(cv) + std::string("' is not in declared enum {") +
                         allowed + "}"
                     });
                 }
@@ -296,8 +304,8 @@ inline void validate_config_against_manifest(
         // grows nested-object support, extend the recursion here.
     }
 
-    cJSON_Delete(croot);
-    cJSON_Delete(mroot);
+    yyjson_doc_free(cdoc);
+    yyjson_doc_free(mdoc);
 }
 
 } // namespace xi
