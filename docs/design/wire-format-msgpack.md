@@ -19,14 +19,20 @@ chosen to kill the cJSON serialization tax and minimize copies.
 >   serialize, no copy.** Reading a yyjson doc is pure `static inline` struct
 >   traversal (no malloc/free), so it is **safe across DLLs** as long as everyone
 >   includes the same vendored `yyjson.h` (same struct layout) — the cross-CRT
->   *free* hazard that forced cJSON to serialize never applies to *reads*. Input
->   = host-owned doc; output = plugin-TLS-owned doc; each frees its own.
+>   *free* hazard that forced cJSON to serialize never applies to *reads*. The
+>   concrete ownership model (host owns the allocator, exactly like the image
+>   pool; borrow-for-read; output is host-allocated and adopted by the caller) is
+>   spec'd in **§γ — in-process doc pass-by-pointer** below.
 > - **Serialize (`yyjson_write` → JSON text) only at real boundaries**: WS→JS
 >   (the extension/HMI keep `JSON.parse` — no `@msgpack/msgpack`, human-readable),
 >   persistence/config, and a fallback for a foreign plugin built against a
 >   different yyjson version. So the WS-msgpack work (old option 1) is **moot**.
-> - **Memory**: a thread-local `yyjson_alc` **pool** per dispatch thread → near
->   **zero allocation per frame** (vs cJSON's malloc-per-node churn + fragmentation).
+> - **Memory**: one host-owned, refcounted **doc-chunk pool** (fixed chunk, O(1)
+>   intrusive free-list) backs every crossing/cacheable doc — **zero `malloc` per
+>   frame** after warm-up, and **caching = a refcount bump (zero copy)**. Mirrors
+>   `ImagePool` exactly; spec'd in §γ. (Supersedes the earlier per-thread bump-pool
+>   sketch — a bump pool can't keep individual docs alive past a frame, which
+>   caching needs.)
 > - **cwpack removed** (it was a temporary 21× bridge on master); **cJSON deleted**.
 >
 > Bench (still the evidence, `backend/tests/bench_record.cpp`): N=150 round-trip
@@ -38,7 +44,212 @@ chosen to kill the cJSON serialization tax and minimize copies.
 > Phasing section is superseded by: α vendor yyjson + pool wrapper · β Record DOM
 > cJSON→yyjson (Record::Value + xi_types) · γ in-process doc-pointer ABI · δ
 > service_main/xi::Json/config → yyjson · ε delete cJSON + cwpack. On branch
-> `refactor/yyjson-dom`.
+> `refactor/yyjson-dom`. **α/β/δ/ε done; γ spec'd below, not yet built.**
+
+---
+
+## γ — in-process doc pass-by-pointer (concrete design)
+
+α–ε made Record yyjson-backed and deleted cJSON, but the in-process `process()`
+seam still pays a full round-trip: the caller `yyjson_mut_write`s its doc to JSON
+bytes (`xi_record.data/len`), the callee `yyjson_read`s them back. γ removes that
+round-trip for same-process, same-yyjson-layout calls by passing the
+`yyjson_mut_doc*` directly — and falls back to the JSON bytes otherwise.
+
+### Design principle: one host pool, mirror the image pool exactly
+
+Images are already cross-DLL-safe because **the host owns one refcounted pool**;
+plugins only **borrow** (read pixels via a pointer, build output into a host slot
+via `image_create`, hold across frames via `image_addref`). γ gives the JSON doc
+the **same** mechanism — a single host-owned, refcounted **doc-chunk pool**:
+
+| | image (today) | data / doc (γ) |
+|---|---|---|
+| crosses the ABI as | `uint64` handle | `yyjson_mut_doc*` pointer |
+| backing store | one host pixel pool | one host **doc-chunk pool** |
+| reclamation | refcount → return slot | refcount → return chunk(s) |
+| callee on **input** | borrow-read pixels | borrow-**read** doc nodes |
+| callee on **output** | write into a host slot | build into a host-pool doc |
+| **cache / re-emit** | `image_addref`, hold | refcount bump, hold (no copy) |
+| cross-process / mismatch | serialize / handle | fall back to JSON `data/len` |
+
+There is **no "ephemeral vs retained" split and no per-frame bump pool** — every
+doc that crosses (or might be cached) lives in the one host pool; lifetime is
+purely its refcount. A doc that dies this frame just drops to 0 quickly; a cached
+one is held by extra refs. This keeps images and docs structurally identical and
+makes **caching a zero-copy refcount bump** (see Retention below).
+
+### The host doc pool
+
+A single host-owned allocator behind every crossing doc:
+
+- **Fixed-size chunks + an intrusive singly-linked free-list → O(1) acquire/
+  release, no search, no per-chunk metadata** (a free chunk stores the next-free
+  pointer in its own bytes; acquire = pop head, release = push head). yyjson
+  bump-allocates *nodes within* a chunk, so the pool is hit only **per chunk**
+  (a handful per doc), not per node — the free-list cost is amortized to noise and
+  there is **zero `malloc` per frame** after warm-up, same as the old bump idea.
+- **Refcounted**: `yyjson_mut_doc_free` (via the doc's `alc.free`) returns the
+  doc's chunks to the free-list; the last ref to drop triggers it. Whoever drops
+  it, the free routes back to the host pool → **cross-DLL free is automatically
+  safe** (the hazard that forced cJSON to serialize never fires).
+- **Thread-safety the same way `ImagePool` already does it**: shard the free-list
+  (or give each dispatch thread a thread-local chunk cache that batch-refills from
+  the shared pool). No new concurrency problem.
+- v1 takes the **fixed-chunk shortcut** (uniform free-list, ImagePool-simple);
+  size-classed free-lists are a later packing optimisation, still O(1). Reads
+  never allocate (`yyjson_obj_get`/`get_str`/`arr_foreach` are pure pointer
+  walks), so the pool is touched only on build/free, never on read.
+
+### Record = refcounted doc + refcounted images; single-writer
+
+Record becomes a handle pair: a **refcounted `yyjson_mut_doc`** (host pool) + the
+existing **refcounted image handles**. The ownership invariant (confirmed
+requirement — only the originator writes):
+
+> **Single-writer / freeze-on-publish.** A doc has one owner who may mutate it
+> *only while it is unshared* (refcount 1, not yet borrowed out). The moment it is
+> borrowed for read or its refcount rises (cached / fanned-out), it is **frozen —
+> read-only for everyone**. To change a frozen/shared doc, **copy-on-write**:
+> `mut_copy` into a fresh (host-pool) doc you own, edit that.
+
+This is immutable-snapshot discipline, and it preserves the old "copies are cheap
+until you mutate" semantic — at the API level a borrowed-input Record is a read
+view; the first `.set()` transparently COWs into an owned doc, so plugin authors
+never see the rule.
+
+### ABI changes (append-only)
+
+`xi_record`/`xi_record_out` each gain ONE optional doc pointer; when it is
+non-null the JSON `data/len` is empty (never both, or we serialized for nothing).
+
+```c
+typedef struct {
+    const xi_record_image* images;
+    int32_t                image_count;
+    const uint8_t*         data;   /* JSON bytes — used iff doc == NULL */
+    int32_t                len;
+    const void*            doc;    /* yyjson_mut_doc*, BORROWED read-only (frozen);
+                                      non-null only in-process + layout match */
+} xi_record;
+
+typedef struct {
+    xi_record_image* images; int32_t image_count; int32_t image_capacity;
+    const uint8_t*   data;   int32_t len;   /* JSON bytes — used iff out_doc == NULL */
+    void*            out_doc; /* yyjson_mut_doc* built in the HOST doc pool;
+                                ref handed to the caller (refcount, not deep copy) */
+} xi_record_out;
+```
+
+`xi_host_api` exposes the doc pool as a yyjson-agnostic allocator (the plugin
+wraps these into a `yyjson_alc`); the backing store is the host doc-chunk pool,
+not raw `malloc`:
+
+```c
+/* Host doc-chunk pool. A doc built through these is host-owned, so any side may
+   drop the last ref and the free returns chunks to the host pool — mirrors
+   image_create / image_addref / image_release for pixels. */
+void* (*doc_chunk_alloc)(size_t);
+void* (*doc_chunk_realloc)(void*, size_t);
+void  (*doc_chunk_free)(void*);
+```
+
+Plus a **layout-compatibility gate** so a foreign prebuilt DLL carrying a
+different yyjson is never handed a raw doc pointer:
+
+```c
+/* Exported by every plugin built against the in-tree yyjson. Stamp = yyjson
+   version + sizeof(yyjson_mut_doc) + sizeof(yyjson_mut_val). Host passes a doc
+   pointer ONLY if stamp == host's; else serialize to data/len. Absent → assume
+   incompatible → fall back. */
+uint32_t xi_yyjson_abi(void);
+```
+
+### Flow (in-process, compatible)
+
+1. **Caller** sets `in.doc = record.doc()` (its frozen doc), `in.data/len` empty.
+   Images marshalled as handles, unchanged.
+2. **Callee** sees `in.doc != NULL` → wraps it as a **read-only Record view** (no
+   parse, no copy). To extend/modify, it COWs (`mut_copy`) into its own host-pool
+   doc first — read of the frozen input is safe; the copy allocates on its side.
+3. **Callee** builds its output Record in the **host doc pool** (its `xi::Record`
+   uses the host doc allocator in-process — the doc analog of `out.image(...)`
+   landing in the host pixel pool). Returns `out.out_doc = out.doc()`.
+4. **Caller** **adopts the ref** to `out.out_doc` as the result Record's doc —
+   zero copy, zero parse — and drops it when that Record dies (→ chunks return to
+   the host pool).
+
+### Retention & caching (the payoff)
+
+Because every crossing doc already lives in the host pool and is refcounted,
+**caching a Record is a refcount bump — zero copy, no "promotion"**:
+
+- **Input revisit / cache N read-only records** (e.g. 30): hold an extra ref to
+  each incoming Record's (frozen) doc + `image_addref` its handles; drop refs to
+  evict. Reads are free. No deep copy — the snapshot is the shared frozen doc.
+- **Image-source cache re-emit**: the emitter holds `{frozen doc ref + addref'd
+  image handles}` and re-emits by handing borrows again (cross-process → serialize).
+  This upgrades `xi_resource_store.hpp`'s metadata from a JSON string to a retained
+  doc ref; the store's shape is unchanged.
+- **Leaf / branch borrow**: borrowing a sub-node (`yyjson_val*`) for a *transient
+  read* is free (a pointer into the owner's doc). **Retaining** a branch is not a
+  thing — yyjson nodes aren't individually refcounted/freeable, their lifetime is
+  the whole doc's — so to keep a branch you `yyjson_mut_val_mut_copy` it into your
+  own doc. Branch-borrow is a read convenience, not a retention mechanism.
+
+### Ownership & lifetime rule
+
+A borrowed/shared doc is **frozen → read-only**. Reads never allocate and are
+trivially safe across DLLs. To change anything you don't solely own, **COW** into
+your own host-pool doc. A `mut_copy` is a node-tree walk + chunk-pool allocs (no
+string encode/decode), so it is far cheaper than the serialize round-trip it
+replaces — and it only happens on the rarer pass-through-modify path; the common
+read-input-build-fresh-output path copies nothing.
+
+### Fallback paths (unchanged, always correct)
+
+- `xi_yyjson_abi()` absent/mismatched → host serializes to `data/len`; callee
+  `yyjson_read`s. (Foreign third-party plugin, or future ABI skew.)
+- Cross-process / remote / isolation (no shared address space) → doc pointer is
+  meaningless → JSON bytes.
+- Persistence, config, WS→JS stay JSON text regardless (cold / human-readable /
+  `JSON.parse`).
+
+### Blast radius
+
+- `xi_abi.h`: `xi_record.doc`, `xi_record_out.out_doc`, the three `doc_chunk_*`
+  allocator fns, `xi_yyjson_abi` export. Append-only; bump `XI_ABI_VERSION`.
+- `xi_image_pool.hpp` (or a sibling `xi_doc_pool.hpp`): the host doc-chunk pool
+  (fixed chunk, sharded free-list, refcount) + wire it into `make_host_api`.
+- `xi_record.hpp`: Record = refcounted host-pool doc + image handles; build via
+  the host doc allocator in-process; `doc()` / `from_doc(borrowed, frozen)` view
+  ctor; freeze-on-publish + COW-on-first-write.
+- `xi_abi.hpp` `record_to_c`/`record_from_c`, `xi_use.hpp` `UseProxy::process`,
+  `xi_plugin_handle.hpp` `process()`: emit/adopt `doc` when compatible, else JSON.
+- `XI_PLUGIN_IMPL`: export `xi_yyjson_abi`.
+- **Unchanged:** plugin/script source, io.hpp, nominal types, the JSON wire to JS.
+
+### Open questions / risks
+
+- **In-process allocator binding.** `xi::Record out;` must pick up the host doc
+  pool when it's built for an in-process return. A TLS "current host doc alc" set
+  around each call is clean for `PluginHandle`/`UseProxy`; a Record built on a
+  *different* thread (async worker) than the call wouldn't inherit it → that
+  output just isn't host-pool-backed → falls back to serialize for that return.
+  Correctness preserved; measure how often it hits.
+- **Ref handoff at the ABI.** Output `out_doc` transfers a *ref* to the caller;
+  the callee's Record must not also drop it. Encode in `record_to_c` (release-on-
+  fill). With a shared refcount the "who frees" question is moot — last ref wins.
+- **Layout stamp granularity.** version + two `sizeof`s catches common skew; a
+  field reorder within the same version+sizes would slip through. We pin one
+  yyjson, so it's belt-and-suspenders — document the assumption.
+- **Pool sizing / high-water mark.** The free-list grows to the peak count of
+  concurrently-live docs (incl. caches) and stays there (chunks not returned to
+  the OS). Caching raises that peak by design; cap chunk size and, if needed,
+  trim idle chunks on a low-water timer.
+- **Worth it for tiny docs?** The win scales with node count; small metadata may
+  not beat the bookkeeping. Same path either way (fallback = today's serialize) so
+  it's never a regression — measure on the toolbox pipeline before tuning.
 
 ---
 
