@@ -329,9 +329,15 @@ public:
         // copied what it needed.
         for (auto h : in_handles) host->image_release(h);
 
-        Record result = (output.data && output.len > 0)
-            ? Record::from_json_bytes(output.data, (size_t)output.len)
-            : Record();
+        // γ: adopt the borrowed-doc output by pointer (zero parse) when the
+        // plugin returned one; otherwise decode the JSON bytes. The adopted doc
+        // is host-pool-backed, so freeing it when `result` dies routes through
+        // the host (doc->alc) — safe across the DLL boundary.
+        Record result = output.out_doc
+            ? Record::adopt_doc((yyjson_mut_doc*)output.out_doc)
+            : ((output.data && output.len > 0)
+                   ? Record::from_json_bytes(output.data, (size_t)output.len)
+                   : Record());
         // Output handles live in the BACKEND pool. Zero-copy: wrap as
         // a pool-backed view (adopt_pool_handle addrefs internally) and
         // release our process_fn ref. Net refcount: still 1, held by

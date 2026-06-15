@@ -106,9 +106,13 @@ public:
         // Release input handles
         for (auto h : in_handles) ImagePool::instance().release(h);
 
-        // Unmarshal: C ABI output (yyjson JSON bytes) → Record
-        Record result = (out.data && out.len > 0)
-            ? Record::from_json_bytes(out.data, (size_t)out.len) : Record();
+        // Unmarshal: γ doc-pointer output when the plugin returned one (we sent
+        // a borrowed doc, so it answered with one), else yyjson JSON bytes. The
+        // adopted doc is host-pool-backed → freed via host alc when result dies.
+        Record result = out.out_doc
+            ? Record::adopt_doc((yyjson_mut_doc*)out.out_doc)
+            : ((out.data && out.len > 0)
+                   ? Record::from_json_bytes(out.data, (size_t)out.len) : Record());
         for (int i = 0; i < out.image_count; ++i) {
             result.image(out.images[i].key, ImagePool::instance().to_image(out.images[i].handle));
             ImagePool::instance().release(out.images[i].handle);

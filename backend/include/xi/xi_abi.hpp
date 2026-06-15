@@ -252,6 +252,52 @@ protected:
     std::string name_;
 };
 
+// --- γ: host doc allocator bridge ---
+//
+// Adapt the host's doc_chunk_* (size)/(ptr,size)/(ptr) functions to yyjson's
+// (ctx, ...) allocator signatures, with ctx = the host_api pointer. A
+// yyjson_mut_doc built through this allocator is backed by the host doc pool, so
+// its chunks free back to the host (doc->alc.free) and the doc is safe to hand
+// across the ABI and free from either side. yyjson copies the alc into the doc,
+// so a transient yyjson_alc is fine.
+namespace detail {
+inline void* doc_alc_malloc(void* ctx, size_t s) {
+    return reinterpret_cast<const xi_host_api*>(ctx)->doc_chunk_alloc(s);
+}
+inline void* doc_alc_realloc(void* ctx, void* p, size_t /*old*/, size_t s) {
+    return reinterpret_cast<const xi_host_api*>(ctx)->doc_chunk_realloc(p, s);
+}
+inline void doc_alc_free(void* ctx, void* p) {
+    reinterpret_cast<const xi_host_api*>(ctx)->doc_chunk_free(p);
+}
+} // namespace detail
+
+inline yyjson_alc make_host_doc_alc(const xi_host_api* host) {
+    yyjson_alc a;
+    a.malloc  = detail::doc_alc_malloc;
+    a.realloc = detail::doc_alc_realloc;
+    a.free    = detail::doc_alc_free;
+    a.ctx     = const_cast<xi_host_api*>(host);
+    return a;
+}
+
+// RAII: install the host doc allocator as the thread-local Record allocator for
+// the duration of an in-process plugin call, so the docs the plugin builds (its
+// output + temporaries) come from the host pool — host-owned, poolable (γ-5),
+// safe to hand back. No-op on a pre-v3 host (doc_chunk_alloc null) → default
+// allocator, JSON output path. Restores the previous alc on scope exit.
+struct HostDocAlcScope {
+    yyjson_alc         alc_;
+    const yyjson_alc*  prev_;
+    explicit HostDocAlcScope(const xi_host_api* host)
+        : alc_(host ? make_host_doc_alc(host) : yyjson_alc{}), prev_(tls_doc_alc()) {
+        if (host && host->doc_chunk_alloc) tls_doc_alc() = &alc_;
+    }
+    ~HostDocAlcScope() { tls_doc_alc() = prev_; }
+    HostDocAlcScope(const HostDocAlcScope&) = delete;
+    HostDocAlcScope& operator=(const HostDocAlcScope&) = delete;
+};
+
 // --- Conversion helpers ---
 
 // Convert a C xi_record to a C++ Record (images become HostImages → copied to xi::Image)
@@ -311,16 +357,26 @@ inline PluginOutputStorage& tls_output_storage() {
 // C inline `xi_record_out_free` honours that and skips the free path
 // entirely. This closes the cross-CRT heap-corruption hole that
 // existed when plugin DLLs and the backend EXE used different CRTs.
-inline void record_to_c(const xi_host_api* host, const Record& r, xi_record_out* out) {
+inline void record_to_c(const xi_host_api* host, Record& r, xi_record_out* out,
+                        bool want_doc = false) {
     auto& s = detail::tls_output_storage();
     s.keys.clear();
     s.images.clear();
-    {
+    // γ symmetric fast path: when the call came in as a borrowed doc (want_doc)
+    // and the host owns a doc allocator, hand the OUTPUT doc back by pointer —
+    // no serialize. The output Record was built under HostDocAlcScope, so its
+    // doc is host-pool-backed; release the ref to the caller, who adopts and
+    // frees it via the host (doc->alc). Otherwise serialize to JSON as before.
+    if (want_doc && host && host->doc_chunk_alloc && r.owns_doc()) {
+        out->out_doc = r.release_doc();
+        out->data = nullptr;
+        out->len  = 0;
+    } else {
         std::string js = r.data_json();   // yyjson serialize
         s.bytes.assign(js.begin(), js.end());
+        out->data = s.bytes.data();
+        out->len  = (int32_t)s.bytes.size();
     }
-    out->data = s.bytes.data();
-    out->len  = (int32_t)s.bytes.size();
 
     const size_t n = r.images().size();
     s.keys.reserve(n);
@@ -377,9 +433,12 @@ void xi_plugin_process(void* inst,                                             \
                        const xi_record* input,                                 \
                        xi_record_out* output) {                                \
     auto* self = static_cast<ClassName*>(inst);                                \
+    /* γ: build the input view / output doc under the host doc allocator, and  */ \
+    /* return by doc-pointer when the input arrived as one (symmetric path).   */ \
+    xi::HostDocAlcScope _xi_alc(self->host());                                 \
     xi::Record in_rec = xi::record_from_c(self->host(), input);                \
     xi::Record out_rec = self->process(in_rec);                                \
-    xi::record_to_c(self->host(), out_rec, output);                            \
+    xi::record_to_c(self->host(), out_rec, output, input->doc != nullptr);     \
 }                                                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \

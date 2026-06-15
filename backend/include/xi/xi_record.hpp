@@ -473,6 +473,10 @@ public:
     // The mutable yyjson root object (advanced; used by the ABI seam).
     yyjson_mut_val* json() const { return root_; }
     yyjson_mut_doc* doc()  const { return doc_; }
+    // γ: does this Record own its doc (vs a borrowed read-only view)? The ABI
+    // output handoff (record_to_c) only transfers ownership of an OWNED doc — a
+    // borrowed view must serialize, never hand back the caller's own doc.
+    bool owns_doc() const { return owns_doc_; }
 
     bool has_image(const std::string& key) const { return images_.count(key) > 0; }
     const Image& get_image(const std::string& key) const {
