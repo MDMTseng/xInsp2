@@ -392,21 +392,8 @@ XI_SCRIPT_EXPORT int xi_script_get_state(char* buf, int buflen) {
 
 XI_SCRIPT_EXPORT int xi_script_set_state(const char* json) {
     if (!json) return -1;
-    cJSON* parsed = cJSON_Parse(json);
-    if (!parsed) return -1;
-    // Replace the state Record's internal JSON tree
-    xi::Record& s = xi::state();
-    // Clear and rebuild
-    s = xi::Record();
-    cJSON* item = parsed->child;
-    while (item) {
-        if (cJSON_IsNumber(item))      s.set(item->string, item->valuedouble);
-        else if (cJSON_IsBool(item))   s.set(item->string, cJSON_IsTrue(item) ? true : false);
-        else if (cJSON_IsString(item)) s.set(item->string, std::string(item->valuestring));
-        else                           s.set_raw(item->string, cJSON_Duplicate(item, true));
-        item = item->next;
-    }
-    cJSON_Delete(parsed);
+    // Replace the state Record by parsing the JSON (yyjson via from_json_bytes).
+    xi::state() = xi::Record::from_json_bytes((const uint8_t*)json, std::strlen(json));
     return 0;
 }
 

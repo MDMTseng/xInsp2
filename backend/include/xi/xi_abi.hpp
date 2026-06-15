@@ -29,8 +29,7 @@
 
 #include "xi_abi.h"
 #include "xi_image.hpp"
-#include "xi_record.hpp"
-#include "xi_msgpack.hpp"   // Record wire codec (MessagePack via CWPack)
+#include "xi_record.hpp"   // wire codec is yyjson JSON (Record::from_json_bytes / data_json)
 
 #include <cstring>
 #include <map>
@@ -257,21 +256,9 @@ protected:
 
 // Convert a C xi_record to a C++ Record (images become HostImages → copied to xi::Image)
 inline Record record_from_c(const xi_host_api* host, const xi_record* rec) {
-    Record r;
-    if (rec->data && rec->len > 0) {
-        cJSON* parsed = msgpack_to_cjson(rec->data, (size_t)rec->len);
-        if (parsed) {
-            cJSON* item = parsed->child;
-            while (item) {
-                if (cJSON_IsNumber(item))      r.set(item->string, item->valuedouble);
-                else if (cJSON_IsBool(item))   r.set(item->string, cJSON_IsTrue(item) ? true : false);
-                else if (cJSON_IsString(item)) r.set(item->string, std::string(item->valuestring));
-                else                           r.set_raw(item->string, cJSON_Duplicate(item, true));
-                item = item->next;
-            }
-            cJSON_Delete(parsed);
-        }
-    }
+    Record r = (rec->data && rec->len > 0)
+                 ? Record::from_json_bytes(rec->data, (size_t)rec->len)
+                 : Record();
     for (int i = 0; i < rec->image_count; ++i) {
         // Zero-copy: wrap the handle as a refcounted view over pool
         // memory. The xi::Image addrefs the handle on adopt and releases
@@ -321,8 +308,10 @@ inline void record_to_c(const xi_host_api* host, const Record& r, xi_record_out*
     auto& s = detail::tls_output_storage();
     s.keys.clear();
     s.images.clear();
-    s.bytes = cjson_to_msgpack(r.json());
-
+    {
+        std::string js = r.data_json();   // yyjson serialize
+        s.bytes.assign(js.begin(), js.end());
+    }
     out->data = s.bytes.data();
     out->len  = (int32_t)s.bytes.size();
 

@@ -46,8 +46,8 @@ public:
     int feature_count() const { return root_->get_array_size("features"); }
     Feature feature(int i) const {
         if (root_->is_na()) return Feature::na(root_->na_reason());
-        cJSON* arr  = root_->at("features").raw();
-        cJSON* node = arr ? cJSON_GetArrayItem(arr, i) : nullptr;
+        yyjson_mut_val* arr  = root_->at("features").raw();
+        yyjson_mut_val* node = arr ? yyjson_mut_arr_get(arr, (size_t)i) : nullptr;
         if (!node) return Feature::na("synth_io: no feature at index");
         Feature f(root_, node);   // VIEW — no copy
         f.set_src(root_->src());
@@ -55,11 +55,11 @@ public:
     }
     std::vector<Feature> features() const {
         std::vector<Feature> out;
-        cJSON* arr = root_->at("features").raw();
-        const int n = arr ? cJSON_GetArraySize(arr) : 0;
+        yyjson_mut_val* arr = root_->at("features").raw();
+        const int n = arr ? (int)yyjson_mut_arr_size(arr) : 0;
         out.reserve(n);
         for (int i = 0; i < n; ++i) {
-            Feature f(root_, cJSON_GetArrayItem(arr, i));
+            Feature f(root_, yyjson_mut_arr_get(arr, (size_t)i));
             f.set_src(root_->src());
             out.push_back(std::move(f));
         }
@@ -69,7 +69,7 @@ public:
 private:
     template <class T> T view(const char* path) const {
         if (root_->is_na()) return T::na(root_->na_reason());
-        cJSON* node = root_->at(path).raw();
+        yyjson_mut_val* node = root_->at(path).raw();
         if (!node) return T::na("synth_io: missing field");
         T t(root_, node);          // VIEW — shares root, points at the sub-node
         t.set_src(root_->src());

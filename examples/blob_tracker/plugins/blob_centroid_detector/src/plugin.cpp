@@ -109,7 +109,8 @@ public:
             cleaned.as_cv_mat(), labels, stats, centroids, 8, CV_32S);
 
         int n_small = 0, n_big = 0, n_count = 0;
-        xi::Json arr = xi::Json::array();
+        xi::Record out;
+        out.image("mask", mask).image("cleaned", cleaned);
         for (int i = 1; i < n_labels; ++i) {
             int area = stats.at<int>(i, cv::CC_STAT_AREA);
             if (area < min_a) { ++n_small; continue; }
@@ -117,11 +118,7 @@ public:
             ++n_count;
             int cx = (int)centroids.at<double>(i, 0);
             int cy = (int)centroids.at<double>(i, 1);
-            xi::Json c = xi::Json::object();
-            c.set("x", cx);
-            c.set("y", cy);
-            c.set("area", area);
-            arr.push(c);
+            out.push("centroids", xi::Record().set("x", cx).set("y", cy).set("area", area));
         }
         int total_regions = std::max(0, n_labels - 1);
 
@@ -131,10 +128,7 @@ public:
         last_big_   = n_big;
         ++frames_processed_;
 
-        xi::Record out;
-        out.image("mask",    mask)
-           .image("cleaned", cleaned)
-           .set("count",          n_count)
+        out.set("count",          n_count)
            .set("total_regions",  total_regions)
            .set("rejected_small", n_small)
            .set("rejected_big",   n_big)
@@ -144,7 +138,6 @@ public:
            .set("close_radius",   close_r)
            .set("min_area",       min_a)
            .set("max_area",       max_a);
-        out.set_raw("centroids", cJSON_Duplicate(arr.raw(), 1));
         return out;
     }
 

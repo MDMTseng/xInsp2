@@ -584,6 +584,9 @@ inline CompileResult compile(const CompileRequest& req) {
     // cwpack lives in vendor/cwpack/ — xi_msgpack.hpp does #include "cwpack.h"
     auto cwpack_inc = vendor_dir / "cwpack";
     if (std::filesystem::exists(cwpack_inc)) front += " /I\"" + cwpack_inc.string() + "\"";
+    // yyjson lives in vendor/yyjson/ — xi_record.hpp does #include "yyjson.h"
+    auto yyjson_inc = vendor_dir / "yyjson";
+    if (std::filesystem::exists(yyjson_inc)) front += " /I\"" + yyjson_inc.string() + "\"";
     for (auto& d : req.include_dirs) front += " /I\"" + d + "\"";   // project extra includes
     front += " /I\"" + req.opencv_dir + "\\include\"";
     if (!req.turbojpeg_root.empty()) {
@@ -643,6 +646,11 @@ inline CompileResult compile(const CompileRequest& req) {
     auto cwpack_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "cwpack.lib";
     if (std::filesystem::exists(cwpack_lib)) {
         cmd += " \"" + cwpack_lib.string() + "\"";
+    }
+    // Link against pre-built yyjson.lib (the Record DOM/codec, via xi_record.hpp).
+    auto yyjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "yyjson.lib";
+    if (std::filesystem::exists(yyjson_lib)) {
+        cmd += " \"" + yyjson_lib.string() + "\"";
     }
     // The PCH's own object (from /Yc) must be linked when consuming via /Yu.
     if (!pch_obj.empty()) cmd += " \"" + pch_obj + "\"";

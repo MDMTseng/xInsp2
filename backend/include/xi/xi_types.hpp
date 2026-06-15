@@ -3,11 +3,11 @@
 // xi_types.hpp — nominal types for ergonomic, type-checked I/O wiring.
 //
 // Each type is JUST A NAME over a generic, schema-less xi::Record. No fields are
-// enforced; the payload stays cJSON. The wrapper is a lightweight handle (shared
-// payload — cheap to copy, so std::vector<Pose> is cheap), carries schema-less
-// convenience accessors, and can be NA. The name is the vocabulary that
-// extractors return, constructors accept, the manifest `kind` describes, and the
-// (future) wiring UI uses to decide what connects to what. Types live ONLY in
+// enforced; the payload stays JSON (yyjson). The wrapper is a lightweight handle
+// (shared payload — cheap to copy, so std::vector<Pose> is cheap), carries
+// schema-less convenience accessors, and can be NA. The name is the vocabulary
+// that extractors return, constructors accept, the manifest `kind` describes, and
+// the (future) wiring UI uses to decide what connects to what. Types live ONLY in
 // the wiring layer; the process() ABI stays untyped (Record).
 //
 // Plugin / toolbox authors define their own nominal types the same way (it's
@@ -22,7 +22,7 @@
 
 namespace xi {
 
-// A read/write proxy for one field of a cJSON object node. Returned by
+// A read/write proxy for one field of a yyjson object node. Returned by
 // Typed::operator[]. Reads via implicit conversion (so it drops into arithmetic),
 // writes via operator= (write-through to the node). Lives only for the
 // statement — do NOT `auto`-capture it (it aliases the node, like a
@@ -33,7 +33,8 @@ namespace xi {
 //
 class Field {
 public:
-    Field(cJSON* node, const char* key) : node_(node), key_(key) {}
+    Field(yyjson_mut_doc* doc, yyjson_mut_val* node, const char* key)
+        : doc_(doc), node_(node), key_(key) {}
 
     operator double() const { return Record::Value(node_)[key_.c_str()].as_double(0); }
     double      as_double(double d = 0)         const { return Record::Value(node_)[key_.c_str()].as_double(d); }
@@ -41,21 +42,22 @@ public:
     bool        as_bool(bool d = false)         const { return Record::Value(node_)[key_.c_str()].as_bool(d); }
     std::string as_string(const std::string& d = "") const { return Record::Value(node_)[key_.c_str()].as_string(d); }
 
-    Field& operator=(double v)             { set_(cJSON_CreateNumber(v));            return *this; }
-    Field& operator=(int v)                { set_(cJSON_CreateNumber(v));            return *this; }
-    Field& operator=(bool v)               { set_(cJSON_CreateBool(v));              return *this; }
-    Field& operator=(const std::string& v) { set_(cJSON_CreateString(v.c_str()));    return *this; }
-    Field& operator=(const char* v)        { set_(cJSON_CreateString(v ? v : ""));   return *this; }
+    Field& operator=(double v)             { set_(yyjson_mut_real(doc_, v));                 return *this; }
+    Field& operator=(int v)                { set_(yyjson_mut_sint(doc_, v));                 return *this; }
+    Field& operator=(bool v)               { set_(yyjson_mut_bool(doc_, v));                 return *this; }
+    Field& operator=(const std::string& v) { set_(yyjson_mut_strcpy(doc_, v.c_str()));       return *this; }
+    Field& operator=(const char* v)        { set_(yyjson_mut_strcpy(doc_, v ? v : ""));      return *this; }
     Field& operator=(const Field& o)       { return *this = static_cast<double>(o); }   // value copy
 
 private:
-    void set_(cJSON* item) {
-        if (!node_ || !item) { if (item) cJSON_Delete(item); return; }
-        cJSON_DeleteItemFromObject(node_, key_.c_str());
-        cJSON_AddItemToObject(node_, key_.c_str(), item);
+    void set_(yyjson_mut_val* item) {
+        if (!node_ || !item || !yyjson_mut_is_obj(node_)) return;
+        yyjson_mut_obj_remove_key(node_, key_.c_str());
+        yyjson_mut_obj_put(node_, yyjson_mut_strcpy(doc_, key_.c_str()), item);
     }
-    cJSON*      node_;
-    std::string key_;
+    yyjson_mut_doc* doc_;
+    yyjson_mut_val* node_;
+    std::string     key_;
 };
 
 // Base: a NAME over a Record, with a SHALLOW (view) mode.
@@ -64,7 +66,7 @@ private:
 //              build into it.
 //   - VIEW   : shares another value's root_ (refcount bump, no copy) and points
 //              node_ at a sub-node of it. Extractors hand these out so pulling N
-//              nested values / array items costs no cJSON duplication.
+//              nested values / array items costs no duplication.
 //
 // record() materializes a standalone Record (copy of the viewed node) only when
 // you embed the value into a constructor input — the one unavoidable copy.
@@ -72,8 +74,8 @@ class Typed {
 public:
     Typed() : root_(std::make_shared<Record>()), node_(root_->json()) {}
     explicit Typed(Record r) : root_(std::make_shared<Record>(std::move(r))), node_(root_->json()) {}
-    // VIEW ctor: share `root`, point at `node` (a cJSON inside root's tree).
-    Typed(std::shared_ptr<Record> root, cJSON* node) : root_(std::move(root)), node_(node) {}
+    // VIEW ctor: share `root`, point at `node` (a yyjson val inside root's tree).
+    Typed(std::shared_ptr<Record> root, yyjson_mut_val* node) : root_(std::move(root)), node_(node) {}
 
     // Standalone Record of this value — for embedding into a constructor input.
     // Owned: copy the root; view: deep-copy just the node.
@@ -82,10 +84,13 @@ public:
         return Record::Value(node_).as_record();
     }
 
-    bool        is_na()     const { return node_ && cJSON_GetObjectItem(node_, Record::kNaKey) != nullptr; }
+    bool is_na() const {
+        return node_ && yyjson_mut_is_obj(node_) && yyjson_mut_obj_get(node_, Record::kNaKey) != nullptr;
+    }
     std::string na_reason() const {
-        cJSON* n = node_ ? cJSON_GetObjectItem(node_, Record::kNaKey) : nullptr;
-        return (n && cJSON_IsString(n)) ? n->valuestring : "";
+        yyjson_mut_val* n = (node_ && yyjson_mut_is_obj(node_)) ? yyjson_mut_obj_get(node_, Record::kNaKey) : nullptr;
+        const char* s = (n && yyjson_mut_is_str(n)) ? yyjson_mut_get_str(n) : nullptr;
+        return s ? std::string(s) : "";
     }
 
     // Provenance: where this value came from. Kept on the wrapper (a view doesn't
@@ -97,32 +102,33 @@ public:
     // --- WRITE-THROUGH setters ---------------------------------------------
     // Writes the viewed node. A VIEW writes into the SHARED tree, so it mutates
     // the ORIGINAL it was extracted from — by design (like a NumPy view). If you
-    // don't want that, .clone() first for an independent copy. See
-    // docs/design/io-types-and-na.md.
-    Typed& set(const char* k, double v)             { set_node_(k, cJSON_CreateNumber(v)); return *this; }
-    Typed& set(const char* k, int v)                { set_node_(k, cJSON_CreateNumber(v)); return *this; }
-    Typed& set(const char* k, bool v)               { set_node_(k, cJSON_CreateBool(v));   return *this; }
-    Typed& set(const char* k, const std::string& v) { set_node_(k, cJSON_CreateString(v.c_str())); return *this; }
+    // don't want that, .clone() first for an independent copy.
+    Typed& set(const char* k, double v)             { set_node_(k, yyjson_mut_real(mut_doc(), v)); return *this; }
+    Typed& set(const char* k, int v)                { set_node_(k, yyjson_mut_sint(mut_doc(), v)); return *this; }
+    Typed& set(const char* k, bool v)               { set_node_(k, yyjson_mut_bool(mut_doc(), v)); return *this; }
+    Typed& set(const char* k, const std::string& v) { set_node_(k, yyjson_mut_strcpy(mut_doc(), v.c_str())); return *this; }
 
     // Field proxy: read (implicit) + write (operator=), so e.g.
     //   roi["x"] = roi["x"] * 0.533 + 45;
-    Field operator[](const char* key) const { return Field(node_, key); }
+    Field operator[](const char* key) const { return Field(mut_doc(), node_, key); }
 
 protected:
+    yyjson_mut_doc* mut_doc() const { return root_ ? root_->doc() : nullptr; }
+
     // A nested value as a VIEW into this one's tree (no copy). `key` is a direct
     // child name. NA-safe. Used by composite types (e.g. Feature::pose()).
     template <class T> T subview(const char* key) const {
         if (is_na()) return T::na(na_reason());
-        cJSON* n = node_ ? cJSON_GetObjectItem(node_, key) : nullptr;
+        yyjson_mut_val* n = (node_ && yyjson_mut_is_obj(node_)) ? yyjson_mut_obj_get(node_, key) : nullptr;
         if (!n) return T::na("missing sub-field");
         T t(root_, n);
         t.set_src(src_);
         return t;
     }
-    void set_node_(const char* k, cJSON* item) {
-        if (!node_ || !item) { if (item) cJSON_Delete(item); return; }
-        cJSON_DeleteItemFromObject(node_, k);
-        cJSON_AddItemToObject(node_, k, item);
+    void set_node_(const char* k, yyjson_mut_val* item) {
+        if (!node_ || !item || !yyjson_mut_is_obj(node_)) return;
+        yyjson_mut_obj_remove_key(node_, k);
+        yyjson_mut_obj_put(node_, yyjson_mut_strcpy(mut_doc(), k), item);
     }
     // Schema-less field reads off the viewed node: missing / wrong-type → default.
     double      num(const char* k, double def = 0.0)            const { return Record::Value(node_)[k].as_double(def); }
@@ -130,7 +136,7 @@ protected:
     std::string str(const char* k, const std::string& d = "")   const { return Record::Value(node_)[k].as_string(d); }
 
     std::shared_ptr<Record> root_;
-    cJSON*                   node_ = nullptr;
+    yyjson_mut_val*          node_ = nullptr;
     std::string             src_;
 };
 
@@ -139,7 +145,7 @@ protected:
 #define XI_NOMINAL(Name)                                                       \
     Name() = default;                                                          \
     explicit Name(::xi::Record r) : ::xi::Typed(std::move(r)) {}               \
-    Name(std::shared_ptr<::xi::Record> root, cJSON* node)                      \
+    Name(std::shared_ptr<::xi::Record> root, ::yyjson_mut_val* node)           \
         : ::xi::Typed(std::move(root), node) {}                               \
     static Name na(const std::string& reason = "") {                          \
         return Name(::xi::Record::na(reason));                                 \
@@ -206,7 +212,7 @@ public:
     double w() const { return num("w"); }  double h() const { return num("h"); }
 };
 
-// Small fixed vectors — {x}, {x,y}, {x,y,z}, {x,y,z,w}. Components are also
+// Small fixed vectors — {x,y}, {x,y,z}, {x,y,z,w}. Components are also
 // reachable by name via operator[] (vec["y"] = ...).
 class Vec2 : public Typed {
 public:
@@ -244,25 +250,25 @@ class MatN : public Typed {
 public:
     MatN() { set_identity_(); }
     explicit MatN(Record r) : Typed(std::move(r)) {}
-    MatN(std::shared_ptr<Record> root, cJSON* node) : Typed(std::move(root), node) {}
+    MatN(std::shared_ptr<Record> root, yyjson_mut_val* node) : Typed(std::move(root), node) {}
     static MatN na(const std::string& reason = "") { return MatN(Record::na(reason)); }
     MatN clone() const { return MatN(this->record()); }
 
     static constexpr int dim = N;
     double at(int r, int c) const { return elem_(r * N + c); }
     MatN&  set(int r, int c, double v) {
-        cJSON* arr = node_ ? cJSON_GetObjectItem(node_, "m") : nullptr;
-        cJSON* e   = arr ? cJSON_GetArrayItem(arr, r * N + c) : nullptr;
-        if (e) { e->valuedouble = v; e->valueint = (int)v; }
+        yyjson_mut_val* arr = (node_ && yyjson_mut_is_obj(node_)) ? yyjson_mut_obj_get(node_, "m") : nullptr;
+        yyjson_mut_val* e   = arr ? yyjson_mut_arr_get(arr, (size_t)(r * N + c)) : nullptr;
+        if (e) yyjson_mut_set_real(e, v);
         return *this;
     }
 
 private:
     void set_data_(const double* d) {
-        cJSON* arr = cJSON_CreateArray();
-        for (int i = 0; i < N * N; ++i) cJSON_AddItemToArray(arr, cJSON_CreateNumber(d[i]));
-        cJSON_DeleteItemFromObject(node_, "m");
-        cJSON_AddItemToObject(node_, "m", arr);
+        yyjson_mut_doc* doc = mut_doc();
+        yyjson_mut_val* arr = yyjson_mut_arr(doc);
+        for (int i = 0; i < N * N; ++i) yyjson_mut_arr_add_val(arr, yyjson_mut_real(doc, d[i]));
+        set_node_("m", arr);
     }
     void set_identity_() {
         double I[N * N] = {};
@@ -270,30 +276,25 @@ private:
         set_data_(I);
     }
     double elem_(int idx) const {
-        cJSON* arr = node_ ? cJSON_GetObjectItem(node_, "m") : nullptr;
-        cJSON* e   = arr ? cJSON_GetArrayItem(arr, idx) : nullptr;
-        return (e && cJSON_IsNumber(e)) ? e->valuedouble : 0.0;
+        yyjson_mut_val* arr = (node_ && yyjson_mut_is_obj(node_)) ? yyjson_mut_obj_get(node_, "m") : nullptr;
+        yyjson_mut_val* e   = arr ? yyjson_mut_arr_get(arr, (size_t)idx) : nullptr;
+        return (e && yyjson_mut_is_num(e)) ? yyjson_mut_get_num(e) : 0.0;
     }
 };
 using Mat2 = MatN<2>;
 using Mat3 = MatN<3>;
 using Mat4 = MatN<4>;
 
-// --- iconic types (payload rides the IMAGE channel, not cJSON) ------------
+// --- iconic types (payload rides the IMAGE channel, not JSON) ------------
 //
-// Region is the first nominal type whose data is NOT cJSON: it's a binary
-// MASK image that travels on the Record's image channel (key "mask"), with
-// only light metadata (frame w/h) mirrored into json for cheap reads. It's
-// "just a name over a Record" exactly like the others — but because the
-// bytes live in images_, a Region is zero-copy through the in-process
-// ImagePool and goes straight to OpenCV via `mask().as_cv_mat()`.
+// Region is the first nominal type whose data is NOT JSON: it's a binary MASK
+// image that travels on the Record's image channel (key "mask"), with only light
+// metadata (frame w/h) mirrored into json for cheap reads. Because the bytes live
+// in images_, a Region is zero-copy through the in-process ImagePool and goes
+// straight to OpenCV via `mask().as_cv_mat()`.
 //
-// This is the BINARY case (CV_8U, 1-channel, nonzero = inside). Multi-region
-// / labeled images want a wider pixel depth (CV_32S) and wait on the Image
-// depth tag (see docs/design/io-types-and-na.md, "Image as a typed buffer").
-//
-// OpenCV-side helpers (to_cv / region_from_mask / area / bbox) live in the
-// opt-in xi_types_cv.hpp so this header stays free of imgproc.
+// This is the BINARY case (CV_8U, 1-channel, nonzero = inside). OpenCV helpers
+// (to_cv / region_from_mask / area / bbox) live in the opt-in xi_types_cv.hpp.
 class Region : public Typed {
 public:
     XI_NOMINAL(Region)
@@ -308,8 +309,6 @@ public:
     static constexpr const char* kMaskKey = "mask";
 
     // The binary mask. Empty Image if this Region is NA or carries no mask.
-    // (A VIEW Region reads the root's mask; Region is a top-level value by
-    // convention, so that's the same thing.)
     Image mask() const { return root_ ? root_->get_image(kMaskKey) : Image{}; }
     int  width()  const { return i32("w"); }
     int  height() const { return i32("h"); }

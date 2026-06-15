@@ -2956,16 +2956,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
 
         xi_record_image in_imgs[] = { {"gray", src_h} };
-        // WS command carries JSON params; the internal ABI is MessagePack — bridge.
-        cJSON* params_tree = cJSON_Parse(params_json.c_str());
-        if (!params_tree) params_tree = cJSON_CreateObject();
-        std::vector<uint8_t> in_mp = xi::cjson_to_msgpack(params_tree);
-        cJSON_Delete(params_tree);
+        // WS command carries JSON params; the internal ABI is also JSON now — pass through.
         xi_record input_rec;
         input_rec.images = in_imgs;
         input_rec.image_count = 1;
-        input_rec.data = in_mp.data();
-        input_rec.len = (int32_t)in_mp.size();
+        input_rec.data = (const uint8_t*)params_json.data();
+        input_rec.len = (int32_t)params_json.size();
 
         xi_record_out output;
         xi_record_out_init(&output);
@@ -2996,14 +2992,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Release input image handle (success path)
         xi::ImagePool::instance().release(src_h);
 
-        // Build response: decode the MessagePack output back to JSON for the WS.
-        std::string result_json = "{}";
-        if (output.data && output.len > 0) {
-            cJSON* o = xi::msgpack_to_cjson(output.data, (size_t)output.len);
-            char* s = cJSON_PrintUnformatted(o);
-            if (s) { result_json = s; cJSON_free(s); }
-            cJSON_Delete(o);
-        }
+        // Build response: the ABI output is already JSON bytes — forward it.
+        std::string result_json = (output.data && output.len > 0)
+            ? std::string((const char*)output.data, (size_t)output.len)
+            : "{}";
 
         // Add image info to result
         std::string full_json = result_json;

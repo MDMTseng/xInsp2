@@ -2,8 +2,10 @@
 //
 // xi_record.hpp — unified output type for inspection steps.
 //
-// A Record bundles named images + schemaless JSON data. Built on cJSON
-// so all escaping, nesting, and serialization is handled correctly.
+// A Record bundles named images + schemaless JSON data. Backed by yyjson
+// (a mutable doc) so building is incremental + mutable and reading/serializing
+// are fast; escaping, nesting, and serialization are handled correctly.
+// (Migrated from cJSON 2026-06 — see docs/design/wire-format-msgpack.md.)
 //
 // Usage:
 //
@@ -16,9 +18,13 @@
 //           .set("area", 142.5)
 //           .set("label", "ok")));
 //
+// yyjson note: keys and string values are BORROWED by the mutable API, so every
+// key/string we store goes through yyjson_mut_strcpy (copy into the doc) — the
+// std::string callers pass is transient.
+//
 
 #include "xi_image.hpp"
-#include "cJSON.h"
+#include "yyjson.h"
 
 #include <cmath>
 #include <cstdio>
@@ -33,11 +39,11 @@
 
 namespace xi {
 
-// Non-finite doubles can't be represented in JSON — cJSON serialises NaN/Inf as
-// the literal `null`, which then reads back as the caller's default (typically
-// 0.0), silently turning an invalid measurement into a plausible zero. We store
-// them as explicit string sentinels instead; these helpers convert both ways so
-// a non-finite value survives the Record↔JSON round-trip and stays visible.
+// Non-finite doubles can't be represented in JSON — they serialise as the
+// literal `null`, which then reads back as the caller's default (typically 0.0),
+// silently turning an invalid measurement into a plausible zero. We store them
+// as explicit string sentinels instead; these helpers convert both ways so a
+// non-finite value survives the Record↔JSON round-trip and stays visible.
 inline const char* nonfinite_to_str(double v) {
     if (std::isnan(v)) return "NaN";
     return v > 0 ? "Infinity" : "-Infinity";
@@ -76,35 +82,38 @@ inline void append_json_escaped(std::string& out, const std::string& s) {
 
 class Record {
 public:
-    Record() : json_(cJSON_CreateObject()) {}
+    Record() { init_(); }
 
-    ~Record() {
-        if (json_) cJSON_Delete(json_);
-    }
+    ~Record() { if (doc_) yyjson_mut_doc_free(doc_); }
 
     Record(const Record& o) : images_(o.images_) {
-        json_ = o.json_ ? cJSON_Duplicate(o.json_, true) : cJSON_CreateObject();
+        doc_  = yyjson_mut_doc_new(nullptr);
+        root_ = o.root_ ? yyjson_mut_val_mut_copy(doc_, o.root_) : yyjson_mut_obj(doc_);
+        yyjson_mut_doc_set_root(doc_, root_);
     }
 
     Record& operator=(const Record& o) {
         if (this != &o) {
             images_ = o.images_;
-            if (json_) cJSON_Delete(json_);
-            json_ = o.json_ ? cJSON_Duplicate(o.json_, true) : cJSON_CreateObject();
+            if (doc_) yyjson_mut_doc_free(doc_);
+            doc_  = yyjson_mut_doc_new(nullptr);
+            root_ = o.root_ ? yyjson_mut_val_mut_copy(doc_, o.root_) : yyjson_mut_obj(doc_);
+            yyjson_mut_doc_set_root(doc_, root_);
         }
         return *this;
     }
 
-    Record(Record&& o) noexcept : images_(std::move(o.images_)), json_(o.json_) {
-        o.json_ = nullptr;
+    Record(Record&& o) noexcept
+        : images_(std::move(o.images_)), doc_(o.doc_), root_(o.root_) {
+        o.doc_ = nullptr; o.root_ = nullptr;
     }
 
     Record& operator=(Record&& o) noexcept {
         if (this != &o) {
             images_ = std::move(o.images_);
-            if (json_) cJSON_Delete(json_);
-            json_ = o.json_;
-            o.json_ = nullptr;
+            if (doc_) yyjson_mut_doc_free(doc_);
+            doc_ = o.doc_; root_ = o.root_;
+            o.doc_ = nullptr; o.root_ = nullptr;
         }
         return *this;
     }
@@ -117,85 +126,69 @@ public:
 
     // --- Data builders (add to the JSON object) ---
     //
-    // Integer overload accepts every standard integral type — int,
-    // long, long long, int64_t, size_t, uint32_t, ... — collapsed
-    // through cJSON's number (which is a double). Values ≤ 2^53
-    // round-trip exactly; bigger ints lose precision (cJSON has no
-    // native int64 path). bool is excluded so it goes to the
+    // Integer overload accepts every standard integral type (int, long, int64_t,
+    // size_t, ...). Stored as a JSON integer; bool is excluded so it goes to the
     // dedicated bool overload below.
     template <typename T,
               typename = std::enable_if_t<std::is_integral_v<T> &&
                                           !std::is_same_v<T, bool>>>
     Record& set(const std::string& key, T v) {
-        cJSON_DeleteItemFromObject(json_, key.c_str());
-        cJSON_AddNumberToObject(json_, key.c_str(), static_cast<double>(v));
+        put_(key.c_str(), yyjson_mut_sint(doc_, (int64_t)v));
         return *this;
     }
     Record& set(const std::string& key, double v) {
-        cJSON_DeleteItemFromObject(json_, key.c_str());
         if (!std::isfinite(v))
-            cJSON_AddStringToObject(json_, key.c_str(), nonfinite_to_str(v));
+            put_(key.c_str(), yyjson_mut_strcpy(doc_, nonfinite_to_str(v)));
         else
-            cJSON_AddNumberToObject(json_, key.c_str(), v);
+            put_(key.c_str(), yyjson_mut_real(doc_, v));
         return *this;
     }
-    Record& set(const std::string& key, float v) {
-        return set(key, (double)v);
-    }
+    Record& set(const std::string& key, float v) { return set(key, (double)v); }
     Record& set(const std::string& key, bool v) {
-        cJSON_DeleteItemFromObject(json_, key.c_str());
-        cJSON_AddBoolToObject(json_, key.c_str(), v ? 1 : 0);
+        put_(key.c_str(), yyjson_mut_bool(doc_, v));
         return *this;
     }
     Record& set(const std::string& key, const std::string& v) {
-        cJSON_DeleteItemFromObject(json_, key.c_str());
-        cJSON_AddStringToObject(json_, key.c_str(), v.c_str());
+        put_(key.c_str(), yyjson_mut_strcpy(doc_, v.c_str()));
         return *this;
     }
-    Record& set(const std::string& key, const char* v) {
-        return set(key, std::string(v));
-    }
+    Record& set(const std::string& key, const char* v) { return set(key, std::string(v ? v : "")); }
 
-    // Nest a sub-Record as a JSON object
+    // Nest a sub-Record as a JSON object (deep copy into this doc).
     Record& set(const std::string& key, const Record& sub) {
-        cJSON_DeleteItemFromObject(json_, key.c_str());
-        cJSON* dup = sub.json_ ? cJSON_Duplicate(sub.json_, true) : cJSON_CreateObject();
-        cJSON_AddItemToObject(json_, key.c_str(), dup);
+        yyjson_mut_val* dup = sub.root_ ? yyjson_mut_val_mut_copy(doc_, sub.root_)
+                                        : yyjson_mut_obj(doc_);
+        put_(key.c_str(), dup);
         return *this;
     }
 
-    // Add raw cJSON item (for advanced use)
-    Record& set_raw(const std::string& key, cJSON* item) {
-        cJSON_DeleteItemFromObject(json_, key.c_str());
-        cJSON_AddItemToObject(json_, key.c_str(), item);
+    // Add a raw yyjson value that ALREADY belongs to this Record's doc (advanced).
+    Record& set_raw(const std::string& key, yyjson_mut_val* item) {
+        put_(key.c_str(), item);
         return *this;
     }
 
     // --- Array builders ---
     Record& push(const std::string& key, int v) {
-        ensure_array(key);
-        cJSON_AddItemToArray(cJSON_GetObjectItem(json_, key.c_str()), cJSON_CreateNumber(v));
+        yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), yyjson_mut_sint(doc_, v));
         return *this;
     }
     Record& push(const std::string& key, double v) {
-        ensure_array(key);
-        cJSON_AddItemToArray(cJSON_GetObjectItem(json_, key.c_str()), cJSON_CreateNumber(v));
+        yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), yyjson_mut_real(doc_, v));
         return *this;
     }
     Record& push(const std::string& key, bool v) {
-        ensure_array(key);
-        cJSON_AddItemToArray(cJSON_GetObjectItem(json_, key.c_str()), cJSON_CreateBool(v));
+        yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), yyjson_mut_bool(doc_, v));
         return *this;
     }
     Record& push(const std::string& key, const std::string& v) {
-        ensure_array(key);
-        cJSON_AddItemToArray(cJSON_GetObjectItem(json_, key.c_str()), cJSON_CreateString(v.c_str()));
+        yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), yyjson_mut_strcpy(doc_, v.c_str()));
         return *this;
     }
     Record& push(const std::string& key, const Record& sub) {
-        ensure_array(key);
-        cJSON* dup = sub.json_ ? cJSON_Duplicate(sub.json_, true) : cJSON_CreateObject();
-        cJSON_AddItemToArray(cJSON_GetObjectItem(json_, key.c_str()), dup);
+        yyjson_mut_val* dup = sub.root_ ? yyjson_mut_val_mut_copy(doc_, sub.root_)
+                                        : yyjson_mut_obj(doc_);
+        yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), dup);
         return *this;
     }
 
@@ -209,93 +202,85 @@ public:
     class Value {
     public:
         Value() : node_(nullptr) {}
-        explicit Value(cJSON* node) : node_(node) {}
+        explicit Value(yyjson_mut_val* node) : node_(node) {}
 
-        // Chain into object key
         Value operator[](const char* key) const {
-            if (!node_ || !cJSON_IsObject(node_)) return {};
-            return Value(cJSON_GetObjectItem(node_, key));
+            if (!node_ || !yyjson_mut_is_obj(node_)) return {};
+            return Value(yyjson_mut_obj_get(node_, key));
         }
         Value operator[](const std::string& key) const { return (*this)[key.c_str()]; }
 
-        // Chain into array index
         Value operator[](int index) const {
-            if (!node_ || !cJSON_IsArray(node_)) return {};
-            return Value(cJSON_GetArrayItem(node_, index));
+            if (!node_ || !yyjson_mut_is_arr(node_)) return {};
+            return Value(yyjson_mut_arr_get(node_, (size_t)index));
         }
 
         // Terminal reads with defaults
-        int         as_int(int def = 0)                       const { return (node_ && cJSON_IsNumber(node_)) ? node_->valueint : def; }
-        double      as_double(double def = 0.0)               const {
-            if (node_ && cJSON_IsNumber(node_)) return node_->valuedouble;
-            if (node_ && cJSON_IsString(node_)) { double v; if (nonfinite_from_str(node_->valuestring, v)) return v; }
+        int    as_int(int def = 0) const {
+            return is_number() ? (int)yyjson_mut_get_num(node_) : def;
+        }
+        double as_double(double def = 0.0) const {
+            if (is_number()) return yyjson_mut_get_num(node_);
+            if (node_ && yyjson_mut_is_str(node_)) { double v; if (nonfinite_from_str(yyjson_mut_get_str(node_), v)) return v; }
             return def;
         }
-        bool        as_bool(bool def = false)                  const { return node_ ? cJSON_IsTrue(node_) : def; }
-        std::string as_string(const std::string& def = "")    const { return (node_ && cJSON_IsString(node_)) ? node_->valuestring : def; }
-
-        // Array length
-        int size() const { return (node_ && cJSON_IsArray(node_)) ? cJSON_GetArraySize(node_) : 0; }
-
-        // Check existence
-        bool exists()    const { return node_ != nullptr; }
-        bool is_null()   const { return !node_ || cJSON_IsNull(node_); }
-        bool is_object() const { return node_ && cJSON_IsObject(node_); }
-        bool is_array()  const { return node_ && cJSON_IsArray(node_); }
-        bool is_number() const { return node_ && cJSON_IsNumber(node_); }
-        bool is_string() const { return node_ && cJSON_IsString(node_); }
-        bool is_bool()   const { return node_ && cJSON_IsBool(node_); }
-
-        // Extract as a standalone Record (deep copy)
-        Record as_record() const {
-            if (!node_ || !cJSON_IsObject(node_)) return {};
-            Record r;
-            cJSON_Delete(r.json_);
-            r.json_ = cJSON_Duplicate(node_, true);
-            return r;
+        bool as_bool(bool def = false) const { return node_ ? yyjson_mut_is_true(node_) : def; }
+        std::string as_string(const std::string& def = "") const {
+            const char* s = (node_ && yyjson_mut_is_str(node_)) ? yyjson_mut_get_str(node_) : nullptr;
+            return s ? std::string(s) : def;
         }
 
-        // Iterate array: for (int i = 0; i < val.size(); ++i) val[i]...
-        // Or use the raw cJSON pointer for cJSON_ArrayForEach
-        cJSON* raw() const { return node_; }
+        int size() const { return (node_ && yyjson_mut_is_arr(node_)) ? (int)yyjson_mut_arr_size(node_) : 0; }
+
+        bool exists()    const { return node_ != nullptr; }
+        bool is_null()   const { return !node_ || yyjson_mut_is_null(node_); }
+        bool is_object() const { return node_ && yyjson_mut_is_obj(node_); }
+        bool is_array()  const { return node_ && yyjson_mut_is_arr(node_); }
+        bool is_number() const { return node_ && yyjson_mut_is_num(node_); }
+        bool is_string() const { return node_ && yyjson_mut_is_str(node_); }
+        bool is_bool()   const { return node_ && yyjson_mut_is_bool(node_); }
+
+        // Extract as a standalone Record (deep copy).
+        Record as_record() const {
+            if (!node_ || !yyjson_mut_is_obj(node_)) return {};
+            return Record(node_);   // private deep-copy ctor
+        }
+
+        // Raw yyjson value (advanced; for cross-doc copy via set_value or
+        // iteration). Belongs to the source Record's doc — do not free.
+        yyjson_mut_val* raw() const { return node_; }
 
         // Path expression access:
         //   val.at(".a.b[3].c")     object→object→array[3]→object
         //   val.at("[1].x")         array[1]→object
         //   val.at("a.b.c")         same as .a.b.c
-        Value at(const char* path) const {
-            return Value(resolve_path(node_, path));
-        }
+        Value at(const char* path) const { return Value(resolve_path(node_, path)); }
         Value at(const std::string& path) const { return at(path.c_str()); }
 
     private:
-        cJSON* node_;
+        yyjson_mut_val* node_;
 
-        static cJSON* resolve_path(cJSON* root, const char* p) {
+        static yyjson_mut_val* resolve_path(yyjson_mut_val* root, const char* p) {
             if (!root || !p) return nullptr;
-            cJSON* cur = root;
+            yyjson_mut_val* cur = root;
             while (*p && cur) {
                 if (*p == '.') ++p;  // skip leading or separator dot
                 if (*p == '[') {
-                    // Array index: [N]. Reject non-digit (e.g. [-1], [abc])
-                    // instead of silently yielding idx=0.
                     ++p;
                     if (*p < '0' || *p > '9') return nullptr;
                     int idx = 0;
                     while (*p >= '0' && *p <= '9') { idx = idx * 10 + (*p - '0'); ++p; }
                     if (*p != ']') return nullptr;
                     ++p;
-                    if (!cJSON_IsArray(cur)) return nullptr;
-                    cur = cJSON_GetArrayItem(cur, idx);
+                    if (!yyjson_mut_is_arr(cur)) return nullptr;
+                    cur = yyjson_mut_arr_get(cur, (size_t)idx);
                 } else {
-                    // Object key: read until next . or [ or end. Keys of any
-                    // length — std::string, no silent truncation at 256.
                     const char* start = p;
                     while (*p && *p != '.' && *p != '[') ++p;
                     if (p == start) return nullptr;
                     std::string key(start, p - start);
-                    if (!cJSON_IsObject(cur)) return nullptr;
-                    cur = cJSON_GetObjectItem(cur, key.c_str());
+                    if (!yyjson_mut_is_obj(cur)) return nullptr;
+                    cur = yyjson_mut_obj_get(cur, key.c_str());
                 }
             }
             return cur;
@@ -304,141 +289,112 @@ public:
 
     // Entry point for chained access
     Value operator[](const char* key) const {
-        // If key contains '.' or '[', treat as path expression
         bool is_path = false;
         for (const char* p = key; *p; ++p) {
             if (*p == '.' || *p == '[') { is_path = true; break; }
         }
-        if (is_path) return Value(json_).at(key);
-        return Value(cJSON_GetObjectItem(json_, key));
+        if (is_path) return Value(root_).at(key);
+        return Value(root_ ? yyjson_mut_obj_get(root_, key) : nullptr);
     }
-    Value operator[](const std::string& key) const {
-        return (*this)[key.c_str()];
-    }
-    // Explicit path access (always uses path parser)
-    Value at(const char* path) const { return Value(json_).at(path); }
+    Value operator[](const std::string& key) const { return (*this)[key.c_str()]; }
+    Value at(const char* path) const { return Value(root_).at(path); }
     Value at(const std::string& path) const { return at(path.c_str()); }
 
-    // --- Data getters (with defaults) ---
-
-    // NOTE: cJSON stores numbers as double and clamps `valueint` to the int
-    // range — a value above 2^31 read here SATURATES at INT_MAX (no error). For
-    // counts/ids that may exceed 2^31 use get_double and cast to int64_t.
-    int get_int(const std::string& key, int def = 0) const {
-        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
-        return (item && cJSON_IsNumber(item)) ? item->valueint : def;
+    // Deep-copy any Value (from any Record) into this Record under `key`.
+    // The ergonomic replacement for the old set_raw(cJSON_Duplicate(...)) idiom.
+    Record& set_value(const std::string& key, const Value& v) {
+        yyjson_mut_val* src = v.raw();
+        put_(key.c_str(), src ? yyjson_mut_val_mut_copy(doc_, src) : yyjson_mut_null(doc_));
+        return *this;
     }
 
+    // --- Data getters (with defaults) ---
+    int get_int(const std::string& key, int def = 0) const {
+        yyjson_mut_val* it = get_(key.c_str());
+        return (it && yyjson_mut_is_num(it)) ? (int)yyjson_mut_get_num(it) : def;
+    }
     double get_double(const std::string& key, double def = 0.0) const {
-        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
-        if (item && cJSON_IsNumber(item)) return item->valuedouble;
-        if (item && cJSON_IsString(item)) { double v; if (nonfinite_from_str(item->valuestring, v)) return v; }
+        yyjson_mut_val* it = get_(key.c_str());
+        if (it && yyjson_mut_is_num(it)) return yyjson_mut_get_num(it);
+        if (it && yyjson_mut_is_str(it)) { double v; if (nonfinite_from_str(yyjson_mut_get_str(it), v)) return v; }
         return def;
     }
-
     bool get_bool(const std::string& key, bool def = false) const {
-        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
-        return item ? cJSON_IsTrue(item) : def;
+        yyjson_mut_val* it = get_(key.c_str());
+        return it ? yyjson_mut_is_true(it) : def;
     }
-
     std::string get_string(const std::string& key, const std::string& def = "") const {
-        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
-        return (item && cJSON_IsString(item)) ? item->valuestring : def;
+        yyjson_mut_val* it = get_(key.c_str());
+        const char* s = (it && yyjson_mut_is_str(it)) ? yyjson_mut_get_str(it) : nullptr;
+        return s ? std::string(s) : def;
     }
-
-    bool has(const std::string& key) const {
-        return cJSON_GetObjectItem(json_, key.c_str()) != nullptr;
-    }
+    bool has(const std::string& key) const { return get_(key.c_str()) != nullptr; }
 
     // --- NA (not-available) -------------------------------------------------
-    // A "poison" Record: empty output that carries a reason. Returned by a
-    // plugin that can't proceed (missing inputs, no detection, etc.). NA is
-    // marked by a reserved "$na" key so it survives the process() ABI + the WS,
-    // and it PROPAGATES: feeding an NA Record into use("x").process() short-
-    // circuits to NA without running the plugin (see xi_use.hpp), so a failure
-    // anywhere flows to the end of the pipeline with no defensive code between.
-    // See docs/design/io-types-and-na.md.
     static constexpr const char* kNaKey = "$na";
     static Record na(const std::string& reason = "") {
         Record r;
-        cJSON_AddStringToObject(r.json_, kNaKey, reason.c_str());
+        r.set(kNaKey, reason);
         return r;
     }
     bool is_na() const { return has(kNaKey); }
     std::string na_reason() const { return get_string(kNaKey); }
 
     // --- Provenance (src id) ------------------------------------------------
-    // A Record can carry WHERE it came from: the host stamps an instance's
-    // output with its name ($src), extractors pipe that onto the typed values
-    // they pull out, and constructors record which source each input field came
-    // from ($prov: field -> src). This makes the non-image data flow self-
-    // describing — the constructor (and a future graph) knows the data lineage
-    // without parsing the script. Reserved keys, like $na; harmless to plugins.
-    // See docs/design/io-types-and-na.md.
     static constexpr const char* kSrcKey  = "$src";
     static constexpr const char* kProvKey = "$prov";
-    Record& set_src(const std::string& id) {
-        cJSON_DeleteItemFromObject(json_, kSrcKey);
-        cJSON_AddStringToObject(json_, kSrcKey, id.c_str());
-        return *this;
-    }
+    Record& set_src(const std::string& id) { return set(kSrcKey, id); }
     std::string src() const { return get_string(kSrcKey); }
-    // Record that input field `field` was sourced from `src` (used by constructors).
     Record& set_prov(const std::string& field, const std::string& src) {
         if (src.empty()) return *this;
-        cJSON* prov = cJSON_GetObjectItem(json_, kProvKey);
-        if (!prov) { prov = cJSON_CreateObject(); cJSON_AddItemToObject(json_, kProvKey, prov); }
-        cJSON_DeleteItemFromObject(prov, field.c_str());
-        cJSON_AddStringToObject(prov, field.c_str(), src.c_str());
+        yyjson_mut_val* prov = get_(kProvKey);
+        if (!prov || !yyjson_mut_is_obj(prov)) {
+            prov = yyjson_mut_obj(doc_);
+            put_(kProvKey, prov);
+        }
+        yyjson_mut_obj_remove_key(prov, field.c_str());
+        yyjson_mut_obj_put(prov, yyjson_mut_strcpy(doc_, field.c_str()),
+                                 yyjson_mut_strcpy(doc_, src.c_str()));
         return *this;
     }
     std::string prov_of(const std::string& field) const {
-        cJSON* prov = cJSON_GetObjectItem(json_, kProvKey);
-        if (!prov) return "";
-        cJSON* f = cJSON_GetObjectItem(prov, field.c_str());
-        return (f && cJSON_IsString(f)) ? f->valuestring : "";
+        yyjson_mut_val* prov = get_(kProvKey);
+        if (!prov || !yyjson_mut_is_obj(prov)) return "";
+        yyjson_mut_val* f = yyjson_mut_obj_get(prov, field.c_str());
+        const char* s = (f && yyjson_mut_is_str(f)) ? yyjson_mut_get_str(f) : nullptr;
+        return s ? std::string(s) : "";
     }
 
-    // Get a nested Record (returns empty Record if not found)
+    // Get a nested Record (returns empty Record if not found).
     Record get_record(const std::string& key) const {
-        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
-        if (!item || !cJSON_IsObject(item)) return {};
-        Record r;
-        cJSON_Delete(r.json_);
-        r.json_ = cJSON_Duplicate(item, true);
-        return r;
+        yyjson_mut_val* it = get_(key.c_str());
+        if (!it || !yyjson_mut_is_obj(it)) return {};
+        return Record(it);
     }
-
-    // Get array length (returns 0 if key not found or not array)
     int get_array_size(const std::string& key) const {
-        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
-        return (item && cJSON_IsArray(item)) ? cJSON_GetArraySize(item) : 0;
+        yyjson_mut_val* it = get_(key.c_str());
+        return (it && yyjson_mut_is_arr(it)) ? (int)yyjson_mut_arr_size(it) : 0;
     }
-
-    // Get array element as Record (for arrays of objects)
     Record get_array_item(const std::string& key, int index) const {
-        cJSON* arr = cJSON_GetObjectItem(json_, key.c_str());
-        if (!arr || !cJSON_IsArray(arr)) return {};
-        cJSON* item = cJSON_GetArrayItem(arr, index);
-        if (!item || !cJSON_IsObject(item)) return {};
-        Record r;
-        cJSON_Delete(r.json_);
-        r.json_ = cJSON_Duplicate(item, true);
-        return r;
+        yyjson_mut_val* arr = get_(key.c_str());
+        if (!arr || !yyjson_mut_is_arr(arr)) return {};
+        yyjson_mut_val* it = yyjson_mut_arr_get(arr, (size_t)index);
+        if (!it || !yyjson_mut_is_obj(it)) return {};
+        return Record(it);
     }
 
     // --- Image accessors ---
     const std::map<std::string, Image>& images() const { return images_; }
-    cJSON* json() const { return json_; }
+    // The mutable yyjson root object (advanced; used by the ABI seam).
+    yyjson_mut_val* json() const { return root_; }
+    yyjson_mut_doc* doc()  const { return doc_; }
 
     bool has_image(const std::string& key) const { return images_.count(key) > 0; }
-
     const Image& get_image(const std::string& key) const {
         static const Image empty;
         auto it = images_.find(key);
         return it != images_.end() ? it->second : empty;
     }
-
     Image get_image(const std::string& key, const Image& def) const {
         auto it = images_.find(key);
         return it != images_.end() ? it->second : def;
@@ -446,19 +402,41 @@ public:
 
     // --- Serialization ---
     std::string data_json() const {
-        if (!json_) return "{}";
-        char* s = cJSON_PrintUnformatted(json_);
-        std::string out(s);
-        cJSON_free(s);
+        if (!doc_) return "{}";
+        size_t len = 0;
+        char* s = yyjson_mut_write(doc_, 0, &len);
+        if (!s) return "{}";
+        std::string out(s, len);
+        free(s);
+        return out;
+    }
+    std::string data_json_pretty() const {
+        if (!doc_) return "{}";
+        size_t len = 0;
+        char* s = yyjson_mut_write(doc_, YYJSON_WRITE_PRETTY, &len);
+        if (!s) return "{}";
+        std::string out(s, len);
+        free(s);
         return out;
     }
 
-    std::string data_json_pretty() const {
-        if (!json_) return "{}";
-        char* s = cJSON_Print(json_);
-        std::string out(s);
-        cJSON_free(s);
-        return out;
+    // Build a Record from a JSON-text buffer (the wire decode path). Parses with
+    // yyjson (immutable, fast) and materialises a mutable Record. Total: returns
+    // an empty Record on null / empty / malformed / non-object input.
+    static Record from_json_bytes(const uint8_t* data, size_t len) {
+        Record r;
+        if (!data || len == 0) return r;
+        yyjson_doc* idoc = yyjson_read((const char*)data, len, 0);
+        if (!idoc) return r;
+        yyjson_val* iroot = yyjson_doc_get_root(idoc);
+        if (iroot && yyjson_is_obj(iroot)) {
+            yyjson_mut_doc_free(r.doc_);
+            r.doc_  = yyjson_mut_doc_new(nullptr);
+            r.root_ = yyjson_val_mut_copy(r.doc_, iroot);
+            yyjson_mut_doc_set_root(r.doc_, r.root_);
+        }
+        yyjson_doc_free(idoc);
+        return r;
     }
 
     std::string image_keys_json() const {
@@ -473,18 +451,45 @@ public:
         return out;
     }
 
-    bool empty() const { return images_.empty() && (!json_ || !json_->child); }
+    bool empty() const {
+        return images_.empty() && (!root_ || yyjson_mut_obj_size(root_) == 0);
+    }
 
 private:
     std::map<std::string, Image> images_;
-    cJSON* json_;
+    yyjson_mut_doc* doc_  = nullptr;
+    yyjson_mut_val* root_ = nullptr;
 
-    void ensure_array(const std::string& key) {
-        cJSON* item = cJSON_GetObjectItem(json_, key.c_str());
-        if (!item || !cJSON_IsArray(item)) {
-            cJSON_DeleteItemFromObject(json_, key.c_str());
-            cJSON_AddItemToObject(json_, key.c_str(), cJSON_CreateArray());
+    void init_() {
+        doc_  = yyjson_mut_doc_new(nullptr);
+        root_ = yyjson_mut_obj(doc_);
+        yyjson_mut_doc_set_root(doc_, root_);
+    }
+
+    // Deep-copy a yyjson object value into a fresh Record (used by getters/Value).
+    explicit Record(yyjson_mut_val* obj_val) {
+        doc_  = yyjson_mut_doc_new(nullptr);
+        root_ = (obj_val && yyjson_mut_is_obj(obj_val))
+                  ? yyjson_mut_val_mut_copy(doc_, obj_val) : yyjson_mut_obj(doc_);
+        yyjson_mut_doc_set_root(doc_, root_);
+    }
+
+    yyjson_mut_val* get_(const char* key) const {
+        return root_ ? yyjson_mut_obj_get(root_, key) : nullptr;
+    }
+    // Set key -> val with replace-if-exists semantics (the key is copied).
+    void put_(const char* key, yyjson_mut_val* val) {
+        if (!root_ || !val) return;
+        yyjson_mut_obj_remove_key(root_, key);
+        yyjson_mut_obj_put(root_, yyjson_mut_strcpy(doc_, key), val);
+    }
+    yyjson_mut_val* ensure_arr_(const char* key) {
+        yyjson_mut_val* arr = get_(key);
+        if (!arr || !yyjson_mut_is_arr(arr)) {
+            arr = yyjson_mut_arr(doc_);
+            put_(key, arr);
         }
+        return arr;
     }
 };
 
@@ -494,8 +499,6 @@ private:
 //
 //   if (auto na = xi::require(in, {"current", "baseline"})) return *na;
 //
-// (Validation lives at the compute boundary — the plugin decides what it needs;
-// see docs/design/io-types-and-na.md.)
 inline std::optional<Record> require(const Record& in,
                                      std::initializer_list<const char*> fields) {
     for (const char* f : fields)

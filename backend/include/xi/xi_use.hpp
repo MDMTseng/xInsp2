@@ -19,9 +19,8 @@
 
 #include "xi_abi.h"
 #include "xi_clock.hpp"
-#include "xi_record.hpp"
+#include "xi_record.hpp"   // wire codec is yyjson JSON (Record::from_json_bytes / data_json)
 #include "xi_image.hpp"
-#include "xi_msgpack.hpp"   // Record wire codec (MessagePack via CWPack)
 
 #include <chrono>
 #include <cstring>
@@ -310,33 +309,21 @@ public:
             in_imgs.push_back({key.c_str(), h});
             in_handles.push_back(h);
         }
-        std::vector<uint8_t> in_bytes = cjson_to_msgpack(input.json());
+        std::string in_js = input.data_json();   // yyjson serialize
 
         xi_record_out output;
         xi_record_out_init(&output);
 
-        process_fn(name_.c_str(), in_bytes.data(), (int32_t)in_bytes.size(),
+        process_fn(name_.c_str(), (const uint8_t*)in_js.data(), (int32_t)in_js.size(),
                    in_imgs.data(), (int)in_imgs.size(), &output);
 
         // Release input handles from the BACKEND pool — plugin's process()
         // copied what it needed.
         for (auto h : in_handles) host->image_release(h);
 
-        Record result;
-        if (output.data && output.len > 0) {
-            cJSON* parsed = msgpack_to_cjson(output.data, (size_t)output.len);
-            if (parsed) {
-                cJSON* item = parsed->child;
-                while (item) {
-                    if (cJSON_IsNumber(item))      result.set(item->string, item->valuedouble);
-                    else if (cJSON_IsBool(item))   result.set(item->string, cJSON_IsTrue(item) ? true : false);
-                    else if (cJSON_IsString(item)) result.set(item->string, std::string(item->valuestring));
-                    else                           result.set_raw(item->string, cJSON_Duplicate(item, true));
-                    item = item->next;
-                }
-                cJSON_Delete(parsed);
-            }
-        }
+        Record result = (output.data && output.len > 0)
+            ? Record::from_json_bytes(output.data, (size_t)output.len)
+            : Record();
         // Output handles live in the BACKEND pool. Zero-copy: wrap as
         // a pool-backed view (adopt_pool_handle addrefs internally) and
         // release our process_fn ref. Net refcount: still 1, held by

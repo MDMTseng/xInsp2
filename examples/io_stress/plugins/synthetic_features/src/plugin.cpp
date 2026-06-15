@@ -26,7 +26,7 @@ public:
         const double thr  = input["threshold"].as_double(0.0);
 
         const int n = (seed % 5) + 3;   // 3..7 raw features
-        xi::Json features = xi::Json::array();
+        xi::Record out;
 
         int    accepted = 0;
         double sx = 0, sy = 0, ssum = 0;
@@ -40,11 +40,10 @@ public:
             const double y = (seed * 5 + i * 7) % 480;
             const double angle = (i * 30) % 360;
 
-            xi::Json f = xi::Json::object();
-            f.set("pose", xi::Json::object().set("x", x).set("y", y).set("angle", angle));
-            f.set("score", score);
-            f.set("edge", xi::Json::object().set("x1", x).set("y1", y).set("x2", x + 20).set("y2", y + 5));
-            features.push(f);
+            out.push("features", xi::Record()
+                .set("pose", xi::Record().set("x", x).set("y", y).set("angle", angle))
+                .set("score", score)
+                .set("edge", xi::Record().set("x1", x).set("y1", y).set("x2", x + 20).set("y2", y + 5)));
 
             ++accepted;
             sx += x; sy += y; ssum += score;
@@ -55,10 +54,8 @@ public:
         const double cx = accepted ? sx / accepted : 0.0;
         const double cy = accepted ? sy / accepted : 0.0;
 
-        xi::Record out;
         out.set("count", accepted);
         out.set("centroid", xi::Record().set("x", cx).set("y", cy));
-        out.set_raw("features", cJSON_Duplicate(features.raw(), 1));
         out.set("best", xi::Record()
                             .set("pose", xi::Record().set("x", bx).set("y", by).set("angle", ba))
                             .set("score", bscore < 0 ? 0.0 : bscore));
