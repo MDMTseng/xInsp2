@@ -109,8 +109,11 @@ After a backend crash + auto-respawn:
 
 ### Symptom: plugin's `process()` runs forever (UI freezes)
 
-The host's **watchdog** kills runaway inspects after `watchdog_ms` (set
-via `cmd:set_watchdog_ms` or per-project). Default 10000 ms.
+The host's **watchdog** is **off by default** (`watchdog_ms` = 0). Enable it with
+`--watchdog=MS`, `cmd:set_watchdog_ms`, or per-project. On breach it first asks the
+script to cancel cooperatively (1 s grace); if the inspect ignores that, the backend
+**exits** (`_Exit`) for the FE supervisor to respawn — it does not kill the worker
+thread.
 
 Fix by:
 - Adding loop bounds in your plugin / op.

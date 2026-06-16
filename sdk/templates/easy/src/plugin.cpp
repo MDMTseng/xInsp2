@@ -66,7 +66,7 @@ public:
     // ---- 4. exchange — RPC channel ----------------------------------------
     //
     // Lets the script call:
-    //     auto rsp = xi::use<{{CLASS}}>("{{NAME}}").exchange("hello");
+    //     auto rsp = xi::use("{{NAME}}").exchange("hello");
     // We return a JSON string. Use this for "do X right now" actions that
     // don't fit the per-frame process() flow.
     //

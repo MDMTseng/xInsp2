@@ -63,7 +63,7 @@ leaves it to FE). Rule everywhere: **whoever spawns BE passes it the project pat
 
 ## Export bundle — copy to another PC, run with minimal requirements
 
-`python tools/export_bundle.py <project> <out> [--fps N]` produces a self-contained
+`python tools/export_bundle.py <project> <out> [--fps N] [--port P]` produces a self-contained
 folder (✅ implemented). The **target machine needs no toolchain** — the script +
 project plugins are **pre-compiled on the dev box** (via a throwaway dev backend)
 and shipped as DLLs; the target backend loads them with **`--aot`** (a `.dll`

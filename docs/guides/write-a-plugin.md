@@ -101,8 +101,8 @@ others.
 node <xinsp2>\sdk\scaffold.mjs C:\dev\my_plugins\foo
 ```
 
-(For the unified `--template easy|medium|expert` flag, use the
-scaffold variant that renders from `sdk/templates/`.)
+(`scaffold.mjs` also accepts `--template easy|medium|expert` (default easy),
+rendering from `sdk/templates/`.)
 
 ### 2. Build
 
@@ -186,7 +186,6 @@ ref when it goes out of scope. Net refcount: 1, owned by the receiver.
 You never call `image_addref` / `image_release` from plugin code.
 
 For the API contracts in detail, see
-[`docs/reference/c-abi.md`](../reference/c-abi.md) and
 [`docs/reference/c-abi.md`](../reference/c-abi.md).
 
 ---
@@ -302,7 +301,7 @@ h.setParam('inst0', 'close_radius', 8);   // → [data-param="close_radius"]
 h.action('inst0', 'apply');               // → [data-action="apply"]
 ```
 
-(`h.setInput('#close', 8)` / `h.click('#apply')` still work for id-targeting when
+(`h.setInput('inst0', '#close', 8)` / `h.click('inst0', '#apply')` still work for id-targeting when
 you need it.)
 
 ### Driving the UI in a test
