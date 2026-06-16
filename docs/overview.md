@@ -122,4 +122,5 @@ handling, dispatch pools, script lifecycle, crash filter.
 ---
 
 Where next: [`guides/build-and-run.md`](./guides/build-and-run.md) to build + run,
-the [index](./README.md) for everything else.
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md) if you're going to develop xInsp2 itself
+(setup + test sweep + conventions), the [index](./README.md) for everything else.
