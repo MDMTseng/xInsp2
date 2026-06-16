@@ -35,7 +35,7 @@ cmake --build build --config Release
 
 cd ..\vscode-extension
 npm install
-node esbuild.mjs
+npm run build
 ```
 
 `backend/build/Release/xinsp-backend.exe` is the WebSocket service.
