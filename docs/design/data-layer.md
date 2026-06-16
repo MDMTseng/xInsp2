@@ -297,12 +297,9 @@ read-input-build-fresh-output path copies nothing.
 
 ---
 
-_The MessagePack design below is retained as the explored-and-superseded record._
-
-## Why (measured)
-
-Record crosses every plugin boundary as a serialized blob. With everything now
-in-process (SHM/worker gone), `UseProxy::process` still does
+_The MessagePack design below is retained as the explored-and-superseded record
+of why a binary codec was once considered. The in-process doc-pointer path
+(§γ above) supersedes ALL of it — the fast path doesn't serialize at all._
 
 ## Why (measured)
 

@@ -412,15 +412,30 @@ typedef struct xi_host_api {
     uint8_t*        (*image_data)(xi_image_handle h);
     int32_t         (*image_width/height/channels/stride)(xi_image_handle h);
     void            (*log)(int32_t level, const char* msg);
+    /* + emit_trigger, emit/fetch resource hooks, set_safe_state, and the γ
+       in-process doc allocator + refcount (doc_chunk_*, doc_retain/release/
+       refcount). Full struct + ABI version (v4): reference/host_api.md. */
 } xi_host_api;
 ```
 
 ### Record at boundary
 
+The in-process fast path passes the yyjson doc BY POINTER (`doc` / `out_doc`,
+zero-serialize); `data`/`len` carry JSON bytes only when the doc pointer is null
+(foreign plugin / layout mismatch). See `design/data-layer.md §γ`.
+
 ```c
 typedef struct { const char* key; xi_image_handle handle; } xi_record_image;
-typedef struct { const xi_record_image* images; int32_t image_count; const char* json; } xi_record;
-typedef struct { xi_record_image* images; int32_t image_count; int32_t image_capacity; char* json; } xi_record_out;
+typedef struct {
+    const xi_record_image* images; int32_t image_count;
+    const uint8_t* data; int32_t len;   /* JSON bytes — used iff doc == NULL */
+    const void* doc;                    /* borrowed yyjson_mut_doc* (in-process) */
+} xi_record;
+typedef struct {
+    xi_record_image* images; int32_t image_count; int32_t image_capacity;
+    const uint8_t* data; int32_t len;   /* JSON bytes — used iff out_doc == NULL */
+    void* out_doc;                      /* adopted yyjson_mut_doc* (zero-copy) */
+} xi_record_out;
 ```
 
 ### Plugin exports

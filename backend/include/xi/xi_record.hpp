@@ -5,7 +5,7 @@
 // A Record bundles named images + schemaless JSON data. Backed by yyjson
 // (a mutable doc) so building is incremental + mutable and reading/serializing
 // are fast; escaping, nesting, and serialization are handled correctly.
-// (Migrated from cJSON 2026-06 — see docs/design/wire-format-msgpack.md.)
+// (Migrated from cJSON 2026-06 — see docs/design/data-layer.md.)
 //
 // Usage:
 //

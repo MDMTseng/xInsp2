@@ -57,12 +57,32 @@ typedef struct xi_host_api {
     int32_t (*emit_dispatch)(const char* emitter_name, xi_trigger_id res_id,
                               int64_t timestamp_us);
     void    (*set_safe_state)(const char* payload);
+
+    /* In-process doc allocator (ABI v3, γ) — host-owned pool behind a yyjson doc
+     * passed across the ABI BY POINTER (zero-serialize). A doc built through
+     * these is host-owned, so its free routes back to the host; the plugin wraps
+     * them into a yyjson_alc. See design/data-layer.md §γ. */
+    void*   (*doc_chunk_alloc)(size_t size);
+    void*   (*doc_chunk_realloc)(void* ptr, size_t size);
+    void    (*doc_chunk_free)(void* ptr);
+
+    /* In-process doc refcount (ABI v4, γ-4) — the doc analogue of
+     * image_addref/release. A yyjson doc handed across the ABI can be held by
+     * more than one side (host caches; a plugin caches its input) with NO copy;
+     * doc_refcount lets the adopter learn whether it is the sole side. */
+    void    (*doc_retain)(void* doc);
+    void    (*doc_release)(void* doc);
+    int32_t (*doc_refcount)(void* doc);
 } xi_host_api;
 ```
 
-`XI_ABI_VERSION` is **2** (defined in `xi_abi.h`). The struct is
+`XI_ABI_VERSION` is **4** (defined in `xi_abi.h`). The struct is
 **append-only** — older plugin DLLs that don't read tail fields stay binary
-compatible.
+compatible. Version history: v2 added the emit/fetch resource + safe-state
+hooks; **v3** added the in-process doc allocator (`doc_chunk_*`, γ); **v4** added
+the doc refcount (`doc_retain`/`doc_release`/`doc_refcount`, γ-4). The plugin's
+`xi_plugin_abi_version()` export is gated against this — a plugin asking for a
+newer ABI than the host provides is refused at load.
 
 ### Wiring status — where each field gets set
 
@@ -80,6 +100,7 @@ still has them `nullptr`. Either way, plugins null-check before calling.
 | `set_status` | Wired — routes to the status registry via `xi::status_sink()` |
 | `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` | Wired via `install_resource_hooks()` in `PluginManager::default_host_api()` |
 | `set_safe_state` | Wired via `install_safe_state_hook()` in `PluginManager::default_host_api()` |
+| `doc_chunk_*` (3), `doc_retain`/`doc_release`/`doc_refcount` (3) | Wired in `make_host_api()` (xi_image_pool.hpp) — back the γ in-process doc-pointer path (`xi_doc_pool.hpp` + `xi_doc_registry.hpp`) |
 
 > The five `shm_*` fields remain in the struct for binary compatibility but
 > are always `nullptr`. Plugins must null-check before calling them and fall
@@ -246,4 +267,9 @@ manage refs in that case — the host's record bridge does it.
   plugin DLL must provide.
 - [`reference/instance-model.md`](./instance-model.md) — how instances
   are loaded, persisted, and torn down.
+- [`design/emitter-fetch-model.md`](../design/emitter-fetch-model.md) — the
+  emit/fetch dispatch model behind `emit_resource` / `emit_dispatch` / `fetch_*`.
+- [`design/data-layer.md`](../design/data-layer.md) §γ — the
+  in-process doc pass-by-pointer + refcount behind `doc_chunk_*` / `doc_retain` /
+  `doc_release` / `doc_refcount`.
 - `backend/include/xi/xi_abi.h` — authoritative source.

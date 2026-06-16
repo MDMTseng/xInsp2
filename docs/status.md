@@ -53,7 +53,7 @@ compute core (BE) under a frontend (FE) supervisor — all plugins
 | Feature | Status |
 |---|---|
 | `Instance<T>` / `Param<T>` / `xi::use("name")` | ✅ |
-| `xi::Record` (cJSON-backed, path expressions, image bag) | ✅ |
+| `xi::Record` (yyjson-backed; in-process doc pass-by-pointer + cross-ABI refcount, γ-4; path expressions, image bag) | ✅ |
 | `xi::Json` (RAII JSON builder + reader) | ✅ |
 | `xi::state()` persistent cross-frame / cross-reload | ✅ |
 | `xi::breakpoint(label)` + `cmd:resume` | ✅ |
@@ -130,6 +130,19 @@ and `script_isolated_run` commands, and the `event:isolation_dead`.
 The `instance.json` `"isolation"` field is now accepted but ignored
 with a one-time deprecation warning, so old projects still load.
 `docs/reference/ipc-shm.md` is retained for historical reference only.
+
+---
+
+## Data layer — yyjson-only + in-process doc pass-by-pointer (2026-06)
+
+`xi::Record`'s backing pivoted cJSON → (msgpack/CWPack explored, dropped) →
+**yyjson-only**; cJSON was removed from the tree. The in-process script↔plugin
+seam passes the yyjson doc BY POINTER (zero serialize), backed by a host-owned
+doc-chunk pool. **γ-4** makes the doc a cross-ABI refcount (host `DocRegistry`,
+like a shared_ptr): both sides cache a doc zero-copy, and a plugin whose yyjson
+layout mismatches the host is refused at load unless `plugin.json` sets
+`"json_fallback": true`. `XI_ABI_VERSION` is now **4**. See
+`design/data-layer.md §γ`.
 
 ---
 

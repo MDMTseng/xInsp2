@@ -6,7 +6,7 @@
 // per-frame malloc churn after warm-up. Pure internal swap — no ABI change,
 // no caller change; doc_chunk_* keep their (size)/(ptr,size)/(ptr) signatures.
 //
-// Design (see docs/design/wire-format-msgpack.md §γ):
+// Design (see docs/design/data-layer.md §γ):
 //   - Segregated free-lists by power-of-two size class (O(1) acquire/release,
 //     no search). yyjson bump-allocates nodes WITHIN a chunk, so the pool is
 //     hit only per chunk (a handful per doc), not per node.

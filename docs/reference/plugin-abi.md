@@ -338,7 +338,7 @@ Fields:
   default** so that per-frame perf cliff is never silent; set `"json_fallback":
   true` to opt in (logged once at load). Plugins built with `XI_PLUGIN_IMPL`
   against the host's vendored yyjson get the doc path automatically and never need
-  this. See `docs/design/wire-format-msgpack.md` §γ.
+  this. See `docs/design/data-layer.md` §γ.
 - `abi_version` (int, optional but written by `cmd:export_project_plugin`)
   — the `XI_ABI_VERSION` the plugin was compiled against. Matches the
   plugin DLL's `xi_plugin_abi_version()` export. Backends refuse

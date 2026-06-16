@@ -44,9 +44,9 @@ shapes.
 
 ## Design sketches (`design/`)
 
-Forward-looking design docs for work that isn't implemented yet.
-Updated when scope solidifies; deleted when the work lands and the
-content moves into the relevant reference / guide.
+Design docs — the rationale + mechanics behind a subsystem. Some are
+**SHIPPED** (the doc is the design-of-record); others are forward-looking
+sketches for work **not yet scheduled**. Each entry notes which.
 
 | File | Subject |
 |---|---|
@@ -55,11 +55,12 @@ content moves into the relevant reference / guide.
 | [`design/comms-gateway.md`](./design/comms-gateway.md) | **Superseded:** the `xinsp-comms` gateway + `xi::comms` were removed — PLC I/O is now a plugin concern, and BE-crash → PLC is served by the FE safe-state sink + `host->set_safe_state`. |
 | [`design/interactive-tool-registry.md`](./design/interactive-tool-registry.md) | How plugins that need GUI setup (shape-model template editing, ROI mask drawing) hook into a shared image-viewer panel without reimplementing pan/zoom/draw plumbing. |
 | [`design/linux-port.md`](./design/linux-port.md) | Cross-platform port (Linux / ARM / macOS): Windows-only inventory, effort + phasing estimates, ARM/macOS deltas, the runtime-compile / AOT-bundle strategy, and the going-forward rule that new code stays cross-platform-friendly. Not scheduled. |
-| [`design/dispatch-groups.md`](./design/dispatch-groups.md) | Priority + concurrency for trigger work: each dispatch group owns its `max_parallel` worker threads at its OS `thread_priority` (+ per-group queue/rate). No shared pool / priority queue — group priority = thread_priority + max_parallel, and the OS preempts on the cores. Default = high(4)/low(1); legacy (no groups) = one implicit group. Design, not scheduled. |
+| [`design/dispatch-groups.md`](./design/dispatch-groups.md) | Priority + concurrency for trigger work: each dispatch group owns its `max_parallel` worker threads at its OS `thread_priority` (+ per-group queue/rate). No shared pool / priority queue — group priority = thread_priority + max_parallel, and the OS preempts on the cores. Default = high(4)/low(1); legacy (no groups) = one implicit group. **v1 shipped** (gated on `parallelism.groups`). |
 | [`design/deployment.md`](./design/deployment.md) | Production deployment: boot order (OS service → FE root → BE; HMI is a non-critical viewer), who may crash, who knows the project folder (FE + BE only), and the **AOT export bundle** (`tools/export_bundle.py` → copy-and-run folder, `--aot` loads prebuilt script/plugin DLLs so the target needs no toolchain). |
 | [`design/run-result.md`](./design/run-result.md) | Per-run result record (one per trigger): a signed status code (`>0` ok-class, `0` NA, `-1…` user ng-class, `≤ -990000` a framework system-fail enum: dropped/crashed/timeout/no-verdict) + message + provenance. The framework fills the non-run cases (drop → `XI_SYS_DROPPED`) so the result stream has no silent gaps; feeds the HMI verdict/yield/Pareto cards + the PLC verdict. `xi::result/ok/ng` API, distinct from `VAR`. Design, not scheduled. |
 | [`design/io-types-and-na.md`](./design/io-types-and-na.md) | Ergonomic typed I/O wiring without a core schema: nominal types over `xi::Record` (`Number/Point/Pose/Line/Arc/Roi/Vec/Mat/Region`), per-plugin `io.hpp` extract/build facades, NA propagation (`$na`), and `$src`/`$prov` provenance. Phases 1–3 shipped; wiring UI deferred. |
-| [`design/wire-format-msgpack.md`](./design/wire-format-msgpack.md) | Data-layer decision: **yyjson-only**, replacing cJSON entirely (Record = `yyjson_mut_doc` + pool allocator; ~17× faster round-trip). Supersedes the explored MessagePack/CWPack plan (killed by unknown-count headers + hard in-place mutation), which the doc retains for rationale. Migration in progress on `refactor/yyjson-dom`. |
+| [`design/data-layer.md`](./design/data-layer.md) | **SHIPPED.** The data layer: **yyjson-only** (replaced cJSON; ~17× round-trip) + in-process doc pass-by-pointer + **γ-4 cross-ABI doc refcount** (host `DocRegistry`, zero-copy cache on both sides; layout-mismatch plugins refused at load unless `plugin.json` opts into `json_fallback`). Retains the explored-and-dropped MessagePack/CWPack plan for rationale. |
+| [`design/emitter-fetch-model.md`](./design/emitter-fetch-model.md) | **SHIPPED.** The emit/fetch dispatch model: an emitter stages a frame-set under a `res_id`, `emit_dispatch` runs an id-only inspection (bypassing trigger-bus correlation), the consumer `xi::use(emitter).fetch(id)`s it back. Back-pressure keeps the downstream `seq` stream gap-free. |
 | [`design/production-hmi.md`](./design/production-hmi.md) | Production operator HMI + standalone package export: a recursive split-pane SPA dashboard composer (compose/run modes), script-computes-data binding, web-component cards, vector overlay layers, the plugin `ui`/`card`/`overlay` surfaces, `dashboard.json`, and the AOT production bundle. v1.0 RUN mode built under `hmi/`. |
 
 ## Archive (`archive/`)
