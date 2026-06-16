@@ -25,7 +25,7 @@ Run all: `ctest --test-dir backend/build -C Release`
 | Binary | Coverage |
 |---|---|
 | `test_xi_core` | `xi::async`, `xi::Var`, `xi::Param`, `xi::Instance` registries; `await_all`, `Future<void>`, ASYNC_WRAP |
-| `test_record` | yyjson-backed `Record`; path expressions (`a.b[0].c`), image bag, default returns |
+| `test_record` | yyjson-backed `Record`; path expressions (`a.b[0].c`), image bag, default returns; γ-4 refcount + COW, cross-ABI share/adopt, zero-copy input cache |
 | `test_protocol` | `parse_cmd`, `Rsp` / `VarItem` / preview header serialization; fixture parity with TS side |
 | `test_image_pool` | 16-shard refcounted pool; concurrent create/release/data; 20 MP allocation |
 | `test_image_pool_stress` | high-volume concurrent pool churn; refcount integrity under load |
@@ -56,6 +56,7 @@ Run all: `cd vscode-extension && node --test test/*.test.mjs`
 | `ws_compile_reload.test.mjs` | compile_and_load + version increment |
 | `ws_crash.test.mjs` | null deref / div0 / array overrun → backend survives |
 | `ws_plugins.test.mjs` | plugin scan + create_instance |
+| `ws_fallback_gate.test.mjs` | γ-4 load gate: yyjson-layout-incompatible plugin (no `xi_yyjson_abi`) refused at load; `json_fallback:true` opt-in loads it |
 | `ws_project.test.mjs` | save_project / load_project / open_project |
 | `ws_defect.test.mjs` | `defect_detection.cpp` end-to-end |
 | `ws_reload_verify.test.mjs` | hot-reload preserves state, params, fresh code |

@@ -427,6 +427,53 @@ static void test_cross_abi_share() {
     CHECK(reg.live_count() == base);
 }
 
+// ---------- Test 19: γ-4 v4-4 zero-copy cache of a borrowed input ----------
+//
+// Models the input path: the host share_out's an input doc, the plugin adopts it
+// and CACHES it across frames by copy. The cached Record must point at the SAME
+// doc (no deep copy), stay readable after the host's input dies, and free only
+// when the plugin finally drops it.
+
+static void test_cache_input_zero_copy() {
+    SECTION("zero-copy cache of borrowed input (γ-4 v4-4)");
+    auto& reg = xi::DocRegistry::instance();
+    auto retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+    auto release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
+    size_t base = reg.live_count();
+
+    // Host has an input Record and shares it out to a plugin.
+    xi::Record host_input;
+    host_input.set("frame", 1);
+    yyjson_mut_doc* doc = host_input.share_out(retain, release);
+    CHECK(doc != nullptr);
+    CHECK(reg.refcount(doc) == 2);            // host side + reserved adopter
+
+    // Plugin adopts (consumes the reserve) and caches it across frames.
+    xi::Record plugin_cache;
+    {
+        xi::Record in = xi::Record::adopt_shared(doc, release, /*frozen=*/true);
+        CHECK(in.get_int("frame") == 1);
+        CHECK(reg.refcount(doc) == 2);        // host + plugin's adopted box
+
+        plugin_cache = in;                    // CACHE: copy = in-process box rc++
+        CHECK(plugin_cache.doc() == doc);     // SAME doc pointer — zero copy, no COW
+        CHECK(in.doc() == doc);
+        CHECK(reg.refcount(doc) == 2);        // copy shares the box; still one plugin side
+    }   // `in` dies: in-process box rc 2->1; registry unchanged (plugin_cache holds it)
+    CHECK(reg.refcount(doc) == 2);
+
+    // The host's call returns and its input Record dies — releases the host side.
+    host_input = xi::Record();
+    CHECK(reg.refcount(doc) == 1);            // only the plugin's cache keeps it alive
+    CHECK(plugin_cache.get_int("frame") == 1);// STILL readable — not freed, not copied
+    CHECK(plugin_cache.doc() == doc);         // same doc, never deep-copied
+
+    // Plugin finally drops the cache → last side → freed.
+    plugin_cache = xi::Record();
+    CHECK(reg.refcount(doc) == 0);
+    CHECK(reg.live_count() == base);
+}
+
 // ---------- main ----------
 
 int main() {
@@ -448,6 +495,7 @@ int main() {
     test_image_in_record();       // 16
     test_refcount_cow();          // 17
     test_cross_abi_share();       // 18
+    test_cache_input_zero_copy(); // 19
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
