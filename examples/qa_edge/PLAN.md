@@ -1,7 +1,7 @@
 # QA Agent EDGE — resource / security / edge-case plan
 
 Viewpoint: resource exhaustion, security, and edge cases for the FE/BE split.
-Maps to [`fe-be-split-test-plan.md`](../../docs/design/fe-be-split-test-plan.md)
+Maps to [`fe-be-split-test-plan.md`](../../docs/archive/fe-be-split-test-plan.md)
 §1 (CR-U* crash-report parsing), §3 (FE-E3 orphan guarantee), §5 (SP5 no
 orphan). Complements — does **not** duplicate — `examples/fe_supervisor`
 (crash-storm loop), `examples/fe_supervisor_healthy` (happy path),

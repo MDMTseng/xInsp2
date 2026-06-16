@@ -3,7 +3,7 @@
 // version it found and the path the module ACTUALLY loaded from. Two copies of
 // this plugin (depprobe_a / depprobe_b) each ship a different version of the
 // same-named dep.dll; loading both into the one backend process shows the
-// same-base-name collision (see ../../README.md and docs/guides/adding-a-plugin.md).
+// same-base-name collision (see ../../README.md and docs/guides/write-a-plugin.md).
 //
 // Identical to depprobe_b/plugin.cpp on purpose — only the plugin folder + the
 // dep.dll bytes differ.

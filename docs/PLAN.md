@@ -88,24 +88,24 @@ docs-v2/
 
 | New file | Built from current docs |
 |---|---|
-| `overview.md` | `getting-started.md` + the conceptual half of `architecture.md` |
-| `guides/build-and-run.md` | `guides/install.md` + run-on-day-one from `getting-started.md` |
-| `guides/write-a-script.md` | `guides/writing-a-script.md` |
-| `guides/write-a-plugin.md` | `guides/adding-a-plugin.md` + `guides/plugin-ui-conventions.md` |
-| `guides/debug.md` | `guides/debugging.md` |
-| `guides/extend-the-ui.md` | `guides/extending-the-ui.md` |
-| `guides/deploy.md` | `design/deployment.md` + `guides/project-working-copy.md` |
-| `reference/c-abi.md` | `reference/plugin-abi.md` + `reference/host_api.md` (merged) |
-| `reference/data-types.md` | `reference/image-io.md` + Record/boundary parts of `architecture.md` + `design/io-types-and-na.md` (the contract surface) |
+| `overview.md` | `overview.md` + the conceptual half of `architecture.md` |
+| `guides/build-and-run.md` | `guides/build-and-run.md` + run-on-day-one from `overview.md` |
+| `guides/write-a-script.md` | `guides/write-a-script.md` |
+| `guides/write-a-plugin.md` | `guides/write-a-plugin.md` + `guides/write-a-plugin.md` |
+| `guides/debug.md` | `guides/debug.md` |
+| `guides/extend-the-ui.md` | `guides/extend-the-ui.md` |
+| `guides/deploy.md` | `guides/deploy.md` + `guides/deploy.md` |
+| `reference/c-abi.md` | `reference/c-abi.md` + `reference/c-abi.md` (merged) |
+| `reference/data-types.md` | `reference/data-types.md` + Record/boundary parts of `architecture.md` + `internals/typed-io.md` (the contract surface) |
 | `reference/ws-protocol.md` | `protocol.md` |
-| `reference/instances.md` | `reference/instance-model.md` |
-| `internals/data-layer.md` | `design/data-layer.md` (drop the retained-msgpack appendix to an archive note) |
-| `internals/dispatch.md` | `design/emitter-fetch-model.md` + `design/dispatch-groups.md` + trigger-bus parts of `architecture.md` |
-| `internals/fe-be.md` | `design/fe-be-split.md` (+ test-plan as a linked appendix) |
-| `internals/typed-io.md` | `design/io-types-and-na.md` (the mechanics half) |
+| `reference/instances.md` | `reference/instances.md` |
+| `internals/data-layer.md` | `internals/data-layer.md` (drop the retained-msgpack appendix to an archive note) |
+| `internals/dispatch.md` | `internals/dispatch.md` + `internals/dispatch.md` + trigger-bus parts of `architecture.md` |
+| `internals/fe-be.md` | `internals/fe-be.md` (+ test-plan as a linked appendix) |
+| `internals/typed-io.md` | `internals/typed-io.md` (the mechanics half) |
 | `roadmap/README.md` | `status.md` (slimmed to status + links, no re-description) |
 | `roadmap/*` | `design/{run-result,interactive-tool-registry,production-hmi,linux-port}.md` |
-| `archive/*` | current `archive/*` + `reference/ipc-shm.md` + `design/comms-gateway.md` |
+| `archive/*` | current `archive/*` + `archive/ipc-shm.md` + `archive/comms-gateway.md` |
 
 Notes:
 - `reference/c-abi.md` is the biggest merge — `plugin-abi.md` (exports) and
@@ -141,7 +141,7 @@ in parallel, then swapped in one move.
 1. Folder name on cutover: keep `docs/` (replace contents) — assumed yes.
 2. `reference/data-types.md` — is merging Image-io + Record + typed-IO too much
    in one file, or is one "what crosses the boundary" doc the right grouping?
-3. Keep `getting-started.md` as a separate front door, or fold it into
+3. Keep `overview.md` as a separate front door, or fold it into
    `overview.md` + `guides/build-and-run.md`? (plan assumes fold)
 4. How aggressively to prune the retained-MessagePack appendix in `data-layer.md`
    — archive-note vs keep-inline.

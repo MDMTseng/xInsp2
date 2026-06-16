@@ -88,7 +88,7 @@ reachable — and still inspects).
 install, no Node — the HMI runs in the machine's browser; the script/plugins are
 prebuilt. The backend loads the prebuilt script DLL instead of compiling (so the
 toolchain is a *build/export-time* dependency, not a *run-time* one). See
-[`guides/install.md`](../guides/install.md) for the dev-box toolchain that export
+[`guides/build-and-run.md`](../guides/build-and-run.md) for the dev-box toolchain that export
 itself needs.
 
 

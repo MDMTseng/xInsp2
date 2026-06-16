@@ -37,8 +37,8 @@ timer tick when the bus is idle). On those, `xi::current_trigger()
 filter them out in driver.py before scoring.
 
 **Source-plugin isolation constraint.** The docs warned about it
-explicitly. `docs/reference/host_api.md` "Isolation gotcha" and
-`docs/guides/adding-a-plugin.md` "How do I emit images" both spell it
+explicitly. `docs/reference/c-abi.md` "Isolation gotcha" and
+`docs/guides/write-a-plugin.md` "How do I emit images" both spell it
 out: a worker-process source plugin gets a stub `emit_trigger` that
 no-ops, because the bus is a singleton in the backend's address space.
 I read both files before writing instance.json, so I went straight to

@@ -28,7 +28,7 @@ in the manual reading of frames_processed in the exchange responses
 - Severity: P2
 - Root cause: docs gap
 - What I tried: had to grep `backend/src/xi_image_io.cpp` to confirm `stbi_load(...)` (RGB order) so I'd know to use `cv::COLOR_RGB2HSV` not `BGR2HSV`. If I'd guessed wrong, red discs (RGB 255,0,0) would have been read as BGR (0,0,255) and HSV-mapped near H=120, the whole pipeline would have looked correct but with permuted color labels — a particularly nasty silent failure for new plugin authors.
-- What worked: reading the source. Confirmed in `xi_io.hpp`: comment says "decoder runs on the host side" but doesn't say the host emits RGB. A line in `docs/guides/adding-a-plugin.md` under "Image ops" along the lines of *"`xi::imread` returns RGB-ordered pixels (host uses stb_image); use `cv::COLOR_RGB2*` not `BGR2*` when handing the Mat to OpenCV"* would prevent this trap.
+- What worked: reading the source. Confirmed in `xi_io.hpp`: comment says "decoder runs on the host side" but doesn't say the host emits RGB. A line in `docs/guides/write-a-plugin.md` under "Image ops" along the lines of *"`xi::imread` returns RGB-ordered pixels (host uses stb_image); use `cv::COLOR_RGB2*` not `BGR2*` when handing the Mat to OpenCV"* would prevent this trap.
 - Time lost: ~3 minutes
 
 ### F-3: my own test-data trap — gradient bg saturated through the S floor

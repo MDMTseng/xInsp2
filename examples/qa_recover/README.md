@@ -26,5 +26,5 @@ python driver.py     # VERDICT: PASS
 ```
 
 Windows-only today (process spawn / Job Object). Skips on non-`nt`. See
-[`docs/design/fe-be-split-test-plan.md`](../../docs/design/fe-be-split-test-plan.md)
+[`docs/archive/fe-be-split-test-plan.md`](../../docs/archive/fe-be-split-test-plan.md)
 "Phase G".

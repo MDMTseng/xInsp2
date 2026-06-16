@@ -15,9 +15,9 @@
 
 ## What I observed about hot-reload semantics
 The framework handled the reload exactly as the brief described, and the behaviour is BARELY discoverable from the user-facing docs:
-- `docs/guides/writing-a-script.md` documents that `xi::state()` and   `xi::Param<T>` survive reloads (good — both observed).
-- `docs/protocol.md` describes `compile_and_load` rsp shape as   `{build_log, instances, params}` and does NOT mention either   `dll` or `resumed_continuous` keys, even though the backend   emits both. I only knew to check `resumed_continuous` because   the brief told me. A naive client following protocol.md would   never look for it.
-- Neither `cmd:start` nor `cmd:stop` is documented in   `docs/protocol.md` at all (only mentioned in passing in   writing-a-script.md re. the trigger guard). The fps arg,   reply shape `{started:true}` / `{already:true}`, and the   fact that `compile_and_load` auto-tears-down + auto-rearms   the worker are all undocumented.
+- `docs/guides/write-a-script.md` documents that `xi::state()` and   `xi::Param<T>` survive reloads (good — both observed).
+- `docs/reference/ws-protocol.md` describes `compile_and_load` rsp shape as   `{build_log, instances, params}` and does NOT mention either   `dll` or `resumed_continuous` keys, even though the backend   emits both. I only knew to check `resumed_continuous` because   the brief told me. A naive client following protocol.md would   never look for it.
+- Neither `cmd:start` nor `cmd:stop` is documented in   `docs/reference/ws-protocol.md` at all (only mentioned in passing in   writing-a-script.md re. the trigger guard). The fps arg,   reply shape `{started:true}` / `{already:true}`, and the   fact that `compile_and_load` auto-tears-down + auto-rearms   the worker are all undocumented.
 - The auto-resume + param-replay + state-restore path lives in   `service_main.cpp` around lines 1095–1340 and is comprehensive   (including schema-version drop on mismatch via XI_STATE_SCHEMA),   but a user would only know it exists by reading the backend.
 
 ## Friction log
@@ -28,7 +28,7 @@ The framework handled the reload exactly as the brief described, and the behavio
 ### F-1: `cmd:start` and `cmd:stop` undocumented in protocol.md
 - Severity: P1
 - Root cause: docs gap
-- What I tried: searched `docs/protocol.md` for `start`/`stop` — only   found `cmd:start fps=N` mentioned offhand in writing-a-script.md.
+- What I tried: searched `docs/reference/ws-protocol.md` for `start`/`stop` — only   found `cmd:start fps=N` mentioned offhand in writing-a-script.md.
 - What worked: read `backend/src/service_main.cpp` to see the   handler signatures (`fps` arg, default 10, `{started:true}` rsp).
 - Time lost: ~3 minutes
 

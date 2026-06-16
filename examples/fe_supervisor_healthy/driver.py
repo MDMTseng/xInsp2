@@ -19,7 +19,7 @@ Acceptance (mechanical): both phases hold -> PASS.
 Run:  python driver.py
 
 TODO(linux): xinsp-fe is Windows-only today (Job Object / console-ctrl /
-CreateProcess). Skips on non-nt. See docs/design/linux-port.md.
+CreateProcess). Skips on non-nt. See docs/roadmap/linux-port.md.
 """
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def launch_fe(port: int, log_path: Path) -> subprocess.Popen:
 
 def main() -> int:
     if os.name != "nt":
-        print("SKIP: xinsp-fe is Windows-only today (see docs/design/linux-port.md)")
+        print("SKIP: xinsp-fe is Windows-only today (see docs/roadmap/linux-port.md)")
         return 0
     if not FE_EXE.exists():
         sys.exit(f"FAIL: xinsp-fe not found: {FE_EXE}\n"

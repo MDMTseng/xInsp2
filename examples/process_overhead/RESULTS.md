@@ -45,7 +45,7 @@ Per-process overhead breaks down as:
 - **Steady-state per-event**: effectively zero. At 60 Hz steady,
   rate / mean gap / p95 / stdev all sit within noise of the
   thread-mode baseline. IPC goes through named pipes + shared memory
-  (see `docs/reference/ipc-shm.md`) which costs single-digit µs per
+  (see `docs/archive/ipc-shm.md`) which costs single-digit µs per
   hop.
 
 So the cost model is **per-instance, not per-event**: process

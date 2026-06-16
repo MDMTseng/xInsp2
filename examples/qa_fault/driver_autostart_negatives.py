@@ -17,7 +17,7 @@ GOOD project + ping again — the BE is still fully usable).
 Run from anywhere:  python driver_autostart_negatives.py
 
 TODO(linux): spawns xinsp-backend.exe; the .exe suffix + name-checked kill are
-gated on os.name == "nt". SKIPs on non-nt. See docs/design/linux-port.md.
+gated on os.name == "nt". SKIPs on non-nt. See docs/roadmap/linux-port.md.
 """
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ def case(name: str, port: int, log_name: str, project: str | None,
 
 def main() -> int:
     if os.name != "nt":
-        print("SKIP: backend autostart spawn path is Windows-only (see docs/design/linux-port.md)")
+        print("SKIP: backend autostart spawn path is Windows-only (see docs/roadmap/linux-port.md)")
         return 0
     if not BACKEND_EXE.exists():
         sys.exit(f"FAIL: backend exe not found: {BACKEND_EXE}\n"

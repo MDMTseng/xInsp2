@@ -22,4 +22,4 @@ python driver.py     # VERDICT: PASS
 ```
 
 Windows-only (plugin/script compile); skips on non-`nt`. See
-`docs/guides/writing-a-script.md` (Parallel dispatch → `result_order`).
+`docs/guides/write-a-script.md` (Parallel dispatch → `result_order`).

@@ -43,7 +43,7 @@ def port_open(port: int, timeout: float = 0.3) -> bool:
 
 def main() -> int:
     if os.name != "nt":
-        print("SKIP: backend is Windows-only here (see docs/design/linux-port.md)")
+        print("SKIP: backend is Windows-only here (see docs/roadmap/linux-port.md)")
         return 0
     if not BACKEND_EXE.exists():
         sys.exit(f"FAIL: backend not found: {BACKEND_EXE}")

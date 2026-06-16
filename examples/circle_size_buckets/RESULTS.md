@@ -98,7 +98,7 @@ post-open `list_plugins` call as a safety net.
 
 ### Did I hit the VAR redeclaration trap on first try?
 
-No, because I'd just read `docs/guides/writing-a-script.md`. But —
+No, because I'd just read `docs/guides/write-a-script.md`. But —
 the hint paragraph there is what saved me. I wrote
 `auto bk = bucket.process(...)` deliberately because I knew
 `VAR(bucket, …)` would have shadowed the `xi::use("bucket")` proxy. A
@@ -144,7 +144,7 @@ counter, or a snapshot triggered *during* a run.
   `circle_counting/driver_v2.py`; the SDK exposes `open_project(path)`
   but the prose doesn't say whether `path` should be the folder or
   the `project.json` file. I copied the `folder=` form from the
-  prior driver. Worth nailing down in `docs/protocol.md`.
+  prior driver. Worth nailing down in `docs/reference/ws-protocol.md`.
 - `xi::ops::close` (used here) is fine, but I had to grep
   `xi_ops.hpp` to confirm the signature `close(Image, int radius)`
   rather than rely on docs. A short ops cheatsheet at

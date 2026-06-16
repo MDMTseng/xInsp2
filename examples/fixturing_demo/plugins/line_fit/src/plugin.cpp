@@ -14,7 +14,7 @@
 //     "current" : echoed pose
 //
 // Demonstrates: xi::require() guarding the compute boundary; an NA result that
-// propagates downstream. See docs/design/io-types-and-na.md.
+// propagates downstream. See docs/internals/typed-io.md.
 //
 #include <xi/xi_json.hpp>
 

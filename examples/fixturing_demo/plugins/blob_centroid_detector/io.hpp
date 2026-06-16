@@ -7,7 +7,7 @@
 // becomes an xi::Pose (position only — angle 0). Total: never fails; an NA input
 // (or a missing index) yields an NA Pose so the failure propagates.
 //
-// See docs/design/io-types-and-na.md.
+// See docs/internals/typed-io.md.
 //
 #include <xi/xi_record.hpp>
 #include <xi/xi_types.hpp>

@@ -2,7 +2,7 @@
 //
 // Kept dependency-free (no `vscode` import) so it is the single source of truth
 // for both extension.ts and a node --test unit (test/backend_mode.test.mjs).
-// See docs/design/fe-be-split.md "managed vs attach".
+// See docs/internals/fe-be.md "managed vs attach".
 //
 // managed : the extension owns the backend (spawns + respawns it).
 // attach  : a supervisor (xinsp-fe.exe) owns it; connect read-only, never spawn.

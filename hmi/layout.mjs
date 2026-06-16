@@ -1,6 +1,6 @@
 //
 // layout.mjs — recursive N-ary split layout tree (pure; no DOM). Shared by the
-// renderer and the node test. See docs/design/production-hmi.md.
+// renderer and the node test. See docs/roadmap/production-hmi.md.
 //
 // A layout node is either:
 //   a SPLIT: { dir: "row"|"col", children: [node, …], weights?: [w, …] }

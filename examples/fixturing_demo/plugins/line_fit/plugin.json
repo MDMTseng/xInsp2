@@ -1,6 +1,6 @@
 {
   "name": "line_fit",
-  "description": "Pose-aligned search line. The search line is authored in a BASELINE pose frame (config); at runtime it is transformed by the (current vs baseline) pose delta. A demo of fixturing + typed I/O wiring — see docs/design/io-types-and-na.md.",
+  "description": "Pose-aligned search line. The search line is authored in a BASELINE pose frame (config); at runtime it is transformed by the (current vs baseline) pose delta. A demo of fixturing + typed I/O wiring — see docs/internals/typed-io.md.",
   "dll": "line_fit.dll",
   "factory": "xi_plugin_create",
   "has_ui": false,

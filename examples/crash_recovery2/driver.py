@@ -342,7 +342,7 @@ def _observation_essay(rows, log_lines, observed_notes):
             )
     parts.append("")
     parts.append(
-        "Documentation accuracy: `docs/reference/instance-model.md` "
+        "Documentation accuracy: `docs/reference/instances.md` "
         "\"isolation modes\" describes process isolation as the default and "
         "predicts the exact two-layer recovery (in-worker SEH catch + process "
         "respawn). Our case only exercises layer 1 — every crash was caught "
@@ -350,7 +350,7 @@ def _observation_essay(rows, log_lines, observed_notes):
         "need to be respawned. The docs were accurate. The one thing not "
         "explicitly written down is what `Plugin::process()` returning a "
         "Record with `error` actually looks like to the script — a quick "
-        "example like the one in `docs/guides/adding-a-plugin.md` was enough "
+        "example like the one in `docs/guides/write-a-plugin.md` was enough "
         "to bridge that."
     )
     return "\n".join(parts)
@@ -364,7 +364,7 @@ def _smooth_essay(rows, alive, friction):
             "accurately, the SDK's `c.run(frame_path=...)` + `exchange_instance()` "
             "pair was sufficient for the driver, and the in-script branch on "
             "`out[\"error\"]` was the obvious shape per "
-            "`docs/guides/adding-a-plugin.md`."
+            "`docs/guides/write-a-plugin.md`."
         )
     elif alive:
         bits.append(

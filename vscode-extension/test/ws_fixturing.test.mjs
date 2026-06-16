@@ -7,7 +7,7 @@
 //     back transformed (baseline line shifted to the pose, angle 0),
 //   - feeding line_fit no current pose makes it return NA (require), and that NA
 //     propagates into the typed Line — with no defensive code in the wiring.
-// See docs/design/io-types-and-na.md.
+// See docs/internals/typed-io.md.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

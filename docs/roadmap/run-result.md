@@ -158,4 +158,4 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 ## See also
 - [`production-hmi.md`](./production-hmi.md) — verdict / yield / Pareto cards.
 - [`dispatch-groups.md`](./dispatch-groups.md) — the overflow drop site that emits `XI_SYS_DROPPED`.
-- [`guides/writing-a-script.md`](../guides/writing-a-script.md) — `VAR` vs `RESULT`.
+- [`guides/write-a-script.md`](../guides/write-a-script.md) — `VAR` vs `RESULT`.

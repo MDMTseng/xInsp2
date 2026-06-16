@@ -194,7 +194,7 @@ What surprised me, in order of impact:
 
 ### F-3: docs imply emit_trigger works under default isolation
 - Severity: P2 / Doc
-- Root cause: `docs/guides/adding-a-plugin.md` "How do I emit images
+- Root cause: `docs/guides/write-a-plugin.md` "How do I emit images
   (camera / source)?" says
 
   > Call `host->emit_trigger(name, tid, ts, images, count)` from a

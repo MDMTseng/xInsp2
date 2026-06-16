@@ -4,7 +4,7 @@ export_bundle.py — build a self-contained xInsp2 deployment bundle.
 Runs on a DEV box (needs the MSVC toolchain + a built backend). It compiles the
 project's script + plugins to DLLs, then assembles a folder you can copy to a
 TARGET PC and run with NO toolchain (the backend loads the prebuilt DLLs via
---aot; the HMI runs in the machine's browser). See docs/design/deployment.md.
+--aot; the HMI runs in the machine's browser). See docs/guides/deploy.md.
 
     python tools/export_bundle.py <project_dir> <out_dir> [--fps N] [--port P]
 

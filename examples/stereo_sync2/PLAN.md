@@ -40,7 +40,7 @@ delayed emitter still match its peer.
 
 ### Isolation
 **Source plugins MUST set `"isolation": "in_process"`** per
-docs/reference/host_api.md and docs/guides/adding-a-plugin.md — the
+docs/reference/c-abi.md and docs/guides/write-a-plugin.md — the
 default `process` isolation routes emit_trigger to a stub that no-ops.
 
 ### Script (`inspect.cpp`)

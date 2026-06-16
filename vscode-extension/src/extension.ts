@@ -291,7 +291,7 @@ export function activate(context: vscode.ExtensionContext) {
     const extraPluginDirs = config.get<string[]>('extraPluginDirs', []);
     const remoteUrl = (config.get<string>('remoteUrl', '') || '').trim();
     const authSecret = (config.get<string>('authSecret', '') || '').trim();
-    // Backend ownership mode (see docs/design/fe-be-split.md):
+    // Backend ownership mode (see docs/internals/fe-be.md):
     //   managed — extension spawns + respawns the backend (dev inner-loop).
     //   attach  — a supervisor (xinsp-fe.exe) owns it; connect read-only, never spawn.
     //   auto    — attach if a backend is already on the port, else managed.
@@ -477,7 +477,7 @@ export function activate(context: vscode.ExtensionContext) {
     // OR a sibling C/C++ file whose name is prefixed with the script's stem +"_"
     // (e.g. inspect.cpp → inspect_lane_a.hpp). Multi-file scripts split via
     // HEADERS #included into the one script TU (separate .cpp TUs can't link the
-    // use()/thunk globals — see docs/guides/writing-a-script.md). The stem prefix
+    // use()/thunk globals — see docs/guides/write-a-script.md). The stem prefix
     // makes the association explicit, so saving an unrelated header dropped in the
     // folder does NOT trigger a script recompile, and plugin sources (different
     // folder) never match.
@@ -939,7 +939,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // ---- FE status channel (attach mode) -----------------------------------
     // The xinsp-fe supervisor rewrites a small fe-status.json on every transition
-    // (see docs/design/fe-be-split.md). When the path is configured we poll it and
+    // (see docs/internals/fe-be.md). When the path is configured we poll it and
     // drive the health indicator from the supervisor's TRUE state instead of
     // inferring "down" from a WS disconnect. Poll (not fs.watch): the FE writes via
     // atomic rename, which fs.watch reports unreliably across editors; the file is

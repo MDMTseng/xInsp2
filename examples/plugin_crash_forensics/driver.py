@@ -33,7 +33,7 @@ TODO(linux): this exercises Windows minidump forensics
 (MiniDumpWriteDump) and spawns xinsp-backend.exe. The crashdump path +
 the .exe suffix + the name-checked kill are gated on os.name == "nt".
 On Linux the equivalent is a core dump + /proc/<pid>; see
-docs/design/linux-port.md.
+docs/roadmap/linux-port.md.
 """
 from __future__ import annotations
 

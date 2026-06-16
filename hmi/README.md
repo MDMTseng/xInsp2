@@ -3,7 +3,7 @@
 A standalone browser SPA operator dashboard. It is the **single WS client** of a
 (FE-supervised) backend: it subscribes to the live `vars` + image preview stream
 and renders a grid of cards described by `dashboard.json`. No build step in v1 —
-plain ES modules. Design: [`../docs/design/production-hmi.md`](../docs/design/production-hmi.md).
+plain ES modules. Design: [`../docs/roadmap/production-hmi.md`](../docs/roadmap/production-hmi.md).
 
 ## Try it (live demo)
 

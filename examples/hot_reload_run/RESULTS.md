@@ -22,9 +22,9 @@ The reload boundary is *not* a graceful continuation. It's a stop / unload / com
 5. **Continuous mode (`cmd:start`) does not resume automatically.** After compile_and_load returns, the timer thread is dead. The driver had to issue `cmd:start fps=20` again. Without that, the post-reload phase would have collected zero vars events and the case would have failed even harder.
 
 What the docs predicted vs what happened:
-- `docs/guides/writing-a-script.md` lifecycle box says the reload sequence is `get_state → unload → load → set_state → restore params → ready`. Step "restore params" is documented but **does not happen** in `cmd:compile_and_load` — only in `cmd:load_project`. The text underneath ("`xi::Param<T>` values (replayed by `xi_script_set_param`)") is misleading: the replay only happens on project load, not on save/recompile.
+- `docs/guides/write-a-script.md` lifecycle box says the reload sequence is `get_state → unload → load → set_state → restore params → ready`. Step "restore params" is documented but **does not happen** in `cmd:compile_and_load` — only in `cmd:load_project`. The text underneath ("`xi::Param<T>` values (replayed by `xi_script_set_param`)") is misleading: the replay only happens on project load, not on save/recompile.
 - The same lifecycle box implies a continuous run would smoothly continue across the reload. In reality, continuous mode is unconditionally stopped and not auto-resumed.
-- `docs/protocol.md`'s `compile_and_load` entry doesn't mention either of these side effects (continuous-mode stop, Param-loss). The state-persistence story (with its `state_dropped` event and `XI_STATE_SCHEMA` macro) is documented in detail; the Param story isn't.
+- `docs/reference/ws-protocol.md`'s `compile_and_load` entry doesn't mention either of these side effects (continuous-mode stop, Param-loss). The state-persistence story (with its `state_dropped` event and `XI_STATE_SCHEMA` macro) is documented in detail; the Param story isn't.
 
 ## Friction log
 
@@ -51,7 +51,7 @@ What the docs predicted vs what happened:
 - Backend evidence: `service_main.cpp:1086` — unconditional `g_continuous = false`; the worker is joined; nothing rearms it on success.
 - Time lost: ~5 minutes (immediately obvious from "had_to_restart=True" output, then confirmed in source).
 - Suggested fix (one of):
-    (a) document this clearly in `docs/protocol.md` under `compile_and_load`, and in the writing-a-script lifecycle diagram. Edit the diagram to add a "stop/restart continuous" arrow.
+    (a) document this clearly in `docs/reference/ws-protocol.md` under `compile_and_load`, and in the writing-a-script lifecycle diagram. Edit the diagram to add a "stop/restart continuous" arrow.
     (b) make compile_and_load remember it was running and auto-resume after load_script succeeds. The 4-second gap will still be there — that's the cost of cl.exe — but at least the run continues by itself.
 
 ### F-3: VAR macro shadowing produces a confusing redeclaration error

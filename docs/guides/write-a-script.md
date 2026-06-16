@@ -17,7 +17,7 @@ uses, with pointers into the deeper reference for each piece.
 > force-included), and go-to-definition works with no false errors. The file is
 > auto-generated — to hand-tune it, delete its `"_generated_by": "xinsp2"` stamp
 > and the backend will stop overwriting it. See
-> [`protocol.md`](../protocol.md) → `open_project`.
+> [`protocol.md`](../reference/ws-protocol.md) → `open_project`.
 
 ---
 
@@ -56,7 +56,7 @@ void xi_inspect_entry(int frame) {
     // Wrap a cv::Mat back as xi::Image so it crosses the plugin ABI.
     // For inspection scripts this is a one-shot copy; project plugins
     // skip it by using xi::Image::create_in_pool(host(), ...) + cv::
-    // writing directly into pool memory (see docs/guides/adding-a-plugin.md).
+    // writing directly into pool memory (see docs/guides/write-a-plugin.md).
     xi::Image blur(blur_mat.cols, blur_mat.rows, 1, blur_mat.data);
 
     auto result = det.process(xi::Record()
@@ -188,7 +188,7 @@ lifetime bug: the macro copies into a `std::string` value.
 To surface an intermediate **`cv::Mat`** (a mask, a response image), wrap it with
 **`xi::from_cv_mat(m)`** — it copies into an owning `xi::Image` so there's no
 lifetime trap: `VAR(mask, xi::from_cv_mat(mask_mat));`. See
-[`../reference/image-io.md`](../reference/image-io.md) for `xi::Image` / `imread`
+[`../reference/data-types.md`](../reference/data-types.md) for `xi::Image` / `imread`
 / `as_cv_mat` / `from_cv_mat` and the RGB-not-BGR gotcha.
 
 > **`VAR(name, ...)` declares a local; use `EMIT(name)` to surface an
@@ -233,7 +233,7 @@ passes a code in that band the host records the run as NA (`0`) and **logs a
 warning naming the bad code** (it doesn't silently fake a verdict). The host emits
 a `run_result` event per run (and one
 per *dropped* trigger, so the stream has no gaps). Full spec + the system enum:
-[`../design/run-result.md`](../design/run-result.md).
+[`../roadmap/run-result.md`](../roadmap/run-result.md).
 
 ## Reading a frame from disk
 
@@ -351,7 +351,7 @@ threads, and `cv::` ops are internally multi-threaded, so stacking OpenMP on top
 can exceed core count and *slow down*. That's why the switch is a thread cap, not
 a bool: for **CPU-bound** work set it around `cores ÷ dispatch_threads` and
 **measure** end-to-end throughput, not just single-op latency (see
-[`../design/dispatch-groups.md`](../design/dispatch-groups.md)).
+[`../internals/dispatch.md`](../internals/dispatch.md)).
 
 OpenMP is a **CPU-bound** fork-join model — sizing a thread pool to cores. For
 **IO-wait** operators (PLC / network / disk), don't reach for OpenMP: the threads
@@ -423,7 +423,7 @@ would null-deref / read empty Images on those ticks. In single-shot
 mode (`cmd:run`) this distinction doesn't apply — there's exactly one
 dispatch per command.
 
-See [`docs/architecture.md`](../architecture.md) for bus policies (Any
+See [`docs/overview.md`](../overview.md) for bus policies (Any
 / AllRequired / LeaderFollowers) and the `synced_stereo` reference
 plugin.
 
@@ -585,7 +585,7 @@ group owns its own `max_parallel` worker threads at its OS `thread_priority`, an
 a source's triggers route to the group named in its `instance.json` `"group"`. A
 saturated low-priority group can't steal the critical group's threads or CPU.
 `dispatch_stats` then includes a per-group breakdown. See
-[`../design/dispatch-groups.md`](../design/dispatch-groups.md).
+[`../internals/dispatch.md`](../internals/dispatch.md).
 
 If `queue_depth_high_watermark` stays pinned at the cap and
 `dropped_oldest` keeps growing, your source is producing faster than
@@ -759,9 +759,9 @@ the full path and sidesteps search rules entirely.
 
 ## Where to look next
 
-- [`docs/reference/host_api.md`](../reference/host_api.md) — the C ABI
+- [`docs/reference/c-abi.md`](../reference/c-abi.md) — the C ABI
   the script's plugins consume.
-- [`docs/protocol.md`](../protocol.md) — the WS commands a UI client
+- [`docs/reference/ws-protocol.md`](../reference/ws-protocol.md) — the WS commands a UI client
   sends to drive a script (`run` / `set_param` / `compile_and_load` /
   …).
 - [`examples/`](../../examples/) — working scripts:

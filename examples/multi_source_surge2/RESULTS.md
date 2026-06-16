@@ -29,7 +29,7 @@ Topology deliberately different from `multi_source_surge/`:
 
 ### FIX 1 — `dispatch_stats` reset semantics (P1-1)
 
-**Doc check.** I read `docs/protocol.md`'s new `dispatch_stats` section
+**Doc check.** I read `docs/reference/ws-protocol.md`'s new `dispatch_stats` section
 and the `cmd:start` reset note. I read the `writing-a-script.md`
 parallelism section's "Don't subtract" callout. Then I wrote the driver
 following only the docs (`per_run_stats_after()`: snapshot AFTER stop,
@@ -71,7 +71,7 @@ set_watchdog_ms -> {'ms': 500, 'trips': 0}
 log lines during start: 1 total, 1 warn, 1 watchdog-related
   [warn] dispatch_threads=4 — script watchdog disabled under N>1
          (single-slot deadline state). Long-running ops should poll
-         xi::cancellation_requested(). See docs/guides/writing-a-script.md.
+         xi::cancellation_requested(). See docs/guides/write-a-script.md.
 ```
 
 **Negative control.** Disarm watchdog (`set_watchdog_ms 0`), `cmd:start`

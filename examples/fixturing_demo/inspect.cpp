@@ -8,7 +8,7 @@
 // input and returns NA if a pose is missing — and that NA propagates into the
 // typed Line with no defensive code in the wiring.
 //
-// See docs/design/io-types-and-na.md.
+// See docs/internals/typed-io.md.
 //
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>

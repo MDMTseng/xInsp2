@@ -1,7 +1,7 @@
 //
 // cards.mjs — built-in HMI cards as web components (xInsp2 production HMI v1).
 //
-// Contract (see docs/design/production-hmi.md):
+// Contract (see docs/roadmap/production-hmi.md):
 //   - host sets  el.binding = { var: "name", source? }  and  el.config = {...}
 //   - host calls el.feed({ run_id, vars, images, run_ms, status }) on each update
 //   - cards never open their own WS; they only render what they're fed.
@@ -25,7 +25,7 @@ function shell(el, title) {
 const titleOf = (el, fallback) => (el.config && el.config.title) || (el.binding && el.binding.var) || fallback;
 const val = (st, b) => (b && st.vars[b.var] ? st.vars[b.var].value : undefined);
 
-// Interpret a run_result code into a verdict bucket (see docs/design/run-result.md):
+// Interpret a run_result code into a verdict bucket (see docs/roadmap/run-result.md):
 // >0 ok-class, 0 NA, -1..-989999 ng-class, <=-990000 framework system-fail.
 function classifyResult(code) {
   if (code == null)        return { kind: "none", label: "—",  color: "#bbb"  };

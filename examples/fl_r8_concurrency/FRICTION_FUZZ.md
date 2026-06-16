@@ -156,7 +156,7 @@ exited within **0.10–0.11 s**. No orphans on any iter.
 ## Out of scope (explicitly not covered)
 
 - Multi-client concurrency. The WS server is single-client by design
-  (`docs/protocol.md` § Single-client enforcement); 2nd-client
+  (`docs/reference/ws-protocol.md` § Single-client enforcement); 2nd-client
   rejection was already validated by FL r7 P1 fix.
 - Long-soak (hours) tests. Each harness here runs ≤30 s. Memory
   leak detection is bounded to what shows up in 30 s; subtler leaks
@@ -174,4 +174,4 @@ exited within **0.10–0.11 s**. No orphans on any iter.
 `tasklist /fi imagename` (gated `if os.name == "nt"` in
 `_common.py::count_processes`). Linux port replaces with
 `kill -9 <pid>` and `pgrep -c <name>`. Logged in
-`docs/design/linux-port.md` inventory entry under "fuzz harnesses".
+`docs/roadmap/linux-port.md` inventory entry under "fuzz harnesses".

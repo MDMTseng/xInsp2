@@ -117,7 +117,7 @@ dialog**, see the **C++ Toolchain** section in `xinsp2.openProjectSettings`
 extension answers with `toolchain_health` over WS, drives
 `vscode.window.showOpenDialog` for path picking, writes the choice via
 `set_toolchain_override`, and posts the refreshed `tc_health` back. See
-[`install.md`](./install.md) §5 + [`../protocol.md`](../protocol.md) →
+[`install.md`](./install.md) §5 + [`../reference/ws-protocol.md`](../reference/ws-protocol.md) →
 `toolchain_health`.
 
 ---
@@ -222,7 +222,7 @@ pattern.
 
 The extension can either **own** the backend process or **attach** to one
 owned by the `xinsp-fe.exe` supervisor (the production frontend — see
-[`../design/fe-be-split.md`](../design/fe-be-split.md)). This is the
+[`../internals/fe-be.md`](../internals/fe-be.md)). This is the
 `xinsp2.backendMode` setting:
 
 - **`managed`** (default) — the extension spawns the backend and respawns it on
@@ -240,7 +240,7 @@ owned by the `xinsp-fe.exe` supervisor (the production frontend — see
 WS disconnect can't tell a transient respawn from a latched
 `RespawnLimitExceeded`. Point this setting at the supervisor's `fe-status.json`
 (the FE writes it next to its `--be-log`; see
-[`../design/fe-be-split.md`](../design/fe-be-split.md)) and the extension polls
+[`../internals/fe-be.md`](../internals/fe-be.md)) and the extension polls
 it (1.5s) to drive the health indicator from the FE's **true** state:
 - `safe (n/max)` — recovering, with the respawn budget (warning background);
 - `$(error) xInsp2 · LATCHED` — the FE gave up; the tooltip carries the reason +
@@ -262,7 +262,7 @@ text and the crash messaging branch on `attachMode` too.
 
 Each plugin instance and the script can publish a sticky status string
 (`xi::status(...)` / `xi::Plugin::status(...)`; see
-[`../protocol.md`](../protocol.md) "Status channel"). The extension renders it:
+[`../reference/ws-protocol.md`](../reference/ws-protocol.md) "Status channel"). The extension renders it:
 the instance tree shows `<plugin> · <status>` per instance and the live script
 status on the script item (`InstanceTreeProvider.setStatuses`; the item's
 label follows the project's `script` name).

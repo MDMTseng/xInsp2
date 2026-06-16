@@ -22,5 +22,5 @@ python driver.py     # VERDICT: PASS
 ```
 
 Windows-only (plugin compile); skips on non-`nt`. See
-`docs/guides/writing-a-script.md` (Parallel dispatch) and
-`docs/reference/instance-model.md` (`max_concurrency`).
+`docs/guides/write-a-script.md` (Parallel dispatch) and
+`docs/reference/instances.md` (`max_concurrency`).

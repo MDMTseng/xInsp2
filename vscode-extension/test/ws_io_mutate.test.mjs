@@ -2,7 +2,7 @@
 //
 // Extracted values are SHALLOW views: set() writes through to the original by
 // design; .clone() first if you want an independent copy. See
-// docs/design/io-types-and-na.md.
+// docs/internals/typed-io.md.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

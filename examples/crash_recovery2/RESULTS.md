@@ -31,27 +31,27 @@ The framework absorbed 5 crashes inside the plugin's `process()` and the next ca
 
 Happy frames came through with the correct count (e.g. frame_00.png: truth=5, observed=5).
 
-Documentation accuracy: `docs/reference/instance-model.md` "isolation modes" describes process isolation as the default and predicts the exact two-layer recovery (in-worker SEH catch + process respawn). Our case only exercises layer 1 — every crash was caught in-worker and replied as a per-call error; the worker process didn't need to be respawned. The docs were accurate. The one thing not explicitly written down is what `Plugin::process()` returning a Record with `error` actually looks like to the script — a quick example like the one in `docs/guides/adding-a-plugin.md` was enough to bridge that.
+Documentation accuracy: `docs/reference/instances.md` "isolation modes" describes process isolation as the default and predicts the exact two-layer recovery (in-worker SEH catch + process respawn). Our case only exercises layer 1 — every crash was caught in-worker and replied as a per-call error; the worker process didn't need to be respawned. The docs were accurate. The one thing not explicitly written down is what `Plugin::process()` returning a Record with `error` actually looks like to the script — a quick example like the one in `docs/guides/write-a-plugin.md` was enough to bridge that.
 
 ## Friction log
 
 ### F-1: `VAR(mask, mask)` collides with the local `auto mask` it expanded from
 - Severity: P2 (annoying but not blocking)
-- Root cause: API design / docs gap — the trap is mentioned in passing inside `examples/circle_counting/inspect.cpp` ("VAR expands to `auto NAME = expr;` so we name the local differently to avoid the redeclaration trap") but it's not in `docs/guides/writing-a-script.md` or anywhere a first-time author would look. cl.exe's diagnostic (`'mask': cannot be used before initialization`) doesn't point at the macro.
+- Root cause: API design / docs gap — the trap is mentioned in passing inside `examples/circle_counting/inspect.cpp` ("VAR expands to `auto NAME = expr;` so we name the local differently to avoid the redeclaration trap") but it's not in `docs/guides/write-a-script.md` or anywhere a first-time author would look. cl.exe's diagnostic (`'mask': cannot be used before initialization`) doesn't point at the macro.
 - What I tried: `auto mask = out.get_image("mask"); ... VAR(mask, mask);` → `error C3536`.
 - What worked: rename the local to `mask_img`; `VAR(mask, mask_img)` compiles. Cost: one round-trip to the script_build log under `%TEMP%\xinsp2\script_build\inspect_v3.log` because the ProtocolError surfaced only as `compile failed` — see F-2.
 - Time lost: ~3 minutes
 
 ### F-2: `compile_and_load` ProtocolError says only `compile failed`; the cl.exe diagnostic isn't on the wire
 - Severity: P2 (annoying but not blocking)
-- Root cause: unclear error message. The build log lives at `%TEMP%\xinsp2\script_build\inspect_v<N>.log` and contains the actual cl.exe error/warning lines, but neither the SDK's `ProtocolError` text nor the backend's stderr stream (`xinsp-backend.exe` redirected to `backend.log`) carry them. An agent / developer has to know that path exists. The Python SDK's `compile_and_load` docstring doesn't mention it; `docs/guides/writing-a-script.md` could call it out.
+- Root cause: unclear error message. The build log lives at `%TEMP%\xinsp2\script_build\inspect_v<N>.log` and contains the actual cl.exe error/warning lines, but neither the SDK's `ProtocolError` text nor the backend's stderr stream (`xinsp-backend.exe` redirected to `backend.log`) carry them. An agent / developer has to know that path exists. The Python SDK's `compile_and_load` docstring doesn't mention it; `docs/guides/write-a-script.md` could call it out.
 - What I tried: `c.on_log(...)` to capture log messages; got nothing useful. Tailed `backend.log`; nothing there either.
 - What worked: `ls -lt %TEMP%/xinsp2/script_build/*.log | head` and reading the newest one. The fix-loop after that was instant.
 - Time lost: ~5 minutes
 
 ## What was smooth
 
-The crash-recovery story itself was textbook. The docs at `docs/reference/instance-model.md` "isolation modes" + `docs/guides/adding-a-plugin.md` "Crash isolation?" predicted the exact behaviour we saw: process isolation is the default with no `instance.json` opt-in needed, the worker SEH wrapper catches the AV, the script gets a Record with `error` set, the next call goes straight through, no respawn fired (worker pid stayed identical across the storm). `c.run(frame_path=...)` + `c.exchange_instance(...)` were enough to express the whole driver. Backend log even printed `[ProcessInstanceAdapter] 'det' spawned worker pid=<N>` once and never again — clean signal that layer 2 wasn't needed.
+The crash-recovery story itself was textbook. The docs at `docs/reference/instances.md` "isolation modes" + `docs/guides/write-a-plugin.md` "Crash isolation?" predicted the exact behaviour we saw: process isolation is the default with no `instance.json` opt-in needed, the worker SEH wrapper catches the AV, the script gets a Record with `error` set, the next call goes straight through, no respawn fired (worker pid stayed identical across the storm). `c.run(frame_path=...)` + `c.exchange_instance(...)` were enough to express the whole driver. Backend log even printed `[ProcessInstanceAdapter] 'det' spawned worker pid=<N>` once and never again — clean signal that layer 2 wasn't needed.
 
 The plugin authoring path (subclass `xi::Plugin`, `pool_image()`, `cv::*` directly, `XI_PLUGIN_IMPL`, `plugin.json`) is concise enough that a new plugin took ~30 lines, and the in-place build (`plugins/<name>/build/plugin_v<N>.dll`) on `compile_and_load` worked first try with no explicit cmake step. No framework code had to be modified.
 

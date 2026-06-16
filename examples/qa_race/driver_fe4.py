@@ -57,7 +57,7 @@ def port_open(port: int, timeout: float = 0.3) -> bool:
 
 def main() -> int:
     if os.name != "nt":
-        print("SKIP: xinsp-fe is Windows-only today (see docs/design/linux-port.md)")
+        print("SKIP: xinsp-fe is Windows-only today (see docs/roadmap/linux-port.md)")
         return 0
     if not MANUAL_HOOK_AVAILABLE:
         print("SKIP: RACE-FE4 (PortUnresponsive) needs a BE poll-stall hook that does not")

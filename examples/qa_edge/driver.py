@@ -36,7 +36,7 @@ Run from this dir:  python driver.py
 
 TODO(linux): xinsp-fe + Job Object + taskkill are Windows-only today; this
 driver SKIPs on non-nt. The orphan guarantee maps to PR_SET_PDEATHSIG on Linux
-(see docs/design/linux-port.md).
+(see docs/roadmap/linux-port.md).
 """
 from __future__ import annotations
 
@@ -122,7 +122,7 @@ def launch_fe(port: int, project: str, fps: int, log_path: Path,
 def main() -> int:
     if os.name != "nt":
         print("SKIP: xinsp-fe + Job Object orphan-kill are Windows-only "
-              "(see docs/design/linux-port.md)")
+              "(see docs/roadmap/linux-port.md)")
         return 0
     if not FE_EXE.exists():
         sys.exit(f"FAIL: xinsp-fe not found: {FE_EXE}\n"

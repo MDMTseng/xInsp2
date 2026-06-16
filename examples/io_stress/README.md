@@ -1,7 +1,7 @@
 # io_stress — extractor/constructor against a rich contract
 
 A stress test for the typed-I/O wiring (see
-[`../../docs/design/io-types-and-na.md`](../../docs/design/io-types-and-na.md)),
+[`../../docs/internals/typed-io.md`](../../docs/internals/typed-io.md)),
 using a plugin that emits **deterministic fake data** — no image processing.
 
 `synthetic_features` turns a `seed` into a rich output: a feature array (each a

@@ -29,7 +29,7 @@ taking the backend down, and that subsequent calls (including a live
 - `instances/cnt/instance.json` configures the plugin with the default
   `crash_when_count_above = 8`.
 - Use the **default** isolation (so `instance.json` deliberately does NOT
-  set `"isolation"`). Per `docs/reference/instance-model.md` the default is
+  set `"isolation"`). Per `docs/reference/instances.md` the default is
   `"process"`, which is exactly what we're trying to validate. If the docs
   are right, the worker process eats the segfault and the backend survives;
   if it's wrong, the backend dies and we have a P0.

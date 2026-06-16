@@ -186,7 +186,7 @@ toolchain + OpenCV dev headers present — this is not a "ship one binary" port.
 
 - `docs/testing.md` "Known limitations" already calls out the Linux
   build path as untested.
-- `docs/reference/ipc-shm.md` — IPC + SHM design (historical; the
+- `docs/archive/ipc-shm.md` — IPC + SHM design (historical; the
   cross-process work was removed 2026-05).
-- `docs/architecture.md` — top-level component map; everything not in
+- `docs/overview.md` — top-level component map; everything not in
   the tables above is presumed portable.

@@ -3,7 +3,7 @@
 // Proves: xi::Record::na / is_na / na_reason round-trip through a run; feeding an
 // NA Record into use("x").process() short-circuits to NA (plugin never runs) and
 // carries the reason; xi::require() returns an NA naming the first missing field.
-// See docs/design/io-types-and-na.md.
+// See docs/internals/typed-io.md.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

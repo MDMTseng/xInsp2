@@ -1,7 +1,7 @@
 """Synchronous WS client for xInsp2.
 
 One client = one connection. Not thread-safe; intended for scripts driven
-by an AI agent (or a human at a REPL). Spec: docs/protocol.md.
+by an AI agent (or a human at a REPL). Spec: docs/reference/ws-protocol.md.
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ class ConnectionLostError(ConnectionError):
 class UnknownCommandError(ProtocolError):
     """Plugin's `exchange()` returned the canonical
     `{"error": "unknown_command", "command": "<name>"}` shape (see
-    `docs/reference/plugin-abi.md` § "Unknown commands"). The SDK's
+    `docs/reference/c-abi.md` § "Unknown commands"). The SDK's
     `Client.exchange_instance()` raises this when it sees that
     payload, so callers don't have to remember to inspect
     `rsp.get("error")` themselves.
@@ -359,7 +359,7 @@ class Client:
         Each entry: `{name, description, folder, has_ui, loaded, origin,
         cert, manifest?}`. `manifest` is the optional structured
         `params / inputs / outputs / exchange` block from the plugin's
-        `plugin.json` (see docs/reference/plugin-abi.md).
+        `plugin.json` (see docs/reference/c-abi.md).
         """
         return self.call("list_plugins")
 
@@ -400,7 +400,7 @@ class Client:
             {'hue_lo': 110, 'hi_hi': 130, 'min_area': 300,
              'frames_processed': 8, 'last_count': 4}
 
-        Unknown commands: per `docs/reference/plugin-abi.md` § "Unknown
+        Unknown commands: per `docs/reference/c-abi.md` § "Unknown
         commands", a well-behaved plugin returns the canonical
         `{"error": "unknown_command", "command": "<name>"}` for
         misspelt commands. The SDK detects that shape and raises
@@ -409,7 +409,7 @@ class Client:
         out of the auto-raise and inspect the raw shape yourself, use
         `c.call("exchange_instance", ...)` directly.
 
-        See `docs/reference/plugin-abi.md` ("Return shape convention").
+        See `docs/reference/c-abi.md` ("Return shape convention").
         """
         rsp = self.call("exchange_instance", {"name": name, "cmd": cmd_obj})
         # Surface the canonical unknown_command shape as a typed error.

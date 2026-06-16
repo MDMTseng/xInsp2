@@ -266,9 +266,9 @@ package launcher (`run.cmd` → `run.sh`) and the kiosk-browser invocation; gate
 
 ## See also
 
-- `docs/design/fe-be-split.md` — the FE supervisor + headless autostart this builds on.
-- `docs/design/linux-port.md` — the AOT / pre-compiled bundle strategy.
-- `docs/guides/plugin-ui-conventions.md` — the web stack + data contract the three
+- `docs/internals/fe-be.md` — the FE supervisor + headless autostart this builds on.
+- `docs/roadmap/linux-port.md` — the AOT / pre-compiled bundle strategy.
+- `docs/guides/write-a-plugin.md` — the web stack + data contract the three
   plugin surfaces share.
-- `docs/guides/writing-a-script.md` — where verdict/metric/overlay vars are emitted.
-- `docs/protocol.md` — `vars` / preview frames / `run_finished` / `history`.
+- `docs/guides/write-a-script.md` — where verdict/metric/overlay vars are emitted.
+- `docs/reference/ws-protocol.md` — `vars` / preview frames / `run_finished` / `history`.

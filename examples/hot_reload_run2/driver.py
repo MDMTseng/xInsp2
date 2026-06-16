@@ -221,16 +221,16 @@ def main() -> int:
     lines.append(
         "The framework handled the reload exactly as the brief described, and the "
         "behaviour is BARELY discoverable from the user-facing docs:\n"
-        "- `docs/guides/writing-a-script.md` documents that `xi::state()` and "
+        "- `docs/guides/write-a-script.md` documents that `xi::state()` and "
         "  `xi::Param<T>` survive reloads (good — both observed).\n"
-        "- `docs/protocol.md` describes `compile_and_load` rsp shape as "
+        "- `docs/reference/ws-protocol.md` describes `compile_and_load` rsp shape as "
         "  `{build_log, instances, params}` and does NOT mention either "
         "  `dll` or `resumed_continuous` keys, even though the backend "
         "  emits both. I only knew to check `resumed_continuous` because "
         "  the brief told me. A naive client following protocol.md would "
         "  never look for it.\n"
         "- Neither `cmd:start` nor `cmd:stop` is documented in "
-        "  `docs/protocol.md` at all (only mentioned in passing in "
+        "  `docs/reference/ws-protocol.md` at all (only mentioned in passing in "
         "  writing-a-script.md re. the trigger guard). The fps arg, "
         "  reply shape `{started:true}` / `{already:true}`, and the "
         "  fact that `compile_and_load` auto-tears-down + auto-rearms "
@@ -248,7 +248,7 @@ def main() -> int:
     lines.append("### F-1: `cmd:start` and `cmd:stop` undocumented in protocol.md")
     lines.append("- Severity: P1")
     lines.append("- Root cause: docs gap")
-    lines.append("- What I tried: searched `docs/protocol.md` for `start`/`stop` — only "
+    lines.append("- What I tried: searched `docs/reference/ws-protocol.md` for `start`/`stop` — only "
                  "  found `cmd:start fps=N` mentioned offhand in writing-a-script.md.")
     lines.append("- What worked: read `backend/src/service_main.cpp` to see the "
                  "  handler signatures (`fps` arg, default 10, `{started:true}` rsp).")

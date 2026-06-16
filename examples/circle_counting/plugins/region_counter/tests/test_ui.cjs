@@ -5,7 +5,7 @@
 // DOM): moves the close/min/max range sliders, clicks Apply, and asserts the
 // backend's param state round-trips back to the UI values. Then Reset → defaults.
 //
-// Uses the convention-based helpers (docs/guides/plugin-ui-conventions.md):
+// Uses the convention-based helpers (docs/guides/write-a-plugin.md):
 //   h.useProjectPlugin(dir) — compile this source-only plugin as a project plugin
 //   h.setParam(inst, '<param_name>', v) — targets [data-param="<name>"]
 //   h.action(inst, '<action>')          — targets [data-action="<name>"]

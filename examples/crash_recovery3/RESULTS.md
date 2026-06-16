@@ -56,7 +56,7 @@ error rather than a process death:
 
 Net: layer 1 (in-worker SEH catch) absorbed everything — I never saw the
 process-respawn path fire in the backend log. Behaviour matches
-`docs/reference/instance-model.md` "isolation modes" exactly.
+`docs/reference/instances.md` "isolation modes" exactly.
 
 ## Friction log
 

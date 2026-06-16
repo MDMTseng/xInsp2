@@ -43,13 +43,13 @@ small post-start number; subtraction goes negative.
 
 inside the `cmd:start` handler. This is correct behaviour — per-run
 windows are what you want — but **nothing in the dispatch_stats
-inline comment, in `docs/protocol.md`, or in
+inline comment, in `docs/reference/ws-protocol.md`, or in
 `docs/concepts/parallelism.md` (which doesn't exist yet) says so**.
 The cmd:start cmd's protocol doc also doesn't list this side effect.
 
 **Who fixes.** Framework / docs. Two options:
 
-- (cheap) document the reset behaviour in `docs/protocol.md` under
+- (cheap) document the reset behaviour in `docs/reference/ws-protocol.md` under
   `dispatch_stats` AND `cmd:start`. The fields' inline comments in
   service_main.cpp 2473-2478 already mention "since last cmd:start"
   for `queue_depth_high_watermark` but NOT for the dropped counters.
@@ -59,7 +59,7 @@ The cmd:start cmd's protocol doc also doesn't list this side effect.
   Drivers can detect "the counters got reset between my snapshots"
   and stop subtracting.
 
-**Fixed in this PR.** Documented in `docs/protocol.md` and the
+**Fixed in this PR.** Documented in `docs/reference/ws-protocol.md` and the
 inline comments in `service_main.cpp`. Driver also updated to
 trust `stats_after` as the per-sweep total (which `cmd:start` makes
 correct).
@@ -128,7 +128,7 @@ script ops should poll xi::cancellation_requested()."
 
 **Fixed in this PR.** Added the warning log emission in
 `service_main.cpp` cmd:start branch + a note in
-`docs/guides/writing-a-script.md` parallelism section.
+`docs/guides/write-a-script.md` parallelism section.
 
 ---
 
@@ -164,7 +164,7 @@ of "I have a local, surface it" silently impossible.
 intrusiveness:
 
 - (cheap) document the shadow rule next to the macro definition
-  AND in `docs/guides/writing-a-script.md` with a worked
+  AND in `docs/guides/write-a-script.md` with a worked
   example: "if you already have a local `foo`, you must rename
   one of them — `VAR(foo, bar)` introduces a new `foo`."
 - (medium) provide an alternate `VAR_OF(name, expr)` form that
@@ -175,7 +175,7 @@ intrusiveness:
   caller that relied on "name is available after."
 
 **Status.** The shadow gotcha IS already documented in
-`docs/guides/writing-a-script.md` line 178 ("**Gotcha — `VAR(name,
+`docs/guides/write-a-script.md` line 178 ("**Gotcha — `VAR(name,
 ...)` declares a local.**"). I missed it on first read because I
 was searching the file for "redefinition" / "redeclare," not
 "declare." This is a discoverability issue more than a doc gap.
@@ -265,7 +265,7 @@ kinds — `unknown_config_key`, `type_mismatch`, `out_of_range`,
 `not_in_enum` — through the existing `open_project_warnings` channel.
 Warnings only, no behaviour change for valid configs; plugins without
 `manifest.params` skip validation entirely. Schema docs updated in
-`docs/reference/plugin-abi.md` and `docs/reference/instance-model.md`.
+`docs/reference/c-abi.md` and `docs/reference/instances.md`.
 
 ---
 
@@ -291,7 +291,7 @@ framework can do better by:
 - adding a default `xi::Plugin::exchange_default` that returns
   `{"error": "unknown_command", "command": "<name>"}` if the
   subclass didn't override.
-- documenting the expected error-shape in `docs/reference/plugin-abi.md`.
+- documenting the expected error-shape in `docs/reference/c-abi.md`.
 
 **Fixed in this PR (tiny).** This example's `burst_source` and
 `work_detector` plugins now log "unknown command" and surface it
@@ -350,11 +350,11 @@ display "compiling..." UI without parsing log lines.
 ## What got fixed in this PR
 
 - Documented the `cmd:start` reset semantics for drop counters and
-  high-watermark in `docs/protocol.md` + clarified the inline
+  high-watermark in `docs/reference/ws-protocol.md` + clarified the inline
   comments in `backend/src/service_main.cpp`.
 - Added a `VAR(name, expr)` shadow-collision warning to
-  `docs/guides/writing-a-script.md`.
-- Updated the linux-port inventory in `docs/design/linux-port.md`
+  `docs/guides/write-a-script.md`.
+- Updated the linux-port inventory in `docs/roadmap/linux-port.md`
   to note the new example uses no Win-specific code.
 - This example itself: a self-contained 5-instance project + driver
   + reproducible numbers.

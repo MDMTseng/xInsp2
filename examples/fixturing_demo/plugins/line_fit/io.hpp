@@ -7,7 +7,7 @@
 //              Record the plugin will reject to NA.
 //   extract(): one typed getter per output port. NA propagates into the wrapper.
 //
-// See docs/design/io-types-and-na.md.
+// See docs/internals/typed-io.md.
 //
 #include <xi/xi_record.hpp>
 #include <xi/xi_types.hpp>

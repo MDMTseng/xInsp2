@@ -156,7 +156,7 @@ the second `open_project` is just a no-op rather than a landmine.
 
 None made this round. The SDK docstring on `Client.run()` already
 documents the no-drain contract clearly. `XI_STATE_SCHEMA(N)`'s
-expected behaviour matches `xi_state.hpp` doc and `docs/protocol.md`.
+expected behaviour matches `xi_state.hpp` doc and `docs/reference/ws-protocol.md`.
 The one papercut I'd flag for the next maintainer is the `open_project
 resets state` doc-line gap on `open_project()` — that's a one-line
 docstring fix on `tools/xinsp2_py/xinsp2/client.py:144`. I did not

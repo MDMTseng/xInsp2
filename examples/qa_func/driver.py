@@ -20,7 +20,7 @@ Run one case:       python driver.py AS-I2     (or any case ID / substring)
 TODO(linux): xinsp-fe.exe autostart + the FE supervisor are Windows-only
 today (CreateProcess / Job Object / console-ctrl). The .exe suffix and the
 name-checked kill are gated on os.name == "nt"; the whole driver SKIPs on
-non-nt. See docs/design/linux-port.md.
+non-nt. See docs/roadmap/linux-port.md.
 """
 from __future__ import annotations
 
@@ -404,7 +404,7 @@ CASES = [
 def main() -> int:
     if os.name != "nt":
         print("SKIP: xinsp-fe / backend autostart are Windows-only today "
-              "(see docs/design/linux-port.md)")
+              "(see docs/roadmap/linux-port.md)")
         return 0
     if not BACKEND_EXE.exists():
         sys.exit(f"FAIL: backend exe not found: {BACKEND_EXE}\n"

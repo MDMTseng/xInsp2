@@ -78,7 +78,7 @@ post_recover  : {"file": "frame_02.png", "truth": 12, "status": "ok", "count": 1
 
 ## What I observed about crash handling
 
-The plugin's `process()` does a hard `*(volatile int*)nullptr = 42`. With the default (un-set) `isolation` field in `instance.json`, the backend ran the instance in a separate worker process — the backend log shows `[ProcessInstanceAdapter] 'cnt' spawned worker pid=... pipe=xinsp2-pipe-...` at open time. So the **default really is `"process"` isolation**, matching `docs/reference/instance-model.md` and contradicting the `docs/guides/adding-a-plugin.md` statement that crash isolation is via `_set_se_translator` (which describes the legacy in-proc behaviour, not what ships).
+The plugin's `process()` does a hard `*(volatile int*)nullptr = 42`. With the default (un-set) `isolation` field in `instance.json`, the backend ran the instance in a separate worker process — the backend log shows `[ProcessInstanceAdapter] 'cnt' spawned worker pid=... pipe=xinsp2-pipe-...` at open time. So the **default really is `"process"` isolation**, matching `docs/reference/instances.md` and contradicting the `docs/guides/write-a-plugin.md` statement that crash isolation is via `_set_se_translator` (which describes the legacy in-proc behaviour, not what ships).
 
 What I expected, after re-reading instance-model.md: each crash kills the worker → backend logs a respawn line → next call works because the adapter re-spawns and replays `set_def`.
 
@@ -104,13 +104,13 @@ Side observation: even though the per-frame `c.ping()` succeeded after every cra
 ### F-1: Docs disagree on what "crash isolation" means
 - Severity: P1 (had to work around)
 - Root cause: docs gap
-- `docs/guides/adding-a-plugin.md` (the on-ramp doc a new plugin author
+- `docs/guides/write-a-plugin.md` (the on-ramp doc a new plugin author
   reads first): "Same-process plugins are protected by
   `_set_se_translator`: a segfault in `process()` becomes an exception
   and the backend stays up. For deeper isolation (separate process), see
   the `shm-process-isolation` spike on its branch — `instance.json` gains
   `"isolation": "process"` opt-in."
-- `docs/reference/instance-model.md` (the reference doc): "**Default:
+- `docs/reference/instances.md` (the reference doc): "**Default:
   process.** A new instance with no `isolation` field in its
   `instance.json` runs in its own `xinsp-worker.exe`."
 - Reality (this run): default behaviour matches the reference doc, not
@@ -122,7 +122,7 @@ Side observation: even though the per-frame `c.ping()` succeeded after every cra
 - What worked: trusting the reference doc + observing the backend log
   (`[ProcessInstanceAdapter] 'cnt' spawned worker pid=...`) to confirm
   what actually fired.
-- Fix: `docs/guides/adding-a-plugin.md` "Crash isolation?" Q&A needs the
+- Fix: `docs/guides/write-a-plugin.md` "Crash isolation?" Q&A needs the
   same rewrite the reference got — point at `instance-model.md`, mention
   the worker-process default, drop the "see the spike branch" line.
 - Time lost: ~5 minutes (mostly while writing PLAN.md, deciding which

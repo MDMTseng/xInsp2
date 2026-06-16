@@ -4,7 +4,7 @@ Viewpoint: the *positive* wiring of the FE/BE split lifecycle — does the right
 project/script get opened, compiled, started; does a degraded config (no
 script) fail safe by staying up; can a client still attach; and is the FE
 config surface (fe.json / CLI / --help) correct. Maps to
-`docs/design/fe-be-split-test-plan.md` §2 (AS-I*) and §3 FE-E9/FE-E10.
+`docs/archive/fe-be-split-test-plan.md` §2 (AS-I*) and §3 FE-E9/FE-E10.
 
 Complements (does NOT duplicate): `examples/fe_supervisor` (crash storm,
 FE-E1), `examples/fe_supervisor_healthy` (FE-E2 happy / FE-E3 orphan),

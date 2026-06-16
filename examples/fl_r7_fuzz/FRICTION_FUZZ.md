@@ -13,7 +13,7 @@ entry: assumption I made, friction I hit, suggested follow-up.
 > Fix wraps post-`start_reader_()` ctor body in try/catch + funnels
 > failures through `shutdown_()`; also belt-and-suspenders catch-all
 > in `run_reader_()`. Harness now reports 16/16 strategies survived,
-> 0 fatal. See `docs/reference/ipc-shm.md` § "Reader thread failure
+> 0 fatal. See `docs/archive/ipc-shm.md` § "Reader thread failure
 > modes" for the post-fix design.
 
 ### IPC reader thread does not catch the EOF exception
@@ -66,7 +66,7 @@ contract rules out.
 `listen_` in the select set; on `accept()` while `client_` is set,
 send back `HTTP/1.1 503 Service Unavailable` with
 `X-Xi-Reason: single-client-busy` and close. Documented in
-`docs/protocol.md` § Single-client enforcement.
+`docs/reference/ws-protocol.md` § Single-client enforcement.
 
 **Harness fix** (`harness_ws_cmd.py`): close the main fuzz WS before
 the liveness probe, reopen after.
@@ -166,4 +166,4 @@ binary in `backend/CMakeLists.txt` with `if(WIN32)` and left a
 `TODO(linux):` block at the top of `evil_worker.cpp` keyed off
 `xi_ipc.hpp`'s POSIX port. When that header gains a POSIX backend,
 the fuzzer can ride on the same change. See
-`docs/design/linux-port.md` inventory entry under "fuzz harnesses".
+`docs/roadmap/linux-port.md` inventory entry under "fuzz harnesses".

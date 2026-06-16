@@ -1,8 +1,8 @@
 # qa_fault — fault-injection test plan (QA viewpoint: FAULT)
 
 Reliability / fault-injection coverage for the FE/BE split
-([`../../docs/design/fe-be-split.md`](../../docs/design/fe-be-split.md),
-[`fe-be-split-test-plan.md`](../../docs/design/fe-be-split-test-plan.md)).
+([`../../docs/internals/fe-be.md`](../../docs/internals/fe-be.md),
+[`fe-be-split-test-plan.md`](../../docs/archive/fe-be-split-test-plan.md)).
 
 This viewpoint owns the **negative / degrade-safely** cases the central plan
 flags as gaps: §2 AS-I4/5/6 (backend autostart negatives), §3 FE-E4/E5/E6 (FE
@@ -12,7 +12,7 @@ proven by `examples/fe_supervisor/driver.py` (FE-E1) — except to assert the on
 property that example only checks loosely: **exact respawn-count accounting**.
 
 All drivers are Windows-only (the FE + autostart spawn path is `#ifdef _WIN32`);
-each SKIPs with rc=0 on non-`nt`. See `docs/design/linux-port.md`.
+each SKIPs with rc=0 on non-`nt`. See `docs/roadmap/linux-port.md`.
 
 Private ports: **7870–7889** (no overlap with other examples).
 

@@ -46,7 +46,7 @@ the backend down, and that subsequent calls succeed.
 
 ## Open questions about framework crash handling
 
-From `docs/reference/instance-model.md` "isolation modes":
+From `docs/reference/instances.md` "isolation modes":
 - Default is `"process"` isolation. The worker has an SEH wrapper
   around `process()` and converts AVs into a per-call error in the
   reply Record.

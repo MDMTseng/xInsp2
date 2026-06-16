@@ -104,7 +104,7 @@ async function makeHelpers(pluginFolder, opts = {}) {
         click:    (instance, selector)          => api.clickInWebview(instance, selector),
         setInput: (instance, selector, value)   => api.setInputInWebview(instance, selector, value),
 
-        // Convention-based controls (docs/guides/plugin-ui-conventions.md): target
+        // Convention-based controls (docs/guides/write-a-plugin.md): target
         // by canonical PARAM NAME via [data-param="<name>"] / [data-action="<name>"]
         // instead of author-chosen element ids — so a generic harness can drive any
         // plugin's UI from its manifest param list without reading its HTML.

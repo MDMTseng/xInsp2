@@ -117,7 +117,7 @@ duplicated pan/zoom/draw plumbing makes the extraction pay off.
 
 ## See also
 
-- `docs/guides/extending-the-ui.md` — current image viewer test hooks
+- `docs/guides/extend-the-ui.md` — current image viewer test hooks
   (`xinsp2.imageViewer.runSelftest` / `applyOp`) that this design
   generalises.
 - `vscode-extension/src/imageViewerPanel.ts` — current implementation; its

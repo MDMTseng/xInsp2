@@ -22,5 +22,5 @@ python driver.py     # VERDICT: PASS
 
 The equivalent N=1 path (and the WS-level contract) is covered by the extension
 test `vscode-extension/test/runWatchdog.mjs`. Windows-only (plugin/script
-compile); skips on non-`nt`. See `docs/guides/writing-a-script.md` (Parallel
+compile); skips on non-`nt`. See `docs/guides/write-a-script.md` (Parallel
 dispatch).

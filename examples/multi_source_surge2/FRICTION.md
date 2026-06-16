@@ -70,7 +70,7 @@ message body on a non-CJK locale, it's noise.
 - Backend side: consider invoking cl.exe with `VSLANG=1033` always
   (set via the spawn env), not relying on the parent's environment.
   Already documented as a workaround in
-  `docs/guides/writing-a-script.md`'s "mojibake" subsection but the
+  `docs/guides/write-a-script.md`'s "mojibake" subsection but the
   backend doesn't enforce it for its own subprocess.
 
 I did NOT fix this in the regression — it's a backend behaviour

@@ -49,7 +49,7 @@ only bites when a dependency is resolved **by base name**, which is exactly how 
 
 True same-name side-by-side versioning of a *static* import needs process
 isolation, which xInsp2 doesn't provide (plugins run in-process for speed). See
-[`docs/guides/adding-a-plugin.md`](../../docs/guides/adding-a-plugin.md) →
+[`docs/guides/write-a-plugin.md`](../../docs/guides/write-a-plugin.md) →
 "Can I ship extra dependency DLLs with my plugin?".
 
 ## Files

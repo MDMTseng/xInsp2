@@ -3,7 +3,7 @@
 // A nominal type is just a name + a lightweight handle over a schema-less
 // Record: field accessors read conventional keys, it can be NA, and it round-
 // trips through Record (what crosses into a constructor / process()).
-// See docs/design/io-types-and-na.md.
+// See docs/internals/typed-io.md.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

@@ -45,7 +45,7 @@ def progress(msg: str) -> None:
 
 # TODO(linux): tasklist is Win-specific; on Linux use `pgrep -c -x` or
 # read /proc. The whole orphan-worker check below needs an #ifdef-style
-# branch. See docs/design/linux-port.md.
+# branch. See docs/roadmap/linux-port.md.
 def count_processes(image_name: str) -> int:
     """Count running processes with the given image name. Windows-only."""
     if os.name != "nt":

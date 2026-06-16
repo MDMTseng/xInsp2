@@ -20,7 +20,7 @@
 //
 // Isolation note
 // --------------
-// Per docs/reference/host_api.md, source plugins MUST run in_process
+// Per docs/reference/c-abi.md, source plugins MUST run in_process
 // because the worker stub emit_trigger is a no-op. Each instance.json
 // for cam_left / cam_right sets "isolation": "in_process".
 //

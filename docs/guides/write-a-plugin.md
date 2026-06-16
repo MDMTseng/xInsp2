@@ -181,8 +181,8 @@ ref when it goes out of scope. Net refcount: 1, owned by the receiver.
 You never call `image_addref` / `image_release` from plugin code.
 
 For the API contracts in detail, see
-[`docs/reference/plugin-abi.md`](../reference/plugin-abi.md) and
-[`docs/reference/host_api.md`](../reference/host_api.md).
+[`docs/reference/c-abi.md`](../reference/c-abi.md) and
+[`docs/reference/c-abi.md`](../reference/c-abi.md).
 
 ---
 
@@ -211,7 +211,7 @@ always reaches the real backend TriggerBus — no special config is
 needed for source plugins. (A legacy `"isolation"` field in
 `instance.json` is accepted but ignored with a one-time deprecation
 warning; see
-[`docs/reference/instance-model.md`](../reference/instance-model.md).)
+[`docs/reference/instances.md`](../reference/instances.md).)
 
 **Crash isolation?**
 All plugins run in-process — a plugin crash CAN take the backend down
@@ -223,7 +223,7 @@ with it. The protections are:
 2. What SEH can't catch (stack overflow, heap corruption) crashes the
    backend; the extension auto-respawns it and a crash report +
    minidump is written for diagnosis. See
-   [`docs/guides/debugging.md`](./debugging.md).
+   [`docs/guides/debug.md`](./debugging.md).
 
 Process isolation + SHM were removed 2026-05; crash diagnosability
 (minidumps + per-thread breadcrumbs + PDB symbolication) is the

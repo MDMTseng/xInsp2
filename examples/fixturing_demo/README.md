@@ -1,6 +1,6 @@
 # fixturing_demo — typed I/O wiring, end to end
 
-The whole story from [`docs/design/io-types-and-na.md`](../../docs/design/io-types-and-na.md)
+The whole story from [`docs/internals/typed-io.md`](../../docs/internals/typed-io.md)
 in one small project: **locate a part, then fit a tool in the part's frame**
 (fixturing / pose-alignment), wired with typed extractors/constructors and NA
 propagation.

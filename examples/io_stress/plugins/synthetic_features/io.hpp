@@ -5,7 +5,7 @@
 // Shows the wiring layer handling a RICH contract: nested records, a typed
 // array, and a plugin-author-defined nominal type (Feature) — all over the
 // generic schema-less Record. Everything is total (NA-safe). See
-// docs/design/io-types-and-na.md.
+// docs/internals/typed-io.md.
 //
 #include <xi/xi_record.hpp>
 #include <xi/xi_types.hpp>

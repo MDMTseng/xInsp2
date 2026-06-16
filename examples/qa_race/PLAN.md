@@ -3,7 +3,7 @@
 Viewpoint: the FE supervisor (`xinsp-fe.exe`) is a **safety** component. Its
 correctness is mostly about **ordering and counting** events under a crashing /
 hanging backend, not throughput. This plan maps to the FE/BE split test plan
-(`docs/design/fe-be-split-test-plan.md`) §5 safety properties **SP1, SP2, SP6**
+(`docs/archive/fe-be-split-test-plan.md`) §5 safety properties **SP1, SP2, SP6**
 and §3 **FE-E4 / FE-E8**.
 
 All tests are Windows-only (the FE supervisor is `#ifdef _WIN32`) and **SKIP**

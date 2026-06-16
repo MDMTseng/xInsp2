@@ -88,7 +88,7 @@ void xi_inspect_entry(int /*frame*/) {
     // can be made deliberately heavy via slow_mode_ms, which is the
     // hook the watchdog-under-N>1 test pokes.
     // NB: this used to read `bool slow_path = ...; VAR(slow_path, slow_path);`
-    // which is the natural pattern flagged in docs/guides/writing-a-script.md
+    // which is the natural pattern flagged in docs/guides/write-a-script.md
     // ("Gotcha - VAR(name, ...) declares a local") and the cross-reference in
     // backend/include/xi/xi_var.hpp. Inline the expression instead, so the
     // VAR macro owns the binding outright.

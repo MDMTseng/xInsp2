@@ -65,7 +65,7 @@ Why each piece:
 ## Process / sequence of approaches
 
 1. **Reading the framework.** Skimmed `SKILL.md`, `docs/README.md`,
-   `docs/guides/writing-a-script.md`, `examples/defect_detection.cpp`,
+   `docs/guides/write-a-script.md`, `examples/defect_detection.cpp`,
    `backend/include/xi/xi_ops.hpp`. The defect example pulls from a
    `TestImageSource`; this task gives a path. Inspected
    `service_main.cpp` and confirmed: **the backend's `cmd:run` accepts

@@ -197,7 +197,7 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   SHM were removed 2026-05; all plugins and scripts run in-process.
   The replacement safety net is crash diagnosability (minidumps +
   per-thread breadcrumbs + PDB symbolication, see
-  `docs/guides/debugging.md`). `docs/reference/ipc-shm.md` documents
+  `docs/guides/debug.md`). `docs/archive/ipc-shm.md` documents
   the removed mesh for historical reference only.
   `examples/plugin_crash_forensics/` is the regression that proves the
   net: it arms a plugin to crash the backend from a raw (unmanaged)
@@ -215,7 +215,7 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   death reason + forensics, the value a UI reads instead of inferring "down"
   from a WS disconnect. (Windows-only; skips on non-`nt`.)
 - **PLC comms as a plugin** (the `xinsp-comms` gateway + `xi::comms` were removed;
-  see `docs/design/comms-gateway.md`). The reorder + crash-payload model is covered
+  see `docs/archive/comms-gateway.md`). The reorder + crash-payload model is covered
   by smokes under `examples/_diag/`: `comm_smoke.py` (sort-comm reorder),
   `parallel_comm_smoke.py` (reorder under a real 4-thread lane), `compose_smoke.py`
   (camera → collector → comm end to end), and `safestate_smoke.py` (a plugin
@@ -234,7 +234,7 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   search path). Builds a tiny `extmath.dll`, compiles+loads the script, asserts
   `ext_add(2,3)==5`.
 - **Phase G stress + race** (#92; see
-  `docs/design/fe-be-split-test-plan.md` "Phase G"). Beyond the `test_qa_stress`
+  `docs/archive/fe-be-split-test-plan.md` "Phase G"). Beyond the `test_qa_stress`
   unit above: `examples/qa_recover/` proves the **recover-and-clear** transition
   (a backend that crashes a few times then heals → FE `CLEAR SAFE STATE`, never
   hits the cap — the `crash_then_heal` plugin counts crashes in a
@@ -266,14 +266,14 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   the committed state. `driver_fe.py` adds the FE layer: the supervisor forwards
   `--working-copy`, and a hard-kill of the backend → FE respawn resumes the
   scratch with the uncommitted edit intact. See
-  `docs/guides/project-working-copy.md`. Windows-only; skip on non-`nt`.
+  `docs/guides/deploy.md`. Windows-only; skip on non-`nt`.
 - **Result ordering** — `examples/qa_result_order/` proves
   `parallelism.result_order: "arrival"`. The same uneven-timing script runs
   under both modes with `dispatch_threads=4`: **completion** reorders (out-of-order
   `run_id`s on the wire), **arrival** emits in frame-arrival order (zero
   inversions) while compute still runs parallel. Windows-only; skip on non-`nt`.
 - **Dispatch groups (per-group lanes)** — Windows-only regressions for the
-  `parallelism.groups` model (see `docs/design/dispatch-groups.md` cheat-sheet):
+  `parallelism.groups` model (see `docs/internals/dispatch.md` cheat-sheet):
   `qa_dispatch_groups` (gating + clamp + warnings), `qa_two_group_paths` (two
   sources route to two lanes, zero cross-routing), `qa_group_parallelism` (peak
   running == `max_parallel`, 1/2/4, + arrival ordering), `qa_group_stress` (8

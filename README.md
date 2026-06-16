@@ -8,7 +8,7 @@ C++, edited in VS Code, wired over WebSockets.**
 > trigger correlation, record/replay, remote backend, and a headless
 > production runner.
 
-> 🚀 **New to the project?** Read **[`docs/getting-started.md`](docs/getting-started.md)**
+> 🚀 **New to the project?** Read **[`docs/overview.md`](docs/overview.md)**
 > first — the mental model, the architecture in one picture, build-and-run on day
 > one, and a guided index into all the docs.
 
@@ -138,7 +138,7 @@ No CMake or Node is needed just to **run** xInsp2. Note, however, that
 the backend compiles the inspection script (and project-local plugins)
 on the fly with `cl.exe`, so the **MSVC C++ toolchain and OpenCV must be
 present at runtime** unless you ship pre-compiled script/plugin DLLs for a
-locked production line. See [`docs/guides/install.md`](docs/guides/install.md)
+locked production line. See [`docs/guides/build-and-run.md`](docs/guides/build-and-run.md)
 for the full per-machine setup, and the in-editor **Project Settings → C++
 Toolchain** panel to verify a machine has everything (it warns on missing or
 wrong paths and lets you pin per-project overrides).
@@ -275,7 +275,7 @@ If you want to modify the framework itself (not just write plugins):
   - **libjpeg-turbo** at `C:\libjpeg-turbo64` — fast JPEG encode (`winget install libjpeg-turbo.libjpeg-turbo.VC`)
   - **Intel IPP 2026+** at `C:\Intel\ipp\<ver>` — image-op SIMD acceleration
 
-See [`docs/guides/install.md`](docs/guides/install.md) for step-by-step new-machine setup.
+See [`docs/guides/build-and-run.md`](docs/guides/build-and-run.md) for step-by-step new-machine setup.
 
 ### Build
 
@@ -466,7 +466,7 @@ xInsp2/
 
 ## Status
 
-See [`docs/status.md`](docs/status.md) for what's shipping and the
+See [`docs/roadmap/README.md`](docs/roadmap/README.md) for what's shipping and the
 locked-in decision log. Process isolation + SHM were removed 2026-05;
 all plugins run in-process.
 
@@ -480,14 +480,14 @@ next jump.
 | If you need to… | Read |
 |---|---|
 | Understand what xInsp2 is | This README |
-| See the technical map | [`docs/architecture.md`](docs/architecture.md) |
-| Know what's shipping vs WIP | [`docs/status.md`](docs/status.md) |
+| See the technical map | [`docs/overview.md`](docs/overview.md) |
+| Know what's shipping vs WIP | [`docs/roadmap/README.md`](docs/roadmap/README.md) |
 | Run / add tests | [`docs/testing.md`](docs/testing.md) |
-| Drive the WebSocket protocol | [`docs/protocol.md`](docs/protocol.md) |
-| Add a plugin | [`docs/guides/adding-a-plugin.md`](docs/guides/adding-a-plugin.md) |
-| Write an inspection script | [`docs/guides/writing-a-script.md`](docs/guides/writing-a-script.md) |
-| Debug a crash | [`docs/guides/debugging.md`](docs/guides/debugging.md) |
-| Extend the VS Code UI | [`docs/guides/extending-the-ui.md`](docs/guides/extending-the-ui.md) |
+| Drive the WebSocket protocol | [`docs/reference/ws-protocol.md`](docs/reference/ws-protocol.md) |
+| Add a plugin | [`docs/guides/write-a-plugin.md`](docs/guides/write-a-plugin.md) |
+| Write an inspection script | [`docs/guides/write-a-script.md`](docs/guides/write-a-script.md) |
+| Debug a crash | [`docs/guides/debug.md`](docs/guides/debug.md) |
+| Extend the VS Code UI | [`docs/guides/extend-the-ui.md`](docs/guides/extend-the-ui.md) |
 | Look up `host_api` / ABI | [`docs/reference/`](docs/reference/) |
 | Browse worked examples | [`sdk/examples/`](sdk/examples/) + [`sdk/README.md`](sdk/README.md) |
 | First plugin in 5 minutes | [`sdk/GETTING_STARTED.md`](sdk/GETTING_STARTED.md) |

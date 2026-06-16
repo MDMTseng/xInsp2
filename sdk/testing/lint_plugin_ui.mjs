@@ -1,6 +1,6 @@
 //
 // lint_plugin_ui.mjs — lint a plugin's instance UI for the automation conventions
-// (docs/guides/plugin-ui-conventions.md). Pure Node, no VS Code — runs in ms.
+// (docs/guides/write-a-plugin.md). Pure Node, no VS Code — runs in ms.
 //
 // Checks ui/index.html (when plugin.json has "has_ui": true):
 //   - every range/number/checkbox/select control carries data-param="<name>"
@@ -61,6 +61,6 @@ if (warnings.length === 0) {
     process.exit(0);
 }
 console.error(`lint_plugin_ui: ${name}: ${warnings.length} convention warning(s) ` +
-              `(see docs/guides/plugin-ui-conventions.md):`);
+              `(see docs/guides/write-a-plugin.md):`);
 for (const w of warnings) console.error(`  - ${w}`);
 process.exit(strict ? 1 : 0);

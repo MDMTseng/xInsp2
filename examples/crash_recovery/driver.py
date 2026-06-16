@@ -303,8 +303,8 @@ def write_results_md(**kw):
         "backend ran the instance in a separate worker process — the backend "
         "log shows `[ProcessInstanceAdapter] 'cnt' spawned worker pid=... "
         "pipe=xinsp2-pipe-...` at open time. So the **default really is "
-        "`\"process\"` isolation**, matching `docs/reference/instance-model.md` "
-        "and contradicting the `docs/guides/adding-a-plugin.md` statement that "
+        "`\"process\"` isolation**, matching `docs/reference/instances.md` "
+        "and contradicting the `docs/guides/write-a-plugin.md` statement that "
         "crash isolation is via `_set_se_translator` (which describes the legacy "
         "in-proc behaviour, not what ships)."
     )
@@ -371,13 +371,13 @@ def write_results_md(**kw):
     L.append("### F-1: Docs disagree on what \"crash isolation\" means")
     L.append("- Severity: P1 (had to work around)")
     L.append("- Root cause: docs gap")
-    L.append("- `docs/guides/adding-a-plugin.md` (the on-ramp doc a new plugin author")
+    L.append("- `docs/guides/write-a-plugin.md` (the on-ramp doc a new plugin author")
     L.append("  reads first): \"Same-process plugins are protected by")
     L.append("  `_set_se_translator`: a segfault in `process()` becomes an exception")
     L.append("  and the backend stays up. For deeper isolation (separate process), see")
     L.append("  the `shm-process-isolation` spike on its branch — `instance.json` gains")
     L.append("  `\"isolation\": \"process\"` opt-in.\"")
-    L.append("- `docs/reference/instance-model.md` (the reference doc): \"**Default:")
+    L.append("- `docs/reference/instances.md` (the reference doc): \"**Default:")
     L.append("  process.** A new instance with no `isolation` field in its")
     L.append("  `instance.json` runs in its own `xinsp-worker.exe`.\"")
     L.append("- Reality (this run): default behaviour matches the reference doc, not")
@@ -389,7 +389,7 @@ def write_results_md(**kw):
     L.append("- What worked: trusting the reference doc + observing the backend log")
     L.append("  (`[ProcessInstanceAdapter] 'cnt' spawned worker pid=...`) to confirm")
     L.append("  what actually fired.")
-    L.append("- Fix: `docs/guides/adding-a-plugin.md` \"Crash isolation?\" Q&A needs the")
+    L.append("- Fix: `docs/guides/write-a-plugin.md` \"Crash isolation?\" Q&A needs the")
     L.append("  same rewrite the reference got — point at `instance-model.md`, mention")
     L.append("  the worker-process default, drop the \"see the spike branch\" line.")
     L.append("- Time lost: ~5 minutes (mostly while writing PLAN.md, deciding which")

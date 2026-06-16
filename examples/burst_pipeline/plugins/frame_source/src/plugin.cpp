@@ -14,7 +14,7 @@
 //
 // isolation: must be "in_process" — emit_trigger only crosses the
 // process boundary during in-flight RPCs and a pure source never has
-// one. See docs/reference/instance-model.md.
+// one. See docs/reference/instances.md.
 
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
