@@ -145,3 +145,38 @@ in parallel, then swapped in one move.
    `overview.md` + `guides/build-and-run.md`? (plan assumes fold)
 4. How aggressively to prune the retained-MessagePack appendix in `data-layer.md`
    — archive-note vs keep-inline.
+
+---
+
+## P2 status (live)
+
+A rule emerged while filling: **already-current, well-shaped docs are MOVED at
+cutover, not rewritten in P2** — P2 only rewrites what genuinely needs merging,
+tightening, or de-staling.
+
+**Rewritten + tightened (done):**
+- `reference/c-abi.md` ← plugin-abi + host_api (merged; de-staled to ABI v4 + doc fields)
+- `reference/data-types.md` ← image-io + Record + io-types contract
+- `reference/instances.md` ← instance-model (tightened, cross-refs)
+- `internals/data-layer.md` ← data-layer (from final impl; msgpack appendix dropped)
+- `internals/dispatch.md` ← emitter-fetch + dispatch-groups + trigger (3-way merge)
+- `internals/fe-be.md` ← fe-be-split
+- `internals/typed-io.md` ← io-types-and-na (mechanics half)
+- `overview.md` ← getting-started + architecture (concepts; links updated)
+- `roadmap/README.md` ← status.md (thinned to links, not restatement)
+
+**Cutover-MOVE (source already current — `git mv` + light tighten at P3):**
+- `reference/ws-protocol.md` ← protocol.md (verify command list vs service_main.cpp)
+- `guides/write-a-script.md` ← writing-a-script.md
+- `guides/debug.md` ← debugging.md
+- `guides/extend-the-ui.md` ← extending-the-ui.md
+- `roadmap/{run-result,interactive-tool-registry,production-hmi,linux-port}.md` ← same-named design/ (forward-looking, port as-is)
+
+**Cutover-MERGE (two current sources stitched at P3 + light tighten):**
+- `guides/build-and-run.md` ← install.md + getting-started §5 (build/run)
+- `guides/write-a-plugin.md` ← adding-a-plugin.md + plugin-ui-conventions.md
+- `guides/deploy.md` ← deployment.md + project-working-copy.md
+
+So P2's *rewrite* work is complete; the remaining 11 files are mechanical
+move/merge that belong with the P3 cutover (they'd only drift if rewritten now
+against still-live `docs/`).
