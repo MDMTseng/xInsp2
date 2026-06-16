@@ -17,6 +17,11 @@ output side. Pick by audience:
 Both produce the same shape of output. You can prototype in-project
 then export to standalone when you're ready to share.
 
+The repo ships reference plugins to crib from: `plugins/` (source/sink/processor
+basics — `mock_camera`, `blob_analysis`, `data_output`, `json_source`,
+`record_save`, `threshold_op`, `synced_stereo`) and richer worked examples under
+`examples/*/plugins/`.
+
 ---
 
 ## Path 1 — in-project (recommended for getting started)
@@ -258,16 +263,13 @@ experiment proves all three cases; the generated plugin README summarises them.
 ---
 
 ## Instance UI conventions
-<!-- folded from plugin-ui-conventions.md — tighten on revisit -->
-
-# Plugin instance-UI conventions
 
 A plugin's instance UI is plain HTML the plugin ships in `ui/index.html`, loaded
 into a VS Code webview (see [`extend-the-ui.md`](./extend-the-ui.md) for the
 host wiring; the `exchange()` contract is covered above). These conventions keep that UI **automatable** — by the
 plugin UI test harness today, and by any generic param-tuning tooling later.
 
-## `data-param` / `data-action` — stable, name-keyed selectors
+### `data-param` / `data-action` — stable, name-keyed selectors
 
 Element `id`s are author-chosen and arbitrary (`#thr`, `#close`), so a test or a
 generic tool can't find "the control for param `threshold`" without reading the
@@ -288,7 +290,7 @@ Keep your `id`s — `data-param`/`data-action` sit alongside them and don't chan
 your own JS. The new-plugin scaffolds (`sdk/templates/{medium,expert}`) already
 emit these; `examples/circle_counting/plugins/region_counter` is a worked example.
 
-### Why
+#### Why
 
 It decouples *selectors* from *ids*, makes the manifest param list the single
 source of truth a test can enumerate, and lets a generic harness drive **any**
@@ -303,7 +305,7 @@ h.action('inst0', 'apply');               // → [data-action="apply"]
 (`h.setInput('#close', 8)` / `h.click('#apply')` still work for id-targeting when
 you need it.)
 
-## Driving the UI in a test
+### Driving the UI in a test
 
 Plugin UI tests live in `<plugin>/tests/test_ui.cjs` and run via
 `node sdk/testing/run_ui_test.mjs <plugin-folder>` (cold-starts VS Code) or the
@@ -326,7 +328,7 @@ module.exports = { async run(h) {
 }};
 ```
 
-## Instantiating an example/source-only plugin: `useProjectPlugin`
+### Instantiating an example/source-only plugin: `useProjectPlugin`
 
 Plugins that ship **source but no built+certified DLL** (all the `examples/`
 plugins) can't be instantiated via the scan path — the backend's cert gate

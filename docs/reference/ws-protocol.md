@@ -897,3 +897,36 @@ WS port binds. No client need ever connect (reply frames are no-ops with no
 client), and the port stays open so an operator HMI / the extension can attach
 live. This lets `xinsp-fe.exe` run a line at the process level without a C++ WS
 client.
+
+## Remote mode & auth
+
+By default the backend binds to **loopback only** (`127.0.0.1`). To expose it on a
+LAN / factory network, set the bind address and an auth secret — via flags or env
+(env is preferred on shared hosts; argv leaks to `ps`/Task Manager):
+
+```bash
+xinsp-backend.exe --host=0.0.0.0 --port=7823 --auth=<secret>
+#  or:  XINSP2_HOST=0.0.0.0  XINSP2_AUTH=<secret>  xinsp-backend.exe
+```
+
+The secret gates the WebSocket **handshake** (not per-frame). Two modes:
+
+- **Plain bearer** (`--auth=<secret>`) — the client sends `Authorization: Bearer
+  <secret>`; the server does a constant-time compare. Anyone who sniffs the
+  handshake can replay it forever, so this is only safe on a trusted network
+  (loopback / VPN / SSH tunnel).
+- **HMAC challenge** (`--auth=hmac:<key>`) — the rest of the secret is the HMAC
+  key. The client sends two headers:
+
+  ```
+  X-Xi-Timestamp: <unix_seconds>
+  Authorization: Bearer <hex(hmac_sha256(key, "<unix_seconds>"))>
+  ```
+
+  The server requires the timestamp within **±60 s** of now **and** the HMAC to
+  match (constant-time). The replay window is 60 s instead of forever.
+
+Either way the WS frames **after** the handshake are plaintext — there is no
+built-in TLS. For a hostile network terminate TLS upstream (nginx / caddy)
+regardless of mode. Binding `--host=0.0.0.0` **without** `--auth` prints a
+prominent stderr warning: the secret is the only access gate.

@@ -95,9 +95,6 @@ itself needs.
 ---
 
 ## Transactional project edits (working copy)
-<!-- folded from project-working-copy.md — tighten on revisit -->
-
-# Project working copy (transactional edits + crash-durable)
 
 > **Status: BE core + FE auto-resume shipped (Increments 1–2).** The VS Code
 > "Save Project / Discard" UI (Inc 3) builds on this.
@@ -121,7 +118,7 @@ aren't lost.
     project.json   instances/   plugins/   inspect.cpp
 ```
 
-## Lifecycle
+### Lifecycle
 
 | Action | Command | Effect |
 |---|---|---|
@@ -137,7 +134,7 @@ editing and show a "save" affordance.
 any `build/` directory (plugin DLLs are recompiled in the scratch on open;
 committing them back would clobber the canonical build).
 
-## Headless / FE-supervised
+### Headless / FE-supervised
 
 Pass **`--working-copy`** alongside `--project` to autostart in working-copy mode:
 
@@ -154,7 +151,7 @@ to every backend it spawns, including respawns. Proven by
 the backend is hard-killed, the FE respawns it and the backend resumes the
 scratch with the uncommitted edit intact).
 
-## Notes & current limits
+### Notes & current limits
 
 - The scratch lives **inside** the project (`.xinsp_work/`), so it persists
   across reboots and is auto-added to the project's `.gitignore`.

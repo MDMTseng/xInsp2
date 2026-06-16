@@ -1,8 +1,7 @@
 # xInsp2 documentation
 
-> **Scope:** one-page index — pick the entry closest to your task.
-> **Status:** SKELETON (docs-v2 build, see [`PLAN.md`](./PLAN.md)). Content is
-> being ported from `docs/`, which stays authoritative until cutover.
+> **Scope:** one-page index — pick the entry closest to your task. Each fact has
+> exactly one home; see [When to update what](#when-to-update-what) below.
 
 New here? Read [`overview.md`](./overview.md) first (~20 min).
 
@@ -44,5 +43,23 @@ New here? Read [`overview.md`](./overview.md) first (~20 min).
 | `roadmap/run-result.md` · `interactive-tool-registry.md` · `production-hmi.md` · `linux-port.md` | Forward-looking sketches; graduate to `internals/` on ship. |
 
 ## Archive
-Historical snapshots + removed subsystems (SHM, comms-gateway, review snapshots).
-Populated at cutover.
+[`archive/`](./archive/) — historical snapshots + removed subsystems (SHM,
+comms-gateway, architecture reviews). Kept for provenance, not maintained.
+
+## When to update what
+
+Doc and code ship in the **same commit**. The one-home rule means each fact lives
+in exactly one file, so a change has exactly one doc to touch — find the row, edit
+that file. (No `status.md` ↔ `architecture.md` re-statement to keep in sync.)
+
+| You changed | Update |
+|---|---|
+| A backend WS command's args / reply / event | `reference/ws-protocol.md` |
+| A plugin DLL export or an `xi_host_api` entry | `reference/c-abi.md` |
+| What crosses the boundary (Record / Image / typed I/O / NA) | `reference/data-types.md` (+ `internals/typed-io.md` if it's the mechanics) |
+| Instance load / persist / `instance.json` | `reference/instances.md` |
+| A data-layer / dispatch / FE-BE internal | the matching `internals/*.md` |
+| A user-facing workflow (build, script, plugin, debug, UI, deploy) | the matching `guides/*.md` |
+| Milestone shipped / spike merged | `roadmap/README.md` (the status table) |
+| Test layout / a new suite | `testing.md` |
+| A new, not-yet-shipped design | a `roadmap/*.md` sketch; graduate it to `internals/` on ship |
