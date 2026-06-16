@@ -1,0 +1,4 @@
+{
+  "plugin": "data_output",
+  "config": {"output_dir":"./output","format":"csv","auto_save":true,"count":0}
+}
