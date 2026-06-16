@@ -8,7 +8,9 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #include <xi/xi_record.hpp>
 #include <xi/xi_doc_registry.hpp>
@@ -474,6 +476,69 @@ static void test_cache_input_zero_copy() {
     CHECK(reg.live_count() == base);
 }
 
+// ---------- Test 20: γ-4 v4-4 many full dispatches leave the registry balanced ----------
+
+static void test_dispatch_balance_no_leak() {
+    SECTION("1000 full dispatch rounds → registry balanced (γ-4 v4-4)");
+    auto retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+    auto release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
+    auto& reg = xi::DocRegistry::instance();
+    size_t base = reg.live_count();
+
+    // Each round mirrors a full in-process dispatch: host shares the input, the
+    // plugin adopts it, produces an output, the host adopts that — all by
+    // refcount, nothing cached. So every round must return the registry to base;
+    // a drift over 1000 rounds would be a retain/release imbalance (a leak).
+    for (int round = 0; round < 1000; ++round) {
+        xi::Record host_in;
+        host_in.set("seq", round);
+        yyjson_mut_doc* in_doc = host_in.share_out(retain, release);
+        {
+            xi::Record plugin_in = xi::Record::adopt_shared(in_doc, release, /*frozen=*/true);
+            xi::Record plugin_out;
+            plugin_out.set("result", plugin_in.get_int("seq") * 2);
+            yyjson_mut_doc* out_doc = plugin_out.share_out(retain, release);
+            xi::Record host_out = xi::Record::adopt_shared(out_doc, release, /*frozen=*/false);
+            CHECK(host_out.get_int("result") == round * 2);
+        }
+    }
+    CHECK(reg.live_count() == base);
+}
+
+// ---------- Test 21: γ-4 v4-4 concurrent dispatch on distinct docs ----------
+
+static void test_concurrent_dispatch_balance() {
+    SECTION("concurrent dispatch + cache/COW stays balanced (γ-4 v4-4)");
+    auto retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+    auto release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
+    auto& reg = xi::DocRegistry::instance();
+    size_t base = reg.live_count();
+
+    // Many threads each run their OWN docs through share/adopt + cache(copy) +
+    // fork(COW). Distinct docs land in different registry shards, so this
+    // exercises the sharded lock + the DocBox atomic refcount under contention.
+    // Everything is balanced per thread, so the registry returns to base.
+    constexpr int THREADS = 4;
+    constexpr int ROUNDS  = 300;
+    std::vector<std::thread> workers;
+    for (int t = 0; t < THREADS; ++t) {
+        workers.emplace_back([&] {
+            for (int round = 0; round < ROUNDS; ++round) {
+                xi::Record host_in;
+                host_in.set("seq", round);
+                yyjson_mut_doc* in_doc = host_in.share_out(retain, release);
+                xi::Record plugin_in = xi::Record::adopt_shared(in_doc, release, /*frozen=*/true);
+                xi::Record cached = plugin_in;          // cache by copy (refcount share)
+                xi::Record forked = plugin_in;          // fork...
+                forked.set("seq", round + 1);           // ...then COW away from the shared input
+                if (cached.get_int("seq") != round) { /* read the shared snapshot */ }
+            }
+        });
+    }
+    for (auto& w : workers) w.join();
+    CHECK(reg.live_count() == base);
+}
+
 // ---------- main ----------
 
 int main() {
@@ -496,6 +561,8 @@ int main() {
     test_refcount_cow();          // 17
     test_cross_abi_share();       // 18
     test_cache_input_zero_copy(); // 19
+    test_dispatch_balance_no_leak();    // 20
+    test_concurrent_dispatch_balance(); // 21
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");

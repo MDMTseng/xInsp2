@@ -57,6 +57,7 @@ Run all: `cd vscode-extension && node --test test/*.test.mjs`
 | `ws_crash.test.mjs` | null deref / div0 / array overrun → backend survives |
 | `ws_plugins.test.mjs` | plugin scan + create_instance |
 | `ws_fallback_gate.test.mjs` | γ-4 load gate: yyjson-layout-incompatible plugin (no `xi_yyjson_abi`) refused at load; `json_fallback:true` opt-in loads it |
+| `ws_cache_input.test.mjs` | γ-4 v4-4 end-to-end: a real plugin caches its input doc across frames (zero-copy); frame N reads frame N-1's input back |
 | `ws_project.test.mjs` | save_project / load_project / open_project |
 | `ws_defect.test.mjs` | `defect_detection.cpp` end-to-end |
 | `ws_reload_verify.test.mjs` | hot-reload preserves state, params, fresh code |
