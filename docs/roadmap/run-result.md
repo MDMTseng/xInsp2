@@ -100,7 +100,7 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 - **PLC / MES**: a plugin or script can act on the Result to drive pass/reject/rework/alarm;
   a system fail (`≤ -990000`) maps to safe-state, not a part reject.
 - **dispatch groups**: the overflow drop path is exactly where `XI_SYS_DROPPED` is
-  emitted — see [`dispatch-groups.md`](./dispatch-groups.md).
+  emitted — see [`dispatch-groups.md`](../internals/dispatch.md).
 
 ## Increment plan
 
@@ -129,7 +129,7 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
    external systems. Direct gateway consumption of `run_result` is v1.1.
 7. **Test + docs** — `examples/qa_run_result/` (ok/ng/unset → assert
    `run_result.code`; a `queue_depth:1` flooded project → assert `XI_SYS_DROPPED`);
-   update `writing-a-script.md` (`VAR` vs `RESULT`).
+   update `write-a-script.md` (`VAR` vs `RESULT`).
 
 ### Phase 2 — per-group result_order ✅ shipped
 - `DispatchGroup.result_order` (default `"completion"`; `"arrival"` = ordered),
@@ -157,5 +157,5 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 
 ## See also
 - [`production-hmi.md`](./production-hmi.md) — verdict / yield / Pareto cards.
-- [`dispatch-groups.md`](./dispatch-groups.md) — the overflow drop site that emits `XI_SYS_DROPPED`.
+- [`dispatch-groups.md`](../internals/dispatch.md) — the overflow drop site that emits `XI_SYS_DROPPED`.
 - [`guides/write-a-script.md`](../guides/write-a-script.md) — `VAR` vs `RESULT`.

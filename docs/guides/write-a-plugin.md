@@ -223,7 +223,7 @@ with it. The protections are:
 2. What SEH can't catch (stack overflow, heap corruption) crashes the
    backend; the extension auto-respawns it and a crash report +
    minidump is written for diagnosis. See
-   [`docs/guides/debug.md`](./debugging.md).
+   [`debug.md`](./debug.md).
 
 Process isolation + SHM were removed 2026-05; crash diagnosability
 (minidumps + per-thread breadcrumbs + PDB symbolication) is the
@@ -263,9 +263,8 @@ experiment proves all three cases; the generated plugin README summarises them.
 # Plugin instance-UI conventions
 
 A plugin's instance UI is plain HTML the plugin ships in `ui/index.html`, loaded
-into a VS Code webview (see [`extending-the-ui.md`](./extending-the-ui.md) for the
-host wiring and [`adding-a-plugin.md`](./adding-a-plugin.md) for the
-`exchange()` contract). These conventions keep that UI **automatable** — by the
+into a VS Code webview (see [`extend-the-ui.md`](./extend-the-ui.md) for the
+host wiring; the `exchange()` contract is covered above). These conventions keep that UI **automatable** — by the
 plugin UI test harness today, and by any generic param-tuning tooling later.
 
 ## `data-param` / `data-action` — stable, name-keyed selectors

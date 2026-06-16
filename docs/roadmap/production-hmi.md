@@ -2,7 +2,7 @@
 
 > **Status: v1 shipped.** The RUN-mode SPA + compose + cards + the AOT export
 > bundle are built (`hmi/`, `tools/export_bundle.py`; see
-> [`deployment.md`](./deployment.md) and [`../../hmi/README.md`](../../hmi/README.md)).
+> [`deployment.md`](../guides/deploy.md) and [`../../hmi/README.md`](../../hmi/README.md)).
 > Phase 2 (multi-client, deeper compose polish) is not scheduled. This doc keeps
 > the design rationale. Assessment date 2026-06-04.
 
@@ -170,7 +170,7 @@ class BlobOverlay extends HTMLElement {
 ```
 
 `ui` / `card` / `overlay` all use the same web stack (the Vite/web-component path
-from `plugin-ui-conventions.md`) and the same vars/exchange data contract — author
+from the instance-UI conventions in `write-a-plugin.md`) and the same vars/exchange data contract — author
 once, reuse across dev and production. The composer's card palette auto-lists the
 cards + overlays contributed by the project's plugins.
 

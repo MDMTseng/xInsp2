@@ -2,7 +2,7 @@
 
 > How an xInsp2 line runs on a production machine: who launches what, who may
 > crash, and who knows the project folder. Pairs with
-> [`fe-be-split.md`](./fe-be-split.md) (FE supervisor). PLC I/O is a plugin
+> [`fe-be.md`](../internals/fe-be.md) (FE supervisor). PLC I/O is a plugin
 > concern; BE-death → safe-state is the FE's job (`host->set_safe_state`).
 
 ## Boot order — FE is the root, not the HMI

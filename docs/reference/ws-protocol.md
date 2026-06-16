@@ -143,7 +143,7 @@ SEH). Drivers waiting for run completion should listen for
 It fires once per run (after vars, before `run_finished`) **and** once per
 **dropped** trigger (queue overflow → `code: -999001` `XI_SYS_DROPPED`, with no
 `run_id`/`ms`) — so a consumer sees one Result per trigger with no gaps. See
-[`roadmap/run-result.md`](./roadmap/run-result.md).
+[`roadmap/run-result.md`](../roadmap/run-result.md).
 
 `compile_started` / `compile_finished` bracket the `cmd:compile_and_load`
 operation. `compile_started` fires immediately before cl.exe is invoked
@@ -424,7 +424,7 @@ The backend re-resolves the globals immediately, then replies `{ "applied": true
 "recompile_needed": true, "health": <toolchain_health> }` — the VS Code extension
 refreshes `c_cpp_properties.json` from that health. The change takes effect on the next
 `compile_and_load`. Surfaced in the editor under **Project Settings → C++
-Toolchain** (see [`guides/build-and-run.md`](./guides/build-and-run.md) §5).
+Toolchain** (see [`guides/build-and-run.md`](../guides/build-and-run.md) §5).
 
 Reply (`data` is an array, newest last):
 
@@ -544,7 +544,7 @@ that feed the script compile: `"include_dirs"` (extra `cl /I` paths) and
 `"link_libs"` (extra import libs to link). Relative entries resolve against the
 project folder. The matching dependency DLL is found at runtime because the
 backend adds the project folder to the process DLL search path. See
-[`guides/write-a-script.md`](./guides/write-a-script.md) → "Using an external
+[`guides/write-a-script.md`](../guides/write-a-script.md) → "Using an external
 library / DLL" and [`examples/script_external_dll`](../examples/script_external_dll).
 
 **Working-copy mode.** `open_project` accepts `"working_copy": true`: the
@@ -557,7 +557,7 @@ crash-durable. The reply data then carries `"working_copy": true`,
 - `discard_working_copy` `args: {}` → delete the scratch, re-seed from canonical,
   reopen. Reply is the project JSON (same shape as `open_project`).
 
-See [`guides/deploy.md`](./guides/deploy.md). The
+See [`guides/deploy.md`](../guides/deploy.md). The
 headless `--working-copy` flag opts autostart into the same mode (so an FE
 respawn after a crash resumes the scratch).
 
@@ -868,7 +868,7 @@ in full detail above. One-line purpose per entry; args follow the same
 
 `xinsp-backend.exe` is normally launched by a supervisor (the VS Code
 extension, or `xinsp-fe.exe` on a line — see
-[`internals/fe-be.md`](./internals/fe-be.md)). Key flags:
+[`internals/fe-be.md`](../internals/fe-be.md)). Key flags:
 
 | Flag | Default | Purpose |
 |---|---|---|
@@ -880,15 +880,15 @@ extension, or `xinsp-fe.exe` on a line — see
 | `--project=DIR` | — | **headless autostart**: `open_project` this folder at boot |
 | `--script=PATH` | project.json's `script` | script to `compile_and_load` for `--project` |
 | `--autostart-fps=N` | 0 (off) | with `--project`, `start` continuous mode at N fps; **N<0 = trigger-only** (start, no timer) |
-| `--working-copy` | off | open via a `<project>/.xinsp_work` scratch (transactional; resumes on crash respawn) — see [working-copy guide](./guides/deploy.md) |
+| `--working-copy` | off | open via a `<project>/.xinsp_work` scratch (transactional; resumes on crash respawn) — see [working-copy guide](../guides/deploy.md) |
 | `--priority=CLASS` | (unchanged) | process priority class (Win): `high`/`above`/`normal`/`below`/`realtime`. `realtime` can starve the OS — use with care |
-| `--aot` | off | prebuilt bundle: load existing plugin/script DLLs, **never invoke the compiler** (a `.dll` `script` path loads directly; plugins load the newest `build/*.dll`). See [`guides/deploy.md`](./guides/deploy.md) export bundle |
+| `--aot` | off | prebuilt bundle: load existing plugin/script DLLs, **never invoke the compiler** (a `.dll` `script` path loads directly; plugins load the newest `build/*.dll`). See [`guides/deploy.md`](../guides/deploy.md) export bundle |
 
 Performance notes: on Windows the backend raises the OS timer resolution to **1 ms**
 (`timeBeginPeriod(1)`) at startup so sleeps / timer-tick fps / CV waits are tight,
 and **logs a warning** if the total dispatch worker count (Σ per-group
 `max_parallel`, or `dispatch_threads`) exceeds the core count (oversubscription →
-context-switch thrash). See [`internals/dispatch.md`](./internals/dispatch.md)
+context-switch thrash). See [`internals/dispatch.md`](../internals/dispatch.md)
 for per-group `thread_priority` / `cpu_affinity`.
 
 The `--project` autostart drives the same `open_project → compile_and_load →

@@ -701,7 +701,7 @@ multiple `.cpp` files; a script can't follow that model for this reason.)
 
 A header that genuinely is a *reusable processing stage* (its own params, state,
 UI) wants to be a **plugin**, not a script header — see the discussion in
-[`adding-a-plugin.md`](./adding-a-plugin.md).
+[`write-a-plugin.md`](./write-a-plugin.md).
 
 ---
 
@@ -711,7 +711,7 @@ Two ways to pull a third-party SDK into a script:
 
 **Best for anything reusable — wrap it in a plugin.** Plugins can ship their
 dependency DLLs in their own folder and get a config UI; the script just
-`xi::use()`s them. See [`adding-a-plugin.md`](./adding-a-plugin.md).
+`xi::use()`s them. See [`write-a-plugin.md`](./write-a-plugin.md).
 
 **Directly in the script — declare it in `project.json`:**
 
@@ -751,7 +751,7 @@ the full path and sidesteps search rules entirely.
   SEH translation handles segfaults / div0 / array overrun, not
   unbounded recursion or write-past-buffer-end. The script runs
   in-process; on a hard crash the backend auto-respawns and writes a
-  crash report + minidump (see [`debugging.md`](./debugging.md)).
+  crash report + minidump (see [`debug.md`](./debug.md)).
 - **`xi::Param<T>` declared inside `xi_inspect_entry`** — won't be
   registered. They must be at file scope.
 

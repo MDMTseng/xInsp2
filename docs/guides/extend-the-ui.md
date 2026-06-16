@@ -117,7 +117,7 @@ dialog**, see the **C++ Toolchain** section in `xinsp2.openProjectSettings`
 extension answers with `toolchain_health` over WS, drives
 `vscode.window.showOpenDialog` for path picking, writes the choice via
 `set_toolchain_override`, and posts the refreshed `tc_health` back. See
-[`install.md`](./install.md) §5 + [`../reference/ws-protocol.md`](../reference/ws-protocol.md) →
+[`build-and-run.md`](./build-and-run.md) §5 + [`../reference/ws-protocol.md`](../reference/ws-protocol.md) →
 `toolchain_health`.
 
 ---
