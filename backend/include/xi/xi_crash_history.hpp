@@ -16,7 +16,7 @@
 // the referenced .dmp (+ sibling .json) somewhere stable as it records the death.
 //
 // Deliberately portable: only <string>/<fstream>/<filesystem>/<cstdio>. No Win32,
-// no OpenCV — compiles unchanged on Linux (see docs/design/linux-port.md). The
+// no OpenCV — compiles unchanged on Linux (see docs/roadmap/linux-port.md). The
 // JSONL line builder (crash_history_line) is pure so it can be unit-tested.
 //
 #include <cstdio>

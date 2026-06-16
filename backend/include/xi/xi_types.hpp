@@ -12,7 +12,7 @@
 //
 // Plugin / toolbox authors define their own nominal types the same way (it's
 // just source): derive from xi::Typed and add accessors. See
-// docs/design/io-types-and-na.md.
+// docs/internals/typed-io.md.
 //
 #include "xi_record.hpp"
 
@@ -95,7 +95,7 @@ public:
 
     // Provenance: where this value came from. Kept on the wrapper (a view doesn't
     // own its node's tree, so it can't stamp $src into it). Extractors pipe the
-    // producing instance's src on. See docs/design/io-types-and-na.md.
+    // producing instance's src on. See docs/internals/typed-io.md.
     std::string src()                  const { return src_; }
     Typed&      set_src(const std::string& id) { src_ = id; return *this; }
 

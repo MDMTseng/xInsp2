@@ -15,7 +15,7 @@
 //
 // Windows-only today: process spawn/wait, Job Object, console-ctrl, and the TCP
 // probe are Win32. The SafeStateSink seam, config/crash-log parsing stay
-// portable. TODO(linux) markers below; see docs/design/linux-port.md.
+// portable. TODO(linux) markers below; see docs/roadmap/linux-port.md.
 //
 #include <xi/xi_clock.hpp>            // xi::wall_ms / xi::mono_ms (single clock home)
 #include <xi/xi_safe_state.hpp>
@@ -95,14 +95,14 @@ struct FeConfig {
     // Working copy: pass --working-copy to the backend so it edits a
     // <project>/.xinsp_work scratch. On a crash respawn the same flag is passed
     // and the backend resumes the scratch (settings survive). See
-    // docs/guides/project-working-copy.md.
+    // docs/guides/deploy.md.
     bool        working_copy = false;
     // Crash history: every BE death appends one structured JSONL record (death
     // reason, rc, parsed forensics, consecutive count, cap-hit) — the FE is the
     // only process that survives every death, so it owns the timeline. Default
     // lands next to be_log; empty disables. preserve_dumps copies each referenced
     // .dmp (+ .json) into preserve_dir so a %TEMP% cleanup can't lose it.
-    // See docs/design/fe-be-split.md.
+    // See docs/internals/fe-be.md.
     std::string crash_history;     // JSONL path (default: <be_log dir>/crash-history.jsonl)
     bool        preserve_dumps = false;
     std::string preserve_dir;      // default: <be_log dir>/crash-dumps

@@ -16,7 +16,7 @@
 //
 // Deliberately portable: only <string>/<fstream>/<sstream>/<regex>/<filesystem>
 // + yyjson (already a backend dep). No Win32, so it compiles unchanged on Linux
-// (see docs/design/linux-port.md). The FE simply forwards its &SafeStateEvent.
+// (see docs/roadmap/linux-port.md). The FE simply forwards its &SafeStateEvent.
 //
 #include <cstring>
 #include <filesystem>

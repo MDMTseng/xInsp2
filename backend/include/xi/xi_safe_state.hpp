@@ -14,7 +14,7 @@
 // stub that records the transition. Real transports slot into make_safe_state_sink().
 //
 // Deliberately portable: only <string>/<memory>/<cstdint>/<cstdio>, no Win32 and
-// no OpenCV, so it compiles unchanged on Linux (see docs/design/linux-port.md).
+// no OpenCV, so it compiles unchanged on Linux (see docs/roadmap/linux-port.md).
 //
 #include "xi_abi.h"     // xi_host_api (for install_safe_state_hook)
 

@@ -68,7 +68,7 @@ struct TriggerEvent {
     std::string    leader_source;
     // Dispatch group (priority/concurrency lane). Stamped by the dispatcher sink
     // from the emitting source instance's "group" (default_group if untagged).
-    // Empty in the legacy single-pool path. See docs/design/dispatch-groups.md.
+    // Empty in the legacy single-pool path. See docs/internals/dispatch.md.
     std::string    group;
 };
 

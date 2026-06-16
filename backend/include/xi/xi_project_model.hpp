@@ -69,7 +69,7 @@ struct ProjectInfo {
     // `thread_priority` + its own queue; a trigger is routed by the emitting
     // source instance's "group". When ABSENT, a single default lane is
     // synthesized from the parallelism fields above — dispatch is one unified
-    // lane model either way. See docs/design/dispatch-groups.md.
+    // lane model either way. See docs/internals/dispatch.md.
     struct DispatchGroup {
         std::string name;
         int         max_parallel    = 1;          // worker threads this group owns

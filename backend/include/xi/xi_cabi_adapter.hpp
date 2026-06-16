@@ -96,14 +96,14 @@ struct PluginInfo {
     // (the default) the host serializes calls per instance with a mutex, so a
     // parallel dispatch pool (parallelism.dispatch_threads > 1) is safe by
     // default — only plugins that opt in get true per-instance parallelism.
-    // See docs/guides/writing-a-script.md (parallelism) + plugin-abi.md.
+    // See docs/guides/write-a-script.md (parallelism) + plugin-abi.md.
     bool        reentrant = false;
     // Opt-in (plugin.json `"json_fallback": true`): allow this plugin to load
     // even when its yyjson layout doesn't match the host's — it then runs the
     // slow JSON-serialize path on every dispatch instead of the zero-copy doc
     // path. Without it, a layout mismatch (or a plugin with no xi_yyjson_abi
     // export) is REFUSED at load so the perf cliff is never silent. See
-    // plugin_abi_compatible / docs/reference/plugin-abi.md.
+    // plugin_abi_compatible / docs/reference/c-abi.md.
     bool        json_fallback = false;
     std::string folder_path;   // absolute path to plugin folder
     std::string ui_path;       // absolute path to ui/ folder (if has_ui)
@@ -114,7 +114,7 @@ struct PluginInfo {
     // it — clients (AI agents, doc tools) parse the content themselves.
     // Convention (free-form): `params` / `inputs` / `outputs` / `exchange`
     // arrays describing what the plugin tunes, consumes, produces, and
-    // accepts via exchange_instance. See docs/reference/plugin-abi.md.
+    // accepts via exchange_instance. See docs/reference/c-abi.md.
     std::string manifest_json;
 
     // Old-style factory: InstanceBase* (name)

@@ -1,7 +1,7 @@
 #pragma once
 //
 // xi_resource_store.hpp — host-provided per-emitter resource ring backing the
-// emit/fetch dispatch model (see docs/design/emitter-fetch-model).
+// emit/fetch dispatch model (see docs/internals/dispatch).
 //
 // An emitter STAGES a frame — named images + cJSON metadata — under an opaque
 // string res_id via emit(); a consumer later FETCHES it by res_id via fetch(). The

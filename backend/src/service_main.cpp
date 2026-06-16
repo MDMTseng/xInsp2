@@ -384,7 +384,7 @@ inline void crash_set_phase(const char* phase) {
 // that for the grace window, the process is unrecoverable (a forced thread kill
 // would leak the per-instance lock + risk heap corruption), so the backend
 // exits and the FE supervisor respawns a clean one. See docs/guides/writing-a-
-// script.md (Parallel dispatch) + design/fe-be-split.md.
+// script.md (Parallel dispatch) + internals/fe-be.md.
 static std::atomic<int>        g_watchdog_ms{0};
 static constexpr int           WD_SLOTS = 64;     // max concurrent in-flight inspects tracked
 // Per-slot inspect deadline (steady_clock epoch-ms); 0 = free. Written by the
@@ -586,7 +586,7 @@ static void status_cb(const char* text) {
 
 // ---- Per-run Result (run_result event) --------------------------------------
 // One Result per trigger: a signed status code + message. See
-// docs/design/run-result.md. Framework system-fail enum lives in a reserved band
+// docs/roadmap/run-result.md. Framework system-fail enum lives in a reserved band
 // (<= -990000) the user API (xi::result) refuses to set.
 enum : int {
     XI_SYS_DROPPED    = -999001,  // overflow: event dropped before it could run
@@ -652,7 +652,7 @@ static void emit_run_result(xi::ws::Server& srv, int code, const std::string& ms
 // The out-of-process comms gateway + the xi::comms script API were removed: PLC
 // I/O is now a plugin concern (a comm plugin owns the socket), and the BE-crash
 // case is covered by host->set_safe_state + the FE's safe-state sink. See
-// docs/design/comms-gateway.md.
+// docs/archive/comms-gateway.md.
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
@@ -908,7 +908,7 @@ static bool write_toolchain_override_(const std::string& folder, const std::stri
 // per-TU (xi_use.hpp's `extern` resolves to xi_script_support.hpp's `static`
 // only within the force-included primary TU), so a second .cpp TU can't call
 // use()/VAR. Multi-file scripts split via headers #included into the one TU —
-// see docs/guides/writing-a-script.md. (Plugins, which export a C ABI, use
+// see docs/guides/write-a-script.md. (Plugins, which export a C ABI, use
 // extra_sources; scripts can't follow that model for this reason.)
 static void read_script_deps_(const std::string& folder,
                               std::vector<std::string>& include_dirs,
@@ -1191,7 +1191,7 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
 
     // F-P1-1: bracket the inspect with run_started / run_finished /
     // run_error events so SDK callers can observe lifecycle outside the
-    // synchronous rsp path. Documented in docs/protocol.md.
+    // synchronous rsp path. Documented in docs/reference/ws-protocol.md.
     auto emit_run_event = [&srv, run_id](const char* name,
                                           const std::string& extra_data = "") {
         xp::Event ev;
@@ -1310,7 +1310,7 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
 // thread_priority, draining only its own queue. Only active when the project
 // declares groups; otherwise the legacy single pool above is used UNCHANGED.
 // Result ordering is per-lane completion order in v1 (per-group arrival + the
-// `group` wire tag are follow-ups). See docs/design/dispatch-groups.md.
+// `group` wire tag are follow-ups). See docs/internals/dispatch.md.
 struct GroupLane {
     xi::ProjectInfo::DispatchGroup cfg;
     std::deque<xi::TriggerEvent>   q;
@@ -2527,7 +2527,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Parse optional fps from args (default 10). fps <= 0 means TRIGGER-ONLY:
         // start continuous (spawn the lanes) but run NO synthetic timer tick — the
         // project's sources are the only dispatch driver. (Avoids loading the
-        // default group with timer ticks; see docs/design/dispatch-groups.md.)
+        // default group with timer ticks; see docs/internals/dispatch.md.)
         // fps here is the SYNTHETIC-TIMER-TICK rate, NOT a real inspection driver —
         // see "CONTINUOUS RUN HAS TWO DRIVERS" at the top of this file. fps>0 ticks
         // a source-less script; fps<=0 = trigger-only (sources drive, the normal
@@ -2570,7 +2570,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // worker under N>1 (no longer bypassed). On a hard trip the backend
         // exits for the FE to respawn; under N>1 the cooperative-cancel phase
         // is global (aborts all in-flight frames that round). See
-        // run_one_inspection() + docs/guides/writing-a-script.md.
+        // run_one_inspection() + docs/guides/write-a-script.md.
 
         int n_threads = std::max(1, g_plugin_mgr.project().dispatch_threads);
         char buf[64];
@@ -3115,7 +3115,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 out += ",\"cert\":{\"present\":false}";
             }
             // Optional `manifest` block from plugin.json (free-form;
-            // see docs/reference/plugin-abi.md). AI agents and doc
+            // see docs/reference/c-abi.md). AI agents and doc
             // tools read this to discover params / inputs / outputs /
             // exchange surface without grepping plugin source.
             if (!p.manifest_json.empty()) {
@@ -3496,7 +3496,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // ALL THREE COUNTERS (high_watermark, dropped_oldest,
         // dropped_newest) are reset by cmd:start. Drivers that snapshot
         // before AND after a start will see the AFTER values come back
-        // smaller than BEFORE — don't subtract. See docs/protocol.md
+        // smaller than BEFORE — don't subtract. See docs/reference/ws-protocol.md
         // `dispatch_stats` for the public contract.
         std::string data;
         // Snapshot the lanes under g_lanes_mu so a concurrent stop can't free
@@ -4025,7 +4025,7 @@ static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
 // channel (their forensics come from that sidecar). We intercept each entry
 // point and re-raise a NONCONTINUABLE exception so write_minidump runs with a
 // real thread context (same trick as on_terminate). Robustness BUG 1, found by
-// the robustness-fuzzer dogfood; see docs/design/fe-be-split.md crash story.
+// the robustness-fuzzer dogfood; see docs/internals/fe-be.md crash story.
 [[noreturn]] static void raise_for_dump(const char* cause, DWORD code) noexcept {
     crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), cause);
     std::fprintf(stderr, "[xinsp2] CRT fatal (%s) — writing crash report\n", cause);
@@ -4429,7 +4429,7 @@ int main(int argc, char** argv) {
         // --working-copy: open via a <project>/.xinsp_work scratch. On a crash
         // respawn the FE passes the same flag; the scratch still exists, so the
         // backend resumes the last in-progress settings instead of reverting to
-        // the pristine project. See docs/guides/project-working-copy.md.
+        // the pristine project. See docs/guides/deploy.md.
         bool working_copy = xi::cli::has_flag(argc, argv, "--working-copy");
 
         bool degraded = false;

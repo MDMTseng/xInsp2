@@ -288,7 +288,7 @@ public:
     Record process(const Record& input) {
         // NA propagation: a poison input short-circuits — the plugin never runs,
         // and the NA (with its reason) flows straight through. See
-        // docs/design/io-types-and-na.md.
+        // docs/internals/typed-io.md.
         if (input.is_na()) return Record::na(input.na_reason()).set_src(name_);
 
         auto process_fn = reinterpret_cast<UseProcessFn>(g_use_process_fn_);
@@ -384,7 +384,7 @@ public:
     // Fetch a frame this emitter staged under res_id (emit/fetch model). Returns
     // a Resource view: .ok() if present, .data() the metadata cJSON, .image(key)
     // for each staged image. Empty/not-ok if res_id isn't staged (or the host
-    // predates the resource store). See docs/design/emitter-fetch-model.
+    // predates the resource store). See docs/internals/dispatch.
     Resource fetch(const std::string& res_id) const {
         auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
         if (!host || !host->fetch_resource) return {};

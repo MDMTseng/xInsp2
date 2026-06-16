@@ -226,7 +226,7 @@ private:
 //     EMIT(count);                 // surfaces `count`; no redefinition
 //
 // Use VAR to declare-and-surface in one step; use EMIT to surface something you
-// already have. (See docs/guides/writing-a-script.md.)
+// already have. (See docs/guides/write-a-script.md.)
 #define VAR(name, expr)                                                        \
     auto name = ::xi::ValueStore::current().track(#name, (expr))
 

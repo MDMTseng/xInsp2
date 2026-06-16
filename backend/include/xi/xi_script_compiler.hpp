@@ -67,7 +67,7 @@ struct CompileRequest {
     //        xi_script_support.hpp calls omp_set_num_threads(N) at DLL load).
     //   -1 → ON, uncapped (all cores) — /openmp, no cap define.
     // One knob = on/off AND the oversubscription ceiling. Links vcomp140.dll
-    // (in System32, no extra deploy). See docs/guides/writing-a-script.md.
+    // (in System32, no extra deploy). See docs/guides/write-a-script.md.
     int openmp_max_threads = 0;
     // OpenCV install root — REQUIRED. Plugins/scripts include
     // <opencv2/opencv.hpp> directly via xi.hpp / xi_plugin_support.hpp,
@@ -513,7 +513,7 @@ inline CompileResult compile(const CompileRequest& req) {
     //                 plugin/script frame is SKIPPED, leaking e.g. the
     //                 pool_image it held (1 ImagePool slot per absorbed crash).
     //                 Must match the backend EXE's /EHa (CMakeLists.txt) and the
-    //                 "Requires /EHa" contract in docs/architecture.md.
+    //                 "Requires /EHa" contract in docs/overview.md.
     //  /MD          — multithreaded DLL runtime (matches stb/xi_core)
     //  /O2          — optimize
     //  /I<dir>      — xi headers

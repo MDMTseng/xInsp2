@@ -4,7 +4,7 @@
 // signed status code + a human message. Exactly one Result per run (last write
 // wins within a run); the host emits it as a dedicated `run_result` event.
 //
-// Code convention (see docs/design/run-result.md):
+// Code convention (see docs/roadmap/run-result.md):
 //   > 0            OK class   — ok1, ok2, …          (xi::ok(n))
 //   = 0            NA / none  — no verdict applicable (the default if unset)
 //   -1 … -989999   NG class   — ng1, ng2, …          (xi::ng(n))

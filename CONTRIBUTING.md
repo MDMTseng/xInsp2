@@ -108,7 +108,7 @@ how to add new tests.
   POSIX equivalent. Don't bake `cl.exe`, `MAX_PATH`, `_strdup`,
   PowerShell, `taskkill` etc into a path that has a portable
   alternative. The full inventory of what's currently Win-only lives
-  at [`docs/design/linux-port.md`](docs/design/linux-port.md) — when
+  at [`docs/roadmap/linux-port.md`](docs/roadmap/linux-port.md) — when
   you add to that surface, update the inventory in the same commit.
 
 ## Doc culture
@@ -116,16 +116,16 @@ how to add new tests.
 - Code change with user-visible impact → update the doc in the same
   commit (or the next one). The repo's doc plan
   ([`docs/`](docs/)) only stays useful if everyone keeps it current.
-- New backend cmd → update `docs/protocol.md`.
+- New backend cmd → update `docs/reference/ws-protocol.md`.
 - New plugin / script feature → update the relevant guide in
   `docs/guides/`.
 - New test → update `docs/testing.md`.
 - Status change (milestone done, spike merged) → update
-  `docs/status.md`.
+  `docs/roadmap/README.md`.
 
 ## Asking for help
 
-- The architectural overview in [`docs/architecture.md`](docs/architecture.md)
+- The architectural overview in [`docs/overview.md`](docs/overview.md)
   has the "where do I look for X?" table.
 - Most public APIs have header comments richer than the dedicated docs.
   When in doubt, read the header.

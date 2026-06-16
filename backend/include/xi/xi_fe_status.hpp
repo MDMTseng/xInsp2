@@ -4,7 +4,7 @@
 //
 // The VS Code extension (attach mode) and any operator HMI can't ask the FE
 // anything directly — the FE has no WS client/server (it stays dependency-light;
-// see docs/design/fe-be-split.md). Before this, the UI inferred "backend down ->
+// see docs/internals/fe-be.md). Before this, the UI inferred "backend down ->
 // line safe" purely from a WebSocket *disconnect*, which can't distinguish a
 // transient respawn from a latched RespawnLimitExceeded, can't show the death
 // reason or respawn budget, and says nothing about the comms gateway (the

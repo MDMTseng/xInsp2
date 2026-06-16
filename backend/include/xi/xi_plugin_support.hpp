@@ -22,7 +22,7 @@
 // (gaussian, erode, threshold, ...). That has been removed; plugins
 // call OpenCV directly via xi::Image::as_cv_mat() (a non-owning view
 // over pool memory) and xi::Image::create_in_pool(host(), w, h, c)
-// for outputs. See docs/guides/adding-a-plugin.md.
+// for outputs. See docs/guides/write-a-plugin.md.
 
 #include "xi_abi.hpp"
 #include "xi_image.hpp"

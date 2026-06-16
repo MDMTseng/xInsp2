@@ -11,7 +11,7 @@ This is a **map**, not a recipe. Pick what helps; skip what doesn't.
 
 - **Python SDK** at `tools/xinsp2_py/` — sync `Client` over WebSocket. Wraps a few common commands (`compile_and_load`, `set_param`, `run`); everything else goes through `c.call(name, args)`. Source is small (~200 lines), read it if you want to know exactly what it does.
 - **`dump_run(run, dir)`** — writes a run to disk as `report.json` + decoded image files. Lets you `Read` artifacts later instead of holding bytes in memory. Optional.
-- **Raw protocol** in `docs/protocol.md`. The SDK is a convenience layer; if it gets in the way, talk to the WS directly.
+- **Raw protocol** in `docs/reference/ws-protocol.md`. The SDK is a convenience layer; if it gets in the way, talk to the WS directly.
 
 ## When the SDK is probably worth it
 
@@ -128,7 +128,7 @@ is rarely what you want.
 `cmd:list_plugins` and `cmd:open_project` reply with each plugin's
 metadata. If the plugin's `plugin.json` includes an optional
 `"manifest"` block (params / inputs / outputs / exchange — see
-`docs/reference/plugin-abi.md`), it lands as `plugin["manifest"]` in
+`docs/reference/c-abi.md`), it lands as `plugin["manifest"]` in
 the reply. Plugins without one still work; the field is just absent.
 
 ```python
@@ -148,13 +148,13 @@ the implementation. If you need ground truth, read the source.
 
 ## Escape hatches
 
-- Anything not wrapped → `c.call(name, args)`. Spec at `docs/protocol.md`.
+- Anything not wrapped → `c.call(name, args)`. Spec at `docs/reference/ws-protocol.md`.
 - SDK getting in the way → use `websocket-client` directly, or any other WS client.
-- Need to drive the VS Code UI → see `docs/guides/extending-the-ui.md` for command IDs (`xinsp2.imageViewer.applyOp`, etc.).
+- Need to drive the VS Code UI → see `docs/guides/extend-the-ui.md` for command IDs (`xinsp2.imageViewer.applyOp`, etc.).
 
 ## Adjacent things this skill doesn't cover
 
 - C++ plugin authoring → `sdk/GETTING_STARTED.md`
-- VS Code extension internals → `docs/guides/extending-the-ui.md`
-- Project file format → `docs/reference/instance-model.md`
+- VS Code extension internals → `docs/guides/extend-the-ui.md`
+- Project file format → `docs/reference/instances.md`
 - Test surface → `docs/testing.md`
