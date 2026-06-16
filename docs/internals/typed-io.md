@@ -91,7 +91,8 @@ an image** — a binary mask (CV_8U) under the image key `"mask"`, with frame `w
 mirrored into JSON for cheap metadata. Still "just a name over a Record"; the
 difference is purely *which channel* holds the bytes — so the mask rides the
 zero-copy ImagePool and drops straight into OpenCV (`xi::to_cv(region)`). Embedding
-a Region as a sub-field merges its mask into the target's image map.
+a Region as a sub-field copies only its JSON — `Record::set(sub)` deep-copies the
+JSON root, not the image map, so the mask must be re-attached explicitly.
 
 ## See also
 

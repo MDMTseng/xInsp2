@@ -112,6 +112,8 @@ struct; null-check tail fields (an older host may leave them `nullptr`).
 |---|---|---|
 | Image pool | `image_create` / `image_addref` / `image_release` / `image_data` / `image_width`/`height`/`channels`/`stride` | Refcounted opaque `uint64` handles; see below. |
 | Logging | `log(level, msg)` | 0=debug … 3=error → backend stderr. Any thread. |
+| Image I/O | `read_image_file(path)` | Decode an image file straight into the pool (v1). |
+| Status | `set_status(source, text)` | Push a status line to the FE status channel → `reference/ws-protocol.md`. |
 | Instance | `instance_folder(name, buf, len)` | Per-instance scratch dir, created before `create()`; never auto-deleted. |
 | Triggers | `emit_trigger(source, tid, ts, images, n)` | Source plugins push frames into the TriggerBus → `internals/dispatch.md`. |
 | Emit/fetch | `emit_resource` / `fetch_resource` / `fetch_image` / `emit_dispatch` | Stage-and-dispatch-by-id model → `internals/dispatch.md`. |

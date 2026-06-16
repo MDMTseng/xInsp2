@@ -78,7 +78,7 @@ mirror the manifest; they are **total (never throw)** — a missing field is NA,
 an exception:
 
 ```cpp
-auto e  = matcher_io::extract(rec);                  // one getter per output
+auto e  = blob_centroid_detector_io::extract(rec);                  // one getter per output
 auto in = line_fit_io::build().current(e.orientation(k)).build();   // one setter per input
 ```
 

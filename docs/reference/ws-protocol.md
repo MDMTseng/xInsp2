@@ -201,7 +201,7 @@ metadata in-band; for JPEG we want it out-of-band for speed.
 
 ## Commands
 
-The backend implements ~50 commands. The core commands are documented in detail
+The backend implements ~60 commands. The core commands are documented in detail
 below; additional commands are listed at the end of this section. Arguments are
 listed under each entry.
 
@@ -705,7 +705,7 @@ images the viewer isn't showing.
 
 - `cmd: subscribe`  `args: { "names": ["gray", "edges"] }` — stream
   preview frames only for vars in the list. Repeatable; each call
-  REPLACES the list. Pass `{ "all": true }` to re-enable send-all.
+  REPLACES the list. Pass `{ "all": true }` to re-enable send-all. Reply: `data: { "all": bool, "count": int }`.
 - `cmd: unsubscribe` — empty the list. No `preview` binary frames emitted
   after subsequent runs until `subscribe` is called again. `vars`
   (metadata) is still sent either way.

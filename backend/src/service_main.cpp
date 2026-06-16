@@ -1308,7 +1308,7 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
 // ---- Dispatch groups: per-group worker lanes (gated on parallelism.groups) ----
 // Each group owns its own queue + max_parallel worker threads at its OS
 // thread_priority, draining only its own queue. Only active when the project
-// declares groups; otherwise the legacy single pool above is used UNCHANGED.
+// declares groups; with no groups a single synthesized default lane runs everything (the old separate single pool is gone — see lane_for_()).
 // Result ordering is per-lane completion order in v1 (per-group arrival + the
 // `group` wire tag are follow-ups). See docs/internals/dispatch.md.
 struct GroupLane {

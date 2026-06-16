@@ -35,7 +35,8 @@ survives the crash — drives the line to a known-safe state:
 
 ```cpp
 enum class SafeStateReason { BackendExit, PortUnresponsive, BootTimeout,
-                             RespawnLimitExceeded, SupervisorShutdown, ... };
+                             RespawnLimitExceeded, SupervisorShutdown,
+                             CommsLost /* retained but inert since the comms gateway was removed */, ... };
 struct SafeStateEvent { reason; backend_rc; exception_name; faulting_module;
                         last_phase; report_path; dump_path; custom_payload; ts_ms; };
 class SafeStateSink { void enter_safe_state(const SafeStateEvent&);

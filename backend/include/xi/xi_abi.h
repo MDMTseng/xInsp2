@@ -211,7 +211,7 @@ typedef struct xi_host_api {
 
     /* --------------------------------------------------------------- */
     /* emit/fetch resource store (v2). Backs the emit/fetch dispatch model:
-     * an emitter STAGES a frame — named images + cJSON metadata — under
+     * an emitter STAGES a frame — named images + JSON metadata — under
      * an opaque string res_id; a consumer FETCHES it later by res_id. The
      * host keeps a bounded per-emitter ring. ABI-additive: plugins built
      * against an older header never call it; an older host leaves it null
@@ -229,7 +229,7 @@ typedef struct xi_host_api {
                                      const xi_record_image* images, int32_t image_count,
                                      const char* cjson);
 
-    /* Pull a staged resource's metadata by res_id. Writes the cJSON into
+    /* Pull a staged resource's metadata by res_id. Writes the JSON into
      * cjson_buf and returns its byte length L: L >= 0 means the resource
      * exists (the L bytes were written iff L <= cjson_buflen — otherwise
      * nothing is written; resize to L and retry); -1 means res_id is not

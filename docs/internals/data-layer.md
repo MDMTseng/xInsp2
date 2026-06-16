@@ -95,7 +95,7 @@ Input and output both go through `share_out`/`adopt_shared`:
 ## The load gate (no silent fallback)
 
 Every `XI_PLUGIN_IMPL` plugin exports `xi_yyjson_abi()` = a stamp of
-`yyjson_version ^ sizeof(yyjson_mut_doc) ^ sizeof(yyjson_mut_val)`. The host hands
+`YYJSON_VERSION_HEX ^ (sizeof(yyjson_mut_doc) << 8) ^ (sizeof(yyjson_mut_val) << 18)`. The host hands
 a raw doc pointer **only** when the stamp matches its own. A mismatch (different
 vendored yyjson) or a missing export means the plugin can only run the slow JSON
 path — so it is **refused at load** with a clear error, unless its `plugin.json`
