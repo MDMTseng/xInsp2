@@ -315,6 +315,11 @@
           "command": "xinsp2.refreshPlugins",
           "when": "view == xinsp2.plugins",
           "group": "navigation@2"
+        },
+        {
+          "command": "xinsp2.rebuildPlugins",
+          "when": "view == xinsp2.plugins && xinsp2.connected && xinsp2.hasProject",
+          "group": "navigation@3"
         }
       ],
       "editor/title": [
