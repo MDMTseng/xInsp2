@@ -1,0 +1,6 @@
+{
+  "name": "calc_pipeline",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": []
+}

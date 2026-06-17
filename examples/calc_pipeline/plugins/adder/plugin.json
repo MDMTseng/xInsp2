@@ -1,0 +1,18 @@
+{
+  "name": "adder",
+  "description": "Adds a configurable addend to input.value. No image processing.",
+  "dll": "adder.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [
+      { "name": "addend", "default": 0, "doc": "Added to value (set per instance config)." }
+    ],
+    "inputs": [
+      { "name": "value", "kind": "number", "doc": "The number to add to. Missing -> 0." }
+    ],
+    "outputs": [
+      { "name": "result", "kind": "number", "doc": "value + addend." }
+    ]
+  }
+}

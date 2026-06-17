@@ -1,0 +1,4 @@
+{
+  "plugin": "multiplier",
+  "config": { "factor": 3 }
+}
