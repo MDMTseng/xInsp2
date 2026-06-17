@@ -3453,16 +3453,32 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // are skipped. The unload→build→load ordering is why CMake runs host-side
         // (Windows can't overwrite a loaded DLL; CMake emits a fixed-name DLL).
         //
-        // Optional args: {"cmake":"<path>", "config":"Release"}.
+        // Optional args: {"cmake":"<path>", "config":"Release",
+        //                 "plugins":["a","b"]}. `plugins` restricts the rebuild to
+        // those names (the extension passes it to rebuild just what you're editing);
+        // omitted = every cmake plugin.
         //
         // Same quiesce constraint as recompile: this resets instance pointers and
         // FreeLibrary's DLLs — drain dispatch first.
         auto cmake_exe = xp::get_string_field(parsed->args_json, "cmake");
         auto config    = xp::get_string_field(parsed->args_json, "config");
+        std::vector<std::string> only;
+        if (yyjson_doc* adoc = yyjson_read(parsed->args_json.c_str(), parsed->args_json.size(), 0)) {
+            yyjson_val* arr = yyjson_obj_get(yyjson_doc_get_root(adoc), "plugins");
+            if (yyjson_is_arr(arr)) {
+                size_t _i, _n; yyjson_val* it;
+                yyjson_arr_foreach(arr, _i, _n, it) {
+                    const char* s = yyjson_get_str(it);
+                    if (yyjson_is_str(it) && s) only.emplace_back(s);
+                }
+            }
+            yyjson_doc_free(adoc);
+        }
         auto guard = quiesce_dispatch_for_lifecycle_op_("rebuild_plugins");
         auto rep = g_plugin_mgr.rebuild_cmake_plugins(
             cmake_exe ? *cmake_exe : std::string("cmake"),
-            config    ? *config    : std::string("Release"));
+            config    ? *config    : std::string("Release"),
+            only);
         std::string data = "{\"plugins\":[";
         bool any_fail = false;
         for (size_t i = 0; i < rep.items.size(); ++i) {

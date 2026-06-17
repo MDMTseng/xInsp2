@@ -56,12 +56,14 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <condition_variable>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace xi {
@@ -210,13 +212,24 @@ private:
         auto build_dir = (std::filesystem::path(src_dir) / "build").string();
         auto q = [](const std::string& s) { return "\"" + s + "\""; };
         if (!std::filesystem::exists(std::filesystem::path(build_dir) / "CMakeCache.txt")) {
-            // Only inject XINSP2_ROOT — NOT OpenCV_DIR. xinsp2_plugin.cmake
-            // self-probes the right `x64/vcNN/lib` OpenCV dir; forcing the
-            // top-level pack dir (the host's compile_env_) breaks that probe
-            // (OpenCV's runtime auto-detect yields OpenCV_FOUND=FALSE). A plugin
-            // with a non-standard OpenCV sets it in its own CMakeLists / env.
             std::string cfg = q(cmake_exe) + " -S " + q(src_dir) + " -B " + q(build_dir) +
                               " -A x64 -DXINSP2_ROOT=" + q(xinsp_root);
+            // OpenCV: pass the resolved `x64/vcNN/lib` SUBDIR (the level whose
+            // OpenCVConfig.cmake actually resolves), NOT the top-level pack dir —
+            // forcing the top dir makes OpenCV's runtime auto-detect set
+            // OpenCV_FOUND=FALSE. compile_env_.opencv_dir is the host's top pack
+            // dir; derive the vc subdir so a NON-standard OpenCV location also
+            // works. If none matches, omit it and let xinsp2_plugin.cmake's own
+            // (hard-coded C:/opencv) probe try.
+            if (!compile_env_.opencv_dir.empty()) {
+                for (const char* vc : {"vc17", "vc16", "vc15", "vc14"}) {
+                    auto lib = std::filesystem::path(compile_env_.opencv_dir) / "x64" / vc / "lib";
+                    if (std::filesystem::exists(lib / "OpenCVConfig.cmake")) {
+                        cfg += " -DOpenCV_DIR=" + q(lib.string());
+                        break;
+                    }
+                }
+            }
             log += "[configure] " + cfg + "\n";
             int rc = run_cmd_capture_(cfg, log);
             if (rc != 0) return rc;
@@ -854,25 +867,46 @@ public:
     // here in the backend rather than client-side — only the host can release the
     // lock around the build while holding each instance's def for replay.
     //
+    // Three phases so a multi-plugin integration round (the common case) is fast
+    // and each plugin is unloaded only as briefly as possible:
+    //   A. unload ALL changed plugins (release every DLL lock) up front,
+    //   B. build them in PARALLEL (independent cmake invocations),
+    //   C. reload each + restore its instances.
+    //
+    // `only` (optional) restricts the set to those plugin names — the extension
+    // passes it to rebuild just the one(s) you're iterating on. Empty = all
+    // cmake plugins.
+    //
     // Caller MUST quiesce dispatch first. cmake_exe = "cmake" (or an absolute
     // path); config = "Release".
     PluginRebuildReport rebuild_cmake_plugins(const std::string& cmake_exe,
-                                              const std::string& config) {
+                                              const std::string& config,
+                                              const std::vector<std::string>& only = {}) {
         std::lock_guard<std::mutex> lk(mu_);
         PluginRebuildReport rep;
         // XINSP2_ROOT for a plugin's CMakeLists = <root> from <root>/backend/include.
         std::string xinsp_root =
             std::filesystem::path(compile_env_.include_dir).parent_path().parent_path().string();
+        std::unordered_set<std::string> filter(only.begin(), only.end());
 
+        struct Job {
+            std::string name, src_dir;
+            bool loaded = false;
+            HMODULE old_base = nullptr;
+            std::vector<PendingInstance> pending;
+            std::string log;
+            int rc = 0;
+        };
+        std::vector<Job> jobs;
+
+        // Decide the changed set (mtime gate) + record unchanged/skip reasons.
         std::vector<std::string> names;
         names.reserve(plugins_.size());
         for (auto& [n, pi] : plugins_) if (pi.prebuilt) names.push_back(n);
-
         for (auto& name : names) {
+            if (!filter.empty() && !filter.count(name)) continue;
             auto it = plugins_.find(name);
             if (it == plugins_.end()) continue;
-            // CMakeLists lives in the source dir: project plugins record their
-            // origin; scanned/external plugins build in their own folder.
             auto oit = project_plugin_origin_.find(name);
             std::string src_dir = (oit != project_plugin_origin_.end())
                                       ? oit->second : it->second.folder_path;
@@ -881,57 +915,74 @@ public:
                     "build:cmake plugin has no CMakeLists.txt in " + src_dir});
                 continue;
             }
-
-            // Change gate: newest source mtime vs the loaded DLL stamp. A plugin
-            // with no live handle (first build / earlier load failure) always builds.
             bool loaded = (it->second.handle != nullptr);
             if (loaded && newest_source_mtime_(src_dir) <= it->second.loaded_dll_mtime) {
                 rep.items.push_back({name, "unchanged", ""});
                 continue;
             }
+            Job j; j.name = name; j.src_dir = src_dir; j.loaded = loaded;
+            jobs.push_back(std::move(j));
+        }
 
-            // Unload first so cmake can overwrite the (otherwise locked) DLL.
-            HMODULE old_base = nullptr;
-            std::vector<PendingInstance> pending;
-            if (loaded) pending = detach_plugin_instances_locked_(name, &old_base);
+        // Phase A — unload every changed plugin (frees all the DLL file locks).
+        for (auto& j : jobs)
+            if (j.loaded) j.pending = detach_plugin_instances_locked_(j.name, &j.old_base);
 
-            std::string log;
-            int rc = build_cmake_plugin_(cmake_exe, src_dir, config, xinsp_root, log);
-            // cmake/MSBuild/cl write OEM-codepage bytes (CP950 on zh-TW) — scrub to
-            // valid UTF-8 so the failure detail never breaks the WS text frame.
-            log = xi::script::ensure_utf8(log);
-            if (rc != 0) {
-                // Build failed — reattach instances against the still-on-disk old
-                // DLL so the plugin keeps running on old code; report the failure.
+        // Phase B — build them in parallel. build_cmake_plugin_ only reads
+        // compile_env_ + touches the filesystem + spawns cmake, so concurrent
+        // calls over distinct dirs don't race (plugins_ isn't touched here).
+        {
+            std::vector<std::future<void>> futs;
+            futs.reserve(jobs.size());
+            for (size_t i = 0; i < jobs.size(); ++i) {
+                futs.push_back(std::async(std::launch::async,
+                    [this, i, &jobs, &cmake_exe, &config, &xinsp_root]() {
+                        auto& j = jobs[i];
+                        j.rc = build_cmake_plugin_(cmake_exe, j.src_dir, config, xinsp_root, j.log);
+                        // cmake/MSBuild/cl write OEM-codepage bytes (CP950 on zh-TW)
+                        // — scrub to valid UTF-8 so a failure log never breaks the
+                        // WS text frame.
+                        j.log = xi::script::ensure_utf8(j.log);
+                    }));
+            }
+            for (auto& f : futs) f.get();
+        }
+
+        // Phase C — reload each + restore instances (sequential; mutates plugins_).
+        for (auto& j : jobs) {
+            auto it = plugins_.find(j.name);
+            if (it == plugins_.end()) { rep.items.push_back({j.name, "failed", "plugin entry vanished"}); continue; }
+            if (j.rc != 0) {
+                // Build failed — reattach against the still-on-disk old DLL so the
+                // plugin keeps running on old code; report the failure.
                 auto dll_path = (std::filesystem::path(it->second.folder_path) /
                                  it->second.dll_name).string();
                 std::string e2;
-                if (loaded && std::filesystem::exists(dll_path))
-                    reattach_plugin_from_dll_locked_(name, dll_path, pending, old_base, &e2);
-                rep.items.push_back({name, "failed", "cmake build failed:\n" + log});
+                if (j.loaded && std::filesystem::exists(dll_path))
+                    reattach_plugin_from_dll_locked_(j.name, dll_path, j.pending, j.old_base, &e2);
+                rep.items.push_back({j.name, "failed", "cmake build failed:\n" + j.log});
                 continue;
             }
-
             // Locate the rebuilt DLL: xinsp2_add_plugin emits next to CMakeLists
             // (RUNTIME_OUTPUT_DIRECTORY = source dir); also accept build/ layouts.
             std::string want = it->second.dll_name;
             std::filesystem::path built;
-            for (auto cand : { std::filesystem::path(src_dir) / want,
-                               std::filesystem::path(src_dir) / "build" / want,
-                               std::filesystem::path(src_dir) / "build" / config / want }) {
+            for (auto cand : { std::filesystem::path(j.src_dir) / want,
+                               std::filesystem::path(j.src_dir) / "build" / want,
+                               std::filesystem::path(j.src_dir) / "build" / config / want }) {
                 if (std::filesystem::exists(cand)) { built = cand; break; }
             }
             if (built.empty()) {
-                rep.items.push_back({name, "failed",
-                    "build OK but no " + want + " found under " + src_dir});
+                rep.items.push_back({j.name, "failed",
+                    "build OK but no " + want + " found under " + j.src_dir});
                 continue;
             }
             it->second.folder_path = built.parent_path().string();
             it->second.dll_name    = built.filename().string();
             std::string err;
-            bool ok = reattach_plugin_from_dll_locked_(name, built.string(),
-                                                       pending, old_base, &err);
-            rep.items.push_back({name, ok ? "rebuilt" : "failed", ok ? built.string() : err});
+            bool ok = reattach_plugin_from_dll_locked_(j.name, built.string(),
+                                                       j.pending, j.old_base, &err);
+            rep.items.push_back({j.name, ok ? "rebuilt" : "failed", ok ? built.string() : err});
         }
         return rep;
     }
