@@ -1354,6 +1354,43 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // --- Rebuild cmake/prebuilt plugins (external libs / CUDA) ---
+    // For every `build: cmake` plugin whose source changed, the backend unloads
+    // it, runs its own CMake build, then reloads the DLL and restores instance
+    // state. Unchanged plugins are skipped. See docs/guides/write-a-plugin.md
+    // (External libraries & CUDA).
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.rebuildPlugins', async () => {
+            if (!client?.connected) { vscode.window.showWarningMessage('xInsp2: not connected'); return; }
+            output.appendLine('[xinsp2] rebuilding cmake plugins...');
+            await vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Notification, title: 'xInsp2: Rebuilding plugins…' },
+                async () => {
+                    try {
+                        const rsp = await sendCmd('rebuild_plugins');
+                        const items: any[] = rsp.data?.plugins ?? [];
+                        if (!items.length) {
+                            vscode.window.showInformationMessage('xInsp2: no cmake/prebuilt plugins to rebuild.');
+                            return;
+                        }
+                        for (const i of items) {
+                            output.appendLine(`[xinsp2]   ${i.plugin}: ${i.status}${i.detail ? ' — ' + i.detail : ''}`);
+                        }
+                        const rebuilt = items.filter((i) => i.status === 'rebuilt');
+                        const failed = items.filter((i) => i.status === 'failed');
+                        if (failed.length) {
+                            vscode.window.showErrorMessage(`xInsp2: ${failed.length} plugin(s) failed to rebuild — see Output.`);
+                        } else {
+                            vscode.window.setStatusBarMessage(`xInsp2: rebuilt ${rebuilt.length} plugin(s)`, 4000);
+                        }
+                        sendCmd('list_instances').catch(() => {});
+                    } catch (e: any) {
+                        vscode.window.showErrorMessage(`xInsp2 rebuild plugins: ${e.message}`);
+                    }
+                });
+        })
+    );
+
     // --- Create a new project plugin from a template ---
     // Walks: pick template → enter name → optional description →
     // generate folder + plugin.cpp + plugin.json under

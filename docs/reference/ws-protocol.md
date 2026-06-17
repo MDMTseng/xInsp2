@@ -831,6 +831,7 @@ in full detail above. One-line purpose per entry; args follow the same
 | `rescan_plugins` | Rescan the global plugins directories and refresh manifests. Does not reload already-loaded plugin DLLs. |
 | `load_plugin` `args: { "name": "...", "folder"?: "..." }` | Force-load (or reload) a specific plugin by name. Typically used after `rescan_plugins` found a new plugin. |
 | `recertify_plugin` `args: { "name": "..." }` | Re-run the baseline certification tests for a plugin and update its cert file. |
+| `rebuild_plugins` `args: { "cmake"?: "...", "config"?: "Release" }` | For every `build: cmake` plugin whose source changed: unload it, run its own CMake build, then reload the DLL and restore instances. Reply `data: { "plugins": [{ "plugin", "status": "rebuilt"\|"unchanged"\|"failed", "detail" }] }`. Unchanged plugins (sources older than their built DLL) are skipped. The unload→build→load order is required on Windows (a loaded DLL can't be overwritten; CMake emits a fixed-name DLL) — which is why CMake runs host-side. A plugin that didn't truly unload (lingering worker thread / GPU context) is reported `failed` rather than silently left on stale code. |
 | `export_project_plugin` `args: { "name": "..." }` | Package a compiled project-local plugin (DLL + manifest) for distribution; stamps `abi_version` in the exported `plugin.json`. |
 
 #### Project and instance CRUD

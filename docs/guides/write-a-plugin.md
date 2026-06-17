@@ -128,6 +128,66 @@ per DLL hash; cached in `cert.json` next to the DLL.
 
 ---
 
+## External libraries & CUDA (cmake plugins)
+
+The in-project path compiles your `.cpp` with `cl.exe` and auto-supplies only
+xInsp2 + OpenCV + the plugin's own `include/`. To link a **third-party import lib**
+or build **CUDA** (`.cu` → `nvcc`), the plugin needs to own its build. Declare that
+in `plugin.json`:
+
+```jsonc
+{ "name": "my_cuda_op", "build": "cmake" }   // alias: "prebuilt": true
+```
+
+A `build: cmake` plugin is **never** compiled by the backend. It can live right
+inside `<project>/plugins/<name>/` (so you keep the instance UI + script wiring +
+`xi::use()` of other plugins) **and** carry its own `CMakeLists.txt`:
+
+```cmake
+cmake_minimum_required(VERSION 3.16)
+project(my_cuda_op CXX C CUDA)              # add CUDA here, or enable_language(CUDA)
+set(CMAKE_CXX_STANDARD 20)
+include($ENV{XINSP2_ROOT}/sdk/cmake/xinsp2_plugin.cmake)
+
+xinsp2_add_plugin(my_cuda_op plugin.cpp kernels.cu)   # creates the DLL target
+# ...then any standard CMake on the `my_cuda_op` target:
+find_package(CUDAToolkit REQUIRED)
+target_link_libraries(my_cuda_op PRIVATE CUDA::cudart)
+target_link_libraries(my_cuda_op PRIVATE C:/sdk/lib/foo.lib)   # any external lib
+target_include_directories(my_cuda_op PRIVATE C:/sdk/include)
+```
+
+The output DLL is named `<name>.dll` (next to the CMakeLists, the
+`xinsp2_add_plugin` default). **Ship its dependency DLLs** (`cudart64_*.dll`, your
+SDK's `.dll`) **next to that DLL** — the backend loads plugins with
+`LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR`, which searches the plugin's own folder (plus
+the app dir + System32) but deliberately **not** `PATH`/CWD (see *Can I ship extra
+dependency DLLs* below).
+
+### The build / reload loop — `xInsp2: Rebuild Plugins`
+
+You don't run cmake by hand. The **xInsp2: Rebuild Plugins** command (and the
+backend `rebuild_plugins` WS cmd) does, for every `build: cmake` plugin:
+
+1. **Skips** plugins whose sources are all older than their built DLL — so a CUDA
+   plugin you didn't touch keeps its GPU context (nothing is reloaded needlessly).
+2. For a changed plugin: **unloads** it first (this is mandatory — Windows can't
+   overwrite a *loaded* DLL, and cmake emits a fixed-name DLL), snapshotting each
+   instance's saved state.
+3. Runs the plugin's **cmake** build (configures `build/` on first run).
+4. **Loads** the rebuilt DLL and re-creates the instances with their state restored.
+
+If a plugin's worker thread or CUDA context isn't torn down cleanly in its
+destructor, the old DLL won't actually unload — the command **reports that plugin
+as failed** ("DLL did not unload … NEW code is NOT active") rather than silently
+running stale code. Clean up threads / `cudaDeviceReset()` in your destructor.
+
+> A `build: cmake` plugin needs its DLL built before it can load. On first
+> `open_project` it shows a "no built DLL — run Rebuild Plugins" warning; run the
+> command once and it loads.
+
+---
+
 ## What a plugin looks like (Easy template, abbreviated)
 
 ```cpp

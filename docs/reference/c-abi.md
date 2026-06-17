@@ -198,6 +198,7 @@ typedef struct {
 | `description` / `factory` / `has_ui` | Tree label / create symbol (default `xi_plugin_create`) / serve `ui/index.html` as the webview. |
 | `reentrant` (alias `thread_safe`) | `process`/`exchange`/`get_def`/`set_def` are safe to call concurrently on one instance. Default `false` = host serializes per instance (so a parallel dispatch pool is safe by default). Set `true` only if internally thread-safe. |
 | `json_fallback` | Allow load despite a yyjson-layout mismatch (runs the slow JSON path). Default `false` = refused; see §4 + `internals/data-layer.md`. |
+| `build` (alias `prebuilt`) | `"source"` (default) = backend compiles the plugin's `.cpp` with `cl.exe`. `"cmake"` (or `"prebuilt": true`) = the plugin owns its build (own `CMakeLists.txt`, for external libs / CUDA); the backend loads the prebuilt `<name>.dll` and `cmd:rebuild_plugins` runs its CMake. See `guides/write-a-plugin.md` (External libraries & CUDA). |
 | `abi_version` | The `XI_ABI_VERSION` compiled against (written by `cmd:export_project_plugin`); gated per §4. |
 | `manifest` (object) | Machine-readable tunables + IO surface (`params`/`inputs`/`outputs`/`exchange`), passed through verbatim for tooling/agents. |
 

@@ -105,9 +105,21 @@ struct PluginInfo {
     // export) is REFUSED at load so the perf cliff is never silent. See
     // plugin_abi_compatible / docs/reference/c-abi.md.
     bool        json_fallback = false;
+    // Build mode (plugin.json `"build"`): `"source"` (default) = the backend
+    // compiles the plugin's .cpp with cl.exe in-place (PluginDev flags). `"cmake"`
+    // (alias `"prebuilt": true`) = the plugin owns its build (its own CMakeLists
+    // for external libs / CUDA); the backend never invokes cl.exe on it and just
+    // loads the prebuilt `build/<name>.dll`. `xInsp2: Rebuild Plugins` runs cmake
+    // on cmake-mode plugins, then hot-reloads whichever DLLs actually changed.
+    // See docs/guides/write-a-plugin.md (External libraries & CUDA).
+    bool        prebuilt = false;
     std::string folder_path;   // absolute path to plugin folder
     std::string ui_path;       // absolute path to ui/ folder (if has_ui)
     HMODULE     handle = nullptr;
+    // Last-loaded DLL stamp (write-time ticks + size) — the change-gate for
+    // reload_changed: a rebuild only triggers a hot-swap when these move.
+    uint64_t    loaded_dll_mtime = 0;
+    uint64_t    loaded_dll_size  = 0;
 
     // Optional. If `plugin.json` has a top-level `manifest` object, its
     // raw JSON text lands here. The backend doesn't validate or reshape

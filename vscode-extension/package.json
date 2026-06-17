@@ -33,6 +33,11 @@
         "icon": "$(gear)"
       },
       {
+        "command": "xinsp2.rebuildPlugins",
+        "title": "xInsp2: Rebuild Plugins",
+        "icon": "$(tools)"
+      },
+      {
         "command": "xinsp2.exportProjectPlugin",
         "title": "xInsp2: Export Project Plugin…",
         "icon": "$(package)"

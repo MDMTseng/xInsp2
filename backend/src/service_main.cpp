@@ -3445,6 +3445,46 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 srv.send_text(lm.to_json());
             }
         }
+    } else if (name == "rebuild_plugins") {
+        // `xInsp2: Rebuild Plugins`. For every cmake/prebuilt plugin whose source
+        // changed, the backend unloads it (releasing the DLL file lock), runs its
+        // own CMake build, then loads the rebuilt DLL and restores each instance's
+        // def. Unchanged plugins (incl. CUDA/heavy-state ones you didn't touch)
+        // are skipped. The unload→build→load ordering is why CMake runs host-side
+        // (Windows can't overwrite a loaded DLL; CMake emits a fixed-name DLL).
+        //
+        // Optional args: {"cmake":"<path>", "config":"Release"}.
+        //
+        // Same quiesce constraint as recompile: this resets instance pointers and
+        // FreeLibrary's DLLs — drain dispatch first.
+        auto cmake_exe = xp::get_string_field(parsed->args_json, "cmake");
+        auto config    = xp::get_string_field(parsed->args_json, "config");
+        auto guard = quiesce_dispatch_for_lifecycle_op_("rebuild_plugins");
+        auto rep = g_plugin_mgr.rebuild_cmake_plugins(
+            cmake_exe ? *cmake_exe : std::string("cmake"),
+            config    ? *config    : std::string("Release"));
+        std::string data = "{\"plugins\":[";
+        bool any_fail = false;
+        for (size_t i = 0; i < rep.items.size(); ++i) {
+            auto& it = rep.items[i];
+            if (i) data += ",";
+            data += "{\"plugin\":"; xp::json_escape_into(data, it.name);
+            data += ",\"status\":"; xp::json_escape_into(data, it.status);
+            data += ",\"detail\":"; xp::json_escape_into(data, it.detail);
+            data += "}";
+            if (it.status == "failed") any_fail = true;
+        }
+        data += "]}";
+        // Partial failures (failed[]) are still a completed run — return ok with
+        // the per-plugin report; the client surfaces failures.
+        send_rsp_ok(srv, id, data);
+        if (any_fail)
+            for (auto& it : rep.items)
+                if (it.status == "failed") {
+                    xp::LogMsg lm; lm.level = "error";
+                    lm.msg = "rebuild_plugins: " + it.name + ": " + it.detail;
+                    srv.send_text(lm.to_json());
+                }
     } else if (name == "recording_start") {
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         if (!folder) { send_rsp_err(srv, id, "missing folder"); return; }

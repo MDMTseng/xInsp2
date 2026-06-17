@@ -148,6 +148,216 @@ public:
     }
 
 private:
+    // Record the on-disk write-time + size of the DLL we just loaded, so
+    // reload_changed_plugins() can later tell whether a rebuild produced a new
+    // DLL (and only hot-swap the ones that actually moved).
+    static void stamp_loaded_dll_(PluginInfo& pi, const std::string& dll_path) {
+        std::error_code ec;
+        auto sz = std::filesystem::file_size(dll_path, ec);
+        pi.loaded_dll_size = ec ? 0 : (uint64_t)sz;
+        auto wt = std::filesystem::last_write_time(dll_path, ec);
+        pi.loaded_dll_mtime = ec ? 0 : (uint64_t)wt.time_since_epoch().count();
+    }
+
+    // Newest write-time (ticks) over a cmake plugin's source tree — the rebuild
+    // change-gate input. Counts source + build-script files, skips the build/
+    // tree (its artifacts aren't "source"). 0 if nothing found.
+    static uint64_t newest_source_mtime_(const std::string& dir) {
+        uint64_t newest = 0;
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec)) return 0;
+        for (auto it = std::filesystem::recursive_directory_iterator(dir, ec);
+             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+            if (it->is_directory()) {
+                if (it->path().filename() == "build") it.disable_recursion_pending();
+                continue;
+            }
+            auto ext = it->path().extension().string();
+            auto fn  = it->path().filename().string();
+            bool src = ext == ".c"  || ext == ".cpp" || ext == ".cc"  || ext == ".cxx" ||
+                       ext == ".cu" || ext == ".cuh" || ext == ".h"   || ext == ".hpp" ||
+                       ext == ".hxx"|| fn == "CMakeLists.txt" || ext == ".cmake";
+            if (!src) continue;
+            auto wt = std::filesystem::last_write_time(it->path(), ec);
+            if (!ec) newest = std::max(newest, (uint64_t)wt.time_since_epoch().count());
+        }
+        return newest;
+    }
+
+    // Run a command, capturing combined stdout+stderr into *log. Returns the
+    // process exit code (or -1 if it couldn't be spawned).
+    static int run_cmd_capture_(const std::string& cmd, std::string& log) {
+#ifdef _WIN32
+        // _popen routes through cmd.exe; the extra outer quotes keep a quoted
+        // exe path + quoted args parsing correctly.
+        std::string full = "\"" + cmd + " 2>&1\"";
+        FILE* pipe = _popen(full.c_str(), "r");
+        if (!pipe) { log += "[failed to spawn: " + cmd + "]\n"; return -1; }
+        char buf[4096];
+        while (fgets(buf, sizeof(buf), pipe)) log += buf;
+        int rc = _pclose(pipe);
+        return rc;
+#else
+        // TODO(linux): popen(cmd + " 2>&1") — same shape, no outer-quote wrap.
+        (void)cmd; log += "[cmake build unsupported on this platform]\n"; return -1;
+#endif
+    }
+
+    // Configure (first time) + build one cmake plugin. Appends logs. 0 = success.
+    int build_cmake_plugin_(const std::string& cmake_exe, const std::string& src_dir,
+                            const std::string& config, const std::string& xinsp_root,
+                            std::string& log) {
+        auto build_dir = (std::filesystem::path(src_dir) / "build").string();
+        auto q = [](const std::string& s) { return "\"" + s + "\""; };
+        if (!std::filesystem::exists(std::filesystem::path(build_dir) / "CMakeCache.txt")) {
+            // Only inject XINSP2_ROOT — NOT OpenCV_DIR. xinsp2_plugin.cmake
+            // self-probes the right `x64/vcNN/lib` OpenCV dir; forcing the
+            // top-level pack dir (the host's compile_env_) breaks that probe
+            // (OpenCV's runtime auto-detect yields OpenCV_FOUND=FALSE). A plugin
+            // with a non-standard OpenCV sets it in its own CMakeLists / env.
+            std::string cfg = q(cmake_exe) + " -S " + q(src_dir) + " -B " + q(build_dir) +
+                              " -A x64 -DXINSP2_ROOT=" + q(xinsp_root);
+            log += "[configure] " + cfg + "\n";
+            int rc = run_cmd_capture_(cfg, log);
+            if (rc != 0) return rc;
+        }
+        std::string bld = q(cmake_exe) + " --build " + q(build_dir) + " --config " + config;
+        log += "[build] " + bld + "\n";
+        return run_cmd_capture_(bld, log);
+    }
+
+    // One instance preserved across a plugin reload: its name + folder +
+    // serialized def, captured before destruction and replayed after reload.
+    struct PendingInstance {
+        std::string name, folder, def_json;
+        int         max_concurrency = 0;
+    };
+
+    // Phase 1 of a reload: snapshot every instance's def, then destroy them and
+    // FreeLibrary the plugin's old DLL. The instance dtor runs xi_plugin_destroy
+    // (joins worker threads / frees a CUDA context) BEFORE we unload, and freeing
+    // the DLL releases the on-disk file lock so a rebuild (cl.exe-versioned or
+    // cmake fixed-name) can overwrite it. Returns the snapshots + the old module
+    // base (for the post-reload stale-module fail-check). mu_ MUST be held.
+    std::vector<PendingInstance> detach_plugin_instances_locked_(
+            const std::string& plugin_name, HMODULE* old_base_out) {
+        std::vector<PendingInstance> pending;
+        for (auto& [iname, ii] : project_.instances) {
+            if (ii.plugin_name != plugin_name) continue;
+            PendingInstance p; p.name = iname; p.folder = ii.folder_path;
+            p.max_concurrency = ii.max_concurrency;
+            if (ii.instance) p.def_json = ii.instance->get_def();
+            pending.push_back(std::move(p));
+        }
+        for (auto& p : pending) {
+            auto& ii = project_.instances[p.name];
+            InstanceRegistry::instance().remove(p.name);
+            ii.instance.reset();   // dtor -> xi_plugin_destroy
+        }
+        auto pi_it = plugins_.find(plugin_name);
+        HMODULE base = (pi_it != plugins_.end()) ? pi_it->second.handle : nullptr;
+        if (old_base_out) *old_base_out = base;
+        if (pi_it != plugins_.end() && pi_it->second.handle) {
+            FreeLibrary(pi_it->second.handle);
+            pi_it->second.handle = nullptr;
+            pi_it->second.factory = nullptr;
+            pi_it->second.c_factory = nullptr;
+        }
+        return pending;
+    }
+
+    // Phase 2 of a reload: load the (re)built DLL, re-resolve the factory, and
+    // re-instantiate every snapshotted instance with its def restored. Fail-check:
+    // a module that maps at the SAME base as before means FreeLibrary didn't
+    // actually unload it (a lingering worker thread or a pinning dependency DLL)
+    // — the OLD code is still live. We re-attach instances against it (so nothing
+    // dangles) but report failure loudly, since silently running stale code is the
+    // exact bug to surface. mu_ MUST be held. Returns false + *err on failure.
+    bool reattach_plugin_from_dll_locked_(const std::string& plugin_name,
+                                          const std::string& new_dll_path,
+                                          const std::vector<PendingInstance>& pending,
+                                          HMODULE old_base,
+                                          std::string* err) {
+        auto pi_it = plugins_.find(plugin_name);
+        if (pi_it == plugins_.end()) {
+            if (err) *err = "plugin not registered: " + plugin_name;
+            return false;
+        }
+        auto& pi = pi_it->second;
+        // Fail-check, BEFORE reloading: if the old module is still mapped, the
+        // FreeLibrary in detach didn't drop its last ref (a lingering worker
+        // thread / pinning dependency DLL), so the LoadLibrary below would just
+        // bump the stale module's refcount and hand back the OLD code. Detect it
+        // with a refcount-neutral module query. (Comparing the reloaded base to
+        // the old base is unreliable — a fully-unloaded DLL usually remaps at its
+        // same preferred base, which would false-positive every clean reload.)
+        bool stale_module = false;
+        if (old_base != nullptr) {
+            HMODULE still = nullptr;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   new_dll_path.c_str(), &still) && still != nullptr)
+                stale_module = true;
+        }
+        HMODULE h = LoadLibraryExA(new_dll_path.c_str(), nullptr,
+                                   LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+        if (!h) {
+            if (err) *err = "LoadLibrary failed on rebuilt DLL — instances for "
+                            "this plugin are gone; reopen the project to recover";
+            return false;
+        }
+        pi.handle = h;
+
+        std::string aerr;
+        if (!plugin_abi_compatible(pi.handle, plugin_name, pi.json_fallback, &aerr)) {
+            FreeLibrary(pi.handle);
+            pi.handle = nullptr;
+            if (err) *err = aerr + " — instances for this plugin are gone; "
+                                   "reopen the project to recover";
+            return false;
+        }
+        bool has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
+        if (has_destroy) {
+            pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
+                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+        } else {
+            pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
+                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+        }
+        if (!pi.c_factory && !pi.factory) {
+            if (err) *err = "factory '" + pi.factory_symbol + "' not exported in "
+                            "rebuilt DLL — instances for this plugin are gone; "
+                            "reopen the project to recover";
+            return false;
+        }
+
+        xi_host_api& host = default_host_api();
+        for (auto& p : pending) {
+            std::shared_ptr<InstanceBase> inst;
+            if (pi.c_factory) {
+                void* raw = pi.c_factory(&host, p.name.c_str());
+                if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
+                    p.name, plugin_name, pi.handle, raw, pi.reentrant, p.max_concurrency);
+            } else if (pi.factory) {
+                auto* raw = pi.factory(p.name.c_str());
+                if (raw) inst.reset(raw);
+            }
+            if (!inst) continue;
+            if (!p.def_json.empty()) inst->set_def(p.def_json);
+            project_.instances[p.name].instance = inst;
+            InstanceRegistry::instance().add(inst);
+            attach_trigger_bridge(inst.get(), p.name);
+        }
+        stamp_loaded_dll_(pi, new_dll_path);   // refresh change-gate
+        if (stale_module) {
+            if (err) *err = "DLL did not unload (same module base after reload) — "
+                            "an instance likely left a worker thread or GPU context "
+                            "alive; NEW code is NOT active";
+            return false;
+        }
+        return true;
+    }
+
     int compile_project_plugins_locked(const std::string& project_folder) {
         auto root = std::filesystem::path(project_folder) / "plugins";
         if (!std::filesystem::exists(root)) return 0;
@@ -157,13 +367,32 @@ private:
             if (!entry.is_directory()) continue;
             std::string pname = entry.path().filename().string();
             try {
+                // Build mode + DLL name from plugin.json, read up-front because
+                // it decides whether we cl.exe-compile at all. A prebuilt/cmake
+                // plugin owns its own build (its CMakeLists handles external libs
+                // / CUDA); the backend never compiles it, it just loads the
+                // plugin's named DLL.
+                bool prebuilt = false;
+                std::string want_dll = pname + ".dll";
+                {
+                    auto mpath = entry.path() / "plugin.json";
+                    if (std::filesystem::exists(mpath)) {
+                        std::ifstream mf(mpath.string());
+                        std::stringstream ms; ms << mf.rdbuf();
+                        std::string mc = ms.str();
+                        prebuilt = json_flag_true(mc, "prebuilt") ||
+                                   (extract_string(mc, "build").value_or("") == "cmake");
+                        if (auto d = extract_string(mc, "dll")) want_dll = *d;
+                    }
+                }
+
                 // Collect .cpp sources: prefer src/ if present, else root.
                 std::vector<std::string> sources;
                 auto src_dir = entry.path() / "src";
                 auto walk = [&](const std::filesystem::path& dir) { collect_cpp_sources(dir, sources); };
                 if (std::filesystem::exists(src_dir)) walk(src_dir);
                 else                                  walk(entry.path());
-                if (sources.empty()) {
+                if (!prebuilt && sources.empty()) {
                     last_open_warnings_.push_back(
                         {pname, pname, "no .cpp sources found in project plugin folder"});
                     std::fprintf(stderr,
@@ -180,8 +409,10 @@ private:
                 }
 
                 xi::script::CompileRequest req;
-                req.source_path    = sources.front();
-                req.extra_sources.assign(sources.begin() + 1, sources.end());
+                if (!sources.empty()) {
+                    req.source_path = sources.front();
+                    req.extra_sources.assign(sources.begin() + 1, sources.end());
+                }
                 req.include_dirs   = includes;
                 req.output_dir     = (entry.path() / "build").string();
                 req.include_dir    = compile_env_.include_dir;
@@ -192,23 +423,58 @@ private:
                 req.mode           = xi::script::CompileMode::PluginDev;
 
                 xi::script::CompileResult res;
-                if (compile_env_.aot) {
-                    // AOT bundle: load the newest prebuilt DLL in build/ — no cl.exe.
-                    std::filesystem::path build_dir = entry.path() / "build", newest;
-                    std::filesystem::file_time_type best{};
-                    if (std::filesystem::exists(build_dir))
-                        for (auto& f : std::filesystem::directory_iterator(build_dir))
-                            if (f.is_regular_file() && f.path().extension() == ".dll") {
-                                auto t = std::filesystem::last_write_time(f);
-                                if (newest.empty() || t > best) { best = t; newest = f.path(); }
-                            }
-                    if (newest.empty()) {
-                        last_open_warnings_.push_back({pname, pname, "AOT: no prebuilt DLL in build/ (export first)"});
-                        std::fprintf(stderr, "[xinsp2] AOT: plugin '%s' has no prebuilt DLL — skipped\n", pname.c_str());
+                if (compile_env_.aot || prebuilt) {
+                    // AOT bundle OR a cmake/prebuilt plugin: load a prebuilt DLL,
+                    // no cl.exe. A cmake plugin emits its DLL either into build/
+                    // (the in-tree convention) or next to plugin.json (the
+                    // standalone xinsp2_add_plugin default), so load the
+                    // *named* DLL from either — never "newest .dll", which could
+                    // pick up a shipped dependency DLL. AOT keeps its legacy
+                    // newest-in-build/ behaviour for export bundles.
+                    std::filesystem::path found;
+                    if (prebuilt) {
+                        for (auto cand : { entry.path() / "build" / want_dll,
+                                           entry.path() / want_dll }) {
+                            if (std::filesystem::exists(cand)) { found = cand; break; }
+                        }
+                    } else {
+                        std::filesystem::path build_dir = entry.path() / "build";
+                        std::filesystem::file_time_type best{};
+                        if (std::filesystem::exists(build_dir))
+                            for (auto& f : std::filesystem::directory_iterator(build_dir))
+                                if (f.is_regular_file() && f.path().extension() == ".dll") {
+                                    auto t = std::filesystem::last_write_time(f);
+                                    if (found.empty() || t > best) { best = t; found = f.path(); }
+                                }
+                    }
+                    if (found.empty()) {
+                        if (prebuilt) {
+                            // Register an unbuilt cmake plugin (no handle) so it's
+                            // listed AND `rebuild_plugins` can build + load it later.
+                            auto mpath = entry.path() / "plugin.json";
+                            PluginInfo stub = std::filesystem::exists(mpath)
+                                ? parse_manifest(mpath.string(), entry.path().string())
+                                : PluginInfo{};
+                            if (stub.name.empty()) stub.name = pname;
+                            if (stub.dll_name.empty()) stub.dll_name = want_dll;
+                            if (stub.factory_symbol.empty()) stub.factory_symbol = "xi_plugin_create";
+                            stub.prebuilt = true;
+                            stub.description = "Project plugin (cmake, not built): " + pname;
+                            plugins_[pname] = std::move(stub);
+                            project_plugin_origin_[pname] = entry.path().string();
+                            last_open_warnings_.push_back(
+                                {pname, pname, "build:cmake plugin not built yet — run 'Rebuild Plugins'"});
+                            std::fprintf(stderr,
+                                "[xinsp2] cmake plugin '%s' registered (not built) — run Rebuild Plugins\n",
+                                pname.c_str());
+                        } else {
+                            last_open_warnings_.push_back({pname, pname, "AOT: no prebuilt DLL in build/ (export first)"});
+                            std::fprintf(stderr, "[xinsp2] AOT: plugin '%s' has no prebuilt DLL — skipped\n", pname.c_str());
+                        }
                         continue;
                     }
-                    res.ok = true; res.dll_path = newest.string();
-                    std::fprintf(stderr, "[xinsp2] AOT: loading prebuilt plugin '%s': %s\n", pname.c_str(), res.dll_path.c_str());
+                    res.ok = true; res.dll_path = found.string();
+                    std::fprintf(stderr, "[xinsp2] loading prebuilt plugin '%s': %s\n", pname.c_str(), res.dll_path.c_str());
                 } else {
                     std::fprintf(stderr,
                         "[xinsp2] compiling project plugin '%s' (%zu source%s)...\n",
@@ -240,6 +506,8 @@ private:
                 pi.dll_name       = std::filesystem::path(res.dll_path).filename().string();
                 pi.factory_symbol = "xi_plugin_create";
                 pi.folder_path    = std::filesystem::path(res.dll_path).parent_path().string();
+                pi.prebuilt       = prebuilt;
+                stamp_loaded_dll_(pi, res.dll_path);
                 // Optional plugin.json overrides
                 auto manifest = entry.path() / "plugin.json";
                 if (std::filesystem::exists(manifest)) {
@@ -541,6 +809,10 @@ public:
             return r;
         }
 
+        // Refresh the change-gate stamp so a later reload_changed_plugins()
+        // doesn't see this freshly-recompiled DLL as "changed" and swap it again.
+        stamp_loaded_dll_(pi, cres.dll_path);
+
         // 4. Re-instantiate every preserved instance using the new factory.
         xi_host_api& host = default_host_api();
         for (auto& p : pending) {
@@ -562,6 +834,106 @@ public:
         }
         r.ok = true;
         return r;
+    }
+
+    struct PluginRebuildReport {
+        // status: "rebuilt" | "unchanged" | "failed"
+        struct Item { std::string name, status, detail; };
+        std::vector<Item> items;
+    };
+
+    // Backend-driven "Rebuild Plugins": for every cmake/prebuilt plugin whose
+    // source changed, unload it (releasing the loaded DLL's file lock), run its
+    // own CMake build, then load the rebuilt DLL and restore each instance's def.
+    // Unchanged plugins (all sources older than their built DLL) are skipped, so
+    // a CUDA/heavy-state plugin you didn't touch keeps its context.
+    //
+    // The unload→build→load ordering is REQUIRED on Windows: a loaded DLL can't
+    // be overwritten, and CMake emits a fixed-name DLL (unlike the cl.exe path,
+    // which versions the filename to dodge the lock). That's also why CMake runs
+    // here in the backend rather than client-side — only the host can release the
+    // lock around the build while holding each instance's def for replay.
+    //
+    // Caller MUST quiesce dispatch first. cmake_exe = "cmake" (or an absolute
+    // path); config = "Release".
+    PluginRebuildReport rebuild_cmake_plugins(const std::string& cmake_exe,
+                                              const std::string& config) {
+        std::lock_guard<std::mutex> lk(mu_);
+        PluginRebuildReport rep;
+        // XINSP2_ROOT for a plugin's CMakeLists = <root> from <root>/backend/include.
+        std::string xinsp_root =
+            std::filesystem::path(compile_env_.include_dir).parent_path().parent_path().string();
+
+        std::vector<std::string> names;
+        names.reserve(plugins_.size());
+        for (auto& [n, pi] : plugins_) if (pi.prebuilt) names.push_back(n);
+
+        for (auto& name : names) {
+            auto it = plugins_.find(name);
+            if (it == plugins_.end()) continue;
+            // CMakeLists lives in the source dir: project plugins record their
+            // origin; scanned/external plugins build in their own folder.
+            auto oit = project_plugin_origin_.find(name);
+            std::string src_dir = (oit != project_plugin_origin_.end())
+                                      ? oit->second : it->second.folder_path;
+            if (!std::filesystem::exists(std::filesystem::path(src_dir) / "CMakeLists.txt")) {
+                rep.items.push_back({name, "failed",
+                    "build:cmake plugin has no CMakeLists.txt in " + src_dir});
+                continue;
+            }
+
+            // Change gate: newest source mtime vs the loaded DLL stamp. A plugin
+            // with no live handle (first build / earlier load failure) always builds.
+            bool loaded = (it->second.handle != nullptr);
+            if (loaded && newest_source_mtime_(src_dir) <= it->second.loaded_dll_mtime) {
+                rep.items.push_back({name, "unchanged", ""});
+                continue;
+            }
+
+            // Unload first so cmake can overwrite the (otherwise locked) DLL.
+            HMODULE old_base = nullptr;
+            std::vector<PendingInstance> pending;
+            if (loaded) pending = detach_plugin_instances_locked_(name, &old_base);
+
+            std::string log;
+            int rc = build_cmake_plugin_(cmake_exe, src_dir, config, xinsp_root, log);
+            // cmake/MSBuild/cl write OEM-codepage bytes (CP950 on zh-TW) — scrub to
+            // valid UTF-8 so the failure detail never breaks the WS text frame.
+            log = xi::script::ensure_utf8(log);
+            if (rc != 0) {
+                // Build failed — reattach instances against the still-on-disk old
+                // DLL so the plugin keeps running on old code; report the failure.
+                auto dll_path = (std::filesystem::path(it->second.folder_path) /
+                                 it->second.dll_name).string();
+                std::string e2;
+                if (loaded && std::filesystem::exists(dll_path))
+                    reattach_plugin_from_dll_locked_(name, dll_path, pending, old_base, &e2);
+                rep.items.push_back({name, "failed", "cmake build failed:\n" + log});
+                continue;
+            }
+
+            // Locate the rebuilt DLL: xinsp2_add_plugin emits next to CMakeLists
+            // (RUNTIME_OUTPUT_DIRECTORY = source dir); also accept build/ layouts.
+            std::string want = it->second.dll_name;
+            std::filesystem::path built;
+            for (auto cand : { std::filesystem::path(src_dir) / want,
+                               std::filesystem::path(src_dir) / "build" / want,
+                               std::filesystem::path(src_dir) / "build" / config / want }) {
+                if (std::filesystem::exists(cand)) { built = cand; break; }
+            }
+            if (built.empty()) {
+                rep.items.push_back({name, "failed",
+                    "build OK but no " + want + " found under " + src_dir});
+                continue;
+            }
+            it->second.folder_path = built.parent_path().string();
+            it->second.dll_name    = built.filename().string();
+            std::string err;
+            bool ok = reattach_plugin_from_dll_locked_(name, built.string(),
+                                                       pending, old_base, &err);
+            rep.items.push_back({name, ok ? "rebuilt" : "failed", ok ? built.string() : err});
+        }
+        return rep;
     }
 
     // Export a project plugin as a standalone deployable folder. Steps:
@@ -811,6 +1183,7 @@ public:
         if (pi.c_factory == nullptr && pi.factory == nullptr)
             return fail("plugin '" + name + "': factory symbol '" + pi.factory_symbol +
                         "' not found in the DLL");
+        stamp_loaded_dll_(pi, dll_path.string());   // change-gate for reload_changed
         return true;
     }
 

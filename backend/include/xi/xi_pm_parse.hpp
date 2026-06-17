@@ -122,6 +122,11 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
     pi.reentrant = json_flag_true(content, "reentrant") ||
                    json_flag_true(content, "thread_safe");  // documented alias
     pi.json_fallback = json_flag_true(content, "json_fallback");
+    // Build mode: `"build": "cmake"` (alias `"prebuilt": true`) means the plugin
+    // owns its build — the backend loads its prebuilt `build/<name>.dll` and never
+    // invokes cl.exe on it. Default (absent / "source") = backend compiles it.
+    pi.prebuilt = json_flag_true(content, "prebuilt") ||
+                  (extract_string(content, "build").value_or("") == "cmake");
     pi.folder_path = folder;
     if (pi.has_ui) {
         pi.ui_path = (std::filesystem::path(folder) / "ui").string();
