@@ -2106,6 +2106,7 @@ public:
             out += ",\"description\":"; pm_json_escape(out, v.description);
             out += ",\"has_ui\":" + std::string(v.has_ui ? "true" : "false");
             out += ",\"loaded\":" + std::string(v.handle ? "true" : "false");
+            out += ",\"prebuilt\":" + std::string(v.prebuilt ? "true" : "false");
             // origin: "project" if compiled from <project>/plugins, else "global"
             out += ",\"origin\":\"" + std::string(is_proj ? "project" : "global") + "\"";
             if (is_proj) {

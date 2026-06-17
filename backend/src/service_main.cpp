@@ -3099,6 +3099,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             out += ",\"folder\":\"" + esc(p.folder_path) + "\"";
             out += ",\"has_ui\":" + std::string(p.has_ui ? "true" : "false");
             out += ",\"loaded\":" + std::string(p.handle ? "true" : "false");
+            // cmake/prebuilt plugins get the per-item "Rebuild this plugin" action
+            // in the extension's Plugins tree (rebuild_plugins {plugins:[name]}).
+            out += ",\"prebuilt\":" + std::string(p.prebuilt ? "true" : "false");
             // Same origin field as to_json — extension's pluginTree relies
             // on it to badge project plugins, e2e journey asserts it.
             bool is_proj = g_plugin_mgr.is_project_plugin(p.name);

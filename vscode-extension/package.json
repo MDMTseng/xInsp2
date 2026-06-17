@@ -376,6 +376,11 @@
           "group": "inline@1"
         },
         {
+          "command": "xinsp2.rebuildPlugins",
+          "when": "view == xinsp2.plugins && viewItem == projectPluginCmake",
+          "group": "inline@1"
+        },
+        {
           "command": "xinsp2.recertifyPlugin",
           "when": "view == xinsp2.plugins && viewItem == plugin",
           "group": "inline@2"

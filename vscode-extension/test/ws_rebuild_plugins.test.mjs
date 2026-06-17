@@ -93,8 +93,11 @@ test('build:cmake plugin builds + reloads via rebuild_plugins, skips when unchan
             for (;;) {
                 const m = await c.nextText();
                 if (m.type === 'rsp' && m.id === 11) {
-                    const names = JSON.stringify(m.data ?? m);
-                    assert.ok(names.includes('verprobe'), 'verprobe listed after rebuild');
+                    const list = m.data ?? m;
+                    const vp = (Array.isArray(list) ? list : []).find((p) => p && p.name === 'verprobe');
+                    assert.ok(vp, 'verprobe listed after rebuild');
+                    // the prebuilt flag drives the tree's per-item "Rebuild this plugin"
+                    assert.equal(vp.prebuilt, true, 'verprobe reported prebuilt:true in list_plugins');
                     break;
                 }
             }

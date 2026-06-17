@@ -13,6 +13,9 @@ export interface PluginInfo {
     // source_dir is set only when origin === "project".
     origin?: 'project' | 'global';
     source_dir?: string;
+    // true = `build: cmake` plugin (owns its CMakeLists; rebuilt via rebuild_plugins,
+    // not cl.exe). Drives the per-item "Rebuild this plugin" action.
+    prebuilt?: boolean;
     // Free-form schema block from plugin.json's `manifest` (params / inputs /
     // outputs / exchange). The backend embeds it verbatim in list_plugins.
     manifest?: any;
@@ -107,7 +110,9 @@ export class PluginTreeProvider implements vscode.TreeDataProvider<Node> {
             (p.has_ui ? 'Has UI panel\n\n' : 'No UI panel\n\n') +
             (uses ? `Used by ${uses} instance(s) in current project.` : 'Not in use.')
         );
-        ti.contextValue = isProj ? 'projectPlugin' : 'plugin';
+        // cmake/prebuilt project plugins get their own contextValue so the tree
+        // offers "Rebuild this plugin" (and not the cl.exe-only Export action).
+        ti.contextValue = isProj ? (p.prebuilt ? 'projectPluginCmake' : 'projectPlugin') : 'plugin';
         return ti;
     }
 

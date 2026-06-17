@@ -1360,14 +1360,20 @@ export function activate(context: vscode.ExtensionContext) {
     // state. Unchanged plugins are skipped. See docs/guides/write-a-plugin.md
     // (External libraries & CUDA).
     context.subscriptions.push(
-        vscode.commands.registerCommand('xinsp2.rebuildPlugins', async () => {
+        vscode.commands.registerCommand('xinsp2.rebuildPlugins', async (arg?: any) => {
             if (!client?.connected) { vscode.window.showWarningMessage('xInsp2: not connected'); return; }
-            output.appendLine('[xinsp2] rebuilding cmake plugins...');
+            // From the per-item right-click the arg is a plugin tree Node — scope
+            // the rebuild to just that plugin. From the title-bar button / palette
+            // there's no arg → rebuild all cmake plugins (changed ones).
+            const one: string | undefined = arg?.info?.name;
+            const cmdArgs = one ? { plugins: [one] } : undefined;
+            output.appendLine(one ? `[xinsp2] rebuilding plugin '${one}'...` : '[xinsp2] rebuilding cmake plugins...');
             await vscode.window.withProgress(
-                { location: vscode.ProgressLocation.Notification, title: 'xInsp2: Rebuilding plugins…' },
+                { location: vscode.ProgressLocation.Notification,
+                  title: one ? `xInsp2: Rebuilding ${one}…` : 'xInsp2: Rebuilding plugins…' },
                 async () => {
                     try {
-                        const rsp = await sendCmd('rebuild_plugins');
+                        const rsp = await sendCmd('rebuild_plugins', cmdArgs);
                         const items: any[] = rsp.data?.plugins ?? [];
                         if (!items.length) {
                             vscode.window.showInformationMessage('xInsp2: no cmake/prebuilt plugins to rebuild.');
