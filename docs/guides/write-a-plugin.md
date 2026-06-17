@@ -117,9 +117,41 @@ cmake --build C:\dev\my_plugins\foo\build --config Release
 One of:
 - VS Code setting `xinsp2.extraPluginDirs = ["C:\\dev\\my_plugins"]`
 - CLI flag `xinsp-backend.exe --plugins-dir=C:\dev\my_plugins`
+- **`project.json` `plugin_dirs` + `plugins`** — see below (the portable, in-project way)
 
 The backend's plugin scanner picks up any subfolder with a
 `plugin.json`.
+
+#### Referencing external plugins from `project.json` (portable)
+
+`extraPluginDirs` / `--plugins-dir` are machine-level. To keep a project
+**self-describing and portable** — so it resolves the same after a fresh clone on
+another machine — declare its external plugins in `project.json`:
+
+```jsonc
+{
+  // ordered SEARCH ROOTS. Keep these portable: relative paths (resolved against
+  // the project folder), ${ENV} expansion, and ~ — NOT absolute machine paths.
+  "plugin_dirs": ["./plugins", "${XINSP2_PLUGIN_PATH}", "../shared-plugins"],
+
+  // plugin COORDINATES. Each path is looked up in each root, first match wins
+  // (like $PATH / a makefile search path). Resolved folders are registered just
+  // like a scanned plugin.
+  "plugins": {
+    "blob":    { "path": "vision/blob_detect" },
+    "matcher": { "path": "author/toolbox4/matcher" }
+  }
+}
+```
+
+The split is the point: **coordinates** (`plugins`) are committed and portable;
+the **machine-specific** absolute location lives in an env var (`XINSP2_PLUGIN_PATH`)
+or a relative checkout layout — never hard-coded in the committed file. On a new
+machine: clone the project + the plugin repos, set one env var (or keep them in a
+consistent relative location), and it resolves. An unresolved coordinate is
+surfaced as an open warning listing every root searched. Resolution runs in the
+backend (so headless / FE runs work too); project-local `plugins/<name>` of the
+same name win over resolved ones.
 
 ### 4. Iterate
 

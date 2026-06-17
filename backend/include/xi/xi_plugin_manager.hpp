@@ -52,11 +52,13 @@
 
 #include "yyjson.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
+#include <utility>
 #include <memory>
 #include <mutex>
 #include <condition_variable>
@@ -103,26 +105,96 @@ public:
         if (!std::filesystem::exists(plugins_dir)) return 0;
         for (auto& entry : std::filesystem::directory_iterator(plugins_dir)) {
             if (!entry.is_directory()) continue;
-            auto manifest = entry.path() / "plugin.json";
-            if (!std::filesystem::exists(manifest)) continue;
-            auto info = parse_manifest(manifest.string(), entry.path().string());
-            if (info.name.empty()) continue;
-            auto existing = plugins_.find(info.name);
-            if (existing != plugins_.end() && existing->second.handle) {
-                // Preserve the live handle + factories; update only the
-                // fields that can legitimately change between scans.
-                existing->second.description   = info.description;
-                existing->second.has_ui        = info.has_ui;
-                existing->second.reentrant      = info.reentrant;
-                existing->second.ui_path       = info.ui_path;
-                existing->second.folder_path   = info.folder_path;
-                existing->second.manifest_json = info.manifest_json;
-            } else {
-                plugins_[info.name] = std::move(info);
-            }
-            count++;
+            if (register_plugin_folder_locked_(entry.path().string())) count++;
         }
         return count;
+    }
+
+    // Register a single plugin folder (one that contains plugin.json) into the
+    // registry. An already-loaded plugin of the same name keeps its live handle +
+    // factories — we refresh only the metadata that can change between scans, so
+    // re-registering doesn't leak the prior HMODULE. mu_ MUST be held.
+    bool register_plugin_folder_locked_(const std::string& folder) {
+        auto manifest = std::filesystem::path(folder) / "plugin.json";
+        if (!std::filesystem::exists(manifest)) return false;
+        auto info = parse_manifest(manifest.string(), folder);
+        if (info.name.empty()) return false;
+        auto existing = plugins_.find(info.name);
+        if (existing != plugins_.end() && existing->second.handle) {
+            existing->second.description   = info.description;
+            existing->second.has_ui        = info.has_ui;
+            existing->second.reentrant     = info.reentrant;
+            existing->second.prebuilt      = info.prebuilt;
+            existing->second.ui_path       = info.ui_path;
+            existing->second.folder_path   = info.folder_path;
+            existing->second.manifest_json = info.manifest_json;
+        } else {
+            plugins_[info.name] = std::move(info);
+        }
+        return true;
+    }
+
+    // Expand a project.json plugin_dir entry to an absolute search root. Portable
+    // forms only: `${ENV}` substitution, leading `~`, and relative paths (resolved
+    // against the project folder). Absolute paths pass through. This is what keeps
+    // the committed project.json machine-independent — absolute machine roots live
+    // in env vars, not in the file.
+    static std::string expand_plugin_root_(std::string r, const std::string& project_folder) {
+        for (size_t p; (p = r.find("${")) != std::string::npos; ) {
+            auto e = r.find('}', p);
+            if (e == std::string::npos) break;
+            std::string var = r.substr(p + 2, e - p - 2);
+            const char* val = std::getenv(var.c_str());
+            r.replace(p, e - p + 1, val ? val : "");
+        }
+        if (!r.empty() && r[0] == '~') {
+            const char* home = std::getenv("USERPROFILE");      // TODO(linux): $HOME
+            if (!home) home = std::getenv("HOME");
+            if (home) r = std::string(home) + r.substr(1);
+        }
+        std::filesystem::path p(r);
+        if (p.is_relative()) p = std::filesystem::path(project_folder) / p;
+        return p.lexically_normal().string();
+    }
+
+    // Resolve project.json's external plugin coordinates: for each `plugins`
+    // entry's `path`, search each (expanded) `plugin_dirs` root in order and
+    // register the first `<root>/<path>/plugin.json` found (makefile-/$PATH-style
+    // first-match-wins). Unresolved refs become open warnings listing the roots
+    // searched. Runs AFTER project-local plugins are built so a same-named project
+    // plugin wins. mu_ MUST be held.
+    void resolve_external_project_plugins_locked_(
+            const std::string& project_folder,
+            const std::vector<std::string>& dirs_raw,
+            const std::vector<std::pair<std::string, std::string>>& refs) {
+        if (refs.empty()) return;
+        std::vector<std::string> roots;
+        roots.reserve(dirs_raw.size());
+        for (auto& d : dirs_raw) roots.push_back(expand_plugin_root_(d, project_folder));
+        for (auto& [label, rel] : refs) {
+            std::filesystem::path found;
+            for (auto& root : roots) {
+                auto cand = std::filesystem::path(root) / rel;
+                if (std::filesystem::exists(cand / "plugin.json")) { found = cand; break; }
+            }
+            if (found.empty()) {
+                std::string searched;
+                for (auto& root : roots)
+                    searched += "\n  - " + (std::filesystem::path(root) / rel).string();
+                last_open_warnings_.push_back({label, "",
+                    "plugin '" + rel + "' not found in any plugin_dir; searched:" + searched +
+                    (roots.empty() ? "\n  (no plugin_dirs declared)" : "")});
+                std::fprintf(stderr, "[xinsp2] plugin '%s' (%s) not resolved against %zu plugin_dir(s)\n",
+                             label.c_str(), rel.c_str(), roots.size());
+                continue;
+            }
+            if (register_plugin_folder_locked_(found.string()))
+                std::fprintf(stderr, "[xinsp2] resolved plugin '%s' -> %s\n",
+                             label.c_str(), found.string().c_str());
+            else
+                last_open_warnings_.push_back({label, "",
+                    "resolved folder has no valid plugin.json: " + found.string()});
+        }
     }
 
     // Compile and register every plugin under <project>/plugins/. Each
@@ -1481,9 +1553,28 @@ public:
         // (truncated / garbage) used to load "successfully" with all defaults and
         // no signal to the user — surface it as an open warning below.
         bool project_json_malformed = false;
+        // External plugin coordinates (resolved after project-local plugins build):
+        // plugin_dirs = ordered search roots; plugins = { label: { path } } refs.
+        std::vector<std::string> proj_plugin_dirs;
+        std::vector<std::pair<std::string, std::string>> proj_plugin_refs;
         yyjson_doc* doc = yyjson_read(content.c_str(), content.size(), 0);
         yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
         if (root) {
+            if (yyjson_val* pd = yyjson_obj_get(root, "plugin_dirs"); pd && yyjson_is_arr(pd)) {
+                size_t _pi, _pn; yyjson_val* it;
+                yyjson_arr_foreach(pd, _pi, _pn, it)
+                    if (yyjson_is_str(it) && yyjson_get_str(it)) proj_plugin_dirs.push_back(yyjson_get_str(it));
+            }
+            if (yyjson_val* pl = yyjson_obj_get(root, "plugins"); pl && yyjson_is_obj(pl)) {
+                size_t _pi, _pn; yyjson_val *k, *v;
+                yyjson_obj_foreach(pl, _pi, _pn, k, v) {
+                    if (!yyjson_is_obj(v)) continue;
+                    const char* label = yyjson_get_str(k);
+                    yyjson_val* pathv = yyjson_obj_get(v, "path");
+                    if (label && pathv && yyjson_is_str(pathv) && yyjson_get_str(pathv))
+                        proj_plugin_refs.emplace_back(label, yyjson_get_str(pathv));
+                }
+            }
             if (yyjson_val* tp = yyjson_obj_get(root, "trigger_policy");
                 tp && yyjson_is_obj(tp)) {
                 if (yyjson_val* k = yyjson_obj_get(tp, "policy");
@@ -1658,6 +1749,12 @@ public:
         if (proj_plugins > 0) {
             std::fprintf(stderr, "[xinsp2] %d project plugin(s) built\n", proj_plugins);
         }
+
+        // Resolve external plugin coordinates from project.json (plugin_dirs +
+        // plugins) AFTER the in-project ones, so a same-named project plugin wins.
+        // These register the plugin folder; the instance loop below auto-loads it
+        // (and rebuild_plugins can build it if it's build:cmake).
+        resolve_external_project_plugins_locked_(folder, proj_plugin_dirs, proj_plugin_refs);
 
         // Scan instances/ subdirectories. A broken instance.json or a
         // factory that throws must NOT abort the whole project load —
