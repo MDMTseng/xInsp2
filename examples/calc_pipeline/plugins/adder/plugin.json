@@ -1,6 +1,7 @@
 {
   "name": "adder",
-  "description": "Adds a configurable addend to input.value. No image processing.",
+  "description": "Adds a configurable addend to input.value via the external mathx lib. No image processing.",
+  "build": "cmake",
   "dll": "adder.dll",
   "factory": "xi_plugin_create",
   "has_ui": false,

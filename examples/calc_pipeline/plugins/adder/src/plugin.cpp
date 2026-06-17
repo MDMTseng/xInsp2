@@ -3,8 +3,13 @@
 // Pure data plugin: it only reads/writes xi::Record (JSON) fields. `addend`
 // round-trips through get_def/set_def, so it persists in instance.json and can
 // be retuned live in the instance UI.
+//
+// This plugin is `build: cmake` (see plugin.json + CMakeLists.txt): it owns its
+// own build so it can link the EXTERNAL `mathx` library for the actual add.
+// Rebuild it from the Plugins tree ("Rebuild Plugins", or right-click → Rebuild).
 
 #include <xi/xi_abi.hpp>   // xi::Plugin, xi::Record, XI_PLUGIN_IMPL
+#include <mathx.hpp>       // external dependency, linked via CMakeLists
 
 class Adder : public xi::Plugin {
     double addend_ = 0.0;   // applied to every input; loaded from instance config
@@ -22,11 +27,11 @@ public:
         return true;
     }
 
-    // --- the work: result = value + addend ---
+    // --- the work: result = value + addend (add done by the external lib) ---
     xi::Record process(const xi::Record& in) override {
         double value = in["value"].as_double(0.0);
         return xi::Record()
-            .set("result", value + addend_)
+            .set("result", mathx::add(value, addend_))   // external dependency
             .set("op", std::string("add"))
             .set("addend", addend_);
     }
