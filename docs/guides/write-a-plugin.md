@@ -52,8 +52,11 @@ plugins/<name>/
 └── ui/index.html        ← (Medium / Expert) plugin UI panel
 ```
 
-The backend compiles the plugin in-place with debug-friendly flags
-(`/Od /Zi /RTC1`), so you can attach a debugger.
+…**and declares it in `project.json`** — plugins are loaded from explicit
+declarations, not by scanning the folder (see *How plugins are declared* below).
+The command adds `plugins.<name> = { "path": "<name>", "compile": true }` for you,
+where `./plugins` is the default search root. The backend then compiles the plugin
+in-place with debug-friendly flags (`/Od /Zi /RTC1`), so you can attach a debugger.
 
 ### 3. Edit + save = hot reload
 
@@ -122,27 +125,35 @@ One of:
 The backend's plugin scanner picks up any subfolder with a
 `plugin.json`.
 
-#### Referencing external plugins from `project.json` (portable)
+#### How plugins are declared (`plugin_dirs` + `plugins`)
 
-`extraPluginDirs` / `--plugins-dir` are machine-level. To keep a project
-**self-describing and portable** — so it resolves the same after a fresh clone on
-another machine — declare its external plugins in `project.json`:
+**Every** plugin a project uses — local OR external — is declared in `project.json`.
+There is **no auto-discovery**: a folder under `./plugins` does nothing until it's
+listed. This keeps a project self-describing and portable, and lets you pick exactly
+which plugins a project loads (handy when you keep a toolbox of many plugins).
 
 ```jsonc
 {
   // ordered SEARCH ROOTS. Keep these portable: relative paths (resolved against
   // the project folder), ${ENV} expansion, and ~ — NOT absolute machine paths.
+  // Falls back to ["./plugins"] when omitted; set it and you get exactly your
+  // roots (re-add "./plugins" yourself if you still want the local folder).
   "plugin_dirs": ["./plugins", "${XINSP2_PLUGIN_PATH}", "../shared-plugins"],
 
-  // plugin COORDINATES. Each path is looked up in each root, first match wins
-  // (like $PATH / a makefile search path). Resolved folders are registered just
-  // like a scanned plugin.
+  // plugin DECLARATIONS. Each `path` is looked up in each root, first match wins
+  // (like $PATH / a makefile search path). `compile` (per-plugin) decides whether
+  // the resolved folder is cl.exe-compiled / built + trusted, or just registered.
   "plugins": {
-    "blob":    { "path": "vision/blob_detect" },
+    "myop":    { "path": "myop", "compile": true },   // local: ./plugins/myop, source -> compiled
+    "blob":    { "path": "vision/blob_detect" },       // external: prebuilt / build:cmake
     "matcher": { "path": "author/toolbox4/matcher" }
   }
 }
 ```
+
+A **local** plugin is just a declaration whose `path` resolves under `./plugins`
+(no `./` needed) — there's nothing special about the project folder. **xInsp2: New
+Project Plugin** writes the declaration (with `compile: true`) for you.
 
 The split is the point: **coordinates** (`plugins`) are committed and portable;
 the **machine-specific** absolute location lives in an env var (`XINSP2_PLUGIN_PATH`)
