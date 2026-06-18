@@ -545,7 +545,7 @@ that feed the script compile: `"include_dirs"` (extra `cl /I` paths) and
 project folder. The matching dependency DLL is found at runtime because the
 backend adds the project folder to the process DLL search path. See
 [`guides/write-a-script.md`](../guides/write-a-script.md) → "Using an external
-library / DLL" and [`examples/script_external_dll`](../examples/script_external_dll).
+library / DLL" and [`examples/script_external_dll`](../../examples/script_external_dll).
 
 **Working-copy mode.** `open_project` accepts `"working_copy": true`: the
 backend then operates on a `<project>/.xinsp_work` scratch copy (resume if
