@@ -157,11 +157,6 @@ public:
         return p.lexically_normal().string();
     }
 
-    // One project.json `plugins` coordinate: a label, a search-relative `path`,
-    // and a PER-PLUGIN `compile` flag (each plugin decides; the project-level
-    // `plugin_dirs_compile` is just the default when an entry omits it).
-    struct ExtPluginRef { std::string label, path; bool compile = false; };
-
     // Resolve project.json's external plugin coordinates: for each `plugins`
     // entry's `path`, search each (expanded) `plugin_dirs` root in order and take
     // the first `<root>/<path>/plugin.json` found (makefile-/$PATH-style
@@ -177,7 +172,7 @@ public:
     void resolve_external_project_plugins_locked_(
             const std::string& project_folder,
             const std::vector<std::string>& dirs_raw,
-            const std::vector<ExtPluginRef>& refs) {
+            const std::vector<ProjectInfo::PluginRef>& refs) {
         if (refs.empty()) return;
         std::vector<std::string> roots;
         roots.reserve(dirs_raw.size());
@@ -1365,6 +1360,10 @@ public:
         project_.folder_path = folder;
         project_.script_path = (std::filesystem::path(folder) / "inspect.cpp").string();
         project_.instances.clear();
+        // New projects start with the local ./plugins root visible + an empty
+        // plugins map; declare each plugin (or add it from the Plugin Browser).
+        project_.plugin_dirs = {"./plugins"};
+        project_.plugins.clear();
 
         // Write initial project.json
         save_project_locked();
@@ -1581,7 +1580,7 @@ public:
         // External plugin coordinates (resolved after project-local plugins build):
         // plugin_dirs = ordered search roots; plugins = { label: { path } } refs.
         std::vector<std::string> proj_plugin_dirs;
-        std::vector<ExtPluginRef> proj_plugin_refs;
+        std::vector<ProjectInfo::PluginRef> proj_plugin_refs;
         // Project-level DEFAULT for a `plugins` entry that omits its own `compile`
         // flag; per-entry `compile` (parsed below) overrides it. Default off.
         bool proj_plugin_dirs_compile = json_flag_true(content, "plugin_dirs_compile");
@@ -1785,6 +1784,10 @@ public:
         // yourself if you still want it). Each `plugins` entry's `compile` decides
         // whether its resolved folder is cl.exe-compiled / treated as a trusted
         // project plugin (recompile/rebuild-able) or just registered.
+        // Persist the declarations as-written (pre-fallback) so save_project_locked
+        // round-trips them without baking in the implicit ./plugins.
+        project_.plugin_dirs = proj_plugin_dirs;
+        project_.plugins     = proj_plugin_refs;
         if (proj_plugin_dirs.empty()) proj_plugin_dirs.push_back("./plugins");
         resolve_external_project_plugins_locked_(folder, proj_plugin_dirs, proj_plugin_refs);
 
@@ -2406,7 +2409,28 @@ private:
             out += ", \"plugin\": ";   pm_json_escape(out, v.plugin_name);
             out += "}";
         }
-        out += "\n  ]\n}\n";
+        out += "\n  ]";
+        // Round-trip the declarative plugin model (a save must not drop it).
+        if (!project_.plugin_dirs.empty()) {
+            out += ",\n  \"plugin_dirs\": [";
+            for (size_t j = 0; j < project_.plugin_dirs.size(); ++j) {
+                if (j) out += ", ";
+                pm_json_escape(out, project_.plugin_dirs[j]);
+            }
+            out += "]";
+        }
+        if (!project_.plugins.empty()) {
+            out += ",\n  \"plugins\": {";
+            int j = 0;
+            for (auto& p : project_.plugins) {
+                if (j++) out += ",";
+                out += "\n    "; pm_json_escape(out, p.label);
+                out += ": {\"path\": "; pm_json_escape(out, p.path);
+                out += ", \"compile\": " + std::string(p.compile ? "true" : "false") + "}";
+            }
+            out += "\n  }";
+        }
+        out += "\n}\n";
         // D-P1-5: atomic_write may fail (disk full / read-only / etc.).
         // Bubble that up — silently losing project.json was the audit
         // finding. Caller can't really recover, but at least logs it.

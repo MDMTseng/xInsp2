@@ -34,6 +34,15 @@ struct ProjectInfo {
     std::string script_path;
     std::unordered_map<std::string, InstanceInfo> instances;
 
+    // Declarative plugin model (project.json). `plugin_dirs` = portable search
+    // roots (relative / ${ENV} / ~; empty = falls back to ["./plugins"] at load).
+    // `plugins` = the per-project plugin declarations resolved against them. Stored
+    // here so save_project_locked round-trips them — a save must NOT drop the
+    // plugin declarations. See docs/guides/write-a-plugin.md.
+    struct PluginRef { std::string label, path; bool compile = false; };
+    std::vector<std::string> plugin_dirs;
+    std::vector<PluginRef>   plugins;
+
     // Trigger bus policy persisted per project. Default is Any (every
     // source emit fires one dispatch) — back-compat with pre-trigger
     // plugins. Change to AllRequired for multi-camera synchronisation.
