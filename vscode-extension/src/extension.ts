@@ -1465,7 +1465,20 @@ export function activate(context: vscode.ExtensionContext) {
                 }
                 const cppPath = path.join(root, 'src', 'plugin.cpp');
 
-                // 5. Re-open the project so the backend compiles + loads
+                // 5. Declare it in project.json so the declarative loader picks it
+                //    up (./plugins is the default search root; compile:true builds +
+                //    trusts it, matching the old auto-discovery behaviour).
+                try {
+                    const pjPath = path.join(lastProjectFolder, 'project.json');
+                    const pj = JSON.parse(fs.readFileSync(pjPath, 'utf8'));
+                    if (!pj.plugins || typeof pj.plugins !== 'object' || Array.isArray(pj.plugins)) pj.plugins = {};
+                    pj.plugins[pname] = { path: pname, compile: true };
+                    fs.writeFileSync(pjPath, JSON.stringify(pj, null, 2) + '\n');
+                } catch (e: any) {
+                    output.appendLine(`[xinsp2] warning: could not declare '${pname}' in project.json — ${e.message}`);
+                }
+
+                // 6. Re-open the project so the backend compiles + loads
                 //    the new plugin. We use open_project rather than
                 //    recompile_project_plugin because the plugin is
                 //    brand-new and not yet in plugins_.
