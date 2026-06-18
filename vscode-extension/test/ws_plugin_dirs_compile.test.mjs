@@ -1,11 +1,12 @@
-// ws_plugin_dirs_compile.test.mjs — project.json `plugin_dirs_compile` switch.
+// ws_plugin_dirs_compile.test.mjs — per-plugin `compile` flag on plugin_dirs refs.
 //
 // By default a plugin_dirs-resolved plugin is only REGISTERED (must be prebuilt
-// or build:cmake). With `"plugin_dirs_compile": true` the backend treats each
-// resolved folder exactly like a <project>/plugins/ one — cl.exe-compiles a source
-// plugin and loads it as a TRUSTED project plugin. This is the "plugin toolbox"
-// dev switch: point plugin_dirs at a folder of WIP source plugins and they build
-// + show up like in-project plugins (recompile / rebuild from VS Code).
+// or build:cmake). A `plugins` entry with `"compile": true` (per-plugin; the
+// project-level `plugin_dirs_compile` is just the default) makes the backend treat
+// that resolved folder exactly like a <project>/plugins/ one — cl.exe-compile a
+// source plugin and load it as a TRUSTED project plugin. The "plugin toolbox" dev
+// case: point plugin_dirs at a folder of WIP source plugins and compile the ones
+// you're working on (recompile / rebuild from VS Code).
 //
 // Verifies: an EXTERNAL source plugin (no prebuilt DLL, no CMakeLists) compiles
 // and loads only because the switch is on, and is reported origin:"project".
@@ -49,8 +50,8 @@ test('plugin_dirs_compile cl.exe-compiles an external source plugin', async () =
         name: 'tbx_test',
         script: 'inspect.cpp',
         plugin_dirs: [slash(join(base, 'toolbox'))],
-        plugin_dirs_compile: true,
-        plugins: { extdbl: { path: 'x/extdbl' } },
+        // per-plugin compile flag (not a project-wide switch)
+        plugins: { extdbl: { path: 'x/extdbl', compile: true } },
     }));
 
     try {
