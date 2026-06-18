@@ -2,5 +2,19 @@
   "name": "golden_defect",
   "script": "inspect.cpp",
   "params": [],
-  "instances": []
+  "instances": [],
+  "plugins": {
+    "golden_defect_finder": {
+      "path": "golden_defect_finder",
+      "compile": true
+    },
+    "png_frame_source": {
+      "path": "png_frame_source",
+      "compile": true
+    },
+    "reference_image": {
+      "path": "reference_image",
+      "compile": true
+    }
+  }
 }

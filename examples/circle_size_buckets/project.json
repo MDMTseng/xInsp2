@@ -2,5 +2,15 @@
   "name": "circle_size_buckets",
   "script": "inspect.cpp",
   "params": [],
-  "instances": []
+  "instances": [],
+  "plugins": {
+    "local_contrast_detector": {
+      "path": "local_contrast_detector",
+      "compile": true
+    },
+    "size_bucket_counter": {
+      "path": "size_bucket_counter",
+      "compile": true
+    }
+  }
 }

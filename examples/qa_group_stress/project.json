@@ -109,5 +109,11 @@
       "name": "src_g7",
       "plugin": "burst_source"
     }
-  ]
+  ],
+  "plugins": {
+    "burst_source": {
+      "path": "burst_source",
+      "compile": true
+    }
+  }
 }

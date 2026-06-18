@@ -2,5 +2,11 @@
   "name": "crash_recovery",
   "script": "inspect.cpp",
   "params": [],
-  "instances": []
+  "instances": [],
+  "plugins": {
+    "count_or_crash": {
+      "path": "count_or_crash",
+      "compile": true
+    }
+  }
 }

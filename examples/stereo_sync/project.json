@@ -1,9 +1,29 @@
 {
   "name": "stereo_sync",
   "script": "inspect.cpp",
-  "trigger_policy": {"policy":"all_required","window_ms":1000,"required":["cam_left","cam_right"],"leader":""},
+  "trigger_policy": {
+    "policy": "all_required",
+    "window_ms": 1000,
+    "required": [
+      "cam_left",
+      "cam_right"
+    ],
+    "leader": ""
+  },
   "instances": [
-    {"name": "cam_left", "plugin": "synced_cam"},
-    {"name": "cam_right", "plugin": "synced_cam"}
-  ]
+    {
+      "name": "cam_left",
+      "plugin": "synced_cam"
+    },
+    {
+      "name": "cam_right",
+      "plugin": "synced_cam"
+    }
+  ],
+  "plugins": {
+    "synced_cam": {
+      "path": "synced_cam",
+      "compile": true
+    }
+  }
 }

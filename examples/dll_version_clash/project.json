@@ -1,4 +1,14 @@
 {
   "name": "dll_version_clash",
-  "script": "inspect.cpp"
+  "script": "inspect.cpp",
+  "plugins": {
+    "depprobe_a": {
+      "path": "depprobe_a",
+      "compile": true
+    },
+    "depprobe_b": {
+      "path": "depprobe_b",
+      "compile": true
+    }
+  }
 }

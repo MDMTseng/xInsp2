@@ -1,1 +1,12 @@
-{ "name": "qa_working_copy", "script": "inspect.cpp", "params": [], "instances": [] }
+{
+  "name": "qa_working_copy",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": [],
+  "plugins": {
+    "kv": {
+      "path": "kv",
+      "compile": true
+    }
+  }
+}

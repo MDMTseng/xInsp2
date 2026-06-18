@@ -2,5 +2,11 @@
   "name": "hue_tune",
   "script": "inspect.cpp",
   "params": [],
-  "instances": []
+  "instances": [],
+  "plugins": {
+    "hue_counter": {
+      "path": "hue_counter",
+      "compile": true
+    }
+  }
 }

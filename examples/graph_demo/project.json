@@ -2,5 +2,11 @@
   "name": "graph_demo",
   "script": "inspect.cpp",
   "params": [],
-  "instances": []
+  "instances": [],
+  "plugins": {
+    "blob_centroid_detector": {
+      "path": "blob_centroid_detector",
+      "compile": true
+    }
+  }
 }

@@ -50,7 +50,8 @@ function makeProject() {
     cpSync(join(BLOB, 'plugins', 'blob_centroid_detector'),
            join(dir, 'plugins', 'blob_centroid_detector'), { recursive: true });
     writeFileSync(join(dir, 'project.json'),
-        JSON.stringify({ name: 'graph_capture_demo', script: 'inspect.cpp', params: [], instances: [] }, null, 2));
+        JSON.stringify({ name: 'graph_capture_demo', script: 'inspect.cpp', params: [], instances: [],
+            plugins: { blob_centroid_detector: { path: 'blob_centroid_detector', compile: true } } }, null, 2));
     writeFileSync(join(dir, 'inspect.cpp'), SCRIPT);
     for (const n of ['a', 'b']) {
         mkdirSync(join(dir, 'instances', n), { recursive: true });

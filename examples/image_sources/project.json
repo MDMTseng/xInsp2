@@ -2,5 +2,19 @@
   "name": "image_sources",
   "script": "inspect.cpp",
   "params": [],
-  "instances": []
+  "instances": [],
+  "plugins": {
+    "binarize": {
+      "path": "binarize",
+      "compile": true
+    },
+    "cached_image_source": {
+      "path": "cached_image_source",
+      "compile": true
+    },
+    "local_image_source": {
+      "path": "local_image_source",
+      "compile": true
+    }
+  }
 }

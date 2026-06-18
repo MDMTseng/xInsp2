@@ -21,5 +21,15 @@
       "name": "classifier",
       "plugin": "light_classifier"
     }
-  ]
+  ],
+  "plugins": {
+    "frame_source": {
+      "path": "frame_source",
+      "compile": true
+    },
+    "light_classifier": {
+      "path": "light_classifier",
+      "compile": true
+    }
+  }
 }

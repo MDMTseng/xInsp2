@@ -5,7 +5,16 @@
   "instances": [],
   "trigger_policy": {
     "policy": "all_required",
-    "required": ["cam_left", "cam_right"],
+    "required": [
+      "cam_left",
+      "cam_right"
+    ],
     "window_ms": 500
+  },
+  "plugins": {
+    "synced_cam": {
+      "path": "synced_cam",
+      "compile": true
+    }
   }
 }

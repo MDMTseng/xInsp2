@@ -3,5 +3,19 @@
   "script": "inspect.cpp",
   "params": [],
   "instances": [],
-  "parallelism": { "dispatch_threads": 4, "queue_depth": 200, "overflow": "drop_oldest" }
+  "parallelism": {
+    "dispatch_threads": 4,
+    "queue_depth": 200,
+    "overflow": "drop_oldest"
+  },
+  "plugins": {
+    "concurrency_probe": {
+      "path": "concurrency_probe",
+      "compile": true
+    },
+    "concurrency_probe_rt": {
+      "path": "concurrency_probe_rt",
+      "compile": true
+    }
+  }
 }

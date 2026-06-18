@@ -71,7 +71,8 @@ test('build:cmake plugin builds + reloads via rebuild_plugins, skips when unchan
     const proj = join(tmpdir(), 'xi_rebuild_' + process.pid + '_' + Date.now());
     const pdir = join(proj, 'plugins', 'verprobe');
     mkdirSync(pdir, { recursive: true });
-    writeFileSync(join(proj, 'project.json'), JSON.stringify({ name: 'rebuild_test' }));
+    writeFileSync(join(proj, 'project.json'), JSON.stringify({ name: 'rebuild_test',
+        plugins: { verprobe: { path: 'verprobe', compile: true } } }));
     writeFileSync(join(proj, 'inspect.cpp'), '#include <xi/xi.hpp>\nXI_SCRIPT_EXPORT void xi_inspect_entry(int){}\n');
     writeFileSync(join(pdir, 'plugin.json'), PLUGIN_JSON);
     writeFileSync(join(pdir, 'CMakeLists.txt'), CMAKELISTS);

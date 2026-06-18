@@ -1,16 +1,45 @@
 {
   "name": "qa_two_group_paths",
   "script": "inspect.cpp",
-  "trigger_policy": { "policy": "any", "window_ms": 1000, "required": [], "leader": "" },
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
   "parallelism": {
     "default_group": "fast",
     "groups": [
-      { "name": "fast", "max_parallel": 3, "thread_priority": "normal", "queue_depth": 200, "overflow": "drop_oldest" },
-      { "name": "slow", "max_parallel": 1, "thread_priority": "low",    "queue_depth": 200, "overflow": "drop_oldest" }
+      {
+        "name": "fast",
+        "max_parallel": 3,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest"
+      },
+      {
+        "name": "slow",
+        "max_parallel": 1,
+        "thread_priority": "low",
+        "queue_depth": 200,
+        "overflow": "drop_oldest"
+      }
     ]
   },
   "instances": [
-    { "name": "src_fast", "plugin": "frame_source" },
-    { "name": "src_slow", "plugin": "frame_source" }
-  ]
+    {
+      "name": "src_fast",
+      "plugin": "frame_source"
+    },
+    {
+      "name": "src_slow",
+      "plugin": "frame_source"
+    }
+  ],
+  "plugins": {
+    "frame_source": {
+      "path": "frame_source",
+      "compile": true
+    }
+  }
 }

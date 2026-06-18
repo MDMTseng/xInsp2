@@ -2,5 +2,11 @@
   "name": "fe_supervisor",
   "script": "inspect.cpp",
   "params": [],
-  "instances": []
+  "instances": [],
+  "plugins": {
+    "raw_thread_crash": {
+      "path": "raw_thread_crash",
+      "compile": true
+    }
+  }
 }

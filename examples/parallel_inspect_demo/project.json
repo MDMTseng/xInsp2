@@ -25,5 +25,11 @@
       "name": "cam_right",
       "plugin": "burst_source"
     }
-  ]
+  ],
+  "plugins": {
+    "burst_source": {
+      "path": "burst_source",
+      "compile": true
+    }
+  }
 }

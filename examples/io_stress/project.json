@@ -2,5 +2,11 @@
   "name": "io_stress",
   "script": "inspect.cpp",
   "params": [],
-  "instances": []
+  "instances": [],
+  "plugins": {
+    "synthetic_features": {
+      "path": "synthetic_features",
+      "compile": true
+    }
+  }
 }

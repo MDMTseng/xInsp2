@@ -60,7 +60,8 @@ function makeProject(dir) {
     mkdirSync(join(dir, 'plugins', 'cache_probe', 'src'), { recursive: true });
     mkdirSync(join(dir, 'instances', 'probe'), { recursive: true });
     writeFileSync(join(dir, 'project.json'),
-        JSON.stringify({ name: 'cache_test', script: 'inspect.cpp', params: [], instances: [] }, null, 2));
+        JSON.stringify({ name: 'cache_test', script: 'inspect.cpp', params: [], instances: [],
+            plugins: { cache_probe: { path: 'cache_probe', compile: true } } }, null, 2));
     writeFileSync(join(dir, 'inspect.cpp'), SCRIPT);
     writeFileSync(join(dir, 'plugins', 'cache_probe', 'plugin.json'), PLUGIN_JSON);
     writeFileSync(join(dir, 'plugins', 'cache_probe', 'src', 'plugin.cpp'), PLUGIN_CPP);

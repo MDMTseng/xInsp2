@@ -13,6 +13,15 @@
     "overflow": "drop_oldest"
   },
   "instances": [
-    { "name": "src_main", "plugin": "burst_source" }
-  ]
+    {
+      "name": "src_main",
+      "plugin": "burst_source"
+    }
+  ],
+  "plugins": {
+    "burst_source": {
+      "path": "burst_source",
+      "compile": true
+    }
+  }
 }

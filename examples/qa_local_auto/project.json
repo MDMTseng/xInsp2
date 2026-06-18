@@ -1,8 +1,22 @@
 {
   "name": "qa_local_auto",
   "script": "inspect.cpp",
-  "trigger_policy": { "policy": "any", "window_ms": 1000, "required": [], "leader": "" },
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
   "instances": [
-    { "name": "cam", "plugin": "local_image_source" }
-  ]
+    {
+      "name": "cam",
+      "plugin": "local_image_source"
+    }
+  ],
+  "plugins": {
+    "local_image_source": {
+      "path": "local_image_source",
+      "compile": true
+    }
+  }
 }

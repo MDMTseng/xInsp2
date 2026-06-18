@@ -25,5 +25,15 @@
       "name": "sink",
       "plugin": "work_detector"
     }
-  ]
+  ],
+  "plugins": {
+    "burst_source": {
+      "path": "burst_source",
+      "compile": true
+    },
+    "work_detector": {
+      "path": "work_detector",
+      "compile": true
+    }
+  }
 }

@@ -1,18 +1,59 @@
 {
   "name": "qa_group_parallelism",
   "script": "inspect.cpp",
-  "trigger_policy": { "policy": "any", "window_ms": 1000, "required": [], "leader": "" },
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
   "parallelism": {
     "default_group": "p1",
     "groups": [
-      { "name": "p1", "max_parallel": 1, "thread_priority": "normal", "queue_depth": 200, "overflow": "drop_oldest", "result_order": "arrival" },
-      { "name": "p2", "max_parallel": 2, "thread_priority": "normal", "queue_depth": 200, "overflow": "drop_oldest", "result_order": "arrival" },
-      { "name": "p4", "max_parallel": 4, "thread_priority": "normal", "queue_depth": 200, "overflow": "drop_oldest", "result_order": "arrival" }
+      {
+        "name": "p1",
+        "max_parallel": 1,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      },
+      {
+        "name": "p2",
+        "max_parallel": 2,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      },
+      {
+        "name": "p4",
+        "max_parallel": 4,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest",
+        "result_order": "arrival"
+      }
     ]
   },
   "instances": [
-    { "name": "src_p1", "plugin": "burst_source" },
-    { "name": "src_p2", "plugin": "burst_source" },
-    { "name": "src_p4", "plugin": "burst_source" }
-  ]
+    {
+      "name": "src_p1",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "src_p2",
+      "plugin": "burst_source"
+    },
+    {
+      "name": "src_p4",
+      "plugin": "burst_source"
+    }
+  ],
+  "plugins": {
+    "burst_source": {
+      "path": "burst_source",
+      "compile": true
+    }
+  }
 }

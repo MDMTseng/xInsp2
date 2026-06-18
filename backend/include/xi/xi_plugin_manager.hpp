@@ -1777,15 +1777,15 @@ public:
                 "(check for a syntax error or truncation)"});
             std::fprintf(stderr, "[xinsp2] project.json malformed - loaded with defaults\n");
         }
-        int proj_plugins = compile_project_plugins_locked(folder);
-        if (proj_plugins > 0) {
-            std::fprintf(stderr, "[xinsp2] %d project plugin(s) built\n", proj_plugins);
-        }
-
-        // Resolve external plugin coordinates from project.json (plugin_dirs +
-        // plugins) AFTER the in-project ones, so a same-named project plugin wins.
-        // These register the plugin folder; the instance loop below auto-loads it
-        // (and rebuild_plugins can build it if it's build:cmake).
+        // Declarative plugin model: EVERY plugin (local + external) comes from the
+        // project.json `plugins` declarations, resolved against `plugin_dirs`. There
+        // is NO auto-discovery of <project>/plugins/* — a folder there does nothing
+        // until it's listed in `plugins`. `plugin_dirs` falls back to ["./plugins"]
+        // only when unset; set it and you get exactly your roots (re-add "./plugins"
+        // yourself if you still want it). Each `plugins` entry's `compile` decides
+        // whether its resolved folder is cl.exe-compiled / treated as a trusted
+        // project plugin (recompile/rebuild-able) or just registered.
+        if (proj_plugin_dirs.empty()) proj_plugin_dirs.push_back("./plugins");
         resolve_external_project_plugins_locked_(folder, proj_plugin_dirs, proj_plugin_refs);
 
         // Scan instances/ subdirectories. A broken instance.json or a
