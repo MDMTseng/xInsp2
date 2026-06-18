@@ -83,7 +83,7 @@ Per-item fields:
   non-finite doubles in a `Record` — they round-trip back to the non-finite value
   via `get_double`/`as_double` instead of silently reading as `0.0`.
 - `gid` (int) — present for `image` kind; matches a subsequent binary preview frame
-- `raw` (bool) — `true` if the image is transmitted uncompressed (BMP), `false` for JPEG
+- `raw` (bool) — `true` if the image is transmitted uncompressed (BMP), `false` for JPEG (currently always `false` — see *Binary frame layout*)
 
 ### `instances` — backend to client
 
@@ -191,6 +191,13 @@ offset  size  field
 
 Total header = 20 bytes. Clients read the 20-byte header, then consume the
 remainder of the frame as the payload.
+
+> **Current implementation emits JPEG only.** Every preview path encodes with
+> `encode_jpeg` (quality 85 for run/var previews, 80 for `preview_instance`) and
+> sets `codec = 0` (JPEG); `vars.items[*].raw` is therefore always `false`. The
+> `BMP` (1) / `PNG` (2) codec values and the `raw` flag are reserved in the wire
+> format but not produced today. A client may branch on `codec` defensively, but
+> in practice can treat the payload as JPEG.
 
 Rationale for including width/height/channels in the header: JPEG decoders
 on the UI side need dimensions up front for layout, and embedding them lets
