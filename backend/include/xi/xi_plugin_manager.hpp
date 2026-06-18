@@ -163,14 +163,22 @@ public:
     // first-match-wins). Unresolved refs become open warnings listing the roots
     // searched. Runs AFTER project-local plugins are built so a same-named project
     // plugin wins. mu_ MUST be held.
+    // `compile`: project.json `plugin_dirs_compile`. false (default) = resolved
+    // folders are only registered (must be prebuilt or build:cmake). true = treat
+    // each resolved folder exactly like a `<project>/plugins/` one — cl.exe-compile
+    // source, load cmake-prebuilt, TRUSTED (no cert), recompile/rebuild-able. This
+    // is the "plugin toolbox" dev switch: point plugin_dirs at a folder of WIP
+    // source plugins and they build + hot-reload like in-project ones.
     void resolve_external_project_plugins_locked_(
             const std::string& project_folder,
             const std::vector<std::string>& dirs_raw,
-            const std::vector<std::pair<std::string, std::string>>& refs) {
+            const std::vector<std::pair<std::string, std::string>>& refs,
+            bool compile) {
         if (refs.empty()) return;
         std::vector<std::string> roots;
         roots.reserve(dirs_raw.size());
         for (auto& d : dirs_raw) roots.push_back(expand_plugin_root_(d, project_folder));
+        std::vector<std::filesystem::directory_entry> to_compile;
         for (auto& [label, rel] : refs) {
             std::filesystem::path found;
             for (auto& root : roots) {
@@ -188,13 +196,16 @@ public:
                              label.c_str(), rel.c_str(), roots.size());
                 continue;
             }
-            if (register_plugin_folder_locked_(found.string()))
-                std::fprintf(stderr, "[xinsp2] resolved plugin '%s' -> %s\n",
-                             label.c_str(), found.string().c_str());
-            else
+            std::fprintf(stderr, "[xinsp2] resolved plugin '%s' -> %s%s\n",
+                         label.c_str(), found.string().c_str(), compile ? " (compile)" : "");
+            if (compile) {
+                to_compile.emplace_back(found);   // build + register as a trusted project plugin
+            } else if (!register_plugin_folder_locked_(found.string())) {
                 last_open_warnings_.push_back({label, "",
                     "resolved folder has no valid plugin.json: " + found.string()});
+            }
         }
+        if (!to_compile.empty()) compile_plugin_folders_locked_(to_compile);
     }
 
     // Compile and register every plugin under <project>/plugins/. Each
@@ -444,12 +455,22 @@ private:
     }
 
     int compile_project_plugins_locked(const std::string& project_folder) {
+        std::vector<std::filesystem::directory_entry> folders;
         auto root = std::filesystem::path(project_folder) / "plugins";
-        if (!std::filesystem::exists(root)) return 0;
+        std::error_code ec;
+        if (std::filesystem::exists(root))
+            for (auto& e : std::filesystem::directory_iterator(root, ec))
+                if (e.is_directory()) folders.push_back(e);
+        return compile_plugin_folders_locked_(folders);
+    }
 
+    // Compile (cl.exe source / load cmake-prebuilt) + register each plugin folder
+    // as a TRUSTED project plugin (no cert; recompile/rebuild-able). Used for
+    // <project>/plugins/* and — when project.json `plugin_dirs_compile` is on —
+    // for plugin_dirs-resolved folders too. mu_ MUST be held.
+    int compile_plugin_folders_locked_(const std::vector<std::filesystem::directory_entry>& folders) {
         int ok_count = 0;
-        for (auto& entry : std::filesystem::directory_iterator(root)) {
-            if (!entry.is_directory()) continue;
+        for (auto& entry : folders) {
             std::string pname = entry.path().filename().string();
             try {
                 // Build mode + DLL name from plugin.json, read up-front because
@@ -1557,6 +1578,9 @@ public:
         // plugin_dirs = ordered search roots; plugins = { label: { path } } refs.
         std::vector<std::string> proj_plugin_dirs;
         std::vector<std::pair<std::string, std::string>> proj_plugin_refs;
+        // Dev switch: compile/manage plugin_dirs-resolved source plugins exactly
+        // like in-project ones (the "plugin toolbox" case). Default off.
+        bool proj_plugin_dirs_compile = json_flag_true(content, "plugin_dirs_compile");
         yyjson_doc* doc = yyjson_read(content.c_str(), content.size(), 0);
         yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
         if (root) {
@@ -1754,7 +1778,8 @@ public:
         // plugins) AFTER the in-project ones, so a same-named project plugin wins.
         // These register the plugin folder; the instance loop below auto-loads it
         // (and rebuild_plugins can build it if it's build:cmake).
-        resolve_external_project_plugins_locked_(folder, proj_plugin_dirs, proj_plugin_refs);
+        resolve_external_project_plugins_locked_(folder, proj_plugin_dirs, proj_plugin_refs,
+                                                 proj_plugin_dirs_compile);
 
         // Scan instances/ subdirectories. A broken instance.json or a
         // factory that throws must NOT abort the whole project load —

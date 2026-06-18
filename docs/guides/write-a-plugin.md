@@ -153,6 +153,23 @@ surfaced as an open warning listing every root searched. Resolution runs in the
 backend (so headless / FE runs work too); project-local `plugins/<name>` of the
 same name win over resolved ones.
 
+By default a resolved plugin is only **registered** — it must already be built
+(prebuilt DLL) or be `build: cmake`. To develop a **toolbox of source plugins**
+out-of-tree and have them compile + hot-reload like in-project ones, add the
+switch:
+
+```jsonc
+{ "plugin_dirs": ["../my-plugin-toolbox"], "plugin_dirs_compile": true,
+  "plugins": { "edge": { "path": "edge_detect" }, "blob": { "path": "blob" } } }
+```
+
+With `plugin_dirs_compile: true` each resolved folder is treated exactly like a
+`<project>/plugins/` one: a source plugin is `cl.exe`-compiled, a `build: cmake`
+one is built by **Rebuild Plugins**, and either way it's **trusted** (no cert) and
+shows in the Plugins tree as a project plugin you can recompile / rebuild from VS
+Code. Off by default because compiling writes a `build/` into the resolved folder
+— fine for a toolbox you own, not for a read-only shared registry.
+
 ### 4. Iterate
 
 Edit → rebuild DLL → backend hot-reloads. The certify step runs once
