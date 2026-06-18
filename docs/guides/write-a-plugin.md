@@ -186,6 +186,27 @@ Code. It's per-plugin (each entry decides); a project-level
 Off by default because compiling writes a `build/` into the resolved folder — fine
 for a toolbox you own, not for a read-only shared registry.
 
+#### Editing the declarations from VS Code — **Plugin Browser**
+
+You don't have to hand-edit `project.json`. **xInsp2: Plugin Browser** (the 🔍
+button in the Plugins tree title bar, or the command palette) is a GUI over exactly
+the `plugin_dirs` + `plugins` model above:
+
+- **Added plugins** — every declaration in `plugins`, with its resolved `path`, a
+  live **compile** checkbox (per-plugin, toggles `compile`), and **Remove**.
+- **Browse** — one collapsible folder tree per search root in `plugin_dirs` (or
+  `./plugins (default)` when none is set). A folder holding a `plugin.json` is a
+  plugin node with **Add** (already-declared ones show **✓ added**); nested
+  toolbox layouts (`author/toolbox/plugin`) expand too. **Add** writes a `plugins`
+  entry, defaulting `compile` to `true` when the folder has `.cpp`/`CMakeLists`
+  (source/cmake) and `false` for a prebuilt-only folder.
+- **+ Add folder…** — pick a folder to append to `plugin_dirs` (relativised to
+  `./…` when possible so the project stays portable, else an absolute path).
+
+Every action writes `project.json` and reopens the project, so it takes effect
+immediately; the backend's save round-trips these declarations, so nothing you set
+here gets erased on the next save.
+
 ### 4. Iterate
 
 Edit → rebuild DLL → backend hot-reloads. The certify step runs once
