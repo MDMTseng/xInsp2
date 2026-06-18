@@ -11,8 +11,60 @@ import { PREVIEW_HEADER_SIZE } from './protocol';
 import { TEMPLATE_CHOICES, TemplateId, locateSdkRoot, renderPluginFiles }
     from './projectPluginTemplates';
 import { renderProjectSettingsHtml } from './projectSettingsHtml';
+import { renderPluginBrowserHtml, PBModel, PBRoot, PBTreeNode, PBPlugin } from './pluginBrowser';
 import { ImageViewerPanel } from './imageViewerPanel';
 import { resolveBackendMode } from './backendMode.mjs';
+
+// --- Plugin Browser model building (pure; reads project.json + the filesystem) ---
+function pbExpandRoot(raw: string, projectFolder: string): string {
+    let r = raw.replace(/\$\{([^}]+)\}/g, (_m, v) => process.env[v] || '');
+    if (r.startsWith('~')) r = (process.env.USERPROFILE || process.env.HOME || '~') + r.slice(1);
+    if (!path.isAbsolute(r)) r = path.join(projectFolder, r);
+    return path.normalize(r);
+}
+function pbHasSourceOrCmake(folder: string): boolean {
+    const fs = require('fs') as typeof import('fs');
+    if (fs.existsSync(path.join(folder, 'CMakeLists.txt'))) return true;
+    for (const d of [folder, path.join(folder, 'src')]) {
+        try { if (fs.readdirSync(d).some((f) => f.endsWith('.cpp'))) return true; } catch { /* ignore */ }
+    }
+    return false;
+}
+function pbScanTree(dir: string, relBase: string, depth: number): PBTreeNode[] {
+    const fs = require('fs') as typeof import('fs');
+    const out: PBTreeNode[] = [];
+    let names: string[] = [];
+    try { names = fs.readdirSync(dir).sort(); } catch { return out; }
+    for (const name of names) {
+        if (name === 'build' || name === 'node_modules' || name.startsWith('.')) continue;
+        const full = path.join(dir, name);
+        try { if (!fs.statSync(full).isDirectory()) continue; } catch { continue; }
+        const rel = relBase ? relBase + '/' + name : name;
+        if (fs.existsSync(path.join(full, 'plugin.json'))) {
+            out.push({ name, rel, isPlugin: true, needsCompile: pbHasSourceOrCmake(full), children: [] });
+        } else if (depth > 0) {
+            const children = pbScanTree(full, rel, depth - 1);
+            if (children.length) out.push({ name, rel, isPlugin: false, needsCompile: false, children });
+        }
+    }
+    return out;
+}
+function pbBuildModel(projectFolder: string): PBModel {
+    const fs = require('fs') as typeof import('fs');
+    let pj: any = {};
+    try { pj = JSON.parse(fs.readFileSync(path.join(projectFolder, 'project.json'), 'utf8')); } catch { /* ignore */ }
+    const obj = (pj.plugins && typeof pj.plugins === 'object' && !Array.isArray(pj.plugins)) ? pj.plugins : {};
+    const added: PBPlugin[] = Object.keys(obj).map((k) => ({ label: k, path: obj[k]?.path ?? k, compile: !!obj[k]?.compile }));
+    let dirsRaw: string[] = Array.isArray(pj.plugin_dirs) ? pj.plugin_dirs.slice() : [];
+    const usedFallback = !dirsRaw.length;
+    if (usedFallback) dirsRaw = ['./plugins'];
+    const roots: PBRoot[] = dirsRaw.map((raw) => {
+        const resolved = pbExpandRoot(raw, projectFolder);
+        const exists = fs.existsSync(resolved);
+        return { raw: usedFallback ? raw + '  (default)' : raw, resolved, exists, tree: exists ? pbScanTree(resolved, '', 4) : [] };
+    });
+    return { projectName: pj.name || path.basename(projectFolder), added, addedPaths: added.map((p) => p.path), roots };
+}
 
 let backend: ChildProcess | null = null;
 // Auto-respawn state. `intendedRunning` is true while the extension wants
@@ -1394,6 +1446,68 @@ export function activate(context: vscode.ExtensionContext) {
                         vscode.window.showErrorMessage(`xInsp2 rebuild plugins: ${e.message}`);
                     }
                 });
+        })
+    );
+
+    // --- Plugin Browser: folder-tree browse of the plugin_dirs roots + the
+    //     declared (added) plugins. Add/remove/toggle-compile write project.json
+    //     and reopen; "+ Add folder" appends a search root. ---
+    let pluginBrowserPanel: vscode.WebviewPanel | undefined;
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.pluginBrowser', async () => {
+            if (!lastProjectFolder) { vscode.window.showWarningMessage('xInsp2: open a project first'); return; }
+            const fs = require('fs') as typeof import('fs');
+            const refresh = () => pluginBrowserPanel?.webview.postMessage({ type: 'model', model: pbBuildModel(lastProjectFolder!) });
+            const writePj = (mut: (pj: any) => void) => {
+                const pjPath = path.join(lastProjectFolder!, 'project.json');
+                let pj: any = {};
+                try { pj = JSON.parse(fs.readFileSync(pjPath, 'utf8')); } catch { /* ignore */ }
+                if (!pj.plugins || typeof pj.plugins !== 'object' || Array.isArray(pj.plugins)) pj.plugins = {};
+                mut(pj);
+                fs.writeFileSync(pjPath, JSON.stringify(pj, null, 2) + '\n');
+            };
+            const reopen = async () => {
+                if (client?.connected) await sendCmd('open_project', { folder: lastProjectFolder });
+                refresh();
+            };
+            if (pluginBrowserPanel) { pluginBrowserPanel.reveal(vscode.ViewColumn.Active); refresh(); return; }
+            pluginBrowserPanel = vscode.window.createWebviewPanel(
+                'xinsp2.pluginBrowser', 'Plugin Browser', vscode.ViewColumn.Active,
+                { enableScripts: true, retainContextWhenHidden: true });
+            pluginBrowserPanel.onDidDispose(() => { pluginBrowserPanel = undefined; });
+            pluginBrowserPanel.webview.onDidReceiveMessage(async (msg: any) => {
+                try {
+                    if (msg.type === 'refresh') { refresh(); return; }
+                    if (msg.type === 'add') {
+                        const label = String(msg.path).split('/').pop()!;
+                        writePj((pj) => { pj.plugins[label] = { path: msg.path, compile: !!msg.compile }; });
+                        await reopen();
+                    } else if (msg.type === 'remove') {
+                        writePj((pj) => { delete pj.plugins[msg.label]; });
+                        await reopen();
+                    } else if (msg.type === 'toggleCompile') {
+                        writePj((pj) => { if (pj.plugins[msg.label]) pj.plugins[msg.label].compile = !pj.plugins[msg.label].compile; });
+                        await reopen();
+                    } else if (msg.type === 'addFolder') {
+                        const uris = await vscode.window.showOpenDialog({
+                            canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
+                            openLabel: 'Add as plugin search root', title: 'Pick a folder to add to plugin_dirs' });
+                        if (!uris || !uris.length) return;
+                        const rel = path.relative(lastProjectFolder!, uris[0].fsPath);
+                        const stored = (rel && !rel.startsWith('..') && !path.isAbsolute(rel))
+                            ? './' + rel.split(path.sep).join('/')
+                            : uris[0].fsPath.split(path.sep).join('/');
+                        writePj((pj) => {
+                            let dirs: string[] = Array.isArray(pj.plugin_dirs) ? pj.plugin_dirs : [];
+                            if (!dirs.length) dirs = ['./plugins'];   // materialize the fallback once customizing
+                            if (!dirs.includes(stored)) dirs.push(stored);
+                            pj.plugin_dirs = dirs;
+                        });
+                        await reopen();
+                    }
+                } catch (e: any) { vscode.window.showErrorMessage('xInsp2 Plugin Browser: ' + e.message); }
+            });
+            pluginBrowserPanel.webview.html = renderPluginBrowserHtml(pbBuildModel(lastProjectFolder));
         })
     );
 

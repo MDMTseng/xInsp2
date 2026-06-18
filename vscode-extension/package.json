@@ -38,6 +38,11 @@
         "icon": "$(tools)"
       },
       {
+        "command": "xinsp2.pluginBrowser",
+        "title": "xInsp2: Plugin Browser",
+        "icon": "$(search)"
+      },
+      {
         "command": "xinsp2.exportProjectPlugin",
         "title": "xInsp2: Export Project Plugin…",
         "icon": "$(package)"
@@ -320,6 +325,11 @@
           "command": "xinsp2.rebuildPlugins",
           "when": "view == xinsp2.plugins && xinsp2.connected && xinsp2.hasProject",
           "group": "navigation@3"
+        },
+        {
+          "command": "xinsp2.pluginBrowser",
+          "when": "view == xinsp2.plugins && xinsp2.hasProject",
+          "group": "navigation@4"
         }
       ],
       "editor/title": [
