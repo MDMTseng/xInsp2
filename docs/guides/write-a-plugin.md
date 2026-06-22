@@ -357,6 +357,26 @@ return out;
 an object; `set_raw(key, yyjson_mut_val*)` is the escape hatch. See
 [`reference/data-types.md`](../reference/data-types.md).
 
+### Test `process()` headlessly — `xi_run_plugin`
+
+To exercise a plugin's `process()` on an image **without** VS Code / the backend /
+a WS connection, build the host-mock CLI once and point it at any plugin DLL:
+
+```bat
+set XINSP2_ROOT=C:\path\to\xInsp2
+cmake -S %XINSP2_ROOT%\sdk\host_mock -B %XINSP2_ROOT%\sdk\host_mock\build -A x64 -DXINSP2_ROOT=%XINSP2_ROOT%
+cmake --build %XINSP2_ROOT%\sdk\host_mock\build --config Release
+
+xi_run_plugin <plugin.dll> --image src=in.png --def "{...}" --out-dir out --runs 1
+```
+
+It stands up the real `ImagePool` host_api (so `pool_image` + the image getters
+behave as in the backend), creates one instance, optionally `set_def`s a config,
+loads each `--image` (OpenCV, BGR→RGB), runs `process()`, and prints the output
+Record JSON + writes any output images (RGB→BGR) to `--out-dir`. `--runs N` repeats
+for stateful plugins. Great for CI / offline geometry checks of a `build:cmake`
+plugin's core.
+
 ---
 
 ## Common questions
