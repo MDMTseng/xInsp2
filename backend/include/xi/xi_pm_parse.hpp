@@ -233,6 +233,12 @@ inline void validate_config_against_manifest(
         const std::string key = ckeystr;
         auto pit = by_name.find(key);
         if (pit == by_name.end()) {
+            // Only SCALARS are tunables. A get_def() legitimately persists
+            // structured state (e.g. a `templates` array, a nested object) that
+            // isn't a manifest.param — don't warn on those (was DM-8: authors had
+            // to declare fake description-only pseudo-params to silence it, which
+            // polluted the tunables surface tooling/agents read).
+            if (yyjson_is_arr(cv) || yyjson_is_obj(cv)) continue;
             out_warnings.push_back({
                 instance, plugin,
                 "unknown_config_key: '" + key +

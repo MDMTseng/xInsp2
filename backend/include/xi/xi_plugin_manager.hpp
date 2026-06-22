@@ -491,6 +491,20 @@ private:
                     }
                 }
 
+                // DM-9: a folder with a CMakeLists.txt but build != cmake is almost
+                // certainly mis-declared — it cl.exe-compiles (and likely can't link
+                // its external deps) instead of building via CMake, and 'Rebuild
+                // Plugins' silently skips it (it only iterates prebuilt plugins).
+                // Warn so the missing `"build": "cmake"` isn't a silent stale-code trap.
+                if (!prebuilt && std::filesystem::exists(entry.path() / "CMakeLists.txt")) {
+                    last_open_warnings_.push_back({pname, pname,
+                        "plugin has a CMakeLists.txt but no \"build\": \"cmake\" in plugin.json — "
+                        "it won't be built by Rebuild Plugins; set build:cmake"});
+                    std::fprintf(stderr,
+                        "[xinsp2] plugin '%s': CMakeLists.txt present but build != cmake — "
+                        "set \"build\":\"cmake\"\n", pname.c_str());
+                }
+
                 // Collect .cpp sources: prefer src/ if present, else root.
                 std::vector<std::string> sources;
                 auto src_dir = entry.path() / "src";

@@ -305,6 +305,11 @@ xInsp2 doesn't ship its own operator library — `xi.hpp` /
 | `xi::Image::as_cv_mat()` | Non-owning `cv::Mat` view over the same bytes — no allocation, no copy. The Mat must not outlive the Image. |
 | `Plugin::pool_image(w, h, c)` | Allocate a fresh slot in the host's ImagePool and return a refcounted Image whose `data()` (and `as_cv_mat()`) point straight at pool memory. cv:: writes land in the pool, so returning the Image from `process()` short-circuits to an `addref` — no heap-to-pool memcpy on the way out. |
 
+Don't hand-roll Image⇄Mat copies or the RGB↔BGR flip — `<xi/xi_cv.hpp>` ships the
+canonical helpers: `xi::to_cv(img)` (owning copy), `xi::from_cv_mat(mat)` /
+`xi::to_image(mat)` (Mat→owning Image), and `xi::encode_preview(img, ".jpg")`
+(RGB→BGR + encode to a JPEG/PNG buffer, so preview colours come out right).
+
 Pattern:
 
 ```cpp
