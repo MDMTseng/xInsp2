@@ -144,6 +144,17 @@ once and correctly.
   already existed (`as_cv_mat` / `from_cv_mat`) — this was also a discoverability
   gap; `write-a-plugin.md` now points at them.
 
-**Still open (bigger / need design):** DM-7 (param single-source-of-truth),
-DM-10 (`gen_manifest_params` scaffolder, pairs with DM-7), DM-11 (gate
-`lint_plugin_ui.mjs` on save/export).
+### Round-2 param/manifest tooling (`589d1b8`, `3fca5a8`)
+
+- **DM-7 / DM-10** — `xi_run_plugin --dump-def` (prints `get_def()` JSON) +
+  `sdk/testing/gen_manifest_params.mjs`: **seed** a `manifest.params` skeleton from
+  the scalar `get_def` keys (DM-10), or `--check <plugin.json>` to fail on drift
+  between the scalar `get_def` keys and `manifest.params` names (DM-7's
+  consistency gate). Only scalars count as tunables (matches DM-8).
+- **DM-11** — **Export Project Plugin** now runs `lint_plugin_ui.mjs` (warn-only)
+  on the source plugin and surfaces findings in Output.
+
+**Not done (full SSOT generator):** DM-7's *minimum viable* gate ships above;
+the fuller "one declarative param table that generates the C++ (de)serializers +
+the UI form + manifest.params" is still future work — the `--check` gate catches
+drift, but the five edit sites aren't yet generated from one source.
