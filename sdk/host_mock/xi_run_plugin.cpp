@@ -14,6 +14,8 @@
 //     --def <json>              set_def config applied before process()
 //     --out-dir <dir>           where to write output images (default ".")
 //     --runs <n>                call process() n times (stateful plugins; default 1)
+//     --dump-def                print the instance's get_def() JSON and exit
+//                               (no process()) — feeds the manifest-param tooling
 //
 // Images use xInsp2's RGB pool convention: inputs are loaded with OpenCV and
 // BGR->RGB converted; output images are RGB->BGR converted before writing.
@@ -85,6 +87,7 @@ int main(int argc, char** argv) {
     std::vector<std::pair<std::string, std::string>> images;   // (key, file)
     std::string in_json = "{}", def, out_dir = ".";
     int runs = 1;
+    bool dump_def = false;
 
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -101,6 +104,7 @@ int main(int argc, char** argv) {
         else if (a == "--def")       { def     = need("--def"); }
         else if (a == "--out-dir")   { out_dir = need("--out-dir"); }
         else if (a == "--runs")      { runs    = std::atoi(need("--runs").c_str()); if (runs < 1) runs = 1; }
+        else if (a == "--dump-def")  { dump_def = true; }
         else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); usage(); return 2; }
     }
 
@@ -119,6 +123,20 @@ int main(int argc, char** argv) {
     void* inst = syms.create(&host, "xi_run_plugin");
     if (!inst) { std::fprintf(stderr, "xi_plugin_create returned null\n"); return 2; }
     if (!def.empty() && syms.set_def) syms.set_def(inst, def.c_str());
+
+    if (dump_def) {
+        // Print get_def() JSON and exit (feeds gen_manifest_params). get_def
+        // returns the byte count, or -needed when the buffer is too small.
+        std::vector<char> buf(4096);
+        int n = syms.get_def ? syms.get_def(inst, buf.data(), (int)buf.size()) : 0;
+        if (n < 0) { buf.resize(-n + 1); n = syms.get_def(inst, buf.data(), (int)buf.size()); }
+        std::printf("%s\n", (n > 0) ? std::string(buf.data(), n).c_str() : "{}");
+        syms.destroy(inst);
+#ifdef _WIN32
+        FreeLibrary(dll);
+#endif
+        return 0;
+    }
 
     std::vector<xi_record_image> recimgs;
     recimgs.reserve(images.size());
