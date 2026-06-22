@@ -2478,6 +2478,16 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, "cannot run while continuous mode is active — stop first");
             return;
         }
+        // No script loaded: return a clear error NOW, before the ok+detached-run
+        // path. `run` sends its rsp before vars, so without this a no-script run
+        // would reply ok, then silently emit no vars — a headless driver waiting
+        // for vars times out with an empty error and drops the WS. open_project
+        // does not compile the project's script (that's compile_and_load's job),
+        // so this is the common headless gotcha. (Reported bug BUG-3.)
+        if (!g_script.ok()) {
+            send_rsp_err(srv, id, "no script loaded — call compile_and_load first");
+            return;
+        }
         int64_t run_id = ++g_run_id;
 
         // Optional `frame_path` arg — plumbed to the script via
