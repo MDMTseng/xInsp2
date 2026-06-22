@@ -1657,6 +1657,22 @@ export function activate(context: vscode.ExtensionContext) {
                     if (open === 'Reveal' && d.dest) {
                         vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(d.dest));
                     }
+                    // DM-11: run the UI convention linter (warn-only) on the source
+                    // plugin and surface findings in Output — never blocks the export.
+                    try {
+                        const fsmod = require('fs') as typeof import('fs');
+                        const sdkRoot = locateSdkRoot(context.extensionPath, findBackendExe(context),
+                            vscode.workspace.getConfiguration('xinsp2').get<string>('sdkPath'));
+                        const lint = sdkRoot ? path.join(sdkRoot, 'testing', 'lint_plugin_ui.mjs') : '';
+                        const src = lastProjectFolder ? path.join(lastProjectFolder, 'plugins', pname) : '';
+                        if (lint && fsmod.existsSync(lint) && src && fsmod.existsSync(src)) {
+                            const { spawnSync } = require('child_process');
+                            const r = spawnSync(process.execPath, [lint, src],
+                                { encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
+                            const txt = ((r.stdout || '') + (r.stderr || '')).trim();
+                            if (txt) output.appendLine('[xinsp2] ui-lint: ' + txt.split('\n').join('\n           '));
+                        }
+                    } catch { /* lint is advisory */ }
                 } else {
                     output.appendLine(`[xinsp2] export FAILED: ${rsp.error}`);
                     vscode.window.showErrorMessage(`xInsp2 export failed: ${rsp.error}`);
