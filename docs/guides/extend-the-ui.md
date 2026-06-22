@@ -111,6 +111,28 @@ For plugin webviews specifically: the existing flow at
 `exchange_instance` command. Plugin authors don't need to know about
 WS; they just write their HTML to talk via that channel.
 
+### Plugin instance-UI message contract (exact)
+
+The webview ↔ extension protocol for `<plugin>/ui/index.html`:
+
+**Webview → extension** (`acquireVsCodeApi().postMessage(...)`):
+
+| Post | Effect |
+|---|---|
+| `{ type: 'exchange', cmd }` | Calls `exchange_instance(name, cmd)`. **`cmd` may be a string OR an object** — an object is JSON-serialized on its way to the plugin's `exchange()`. The reply comes back on the **status** channel (below). |
+| `{ type: 'request_preview' }` | Starts an image-preview poll (`preview_instance`); preview frames arrive as binary. |
+| `{ type: 'request_process', cmd? }` | Runs `exchange_instance` (defaults to `{command:'get_status'}`); reply arrives as `{ type: 'process_result', ... }`. |
+
+**Extension → webview** (`window.addEventListener('message', …)`):
+
+> ⚠️ The extension **overwrites `type`** on exchange replies. An `exchange`
+> reply is delivered as `{ type: 'status', ...<your reply JSON, spread> }`, and a
+> `request_process` reply as `{ type: 'process_result', ...<reply> }`. So your
+> plugin's `exchange()` JSON should **not** rely on its own `type` field (it's
+> clobbered) — branch on a distinctive field instead (e.g. `msg.jpeg`,
+> `msg.results`, `msg.features`). The initial `get_status` is pushed the same way
+> (`{ type: 'status', ... }`).
+
 For a worked example of a webview that does a **WS round-trip plus a native
 dialog**, see the **C++ Toolchain** section in `xinsp2.openProjectSettings`
 (`renderProjectSettingsHtml`): the webview posts `tc_refresh` / `tc_set`, the

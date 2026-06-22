@@ -320,7 +320,10 @@ flows through the host pool unchanged. When you hand a Mat to
 `cv::cvtColor`, use `cv::COLOR_RGB2*` (e.g. `RGB2GRAY`, `RGB2HSV`),
 **not** `BGR2*`. Mixing them up is a silent failure — red and blue
 swap, hue values land 120° away from where they should be, and the
-plugin still "works", just on the wrong colour.
+plugin still "works", just on the wrong colour. Corollary:
+`cv::imencode` / `cv::imwrite` expect **BGR**, so before encoding an RGB
+overlay to a JPEG preview, `cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR)`
+first — otherwise the preview's colours are R/B-swapped.
 
 **You don't manage refcounts yourself.** `pool_image()` returns an
 `xi::Image` that holds the pool handle's ref via its internal
@@ -334,6 +337,26 @@ You never call `image_addref` / `image_release` from plugin code.
 For the API contracts in detail, see
 [`docs/reference/c-abi.md`](../reference/c-abi.md).
 
+### Building a richer output Record
+
+`xi::Record::set` is **not** scalar-only — nest sub-records and build arrays, so a
+variable-length result set needs no hand-rolled JSON string:
+
+```cpp
+xi::Record out;
+out.set("count", n);
+out.set("best", xi::Record().set("x", bx).set("y", by).set("score", bs));   // nested object
+for (auto& f : features)
+    out.push("features", xi::Record()                                        // array of objects
+        .set("pose", xi::Record().set("x", f.x).set("y", f.y).set("angle", f.angle))
+        .set("score", f.score));
+return out;
+```
+
+`push(key, …)` appends to (and creates) an array; `set(key, const Record&)` nests
+an object; `set_raw(key, yyjson_mut_val*)` is the escape hatch. See
+[`reference/data-types.md`](../reference/data-types.md).
+
 ---
 
 ## Common questions
@@ -343,6 +366,15 @@ Each instance gets `<project>/instances/<name>/`. The host calls
 `get_def()` on save, hands the JSON to `set_def()` on load. For larger
 data (calibration images, ML weights), write to that folder using
 `host->instance_folder()` to get the path.
+
+**What's the on-disk instance shape, and how are instances loaded?**
+`<project>/instances/<name>/instance.json` is `{ "plugin": "<plugin-name>",
+"config": { … } }`. On `open_project` the backend **auto-discovers** every
+`instances/*` folder and creates the instance; its `config` object is passed
+**verbatim as the `set_def` JSON root** (so design `set_def` to parse exactly what
+you put under `config`). (Instance auto-discovery from `instances/` is unrelated
+to plugins, which are declared explicitly — see *How plugins are declared* above.)
+Full lifecycle: [`reference/instances.md`](../reference/instances.md).
 
 **How do I show a UI?**
 Set `"has_ui": true` in `plugin.json`, ship a `ui/index.html`. It runs

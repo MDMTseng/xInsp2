@@ -41,21 +41,29 @@ if(MSVC)
     add_compile_options(/W3 /utf-8 /EHa)
 endif()
 
-# OpenCV: mandatory. xInsp2 headers (xi.hpp / xi_plugin_support.hpp)
-# pull in <opencv2/opencv.hpp> for image operators, so every plugin
-# needs OpenCV's include + libs visible.
-if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
-    foreach(_d "C:/opencv/opencv/build/x64/vc16/lib"
-               "C:/opencv/opencv/build/x64/vc17/lib"
-               "C:/opencv/build/x64/vc16/lib"
-               "C:/opencv/build/x64/vc17/lib")
-        if(EXISTS "${_d}/OpenCVConfig.cmake")
-            set(OpenCV_DIR "${_d}")
-            break()
-        endif()
-    endforeach()
-endif()
-find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
+# OpenCV: mandatory. xInsp2 headers (xi.hpp / xi_plugin_support.hpp) pull in
+# <opencv2/opencv.hpp>, so every plugin (and any SDK-adjacent test/aux exe) needs
+# OpenCV visible. Plain `find_package(OpenCV)` with OpenCV_DIR pointing at the
+# top-level pack dir reports OpenCV_FOUND=FALSE (that config is a stub) — the
+# resolvable level is `.../build/x64/vcNN/lib`. This macro probes those candidates
+# and find_package's OpenCV; it's exposed so an auxiliary CMake (a verify exe, a
+# tool) can reuse the SDK's OpenCV-locating logic instead of re-implementing the
+# foreach:  include(xinsp2_plugin.cmake); xinsp2_find_opencv();
+macro(xinsp2_find_opencv)
+    if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
+        foreach(_d "C:/opencv/opencv/build/x64/vc16/lib"
+                   "C:/opencv/opencv/build/x64/vc17/lib"
+                   "C:/opencv/build/x64/vc16/lib"
+                   "C:/opencv/build/x64/vc17/lib")
+            if(EXISTS "${_d}/OpenCVConfig.cmake")
+                set(OpenCV_DIR "${_d}")
+                break()
+            endif()
+        endforeach()
+    endif()
+    find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
+endmacro()
+xinsp2_find_opencv()   # run once at include so xinsp2_add_plugin* have OpenCV
 
 # xinsp2_add_plugin(<target> <sources...>)
 #
