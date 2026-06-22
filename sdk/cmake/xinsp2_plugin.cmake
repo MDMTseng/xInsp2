@@ -78,12 +78,19 @@ endfunction()
 #
 # Builds a developer-side test executable that links the C ABI surface
 # (no SHARED — the test loads the plugin DLL via LoadLibrary).
+#
+# OpenCV is wired here too: the baseline/cert harness a test uses
+# (xi_baseline.hpp + xi_image_pool.hpp → xi_image.hpp) transitively includes
+# <opencv2/core.hpp>, so without it every plugin's test fails with
+# `C1083: 'opencv2/core.hpp'`. Mirror xinsp2_add_plugin's OpenCV wiring.
 function(xinsp2_add_plugin_test target_name)
     add_executable(${target_name} ${ARGN} ${XINSP2_YYJSON})
     target_include_directories(${target_name} PRIVATE
         ${XINSP2_INCLUDE}
         ${XINSP2_VENDOR}
-        ${XINSP2_VENDOR}/yyjson)
+        ${XINSP2_VENDOR}/yyjson
+        ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(${target_name} PRIVATE ${OpenCV_LIBS})
     set_target_properties(${target_name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR})
 endfunction()
