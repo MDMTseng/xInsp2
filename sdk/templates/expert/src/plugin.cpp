@@ -2,12 +2,12 @@
 // {{NAME}} — "expert" template: stateful synthetic image source.
 //
 // Owns its own worker thread. While running, it pushes a frame into the
-// trigger bus every `interval_ms` and counts each emit so a script can
+// pipeline every `interval_ms` and counts each emit so a script can
 // read frame count via exchange("count").
 //
 // Shows:
 //   - Background thread management with xi::spawn_worker (SEH-safe)
-//   - host_api emit_trigger to push images into the bus zero-copy
+//   - host_api emit_record to push images into the pipeline zero-copy
 //   - Persistent config across reloads (set_def from project.json)
 //   - exchange() as a start/stop/query channel
 //
@@ -149,17 +149,19 @@ private:
             if (h != XI_IMAGE_NULL) {
                 std::memcpy(host_->image_data(h), buf.data(), buf.size());
 
-                // Build a one-image record and push it onto the bus
-                // under our own source name.
+                // Build a one-image record and push it into the pipeline
+                // under our own source name. id = XI_TRIGGER_NULL → the host
+                // mints a fresh trigger id; ts = 0 → host stamps now(). The
+                // host dispatches the inspection once per emit.
                 xi_record_image rec_img{ "frame", h };
-                xi_trigger_id   tid{ seq, (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count() };
-                int64_t         ts_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                                            std::chrono::steady_clock::now().time_since_epoch()).count();
-                if (host_->emit_trigger) {
-                    host_->emit_trigger(name_.c_str(), tid, ts_us, &rec_img, 1);
+                xi_record rec{};
+                rec.images      = &rec_img;
+                rec.image_count = 1;
+                if (host_->emit_record) {
+                    host_->emit_record(name_.c_str(), XI_TRIGGER_NULL, &rec, /*ts=*/0);
                 }
                 emit_count_.fetch_add(1);
-                // emit_trigger addrefs internally; release our ref.
+                // emit_record addrefs the handle internally; release our ref.
                 host_->image_release(h);
             }
 

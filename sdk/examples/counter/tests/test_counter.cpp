@@ -1,20 +1,15 @@
 //
 // test_counter.cpp — developer-side tests for the counter plugin.
 //
-// Shows two layers:
-//   1. Baseline tests — the exact same ones the backend runs for cert.
-//      Passing these guarantees the plugin won't be quarantined on load.
-//   2. Plugin-specific tests — behavior unique to counter (increment,
-//      reset, persistence across instances).
+// Plugins are trusted (no certification gate), so testing is optional and
+// owned by you. This shows the pattern: resolve the plugin's C-ABI exports
+// from the built DLL, then assert its behaviour (starts at zero, increments,
+// reset, persistence across instances) with xi_test.
 //
 // Build produces counter_test.exe. Run it; exit code 0 = all pass.
-// If baseline tests pass here, it writes cert.json, saving the backend
-// from re-running them on first load.
 //
 
 #include <xi/xi_abi.hpp>
-#include <xi/xi_baseline.hpp>
-#include <xi/xi_cert.hpp>
 #include <xi/xi_image_pool.hpp>
 #include <xi/xi_test.hpp>
 #include "yyjson.h"
@@ -23,12 +18,11 @@
   #include <windows.h>
 #endif
 
-#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 
-// Current ABI (v4): an xi_record carries its JSON in data/len (doc == NULL),
+// Current ABI (v6): an xi_record carries its JSON in data/len (doc == NULL),
 // not a `.json` member; an xi_record_out hands JSON back in data/len, or in
 // out_doc when the in-process zero-copy doc path was taken. These two helpers
 // hide that so the tests below read cleanly.
@@ -55,8 +49,17 @@ static std::string out_json(const xi_record_out& out) {
 #define COUNTER_DLL_PATH "counter.dll"
 #endif
 
+// Plugin C-ABI exports, resolved by name from the DLL (see xi_abi.h).
+struct Syms {
+    xi_plugin_create_fn   create   = nullptr;
+    xi_plugin_destroy_fn  destroy  = nullptr;
+    xi_plugin_process_fn  process  = nullptr;
+    xi_plugin_exchange_fn exchange = nullptr;
+    xi_plugin_get_def_fn  get_def  = nullptr;
+    xi_plugin_set_def_fn  set_def  = nullptr;
+};
 static HMODULE g_dll = nullptr;
-static xi::baseline::PluginSymbols g_syms;
+static Syms g_syms;
 static xi_host_api g_host = xi::ImagePool::make_host_api();
 
 static void load_dll() {
@@ -67,28 +70,16 @@ static void load_dll() {
                      COUNTER_DLL_PATH, GetLastError());
         std::exit(2);
     }
-    g_syms = xi::baseline::load_symbols(g_dll);
-    if (!g_syms.ok()) {
+    g_syms.create   = (xi_plugin_create_fn)  GetProcAddress(g_dll, "xi_plugin_create");
+    g_syms.destroy  = (xi_plugin_destroy_fn) GetProcAddress(g_dll, "xi_plugin_destroy");
+    g_syms.process  = (xi_plugin_process_fn) GetProcAddress(g_dll, "xi_plugin_process");
+    g_syms.exchange = (xi_plugin_exchange_fn)GetProcAddress(g_dll, "xi_plugin_exchange");
+    g_syms.get_def  = (xi_plugin_get_def_fn) GetProcAddress(g_dll, "xi_plugin_get_def");
+    g_syms.set_def  = (xi_plugin_set_def_fn) GetProcAddress(g_dll, "xi_plugin_set_def");
+    if (!g_syms.create || !g_syms.destroy || !g_syms.process) {
         std::fprintf(stderr, "DLL missing required C ABI exports\n");
         std::exit(2);
     }
-}
-
-// --- Baseline tests (run against the DLL via shared helper) -------------
-
-XI_TEST(baseline_all_pass) {
-    load_dll();
-    auto summary = xi::baseline::run_all(g_syms, &g_host);
-    if (!summary.all_passed) {
-        for (auto& r : summary.results) {
-            if (!r.passed) std::fprintf(stderr, "  baseline fail: %s: %s\n",
-                                        r.name.c_str(), r.error.c_str());
-        }
-        XI_EXPECT(summary.all_passed);
-    }
-    // On success, write cert so the backend doesn't re-run these.
-    std::filesystem::path folder = std::filesystem::path(COUNTER_DLL_PATH).parent_path();
-    xi::cert::certify(folder, COUNTER_DLL_PATH, "counter", g_syms, &g_host);
 }
 
 // --- Plugin-specific tests ---------------------------------------------

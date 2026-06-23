@@ -70,7 +70,7 @@ my_first_plugin/
 ├── ui/index.html          ← matching webview
 ├── CMakeLists.txt         ← 3 functional lines
 ├── tests/
-│   ├── test_native.cpp    ← baseline + 2 starter XI_TEST blocks
+│   ├── test_native.cpp    ← 2 starter XI_TEST blocks
 │   └── test_ui.cjs        ← UI E2E test (drives the live webview)
 └── README.md              ← 500-line offline kit, plugin-specific
 ```
@@ -118,11 +118,9 @@ set XINSP2_EXTRA_PLUGIN_DIRS=C:\dev\my_plugins
 The host scans the parent folder; any subfolder containing a
 `plugin.json` is registered.
 
-On first load, the host runs an 8-test **baseline** against your DLL
-(C-ABI safety: doesn't crash on empty input, no leaks, JSON round-trips,
-etc). On pass it writes `cert.json` next to the DLL — subsequent loads
-of the same DLL skip the baseline. On fail it logs the failing tests
-and refuses to instantiate.
+On load, the host checks your DLL's ABI version and then loads it
+straight through — plugins are **trusted**, there's no certification
+gate. (Write your own tests to gain confidence; see step 7.)
 
 ---
 
@@ -148,7 +146,7 @@ cmake --build build --config Release
 
 The host detects the DLL change, unloads the old one, loads the new
 one, **and restores instance state** (via `get_def`/`set_def`). No
-restart, no project reopen, no rerunning the baseline.
+restart, no project reopen.
 
 ---
 
@@ -161,9 +159,8 @@ cmake --build build --config Release --target my_first_plugin_test
 .\my_first_plugin_test.exe
 ```
 
-Runs the same 8 baseline tests + your custom `XI_TEST(...)` blocks.
-A passing run writes `cert.json` proactively — the host won't re-run
-the baseline next time.
+Runs your `XI_TEST(...)` blocks (a useful starter set: create/destroy,
+`get_def`/`set_def` round-trip, `process()` on empty input).
 
 ### UI E2E (JavaScript) — drives the live webview
 
@@ -188,9 +185,9 @@ Screenshots land in `tests/screenshots/`.
 | You want the SDK's overview + cheatsheets | `xInsp2/sdk/README.md` |
 | You want to see real working examples | `xInsp2/sdk/examples/` (hello, counter, invert, histogram, trigger_source) |
 | You want a complex production-grade plugin | The `ct_shape_based_matching` plugin in the parent `xInsp/plugins/` tree (OpenCV + AVX2 + UI + per-instance template storage) — an out-of-tree plugin that consumes xInsp2 the same way yours will |
-| You want the trigger-bus / multi-camera path | `xInsp2/sdk/examples/trigger_source/` + `xInsp2/plugins/synced_stereo/` (paired frames under one tid) |
+| You want the image-source / multi-camera path | `xInsp2/sdk/examples/trigger_source/` (a source using `emit_record`) + `xInsp2/examples/stereo_sync/` (a gathering plugin combining paired frames) |
 | You want the C ABI definition | `xInsp2/backend/include/xi/xi_abi.h` |
-| You want the test-framework + baseline source | `xInsp2/backend/include/xi/xi_test.hpp`, `xi_baseline.hpp` |
+| You want the test framework | `xInsp2/backend/include/xi/xi_test.hpp` |
 
 ---
 
@@ -205,9 +202,6 @@ Screenshots land in `tests/screenshots/`.
   "XINSP2_ROOT is not set" — that's the fix.
 - **Plugin name uniqueness is global.** If two folders have the same
   `name` in `plugin.json`, the later-scanned one wins.
-- **Cert is invalidated by any DLL change** (size or mtime). After
-  rebuild, the host re-runs the baseline on next load. Run the test
-  binary to write cert proactively.
 - **Hot-reload preserves instance state.** Cache mutable fields in
   your class, not in statics — statics get re-initialized on reload.
 - **`folder_path()` is empty until a project is loaded.** If your

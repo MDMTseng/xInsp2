@@ -22,7 +22,6 @@
 // Output Record JSON is read from out_doc (in-process doc path) or data/len.
 
 #include <xi/xi_abi.hpp>
-#include <xi/xi_baseline.hpp>     // load_symbols
 #include <xi/xi_image_pool.hpp>   // ImagePool::make_host_api
 #include "yyjson.h"
 
@@ -117,8 +116,23 @@ int main(int argc, char** argv) {
     void* dll = nullptr;   // TODO(linux): dlopen
     std::fprintf(stderr, "xi_run_plugin is Windows-only for now\n"); return 2;
 #endif
-    auto syms = xi::baseline::load_symbols(dll);
-    if (!syms.ok() || !syms.process) { std::fprintf(stderr, "%s: missing required C ABI exports\n", dllpath.c_str()); return 2; }
+    // Resolve the plugin's C-ABI exports directly (the canonical symbol names
+    // from xi_abi.h). Only create/destroy/process are mandatory.
+    struct Syms {
+        xi_plugin_create_fn  create  = nullptr;
+        xi_plugin_destroy_fn destroy = nullptr;
+        xi_plugin_process_fn process = nullptr;
+        xi_plugin_set_def_fn set_def = nullptr;
+        xi_plugin_get_def_fn get_def = nullptr;
+    } syms;
+    syms.create  = (xi_plugin_create_fn) GetProcAddress(dll, "xi_plugin_create");
+    syms.destroy = (xi_plugin_destroy_fn)GetProcAddress(dll, "xi_plugin_destroy");
+    syms.process = (xi_plugin_process_fn)GetProcAddress(dll, "xi_plugin_process");
+    syms.set_def = (xi_plugin_set_def_fn)GetProcAddress(dll, "xi_plugin_set_def");
+    syms.get_def = (xi_plugin_get_def_fn)GetProcAddress(dll, "xi_plugin_get_def");
+    if (!syms.create || !syms.destroy || !syms.process) {
+        std::fprintf(stderr, "%s: missing required C ABI exports\n", dllpath.c_str()); return 2;
+    }
 
     void* inst = syms.create(&host, "xi_run_plugin");
     if (!inst) { std::fprintf(stderr, "xi_plugin_create returned null\n"); return 2; }

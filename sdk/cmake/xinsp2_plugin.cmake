@@ -75,6 +75,22 @@ function(xinsp2_add_plugin name)
         ${XINSP2_INCLUDE}
         ${XINSP2_VENDOR}
         ${XINSP2_VENDOR}/yyjson)
+    # Force-include the plugin support umbrella — same as the backend's own
+    # runtime compile (xi_script_compiler.hpp `/FIxi/xi_plugin_support.hpp`).
+    # Plugin sources (and the scaffold templates) rely on xi::Plugin /
+    # XI_PLUGIN_IMPL / xi::Record being present without an explicit #include;
+    # idempotent for sources that do include the xi headers themselves.
+    # Apply the force-include ONLY to the plugin's own sources (${ARGN}) — a
+    # per-source property, so the bundled yyjson.c (C, must not pull in the C++
+    # umbrella) is left alone. (Target-level COMPILE_LANGUAGE scoping isn't
+    # honoured by the VS generator, hence the per-source form.)
+    if(MSVC)
+        set_source_files_properties(${ARGN} PROPERTIES
+            COMPILE_FLAGS "/FIxi/xi_plugin_support.hpp")
+    else()
+        set_source_files_properties(${ARGN} PROPERTIES
+            COMPILE_FLAGS "-includexi/xi_plugin_support.hpp")
+    endif()
     set_target_properties(${name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}
         LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -87,8 +103,8 @@ endfunction()
 # Builds a developer-side test executable that links the C ABI surface
 # (no SHARED — the test loads the plugin DLL via LoadLibrary).
 #
-# OpenCV is wired here too: the baseline/cert harness a test uses
-# (xi_baseline.hpp + xi_image_pool.hpp → xi_image.hpp) transitively includes
+# OpenCV is wired here too: a test that stands up the host image API
+# (xi_image_pool.hpp → xi_image.hpp) transitively includes
 # <opencv2/core.hpp>, so without it every plugin's test fails with
 # `C1083: 'opencv2/core.hpp'`. Mirror xinsp2_add_plugin's OpenCV wiring.
 function(xinsp2_add_plugin_test target_name)
