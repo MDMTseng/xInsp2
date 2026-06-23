@@ -164,6 +164,18 @@ add_executable(test_diagnostics tests/test_diagnostics.cpp)
 target_link_libraries(test_diagnostics PRIVATE xi_core)
 add_test(NAME diagnostics COMMAND test_diagnostics)
 
+# Config/process race: an unprotected fixture plugin (race_probe) + a harness
+# that hammers set_def against process() through the real CAbiInstanceAdapter,
+# proving the CallScope gate serializes them for a non-reentrant plugin.
+add_library(race_probe SHARED tests/race_probe.cpp)
+target_include_directories(race_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_executable(test_set_def_race tests/test_set_def_race.cpp)
+target_link_libraries(test_set_def_race PRIVATE xi_core)
+target_compile_definitions(test_set_def_race PRIVATE RACE_PROBE_DLL="race_probe.dll")
+add_dependencies(test_set_def_race race_probe)
+add_test(NAME set_def_race COMMAND test_set_def_race
+         WORKING_DIRECTORY $<TARGET_FILE_DIR:test_set_def_race>)
+
 # SHM / worker-process / script-runner tests removed 2026-05 with the
 # FE/BE in-process split (no more SHM region or worker processes).
 set_tests_properties(protocol PROPERTIES
