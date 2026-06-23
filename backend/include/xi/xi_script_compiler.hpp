@@ -244,6 +244,69 @@ inline std::vector<Diagnostic> parse_diagnostics(const std::string& log) {
     return out;
 }
 
+// VAR(name, expr) expands to `auto name = ...`, so the SAME name twice in one
+// scope is a plain C++ redefinition — cl reports a terse "'name': redefinition"
+// (C2374/C2086/...) pointing at the macro, which is easy to misread. This maps
+// such an error back to the VAR()/VAR_RAW() call sites and appends a clear,
+// actionable hint (only when the symbol really is VAR'd 2+ times — zero false
+// positives, since the compiler already proved it's a redefinition).
+inline void augment_var_redefinitions(std::vector<Diagnostic>& diags,
+                                      const std::string& source_path) {
+    auto is_redef = [](const std::string& code) {
+        return code == "C2374" || code == "C2086" || code == "C2371" || code == "C2365";
+    };
+    bool any = false;
+    for (auto& d : diags) if (d.severity == "error" && is_redef(d.code)) { any = true; break; }
+    if (!any) return;
+
+    std::ifstream f(source_path);
+    if (!f) return;
+    std::vector<std::string> lines;
+    for (std::string ln; std::getline(f, ln); ) lines.push_back(ln);
+
+    auto is_ident = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '_';
+    };
+    auto var_sites = [&](const std::string& sym) {
+        std::vector<int> hits;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const std::string& L = lines[i];
+            for (const char* macro : { "VAR(", "VAR_RAW(" }) {
+                size_t mlen = std::strlen(macro), p = 0;
+                while ((p = L.find(macro, p)) != std::string::npos) {
+                    size_t a = p + mlen;
+                    while (a < L.size() && (L[a] == ' ' || L[a] == '\t')) ++a;
+                    if (L.compare(a, sym.size(), sym) == 0) {
+                        size_t e = a + sym.size();
+                        if (e >= L.size() || !is_ident(L[e])) hits.push_back((int)i + 1);
+                    }
+                    p = a;
+                }
+            }
+        }
+        return hits;
+    };
+
+    for (auto& d : diags) {
+        if (d.severity != "error" || !is_redef(d.code)) continue;
+        size_t q1 = d.message.find('\'');
+        if (q1 == std::string::npos) continue;
+        size_t q2 = d.message.find('\'', q1 + 1);
+        if (q2 == std::string::npos) continue;
+        std::string sym = d.message.substr(q1 + 1, q2 - q1 - 1);
+        auto sites = var_sites(sym);
+        if (sites.size() < 2) continue;
+        std::string hint = "  >> xinsp2: duplicate VAR(" + sym + ") at line";
+        hint += sites.size() > 1 ? "s " : " ";
+        for (size_t i = 0; i < sites.size(); ++i) { if (i) hint += ", "; hint += std::to_string(sites[i]); }
+        hint += " — VAR declares a variable, so the same name twice in one scope is a "
+                "redefinition. Rename one, or use EMIT(" + sym + ") to surface an existing "
+                "value without re-declaring.";
+        d.message += "\n" + hint;
+    }
+}
+
 namespace detail {
 
 // Search a few known VS install roots for vcvars64.bat. Returns empty
@@ -734,6 +797,7 @@ inline CompileResult compile(const CompileRequest& req) {
         }
     }
     r.diagnostics = parse_diagnostics(r.build_log);
+    augment_var_redefinitions(r.diagnostics, req.source_path);
     return r;
 }
 

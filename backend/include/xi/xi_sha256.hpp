@@ -5,7 +5,7 @@
 // One-shot file hash: `sha256_file(path) -> "<hex>"`. Empty string on
 // I/O failure. Pure C++; no OpenSSL / Win32 BCrypt dependency.
 //
-// Used by xi_cert.hpp to fingerprint plugin DLLs. The (file_size,
+// Used by xi_ws_server.hpp for HMAC bearer-token auth. The (file_size,
 // mtime) approach this replaces was "trivially forgeable" per the
 // 2026-04-28 deep architecture review — `touch` + same size passed
 // validation. SHA-256 closes that.

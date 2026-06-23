@@ -10,7 +10,6 @@
 // read/write helpers in namespace xi::project — not the model.)
 //
 #include "xi_instance.hpp"      // InstanceBase (held by InstanceInfo)
-#include "xi_trigger_bus.hpp"   // TriggerPolicy
 
 #include <memory>
 #include <string>
@@ -42,14 +41,6 @@ struct ProjectInfo {
     struct PluginRef { std::string label, path; bool compile = false; };
     std::vector<std::string> plugin_dirs;
     std::vector<PluginRef>   plugins;
-
-    // Trigger bus policy persisted per project. Default is Any (every
-    // source emit fires one dispatch) — back-compat with pre-trigger
-    // plugins. Change to AllRequired for multi-camera synchronisation.
-    TriggerPolicy trigger_policy    = TriggerPolicy::Any;
-    std::vector<std::string> trigger_required;    // source names (AllRequired)
-    std::string   trigger_leader;                 // source name (LeaderFollowers)
-    int           trigger_window_ms = 100;
 
     // `parallelism.dispatch_threads`: how many dispatcher threads run
     // xi_inspect_entry concurrently in continuous mode. Default 1 (single

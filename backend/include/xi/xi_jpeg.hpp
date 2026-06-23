@@ -2,15 +2,10 @@
 //
 // xi_jpeg.hpp — encode xi::Image to JPEG bytes.
 //
-// Three backends, selected at runtime by CPU vendor:
-//   - Intel CPU + XINSP2_HAS_IPP:  Intel IPP (fastest on Intel)
-//   - Non-Intel + XINSP2_HAS_OPENCV: OpenCV imencode (good AVX2 via turbo)
-//   - Fallback: stb_image_write (no deps, slowest)
-//
-// Build flags:
-//   -DXINSP2_HAS_IPP=1      — link against IPP libs
-//   -DXINSP2_HAS_OPENCV=1   — link against OpenCV
-//   (neither)                — stb fallback only
+// Backends, fastest first:
+//   - XINSP2_HAS_TURBOJPEG: libjpeg-turbo (the fast SIMD path)
+//   - XINSP2_HAS_OPENCV:    OpenCV imencode
+//   - Fallback:             stb_image_write (no deps, slowest)
 //
 
 #include <cstdint>
@@ -18,11 +13,6 @@
 #include <vector>
 
 #include "xi_image.hpp"
-
-// Note: IPP no longer ships a JPEG codec (ippj.h was removed in IPP 2021+).
-// The encode_jpeg_ipp body below is intentionally a stub; the IPP build
-// gate stays around in case a future release reintroduces JPEG, but the
-// real fast path is libjpeg-turbo (XINSP2_HAS_TURBOJPEG).
 
 #ifdef XINSP2_HAS_OPENCV
   #include <opencv2/imgcodecs.hpp>
@@ -71,10 +61,6 @@ inline CpuVendor detect_cpu_vendor() {
     }();
     return cached;
 }
-
-// (IPP JPEG path removed — Intel deprecated the JPEG codec API in
-// IPP 2021+. The fast SIMD JPEG path is libjpeg-turbo via
-// XINSP2_HAS_TURBOJPEG; OpenCV is the secondary fallback.)
 
 // ---------- OpenCV backend ----------
 
