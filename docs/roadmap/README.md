@@ -12,13 +12,13 @@ re-describing other docs.
 | C ABI, plugin loading, instances | [`../reference/c-abi.md`](../reference/c-abi.md), [`../reference/instances.md`](../reference/instances.md) |
 | Record / Image / typed I/O + NA | [`../reference/data-types.md`](../reference/data-types.md), [`../internals/typed-io.md`](../internals/typed-io.md) |
 | yyjson data layer + γ-4 doc refcount | [`../internals/data-layer.md`](../internals/data-layer.md) |
-| Trigger bus + emit/fetch + dispatch groups | [`../internals/dispatch.md`](../internals/dispatch.md) |
-| FE/BE supervisor + safe-state + crash | [`../internals/fe-be.md`](../internals/fe-be.md) |
+| Trigger bus + `emit_record` + dispatch groups | [`../internals/dispatch.md`](../internals/dispatch.md) |
+| FE/BE supervisor + crash history | [`../internals/fe-be.md`](../internals/fe-be.md) |
 | WS API | [`../reference/ws-protocol.md`](../reference/ws-protocol.md) |
 | Sharded refcounted ImagePool, SEH crash isolation, auto-respawn, atomic JSON writes, skip-bad-instance, compile diagnostics | [`../internals/fe-be.md`](../internals/fe-be.md), [`../guides/debug.md`](../guides/debug.md) |
-| In-project plugins, hot reload, export-plugin, SDK scaffold, per-plugin cert, plugin webviews | [`../guides/write-a-plugin.md`](../guides/write-a-plugin.md) |
+| In-project plugins, hot reload, export-plugin, SDK scaffold, plugin webviews | [`../guides/write-a-plugin.md`](../guides/write-a-plugin.md) |
 | `xi::state` / `xi::async` / `xi::breakpoint` / hot-reload / script DLL versioning | [`../guides/write-a-script.md`](../guides/write-a-script.md) |
-| Recording + replay, interactive viewer, variants/compare, remote mode | [`../guides/extend-the-ui.md`](../guides/extend-the-ui.md) |
+| Replay (buffer_replay plugin), interactive viewer, remote mode | [`../guides/extend-the-ui.md`](../guides/extend-the-ui.md) |
 
 7 plugins shipped under `plugins/`; SDK demo plugins under `sdk/examples/`. Full
 test surface: [`../../docs/testing.md`](../../docs/testing.md) (→ `testing.md` after cutover).
@@ -30,7 +30,20 @@ test surface: [`../../docs/testing.md`](../../docs/testing.md) (→ `testing.md`
   field is accepted-but-ignored.
 - **cJSON, the explored MessagePack/CWPack wire, the `xinsp-comms` gateway** — see
   [`../internals/data-layer.md`](../internals/data-layer.md) (data) +
-  `../internals/fe-be.md` (PLC is a plugin + the FE safe-state sink).
+  `../internals/fe-be.md` (PLC is a plugin; line-safe is its own sidecar process).
+- **The multi-verb dispatch surface** (2026-06, ABI v6) — `emit_trigger` /
+  `emit_resource` / `fetch_image` / `fetch_resource` / `emit_dispatch`, trigger-bus
+  correlation policies, the host record/replay recorder, and the legacy
+  `xi::ImageSource` + `grab()` pull-model. Collapsed to ONE verb `emit_record`;
+  multi-cam = a gathering plugin, replay = a `buffer_replay` plugin. See
+  [`../internals/dispatch.md`](../internals/dispatch.md).
+- **Plugin certification** (cert.json / baseline / certify-on-load gate /
+  `recertify_plugin`) — plugins now load trusted (speed-first); no cert gate or UI.
+- **FE-brokered PLC safe-state** (the `--safe-state` flag + `set_safe_state` ABI
+  verb + FE→PLC delivery sink) — replaced by a comms plugin's crash-watching
+  sidecar; see `../internals/fe-be.md`.
+- **ws commands `preview_instance` / `process_instance` / `compare_variants`** —
+  redundant with `cmd:run`.
 
 ## Decision log (locked-in)
 

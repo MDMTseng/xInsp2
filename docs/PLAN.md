@@ -66,7 +66,7 @@ docs-v2/
   internals/                 # design-of-record for SHIPPED subsystems (the "how")
     data-layer.md            # yyjson-only + in-process doc pass-by-pointer + γ-4
     dispatch.md              # trigger bus + emit/fetch + dispatch groups
-    fe-be.md                 # FE supervisor over BE, safe-state, crash history
+    fe-be.md                 # FE supervisor over BE, crash history
     typed-io.md              # nominal types over Record + NA + provenance
 
   roadmap/                   # NOT scheduled — sketches; graduate to internals/

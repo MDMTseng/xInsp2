@@ -29,12 +29,10 @@ Run all: `ctest --test-dir backend/build -C Release`
 | `test_protocol` | `parse_cmd`, `Rsp` / `VarItem` / preview header serialization; fixture parity with TS side |
 | `test_image_pool` | 16-shard refcounted pool; concurrent create/release/data; 20 MP allocation |
 | `test_image_pool_stress` | high-volume concurrent pool churn; refcount integrity under load |
-| `test_sha256` | SHA-256 digest vectors (plugin cert hashing) |
+| `test_sha256` | SHA-256 digest vectors (WS-auth bearer hashing) |
 | `test_diagnostics` | cl.exe / link.exe diagnostic parser (error / warning / fatal / note shapes) |
-| `test_safe_state` | FE `SafeStateSink`: reason→string, factory fallthrough, log formatting + `ts=`, empty-field placeholders, overflow/null safety |
 | `test_qa_fault` / `test_qa_race` | FE respawn sliding-window + cap arithmetic; forensics carried on the cap event |
-| `test_qa_edge` | FE crash-report parser (`xi_crash_report.hpp`): good / threads[] fallback / no-minidump / corrupt / last-wins, against crafted fixtures; crash-history JSONL builder (`xi_crash_history.hpp` CH-U*): field coverage, Windows-path backslash escaping, control-char escaping, empty-event totality; FE status renderer (`xi_fe_status.hpp` FS-U*): healthy/latched snapshots, comms object, last_event forensics, path escaping |
-| `test_qa_stress` | Phase G stress/fuzz of the respawn-cap + safe-state core: degenerate caps, exact reset boundary, recover-then-recur, a 200k-step equivalence fuzz vs a reference model, high-volume bounded emission |
+| `test_qa_edge` | FE crash-report parser (`xi_crash_report.hpp`): good / threads[] fallback / no-minidump / corrupt / last-wins, against crafted fixtures; crash-history JSONL builder; FE status renderer (`fe_status`): healthy/latched snapshots, last_event forensics, path escaping |
 
 All exit with `ALL TESTS PASSED`.
 
@@ -49,9 +47,10 @@ Run all: `cd vscode-extension && node --test test/*.test.mjs`
 | `protocol.test.mjs` | TS protocol mirror parses C++ fixtures |
 | `backend_mode.test.mjs` | `resolveBackendMode` managed/attach/auto decision (FE/BE ownership) |
 | `ws_basic.test.mjs` | ping / version / hello / shutdown / unknown |
+| `ws_buffer_replay.test.mjs` | replay as plugin composition: a `buffer_replay` plugin captures + re-emits records (host no longer owns record/replay) |
 | `ws_run_vars.test.mjs` | run → vars round-trip with image gid |
 | `ws_preview.test.mjs` | binary preview frame format |
-| `ws_trigger.test.mjs` | TriggerBus emit_trigger + sink |
+| `ws_trigger.test.mjs` | compile + start continuous mode → multiple runs fire |
 | `ws_state.test.mjs` | `xi::state` persists across reload |
 | `ws_compile_reload.test.mjs` | compile_and_load + version increment |
 | `ws_crash.test.mjs` | null deref / div0 / array overrun → backend survives |
@@ -88,16 +87,13 @@ cd vscode-extension && node test/runUserJourney.mjs
 
 | Runner | What it proves |
 |---|---|
-| `runMulticam` | TriggerBus pairs left+right under same tid (`synced_stereo`) |
+| `runMulticam` | `synced_stereo` gathering plugin emits one record carrying left+right (same `seq`) |
 | `runSubscribe` | preview subscription gates binary frames by name |
-| `runVariants` | compare_variants applies A → run → snapshot → B → run → snapshot |
 | `runBreakpoint` | `xi::breakpoint("label")` parks worker; `cmd:resume` releases |
 | `runWatchdog` | watchdog kills runaway inspect; backend stays alive |
 | `runRemoteAuth` | `--auth` bearer gate, 401 on bad/missing, constant-time compare |
-| `runTriggerPolicies` | Any / AllRequired / LeaderFollowers all behave correctly |
 | `runHistory` | ring buffer keeps 50; `since_run_id` filter; `set_history_depth` resize |
 | `runHeadlessRunner` | `xinsp-runner.exe` produces JSON report from a project |
-| `runRecordReplay` | record observer-mode → replay through bus → events match |
 | `runUserJourney` | full 10-step real-user flow (24 screenshots) |
 | `runProjectPluginJourney` | in-project plugin create / edit / typo / fix / instance / export (12 screenshots) |
 | `runImageViewerJourney` | plugin + interactive image viewer pan/zoom/fit/1:1/tool ops (18 screenshots, scripted via `xinsp2.imageViewer.applyOp`) |
@@ -205,23 +201,21 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   dispatch thread's `last_phase="inspect"` breadcrumb intact.
   `examples/fe_supervisor/` is the next layer up: it runs the
   `xinsp-fe.exe` supervisor against an auto-crashing project and asserts
-  the FE detects each death, drives the line to a safe state (with crash
-  forensics from the backend log), respawns rate-limited, hits the cap,
-  stays safe, and leaves no orphaned backend. It also asserts the FE's
+  the FE detects each death, records its crash forensics (from the backend
+  log), respawns rate-limited, latches `down` at the cap, and leaves no
+  orphaned backend. It also asserts the FE's
   **crash-history** JSONL (`xi_crash_history.hpp`): one record per death,
   `consecutive` counting up 1..N, the final death marked `cap_hit=true`,
   forensics + minidump path on each; and the FE **status channel**
-  (`xi_fe_status.hpp` → `fe-status.json`): a latched safe state carrying the
-  death reason + forensics, the value a UI reads instead of inferring "down"
+  (`xi_fe_status.hpp` → `fe-status.json`): a latched `down` state carrying the
+  death reason + forensics, the value a UI reads instead of inferring it
   from a WS disconnect. (Windows-only; skips on non-`nt`.)
 - **PLC comms as a plugin** (the `xinsp-comms` gateway + `xi::comms` were removed;
-  see `docs/archive/comms-gateway.md`). The reorder + crash-payload model is covered
-  by smokes under `examples/_diag/`: `comm_smoke.py` (sort-comm reorder),
-  `parallel_comm_smoke.py` (reorder under a real 4-thread lane), `compose_smoke.py`
-  (camera → collector → comm end to end), and `safestate_smoke.py` (a plugin
-  registers an emergency payload via `host->set_safe_state`, crashes, and the FE
-  forwards it to the PLC). `examples/plc_safe_state/` still exercises the FE PLC
-  safe-state sink directly.
+  see `docs/archive/comms-gateway.md`). Line-safe-on-crash is no longer brokered by
+  the core or the FE: a comms plugin spawns its **own sidecar process** that holds
+  the PLC link, watches the backend process handle, and signals the PLC to go
+  line-safe when the backend dies (the `set_safe_state` ABI verb + the FE
+  PLC-delivery sink were removed 2026-06).
   `examples/dll_version_clash/` — two plugins each depending on a different
   version of a same-named DLL, in one process. Proves the loader rules: a
   **by-name** (static-import) dependency collides on base name (second plugin
@@ -234,10 +228,10 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   search path). Builds a tiny `extmath.dll`, compiles+loads the script, asserts
   `ext_add(2,3)==5`.
 - **Phase G stress + race** (#92; see
-  `docs/archive/fe-be-split-test-plan.md` "Phase G"). Beyond the `test_qa_stress`
-  unit above: `examples/qa_recover/` proves the **recover-and-clear** transition
-  (a backend that crashes a few times then heals → FE `CLEAR SAFE STATE`, never
-  hits the cap — the `crash_then_heal` plugin counts crashes in a
+  `docs/archive/fe-be-split-test-plan.md` "Phase G"). Beyond the `test_qa_fault` /
+  `test_qa_race` units above: `examples/qa_recover/` proves the **recover-and-clear** transition
+  (a backend that crashes a few times then heals → FE clears `down` back to
+  `healthy`, never hits the cap — the `crash_then_heal` plugin counts crashes in a
   respawn-surviving marker). (The `qa_soak` full-stack FE+BE+gateway soak was
   retired with the comms gateway.)
 - **Burst-parallelism safety** — `examples/qa_reentrancy/` proves the

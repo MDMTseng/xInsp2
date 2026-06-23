@@ -33,8 +33,9 @@ xInsp2 itself?** Jump to [Develop xInsp2](#develop-xinsp2-itself) below.
 | File | Subsystem |
 |---|---|
 | [`internals/data-layer.md`](./internals/data-layer.md) | yyjson-only + in-process doc pass-by-pointer + γ-4 cross-ABI refcount. |
-| [`internals/dispatch.md`](./internals/dispatch.md) | How a trigger becomes a run: trigger bus + emit/fetch + dispatch groups. |
-| [`internals/fe-be.md`](./internals/fe-be.md) | FE supervisor over the BE compute core, safe-state, crash history. |
+| [`internals/dispatch.md`](./internals/dispatch.md) | How an emit becomes a run: trigger bus + `emit_record` + dispatch groups. |
+| [`internals/fe-be.md`](./internals/fe-be.md) | FE supervisor over the BE compute core, crash history. |
+| [`internals/comms-sidecar.md`](./internals/comms-sidecar.md) | Line safety as a comms plugin's own sidecar process (replaces FE PLC safe-state). |
 | [`internals/typed-io.md`](./internals/typed-io.md) | Nominal types over Record + NA propagation + provenance. |
 
 ## Planned / not scheduled (`roadmap/`)

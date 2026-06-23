@@ -20,7 +20,7 @@ config, and identity.
 ```
 <project>/
 ├── project.json        { name, script: "inspect.cpp", auto_respawn, watchdog_ms,
-│                         trigger_policy, parallelism, ... }
+│                         parallelism, ... }
 ├── inspect.cpp
 └── instances/
     └── cam0/
@@ -36,11 +36,11 @@ captured frames, anything bigger than the small `config` blob. Never auto-delete
 
 | Command | What happens |
 |---|---|
-| `open_project` | Read `project.json` (policy/respawn/watchdog), scan `instances/`, for each: read `instance.json`, look up the plugin, build a `CAbiInstanceAdapter` via `xi_plugin_create(host, name)`, apply `config` via `set_def`, register. **Skip-bad-instance**: any failure records an `OpenWarning` and continues — the project opens with the survivors (read them via `cmd:open_project_warnings`). |
+| `open_project` | Read `project.json` (respawn/watchdog/parallelism), scan `instances/`, for each: read `instance.json`, look up the plugin, build a `CAbiInstanceAdapter` via `xi_plugin_create(host, name)`, apply `config` via `set_def`, register. **Skip-bad-instance**: any failure records an `OpenWarning` and continues — the project opens with the survivors (read them via `cmd:open_project_warnings`). |
 | `create_instance` | Validate name (unique, non-empty), create the folder, `xi_plugin_create(host, name)`, write initial `instance.json` from `get_def()`, register. |
 | `save_project` | For each instance: `get_def()` → atomic write `instance.json` (`xi_atomic_io.hpp`, crash-safe). |
 | `remove_instance` | Unregister (proxies start erroring), `xi_plugin_destroy`. **Folder kept by default** (recreate with the same name to resume); `--purge` to wipe. |
-| `close_project` | `xi_plugin_destroy` all, clear registry, reset the trigger bus, stop recording. Plugin DLLs stay loaded. |
+| `close_project` | `xi_plugin_destroy` all, clear registry, tear down the dispatch lanes. Plugin DLLs stay loaded. |
 | Backend shutdown | `~PluginManager` `FreeLibrary`s every DLL explicitly (surfaces leaks under tools). |
 
 ## Registry
@@ -87,11 +87,12 @@ keys default in `set_def`). Four kinds + details in
 
 ## Triggers
 
-Each `xi::ImageSource` instance gets a TriggerBridge that routes its
-`host->emit_trigger`s into the bus tagged by the instance name. The project's
-`trigger_policy` (Any / AllRequired / LeaderFollowers) decides when frames
-correlate into one inspection. Instances just emit; the bus does the rest — full
-mechanics in [`../internals/dispatch.md`](../internals/dispatch.md).
+A source instance is an ordinary plugin that calls `host->emit_record(emitter,
+id, rec, ts)` from a worker thread; each record dispatches one inspection, which
+the script reads via `xi::current_trigger()`. There is no bus correlation —
+multi-camera capture is a "gathering" plugin that emits one record carrying N
+named images. Full mechanics in
+[`../internals/dispatch.md`](../internals/dispatch.md).
 
 ## See also
 
