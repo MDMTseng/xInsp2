@@ -239,6 +239,20 @@ XI_SCRIPT_EXPORT int xi_script_set_instance_def(const char* name, const char* de
     return inst->set_def(def_json) ? 0 : -2;
 }
 
+// Symmetric read of set_instance_def: returns the instance's full def JSON
+// (the same string set_def round-trips). Buffer protocol matches exchange:
+// returns bytes written, or -needed when buf is too small (caller grows + retries).
+XI_SCRIPT_EXPORT int xi_script_get_instance_def(const char* name, char* buf, int buflen) {
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    std::string def = inst->get_def();
+    int needed = (int)def.size();
+    if (buflen < needed + 1) return -needed;
+    std::memcpy(buf, def.data(), def.size());
+    buf[def.size()] = 0;
+    return needed;
+}
+
 XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* cmd_json,
                                                   char* rsp_buf, int rsp_buflen) {
     auto inst = xi::InstanceRegistry::instance().find(name);

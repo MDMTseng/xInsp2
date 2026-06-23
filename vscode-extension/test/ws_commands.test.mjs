@@ -143,6 +143,61 @@ test('set_instance_def updates instance definition', { timeout: 10000 }, async (
 });
 
 // ---------------------------------------------------------------
+// 5b. get_instance_def is the symmetric read of set_instance_def
+// ---------------------------------------------------------------
+test('get_instance_def round-trips an instance definition', { timeout: 10000 }, async () => {
+    await withBackend(async (c) => {
+        await c.nextText();
+
+        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        const projDir = resolve(tmpdir(), `xi_getdef_${Date.now()}`);
+        c.send({ type: 'cmd', id: 2, name: 'create_project',
+                 args: { folder: projDir, name: 'test_getdef' } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        c.send({ type: 'cmd', id: 3, name: 'create_instance',
+                 args: { name: 'cam_rt', plugin: 'mock_camera' } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        // Configure, then read it back via get_instance_def (no get_status scrape).
+        c.send({ type: 'cmd', id: 4, name: 'set_instance_def',
+                 args: { name: 'cam_rt', def: { width: 640, height: 480 } } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        c.send({ type: 'cmd', id: 5, name: 'get_instance_def', args: { name: 'cam_rt' } });
+        const gr = await c.nextNonLog();
+        assert.equal(gr.ok, true, 'get_instance_def ok');
+        const captured = typeof gr.data === 'string' ? JSON.parse(gr.data) : gr.data;
+        assert.equal(captured.width, 640, 'captured def reflects the set width');
+
+        // Mutate away, then restore the captured def → the round-trip works.
+        c.send({ type: 'cmd', id: 6, name: 'set_instance_def',
+                 args: { name: 'cam_rt', def: { width: 800, height: 600 } } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        c.send({ type: 'cmd', id: 7, name: 'set_instance_def',
+                 args: { name: 'cam_rt', def: captured } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        c.send({ type: 'cmd', id: 8, name: 'get_instance_def', args: { name: 'cam_rt' } });
+        const gr2 = await c.nextNonLog();
+        const restored = typeof gr2.data === 'string' ? JSON.parse(gr2.data) : gr2.data;
+        assert.equal(restored.width, 640, 'restored def matches the captured one');
+    });
+});
+
+test('get_instance_def on an unknown instance returns ok:false', { timeout: 10000 }, async () => {
+    await withBackend(async (c) => {
+        await c.nextText();
+        c.send({ type: 'cmd', id: 1, name: 'get_instance_def', args: { name: 'nope_404' } });
+        const rsp = await c.nextNonLog();
+        assert.equal(rsp.ok, false, 'missing instance should not succeed');
+    });
+});
+
+// ---------------------------------------------------------------
 // 8. save_project / load_project round-trip
 // ---------------------------------------------------------------
 test('save_project then load_project preserves instances and params', { timeout: 10000 }, async () => {

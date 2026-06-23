@@ -520,6 +520,22 @@ here — there is a single host ImagePool.
 ### `set_instance_def`
 `args: { "name": "cam0", "def": { ... } }` → `ok: true`
 
+Pushes a full config object into an instance (the plugin's `set_def`). The `def`
+may embed assets the plugin round-trips — e.g. `ct_shape_based_matching` accepts
+each template's image as an `image_png_b64` field, so a template set is fully
+self-contained in the def (no sidecar files needed).
+
+### `get_instance_def`
+`args: { "name": "cam0" }` → `data: { ... }`
+
+The symmetric **read** of `set_instance_def`: returns the instance's full def
+JSON (the plugin's `get_def`), including any embedded assets like template PNGs.
+Resolves the backend's `InstanceRegistry` first, then the script-loaded instances
+(`xi_script_get_instance_def`). This makes an instance's setup **portable**
+without scraping `exchange:get_status` — `get_instance_def` then `set_instance_def`
+round-trips one instance, and looping over `list_instances` snapshots/restores a
+whole project (the basis for product/instrument config bundles).
+
 ### `exchange_instance`
 Generic passthrough to an instance's `exchange()` method — used by plugin
 UIs that ship their own command vocabulary.
