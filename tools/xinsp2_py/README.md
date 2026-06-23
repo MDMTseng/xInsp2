@@ -57,8 +57,8 @@ specific image files only when needed — keeps context small.
   parse the build log out of the message, edit, retry.
 - **Param sweep**: loop over `set_param` + `run` + `dump_run`,
   `prefix="sweep_sigma_3p5"` to keep snapshots straight.
-- **A/B**: use `c.call("compare_variants", {"a": ..., "b": ...})`
-  directly; the SDK doesn't wrap this yet.
+- **A/B**: drive the two variants yourself — `set_param` + `run` +
+  `dump_run` with a distinct `prefix` per variant, then diff the snapshots.
 - **Long-running observation**: `c.on_log(print)` to mirror backend logs
   to stdout while you drive runs.
 

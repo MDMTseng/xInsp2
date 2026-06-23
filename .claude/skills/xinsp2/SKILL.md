@@ -90,7 +90,7 @@ c.recompile_project_plugin("local_contrast_detector")
 ## Things that worked before (not prescriptions)
 
 - **Param sweep**: loop `set_param` + `run` + `dump_run(prefix=…)`, tabulate scalar VARs, only open images for the interesting points.
-- **A/B**: `c.call("compare_variants", {"a": {...}, "b": {...}})` does both runs server-side and returns both snapshots.
+- **A/B**: drive both variants client-side — `set_param` + `run` + `dump_run(prefix=…)` per variant, then diff the snapshots.
 - **Compile-fix**: catch `ProtocolError`, edit the .cpp based on the build log, retry.
 - **Live log mirror**: `c.on_log(print)` while iterating.
 

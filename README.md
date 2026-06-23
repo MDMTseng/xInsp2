@@ -25,10 +25,11 @@ xi::Param<double> sigma  {"sigma",     2.0, {0.1, 10.0}};
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& cam = xi::use("cam0");              // backend-managed instance
     auto& det = xi::use("detector0");         // survives hot-reload
 
-    auto img = cam.grab(500);
+    auto t = xi::current_trigger();           // frames pushed by the cam0 source
+    if (!t.is_active()) return;
+    auto img = t.image("frame");
     if (img.empty()) return;
 
     VAR(input, img);                          // tracked & visible in UI
@@ -87,7 +88,7 @@ editor.
         │        │   frames, writes report │
         │        └─────────────────────────┘
         │
-   plugin DLLs (C ABI, cert.json'd)
+   plugin DLLs (C ABI, trusted load)
    user inspect.dll (JIT-compiled)
 ```
 
@@ -101,10 +102,10 @@ Key design choices:
   C++ throw — all recoverable without killing the backend.
 - **Hot-reload with state.** `xi::state()` serialises before DLL unload,
   restores after. Script edits are a one-file recompile.
-- **TriggerBus.** 128-bit trigger ids; three correlation policies
-  (`Any` / `AllRequired` / `LeaderFollowers`) for hardware-synced
-  multi-camera capture.
-- **Lean host.** Only cJSON + stb_image vendored. **OpenCV is required**
+- **Dispatch.** Sources `emit_record` (images + metadata under a 128-bit
+  trigger id); the host dispatches one inspection per emit. Multi-camera
+  correlation is a gathering plugin (e.g. `synced_stereo`), not a policy.
+- **Lean host.** Only yyjson + stb_image vendored. **OpenCV is required**
   (image ops + every script/plugin force-includes it); libjpeg-turbo and
   IPP are optional accelerators behind `XINSP2_HAS_*`.
 
@@ -202,11 +203,12 @@ buffer style as any C++ file (IntelliSense, save, format).
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& cam   = xi::use("cam0");
     auto& det   = xi::use("det0");
     auto& saver = xi::use("saver0");
 
-    auto img = cam.grab(500);
+    auto t = xi::current_trigger();        // frames pushed by the cam0 source
+    if (!t.is_active()) return;
+    auto img = t.image("frame");
     if (img.empty()) return;
 
     VAR(input, img);
@@ -342,7 +344,7 @@ This is the same script that produced the file on the Releases page.
 - **Parallel ops.** `xi::async(fn, args...)` + `Future<T>` with implicit
   await. `ASYNC_WRAP(name)` to pre-wrap an operator.
 - **Record type.** `rec["roi.x"].as_int(0)`, `rec["items[0].score"].as_double()`
-  — path expressions, safe defaults, named-image bag, cJSON-backed.
+  — path expressions, safe defaults, named-image bag, yyjson-backed.
 
 ### Operational
 
@@ -354,28 +356,24 @@ This is the same script that produced the file on the Releases page.
 - **CodeLens.** `⚙ Configure` / `🎚 Tune` / `👁 Preview` on every
   `xi::use(...)` / `xi::Param<...>` / `VAR(...)` site.
 
-### Multi-camera (TriggerBus)
+### Image sources & dispatch
 
-- **`host->emit_trigger(source, tid, ts, images, count)`** — source
-  plugins publish frames under a 128-bit trigger id.
-- **Policies:** `Any` (fire every emit) / `AllRequired` (fire when all
-  named sources emitted the same tid) / `LeaderFollowers` (fire on
-  leader; attach latest followers).
-- **Script API:** `xi::current_trigger().image("cam_left")`,
-  `.id_string()`, `.timestamp_us()`, `.sources()`.
-- **Reference plugin:** `plugins/synced_stereo/` emits paired left+right
-  frames under one tid.
+- **`xi::emit_record(host, source, record)`** — source plugins push a
+  record (images + metadata) into the pipeline; the host stamps a 128-bit
+  trigger id and dispatches the inspection once per emit.
+- **Script API:** `xi::current_trigger().image("frame")`, `.id_string()`,
+  `.meta()`, `.sources()`.
+- **Multi-source correlation** (e.g. a synced stereo pair) is plugin
+  composition, not a bus policy: a **gathering plugin** subscribes to the
+  sources, combines their frames into one record, and emits that. See
+  `examples/stereo_sync/`.
 
 ### Recording & replay
 
-- **Observer-mode recorder.** `recording_start` installs a bus observer
-  that serialises every `TriggerEvent` to disk without interrupting the
-  live pipeline.
-- **Replay.** `recording_replay` pushes events back through
-  `emit_trigger`; the whole pipeline (sinks, correlators, scripts) sees
-  them identically to the live run.
-- **On-disk format.** `manifest.json` + per-image `.raw` files with a
-  24-byte `XIMG` header (`0x58494D47`).
+- **Replay is a plugin.** The **buffer_replay** plugin captures emitted
+  records and re-emits them through the same `emit_record` path, so the
+  whole pipeline sees them identically to a live run — for regression
+  tests and off-line tuning. See `examples/buffer_replay_demo/`.
 
 ### Deployment
 
@@ -413,9 +411,9 @@ Scaffolding:
 node <xinsp2>/sdk/scaffold.mjs ~/my_plugins/my_first_plugin
 ```
 
-Every plugin passes an 8-test **baseline** (C ABI safety: create/destroy,
-JSON round-trip, concurrent calls, empty input) on first load; a
-`cert.json` caches the result. A failed baseline refuses to instantiate.
+Plugins are **trusted** — the host loads the DLL straight through after an
+ABI-version check (no certification gate). Write your own tests with
+`xi_test.hpp` to gain confidence; nothing blocks a plugin from loading.
 
 Full SDK docs: [`sdk/README.md`](sdk/README.md) and
 [`sdk/GETTING_STARTED.md`](sdk/GETTING_STARTED.md).
@@ -496,5 +494,5 @@ next jump.
 
 ## License
 
-See individual files for vendored library licenses (cJSON — MIT;
+See individual files for vendored library licenses (yyjson — MIT;
 stb_image_write — public domain). Everything else is this project's own.
