@@ -150,92 +150,6 @@ let client: WsClient | null = null;
 let cmdId = 1;
 const nextId = () => cmdId++;
 
-// Webview HTML for the cert drill-down panel.
-function certPanelHtml(
-    pluginName: string, folder: string, plugin: any, certJson: any
-): string {
-    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    const certState = !plugin?.cert?.present ? 'missing' :
-                       plugin.cert?.valid     ? 'valid'   : 'stale';
-    const statusColor = certState === 'valid' ? '#4caf50' :
-                         certState === 'stale' ? '#ff9800' : '#f44336';
-    const statusLabel = certState === 'valid' ? 'Valid' :
-                         certState === 'stale' ? 'Stale (DLL changed)' : 'Missing';
-    const tests = Array.isArray(certJson?.tests_passed) ? certJson.tests_passed : [];
-    const testRows = tests.map((t: string) =>
-        `<div class="test"><span class="check">✓</span> ${esc(t)}</div>`
-    ).join('');
-    return `<!doctype html>
-<html><head><meta charset="utf-8"><style>
-body { font-family: var(--vscode-font-family, sans-serif); background: var(--vscode-editor-background); color: var(--vscode-foreground); padding: 24px; line-height: 1.5; }
-h1 { margin: 0 0 4px; font-size: 20px; display:flex; align-items:center; gap:10px; }
-.status-pill { display:inline-block; padding: 2px 10px; border-radius: 10px; font-size: 11px; font-weight: 600; background: ${statusColor}; color: #fff; letter-spacing: 0.3px; }
-.meta { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 24px; }
-.card { background: var(--vscode-editor-background); border: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08)); border-radius: 6px; padding: 16px 20px; margin-bottom: 14px; }
-.card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--vscode-descriptionForeground); margin: 0 0 12px; font-weight: 600; }
-.grid { display: grid; grid-template-columns: 180px 1fr; gap: 8px 18px; font-size: 13px; }
-.grid .k { color: var(--vscode-descriptionForeground); }
-.grid .v { font-family: var(--vscode-editor-font-family, monospace); word-break: break-all; }
-.test { padding: 4px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
-.check { color: #4caf50; margin-right: 8px; }
-#recert-result { margin-top: 12px; font-size: 12px; }
-.actions { margin-top: 18px; }
-</style></head><body>
-<h1>${esc(pluginName)} <span class="status-pill">${statusLabel}</span></h1>
-<div class="meta">Plugin folder: ${esc(folder)}</div>
-
-<div class="card">
-    <div class="card-title">Summary</div>
-    <div class="grid">
-        <div class="k">Name</div>             <div class="v">${esc(pluginName)}</div>
-        <div class="k">Description</div>      <div class="v">${esc(plugin?.description || '—')}</div>
-        <div class="k">Loaded</div>           <div class="v">${plugin?.loaded ? 'yes' : 'no'}</div>
-        <div class="k">Has UI</div>           <div class="v">${plugin?.has_ui ? 'yes' : 'no'}</div>
-    </div>
-</div>
-
-<div class="card">
-    <div class="card-title">Certificate (cert.json)</div>
-    ${certJson ? `
-    <div class="grid">
-        <div class="k">Certified at</div>     <div class="v">${esc(certJson.certified_at || '—')}</div>
-        <div class="k">Baseline version</div> <div class="v">${certJson.baseline_version ?? '—'}</div>
-        <div class="k">Duration</div>         <div class="v">${certJson.duration_ms != null ? certJson.duration_ms.toFixed(1) + ' ms' : '—'}</div>
-        <div class="k">DLL size</div>         <div class="v">${certJson.dll_size != null ? certJson.dll_size.toLocaleString() + ' bytes' : '—'}</div>
-        <div class="k">DLL mtime</div>        <div class="v">${certJson.dll_mtime != null ? certJson.dll_mtime : '—'}</div>
-    </div>
-    <div style="margin-top: 16px;">
-        <div class="card-title" style="margin-bottom: 8px">Tests passed (${tests.length})</div>
-        ${testRows || '<div class="meta">None recorded.</div>'}
-    </div>
-    ` : `<div class="meta">No cert.json present. The host will re-certify on next load; or click below to do it now.</div>`}
-    <div class="actions">
-        <button id="btn-recert" style="padding: 6px 14px; border: none; border-radius: 3px; background: #2196f3; color: #fff; cursor: pointer;">
-            Re-certify now
-        </button>
-        <span id="recert-result"></span>
-    </div>
-</div>
-
-<script>
-const vscode = acquireVsCodeApi();
-document.getElementById('btn-recert').addEventListener('click', () => {
-    document.getElementById('recert-result').textContent = 'Running baseline…';
-    vscode.postMessage({ type: 'recert' });
-});
-window.addEventListener('message', (e) => {
-    const m = e.data;
-    if (m?.type === 'recert_result') {
-        const msg = m.passed
-            ? \`✓ \${m.pass_count} tests passed (\${m.total_ms?.toFixed?.(0) ?? '?'} ms)\`
-            : \`⚠ \${m.fail_count} failed: \` + (m.failures || []).map(f => f.name).join(', ');
-        document.getElementById('recert-result').textContent = msg;
-    }
-});
-</script>
-</body></html>`;
-}
-
 function findBackendExe(context: vscode.ExtensionContext): string {
     // Explicit override always wins.
     const cfg = vscode.workspace.getConfiguration('xinsp2');
@@ -1651,7 +1565,7 @@ export function activate(context: vscode.ExtensionContext) {
                 const rsp = await sendCmd('export_project_plugin', { plugin: pname, dest });
                 if (rsp.ok) {
                     const d = rsp.data || {};
-                    const msg = `xInsp2: exported '${pname}' (${d.cert_pass_count} baseline tests passed) to ${d.dest}`;
+                    const msg = `xInsp2: exported '${pname}' to ${d.dest}`;
                     output.appendLine('[xinsp2] ' + msg);
                     const open = await vscode.window.showInformationMessage(msg, 'Reveal');
                     if (open === 'Reveal' && d.dest) {
@@ -1980,66 +1894,6 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // Trigger policy picker — controls how the bus correlates frames from
-    // multiple sources for this project.
-    context.subscriptions.push(
-        vscode.commands.registerCommand('xinsp2.setTriggerPolicy', async () => {
-            if (!currentProjectPath) {
-                vscode.window.showWarningMessage('xInsp2: no project open');
-                return;
-            }
-            type Pol = vscode.QuickPickItem & { id: 'any'|'all_required'|'leader_followers' };
-            const choice = await vscode.window.showQuickPick<Pol>([
-                { id: 'any',              label: 'Any',              description: 'Fire on every emit (default; back-compat)' },
-                { id: 'all_required',     label: 'All required',     description: 'Wait until every listed source has emitted under the same trigger ID' },
-                { id: 'leader_followers', label: 'Leader / followers', description: 'Fire on leader emit; attach latest follower frames' },
-            ], { placeHolder: 'Trigger correlation policy' });
-            if (!choice) return;
-
-            let required: string[] = [];
-            let leader = '';
-            let window_ms = 100;
-
-            if (choice.id === 'all_required' || choice.id === 'leader_followers') {
-                // Get the list of available source instances.
-                const inst = await sendCmd('list_instances');
-                const sources: string[] = (inst?.data?.instances || []).map((i: any) => i.name);
-                if (sources.length === 0) {
-                    vscode.window.showWarningMessage('xInsp2: no instances yet — add some first');
-                    return;
-                }
-                if (choice.id === 'all_required') {
-                    const picks = await vscode.window.showQuickPick(sources,
-                        { placeHolder: 'Select required source instances', canPickMany: true });
-                    if (!picks?.length) return;
-                    required = picks;
-                } else {
-                    const pick = await vscode.window.showQuickPick(sources,
-                        { placeHolder: 'Select the leader source' });
-                    if (!pick) return;
-                    leader = pick;
-                }
-                const winStr = await vscode.window.showInputBox({
-                    prompt: 'Correlation window (ms)',
-                    value: '100',
-                    validateInput: v => /^\d+$/.test(v) ? undefined : 'must be a positive integer',
-                });
-                if (!winStr) return;
-                window_ms = parseInt(winStr, 10);
-            }
-
-            const r = await sendCmd('set_trigger_policy', {
-                policy: choice.id, required, leader, window_ms,
-            });
-            if (r?.ok) {
-                vscode.window.setStatusBarMessage(
-                    `xInsp2: trigger policy → ${choice.label}`, 3000);
-            } else {
-                vscode.window.showErrorMessage(`xInsp2: ${r?.error || 'failed'}`);
-            }
-        })
-    );
-
     // ---- Project Settings webview -------------------------------------
     // One-stop form for everything that lives in project.json. Save
     // writes the file directly + applies live where the backend cares
@@ -2142,7 +1996,6 @@ export function activate(context: vscode.ExtensionContext) {
                     cur.script         = next.script ?? cur.script;
                     cur.auto_respawn   = next.auto_respawn;
                     if (next.watchdog_ms !== undefined) cur.watchdog_ms = next.watchdog_ms;
-                    if (next.trigger_policy) cur.trigger_policy = next.trigger_policy;
                     // Dispatch groups: merge into parallelism (keep dispatch_threads
                     // etc.). No groups → drop the groups/default_group keys (legacy).
                     if (next.parallelism && Array.isArray(next.parallelism.groups) && next.parallelism.groups.length) {
@@ -2181,20 +2034,11 @@ export function activate(context: vscode.ExtensionContext) {
                     if (typeof next.watchdog_ms === 'number') {
                         await sendCmd('set_watchdog_ms', { ms: next.watchdog_ms });
                     }
-                    if (next.trigger_policy?.mode) {
-                        await sendCmd('set_trigger_policy', {
-                            policy:    next.trigger_policy.mode,
-                            required:  next.trigger_policy.required || [],
-                            leader:    next.trigger_policy.leader || '',
-                            window_ms: next.trigger_policy.window_ms ?? 100,
-                        });
-                    }
                     vscode.window.setStatusBarMessage('xInsp2: project settings saved', 3000);
                     settingsPanel?.webview.postMessage({ type: 'saved' });
                 });
             }
             // (Re)render with current state.
-            const tp = pj.trigger_policy || {};
             const par = pj.parallelism || {};
             const state = {
                 name:         pj.name || path.basename(projDir),
@@ -2202,12 +2046,6 @@ export function activate(context: vscode.ExtensionContext) {
                 folder:       projDir,
                 auto_respawn: pj.auto_respawn !== false,    // default true
                 watchdog_ms:  typeof pj.watchdog_ms === 'number' ? pj.watchdog_ms : 0,
-                trigger_policy: {
-                    mode:      tp.mode || 'any',
-                    required:  Array.isArray(tp.required) ? tp.required : [],
-                    leader:    tp.leader || '',
-                    window_ms: typeof tp.window_ms === 'number' ? tp.window_ms : 100,
-                },
                 parallelism: {
                     default_group: typeof par.default_group === 'string' ? par.default_group : '',
                     groups:        Array.isArray(par.groups) ? par.groups : [],
@@ -2238,50 +2076,6 @@ export function activate(context: vscode.ExtensionContext) {
                 treeProvider.setProjectOpen(false);
                 vscode.window.setStatusBarMessage('xInsp2: project closed', 2000);
             }
-        })
-    );
-
-    // Cert drill-down: read cert.json + run recertify, show as a webview.
-    context.subscriptions.push(
-        vscode.commands.registerCommand('xinsp2.showPluginCert', async (treeItem?: any) => {
-            // TreeItem label has the name + optional "  ×N" suffix; strip that.
-            let pluginName = '';
-            if (typeof treeItem === 'string') pluginName = treeItem;
-            else if (treeItem?.label) pluginName = String(treeItem.label).split('  ×')[0];
-            if (!pluginName) {
-                const pick = await vscode.window.showInputBox({ prompt: 'Plugin name' });
-                if (!pick) return;
-                pluginName = pick;
-            }
-            const panel = vscode.window.createWebviewPanel(
-                'xinsp2.pluginCert',
-                `Cert · ${pluginName}`,
-                vscode.ViewColumn.Active,
-                { enableScripts: true, retainContextWhenHidden: true }
-            );
-            const render = async () => {
-                // Find the plugin folder via list_plugins
-                const all = await sendCmd('list_plugins');
-                const p = (all?.data || []).find((x: any) => x.name === pluginName);
-                const folder: string = p?.folder || '';
-                let certJson: any = null;
-                try {
-                    const certPath = path.join(folder, 'cert.json');
-                    if (folder && require('fs').existsSync(certPath)) {
-                        certJson = JSON.parse(require('fs').readFileSync(certPath, 'utf8'));
-                    }
-                } catch {}
-                panel.webview.html = certPanelHtml(pluginName, folder, p, certJson);
-            };
-            panel.webview.onDidReceiveMessage(async (msg: any) => {
-                if (msg?.type === 'recert') {
-                    const r = await sendCmd('recertify_plugin', { name: pluginName });
-                    panel.webview.postMessage({ type: 'recert_result', ...r.data });
-                    await render();
-                    refreshPlugins();
-                }
-            });
-            await render();
         })
     );
 
@@ -2331,24 +2125,6 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.setStatusBarMessage(`xInsp2: renamed to "${newName}"`, 2500);
             } else {
                 vscode.window.showErrorMessage(`Rename failed: ${r?.error || 'unknown'}`);
-            }
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.commands.registerCommand('xinsp2.recertifyPlugin', async (treeItem?: any) => {
-            let pluginName = '';
-            if (typeof treeItem === 'string') pluginName = treeItem;
-            else if (treeItem?.label) pluginName = String(treeItem.label).split('  ×')[0];
-            if (!pluginName) return;
-            const r = await sendCmd('recertify_plugin', { name: pluginName });
-            if (r?.ok) {
-                const msg = r.data?.passed ? `✓ ${pluginName} re-certified` :
-                            `⚠ ${pluginName}: ${r.data?.fail_count || 0} test(s) failed`;
-                vscode.window.showInformationMessage(msg);
-                refreshPlugins();
-            } else {
-                vscode.window.showErrorMessage(`re-cert failed: ${r?.error || 'unknown'}`);
             }
         })
     );
@@ -2743,12 +2519,6 @@ void xi_inspect_entry(int frame) {
                             typeof rsp.data === 'string' ? rsp.data : JSON.stringify(rsp.data)
                         )});
                     }
-                } else if (msg.type === 'request_preview') {
-                    sendCmd('preview_instance', { name: instanceName }).then((rsp: any) => {
-                        if (rsp.ok && rsp.data?.gid) {
-                            previewGidToPanel.set(rsp.data.gid, panel);
-                        }
-                    }).catch(() => {});
                 } else if (msg.type === 'request_process') {
                     // Plugin UI wants to run process() and see results
                     sendCmd('exchange_instance', {

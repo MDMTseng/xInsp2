@@ -151,12 +151,6 @@ async function run() {
             camPanel.webview.onDidReceiveMessage(async (msg) => {
                 if (msg.type === 'exchange' && msg.cmd) {
                     await camExchange(msg.cmd);
-                } else if (msg.type === 'request_preview') {
-                    const r = await sendCmd('preview_instance', { name: 'cam0' }).catch(() => null);
-                    // Register the gid → panel mapping so binary frames route correctly
-                    if (r && r.ok && r.data && r.data.gid && api?.registerPreviewGid) {
-                        api.registerPreviewGid(r.data.gid, camPanel);
-                    }
                 }
             });
             // Register panel so extension routes preview frames to it

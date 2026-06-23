@@ -66,8 +66,8 @@ void xi_inspect_entry(int frame) {
     VAR(tid, t.id_string());
     VAR(timestamp_us, (double)t.timestamp_us());
 
-    auto left  = t.image("synced0/left");
-    auto right = t.image("synced0/right");
+    auto left  = t.image("left");
+    auto right = t.image("right");
 
     VAR(has_left,  !left.empty());
     VAR(has_right, !right.empty());

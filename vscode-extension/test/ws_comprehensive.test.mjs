@@ -63,17 +63,14 @@ test('run produces correct var values (not just ok:true)', async () => {
 // ---------------------------------------------------------------
 // 3. Run without script returns warning (not crash)
 // ---------------------------------------------------------------
-test('run without loaded script returns ok + warning log', async () => {
+test('run without loaded script returns a clean no-script error', async () => {
     await withBackend(async (c) => {
         await c.nextText();
         c.send({ type: 'cmd', id: 1, name: 'run' });
         const rsp = await c.nextNonLog();
-        assert.equal(rsp.ok, true);
-        // Should get a log warning about no script
-        await sleep(300);
-        const logs = c.drainLogs();
-        const warns = logs.filter(l => l.level === 'warn');
-        assert.ok(warns.length > 0, 'should get a warning about no script');
+        // No script loaded → clear error rsp (not a crash, connection stays alive).
+        assert.equal(rsp.ok, false);
+        assert.match(String(rsp.error || ''), /no script/i);
     });
 });
 

@@ -9,7 +9,6 @@ export interface SettingsState {
     folder: string;
     auto_respawn: boolean;
     watchdog_ms: number;
-    trigger_policy: { mode: string; required: string[]; leader: string; window_ms: number };
     sources: string[];
     // Dispatch groups (parallelism.groups). Empty groups = legacy single pool.
     parallelism: {
@@ -30,15 +29,6 @@ export function renderProjectSettingsHtml(s: SettingsState): string {
     const esc = (x: any) => String(x ?? '').replace(/[&<>"']/g, c =>
         ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
     const checked = (b: boolean) => b ? 'checked' : '';
-    const sel = (v: string, want: string) => v === want ? 'selected' : '';
-    const requiredSet = new Set(s.trigger_policy.required || []);
-    const sourcesHtml = (s.sources || []).map((n: string) =>
-        `<label class="check"><input type="checkbox" data-required="${esc(n)}" ${requiredSet.has(n) ? 'checked' : ''}/> ${esc(n)}</label>`
-    ).join('') || '<div class="hint">No instances yet — add some via the + button in Instances view.</div>';
-    const leaderOpts = ['<option value="">(none)</option>']
-        .concat((s.sources || []).map((n: string) =>
-            `<option value="${esc(n)}" ${sel(s.trigger_policy.leader, n)}>${esc(n)}</option>`))
-        .join('');
     // Seed data for the dynamic Parallelism editor (managed in JS).
     const parJson = JSON.stringify(s.parallelism || { default_group: '', groups: [] });
     const sourcesJson = JSON.stringify(s.sources || []);
@@ -66,7 +56,6 @@ export function renderProjectSettingsHtml(s: SettingsState): string {
     button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
     .saved { color: var(--vscode-charts-green); margin-left: 8px; opacity: 0; transition: opacity 0.3s; }
     .saved.show { opacity: 1; }
-    .policy-deps { margin-top: 8px; padding-left: 20px; }
     .tc-row { display: grid; grid-template-columns: 18px 150px 1fr auto; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid var(--vscode-panel-border); }
     .tc-row:first-child { border-top: none; }
     .tc-badge { font-size: 1.1em; line-height: 1; }
@@ -110,30 +99,6 @@ export function renderProjectSettingsHtml(s: SettingsState): string {
     <label class="check"><input id="auto_respawn" type="checkbox" ${checked(s.auto_respawn)}/> Auto-respawn backend on crash (rate-limited 5/min)</label>
     <label class="field"><span>Watchdog (ms)</span><input id="watchdog_ms" type="number" min="0" max="600000" value="${esc(s.watchdog_ms)}"/></label>
     <div class="hint">0 = disabled. When non-zero, every <code>inspect()</code> call has this many ms of wall-clock budget; runaway scripts are terminated.</div>
-</section>
-
-<section>
-    <h2>Trigger Bus Policy</h2>
-    <label class="field"><span>Mode</span>
-      <select id="tp_mode">
-        <option value="any" ${sel(s.trigger_policy.mode, 'any')}>Any — fire on every emit (default)</option>
-        <option value="all_required" ${sel(s.trigger_policy.mode, 'all_required')}>All required — wait for every listed source</option>
-        <option value="leader_followers" ${sel(s.trigger_policy.mode, 'leader_followers')}>Leader / followers — leader drives, followers attached best-effort</option>
-      </select>
-    </label>
-    <div class="policy-deps">
-      <div><b>Required sources</b> (used by All-required and as followers under Leader/followers):</div>
-      <div class="checks">${sourcesHtml}</div>
-    </div>
-    <div class="policy-deps">
-      <label class="field"><span>Leader source</span>
-        <select id="tp_leader">${leaderOpts}</select>
-      </label>
-      <label class="field"><span>Window (ms)</span>
-        <input id="tp_window_ms" type="number" min="1" max="60000" value="${esc(s.trigger_policy.window_ms)}"/>
-      </label>
-    </div>
-    <div class="hint">Window = how long to keep partial events around before dropping.</div>
 </section>
 
 <section>
@@ -295,8 +260,6 @@ function renderToolchain(h) {
 vscode.postMessage({ type: 'tc_refresh' });
 
 function collect() {
-    const reqs = Array.from(document.querySelectorAll('[data-required]'))
-        .filter(e => e.checked).map(e => e.dataset.required);
     // Parallelism: only emit if at least one named group; drop empty-named groups.
     const groups = par.groups.filter(g => (g.name || '').trim());
     const parallelism = groups.length ? { default_group: par.default_group || '', groups } : null;
@@ -306,12 +269,6 @@ function collect() {
         script:       document.getElementById('script').value.trim(),
         auto_respawn: document.getElementById('auto_respawn').checked,
         watchdog_ms:  parseInt(document.getElementById('watchdog_ms').value || '0', 10),
-        trigger_policy: {
-            mode:      document.getElementById('tp_mode').value,
-            required:  reqs,
-            leader:    document.getElementById('tp_leader').value,
-            window_ms: parseInt(document.getElementById('tp_window_ms').value || '100', 10),
-        },
         parallelism,
         instance_groups: inst,
         runtime: {
