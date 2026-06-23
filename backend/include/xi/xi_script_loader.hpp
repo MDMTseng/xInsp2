@@ -51,6 +51,7 @@ struct LoadedScript {
     using ResetFn            = void (*)();
     using ListInstancesFn    = int  (*)(char* buf, int buflen);
     using SetInstanceDefFn   = int  (*)(const char* name, const char* def_json);
+    using GetInstanceDefFn   = int  (*)(const char* name, char* buf, int buflen);
     using ExchangeInstanceFn = int  (*)(const char* name, const char* cmd_json, char* rsp, int rsplen);
     using GetStateFn         = int  (*)(char* buf, int buflen);
     using SetStateFn         = int  (*)(const char* json);
@@ -71,6 +72,7 @@ struct LoadedScript {
     ResetFn            reset            = nullptr;
     ListInstancesFn    list_instances   = nullptr;
     SetInstanceDefFn   set_instance_def = nullptr;
+    GetInstanceDefFn   get_instance_def = nullptr;
     ExchangeInstanceFn exchange_instance = nullptr;
     GetStateFn         get_state         = nullptr;
     SetStateFn         set_state         = nullptr;
@@ -125,6 +127,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.reset            = reinterpret_cast<LoadedScript::ResetFn>(GetProcAddress(h, "xi_script_reset"));
     out.list_instances   = reinterpret_cast<LoadedScript::ListInstancesFn>(GetProcAddress(h, "xi_script_list_instances"));
     out.set_instance_def = reinterpret_cast<LoadedScript::SetInstanceDefFn>(GetProcAddress(h, "xi_script_set_instance_def"));
+    out.get_instance_def = reinterpret_cast<LoadedScript::GetInstanceDefFn>(GetProcAddress(h, "xi_script_get_instance_def"));
     out.exchange_instance = reinterpret_cast<LoadedScript::ExchangeInstanceFn>(GetProcAddress(h, "xi_script_exchange_instance"));
     out.get_state         = reinterpret_cast<LoadedScript::GetStateFn>(GetProcAddress(h, "xi_script_get_state"));
     out.set_state         = reinterpret_cast<LoadedScript::SetStateFn>(GetProcAddress(h, "xi_script_set_state"));

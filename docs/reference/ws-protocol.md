@@ -520,6 +520,16 @@ here — there is a single host ImagePool.
 ### `set_instance_def`
 `args: { "name": "cam0", "def": { ... } }` → `ok: true`
 
+### `get_instance_def`
+Symmetric read of `set_instance_def` — returns an instance's full def JSON.
+`args: { "name": "cam0" }` → `data: { ... }` (the def; `ok: false` if no such
+instance). The def includes any assets the plugin round-trips through
+`get_def`/`set_def` — e.g. a matcher's per-template `image_png_b64` — so
+`get_instance_def` → `set_instance_def` is an exact round-trip, and looping it
+over `list_instances` snapshots a whole project (the basis for portable config
+bundles). Resolves backend (plugin-manager) instances first, then script-loaded
+instances.
+
 ### `exchange_instance`
 Generic passthrough to an instance's `exchange()` method — used by plugin
 UIs that ship their own command vocabulary.

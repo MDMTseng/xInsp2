@@ -2526,6 +2526,34 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 send_rsp_err(srv, id, "instance not found: " + *iname);
             }
         }
+    } else if (name == "get_instance_def") {
+        // Symmetric read of set_instance_def: returns the instance's full def
+        // JSON (incl. any assets the plugin round-trips, e.g. image_png_b64), so
+        // a host can snapshot an instance without scraping exchange:get_status.
+        // Loop over list_instances to snapshot a whole project (the foundation
+        // for portable product/instrument config bundles).
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        // Backend's InstanceRegistry first (plugin-manager instances).
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        if (inst) {
+            std::string def = inst->get_def();
+            send_rsp_ok(srv, id, def.empty() ? "{}" : def);
+        } else {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.get_instance_def) {
+                std::vector<char> buf(256 * 1024);
+                int n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                if (n < 0 && n != -1) {   // -needed → grow + retry (-1 = not found)
+                    buf.resize((size_t)(-(int64_t)n) + 1024);
+                    n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                }
+                if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
+                else        send_rsp_err(srv, id, "instance not found: " + *iname);
+            } else {
+                send_rsp_err(srv, id, "instance not found: " + *iname);
+            }
+        }
     } else if (name == "exchange_instance") {
         // Crash-blame: capture which instance/plugin we're about to talk to.
         if (auto in = xp::get_string_field(parsed->args_json, "name")) {

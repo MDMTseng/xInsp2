@@ -163,6 +163,15 @@ error, then `FreeLibrary`'d):
    warning). Plugins built with `XI_PLUGIN_IMPL` against the host's vendored
    yyjson pass automatically. See `internals/data-layer.md`.
 
+> **Migration note (v6).** "Rebuild all plugins" also covers your **native
+> tests**: the plugin certification suite (`xi/xi_baseline.hpp` + `xi/xi_cert.hpp`
+> — `xi::baseline::load_symbols` / `run_all`, `xi::cert::certify`) was removed
+> with the cert gate. A test that used it must resolve the plugin's C-ABI exports
+> directly: `LoadLibrary` the DLL, then `GetProcAddress` for `xi_plugin_create` /
+> `xi_plugin_destroy` / `xi_plugin_process` (+ `get_def`/`set_def`/`exchange` as
+> needed), and assert behaviour with `xi/xi_test.hpp` (which survives). See
+> `sdk/examples/counter/tests/test_counter.cpp` for the pattern.
+
 ---
 
 ## 5. Record at the boundary

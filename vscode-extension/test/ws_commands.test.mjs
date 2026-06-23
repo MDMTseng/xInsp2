@@ -143,6 +143,48 @@ test('set_instance_def updates instance definition', { timeout: 10000 }, async (
 });
 
 // ---------------------------------------------------------------
+// 7b. get_instance_def — symmetric read; set→get→mutate→restore round-trip
+// ---------------------------------------------------------------
+test('get_instance_def round-trips set_instance_def', { timeout: 10000 }, async () => {
+    await withBackend(async (c) => {
+        await c.nextText();
+
+        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        const projDir = resolve(tmpdir(), `xi_getdef_${Date.now()}`);
+        c.send({ type: 'cmd', id: 2, name: 'create_project',
+                 args: { folder: projDir, name: 'test_getdef' } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        c.send({ type: 'cmd', id: 3, name: 'create_instance',
+                 args: { name: 'cam_g', plugin: 'mock_camera' } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        // Set a known def, then read it straight back.
+        c.send({ type: 'cmd', id: 4, name: 'set_instance_def',
+                 args: { name: 'cam_g', def: { width: 800, height: 600 } } });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        c.send({ type: 'cmd', id: 5, name: 'get_instance_def', args: { name: 'cam_g' } });
+        const g1 = await c.nextNonLog();
+        assert.equal(g1.ok, true, 'get_instance_def ok');
+        const def1 = typeof g1.data === 'string' ? JSON.parse(g1.data) : g1.data;
+        assert.equal(def1.width, 800, 'read-back width matches what was set');
+
+        // Round-trip: feed the read def straight back via set_instance_def.
+        c.send({ type: 'cmd', id: 6, name: 'set_instance_def',
+                 args: { name: 'cam_g', def: def1 } });
+        assert.equal((await c.nextNonLog()).ok, true, 'def round-trips through set_instance_def');
+
+        // Unknown instance → ok:false.
+        c.send({ type: 'cmd', id: 7, name: 'get_instance_def', args: { name: 'nope' } });
+        const g2 = await c.nextNonLog();
+        assert.equal(g2.ok, false, 'unknown instance returns ok:false');
+    });
+});
+
+// ---------------------------------------------------------------
 // 8. save_project / load_project round-trip
 // ---------------------------------------------------------------
 test('save_project then load_project preserves instances and params', { timeout: 10000 }, async () => {
