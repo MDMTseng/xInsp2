@@ -69,39 +69,6 @@ int main() {
         CHECK(a == CAP);
     }
 
-    // RACE-U2: the cap event carries forward the prior BackendExit forensics
-    // (module/report), exactly as fe_main.cpp builds `stuck` from `ev`.
-    {
-        SafeStateEvent ev;
-        ev.reason          = SafeStateReason::BackendExit;
-        ev.faulting_module = "raw_thread_crash.dll";
-        ev.last_phase      = "inspect";
-        ev.report_path     = "C:\\tmp\\xinsp-backend-1-2.json";
-
-        SafeStateEvent stuck;
-        stuck.reason          = SafeStateReason::RespawnLimitExceeded;
-        stuck.exception_name  = ev.exception_name;
-        stuck.faulting_module = ev.faulting_module;
-        stuck.report_path     = ev.report_path;
-
-        CHECK(stuck.reason == SafeStateReason::RespawnLimitExceeded);
-        CHECK(stuck.faulting_module == "raw_thread_crash.dll");
-        CHECK(stuck.report_path == ev.report_path);
-        // The cap line should still name the module an operator must fix.
-        std::string s;
-        {
-            std::FILE* f = std::tmpfile();
-            xi::LoggingSafeStateSink sink(f);
-            sink.enter_safe_state(stuck);
-            std::fflush(f); std::rewind(f);
-            char buf[1024]; size_t n;
-            while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) s.append(buf, n);
-            std::fclose(f);
-        }
-        CHECK(s.find("reason=RespawnLimitExceeded") != std::string::npos);
-        CHECK(s.find("module=raw_thread_crash.dll") != std::string::npos);
-    }
-
     if (g_failures == 0) {
         std::printf("ALL TESTS PASSED\n");
         return 0;

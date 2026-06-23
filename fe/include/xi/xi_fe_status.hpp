@@ -32,12 +32,14 @@ namespace xi {
 
 // The FE's live state snapshot. Mutated in place by the supervisor at each
 // transition, then render()'d to the status file. Field semantics mirror the
-// supervisor's own variables (in_safe_state, RespawnTracker.consecutive, etc.).
+// supervisor's own variables (state, RespawnTracker.consecutive, etc.).
 struct FeStatus {
-    // "starting" (spawned, not yet serving) | "healthy" (serving, line clear)
-    // | "safe" (line driven safe; recovering) | "stopped" (FE shutting down).
+    // "starting" (spawned, not yet serving) | "healthy" (serving)
+    // | "down" (backend died; recovering, or latched if the respawn cap tripped)
+    // | "stopped" (FE shutting down). Driving the production line to a safe state
+    // on a "down" transition is a comms plugin's own sidecar, not the FE.
     std::string state        = "starting";
-    std::string reason;              // safe-state reason while not healthy, else ""
+    std::string reason;              // death/classification reason while not healthy, else ""
     bool        latched      = false;// RespawnLimitExceeded -> awaiting manual restart
     int         consecutive  = 0;    // consecutive BE failures since last recovery
     int         respawn_max  = 0;    // the cap

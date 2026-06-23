@@ -55,6 +55,15 @@ target_include_directories(xi_core INTERFACE
 )
 # xi_record.hpp is backed by yyjson — every xi_core user links it.
 target_link_libraries(xi_core INTERFACE yyjson)
+
+# xi_fe — the FE-supervisor header surface (crash history/report, fe_status,
+# respawn policy, safe-state crash model). Lives in a SEPARATE include root
+# (fe/include) so it is NOT on xi_core's path: the backend/runner binaries and
+# the runtime script/plugin cl-compiler can't reach FE headers, which makes the
+# core/supervisor split compile-enforced, not just cosmetic. Only the FE binary
+# and the FE unit tests link this. yyjson comes in via the target's own link.
+add_library(xi_fe INTERFACE)
+target_include_directories(xi_fe INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../fe/include)
 # xi.hpp / xi_plugin_support.hpp pull in <opencv2/opencv.hpp>, so every
 # target that uses xi_core needs OpenCV's include + libs visible.
 # OpenCV is configured immediately below.
@@ -186,34 +195,21 @@ add_executable(test_sha256 tests/test_sha256.cpp)
 target_link_libraries(test_sha256 PRIVATE xi_core)
 add_test(NAME sha256 COMMAND test_sha256)
 
-# SafeStateSink unit (FE safe-state seam). Header-only under test; links xi_core
-# only for the include path. See docs/design/fe-be-split-test-plan.md §1.
-add_executable(test_safe_state tests/test_safe_state.cpp)
-target_link_libraries(test_safe_state PRIVATE xi_core)
-add_test(NAME safe_state COMMAND test_safe_state)
-
 # QA team-loop units (FE/BE split hardening). See docs/design/fe-test-rounds/.
 # qa_fault/qa_race pin the respawn cap + sliding-window math; qa_edge pins the
 # crash-report parser (xi_crash_report.hpp) against crafted fixtures.
 add_executable(test_qa_fault tests/test_qa_fault.cpp)
-target_link_libraries(test_qa_fault PRIVATE xi_core)
+target_link_libraries(test_qa_fault PRIVATE xi_core xi_fe)
 add_test(NAME qa_fault COMMAND test_qa_fault)
 
 add_executable(test_qa_race tests/test_qa_race.cpp)
-target_link_libraries(test_qa_race PRIVATE xi_core)
+target_link_libraries(test_qa_race PRIVATE xi_core xi_fe)
 add_test(NAME qa_race COMMAND test_qa_race)
 
 add_executable(test_qa_edge tests/test_qa_edge.cpp)
-target_link_libraries(test_qa_edge PRIVATE xi_core)
+target_link_libraries(test_qa_edge PRIVATE xi_core xi_fe)
 add_test(NAME qa_edge COMMAND test_qa_edge)
 
-# Phase G (#92) stress/fuzz: hammers the respawn-cap + safe-state core with
-# degenerate caps, the exact reset boundary, recover-then-recur cycles, a
-# 200k-step equivalence fuzz, and high-volume emission. See docs/design/
-# fe-be-split-test-plan.md "Phase G".
-add_executable(test_qa_stress tests/test_qa_stress.cpp)
-target_link_libraries(test_qa_stress PRIVATE xi_core)
-add_test(NAME qa_stress COMMAND test_qa_stress)
 
 add_executable(xinsp_backend
     src/service_main.cpp
@@ -252,7 +248,9 @@ target_compile_definitions(xinsp_runner PRIVATE
 # Win32 process/socket APIs, so it carries no accelerator-DLL dependency and is
 # excluded from _xinsp_deploy_dlls below.
 add_executable(xinsp_fe src/fe_main.cpp)
-target_link_libraries(xinsp_fe PRIVATE yyjson)
+target_link_libraries(xinsp_fe PRIVATE yyjson xi_fe)
+# backend/include for the shared core bits fe_main still uses (xi_clock);
+# vendor for yyjson.h; xi_fe brings fe/include for the supervisor headers.
 target_include_directories(xinsp_fe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
@@ -264,9 +262,9 @@ target_compile_definitions(xinsp_fe PRIVATE
     XINSP2_VERSION="${XINSP2_VERSION}"
     XINSP2_COMMIT="${XINSP2_COMMIT}")
 
-# (xinsp-comms gateway removed — PLC I/O is now a plugin concern; the FE's
-# safe-state sink + host->set_safe_state cover the BE-crash case. See
-# docs/design/comms-gateway.md.)
+# (xinsp-comms gateway removed — PLC I/O is now a plugin concern; the BE-crash
+# line-safe case is handled by a comms plugin's own sidecar process, not the
+# core/FE. See docs/internals/comms-sidecar.md.)
 
 # JPEG-encoder benchmark — quantifies the IPP/OpenCV/stb dispatch.
 # Not run as a test (no pass/fail); invoke manually for numbers.
