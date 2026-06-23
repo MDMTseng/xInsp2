@@ -2,8 +2,10 @@
 
 Process isolation was removed (2026-05): a hard plugin crash takes the whole
 backend down. xinsp-fe.exe is the replacement safety net — it spawns/monitors
-the backend, drives the line to a safe state the instant the backend dies, and
-respawns it (rate-limited). This driver proves that loop end-to-end.
+the backend, records crash forensics the instant the backend dies, and respawns
+it (rate-limited) until a consecutive-failure cap latches the line `down`. (The
+old PLC "safe state" delivery was removed 2026-06 — it's now a comms plugin's
+own sidecar; the FE just supervises.) This driver proves that loop end-to-end.
 
 What it does
 ------------
@@ -11,13 +13,14 @@ What it does
    `--autostart-fps` so the backend self-opens/compiles/starts headlessly.
 2. The "crasher" instance is configured `armed: true`, so the backend's first
    inspect spawns a raw thread that null-derefs — the backend dies repeatedly.
-3. The FE detects each death, calls `enter_safe_state`, reads the crash report
-   from the backend log, and respawns — until it hits the 5-in-60s cap, then
-   stays in safe state and exits on its own (rc=2).
-4. The driver waits for the FE to exit, then asserts from the FE log:
-     - >=1 `ENTER SAFE STATE reason=BackendExit` with a crash module + phase,
-     - >=1 `respawning backend`,
-     - `respawn limit ... exceeded` + `ENTER SAFE STATE reason=RespawnLimitExceeded`,
+3. The FE detects each death, appends a structured crash-history record (with
+   the crash report parsed from the backend log), and respawns — until it hits
+   the 5-in-60s cap, then latches `down` and exits on its own (rc=2).
+4. The driver waits for the FE to exit, then asserts:
+     - a `respawning backend` line (death detected -> respawn),
+     - >=1 crash-history record with reason=="BackendExit" carrying forensics,
+     - `respawn limit ... exceeded` ("staying down") + fe-status latched with
+       reason=="RespawnLimitExceeded",
      - the FE exited (rc=2) and left no backend listening on the port (no orphan).
 
 Acceptance (mechanical): all of the above hold -> PASS.
@@ -106,26 +109,17 @@ def main() -> int:
 
     failures: list[str] = []
 
-    enter_backend_exit = [ln for ln in log.splitlines()
-                          if "ENTER SAFE STATE" in ln and "reason=BackendExit" in ln]
-    if not enter_backend_exit:
-        failures.append("no 'ENTER SAFE STATE reason=BackendExit' line — death not detected / safe-state not driven")
-    else:
-        # At least one should carry crash forensics (module + phase) parsed from
-        # the backend's crash report.
-        has_forensics = any(("module=" in ln and "module=-" not in ln) or
-                            ("phase=" in ln and "phase=-" not in ln)
-                            for ln in enter_backend_exit)
-        if not has_forensics:
-            failures.append("safe-state lines carried no crash forensics (module/phase) from the report")
-
+    # Death detection + respawn: the FE no longer logs "ENTER SAFE STATE"; a
+    # detected death that respawns shows up as a 'respawning backend' line, and
+    # the authoritative per-death record lands in crash-history.jsonl (asserted
+    # below, including the crash forensics that used to ride the stderr line).
     if not any("respawning backend" in ln for ln in log.splitlines()):
-        failures.append("FE never logged a respawn")
+        failures.append("FE never logged a respawn — death not detected / not respawned")
 
     if "respawn limit" not in log or "exceeded" not in log:
         failures.append("FE did not hit/report the respawn cap")
-    if "reason=RespawnLimitExceeded" not in log:
-        failures.append("no 'ENTER SAFE STATE reason=RespawnLimitExceeded' — FE didn't stay safe at cap")
+    if "staying down" not in log:
+        failures.append("FE did not log the 'staying down' cap line — didn't latch down at the cap")
 
     if rc is None:
         failures.append("FE did not exit on its own after the cap")
@@ -156,6 +150,14 @@ def main() -> int:
                 failures.append(f"consecutive counts not 1..N: {consec}")
             if not any(r.get("cap_hit") for r in recs):
                 failures.append("no record marked cap_hit=true (cap should have tripped)")
+            # Every death is a BackendExit here; at least one must carry the crash
+            # forensics (module/phase) parsed from the report — this used to be
+            # asserted on the (now-removed) stderr safe-state line.
+            if not all(r.get("reason") == "BackendExit" for r in recs):
+                failures.append(f"not all records are reason=BackendExit: {[r.get('reason') for r in recs]}")
+            has_forensics = any(r.get("module") or r.get("phase") for r in recs)
+            if not has_forensics:
+                failures.append("no crash-history record carried forensics (module/phase) from the report")
             last = recs[-1]
             if last.get("reason") != "BackendExit" or last.get("exception") != "ACCESS_VIOLATION":
                 failures.append(f"last record missing expected forensics: {last}")
@@ -163,7 +165,7 @@ def main() -> int:
                 failures.append(f"record missing minidump path: {last.get('dump')!r}")
 
     # Status channel: the FE rewrites fe-status.json on every transition. After the
-    # cap, it should reflect a latched safe state with the death's forensics — the
+    # cap, it should reflect a latched DOWN state with the death's forensics — the
     # UI reads THIS instead of inferring "down" from a WS disconnect.
     if not STATUS_FILE.exists():
         failures.append(f"no fe-status.json written ({STATUS_FILE})")
@@ -171,7 +173,9 @@ def main() -> int:
         try:
             st = json.loads(STATUS_FILE.read_text(encoding="utf-8", errors="ignore"))
             print(f"---- fe-status.json ----\n  {json.dumps(st)}")
-            # End state after the cap: stopped (the FE exits) or safe, but latched.
+            # End state after the cap: "stopped" (the FE exits) or "down", but latched.
+            if st.get("state") not in ("stopped", "down"):
+                failures.append(f"status state not stopped/down after cap: {st.get('state')!r}")
             if not st.get("latched"):
                 failures.append(f"status not latched after cap: {st}")
             if st.get("reason") != "RespawnLimitExceeded":
@@ -196,8 +200,8 @@ def main() -> int:
             print(f"  - {f}")
     else:
         print("VERDICT: PASS")
-        print("  backend died repeatedly -> FE drove safe-state with crash")
-        print("  forensics, respawned, hit the cap, stayed safe, no orphan.")
+        print("  backend died repeatedly -> FE recorded crash forensics, respawned,")
+        print("  hit the cap, latched down, exited rc=2, no orphan.")
     return 1 if failures else 0
 
 

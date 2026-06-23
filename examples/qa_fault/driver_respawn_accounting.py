@@ -1,24 +1,26 @@
 """qa_fault — exact respawn-count accounting at the cap (safety props SP2/SP6/SP1).
 
 fe_supervisor/driver.py (FE-E1) proves the crash-storm loop *qualitatively*
-(>=1 ENTER, >=1 respawn, a cap, no orphan). This driver pins the EXACT counts,
-which the safety plan calls out as SP2: safe-state is driven on EVERY death,
-including the cap one.
+(>=1 respawn, a cap, no orphan). This driver pins the EXACT counts, which the
+safety plan calls out as SP2: a death is RECORDED on EVERY death, including the
+cap one. (The old PLC "safe state" lines were removed 2026-06; the authoritative
+per-death ledger is now crash-history.jsonl, and the cap is the 'staying down'
+stderr line + the cap_hit record.)
 
 With the FE defaults (respawn_max=5, window=60s) and an always-crashing backend,
 the supervisor loop produces a deterministic ledger:
 
-    death 1..5 : ENTER(BackendExit) -> respawns.size 0..4 (<5) -> respawning N/5
-    death 6    : ENTER(BackendExit) -> respawns.size==5      -> RespawnLimitExceeded, exit rc=2
+    death 1..5 : BackendExit record -> respawns.size 0..4 (<5) -> respawning N/5
+    death 6    : BackendExit record (cap_hit) -> staying down, exit rc=2
 
-so:  #ENTER(BackendExit) == respawn_max + 1   (== 6)
-     #RespawnLimitExceeded == 1
-     #respawning            == respawn_max     (== 5)
-     and NO 'respawning' line appears after the RespawnLimitExceeded (SP6).
+so:  #crash-history records (BackendExit) == respawn_max + 1   (== 6)
+     #cap_hit records                     == 1
+     #respawning                          == respawn_max       (== 5)
+     and NO 'respawning' line appears after the 'staying down' cap line (SP6).
 
-Asserts all of the above, plus SP1 (each ENTER precedes its respawn) and the
-no-orphan post-check. Uses storm_project (armed raw_thread_crash) on a private
-port; the FE self-exits at the cap so we just wait for it.
+Asserts all of the above, plus SP1 (a death is recorded before its respawn) and
+the no-orphan post-check. Uses storm_project (armed raw_thread_crash) on a
+private port; the FE self-exits at the cap so we just wait for it.
 
 Run from anywhere:  python driver_respawn_accounting.py
 
@@ -26,6 +28,7 @@ TODO(linux): xinsp-fe is Windows-only today. SKIPs on non-nt.
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -41,6 +44,7 @@ STORM_PROJECT = ROOT / "storm_project"
 PORT = 7875
 FE_LOG = ROOT / "fe_accounting.log"
 BE_LOG = ROOT / "be_accounting.log"
+CRASH_HISTORY = ROOT / "crash-history.jsonl"   # default lands next to --be-log
 RESPAWN_MAX = 5          # the FE default (fe_main.cpp FeConfig::respawn_max)
 MAX_WAIT_S = 180.0       # cold plugin compile on each of the N backend starts
 
@@ -62,6 +66,8 @@ def main() -> int:
                  f"build it: cmake --build backend/build --config Release --target xinsp_fe")
     if port_open():
         sys.exit(f"FAIL: something already listening on :{PORT}; pick a free port")
+
+    CRASH_HISTORY.unlink(missing_ok=True)
 
     fe_log = open(FE_LOG, "wb")
     proc = subprocess.Popen(
@@ -96,38 +102,57 @@ def main() -> int:
 
     failures: list[str] = []
 
-    enter_idx = [i for i, ln in enumerate(lines)
-                 if "ENTER SAFE STATE" in ln and "reason=BackendExit" in ln]
-    cap_idx = [i for i, ln in enumerate(lines)
-               if "ENTER SAFE STATE" in ln and "reason=RespawnLimitExceeded" in ln]
+    # The authoritative per-death ledger is crash-history.jsonl.
+    recs = []
+    if CRASH_HISTORY.exists():
+        for ln in CRASH_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines():
+            ln = ln.strip()
+            if ln:
+                try:
+                    recs.append(json.loads(ln))
+                except json.JSONDecodeError as e:
+                    failures.append(f"crash-history line is not valid JSON: {e}")
+    else:
+        failures.append(f"no crash-history.jsonl written ({CRASH_HISTORY})")
+
+    backend_exits = [r for r in recs if r.get("reason") == "BackendExit"]
+    cap_hits = [r for r in recs if r.get("cap_hit")]
+    cap_idx = [i for i, ln in enumerate(lines) if "staying down" in ln]
     respawn_idx = [i for i, ln in enumerate(lines) if "respawning backend" in ln]
 
-    n_deaths = len(enter_idx)
-    print(f"counts: BackendExit ENTER={n_deaths}  RespawnLimitExceeded={len(cap_idx)}  "
-          f"respawning={len(respawn_idx)}")
+    n_deaths = len(backend_exits)
+    print(f"counts: BackendExit records={n_deaths}  cap_hit={len(cap_hits)}  "
+          f"staying-down lines={len(cap_idx)}  respawning={len(respawn_idx)}")
 
-    # SP2: one safe-state per death, and the deterministic ledger above.
+    # SP2: one death record per death, and the deterministic ledger above.
     expected_deaths = RESPAWN_MAX + 1
     if n_deaths != expected_deaths:
-        failures.append(f"expected {expected_deaths} 'ENTER SAFE STATE reason=BackendExit' "
+        failures.append(f"expected {expected_deaths} BackendExit crash-history records "
                         f"(respawn_max+1), got {n_deaths}")
+    # consecutive must climb 1..N over the run.
+    consec = [r.get("consecutive") for r in recs]
+    if consec != list(range(1, len(recs) + 1)):
+        failures.append(f"consecutive counts not 1..N: {consec}")
+    if len(cap_hits) != 1:
+        failures.append(f"expected exactly 1 cap_hit record, got {len(cap_hits)}")
+    elif recs and not recs[-1].get("cap_hit"):
+        failures.append("cap_hit is not the LAST record — cap should trip on the final death")
     if len(cap_idx) != 1:
-        failures.append(f"expected exactly 1 'reason=RespawnLimitExceeded', got {len(cap_idx)}")
+        failures.append(f"expected exactly 1 'staying down' cap line, got {len(cap_idx)}")
     if len(respawn_idx) != RESPAWN_MAX:
         failures.append(f"expected exactly {RESPAWN_MAX} 'respawning backend' lines, "
                         f"got {len(respawn_idx)}")
 
-    # SP1: each respawn is preceded by an ENTER (the first ENTER precedes the
-    # first respawn; counts already pin the rest).
-    if enter_idx and respawn_idx and not (min(enter_idx) < min(respawn_idx)):
-        failures.append("SP1 violated: 'respawning' appears before the first 'ENTER SAFE STATE'")
+    # SP1: a death is recorded before any respawn (the record drives the respawn).
+    if respawn_idx and not backend_exits:
+        failures.append("SP1 violated: a 'respawning' line with no death recorded")
 
-    # SP6: after the cap, the FE stays safe — no further respawn attempts.
+    # SP6: after the cap, the FE stays down — no further respawn attempts.
     if cap_idx:
         cap_line = cap_idx[0]
         if any(r > cap_line for r in respawn_idx):
             failures.append("SP6 violated: a 'respawning backend' line appears AFTER "
-                            "RespawnLimitExceeded — FE is spinning, not staying safe")
+                            "'staying down' — FE is spinning, not staying down")
 
     if rc is None:
         failures.append("FE did not exit at the cap")
@@ -145,8 +170,8 @@ def main() -> int:
             print(f"  - {f}")
     else:
         print("VERDICT: PASS")
-        print(f"  exact ledger: {expected_deaths} BackendExit ENTERs + 1 "
-              f"RespawnLimitExceeded + {RESPAWN_MAX} respawns,")
+        print(f"  exact ledger: {expected_deaths} BackendExit records (1 cap_hit) + "
+              f"{RESPAWN_MAX} respawns,")
         print("  no spin past the cap (SP6), no orphan.")
     return 1 if failures else 0
 

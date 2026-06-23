@@ -2,5 +2,11 @@
   "name": "qa_fault_storm",
   "script": "inspect.cpp",
   "params": [],
-  "instances": []
+  "instances": [],
+  "plugins": {
+    "raw_thread_crash": {
+      "path": "raw_thread_crash",
+      "compile": true
+    }
+  }
 }

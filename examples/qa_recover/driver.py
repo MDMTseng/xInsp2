@@ -1,10 +1,12 @@
 """qa_recover — FE supervisor recover-and-clear regression (Phase G, #92).
 
 fe_supervisor proves the FE's *give-up* path: a backend that crashes forever ->
-safe-state -> respawn -> hit the cap -> stay safe. This proves the *happy exit*
-the cap path can't: a backend that crashes a FEW times and then RECOVERS must
-have its safe state CLEARED, and the FE must NOT hit the cap (test plan FE-E5 /
-safety property SP4).
+respawn -> hit the cap -> latch down. This proves the *happy exit* the cap path
+can't: a backend that crashes a FEW times and then RECOVERS must heal back to a
+"healthy" (un-latched) state, and the FE must NOT hit the cap (test plan FE-E5 /
+safety property SP4). (The old PLC "safe state" lines were removed 2026-06; the
+FE now just supervises — the recover transition shows up as fe-status returning
+to state=="healthy" with latched==false and no cap_hit record.)
 
 What it does
 ------------
@@ -13,13 +15,15 @@ What it does
    first `crash_count` (2) starts, counting in that file (which survives the
    process dying), then returns normally forever.
 2. Launches `xinsp-fe.exe` on this project with `--autostart-fps`.
-3. The backend crashes twice -> FE drives BackendExit safe-state + respawns each
-   time. The 3rd backend instance is healthy -> FE logs CLEAR SAFE STATE.
-4. Asserts from the FE log + state:
-     - >=1 `ENTER SAFE STATE reason=BackendExit` (death detected, line driven safe),
-     - >=1 `respawning backend`,
-     - `CLEAR SAFE STATE` present (the recover transition — the whole point),
-     - NO `RespawnLimitExceeded` (recovered before the cap),
+3. The backend crashes twice -> FE records each death + respawns. The 3rd backend
+   instance is healthy -> FE returns fe-status to state=="healthy".
+4. Asserts from the FE log + crash-history.jsonl + fe-status.json:
+     - >=1 crash-history record reason=="BackendExit" (death detected + recorded),
+     - >=1 `respawning backend` stderr line,
+     - a `backend healthy` line AFTER a `respawning backend` line (the recover —
+       the whole point) and fe-status state=="healthy", latched==false,
+     - NO `staying down` / RespawnLimitExceeded and no cap_hit record (recovered
+       before the cap),
      - the marker counted EXACTLY `crash_count` crashes,
      - the backend is up at the end and the FE is still running (didn't give up).
 5. Stops the FE and asserts no orphan.
@@ -30,6 +34,7 @@ TODO(linux): xinsp-fe is Windows-only today. Skips on non-nt.
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -46,7 +51,21 @@ PORT = 7861
 CRASH_COUNT = 2                       # must match instances/healer/instance.json
 FE_LOG = ROOT / "fe.log"
 BE_LOG = ROOT / "be.log"
+CRASH_HISTORY = ROOT / "crash-history.jsonl"   # default lands next to --be-log
+STATUS_FILE = ROOT / "fe-status.json"          # default lands next to --be-log
 MAX_WAIT_S = 120.0
+
+
+def recovered_in_log(lines: list[str], min_respawns: int = CRASH_COUNT) -> bool:
+    """True once all expected crashes have happened (>= min_respawns 'respawning
+    backend' lines) AND a 'backend healthy' line appears AFTER the LAST respawn —
+    i.e. the final respawned instance came back up and stayed up (the recover
+    transition that used to be logged as CLEAR SAFE STATE). Using the LAST respawn
+    (not the first) avoids a false positive from a healthy blip BETWEEN crashes."""
+    respawns = [i for i, ln in enumerate(lines) if "respawning backend" in ln]
+    if len(respawns) < min_respawns:
+        return False
+    return any("backend healthy" in ln for ln in lines[respawns[-1] + 1:])
 
 
 def port_open(port: int = PORT, timeout: float = 0.25) -> bool:
@@ -75,6 +94,11 @@ def main() -> int:
     if port_open():
         sys.exit(f"FAIL: something already listening on :{PORT}; pick a free port")
 
+    # Clear last run's structured state for a clean slate (crash-history is
+    # append-only and must survive FE restarts in prod).
+    CRASH_HISTORY.unlink(missing_ok=True)
+    STATUS_FILE.unlink(missing_ok=True)
+
     marker = Path(tempfile.gettempdir()) / "xinsp2_qa_recover.marker"
     marker.unlink(missing_ok=True)
     env = dict(os.environ)
@@ -96,8 +120,9 @@ def main() -> int:
     failures: list[str] = []
     recovered = False
     try:
-        # Wait until: the backend crashed crash_count times (marker), CLEAR is in
-        # the log, and the backend is back up — or the FE gives up / times out.
+        # Wait until: the backend crashed crash_count times (marker), a respawned
+        # instance came back healthy (the recover transition), and the backend is
+        # up — or the FE gives up / times out.
         deadline = time.time() + MAX_WAIT_S
         while time.time() < deadline:
             if proc.poll() is not None:
@@ -105,10 +130,10 @@ def main() -> int:
                 # here (it should have recovered first).
                 break
             log = FE_LOG.read_text(encoding="utf-8", errors="ignore")
-            if "reason=RespawnLimitExceeded" in log:
+            if "staying down" in log:
                 break  # gave up — assertions below will flag it
             if (read_marker(marker) >= CRASH_COUNT
-                    and "CLEAR SAFE STATE" in log
+                    and recovered_in_log(log.splitlines())
                     and port_open()):
                 recovered = True
                 break
@@ -122,16 +147,45 @@ def main() -> int:
         log = FE_LOG.read_text(encoding="utf-8", errors="ignore")
         lines = log.splitlines()
 
-        n_backend_exit = sum(1 for ln in lines
-                             if "ENTER SAFE STATE" in ln and "reason=BackendExit" in ln)
-        if n_backend_exit < 1:
-            failures.append("no 'ENTER SAFE STATE reason=BackendExit' — crash not detected / not driven safe")
         if not any("respawning backend" in ln for ln in lines):
-            failures.append("FE never logged a respawn")
-        if "CLEAR SAFE STATE" not in log:
-            failures.append("no 'CLEAR SAFE STATE' — the recover-and-clear transition never happened (FE-E5)")
-        if "reason=RespawnLimitExceeded" in log:
-            failures.append("FE hit the respawn cap — it gave up instead of recovering")
+            failures.append("FE never logged a respawn — crash not detected / not respawned")
+        if not recovered_in_log(lines):
+            failures.append("no 'backend healthy' after a 'respawning backend' — the "
+                            "recover transition never happened (FE-E5)")
+        if "staying down" in log or "RespawnLimitExceeded" in log:
+            failures.append("FE latched down at the cap — it gave up instead of recovering")
+
+        # crash-history.jsonl: one BackendExit record per death, none cap_hit.
+        recs = []
+        if CRASH_HISTORY.exists():
+            for ln in CRASH_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines():
+                ln = ln.strip()
+                if ln:
+                    try:
+                        recs.append(json.loads(ln))
+                    except json.JSONDecodeError as e:
+                        failures.append(f"crash-history line is not valid JSON: {e}")
+        if len(recs) < 1:
+            failures.append("no crash-history record — death not detected / not recorded")
+        elif not all(r.get("reason") == "BackendExit" for r in recs):
+            failures.append(f"crash-history has non-BackendExit reasons: {[r.get('reason') for r in recs]}")
+        if any(r.get("cap_hit") for r in recs):
+            failures.append("a crash-history record is cap_hit=true — FE hit the cap (should have recovered)")
+
+        # fe-status.json: after recovery the FE returns to a healthy, un-latched state.
+        if STATUS_FILE.exists():
+            try:
+                st = json.loads(STATUS_FILE.read_text(encoding="utf-8", errors="ignore"))
+                print(f"---- fe-status.json ----\n  {json.dumps(st)}")
+                if recovered:
+                    if st.get("state") != "healthy":
+                        failures.append(f"fe-status state not 'healthy' after recovery: {st.get('state')!r}")
+                    if st.get("latched"):
+                        failures.append(f"fe-status still latched after recovery: {st}")
+            except json.JSONDecodeError as e:
+                failures.append(f"fe-status.json is not valid JSON: {e}")
+        else:
+            failures.append(f"no fe-status.json written ({STATUS_FILE})")
 
         crashes = read_marker(marker)
         if crashes != CRASH_COUNT:
@@ -173,8 +227,8 @@ def main() -> int:
             print(f"  - {f}")
     else:
         print("VERDICT: PASS")
-        print(f"  backend crashed {CRASH_COUNT}x -> FE drove safe-state + respawned,")
-        print("  then it recovered -> FE CLEARED safe state, never hit the cap, no orphan.")
+        print(f"  backend crashed {CRASH_COUNT}x -> FE recorded each death + respawned,")
+        print("  then it recovered -> fe-status healthy/un-latched, never hit the cap, no orphan.")
     return 1 if failures else 0
 
 

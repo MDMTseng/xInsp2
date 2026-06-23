@@ -1,5 +1,0 @@
-{
-  "name": "safestate",
-  "script": "inspect.cpp",
-  "instances": [ {"name": "crasher", "plugin": "crasher"} ]
-}

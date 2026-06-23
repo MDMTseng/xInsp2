@@ -2,15 +2,12 @@
   "name": "stereo_sync2",
   "script": "inspect.cpp",
   "params": [],
-  "instances": [],
-  "trigger_policy": {
-    "policy": "all_required",
-    "required": [
-      "cam_left",
-      "cam_right"
-    ],
-    "window_ms": 500
-  },
+  "instances": [
+    {
+      "name": "stereo",
+      "plugin": "synced_cam"
+    }
+  ],
   "plugins": {
     "synced_cam": {
       "path": "synced_cam",

@@ -1,0 +1,1 @@
+{ "plugin": "pulse_src", "isolation": "in_process", "config": { "period_ms": 50 } }

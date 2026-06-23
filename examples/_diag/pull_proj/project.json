@@ -1,7 +1,0 @@
-{
-  "name": "pull_smoke",
-  "script": "inspect.cpp",
-  "instances": [
-    {"name": "src", "plugin": "res_src"}
-  ]
-}

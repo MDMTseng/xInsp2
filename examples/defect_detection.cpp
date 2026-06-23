@@ -1,38 +1,41 @@
 //
 // defect_detection.cpp — example inspection using OpenCV directly.
 //
-// Demonstrates the camera trigger model:
-// - TestImageSource runs its own acquisition thread inside the DLL
-// - cam->grab() dequeues the latest frame
-// - The backend calls xi_inspect_entry on each trigger
+// A self-contained OpenCV pipeline (gray → blur → threshold → morphology →
+// connected components) on a synthetic frame generated inline. In a real
+// project a source plugin would emit the frame and this script would read it
+// via xi::current_trigger().image(...) (see examples/trigger_metadata) — here
+// we generate one inline so the example needs no source.
 //
 
 #include <xi/xi.hpp>
 #include <xi/xi_image.hpp>
-#include <xi/xi_source.hpp>
+
+#include <vector>
 
 // Tunable parameters — show up in the VS Code Params panel
 static xi::Param<int>    blur_radius {"blur_radius",  2,   {0, 10}};
 static xi::Param<int>    thresh_val  {"thresh_val",   180, {0, 255}};
 static xi::Param<int>    morph_radius{"morph_radius", 1,   {0, 5}};
 
-// Image source — runs its own thread, generates frames at 5 FPS.
-// In a real system this would be xi::Instance<GigECamera> or similar.
-static auto& cam_source() {
-    static xi::TestImageSource src("cam0", 320, 240, 5);
-    return src;
+// Synthetic 320x240 RGB frame: a shifting gradient (varies with `seq` so a
+// continuous run isn't a static image).
+static xi::Image make_frame(int seq) {
+    const int W = 320, H = 240;
+    std::vector<uint8_t> px((size_t)W * H * 3);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            size_t i = ((size_t)y * W + x) * 3;
+            px[i + 0] = (uint8_t)((x + seq * 3) & 0xFF);
+            px[i + 1] = (uint8_t)((y + seq * 5) & 0xFF);
+            px[i + 2] = (uint8_t)((x + y + seq) & 0xFF);
+        }
+    return xi::Image(W, H, 3, px.data());
 }
-
-// Auto-start the source when the DLL loads. Auto-stop on unload.
-struct AutoStart {
-    AutoStart()  { cam_source().start(); }
-    ~AutoStart() { cam_source().stop(); }
-} static g_auto_start;
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    (void)frame;
-    xi::Image rgb = cam_source().grab_wait(500);
+    xi::Image rgb = make_frame(frame);
     if (rgb.empty()) return;
 
     VAR(input, rgb);

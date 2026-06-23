@@ -35,6 +35,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 constexpr uint64_t MSS_TID_HI = 0x6d73735f74726967ull;  // "mss_trig"
@@ -97,6 +98,10 @@ public:
         auto command = p["command"].as_string();
         if (command == "start") start_();
         else if (command == "stop") stop_();
+        else if (command == "fire") {                 // deterministic headless drive
+            int n = p["n"].as_int(1); if (n < 1) n = 1; if (n > 10000) n = 10000;
+            for (int i = 0; i < n; ++i) emit_one_();
+        }
         else if (command == "set_fps") {
             int v = p["value"].as_int(fps_.load());
             if (v < 1) v = 1;
@@ -156,25 +161,20 @@ private:
         if (W < 32 || H < 32) return;
 
         uint64_t seq = seq_.fetch_add(1);
-        xi_image_handle h = host_->image_create(W, H, 1);
-        if (h == XI_IMAGE_NULL) return;
-
-        uint8_t* px = host_->image_data(h);
-        std::memset(px, 200, (size_t)W * H);
+        std::vector<uint8_t> px((size_t)W * H, 200);
         // Stripe (cheap visual sanity).
         int stripe_x = (int)(seq % (uint64_t)W);
         for (int y = 0; y < H; ++y) px[y * W + stripe_x] = 32;
         // Stamp seq + src_tag.
-        std::memcpy(px,     &seq,      sizeof(seq));
-        std::memcpy(px + 8, &src_tag_, sizeof(src_tag_));
+        std::memcpy(px.data(),     &seq,      sizeof(seq));
+        std::memcpy(px.data() + 8, &src_tag_, sizeof(src_tag_));
 
-        xi_record_image entry = { "img", h };
+        xi::Record rec = xi::Record().image("img", xi::Image(W, H, 1, px.data()));
         xi_trigger_id   tid;
         tid.hi = MSS_TID_HI ^ src_tag_;     // separate keyspace per source
         tid.lo = seq + 1;                   // avoid (0,0)
 
-        host_->emit_trigger(name().c_str(), tid, /*ts=*/0, &entry, 1);
-        host_->image_release(h);
+        xi::emit_record(host_, name().c_str(), rec, tid);
         emitted_.fetch_add(1);
     }
 

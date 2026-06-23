@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <thread>
+#include <vector>
 
 namespace { constexpr uint64_t BURST_TID_HI = 0x6275727374677270ull; }  // "burstgrp"
 
@@ -45,6 +46,10 @@ public:
         auto command = p["command"].as_string();
         if (command == "start") start_();
         else if (command == "stop") stop_();
+        else if (command == "fire") {                 // deterministic headless drive
+            int n = p["n"].as_int(1); if (n < 1) n = 1; if (n > 10000) n = 10000;
+            for (int i = 0; i < n; ++i) emit_one_();
+        }
         return get_def();
     }
 
@@ -61,16 +66,12 @@ private:
 
     void emit_one_() {
         const int W = 16, H = 16;
-        xi_image_handle h = host_->image_create(W, H, 1);
-        if (h == XI_IMAGE_NULL) return;
         uint64_t seq = seq_.fetch_add(1);
-        uint8_t* px = host_->image_data(h);
-        std::memset(px, 128, (size_t)W * H);
-        std::memcpy(px, &seq, sizeof(seq));            // seq in first 8 bytes
-        xi_record_image entry = { "img", h };
+        std::vector<uint8_t> px((size_t)W * H, 128);
+        std::memcpy(px.data(), &seq, sizeof(seq));     // seq in first 8 bytes
+        xi::Record rec = xi::Record().image("img", xi::Image(W, H, 1, px.data()));
         xi_trigger_id tid; tid.hi = BURST_TID_HI; tid.lo = seq + 1;
-        host_->emit_trigger(name().c_str(), tid, /*ts=*/0, &entry, 1);
-        host_->image_release(h);
+        xi::emit_record(host_, name().c_str(), rec, tid);
         emitted_.fetch_add(1);
     }
 

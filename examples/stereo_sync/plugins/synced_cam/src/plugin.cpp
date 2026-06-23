@@ -1,22 +1,23 @@
 //
-// synced_cam.cpp — synthetic single-image source plugin.
+// synced_cam.cpp — synthetic stereo camera: a GATHERING source. ONE instance
+// grabs BOTH cameras each tick and emits left+right in ONE record. Multi-camera
+// sync needs no bus policy — the frames are correlated because they ride the
+// same record.
 //
-// Two instances (cam_left, cam_right) emit independently to the framework's
-// TriggerBus. Both derive their tid deterministically from the running
-// sequence number so the bus's AllRequired policy can correlate them.
+// Per tick:
+//   1. Build two distinct 320x240 frames (cam_left = vertical stripes,
+//      cam_right = horizontal stripes) stamped with the SAME `seq` in the first
+//      4 bytes so the script can verify left_seq == right_seq.
+//   2. xi::emit_record(host, name, Record().image("cam_left", L)
+//                                          .image("cam_right", R), tid)
 //
-// Per-tick output:
-//   - 320x240 grayscale frame
-//   - First 4 bytes = little-endian uint32 sequence number (the script
-//     reads these out and verifies left.seq == right.seq).
+// The dispatched event carries both images keyed by the record's own keys, so
+// the script reads them via xi::current_trigger().image("cam_left") and
+// .image("cam_right").
 //
-// The TID convention:
-//   tid.hi = STEREO_TID_HI = 0x73796E635F636166ull  ("sync_cam" ASCII)
-//   tid.lo = (uint64_t)seq + 1
-// Both instances use the same formula keyed by their own seq counter, so
-// frame N from cam_left and frame N from cam_right share a tid.
-//
-// Build: handled by the backend's project-plugin compile path (cl.exe).
+// The TID convention (kept from the old two-instance model):
+//   tid.hi = STEREO_TID_HI = 0x73796E635F636166ull  ("sync_caf")
+//   tid.lo = (uint64_t)seq + 1   (avoid (0,0) which is NULL)
 //
 
 #include <xi/xi_abi.hpp>
@@ -27,6 +28,7 @@
 #include <cstdint>
 #include <cstring>
 #include <thread>
+#include <vector>
 
 namespace {
 constexpr uint64_t STEREO_TID_HI = 0x73796E635F636166ull;  // "sync_caf"
@@ -36,11 +38,8 @@ class SyncedCam : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    SyncedCam(const xi_host_api* host, const char* name)
-        : xi::Plugin(host, name)
-    {
-        // Start the worker as soon as the plugin instance is created.
-        start_();
+    SyncedCam(const xi_host_api* host, const char* name) : xi::Plugin(host, name) {
+        start_();   // a camera runs on its own — emit as soon as the instance exists
     }
 
     ~SyncedCam() override { stop_(); }
@@ -69,8 +68,12 @@ public:
     std::string exchange(const std::string& cmd) override {
         auto p = xi::Json::parse(cmd);
         auto command = p["command"].as_string();
-        if (command == "start") start_();
-        else if (command == "stop") stop_();
+        if      (command == "start") start_();
+        else if (command == "stop")  stop_();
+        else if (command == "fire") {                 // deterministic headless drive
+            int n = p["n"].as_int(1); if (n < 1) n = 1; if (n > 10000) n = 10000;
+            for (int i = 0; i < n; ++i) emit_one_();
+        }
         else if (command == "set_fps") {
             int v = p["value"].as_int(fps_.load());
             if (v < 1) v = 1;
@@ -98,39 +101,39 @@ private:
         if (thread_.joinable()) thread_.join();
     }
 
-    void run_loop_() {
+    void emit_one_() {
         const int W = 320, H = 240;
+        uint32_t seq = seq_.fetch_add(1);
+
+        // cam_left: vertical stripes. cam_right: horizontal stripes. Same seq.
+        std::vector<uint8_t> L((size_t)W * H), R((size_t)W * H);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                L[y * W + x] = (uint8_t)(((x + (int)seq) & 31) ? 200 : 32);
+                R[y * W + x] = (uint8_t)(((y + (int)seq) & 31) ? 32 : 200);
+            }
+        // Stamp seq as little-endian uint32 in the first 4 bytes of each so the
+        // script can verify "these came from the same event".
+        std::memcpy(L.data(), &seq, sizeof(seq));
+        std::memcpy(R.data(), &seq, sizeof(seq));
+
+        // Both frames in ONE record → one dispatched event, no bus policy.
+        xi_trigger_id tid;
+        tid.hi = STEREO_TID_HI;
+        tid.lo = (uint64_t)seq + 1;     // avoid (0,0) which is NULL
+
+        xi::Record rec = xi::Record()
+            .image("cam_left",  xi::Image(W, H, 1, L.data()))
+            .image("cam_right", xi::Image(W, H, 1, R.data()));
+        xi::emit_record(host_, name().c_str(), rec, tid);
+        emitted_.fetch_add(1);
+    }
+
+    void run_loop_() {
         while (running_.load()) {
-            uint32_t seq = seq_.fetch_add(1);
-
-            xi_image_handle h = host_->image_create(W, H, 1);
-            if (h == XI_IMAGE_NULL) {
-                // out of pool; skip this tick
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(1000 / std::max(fps_.load(), 1)));
-                continue;
-            }
-            uint8_t* px = host_->image_data(h);
-            // Fill pattern: flat midgrey, instance-distinct stripe, then stamp seq.
-            for (int y = 0; y < H; ++y) {
-                for (int x = 0; x < W; ++x) {
-                    px[y * W + x] = (uint8_t)(((x + (int)seq) & 31) ? 200 : 32);
-                }
-            }
-            // Stamp seq as little-endian uint32 in the first 4 bytes.
-            std::memcpy(px, &seq, sizeof(seq));
-
-            xi_record_image entry = { "img", h };
-            xi_trigger_id tid;
-            tid.hi = STEREO_TID_HI;
-            tid.lo = (uint64_t)seq + 1;     // avoid (0,0) which is NULL
-
-            host_->emit_trigger(name().c_str(), tid, /*ts=*/0, &entry, 1);
-            host_->image_release(h);
-            emitted_.fetch_add(1);
-
-            int sleep_ms = 1000 / std::max(fps_.load(), 1);
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+            emit_one_();
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(1000 / std::max(fps_.load(), 1)));
         }
     }
 };

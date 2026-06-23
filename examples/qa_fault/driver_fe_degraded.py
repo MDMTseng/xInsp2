@@ -4,15 +4,16 @@ The sharpest coverage gap (test plan gap #1): the backend binds its WS port,
 then compiles; if the script FAILS to compile the port is still up, so a
 connect-only view would call the line "healthy" even though it can never
 inspect. The fix: the backend withholds the "autostart: ready" signal and logs
-"autostart: degraded" instead; the FE treats that as a failed boot — drives
-safe-state and respawns (and, since a compile error is deterministic, churns to
-the respawn cap and stays safe rather than silently running a blind line).
+"autostart: degraded" instead; the FE treats that as a failed boot — records a
+BootTimeout death and respawns (and, since a compile error is deterministic,
+churns to the respawn cap and latches down rather than silently running blind).
 
 This drives it end-to-end through the FE against the deliberately-uncompilable
 badscript_project fixture, and asserts:
   - the FE NEVER logged "backend healthy" (it must not trust port-up here),
   - the backend log shows "autostart: degraded" and NOT "autostart: ready",
-  - the FE drove ENTER SAFE STATE (BootTimeout) and respawned to the cap,
+  - the FE detected the degraded backend, recorded BootTimeout deaths, and
+    respawned to the cap ("staying down"),
   - no orphaned backend remained.
 
 Run:  python driver_fe_degraded.py
@@ -20,6 +21,7 @@ TODO(linux): xinsp-fe Windows-only today; SKIPs on non-nt.
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -35,6 +37,7 @@ BADSCRIPT_PROJECT = ROOT / "badscript_project"
 PORT = 7876
 FE_LOG = ROOT / "fe_degraded.log"
 BE_LOG = ROOT / "be_degraded.log"
+CRASH_HISTORY = ROOT / "crash-history.jsonl"   # default lands next to --be-log
 
 
 def port_open(port: int, timeout: float = 0.3) -> bool:
@@ -53,6 +56,8 @@ def main() -> int:
         sys.exit(f"FAIL: xinsp-fe not found: {FE_EXE}")
     if port_open(PORT):
         sys.exit(f"FAIL: :{PORT} already in use")
+
+    CRASH_HISTORY.unlink(missing_ok=True)
 
     fe_log = open(FE_LOG, "wb")
     # Short boot timeout is a safety net; the FE should trip on the explicit
@@ -94,12 +99,27 @@ def main() -> int:
         failures.append("backend emitted 'autostart: ready' despite a failed compile (must not!)")
     if "autostart degraded" not in fe:
         failures.append("FE did not detect the degraded backend")
-    if "ENTER SAFE STATE reason=BootTimeout" not in fe:
-        failures.append("FE did not drive a safe state for the degraded line")
     if "respawning backend" not in fe:
         failures.append("FE did not respawn the degraded backend")
-    if "reason=RespawnLimitExceeded" not in fe:
-        failures.append("FE did not reach the cap (a deterministic compile error should)")
+    if "staying down" not in fe:
+        failures.append("FE did not reach the cap / latch down (a deterministic compile error should)")
+
+    # crash-history.jsonl: each degraded boot is recorded as a BootTimeout death,
+    # and the last one trips the cap.
+    recs = []
+    if CRASH_HISTORY.exists():
+        for ln in CRASH_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines():
+            ln = ln.strip()
+            if ln:
+                try:
+                    recs.append(json.loads(ln))
+                except json.JSONDecodeError as e:
+                    failures.append(f"crash-history line is not valid JSON: {e}")
+    if not any(r.get("reason") == "BootTimeout" for r in recs):
+        failures.append("no BootTimeout crash-history record — FE didn't record the degraded boot as a death")
+    if not any(r.get("cap_hit") for r in recs):
+        failures.append("no cap_hit crash-history record — FE didn't latch down at the cap")
+
     time.sleep(1.0)
     if port_open(PORT):
         failures.append(f"a backend is still listening on :{PORT} after FE exit (orphan)")
@@ -112,7 +132,7 @@ def main() -> int:
     else:
         print("VERDICT: PASS")
         print("  compile-broken line -> NOT 'healthy' -> degraded detected ->")
-        print("  safe-state -> respawn -> cap, no orphan.")
+        print("  BootTimeout recorded -> respawn -> cap (staying down), no orphan.")
     return 1 if failures else 0
 
 

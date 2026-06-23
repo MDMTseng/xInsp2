@@ -174,13 +174,9 @@ private:
         xi::Image img = xi::Image::adopt_pool_handle(host(), rh);
         host()->image_release(rh);
         if (img.empty()) return false;
-        // Copy into a pool handle to attach to the trigger (burst_source pattern).
-        xi_image_handle h = host()->image_create(img.width, img.height, img.channels);
-        if (!h) return false;
-        std::memcpy(host()->image_data(h), img.data(), img.size());
-        xi_record_image rec{ "frame", h };
-        host()->emit_trigger(name().c_str(), XI_TRIGGER_NULL, /*ts=*/0, &rec, 1);
-        host()->image_release(h);   // bus addref'd; drop our ref
+        // Emit the loaded image as a fresh-id trigger (burst_source pattern).
+        xi::Record rec = xi::Record().image("frame", img);
+        xi::emit_record(host(), name().c_str(), rec, XI_TRIGGER_NULL);
         return true;
     }
 

@@ -1,7 +1,0 @@
-{
-  "name": "dispatch_smoke",
-  "script": "inspect.cpp",
-  "instances": [
-    {"name": "src", "plugin": "disp_src"}
-  ]
-}

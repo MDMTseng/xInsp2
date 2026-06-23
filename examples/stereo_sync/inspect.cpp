@@ -33,7 +33,8 @@ void xi_inspect_entry(int frame) {
     VAR(has_right, !right.empty());
 
     if (left.empty() || right.empty()) {
-        // Half-trigger — should never happen under AllRequired policy
+        // Half-trigger — should never happen now that both frames ride the
+        // SAME record from the gathering source (no bus policy involved),
         // but log it explicitly so the driver can spot it.
         VAR(half_trigger, true);
         return;
