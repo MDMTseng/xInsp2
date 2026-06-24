@@ -294,6 +294,59 @@ XI_PLUGIN_IMPL(MyPlugin)
 
 `xi::Plugin` is the base; `XI_PLUGIN_IMPL` generates the C ABI exports.
 
+### Concurrency & config-change safety — which plugin type are you?
+
+The host can call `process()` while the operator is changing your config
+(`set_def` / the orchestrator's `prepare`+`commit`). Whether that's safe — and
+whether *you* have to do anything about it — depends on two independent choices:
+**are you reentrant?** and **do you keep mutable state?** The host has one
+admission gate per instance (the "CallScope"): for a **non-reentrant** plugin
+(the default) it serializes `process`/`set_def`/`exchange`/`get_def` so they never
+overlap; for a **reentrant** plugin (`"reentrant": true` in `plugin.json`, for
+per-instance parallelism) it does **not** — concurrency is then your problem.
+
+Find your row — most plugins are T0 or T1 and write **zero** concurrency code:
+
+| Type | You are… | What you must do |
+|---|---|---|
+| **T0** | reentrant **and** stateless / immutable config (e.g. a pure `gray→blur`) | Nothing. No shared mutable state ⇒ no races even at full parallelism. Fastest. |
+| **T1** | non-reentrant with a mutable config (the common case, e.g. a threshold you tune live) | Nothing. The host serializes `set_def` vs `process` for you — a live param change can't tear a frame. |
+| **T2** | reentrant **and** you mutate shared state across concurrent `process()` calls (accumulators, caches, counters) | **Lock it yourself.** Reentrancy means N `process()` run at once; the host won't serialize them. This is *your* lock, about process-vs-process — unrelated to config swaps. |
+| **T3** | any of the above **plus** a config change that reloads heavy assets you don't want to stall the pipeline | Implement the double-slot `prepare`/`commit` below (`XI_PLUGIN_STAGED`). Orthogonal to T0–T2: it composes with whichever you are. |
+
+**Caveats that bite:**
+
+- **"Reentrant ⇒ must lock" is false.** A *stateless* reentrant plugin (T0) needs
+  no lock — that's the cheapest, fastest plugin you can write. The lock (T2) is
+  only for shared *mutable* state touched during `process()`.
+- **`binarize(threshold)` is NOT stateless.** `threshold` is set by `set_def` and
+  read by `process` — that *is* racy mutable state. As non-reentrant (T1) the host
+  protects it; as reentrant you'd be T2 and must guard it.
+- **The lock-free escape hatch.** If you want T2's throughput *without* a lock:
+  put **all** mutable state behind a single `std::atomic<std::shared_ptr<const T>>`
+  and make `process()` a pure read of it (swap a fresh immutable snapshot on
+  change). Then reads never tear and you need no mutex — this is exactly the T3
+  double-slot shape, doing double duty.
+- **`prepare` runs UNGATED.** The host calls `prepare()` *concurrent* with
+  `process()` on purpose (so the load doesn't stall the pipeline) — so `prepare`
+  must touch **only** the staging slot, never live state. That contract is yours
+  the moment you add `XI_PLUGIN_STAGED`; `commit()` is the only part the host gates.
+
+### Heavy config changes — frame-perfect swap (optional)
+
+If a config change reloads **big assets** (model weights, templates, calibration)
+and you don't want that load to stall the running pipeline, opt into the two-phase
+swap: override `prepare()` / `commit()` and add `XI_PLUGIN_STAGED(MyPlugin)` after
+`XI_PLUGIN_IMPL`. `prepare(def, folder)` loads the new assets into a **background
+staging slot** — the host calls it *concurrent with* `process()`, so it must touch
+**only** staging, never live state. `commit()` then **atomically swaps** staging →
+live. The canonical lock-free shape: keep the live config in a
+`std::atomic<std::shared_ptr<const T>>` that `process()` reads, build a new one in
+`prepare()`, swap the pointer in `commit()`. Omit all this and a config change is a
+plain (host-serialized) `set_def` — fine for light plugins. The orchestrator drives
+it via `prepare_instance` + `commit_group`; see `plugins/config_swap_probe/` for a
+complete example and [`../reference/c-abi.md`](../reference/c-abi.md) §1.
+
 ### Image ops
 
 xInsp2 doesn't ship its own operator library — `xi.hpp` /

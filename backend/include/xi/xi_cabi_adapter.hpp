@@ -150,6 +150,12 @@ public:
         set_def_fn_  = reinterpret_cast<xi_plugin_set_def_fn>(GetProcAddress(dll_, "xi_plugin_set_def"));
         destroy_fn_  = reinterpret_cast<xi_plugin_destroy_fn>(GetProcAddress(dll_, "xi_plugin_destroy"));
         process_fn_  = reinterpret_cast<xi_plugin_process_fn>(GetProcAddress(dll_, "xi_plugin_process"));
+        // ABI v7 (optional — present only if the plugin opted in with
+        // XI_PLUGIN_STAGED). Their presence IS the opt-in signal: a plugin that
+        // exports prepare promises it touches only its staging slot, so we may
+        // call it ungated (concurrent with process). Absent → gated set_def / no-op.
+        prepare_fn_  = reinterpret_cast<xi_plugin_prepare_fn>(GetProcAddress(dll_, "xi_plugin_prepare"));
+        commit_fn_   = reinterpret_cast<xi_plugin_commit_fn>(GetProcAddress(dll_, "xi_plugin_commit"));
         // γ: may we hand this plugin a borrowed yyjson_mut_doc* (in-process zero-
         // serialize input)? Only if it was built against our yyjson layout.
         if (auto abi_fn = reinterpret_cast<uint32_t(*)()>(GetProcAddress(dll_, "xi_yyjson_abi")))
@@ -223,6 +229,29 @@ public:
         return out->image_count;
     }
 
+    // Frame-perfect config swap (ABI v7). prepare loads the new config's heavy
+    // assets into the plugin's background staging slot; it runs UNGATED — NO
+    // CallScope — so it proceeds concurrent with process() and never stalls the
+    // pipeline. That is sound ONLY because a plugin that exports xi_plugin_prepare
+    // (via XI_PLUGIN_STAGED) contracts to touch staging ONLY. A plugin without
+    // the export falls back to the base prepare ≡ set_def, which IS gated (safe).
+    bool prepare(const std::string& def, const std::string& folder) override {
+        if (!prepare_fn_ || !inst_) return InstanceBase::prepare(def, folder);
+        ImagePool::OwnerGuard g(owner_id_);
+        return prepare_fn_(inst_, def.c_str(), folder.c_str()) == 0;
+    }
+
+    // commit swaps staging → live. Gated (CallScope): a lone commit while the
+    // pipeline runs is serialized vs process() for a non-reentrant plugin; under
+    // a host commit_group the dispatch is already drained, so it's uncontended.
+    // No export → no-op (a plugin with no double-slot already swapped in set_def).
+    void commit() override {
+        if (!commit_fn_ || !inst_) return;
+        ImagePool::OwnerGuard g(owner_id_);
+        CallScope cs(this);
+        commit_fn_(inst_);
+    }
+
     void* raw_instance() const { return inst_; }
     xi_plugin_process_fn process_fn() const { return process_fn_; }
     bool reentrant() const { return reentrant_; }
@@ -276,6 +305,8 @@ private:
     xi_plugin_set_def_fn  set_def_fn_ = nullptr;
     xi_plugin_destroy_fn  destroy_fn_ = nullptr;
     xi_plugin_process_fn  process_fn_ = nullptr;
+    xi_plugin_prepare_fn  prepare_fn_ = nullptr;   // ABI v7, optional
+    xi_plugin_commit_fn   commit_fn_  = nullptr;   // ABI v7, optional
     bool                  doc_input_ok_ = false;
     ImagePoolOwnerId      owner_id_ = 0;
 };

@@ -176,6 +176,18 @@ add_dependencies(test_set_def_race race_probe)
 add_test(NAME set_def_race COMMAND test_set_def_race
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_set_def_race>)
 
+# ABI v7 prepare/commit gating: a fixture (stage_probe) that parks process() in
+# the cap=1 slot, proving the adapter calls prepare() UNGATED (completes while a
+# process is in flight) but commit() GATED (blocks until the slot frees).
+add_library(stage_probe SHARED tests/stage_probe.cpp)
+target_include_directories(stage_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_executable(test_prepare_concurrency tests/test_prepare_concurrency.cpp)
+target_link_libraries(test_prepare_concurrency PRIVATE xi_core)
+target_compile_definitions(test_prepare_concurrency PRIVATE STAGE_PROBE_DLL="stage_probe.dll")
+add_dependencies(test_prepare_concurrency stage_probe)
+add_test(NAME prepare_concurrency COMMAND test_prepare_concurrency
+         WORKING_DIRECTORY $<TARGET_FILE_DIR:test_prepare_concurrency>)
+
 # SHM / worker-process / script-runner tests removed 2026-05 with the
 # FE/BE in-process split (no more SHM region or worker processes).
 set_tests_properties(protocol PROPERTIES

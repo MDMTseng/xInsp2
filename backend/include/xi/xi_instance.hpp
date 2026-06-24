@@ -55,6 +55,17 @@ public:
     // routed here. Mirrors the existing PluginInstanceBase::exchangeCMD
     // contract without dragging cJSON into this header.
     virtual std::string exchange(const std::string& /*cmd_json*/) { return "{}"; }
+
+    // Frame-perfect config swap (ABI v7 orchestrator path). Default: prepare
+    // does an immediate set_def (the tier-1 gated path), commit is a no-op — so
+    // any instance that doesn't implement a real double-slot still behaves
+    // correctly under the orchestrator's prepare→commit_group protocol. The
+    // C-ABI adapter overrides these to call the plugin's optional prepare/commit
+    // exports (ungated load + gated swap). See xi_cabi_adapter.hpp.
+    virtual bool prepare(const std::string& def, const std::string& /*folder*/) {
+        return set_def(def);
+    }
+    virtual void commit() {}
 };
 
 // Global registry — script declarations populate this at load time.
