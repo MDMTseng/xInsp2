@@ -1,0 +1,31 @@
+{
+  "name": "@xinsp2/components",
+  "version": "0.1.0",
+  "description": "xInsp2 UI web components (Svelte-authored, ship as standard custom elements) + WS-client shim",
+  "type": "module",
+  "main": "./dist/xi-components.js",
+  "module": "./dist/xi-components.esm.js",
+  "exports": {
+    ".": {
+      "import": "./dist/xi-components.esm.js",
+      "require": "./dist/xi-components.js"
+    },
+    "./ws-client": "./src/ws-client.mjs",
+    "./protocol": "./src/protocol.mjs"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "test": "node --test --test-concurrency=1 test/viewport.mjs test/options.mjs test/xi-slider.dom.mjs test/widgets.dom.mjs test/auto-panel.dom.mjs test/xi-trace.dom.mjs test/ws-client.smoke.mjs"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "jsdom": "^29.1.1",
+    "svelte": "^5.0.0",
+    "vite": "^6.0.0"
+  }
+}

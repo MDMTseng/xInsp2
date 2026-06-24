@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>xi-components demo</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 2rem; max-width: 40rem; }
+    h1 { font-size: 1.1rem; }
+    .row { margin: 1rem 0; }
+    pre { background: #f4f4f5; padding: .5rem .75rem; border-radius: 6px; }
+    /* theming tokens the components read */
+    :root { --xi-accent: #6366f1; }
+  </style>
+  <!-- Drop-in usage: load the built bundle, then use <xi-*> in plain HTML.
+       The consumer is fully vanilla — no Svelte, no build. -->
+  <script type="module" src="../dist/xi-components.esm.js"></script>
+</head>
+<body>
+  <h1>xi-components — drop-in demo</h1>
+  <p>Vanilla HTML using the built custom elements. The slider exposes a
+     <code>value</code> property and emits <code>input</code>/<code>change</code>
+     events (tap-out, not iframe).</p>
+
+  <div class="row">
+    <xi-slider id="s" label="Threshold" min="0" max="255" step="1" value="128"></xi-slider>
+  </div>
+
+  <div class="row">
+    <button id="set200">host sets value = 200 (property tap-in)</button>
+    <button id="read">host reads value</button>
+  </div>
+
+  <pre id="log">events:\n</pre>
+
+  <script type="module">
+    const s = document.getElementById("s");
+    const log = document.getElementById("log");
+    const line = (t) => (log.textContent += t + "\n");
+
+    s.addEventListener("input",  (e) => line(`input  → ${e.detail.value}`));
+    s.addEventListener("change", (e) => line(`change → ${e.detail.value}`));
+
+    document.getElementById("set200").onclick = () => { s.value = 200; line("host set .value = 200"); };
+    document.getElementById("read").onclick   = () => line(`host read .value = ${s.value}`);
+  </script>
+</body>
+</html>

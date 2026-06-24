@@ -17,6 +17,11 @@ output side. Pick by audience:
 Both produce the same shape of output. You can prototype in-project
 then export to standalone when you're ready to share.
 
+> **Before you ship:** skim [`plugin-caveats.md`](./plugin-caveats.md) — the
+> non-obvious gotchas (reentrancy/locking, the `prepare`/`commit` staging
+> contract, image-handle refcounts, and the UI patterns: keep UX flow in the
+> webui not C++, and don't reimplement geometry in JS).
+
 The repo ships reference plugins to crib from: `plugins/` (source/sink/processor
 basics — `mock_camera`, `blob_analysis`, `data_output`, `json_source`,
 `record_save`, `threshold_op`, `synced_stereo`) and richer worked examples under
