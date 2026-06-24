@@ -45,6 +45,28 @@ Image sources are ordinary plugins too — they push frames by calling
 `host->emit_record(...)` from a worker thread (see the `mock_camera` plugin);
 there is no separate source interface or pull/`grab` model.
 
+**Optional (ABI v7) — frame-perfect config swap.** A heavy-resource plugin (one
+that loads big assets — model weights, templates, calibration — on a config
+change) can opt into a two-phase swap so the load never stalls the pipeline:
+
+```c
+int  xi_plugin_prepare(void* inst, const char* def_json, const char* folder);  /* 0 = ok */
+void xi_plugin_commit(void* inst);
+```
+
+Override `prepare()` / `commit()` on your class and add `XI_PLUGIN_STAGED(MyPlugin)`
+*after* `XI_PLUGIN_IMPL`. `prepare()` loads the new config's assets into a
+**background staging slot**; the host calls it **UNGATED** (concurrent with
+`process()`), so it must touch **only** the staging slot — never live state.
+`commit()` then **atomically swaps** staging → live; the host calls it **gated**
+(serialized vs `process()`, and under `commit_group` after draining dispatch).
+Canonical pattern: hold the live config in a `std::atomic<std::shared_ptr<const
+T>>` that `process()` reads lock-free, `prepare()` builds a new one, `commit()`
+swaps the pointer. A plugin that omits these falls back to gated `set_def`
+(prepare) / no-op (commit), so simple plugins need neither. The orchestrator
+drives them via `prepare_instance` + `commit_group` → `reference/ws-protocol.md`,
+`roadmap/config-bundles-and-orchestration.md`, and `plugins/config_swap_probe/`.
+
 ### Lifecycle
 
 ```
@@ -139,9 +161,11 @@ decrements (freed at 0; invalid handles are no-ops). `image_stride(h)` is
 
 ## 4. ABI version + load gate
 
-`XI_ABI_VERSION` is **6**. The struct was append-only through v5; v6 broke that
+`XI_ABI_VERSION` is **7**. The struct was append-only through v5; v6 broke that
 to remove the retired dispatch fields, so **all plugins must be rebuilt against
-v6** (no binary compat with v4/v5 kept — this is pre-stable-release). History:
+the current ABI** (no binary compat with v4/v5 kept — this is pre-stable-release).
+v7 added only OPTIONAL *plugin* exports (not `xi_host_api` fields), so it shifts no
+struct — an older v6 plugin still loads on a v7 host. History:
 
 | ver | added |
 |---|---|
@@ -151,6 +175,7 @@ v6** (no binary compat with v4/v5 kept — this is pre-stable-release). History:
 | 4 | in-process doc refcount `doc_retain`/`doc_release`/`doc_refcount` (γ-4) |
 | 5 | `emit_trigger_record` — trigger metadata doc (superseded by v6) |
 | 6 | dispatch collapsed to ONE verb `emit_record(emitter,id,rec,ts)`; `emit_trigger`, `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` REMOVED (no v4 compat — rebuild all plugins). Multi-cam = gathering plugin; replay = buffer-replay plugin. |
+| 7 | optional plugin exports `xi_plugin_prepare(inst,def,folder)` + `xi_plugin_commit(inst)` for frame-perfect config swap (opt in via `XI_PLUGIN_STAGED`; prepare ungated, commit gated). PLUGIN exports, not host-api fields — no struct shift, older plugins still load. |
 
 **Two load gates** (a plugin failing either is refused at load with a clear
 error, then `FreeLibrary`'d):
@@ -207,7 +232,7 @@ typedef struct {
 | `name` (req) | Registered name; what `xi::use("...")` resolves against. |
 | `dll` (req) | DLL filename relative to the folder; `<name>.dll` by convention. |
 | `description` / `factory` / `has_ui` | Tree label / create symbol (default `xi_plugin_create`) / serve `ui/index.html` as the webview. |
-| `reentrant` (alias `thread_safe`) | `process`/`exchange`/`get_def`/`set_def` are safe to call concurrently on one instance. Default `false` = host serializes per instance (so a parallel dispatch pool is safe by default). Set `true` only if internally thread-safe. |
+| `reentrant` (alias `thread_safe`) | `process`/`exchange`/`get_def`/`set_def` are safe to call concurrently on one instance. Default `false` = host serializes per instance (so a parallel dispatch pool is safe by default). Set `true` only if internally thread-safe. **Which type are you + the caveats** (T0 stateless-free, T1 host-protected, T2 lock-it-yourself, T3 double-slot): see [`guides/write-a-plugin.md`](../guides/write-a-plugin.md) → "Concurrency & config-change safety". |
 | `json_fallback` | Allow load despite a yyjson-layout mismatch (runs the slow JSON path). Default `false` = refused; see §4 + `internals/data-layer.md`. |
 | `build` (alias `prebuilt`) | `"source"` (default) = backend compiles the plugin's `.cpp` with `cl.exe`. `"cmake"` (or `"prebuilt": true`) = the plugin owns its build (own `CMakeLists.txt`, for external libs / CUDA); the backend loads the prebuilt `<name>.dll` and `cmd:rebuild_plugins` runs its CMake. See `guides/write-a-plugin.md` (External libraries & CUDA). |
 | `abi_version` | The `XI_ABI_VERSION` compiled against (written by `cmd:export_project_plugin`); gated per §4. |

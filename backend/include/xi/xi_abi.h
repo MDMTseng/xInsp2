@@ -103,8 +103,25 @@ extern "C" {
 /*       script reads the dispatched record via current_trigger().     */
 /*       image()/.meta(); cmd:run injects the same way for headless    */
 /*       tests. See internals/dispatch.md.                             */
+/*   7 — + frame-perfect config swap: two OPTIONAL plugin exports,      */
+/*       xi_plugin_prepare(inst, def_json, folder) and                 */
+/*       xi_plugin_commit(inst). prepare() loads heavy assets into a    */
+/*       plugin-internal BACKGROUND staging slot (the live config keeps  */
+/*       running); commit() atomically swaps staging -> live. The host  */
+/*       calls prepare OUTSIDE its per-instance serialization gate (it  */
+/*       runs concurrent with process(), so the load doesn't stall the  */
+/*       pipeline) — a plugin only gets this by opting in with the      */
+/*       XI_PLUGIN_STAGED macro, whose contract is "prepare touches the */
+/*       staging slot ONLY, never live state". commit runs gated. Both  */
+/*       are resolved via GetProcAddress: a plugin without them falls   */
+/*       back to gated set_def (prepare) / no-op (commit), so simple    */
+/*       plugins need neither. These are PLUGIN exports (host->plugin), */
+/*       not xi_host_api fields, so they don't shift any struct — an    */
+/*       older host simply never calls them. The host pairs prepare     */
+/*       with commit_group (a drain-barrier) for frame-perfect group    */
+/*       switches. See roadmap/config-bundles-and-orchestration.md.     */
 /* ------------------------------------------------------------------ */
-#define XI_ABI_VERSION 6
+#define XI_ABI_VERSION 7
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -439,6 +456,13 @@ typedef void  (*xi_plugin_process_fn)(void* inst, const xi_record* input, xi_rec
 typedef int   (*xi_plugin_exchange_fn)(void* inst, const char* cmd, char* rsp, int rsplen);
 typedef int   (*xi_plugin_get_def_fn)(void* inst, char* buf, int buflen);
 typedef int   (*xi_plugin_set_def_fn)(void* inst, const char* json);
+/* ABI v7 — OPTIONAL (null if the plugin didn't opt in via XI_PLUGIN_STAGED).
+ *   xi_plugin_prepare(inst, def_json, folder) -> 0 on success. Loads heavy
+ *     assets into a background staging slot; called UNGATED (concurrent with
+ *     process), so it MUST touch only staging, never live state.
+ *   xi_plugin_commit(inst). Atomically swaps staging -> live; called gated. */
+typedef int   (*xi_plugin_prepare_fn)(void* inst, const char* def_json, const char* folder);
+typedef void  (*xi_plugin_commit_fn)(void* inst);
 
 #ifdef __cplusplus
 }

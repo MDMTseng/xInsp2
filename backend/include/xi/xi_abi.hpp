@@ -219,6 +219,22 @@ public:
     virtual std::string get_def() const { return "{}"; }
     virtual bool set_def(const std::string& json) { (void)json; return true; }
 
+    // Frame-perfect config swap (ABI v7). Heavy-resource plugins override these
+    // AND opt in with XI_PLUGIN_STAGED(Class) so the host exports them:
+    //   prepare() — load the new config's heavy assets into a BACKGROUND staging
+    //     slot. The host calls this UNGATED (concurrent with process()), so the
+    //     load never stalls the pipeline — therefore prepare MUST touch ONLY the
+    //     staging slot, never live state read by process(). `folder` is this
+    //     instance's resource folder (load big assets from there).
+    //   commit() — atomically swap staging → live (a cheap pointer swap). The host
+    //     calls this gated / after draining dispatch, so it's uncontended.
+    // Defaults: prepare ≡ set_def (immediate, host-gated), commit ≡ no-op — a
+    // simple plugin overrides neither and the host falls back automatically.
+    virtual bool prepare(const std::string& def, const std::string& folder) {
+        (void)folder; return set_def(def);
+    }
+    virtual void commit() {}
+
 protected:
     HostImage create_image(int w, int h, int ch) {
         if (!host_) return {};
@@ -568,4 +584,21 @@ int xi_plugin_abi_version(void) {                                              \
 extern "C" __declspec(dllexport)                                               \
 uint32_t xi_yyjson_abi(void) {                                                 \
     return xi::yyjson_layout_stamp();                                          \
+}
+
+// Opt into the ABI v7 frame-perfect config swap. Place AFTER XI_PLUGIN_IMPL.
+// ONLY use this if your plugin OVERRIDES prepare()/commit() with a real double-
+// slot — the host calls prepare UNGATED (concurrent with process), and the
+// CONTRACT is that prepare touches the staging slot ONLY, never live state. A
+// plugin that doesn't export these (didn't use this macro) is driven through the
+// host's gated set_def fallback instead, which is always safe.
+#define XI_PLUGIN_STAGED(ClassName)                                            \
+extern "C" __declspec(dllexport)                                               \
+int xi_plugin_prepare(void* inst, const char* def_json, const char* folder) {  \
+    return static_cast<ClassName*>(inst)->prepare(def_json ? def_json : "",     \
+                                                  folder ? folder : "") ? 0 : -1; \
+}                                                                              \
+extern "C" __declspec(dllexport)                                               \
+void xi_plugin_commit(void* inst) {                                            \
+    static_cast<ClassName*>(inst)->commit();                                   \
 }
