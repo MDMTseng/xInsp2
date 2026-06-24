@@ -20,7 +20,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "test": "node --test --test-concurrency=1 test/viewport.mjs test/options.mjs test/xi-slider.dom.mjs test/widgets.dom.mjs test/auto-panel.dom.mjs test/xi-trace.dom.mjs test/monitor.dom.mjs test/build-monitor.mjs test/ws-client.smoke.mjs"
+    "test": "node --test --test-concurrency=1 test/viewport.mjs test/options.mjs test/xi-slider.dom.mjs test/widgets.dom.mjs test/auto-panel.dom.mjs test/xi-trace.dom.mjs test/monitor.dom.mjs test/build-monitor.mjs test/create-webapp.mjs test/ws-client.smoke.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",

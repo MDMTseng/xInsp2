@@ -83,4 +83,23 @@ Editing a control reads the current def, patches the key, and sends the **full**
 def back via `set_instance_def` (no key loss regardless of plugin merge
 semantics). Omit `descriptor` and it's **inferred** from the instance's def
 (number→number, boolean→toggle) — a basic panel with zero declaration. Sections
-carry a `tag` (`setup`/`control`/`status`) — the unit of UI export (tasks #78/#79).
+carry a `tag` (`setup`/`control`/`status`) — the unit of UI export below.
+
+## UI export — two shapes
+
+- **A — status monitor (generic, auto).** `export/build-monitor.mjs` emits a
+  self-contained static folder: a read-only `mountMonitor` wall (value tiles,
+  `xi-trace` sparklines, `xi-image-viewer` fed by the preview stream) + the
+  vendored bundle. `collectStatusItems(descriptors)` flattens a project's
+  `status` sections into the item list.
+  ```
+  node export/build-monitor.mjs config.json out/    # → out/index.html + bundle
+  ```
+- **B — full app (bespoke, library-import).** `export/create-webapp.mjs` scaffolds
+  an **external** webapp project that owns its stack and imports the components,
+  with WS pre-wired (version-pinned) and an example composition (panel + viewer +
+  monitor) you then develop. The bundle is vendored (runs offline); swap for the
+  `@xinsp2/components` npm package when you add a build step.
+  ```
+  node export/create-webapp.mjs my-hmi/ "Line 1 HMI" ws://plc:7823/
+  ```
