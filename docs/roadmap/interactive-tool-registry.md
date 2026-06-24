@@ -1,6 +1,11 @@
 # Interactive tool registry — design sketch
 
-> **Status: design only, not implemented.** This is the response to
+> **Status: design only, not implemented. Now a sub-part of**
+> [`webui-and-ui-export.md`](./webui-and-ui-export.md) — the draw-on-image teach
+> tools are the `setup`-section tooling of that broader Web Component library.
+> This page keeps the detailed tool-registry + `xi_host_request_editor` design.
+>
+> This is the response to
 > "how should plugins that *need* GUI setup (shape-model template
 > editing, ROI mask drawing, calibration target capture) wire that
 > setup into xInsp2 without each plugin reimplementing pan/zoom/draw
