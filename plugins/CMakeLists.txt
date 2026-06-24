@@ -40,6 +40,16 @@ set_target_properties(mock_camera PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera
 )
 
+# config_swap_probe — reference plugin for the orchestrator config-swap design
+# (double-slot prepare/commit via exchange; see
+# docs/roadmap/config-bundles-and-orchestration.md)
+add_library(config_swap_probe SHARED config_swap_probe/config_swap_probe.cpp)
+target_include_directories(config_swap_probe PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+set_target_properties(config_swap_probe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe
+)
+
 # synced_stereo — emits left+right frames under one trigger ID
 add_library(synced_stereo SHARED synced_stereo/synced_stereo.cpp)
 target_include_directories(synced_stereo PRIVATE ${XI_INCLUDE} ${XI_VENDOR})

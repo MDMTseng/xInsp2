@@ -1660,6 +1660,52 @@ static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name)
     return g;
 }
 
+// ---------------------------------------------------------------------------
+// Host-tracked instance state (orchestrator get_state — task #67).
+//
+// A deliberately tiny state machine the HOST keeps per instance, driven by the
+// host-visible orchestrator verbs. Fine staging/ready sub-state stays plugin-
+// side (exchange get_status); the host records only these three coarse states +
+// the last error. In the exchange-convention prototype the host can't see
+// prepare/commit (they ride opaque exchange commands), so only create_instance,
+// set_instance_def and commit_group move the state — once prepare/commit are
+// first-class ABI (task #69) the host will observe them directly and refine this.
+// ---------------------------------------------------------------------------
+enum class InstState { Created, Active, Faulted };
+
+static const char* inst_state_str(InstState s) {
+    switch (s) { case InstState::Active: return "active";
+                 case InstState::Faulted: return "faulted";
+                 default: return "created"; }
+}
+
+struct InstStateRec { InstState state = InstState::Created; std::string last_error; };
+static std::mutex                                    g_inst_state_mu;
+static std::unordered_map<std::string, InstStateRec> g_inst_state;
+
+static void set_inst_state(const std::string& name, InstState s,
+                           const std::string& err = "") {
+    std::lock_guard<std::mutex> lk(g_inst_state_mu);
+    auto& r = g_inst_state[name];
+    r.state = s;
+    r.last_error = (s == InstState::Faulted) ? err : std::string();
+}
+static void drop_inst_state(const std::string& name) {
+    std::lock_guard<std::mutex> lk(g_inst_state_mu);
+    g_inst_state.erase(name);
+}
+static void rename_inst_state(const std::string& from, const std::string& to) {
+    std::lock_guard<std::mutex> lk(g_inst_state_mu);
+    auto it = g_inst_state.find(from);
+    if (it == g_inst_state.end()) return;
+    g_inst_state[to] = it->second;
+    g_inst_state.erase(it);
+}
+static void clear_inst_state() {
+    std::lock_guard<std::mutex> lk(g_inst_state_mu);
+    g_inst_state.clear();
+}
+
 static void handle_command(xi::ws::Server& srv, std::string_view text) {
     auto parsed = xp::parse_cmd(text);
     if (!parsed) {
@@ -2565,14 +2611,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Try backend's InstanceRegistry first (plugin-manager instances)
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
-            if (inst->set_def(def_str)) send_rsp_ok(srv, id);
-            else send_rsp_err(srv, id, "set_def returned false");
+            if (inst->set_def(def_str)) {
+                set_inst_state(*iname, InstState::Active);
+                send_rsp_ok(srv, id);
+            } else {
+                set_inst_state(*iname, InstState::Faulted, "set_def returned false");
+                send_rsp_err(srv, id, "set_def returned false");
+            }
         } else {
             std::lock_guard<std::mutex> lk(g_script_mu);
             if (g_script.ok() && g_script.set_instance_def) {
                 int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
-                if (rc == 0) send_rsp_ok(srv, id);
-                else         send_rsp_err(srv, id, "set_instance_def failed");
+                if (rc == 0) { set_inst_state(*iname, InstState::Active); send_rsp_ok(srv, id); }
+                else { set_inst_state(*iname, InstState::Faulted, "set_instance_def failed");
+                       send_rsp_err(srv, id, "set_instance_def failed"); }
             } else {
                 send_rsp_err(srv, id, "instance not found: " + *iname);
             }
@@ -2659,6 +2711,189 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             } else {
                 send_rsp_err(srv, id, "instance not found: " + *iname);
             }
+        }
+    } else if (name == "get_state") {
+        // Orchestrator read (task #67): the host-tracked instance state machine
+        // (created / active / faulted) + last error. Coarse by design — fine
+        // staging/ready sub-state is plugin-side (exchange get_status). An
+        // instance that exists but has had no host-visible transition yet reads
+        // "created". args: { "name": "cam0" } → data: { state, last_error }.
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        InstState st; std::string err; bool known = false;
+        {
+            std::lock_guard<std::mutex> lk(g_inst_state_mu);
+            auto it = g_inst_state.find(*iname);
+            if (it != g_inst_state.end()) { st = it->second.state; err = it->second.last_error; known = true; }
+        }
+        if (!known) {
+            // No tracked transition — report "created" if the instance actually
+            // exists, else a clean not-found.
+            if (xi::InstanceRegistry::instance().find(*iname)) { st = InstState::Created; }
+            else { send_rsp_err(srv, id, "instance not found: " + *iname); return; }
+        }
+        std::string data = std::string("{\"state\":\"") + inst_state_str(st) + "\",\"last_error\":";
+        xp::json_escape_into(data, err);
+        data += "}";
+        send_rsp_ok(srv, id, data);
+    } else if (name == "prepare_instance") {
+        // Orchestrator STAGE (ABI v7, task #69): load a new config's heavy assets
+        // into an instance's BACKGROUND staging slot, off the critical path — the
+        // live config keeps running. Pair with commit_group to swap them in
+        // frame-perfectly. For a plugin that opted into XI_PLUGIN_STAGED this calls
+        // its ungated prepare() (concurrent with process); otherwise it falls back
+        // to a gated set_def (immediate swap — the tier-1 path). Script-side
+        // instances keep the exchange convention.
+        // args: { "name": "cam0", "def": { ... }, "folder"?: "..." }
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        std::string def_str;
+        const char* after;
+        if (!xp::detail::find_key(parsed->args_json.data(),
+                                  parsed->args_json.data() + parsed->args_json.size(),
+                                  "def", def_str, after)) {
+            def_str = "{}";
+        }
+        auto folder = xp::get_string_field(parsed->args_json, "folder");
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        if (inst) {
+            bool ok = false;
+            try { ok = inst->prepare(def_str, folder ? *folder : std::string()); }
+            catch (const std::exception& e) {
+                set_inst_state(*iname, InstState::Faulted, e.what());
+                send_rsp_err(srv, id, std::string("prepare error: ") + e.what());
+                return;
+            }
+            if (ok) send_rsp_ok(srv, id);
+            else { set_inst_state(*iname, InstState::Faulted, "prepare returned false");
+                   send_rsp_err(srv, id, "prepare returned false"); }
+        } else {
+            // Script-side: exchange convention {command:"prepare", def, folder}.
+            std::string cmd = "{\"command\":\"prepare\",\"def\":" + def_str;
+            if (folder) { cmd += ",\"folder\":"; xp::json_escape_into(cmd, *folder); }
+            cmd += "}";
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.exchange_instance) {
+                std::vector<char> buf(64 * 1024);
+                int n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
+                                                   buf.data(), (int)buf.size());
+                if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
+                             n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
+                                                            buf.data(), (int)buf.size()); }
+                if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
+                else        send_rsp_err(srv, id, "prepare failed");
+            } else {
+                send_rsp_err(srv, id, "instance not found: " + *iname);
+            }
+        }
+    } else if (name == "commit_group") {
+        // Orchestrator DRAIN-BARRIER (RFC #65 / config-swap design, tasks #66/#69).
+        // Commit a GROUP of instances atomically w.r.t. inspection runs: quiesce
+        // dispatch + drain in-flight runs so NO process() is mid-flight, call the
+        // first-class commit() slot on every target in that one no-process window
+        // (so no run ever sees a half-committed group), then resume dispatch at the
+        // prior fps — a config switch must not stop the camera stream. Reuses the
+        // same quiesce primitive as recompile/rebuild. The expensive asset load has
+        // already happened off the barrier via `prepare_instance`; commit() is just
+        // a cheap pointer swap, so this barrier is one in-flight run (~ms).
+        //
+        // Addressing (task #68): an explicit name array AND/OR selectors that the
+        // host expands against existing instance properties — no new schema:
+        //   "instances": ["a","b"]   explicit names (covers script-side too)
+        //   "group":  "line1"        all backend instances in that dispatch group
+        //   "plugin": "binarize"     all backend instances of that plugin type
+        // The union is deduped. (If config-switch cohorts ever need to cut ACROSS
+        // dispatch groups, add a dedicated per-instance tag then; reusing `group`
+        // + `plugin` is the zero-schema choice that covers the common cases.)
+        // args: { instances?, group?, plugin? }
+        // See docs/roadmap/config-bundles-and-orchestration.md.
+        std::vector<std::string> targets;
+        std::unordered_set<std::string> seen;
+        auto add_target = [&](const std::string& n) {
+            if (seen.insert(n).second) targets.push_back(n);
+        };
+        if (yyjson_doc* adoc = yyjson_read(parsed->args_json.c_str(),
+                                           parsed->args_json.size(), 0)) {
+            yyjson_val* arr = yyjson_obj_get(yyjson_doc_get_root(adoc), "instances");
+            if (yyjson_is_arr(arr)) {
+                size_t _i, _n; yyjson_val* it;
+                yyjson_arr_foreach(arr, _i, _n, it) {
+                    const char* s = yyjson_get_str(it);
+                    if (yyjson_is_str(it) && s) add_target(s);
+                }
+            }
+            yyjson_doc_free(adoc);
+        }
+        auto group_sel  = xp::get_string_field(parsed->args_json, "group");
+        auto plugin_sel = xp::get_string_field(parsed->args_json, "plugin");
+        if (group_sel || plugin_sel) {
+            for (auto& [iname, ii] : g_plugin_mgr.project().instances) {
+                if (group_sel  && ii.group       != *group_sel)  continue;
+                if (plugin_sel && ii.plugin_name != *plugin_sel) continue;
+                add_target(iname);
+            }
+        }
+        if (targets.empty()) {
+            send_rsp_err(srv, id, "no targets — pass instances[], group, or plugin");
+            return;
+        }
+        // DRAIN-BARRIER: after this returns there is provably no process() running
+        // (pool stopped + workers joined + in-flight cmd:run drained via g_run_mu).
+        auto guard = quiesce_dispatch_for_lifecycle_op_("commit_group");
+        std::string results = "[";
+        bool any_fail = false;
+        for (size_t i = 0; i < targets.size(); ++i) {
+            if (i) results += ",";
+            results += "{\"name\":"; xp::json_escape_into(results, targets[i]);
+            std::string r; bool ok = false;
+            auto inst = xi::InstanceRegistry::instance().find(targets[i]);
+            if (inst) {
+                // First-class commit() slot (ABI v7): swap staging → live. The
+                // result echoes the now-live def. A plugin with no double-slot
+                // gets the InstanceBase no-op (it already swapped in set_def).
+                try { inst->commit(); r = inst->get_def(); ok = true; }
+                catch (const std::exception& e) {
+                    r = std::string("{\"error\":\"") + e.what() + "\"}";
+                }
+            } else {
+                // Script-side instances keep the exchange convention.
+                std::lock_guard<std::mutex> lk(g_script_mu);
+                if (g_script.ok() && g_script.exchange_instance) {
+                    const char* commit_cmd = R"({"command":"commit"})";
+                    std::vector<char> buf(64 * 1024);
+                    int n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
+                                                       buf.data(), (int)buf.size());
+                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
+                                 n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
+                                                                buf.data(), (int)buf.size()); }
+                    if (n >= 0) { r.assign(buf.data(), (size_t)n); ok = true; }
+                }
+                if (!ok) r = "{\"error\":\"instance not found\"}";
+            }
+            if (!ok) any_fail = true;
+            set_inst_state(targets[i], ok ? InstState::Active : InstState::Faulted,
+                           ok ? "" : "commit failed");
+            results += ",\"ok\":"; results += ok ? "true" : "false";
+            results += ",\"result\":"; results += r.empty() ? "null" : r;
+            results += "}";
+        }
+        results += "]";
+        // RESUME dispatch at the prior fps (config switch must not halt streaming).
+        if (guard.was_continuous) {
+            bool trig_only = guard.prior_fps <= 0;
+            int fps = trig_only ? 0 : guard.prior_fps;
+            g_continuous_fps = fps;
+            g_continuous = true;
+            int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(fps, 1));
+            spawn_group_pool_(&srv, interval_ms);
+        }
+        std::string data = "{\"results\":" + results + "}";
+        if (any_fail) {
+            xp::Rsp r; r.id = id; r.ok = false;
+            r.error = "one or more commits failed"; r.data_json = data;
+            srv.send_text(r.to_json());
+        } else {
+            send_rsp_ok(srv, id, data);
         }
     } else if (name == "save_project") {
         auto path = xp::get_string_field(parsed->args_json, "path");
@@ -3015,6 +3250,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xi::TriggerBus::instance().clear_sink();
         xi::TriggerBus::instance().reset();
         g_plugin_mgr.close_project();
+        clear_inst_state();   // instances are gone — drop host-tracked state
         send_rsp_ok(srv, id, "{\"closed\":true}");
     } else if (name == "export_project_plugin") {
         // Package a project plugin as a deployable folder. Compiles Release;
@@ -3267,6 +3503,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         std::string create_err;
         auto* ii = g_plugin_mgr.create_instance(*iname, *plugin, &create_err);
         if (ii) {
+            set_inst_state(*iname, InstState::Created);
             send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, create_err.empty() ? "failed to create instance" : create_err);
@@ -3277,6 +3514,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         bool delete_folder =
             parsed->args_json.find("\"delete_folder\":true") != std::string::npos;
         if (g_plugin_mgr.remove_instance(*iname, delete_folder)) {
+            drop_inst_state(*iname);
             send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "instance not found: " + *iname);
@@ -3286,6 +3524,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         auto new_name = xp::get_string_field(parsed->args_json, "new_name");
         if (!old_name || !new_name) { send_rsp_err(srv, id, "missing name or new_name"); return; }
         if (g_plugin_mgr.rename_instance(*old_name, *new_name)) {
+            rename_inst_state(*old_name, *new_name);
             send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "rename failed — name in use or instance missing");

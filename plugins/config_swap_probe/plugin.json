@@ -1,0 +1,6 @@
+{
+  "name": "config_swap_probe",
+  "description": "Reference plugin for the orchestrator config-swap design — double-slot prepare/commit via exchange",
+  "dll": "config_swap_probe.dll",
+  "factory": "xi_plugin_create"
+}

@@ -542,6 +542,54 @@ Generic passthrough to an instance's `exchange()` method — used by plugin
 UIs that ship their own command vocabulary.
 `args: { "name": "cam0", "cmd": { ... } }` → `data: <whatever the plugin returns>`
 
+### `get_state`
+Orchestrator read: the host-tracked instance state machine.
+`args: { "name": "cam0" }` → `data: { "state": "created"|"active"|"faulted",
+"last_error": "..." }` (`ok: false` if no such instance). Coarse by design — the
+host records only these three states, driven by the host-visible verbs
+(`create_instance` → `created`; a successful `set_instance_def`/`commit_group` →
+`active`; a failed one → `faulted` with `last_error`). Fine staging/ready
+sub-state stays plugin-side via `exchange {command:"get_status"}`. An instance
+that exists but has had no host-visible transition yet reads `created`.
+
+### `prepare_instance`
+Orchestrator **stage**: load a new config's heavy assets into an instance's
+background staging slot, off the critical path — the live config keeps running.
+`args: { "name": "cam0", "def": { ... }, "folder"?: "..." }` → `ok: true`. For a
+plugin that opted into the ABI v7 `XI_PLUGIN_STAGED` path this calls its **ungated**
+`prepare()` (runs concurrent with `process()`); otherwise it falls back to a gated
+`set_def` (immediate swap — the tier-1 path). Pair with `commit_group` to swap the
+staged config in frame-perfectly. Resolves backend instances first, then script-
+loaded ones (which keep the `exchange {command:"prepare"}` convention).
+
+### `commit_group`
+Orchestrator **drain-barrier**: call the first-class `commit()` on a GROUP of
+instances atomically w.r.t. inspection runs. The host quiesces dispatch + drains
+in-flight runs so no `process()` is mid-flight, commits every target in that one
+no-process window (no run ever sees a half-committed group), then resumes dispatch
+at the prior fps — a config switch must not stop the stream.
+`args: { "instances"?: ["a","b"], "group"?: "line1", "plugin"?: "binarize",
+"cmd"?: { ... } }` → `data: { "results": [ { "name", "ok", "result" }, ... ] }`.
+Overall `ok: false` if any target failed. Resolves backend instances first, then
+script-loaded ones.
+
+**Addressing.** Targets are the deduped union of an explicit `instances[]` (which
+also covers script-side instances) plus selectors that expand against existing
+backend-instance properties — no new schema: `group` (the instance's dispatch
+group) and `plugin` (its plugin type). Reusing `group`+`plugin` is the zero-schema
+choice covering the common cohorts ("all of line1", "all binarize"); a dedicated
+per-instance tag would only be needed if a config-switch cohort must cut ACROSS
+dispatch groups.
+
+This pairs with the **double-slot `prepare`/`commit`** a heavy-resource plugin
+implements (ABI v7 `XI_PLUGIN_STAGED`): `prepare_instance` loads the new assets
+into a background staging slot (the live config keeps running); `commit_group`
+then swaps them in across the group. The expensive load happens off the barrier,
+so the barrier is one in-flight run (~ms), not a stall. See
+[`roadmap/config-bundles-and-orchestration.md`](../roadmap/config-bundles-and-orchestration.md)
+for the full model, [`c-abi.md`](./c-abi.md) §1 for the ABI, and
+`plugins/config_swap_probe/` for the reference plugin.
+
 ### `save_project` / `load_project` / `open_project`
 `args: { "path": "project.json" }` → `ok: true`
 
