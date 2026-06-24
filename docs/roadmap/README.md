@@ -70,8 +70,12 @@ Several are platform requests from RFC
   "command-other-instances" host_api; version branch-graph view (RFC #65 FR-2/FR-4).
 - [`run-result.md`](./run-result.md) — per-run signed verdict record (the
   `xi::result` API ships; the full status-band + HMI/PLC wiring is the sketch).
-- [`interactive-tool-registry.md`](./interactive-tool-registry.md) — shared
-  image-viewer panel for plugins needing GUI setup.
+- [`webui-and-ui-export.md`](./webui-and-ui-export.md) — a Web Component library
+  (auto-webui from a control-descriptor schema + custom escape hatch) and
+  section-based UI export in two shapes (status-observation vs full-app extract).
+  Absorbs the interactive-tool-registry sketch.
+- [`interactive-tool-registry.md`](./interactive-tool-registry.md) — draw-on-image
+  teach tools (polygon/ROI/fiducial); now a sub-part of `webui-and-ui-export.md`.
 - [`production-hmi.md`](./production-hmi.md) — operator dashboard composer (v1.0
   RUN mode built; compose mode + the rest forward-looking).
 - [`linux-port.md`](./linux-port.md) — cross-platform port (revisit after a stable
