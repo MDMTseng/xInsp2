@@ -1,0 +1,1 @@
+{ "plugin": "meta_source", "isolation": "in_process", "config": { "period_ms": 50, "recipe": 7, "command": "inspect_top" } }

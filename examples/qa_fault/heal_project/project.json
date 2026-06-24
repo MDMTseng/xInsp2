@@ -2,5 +2,11 @@
   "name": "qa_fault_heal",
   "script": "inspect.cpp",
   "params": [],
-  "instances": []
+  "instances": [],
+  "plugins": {
+    "crash_once_heal": {
+      "path": "crash_once_heal",
+      "compile": true
+    }
+  }
 }

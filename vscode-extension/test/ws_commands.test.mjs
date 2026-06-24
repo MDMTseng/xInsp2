@@ -1,7 +1,7 @@
 // ws_commands.test.mjs — Tests for untested WS commands.
 //
 // Covers: ping, version, unload_script+run, list_instances,
-// set_instance_def, preview_instance, process_instance,
+// set_instance_def,
 // save_project/load_project round-trip, get_plugin_ui, unknown command.
 
 import { test } from 'node:test';
@@ -60,10 +60,10 @@ test('unload_script then run produces warning, not crash', { timeout: 90000 }, a
         const ur = await c.nextNonLog();
         assert.equal(ur.ok, true, 'unload_script ok');
 
-        // Run with no script loaded — should not crash
+        // Run with no script loaded — clean error rsp, not a crash.
         c.send({ type: 'cmd', id: 3, name: 'run' });
         const rr = await c.nextNonLog();
-        assert.equal(rr.ok, true, 'run after unload should succeed (no-op)');
+        assert.equal(rr.ok, false, 'run after unload returns a clear no-script error');
 
         // Backend still alive — verify with ping
         c.send({ type: 'cmd', id: 4, name: 'ping' });
@@ -143,91 +143,44 @@ test('set_instance_def updates instance definition', { timeout: 10000 }, async (
 });
 
 // ---------------------------------------------------------------
-// 6. preview_instance returns JPEG
+// 7b. get_instance_def — symmetric read; set→get→mutate→restore round-trip
 // ---------------------------------------------------------------
-test('preview_instance returns JPEG binary frame', { timeout: 10000 }, async () => {
+test('get_instance_def round-trips set_instance_def', { timeout: 10000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
         c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
         assert.equal((await c.nextNonLog()).ok, true);
 
-        const projDir = resolve(tmpdir(), `xi_preview_${Date.now()}`);
+        const projDir = resolve(tmpdir(), `xi_getdef_${Date.now()}`);
         c.send({ type: 'cmd', id: 2, name: 'create_project',
-                 args: { folder: projDir, name: 'test_preview' } });
+                 args: { folder: projDir, name: 'test_getdef' } });
         assert.equal((await c.nextNonLog()).ok, true);
 
         c.send({ type: 'cmd', id: 3, name: 'create_instance',
-                 args: { name: 'cam_prev', plugin: 'mock_camera' } });
+                 args: { name: 'cam_g', plugin: 'mock_camera' } });
         assert.equal((await c.nextNonLog()).ok, true);
 
-        // Start the camera so it has frames
-        c.send({ type: 'cmd', id: 4, name: 'exchange_instance',
-                 args: { name: 'cam_prev', cmd: { command: 'start' } } });
-        await c.nextNonLog();
-        await sleep(200);
-
-        // Request preview
-        c.send({ type: 'cmd', id: 5, name: 'preview_instance',
-                 args: { name: 'cam_prev' } });
-        const rsp = await c.nextNonLog();
-        assert.equal(rsp.ok, true, 'preview_instance ok');
-
-        // Check for JPEG binary frame
-        const frame = await c.nextBinary(5000);
-        assert.ok(frame.length > 2, 'binary frame should have data');
-
-        // JPEG magic bytes (may have header prefix)
-        const jpg = frame.length > 20 ? frame.subarray(20) : frame;
-        assert.equal(jpg[0], 0xFF, 'JPEG SOI marker byte 1');
-        assert.equal(jpg[1], 0xD8, 'JPEG SOI marker byte 2');
-    });
-});
-
-// ---------------------------------------------------------------
-// 7. process_instance with source
-// ---------------------------------------------------------------
-test('process_instance processes blob_analysis with camera source', { timeout: 10000 }, async () => {
-    await withBackend(async (c) => {
-        await c.nextText();
-
-        // Load plugins
-        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
-        assert.equal((await c.nextNonLog()).ok, true);
-        c.send({ type: 'cmd', id: 2, name: 'load_plugin', args: { name: 'blob_analysis' } });
+        // Set a known def, then read it straight back.
+        c.send({ type: 'cmd', id: 4, name: 'set_instance_def',
+                 args: { name: 'cam_g', def: { width: 800, height: 600 } } });
         assert.equal((await c.nextNonLog()).ok, true);
 
-        const projDir = resolve(tmpdir(), `xi_process_${Date.now()}`);
-        c.send({ type: 'cmd', id: 3, name: 'create_project',
-                 args: { folder: projDir, name: 'test_process' } });
-        assert.equal((await c.nextNonLog()).ok, true);
+        c.send({ type: 'cmd', id: 5, name: 'get_instance_def', args: { name: 'cam_g' } });
+        const g1 = await c.nextNonLog();
+        assert.equal(g1.ok, true, 'get_instance_def ok');
+        const def1 = typeof g1.data === 'string' ? JSON.parse(g1.data) : g1.data;
+        assert.equal(def1.width, 800, 'read-back width matches what was set');
 
-        // Create camera instance
-        c.send({ type: 'cmd', id: 4, name: 'create_instance',
-                 args: { name: 'cam_proc', plugin: 'mock_camera' } });
-        assert.equal((await c.nextNonLog()).ok, true);
+        // Round-trip: feed the read def straight back via set_instance_def.
+        c.send({ type: 'cmd', id: 6, name: 'set_instance_def',
+                 args: { name: 'cam_g', def: def1 } });
+        assert.equal((await c.nextNonLog()).ok, true, 'def round-trips through set_instance_def');
 
-        // Start camera
-        c.send({ type: 'cmd', id: 5, name: 'exchange_instance',
-                 args: { name: 'cam_proc', cmd: { command: 'start' } } });
-        await c.nextNonLog();
-        await sleep(200);
-
-        // Create blob_analysis instance
-        c.send({ type: 'cmd', id: 6, name: 'create_instance',
-                 args: { name: 'det_proc', plugin: 'blob_analysis' } });
-        assert.equal((await c.nextNonLog()).ok, true);
-
-        // Process: run blob_analysis with camera as source
-        c.send({ type: 'cmd', id: 7, name: 'process_instance',
-                 args: { name: 'det_proc', source: 'cam_proc' } });
-        const rsp = await c.nextNonLog();
-        assert.equal(rsp.ok, true, 'process_instance ok');
-
-        // Verify result has blob_count
-        const data = typeof rsp.data === 'string' ? JSON.parse(rsp.data) : rsp.data;
-        assert.ok('blob_count' in data || rsp.ok,
-            'process result should contain blob_count or succeed');
+        // Unknown instance → ok:false.
+        c.send({ type: 'cmd', id: 7, name: 'get_instance_def', args: { name: 'nope' } });
+        const g2 = await c.nextNonLog();
+        assert.equal(g2.ok, false, 'unknown instance returns ok:false');
     });
 });
 

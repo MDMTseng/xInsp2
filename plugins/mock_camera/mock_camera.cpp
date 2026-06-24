@@ -9,9 +9,10 @@
 //      mock_camera.cpp /Fe:mock_camera.dll
 //
 
-#include <xi/xi_instance.hpp>
-#include <xi/xi_image.hpp>
-#include <xi/xi_source.hpp>
+#include <xi/xi_abi.hpp>   // xi::Plugin, xi::Record, xi::Image, xi::emit_record
+
+#include <atomic>
+#include <chrono>
 
 #include <cstdio>
 #include <cstring>
@@ -68,20 +69,18 @@ static void draw_number(xi::Image& img, int x, int y, int number) {
     }
 }
 
-class MockCamera : public xi::ImageSource {
+class MockCamera : public xi::Plugin {
 public:
-    explicit MockCamera(std::string name)
-        : ImageSource(std::move(name), 3), w_(640), h_(480), fps_(10) {}
+    using xi::Plugin::Plugin;
+    MockCamera(const xi_host_api* host, const char* name) : xi::Plugin(host, name) {}
 
-    ~MockCamera() override { stop(); }
-
-    std::string plugin_name() const override { return "mock_camera"; }
+    ~MockCamera() override { stop_(); }
 
     std::string get_def() const override {
         char buf[256];
         std::snprintf(buf, sizeof(buf),
             R"({"width":%d,"height":%d,"fps":%d,"streaming":%s})",
-            w_, h_, fps_, is_running() ? "true" : "false");
+            w_, h_, fps_, running_.load() ? "true" : "false");
         return buf;
     }
 
@@ -101,11 +100,11 @@ public:
 
     std::string exchange(const std::string& cmd_json) override {
         if (cmd_json.find("\"start\"") != std::string::npos) {
-            start();
+            start_();
             return get_def();
         }
         if (cmd_json.find("\"stop\"") != std::string::npos) {
-            stop();
+            stop_();
             return get_def();
         }
         if (cmd_json.find("\"get_status\"") != std::string::npos) {
@@ -127,20 +126,21 @@ public:
         return R"({"error":"unknown command"})";
     }
 
-    void start() override {
-        if (running_) return;
+private:
+    int w_ = 640, h_ = 480, fps_ = 10;
+    std::atomic<bool> running_{false};
+    std::thread thread_;
+
+    void start_() {
+        if (running_.load()) return;
         running_ = true;
         thread_ = std::thread([this] { run_loop(); });
     }
 
-    void stop() override {
+    void stop_() {
         running_ = false;
         if (thread_.joinable()) thread_.join();
     }
-
-private:
-    int w_, h_, fps_;
-    std::thread thread_;
 
     void run_loop() {
         int seq = 0;
@@ -170,7 +170,8 @@ private:
             }
             draw_number(img, 4, 4, seq);
 
-            push(std::move(img));
+            xi::emit_record(host_, name().c_str(),
+                            xi::Record().image("frame", img));
             seq++;
 
             int sleep_ms = 1000 / std::max(fps_, 1);
@@ -179,7 +180,4 @@ private:
     }
 };
 
-extern "C" __declspec(dllexport)
-xi::InstanceBase* xi_plugin_create(const char* instance_name) {
-    return new MockCamera(instance_name);
-}
+XI_PLUGIN_IMPL(MockCamera)

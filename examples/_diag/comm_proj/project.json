@@ -1,5 +1,0 @@
-{
-  "name": "comm_reorder",
-  "script": "inspect.cpp",
-  "instances": [ {"name": "comm", "plugin": "comm"} ]
-}

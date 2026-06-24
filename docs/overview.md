@@ -16,8 +16,9 @@ script** that orchestrates them per frame. The bets:
   by pointer (zero-copy) through refcounted pools.
 - **HDevelop-like iteration despite C++.** Fast edit→run via hot-reload + cached
   replay + hot params — not just fast compile.
-- **Production-grade resilience.** A supervisor (FE) keeps the line safe and the
-  compute core (BE) respawning; a PLC dead-man chain survives a crash.
+- **Production-grade resilience.** A supervisor (FE) keeps the compute core (BE)
+  respawning and records crash history; line safety is a comms plugin's own
+  crash-watching sidecar process.
 
 ## The 60-second mental model
 
@@ -28,7 +29,7 @@ script** that orchestrates them per frame. The bets:
 | **Plugin** | A DLL implementing the C ABI: a camera/source, detector, op, or I/O bridge. Reusable across projects. |
 | **Instance** | A *configured* plugin (`instances/<name>/instance.json`): which plugin + its config + its dispatch group. |
 | **Record** | The data passed between script and plugin: schema-less JSON + a named-image bag. Zero-copy across the ABI. |
-| **Trigger bus** | Correlates frames from multiple sources into one inspection by trigger id within a window. |
+| **Trigger bus** | Turns each emitted record into one inspection run; a record carrying several named images (a gathering source) is inspected together. |
 | **Dispatch group** | Worker threads (own `max_parallel` + OS priority + queue) that run inspections; groups are isolated. |
 | **Run-result** | The one verdict per run: a signed status code + message (`>0` ok, `0` NA, `-1…` ng, `≤-990000` framework system-fail). Feeds HMI + PLC. |
 | **HMI** | A standalone browser SPA that connects over WebSocket and *only* visualizes. |
@@ -37,9 +38,9 @@ script** that orchestrates them per frame. The bets:
 
 ```
               ┌───────────────────── one machine ─────────────────────┐
- PLC / line ◄─┤ xinsp-fe.exe ──spawns──► xinsp-backend.exe ─WS(:7823)─► HMI
- (safe-state) │ (supervisor, ROOT)       (compute core: trigger bus +   (browser
-              │  safe-state, respawn      dispatch groups + script +      viewer)
+              │ xinsp-fe.exe ──spawns──► xinsp-backend.exe ─WS(:7823)─► HMI
+              │ (supervisor, ROOT)       (compute core: trigger bus +   (browser
+              │  respawn + crash history  dispatch groups + script +     viewer)
               │                           plugins — all in-process)
               └────────────────────────────────────────────────────────┘
  Dev box: the VS Code extension plays the FE's role (spawn/attach the BE) plus the
@@ -49,24 +50,25 @@ script** that orchestrates them per frame. The bets:
 - **`xinsp-backend.exe` (BE)** — the compute core. Opens a project, compiles the
   script + plugins, runs continuous dispatch, serves a WebSocket API. All plugins
   run **in-process** (a hard plugin crash takes the BE down — the accepted trade
-  for zero-copy speed; the FE is the safety net).
+  for zero-copy speed; the FE respawns it).
 - **`xinsp-fe.exe` (FE)** — the supervisor / root in production: spawn + monitor
-  the BE, drive **safe-state** on backend death, rate-limited respawn. PLC I/O is a
-  plugin; the FE forwards a plugin-registered payload to the PLC on crash. See
-  [`internals/fe-be.md`](./internals/fe-be.md).
+  the BE, rate-limited respawn, record crash history, expose `fe_status`. PLC I/O
+  is a plugin; line safety on a BE crash is that comms plugin's own sidecar
+  process, not the FE. See [`internals/fe-be.md`](./internals/fe-be.md).
 - **VS Code extension** — the dev front-end (spawn/attach BE, edit→run, trees,
   viewer). **HMI** (`hmi/`) — the production operator panel, a WS-only SPA
   ([`roadmap/production-hmi.md`](./roadmap/production-hmi.md)).
 
 ## The life of one inspection
 
-1. A **source** plugin `emit_trigger`s frames tagged with a trigger id + its
-   dispatch group.
-2. The **trigger bus** correlates required sources by id within a window
-   (`trigger_policy`) → one event carrying the images.
+1. A **source** plugin `emit_record`s a record (one or more named images +
+   metadata) into its dispatch group.
+2. The **trigger bus** turns that record into ONE event carrying its images; a
+   *gathering* source that wants several frames inspected together puts them all in
+   the same record.
 3. The event runs in its **group's lane** on a worker thread (up to `max_parallel`
    parallel).
-4. The **script** `xi_inspect_entry()` runs: reads the trigger images, calls
+4. The **script** `xi_inspect_entry()` runs: reads the record's images, calls
    plugins (`xi::use("det").process(...)` → a `Record`), computes a verdict, emits
    `VAR(...)` (per-run values) + `xi::result(code, msg)` (the one verdict), and may
    forward to a PLC via a comm plugin.
@@ -108,8 +110,10 @@ handling, dispatch pools, script lifecycle, crash filter.
 ## Glossary
 
 - **BE / FE** — backend (compute) / frontend (supervisor).
-- **trigger / trigger id** — an event from a source; the id is the correlation key.
-- **trigger_policy** — `any` / `all_required` / `leader_followers` + a window.
+- **record / emit** — a source `emit_record`s a record (named images + metadata);
+  each emit becomes one inspection run.
+- **gathering source** — one plugin that emits several frames in a single record
+  so they're inspected together (replaces multi-source correlation).
 - **dispatch group** — a per-group worker lane (`max_parallel`, `thread_priority`, …).
 - **run-result** — the one signed verdict code + message per run; the `≤-990000`
   band is framework-only (e.g. `XI_SYS_DROPPED`). See [`roadmap/run-result.md`](./roadmap/run-result.md).

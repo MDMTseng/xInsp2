@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstring>
 #include <thread>
+#include <vector>
 
 namespace {
 constexpr uint64_t BURST_TID_HI = 0x6275727374706970ull;  // "burstpip"
@@ -101,32 +102,26 @@ private:
         while (running_.load()) {
             uint64_t seq = seq_.fetch_add(1);
 
-            xi_image_handle h = host_->image_create(W, H, 1);
-            if (h != XI_IMAGE_NULL) {
-                uint8_t* px = host_->image_data(h);
-                // Cheap fill: midgrey background + a moving stripe so
-                // visual debuggers can sanity-check the stream. Keep
-                // this fast — the source is supposed to be ~free.
-                std::memset(px, 200, (size_t)W * H);
-                int stripe_x = (int)(seq % (uint64_t)W);
-                for (int y = 0; y < H; ++y) {
-                    px[y * W + stripe_x] = 32;
-                }
-                // Stamp seq as little-endian uint64 in first 8 bytes.
-                std::memcpy(px, &seq, sizeof(seq));
-
-                xi_record_image entry = { "img", h };
-                xi_trigger_id   tid;
-                tid.hi = BURST_TID_HI;
-                tid.lo = seq + 1;            // avoid (0,0) which is NULL
-
-                // timestamp_us = 0 → host stamps with its now() clock.
-                // We need this for end-to-end latency measurement.
-                host_->emit_trigger(name().c_str(), tid, /*ts=*/0,
-                                    &entry, 1);
-                host_->image_release(h);
-                emitted_.fetch_add(1);
+            // Cheap fill: midgrey background + a moving stripe so
+            // visual debuggers can sanity-check the stream. Keep
+            // this fast — the source is supposed to be ~free.
+            std::vector<uint8_t> px((size_t)W * H, 200);
+            int stripe_x = (int)(seq % (uint64_t)W);
+            for (int y = 0; y < H; ++y) {
+                px[y * W + stripe_x] = 32;
             }
+            // Stamp seq as little-endian uint64 in first 8 bytes.
+            std::memcpy(px.data(), &seq, sizeof(seq));
+
+            xi::Record rec = xi::Record().image("img", xi::Image(W, H, 1, px.data()));
+            xi_trigger_id tid;
+            tid.hi = BURST_TID_HI;
+            tid.lo = seq + 1;            // avoid (0,0) which is NULL
+
+            // timestamp_us = 0 → host stamps with its now() clock.
+            // We need this for end-to-end latency measurement.
+            xi::emit_record(host_, name().c_str(), rec, tid);
+            emitted_.fetch_add(1);
 
             // sleep_until — cumulative drift stays bounded.
             int fps = fps_.load();

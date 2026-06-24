@@ -37,6 +37,7 @@ extern void* g_trigger_info_fn_;
 extern void* g_trigger_image_fn_;
 extern void* g_trigger_sources_fn_;
 extern void* g_trigger_leader_fn_;
+extern void* g_trigger_meta_fn_;
 
 namespace xi {
 
@@ -90,6 +91,11 @@ using TriggerSourcesFn = int32_t (*)(char* buf, int32_t buflen);
 // as TriggerSourcesFn: positive return = bytes written, negative return
 // = -needed_bytes (caller resizes and retries), 0 = no leader.
 using TriggerLeaderFn  = int32_t (*)(char* buf, int32_t buflen);
+// ABI v5: returns the event's metadata doc (emit_trigger_record) as a
+// yyjson_mut_doc* with one ref RESERVED for the caller to adopt_shared (==
+// consume) — exactly the share_out/adopt_shared handshake the process()-input
+// doc uses. null when the trigger carries no metadata.
+using TriggerMetaFn    = void* (*)();
 
 // xi::Trigger — read-only view of the current inspection event.
 //
@@ -218,6 +224,33 @@ public:
         return srcs.empty() ? std::string{} : srcs.front();
     }
 
+    // ABI v5: the event's routing/context metadata (whatever the source put in
+    // the record it emit_trigger_record'd), as a read-only Record. Zero-copy /
+    // zero-serialize — borrows the host-owned metadata doc by pointer (held by
+    // the DocRegistry refcount for the life of this dispatch), exactly as a
+    // plugin's process(in) borrows in.doc. Read fields off it like any Record:
+    //
+    //   auto t = xi::current_trigger();
+    //   if (t.is_active()) {
+    //       auto m = t.meta();
+    //       std::string cmd = m["command"].as_string();   // routing key
+    //   }
+    //
+    // Returns an empty Record when the trigger carries no metadata (the bare
+    // emit_trigger path) or the host predates this callback. The returned
+    // Record is FROZEN (the host still holds its own ref): reads are free,
+    // a mutation copy-on-writes into the script's own doc.
+    Record meta() const {
+        auto fn   = reinterpret_cast<TriggerMetaFn>(g_trigger_meta_fn_);
+        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
+        if (!fn || !host || !host->doc_release) return Record();
+        void* d = fn();
+        if (!d) return Record();
+        // adopt_shared CONSUMES the ref trigger_meta_cb reserved for us; the
+        // returned Record doc_release's it when it dies, balancing the reserve.
+        return Record::adopt_shared((yyjson_mut_doc*)d, host->doc_release, /*frozen=*/true);
+    }
+
     // True if `name` appears in this trigger's source list. Cheap routing
     // affordance for multi-source scripts that switch on source identity
     // without re-implementing string compare or hashing in the hot path.
@@ -243,44 +276,6 @@ private:
 inline Trigger current_trigger() { return Trigger{}; }
 
 // Proxy object returned by xi::use()
-// xi::Resource — a fetched view of a frame an emitter staged under a res_id
-// (emit/fetch dispatch model). Returned by xi::use("emitter").get(res_id).
-// Metadata (dataInfo cJSON) is fetched eagerly; images are fetched lazily by
-// key, so a consumer only pays for the images it actually reads.
-//
-//   auto r = xi::use("cam").get(res_id);
-//   if (r.ok()) {
-//       Image left = r.image("cam_left");
-//       int seq = /* parse r.data() for "seq" */;
-//   }
-class Resource {
-public:
-    Resource() = default;
-    Resource(std::string emitter, std::string res_id, std::string data, bool ok)
-        : emitter_(std::move(emitter)), res_id_(std::move(res_id)),
-          data_(std::move(data)), ok_(ok) {}
-
-    bool ok() const { return ok_; }                    // res_id was staged
-    const std::string& data() const { return data_; }  // dataInfo cJSON ("" if none)
-
-    // Lazily fetch one named image as a zero-copy pool view. Empty if the
-    // resource or key is absent. Default key "" = the single-image convention.
-    Image image(const std::string& key = "") const {
-        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
-        if (!ok_ || !host || !host->fetch_image) return {};
-        xi_image_handle h = host->fetch_image(emitter_.c_str(),
-                                                     res_id_.c_str(), key.c_str());
-        if (h == XI_IMAGE_NULL) return {};
-        Image img = Image::adopt_pool_handle(host, h);
-        host->image_release(h);
-        return img;
-    }
-
-private:
-    std::string emitter_, res_id_, data_;
-    bool ok_ = false;
-};
-
 class UseProxy {
 public:
     explicit UseProxy(const std::string& name) : name_(name) {}
@@ -379,26 +374,6 @@ public:
         Image img = Image::adopt_pool_handle(host, h);
         host->image_release(h);
         return img;
-    }
-
-    // Fetch a frame this emitter staged under res_id (emit/fetch model). Returns
-    // a Resource view: .ok() if present, .data() the metadata cJSON, .image(key)
-    // for each staged image. Empty/not-ok if res_id isn't staged (or the host
-    // predates the resource store). See docs/internals/dispatch.
-    Resource fetch(const std::string& res_id) const {
-        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
-        if (!host || !host->fetch_resource) return {};
-        std::vector<char> buf(4096);
-        int32_t n = host->fetch_resource(name_.c_str(), res_id.c_str(),
-                                       buf.data(), (int32_t)buf.size());
-        if (n < 0) return Resource(name_, res_id, "", false);   // not staged
-        if (n > (int32_t)buf.size()) {                          // grow + retry
-            buf.resize((size_t)n);
-            n = host->fetch_resource(name_.c_str(), res_id.c_str(),
-                                   buf.data(), (int32_t)buf.size());
-            if (n < 0) return Resource(name_, res_id, "", false);
-        }
-        return Resource(name_, res_id, std::string(buf.data(), (size_t)n), true);
     }
 
     const std::string& name() const { return name_; }

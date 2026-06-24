@@ -1,27 +1,24 @@
 //
-// trigger_source.cpp — minimal image source using the TriggerBus API.
+// trigger_source.cpp — minimal image source using emit_record.
 //
-// Demonstrates the one piece of machinery the older ImageSource-style
-// cameras can't do: stamping each emitted frame with a 128-bit trigger
-// id so the host can CORRELATE multiple sources firing "at the same
-// event" (hardware pulse, software trigger, external I/O, whatever).
+// A source plugin PUSHES frames into the pipeline: build a record (one or
+// more images + optional metadata) and hand it to the host with
+// xi::emit_record(). The host dispatches the inspection script exactly once
+// per emitted record; the script reads the frames back via
+// xi::current_trigger().image(...).
 //
-// Single-source case: pass XI_TRIGGER_NULL and let the host allocate an
-// id for you. That alone makes every frame individually addressable
-// (replayable, recordable).
+// Each record carries a 128-bit trigger id. Pass XI_TRIGGER_NULL (the default)
+// and the host mints a fresh one — that alone makes every frame individually
+// addressable (its hex is current_trigger().id_string(), used by the
+// buffer_replay plugin to replay a run). timestamp = 0 stamps host time.
 //
-// Multi-source case: a pair of cameras trigger-synced in hardware share
-// ONE tid across both emits. Under the AllRequired bus policy, the
-// script only dispatches when both have emitted for that tid — no
-// mis-pairing on dropped frames.
-//
-// To see correlation in action, wire two `trigger_source` instances
-// under the same project and set trigger_policy → all_required. Each
-// instance generates its own tid here; for real pairing swap the
-// XI_TRIGGER_NULL below with a shared tid from your hardware.
+// Correlating MULTIPLE sources "at the same event" (e.g. a hardware-synced
+// stereo pair) is done by a GATHERING plugin that subscribes to the sources
+// and emits ONE combined record — not by a bus policy (those were removed).
+// See examples/stereo_sync/ for a paired-cameras reference.
 //
 
-#include <xi/xi_abi.hpp>
+#include <xi/xi_abi.hpp>   // xi::Plugin, xi::Record, xi::Image, xi::emit_record
 #include <xi/xi_json.hpp>
 
 #include <atomic>
@@ -80,23 +77,16 @@ private:
         const int W = 320, H = 240;
         int seq = 0;
         while (running_.load()) {
-            // 1. Create one frame in the host's image pool (refcount=1).
-            xi_image_handle h = host_->image_create(W, H, 1);
-            uint8_t* px = host_->image_data(h);
+            // 1. Paint one frame.
+            xi::Image img(W, H, 1);
+            uint8_t* px = img.data();
             for (int i = 0; i < W * H; ++i) px[i] = (uint8_t)((i + seq) & 0xFF);
 
-            // 2. Emit it. XI_TRIGGER_NULL asks the host for a fresh tid
-            //    (single-source mode); pass a shared tid to pair across
-            //    multiple sources. timestamp_us=0 → host uses now().
-            xi_record_image frame = { "frame", h };
-            host_->emit_trigger(name().c_str(),
-                                XI_TRIGGER_NULL,
-                                /*timestamp_us=*/0,
-                                &frame, 1);
-
-            // 3. Bus addref'd the handle internally; release OURS so the
-            //    pool can free it once the script is done reading.
-            host_->image_release(h);
+            // 2. Emit it. Default id = XI_TRIGGER_NULL → host mints a fresh
+            //    trigger id; default ts = 0 → host stamps now(). The script
+            //    reads this frame back as current_trigger().image("frame").
+            xi::emit_record(host_, name().c_str(),
+                            xi::Record().image("frame", img));
 
             ++seq;
             ticks_++;

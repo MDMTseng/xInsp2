@@ -5,9 +5,9 @@ backend. This proves the two properties that test can't:
 
   FE-E2  happy path / clean shutdown:
      A healthy project (the crasher plugin, armed:false) runs under FE autostart.
-     The FE should bring the backend up, log "backend healthy", drive NO safe
-     state, keep it alive, and on a Ctrl-Break shut down cleanly
-     (SupervisorShutdown) with no orphaned backend.
+     The FE should bring the backend up, log "backend healthy", NEVER respawn
+     (no death), keep it alive, and on a Ctrl-Break shut down cleanly
+     ("supervisor stopping", status reason=SupervisorShutdown) with no orphan.
 
   FE-E3  orphan guarantee:
      A *hard* kill of the FE (TerminateProcess — no console-ctrl handler runs)
@@ -122,12 +122,12 @@ def main() -> int:
     e2log = log.read_text(encoding="utf-8", errors="ignore")
     if "backend healthy" not in e2log:
         failures.append("E2: FE never logged 'backend healthy' (no positive liveness signal)")
-    if "ENTER SAFE STATE reason=BackendExit" in e2log:
-        failures.append("E2: a healthy line drove BackendExit safe-state (false alarm)")
-    if "ENTER SAFE STATE reason=SupervisorShutdown" not in e2log:
-        failures.append("E2: clean shutdown did not drive SupervisorShutdown safe-state")
+    if "respawning backend" in e2log:
+        failures.append("E2: a healthy line triggered a respawn (false death alarm)")
+    if "respawn limit" in e2log:
+        failures.append("E2: a healthy line hit the respawn cap (false death alarm)")
     if "supervisor stopping" not in e2log:
-        failures.append("E2: FE did not log a clean 'supervisor stopping'")
+        failures.append("E2: clean shutdown did not log 'supervisor stopping'")
     if not wait_port(port, up=False, budget=8):
         failures.append("E2: backend still listening after clean FE shutdown (orphan)")
     print(f"[E2] {'ok' if not failures else 'issues'} — healthy window + clean shutdown")

@@ -1,81 +1,68 @@
 #pragma once
 //
-// xi_trigger_bus.hpp — host-side correlator for trigger-tagged frames.
+// xi_trigger_bus.hpp — the host-side dispatch funnel for emit_record.
 //
-// Image-source plugins publish frames via host->emit_trigger(name, tid, ...).
-// The bus accumulates per-source images keyed by tid, applies the active
-// correlation policy, and dispatches a complete TriggerEvent to the
-// subscribed worker (the script's inspect loop).
+// A source plugin pushes a record (frames + metadata) via host->emit_record
+// (xi::emit_record). The bus builds ONE TriggerEvent per emit and hands it to
+// the subscribed worker (the script's inspect loop). There is no correlation:
+// a source that wants several frames inspected together (e.g. a gathering
+// stereo source) puts them in the SAME record, so the bus is a pure funnel —
+// emit in, dispatch out. (Multi-camera sync, recording/replay, and trigger
+// policies were removed in the ABI-v6 dispatch cleanup: sync is a gathering
+// plugin, replay is a buffer-replay plugin.)
 //
-// Policies (set per project at script-load time):
-//
-//   POLICY_ANY              — fire as soon as any source emits (default,
-//                             back-compat: behaves like the old per-source
-//                             trigger loop).
-//   POLICY_ALL_REQUIRED     — wait until every source in `required_sources`
-//                             has emitted for that tid; fire then. Drop
-//                             tids that don't complete within window_ms.
-//   POLICY_LEADER_FOLLOWERS — fire as soon as the leader emits; attach
-//                             whatever the followers have most recently
-//                             posted (correlation is best-effort, not
-//                             event-locked).
-//
-// All image handles inside a TriggerEvent are owned by the bus; the worker
-// that consumes the event is responsible for releasing them via
-// host->image_release() after dispatch.
+// Every image handle inside a TriggerEvent is owned by the bus; the worker that
+// consumes the event releases them (and the metadata doc) after dispatch.
 //
 
 #include "xi_abi.h"
 #include "xi_clock.hpp"
 #include "xi_image_pool.hpp"
 
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
-#include <deque>
 #include <functional>
 #include <mutex>
 #include <random>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace xi {
 
 struct TriggerEvent {
     xi_trigger_id  id{0, 0};
-    int64_t        timestamp_us = 0;          // earliest source timestamp
-    // Stamped by the dispatcher worker the moment this event is popped
-    // off the dispatch queue (g_ev_queue). Same clock as timestamp_us
-    // (system_clock microseconds — see xi::now_us()), so scripts can
-    // compute queue_wait_us = dequeued_at_us - timestamp_us and
-    // inspect_us = xi::now_us() - dequeued_at_us. Zero until the
-    // worker stamps it; observer/recorder copies see 0.
+    int64_t        timestamp_us = 0;          // emit (capture) timestamp
+    // Stamped by the dispatcher worker the moment this event is popped off the
+    // dispatch queue. Same clock as timestamp_us (system_clock µs — see
+    // xi::now_us()), so scripts can compute queue_wait_us = dequeued_at_us -
+    // timestamp_us and inspect_us = xi::now_us() - dequeued_at_us. 0 until the
+    // worker stamps it.
     int64_t        dequeued_at_us = 0;
     // Arrival/run id, assigned by the backend dispatcher when the frame is
-    // committed to a dispatch queue (in push order == FIFO dequeue order). The
-    // worker uses it as the run_id; a dropped frame's marker carries it too, so
-    // a consumer can order drop notifications relative to run results even though
-    // markers are emitted out-of-band (not through the arrival-order gate, which
-    // would stall the acquiring source). 0 until the dispatcher assigns it.
+    // committed to a dispatch queue (in push == FIFO dequeue order). The worker
+    // uses it as the run_id; a dropped frame's marker carries it too. 0 until
+    // the dispatcher assigns it.
     int64_t        arrival_id = 0;
-    // Source name → image handle. Caller must release each handle after use.
+    // Image key → handle. The key is the record's own key for a multi-image
+    // record (e.g. "cam_left"/"cam_right"), or the emitter name for a single
+    // image. Caller releases each handle after use.
     std::unordered_map<std::string, xi_image_handle> images;
-    // Best-effort metadata: which source first published this tid.
+    // The emitting instance's name — current_trigger().primary_source().
     std::string    leader_source;
     // Dispatch group (priority/concurrency lane). Stamped by the dispatcher sink
-    // from the emitting source instance's "group" (default_group if untagged).
-    // Empty in the legacy single-pool path. See docs/internals/dispatch.md.
+    // from the emitting instance's "group" (default_group if untagged).
     std::string    group;
-};
-
-enum class TriggerPolicy {
-    Any,                // default; fire on every emit
-    AllRequired,        // fire when all required sources have a frame
-    LeaderFollowers,    // fire on leader; attach follower latest
+    // ABI v6: routing/context metadata from emit_record, carried by POINTER
+    // (zero-serialize) across the async dispatch — a host-owned yyjson_mut_doc*
+    // refcounted through DocRegistry, exactly as the image handles ride the
+    // ImagePool refcount. NULL when the record carried no metadata. Owned like
+    // the images: whoever holds this event owns one ref and MUST
+    // DocRegistry::release() it at every drop/consume site (TriggerEvent has no
+    // destructor — the discipline is manual). The script reads it as a borrowed
+    // read-only view via current_trigger().meta().
+    yyjson_mut_doc* meta_doc = nullptr;
 };
 
 #ifndef XI_NOW_US_DEFINED
@@ -108,7 +95,7 @@ public:
 
     using Sink = std::function<void(TriggerEvent)>;
 
-    // Primary sink: the inspection thread. Only one. clear via clear_sink.
+    // Primary sink: the inspection thread. Only one. Clear via clear_sink.
     void set_sink(Sink sink) {
         std::lock_guard<std::mutex> lk(mu_);
         sink_ = std::move(sink);
@@ -116,319 +103,100 @@ public:
 
     void clear_sink() {
         std::lock_guard<std::mutex> lk(mu_);
-        for (auto& [tid, p] : pending_) {
-            for (auto& [src, h] : p.event.images) {
-                ImagePool::instance().release(h);
-            }
-        }
-        pending_.clear();
         sink_ = nullptr;
     }
 
-    // Observer sink — fires in addition to the primary sink. Used by the
-    // recorder to persist events without interrupting the worker. The
-    // observer's event is a deep-ref copy: each image handle is addref'd
-    // so the observer can release them on its own schedule.
-    void set_observer(Sink observer) {
-        std::lock_guard<std::mutex> lk(mu_);
-        observer_ = std::move(observer);
-    }
-    void clear_observer() {
-        std::lock_guard<std::mutex> lk(mu_);
-        observer_ = nullptr;
-    }
-
-    void set_policy(TriggerPolicy policy,
-                    std::vector<std::string> required_sources = {},
-                    std::string leader_source = "",
-                    int window_ms = 100) {
-        std::lock_guard<std::mutex> lk(mu_);
-        policy_      = policy;
-        required_    = std::unordered_set<std::string>(required_sources.begin(),
-                                                       required_sources.end());
-        leader_      = std::move(leader_source);
-        window_ms_   = window_ms;
-        // Discard whatever was correlating; any partial events are dropped.
-        for (auto& [tid, p] : pending_) {
-            for (auto& [src, h] : p.event.images) {
-                ImagePool::instance().release(h);
-            }
-        }
-        pending_.clear();
-    }
-
-    // Plugins call this via host_api->emit_trigger.
-    // The bus addrefs each input handle so the source can release immediately.
+    // emit_record routes here. meta_doc (ABI v6): the event's metadata doc, a
+    // host-owned yyjson_mut_doc*. OWNERSHIP IS TRANSFERRED — the caller hands
+    // one ref and the bus consumes it (stores it on the dispatched event, or
+    // DocRegistry::release()s it when there is no sink). nullptr ⇒ no metadata.
+    // The bus addrefs each input image handle so the source can release at once.
     void emit(const std::string& source,
-              xi_trigger_id tid_in,
+              xi_trigger_id id_in,
               int64_t ts_us,
               const xi_record_image* images,
-              int image_count)
+              int image_count,
+              yyjson_mut_doc* meta_doc = nullptr)
     {
-        emit_impl_(source, tid_in, ts_us, images, image_count);
-    }
-
-    // Internal implementation behind emit(). Marked public so the inline
-    // call site above can invoke it without function-call overhead in
-    // Release; effectively private — external callers go through emit().
-    //
-    // All callers are in-process (host_api->emit_trigger, trigger_bridge,
-    // recorder replay): they own their refs and release after emit()
-    // returns, so the bus addrefs each handle to own its own independent
-    // ref. (The cross-process ownership-transfer variant was removed with
-    // SHM in 2026-05; nothing transfers refs over a wire anymore.)
-    void emit_impl_(const std::string& source,
-                    xi_trigger_id tid_in,
-                    int64_t ts_us,
-                    const xi_record_image* images,
-                    int image_count)
-    {
-        if (image_count <= 0 || !images) return;
+        // We own the transferred meta_doc ref: every return path releases it.
+        if (image_count <= 0 || !images) {
+            DocRegistry::instance().release(meta_doc);
+            return;
+        }
         if (ts_us == 0) ts_us = now_us();
-        xi_trigger_id tid = xi_trigger_id_is_null(tid_in) ? make_trigger_id() : tid_in;
+        xi_trigger_id id = xi_trigger_id_is_null(id_in) ? make_trigger_id() : id_in;
 
-        std::vector<std::pair<std::string, xi_image_handle>> entries;
-        entries.reserve(image_count);
+        TriggerEvent ev;
+        ev.id            = id;
+        ev.timestamp_us  = ts_us;
+        ev.leader_source = source;
+        ev.meta_doc      = meta_doc;            // transfer
         for (int i = 0; i < image_count; ++i) {
             ImagePool::instance().addref(images[i].handle);
-            // Use multi-image keys as "<source>/<key>" so a source can
-            // publish several named images (e.g. "raw" + "depth"). For the
-            // common single-image case the key collapses to source name.
-            std::string name = source;
+            // A multi-image record is keyed by the record's OWN keys, so the
+            // script reads t.image("cam_left") directly. A single image
+            // collapses to the emitter name, so t.image("<source>") works.
+            std::string name;
             if (image_count > 1 && images[i].key && images[i].key[0]) {
-                name += "/";
-                name += images[i].key;
+                name = images[i].key;
+            } else {
+                name = source;
             }
-            entries.emplace_back(std::move(name), images[i].handle);
+            ev.images.emplace(std::move(name), images[i].handle);
         }
 
         Sink to_fire;
-        TriggerEvent event_to_dispatch;
+        { std::lock_guard<std::mutex> lk(mu_); to_fire = sink_; }
 
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            // Correlation needs a stable trigger id SHARED across sources. A
-            // source that emits XI_TRIGGER_NULL gets a freshly minted unique id
-            // per emit (above), so under AllRequired / LeaderFollowers it can
-            // never match its peers and the event never completes. Warn once per
-            // source instead of leaving a silently-dead pipeline. (Any policy is
-            // fine with NULL — each emit is its own one-shot event.)
-            if (xi_trigger_id_is_null(tid_in) &&
-                (policy_ == TriggerPolicy::AllRequired ||
-                 policy_ == TriggerPolicy::LeaderFollowers) &&
-                null_tid_warned_.insert(source).second) {
-                std::fprintf(stderr,
-                    "[xinsp2] WARNING: source '%s' emitted a NULL trigger id under the %s "
-                    "policy; each emit gets a unique id, so it cannot correlate with other "
-                    "sources (the event will never complete). The source must emit a shared "
-                    "trigger id (e.g. frame/line index) for multi-source sync.\n",
-                    source.c_str(),
-                    policy_ == TriggerPolicy::AllRequired ? "all_required" : "leader_followers");
-            }
-            switch (policy_) {
-            case TriggerPolicy::Any: {
-                // Build a one-shot event and fire it immediately.
-                TriggerEvent ev;
-                ev.id = tid;
-                ev.timestamp_us = ts_us;
-                ev.leader_source = source;
-                for (auto& [n, h] : entries) ev.images[n] = h;
-                event_to_dispatch = std::move(ev);
-                to_fire = sink_;
-                break;
-            }
-            case TriggerPolicy::AllRequired: {
-                auto& p = pending_[tid];
-                if (p.event.id.hi == 0 && p.event.id.lo == 0) {
-                    p.event.id = tid;
-                    p.event.timestamp_us = ts_us;
-                    p.event.leader_source = source;
-                    p.first_seen_us = steady_now_us();   // steady: window must not move on a wall jump
-                } else if (ts_us < p.event.timestamp_us) {
-                    // timestamp_us is the EARLIEST source timestamp (TriggerEvent
-                    // doc); take the min as later sources append, so the script's
-                    // queue_wait_us math isn't skewed by which source arrived first.
-                    p.event.timestamp_us = ts_us;
-                }
-                for (auto& [n, h] : entries) {
-                    auto it = p.event.images.find(n);
-                    if (it != p.event.images.end()) {
-                        // Duplicate from same source? Replace + drop old.
-                        ImagePool::instance().release(it->second);
-                        it->second = h;
-                    } else {
-                        p.event.images[n] = h;
-                    }
-                }
-                p.sources_seen.insert(source);
-                if (is_complete_locked(p)) {
-                    event_to_dispatch = std::move(p.event);
-                    pending_.erase(tid);
-                    to_fire = sink_;
-                }
-                evict_stale_locked();
-                break;
-            }
-            case TriggerPolicy::LeaderFollowers: {
-                if (source == leader_) {
-                    // Build event with leader's image + latest from each follower.
-                    TriggerEvent ev;
-                    ev.id = tid;
-                    ev.timestamp_us = ts_us;
-                    ev.leader_source = source;
-                    for (auto& [n, h] : entries) ev.images[n] = h;
-                    // Attach latest follower frames (still addref'd in the cache)
-                    for (auto& [name, h] : follower_latest_) {
-                        ImagePool::instance().addref(h);
-                        ev.images[name] = h;
-                    }
-                    event_to_dispatch = std::move(ev);
-                    to_fire = sink_;
-                } else {
-                    // Replace cached latest for this follower-source.
-                    for (auto& [n, h] : entries) {
-                        auto it = follower_latest_.find(n);
-                        if (it != follower_latest_.end()) {
-                            ImagePool::instance().release(it->second);
-                            it->second = h;
-                        } else {
-                            follower_latest_[n] = h;
-                        }
-                    }
-                }
-                break;
-            }
-            }
-        }
-
-        // Observer gets a deep-ref copy (addref all handles). Dispatched
-        // even when no primary sink is set, so recording works before
-        // continuous mode starts.
-        Sink obs;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            obs = observer_;
-        }
-        if (obs && !event_to_dispatch.images.empty()) {
-            TriggerEvent copy;
-            copy.id = event_to_dispatch.id;
-            copy.timestamp_us = event_to_dispatch.timestamp_us;
-            copy.leader_source = event_to_dispatch.leader_source;
-            for (auto& [n, h] : event_to_dispatch.images) {
-                ImagePool::instance().addref(h);
-                copy.images[n] = h;
-            }
-            try { obs(std::move(copy)); }
-            catch (...) { /* observer failures must not kill emit */ }
-        }
-
-        // Dispatch to the primary sink (worker/script).
-        if (to_fire) to_fire(std::move(event_to_dispatch));
-        else {
-            for (auto& [n, h] : event_to_dispatch.images) {
-                ImagePool::instance().release(h);
-            }
+        if (to_fire) {
+            to_fire(std::move(ev));
+        } else {
+            for (auto& [n, h] : ev.images) ImagePool::instance().release(h);
+            DocRegistry::instance().release(ev.meta_doc);
         }
     }
 
-    // Drop all pending state. Call on script reload.
-    void reset() {
-        std::lock_guard<std::mutex> lk(mu_);
-        for (auto& [tid, p] : pending_) {
-            for (auto& [src, h] : p.event.images) ImagePool::instance().release(h);
-        }
-        pending_.clear();
-        for (auto& [n, h] : follower_latest_) ImagePool::instance().release(h);
-        follower_latest_.clear();
-        // Script reload / fresh start: let NULL-tid-under-correlating-policy
-        // warnings fire again for the new run instead of being suppressed by a
-        // prior run's set.
-        null_tid_warned_.clear();
-    }
+    // No correlation state to drop anymore; kept so lifecycle callers (script
+    // reload / project close) need not change.
+    void reset() {}
 
-    // Time-driven eviction of stale partial correlations. Eviction also runs
-    // inside emit_impl_, but that only fires while events keep arriving — call
-    // this from a periodic tick so a partial set left when a source goes quiet
-    // releases its held image handles instead of pinning them indefinitely.
-    void evict_stale() {
-        std::lock_guard<std::mutex> lk(mu_);
-        evict_stale_locked();
-    }
+    // No partial-correlation state to evict anymore; kept as a no-op so the
+    // dispatch timer's periodic call needs no change.
+    void evict_stale() {}
 
 private:
-    struct Pending {
-        TriggerEvent                       event;
-        std::unordered_set<std::string>    sources_seen;
-        int64_t                            first_seen_us = 0;
-    };
-
-    // Hash + equality for using xi_trigger_id directly as the
-    // pending_ map key. Was previously folded to uint64_t via XOR
-    // (`hi ^ lo`); two distinct tids whose halves XOR to the same
-    // value collided, causing AllRequired to cross-correlate frames
-    // from different acquisitions silently.
-    struct TidHash {
-        std::size_t operator()(const xi_trigger_id& t) const noexcept {
-            // 64-bit splitmix-style mix; collisions in the *hash*
-            // are fine (map then falls through to TidEq), what
-            // matters is no information loss in the KEY.
-            uint64_t x = t.hi ^ (t.lo + 0x9E3779B97F4A7C15ull
-                + (t.hi << 6) + (t.hi >> 2));
-            x ^= x >> 33; x *= 0xff51afd7ed558ccdull;
-            x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ull;
-            x ^= x >> 33;
-            return (std::size_t)x;
-        }
-    };
-    struct TidEq {
-        bool operator()(const xi_trigger_id& a, const xi_trigger_id& b) const noexcept {
-            return a.hi == b.hi && a.lo == b.lo;
-        }
-    };
-
-    bool is_complete_locked(const Pending& p) const {
-        for (auto& src : required_) {
-            if (!p.sources_seen.count(src)) return false;
-        }
-        return !required_.empty();
-    }
-
-    void evict_stale_locked() {
-        if (window_ms_ <= 0) return;
-        int64_t cutoff = steady_now_us() - (int64_t)window_ms_ * 1000;
-        for (auto it = pending_.begin(); it != pending_.end();) {
-            if (it->second.first_seen_us < cutoff) {
-                for (auto& [src, h] : it->second.event.images) {
-                    ImagePool::instance().release(h);
-                }
-                it = pending_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-
-    std::mutex                                  mu_;
-    Sink                                        sink_;
-    Sink                                        observer_;
-    TriggerPolicy                               policy_ = TriggerPolicy::Any;
-    std::unordered_set<std::string>             required_;
-    std::string                                 leader_;
-    int                                         window_ms_ = 100;
-    std::unordered_map<xi_trigger_id, Pending, TidHash, TidEq> pending_;
-    std::unordered_map<std::string, xi_image_handle> follower_latest_;
-    // Sources already warned about emitting a NULL trigger id under a correlating
-    // policy (so the warning fires once per source, not every frame).
-    std::unordered_set<std::string>             null_tid_warned_;
+    std::mutex mu_;
+    Sink       sink_;
 };
 
-// Wire emit_trigger on a host_api struct produced by ImagePool::make_host_api().
+// Wire emit_record on a host_api struct produced by ImagePool::make_host_api().
 // Call once after constructing the api; further callers see the live bus.
 inline void install_trigger_hook(xi_host_api& api) {
-    api.emit_trigger = [](const char* source, xi_trigger_id tid,
-                          int64_t ts_us,
-                          const xi_record_image* images, int32_t n) {
-        TriggerBus::instance().emit(source ? source : "", tid, ts_us, images, n);
+    // ABI v6: emit_record — the one dispatch verb. The record's images +
+    // metadata doc go onto the dispatch path; we hand emit() ONE owned ref to
+    // the meta doc (it consumes it). rec->doc arrives through the SDK's
+    // share_out (xi::emit_record) exactly like the process() output doc:
+    // share_out reserved one registry ref for the consumer, so we CONSUME it
+    // here (no extra retain) — adopt_shared's analogue. A doc-less record with
+    // raw JSON bytes is parsed once into a fresh host-owned doc (the only
+    // deserialize, taken only when a hand-rolled source chose data/len).
+    api.emit_record = [](const char* emitter, xi_trigger_id id,
+                         const struct xi_record* rec, int64_t ts) {
+        if (!rec) return;
+        yyjson_mut_doc* meta = nullptr;
+        if (rec->doc) {
+            // share_out reserved a ref for us; take it as the host's ref.
+            meta = (yyjson_mut_doc*)(void*)rec->doc;
+        } else if (rec->data && rec->len > 0) {
+            yyjson_doc* idoc = yyjson_read((const char*)rec->data, (size_t)rec->len, 0);
+            if (idoc) {
+                meta = yyjson_doc_mut_copy(idoc, nullptr);   // host-owned (default alc)
+                yyjson_doc_free(idoc);
+                if (meta) DocRegistry::instance().retain(meta);   // register at rc=1
+            }
+        }
+        TriggerBus::instance().emit(emitter ? emitter : "", id, ts,
+                                    rec->images, rec->image_count, meta);
     };
 }
 

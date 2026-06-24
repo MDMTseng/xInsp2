@@ -32,9 +32,7 @@
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
-#include <xi/xi_source.hpp>
 #include <xi/xi_trigger_bus.hpp>
-#include <xi/xi_trigger_bridge.hpp>
 
 #include <windows.h>
 #include <eh.h>
@@ -110,13 +108,10 @@ static int use_exchange_cb(const char* name, const char* cmd,
     } catch (...) { return -1; }
 }
 
-static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
-    auto inst = xi::InstanceRegistry::instance().find(name);
-    auto* src = inst ? dynamic_cast<xi::ImageSource*>(inst.get()) : nullptr;
-    if (!src) return XI_IMAGE_NULL;
-    xi::Image img = src->grab_wait(timeout_ms);
-    if (img.empty()) return XI_IMAGE_NULL;
-    return xi::ImagePool::instance().from_image(img);
+// grab() was the legacy pull model (xi::ImageSource queue), removed — sources
+// now PUSH via emit_record and scripts read current_trigger().
+static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
+    return XI_IMAGE_NULL;
 }
 
 // --- args ---------------------------------------------------------------
@@ -232,8 +227,6 @@ int main(int argc, char** argv) {
     // null — trigger events just release their images and move on.
     auto host_api = xi::ImagePool::make_host_api();
     xi::install_trigger_hook(host_api);
-    xi::install_resource_hooks(host_api);
-    xi::install_safe_state_hook(host_api);
 
     // Restore instances (plugins + configs) from project.json.
     if (!pm.open_project(args.project_dir)) {

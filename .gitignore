@@ -96,3 +96,6 @@ examples/*/*.scratch.log
 # FE heartbeat files (runtime)
 examples/*/*.hb
 examples/*/gw.log
+
+# plugin export packaging scratch (xinsp2 Export Project Plugin)
+**/export_build/

@@ -1,1 +1,0 @@
-{ "name": "burst_src", "dll": "burst_src.dll", "factory": "xi_plugin_create", "has_ui": false }

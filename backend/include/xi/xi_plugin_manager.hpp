@@ -36,18 +36,17 @@
 
 #include "xi_abi.h"
 #include "xi_atomic_io.hpp"
-#include "xi_baseline.hpp"
 #include "xi_cabi_adapter.hpp" // plugin_abi_compatible / PluginInfo / CAbiInstanceAdapter
-#include "xi_cert.hpp"
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
+#include "xi_config_validate.hpp" // validate_config_against_manifest (opt-in diagnostic, extracted leaf)
 #include "xi_pm_json.hpp"      // pm_json_escape / pm_json_quote (extracted leaf)
-#include "xi_pm_parse.hpp"     // parse_manifest / extract_string / validate_config_against_manifest
+#include "xi_pm_parse.hpp"     // parse_manifest / extract_string / detail_find_key
+#include "xi_plugin_export.hpp" // export_project_plugin_impl (deploy packaging, extracted leaf)
+#include "xi_cmake_build.hpp"  // xi::cmake_build:: host-side cmake invocation (extracted leaf)
+#include "xi_working_copy.hpp" // xi::wc:: transactional scratch fs mechanics (extracted leaf)
 #include "xi_project_model.hpp" // ProjectInfo / InstanceInfo / CompileEnv / OpenWarning (data model)
-#include "xi_resource_store.hpp" // install_resource_hooks (emit/fetch: emit_resource)
-#include "xi_safe_state.hpp"   // install_safe_state_hook (set_safe_state)
 #include "xi_script_compiler.hpp"
-#include "xi_source.hpp"
 #include "xi_trigger_bus.hpp"
 
 #include "yyjson.h"
@@ -243,83 +242,9 @@ private:
         pi.loaded_dll_mtime = ec ? 0 : (uint64_t)wt.time_since_epoch().count();
     }
 
-    // Newest write-time (ticks) over a cmake plugin's source tree — the rebuild
-    // change-gate input. Counts source + build-script files, skips the build/
-    // tree (its artifacts aren't "source"). 0 if nothing found.
-    static uint64_t newest_source_mtime_(const std::string& dir) {
-        uint64_t newest = 0;
-        std::error_code ec;
-        if (!std::filesystem::exists(dir, ec)) return 0;
-        for (auto it = std::filesystem::recursive_directory_iterator(dir, ec);
-             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
-            if (it->is_directory()) {
-                if (it->path().filename() == "build") it.disable_recursion_pending();
-                continue;
-            }
-            auto ext = it->path().extension().string();
-            auto fn  = it->path().filename().string();
-            bool src = ext == ".c"  || ext == ".cpp" || ext == ".cc"  || ext == ".cxx" ||
-                       ext == ".cu" || ext == ".cuh" || ext == ".h"   || ext == ".hpp" ||
-                       ext == ".hxx"|| fn == "CMakeLists.txt" || ext == ".cmake";
-            if (!src) continue;
-            auto wt = std::filesystem::last_write_time(it->path(), ec);
-            if (!ec) newest = std::max(newest, (uint64_t)wt.time_since_epoch().count());
-        }
-        return newest;
-    }
-
-    // Run a command, capturing combined stdout+stderr into *log. Returns the
-    // process exit code (or -1 if it couldn't be spawned).
-    static int run_cmd_capture_(const std::string& cmd, std::string& log) {
-#ifdef _WIN32
-        // _popen routes through cmd.exe; the extra outer quotes keep a quoted
-        // exe path + quoted args parsing correctly.
-        std::string full = "\"" + cmd + " 2>&1\"";
-        FILE* pipe = _popen(full.c_str(), "r");
-        if (!pipe) { log += "[failed to spawn: " + cmd + "]\n"; return -1; }
-        char buf[4096];
-        while (fgets(buf, sizeof(buf), pipe)) log += buf;
-        int rc = _pclose(pipe);
-        return rc;
-#else
-        // TODO(linux): popen(cmd + " 2>&1") — same shape, no outer-quote wrap.
-        (void)cmd; log += "[cmake build unsupported on this platform]\n"; return -1;
-#endif
-    }
-
-    // Configure (first time) + build one cmake plugin. Appends logs. 0 = success.
-    int build_cmake_plugin_(const std::string& cmake_exe, const std::string& src_dir,
-                            const std::string& config, const std::string& xinsp_root,
-                            std::string& log) {
-        auto build_dir = (std::filesystem::path(src_dir) / "build").string();
-        auto q = [](const std::string& s) { return "\"" + s + "\""; };
-        if (!std::filesystem::exists(std::filesystem::path(build_dir) / "CMakeCache.txt")) {
-            std::string cfg = q(cmake_exe) + " -S " + q(src_dir) + " -B " + q(build_dir) +
-                              " -A x64 -DXINSP2_ROOT=" + q(xinsp_root);
-            // OpenCV: pass the resolved `x64/vcNN/lib` SUBDIR (the level whose
-            // OpenCVConfig.cmake actually resolves), NOT the top-level pack dir —
-            // forcing the top dir makes OpenCV's runtime auto-detect set
-            // OpenCV_FOUND=FALSE. compile_env_.opencv_dir is the host's top pack
-            // dir; derive the vc subdir so a NON-standard OpenCV location also
-            // works. If none matches, omit it and let xinsp2_plugin.cmake's own
-            // (hard-coded C:/opencv) probe try.
-            if (!compile_env_.opencv_dir.empty()) {
-                for (const char* vc : {"vc17", "vc16", "vc15", "vc14"}) {
-                    auto lib = std::filesystem::path(compile_env_.opencv_dir) / "x64" / vc / "lib";
-                    if (std::filesystem::exists(lib / "OpenCVConfig.cmake")) {
-                        cfg += " -DOpenCV_DIR=" + q(lib.string());
-                        break;
-                    }
-                }
-            }
-            log += "[configure] " + cfg + "\n";
-            int rc = run_cmd_capture_(cfg, log);
-            if (rc != 0) return rc;
-        }
-        std::string bld = q(cmake_exe) + " --build " + q(build_dir) + " --config " + config;
-        log += "[build] " + bld + "\n";
-        return run_cmd_capture_(bld, log);
-    }
+    // Host-side cmake invocation (newest_source_mtime / run_cmd_capture /
+    // build_cmake_plugin) moved to xi_cmake_build.hpp (xi::cmake_build::;
+    // included above). rebuild_cmake_plugins below orchestrates them.
 
     // One instance preserved across a plugin reload: its name + folder +
     // serialized def, captured before destruction and replayed after reload.
@@ -355,7 +280,6 @@ private:
         if (pi_it != plugins_.end() && pi_it->second.handle) {
             FreeLibrary(pi_it->second.handle);
             pi_it->second.handle = nullptr;
-            pi_it->second.factory = nullptr;
             pi_it->second.c_factory = nullptr;
         }
         return pending;
@@ -411,15 +335,9 @@ private:
                                    "reopen the project to recover";
             return false;
         }
-        bool has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
-        if (has_destroy) {
-            pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
-                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
-        } else {
-            pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
-                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
-        }
-        if (!pi.c_factory && !pi.factory) {
+        pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
+            GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+        if (!pi.c_factory) {
             if (err) *err = "factory '" + pi.factory_symbol + "' not exported in "
                             "rebuilt DLL — instances for this plugin are gone; "
                             "reopen the project to recover";
@@ -433,15 +351,11 @@ private:
                 void* raw = pi.c_factory(&host, p.name.c_str());
                 if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
                     p.name, plugin_name, pi.handle, raw, pi.reentrant, p.max_concurrency);
-            } else if (pi.factory) {
-                auto* raw = pi.factory(p.name.c_str());
-                if (raw) inst.reset(raw);
             }
             if (!inst) continue;
             if (!p.def_json.empty()) inst->set_def(p.def_json);
             project_.instances[p.name].instance = inst;
             InstanceRegistry::instance().add(inst);
-            attach_trigger_bridge(inst.get(), p.name);
         }
         stamp_loaded_dll_(pi, new_dll_path);   // refresh change-gate
         if (stale_module) {
@@ -615,7 +529,6 @@ private:
                 if (prev != plugins_.end() && prev->second.handle) {
                     FreeLibrary(prev->second.handle);
                     prev->second.handle = nullptr;
-                    prev->second.factory = nullptr;
                     prev->second.c_factory = nullptr;
                 }
 
@@ -681,15 +594,9 @@ private:
                         continue;
                     }
                 }
-                bool has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
-                if (has_destroy) {
-                    pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
-                        GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
-                } else {
-                    pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
-                        GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
-                }
-                if (!pi.c_factory && !pi.factory) {
+                pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
+                    GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+                if (!pi.c_factory) {
                     last_open_warnings_.push_back(
                         {pname, pname,
                          "DLL loaded but factory '" + pi.factory_symbol + "' not found"});
@@ -775,7 +682,7 @@ public:
             auto pi_it = plugins_.find(plugin_name);
             if (pi_it == plugins_.end()) return;
             auto& pi_old = pi_it->second;
-            if (!pi_old.c_factory && !pi_old.factory) return;
+            if (!pi_old.c_factory) return;
             xi_host_api& host = default_host_api();
             for (auto& p : pending) {
                 std::shared_ptr<InstanceBase> inst;
@@ -783,15 +690,11 @@ public:
                     void* raw = pi_old.c_factory(&host, p.name.c_str());
                     if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
                         p.name, plugin_name, pi_old.handle, raw, pi_old.reentrant, p.max_concurrency);
-                } else if (pi_old.factory) {
-                    auto* raw = pi_old.factory(p.name.c_str());
-                    if (raw) inst.reset(raw);
                 }
                 if (!inst) continue;
                 if (!p.def_json.empty()) inst->set_def(p.def_json);
                 project_.instances[p.name].instance = inst;
                 InstanceRegistry::instance().add(inst);
-                attach_trigger_bridge(inst.get(), p.name);
                 r.reattached_instances.push_back(p.name);
             }
         };
@@ -834,16 +737,8 @@ public:
             // Re-instantiate against the OLD DLL so we don't leave the
             // project broken. Old DLL is still loaded since we never
             // FreeLibrary'd it.
-            //
-            // P0-D4: previously only handled the c_factory branch; an
-            // old-ABI plugin (using the legacy `factory` C++ symbol)
-            // had its instances destroyed in step 1 but never
-            // re-attached. The instances dict entries were left with
-            // null `instance`; subsequent calls silently no-op.
-            // Handle BOTH old- and new-ABI factory shapes here.
             auto pi_it = plugins_.find(plugin_name);
-            if (pi_it != plugins_.end()
-                && (pi_it->second.c_factory || pi_it->second.factory)) {
+            if (pi_it != plugins_.end() && pi_it->second.c_factory) {
                 xi_host_api& host = default_host_api();
                 for (auto& p : pending) {
                     std::shared_ptr<InstanceBase> inst;
@@ -851,15 +746,11 @@ public:
                         void* raw = pi_it->second.c_factory(&host, p.name.c_str());
                         if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
                             p.name, plugin_name, pi_it->second.handle, raw, pi_it->second.reentrant, p.max_concurrency);
-                    } else if (pi_it->second.factory) {
-                        auto* raw = pi_it->second.factory(p.name.c_str());
-                        if (raw) inst.reset(raw);
                     }
                     if (!inst) continue;
                     if (!p.def_json.empty()) inst->set_def(p.def_json);
                     project_.instances[p.name].instance = inst;
                     InstanceRegistry::instance().add(inst);
-                    attach_trigger_bridge(inst.get(), p.name);
                     r.reattached_instances.push_back(p.name);
                 }
             }
@@ -878,7 +769,6 @@ public:
         if (pi.handle) {
             FreeLibrary(pi.handle);
             pi.handle    = nullptr;
-            pi.factory   = nullptr;
             pi.c_factory = nullptr;
         }
         // After the FreeLibrary above, restore_against_old() can no
@@ -913,15 +803,9 @@ public:
                 return r;
             }
         }
-        bool has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
-        if (has_destroy) {
-            pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
-                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
-        } else {
-            pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
-                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
-        }
-        if (!pi.c_factory && !pi.factory) {
+        pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
+            GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+        if (!pi.c_factory) {
             r.error = "factory '" + pi.factory_symbol + "' not exported in new DLL"
                       " — instances for this plugin are gone; reopen the "
                       "project to recover";
@@ -940,15 +824,11 @@ public:
                 void* raw = pi.c_factory(&host, p.name.c_str());
                 if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
                     p.name, plugin_name, pi.handle, raw, pi.reentrant, p.max_concurrency);
-            } else if (pi.factory) {
-                auto* raw = pi.factory(p.name.c_str());
-                if (raw) inst.reset(raw);
             }
             if (!inst) continue;
             if (!p.def_json.empty()) inst->set_def(p.def_json);
             project_.instances[p.name].instance = inst;
             InstanceRegistry::instance().add(inst);
-            attach_trigger_bridge(inst.get(), p.name);
             r.reattached_instances.push_back(p.name);
         }
         r.ok = true;
@@ -1022,7 +902,7 @@ public:
                 continue;
             }
             bool loaded = (it->second.handle != nullptr);
-            if (loaded && newest_source_mtime_(src_dir) <= it->second.loaded_dll_mtime) {
+            if (loaded && xi::cmake_build::newest_source_mtime(src_dir) <= it->second.loaded_dll_mtime) {
                 rep.items.push_back({name, "unchanged", ""});
                 continue;
             }
@@ -1044,7 +924,9 @@ public:
                 futs.push_back(std::async(std::launch::async,
                     [this, i, &jobs, &cmake_exe, &config, &xinsp_root]() {
                         auto& j = jobs[i];
-                        j.rc = build_cmake_plugin_(cmake_exe, j.src_dir, config, xinsp_root, j.log);
+                        j.rc = xi::cmake_build::build_cmake_plugin(
+                            cmake_exe, j.src_dir, config, xinsp_root,
+                            compile_env_.opencv_dir, j.log);
                         // cmake/MSBuild/cl write OEM-codepage bytes (CP950 on zh-TW)
                         // — scrub to valid UTF-8 so a failure log never breaks the
                         // WS text frame.
@@ -1093,25 +975,11 @@ public:
         return rep;
     }
 
-    // Export a project plugin as a standalone deployable folder. Steps:
-    //   1. Recompile in PluginExport mode (/O2 /Zi — Release with PDB).
-    //   2. LoadLibrary the new DLL into a temporary handle.
-    //   3. Run baseline tests (cert::certify) — if they fail, the export
-    //      aborts so we never ship an uncertified plugin.
-    //   4. Copy <plugin>.dll, <plugin>.pdb, cert.json, plugin.json (auto-
-    //      generated if missing), and any ui/ subfolder into <dest>/<name>/.
-    //   5. Free the temporary handle (the in-process plugin keeps its
-    //      Dev DLL — export doesn't disturb the running session).
-    struct ExportResult {
-        bool                     ok = false;
-        std::string              dest_dir;       // <dest>/<name>
-        std::string              error;
-        std::string              build_log;
-        std::vector<xi::script::Diagnostic> diagnostics;
-        bool                     cert_passed = false;
-        int                      cert_pass_count = 0;
-        int                      cert_fail_count = 0;
-    };
+    // Export a project plugin as a standalone deployable folder. The packaging
+    // logic lives in xi_plugin_export.hpp (export_project_plugin_impl) — a
+    // self-contained build concern. This wrapper just takes the lock, resolves
+    // the plugin's source dir + manifest info, and delegates.
+    using ExportResult = xi::PluginExportResult;
     ExportResult export_project_plugin(const std::string& plugin_name,
                                         const std::string& dest_root) {
         std::lock_guard<std::mutex> lk(mu_);
@@ -1121,135 +989,14 @@ public:
             er.error = "not a project plugin: " + plugin_name;
             return er;
         }
-        auto src_dir = std::filesystem::path(orig_it->second);
         auto pi_it = plugins_.find(plugin_name);
         if (pi_it == plugins_.end()) {
             er.error = "plugin entry missing: " + plugin_name;
             return er;
         }
-        auto& pi = pi_it->second;
-
-        // Re-collect sources (mirror of compile_project_plugins_locked).
-        std::vector<std::string> sources;
-        auto walk = [&](const std::filesystem::path& dir) { collect_cpp_sources(dir, sources); };
-        auto src_subdir = src_dir / "src";
-        if (std::filesystem::exists(src_subdir)) walk(src_subdir);
-        else                                     walk(src_dir);
-        if (sources.empty()) { er.error = "no .cpp sources"; return er; }
-        std::vector<std::string> includes;
-        auto inc_dir = src_dir / "include";
-        if (std::filesystem::exists(inc_dir)) includes.push_back(inc_dir.string());
-
-        // Build into a separate export/ folder so the dev DLL isn't touched.
-        auto export_build = src_dir / "export_build";
-        xi::script::CompileRequest req;
-        req.source_path    = sources.front();
-        req.extra_sources.assign(sources.begin() + 1, sources.end());
-        req.include_dirs   = includes;
-        req.output_dir     = export_build.string();
-        req.include_dir    = compile_env_.include_dir;
-        req.vcvars_path    = compile_env_.vcvars_path;
-        req.opencv_dir     = compile_env_.opencv_dir;
-        req.turbojpeg_root = compile_env_.turbojpeg_root;
-        req.ipp_root       = compile_env_.ipp_root;
-        req.mode           = xi::script::CompileMode::PluginExport;
-
-        std::fprintf(stderr, "[xinsp2] export: compiling '%s' (Release)...\n",
-                     plugin_name.c_str());
-        auto cres = xi::script::compile(req);
-        er.build_log   = cres.build_log;
-        er.diagnostics = cres.diagnostics;
-        if (!cres.ok) { er.error = "Release compile failed"; return er; }
-
-        // Load the freshly built DLL into a temp handle for cert.
-        HMODULE temp = LoadLibraryA(cres.dll_path.c_str());
-        if (!temp) { er.error = "LoadLibrary failed on Release DLL"; return er; }
-
-        // Run baseline. cert::certify writes cert.json beside the DLL on pass.
-        auto syms = xi::baseline::load_symbols(temp);
-        static xi_host_api cert_host = ImagePool::make_host_api();
-        auto build_dir = std::filesystem::path(cres.dll_path).parent_path();
-        std::fprintf(stderr, "[xinsp2] export: running baseline...\n");
-        auto summary = xi::cert::certify(build_dir, cres.dll_path,
-                                          plugin_name, syms, &cert_host);
-        FreeLibrary(temp);
-        er.cert_pass_count = summary.pass_count;
-        er.cert_fail_count = summary.fail_count;
-        er.cert_passed     = summary.all_passed;
-        if (!summary.all_passed) {
-            er.error = "baseline certification failed: "
-                     + std::to_string(summary.pass_count) + "/"
-                     + std::to_string(summary.pass_count + summary.fail_count)
-                     + " passed";
-            return er;
-        }
-
-        // Copy the deployable into dest_root/<plugin_name>/.
-        auto dest = std::filesystem::path(dest_root) / plugin_name;
-        std::error_code ec;
-        std::filesystem::create_directories(dest, ec);
-
-        // DLL — rename _v<n> versioning out so the deployed file is stable.
-        auto dll_dest = dest / (plugin_name + ".dll");
-        std::filesystem::copy_file(cres.dll_path, dll_dest,
-            std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) { er.error = "copy DLL: " + ec.message(); return er; }
-
-        // PDB beside DLL — keep so end-user crashes can blame source line.
-        auto pdb_src = std::filesystem::path(cres.dll_path)
-                           .replace_extension(".pdb");
-        if (std::filesystem::exists(pdb_src)) {
-            std::filesystem::copy_file(pdb_src,
-                dest / (plugin_name + ".pdb"),
-                std::filesystem::copy_options::overwrite_existing, ec);
-        }
-
-        // cert.json
-        auto cert_src = build_dir / "cert.json";
-        if (std::filesystem::exists(cert_src)) {
-            std::filesystem::copy_file(cert_src,
-                dest / "cert.json",
-                std::filesystem::copy_options::overwrite_existing, ec);
-        }
-
-        // plugin.json — synthesize from PluginInfo if there's no manifest in
-        // the source folder. Generated form points dll/factory at the names
-        // the export uses, so the deployed folder is self-contained. The
-        // synthesized version stamps `abi_version` so a target backend
-        // older than the plugin's compile-time ABI can detect the
-        // mismatch on scan (matches the runtime plugin_abi_compatible
-        // check via the DLL's xi_plugin_abi_version export).
-        auto src_manifest = src_dir / "plugin.json";
-        std::string manifest_text;
-        if (std::filesystem::exists(src_manifest)) {
-            std::ifstream mf(src_manifest.string());
-            std::stringstream ms; ms << mf.rdbuf();
-            manifest_text = ms.str();
-        } else {
-            manifest_text = "{\n";
-            manifest_text += "  \"name\":        \"" + pi.name + "\",\n";
-            manifest_text += "  \"description\": \"" + pi.description + "\",\n";
-            manifest_text += "  \"dll\":         \"" + pi.name + ".dll\",\n";
-            manifest_text += "  \"factory\":     \"" + pi.factory_symbol + "\",\n";
-            manifest_text += "  \"has_ui\":      " + std::string(pi.has_ui ? "true" : "false") + ",\n";
-            manifest_text += "  \"abi_version\": " + std::to_string(XI_ABI_VERSION) + "\n";
-            manifest_text += "}\n";
-        }
-        xi::atomic_write(dest / "plugin.json", manifest_text);
-
-        // ui/ — copy whole subtree if present.
-        auto ui_src = src_dir / "ui";
-        if (std::filesystem::exists(ui_src)) {
-            std::filesystem::copy(ui_src, dest / "ui",
-                std::filesystem::copy_options::recursive |
-                std::filesystem::copy_options::overwrite_existing, ec);
-        }
-
-        er.ok       = true;
-        er.dest_dir = dest.string();
-        std::fprintf(stderr, "[xinsp2] exported '%s' to %s\n",
-                     plugin_name.c_str(), er.dest_dir.c_str());
-        return er;
+        return xi::export_project_plugin_impl(
+            plugin_name, std::filesystem::path(orig_it->second),
+            pi_it->second, compile_env_, dest_root);
     }
 
     // Was this plugin loaded from inside the current project (vs. global)?
@@ -1260,11 +1007,8 @@ public:
 
     // Load a plugin's DLL and resolve the factory function.
     //
-    // Side effect (new ABI only): if the plugin has no cert.json, or the
-    // cert is out of date relative to the DLL or the current
-    // BASELINE_VERSION, runs baseline tests and writes cert.json on pass.
-    // A failed certification unloads the DLL and returns false — the
-    // plugin cannot be instantiated until the developer fixes the issue.
+    // Plugins are trusted: the DLL is loaded straight through after an ABI
+    // compatibility check (no baseline cert gate — removed 2026-06).
     // err (optional): on failure, filled with a human-readable reason so callers
     // (the create_instance handler) can surface WHY instead of a generic message.
     bool load_plugin(const std::string& name, std::string* err = nullptr) {
@@ -1298,46 +1042,12 @@ public:
             }
         }
 
-        // Distinguish new vs old ABI: new ABI also exports xi_plugin_destroy
-        auto has_destroy = GetProcAddress(pi.handle, "xi_plugin_destroy") != nullptr;
-        if (has_destroy) {
-            // New C ABI: factory takes (xi_host_api*, const char*) → void*
-            pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
-                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
-
-            // Run certification (baseline tests) if cert is missing/stale.
-            auto plugin_folder = std::filesystem::path(pi.folder_path);
-            if (!xi::cert::is_valid(plugin_folder, dll_path)) {
-                std::fprintf(stderr, "[xinsp2] certifying plugin '%s'...\n", name.c_str());
-                auto syms = xi::baseline::load_symbols(pi.handle);
-                static xi_host_api cert_host = ImagePool::make_host_api();
-                auto summary = xi::cert::certify(plugin_folder, dll_path, name, syms, &cert_host);
-                if (summary.all_passed) {
-                    std::fprintf(stderr, "[xinsp2] cert OK '%s' (%d tests, %.0fms)\n",
-                                 name.c_str(), summary.pass_count, summary.total_ms);
-                } else {
-                    std::fprintf(stderr, "[xinsp2] cert FAILED '%s' — %d/%d passed:\n",
-                                 name.c_str(), summary.pass_count,
-                                 summary.pass_count + summary.fail_count);
-                    for (auto& r : summary.results) {
-                        if (!r.passed) {
-                            std::fprintf(stderr, "  - %s: %s\n", r.name.c_str(), r.error.c_str());
-                        }
-                    }
-                    FreeLibrary(pi.handle);
-                    pi.handle = nullptr;
-                    pi.c_factory = nullptr;
-                    return fail("plugin '" + name + "': certification failed (" +
-                                std::to_string(summary.fail_count) + " baseline test(s) failed; "
-                                "see backend log for details)");
-                }
-            }
-        } else {
-            // Old-style: factory takes (const char*) → InstanceBase*
-            pi.factory = reinterpret_cast<PluginInfo::FactoryFn>(
-                GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
-        }
-        if (pi.c_factory == nullptr && pi.factory == nullptr)
+        // C ABI factory takes (xi_host_api*, const char*) → void*.
+        // Plugins are trusted (no baseline cert gate — removed 2026-06; in-
+        // process plugins load straight through, speed-first).
+        pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
+            GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
+        if (pi.c_factory == nullptr)
             return fail("plugin '" + name + "': factory symbol '" + pi.factory_symbol +
                         "' not found in the DLL");
         stamp_loaded_dll_(pi, dll_path.string());   // change-gate for reload_changed
@@ -1429,12 +1139,11 @@ public:
     }
 
     // ---- working copy (transactional edits at <project>/.xinsp_work) --------
-    static constexpr const char* kWorkingCopyDir = ".xinsp_work";
-    // Commit-in-progress journal marker. Written at the canonical root before a
-    // commit's mirror starts and removed after it completes. If it survives (a
-    // crash/power-loss mid-commit left the canonical tree torn), the next
-    // open_project rolls the commit forward from the intact scratch.
-    static constexpr const char* kCommitMarker = ".xinsp_commit_pending";
+    // Constants + the filesystem mechanics (seed/mirror/exclude/gitignore) live
+    // in xi_working_copy.hpp; these aliases keep the references below terse. The
+    // stateful transactional methods (open/commit/discard) stay here.
+    static constexpr const char* kWorkingCopyDir = xi::wc::kWorkingCopyDir;
+    static constexpr const char* kCommitMarker   = xi::wc::kCommitMarker;
 
     // The canonical project dir when a working copy is active; empty otherwise.
     const std::string& canonical_path() const { return canonical_path_; }
@@ -1453,7 +1162,7 @@ public:
         std::error_code ec;
         std::filesystem::path marker = std::filesystem::path(canonical_path_) / kCommitMarker;
         { std::ofstream mf(marker); mf << "commit in progress\n"; }
-        mirror_tree_(project_.folder_path, canonical_path_);
+        xi::wc::mirror_tree(project_.folder_path, canonical_path_);
         std::filesystem::remove(marker, ec);   // commit complete -> clear journal
         std::fprintf(stderr, "[xinsp2] working copy: committed to %s\n",
                      canonical_path_.c_str());
@@ -1494,7 +1203,7 @@ public:
                 std::fprintf(stderr, "[xinsp2] working copy: completing interrupted "
                              "commit from %s (canonical may be torn)\n",
                              scratch.string().c_str());
-                mirror_tree_(scratch, canon);
+                xi::wc::mirror_tree(scratch, canon);
                 std::filesystem::remove(marker, ec);
             }
         }
@@ -1514,14 +1223,14 @@ public:
             if (!std::filesystem::exists(scratch / "project.json")) {
                 std::error_code ec;
                 std::filesystem::remove_all(scratch, ec);   // clear any partial seed
-                copy_tree_excluding_(canon, scratch);
+                xi::wc::copy_tree_excluding(canon, scratch);
                 std::fprintf(stderr, "[xinsp2] working copy: seeded %s from project\n",
                              scratch.string().c_str());
             } else {
                 std::fprintf(stderr, "[xinsp2] working copy: resuming existing %s\n",
                              scratch.string().c_str());
             }
-            ensure_gitignore_(canon, std::string(kWorkingCopyDir) + "/");
+            xi::wc::ensure_gitignore(canon, std::string(kWorkingCopyDir) + "/");
             canonical_path_ = canon.string();
             folder = scratch.string();
         }
@@ -1572,10 +1281,6 @@ public:
         // `"required":[` with no whitespace and silently dropped the
         // list when a tool / human formatted the JSON with a space
         // after the colon (Python's json.dumps default).
-        project_.trigger_policy    = TriggerPolicy::Any;
-        project_.trigger_required.clear();
-        project_.trigger_leader.clear();
-        project_.trigger_window_ms = 100;
         project_.dispatch_threads  = 1;
         project_.queue_depth       = 100;
         project_.overflow          = "drop_oldest";
@@ -1620,32 +1325,9 @@ public:
                     }
                 }
             }
-            if (yyjson_val* tp = yyjson_obj_get(root, "trigger_policy");
-                tp && yyjson_is_obj(tp)) {
-                if (yyjson_val* k = yyjson_obj_get(tp, "policy");
-                    k && yyjson_is_str(k) && yyjson_get_str(k)) {
-                    std::string p = yyjson_get_str(k);
-                    if      (p == "all_required")     project_.trigger_policy = TriggerPolicy::AllRequired;
-                    else if (p == "leader_followers") project_.trigger_policy = TriggerPolicy::LeaderFollowers;
-                }
-                if (yyjson_val* k = yyjson_obj_get(tp, "leader");
-                    k && yyjson_is_str(k) && yyjson_get_str(k)) {
-                    project_.trigger_leader = yyjson_get_str(k);
-                }
-                if (yyjson_val* k = yyjson_obj_get(tp, "window_ms");
-                    k && yyjson_is_num(k)) {
-                    project_.trigger_window_ms = (int)yyjson_get_num(k);
-                }
-                if (yyjson_val* arr = yyjson_obj_get(tp, "required");
-                    arr && yyjson_is_arr(arr)) {
-                    size_t _i, _n; yyjson_val* it;
-                    yyjson_arr_foreach(arr, _i, _n, it) {
-                        if (yyjson_is_str(it) && yyjson_get_str(it)) {
-                            project_.trigger_required.emplace_back(yyjson_get_str(it));
-                        }
-                    }
-                }
-            }
+            // (trigger_policy removed in the ABI-v6 dispatch cleanup — multi-cam
+            // sync is now a gathering plugin, so the bus does no correlation. A
+            // legacy trigger_policy block in project.json is simply ignored.)
             // runtime block — operational knobs (also live-settable). process_priority
             // applied on open; timer_fps seeds the live timer rate.
             if (yyjson_val* rt = yyjson_obj_get(root, "runtime"); rt && yyjson_is_obj(rt)) {
@@ -1775,10 +1457,6 @@ public:
             yyjson_doc_free(doc);
             project_json_malformed = true;
         }
-        TriggerBus::instance().set_policy(
-            project_.trigger_policy, project_.trigger_required,
-            project_.trigger_leader, project_.trigger_window_ms);
-
         // Compile project-local plugins BEFORE instances are loaded — the
         // instance loop below resolves plugin name → loaded DLL, and we
         // want project plugins to win over global ones with the same name.
@@ -1854,7 +1532,7 @@ public:
                 }
                 // Auto-load the plugin if not yet loaded
                 auto pit = plugins_.find(*plugin);
-                if (pit != plugins_.end() && !pit->second.factory && !pit->second.c_factory) {
+                if (pit != plugins_.end() && !pit->second.c_factory) {
                     // Plugin discovered but not loaded — load it now
                     auto& pi2 = pit->second;
                     auto dll_path = std::filesystem::path(pi2.folder_path) / pi2.dll_name;
@@ -1878,21 +1556,16 @@ public:
                                     inst_name.c_str(), err.c_str());
                                 continue;
                             }
-                            auto has_destroy = GetProcAddress(pi2.handle, "xi_plugin_destroy") != nullptr;
-                            if (has_destroy)
-                                pi2.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
-                                    GetProcAddress(pi2.handle, pi2.factory_symbol.c_str()));
-                            else
-                                pi2.factory = reinterpret_cast<PluginInfo::FactoryFn>(
-                                    GetProcAddress(pi2.handle, pi2.factory_symbol.c_str()));
-                            // P0-D3 (cont.): if neither factory symbol
-                            // resolves, the DLL is loaded but unusable.
+                            pi2.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
+                                GetProcAddress(pi2.handle, pi2.factory_symbol.c_str()));
+                            // P0-D3 (cont.): if the factory symbol doesn't
+                            // resolve, the DLL is loaded but unusable.
                             // Previously left in place with handle set
                             // and factory=null; subsequent open_project
                             // attempts found a stale entry. FreeLibrary
                             // and clear handle so the entry stays in a
                             // clean "not loaded" state.
-                            if (!pi2.factory && !pi2.c_factory) {
+                            if (!pi2.c_factory) {
                                 FreeLibrary(pi2.handle);
                                 pi2.handle = nullptr;
                                 last_open_warnings_.push_back(
@@ -1964,12 +1637,6 @@ public:
                         } else {
                             ImagePool::instance().release_all_for(pre_owner);
                         }
-                    } else if (!created && pi.factory) {
-                        auto* raw = pi.factory(ii.name.c_str());
-                        if (raw) {
-                            ii.instance.reset(raw);
-                            created = true;
-                        }
                     }
                     if (created && ii.instance) {
                         std::string cfg_val;
@@ -1987,7 +1654,6 @@ public:
                             ii.instance->set_def(cfg_val);
                         }
                         InstanceRegistry::instance().add(ii.instance);
-                        attach_trigger_bridge(ii.instance.get(), ii.name);
                     }
                     if (!created) {
                         // B-P1-2: factory failed → adapter wasn't created,
@@ -2058,7 +1724,7 @@ public:
         if (pit == plugins_.end())
             return fail("plugin '" + plugin_name + "' not loaded");
         auto& pi = pit->second;
-        if (!pi.factory && !pi.c_factory)
+        if (!pi.c_factory)
             return fail("plugin '" + plugin_name + "' has no factory (load_plugin failed?)");
 
         auto inst_folder = std::filesystem::path(project_.folder_path) / "instances" / instance_name;
@@ -2073,8 +1739,8 @@ public:
         // call host->instance_folder() from inside its constructor.
         InstanceFolderRegistry::instance().set(instance_name, ii.folder_path);
 
-        if (pi.c_factory) {
-            // New C ABI — create via host API. Pre-allocate the owner
+        {
+            // C ABI — create via host API. Pre-allocate the owner
             // id so any host->image_create called from inside the
             // plugin's ctor is tagged. Sweep on null return / throw
             // so a half-initialised plugin doesn't leak handles.
@@ -2099,14 +1765,8 @@ public:
                 instance_name, plugin_name, pi.handle, raw, pi.reentrant, /*max_concurrency=*/0);
             adapter->adopt_owner_id(pre_owner);
             ii.instance = std::move(adapter);
-        } else {
-            // Old-style factory
-            auto* raw = pi.factory(instance_name.c_str());
-            if (!raw) return fail("plugin '" + plugin_name + "' factory returned null");
-            ii.instance.reset(raw);
         }
         InstanceRegistry::instance().add(ii.instance);
-        attach_trigger_bridge(ii.instance.get(), instance_name);
 
         // Save instance.json
         save_instance_json(ii);
@@ -2115,11 +1775,6 @@ public:
         save_project_locked();
         return &project_.instances[instance_name];
     }
-
-    // Bridge legacy xi::ImageSource into the global TriggerBus so trigger-
-    // aware scripts see push()'d frames as bus events without each plugin
-    // having to migrate. Implemented out-of-line in xi_trigger_bridge.hpp.
-    static void attach_trigger_bridge(InstanceBase* inst, const std::string& source);
 
     // Save an instance's current config to its folder.
     bool save_instance(const std::string& instance_name) {
@@ -2138,7 +1793,6 @@ public:
         if (it == project_.instances.end()) return false;
         InstanceRegistry::instance().remove(instance_name);
         InstanceFolderRegistry::instance().clear(instance_name);
-        ImageSource::unregister_publish_hook(instance_name);
         std::string folder = it->second.folder_path;
         project_.instances.erase(it);
         if (delete_folder && !folder.empty()) {
@@ -2191,10 +1845,6 @@ public:
             if (!raw) { InstanceFolderRegistry::instance().clear(new_name); return false; }
             ii.instance = std::make_shared<CAbiInstanceAdapter>(
                 new_name, ii.plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency);
-        } else if (pi.factory) {
-            auto* raw = pi.factory(new_name.c_str());
-            if (!raw) return false;
-            ii.instance.reset(raw);
         } else {
             return false;
         }
@@ -2209,25 +1859,6 @@ public:
     }
 
     ProjectInfo& project() { return project_; }
-
-    // Update the trigger policy for the current project. Applies to the
-    // global TriggerBus immediately and re-saves project.json.
-    bool set_trigger_policy(TriggerPolicy p,
-                            std::vector<std::string> required,
-                            std::string leader,
-                            int window_ms)
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (project_.folder_path.empty()) return false;
-        project_.trigger_policy    = p;
-        project_.trigger_required  = std::move(required);
-        project_.trigger_leader    = std::move(leader);
-        project_.trigger_window_ms = window_ms;
-        TriggerBus::instance().set_policy(
-            p, project_.trigger_required, project_.trigger_leader, window_ms);
-        save_project_locked();
-        return true;
-    }
 
     std::string to_json() {
         std::lock_guard<std::mutex> lk(mu_);
@@ -2308,7 +1939,7 @@ private:
     // Cold path (instance create / recompile / rename), so the single shared
     // static is fine and costs nothing extra.
     static xi_host_api& default_host_api() {
-        static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); install_resource_hooks(a); install_safe_state_hook(a); return a; }();
+        static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
         return host;
     }
 
@@ -2324,80 +1955,13 @@ private:
         }
     }
 
-    // True if a path component should be skipped when seeding/mirroring the
-    // working copy: the scratch dir itself, VCS metadata, and regenerated build
-    // output (recompiled on open, no point copying — and committing it back
-    // would clobber the canonical build with the scratch's).
-    static bool wc_excluded_(const std::filesystem::path& rel) {
-        for (const auto& part : rel) {
-            std::string s = part.string();
-            if (s == kWorkingCopyDir || s == ".git" || s == "build" ||
-                s == kCommitMarker) return true;
-        }
-        return false;
-    }
+    // Working-copy filesystem mechanics (wc_excluded / copy_tree_excluding /
+    // mirror_tree / ensure_gitignore) moved to xi_working_copy.hpp (xi::wc::;
+    // included above). The transactional methods above call into them.
 
-    // Recursively copy `src` -> `dst`, skipping wc_excluded_ paths. Used to seed
-    // a fresh working copy from the canonical project.
-    static void copy_tree_excluding_(const std::filesystem::path& src,
-                                     const std::filesystem::path& dst) {
-        std::error_code ec;
-        std::filesystem::create_directories(dst, ec);
-        for (auto it = std::filesystem::recursive_directory_iterator(
-                 src, std::filesystem::directory_options::skip_permission_denied, ec);
-             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
-            auto rel = std::filesystem::relative(it->path(), src, ec);
-            if (ec || rel.empty()) continue;
-            if (wc_excluded_(rel)) { if (it->is_directory()) it.disable_recursion_pending(); continue; }
-            auto target = dst / rel;
-            if (it->is_directory()) {
-                std::filesystem::create_directories(target, ec);
-            } else {
-                std::filesystem::create_directories(target.parent_path(), ec);
-                std::filesystem::copy_file(it->path(), target,
-                    std::filesystem::copy_options::overwrite_existing, ec);
-            }
-        }
-    }
-
-    // Mirror `src` (working copy) onto `dst` (canonical): copy/overwrite every
-    // file, then delete files/dirs in `dst` that aren't in `src` — so removals
-    // (e.g. a deleted instance) propagate. Excluded paths are left untouched on
-    // both sides (the canonical .git stays; build/ is regenerated).
-    static void mirror_tree_(const std::filesystem::path& src,
-                             const std::filesystem::path& dst) {
-        std::error_code ec;
-        copy_tree_excluding_(src, dst);   // adds + overwrites
-        // Prune: remove dst entries with no src counterpart.
-        std::vector<std::filesystem::path> to_remove;
-        for (auto it = std::filesystem::recursive_directory_iterator(
-                 dst, std::filesystem::directory_options::skip_permission_denied, ec);
-             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
-            auto rel = std::filesystem::relative(it->path(), dst, ec);
-            if (ec || rel.empty()) continue;
-            if (wc_excluded_(rel)) { if (it->is_directory()) it.disable_recursion_pending(); continue; }
-            if (!std::filesystem::exists(src / rel)) to_remove.push_back(it->path());
-        }
-        for (auto& p : to_remove) std::filesystem::remove_all(p, ec);
-    }
-
-    // Append `line` to <dir>/.gitignore if not already present (so the scratch
-    // dir isn't accidentally committed). Best-effort; ignores I/O errors.
-    static void ensure_gitignore_(const std::filesystem::path& dir,
-                                  const std::string& line) {
-        auto gi = dir / ".gitignore";
-        std::string content;
-        { std::ifstream f(gi); std::stringstream ss; ss << f.rdbuf(); content = ss.str(); }
-        if (content.find(line) != std::string::npos) return;
-        std::ofstream f(gi, std::ios::app);
-        if (!f) return;
-        if (!content.empty() && content.back() != '\n') f << "\n";
-        f << line << "\n";
-    }
-
-    // json_flag_true / extract_string / detail_find_key / parse_manifest /
-    // validate_config_against_manifest moved to xi_pm_parse.hpp (leaf;
-    // included above). Called unqualified -> resolve in namespace xi.
+    // json_flag_true / extract_string / detail_find_key / parse_manifest moved
+    // to xi_pm_parse.hpp; validate_config_against_manifest to xi_config_validate.hpp
+    // (leaf; both included above). Called unqualified -> resolve in namespace xi.
 
     void save_project_locked() {
         auto pj = std::filesystem::path(project_.folder_path) / "project.json";
@@ -2406,7 +1970,6 @@ private:
         out += "  \"script\": ";
         pm_json_escape(out, std::filesystem::path(project_.script_path).filename().string());
         out += ",\n";
-        out += "  \"trigger_policy\": " + trigger_policy_json_locked() + ",\n";
         out += "  \"parallelism\": {";
         out += "\"dispatch_threads\":" + std::to_string(project_.dispatch_threads);
         out += ",\"queue_depth\":"     + std::to_string(project_.queue_depth);
@@ -2456,24 +2019,6 @@ private:
         }
     }
 
-    std::string trigger_policy_json_locked() const {
-        const char* p =
-            project_.trigger_policy == TriggerPolicy::AllRequired     ? "all_required" :
-            project_.trigger_policy == TriggerPolicy::LeaderFollowers ? "leader_followers" :
-                                                                         "any";
-        std::string s = "{\"policy\":\"";
-        s += p; s += "\",\"window_ms\":";
-        s += std::to_string(project_.trigger_window_ms);
-        s += ",\"required\":[";
-        for (size_t i = 0; i < project_.trigger_required.size(); ++i) {
-            if (i) s += ",";
-            pm_json_escape(s, project_.trigger_required[i]);
-        }
-        s += "],\"leader\":";
-        pm_json_escape(s, project_.trigger_leader);
-        s += "}";
-        return s;
-    }
 
     void save_instance_json(const InstanceInfo& ii) {
         auto path = std::filesystem::path(ii.folder_path) / "instance.json";

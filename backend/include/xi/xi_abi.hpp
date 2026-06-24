@@ -427,6 +427,71 @@ inline void record_to_c(const xi_host_api* host, Record& r, xi_record_out* out,
     out->image_capacity = 0;   // tls-owned, see xi_record_out_free
 }
 
+// Emit a Record as a trigger event WITH routing/context metadata (ABI v5).
+//
+// The ONE emit verb (ABI v6): a source hands the host a record (images +
+// metadata) under an id; the host stages it and dispatches one inspection. The
+// script reads it back via xi::current_trigger().image()/.meta()/.id_string().
+// The metadata doc is handed over by pointer (zero-serialize) through the same
+// share_out/adopt refcount handshake the process() path uses — no JSON round
+// trip on the live path.
+//
+//   auto rec = xi::Record()
+//       .image("frame", img)
+//       .set("command", "inspect_top")     // ← routing/context metadata
+//       .set("recipe", 7);
+//   xi::emit_record(host(), name().c_str(), rec);   // id auto-minted, ts = now
+//
+// id == XI_TRIGGER_NULL asks the host to mint a fresh id (its hex is
+// id_string()). ts = 0 stamps the host's current time. No-op on a host without
+// emit_record (the slot is null).
+inline void emit_record(const xi_host_api* host, const char* emitter, Record& r,
+                        xi_trigger_id id = XI_TRIGGER_NULL,
+                        int64_t ts = 0) {
+    if (!host) return;
+    // Marshal images → host pool handles (same forward logic as record_to_c).
+    // Locals, not TLS: emit is synchronous — the bus addref's the handles and
+    // consumes the doc ref during the call, so we can release our refs after.
+    std::vector<std::string>     keys;
+    std::vector<xi_record_image> entries;
+    std::vector<xi_image_handle> mine;     // refs we own, released post-emit
+    keys.reserve(r.images().size());       // reserve so key c_str()s don't move
+    entries.reserve(r.images().size());
+    for (auto& [key, img] : r.images()) {
+        if (img.empty()) continue;
+        xi_image_handle h = XI_IMAGE_NULL;
+        if (img.pool_handle() && img.pool_host() == host) {
+            h = img.pool_handle();
+            host->image_addref(h);
+        } else {
+            h = host->image_create(img.width, img.height, img.channels);
+            if (!h) continue;
+            std::memcpy(host->image_data(h), img.data(), img.size());
+        }
+        mine.push_back(h);
+        keys.push_back(key);
+        xi_record_image e{};
+        e.key = keys.back().c_str();
+        e.handle = h;
+        entries.push_back(e);
+    }
+
+    if (host->emit_record) {
+        // Hand the metadata doc over by pointer: share_out reserves a ref the
+        // host consumes. Null when there's no owned doc (nothing to carry).
+        yyjson_mut_doc* shared = (host->doc_retain && host->doc_release)
+            ? r.share_out(host->doc_retain, host->doc_release) : nullptr;
+        xi_record rec{};
+        rec.images      = entries.empty() ? nullptr : entries.data();
+        rec.image_count = (int32_t)entries.size();
+        rec.data        = nullptr;
+        rec.len         = 0;
+        rec.doc         = shared;
+        host->emit_record(emitter, id, &rec, ts);
+    }
+    for (auto h : mine) host->image_release(h);
+}
+
 } // namespace xi
 
 // --- XI_PLUGIN_IMPL macro ---

@@ -129,9 +129,6 @@ struct PluginInfo {
     // accepts via exchange_instance. See docs/reference/c-abi.md.
     std::string manifest_json;
 
-    // Old-style factory: InstanceBase* (name)
-    using FactoryFn = InstanceBase* (*)(const char* instance_name);
-    FactoryFn factory = nullptr;
     // New C ABI factory: void* (host_api, name)
     using CFactoryFn = void* (*)(const xi_host_api* host, const char* name);
     CFactoryFn c_factory = nullptr;

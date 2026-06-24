@@ -9,8 +9,8 @@ include(${XINSP2_ROOT}/sdk/cmake/xinsp2_plugin.cmake)
 
 xinsp2_add_plugin(counter counter.cpp)
 
-# Developer-side test binary. Runs baseline + custom tests. Passing this
-# writes cert.json so the backend skips re-testing on first load.
+# Developer-side test binary (optional — plugins are trusted, no load gate).
+# Resolves the built DLL's C-ABI exports and asserts counter's behaviour.
 xinsp2_add_plugin_test(counter_test tests/test_counter.cpp)
 target_compile_definitions(counter_test PRIVATE
     COUNTER_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/counter.dll")

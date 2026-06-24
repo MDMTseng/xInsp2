@@ -33,10 +33,11 @@ xi::Param<double> sigma { "sigma",     2.0, {0.1, 10.0} };
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& cam = xi::use("cam0");        // backend-managed instance
     auto& det = xi::use("detector0");
 
-    auto img = cam.grab(500);
+    auto t = xi::current_trigger();     // the record a source emitted
+    if (!t.is_active()) return;         // skip synthetic timer ticks
+    auto img = t.image("frame");
     if (img.empty()) return;
 
     VAR(input, img);                                 // visible in viewer
@@ -130,18 +131,15 @@ auto& det = xi::use("detector0");
 auto out  = det.process(xi::Record().image("gray", img).set("t", 50));
 ```
 
-`UseProxy` exposes `process(Record)`, `exchange(string)`, and
-`grab(timeout_ms)` — which routes to the named image source's frame
-queue. `grab_wait` (blocking) is a method on `xi::ImageSource` itself
-and is not available through the script-side proxy.
+`UseProxy` exposes `process(Record)` and `exchange(string)`.
 
 `xi::use` works seamlessly across script reloads: the proxy
 re-resolves to the host's current instance after each load.
 
-`xi::ImageSource` is a sibling of `xi::Plugin` — both inherit from
-`xi::InstanceBase`. Scripts never construct sources directly; they call
-`xi::use("source_name").grab(ms)` to dequeue frames the source
-produces.
+Image sources are ordinary plugins too — they don't sit behind a pull/`grab`
+API. A source pushes frames by calling `host->emit_record(...)`, and the script
+reads the resulting frame from `xi::current_trigger()` (see *Triggers /
+multi-camera* below), not by polling the source proxy.
 
 ---
 
@@ -195,9 +193,12 @@ lifetime trap: `VAR(mask, xi::from_cv_mat(mask_mat));`. See
 > existing one.** `VAR` expands to roughly `auto name = expr; <ship to
 > viewer>`, so `name` becomes a real variable in the enclosing scope —
 > you **cannot** `VAR(count, count)` to surface a value you already
-> computed (it redefines `count`; cl.exe fires C2374). For that, use
-> **`EMIT(name)`**, which ships an existing in-scope variable without
-> declaring anything:
+> computed, and you **cannot** `VAR(count, …)` *twice* in one scope (it
+> redefines `count`; cl.exe fires C2374). When that happens the backend
+> appends a clear hint to the compile error — *"duplicate VAR(count) at
+> lines X, Y … use EMIT(count)"* — so it's obvious VAR is the cause. For
+> a value you already have, use **`EMIT(name)`**, which ships an existing
+> in-scope variable without declaring anything:
 >
 > ```cpp
 > int count = blobs.size();
@@ -398,9 +399,10 @@ specific stage.
 
 ## Triggers / multi-camera
 
-For multi-camera setups, sources publish frames under a 128-bit
-trigger ID; the host's TriggerBus correlates and dispatches one
-inspect call per complete trigger.
+For multi-camera setups, a "gathering" plugin captures from N cameras and emits
+**one record carrying N named images**; the host dispatches one inspect call per
+record. There is no bus correlation step — the gathering plugin decides what
+makes up a complete frame set before it emits.
 
 Inside the script:
 
@@ -415,17 +417,15 @@ VAR(disp, stereo_match(left, right));
 
 The `is_active()` guard is **required** in continuous mode
 (`cmd:start fps=N`). The host runs two dispatch sources side-by-side:
-the trigger bus dispatches one inspect call per complete trigger AND a
+each `emit_record()` from a source dispatches one inspect call AND a
 wall-clock timer dispatches one per frame regardless of whether a
-trigger fired. The timer-driven dispatches arrive with no trigger
+record arrived. The timer-driven dispatches arrive with no record
 attached (`is_active() == false`); without the guard your script
 would null-deref / read empty Images on those ticks. In single-shot
 mode (`cmd:run`) this distinction doesn't apply — there's exactly one
 dispatch per command.
 
-See [`docs/overview.md`](../overview.md) for bus policies (Any
-/ AllRequired / LeaderFollowers) and the `synced_stereo` reference
-plugin.
+See the `synced_stereo` reference plugin for a worked gathering source.
 
 ### `xi::Trigger` accessors
 
@@ -433,40 +433,52 @@ plugin.
 | ------------------------- | --------------------------------------------------------------------- |
 | `t.is_active()`           | `false` for synthetic timer ticks; `true` once a real event landed    |
 | `t.id()` / `t.id_string()`| 128-bit trigger id (struct or 32-char hex)                            |
-| `t.timestamp_us()`        | μs since Unix epoch when the source called `host->emit_trigger`       |
+| `t.timestamp_us()`        | μs since Unix epoch when the source called `host->emit_record`        |
 | `t.dequeued_at_us()`      | μs (same clock) when the dispatcher worker popped this event          |
-| `t.image(name)`           | the named source's frame, zero-copy view                              |
-| `t.sources()`             | list of source names present in this event                            |
-| `t.primary_source()`      | leader source name (policy-aware); falls back to `sources().front()`  |
+| `t.image(name)`           | the named image in the record, zero-copy view                         |
+| `t.sources()`             | list of image names present in this record                            |
 | `t.has_source(name)`      | `true` if `name` appears in `sources()`; routing without manual hash  |
+| `t.meta()`                | routing/context metadata the source attached, as a read-only `Record` (empty if none) |
 
-#### Routing by source identity
+#### Reading trigger metadata
 
-Multi-source scripts often need different processing per source. Before
-P2-2 the idiom was to stamp an FNV-1a hash into pixel bytes [8..15] at
-the plugin and recompute it at the script — workable but awkward. The
-direct path is now:
+When a source emits with `xi::emit_record` (ABI v6) it attaches a JSON
+metadata object — a command id, recipe, lane hint, whatever the line needs to
+route the run. Read it back, correlated to the frame, with `t.meta()`:
 
 ```cpp
 auto t = xi::current_trigger();
 if (!t.is_active()) return;
 
-// Single-source case (policy=any with one source): primary == only source
+auto m = t.meta();                          // borrowed read-only Record (zero-copy)
+std::string cmd = m["command"].as_string(); // routing key the source set
+int recipe      = m["recipe"].as_int(-1);
+```
+
+`meta()` is total — an event with no metadata (a source that emitted only a
+frame, or a timer tick) returns an empty `Record`, so the reads just yield their defaults. The
+doc is borrowed from the host for the life of the dispatch (zero-serialize); a
+mutation copy-on-writes into the script's own doc. This is the supported way to
+carry per-trigger routing context — no side-channel queue to keep in lock-step.
+
+#### Routing by image name
+
+Multi-source scripts often need different processing per image. The record
+carries each image under the name the source gave it, so branch on
+`has_source(name)`:
+
+```cpp
+auto t = xi::current_trigger();
+if (!t.is_active()) return;
+
 if (t.has_source("camera_left")) {
     auto img = t.image("camera_left");
     // ...
 }
-
-// Leader/follower case (policy:"leader_followers"): primary is the leader
-if (t.primary_source() == "camera_top") {
-    // run the leader-specific pipeline
-}
 ```
 
-`primary_source()` is policy-aware on the host side: for `policy:"any"`
-it's whichever instance emitted; for `leader_followers` it's the
-configured leader; for `all_required` it may be empty (consult
-`sources()` instead).
+A gathering plugin chooses the names it emits, so the script and the source
+agree on the keys without any host-side correlation policy.
 
 ### Latency: queue-wait vs inspect-time
 
@@ -540,7 +552,7 @@ fills:
   are useless.
 - **`drop_newest`**: refuse new, preserve FIFO. Right when downstream
   ordering matters (archival, ML training capture).
-- **`block`**: `emit_trigger` blocks until room. Back-pressure to
+- **`block`**: `emit_record` blocks until room. Back-pressure to
   the source. Right when the source itself can throttle.
 
 `result_order` controls how per-frame results land on the wire under N > 1:

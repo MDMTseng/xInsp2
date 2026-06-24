@@ -109,9 +109,9 @@ test('run without script returns warning, not crash', async () => {
     await withBackend(async (c) => {
         await c.next(); // hello
         c.send({ type: 'cmd', id: 1, name: 'run' });
-        // Should get rsp + a log warning (no vars since no script)
+        // No script loaded → a clean error rsp (not a crash); connection stays alive.
         const rsp = await c.nextNonLog();
-        assert.equal(rsp.ok, true);
-        // No vars expected — just verify no crash
+        assert.equal(rsp.ok, false);
+        assert.match(String(rsp.error || ''), /no script/i);
     });
 });

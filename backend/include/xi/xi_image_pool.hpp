@@ -337,7 +337,10 @@ public:
             buf[n] = 0;
             return n;
         };
-        api.emit_trigger = nullptr;
+        // ABI v6: wired by install_trigger_hook (xi_trigger_bus.hpp); null here
+        // so a host that never installs the hook leaves it null (the SDK helper
+        // null-checks).
+        api.emit_record = nullptr;
         // SHM removed 2026-05 (FE/BE in-process split): no shared-memory
         // region exists. Per the ABI contract these stay null and plugins
         // fall back to image_create / the host ImagePool (zero-copy via

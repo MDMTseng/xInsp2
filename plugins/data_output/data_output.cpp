@@ -4,20 +4,14 @@
 // Configurable: output directory, format (csv/json), auto-save toggle.
 //
 
-#include <xi/xi_instance.hpp>
+#include <xi/xi_abi.hpp>   // xi::Plugin, XI_PLUGIN_IMPL
 
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
 #include <string>
 
-class DataOutput : public xi::InstanceBase {
+class DataOutput : public xi::Plugin {
 public:
-    explicit DataOutput(std::string name)
-        : name_(std::move(name)) {}
-
-    const std::string& name() const override { return name_; }
-    std::string plugin_name() const override { return "data_output"; }
+    using xi::Plugin::Plugin;
 
     std::string get_def() const override {
         char buf[512];
@@ -55,8 +49,6 @@ public:
             return get_def();
         }
         if (cmd_json.find("\"save\"") != std::string::npos) {
-            // In a real implementation, the inspection result would be
-            // passed via the command. For now, just increment the counter.
             save_count_++;
             return get_def();
         }
@@ -64,14 +56,10 @@ public:
     }
 
 private:
-    std::string name_;
     std::string output_dir_ = "./output";
     std::string format_ = "csv";
     bool        auto_save_ = true;
     int         save_count_ = 0;
 };
 
-extern "C" __declspec(dllexport)
-xi::InstanceBase* xi_plugin_create(const char* instance_name) {
-    return new DataOutput(instance_name);
-}
+XI_PLUGIN_IMPL(DataOutput)

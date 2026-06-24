@@ -1,0 +1,22 @@
+{
+  "name": "trigger_metadata",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "instances": [
+    {
+      "name": "src",
+      "plugin": "meta_source"
+    }
+  ],
+  "plugins": {
+    "meta_source": {
+      "path": "meta_source",
+      "compile": true
+    }
+  }
+}

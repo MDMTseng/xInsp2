@@ -86,10 +86,10 @@ plugin from your inspection script:
 
 - Plugins tree → right-click your project plugin → **Export Project
   Plugin…** → pick a destination folder.
-- The extension does a Release rebuild, runs the baseline cert tests,
-  then copies `plugin.json + <name>.dll + <name>.pdb + cert.json` (and
-  `ui/` if present) into `<dest>/<name>/`. That folder is now a
-  standalone plugin you can drop into any other project.
+- The extension does a Release rebuild, then copies
+  `plugin.json + <name>.dll + <name>.pdb` (and `ui/` if present) into
+  `<dest>/<name>/`. That folder is now a standalone plugin you can drop
+  into any other project.
 
 ---
 
@@ -209,8 +209,8 @@ here gets erased on the next save.
 
 ### 4. Iterate
 
-Edit → rebuild DLL → backend hot-reloads. The certify step runs once
-per DLL hash; cached in `cert.json` next to the DLL.
+Edit → rebuild DLL → backend hot-reloads. Plugins are trusted and load
+straight through — no certification step.
 
 ---
 
@@ -409,15 +409,30 @@ forwards to your plugin's `exchange()` and posts the response back as
 `{ type: 'status', ... }`.
 
 **How do I emit images (camera / source)?**
-Call `host->emit_trigger(name, tid, ts, images, count)` from a worker
-thread. The backend's TriggerBus correlates by `tid`. See the Expert
+A source is an ordinary plugin: build an `xi::Record` carrying the frame (and any
+routing/context metadata — a command id, recipe, lane hint — the script needs)
+and hand it to the host with the one dispatch verb, `xi::emit_record` (ABI v6),
+from a worker thread. Each record dispatches one inspection. See the Expert
 template for a working synthetic source.
 
-All plugins run in-process (cameras included), so `emit_trigger`
-always reaches the real backend TriggerBus — no special config is
-needed for source plugins. (A legacy `"isolation"` field in
-`instance.json` is accepted but ignored with a one-time deprecation
-warning; see
+```cpp
+auto rec = xi::Record()
+    .image("frame", img)
+    .set("command", "inspect_top")     // ← rides along as metadata
+    .set("recipe", 7);
+xi::emit_record(host(), name().c_str(), rec);   // id auto, ts = now
+```
+
+The metadata travels with the frame and the script reads it back with
+`xi::current_trigger().meta()` — no side-channel queue. It's handed over by
+pointer (zero-serialize). Multi-camera capture is a "gathering" plugin that emits
+one record carrying N named images. See
+[`docs/internals/dispatch.md`](../internals/dispatch.md).
+
+All plugins run in-process (cameras included), so `emit_record` always reaches the
+real backend dispatcher — no special config is needed for source plugins. (A
+legacy `"isolation"` field in `instance.json` is accepted but ignored with a
+one-time deprecation warning; see
 [`docs/reference/instances.md`](../reference/instances.md).)
 
 **Crash isolation?**
@@ -455,9 +470,7 @@ experiment proves all three cases; the generated plugin README summarises them.
 **My plugin won't load.** Check:
 1. Backend stderr — usually says exactly which symbol failed to
    resolve.
-2. `cert.json` next to the DLL — if cert failed, the backend refuses
-   to instantiate. Re-cert after fixing the baseline test.
-3. Plugin tree origin badge — `[project]` means in-project,
+2. Plugin tree origin badge — `[project]` means in-project,
    `[global]` means scanned from a plugins dir; mismatched expectations
    often surface here.
 
@@ -532,11 +545,9 @@ module.exports = { async run(h) {
 
 ### Instantiating an example/source-only plugin: `useProjectPlugin`
 
-Plugins that ship **source but no built+certified DLL** (all the `examples/`
-plugins) can't be instantiated via the scan path — the backend's cert gate
-rejects them and `create_instance` fails (the error now says so explicitly).
-Call **`h.useProjectPlugin(projectFolder)`** right after `createProject`: it
-copies the plugin's source into `<project>/plugins/<name>/` and reopens the
-project, so the backend compiles it as a **trusted project plugin** (project
-plugins are compiled from source and skip the cert gate). This is the supported
-way to UI-test an uncertified example plugin.
+Plugins that ship **source but no built DLL** (all the `examples/` plugins)
+can't be instantiated via the scan path — there's no DLL to load. Call
+**`h.useProjectPlugin(projectFolder)`** right after `createProject`: it copies
+the plugin's source into `<project>/plugins/<name>/` and reopens the project, so
+the backend compiles it as a project plugin. This is the supported way to
+UI-test a source-only example plugin.

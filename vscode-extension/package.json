@@ -169,16 +169,6 @@
         "icon": "$(close)"
       },
       {
-        "command": "xinsp2.showPluginCert",
-        "title": "xInsp2: Show Plugin Cert",
-        "icon": "$(shield)"
-      },
-      {
-        "command": "xinsp2.recertifyPlugin",
-        "title": "xInsp2: Re-certify Plugin",
-        "icon": "$(debug-restart)"
-      },
-      {
         "command": "xinsp2.removeInstance",
         "title": "xInsp2: Remove Instance",
         "icon": "$(trash)"
@@ -197,11 +187,6 @@
         "command": "xinsp2.openScript",
         "title": "xInsp2: Open Inspection Script",
         "icon": "$(file-code)"
-      },
-      {
-        "command": "xinsp2.setTriggerPolicy",
-        "title": "xInsp2: Set Trigger Policy…",
-        "icon": "$(symbol-event)"
       },
       {
         "command": "xinsp2.openProjectSettings",
@@ -376,11 +361,6 @@
           "group": "inline"
         },
         {
-          "command": "xinsp2.showPluginCert",
-          "when": "view == xinsp2.plugins && viewItem == plugin",
-          "group": "inline@1"
-        },
-        {
           "command": "xinsp2.exportProjectPlugin",
           "when": "view == xinsp2.plugins && viewItem == projectPlugin",
           "group": "inline@1"
@@ -389,11 +369,6 @@
           "command": "xinsp2.rebuildPlugins",
           "when": "view == xinsp2.plugins && viewItem == projectPluginCmake",
           "group": "inline@1"
-        },
-        {
-          "command": "xinsp2.recertifyPlugin",
-          "when": "view == xinsp2.plugins && viewItem == plugin",
-          "group": "inline@2"
         }
       ]
     },

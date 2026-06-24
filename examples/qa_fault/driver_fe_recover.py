@@ -2,11 +2,15 @@
 
 The most important POSITIVE fault case: a backend that crashes ONCE and then
 runs healthy after the respawn. The FE must:
-  - detect the one death, drive ENTER SAFE STATE (reason=BackendExit),
-  - respawn (the ENTER must precede the 'respawning' line — SP1),
-  - confirm the respawned backend is healthy, then CLEAR SAFE STATE exactly
-    once (and only AFTER a 'backend healthy' probe — SP4),
+  - detect the one death and record it (crash-history reason=BackendExit),
+  - respawn (the death record must precede the 'respawning' line — SP1),
+  - confirm the respawned backend is healthy ('backend healthy' AFTER the
+    'respawning' line — the recover transition, SP4),
   - keep running with NO further crashes and NO respawn-cap.
+
+(The old PLC "safe state" lines were removed 2026-06; the FE now just supervises.
+The recover transition is 'backend healthy' after a 'respawning backend' line,
+backed by a single BackendExit crash-history record with no cap_hit.)
 
 The fixture (heal_project/crash_once_heal) crashes on the first inspect of a
 fresh instance, drops a marker file, then heals on the next backend start. The
@@ -23,6 +27,7 @@ TODO(linux): xinsp-fe is Windows-only today. SKIPs on non-nt.
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -38,8 +43,20 @@ PORT = 7874
 HEAL_PROJECT = ROOT / "heal_project"
 FE_LOG = ROOT / "fe_recover.log"
 BE_LOG = ROOT / "be_recover.log"
+CRASH_HISTORY = ROOT / "crash-history.jsonl"   # default lands next to --be-log
+STATUS_FILE = ROOT / "fe-status.json"          # default lands next to --be-log
 CLEAR_WAIT_S = 120.0   # cover a cold plugin compile on each backend start
 STABLE_S = 6.0
+
+
+def recovered_in_log(lines: list[str]) -> bool:
+    """True once a 'backend healthy' line appears AFTER the LAST 'respawning
+    backend' line — the final respawned instance came back up (the recover
+    transition that used to be logged as CLEAR SAFE STATE)."""
+    respawns = [i for i, ln in enumerate(lines) if "respawning backend" in ln]
+    if not respawns:
+        return False
+    return any("backend healthy" in ln for ln in lines[respawns[-1] + 1:])
 
 
 def port_open(port: int = PORT, timeout: float = 0.25) -> bool:
@@ -76,6 +93,8 @@ def main() -> int:
         sys.exit(f"FAIL: something already listening on :{PORT}; pick a free port")
 
     clear_markers()
+    CRASH_HISTORY.unlink(missing_ok=True)
+    STATUS_FILE.unlink(missing_ok=True)
 
     fe_log = open(FE_LOG, "wb")
     proc = subprocess.Popen(
@@ -91,7 +110,8 @@ def main() -> int:
 
     failures: list[str] = []
     try:
-        # Poll fe.log until we see the CLEAR SAFE STATE (recovery confirmed).
+        # Poll fe.log until we see the recover transition ('backend healthy'
+        # after a 'respawning backend' line) — recovery confirmed.
         deadline = time.time() + CLEAR_WAIT_S
         cleared = False
         while time.time() < deadline:
@@ -99,13 +119,13 @@ def main() -> int:
                 failures.append(f"FE exited early rc={proc.returncode} — it should keep "
                                 f"running after a single crash+heal")
                 break
-            if any("CLEAR SAFE STATE" in ln for ln in read_log()):
+            if recovered_in_log(read_log()):
                 cleared = True
                 break
             time.sleep(0.5)
         if not cleared and proc.poll() is None:
-            failures.append("FE never logged CLEAR SAFE STATE within budget — "
-                            "did not recover after the single crash")
+            failures.append("FE never recovered within budget ('backend healthy' after "
+                            "'respawning backend') — did not heal after the single crash")
 
         # Stability window: no further crash / respawn after the heal.
         if cleared:
@@ -130,33 +150,42 @@ def main() -> int:
         print("  " + ln)
     print("---------------------")
 
-    enters = [i for i, ln in enumerate(lines)
-              if "ENTER SAFE STATE" in ln and "reason=BackendExit" in ln]
-    clears = [i for i, ln in enumerate(lines) if "CLEAR SAFE STATE" in ln]
     respawns = [i for i, ln in enumerate(lines) if "respawning backend" in ln]
     healthy = [i for i, ln in enumerate(lines) if "backend healthy" in ln]
 
-    # Exactly one death-driven ENTER (crash once).
-    if len(enters) != 1:
-        failures.append(f"expected exactly 1 'ENTER SAFE STATE reason=BackendExit', got {len(enters)}")
-    # Exactly one CLEAR (heal once).
-    if len(clears) < 1:
-        failures.append("no 'CLEAR SAFE STATE' — FE never confirmed the heal")
+    # crash-history.jsonl: exactly one BackendExit death record (crash once), no cap_hit.
+    recs = []
+    if CRASH_HISTORY.exists():
+        for ln in CRASH_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines():
+            ln = ln.strip()
+            if ln:
+                try:
+                    recs.append(json.loads(ln))
+                except json.JSONDecodeError as e:
+                    failures.append(f"crash-history line is not valid JSON: {e}")
+    backend_exits = [r for r in recs if r.get("reason") == "BackendExit"]
+    if len(backend_exits) != 1:
+        failures.append(f"expected exactly 1 BackendExit crash-history record, got {len(backend_exits)} "
+                        f"(reasons: {[r.get('reason') for r in recs]})")
+    if any(r.get("cap_hit") for r in recs):
+        failures.append("a crash-history record is cap_hit=true — a single crash must not trip the cap")
+    # Exactly one respawn (heal after the single crash).
+    if len(respawns) != 1:
+        failures.append(f"expected exactly 1 'respawning backend' line, got {len(respawns)}")
+    # The recover transition must have happened.
+    if not recovered_in_log(lines):
+        failures.append("no 'backend healthy' after 'respawning backend' — FE never confirmed the heal")
     # Must NOT hit the cap.
-    if any("RespawnLimitExceeded" in ln for ln in lines):
-        failures.append("FE hit RespawnLimitExceeded — a single crash must not trip the cap")
+    if any("staying down" in ln or "RespawnLimitExceeded" in ln for ln in lines):
+        failures.append("FE latched down — a single crash must not trip the cap")
     if any("respawn limit" in ln and "exceeded" in ln for ln in lines):
         failures.append("FE logged respawn-cap exceeded on a single crash")
 
-    # SP1: the ENTER precedes its respawn line.
-    if enters and respawns and not (min(enters) < min(respawns)):
-        failures.append("SP1 violated: 'respawning' appears before 'ENTER SAFE STATE'")
-    # SP4: the CLEAR follows a 'backend healthy' probe (never optimistic).
-    if clears and healthy:
-        if not any(h < clears[0] for h in healthy):
-            failures.append("SP4 violated: CLEAR SAFE STATE not preceded by a 'backend healthy' probe")
-    elif clears and not healthy:
-        failures.append("SP4 violated: CLEAR with no 'backend healthy' probe logged")
+    # SP1: a death is recorded before its respawn (the record drives the respawn).
+    if respawns and not backend_exits:
+        failures.append("SP1 violated: a 'respawning' line with no death recorded")
+    # SP4: the recover ('backend healthy') follows the respawn, never optimistic —
+    # this is exactly what recovered_in_log() asserts above.
 
     # No orphan after we stopped the FE.
     time.sleep(1.0)
@@ -170,8 +199,8 @@ def main() -> int:
             print(f"  - {f}")
     else:
         print("VERDICT: PASS")
-        print(f"  one crash -> 1 ENTER (BackendExit) -> respawn -> healthy ->")
-        print(f"  1 CLEAR SAFE STATE, no cap, FE kept running, no orphan.")
+        print(f"  one crash -> 1 BackendExit record -> respawn -> backend healthy")
+        print(f"  (recovered), no cap, FE kept running, no orphan.")
     return 1 if failures else 0
 
 

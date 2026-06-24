@@ -120,7 +120,6 @@ The webview ↔ extension protocol for `<plugin>/ui/index.html`:
 | Post | Effect |
 |---|---|
 | `{ type: 'exchange', cmd }` | Calls `exchange_instance(name, cmd)`. **`cmd` may be a string OR an object** — an object is JSON-serialized on its way to the plugin's `exchange()`. The reply comes back on the **status** channel (below). |
-| `{ type: 'request_preview' }` | Starts an image-preview poll (`preview_instance`); preview frames arrive as binary. |
 | `{ type: 'request_process', cmd? }` | Runs `exchange_instance` (defaults to `{command:'get_status'}`); reply arrives as `{ type: 'process_result', ... }`. |
 
 **Extension → webview** (`window.addEventListener('message', …)`):
@@ -252,19 +251,18 @@ owned by the `xinsp-fe.exe` supervisor (the production frontend — see
 - **`attach`** — a backend is already running (FE-owned on a line). The
   extension connects read/operator-only: it **never** spawns or respawns, and
   `xinsp2.restartBackend` just reconnects (the FE owns the process). On a
-  dropped connection the health status bar shows `$(shield) xInsp2 · safe`,
-  signalling the FE is recovering the backend and the line is in its safe
-  state.
+  dropped connection the health status bar shows `$(shield) xInsp2 · down`,
+  signalling the FE is recovering (respawning) the backend.
 - **`auto`** — `isPortOpen(port)` decides: attach if a backend is
   already listening, else managed.
 
-**FE status channel (`xinsp2.feStatusFile`).** Inferring "down → safe" from a
+**FE status channel (`xinsp2.feStatusFile`).** Inferring "backend down" from a
 WS disconnect can't tell a transient respawn from a latched
 `RespawnLimitExceeded`. Point this setting at the supervisor's `fe-status.json`
 (the FE writes it next to its `--be-log`; see
 [`../internals/fe-be.md`](../internals/fe-be.md)) and the extension polls
 it (1.5s) to drive the health indicator from the FE's **true** state:
-- `safe (n/max)` — recovering, with the respawn budget (warning background);
+- `down (n/max)` — recovering, with the respawn budget (warning background);
 - `$(error) xInsp2 · LATCHED` — the FE gave up; the tooltip carries the reason +
   last-crash forensics and the disconnect toast switches from "recovering" to
   "manual restart required" (error background);

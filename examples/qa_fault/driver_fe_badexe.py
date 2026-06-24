@@ -1,13 +1,15 @@
 """qa_fault — FE with a missing/bad --backend exe (FE-E6).
 
 If the FE cannot even spawn the backend (bad path -> CreateProcess fails), it
-must still drive the line SAFE — it can't leave the line running with no
-inspector and no safety net — and then exit nonzero rather than silently
-spinning. Per fe_main.cpp: spawn failure -> enter_safe_state(BackendExit),
-rc=1, no respawn loop (there's nothing to respawn).
+must record the line as DOWN — it can't leave the line running with no inspector
+and no supervisor — and then exit nonzero rather than silently spinning. Per
+fe_main.cpp: spawn failure -> 'CreateProcess failed' + fe-status state="down"
+reason="BackendExit", rc=1, no respawn loop (there's nothing to respawn).
 
-Asserts from fe.log + the FE exit code:
-  - exactly the spawn-failure path: an `ENTER SAFE STATE reason=BackendExit`
+Asserts from fe.log + fe-status.json + the FE exit code:
+  - the spawn-failure path logged: a `CreateProcess failed` line
+  - fe-status.json last_event reflects reason=="BackendExit" (the FE then exits,
+    so the top-level state/reason settle to stopped/SupervisorShutdown)
   - the FE exited NONZERO (documented rc=1)
   - the FE never logged a respawn (no backend to respawn)
   - nothing left listening on the private port (no orphan; none was spawned)
@@ -18,6 +20,7 @@ TODO(linux): xinsp-fe is Windows-only today. SKIPs on non-nt.
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -31,6 +34,8 @@ EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 FE_EXE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-fe{EXE_SUFFIX}"
 PORT = 7873
 FE_LOG = ROOT / "fe_badexe.log"
+BE_LOG = ROOT / "be_badexe.log"          # status/crash-history default next to this
+STATUS_FILE = ROOT / "fe-status.json"
 BAD_BACKEND = ROOT / "no_such_backend_zzz.exe"
 MAX_WAIT_S = 30.0
 
@@ -53,12 +58,15 @@ def main() -> int:
     if port_open():
         sys.exit(f"FAIL: something already listening on :{PORT}; pick a free port")
 
+    STATUS_FILE.unlink(missing_ok=True)
+
     fe_log = open(FE_LOG, "wb")
     proc = subprocess.Popen(
         [str(FE_EXE),
          f"--port={PORT}",
          f"--backend={BAD_BACKEND}",   # does not exist -> CreateProcess fails
          f"--project={ROOT / 'heal_project'}",
+         f"--be-log={BE_LOG}",         # so fe-status.json lands next to it (ROOT)
          "--autostart-fps=0"],
         cwd=str(FE_EXE.parent),
         stdout=fe_log, stderr=fe_log, stdin=subprocess.DEVNULL,
@@ -87,10 +95,27 @@ def main() -> int:
     failures: list[str] = []
     lines = log.splitlines()
 
-    if not any("ENTER SAFE STATE" in ln and "reason=BackendExit" in ln for ln in lines):
-        failures.append("no 'ENTER SAFE STATE reason=BackendExit' — FE didn't go safe on a spawn failure")
+    if not any("CreateProcess failed" in ln for ln in lines):
+        failures.append("no 'CreateProcess failed' line — FE didn't report the spawn failure")
     if any("respawning backend" in ln for ln in lines):
         failures.append("FE tried to respawn — there was no backend to respawn")
+
+    # fe-status.json records the spawn failure: the FE publishes state="down"
+    # reason="BackendExit" then exits, so the FINAL top-level state/reason settle
+    # to stopped/SupervisorShutdown — but last_event preserves the BackendExit.
+    if STATUS_FILE.exists():
+        try:
+            st = json.loads(STATUS_FILE.read_text(encoding="utf-8", errors="ignore"))
+            print(f"---- fe-status.json ----\n  {json.dumps(st)}")
+            if st.get("state") not in ("down", "stopped"):
+                failures.append(f"fe-status state not down/stopped on spawn failure: {st.get('state')!r}")
+            le = st.get("last_event") or {}
+            if le.get("reason") != "BackendExit":
+                failures.append(f"fe-status last_event reason not 'BackendExit' on spawn failure: {le.get('reason')!r}")
+        except json.JSONDecodeError as e:
+            failures.append(f"fe-status.json is not valid JSON: {e}")
+    else:
+        failures.append(f"no fe-status.json written ({STATUS_FILE}) on spawn failure")
 
     if rc is None:
         failures.append("FE did not exit on a spawn failure (it must not spin)")
@@ -110,7 +135,7 @@ def main() -> int:
             print(f"  - {f}")
     else:
         print("VERDICT: PASS")
-        print("  bad --backend -> CreateProcess failed -> FE drove safe-state")
+        print("  bad --backend -> CreateProcess failed -> fe-status down")
         print("  (BackendExit), did not respawn, exited nonzero, no orphan.")
     return 1 if failures else 0
 

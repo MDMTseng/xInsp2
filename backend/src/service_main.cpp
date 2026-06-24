@@ -31,33 +31,26 @@
 #include <vector>
 
 #include <yyjson.h>
-#include <xi/xi.hpp>
+// (The SDK umbrella <xi/xi.hpp> is intentionally NOT included — it pulls the
+//  script-side SDK headers (xi_var/xi_param/xi_io/xi_state/xi_result/xi_async)
+//  the backend binary never needs. Only the core headers it actually uses are
+//  included below.)
 #include <xi/xi_image.hpp>
 #include <xi/xi_cli_args.hpp>
 #include <xi/xi_jpeg.hpp>
 #include <xi/xi_protocol.hpp>
-#include <xi/xi_cert.hpp>
 #include <xi/xi_plugin_manager.hpp>
 #include <xi/xi_project.hpp>
 #include <xi/xi_trigger_bus.hpp>
-#include <xi/xi_trigger_bridge.hpp>
-#include <xi/xi_trigger_recorder.hpp>
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
-#include <xi/xi_source.hpp>
 #include <xi/xi_ws_server.hpp>
 
 #include <condition_variable>
 #include <filesystem>
 #include <thread>
 
-// Minidump support (top-level crash filter). dbghelp.lib is linked
-// via the CMake target. psapi for module-blame lookup.
 #include <windows.h>
-#include <dbghelp.h>
-#include <psapi.h>
-#pragma comment(lib, "dbghelp.lib")
-#pragma comment(lib, "psapi.lib")
 
 namespace xp = xi::proto;
 
@@ -91,47 +84,16 @@ static std::unordered_map<std::string, std::string> g_param_cache;
 
 #include <xi/xi_use.hpp>
 #include <xi/xi_seh.hpp>
+#include <xi/xi_graph_capture.hpp>
+#include <xi/xi_crash_dump.hpp>   // xi::crash:: minidump + breadcrumb forensics (extracted leaf)
 
 using xi::seh_exception;
 using xi::seh_translator;
 
 // ---- Pipeline graph capture (stage 2) ----------------------------------
-// OFF by default → zero hot-path cost. When enabled (cmd:graph_capture), each
-// xi::use().process() call records one entry; cmd:graph_snapshot reconstructs
-// dataflow EDGES by image-handle identity: if instance A's output image handle
-// is later fed as instance B's input, that's an A→B edge. "Last producer wins"
-// so a recycled pool slot attributes to its most recent writer.
-//
-// What this does NOT see: data the script pulls out of a Record into a plain
-// C++ / cv::Mat var, computes on, and feeds back — once it leaves a Record its
-// provenance is gone (taint-tracking through OpenCV is infeasible). So image
-// edges are accurate; scalar/JSON flow through script math is not traced.
-// TODO(linux): plain STL — already portable.
-struct GraphCall {
-    std::string              instance;
-    std::vector<uint64_t>    in_handles, out_handles;
-    std::vector<std::string> in_keys,    out_keys;
-};
-static std::atomic<bool>      g_graph_capture{false};
-static std::mutex             g_graph_mu;
-static std::vector<GraphCall> g_graph_calls;   // guarded by g_graph_mu
-
-static void graph_record_call_(const char* name,
-                               const xi_record_image* in_imgs, int in_n,
-                               const xi_record_out* out) {
-    GraphCall call;
-    call.instance = name ? name : "";
-    for (int i = 0; i < in_n; ++i) {
-        call.in_handles.push_back((uint64_t)in_imgs[i].handle);
-        call.in_keys.push_back(in_imgs[i].key ? in_imgs[i].key : "");
-    }
-    for (int i = 0; i < out->image_count; ++i) {
-        call.out_handles.push_back((uint64_t)out->images[i].handle);
-        call.out_keys.push_back(out->images[i].key ? out->images[i].key : "");
-    }
-    std::lock_guard<std::mutex> lk(g_graph_mu);
-    g_graph_calls.push_back(std::move(call));
-}
+// Opt-in dataflow-graph capture lives in xi_graph_capture.hpp (xi::GraphCapture
+// singleton). OFF by default → the hot path below pays only a relaxed atomic
+// load. The ws handlers (graph_capture / graph_snapshot) drive it.
 
 static int use_process_cb(const char* name,
                           const void* input_doc,
@@ -178,8 +140,8 @@ static int use_process_cb(const char* name,
             // Graph capture (off by default): record this call's image handles
             // for dataflow-edge reconstruction. Handles are still valid here —
             // the script side adopts/releases the outputs after we return.
-            if (rc >= 0 && g_graph_capture.load(std::memory_order_relaxed))
-                graph_record_call_(name, input_images, input_image_count, output);
+            if (rc >= 0 && xi::GraphCapture::instance().enabled())
+                xi::GraphCapture::instance().record(name, input_images, input_image_count, output);
             return rc;
         } catch (const seh_exception& e) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') crashed: 0x%08X (%s)\n",
@@ -214,13 +176,10 @@ static int use_exchange_cb(const char* name, const char* cmd,
     }
 }
 
-static xi_image_handle use_grab_cb(const char* name, int timeout_ms) {
-    auto inst = xi::InstanceRegistry::instance().find(name);
-    auto* src = inst ? dynamic_cast<xi::ImageSource*>(inst.get()) : nullptr;
-    if (!src) return XI_IMAGE_NULL;
-    xi::Image img = src->grab_wait(timeout_ms);
-    if (img.empty()) return XI_IMAGE_NULL;
-    return xi::ImagePool::instance().from_image(img);
+// grab() was the legacy pull model (xi::ImageSource queue). Sources now PUSH via
+// emit_record and scripts read current_trigger(), so there's nothing to grab.
+static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
+    return XI_IMAGE_NULL;
 }
 
 // ---- Trigger loop state ----
@@ -260,9 +219,10 @@ static std::atomic<int>        g_continuous_fps{10};
 // — 0 = trigger-only (no ticks). Seeded from cmd:start's fps / project.json
 // runtime.timer_fps. Default 100 (10fps) matches the historical default.
 static std::atomic<int>        g_timer_interval_ms{100};
-// Reserve stack headroom (def near write_minidump) so the crash filter can dump
-// after a script STACK_OVERFLOW; called at the top of each inspect-running thread.
-static void reserve_fault_stack();
+// Reserve stack headroom so the crash filter can dump after a script
+// STACK_OVERFLOW; called at the top of each inspect-running thread. Forwards to
+// the extracted forensics leaf (xi_crash_dump.hpp).
+static void reserve_fault_stack() { xi::crash::reserve_fault_stack(); }
 // Synthetic-tick timer thread (`g_timer_thread`): pushes an empty event at the
 // configured fps so scripts without a trigger source still get periodic
 // dispatch. The worker threads themselves are per-lane (see GroupLane).
@@ -314,62 +274,12 @@ struct EmitTurn {
 // one is currently inside run_one_inspection — only one at a time.
 static std::mutex              g_run_mu;
 
-// Crash context — a snapshot of "what was happening" updated by the
-// dispatch hot path. Read by the unhandled-exception filter to produce
-// a human-readable report alongside the minidump. Pure POD + plain
-// strncpy so the filter is signal-safe (no allocations, no locks).
-struct CrashContext {
-    uint32_t thread_id     = 0;  // owning thread (0 = slot free)
-    char last_cmd[64]      {};   // last cmd handled
-    char last_script[260]  {};   // last loaded script DLL path
-    char last_instance[64] {};   // last instance whose plugin we called
-    char last_plugin[64]   {};   // plugin name backing it
-    char last_phase[32]    {};   // inspect lifecycle phase (reset/inspect/...)
-    char last_status[96]   {};   // last xi::status()/set_status text on this thread
-    int  last_run_id       = 0;
-    int  last_frame        = 0;
-};
-
-// Per-thread crash breadcrumbs. A single global was racy under
-// dispatch_threads > 1 — N concurrent inspects all wrote the same
-// struct, so a crash dump could blame the wrong thread's plugin.
-// Each thread claims a fixed slot (keyed by thread id) on first use;
-// slots are static so they never dangle when a dispatch thread exits
-// (its tid just stays recorded until reused). The crash handler walks
-// all claimed slots and flags the one matching the faulting thread.
-static constexpr int kMaxCrashSlots = 64;
-static CrashContext            g_crash_slots[kMaxCrashSlots];
-static std::atomic<uint32_t>   g_crash_slot_tid[kMaxCrashSlots];
-
-static CrashContext& crash_ctx() {
-    static thread_local int t_idx = -1;
-    if (t_idx >= 0) return g_crash_slots[t_idx];
-    uint32_t tid = (uint32_t)GetCurrentThreadId();
-    for (int i = 0; i < kMaxCrashSlots; ++i) {
-        uint32_t expected = 0;
-        if (g_crash_slot_tid[i].compare_exchange_strong(
-                expected, tid, std::memory_order_acq_rel)) {
-            t_idx = i;
-            g_crash_slots[i].thread_id = tid;
-            return g_crash_slots[i];
-        }
-    }
-    // Slots exhausted (>64 live threads ever) — fall back to slot 0.
-    // Racy but never null; bounded to a pathological thread count.
-    return g_crash_slots[0];
-}
-
-inline void crash_set(char* dst, size_t n, const char* src) {
-    if (!dst || !src) return;
-    std::strncpy(dst, src, n - 1);
-    dst[n - 1] = 0;
-}
-
-// Convenience for setting the current thread's inspect phase.
-inline void crash_set_phase(const char* phase) {
-    auto& c = crash_ctx();
-    crash_set(c.last_phase, sizeof(c.last_phase), phase);
-}
+// Crash breadcrumb model + minidump machinery moved to xi_crash_dump.hpp
+// (xi::crash::). These thin forwarders keep the dispatch hot-path call sites
+// (crash_ctx()/crash_set()/crash_set_phase()) terse and unchanged.
+static xi::crash::Context& crash_ctx() { return xi::crash::ctx(); }
+inline void crash_set(char* dst, size_t n, const char* src) { xi::crash::set(dst, n, src); }
+inline void crash_set_phase(const char* phase) { xi::crash::set_phase(phase); }
 
 // Watchdog (P2.4). When > 0, inspect() calls have this many ms of wall-
 // clock budget. Default 0 = disabled (back-compat). Set via
@@ -453,6 +363,15 @@ static std::atomic<xi::ws::Server*> g_srv_for_bp{nullptr};   // set in main
 // dispatch threads can each have their own current trigger.
 static thread_local const xi::TriggerEvent* g_current_trigger = nullptr;
 
+// Release every host resource a finished trigger event owns: image handle refs
+// (ImagePool) + the ABI-v5 metadata doc ref (DocRegistry). Call exactly once
+// per event when it's done — dispatched or dropped — mirroring the bus's own
+// per-drop-site discipline so a metadata doc carried on the bus can't leak.
+static inline void release_trigger_event_(const xi::TriggerEvent& ev) {
+    for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
+    xi::DocRegistry::instance().release(ev.meta_doc);
+}
+
 struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hpp)
     xi_trigger_id id;
     int64_t       timestamp_us;
@@ -512,6 +431,19 @@ static int32_t trigger_leader_cb(char* buf, int32_t buflen) {
     std::memcpy(buf, s.data(), n);
     buf[n] = 0;
     return n;
+}
+
+// ABI v5: hand the script the event's metadata doc (emit_trigger_record) as a
+// borrowed read-only view — zero-serialize. We RESERVE one ref (retain) for the
+// script's adopt_shared to consume, exactly as Record::share_out reserves a ref
+// for record_from_c's adopt_shared on the process()-input doc. The script-side
+// xi::Trigger::meta() adopt_shared's it and doc_release's when its Record dies,
+// balancing this reserve; the worker still holds the event's own ref until
+// release_trigger_event_. Returns null when the trigger carries no metadata.
+static void* trigger_meta_cb() {
+    if (!g_current_trigger || !g_current_trigger->meta_doc) return nullptr;
+    xi::DocRegistry::instance().retain(g_current_trigger->meta_doc);
+    return (void*)g_current_trigger->meta_doc;
 }
 
 static void breakpoint_cb(const char* label) {
@@ -651,8 +583,8 @@ static void emit_run_result(xi::ws::Server& srv, int code, const std::string& ms
 // ---- Comms ------------------------------------------------------------------
 // The out-of-process comms gateway + the xi::comms script API were removed: PLC
 // I/O is now a plugin concern (a comm plugin owns the socket), and the BE-crash
-// case is covered by host->set_safe_state + the FE's safe-state sink. See
-// docs/archive/comms-gateway.md.
+// "go safe" case is the plugin's own sidecar process (it watches the BE and
+// sends the line-safe message on death). See docs/archive/comms-gateway.md.
 
 // Forward-declare: runs one inspection cycle and emits vars+previews.
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
@@ -1415,7 +1347,7 @@ static std::shared_ptr<GroupLane> lane_for_(const std::string& group) {
 
 // Per-lane enqueue with that lane's queue_depth/overflow policy.
 static bool enqueue_to_lane_(xi::TriggerEvent ev) {
-    auto rel = [&] { for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); };
+    auto rel = [&] { release_trigger_event_(ev); };
     if (!g_continuous.load()) { rel(); return false; }
     std::shared_ptr<GroupLane> lane = lane_for_(ev.group);
     if (!lane) { rel(); return false; }
@@ -1436,7 +1368,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         ++lane->dropped;
         int64_t aid = ++g_run_id;   // arrival slot of the dropped (new) frame
         std::string ds = ev.leader_source, dg = ev.group;   // the dropped (new) event
-        for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
+        release_trigger_event_(ev);
         lk.unlock();
         // Out-of-band NA marker (not gated — gating would stall the source); the
         // run_id lets a consumer order it against this lane's run results.
@@ -1446,38 +1378,18 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     }
     if (ov == "block") {
         lane->cv.wait(lk, [&] { return (int)lane->q.size() < depth || !g_continuous.load(); });
-        if (!g_continuous.load()) { for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h); return false; }
+        if (!g_continuous.load()) { release_trigger_event_(ev); return false; }
         ev.arrival_id = ++g_run_id;   // claimed at commit (after the block wait)
         lane->q.push_back(std::move(ev)); lane->cv.notify_one(); return true;
     }
     auto& front = lane->q.front();   // drop_oldest
     int64_t dropped_aid = front.arrival_id;   // the dropped (oldest) frame's slot
     std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
-    for (auto& [s, h] : front.images) xi::ImagePool::instance().release(h);
+    release_trigger_event_(front);
     lane->q.pop_front(); ev.arrival_id = ++g_run_id; lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped;
     lk.unlock();
     if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
         emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);
-    return true;
-}
-
-// emit/fetch enqueue (Phase B): BACK-PRESSURE, not overflow. Unlike
-// enqueue_to_lane_ (the bus path, which applies drop_oldest/newest/block), this
-// REJECTS when the lane is full and lets the caller (emit_dispatch -> the
-// emitter) decide. The id-only event owns no images, so a reject leaks nothing.
-// Returns true if enqueued, false if full / not running. This is where core
-// overflow stops being core policy for the emit/fetch model.
-static bool enqueue_dispatch_(xi::TriggerEvent ev) {
-    if (!g_continuous.load()) return false;
-    std::shared_ptr<GroupLane> lane = lane_for_(ev.group);
-    if (!lane) return false;
-    int depth = lane->cfg.queue_depth < 1 ? 1 : lane->cfg.queue_depth;
-    std::unique_lock<std::mutex> lk(lane->mu);
-    if (!g_continuous.load()) return false;
-    if ((int)lane->q.size() >= depth) return false;   // full -> back-pressure
-    ev.arrival_id = ++g_run_id;
-    lane->q.push_back(std::move(ev));
-    lane->cv.notify_one();
     return true;
 }
 
@@ -1567,7 +1479,7 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                         g_current_trigger = &ev;
                         run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq, &lane->gate);
                         g_current_trigger = nullptr;
-                        for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
+                        release_trigger_event_(ev);
                     } else {
                         run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq, &lane->gate);
                     }
@@ -1611,7 +1523,7 @@ static void stop_group_pool_() {
     // FreeLibrary; #3 leak fix).
     for (auto& lp : lanes) {
         std::lock_guard<std::mutex> lk(lp->mu);
-        for (auto& ev : lp->q) for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
+        for (auto& ev : lp->q) release_trigger_event_(ev);
         lp->q.clear();
     }
     { std::lock_guard<std::mutex> lk(g_lanes_mu); g_lanes.clear(); }
@@ -1649,7 +1561,7 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
         g_current_trigger = evp.get();
         run_one_inspection(*srv, /*frame_hint=*/0, /*run_id=*/0, "", /*emit_seq=*/-1);
         g_current_trigger = nullptr;
-        for (auto& [src, h] : evp->images) xi::ImagePool::instance().release(h);
+        release_trigger_event_(*evp);
     }).detach();
 }
 
@@ -1669,10 +1581,8 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
 // runs it again as the loop unwinds).
 static void controlled_shutdown_teardown_() {
     if (g_continuous.load()) stop_dispatch_pool_();   // joins workers + timer + drains lanes
-    xi::TriggerRecorder::instance().cancel_replay();  // joins the replay thread
     { std::lock_guard<std::mutex> rl(g_run_mu); }     // wait out an in-flight cmd:run / one-shot
     xi::TriggerBus::instance().clear_sink();
-    xi::TriggerBus::instance().clear_observer();
     xi::TriggerBus::instance().reset();               // release pending_/follower_latest_ handles
     { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
     g_srv_for_bp = nullptr;                            // last: every emitter is quiesced now
@@ -1704,30 +1614,6 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
         }
     });
 
-    // emit/fetch dispatch (Phase B): emit_dispatch routes here, bypassing the
-    // bus's per-tid correlation. Build an id-only event (no images — the script
-    // fetches them by res_id via xi::use().fetch()), route by the emitter's group,
-    // and run it through the lane / one-shot path. Returns whether the run was
-    // accepted: the lane uses BACK-PRESSURE (reject when full), never a silent
-    // drop — that's what keeps a downstream seq stream gap-free (the emitter
-    // decides what to do on a reject, dropping at the source before it burns a
-    // seq). See enqueue_dispatch_.
-    xi::set_dispatch_sink([srv](const std::string& emitter, xi_trigger_id res_id,
-                                int64_t ts_us) -> bool {
-        xi::TriggerEvent ev;
-        ev.id            = res_id;
-        ev.timestamp_us  = ts_us ? ts_us : xi::wall_us();
-        ev.leader_source = emitter;            // result source + group routing key
-        std::string g;
-        auto& insts = g_plugin_mgr.project().instances;
-        auto it = insts.find(emitter);
-        if (it != insts.end()) g = it->second.group;
-        if (g.empty()) g = g_plugin_mgr.project().default_group;
-        ev.group = g;
-        if (g_continuous.load()) return enqueue_dispatch_(std::move(ev));
-        dispatch_one_shot_(srv, std::move(ev));
-        return true;
-    });
 }
 
 // Quiesce the dispatcher + timer + breakpoint park before any handler
@@ -1751,10 +1637,6 @@ struct DispatchPoolGuard {
 
 static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name) {
     DispatchPoolGuard g;
-    // Cancel + join any in-flight recording replay first: it's a dispatch driver
-    // that bypasses the pool, and would otherwise keep emitting into the bus
-    // (-> inspect -> a plugin DLL this op is about to unload) = UAF.
-    xi::TriggerRecorder::instance().cancel_replay();
     if (g_continuous.load()) {
         g.was_continuous = true;
         g.prior_fps = g_continuous_fps.load();
@@ -1883,83 +1765,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             }
         }
         send_rsp_ok(srv, id, "{\"removed\":" + std::to_string(n) + "}");
-    } else if (name == "compare_variants") {
-        // S7: apply variant A → run → snapshot → apply B → run → snapshot.
-        // args: { a: {params:[...], instances:[...]}, b: {...} }
-        //   params:    [{name, value}]        (value is JSON scalar)
-        //   instances: [{name, def}]          (def is JSON object)
-        // Reply: { a: {vars: <snap>}, b: {vars: <snap>} }
-        //
-        // The client drives comparison — we just guarantee atomic back-to-
-        // back runs with consistent variant state. A successful run
-        // leaves the script in variant-B state; the caller restores
-        // their own default with a follow-up set_param / load_project.
-        auto apply_variant = [&](yyjson_val* root) -> bool {
-            if (!root || !g_script.ok()) return false;
-            yyjson_val* params = yyjson_obj_get(root, "params");
-            if (yyjson_is_arr(params) && g_script.set_param) {
-                size_t _i, _n; yyjson_val* p;
-                yyjson_arr_foreach(params, _i, _n, p) {
-                    yyjson_val* nm = yyjson_obj_get(p, "name");
-                    yyjson_val* vv = yyjson_obj_get(p, "value");
-                    if (!yyjson_is_str(nm) || !vv) continue;
-                    char* val = yyjson_val_write(vv, 0, NULL);
-                    if (val) { g_script.set_param(yyjson_get_str(nm), val); free(val); }
-                }
-            }
-            yyjson_val* insts = yyjson_obj_get(root, "instances");
-            if (yyjson_is_arr(insts)) {
-                size_t _i, _n; yyjson_val* it;
-                yyjson_arr_foreach(insts, _i, _n, it) {
-                    yyjson_val* nm = yyjson_obj_get(it, "name");
-                    yyjson_val* df = yyjson_obj_get(it, "def");
-                    if (!yyjson_is_str(nm) || !df) continue;
-                    char* def_str = yyjson_val_write(df, 0, NULL);
-                    if (!def_str) continue;
-                    auto inst = xi::InstanceRegistry::instance().find(yyjson_get_str(nm));
-                    if (inst) inst->set_def(def_str);
-                    else if (g_script.set_instance_def)
-                        g_script.set_instance_def(yyjson_get_str(nm), def_str);
-                    free(def_str);
-                }
-            }
-            return true;
-        };
-        auto run_and_snapshot = [&]() -> std::string {
-            if (!g_script.ok() || !g_script.inspect) return "[]";
-            if (g_script.reset) g_script.reset();
-            try { g_script.inspect(0); }
-            catch (...) { /* best-effort: keep going */ }
-            if (!g_script.snapshot) return "[]";
-            std::vector<char> buf(256 * 1024);
-            int n = g_script.snapshot(buf.data(), (int)buf.size());
-            if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                         n = g_script.snapshot(buf.data(), (int)buf.size()); }
-            return n > 0 ? std::string(buf.data(), (size_t)n) : std::string("[]");
-        };
-        yyjson_doc* doc = yyjson_read(parsed->args_json.c_str(),
-                                      parsed->args_json.size(), 0);
-        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
-        if (!root) { send_rsp_err(srv, id, "invalid args JSON"); return; }
-        yyjson_val* a = yyjson_obj_get(root, "a");
-        yyjson_val* b = yyjson_obj_get(root, "b");
-        if (!a || !b) { yyjson_doc_free(doc); send_rsp_err(srv, id, "need args.a and args.b"); return; }
-        std::string snap_a, snap_b;
-        {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (!g_script.ok()) { yyjson_doc_free(doc); send_rsp_err(srv, id, "no script loaded"); return; }
-            apply_variant(a);
-            snap_a = run_and_snapshot();
-            apply_variant(b);
-            snap_b = run_and_snapshot();
-        }
-        yyjson_doc_free(doc);
-        std::string out = "{\"a\":{\"vars\":";
-        out += snap_a;
-        out += "},\"b\":{\"vars\":";
-        out += snap_b;
-        out += "}}";
-        send_rsp_ok(srv, id, out);
     } else if (name == "set_watchdog_ms") {
         // P2.4. Set the wall-clock budget (ms) for a single inspect()
         // call. 0 disables. Tripping the watchdog does not auto-reset —
@@ -2066,44 +1871,28 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // hot-path cost. Enabling clears any prior recording.
         bool enable = parsed->args_json.find("\"enable\":true")  != std::string::npos ||
                       parsed->args_json.find("\"enable\": true") != std::string::npos;
-        { std::lock_guard<std::mutex> lk(g_graph_mu); g_graph_calls.clear(); }
-        g_graph_capture.store(enable, std::memory_order_relaxed);
+        xi::GraphCapture::instance().set(enable);
         send_rsp_ok(srv, id, std::string("{\"capturing\":") + (enable ? "true" : "false") + "}");
     } else if (name == "graph_snapshot") {
-        // Reconstruct dataflow EDGES from the recorded calls by image-handle
-        // identity (A's output handle later used as B's input → A→B). "Last
-        // producer wins" so a recycled pool slot attributes to its most recent
-        // writer. Returns the instances that actually ran + the edges.
-        std::vector<GraphCall> calls;
-        { std::lock_guard<std::mutex> lk(g_graph_mu); calls = g_graph_calls; }
-        std::unordered_map<uint64_t, std::pair<std::string, std::string>> producer;
-        std::map<std::pair<std::string, std::string>, std::unordered_set<std::string>> edges;
-        std::vector<std::string> ran; std::unordered_set<std::string> ran_seen;
-        for (auto& c : calls) {
-            if (ran_seen.insert(c.instance).second) ran.push_back(c.instance);
-            for (size_t i = 0; i < c.in_handles.size(); ++i) {
-                auto it = producer.find(c.in_handles[i]);
-                if (it != producer.end() && it->second.first != c.instance)
-                    edges[{ it->second.first, c.instance }].insert(it->second.second);
-            }
-            for (size_t i = 0; i < c.out_handles.size(); ++i)
-                producer[c.out_handles[i]] = { c.instance, c.out_keys[i] };
-        }
+        // Reconstruct dataflow EDGES (xi::GraphCapture owns the algorithm) and
+        // format the result to wire JSON. Returns the instances that actually
+        // ran + the edges.
+        auto snap = xi::GraphCapture::instance().snapshot();
         std::string out = "{\"capturing\":";
-        out += g_graph_capture.load(std::memory_order_relaxed) ? "true" : "false";
+        out += snap.capturing ? "true" : "false";
         out += ",\"ran\":[";
-        for (size_t i = 0; i < ran.size(); ++i) {
+        for (size_t i = 0; i < snap.ran.size(); ++i) {
             if (i) out += ",";
-            out += xp::json_escape(ran[i]);          // json_escape() already wraps in quotes
+            out += xp::json_escape(snap.ran[i]);     // json_escape() already wraps in quotes
         }
         out += "],\"edges\":[";
         bool first = true;
-        for (auto& [ft, keys] : edges) {
+        for (auto& e : snap.edges) {
             if (!first) out += ","; first = false;
-            out += "{\"from\":" + xp::json_escape(ft.first) +
-                   ",\"to\":"   + xp::json_escape(ft.second) + ",\"keys\":[";
+            out += "{\"from\":" + xp::json_escape(e.from) +
+                   ",\"to\":"   + xp::json_escape(e.to) + ",\"keys\":[";
             bool k1 = true;
-            for (auto& k : keys) { if (!k1) out += ","; k1 = false; out += xp::json_escape(k); }
+            for (auto& k : e.keys) { if (!k1) out += ","; k1 = false; out += xp::json_escape(k); }
             out += "]}";
         }
         out += "]}";
@@ -2334,7 +2123,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // plugins only see that pool via their own host_api, so script-side
             // ImagePool handles would be invisible to them.
             if (g_script.set_use_callbacks) {
-                static xi_host_api use_host = []{ auto a = xi::ImagePool::make_host_api(); xi::install_trigger_hook(a); xi::install_resource_hooks(a); xi::install_safe_state_hook(a); return a; }();
+                static xi_host_api use_host = []{ auto a = xi::ImagePool::make_host_api(); xi::install_trigger_hook(a); return a; }();
                 g_script.set_use_callbacks(
                     (void*)use_process_cb,
                     (void*)use_exchange_cb,
@@ -2355,6 +2144,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // to sources().front().
             if (g_script.set_trigger_leader_callback) {
                 g_script.set_trigger_leader_callback((void*)trigger_leader_cb);
+            }
+            // ABI v5: metadata-doc callback. Scripts compiled before this symbol
+            // existed simply don't export it and current_trigger().meta() returns
+            // an empty Record.
+            if (g_script.set_trigger_meta_callback) {
+                g_script.set_trigger_meta_callback((void*)trigger_meta_cb);
             }
             // S3: breakpoint callback. Scripts without xi_breakpoint.hpp
             // leave this null and xi::breakpoint() is a no-op.
@@ -2499,6 +2294,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             frame_path = *fp;
         }
 
+        // Stage 1b — optional inline `meta` object: its raw JSON is parsed into a
+        // metadata doc and injected into this run's current_trigger() so a
+        // headless cmd:run feeds the script the same record (frame image + meta)
+        // a source's emit_record would, with no source plugin needed.
+        std::string meta_json;
+        {
+            std::string m; const char* after = nullptr;
+            if (xp::detail::find_key(parsed->args_json.data(),
+                                     parsed->args_json.data() + parsed->args_json.size(),
+                                     "meta", m, after)) {
+                meta_json = std::move(m);
+            }
+        }
+
         // Send rsp first (tests expect rsp before vars).
         char buf[128];
         std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":0})", (long long)run_id);
@@ -2518,11 +2327,48 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // contract for no real burst gain (bursts arrive via the trigger path).
         crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "run");
         crash_ctx().last_run_id = (int)run_id;
-        std::thread([&srv, run_id, frame_path = std::move(frame_path)]() {
+        std::thread([&srv, run_id,
+                     frame_path = std::move(frame_path),
+                     meta_json  = std::move(meta_json)]() {
             reserve_fault_stack();   // BUG 2: dump survives a script stack overflow
             _set_se_translator(seh_translator);
             std::lock_guard<std::mutex> lk(g_run_mu);
+
+            // Stage 1b: build a one-shot record (frame image + meta) and expose
+            // it as this run's current_trigger — the same path the dispatch
+            // worker uses (thread_local g_current_trigger). Only injected when
+            // there's something to inject, so a plain cmd:run keeps the previous
+            // "no trigger" behaviour (current_trigger().is_active() == false).
+            xi::TriggerEvent ev;
+            bool inject = false;
+            if (!frame_path.empty()) {
+                if (auto fn = xi::ImagePool::read_image_file_fn()) {
+                    if (xi_image_handle h = fn(frame_path.c_str())) {
+                        ev.images["frame"] = h;   // read under current_trigger().image("frame")
+                        inject = true;
+                    }
+                }
+            }
+            if (!meta_json.empty()) {
+                if (yyjson_doc* idoc = yyjson_read(meta_json.data(), meta_json.size(), 0)) {
+                    yyjson_mut_doc* meta = yyjson_doc_mut_copy(idoc, nullptr);
+                    yyjson_doc_free(idoc);
+                    if (meta) {
+                        xi::DocRegistry::instance().retain(meta);   // register at rc=1
+                        ev.meta_doc = meta;
+                        inject = true;
+                    }
+                }
+            }
+            if (inject) {
+                ev.id = { (uint64_t)run_id, 0 };   // synthesized, unique per run
+                g_current_trigger = &ev;
+            }
             run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
+            if (inject) {
+                g_current_trigger = nullptr;
+                release_trigger_event_(ev);   // release frame handle(s) + meta doc
+            }
         }).detach();
     } else if (name == "start") {
         // Start continuous trigger mode. The backend runs a timer thread
@@ -2614,15 +2460,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 if (n > 0) params_json.assign(buf.data(), (size_t)n);
             }
         }
-        if (params_json.empty()) {
-            params_json = "[";
-            auto list = xi::ParamRegistry::instance().list();
-            for (size_t i = 0; i < list.size(); ++i) {
-                if (i) params_json += ",";
-                params_json += list[i]->as_json();
-            }
-            params_json += "]";
-        }
+        if (params_json.empty()) params_json = "[]";   // params live in the script DLL
         std::string out = "{\"type\":\"instances\",\"instances\":[],\"params\":";
         out += params_json;
         out += "}";
@@ -2661,30 +2499,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 }
             }
         }
-        auto* p = xi::ParamRegistry::instance().find(*pname);
-        if (!p) {
-            send_rsp_err(srv, id, std::string("no such param: ") + *pname);
-            return;
-        }
-        // Extract raw value substring from args_json. get_number_field
-        // handles int/float; for bool we fall back to a string check.
-        auto num = xp::get_number_field(parsed->args_json, "value");
-        bool ok = false;
-        if (num) {
-            char nb[64];
-            std::snprintf(nb, sizeof(nb), "%g", *num);
-            ok = p->set_from_json(nb);
-        } else {
-            // Maybe "value":true / "value":false
-            auto sv = xp::get_string_field(parsed->args_json, "value");
-            if (sv) ok = p->set_from_json(*sv);
-            else {
-                if (parsed->args_json.find("\"value\":true")  != std::string::npos) ok = p->set_from_json("true");
-                if (parsed->args_json.find("\"value\":false") != std::string::npos) ok = p->set_from_json("false");
-            }
-        }
-        if (ok) send_rsp_ok(srv, id);
-        else    send_rsp_err(srv, id, "set_param: bad value");
+        // Params live in the script DLL (set via g_script.set_param above). The
+        // backend keeps no xi::ParamRegistry of its own, so an unhandled name
+        // here is simply unknown.
+        send_rsp_err(srv, id, std::string("no such param: ") + *pname);
     } else if (name == "list_instances") {
         std::string inst_json, params_json;
         {
@@ -2755,6 +2573,34 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
                 if (rc == 0) send_rsp_ok(srv, id);
                 else         send_rsp_err(srv, id, "set_instance_def failed");
+            } else {
+                send_rsp_err(srv, id, "instance not found: " + *iname);
+            }
+        }
+    } else if (name == "get_instance_def") {
+        // Symmetric read of set_instance_def: returns the instance's full def
+        // JSON (incl. any assets the plugin round-trips, e.g. image_png_b64), so
+        // a host can snapshot an instance without scraping exchange:get_status.
+        // Loop over list_instances to snapshot a whole project (the foundation
+        // for portable product/instrument config bundles).
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        // Backend's InstanceRegistry first (plugin-manager instances).
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        if (inst) {
+            std::string def = inst->get_def();
+            send_rsp_ok(srv, id, def.empty() ? "{}" : def);
+        } else {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.get_instance_def) {
+                std::vector<char> buf(256 * 1024);
+                int n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                if (n < 0 && n != -1) {   // -needed → grow + retry (-1 = not found)
+                    buf.resize((size_t)(-(int64_t)n) + 1024);
+                    n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                }
+                if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
+                else        send_rsp_err(srv, id, "instance not found: " + *iname);
             } else {
                 send_rsp_err(srv, id, "instance not found: " + *iname);
             }
@@ -2892,13 +2738,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     if (yyjson_is_num(val))      std::snprintf(vbuf, sizeof(vbuf), "%g", yyjson_get_num(val));
                     else if (yyjson_is_bool(val)) std::snprintf(vbuf, sizeof(vbuf), "%s", yyjson_get_bool(val) ? "true" : "false");
                     else continue;
-                    // Try script params first, then backend params
+                    // Params live in the script DLL.
                     std::lock_guard<std::mutex> lk(g_script_mu);
                     if (g_script.ok() && g_script.set_param) {
                         g_script.set_param(yyjson_get_str(nm), vbuf);
-                    } else {
-                        auto* p = xi::ParamRegistry::instance().find(yyjson_get_str(nm));
-                        if (p) p->set_from_json(vbuf);
                     }
                 }
             }
@@ -2922,180 +2765,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
         yyjson_doc_free(doc);
         send_rsp_ok(srv, id);
-    } else if (name == "preview_instance") {
-        // Grab the latest frame from a named ImageSource instance,
-        // JPEG-encode it, and send as a binary preview frame.
-        auto iname = xp::get_string_field(parsed->args_json, "name");
-        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        auto inst = xi::InstanceRegistry::instance().find(*iname);
-        auto* src = inst ? dynamic_cast<xi::ImageSource*>(inst.get()) : nullptr;
-        if (!src) { send_rsp_err(srv, id, "not an ImageSource: " + *iname); return; }
-
-        xi::Image img = src->grab();
-        if (img.empty()) { send_rsp_ok(srv, id, R"({"frame":false})"); return; }
-
-        std::vector<uint8_t> jpeg;
-        if (!xi::encode_jpeg(img, 80, jpeg)) { send_rsp_ok(srv, id, R"({"frame":false})"); return; }
-
-        // Use a hash of the instance name as gid so the extension can
-        // route the preview to the correct panel.
-        uint32_t preview_gid = 9000;
-        for (char c : *iname) preview_gid = preview_gid * 31 + (uint8_t)c;
-        preview_gid = 9000 + (preview_gid % 1000);
-
-        char gid_buf[64];
-        std::snprintf(gid_buf, sizeof(gid_buf), R"({"frame":true,"gid":%u})", preview_gid);
-        send_rsp_ok(srv, id, gid_buf);
-
-        std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
-        xp::PreviewHeader hd;
-        hd.gid = preview_gid;
-        hd.codec = (uint32_t)xp::Codec::JPEG;
-        hd.width = (uint32_t)img.width;
-        hd.height = (uint32_t)img.height;
-        hd.channels = (uint32_t)img.channels;
-        xp::encode_preview_header(hd, frame.data());
-        std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
-        srv.send_binary(frame.data(), frame.size());
-    } else if (name == "process_instance") {
-        // Call a C ABI plugin's process() with an image from another instance.
-        // args: { name: "detector0", source: "cam0", params: {...} }
-        auto iname = xp::get_string_field(parsed->args_json, "name");
-        auto source = xp::get_string_field(parsed->args_json, "source");
-        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "process_instance");
-        crash_set(crash_ctx().last_instance, sizeof(crash_ctx().last_instance), iname->c_str());
-
-        // Find the plugin instance
-        auto inst = xi::InstanceRegistry::instance().find(*iname);
-        auto* adapter = inst ? dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get()) : nullptr;
-        if (!adapter || !adapter->process_fn()) {
-            send_rsp_err(srv, id, "not a processable plugin: " + *iname);
-            return;
-        }
-
-        // Get source image from an ImageSource instance
-        xi::Image src_img;
-        if (source) {
-            auto src_inst = xi::InstanceRegistry::instance().find(*source);
-            auto* img_src = src_inst ? dynamic_cast<xi::ImageSource*>(src_inst.get()) : nullptr;
-            if (img_src) src_img = img_src->grab();
-        }
-        if (src_img.empty()) {
-            send_rsp_err(srv, id, "no image available — provide a source instance or start streaming");
-            return;
-        }
-
-        // Build input record with the image
-        static xi_host_api host = xi::ImagePool::make_host_api();
-        xi_image_handle src_h = xi::ImagePool::instance().from_image(src_img);
-
-        // Parse extra params from args
-        std::string params_json = "{}";
-        const char* after;
-        if (xp::detail::find_key(parsed->args_json.data(),
-                                  parsed->args_json.data() + parsed->args_json.size(),
-                                  "params", params_json, after)) {
-            // params_json is already set
-        }
-
-        xi_record_image in_imgs[] = { {"gray", src_h} };
-        // WS command carries JSON params; the internal ABI is also JSON now — pass through.
-        xi_record input_rec{};   // zero-init so the v3 `doc` field is null (JSON path)
-        input_rec.images = in_imgs;
-        input_rec.image_count = 1;
-        input_rec.data = (const uint8_t*)params_json.data();
-        input_rec.len = (int32_t)params_json.size();
-
-        xi_record_out output;
-        xi_record_out_init(&output);
-
-        try {
-            adapter->process_fn()(adapter->raw_instance(), &input_rec, &output);
-        } catch (const seh_exception& e) {
-            xi::ImagePool::instance().release(src_h);
-            xi_record_out_free(&output);
-            char msg[256];
-            std::snprintf(msg, sizeof(msg), "process_instance '%s' crashed: 0x%08X (%s)",
-                         iname->c_str(), e.code, e.what());
-            send_rsp_err(srv, id, msg);
-            return;
-        } catch (const std::exception& e) {
-            xi::ImagePool::instance().release(src_h);
-            xi_record_out_free(&output);
-            send_rsp_err(srv, id, std::string("process_instance '") + *iname +
-                                  "' threw: " + e.what());
-            return;
-        } catch (...) {
-            xi::ImagePool::instance().release(src_h);
-            xi_record_out_free(&output);
-            send_rsp_err(srv, id, "process_instance '" + *iname + "' threw unknown exception");
-            return;
-        }
-
-        // Release input image handle (success path)
-        xi::ImagePool::instance().release(src_h);
-
-        // Build response: the ABI output is already JSON bytes — forward it.
-        std::string result_json = (output.data && output.len > 0)
-            ? std::string((const char*)output.data, (size_t)output.len)
-            : "{}";
-
-        // Add image info to result
-        std::string full_json = result_json;
-        if (output.image_count > 0) {
-            // Insert images info into the JSON
-            if (full_json.size() > 1 && full_json.back() == '}') {
-                full_json.pop_back();
-                if (full_json.size() > 1) full_json += ",";
-                full_json += "\"_images\":{";
-                for (int i = 0; i < output.image_count; ++i) {
-                    if (i) full_json += ",";
-                    uint32_t gid = 8000 + (uint32_t)i;
-                    full_json += "\"" + std::string(output.images[i].key) + "\":" + std::to_string(gid);
-                }
-                full_json += "}}";
-            }
-        }
-
-        send_rsp_ok(srv, id, full_json);
-
-        // Send output images as binary preview frames
-        for (int i = 0; i < output.image_count; ++i) {
-            auto& oi = output.images[i];
-            xi::Image out_img = xi::ImagePool::instance().to_image(oi.handle);
-            // Always release the output handle — regardless of encode success
-            xi::ImagePool::instance().release(oi.handle);
-
-            if (out_img.empty()) continue;
-
-            xi::Image jpeg_img = out_img;
-            if (out_img.channels == 1) {
-                jpeg_img = xi::Image(out_img.width, out_img.height, 3);
-                for (int j = 0; j < out_img.width * out_img.height; ++j) {
-                    jpeg_img.data()[j*3+0] = out_img.data()[j];
-                    jpeg_img.data()[j*3+1] = out_img.data()[j];
-                    jpeg_img.data()[j*3+2] = out_img.data()[j];
-                }
-            }
-
-            std::vector<uint8_t> jpeg;
-            if (!xi::encode_jpeg(jpeg_img, 85, jpeg)) continue;
-
-            uint32_t gid = 8000 + (uint32_t)i;
-            std::vector<uint8_t> frame(xp::kPreviewHeaderSize + jpeg.size());
-            xp::PreviewHeader hd;
-            hd.gid = gid;
-            hd.codec = (uint32_t)xp::Codec::JPEG;
-            hd.width = (uint32_t)out_img.width;
-            hd.height = (uint32_t)out_img.height;
-            hd.channels = (uint32_t)jpeg_img.channels;
-            xp::encode_preview_header(hd, frame.data());
-            std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
-            srv.send_binary(frame.data(), frame.size());
-        }
-
-        xi_record_out_free(&output);
     } else if (name == "list_plugins") {
         auto plugins = g_plugin_mgr.list_plugins();
         std::string out = "[";
@@ -3116,17 +2785,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // on it to badge project plugins, e2e journey asserts it.
             bool is_proj = g_plugin_mgr.is_project_plugin(p.name);
             out += ",\"origin\":\"" + std::string(is_proj ? "project" : "global") + "\"";
-            // Cert snapshot (doesn't re-run the tests — just reads cert.json if present)
-            xi::cert::Cert c;
-            if (xi::cert::read(p.folder_path, c)) {
-                auto dll_path = std::filesystem::path(p.folder_path) / p.dll_name;
-                bool valid = xi::cert::is_valid(p.folder_path, dll_path);
-                out += ",\"cert\":{\"present\":true,\"valid\":" + std::string(valid ? "true" : "false");
-                out += ",\"baseline_version\":" + std::to_string(c.baseline_version);
-                out += ",\"certified_at\":\"" + esc(c.certified_at) + "\"}";
-            } else {
-                out += ",\"cert\":{\"present\":false}";
-            }
             // Optional `manifest` block from plugin.json (free-form;
             // see docs/reference/c-abi.md). AI agents and doc
             // tools read this to discover params / inputs / outputs /
@@ -3294,7 +2952,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Drop stale bus state from any previously-open project (releases cached
         // handles + the old sink) before tearing it down + opening the new one.
         xi::TriggerBus::instance().clear_sink();
-        xi::TriggerBus::instance().clear_observer();
         xi::TriggerBus::instance().reset();
         if (g_plugin_mgr.open_project(*folder, working_copy)) {
             auto& proj = g_plugin_mgr.project();
@@ -3356,15 +3013,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // owner=0) leak across every open→emit→close cycle and the stale sink
         // can fire into a torn-down project.
         xi::TriggerBus::instance().clear_sink();
-        xi::TriggerBus::instance().clear_observer();
         xi::TriggerBus::instance().reset();
         g_plugin_mgr.close_project();
         send_rsp_ok(srv, id, "{\"closed\":true}");
     } else if (name == "export_project_plugin") {
-        // Package a project plugin as a deployable folder. Compiles
-        // Release + runs baseline cert; on success, the destination
-        // contains a self-contained plugin.json + DLL + cert.json that
-        // can be dropped into another project's plugins folder.
+        // Package a project plugin as a deployable folder. Compiles Release;
+        // the destination contains a self-contained plugin.json + DLL that can
+        // be dropped into another project's plugins folder.
         auto pname = xp::get_string_field(parsed->args_json, "plugin");
         auto dest  = xp::get_string_field(parsed->args_json, "dest");
         if (!pname || !dest) { send_rsp_err(srv, id, "missing plugin or dest"); return; }
@@ -3372,8 +3027,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, "not a project plugin: " + *pname);
             return;
         }
-        // P0-AB-3: export_project_plugin runs the plugin under cert,
-        // which loads + invokes its DLL. Make sure no dispatcher
+        // export_project_plugin recompiles in Release; quiesce so no dispatcher
         // worker is mid-call into the same plugin's instances.
         (void)quiesce_dispatch_for_lifecycle_op_("export_project_plugin");
         auto er = g_plugin_mgr.export_project_plugin(*pname, *dest);
@@ -3381,9 +3035,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xp::json_escape_into(data, *pname);
         data += ",\"dest\":";
         xp::json_escape_into(data, er.dest_dir);
-        data += ",\"cert_passed\":" + std::string(er.cert_passed ? "true" : "false");
-        data += ",\"cert_pass_count\":" + std::to_string(er.cert_pass_count);
-        data += ",\"cert_fail_count\":" + std::to_string(er.cert_fail_count);
         data += "}";
         if (er.ok) {
             send_rsp_ok(srv, id, data);
@@ -3514,42 +3165,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     lm.msg = "rebuild_plugins: " + it.name + ": " + it.detail;
                     srv.send_text(lm.to_json());
                 }
-    } else if (name == "recording_start") {
-        auto folder = xp::get_string_field(parsed->args_json, "folder");
-        if (!folder) { send_rsp_err(srv, id, "missing folder"); return; }
-        if (xi::TriggerRecorder::instance().start(*folder)) {
-            std::string out = "{\"recording\":true,\"folder\":";
-            xp::json_escape_into(out, *folder);
-            out += "}";
-            send_rsp_ok(srv, id, out);
-        } else {
-            send_rsp_err(srv, id, "already recording");
-        }
-    } else if (name == "recording_stop") {
-        bool ok = xi::TriggerRecorder::instance().stop();
-        std::string out = "{\"recording\":false,\"events\":" +
-            std::to_string(xi::TriggerRecorder::instance().event_count()) + "}";
-        send_rsp_ok(srv, id, out);
-        (void)ok;
-    } else if (name == "recording_status") {
-        std::string out = "{\"recording\":";
-        out += xi::TriggerRecorder::instance().is_recording() ? "true" : "false";
-        out += ",\"replaying\":";
-        out += xi::TriggerRecorder::instance().is_replaying() ? "true" : "false";
-        out += ",\"events\":" + std::to_string(xi::TriggerRecorder::instance().event_count());
-        out += ",\"folder\":";
-        xp::json_escape_into(out, xi::TriggerRecorder::instance().folder());
-        out += "}";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "recording_replay") {
-        auto folder = xp::get_string_field(parsed->args_json, "folder");
-        if (!folder) { send_rsp_err(srv, id, "missing folder"); return; }
-        auto speed = xp::get_number_field(parsed->args_json, "speed").value_or(1.0);
-        if (xi::TriggerRecorder::instance().start_replay(*folder, speed)) {
-            send_rsp_ok(srv, id, "{\"started\":true}");
-        } else {
-            send_rsp_err(srv, id, "could not start replay (no manifest, or already replaying)");
-        }
     } else if (name == "dispatch_stats") {
         // Snapshot of queue health. Useful for drivers / agents that
         // want to know if their source is overproducing.
@@ -3638,88 +3253,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         data += "]}";
         send_rsp_ok(srv, id, data);
-    } else if (name == "set_trigger_policy") {
-        // args: { policy: "any"|"all_required"|"leader_followers",
-        //         required: ["cam_left", ...],
-        //         leader: "cam_left",
-        //         window_ms: 100 }
-        auto pol_str = xp::get_string_field(parsed->args_json, "policy");
-        xi::TriggerPolicy pol = xi::TriggerPolicy::Any;
-        if      (pol_str && *pol_str == "all_required")     pol = xi::TriggerPolicy::AllRequired;
-        else if (pol_str && *pol_str == "leader_followers") pol = xi::TriggerPolicy::LeaderFollowers;
-        // Parse `required` properly (yyjson, not substring). The old
-        // substring scan looked for `"required":[` (no space) and
-        // silently fell back to an empty list when the args came from
-        // Python's default `json.dumps(...)` which emits `"required":
-        // [` (with space). The empty list then got persisted to
-        // project.json by save_project_locked() — silent destruction
-        // of the user's policy.
-        std::vector<std::string> required;
-        if (yyjson_doc* doc = yyjson_read(parsed->args_json.c_str(),
-                                          parsed->args_json.size(), 0)) {
-            yyjson_val* root = yyjson_doc_get_root(doc);
-            if (yyjson_val* arr = yyjson_obj_get(root, "required");
-                arr && yyjson_is_arr(arr)) {
-                size_t _i, _n; yyjson_val* it;
-                yyjson_arr_foreach(arr, _i, _n, it) {
-                    const char* s = yyjson_get_str(it);
-                    if (yyjson_is_str(it) && s) {
-                        required.emplace_back(s);
-                    }
-                }
-            }
-            yyjson_doc_free(doc);
-        }
-        auto leader = xp::get_string_field(parsed->args_json, "leader").value_or("");
-        auto win    = xp::get_number_field(parsed->args_json, "window_ms").value_or(100);
-        if (g_plugin_mgr.set_trigger_policy(pol, required, leader, (int)win)) {
-            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
-        } else {
-            send_rsp_err(srv, id, "no project open");
-        }
-    } else if (name == "recertify_plugin") {
-        auto pname = xp::get_string_field(parsed->args_json, "name");
-        if (!pname) { send_rsp_err(srv, id, "missing name"); return; }
-        auto* pi = g_plugin_mgr.find_plugin(*pname);
-        if (!pi) { send_rsp_err(srv, id, "unknown plugin: " + *pname); return; }
-        // Delete existing cert so load_plugin re-runs baseline on next scan.
-        auto cert_path = std::filesystem::path(pi->folder_path) / "cert.json";
-        std::error_code ec;
-        std::filesystem::remove(cert_path, ec);
-        // If currently loaded, run baseline now and write cert in-place.
-        if (pi->handle) {
-            auto syms = xi::baseline::load_symbols(pi->handle);
-            static xi_host_api host = xi::ImagePool::make_host_api();
-            auto summary = xi::cert::certify(pi->folder_path,
-                std::filesystem::path(pi->folder_path) / pi->dll_name,
-                pi->name, syms, &host);
-            std::string rsp_json = "{\"passed\":" + std::string(summary.all_passed ? "true" : "false");
-            rsp_json += ",\"pass_count\":" + std::to_string(summary.pass_count);
-            rsp_json += ",\"fail_count\":" + std::to_string(summary.fail_count);
-            rsp_json += ",\"total_ms\":" + std::to_string(summary.total_ms);
-            rsp_json += ",\"failures\":[";
-            bool first = true;
-            for (auto& r : summary.results) {
-                if (!r.passed) {
-                    if (!first) rsp_json += ",";
-                    first = false;
-                    auto esc = [](const std::string& s) {
-                        std::string o; for (char c : s) { if (c=='\\'||c=='"') o.push_back('\\'); o.push_back(c); } return o;
-                    };
-                    rsp_json += "{\"name\":\"" + esc(r.name) + "\",\"error\":\"" + esc(r.error) + "\"}";
-                }
-            }
-            rsp_json += "]}";
-            send_rsp_ok(srv, id, rsp_json);
-        } else {
-            send_rsp_ok(srv, id, "{\"queued\":true,\"note\":\"will re-cert on next load\"}");
-        }
     } else if (name == "create_instance") {
         auto iname  = xp::get_string_field(parsed->args_json, "name");
         auto plugin = xp::get_string_field(parsed->args_json, "plugin");
         if (!iname || !plugin) { send_rsp_err(srv, id, "missing name or plugin"); return; }
         // Ensure plugin is loaded — surface WHY if it can't be (missing DLL,
-        // failed cert, ABI mismatch, etc.) instead of a generic failure.
+        // missing factory symbol, ABI mismatch, etc.) instead of a generic failure.
         std::string load_err;
         if (!g_plugin_mgr.load_plugin(*plugin, &load_err)) {
             send_rsp_err(srv, id, load_err.empty() ? "failed to load plugin" : load_err);
@@ -3835,346 +3374,15 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
     }
 }
 
-// Map an instruction pointer to "<module>+0x<offset>" by scanning
-// loaded modules. Used in the crash filter to point at which DLL
-// (script vs plugin vs xinsp-backend itself) was executing.
-static std::string blame_module(void* addr) {
-    HMODULE mods[1024];
-    DWORD needed = 0;
-    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed))
-        return "<unknown>";
-    int n = (int)(needed / sizeof(HMODULE));
-    for (int i = 0; i < n; ++i) {
-        MODULEINFO mi{};
-        if (!GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof(mi))) continue;
-        auto base = (uintptr_t)mi.lpBaseOfDll;
-        if ((uintptr_t)addr < base || (uintptr_t)addr >= base + mi.SizeOfImage) continue;
-        char name[MAX_PATH];
-        GetModuleFileNameA(mods[i], name, sizeof(name));
-        const char* slash = std::strrchr(name, '\\');
-        std::string out = (slash ? slash + 1 : name);
-        char off[64];
-        std::snprintf(off, sizeof(off), "+0x%llx", (unsigned long long)((uintptr_t)addr - base));
-        return out + off;
-    }
-    return "<unknown>";
-}
-
-// JSON-escape a path segment in-place (writes into out). Tiny copy of
-// xp::json_escape_into to keep this filter free of any nontrivial dep.
-static void crash_json_escape(std::string& out, const char* s) {
-    out.push_back('"');
-    for (; *s; ++s) {
-        char c = *s;
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:   out.push_back(c);
-        }
-    }
-    out.push_back('"');
-}
-
-static const char* exception_name(DWORD code) {
-    switch (code) {
-        case EXCEPTION_ACCESS_VIOLATION:        return "ACCESS_VIOLATION";
-        case EXCEPTION_STACK_OVERFLOW:          return "STACK_OVERFLOW";
-        case EXCEPTION_INT_DIVIDE_BY_ZERO:      return "INT_DIVIDE_BY_ZERO";
-        case EXCEPTION_FLT_DIVIDE_BY_ZERO:      return "FLT_DIVIDE_BY_ZERO";
-        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:   return "ARRAY_BOUNDS_EXCEEDED";
-        case EXCEPTION_ILLEGAL_INSTRUCTION:     return "ILLEGAL_INSTRUCTION";
-        case EXCEPTION_PRIV_INSTRUCTION:        return "PRIV_INSTRUCTION";
-        case EXCEPTION_IN_PAGE_ERROR:           return "IN_PAGE_ERROR";
-        case EXCEPTION_NONCONTINUABLE_EXCEPTION:return "NONCONTINUABLE";
-        case 0xE06D7363:                        return "MS_C++_EXCEPTION";
-        // Synthetic codes we RaiseException with so write_minidump runs for
-        // CRT death paths that bypass SEH (terminate/abort/fastfail family).
-        case 0xE0000001:                        return "TEST_CRASH";
-        case 0xE0000002:                        return "CXX_TERMINATE";
-        case 0xE0000003:                        return "CXX_ABORT";
-        case 0xE0000004:                        return "CRT_INVALID_PARAMETER";
-        case 0xE0000005:                        return "CXX_PURE_CALL";
-        default:                                return "UNKNOWN";
-    }
-}
-
-// Reserve stack headroom so the unhandled-exception filter (write_minidump) can
-// still run after a STACK_OVERFLOW — otherwise the filter has no stack left and
-// the process dies with NO minidump/sidecar (robustness BUG 2). Call once at the
-// top of every thread that runs untrusted inspect/plugin code.
-static void reserve_fault_stack() {
-#ifdef _WIN32
-    ULONG guarantee = 128 * 1024;  // 128 KB — room for the filter + MiniDumpWriteDump
-    SetThreadStackGuarantee(&guarantee);
-#endif
-}
-
-// Top-level unhandled-exception filter. Writes a minidump under
-// %TEMP%/xinsp2/crashdumps PLUS a sibling .json crash report containing
-// exception kind, faulting module, and the last activity context. The
-// report is read by the backend on the NEXT startup and surfaced via
-// cmd:crash_reports — the extension shows it as a notification so the
-// user knows *which* component (script / plugin / core) caused the
-// last session's death.
-static LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
-    namespace fs = std::filesystem;
-    auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    SYSTEMTIME st; GetLocalTime(&st);
-    char stem[128];
-    std::snprintf(stem, sizeof(stem),
-        "xinsp-backend-%lu-%04d%02d%02d-%02d%02d%02d",
-        (unsigned long)GetCurrentProcessId(),
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    auto dmp_path  = (dir / (std::string(stem) + ".dmp")).string();
-    auto json_path = (dir / (std::string(stem) + ".json")).string();
-
-    DWORD code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
-    void* addr = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionAddress : nullptr;
-    std::string blamed = blame_module(addr);
-
-    // 1. Minidump
-    HANDLE h = CreateFileA(dmp_path.c_str(), GENERIC_WRITE, 0, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h != INVALID_HANDLE_VALUE) {
-        MINIDUMP_EXCEPTION_INFORMATION mei;
-        mei.ThreadId          = GetCurrentThreadId();
-        mei.ExceptionPointers = info;
-        mei.ClientPointers    = FALSE;
-        // Richer than MiniDumpNormal so the dump is self-contained for
-        // post-mortem of an in-process compute-core crash:
-        //   WithDataSegs              — globals (breadcrumb table,
-        //                               recent_errors ring) land in the dump
-        //   WithThreadInfo            — per-thread times / teb
-        //   WithIndirectlyReferenced  — pointee memory of stack locals
-        //                               (e.g. the TriggerEvent being inspected)
-        //   WithUnloadedModules       — a just-FreeLibrary'd plugin still
-        //                               shows in the module list for blame
-        // Deliberately NOT WithFullMemory — large image buffers would
-        // bloat the dump to GBs; the above captures the forensic state
-        // without the bulk.
-        auto dump_type = (MINIDUMP_TYPE)(
-            MiniDumpNormal
-            | MiniDumpWithDataSegs
-            | MiniDumpWithThreadInfo
-            | MiniDumpWithIndirectlyReferencedMemory
-            | MiniDumpWithUnloadedModules);
-        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
-                          dump_type, &mei, nullptr, nullptr);
-        CloseHandle(h);
-    }
-
-    // 2. JSON sidecar — what the next-startup report path reads.
-    std::string out = "{\"version\":\""  XINSP2_VERSION "\""
-                      ",\"commit\":\""  XINSP2_COMMIT "\""
-                      ",\"pid\":" + std::to_string(GetCurrentProcessId())
-                    + ",\"thread_id\":" + std::to_string(GetCurrentThreadId());
-    char tsbuf[64];
-    std::snprintf(tsbuf, sizeof(tsbuf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    out += ",\"timestamp\":";
-    crash_json_escape(out, tsbuf);
-    out += ",\"exception\":{\"code\":";
-    char codebuf[24];
-    std::snprintf(codebuf, sizeof(codebuf), "\"0x%08X\"", code);
-    out += codebuf;
-    out += ",\"name\":";
-    crash_json_escape(out, exception_name(code));
-    char addrbuf[40];
-    std::snprintf(addrbuf, sizeof(addrbuf), "\"0x%llx\"", (unsigned long long)addr);
-    out += ",\"address\":"; out += addrbuf;
-    out += ",\"module\":"; crash_json_escape(out, blamed.c_str());
-    out += "}";
-    // `context` = the faulting thread's breadcrumb (the handler runs on
-    // the faulting thread, so crash_ctx() is its slot). Back-compat
-    // with the existing report reader which expects this object.
-    uint32_t fault_tid = (uint32_t)GetCurrentThreadId();
-    {
-        auto& c = crash_ctx();
-        out += ",\"context\":{";
-        out += "\"last_cmd\":";      crash_json_escape(out, c.last_cmd);
-        out += ",\"last_script\":";  crash_json_escape(out, c.last_script);
-        out += ",\"last_instance\":";crash_json_escape(out, c.last_instance);
-        out += ",\"last_plugin\":";  crash_json_escape(out, c.last_plugin);
-        out += ",\"last_phase\":";   crash_json_escape(out, c.last_phase);
-        out += ",\"last_status\":";  crash_json_escape(out, c.last_status);
-        out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
-        out += ",\"last_frame\":"  + std::to_string(c.last_frame);
-        out += "}";
-    }
-    // `threads` = every claimed breadcrumb slot, so a multi-dispatch
-    // crash shows what ALL concurrent inspects were doing, not just
-    // the faulting one. `faulting:true` flags the culprit.
-    out += ",\"threads\":[";
-    {
-        bool first = true;
-        for (int i = 0; i < kMaxCrashSlots; ++i) {
-            uint32_t tid = g_crash_slot_tid[i].load(std::memory_order_acquire);
-            if (tid == 0) continue;
-            auto& c = g_crash_slots[i];
-            if (!first) out += ",";
-            first = false;
-            out += "{\"thread_id\":" + std::to_string(tid);
-            out += ",\"faulting\":" + std::string(tid == fault_tid ? "true" : "false");
-            out += ",\"last_cmd\":";     crash_json_escape(out, c.last_cmd);
-            out += ",\"last_instance\":";crash_json_escape(out, c.last_instance);
-            out += ",\"last_plugin\":";  crash_json_escape(out, c.last_plugin);
-            out += ",\"last_phase\":";   crash_json_escape(out, c.last_phase);
-            out += ",\"last_status\":";  crash_json_escape(out, c.last_status);
-            out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
-            out += ",\"last_frame\":"  + std::to_string(c.last_frame);
-            out += "}";
-        }
-    }
-    out += "]";
-    out += ",\"minidump\":";
-    crash_json_escape(out, (std::string(stem) + ".dmp").c_str());
-    out += "}\n";
-
-    HANDLE jh = CreateFileA(json_path.c_str(), GENERIC_WRITE, 0, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (jh != INVALID_HANDLE_VALUE) {
-        DWORD wrote = 0;
-        WriteFile(jh, out.data(), (DWORD)out.size(), &wrote, nullptr);
-        CloseHandle(jh);
-    }
-
-    std::fprintf(stderr, "[xinsp2] CRASH 0x%08X (%s) in %s — minidump: %s\n",
-                 code, exception_name(code), blamed.c_str(), dmp_path.c_str());
-    std::fflush(stderr);
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-
-// std::terminate handler — fires when an unhandled C++ exception
-// unwinds out of a thread (e.g. a detached worker thread that didn't
-// wrap its body in try/catch). This path bypasses
-// SetUnhandledExceptionFilter on its own, so a silent terminate would
-// produce no crashdump. We:
-//   1. Log the current exception's what()/type so the cause appears
-//      in stderr (and thus the bash exit summary).
-//   2. RaiseException with a recognisable code so write_minidump
-//      sees a thread context and can write the dump + json sidecar.
-[[noreturn]] static void on_terminate() noexcept {
-    const char* what  = "<no exception>";
-    const char* tname = "<no exception>";
-    try {
-        if (auto p = std::current_exception()) std::rethrow_exception(p);
-    } catch (const std::exception& e) {
-        what  = e.what();
-        tname = typeid(e).name();
-    } catch (const seh_exception& e) {
-        what  = e.what();
-        tname = "xi::seh_exception";
-    } catch (...) {
-        tname = "<non-std exception>";
-    }
-    std::fprintf(stderr,
-        "[xinsp2] std::terminate (thread %lu): %s — %s\n",
-        (unsigned long)GetCurrentThreadId(), tname, what);
-    std::fflush(stderr);
-    crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "terminate");
-    // 0xE0000002 — distinct from --test-crash's 0xE0000001 so blame_module
-    // and exception_name still tag it as MS_C++ish; the json_path will
-    // record this code so the next-startup report distinguishes the
-    // two paths. NONCONTINUABLE so the filter actually runs.
-    RaiseException(0xE0000002, EXCEPTION_NONCONTINUABLE, 0, nullptr);
-    std::abort();   // unreachable; quiets [[noreturn]]
-}
-
-// CRT abort()/fastfail family — std::abort(), a failed C `assert`, a CRT
-// invalid-parameter trip, or a pure-virtual call all terminate the process via
-// __fastfail (0xC0000409), which bypasses BOTH SetUnhandledExceptionFilter
-// (write_minidump) AND std::set_terminate (on_terminate). Without a handler a
-// script that calls abort() kills the backend leaving NO minidump / .json
-// sidecar — defeating cmd:crash_reports AND the FE crash-history / status
-// channel (their forensics come from that sidecar). We intercept each entry
-// point and re-raise a NONCONTINUABLE exception so write_minidump runs with a
-// real thread context (same trick as on_terminate). Robustness BUG 1, found by
-// the robustness-fuzzer dogfood; see docs/internals/fe-be.md crash story.
-[[noreturn]] static void raise_for_dump(const char* cause, DWORD code) noexcept {
-    crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), cause);
-    std::fprintf(stderr, "[xinsp2] CRT fatal (%s) — writing crash report\n", cause);
-    std::fflush(stderr);
-    RaiseException(code, EXCEPTION_NONCONTINUABLE, 0, nullptr);
-    std::abort();   // unreachable; quiets [[noreturn]]
-}
-static void on_sigabrt(int) { raise_for_dump("abort", 0xE0000003); }
-static void on_invalid_parameter(const wchar_t*, const wchar_t*, const wchar_t*,
-                                 unsigned int, uintptr_t) {
-    raise_for_dump("invalid_parameter", 0xE0000004);
-}
-static void on_purecall() { raise_for_dump("purecall", 0xE0000005); }
-
-// Vectored exception handler — runs BEFORE SEH translators, before
-// any per-thread try/__except. Logs first-chance exceptions that
-// might get swallowed silently. Returning EXCEPTION_CONTINUE_SEARCH
-// lets normal handling proceed; we're just listening here.
-//
-// Filtered to the codes that would actually kill the process if
-// unhandled: AVs, illegal instructions, stack overflow, fastfail,
-// our own RaiseException codes. Skipping benign first-chance C++
-// exceptions (0xE06D7363) that happen all the time during normal
-// try/catch flow.
-static LONG WINAPI veh_logger(EXCEPTION_POINTERS* info) {
-    if (!info || !info->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
-    DWORD code = info->ExceptionRecord->ExceptionCode;
-    // Whitelist things that are actually concerning. C++ exceptions
-    // (0xE06D7363) and breakpoints get filtered out.
-    bool concerning =
-        code == EXCEPTION_ACCESS_VIOLATION ||
-        code == EXCEPTION_ILLEGAL_INSTRUCTION ||
-        code == EXCEPTION_STACK_OVERFLOW ||
-        code == EXCEPTION_INT_DIVIDE_BY_ZERO ||
-        code == EXCEPTION_NONCONTINUABLE_EXCEPTION ||
-        code == 0xC0000409 /* STATUS_STACK_BUFFER_OVERRUN / fastfail */ ||
-        code == 0xC0000374 /* STATUS_HEAP_CORRUPTION */ ||
-        (code >= 0xE0000001 && code <= 0xE0000010);
-    if (concerning) {
-        void* addr = info->ExceptionRecord->ExceptionAddress;
-        std::string blamed = blame_module(addr);
-        std::fprintf(stderr,
-            "[xinsp2] VEH first-chance 0x%08X (%s) thread %lu at %s\n",
-            code, exception_name(code),
-            (unsigned long)GetCurrentThreadId(), blamed.c_str());
-        std::fflush(stderr);
-    }
-    return EXCEPTION_CONTINUE_SEARCH;
-}
 
 int main(int argc, char** argv) {
-    // Top-level guard: minidump on crashes that escape the SEH translator
-    // (stack overflow, plugin static destructor faults, etc.).
-    SetUnhandledExceptionFilter(write_minidump);
-    // Install SEH → C++ exception translator so try/catch catches segfaults
+    // Install the crash-forensics handlers (minidump filter + CRT death-path
+    // interceptors + first-chance logger + fault-stack reserve). Lives in the
+    // extracted leaf xi_crash_dump.hpp.
+    xi::crash::install();
+    // SEH → C++ exception translator so try/catch catches segfaults (a separate
+    // concern from the dump machinery; owned here, re-set per inspect thread).
     _set_se_translator(seh_translator);
-    // C++ terminate path — covers unhandled exceptions in detached threads
-    // (the silent-exit pattern the spike branch's process-isolation work
-    // hit during validation).
-    std::set_terminate(on_terminate);
-    // Vectored handler — first crack at every concerning exception, even
-    // ones that get suppressed somewhere downstream. Diagnostic only;
-    // doesn't change the exception's normal handling path.
-    AddVectoredExceptionHandler(/*first=*/1, veh_logger);
-    // CRT fastfail family (abort / failed assert / invalid-parameter / pure
-    // call) bypasses the three handlers above. Catch each so a crash report is
-    // ALWAYS written (robustness BUG 1). SIGABRT must have a handler installed
-    // BEFORE any abort(); _set_abort_behavior clears the popup + the Watson/
-    // fastfail report so our handler is the path that runs.
-    std::signal(SIGABRT, on_sigabrt);
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-    _set_invalid_parameter_handler(on_invalid_parameter);
-    _set_purecall_handler(on_purecall);
-    reserve_fault_stack();   // BUG 2: let the filter dump on a main-thread stack overflow
-    // Tell Windows not to silently kill us on heap corruption — we want
-    // to see crashpad's report instead. (HeapEnableTerminationOnCorruption
-    // is opt-IN; HeapDisableCoalesceOnFree is unrelated. The default in
-    // newer Windows versions IS termination-on-corruption; flipping it
-    // off via SetProcessDEPPolicy isn't needed — just ensure we get the
-    // event.)
 
     // --test-crash: deliberately trigger a fatal exception so the
     // top-level minidump filter fires. Used by runCrashDump E2E.
@@ -4338,17 +3546,6 @@ int main(int argc, char** argv) {
     env.aot = xi::cli::has_flag(argc, argv, "--aot");
     if (env.aot) std::fprintf(stderr, "[xinsp2] AOT mode: loading prebuilt plugin/script DLLs (no compiler)\n");
     g_plugin_mgr.set_compile_env(env);
-
-    // Persist a plugin's registered safe-state payload (host->set_safe_state) to
-    // a file the supervising FE watches, so on a BE crash the FE forwards it to
-    // the PLC. Convention path: <project>/.xinsp_safestate (the FE computes the
-    // same). Empty payload clears it. No project open -> nothing to watch.
-    xi::set_safe_state_writer([](const std::string& payload) {
-        if (g_project_folder.empty()) return;
-        auto p = std::filesystem::path(g_project_folder) / ".xinsp_safestate";
-        if (payload.empty()) { std::error_code ec; std::filesystem::remove(p, ec); return; }
-        xi::atomic_write(p, payload);
-    });
 
     xi::ws::Server srv;
     srv.on_open  = [&] {

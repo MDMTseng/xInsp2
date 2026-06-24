@@ -26,7 +26,9 @@ unless there's a hard reason it can't be.** That means:
 - New file in `backend/include/xi/` should compile on Linux out of the
   box if it doesn't touch OS primitives. If it does, isolate them
   behind a small header (like `xi_atomic_io.hpp` already does for
-  Windows-only via `#ifdef`).
+  Windows-only via `#ifdef`). **A new FE-supervisor-only header goes in
+  `fe/include/xi/` (linked via the `xi_fe` CMake target), not
+  `backend/include/xi/`** — see the include-tree section below.
 - Don't assume `cl.exe`, MSVC paths, `_strdup`, `MAX_PATH`,
   backslashes, CP-950, etc.
 - Tests added should not require Windows tools (`PowerShell`,
@@ -61,7 +63,8 @@ the port itself; it's a record so we know what to expect.
 |---|---|---|
 | `backend/include/xi/xi_seh.hpp` | `_set_se_translator` + `__try`/`__except` | `sigaction(SIGSEGV / SIGFPE / SIGBUS)` + `sigsetjmp`/`siglongjmp`. Or wire Google Breakpad. |
 | `backend/include/xi/xi_script_compiler.hpp` | `cl.exe` + `vcvars64.bat` + `cmd /C` | `g++` or `clang++` direct spawn; rewrite the diagnostic parser for gcc / clang error format. |
-| Crash forensics in `backend/src/service_main.cpp` | `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` + `EnumProcessModules` + `AddVectoredExceptionHandler` | Google Breakpad or manual `sigaction` + core-file generation; `dl_iterate_phdr` for module-blame addresses. |
+| Crash forensics — `backend/include/xi/xi_crash_dump.hpp` (`xi::crash::`, extracted 2026-06 from `service_main.cpp`) | `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` + `EnumProcessModules` + `AddVectoredExceptionHandler` + the CRT death-path interceptors. All `#ifdef _WIN32`-gated; on non-Win `install()`/`reserve_fault_stack()` are no-ops and the breadcrumb model (`Context`/`ctx()`/`set()`) stays portable. | Google Breakpad or manual `sigaction` + core-file generation; `dl_iterate_phdr` for module-blame addresses. Replace the `#else` stubs in the leaf. |
+| `backend/include/xi/xi_cmake_build.hpp` (`xi::cmake_build::`, host-side cmake invocation for build:cmake plugins, extracted 2026-06) | `_popen`/`_pclose` via `cmd.exe` in `run_cmd_capture` | `popen(cmd + " 2>&1")` — same shape, no outer-quote wrap. Already `#ifdef _WIN32` + `TODO(linux)` stub. |
 | `backend/src/fe_main.cpp` (the `xinsp-fe` supervisor) | `CreateProcessA` + `WaitForSingleObject`, Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), `SetConsoleCtrlHandler`, Winsock TCP probe. | `posix_spawn`/`fork`+`execv`; `waitpid`/`pidfd`; `prctl(PR_SET_PDEATHSIG)` for the kill-on-parent-death guarantee; `sigaction(SIGINT/SIGTERM)`; POSIX `connect` probe. The whole Win32 path is already gated `#ifdef _WIN32` with a `TODO(linux)` stub `main()`; `xi_safe_state.hpp` + the crash-log parsing are portable. |
 
 ### Hard — different semantics (re-design)
@@ -181,6 +184,76 @@ toolchain + OpenCV dev headers present — this is not a "ship one binary" port.
   embedded-deployment burden (no toolchain, no OpenCV headers, smaller image). Worth
   designing the bundle format (a manifest + `.so` set + cert) before the port so
   the loader path is built for it from day one.
+
+## Include-tree split — the SDK public-root design (execute WITH the port)
+
+The core-minimisation campaign (2026-06) separated the `xi` headers into three
+*concerns*. Two of the three are already physically split; the third is designed
+here and deliberately deferred to the port because it touches the same
+runtime-compile machinery the Linux compile-driver work has to generalise anyway
+— doing it Windows-only now then re-doing it at port time is wasted churn.
+
+**Done (source + build, compile-enforced):**
+- `fe/include/xi/` — the FE-supervisor surface (`xi_crash_history`,
+  `xi_crash_report`, `xi_fe_status`, `xi_respawn_policy`, `xi_safe_state`).
+  Reached **only** by `fe_main.cpp` + the three `test_qa_*` units, via the
+  `xi_fe` CMake INTERFACE lib. It is **not** on `xi_core`'s include path, so the
+  backend/runner binaries and the runtime script/plugin cl-compiler physically
+  cannot include FE headers — the split is enforced by the compiler, not just by
+  convention. New supervisor-only headers go here, not in `backend/include/xi/`.
+
+**Deferred to the port — the SDK public root:**
+The blocker is a load-bearing invariant: the runtime cl-compiler resolves a
+**single** include dir (`service_main.cpp` walks up from the exe for
+`include/xi/xi.hpp`, then passes that one dir as `/I` to every script + plugin
+compile; `vendor_dir` and the plugin-cmake `XINSP2_ROOT` are *derived* from it).
+Everything a script/plugin needs therefore has to live under one flat `xi/`.
+
+The correct split is **not** "move the 19 SDK-only headers out". A plugin's
+public surface is the SDK headers (`xi.hpp`, `xi_var/param/io/cv/...`) **plus the
+core ABI/data substrate they include** — `xi_abi.{h,hpp}`, `xi_image`,
+`xi_record`, `xi_image_pool`, `xi_instance`, `xi_doc_pool`, `xi_doc_registry`,
+`xi_seh`, `xi_cabi_adapter`, and their transitive deps (the 20 SDK→CORE edges).
+So:
+
+- `sdk/include/xi/` = **SDK headers + the public ABI substrate = self-contained.**
+  A plugin/script compile (every platform, via clang/g++/cl) points at this ONE
+  root and needs nothing else. The 20 SDK→CORE edges stop crossing a boundary
+  because the substrate moves with the SDK.
+- `backend/include/xi/` = host-internal only (`xi_plugin_manager`,
+  `xi_script_compiler`, `xi_ws_server`, `xi_trigger_bus`, `xi_project`,
+  `xi_protocol`, `xi_use`, `xi_pm_*`, `xi_status_sink`, `xi_sha256`,
+  `xi_cli_args`, `xi_jpeg`). These include the public substrate, so the host
+  build adds `-I sdk/include` — but the host is built by CMake we control.
+- `fe/include/xi/` = supervisor (already done).
+
+Port-time execution checklist (all of it aligns with the Linux compile-driver
+work, which has to touch these same sites):
+1. Generalise `CompileEnv.include_dir` (single) → an **include-dir list**; the
+   clang/g++ spawn and the `cl.exe` spawn both emit one `-I`/`/I` per entry.
+   `service_main`'s probe finds `sdk/include/xi/xi.hpp` and seeds the list with
+   `sdk/include` (+ the host adds `backend/include` for its own build only).
+2. Rewrite the 20 SDK→CORE relative includes (`"xi_foo.hpp"`) to angle form
+   (`<xi/xi_foo.hpp>`) so they resolve via the `-I` search path regardless of
+   which root each header sits in. (List: `xi.hpp`, `xi_async`, `xi_cv`, `xi_io`,
+   `xi_plugin_handle`, `xi_plugin_support`, `xi_script_support`, `xi_state`,
+   `xi_thread`, `xi_types`, `xi_var` → into `xi_image`/`xi_record`/`xi_abi.h`/
+   `xi_instance`/`xi_image_pool`/`xi_seh`.)
+3. `sdk/cmake/xinsp2_plugin.cmake`: `XINSP2_INCLUDE` → `sdk/include` (was
+   `backend/include`); drop the derived `backend/include` assumption.
+4. `tools/build_release.mjs`: the release currently ships `sdk/` + `bin/` but
+   **never stages `backend/include` as a runtime `include/`** — so once the
+   public root is `sdk/include/xi/`, the release naturally ships the right
+   headers and the deployed runtime probe finds them. Confirm the staged layout
+   puts `sdk/include/xi/xi.hpp` where `service_main`'s walk-up expects it.
+5. Re-verify EVERY cl/clang-driven compile path: script compile, project-plugin
+   compile, `build:cmake` plugin, AOT bundle, `rebuild_plugins`.
+
+Net: one self-contained `sdk/include/xi/` public root that the cross-platform
+plugin toolchain points at, host-internal headers invisible to plugins, FE
+already walled off. Until then, Step 2a already removed the SDK headers from the
+backend *binary*'s own compile (the umbrella `#include <xi/xi.hpp>` is gone), so
+the binary is already minimal — only the source-tree relocation remains.
 
 ## See also
 

@@ -217,10 +217,13 @@ private:
 // The value is evaluated exactly once. `name` is available after the macro.
 //
 // VAR introduces a local binding for `name`, so it CANNOT surface a value you
-// already have a variable for: `VAR(count, count)` expands to `auto count =
-// …count…` and cl.exe fires C2374 (redefinition) pointing at the macro, with no
-// hint VAR is the cause. To surface a PRE-EXISTING in-scope value, use EMIT
-// (below) — it declares nothing:
+// already have a variable for, and the same `name` twice in one scope is a C++
+// redefinition: `VAR(count, count)` (or two `VAR(count, …)`) expands to a second
+// `auto count = …` and cl.exe fires C2374/C2371. The backend recognises this and
+// appends a clear hint to the diagnostic — "duplicate VAR(count) at lines X, Y …
+// use EMIT(count)" (see xi_script_compiler.hpp augment_var_redefinitions) — so it
+// no longer reads as a mysterious macro error. To surface a PRE-EXISTING in-scope
+// value, use EMIT (below) — it declares nothing:
 //
 //     int count = blobs.size();
 //     EMIT(count);                 // surfaces `count`; no redefinition

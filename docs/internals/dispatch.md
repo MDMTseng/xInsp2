@@ -1,101 +1,76 @@
-# Dispatch — how a trigger becomes a run
+# Dispatch — how an emit becomes a run
 
-**Shipped design-of-record.** Everything about turning an emitted frame into a
-script run: the **trigger bus** (correlate frames into one inspection), the
-**emit/fetch** model (address a frame-set by id, skip correlation), and
-**dispatch groups** (give critical work its own threads + CPU priority).
-
----
-
-## 1. Trigger bus — correlate frames into a run
-
-A source plugin pushes frames with `host->emit_trigger(source, tid, ts, images,
-n)`. Each `xi::ImageSource` instance has a TriggerBridge that tags emits with the
-instance name. The bus groups frames sharing a 128-bit `tid` per the project's
-`trigger_policy` and dispatches the script once per complete trigger:
-
-| Policy | When it fires one inspection |
-|---|---|
-| `Any` | every emit fires immediately |
-| `AllRequired` | wait for an emit from every named source under the same `tid` |
-| `LeaderFollowers` | wait for the leader; attach the most-recent followers; fire on the leader |
-
-Configured in `project.json: trigger_policy`. Instances don't know the policy —
-they just emit; the bus correlates. The bus applies a drop policy
-(oldest/newest/block) when its queue is full.
+**Shipped design-of-record (ABI v6).** Turning an emitted record into a script
+run: the **dispatch funnel** (one emit → one inspection) and **dispatch groups**
+(give critical work its own threads + CPU priority).
 
 ---
 
-## 2. Emit/fetch — address a frame-set by id
+## 1. The dispatch funnel — one emit, one run
 
-Correlation is the wrong tool when **one emitter already holds a complete
-frame-set** and just wants to run an inspection on it, *addressably* — for replay,
-hot-param re-runs, or a downstream PLC send that needs **gap-free ordering**.
-There's nothing to correlate; the run must be able to name the frame back; and the
-*emitter*, not the core, must own the drop decision.
+A source plugin emits a **record** (images + metadata) with the SDK helper
+`xi::emit_record(host, name, record)` → `host->emit_record(emitter, id, rec, ts)`.
+The bus builds ONE `TriggerEvent` per emit and hands it to the worker; the script
+reads it via `xi::current_trigger()`:
 
-Three moves, keyed on one opaque **`res_id`**:
+```cpp
+auto t = xi::current_trigger();
+if (!t.is_active()) return;            // false for synthetic timer ticks
+auto img  = t.image("cam_left");       // image by the record's key
+auto meta = t.meta();                  // routing/context metadata (Record)
+auto id   = t.id_string();             // the emit id
+```
 
-1. **Stage** — `emit_resource(emitter, res_id, images, n, json)` parks a frame-set
-   (named images + a JSON metadata blob) under `res_id` in a per-emitter ring
-   (`ResourceStore`). Addrefs each handle (caller may release after).
-2. **Dispatch** — `emit_dispatch(emitter, res_id, ts)` builds an **id-only**
-   `TriggerEvent` (no images), routes it by the emitter's *group*, and runs it —
-   **bypassing bus correlation** (`set_dispatch_sink` → `enqueue_dispatch_`). The
-   run carries `res_id` as its trigger id.
-3. **Fetch** — inside that run the script reads the id back and pulls the frame:
+There is **no correlation**: a source that wants several frames inspected
+together puts them in the SAME record (a *gathering* source — see multi-camera
+below). `id == XI_TRIGGER_NULL` asks the host to mint one. Per-image keys: a
+single-image record keys by the emitter name (`t.image("<emitter>")`); a
+multi-image record keys by the record's own keys (`t.image("cam_left")`).
 
-   ```cpp
-   auto r = xi::use("cam").fetch(xi::current_trigger().id_string());
-   if (r.ok()) { xi::Image left = r.image("cam_left"); /* + r.data() metadata */ }
-   ```
-   Metadata is fetched eagerly; images lazily by key (pay only for what you read).
+### Trigger metadata (zero-serialize)
 
-`xi::Emitter` (`xi_emitter.hpp`) wraps stage+dispatch and assigns a contiguous
-`seq` so source authors get the contract right by default:
-`em_.bind(host(), name()); em_.image("img", frame); if (!em_.emit()) { /* back-pressure */ }`.
+The record's JSON metadata (command id, recipe, lane hint…) rides the event **by
+pointer** — a host-owned yyjson doc refcounted through the `DocRegistry` exactly
+as image handles ride the `ImagePool`, so there's no serialize on the live path.
+`t.meta()` returns a borrowed read-only `Record`; reads are free, a mutation
+copy-on-writes into the script's own doc. `t.meta()` is total — an emit with no
+metadata returns an empty `Record`.
 
-### Identity vs. order
+### Multi-camera sync = a gathering plugin
 
-`res_id` is the **dispatch + fetch key** — opaque, unique per live frame
-(`Emitter` uses the `seq`'s hex; a plugin may use a UUID); the store never reads
-inside it. **Ordering is separate**: a downstream serialization point reads a
-`seq` field carried *inside the JSON metadata*, injected by the emitter. Identity
-(where) and order (when) are deliberately different axes.
+Multi-camera synchronisation is **not** a bus policy (the old
+`Any`/`AllRequired`/`LeaderFollowers` correlation was removed). Instead, ONE
+gathering plugin grabs all cameras and emits a single record carrying every
+frame: `xi::Record().image("cam_left", L).image("cam_right", R)` → one
+`emit_record`. The frames are correlated because they ride the same record. See
+the `synced_stereo` plugin and the `stereo_sync` example.
 
-### Back-pressure (never silent drop)
+### Replay / hot-param re-run = a buffer-replay plugin
 
-`emit_dispatch` returns **1 = accepted** or **0 = lane full / dispatch not
-running**. The lane **rejects** when full (it owns no images, so a reject leaks
-nothing) — it never silently drops. On a `0` the **emitter owns the choice**:
-- **skip-before-burning-a-seq** — drop at the source, keep `seq_`, reuse the same
-  `res_id`+`seq` next time. The dropped frame never enters the seq stream, so
-  downstream stays **gap-free**. (`xi::Emitter::emit()` does exactly this.)
-- or **retry** the same `res_id` later.
+Record/replay is **not** a host facility either. A buffer-replay plugin captures
+records (via its `process()`) into a ring and re-emits them with `emit_record` on
+demand — that's the HDevelop-style "tune a Param, re-inspect the same frame"
+loop. See the `buffer_replay` reference plugin and `examples/buffer_replay_demo`.
 
-A gap-free `seq` stream is only possible because the thing that *assigns* `seq` is
-the thing that *decides to drop*.
+### Headless injection
 
-### Ring + lifetime
+A test/tool drives dispatch without a live source two ways: `cmd:run` injects a
+record host-side, and `cmd:exchange_instance` drives a plugin directly (e.g. a
+source's `fire` command). See `reference/ws-protocol.md`.
 
-`ResourceStore` keeps a bounded per-emitter ring of recent `res_id`s (default 16);
-past capacity the oldest evicts, re-emitting a `res_id` overwrites in place (so a
-hot-param re-run reads the latest frame straight back). Image handles mirror the
-bus: `emit_resource` addrefs; eviction / overwrite / `clear()` release;
-`fetch_image` returns an addref'd handle the consumer releases. Never frees under
-a live consumer, never leaks. Metadata is a JSON string copied into the entry.
+---
 
-### ABI surface (v2, additive; null-check)
+## 2. (removed) Trigger-bus correlation + emit/fetch + recorder
 
-| Function | Semantics |
-|---|---|
-| `emit_resource(emitter, res_id, images, n, json)` | Stage a frame-set; addref handles; overwrite same id; evict oldest past capacity. |
-| `emit_dispatch(emitter, res_id, ts) → int` | Id-only run, routed by group, bypassing correlation. **1** accepted / **0** back-pressure. |
-| `fetch_resource(emitter, res_id, buf, len) → int` | Read metadata JSON; returns length `L` (resize+retry if `L > len`), **-1** if not staged. No refcount change. |
-| `fetch_image(emitter, res_id, key) → handle` | Lazily pull one image; **addref'd** handle (release it) or `XI_IMAGE_NULL`. Key `""` = single-image convention. |
-
-Script-side via `xi::use(emitter).fetch(res_id)` → `xi::Resource`; host-side
-backed by `ResourceStore`, wired by `install_resource_hooks()`.
+The ABI-v6 dispatch cleanup removed three subsystems that earlier versions had:
+the trigger-bus **correlation policies** (`trigger_policy`,
+`Any`/`AllRequired`/`LeaderFollowers`), the **emit/fetch** stage-and-dispatch-by-id
+model (`emit_resource`/`fetch_resource`/`fetch_image`/`emit_dispatch` +
+`xi::use().fetch()`), and the host **record/replay** recorder
+(`recording_start/stop/replay`). Multi-camera sync, addressable re-runs, and
+replay are all plugin composition now (gathering + buffer-replay plugins, §1).
+The legacy section that documented them is gone; this note is a tombstone for
+anyone following an old link.
 
 ---
 
@@ -132,7 +107,7 @@ shared pool instead, but that's not the use case.
 
 ## See also
 
-- [`../reference/c-abi.md`](../reference/c-abi.md) — `emit_trigger` + the emit/fetch
-  function signatures.
-- [`../reference/instances.md`](../reference/instances.md) — TriggerBridge per source.
-- `xi_trigger_bus.hpp` / `xi_resource_store.hpp` / `xi_emitter.hpp` — sources.
+- [`../reference/c-abi.md`](../reference/c-abi.md) — the `emit_record` function
+  signature.
+- [`../reference/instances.md`](../reference/instances.md) — per-source instances.
+- `xi_trigger_bus.hpp` — source.

@@ -239,6 +239,23 @@ XI_SCRIPT_EXPORT int xi_script_set_instance_def(const char* name, const char* de
     return inst->set_def(def_json) ? 0 : -2;
 }
 
+// Symmetric read of set_instance_def: serialize an instance's full def (whatever
+// get_def() returns, incl. any assets the plugin round-trips like image_png_b64).
+// Same buffer protocol as xi_script_exchange_instance: returns bytes written, or
+// -needed when the buffer is too small so the caller grows + retries. -1 if the
+// instance isn't found in the script's registry.
+XI_SCRIPT_EXPORT int xi_script_get_instance_def(const char* name, char* buf, int buflen) {
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    std::string def = inst->get_def();
+    if (def.empty()) def = "{}";
+    int needed = (int)def.size();
+    if (buflen < needed + 1) return -needed;
+    std::memcpy(buf, def.data(), def.size());
+    buf[def.size()] = 0;
+    return needed;
+}
+
 XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* cmd_json,
                                                   char* rsp_buf, int rsp_buflen) {
     auto inst = xi::InstanceRegistry::instance().find(name);
@@ -278,6 +295,7 @@ static void* g_trigger_info_fn_     = nullptr;
 static void* g_trigger_image_fn_    = nullptr;
 static void* g_trigger_sources_fn_  = nullptr;
 static void* g_trigger_leader_fn_   = nullptr;
+static void* g_trigger_meta_fn_     = nullptr;   // ABI v5: emit_trigger_record metadata doc
 
 // Breakpoint callback (S3). Host sets this so xi::breakpoint(label)
 // inside user script blocks until the WS client sends `cmd: resume`.
@@ -336,6 +354,13 @@ XI_SCRIPT_EXPORT void xi_script_set_trigger_callbacks(
 // case xi::Trigger::primary_source() falls back to sources().front().
 XI_SCRIPT_EXPORT void xi_script_set_trigger_leader_callback(void* leader_fn) {
     g_trigger_leader_fn_ = leader_fn;
+}
+
+// ABI v5: metadata-doc callback (emit_trigger_record). Separate symbol for the
+// same back-compat reason as the leader callback; missing ⇒ meta unavailable
+// and xi::Trigger::meta() returns an empty Record.
+XI_SCRIPT_EXPORT void xi_script_set_trigger_meta_callback(void* meta_fn) {
+    g_trigger_meta_fn_ = meta_fn;
 }
 
 // Optional: install a breakpoint callback for xi::breakpoint(label).

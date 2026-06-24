@@ -69,8 +69,42 @@ extern "C" {
 /*       copy; doc_refcount lets the adopter learn if it is the sole  */
 /*       side. Additive at the tail; null on a pre-v4 host ⇒ callers  */
 /*       fall back to the v3 deep-copy / serialize behaviour.         */
+/*   5 — + emit_trigger_record: emit_trigger that also carries a       */
+/*       JSON metadata doc, by handing the host a whole xi_record      */
+/*       (images + data/len + doc) instead of a bare image array.      */
+/*       The metadata travels with the event on the trigger bus —      */
+/*       correlated through the same policy as the frames — and is      */
+/*       read script-side via current_trigger().meta(). It is the      */
+/*       routing/context channel the bare emit_trigger lacked          */
+/*       (command id, recipe, lane hint).                              */
+/*                                                                     */
+/*       Zero-serialize: rec->doc (a HOST-OWNED yyjson_mut_doc*, built */
+/*       via doc_chunk_*) is carried across the async dispatch by      */
+/*       POINTER, refcounted through doc_retain/doc_release — exactly  */
+/*       as image handles ride the ImagePool refcount. A plugin-owned  */
+/*       bare doc must NOT be passed (its free can't be reconciled);   */
+/*       the SDK emit() helper builds a host-owned record. Only the    */
+/*       recorder serializes, and only when persisting to disk.        */
+/*                                                                     */
+/*       Additive at the tail; emit_trigger is exactly                 */
+/*       emit_trigger_record with empty metadata, so a pre-v5 host     */
+/*       (the pointer is null) just loses the metadata, never the      */
+/*       frames.                                                       */
+/*   6 — Dispatch model collapsed to ONE plugin verb: emit_trigger_    */
+/*       record renamed `emit_record(emitter, id, rec, ts)` (stage +   */
+/*       dispatch a record). The trigger bus + correlation policies     */
+/*       (Any/AllRequired/LeaderFollowers) and the host record/replay  */
+/*       are gone — multi-camera sync is now a gathering plugin (one    */
+/*       record, N images) and replay is a buffer-replay plugin.       */
+/*       `emit_trigger`, `emit_resource`, `fetch_resource`,            */
+/*       `fetch_image`, `emit_dispatch` are RETIRED and REMOVED in the */
+/*       dispatch cleanup (no v4 binary compat kept — every plugin     */
+/*       rebuilds against v6). A source must now use emit_record. The   */
+/*       script reads the dispatched record via current_trigger().     */
+/*       image()/.meta(); cmd:run injects the same way for headless    */
+/*       tests. See internals/dispatch.md.                             */
 /* ------------------------------------------------------------------ */
-#define XI_ABI_VERSION 4
+#define XI_ABI_VERSION 6
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -111,6 +145,11 @@ typedef struct {
     xi_image_handle  handle;
 } xi_record_image;
 
+/* Forward declaration so emit_trigger_record (ABI v5) can take a whole
+ * record. The full definition (tagged `struct xi_record`) is below, after
+ * xi_host_api, since the record carries no host-api types itself. */
+struct xi_record;
+
 /* ------------------------------------------------------------------ */
 /* Host API — function table provided by the backend to every plugin  */
 /* ------------------------------------------------------------------ */
@@ -140,27 +179,6 @@ typedef struct xi_host_api {
      * written, or -needed if buflen is too small. Returns 0 if the
      * instance is unknown to the host. */
     int32_t (*instance_folder)(const char* instance_name, char* buf, int32_t buflen);
-
-    /* Image-source plugins call this to publish a frame (or set of
-     * frames) tagged with a trigger ID. The host's TriggerBus groups
-     * frames sharing a tid and dispatches the script once per complete
-     * trigger.
-     *
-     *   source_name:   the publishing instance's name (xi::Plugin::name())
-     *   tid:           caller-supplied 128-bit identifier; XI_TRIGGER_NULL
-     *                  asks the host to allocate a fresh one.
-     *   timestamp_us:  capture timestamp in microseconds (host clock).
-     *                  Pass 0 to use the host's current time.
-     *   images:        the frame(s) being published. The bus addrefs each
-     *                  handle internally — the caller may release them
-     *                  immediately after this call returns.
-     *   image_count:   number of entries in `images`.
-     */
-    void (*emit_trigger)(const char* source_name,
-                         xi_trigger_id tid,
-                         int64_t timestamp_us,
-                         const xi_record_image* images,
-                         int32_t image_count);
 
     /* --------------------------------------------------------------- */
     /* SHM zero-copy buffer pool — RETAINED FOR ABI STABILITY ONLY.   */
@@ -209,64 +227,10 @@ typedef struct xi_host_api {
      * The host keeps the LATEST per source and serves it via cmd:status. */
     void            (*set_status)(const char* source, const char* text);
 
-    /* --------------------------------------------------------------- */
-    /* emit/fetch resource store (v2). Backs the emit/fetch dispatch model:
-     * an emitter STAGES a frame — named images + JSON metadata — under
-     * an opaque string res_id; a consumer FETCHES it later by res_id. The
-     * host keeps a bounded per-emitter ring. ABI-additive: plugins built
-     * against an older header never call it; an older host leaves it null
-     * (always null-check before use).
-     *
-     *   emitter_name: the staging instance's name.
-     *   res_id:       opaque id (may be a UUID); the fetch + replay key.
-     *                 Ordering for downstream serialization rides as a
-     *                 `seq` field inside `cjson`, not here.
-     *   images:       frame(s) to stage; the store addrefs each handle, so
-     *                 the caller may release them right after this returns.
-     *   cjson:        metadata blob (may be null/empty).
-     * (The fetch_resource entry is added alongside the use() proxy.) */
-    void            (*emit_resource)(const char* emitter_name, const char* res_id,
-                                     const xi_record_image* images, int32_t image_count,
-                                     const char* cjson);
-
-    /* Pull a staged resource's metadata by res_id. Writes the JSON into
-     * cjson_buf and returns its byte length L: L >= 0 means the resource
-     * exists (the L bytes were written iff L <= cjson_buflen — otherwise
-     * nothing is written; resize to L and retry); -1 means res_id is not
-     * staged for this emitter. Does NOT touch image refcounts. */
-    int32_t         (*fetch_resource)(const char* emitter_name, const char* res_id,
-                                    char* cjson_buf, int32_t cjson_buflen);
-
-    /* Pull one staged image by key. Returns an addref'd handle (caller
-     * image_release when done) or XI_IMAGE_NULL if the resource or key is
-     * absent. Lazy: a consumer fetches only the images it needs. */
-    xi_image_handle (*fetch_image)(const char* emitter_name, const char* res_id,
-                                          const char* key);
-
-    /* Drive one inspection for a staged resource (emit/fetch dispatch). The
-     * emitter calls this AFTER emit_resource to signal "run res_id now"; the
-     * host routes an id-only event into the emitter's lane (by its group),
-     * bypassing trigger-bus correlation. The script reads the id back via
-     * xi::current_trigger().id_string() and fetches with xi::use(emitter).fetch(id).
-     *   res_id:       128-bit id carried as the run's trigger id; its hex form
-     *                 (id_string) is the res_id key used for emit_resource.
-     *   timestamp_us: capture time (0 = host's current time).
-     * Returns 1 if the run was accepted (enqueued / dispatched), 0 if the lane
-     * was full or dispatch isn't running. The lane does NOT silently drop — on a
-     * 0 the EMITTER owns the back-pressure choice (skip this frame at the source
-     * before burning a seq, or retry), which is what keeps a downstream seq
-     * stream gap-free. */
-    int32_t         (*emit_dispatch)(const char* emitter_name, xi_trigger_id res_id,
-                                     int64_t timestamp_us);
-
-    /* Register an emergency PLC payload for the BE-crash case. The host persists
-     * it (atomically) to a file the supervising xinsp-fe watches; if THIS backend
-     * dies, the FE — which survives the crash and owns the PLC safe-state sink —
-     * forwards the payload to the PLC. This is how a comms plugin keeps the
-     * "BE crashed -> tell the PLC" guarantee without living out-of-process.
-     * Call again to update; pass "" to clear. Null/no-op if unsupported (e.g.
-     * the headless runner with no FE). */
-    void            (*set_safe_state)(const char* payload);
+    /* (set_safe_state was REMOVED 2026-06. A comms plugin that needs a
+     * "BE crashed -> tell the PLC" guarantee spawns its own sidecar process
+     * which watches the BE's process handle and sends the line-safe message
+     * itself on death — the core no longer brokers it.) */
 
     /* --------------------------------------------------------------- */
     /* In-process doc allocator (ABI v3, γ). Host-owned heap behind the */
@@ -305,6 +269,36 @@ typedef struct xi_host_api {
      * (adopt frozen, copy-on-write on mutate); <=1 ⇒ sole side (adopt writable,
      * no COW). Null on a pre-v4 host ⇒ adopt writable (the v3 transfer behaviour). */
     int32_t         (*doc_refcount)(void* doc);
+
+    /* --------------------------------------------------------------- */
+    /* emit_record (ABI v6) — the ONE plugin-facing dispatch verb. A    */
+    /* source hands the host a whole record (images + metadata) under an */
+    /* id; the host stages it and dispatches one inspection. The script  */
+    /* reads it back via current_trigger().image()/.meta()/.id_string(). */
+    /*                                                                   */
+    /*   emitter: the staging instance's name (xi::Plugin::name()).      */
+    /*   id:      caller-supplied 128-bit id; XI_TRIGGER_NULL asks the   */
+    /*            host to mint a fresh one. Its hex form is id_string().  */
+    /*   rec->images / rec->image_count: the frame(s); the host addrefs  */
+    /*            each handle, so the caller may release right after.     */
+    /*   rec->doc: a HOST-OWNED yyjson_mut_doc* enrolled via the host    */
+    /*            doc registry — produced by the SDK's xi::emit_record(), */
+    /*            which share_out()s it (reserving one ref for the host   */
+    /*            to consume). Carried across the async dispatch by       */
+    /*            pointer — zero serialize. A plugin-owned bare doc must  */
+    /*            NOT be passed (use the SDK helper, which also guarantees */
+    /*            the doc is built under the host allocator).             */
+    /*   rec->data / rec->len: used only when rec->doc is NULL — parsed   */
+    /*            once into a host-owned doc at emit time.                */
+    /*   ts:     capture timestamp (µs, host clock); 0 = host's now.      */
+    /*                                                                   */
+    /* Multi-camera sync is a gathering plugin (one record, N images),   */
+    /* not a host policy. Null on a pre-v6 host ⇒ use the SDK helper,    */
+    /* which falls back to frames-only on older hosts. */
+    void (*emit_record)(const char* emitter,
+                        xi_trigger_id id,
+                        const struct xi_record* rec,
+                        int64_t ts);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ */
@@ -312,7 +306,7 @@ typedef struct xi_host_api {
 /* ------------------------------------------------------------------ */
 
 /* A record: named images + JSON metadata. */
-typedef struct {
+typedef struct xi_record {
     const xi_record_image* images;
     int32_t                image_count;
     const uint8_t*         data;    /* yyjson JSON bytes — used iff doc == NULL */

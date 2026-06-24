@@ -41,8 +41,9 @@ public:
 XI_PLUGIN_IMPL(MyPlugin)                           // at the bottom of the .cpp
 ```
 
-Image sources additionally provide `grab(int timeout_ms) → xi::Image` (see
-`xi/xi_source.hpp` + the `mock_camera` plugin).
+Image sources are ordinary plugins too — they push frames by calling
+`host->emit_record(...)` from a worker thread (see the `mock_camera` plugin);
+there is no separate source interface or pull/`grab` model.
 
 ### Lifecycle
 
@@ -115,9 +116,7 @@ struct; null-check tail fields (an older host may leave them `nullptr`).
 | Image I/O | `read_image_file(path)` | Decode an image file straight into the pool (v1). |
 | Status | `set_status(source, text)` | Push a status line to the FE status channel → `reference/ws-protocol.md`. |
 | Instance | `instance_folder(name, buf, len)` | Per-instance scratch dir, created before `create()`; never auto-deleted. |
-| Triggers | `emit_trigger(source, tid, ts, images, n)` | Source plugins push frames into the TriggerBus → `internals/dispatch.md`. |
-| Emit/fetch | `emit_resource` / `fetch_resource` / `fetch_image` / `emit_dispatch` | Stage-and-dispatch-by-id model → `internals/dispatch.md`. |
-| Safe-state | `set_safe_state(payload)` | BE-crash → PLC via the FE sink → `internals/fe-be.md`. |
+| Dispatch (v6) | `emit_record(emitter, id, rec, ts)` | **The one dispatch verb.** A source hands the host a record (images + metadata doc); the host dispatches one inspection. The script reads it via `current_trigger().image()/.meta()/.id_string()`. Metadata rides by pointer (zero-serialize). Use the SDK helper `xi::emit_record`. → `internals/dispatch.md`. |
 | Doc allocator (v3, γ) | `doc_chunk_alloc` / `doc_chunk_realloc` / `doc_chunk_free` | Host-owned pool behind the in-process yyjson doc → `internals/data-layer.md`. |
 | Doc refcount (v4, γ-4) | `doc_retain` / `doc_release` / `doc_refcount` | The doc analogue of `image_addref/release` → `internals/data-layer.md`. |
 | SHM (removed 2026-05) | `shm_*` (5) | Always `nullptr`; kept for binary compat. Fall back to `image_create`. |
@@ -140,15 +139,18 @@ decrements (freed at 0; invalid handles are no-ops). `image_stride(h)` is
 
 ## 4. ABI version + load gate
 
-`XI_ABI_VERSION` is **4**. The struct is append-only — older plugins that don't
-read tail fields stay binary-compatible. History:
+`XI_ABI_VERSION` is **6**. The struct was append-only through v5; v6 broke that
+to remove the retired dispatch fields, so **all plugins must be rebuilt against
+v6** (no binary compat with v4/v5 kept — this is pre-stable-release). History:
 
 | ver | added |
 |---|---|
 | 1 | image pool, trigger bus, SHM (since removed), `read_image_file` |
-| 2 | emit/fetch resource hooks + `set_safe_state` |
+| 2 | emit/fetch resource hooks + `set_safe_state` (both removed in v6) |
 | 3 | in-process doc allocator `doc_chunk_*` (γ) |
 | 4 | in-process doc refcount `doc_retain`/`doc_release`/`doc_refcount` (γ-4) |
+| 5 | `emit_trigger_record` — trigger metadata doc (superseded by v6) |
+| 6 | dispatch collapsed to ONE verb `emit_record(emitter,id,rec,ts)`; `emit_trigger`, `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` REMOVED (no v4 compat — rebuild all plugins). Multi-cam = gathering plugin; replay = buffer-replay plugin. |
 
 **Two load gates** (a plugin failing either is refused at load with a clear
 error, then `FreeLibrary`'d):
@@ -160,6 +162,15 @@ error, then `FreeLibrary`'d):
    `"json_fallback": true` (then it loads on the JSON path with a one-shot
    warning). Plugins built with `XI_PLUGIN_IMPL` against the host's vendored
    yyjson pass automatically. See `internals/data-layer.md`.
+
+> **Migration note (v6).** "Rebuild all plugins" also covers your **native
+> tests**: the plugin certification suite (`xi/xi_baseline.hpp` + `xi/xi_cert.hpp`
+> — `xi::baseline::load_symbols` / `run_all`, `xi::cert::certify`) was removed
+> with the cert gate. A test that used it must resolve the plugin's C-ABI exports
+> directly: `LoadLibrary` the DLL, then `GetProcAddress` for `xi_plugin_create` /
+> `xi_plugin_destroy` / `xi_plugin_process` (+ `get_def`/`set_def`/`exchange` as
+> needed), and assert behaviour with `xi/xi_test.hpp` (which survives). See
+> `sdk/examples/counter/tests/test_counter.cpp` for the pattern.
 
 ---
 

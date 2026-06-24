@@ -6,16 +6,17 @@
 //   1. spawns xinsp-backend.exe (with --project/--autostart-fps so the BE runs
 //      a line headlessly — no WS client needed; see service_main.cpp autostart),
 //   2. monitors it (process-exit + a shallow TCP probe of the WS port),
-//   3. the instant the BE dies, drives the line to a safe state via a
-//      SafeStateSink (PLC abstraction; logging stub today) and reads the BE's
-//      crash report for forensics,
+//   3. the instant the BE dies, reads its crash report for forensics + records
+//      the death to the crash history,
 //   4. respawns the BE with the same rate-limit the VS Code extension uses
-//      (5 / 60s, 1.5s backoff); if that cap is exceeded it stays safe and waits
+//      (5 / 60s, 1.5s backoff); if that cap is exceeded it gives up and waits
 //      for a human.
 //
+// (The "drive the production line to a safe state on BE crash" action moved to
+// the comms plugin's own sidecar process — removed from core/FE 2026-06.)
+//
 // Windows-only today: process spawn/wait, Job Object, console-ctrl, and the TCP
-// probe are Win32. The SafeStateSink seam, config/crash-log parsing stay
-// portable. TODO(linux) markers below; see docs/roadmap/linux-port.md.
+// probe are Win32. The crash-event model + crash-log parsing stay portable. TODO(linux) markers below; see docs/roadmap/linux-port.md.
 //
 #include <xi/xi_clock.hpp>            // xi::wall_ms / xi::mono_ms (single clock home)
 #include <xi/xi_safe_state.hpp>
@@ -23,7 +24,6 @@
 #include <xi/xi_crash_history.hpp>    // xi::CrashHistory (structured BE-death JSONL)
 #include <xi/xi_fe_status.hpp>        // xi::FeStatus (live status snapshot -> JSON file)
 #include <xi/xi_respawn_policy.hpp>   // xi::RespawnTracker (unit-tested)
-#include <xi/xi_safe_state_plc.hpp>   // xi::make_plc_sink (tcp:/udp: safe-state)
 
 #include <algorithm>
 #include <atomic>
@@ -59,7 +59,6 @@ struct FeConfig {
     std::string script;            // --script (optional; BE defaults from project.json)
     int         autostart_fps  = 10;
     std::vector<std::string> plugins_dirs;
-    std::string safe_state_type = "log";
     std::string be_log;            // where the BE's stdout/stderr is captured
     // Respawn policy: latch safe after `respawn_max` CONSECUTIVE failures; the
     // counter resets once the backend stays healthy for `respawn_reset_ms`
@@ -74,12 +73,12 @@ struct FeConfig {
     // open/compiles for several seconds before serving (port-up != ready). The
     // FE waits for the "autostart: ready" marker in be.log before declaring the
     // line healthy; if the BE is alive but never reaches ready within this
-    // budget it's a boot hang -> safe-state + respawn. 0 disables the gate.
+    // budget it's a boot hang -> respawn. 0 disables the gate.
     int         boot_timeout_ms    = 60000;
     // Serve-time liveness: the backend writes a monotonic counter to this file
     // from its serving loop; if it stops advancing while the process is alive
     // and the port still accepts, the backend is wedged (bound but not serving)
-    // -> safe-state + respawn. Default derived from be_log; 0 stale = off.
+    // -> respawn. Default derived from be_log; 0 stale = off.
     std::string heartbeat_file;
     // 15 s, not 8 s: a mid-run compile_and_load blocks the backend's serving loop
     // (cl.exe is synchronous, 3-5 s warm and can exceed 8 s on a cold toolchain),
@@ -90,8 +89,6 @@ struct FeConfig {
     // Extra args appended verbatim to the spawned backend's command line
     // (--be-arg=..., repeatable). Lets an operator pass BE flags through the FE.
     std::vector<std::string> be_args;
-    // (Comms gateway removed — PLC I/O is a plugin concern now; the BE-crash case
-    // is covered by host->set_safe_state + the FE's safe-state sink below.)
     // Working copy: pass --working-copy to the backend so it edits a
     // <project>/.xinsp_work scratch. On a crash respawn the same flag is passed
     // and the backend resumes the scratch (settings survive). See
@@ -176,7 +173,6 @@ static FeConfig load_config(int argc, char** argv) {
             str("project", c.project);
             str("script", c.script);
             num("autostart_fps", c.autostart_fps);
-            str("safe_state", c.safe_state_type);
             str("be_log", c.be_log);
             str("crash_history", c.crash_history);
             str("preserve_dir", c.preserve_dir);
@@ -203,7 +199,6 @@ static FeConfig load_config(int argc, char** argv) {
     if (auto v = arg_value(argc, argv, "--project");        !v.empty()) c.project = v;
     if (auto v = arg_value(argc, argv, "--script");         !v.empty()) c.script = v;
     if (auto v = arg_value(argc, argv, "--autostart-fps");  !v.empty()) try { c.autostart_fps = std::stoi(v); } catch (...) {}
-    if (auto v = arg_value(argc, argv, "--safe-state");     !v.empty()) c.safe_state_type = v;
     if (auto v = arg_value(argc, argv, "--be-log");         !v.empty()) c.be_log = v;
     if (auto v = arg_value(argc, argv, "--boot-timeout-ms"); !v.empty()) try { c.boot_timeout_ms = std::stoi(v); } catch (...) {}
     if (auto v = arg_value(argc, argv, "--heartbeat-file");  !v.empty()) c.heartbeat_file = v;
@@ -397,13 +392,8 @@ static int run_supervisor(const FeConfig& c) {
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
 
-    // PLC safe-state sink if --safe-state is a "tcp:HOST:PORT"/"udp:HOST:PORT"
-    // spec; otherwise the logging stub. The PLC sink also logs to stderr, so
-    // pass null to avoid double-printing.
-    std::unique_ptr<xi::SafeStateSink> sink = xi::make_plc_sink(c.safe_state_type, nullptr);
-    if (!sink) sink = xi::make_safe_state_sink(c.safe_state_type, nullptr);
-    std::fprintf(stderr, "[xinsp-fe] supervisor up: backend=%s port=%d project=%s fps=%d sink=%s\n",
-                 c.backend_exe.c_str(), c.port, c.project.c_str(), c.autostart_fps, sink->name());
+    std::fprintf(stderr, "[xinsp-fe] supervisor up: backend=%s port=%d project=%s fps=%d\n",
+                 c.backend_exe.c_str(), c.port, c.project.c_str(), c.autostart_fps);
     std::fprintf(stderr, "[xinsp-fe] BE log -> %s\n", c.be_log.c_str());
 
     // Structured crash history: one JSONL record per BE death (the FE is the only
@@ -435,8 +425,7 @@ static int run_supervisor(const FeConfig& c) {
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jl, sizeof(jl));
     }
 
-    xi::RespawnTracker resp;         // consecutive-failure cap (latches safe)
-    bool in_safe_state = false;
+    xi::RespawnTracker resp;         // consecutive-failure cap (latches "down")
     int  rc = 0;
 
     while (!g_stop.load()) {
@@ -444,8 +433,7 @@ static int run_supervisor(const FeConfig& c) {
         if (!sp.ok) {
             xi::SafeStateEvent ev; ev.reason = xi::SafeStateReason::BackendExit;
             ev.ts_ms = now_ms();
-            sink->enter_safe_state(ev);
-            st.state = "safe"; st.reason = "BackendExit"; st.backend_pid = 0;
+            st.state = "down"; st.reason = "BackendExit"; st.backend_pid = 0;
             st.set_event(ev); publish_status(c, st);
             rc = 1;
             break;
@@ -515,16 +503,6 @@ static int run_supervisor(const FeConfig& c) {
             // Ready (or no gate) — normal liveness handling.
             if (port) {
                 probe_fails = 0;
-                // Clear the line's safe state once the inspector is confirmed
-                // accepting — but only if we'd previously driven it safe (a
-                // crash/respawn). Never clear optimistically (safety property
-                // SP4): a fresh start was never "safe" to begin with.
-                if (in_safe_state) {
-                    sink->clear_safe_state();
-                    in_safe_state = false;
-                    st.state = "healthy"; st.reason.clear();
-                    publish_status(c, st);
-                }
                 // Announce liveness once per backend instance so a healthy line
                 // has a positive "inspector up" signal in the log, not just
                 // silence. (Without this a never-crashed start logged nothing.)
@@ -578,27 +556,14 @@ static int run_supervisor(const FeConfig& c) {
 
         if (intended) break;   // FE shutdown path handled after the loop
 
-        // ---- BE died unexpectedly: go safe + record forensics ----
+        // ---- BE died unexpectedly: record forensics + respawn ----
+        // ("Going safe" on a BE crash is now a comms plugin's own sidecar
+        // process, not the FE — the FE just supervises: classify, log, respawn.)
         xi::SafeStateEvent ev;
         ev.reason     = death_reason;
         ev.backend_rc = (int)exit_code;
         ev.ts_ms      = now_ms();
         xi::enrich_from_crash_report(c.be_log, ev);
-        // Pull in any plugin-registered emergency payload: host->set_safe_state
-        // wrote it (atomically) to <project>/.xinsp_safestate. The FE outlives the
-        // BE, so this is how the app's "if I crash, tell the PLC THIS" survives.
-        if (!c.project.empty()) {
-            std::error_code ec;
-            auto pf = std::filesystem::path(c.project) / ".xinsp_safestate";
-            if (std::filesystem::exists(pf, ec)) {
-                std::ifstream f(pf, std::ios::binary);
-                std::string s((std::istreambuf_iterator<char>(f)),
-                              std::istreambuf_iterator<char>());
-                if (!s.empty()) ev.custom_payload = std::move(s);
-            }
-        }
-        sink->enter_safe_state(ev);
-        in_safe_state = true;
 
         // ---- respawn unless too many CONSECUTIVE failures (xi::RespawnTracker) ----
         // Counts deaths without a sustained-healthy recovery — so a recurring
@@ -607,19 +572,12 @@ static int run_supervisor(const FeConfig& c) {
         // Append the structured crash record now that we know the consecutive
         // count and whether this death tripped the cap.
         history.record(ev, resp.consecutive, cap_hit);
-        st.state = "safe"; st.reason = xi::to_string(death_reason);
+        st.state = "down"; st.reason = xi::to_string(death_reason);
         st.consecutive = resp.consecutive; st.backend_pid = 0;
         st.set_event(ev); publish_status(c, st);
         if (cap_hit) {
-            xi::SafeStateEvent stuck;
-            stuck.reason = xi::SafeStateReason::RespawnLimitExceeded;
-            stuck.ts_ms  = now_ms();
-            stuck.exception_name  = ev.exception_name;
-            stuck.faulting_module = ev.faulting_module;
-            stuck.report_path     = ev.report_path;
-            sink->enter_safe_state(stuck);
             std::fprintf(stderr, "[xinsp-fe] respawn limit (%d consecutive failures without "
-                         "%ds sustained-healthy) exceeded - staying safe; manual restart required\n",
+                         "%ds sustained-healthy) exceeded - staying down; manual restart required\n",
                          c.respawn_max, c.respawn_reset_ms / 1000);
             st.latched = true; st.reason = "RespawnLimitExceeded";
             publish_status(c, st);
@@ -634,9 +592,6 @@ static int run_supervisor(const FeConfig& c) {
     // Shutdown: closing the job kills the BE (KILL_ON_JOB_CLOSE).
     std::fprintf(stderr, "[xinsp-fe] supervisor stopping\n");
     {
-        xi::SafeStateEvent ev; ev.reason = xi::SafeStateReason::SupervisorShutdown;
-        ev.ts_ms = now_ms();
-        sink->enter_safe_state(ev);
         // Preserve a latched reason (e.g. RespawnLimitExceeded) so the final
         // snapshot still says WHY the line is down; only a clean stop overwrites it.
         st.state = "stopped"; st.backend_pid = 0;
@@ -653,8 +608,9 @@ static void print_help() {
     std::printf(
         "xinsp-fe - xInsp2 frontend supervisor\n"
         "\n"
-        "Spawns + monitors xinsp-backend.exe, drives the line to a safe state on\n"
-        "backend death, and respawns it (rate-limited).\n"
+        "Spawns + monitors xinsp-backend.exe; on backend death it records crash\n"
+        "forensics and respawns it (rate-limited). Driving the production line to a\n"
+        "safe state is a comms plugin's own sidecar process, not the FE.\n"
         "\n"
         "Usage: xinsp-fe [options]\n"
         "  --backend=PATH       xinsp-backend.exe (default: auto-discover)\n"
@@ -663,11 +619,9 @@ static void print_help() {
         "  --script=PATH        script to compile (default: project.json's)\n"
         "  --autostart-fps=N    continuous fps for the backend (default 10; 0=off)\n"
         "  --plugins-dir=DIR    extra plugin folder (repeatable)\n"
-        "  --safe-state=SPEC    safe-state sink: 'log' (default), or a PLC endpoint\n"
-        "                       'tcp:HOST:PORT' / 'udp:HOST:PORT' (newline JSON)\n"
         "  --be-log=PATH        where to capture the backend's stdout/stderr\n"
-        "  --boot-timeout-ms=N  boot-hang budget: go safe+respawn if the backend\n"
-        "                       never reaches 'ready' in N ms (default 60000; 0=off)\n"
+        "  --boot-timeout-ms=N  boot-hang budget: respawn if the backend never\n"
+        "                       reaches 'ready' in N ms (default 60000; 0=off)\n"
         "  --heartbeat-stale-ms=N  serve-time wedge budget: respawn if the backend\n"
         "                       heartbeat stalls N ms while listening (default 15000; 0=off)\n"
         "  --be-arg=ARG         extra arg appended to the backend command (repeatable)\n"
@@ -700,7 +654,7 @@ int main(int argc, char** argv) {
     // TODO(linux): implement the supervisor with posix_spawn/fork+execv,
     // prctl(PR_SET_PDEATHSIG) for the kill-on-parent-death guarantee, a
     // ::connect probe (POSIX sockets), and SIGTERM/SIGINT handling. The
-    // SafeStateSink seam + crash-report parsing above are already portable.
+    // The crash-event model + crash-report parsing above are already portable.
     std::fprintf(stderr, "[xinsp-fe] not implemented on this platform yet "
                  "(backend=%s)\n", c.backend_exe.c_str());
     return 3;

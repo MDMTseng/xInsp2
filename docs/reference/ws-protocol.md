@@ -193,7 +193,7 @@ Total header = 20 bytes. Clients read the 20-byte header, then consume the
 remainder of the frame as the payload.
 
 > **Current implementation emits JPEG only.** Every preview path encodes with
-> `encode_jpeg` (quality 85 for run/var previews, 80 for `preview_instance`) and
+> `encode_jpeg` (quality 85 for run/var previews) and
 > sets `codec = 0` (JPEG); `vars.items[*].raw` is therefore always `false`. The
 > `BMP` (1) / `PNG` (2) codec values and the `raw` flag are reserved in the wire
 > format but not produced today. A client may branch on `codec` defensively, but
@@ -219,7 +219,7 @@ listed under each entry.
 `args: {}` → `data: { "version": "0.1.0", "abi": 1, "commit": "abc123" }`
 
 `abi` here is the **WS protocol** version (currently 1) — distinct from the C
-plugin-ABI struct version `XI_ABI_VERSION` (4, see `reference/c-abi.md`).
+plugin-ABI struct version `XI_ABI_VERSION` (6, see `reference/c-abi.md`).
 
 ### `shutdown`
 `args: {}` → `ok: true` then the backend closes the socket and exits.
@@ -262,9 +262,16 @@ never executes from an unloaded module.
 `args: {}` → `ok: true`. Also clears the param replay cache.
 
 ### `run`
-`args: { "frame_path": "..." (optional) }`
+`args: { "frame_path": "..." (optional), "meta": { ... } (optional) }`
 → `data: { "run_id": <int>, "ms": <int> }`
 followed by an asynchronous `vars` message and zero or more binary previews.
+
+When `frame_path` and/or `meta` are given, `cmd:run` builds a one-shot **record**
+host-side (`frame_path` → an image under the key `"frame"`; `meta` → the metadata
+doc) and exposes it as this run's `xi::current_trigger()` — the script reads it
+via `current_trigger().image("frame")` / `.meta()`, exactly as if a source had
+`emit_record`'d it, but with no source plugin and no continuous mode (headless
+single-shot). A plain `cmd:run` (neither arg) leaves `current_trigger()` inactive.
 
 `cmd:run` is the **deterministic single-shot** path (UI "Run", step-through). It
 is rejected while continuous mode is active (`"cannot run while continuous mode
@@ -285,8 +292,8 @@ file frame on demand without a custom source plugin.
 verify the pool size that just came up).
 On already-running: `data: { "already": true }`.
 **Continuous mode has two drivers — don't conflate them.** The real driver is
-**triggers**: image sources `emit_trigger()` and the bus/lanes run `inspect()` per
-frame (a run with no source/trigger is meaningless). `fps > 0` additionally runs a
+**triggers**: image sources call `emit_record()` and the lanes run `inspect()` per
+record (a run with no source/trigger is meaningless). `fps > 0` additionally runs a
 **synthetic timer tick** — an *empty* trigger every `1000/fps` ms — purely so a
 **source-less** script still ticks (dev edit→run loop, the no-camera HMI demo);
 `xi::current_trigger()` is inactive for those ticks. **`fps <= 0` = trigger-only**:
@@ -316,12 +323,11 @@ the backend (default 1; see `docs/guides/write-a-script.md` → Parallel
 dispatch for the pool, per-instance reentrancy, watchdog, and `result_order`).
 Each tick comes from one of two sources:
 
-- The trigger bus dispatches one inspect call per complete trigger
-  (see `instance-model.md` trigger sections).
+- Each `emit_record()` from a source dispatches one inspect call.
 - A wall-clock timer at the requested fps fires a fallback dispatch
-  even when no trigger is queued. Scripts that read trigger images
+  even when no record is queued. Scripts that read trigger images
   must guard `xi::current_trigger().is_active()` because timer-only
-  ticks have no trigger attached.
+  ticks have no record attached.
 
 `vars` messages are emitted on each dispatch, same shape as for
 `cmd:run`. There is no per-frame rsp; the only ack for `start` is the
@@ -363,7 +369,6 @@ end-of-run total; do not subtract a pre-start snapshot.
 [
   { "name": "blob_analysis", "description": "...", "folder": "...",
     "has_ui": true, "loaded": true, "origin": "global",
-    "cert": { "present": true, "valid": true, ... },
     "manifest": { "params": [...], "inputs": [...], "outputs": [...] } }
 ]
 ```
@@ -522,6 +527,16 @@ here — there is a single host ImagePool.
 ### `set_instance_def`
 `args: { "name": "cam0", "def": { ... } }` → `ok: true`
 
+### `get_instance_def`
+Symmetric read of `set_instance_def` — returns an instance's full def JSON.
+`args: { "name": "cam0" }` → `data: { ... }` (the def; `ok: false` if no such
+instance). The def includes any assets the plugin round-trips through
+`get_def`/`set_def` — e.g. a matcher's per-template `image_png_b64` — so
+`get_instance_def` → `set_instance_def` is an exact round-trip, and looping it
+over `list_instances` snapshots a whole project (the basis for portable config
+bundles). Resolves backend (plugin-manager) instances first, then script-loaded
+instances.
+
 ### `exchange_instance`
 Generic passthrough to an instance's `exchange()` method — used by plugin
 UIs that ship their own command vocabulary.
@@ -649,37 +664,6 @@ Optional `since_run_id`: stop once a run with that id-or-older is hit
 
 `cmd: set_history_depth { depth: N }` resizes the ring; entries beyond
 the new cap are dropped immediately. Bounded to [0, 10000].
-
-### `compare_variants`
-
-Run the loaded script once under each of two "variants" (sets of
-`Param` values + instance defs), back-to-back, and return both vars
-snapshots. Client-side code diffs to answer "what does sigma=3 vs
-sigma=4 look like for THIS frame?" without juggling two backends.
-
-```json
-{ "type": "cmd", "id": 7, "name": "compare_variants",
-  "args": {
-    "a": {
-      "params":    [ { "name": "sigma", "value": 3 } ],
-      "instances": [ { "name": "det0",  "def": { "threshold": 120 } } ]
-    },
-    "b": {
-      "params":    [ { "name": "sigma", "value": 4 } ],
-      "instances": [ { "name": "det0",  "def": { "threshold": 150 } } ]
-    }
-  } }
-```
-
-Reply:
-
-```json
-{ "a": { "vars": [ ... snapshot ... ] },
-  "b": { "vars": [ ... snapshot ... ] } }
-```
-
-After the call the script is left in **variant B**'s state — follow
-with your own `set_param` / `load_project` if you need to restore.
 
 ### `resume`
 
@@ -814,22 +798,11 @@ in full detail above. One-line purpose per entry; args follow the same
 | `graph_capture` `args: { "enable": bool }` | Toggle dataflow edge recording (default off — no hot-path cost). Clears any prior recording on enable. Reply: `{ "capturing": bool }`. |
 | `graph_snapshot` | Reconstruct dataflow edges from the recorded calls by image-handle identity (instance A produced handle H; instance B consumed H → A→B edge). Reply: `{ "capturing": bool, "ran": ["inst", ...], "edges": [{ "from": "A", "to": "B", "keys": ["mask"] }, ...] }`. The `ran` list is in call order; `keys` lists the output-image names that crossed the edge. |
 
-#### Recording / replay
-
-| Command | Purpose |
-|---|---|
-| `recording_start` `args: { "path": "...", "max_frames"?: N }` | Start recording trigger events (image handles + metadata) to a file for deterministic replay. |
-| `recording_stop` | Stop an active recording. Reply includes `{ "path": "...", "frame_count": N }`. |
-| `recording_status` | Recording state and frame count so far. |
-| `recording_replay` `args: { "path": "...", "loop"?: bool }` | Replay a recording file into the trigger bus (or dispatch pool if continuous mode is active). |
-
 #### Params and preview (out-of-band operations)
 
 | Command | Purpose |
 |---|---|
 | `list_params` | List all registered `xi::Param` values (name, type, value, min/max if numeric). |
-| `preview_instance` `args: { "name": "cam0", "timeout_ms"?: N }` | Grab one frame from an `ImageSource` instance and return it as a binary preview (no inspect). Useful for live camera aiming without running the full pipeline. |
-| `process_instance` `args: { "name": "det0", "images": [...], "json"?: "..." }` | Call a plugin instance's `process()` directly (bypasses the script and the trigger bus). Input images are supplied as base64-encoded PNG/JPEG in the args; output images are returned the same way. Intended for unit-testing individual plugin instances from outside the script. |
 
 #### Plugin management
 
@@ -837,7 +810,6 @@ in full detail above. One-line purpose per entry; args follow the same
 |---|---|
 | `rescan_plugins` | Rescan the global plugins directories and refresh manifests. Does not reload already-loaded plugin DLLs. |
 | `load_plugin` `args: { "name": "...", "folder"?: "..." }` | Force-load (or reload) a specific plugin by name. Typically used after `rescan_plugins` found a new plugin. |
-| `recertify_plugin` `args: { "name": "..." }` | Re-run the baseline certification tests for a plugin and update its cert file. |
 | `rebuild_plugins` `args: { "cmake"?: "...", "config"?: "Release", "plugins"?: ["a","b"] }` | For every `build: cmake` plugin whose source changed (or just the named `plugins`): unload it, run its own CMake build, then reload the DLL and restore instances. Runs in three phases — unload all changed, **build them in parallel**, reload each — so a multi-plugin round is fast and each is unloaded only briefly. Reply `data: { "plugins": [{ "plugin", "status": "rebuilt"\|"unchanged"\|"failed", "detail" }] }`. Unchanged plugins (sources older than their built DLL) are skipped. The unload→build→load order is required on Windows (a loaded DLL can't be overwritten; CMake emits a fixed-name DLL) — which is why CMake runs host-side. A plugin that didn't truly unload (lingering worker thread / GPU context) is reported `failed` rather than silently left on stale code. |
 | `export_project_plugin` `args: { "name": "..." }` | Package a compiled project-local plugin (DLL + manifest) for distribution; stamps `abi_version` in the exported `plugin.json`. |
 
@@ -846,19 +818,13 @@ in full detail above. One-line purpose per entry; args follow the same
 | Command | Purpose |
 |---|---|
 | `create_project` `args: { "path": "...", "name": "..." }` | Create a new empty project folder with a stub `project.json` and `inspect.cpp`. |
-| `close_project` | Tear down all instances, reset the trigger bus, stop recording. Does not unload script or plugin DLLs. |
+| `close_project` | Tear down all instances and the dispatch lanes. Does not unload script or plugin DLLs. |
 | `create_instance` `args: { "plugin": "blob_analysis", "name": "det0" }` | Add a new instance to the open project (creates folder, calls `xi_plugin_create`, writes `instance.json`). |
 | `remove_instance` `args: { "name": "det0", "purge"?: bool }` | Remove an instance from the registry and call `xi_plugin_destroy`. Default: keep the on-disk folder. Pass `"purge": true` to delete it. |
 | `rename_instance` `args: { "old": "det0", "new": "detector" }` | Rename an instance (moves its folder, updates the registry). |
 | `save_instance_config` `args: { "name": "det0" }` | Write the current `get_def()` output for one instance to `instance.json` without a full `save_project`. |
 | `get_project` | Return the open project's `project.json` content and resolved metadata. |
 | `get_plugin_ui` `args: { "name": "blob_analysis" }` | Return the plugin's `ui/index.html` content (for plugins with `has_ui: true`). Used by the VS Code extension to open the plugin webview. |
-
-#### Trigger policy
-
-| Command | Purpose |
-|---|---|
-| `set_trigger_policy` `args: { "policy": "any"\|"all_required"\|"leader_followers", ... }` | Update the project's trigger correlation policy live (without reloading the project). Changes take effect on the next trigger event. |
 
 #### Dispatch stats
 

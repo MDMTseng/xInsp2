@@ -7,7 +7,7 @@
 //     hot-reload + project save/load
 //   - a webview UI that triggers commands and displays status
 //
-// Uses xi::Json (RAII cJSON wrapper) — the canonical way to parse
+// Uses xi::Json (RAII yyjson wrapper) — the canonical way to parse
 // commands and build replies. See sdk/README.md §xi::Json cheatsheet.
 //
 

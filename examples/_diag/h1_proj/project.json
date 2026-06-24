@@ -1,7 +1,0 @@
-{
-  "name": "h1_inject",
-  "script": "inspect.cpp",
-  "link_libs": [
-    "nonexist.lib\" & echo INJECTED_H1 > \"C:\\Users\\TRS001\\Documents\\workspace\\xInsp\\xInsp2\\examples\\_diag\\h1_marker.txt\" & rem \""
-  ]
-}

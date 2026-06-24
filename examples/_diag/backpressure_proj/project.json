@@ -1,6 +1,0 @@
-{
-  "name": "backpressure",
-  "script": "inspect.cpp",
-  "parallelism": { "queue_depth": 2 },
-  "instances": [ {"name": "src", "plugin": "burst_src"} ]
-}

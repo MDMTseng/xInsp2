@@ -1,5 +1,0 @@
-{
-  "name": "h7_drops",
-  "script": "inspect.cpp",
-  "parallelism": {"dispatch_threads":2,"queue_depth":1,"overflow":"drop_oldest","result_order":"arrival"}
-}

@@ -57,7 +57,6 @@ flowchart LR
         HMI["HMI SPA (kiosk browser)\nsingle WS client"]
         FE -->|spawns headless\n--project --autostart-fps| BE
         HMI <-->|WS: vars + preview frames\n+ run timing + history| BE
-        BE -. safe-state .-> FE
     end
     DEV["VS Code (dev box)"] -->|authors dashboard.json\n+ AOT-builds the bundle| LINE
 ```
@@ -75,7 +74,7 @@ flowchart LR
 | Image pixels | binary **preview frames** (gid-keyed) |
 | Cycle time / throughput | `run_finished` event carries `ms` |
 | Backfill charts on connect / SPC windows | **history ring** (`g_history`) + `history` command |
-| Line safe-state / alarms | FE safe-state + status channel (`fe-status.json`) |
+| Crash / down alarms | FE status channel (`fe-status.json`) — PLC line-safe is the comms plugin's sidecar, not the HMI |
 | Headless run + supervise | `--project --autostart-fps` + `xinsp-fe.exe` |
 | Packaging skeleton | `tools/build_release.mjs` (today: dev zip) |
 

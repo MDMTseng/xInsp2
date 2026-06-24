@@ -119,8 +119,9 @@ All virtuals have sensible defaults; override only what you need:
 | `bool set_def(const std::string& json)` | Restore config from JSON. | returns `true` |
 | `void start()` / `void stop()` | For streaming sources (cameras). | no-op |
 
-`xi::ImageSource` is a subclass for cameras — adds `grab()` /
-`grab_wait()` and a built-in frame queue with backpressure.
+A **source plugin** (camera / frame generator) overrides `start()`/`stop()`
+to run its own capture thread and calls `xi::emit_record(...)` to push frames
+into the pipeline — see [Image sources and dispatch](#image-sources-and-dispatch).
 
 ### Per-instance storage
 
@@ -157,7 +158,7 @@ Returns empty string if the plugin is running detached from a project.
 ## `xi::Json` cheatsheet
 
 For parsing `exchange()` commands and building reply payloads. RAII —
-no manual `cJSON_Delete`. Same path syntax as `xi::Record`.
+no manual document free. Same path syntax as `xi::Record`.
 
 ```cpp
 #include <xi/xi_json.hpp>
@@ -188,8 +189,8 @@ return reply.dump();         // compact
 // or reply.dump_pretty();   // indented
 ```
 
-**Compare to raw cJSON**: a typical exchange handler shrinks from
-~12 lines (parse + null-checks + type checks + delete) to 3 lines.
+**Compare to raw yyjson**: a typical exchange handler shrinks from
+~12 lines (parse + null-checks + type checks + free) to 3 lines.
 
 Reads on missing or wrong-typed fields return the supplied default
 instead of crashing — no need to null-check at every step.
@@ -226,61 +227,49 @@ for (auto& [key, img] : r.images()) { /* iterate */ }
 
 ---
 
-## Image sources and the trigger bus
+## Image sources and dispatch
 
 If your plugin is a **camera / image source** — something that pushes
-frames into the pipeline rather than processing input — you have two
-choices, in increasing order of capability:
+frames into the pipeline rather than processing input — it emits a
+**record** and the host dispatches the inspection script once per emit.
+There is one dispatch verb: `emit_record`.
 
-### Old style: `xi::ImageSource` subclass
+### Emitting frames: `xi::emit_record(...)`
 
-Inherit `xi::ImageSource`, implement `grab()` / `grab_wait()`. The host
-wraps each push into a single-frame trigger automatically (via
-`attach_trigger_bridge`). Works for legacy plugins unchanged. Fine for
-a single free-running camera, not enough for correlated multi-source.
-
-### New style: `host->emit_trigger(...)`
-
-Call `emit_trigger` directly to publish one or more frames under a
-**128-bit trigger id**. The host's bus correlates emissions that share
-a tid and dispatches the inspection exactly once per complete event.
+Build a `xi::Record` (one or more images, plus optional metadata) and
+hand it to the host. The host stamps it with a **128-bit trigger id**,
+dispatches the inspection exactly once, and the script reads the frames
+back via `xi::current_trigger()`.
 
 ```cpp
-// host_api signature
-void emit_trigger(
-    const char*            source_name,   // this instance's name()
-    xi_trigger_id          tid,           // shared id, or XI_TRIGGER_NULL
-    int64_t                timestamp_us,  // 0 → host clock
-    const xi_record_image* images,        // N key → handle entries
-    int32_t                image_count);
+#include <xi/xi_abi.hpp>   // xi::Plugin, xi::Record, xi::Image, xi::emit_record
+
+void run_loop() {
+    xi::Image img(W, H, channels);
+    // ... write pixels into img.data() ...
+    xi::emit_record(host_, name().c_str(),
+                    xi::Record().image("frame", img));   // id auto-minted, ts = now
+}
 ```
 
-Minimum single-source usage:
+The SDK helper signature (default id/ts shown):
 
 ```cpp
-xi_image_handle h = host_->image_create(W, H, ch);
-// ... write pixels into host_->image_data(h) ...
-xi_record_image entry = { "frame", h };
-host_->emit_trigger(name().c_str(), XI_TRIGGER_NULL, /*ts=*/0, &entry, 1);
-host_->image_release(h);  // bus addref'd internally; drop our refcount
+void xi::emit_record(const xi_host_api* host,
+                     const char*        emitter,   // this instance's name()
+                     xi::Record&        rec,
+                     xi_trigger_id      id = XI_TRIGGER_NULL,  // null → host mints one
+                     int64_t            ts = 0);               // 0 → host clock
 ```
 
-See `sdk/examples/trigger_source/` for a complete runnable plugin and
-`plugins/synced_stereo/` in the xInsp2 tree for a paired-cameras
-reference.
+`id == XI_TRIGGER_NULL` asks the host for a fresh id (its hex is
+`current_trigger().id_string()`, used by the buffer_replay plugin to
+replay a run). A record can also carry routing/context metadata:
+`xi::Record().image("frame", img).set("recipe", 7)`.
 
-### Trigger policies
+See `sdk/examples/trigger_source/` for a complete runnable source plugin.
 
-Projects pick one of three bus policies (`cmd: set_trigger_policy`,
-persisted in `project.json`):
-
-| Policy             | Dispatch rule                                               |
-|--------------------|-------------------------------------------------------------|
-| `any`              | Fire on every emit (default, back-compat)                   |
-| `all_required`     | Fire only when every source in the required list has emitted for that tid; drop incomplete tids after `window_ms` |
-| `leader_followers` | Fire on the leader emit; attach followers' most recent frames (best-effort) |
-
-### Reading a trigger from a script
+### Reading a record from a script
 
 Scripts read the current event via `xi::current_trigger()`:
 
@@ -289,24 +278,32 @@ Scripts read the current event via `xi::current_trigger()`:
 void xi_inspect_entry(int frame) {
     auto t = xi::current_trigger();
     if (!t.is_active()) return;
-    VAR(tid,   t.id_string());
-    VAR(left,  t.image("cam_left"));         // single-frame source
-    VAR(right, t.image("synced0/right"));    // multi-frame source
+    VAR(id,    t.id_string());
+    VAR(frame, t.image("frame"));    // key matches what the source emitted
+    auto meta = t.meta();            // the metadata doc, if any
 }
 ```
 
-Multi-frame sources use `<source>/<image_name>` keys; single-frame
-sources use just the source name. `t.sources()` lists every source that
-contributed to this event.
+`t.image(key)` fetches an image by the key the source used; `t.sources()`
+lists every source that contributed; `t.meta()` returns the metadata doc.
+
+### Correlating multiple sources
+
+Bus correlation policies were removed — there is no `set_trigger_policy`.
+To fire one inspection from several sources "at the same event" (e.g. a
+hardware-synced stereo pair), write a **gathering plugin**: it subscribes
+to the source instances, combines their latest frames into one record
+(distinct keys like `"left"` / `"right"`, optionally sharing a trigger
+id), and `emit_record`s that single combined record. See
+`examples/stereo_sync/` for a paired-cameras reference.
 
 ### Recording and replay
 
-Any live project can be recorded: `recording_start` installs an
-observer on the bus that serialises every TriggerEvent to disk (manifest
-+ `.raw` pixels). `recording_replay` pushes those events back through
-`emit_trigger` so the whole pipeline — including sinks and observers —
-sees them identically to the live run. Good for regression tests and
-off-line tuning.
+Replay is a plugin, not a core feature. The **buffer_replay** plugin
+captures emitted records and re-emits them through the same
+`emit_record` path, so the whole pipeline sees them identically to a
+live run — good for regression tests and off-line tuning. See
+`examples/buffer_replay_demo/`.
 
 ---
 
@@ -378,13 +375,16 @@ project(my_plugin)
 set(CMAKE_CXX_STANDARD 20)
 set(XINSP2_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 
-add_library(my_plugin SHARED my_plugin.cpp ${XINSP2_ROOT}/backend/vendor/cJSON.c)
+add_library(my_plugin SHARED my_plugin.cpp ${XINSP2_ROOT}/backend/vendor/yyjson/yyjson.c)
 target_include_directories(my_plugin PRIVATE
     ${XINSP2_ROOT}/backend/include
-    ${XINSP2_ROOT}/backend/vendor)
+    ${XINSP2_ROOT}/backend/vendor/yyjson)
 ```
 
-Point `XINSP2_ROOT` at the xInsp2 checkout. After `cmake --build . --config Release`,
+(Or just use the `xinsp2_add_plugin(...)` helper from
+`sdk/cmake/xinsp2_plugin.cmake`, which wires the include dirs + yyjson in
+for you — that's what the examples use.) Point `XINSP2_ROOT` at the xInsp2
+checkout. After `cmake --build . --config Release`,
 copy the `.dll` + `plugin.json` + `ui/` into `<xInsp2>/plugins/<name>/`
 (or just build directly into that folder — see the template).
 
@@ -407,7 +407,7 @@ sdk/
     ├── counter/        ← persistent state + minimal UI (xi::Json)
     ├── invert/         ← image-in → image-out
     ├── histogram/      ← image analysis with rich JSON output
-    └── trigger_source/ ← image source using host->emit_trigger (bus)
+    └── trigger_source/ ← image source using xi::emit_record (push frames)
 ```
 
 Two ways to start a new plugin:
@@ -436,54 +436,28 @@ capability.
 
 ## Testing your plugin
 
-Every plugin you write has to pass a fixed set of **baseline tests** before
-the host will load it. These probe the C ABI surface — create/destroy,
-JSON round-trip, concurrent calls, empty input — the classes of bug that
-would otherwise take down the whole host on first use.
+Plugins are **trusted** — the host loads your DLL straight through after a
+one-time ABI-version check (no certification gate, no `cert.json`). Testing
+is therefore **optional and owned by you**: nothing blocks a plugin from
+loading, so write the tests that give *you* confidence.
 
-### How certification works
+### Native C++ tests (`xi_test.hpp`)
 
-```
-first scan of plugins/my_plugin/
-         ↓
-host looks for plugins/my_plugin/cert.json
-         ↓
-    ┌────┴───────┬──────────────────────────┐
-  missing     stale                    valid
-  ↓             ↓                        ↓
-  run baseline tests              skip — plugin loads
-  ↓                                      ↓
-  pass → write cert.json           ready to instantiate
-  fail → don't load, log the
-         failing tests to stderr
-```
-
-A cert is stale if *any* of:
-
-- DLL size changed (rebuild)
-- DLL mtime changed (rebuild)
-- `baseline_version` in the cert is lower than the current one (the host
-  added a new baseline test)
-
-**Certs are gradually tightened.** The baseline set is expected to grow —
-each added test bumps `BASELINE_VERSION` and invalidates every existing
-cert, forcing a re-run on next load. This is the mechanism for rolling
-out new correctness requirements across all plugins.
-
-### Running tests yourself
-
-Write a test binary that links the baseline header and your plugin. See
-`examples/counter/tests/test_counter.cpp` for a working template:
+The SDK ships a tiny test framework — `XI_TEST` / `XI_EXPECT` /
+`xi::test::run_all()` — for exercising your plugin's logic directly. A
+useful starting set probes the surface the host actually calls:
+create/destroy, `get_def → set_def` round-trip, `exchange("{}")` returns
+valid JSON, `process()` on empty input, and a few concurrent `process()`
+calls (the host may dispatch your plugin from parallel worker lanes).
 
 ```cpp
-#include <xi/xi_test.hpp>       // XI_TEST, XI_EXPECT, run_all
-#include <xi/xi_baseline.hpp>   // the baseline tests
-#include <xi/xi_cert.hpp>       // cert::certify() writes cert.json on pass
+#include <xi/xi_test.hpp>   // XI_TEST, XI_EXPECT, xi::test::run_all
 
-XI_TEST(baseline_all_pass) {
-    auto summary = xi::baseline::run_all(syms, &host);
-    XI_EXPECT(summary.all_passed);
-    xi::cert::certify(plugin_folder, dll_path, "my_plugin", syms, &host);
+XI_TEST(get_set_def_roundtrip) {
+    MyPlugin p("inst0");
+    auto a = p.get_def();
+    XI_EXPECT(p.set_def(a));
+    XI_EXPECT_EQ(p.get_def(), a);   // reports file:line + the failing expression
 }
 
 XI_TEST(my_custom_behavior) {
@@ -494,50 +468,11 @@ XI_TEST(my_custom_behavior) {
 int main() { auto r = xi::test::run_all(); for (auto& t : r) if (!t.passed) return 1; return 0; }
 ```
 
-Build via CMake (see `counter/CMakeLists.txt`):
-
-```cmake
-add_executable(my_plugin_test tests/test_my_plugin.cpp
-    ${XINSP2_ROOT}/backend/vendor/cJSON.c)
-target_include_directories(my_plugin_test PRIVATE
-    ${XINSP2_ROOT}/backend/include
-    ${XINSP2_ROOT}/backend/vendor)
-target_compile_definitions(my_plugin_test PRIVATE
-    MY_PLUGIN_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/my_plugin.dll")
-add_test(NAME my_plugin_test COMMAND my_plugin_test)
-```
-
-`cmake --build . --config Release --target my_plugin_test && ./my_plugin_test`
-runs both the baseline and your custom tests, and (on pass) writes
-`cert.json` — so the host won't re-run the baselines next time it loads
-your plugin.
-
-### What the baseline covers today
-
-| Test | Checks |
-|------|--------|
-| `factory_create_destroy`     | `create()` returns non-null; `destroy()` doesn't crash |
-| `get_def_returns_valid_json` | `get_def()` output parses as JSON |
-| `get_set_def_roundtrip`      | `get_def → set_def → get_def` is stable |
-| `exchange_valid_json`        | `exchange("{}")` returns valid JSON |
-| `process_empty_input`        | `process(empty Record)` doesn't crash |
-| `concurrent_process`         | 4 threads × 50 `process()` calls, no races |
-| `concurrent_mixed`           | Mixed `process()` + `exchange()` across threads |
-| `many_create_destroy`        | 20 rapid create/destroy cycles, no leaks-that-crash |
-
-Total runtime: typically under 50ms per plugin. Called on first load;
-cached via cert thereafter.
-
-### Writing tests that help you
-
-- Use `XI_EXPECT(cond)` / `XI_EXPECT_EQ(a, b)` — they report file:line + the
-  failing expression
-- One instance per test is the easiest pattern — construct, probe,
-  destroy inside the test body
-- For flows that touch shared state (files, environment variables) clean
-  up after yourself or each test run can leave artifacts that break the
-  next one
-- Custom tests don't invalidate certs — only baseline changes do
+Build it as an ordinary executable linking your plugin source plus the SDK
+include dir (`${XINSP2_ROOT}/backend/include`); `add_test(...)` wires it
+into ctest. Use `XI_EXPECT(cond)` / `XI_EXPECT_EQ(a, b)`; keep one instance
+per test (construct → probe → destroy in the test body); clean up any files
+/ env vars a test touches so runs stay independent.
 
 ---
 
@@ -546,8 +481,7 @@ cached via cert thereafter.
 Native C++ tests cover correctness of the plugin's logic. **UI tests**
 cover the rest of the user journey — the webview, the commands the
 extension wires up, the round-trip through the live host. Both live in
-the plugin folder, both are owned by you, neither runs on the host's
-critical path (no UI test is part of cert).
+the plugin folder and both are owned by you.
 
 ### Layout
 
@@ -558,7 +492,7 @@ my_plugin/
 ├── ui/index.html
 ├── CMakeLists.txt
 └── tests/
-    ├── test_native.cpp     ← C++ baseline + custom (your test.exe)
+    ├── test_native.cpp     ← C++ xi_test tests (your test.exe)
     ├── test_ui.cjs         ← UI/E2E test (one CJS module)
     └── screenshots/        ← created automatically by h.shot(...)
 ```
@@ -639,13 +573,12 @@ Pick the plugin folder when prompted. Both run paths load the same
 `test_ui.cjs` and pass the same `h`. Set `xinsp2.sdkPath` if your SDK
 isn't at `<extension>/../sdk`.
 
-### Why UI tests aren't part of cert
+### Native vs UI tests
 
-`cert.json` asserts the DLL won't take down the host (C-ABI safety
-gate) — it should be machine-portable. UI tests can depend on dev-only
-data (reference images, calibration files) and on a real VS Code
-instance with screen access — those signals don't transfer between
-machines, so they stay separate from cert.
+Native C++ tests are machine-portable — pure logic, no environment. UI
+tests can depend on dev-only data (reference images, calibration files)
+and on a real VS Code instance with screen access — those signals don't
+transfer between machines, so keep the two suites separate.
 
 ---
 
@@ -657,8 +590,8 @@ machines, so they stay separate from cert.
   preserved (backed by `get_def`/`set_def`), so you can iterate without
   restarting the whole host
 - **Don't block**: `process()` runs on the inspection thread. If you need
-  to wait (hardware, network), subclass `xi::ImageSource` or spawn your
-  own worker
+  to wait (hardware, network), do it on your own worker thread (a source
+  plugin's `start()`/`stop()` thread that calls `emit_record`)
 - **Sharing images is free**: `xi::Image` uses a `shared_ptr` to pixels —
   copying a Record does not copy image bytes
 - **Raw host handles** (rare): if you need RAII over an
@@ -670,5 +603,5 @@ machines, so they stay separate from cert.
   deliberately private because mixing it with `image_create()` is a
   refcount trap
 - **JSON**: prefer `xi::Json` (RAII, path access, defaults) for
-  exchange commands and replies. Raw cJSON is still re-exported via
-  `xi_abi.hpp` for performance-critical paths or legacy plugins
+  exchange commands and replies. Raw `yyjson` (via `xi_json.hpp`'s
+  `yyjson.h`) is available for performance-critical paths

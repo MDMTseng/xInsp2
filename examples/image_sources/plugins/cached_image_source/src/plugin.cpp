@@ -109,12 +109,8 @@ private:
         if (index < 0 || index >= (int)ring_.size() || !host()) return;
         const xi::Image& img = ring_[(size_t)index].img;
         if (img.empty()) return;
-        xi_image_handle h = host()->image_create(img.width, img.height, img.channels);
-        if (!h) return;
-        std::memcpy(host()->image_data(h), img.data(), img.size());
-        xi_record_image rec{ "frame", h };
-        host()->emit_trigger(name().c_str(), XI_TRIGGER_NULL, /*ts=*/0, &rec, 1);
-        host()->image_release(h);
+        xi::Record rec = xi::Record().image("frame", img);
+        xi::emit_record(host(), name().c_str(), rec, XI_TRIGGER_NULL);
         ++replayed_;
     }
 

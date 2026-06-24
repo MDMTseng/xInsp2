@@ -8,7 +8,6 @@ export interface PluginInfo {
     folder: string;
     has_ui: boolean;
     loaded: boolean;
-    cert?: { present: boolean; valid?: boolean; baseline_version?: number; certified_at?: string };
     // origin: "project" → built from <project>/plugins/<name>/, "global" → from a plugin folder on disk.
     // source_dir is set only when origin === "project".
     origin?: 'project' | 'global';
@@ -71,26 +70,13 @@ export class PluginTreeProvider implements vscode.TreeDataProvider<Node> {
         const label = uses > 0 ? `${p.name}  ×${uses}` : p.name;
         const ti = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
 
-        // Status icon: ok / warn / unloaded
+        // Status icon: loaded / unloaded
         let icon = 'circle-outline';
         let color: vscode.ThemeColor | undefined;
         let statusHint = 'not loaded yet';
         if (p.loaded) {
-            if (p.cert?.present && p.cert.valid) {
-                icon = 'pass-filled';
-                color = new vscode.ThemeColor('testing.iconPassed');
-                statusHint = `certified ${p.cert.certified_at || ''}`.trim();
-            } else if (p.cert?.present && !p.cert.valid) {
-                icon = 'warning';
-                color = new vscode.ThemeColor('testing.iconQueued');
-                statusHint = 'cert stale (rebuild or re-cert needed)';
-            } else {
-                icon = 'circle-filled';
-                statusHint = 'loaded, no cert file';
-            }
-        } else if (p.cert?.present && p.cert.valid) {
-            icon = 'circle';
-            statusHint = 'cert OK, not loaded yet';
+            icon = 'circle-filled';
+            statusHint = 'loaded';
         }
 
         ti.iconPath = new vscode.ThemeIcon(icon, color);
