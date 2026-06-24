@@ -42,7 +42,7 @@ xInsp2 itself?** Jump to [Develop xInsp2](#develop-xinsp2-itself) below.
 | File | Subject |
 |---|---|
 | [`roadmap/README.md`](./roadmap/README.md) | Shipped-status summary + the roadmap (links, doesn't restate). |
-| `roadmap/run-result.md` · `interactive-tool-registry.md` · `production-hmi.md` · `linux-port.md` | Forward-looking sketches; graduate to `internals/` on ship. |
+| `roadmap/run-result.md` · `interactive-tool-registry.md` · `production-hmi.md` · `config-bundles-and-orchestration.md` · `linux-port.md` | Forward-looking sketches; graduate to `internals/` on ship. |
 
 ## Develop xInsp2 itself
 For working **on** the framework (not just authoring a project on it):

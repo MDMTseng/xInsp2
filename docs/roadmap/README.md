@@ -14,7 +14,7 @@ re-describing other docs.
 | yyjson data layer + γ-4 doc refcount | [`../internals/data-layer.md`](../internals/data-layer.md) |
 | Trigger bus + `emit_record` + dispatch groups | [`../internals/dispatch.md`](../internals/dispatch.md) |
 | FE/BE supervisor + crash history | [`../internals/fe-be.md`](../internals/fe-be.md) |
-| WS API | [`../reference/ws-protocol.md`](../reference/ws-protocol.md) |
+| WS API (incl. `get_instance_def` symmetric read + `cmd:run` record injection) | [`../reference/ws-protocol.md`](../reference/ws-protocol.md) |
 | Sharded refcounted ImagePool, SEH crash isolation, auto-respawn, atomic JSON writes, skip-bad-instance, compile diagnostics | [`../internals/fe-be.md`](../internals/fe-be.md), [`../guides/debug.md`](../guides/debug.md) |
 | In-project plugins, hot reload, export-plugin, SDK scaffold, plugin webviews | [`../guides/write-a-plugin.md`](../guides/write-a-plugin.md) |
 | `xi::state` / `xi::async` / `xi::breakpoint` / hot-reload / script DLL versioning | [`../guides/write-a-script.md`](../guides/write-a-script.md) |
@@ -61,7 +61,13 @@ test surface: [`../../docs/testing.md`](../../docs/testing.md) (→ `testing.md`
 ## Not scheduled (sketches in this folder)
 
 Forward-looking; each graduates into `reference/` or `internals/` when it ships.
+Several are platform requests from RFC
+[#65](https://github.com/MDMTseng/xInsp2/issues/65) (FR-1 shipped via
+`emit_record` + `current_trigger().meta()`; FR-7 mostly via the instance docs).
 
+- [`config-bundles-and-orchestration.md`](./config-bundles-and-orchestration.md) —
+  object/version config switching as a controller plugin over a minimal
+  "command-other-instances" host_api; version branch-graph view (RFC #65 FR-2/FR-4).
 - [`run-result.md`](./run-result.md) — per-run signed verdict record (the
   `xi::result` API ships; the full status-band + HMI/PLC wiring is the sketch).
 - [`interactive-tool-registry.md`](./interactive-tool-registry.md) — shared
