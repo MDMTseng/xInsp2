@@ -59,6 +59,20 @@ auto-generate B.
 5. **Two export modes, not one auto-everything.** A = pick `status` sections →
    read-only monitor bundle (generic). B = curate sections + the app shell +
    bundle-switching into a bespoke webapp (integrator's job, test1-style).
+6. **Integration boundary = custom elements (+ Shadow DOM), NOT iframes.** A plugin
+   UI lives in the host's document, so it can **tap out a rich API** — properties
+   (`el.value`), methods (`viewer.fit()`, `tool.startTool('polygon')`), and custom
+   events (`change`, `pixelpick`, `commit`) the host calls/listens to directly — vs
+   an iframe's postMessage-only channel (serialize everything, hand-roll a protocol
+   per widget). The cost is no JS isolation, but the project's trust model already
+   assumes **trusted plugins** (trusted DLL load, no cert gate, no hostile-plugin
+   defenses), so iframe isolation is low-value here. **Shadow DOM** still gives
+   style/DOM encapsulation (no CSS bleed either way) WITHOUT giving up the JS API —
+   it decouples "don't pollute each other" from "JS sandbox", and we only want the
+   former. Sandboxed `iframe` stays the tool for genuinely **untrusted** third-party
+   UIs (a future hybrid: trusted = custom element, untrusted = sandboxed iframe);
+   not a current need. This also means library-import (model 2 below) hands an
+   external app the full JS API, not a postMessage shim.
 
 ## The component library (`xi-*` web components)
 
@@ -166,6 +180,26 @@ The webui/export work here consumes the WS verbs either way.
    plugin pulls only what it uses? Affects plugin `ui/` weight.
 5. **HMI delivery** — does production HMI become "a page composed of these web
    components" (replacing the bespoke `hmi/*.mjs` cards), or keep both?
+
+## Build order (tasks #71–#80)
+
+```
+#71 scaffold xi-components (Svelte→web-component build) ┐
+#72 WS-client shim ────────────────────────────────────┤
+                                                         ▼
+#73 PoC: xi-image-viewer + xi-slider over WS  ──┬──────────────┐
+                                                ▼              ▼
+#74 bindable widgets (number/toggle/radio/dropdown)   #77 teach tools (registry + request-editor)
+        ▼                                              #80 adopt in existing consumers (webview + HMI)
+#76 control-descriptor schema + section model + auto-webui ──┬──► #78 export A (status monitor bundle)
+                                                             └──► #79 export B (library-import + scaffold)
+#75 xi-trace  ◄── needs only #72
+```
+
+Start = #71 + #72 (parallel) → #73 PoC de-risks the whole stack
+(Svelte→custom-element→vanilla-consumer + tap-out JS API + WS round-trip) before
+the rest fan out. Library lives at `ui-components/` (parallel to `hmi/`); the build
+step is contained there, consumers stay vanilla.
 
 ## See also
 
