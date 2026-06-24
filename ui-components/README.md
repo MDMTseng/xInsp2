@@ -14,6 +14,7 @@ Design + rationale: [`../docs/roadmap/webui-and-ui-export.md`](../docs/roadmap/w
 src/
   components/        Svelte components, each a custom element (<svelte:options customElement=…/>)
     xi-slider / xi-number / xi-toggle / xi-radio / xi-dropdown   key-bound controls (value prop + change/input events)
+    xi-trace.svelte          watch an output key across runs (update(items); latest/history; sparkline)
     xi-image-viewer.svelte   canvas viewer: wheel-zoom/pan/pixel-probe; tap-out setFrame/fit + pixelpick/viewchange
   lib/
     viewport.mjs     pure pan/zoom math (unit-tested), generalizes imageViewerPanel.ts

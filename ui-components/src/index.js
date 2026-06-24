@@ -9,6 +9,7 @@ import "./components/xi-number.svelte";
 import "./components/xi-toggle.svelte";
 import "./components/xi-radio.svelte";
 import "./components/xi-dropdown.svelte";
+import "./components/xi-trace.svelte";
 import "./components/xi-image-viewer.svelte";
 
 // Shared client/protocol (no build needed; handy for `@xinsp2/components` users).
@@ -18,5 +19,6 @@ export * as protocol from "./protocol.mjs";
 export { mountPanel, inferDescriptor, CONTROL_TAGS } from "./auto-panel.mjs";
 
 export const XI_COMPONENTS = [
-  "xi-slider", "xi-number", "xi-toggle", "xi-radio", "xi-dropdown", "xi-image-viewer",
+  "xi-slider", "xi-number", "xi-toggle", "xi-radio", "xi-dropdown",
+  "xi-trace", "xi-image-viewer",
 ];
