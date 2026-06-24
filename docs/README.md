@@ -17,6 +17,7 @@ xInsp2 itself?** Jump to [Develop xInsp2](#develop-xinsp2-itself) below.
 | [`guides/build-and-run.md`](./guides/build-and-run.md) | Set up a machine, build, run on day one. |
 | [`guides/write-a-script.md`](./guides/write-a-script.md) | Write the inspection script for a project. |
 | [`guides/write-a-plugin.md`](./guides/write-a-plugin.md) | Author a plugin (in-project + standalone) + its UI. |
+| [`guides/plugin-caveats.md`](./guides/plugin-caveats.md) | The non-obvious gotchas to skim before shipping a plugin (concurrency, prepare/commit, UI patterns). |
 | [`guides/debug.md`](./guides/debug.md) | Something crashed — what's caught, crash reports, attach a debugger. |
 | [`guides/extend-the-ui.md`](./guides/extend-the-ui.md) | Add a command / tree / webview to the VS Code extension. |
 | [`guides/deploy.md`](./guides/deploy.md) | Production: boot order, AOT bundle, working-copy edits. |
