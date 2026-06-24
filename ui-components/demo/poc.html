@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>xi-components PoC — viewer + slider over WS</title>
+  <style>
+    :root { --xi-accent: #6366f1; }
+    body { font: 14px system-ui, sans-serif; margin: 1.5rem; }
+    h1 { font-size: 1.1rem; }
+    .bar { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .75rem 0; }
+    input[type=text] { width: 18rem; padding: .25rem .4rem; }
+    button { padding: .3rem .7rem; }
+    xi-image-viewer { width: 640px; height: 420px; border: 1px solid #ddd; border-radius: 6px; }
+    pre { background: #f4f4f5; padding: .5rem .75rem; border-radius: 6px; min-height: 1.5rem; }
+    .ok { color: #16a34a; } .err { color: #dc2626; }
+  </style>
+  <!-- Vanilla consumer: load the built bundle, then use <xi-*> + XiClient. -->
+  <script type="module">
+    import { XiClient } from "../dist/xi-components.esm.js";  // registers <xi-*> + exports XiClient
+
+    const $ = (id) => document.getElementById(id);
+    const log = (m, cls = "") => { const p = $("log"); p.innerHTML += `<span class="${cls}">${m}</span>\n`; };
+    let client = null;
+
+    // --- connect + bind a slider to a real instance over WS -------------------
+    $("connect").onclick = async () => {
+      const url = $("url").value;
+      try {
+        client = await new XiClient(url).connect({ checkVersion: /\d+\.\d+\.\d+/ });
+        log(`connected ${url}`, "ok");
+
+        // A real instance to drive: config_swap_probe (def {value:0..255}).
+        await client.cmd("load_plugin", { name: "config_swap_probe" });
+        await client.cmd("create_project", { folder: `xi_poc_${Date.now()}`, name: "poc" }).catch(() => {});
+        await client.cmd("create_instance", { name: "bind0", plugin: "config_swap_probe" }).catch(() => {});
+        await client.setInstanceDef("bind0", { value: Number($("s").value) });
+        log("bound xi-slider → set_instance_def('bind0', {value})", "ok");
+
+        // Live frames (if a project is streaming) render in the viewer.
+        client.onPreview((f) => $("viewer").setFrame(f.dataUrl));
+      } catch (e) { log("connect failed: " + e.message, "err"); }
+    };
+
+    // slider change → set_instance_def → read back (tap-out + WS round-trip)
+    $("s").addEventListener("change", async (e) => {
+      const v = e.detail.value;
+      if (!client) { log("(not connected)"); return; }
+      await client.setInstanceDef("bind0", { value: v });
+      const def = await client.getInstanceDef("bind0");
+      log(`slider ${v} → set_instance_def → read back value=${def.value}`, def.value === v ? "ok" : "err");
+    });
+
+    // --- viewer: synthetic frame proves zoom/pan/pick standalone --------------
+    $("gen").onclick = () => {
+      const c = document.createElement("canvas"); c.width = 256; c.height = 192;
+      const ctx = c.getContext("2d");
+      for (let y = 0; y < 192; y++) for (let x = 0; x < 256; x++) {
+        ctx.fillStyle = `rgb(${x},${(y * 4 / 3) | 0},${(x + y) & 255})`;
+        ctx.fillRect(x, y, 1, 1);
+      }
+      $("viewer").setFrame(c.toDataURL());
+      log("fed synthetic 256×192 frame — wheel=zoom, drag=pan, click=pixel probe");
+    };
+    $("fit").onclick = () => $("viewer").fit();
+
+    $("viewer").addEventListener("pixelpick", (e) => {
+      const { x, y, rgb } = e.detail;
+      log(`pixelpick (${x},${y}) rgb=${rgb ? rgb.join(",") : "—"}`);
+    });
+    $("viewer").addEventListener("viewchange", (e) => { $("zoom").textContent = `${(e.detail.scale * 100) | 0}%`; });
+  </script>
+</head>
+<body>
+  <h1>xi-components PoC — <code>xi-image-viewer</code> + <code>xi-slider</code> over WS</h1>
+  <p>End-to-end: the slider drives a real instance via <code>set_instance_def</code>
+     (round-trip logged); the viewer renders frames fed from WS
+     <code>onPreview</code> (or a synthetic frame) with cursor-anchored zoom, pan,
+     and pixel probe — all tap-out, no iframe.</p>
+
+  <div class="bar">
+    <input type="text" id="url" value="ws://127.0.0.1:7823/" />
+    <button id="connect">Connect</button>
+  </div>
+
+  <div class="bar">
+    <xi-slider id="s" label="bind0.value" min="0" max="255" step="1" value="128"></xi-slider>
+  </div>
+
+  <div class="bar">
+    <button id="gen">Feed synthetic frame</button>
+    <button id="fit">Fit</button>
+    <span>zoom: <b id="zoom">—</b></span>
+  </div>
+  <xi-image-viewer id="viewer"></xi-image-viewer>
+
+  <pre id="log"></pre>
+</body>
+</html>

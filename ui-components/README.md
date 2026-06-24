@@ -14,13 +14,23 @@ Design + rationale: [`../docs/roadmap/webui-and-ui-export.md`](../docs/roadmap/w
 src/
   components/        Svelte components, each a custom element (<svelte:options customElement=…/>)
     xi-slider.svelte
+    xi-image-viewer.svelte   canvas viewer: wheel-zoom/pan/pixel-probe; tap-out setFrame/fit + pixelpick/viewchange
+  lib/
+    viewport.mjs     pure pan/zoom math (unit-tested), generalizes imageViewerPanel.ts
   ws-client.mjs      XiClient — connect + orchestrator verbs + vars/preview subscribe
   protocol.mjs       pure WS decoders (parseVars / decodePreviewFrame)
   index.js           registers all xi-* elements; re-exports XiClient + protocol
-demo/index.html      drop-in usage (loads the built bundle, vanilla)
-test/                node tests (jsdom DOM smoke + live-backend WS smoke)
+demo/
+  index.html         drop-in usage of <xi-slider> (vanilla)
+  poc.html           end-to-end PoC: viewer + slider wired to a live backend over WS
+test/                node tests (viewport invariants + jsdom element smoke + live-backend WS smoke)
 dist/                build output (git-ignored)
 ```
+
+`npm test` runs 8 checks: the viewport pan/zoom invariants (deterministic), the
+built `<xi-slider>` jsdom smoke, and the WS-shim round-trip against a real backend.
+Open `demo/poc.html` against a running backend to exercise the browser-interactive
+parts (canvas render, drag/zoom, pixel probe, live preview) by hand.
 
 ## Build
 
