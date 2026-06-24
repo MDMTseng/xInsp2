@@ -13,10 +13,11 @@ Design + rationale: [`../docs/roadmap/webui-and-ui-export.md`](../docs/roadmap/w
 ```
 src/
   components/        Svelte components, each a custom element (<svelte:options customElement=…/>)
-    xi-slider.svelte
+    xi-slider / xi-number / xi-toggle / xi-radio / xi-dropdown   key-bound controls (value prop + change/input events)
     xi-image-viewer.svelte   canvas viewer: wheel-zoom/pan/pixel-probe; tap-out setFrame/fit + pixelpick/viewchange
   lib/
     viewport.mjs     pure pan/zoom math (unit-tested), generalizes imageViewerPanel.ts
+    options.mjs      normalize an options array / JSON-string attribute for radio/dropdown
   ws-client.mjs      XiClient — connect + orchestrator verbs + vars/preview subscribe
   protocol.mjs       pure WS decoders (parseVars / decodePreviewFrame)
   index.js           registers all xi-* elements; re-exports XiClient + protocol

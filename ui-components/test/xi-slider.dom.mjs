@@ -6,21 +6,10 @@
 //
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { JSDOM } from "jsdom";
+import { setupDom } from "./_dom.mjs";
 
 test("built <xi-slider> instantiates, renders shadow DOM, reflects value (tap-in)", async () => {
-  const dom = new JSDOM("<!doctype html><html><body></body></html>", { pretendToBeVisual: true });
-  const w = dom.window;
-  globalThis.window = w;
-  // Mirror every DOM global jsdom exposes that node doesn't already have, so the
-  // Svelte runtime (Element/HTMLElement/customElements/document/...) resolves.
-  for (const k of Object.getOwnPropertyNames(w)) {
-    if (k in globalThis) continue;
-    const d = Object.getOwnPropertyDescriptor(w, k);
-    try { Object.defineProperty(globalThis, k, d); } catch { /* getter-only */ }
-  }
-  globalThis.requestAnimationFrame = (cb) => w.setTimeout(() => cb(Date.now()), 0);
-
+  const w = setupDom();
   await import("../dist/xi-components.esm.js"); // registers xi-slider
   assert.ok(w.customElements.get("xi-slider"), "xi-slider is defined");
 

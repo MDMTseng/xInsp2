@@ -5,10 +5,16 @@
 
 // Side-effect imports: a CE-compiled .svelte module defines its element on import.
 import "./components/xi-slider.svelte";
+import "./components/xi-number.svelte";
+import "./components/xi-toggle.svelte";
+import "./components/xi-radio.svelte";
+import "./components/xi-dropdown.svelte";
 import "./components/xi-image-viewer.svelte";
 
 // Shared client/protocol (no build needed; handy for `@xinsp2/components` users).
 export { XiClient } from "./ws-client.mjs";
 export * as protocol from "./protocol.mjs";
 
-export const XI_COMPONENTS = ["xi-slider", "xi-image-viewer"];
+export const XI_COMPONENTS = [
+  "xi-slider", "xi-number", "xi-toggle", "xi-radio", "xi-dropdown", "xi-image-viewer",
+];
