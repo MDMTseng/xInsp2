@@ -262,9 +262,16 @@ never executes from an unloaded module.
 `args: {}` → `ok: true`. Also clears the param replay cache.
 
 ### `run`
-`args: { "frame_path": "..." (optional) }`
+`args: { "frame_path": "..." (optional), "meta": { ... } (optional) }`
 → `data: { "run_id": <int>, "ms": <int> }`
 followed by an asynchronous `vars` message and zero or more binary previews.
+
+When `frame_path` and/or `meta` are given, `cmd:run` builds a one-shot **record**
+host-side (`frame_path` → an image under the key `"frame"`; `meta` → the metadata
+doc) and exposes it as this run's `xi::current_trigger()` — the script reads it
+via `current_trigger().image("frame")` / `.meta()`, exactly as if a source had
+`emit_record`'d it, but with no source plugin and no continuous mode (headless
+single-shot). A plain `cmd:run` (neither arg) leaves `current_trigger()` inactive.
 
 `cmd:run` is the **deterministic single-shot** path (UI "Run", step-through). It
 is rejected while continuous mode is active (`"cannot run while continuous mode

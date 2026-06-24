@@ -2294,6 +2294,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             frame_path = *fp;
         }
 
+        // Stage 1b — optional inline `meta` object: its raw JSON is parsed into a
+        // metadata doc and injected into this run's current_trigger() so a
+        // headless cmd:run feeds the script the same record (frame image + meta)
+        // a source's emit_record would, with no source plugin needed.
+        std::string meta_json;
+        {
+            std::string m; const char* after = nullptr;
+            if (xp::detail::find_key(parsed->args_json.data(),
+                                     parsed->args_json.data() + parsed->args_json.size(),
+                                     "meta", m, after)) {
+                meta_json = std::move(m);
+            }
+        }
+
         // Send rsp first (tests expect rsp before vars).
         char buf[128];
         std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":0})", (long long)run_id);
@@ -2313,11 +2327,48 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // contract for no real burst gain (bursts arrive via the trigger path).
         crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "run");
         crash_ctx().last_run_id = (int)run_id;
-        std::thread([&srv, run_id, frame_path = std::move(frame_path)]() {
+        std::thread([&srv, run_id,
+                     frame_path = std::move(frame_path),
+                     meta_json  = std::move(meta_json)]() {
             reserve_fault_stack();   // BUG 2: dump survives a script stack overflow
             _set_se_translator(seh_translator);
             std::lock_guard<std::mutex> lk(g_run_mu);
+
+            // Stage 1b: build a one-shot record (frame image + meta) and expose
+            // it as this run's current_trigger — the same path the dispatch
+            // worker uses (thread_local g_current_trigger). Only injected when
+            // there's something to inject, so a plain cmd:run keeps the previous
+            // "no trigger" behaviour (current_trigger().is_active() == false).
+            xi::TriggerEvent ev;
+            bool inject = false;
+            if (!frame_path.empty()) {
+                if (auto fn = xi::ImagePool::read_image_file_fn()) {
+                    if (xi_image_handle h = fn(frame_path.c_str())) {
+                        ev.images["frame"] = h;   // read under current_trigger().image("frame")
+                        inject = true;
+                    }
+                }
+            }
+            if (!meta_json.empty()) {
+                if (yyjson_doc* idoc = yyjson_read(meta_json.data(), meta_json.size(), 0)) {
+                    yyjson_mut_doc* meta = yyjson_doc_mut_copy(idoc, nullptr);
+                    yyjson_doc_free(idoc);
+                    if (meta) {
+                        xi::DocRegistry::instance().retain(meta);   // register at rc=1
+                        ev.meta_doc = meta;
+                        inject = true;
+                    }
+                }
+            }
+            if (inject) {
+                ev.id = { (uint64_t)run_id, 0 };   // synthesized, unique per run
+                g_current_trigger = &ev;
+            }
             run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
+            if (inject) {
+                g_current_trigger = nullptr;
+                release_trigger_event_(ev);   // release frame handle(s) + meta doc
+            }
         }).detach();
     } else if (name == "start") {
         // Start continuous trigger mode. The backend runs a timer thread
