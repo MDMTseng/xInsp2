@@ -14,6 +14,8 @@ import "./components/xi-image-viewer.svelte";
 // Shared client/protocol (no build needed; handy for `@xinsp2/components` users).
 export { XiClient } from "./ws-client.mjs";
 export * as protocol from "./protocol.mjs";
+// Auto-webui renderer: descriptor → sections of wired widgets (task #76).
+export { mountPanel, inferDescriptor, CONTROL_TAGS } from "./auto-panel.mjs";
 
 export const XI_COMPONENTS = [
   "xi-slider", "xi-number", "xi-toggle", "xi-radio", "xi-dropdown", "xi-image-viewer",

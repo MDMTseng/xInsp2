@@ -11,6 +11,14 @@ export function setupDom() {
     const d = Object.getOwnPropertyDescriptor(w, k);
     try { Object.defineProperty(globalThis, k, d); } catch { /* getter-only */ }
   }
+  // node 22 ships its own Event/CustomEvent/etc.; force jsdom's so events
+  // constructed here share the same realm as the elements (else dispatchEvent
+  // rejects a cross-realm Event).
+  for (const k of ["Event", "CustomEvent", "Node", "Element", "HTMLElement",
+                   "DocumentFragment", "ShadowRoot", "document", "customElements"]) {
+    const d = Object.getOwnPropertyDescriptor(w, k);
+    if (d) { try { Object.defineProperty(globalThis, k, d); } catch { /* getter-only */ } }
+  }
   globalThis.requestAnimationFrame = (cb) => w.setTimeout(() => cb(Date.now()), 0);
   return w;
 }

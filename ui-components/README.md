@@ -20,7 +20,9 @@ src/
     options.mjs      normalize an options array / JSON-string attribute for radio/dropdown
   ws-client.mjs      XiClient — connect + orchestrator verbs + vars/preview subscribe
   protocol.mjs       pure WS decoders (parseVars / decodePreviewFrame)
-  index.js           registers all xi-* elements; re-exports XiClient + protocol
+  auto-panel.mjs     mountPanel(host,{client,instance,descriptor?}) — descriptor → wired
+                     widget sections; inferDescriptor(def) for a zero-config panel
+  index.js           registers all xi-* elements; re-exports XiClient + protocol + mountPanel
 demo/
   index.html         drop-in usage of <xi-slider> (vanilla)
   poc.html           end-to-end PoC: viewer + slider wired to a live backend over WS
@@ -56,6 +58,28 @@ npm test           # jsdom element smoke + WS-shim smoke vs a real backend
    ```
 
 Components expose a **tap-out** API (properties / methods / `change`·`input`
-events) the host calls directly — not an iframe postMessage channel. Wiring a
-control's `change` → `set_instance_def` is the consumer's / auto-renderer's job
-(see task #76); the components stay decoupled from the WS layer.
+events) the host calls directly — not an iframe postMessage channel. The
+components stay decoupled from the WS layer.
+
+## Usable UI for free — `mountPanel`
+
+A plugin declares a **control-descriptor** in its `plugin.json` manifest; the
+renderer turns it into wired widget sections — no UI code:
+
+```js
+import { XiClient, mountPanel } from "@xinsp2/components";
+const client = await new XiClient(url).connect();
+await mountPanel(document.getElementById("panel"), {
+  client, instance: "bin0",
+  descriptor: [{ section: "Threshold", tag: "control", controls: [
+    { type: "slider", key: "threshold", label: "Threshold", min: 0, max: 255 },
+    { type: "dropdown", key: "mode", options: ["light", "dark"] },
+  ]}],
+});
+```
+
+Editing a control reads the current def, patches the key, and sends the **full**
+def back via `set_instance_def` (no key loss regardless of plugin merge
+semantics). Omit `descriptor` and it's **inferred** from the instance's def
+(number→number, boolean→toggle) — a basic panel with zero declaration. Sections
+carry a `tag` (`setup`/`control`/`status`) — the unit of UI export (tasks #78/#79).
