@@ -20,6 +20,11 @@ export function setupDom() {
     if (d) { try { Object.defineProperty(globalThis, k, d); } catch { /* getter-only */ } }
   }
   globalThis.requestAnimationFrame = (cb) => w.setTimeout(() => cb(Date.now()), 0);
+  // jsdom lacks ResizeObserver; the viewer/editor use it. No-op stub.
+  if (!globalThis.ResizeObserver) {
+    globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+    w.ResizeObserver = globalThis.ResizeObserver;
+  }
   return w;
 }
 

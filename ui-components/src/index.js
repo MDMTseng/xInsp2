@@ -11,6 +11,7 @@ import "./components/xi-radio.svelte";
 import "./components/xi-dropdown.svelte";
 import "./components/xi-trace.svelte";
 import "./components/xi-image-viewer.svelte";
+import "./components/xi-image-editor.svelte";
 
 // Shared client/protocol (no build needed; handy for `@xinsp2/components` users).
 export { XiClient } from "./ws-client.mjs";
@@ -20,7 +21,10 @@ export { mountPanel, inferDescriptor, CONTROL_TAGS } from "./auto-panel.mjs";
 // Status monitor (export mode A, task #78): read-only tiles fed by vars/preview.
 export { mountMonitor, collectStatusItems } from "./monitor.mjs";
 
+// Teach tools (task #77): pluggable draw tools for xi-image-editor.
+export { TOOLS, registerTool, makeTool } from "./lib/tools.mjs";
+
 export const XI_COMPONENTS = [
   "xi-slider", "xi-number", "xi-toggle", "xi-radio", "xi-dropdown",
-  "xi-trace", "xi-image-viewer",
+  "xi-trace", "xi-image-viewer", "xi-image-editor",
 ];
