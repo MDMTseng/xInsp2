@@ -20,9 +20,11 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
+    "e2e": "playwright test",
     "test": "node --test --test-concurrency=1 test/viewport.mjs test/options.mjs test/xi-slider.dom.mjs test/widgets.dom.mjs test/auto-panel.dom.mjs test/xi-trace.dom.mjs test/tools.mjs test/monitor.dom.mjs test/build-monitor.mjs test/create-webapp.mjs test/editor.dom.mjs test/ws-client.smoke.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "jsdom": "^29.1.1",
     "svelte": "^5.0.0",
