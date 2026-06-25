@@ -1,6 +1,6 @@
 // Node test for protocol.mjs decoders. Run: node hmi/test/protocol.test.mjs
 import assert from "node:assert";
-import { parseVars, decodePreviewFrame, bytesToBase64 } from "../protocol.mjs";
+import { parseVars, decodePreviewFrame, bytesToBase64 } from "../src/protocol.mjs";
 
 let pass = 0;
 const t = (name, fn) => { fn(); console.log("ok -", name); pass++; };

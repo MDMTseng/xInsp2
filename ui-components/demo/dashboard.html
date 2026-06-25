@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>external dashboard — import mountDashboard</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: #141414; color: #ddd; font: 14px system-ui, sans-serif; }
+    header { padding: 6px 12px; background: #1b1b1b; border-bottom: 1px solid #333; }
+    #dash { flex: 1; padding: 8px; min-height: 0; }
+  </style>
+  <script type="module">
+    // An EXTERNAL webapp importing the whole HMI dashboard from the library.
+    import { XiClient, mountDashboard } from "../dist/xi-components.esm.js";
+    const qs = new URLSearchParams(location.search);
+    const url = qs.get("ws") || "ws://127.0.0.1:7823/";
+    const status = (t) => (document.getElementById("status").textContent = t);
+
+    // This app owns its dashboard config (could be fetched / composed elsewhere).
+    const DASH = { title: "ext", layout: { dir: "row", weights: [1, 1], children: [
+      { card: { type: "value", bind: { var: "fg_pct" }, config: { title: "fg_pct", decimals: 3 } } },
+      { card: { type: "image", bind: { var: "result" }, config: { title: "Inspection" } } },
+    ] } };
+
+    (async () => {
+      const client = await new XiClient(url).connect({ checkVersion: /\d+\.\d+\.\d+/ });
+      status("connected");
+      await client.cmd("subscribe", { all: true }).catch(() => {});
+      mountDashboard(document.getElementById("dash"), { client, dashboard: DASH });
+    })().catch((e) => status("fail: " + e.message));
+  </script>
+</head>
+<body>
+  <header>external app — <code>import { mountDashboard }</code> · <span id="status">connecting…</span></header>
+  <div id="dash"></div>
+</body>
+</html>

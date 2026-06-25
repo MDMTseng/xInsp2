@@ -2,11 +2,14 @@
 // app.mjs — HMI host (v1, RUN mode): connect WS, decode the stream, lay out the
 // dashboard grid, and feed each card. Compose/drag-drop + save_dashboard = v1.1.
 //
-import { parseVars, decodePreviewFrame } from "./protocol.mjs";
-import { CARDS } from "./cards.mjs";
-import { isLeaf, isSplit, isTabs, weightsOf, validate,
+// Cards, the layout engine, and the protocol decoders now live in the shared
+// ui-components library (vendored bundle) — one source, used by the standalone
+// HMI here and by external apps via `import { mountDashboard } from "@xinsp2/
+// components"`. This page keeps its own compose-mode editor below.
+import { parseVars, decodePreviewFrame, CARDS,
+         isLeaf, isSplit, isTabs, weightsOf, validate,
          getNode, addSibling, setCard, setWeights, removePane,
-         wrapInTabs, addTab, removeTab, renameTab, setActive } from "./layout.mjs";
+         wrapInTabs, addTab, removeTab, renameTab, setActive } from "./lib/xi-components.esm.js";
 
 const qs = new URLSearchParams(location.search);
 // Default to a same-origin /ws (served by serve.mjs's proxy) so one HTTP tunnel

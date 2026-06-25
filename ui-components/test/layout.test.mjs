@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { isLeaf, isSplit, isTabs, eachLeaf, countLeaves, weightsOf, validate,
          getNode, splitLeaf, addSibling, removePane, setCard, setWeights, emptyCard,
-         wrapInTabs, addTab, removeTab, renameTab, setActive } from "../layout.mjs";
+         wrapInTabs, addTab, removeTab, renameTab, setActive } from "../src/dashboard/layout.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 let pass = 0;
@@ -108,7 +108,7 @@ t("validate accepts a tabs tree; flags a tab with a bad child", () => {
 });
 
 t("shipped dashboard.json is a valid N-ary tree", () => {
-  const dash = JSON.parse(readFileSync(join(here, "..", "dashboard.json"), "utf8"));
+  const dash = JSON.parse(readFileSync(join(here, "..", "..", "hmi", "dashboard.json"), "utf8"));
   assert.ok(dash.layout, "has a layout tree");
   assert.deepEqual(validate(dash.layout), []);
   assert.ok(countLeaves(dash.layout) >= 5);

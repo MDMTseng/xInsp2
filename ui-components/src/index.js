@@ -25,6 +25,14 @@ export { mountMonitor, collectStatusItems } from "./monitor.mjs";
 // Teach tools (task #77): pluggable draw tools for xi-image-editor.
 export { TOOLS, registerTool, makeTool } from "./lib/tools.mjs";
 
+// HMI dashboard (task #81): importable cards + layout engine + mountDashboard, so
+// an external webapp can drop in the whole composable dashboard. Importing cards
+// registers the <xi-card-*> elements.
+import "./dashboard/cards.mjs";
+export { CARDS } from "./dashboard/cards.mjs";
+export * from "./dashboard/layout.mjs";
+export { mountDashboard } from "./dashboard/dashboard.mjs";
+
 export const XI_COMPONENTS = [
   "xi-slider", "xi-number", "xi-toggle", "xi-radio", "xi-dropdown",
   "xi-trace", "xi-image-viewer", "xi-image-editor",

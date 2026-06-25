@@ -17,6 +17,10 @@ src/
     xi-trace.svelte          watch an output key across runs (update(items); latest/history; sparkline)
     xi-image-viewer.svelte   canvas viewer: wheel-zoom/pan/pixel-probe; tap-out setFrame/fit + pixelpick/viewchange
     xi-image-editor.svelte   teach editor: draw point/rect/polygon (pull model); tap-out setFrame/setTool + commit/cancel
+  dashboard/         the HMI dashboard, importable (one source, used by hmi/ + external apps)
+    cards.mjs        xi-card-* dashboard cards (verdict/value/image/spc/yield/throughput/groups)
+    layout.mjs       N-ary split/tabs layout engine (pure)
+    dashboard.mjs    mountDashboard(host,{client,dashboard}) — render cards from a config + feed from WS
   lib/
     viewport.mjs     pure pan/zoom math (unit-tested), generalizes imageViewerPanel.ts
     tools.mjs        teach-tool state machines (point/rect/polygon) + registerTool
@@ -86,6 +90,28 @@ def back via `set_instance_def` (no key loss regardless of plugin merge
 semantics). Omit `descriptor` and it's **inferred** from the instance's def
 (number→number, boolean→toggle) — a basic panel with zero declaration. Sections
 carry a `tag` (`setup`/`control`/`status`) — the unit of UI export below.
+
+## Import the whole HMI dashboard — `mountDashboard`
+
+An external webapp can drop in the entire composable HMI dashboard, not just
+individual widgets:
+
+```js
+import { XiClient, mountDashboard } from "@xinsp2/components";
+const client = await new XiClient(url).connect();
+mountDashboard(document.getElementById("dash"), {
+  client,
+  dashboard: { title: "Line 1", layout: { dir: "row", weights: [1, 1], children: [
+    { card: { type: "value", bind: { var: "fg_pct" } } },
+    { card: { type: "image", bind: { var: "result" } } },
+  ] } },
+});
+```
+
+It renders the `xi-card-*` cards via the layout engine and feeds them from the
+WS streams (vars / preview / run_result / dispatch_stats). RUN mode (read-only);
+the standalone `hmi/` keeps its own compose editor and now sources the cards,
+layout, and protocol decoders from this same library (one source).
 
 ## UI export — two shapes
 
