@@ -4,8 +4,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { writeFileSync, mkdtempSync } from 'node:fs';
 import WebSocket from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -75,5 +77,53 @@ test('compile + run emits JPEG preview for image variables', async () => {
         const jpg = frame.subarray(20);
         assert.equal(jpg[0], 0xFF);
         assert.equal(jpg[1], 0xD8);
+    });
+});
+
+// When one image buffer is VAR'd by several names (the "one frame to every
+// plugin" case), every var shares a canonical "src" gid, and the backend
+// encodes + sends exactly one preview frame for the whole group.
+test('same buffer VAR\'d 3x → shared src + a single preview frame', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'xi_dedup_'));
+    const sp = join(dir, 'dedup.cpp');
+    writeFileSync(sp, `
+#include <xi/xi.hpp>
+#include <xi/xi_image.hpp>
+#include <cstring>
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int frame) {
+    xi::Image a(64, 48, 1);
+    std::memset(a.data(), 128, 64 * 48);
+    VAR(orig, a);      // first sighting → canonical
+    VAR(same, orig);   // copy shares a's buffer
+    VAR(also, a);      // also a's buffer
+}
+`);
+    await withBackend(async (c) => {
+        await c.nextText(); // hello
+        c.send({ type: 'cmd', id: 1, name: 'compile_and_load', args: { path: sp } });
+        assert.equal((await c.nextNonLog()).ok, true, 'compile ok');
+
+        c.send({ type: 'cmd', id: 2, name: 'run' });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        const vars = await c.nextNonLog();
+        assert.equal(vars.type, 'vars');
+        const imgs = vars.items.filter(i => i.kind === 'image');
+        assert.equal(imgs.length, 3, `expected 3 image vars, got ${imgs.length}`);
+
+        // All three share one canonical src (== the first var's gid).
+        const srcs = new Set(imgs.map(i => i.src));
+        assert.equal(srcs.size, 1, `expected 1 canonical src, got ${[...srcs]}`);
+        assert.equal(imgs[0].src, imgs[0].gid, 'first var is its own canon');
+        assert.ok(imgs.every(i => i.gid !== undefined && i.src !== undefined), 'gid+src present');
+
+        // Exactly one preview frame for the whole canon group.
+        let frames = 0;
+        for (;;) {
+            try { await c.nextBinary(2500); frames++; }
+            catch { break; }
+        }
+        assert.equal(frames, 1, `expected 1 deduped preview frame, got ${frames}`);
     });
 });

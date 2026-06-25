@@ -57,8 +57,9 @@ Snapshot of a `ValueStore` after one `inspect()` call.
   "type": "vars",
   "run_id": 17,
   "items": [
-    { "name": "gray",    "kind": "image",   "gid": 100, "raw": false },
-    { "name": "blurred", "kind": "image",   "gid": 101, "raw": false },
+    { "name": "gray",    "kind": "image",   "gid": 100, "src": 100, "raw": false },
+    { "name": "gray2",   "kind": "image",   "gid": 101, "src": 100, "raw": false },
+    { "name": "blurred", "kind": "image",   "gid": 102, "src": 102, "raw": false },
     { "name": "count",   "kind": "number",  "value": 42 },
     { "name": "label",   "kind": "string",  "value": "ok" },
     { "name": "flag",    "kind": "boolean", "value": true },
@@ -82,7 +83,17 @@ Per-item fields:
   invalid JSON and drop the whole frame). The same sentinel convention applies to
   non-finite doubles in a `Record` — they round-trip back to the non-finite value
   via `get_double`/`as_double` instead of silently reading as `0.0`.
-- `gid` (int) — present for `image` kind; matches a subsequent binary preview frame
+- `gid` (int) — present for `image` kind; unique per image var. Matches a binary
+  preview frame's `gid` **only for the canonical var of its group** (see `src`).
+- `src` (int) — present for `image` kind; the **canonical gid** of this image's
+  group. Vars over the same underlying buffer (the "one frame VAR'd by every
+  plugin/stage" case — in-process pass-by-pointer means they share `Image::data()`)
+  all report a common `src`. The backend encodes + sends **exactly one** preview
+  frame per `src` group (under the canonical var's `gid`); a client maps the
+  frame's `gid` back to its `src` and mirrors the one decoded image onto every var
+  in the group, so the image is JPEG-encoded once and decoded once instead of N
+  times. For a non-duplicated image `src == gid`. (Record sub-images are not
+  deduplicated and carry no `src`.)
 - `raw` (bool) — `true` if the image is transmitted uncompressed (BMP), `false` for JPEG (currently always `false` — see *Binary frame layout*)
 
 ### `instances` — backend to client
@@ -176,12 +187,14 @@ runs at DLL load and wins.)
 
 ## Binary frame layout — image preview
 
-One WebSocket binary frame per image variable, sent after the `vars` message
-that introduces it.
+One WebSocket binary frame per **distinct image** (per `src` group, not per image
+var — see `vars.items[*].src`), sent after the `vars` message that introduces it.
+Several image vars sharing one buffer produce a single frame; the client mirrors
+it onto the whole group via `src`.
 
 ```
 offset  size  field
-  0     4B    gid        (uint32, big-endian)  — matches vars.items[*].gid
+  0     4B    gid        (uint32, big-endian)  — the canonical var's gid (vars.items[*].gid where src==gid)
   4     4B    codec      (uint32, big-endian)  — 0=JPEG, 1=BMP, 2=PNG
   8     4B    width      (uint32, big-endian)
  12     4B    height     (uint32, big-endian)

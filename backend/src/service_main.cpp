@@ -1028,6 +1028,13 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
         std::string_view snap_view(sbuf.data(), (size_t)n);
         size_t pos = 0;
         std::string cur_name;
+        // Image dedup: snapshot tags every image var with a "src" canonical gid
+        // (shared by all vars over the same underlying buffer — the one-frame-to-
+        // every-plugin case). Encode + send a preview once per canonical gid; the
+        // client mirrors that decoded bitmap onto the other vars in the canon
+        // group via their own "src". Skips redundant JPEG encodes here and
+        // redundant decodes on the client.
+        std::unordered_set<uint32_t> sent_canons;
         while (pos < snap_view.size()) {
             // Track the latest `"name":"..."` we saw; every later `"gid":`
             // is assumed to belong to that entry (snapshot emits name
@@ -1042,7 +1049,19 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
             }
             pos = gd + 6;
             uint32_t gid = (uint32_t)std::atoi(snap_view.data() + pos);
+            // Canonical gid for this image's buffer (the snapshot emits "src"
+            // immediately after "gid"; absent on older snapshots → canon = gid).
+            uint32_t canon = gid;
+            {
+                auto sd  = snap_view.find("\"src\":", pos);
+                auto ngd = snap_view.find("\"gid\":", pos);
+                if (sd != std::string_view::npos && (ngd == std::string_view::npos || sd < ngd))
+                    canon = (uint32_t)std::atoi(snap_view.data() + sd + 6);
+            }
             if (!sub_all && !sub_names.count(cur_name)) continue;
+            // First subscribed var of a canon group encodes + sends; the rest are
+            // mirrored client-side, so skip them here.
+            if (!sent_canons.insert(canon).second) continue;
             if (s.dump_image) {
                 // Buffers are thread_local + reused across calls. Without
                 // this, every preview allocated 32 MB of raw + a fresh
@@ -3013,10 +3032,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             out += ",\"folder\":\"" + esc(p.folder_path) + "\"";
             out += ",\"has_ui\":" + std::string(p.has_ui ? "true" : "false");
             out += ",\"loaded\":" + std::string(p.handle ? "true" : "false");
-            // cmake/prebuilt plugins get the per-item "Rebuild this plugin" action
-            // in the extension's Plugins tree (rebuild_plugins {plugins:[name]}).
+            // cmake/prebuilt plugins get the per-item "Rebuild" action in the
+            // extension's Plugin Browser (rebuild_plugins {plugins:[name]}).
             out += ",\"prebuilt\":" + std::string(p.prebuilt ? "true" : "false");
-            // Same origin field as to_json — extension's pluginTree relies
+            // Same origin field as to_json — the extension's Plugin Browser relies
             // on it to badge project plugins, e2e journey asserts it.
             bool is_proj = g_plugin_mgr.is_project_plugin(p.name);
             out += ",\"origin\":\"" + std::string(is_proj ? "project" : "global") + "\"";

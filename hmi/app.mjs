@@ -292,7 +292,12 @@ function connect() {
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
-      if (m.type === "vars") { const { run_id, items } = parseVars(m); state.run_id = run_id; state.vars = items; scheduleRender(); }
+      if (m.type === "vars") { const { run_id, items } = parseVars(m); state.run_id = run_id; state.vars = items;
+        // Map each image var's gid → canonical "src" gid so a single deduped
+        // preview frame (one buffer VAR'd by many plugins) fans out to all of them.
+        const g2c = {};
+        for (const nm of Object.keys(items || {})) { const it = items[nm]; if (it && it.gid != null) g2c[it.gid] = it.src != null ? it.src : it.gid; }
+        state.gidToCanon = g2c; scheduleRender(); }
       else if (m.type === "event" && m.name === "run_finished" && m.data) { if (typeof m.data.ms === "number") state.run_ms = m.data.ms; }
       // The one per-run verdict (see docs/roadmap/run-result.md). Carries its own
       // run_id (absent on a dropped frame) so cards can count distinct runs.
@@ -306,7 +311,9 @@ function connect() {
         else dlog("BE has no project dashboard — keeping static");
       }
     } else {
-      try { const f = decodePreviewFrame(ev.data); state.images[f.gid] = f.dataUrl; scheduleRender(); } catch (e) { console.error(e); }
+      try { const f = decodePreviewFrame(ev.data);
+        const canon = state.gidToCanon && f.gid in state.gidToCanon ? state.gidToCanon[f.gid] : f.gid;
+        state.images[canon] = f.dataUrl; scheduleRender(); } catch (e) { console.error(e); }
     }
   };
 }

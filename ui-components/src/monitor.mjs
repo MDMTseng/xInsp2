@@ -35,7 +35,11 @@ export function mountMonitor(host, { client, items, columns = 3 }) {
   host.appendChild(grid);
 
   const byKey = new Map();        // key -> {type, el, gid?}
-  const gidToViewer = new Map();  // image gid -> viewer el
+  // Image dedup: vars over one buffer share a canonical gid ("src") and the
+  // backend sends a single preview frame per canon. Key viewers by canon and
+  // map each var's gid → canon so the one frame fans out to every tile.
+  const canonViewers = new Map(); // canon gid -> Set<viewer el>
+  const gidToCanon = new Map();   // any var gid -> canon gid
   for (const it of items) {
     const tile = doc.createElement("div");
     tile.className = "xi-tile";
@@ -56,17 +60,28 @@ export function mountMonitor(host, { client, items, columns = 3 }) {
 
   const onVars = (v) => {
     const map = v.items || {};
+    canonViewers.clear();
+    gidToCanon.clear();
     for (const [key, slot] of byKey) {
       const it = map[key];
       if (!it) continue;
       if (slot.type === "trace") slot.el.update(map);
-      else if (slot.type === "image") { if (it.gid != null) { gidToViewer.set(it.gid, slot.el); } }
+      else if (slot.type === "image") {
+        if (it.gid != null) {
+          const canon = it.src != null ? it.src : it.gid;
+          gidToCanon.set(it.gid, canon);
+          let set = canonViewers.get(canon);
+          if (!set) canonViewers.set(canon, (set = new Set()));
+          set.add(slot.el);
+        }
+      }
       else slot.el.textContent = fmtValue(it.value);
     }
   };
   const onPreview = (f) => {
-    const viewer = gidToViewer.get(f.gid);
-    if (viewer) viewer.setFrame(f.dataUrl);
+    const canon = gidToCanon.has(f.gid) ? gidToCanon.get(f.gid) : f.gid;
+    const viewers = canonViewers.get(canon);
+    if (viewers) for (const viewer of viewers) viewer.setFrame(f.dataUrl);
   };
   const offVars = client.onVars(onVars);
   const offPreview = client.onPreview(onPreview);

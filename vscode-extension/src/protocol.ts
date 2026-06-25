@@ -39,6 +39,12 @@ export interface VarItemImage {
     name: string;
     kind: 'image';
     gid: number;
+    /** Canonical gid of this image's dedup group — vars sharing one buffer
+     *  report a common `src` and the backend sends a single preview frame for it
+     *  (under the canonical var, where `src === gid`). Mirror the frame onto the
+     *  group via `src`. For a non-duplicated image `src === gid`. Optional:
+     *  absent on pre-dedup history snapshots — treat a missing `src` as `gid`. */
+    src?: number;
     raw: boolean;
 }
 

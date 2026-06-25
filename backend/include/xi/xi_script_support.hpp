@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 
 // OpenMP thread cap (opt-in via project.json "openmp_max_threads"). When the
 // backend compiles with /openmp for a positive cap it also passes
@@ -92,6 +93,29 @@ XI_SCRIPT_EXPORT int xi_script_snapshot_vars(char* buf, int buflen) {
 
     std::string out = "[";
     uint32_t next_gid = 100;
+
+    // Image dedup. Every image var gets its OWN gid (so the preview slots stay
+    // unique per var), but images sharing the same underlying buffer
+    // (Image::data() — the in-process pass-by-pointer case where one frame is
+    // VAR'd by every plugin/stage) report a common "src" canonical gid. The
+    // backend encodes + sends a preview frame once per canonical gid; clients
+    // mirror that decoded bitmap onto every var in the same canon group. Saves
+    // the backend re-encoding and the client re-decoding the identical image N
+    // times. Pointer identity is exact and free — no hashing.
+    std::unordered_map<const uint8_t*, uint32_t> canon_by_ptr;
+    auto intern_image = [&](const xi::Image& im) -> std::pair<uint32_t, uint32_t> {
+        uint32_t gid = next_gid++;
+        uint32_t canon = gid;
+        const uint8_t* key = im.data();
+        if (key && !im.empty()) {
+            auto it = canon_by_ptr.find(key);
+            if (it != canon_by_ptr.end()) canon = it->second;   // duplicate buffer
+            else canon_by_ptr.emplace(key, gid);                 // first sighting → self
+        }
+        image_cache().push_back({gid, im});   // keep per-gid so dump_image(gid) works for every client
+        return {gid, canon};
+    };
+
     for (size_t i = 0; i < snap.size(); ++i) {
         auto& e = snap[i];
         if (i) out += ",";
@@ -114,13 +138,16 @@ XI_SCRIPT_EXPORT int xi_script_snapshot_vars(char* buf, int buflen) {
                 break;
             }
             case xi::VarKind::Image: {
-                uint32_t gid = next_gid++;
+                uint32_t gid = next_gid, canon = next_gid;
+                try {
+                    auto pr = intern_image(std::any_cast<xi::Image>(e.payload));
+                    gid = pr.first; canon = pr.second;
+                } catch (...) { gid = next_gid++; canon = gid; }
                 out += ",\"kind\":\"image\",\"gid\":";
                 out += std::to_string(gid);
+                out += ",\"src\":";
+                out += std::to_string(canon);
                 out += ",\"raw\":false";
-                try {
-                    image_cache().push_back({gid, std::any_cast<xi::Image>(e.payload)});
-                } catch (...) {}
                 break;
             }
             case xi::VarKind::Json: {

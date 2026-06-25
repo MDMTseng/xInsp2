@@ -81,7 +81,10 @@ class ImageCard extends HTMLElement {
     this.viewer.style.cssText = "width:100%;height:100%;display:block";
     this.body.appendChild(this.viewer); }
   feed(st) { const it = this.binding && st.vars[this.binding.var];
-    const url = it && it.gid != null ? st.images[it.gid] : undefined;
+    // Images dedup by canonical gid ("src" — shared when one buffer is VAR'd by
+    // many plugins); the preview is stored under canon, so read by canon.
+    const ckey = it ? (it.src != null ? it.src : it.gid) : undefined;
+    const url = it && ckey != null ? st.images[ckey] : undefined;
     if (url && url !== this._u && typeof this.viewer.setFrame === "function") { this.viewer.setFrame(url); this._u = url; } }
 }
 

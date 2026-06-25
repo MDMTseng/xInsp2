@@ -83,8 +83,23 @@ export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
 
   // Live streams (built on the shared XiClient — the HMI's own protocol/WS too).
   const offs = [
-    client.onVars((v) => { state.run_id = v.run_id; state.vars = v.items; scheduleRender(); }),
-    client.onPreview((f) => { state.images[f.gid] = f.dataUrl; scheduleRender(); }),
+    client.onVars((v) => {
+      state.run_id = v.run_id; state.vars = v.items;
+      // Map each image var's gid → its canonical gid so a single deduped preview
+      // frame resolves to the canon key the cards read from.
+      const g2c = {};
+      for (const name of Object.keys(v.items || {})) {
+        const it = v.items[name];
+        if (it && it.gid != null) g2c[it.gid] = it.src != null ? it.src : it.gid;
+      }
+      state.gidToCanon = g2c;
+      scheduleRender();
+    }),
+    client.onPreview((f) => {
+      const canon = state.gidToCanon && f.gid in state.gidToCanon ? state.gidToCanon[f.gid] : f.gid;
+      state.images[canon] = f.dataUrl;
+      scheduleRender();
+    }),
     client.onEvent((m) => {
       if (m.name === "run_finished" && m.data && typeof m.data.ms === "number") state.run_ms = m.data.ms;
       else if (m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }

@@ -34,7 +34,10 @@ def dump_run(run: RunResult, out_dir: str | Path, *, prefix: str = "run") -> Run
         kind = item["kind"]
         name = item["name"]
         if kind == "image":
-            pf = run.previews.get(item["gid"])
+            # Images sharing one buffer report a canonical "src" gid; the backend
+            # sends a single preview frame under it. Fall back to canon so deduped
+            # vars still resolve to the same image.
+            pf = run.previews.get(item["gid"]) or run.previews.get(item.get("src", item["gid"]))
             if pf is None:
                 report_vars.append({**item, "missing_preview": True})
                 continue

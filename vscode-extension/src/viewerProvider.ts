@@ -134,10 +134,30 @@ function highlightVar(name) {
     }
 }
 
+// Image dedup mirror maps, rebuilt each vars message. Vars over the same
+// underlying buffer share a canonical gid ("src"); the backend sends one preview
+// frame per canon, and we mirror that decoded image onto every gid in the group
+// so the browser decodes it once instead of once per plugin.
+let gidToCanon = {};
+let canonToGids = {};
+
 function renderVars(vars) {
     document.getElementById('no-data').style.display = 'none';
     const list = document.getElementById('vars-list');
     list.innerHTML = '';
+
+    gidToCanon = {};
+    canonToGids = {};
+    const noteGid = (gid, canon) => {
+        canon = (canon === undefined || canon === null) ? gid : canon;
+        gidToCanon[gid] = canon;
+        (canonToGids[canon] = canonToGids[canon] || []).push(gid);
+    };
+    for (const item of vars.items) {
+        if (item.kind === 'image') noteGid(item.gid, item.src);
+        else if (item.kind === 'record')
+            for (const k of Object.keys(item.images || {})) noteGid(item.images[k]);
+    }
 
     for (const item of vars.items) {
         const div = document.createElement('div');
@@ -306,9 +326,18 @@ function renderValue(v) {
 }
 
 function renderPreview(gid, width, height, jpegBase64) {
+    const dataUrl = 'data:image/jpeg;base64,' + jpegBase64;
+    // The frame's gid is the one var the backend actually encoded; fill every
+    // var in the same canon group from the single decoded image.
+    const canon = (gid in gidToCanon) ? gidToCanon[gid] : gid;
+    const targets = canonToGids[canon] || [gid];
+    for (const g of targets) applyPreview(g, width, height, dataUrl);
+}
+
+function applyPreview(gid, width, height, dataUrl) {
     const el = document.querySelector('[data-gid="' + gid + '"]');
     if (el) {
-        el.src = 'data:image/jpeg;base64,' + jpegBase64;
+        el.src = dataUrl;
         el.title = (el.title || '') + ' (' + width + 'x' + height + ')';
         return;
     }
@@ -322,7 +351,7 @@ function renderPreview(gid, width, height, jpegBase64) {
         img.dataset.gid = gid;
         container.appendChild(img);
     }
-    img.src = 'data:image/jpeg;base64,' + jpegBase64;
+    img.src = dataUrl;
     img.title = width + 'x' + height;
 }
 </script>
