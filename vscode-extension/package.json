@@ -159,11 +159,6 @@
         "icon": "$(trash)"
       },
       {
-        "command": "xinsp2.revealPluginFolder",
-        "title": "xInsp2: Reveal in File Explorer",
-        "icon": "$(folder-opened)"
-      },
-      {
         "command": "xinsp2.closeProject",
         "title": "xInsp2: Close Project",
         "icon": "$(close)"
@@ -211,11 +206,6 @@
           "type": "tree"
         },
         {
-          "id": "xinsp2.plugins",
-          "name": "Plugins",
-          "type": "tree"
-        },
-        {
           "id": "xinsp2.viewer",
           "name": "Viewer",
           "type": "webview"
@@ -239,13 +229,8 @@
         "when": "xinsp2.connected && !xinsp2.hasProject && !xinsp2.busy"
       },
       {
-        "view": "xinsp2.plugins",
-        "contents": "No plugins discovered yet.\n\nPlugins are C++ DLLs that provide inspection capabilities (cameras, detectors, savers…).\n[Add Plugin Folder…](command:xinsp2.addPluginFolder)\n[Rescan](command:xinsp2.refreshPlugins)",
-        "when": "!xinsp2.hasPlugins"
-      },
-      {
         "view": "xinsp2.instances",
-        "contents": "Project is open but has no instances yet.\n\nAn instance is a configured use of a plugin in this project.\n[Add First Instance](command:xinsp2.createInstance)\n\nNo plugins available? [Add a plugin folder](command:xinsp2.addPluginFolder) first.",
+        "contents": "Project is open but has no instances yet.\n\nAn instance is a configured use of a plugin in this project.\n[Add First Instance](command:xinsp2.createInstance)\n\nNo plugins available? [Open the Plugin Browser](command:xinsp2.pluginBrowser) to add one.",
         "when": "xinsp2.connected && xinsp2.hasProject && !xinsp2.hasInstances"
       }
     ],
@@ -267,54 +252,44 @@
           "group": "navigation@2"
         },
         {
-          "command": "xinsp2.openProject",
-          "when": "view == xinsp2.instances && xinsp2.connected",
-          "group": "navigation@3"
-        },
-        {
-          "command": "xinsp2.restartBackend",
-          "when": "view == xinsp2.instances && !xinsp2.connected",
-          "group": "navigation@4"
-        },
-        {
-          "command": "xinsp2.openProjectSettings",
-          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
-          "group": "navigation@4"
-        },
-        {
           "command": "xinsp2.openPipelineGraph",
           "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
           "group": "navigation@3"
         },
         {
-          "command": "xinsp2.closeProject",
-          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
-          "group": "navigation@5"
-        },
-        {
-          "command": "xinsp2.createProjectPlugin",
-          "when": "view == xinsp2.plugins && xinsp2.hasProject",
-          "group": "navigation@0"
-        },
-        {
-          "command": "xinsp2.addPluginFolder",
-          "when": "view == xinsp2.plugins",
-          "group": "navigation@1"
-        },
-        {
-          "command": "xinsp2.refreshPlugins",
-          "when": "view == xinsp2.plugins",
-          "group": "navigation@2"
-        },
-        {
-          "command": "xinsp2.rebuildPlugins",
-          "when": "view == xinsp2.plugins && xinsp2.connected && xinsp2.hasProject",
-          "group": "navigation@3"
+          "command": "xinsp2.restartBackend",
+          "when": "view == xinsp2.instances && !xinsp2.connected",
+          "group": "navigation@9"
         },
         {
           "command": "xinsp2.pluginBrowser",
-          "when": "view == xinsp2.plugins && xinsp2.hasProject",
-          "group": "navigation@4"
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
+          "group": "1_plugins@1"
+        },
+        {
+          "command": "xinsp2.createProjectPlugin",
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
+          "group": "1_plugins@2"
+        },
+        {
+          "command": "xinsp2.rebuildPlugins",
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
+          "group": "1_plugins@3"
+        },
+        {
+          "command": "xinsp2.openProjectSettings",
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
+          "group": "2_project@1"
+        },
+        {
+          "command": "xinsp2.openProject",
+          "when": "view == xinsp2.instances && xinsp2.connected",
+          "group": "2_project@2"
+        },
+        {
+          "command": "xinsp2.closeProject",
+          "when": "view == xinsp2.instances && xinsp2.connected && xinsp2.hasProject",
+          "group": "2_project@3"
         }
       ],
       "editor/title": [
@@ -349,26 +324,6 @@
           "command": "xinsp2.removeInstance",
           "when": "view == xinsp2.instances && viewItem == instance",
           "group": "inline@3"
-        },
-        {
-          "command": "xinsp2.removePluginFolder",
-          "when": "view == xinsp2.plugins && viewItem == pluginFolderRemovable",
-          "group": "inline"
-        },
-        {
-          "command": "xinsp2.revealPluginFolder",
-          "when": "view == xinsp2.plugins && (viewItem == pluginFolderRemovable || viewItem == pluginFolderLocked)",
-          "group": "inline"
-        },
-        {
-          "command": "xinsp2.exportProjectPlugin",
-          "when": "view == xinsp2.plugins && viewItem == projectPlugin",
-          "group": "inline@1"
-        },
-        {
-          "command": "xinsp2.rebuildPlugins",
-          "when": "view == xinsp2.plugins && viewItem == projectPluginCmake",
-          "group": "inline@1"
         }
       ]
     },

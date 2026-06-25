@@ -556,8 +556,8 @@ void xi_inspect_entry(int frame) {
     assert.equal(saverCfg.config.enabled, true, 'saver enabled preserved');
 
     console.log('  ✓ all instance configs saved');
-    // Show the Plugins tree so usage counts + cert status are visible.
-    try { await vscode.commands.executeCommand('xinsp2.plugins.focus'); } catch {}
+    // Open the Plugin Browser so live per-plugin usage counts are visible.
+    try { await vscode.commands.executeCommand('xinsp2.pluginBrowser'); } catch {}
     await sleep(1500);
     shot('project_saved_plugins_view');
 

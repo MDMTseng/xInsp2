@@ -6,7 +6,8 @@
 //
 // This plugin is `build: cmake` (see plugin.json + CMakeLists.txt): it owns its
 // own build so it can link the EXTERNAL `mathx` library for the actual add.
-// Rebuild it from the Plugins tree ("Rebuild Plugins", or right-click → Rebuild).
+// Rebuild it from the Instances view's "Rebuild Plugins" action, or the Plugin
+// Browser's per-plugin Rebuild button.
 
 #include <xi/xi_abi.hpp>   // xi::Plugin, xi::Record, XI_PLUGIN_IMPL
 #include <mathx.hpp>       // external dependency, linked via CMakeLists

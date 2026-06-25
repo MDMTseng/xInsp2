@@ -39,7 +39,7 @@ If you don't have one:
 ### 2. Generate the plugin scaffold
 
 - Command palette → **xInsp2: New Project Plugin…**
-  (or click the file-code (📄) icon in the Plugins tree title bar).
+  (or the file-code (📄) action in the **Instances & Params** view's `⋯` menu).
 - Pick a template:
   | Template | What it shows |
   |---|---|
@@ -76,8 +76,8 @@ in-place with debug-friendly flags (`/Od /Zi /RTC1`), so you can attach a debugg
 Plugin is the *type*; an instance is a *configured use*. To use the
 plugin from your inspection script:
 
-- Plugins tree → right-click your plugin → **Create Instance** (or use
-  the `+` button in the Instances tree). Pick a name (e.g. `det0`).
+- Click the `+` (Add Instance) button in the **Instances & Params** view
+  and pick your plugin. Pick a name (e.g. `det0`).
 - Open the instance UI (gear icon next to the instance) → tune fields.
 - In your `inspect.cpp`:
   ```cpp
@@ -89,8 +89,9 @@ plugin from your inspection script:
 
 ### 5. Export when ready to share
 
-- Plugins tree → right-click your project plugin → **Export Project
-  Plugin…** → pick a destination folder.
+- Plugin Browser → the **Export** button on your project plugin
+  (or command palette → **xInsp2: Export Project Plugin…**) → pick a
+  destination folder.
 - The extension does a Release rebuild, then copies
   `plugin.json + <name>.dll + <name>.pdb` (and `ui/` if present) into
   `<dest>/<name>/`. That folder is now a standalone plugin you can drop
@@ -185,7 +186,7 @@ out-of-tree and have them compile + hot-reload like in-project ones, set
 A `compile: true` entry's resolved folder is treated exactly like a
 `<project>/plugins/` one: a source plugin is `cl.exe`-compiled, a `build: cmake`
 one is built by **Rebuild Plugins**, and either way it's **trusted** (no cert) and
-shows in the Plugins tree as a project plugin you can recompile / rebuild from VS
+shows in the Plugin Browser as a project plugin you can recompile / rebuild from VS
 Code. It's per-plugin (each entry decides); a project-level
 `"plugin_dirs_compile": true` sets the default for entries that omit `compile`.
 Off by default because compiling writes a `build/` into the resolved folder — fine
@@ -194,17 +195,21 @@ for a toolbox you own, not for a read-only shared registry.
 #### Editing the declarations from VS Code — **Plugin Browser**
 
 You don't have to hand-edit `project.json`. **xInsp2: Plugin Browser** (the 🔍
-button in the Plugins tree title bar, or the command palette) is a GUI over exactly
-the `plugin_dirs` + `plugins` model above:
+button in the **Instances & Params** view's `⋯` menu, or the command palette) is
+the single plugin-management surface — a GUI over exactly the `plugin_dirs` +
+`plugins` model above:
 
 - **Added plugins** — every declaration in `plugins`, with its resolved `path`, a
-  live **compile** checkbox (per-plugin, toggles `compile`), and **Remove**.
+  live loaded ● dot + **×N used** count, a per-plugin **compile** checkbox, and
+  **Remove**. Project plugins also get **Rebuild** (cmake) / **Export**, and any
+  discovered plugin gets **Reveal** (open its folder in the file explorer).
 - **Browse** — one collapsible folder tree per search root in `plugin_dirs` (or
   `./plugins (default)` when none is set). A folder holding a `plugin.json` is a
   plugin node with **Add** (already-declared ones show **✓ added**); nested
   toolbox layouts (`author/toolbox/plugin`) expand too. **Add** writes a `plugins`
   entry, defaulting `compile` to `true` when the folder has `.cpp`/`CMakeLists`
-  (source/cmake) and `false` for a prebuilt-only folder.
+  (source/cmake) and `false` for a prebuilt-only folder. Each root has **Reveal**
+  and (when user-added) **Remove**.
 - **+ Add folder…** — pick a folder to append to `plugin_dirs` (relativised to
   `./…` when possible so the project stays portable, else an absolute path).
 

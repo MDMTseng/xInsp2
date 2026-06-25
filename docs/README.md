@@ -16,6 +16,7 @@ xInsp2 itself?** Jump to [Develop xInsp2](#develop-xinsp2-itself) below.
 |---|---|
 | [`guides/build-and-run.md`](./guides/build-and-run.md) | Set up a machine, build, run on day one. |
 | [`guides/write-a-script.md`](./guides/write-a-script.md) | Write the inspection script for a project. |
+| [`guides/instance-lifecycle.md`](./guides/instance-lifecycle.md) | Operator tour: plugin folder → create instance → use from script → delete. |
 | [`guides/write-a-plugin.md`](./guides/write-a-plugin.md) | Author a plugin (in-project + standalone) + its UI. |
 | [`guides/plugin-ui.md`](./guides/plugin-ui.md) | Build a plugin's UI with the xi-components web components (playground, wiring, teach UIs, auto-panels). |
 | [`guides/plugin-caveats.md`](./guides/plugin-caveats.md) | The non-obvious gotchas to skim before shipping a plugin (concurrency, prepare/commit, UI patterns). |

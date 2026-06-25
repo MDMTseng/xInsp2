@@ -1,9 +1,9 @@
 // Capture screenshots of the extension in each UX state:
 //   1. No project (welcome view for Instances)
-//   2. Plugins tree loaded
+//   2. No project (welcome re-capture; Plugin Browser needs a project)
 //   3. Project just created (instances empty but tree visible)
 //   4. Project with 2 instances
-//   5. After adding a plugin folder
+//   5. Plugin Browser with live per-plugin use counts
 //
 // Runs inside the Extension Host (launched by runUxStates.mjs).
 
@@ -104,10 +104,11 @@ async function run() {
     await sleep(1500);
     shot('1_no_project_welcome');
 
-    // --- STATE 2: Plugins view (filled because backend scanned built-in dir)
-    try { await vscode.commands.executeCommand('xinsp2.plugins.focus'); } catch {}
+    // --- STATE 2: connected, no project (Plugin Browser needs a project →
+    //     captured after one exists in state 5). Re-capture the welcome here.
+    try { await vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}
     await sleep(1500);
-    shot('2_plugins_view');
+    shot('2_no_project_welcome');
 
     // --- STATE 3: project created, empty instance tree (secondary welcome)
     const projDir = path.join(os.tmpdir(), `xinsp2_ux_${Date.now()}`);
@@ -124,8 +125,8 @@ async function run() {
     await sleep(1500);
     shot('4_project_with_instances');
 
-    // --- STATE 5: Plugins view after instances (should show "N in use")
-    try { await vscode.commands.executeCommand('xinsp2.plugins.focus'); } catch {}
+    // --- STATE 5: Plugin Browser after instances (added plugins show live ×N use)
+    try { await vscode.commands.executeCommand('xinsp2.pluginBrowser'); } catch {}
     await sleep(1500);
     shot('5_plugins_with_usage');
 

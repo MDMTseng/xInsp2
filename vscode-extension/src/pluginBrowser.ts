@@ -1,14 +1,28 @@
 // pluginBrowser.ts — HTML for the "Plugin Browser" webview.
 //
-// No `vscode` import on purpose (renderable standalone). The panel shows:
+// This is the single plugin-management surface (the old "Plugins" tree view was
+// removed; its functions live here). No `vscode` import on purpose (renderable
+// standalone). The panel shows:
 //   1. ADDED plugins — the project.json `plugins` declarations, each with its
-//      path + a compile toggle + remove.
+//      path, a live loaded ● + ×N use count, a compile toggle, remove, and (for
+//      project plugins) Rebuild / Export.
 //   2. BROWSE — a collapsible folder tree per `plugin_dirs` search root; folders
-//      that contain a plugin.json are addable. A "+ Add folder" adder sits at the
-//      bottom (appends a root to plugin_dirs).
+//      that contain a plugin.json are addable. Each root has Reveal + (when
+//      user-added) Remove, and a "+ Add folder" adder appends a root.
 // The extension fills the model and handles the postMessage actions.
 
-export interface PBPlugin { label: string; path: string; compile: boolean; }
+export interface PBPlugin {
+    label: string;
+    path: string;
+    compile: boolean;
+    // Live info matched from the backend's list_plugins (undefined when the
+    // declared plugin isn't discovered/loaded yet).
+    loaded?: boolean;
+    uses?: number;
+    origin?: 'project' | 'global';
+    prebuilt?: boolean;   // build:cmake project plugin → offer Rebuild
+    folder?: string;      // resolved DLL folder / source dir, for Reveal
+}
 export interface PBTreeNode {
     name: string;          // folder name
     rel: string;           // path relative to its root (what a `plugins` entry's path becomes)
@@ -20,6 +34,7 @@ export interface PBRoot {
     raw: string;           // as written in plugin_dirs (or "(default)" for the fallback)
     resolved: string;      // absolute, expanded
     exists: boolean;
+    removable: boolean;    // user-added (in plugin_dirs) → offer Remove
     tree: PBTreeNode[];
 }
 export interface PBModel {
@@ -41,6 +56,10 @@ export function renderPluginBrowserHtml(model: PBModel): string {
   .added:hover { background: var(--vscode-list-hoverBackground); }
   .added .name { font-weight: 600; min-width: 120px; }
   .added .path { opacity: .7; font-family: var(--vscode-editor-font-family); flex: 1; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
+         background: var(--vscode-charts-green); }
+  .dot.off { background: transparent; border: 1px solid var(--vscode-foreground); opacity: .4; }
+  .uses { font-size: 11px; opacity: .65; min-width: 42px; }
   .muted { opacity: .6; }
   button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);
            border: none; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 12px; }
@@ -83,15 +102,28 @@ function renderAdded() {
   wrap.append(el('h2', null, 'Added plugins (' + M.added.length + ')'));
   if (!M.added.length) wrap.append(el('div', { class: 'muted' }, 'None yet — add one from a root below.'));
   for (const p of M.added) {
-    wrap.append(el('div', { class: 'added' },
+    const loadedTitle = p.loaded === undefined ? 'not discovered yet' : (p.loaded ? 'loaded' : 'not loaded');
+    const row = el('div', { class: 'added' },
+      el('span', { class: 'dot' + (p.loaded ? '' : ' off'), title: loadedTitle }),
       el('span', { class: 'name' }, p.label),
       el('span', { class: 'path' }, p.path),
-      el('label', null,
-        el('input', { type: 'checkbox', ...(p.compile ? { checked: 'checked' } : {}),
-          onchange: () => vscode.postMessage({ type: 'toggleCompile', label: p.label }) }),
-        ' compile'),
-      el('button', { onclick: () => vscode.postMessage({ type: 'remove', label: p.label }) }, 'Remove')
-    ));
+      el('span', { class: 'uses' }, p.uses ? '×' + p.uses + ' used' : ''));
+    if (p.origin === 'project') {
+      if (p.prebuilt)
+        row.append(el('button', { title: 'Rebuild this cmake plugin',
+          onclick: () => vscode.postMessage({ type: 'rebuild', name: p.label }) }, 'Rebuild'));
+      row.append(el('button', { title: 'Export this project plugin as a standalone bundle',
+        onclick: () => vscode.postMessage({ type: 'export', name: p.label }) }, 'Export'));
+    }
+    if (p.folder)
+      row.append(el('button', { title: 'Reveal in File Explorer',
+        onclick: () => vscode.postMessage({ type: 'reveal', path: p.folder }) }, 'Reveal'));
+    row.append(el('label', null,
+      el('input', { type: 'checkbox', ...(p.compile ? { checked: 'checked' } : {}),
+        onchange: () => vscode.postMessage({ type: 'toggleCompile', label: p.label }) }),
+      ' compile'));
+    row.append(el('button', { onclick: () => vscode.postMessage({ type: 'remove', label: p.label }) }, 'Remove'));
+    wrap.append(row);
   }
   return wrap;
 }
@@ -127,7 +159,16 @@ function renderRoots() {
   wrap.append(el('h2', null, 'Browse (' + M.roots.length + ' root' + (M.roots.length === 1 ? '' : 's') + ')'));
   for (const r of M.roots) {
     const rb = el('div', { class: 'root' });
-    rb.append(el('div', { class: 'rhead' }, r.raw, r.exists ? '' : el('span', { class: 'badge' }, '  (missing)')));
+    const head = el('div', { class: 'row' },
+      el('span', { class: 'rhead' }, r.raw),
+      r.exists ? null : el('span', { class: 'badge' }, '(missing)'));
+    if (r.exists)
+      head.append(el('button', { title: 'Reveal in File Explorer',
+        onclick: () => vscode.postMessage({ type: 'reveal', path: r.resolved }) }, 'Reveal'));
+    if (r.removable)
+      head.append(el('button', { title: 'Remove this search root from plugin_dirs',
+        onclick: () => vscode.postMessage({ type: 'removeFolder', raw: r.raw, resolved: r.resolved }) }, 'Remove'));
+    rb.append(head);
     rb.append(el('div', { class: 'rpath' }, r.resolved));
     if (r.exists) {
       const tree = el('div', { class: 'tree' });

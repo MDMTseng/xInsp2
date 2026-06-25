@@ -6,7 +6,7 @@ import { WsClient } from './wsClient';
 import { InstanceTreeProvider } from './instanceTree';
 import { ViewerProvider } from './viewerProvider';
 import { InstanceCodeLensProvider } from './instanceCodeLens';
-import { PluginTreeProvider, PluginInfo } from './pluginTree';
+import { PluginRegistry, PluginInfo } from './pluginRegistry';
 import { PREVIEW_HEADER_SIZE } from './protocol';
 import { TEMPLATE_CHOICES, TemplateId, locateSdkRoot, renderPluginFiles }
     from './projectPluginTemplates';
@@ -49,19 +49,38 @@ function pbScanTree(dir: string, relBase: string, depth: number): PBTreeNode[] {
     }
     return out;
 }
-function pbBuildModel(projectFolder: string): PBModel {
+// Live plugin info (loaded / uses / origin …) folded into the static project.json
+// model so the browser can show runtime status the old tree used to. Supplied by
+// the extension (the pure model build degrades gracefully when it's absent).
+interface PBLive {
+    byName: Map<string, PluginInfo>;
+    uses: (name: string) => number;
+    isRemovable: (folder: string) => boolean;
+}
+function pbBuildModel(projectFolder: string, live?: PBLive): PBModel {
     const fs = require('fs') as typeof import('fs');
     let pj: any = {};
     try { pj = JSON.parse(fs.readFileSync(path.join(projectFolder, 'project.json'), 'utf8')); } catch { /* ignore */ }
     const obj = (pj.plugins && typeof pj.plugins === 'object' && !Array.isArray(pj.plugins)) ? pj.plugins : {};
-    const added: PBPlugin[] = Object.keys(obj).map((k) => ({ label: k, path: obj[k]?.path ?? k, compile: !!obj[k]?.compile }));
+    const added: PBPlugin[] = Object.keys(obj).map((k) => {
+        const info = live?.byName.get(k);
+        return {
+            label: k, path: obj[k]?.path ?? k, compile: !!obj[k]?.compile,
+            loaded: info?.loaded, uses: live?.uses(k),
+            origin: info?.origin, prebuilt: info?.prebuilt,
+            folder: info?.origin === 'project' ? (info?.source_dir || info?.folder) : info?.folder,
+        };
+    });
     let dirsRaw: string[] = Array.isArray(pj.plugin_dirs) ? pj.plugin_dirs.slice() : [];
     const usedFallback = !dirsRaw.length;
     if (usedFallback) dirsRaw = ['./plugins'];
     const roots: PBRoot[] = dirsRaw.map((raw) => {
         const resolved = pbExpandRoot(raw, projectFolder);
         const exists = fs.existsSync(resolved);
-        return { raw: usedFallback ? raw + '  (default)' : raw, resolved, exists, tree: exists ? pbScanTree(resolved, '', 4) : [] };
+        // The materialized "(default)" fallback is never user-removable.
+        const removable = !usedFallback && !!live?.isRemovable(resolved);
+        return { raw: usedFallback ? raw + '  (default)' : raw, resolved, exists, removable,
+                 tree: exists ? pbScanTree(resolved, '', 4) : [] };
     });
     return { projectName: pj.name || path.basename(projectFolder), added, addedPaths: added.map((p) => p.path), roots };
 }
@@ -513,23 +532,34 @@ export function activate(context: vscode.ExtensionContext) {
     const statusMap: Record<string, string> = {};
     const refreshStatuses = () => treeProvider.setStatuses({ ...statusMap });
 
-    const pluginTreeProvider = new PluginTreeProvider();
-    pluginTreeProvider.setRemovableFolders(extraPluginDirs);
-    const pluginsView = vscode.window.createTreeView('xinsp2.plugins', { treeDataProvider: pluginTreeProvider });
+    // Plugin data cache (the "Plugins" tree view was removed; the Plugin Browser
+    // webview is the management surface now — this just holds the last-known set).
+    const pluginRegistry = new PluginRegistry();
+    pluginRegistry.setRemovableFolders(extraPluginDirs);
+
+    // The Plugin Browser webview panel + helpers to (re)feed it live status. The
+    // panel is created lazily by the xinsp2.pluginBrowser command; these are
+    // shared so list_plugins refreshes can push fresh loaded/uses while it's open.
+    let pluginBrowserPanel: vscode.WebviewPanel | undefined;
+    const pbLive = (): PBLive => ({
+        byName: new Map(pluginRegistry.listPlugins().map(p => [p.name, p])),
+        uses: (n) => pluginRegistry.uses(n),
+        isRemovable: (f) => pluginRegistry.isRemovable(f),
+    });
+    const refreshPluginBrowser = () => {
+        if (lastProjectFolder)
+            pluginBrowserPanel?.webview.postMessage({ type: 'model', model: pbBuildModel(lastProjectFolder, pbLive()) });
+    };
 
     // Activity-bar / view badge — surfaces connection state visually.
     function setViewBadge(connected: boolean, instanceCount: number, pluginCount: number) {
         // Disconnected: red "!" badge.
         if (!connected) {
             instancesView.badge = { tooltip: 'xInsp2 backend offline', value: 1 };
-            pluginsView.badge   = undefined;
             return;
         }
         instancesView.badge = instanceCount > 0
             ? { tooltip: `${instanceCount} instance(s)`, value: instanceCount }
-            : undefined;
-        pluginsView.badge = pluginCount > 0
-            ? { tooltip: `${pluginCount} plugin(s) discovered`, value: pluginCount }
             : undefined;
     }
     let lastInstanceCount = 0;
@@ -989,11 +1019,12 @@ export function activate(context: vscode.ExtensionContext) {
         updateHealthStatus(true);
         lastConnected = true;
         setViewBadge(true, lastInstanceCount, lastPluginCount);
-        // Pull plugin list for the Plugins view as soon as we're up.
+        // Pull the plugin list as soon as we're up (feeds the Plugin Browser).
         sendCmd('list_plugins').then((r: any) => {
             if (r?.ok && Array.isArray(r.data)) {
-                pluginTreeProvider.update(r.data as PluginInfo[]);
+                pluginRegistry.update(r.data as PluginInfo[]);
                 setCtx('hasPlugins', r.data.length > 0);
+                refreshPluginBrowser();
             }
         }).catch(() => {});
         // Snapshot every component's latest status on (re)connect — this re-pull
@@ -1135,18 +1166,15 @@ export function activate(context: vscode.ExtensionContext) {
             for (const i of (msg.instances ?? [])) {
                 uses.set(i.plugin, (uses.get(i.plugin) || 0) + 1);
             }
-            pluginTreeProvider.update(
-                // Re-fetch plugin list to pick up any newly-appearing ones; but if
-                // there's nothing fresh, keep the current set with updated counts.
-                (pluginTreeProvider as any).plugins || [],
-                uses,
-            );
+            // Keep the current set but refresh the use counts.
+            pluginRegistry.update(pluginRegistry.listPlugins() as PluginInfo[], uses);
             // Fire-and-forget refetch in case a plugin got loaded.
             sendCmd('list_plugins').then((r: any) => {
                 if (r?.ok && Array.isArray(r.data)) {
-                    pluginTreeProvider.update(r.data as PluginInfo[], uses);
+                    pluginRegistry.update(r.data as PluginInfo[], uses);
                     cachePluginManifests(r.data);   // for the use("…") hover I/O contract
                     setCtx('hasPlugins', r.data.length > 0);
+                    refreshPluginBrowser();         // live loaded/uses → browser, if open
                 }
             }).catch(() => {});
         } else if (msg.type === 'log') {
@@ -1363,15 +1391,16 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // --- Plugin Browser: folder-tree browse of the plugin_dirs roots + the
-    //     declared (added) plugins. Add/remove/toggle-compile write project.json
-    //     and reopen; "+ Add folder" appends a search root. ---
-    let pluginBrowserPanel: vscode.WebviewPanel | undefined;
+    // --- Plugin Browser: the single plugin-management surface (replaces the old
+    //     "Plugins" tree). Browse the plugin_dirs roots + the declared (added)
+    //     plugins with live loaded/uses; add/remove/toggle-compile write
+    //     project.json and reopen; Rebuild/Export/Reveal act on a project plugin;
+    //     Reveal/Remove on a search root; "+ Add folder" appends one. ---
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.pluginBrowser', async () => {
             if (!lastProjectFolder) { vscode.window.showWarningMessage('xInsp2: open a project first'); return; }
             const fs = require('fs') as typeof import('fs');
-            const refresh = () => pluginBrowserPanel?.webview.postMessage({ type: 'model', model: pbBuildModel(lastProjectFolder!) });
+            const refresh = refreshPluginBrowser;
             const writePj = (mut: (pj: any) => void) => {
                 const pjPath = path.join(lastProjectFolder!, 'project.json');
                 let pj: any = {};
@@ -1418,10 +1447,27 @@ export function activate(context: vscode.ExtensionContext) {
                             pj.plugin_dirs = dirs;
                         });
                         await reopen();
+                    } else if (msg.type === 'removeFolder') {
+                        // Drop a search root from project.json plugin_dirs (matched by
+                        // resolved path, so the "(default)" suffix on raw is harmless).
+                        writePj((pj) => {
+                            const dirs: string[] = Array.isArray(pj.plugin_dirs) ? pj.plugin_dirs : [];
+                            pj.plugin_dirs = dirs.filter((d) =>
+                                path.resolve(pbExpandRoot(d, lastProjectFolder!)).toLowerCase()
+                                !== path.resolve(String(msg.resolved)).toLowerCase());
+                        });
+                        await reopen();
+                    } else if (msg.type === 'reveal') {
+                        if (msg.path) try { await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(String(msg.path))); } catch { /* ignore */ }
+                    } else if (msg.type === 'rebuild') {
+                        await vscode.commands.executeCommand('xinsp2.rebuildPlugins', { info: { name: msg.name } });
+                        refresh();
+                    } else if (msg.type === 'export') {
+                        await vscode.commands.executeCommand('xinsp2.exportProjectPlugin', { info: { name: msg.name, origin: 'project' } });
                     }
                 } catch (e: any) { vscode.window.showErrorMessage('xInsp2 Plugin Browser: ' + e.message); }
             });
-            pluginBrowserPanel.webview.html = renderPluginBrowserHtml(pbBuildModel(lastProjectFolder));
+            pluginBrowserPanel.webview.html = renderPluginBrowserHtml(pbBuildModel(lastProjectFolder, pbLive()));
         })
     );
 
@@ -1461,7 +1507,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             // 3. Description (optional)
             const pdesc = (await vscode.window.showInputBox({
-                prompt: 'Short description (shown in plugin tree, optional)',
+                prompt: 'Short description (shown in the Plugin Browser, optional)',
                 placeHolder: 'Leave blank to use the template name',
             })) || '';
 
@@ -1513,7 +1559,8 @@ export function activate(context: vscode.ExtensionContext) {
                 output.appendLine(`[xinsp2] created project plugin '${pname}' (${tplId} template)`);
                 const rsp = await sendCmd('open_project', { folder: lastProjectFolder });
                 if (rsp.ok) {
-                    pluginTreeProvider.update(rsp.data?.plugins || []);
+                    pluginRegistry.update(rsp.data?.plugins || []);
+                    refreshPluginBrowser();
                 }
 
                 // 6. Reveal the .cpp so the user sees their new code.
@@ -1542,7 +1589,7 @@ export function activate(context: vscode.ExtensionContext) {
                 arg?.info?.name && arg?.info?.origin === 'project'
                     ? arg.info.name : undefined;
             if (!pname) {
-                const projPlugins = pluginTreeProvider.listPlugins()
+                const projPlugins = pluginRegistry.listPlugins()
                     .filter(p => p.origin === 'project');
                 if (projPlugins.length === 0) {
                     vscode.window.showInformationMessage('No project plugins to export. Add one under <project>/plugins/.');
@@ -2290,10 +2337,11 @@ void xi_inspect_entry(int frame) {
     async function refreshPlugins() {
         const r = await sendCmd('list_plugins');
         if (r?.ok && Array.isArray(r.data)) {
-            pluginTreeProvider.update(r.data as PluginInfo[]);
+            pluginRegistry.update(r.data as PluginInfo[]);
             setCtx('hasPlugins', r.data.length > 0);
             lastPluginCount = r.data.length;
             setViewBadge(lastConnected, lastInstanceCount, lastPluginCount);
+            refreshPluginBrowser();
         }
     }
 
@@ -2325,7 +2373,7 @@ void xi_inspect_entry(int frame) {
             }
             const next = [...current, folder];
             await config.update('extraPluginDirs', next, vscode.ConfigurationTarget.Global);
-            pluginTreeProvider.setRemovableFolders(next);
+            pluginRegistry.setRemovableFolders(next);
             if (client?.connected) await sendCmd('rescan_plugins', { dir: folder });
             await refreshPlugins();
             vscode.window.showInformationMessage(`xInsp2: added ${folder}`);
@@ -2333,17 +2381,20 @@ void xi_inspect_entry(int frame) {
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('xinsp2.removePluginFolder', async (treeItem?: any) => {
-            // Invoked from the tree's inline action: arg is the TreeItem.
-            const folder = treeItem?.resourceUri?.fsPath || treeItem?.tooltip;
-            if (!folder || typeof folder !== 'string') {
-                vscode.window.showWarningMessage('xInsp2: no folder selected');
+        // Remove one of the global xinsp2.extraPluginDirs search roots. (The
+        // project-local plugin_dirs roots are managed in the Plugin Browser; this
+        // is the workspace-setting side, picked from the palette.)
+        vscode.commands.registerCommand('xinsp2.removePluginFolder', async () => {
+            const current = config.get<string[]>('extraPluginDirs', []);
+            if (!current.length) {
+                vscode.window.showInformationMessage('xInsp2: no extra plugin folders configured.');
                 return;
             }
-            const current = config.get<string[]>('extraPluginDirs', []);
+            const folder = await vscode.window.showQuickPick(current, { placeHolder: 'Remove which plugin folder?' });
+            if (!folder) return;
             const next = current.filter(d => path.resolve(d).toLowerCase() !== path.resolve(folder).toLowerCase());
             await config.update('extraPluginDirs', next, vscode.ConfigurationTarget.Global);
-            pluginTreeProvider.setRemovableFolders(next);
+            pluginRegistry.setRemovableFolders(next);
             // Note: host keeps the plugin registered until restart. Tell the user.
             vscode.window.showWarningMessage(
                 `xInsp2: "${folder}" removed from settings. Restart the backend to fully unload.`,
@@ -2352,14 +2403,6 @@ void xi_inspect_entry(int frame) {
                 if (choice === 'Restart Backend') vscode.commands.executeCommand('xinsp2.restartBackend');
             });
             await refreshPlugins();
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.commands.registerCommand('xinsp2.revealPluginFolder', async (treeItem?: any) => {
-            const folder = treeItem?.resourceUri?.fsPath || treeItem?.tooltip;
-            if (!folder) return;
-            try { await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(folder)); } catch {}
         })
     );
 

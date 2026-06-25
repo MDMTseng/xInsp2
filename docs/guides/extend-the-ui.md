@@ -16,12 +16,15 @@ the entry point is `src/extension.ts`. All code is TypeScript.
                      │ src/extension.ts (~2 kLOC)               │
                      │   activate() — wires everything          │
                      │     ├─ WsClient ────────► backend (WS)   │
-                     │     ├─ TreeView providers                 │
-                     │     │    instanceTree, pluginTree         │
+                     │     ├─ TreeView provider                  │
+                     │     │    instanceTree                      │
                      │     ├─ WebviewViewProvider                │
                      │     │    viewerProvider                   │
                      │     ├─ WebviewPanel(s)                    │
-                     │     │    pluginUI panels, imageViewerPanel│
+                     │     │    pluginBrowser, pluginUI,          │
+                     │     │    imageViewerPanel                  │
+                     │     ├─ Data cache                          │
+                     │     │    pluginRegistry (no view)          │
                      │     ├─ Commands (xinsp2.*)                │
                      │     ├─ DiagnosticCollection (squiggles)   │
                      │     └─ Project state + auto-respawn       │
@@ -67,15 +70,19 @@ backend; the UI is downstream of WS state.
 Existing examples to mimic:
 - Recording status bar in `extension.ts` (`xinsp2.startRecording` /
   `xinsp2.stopRecording` toggle).
-- Project plugin export inline icon (`xinsp2.exportProjectPlugin` on
-  `viewItem == projectPlugin`).
+- The Instances title overflow groups `1_plugins` / `2_project` —
+  non-`navigation` groups collapse into the view's `⋯` menu, keeping only
+  the high-frequency icons (add instance, run/stop, pipeline graph) inline.
 
 ---
 
 ## Adding a tree view item
 
-Tree views: `xinsp2.instances` (left of activity bar) and
-`xinsp2.plugins`.
+The only tree view is `xinsp2.instances` (left of the activity bar).
+Plugins are **not** a tree — they're managed in the **Plugin Browser**
+webview panel (`pluginBrowser.ts`, opened by `xinsp2.pluginBrowser`);
+the last-known plugin set is just cached in `pluginRegistry.ts` (a plain
+data holder, no view) to feed that panel's live loaded/use status.
 
 To add a new top-level tree:
 1. Implement `vscode.TreeDataProvider<T>` in a new
@@ -85,9 +92,9 @@ To add a new top-level tree:
 3. Declare in `package.json` under `"contributes" → "views"`.
 4. Add a Welcome view in `viewsWelcome` for the empty state.
 
-To add an item type to an existing tree (e.g. annotate plugins
-differently): edit `pluginTree.ts`'s `Node` union, render it in
-`getTreeItem`. Set `contextValue` so menu predicates can match it.
+To add an item type to an existing tree: edit `instanceTree.ts`'s `Node`
+union, render it in `getTreeItem`. Set `contextValue` so menu predicates
+can match it.
 
 ---
 
@@ -325,9 +332,9 @@ For each task type, the closest existing example to mimic:
 |---|---|
 | Add a command | `xinsp2.compile` in `extension.ts` |
 | Add a setting | `xinsp2.backendPort` declaration + read |
-| Add a tree provider | `pluginTree.ts` |
+| Add a tree provider | `instanceTree.ts` |
 | Add a webview view | `viewerProvider.ts` |
-| Add a webview panel | `imageViewerPanel.ts` |
+| Add a webview panel | `pluginBrowser.ts` / `imageViewerPanel.ts` |
 | Plugin UI panel | The medium-template `ui/index.html` + the
   `xinsp2.openInstanceUI` handler in `extension.ts` |
 | File watcher → compile | The auto-recompile-on-save block (search

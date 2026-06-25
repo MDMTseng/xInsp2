@@ -80,7 +80,6 @@ async function run() {
 
     // ====== 1 — initial ======
     console.log('\n[1] initial state');
-    try { await vscode.commands.executeCommand('xinsp2.plugins.focus'); } catch {}
     await sleep(1500);
     shot('initial');
 
