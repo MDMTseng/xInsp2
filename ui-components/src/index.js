@@ -17,6 +17,8 @@ export { XiClient } from "./ws-client.mjs";
 export * as protocol from "./protocol.mjs";
 // Auto-webui renderer: descriptor → sections of wired widgets (task #76).
 export { mountPanel, inferDescriptor, CONTROL_TAGS } from "./auto-panel.mjs";
+// Status monitor (export mode A, task #78): read-only tiles fed by vars/preview.
+export { mountMonitor, collectStatusItems } from "./monitor.mjs";
 
 export const XI_COMPONENTS = [
   "xi-slider", "xi-number", "xi-toggle", "xi-radio", "xi-dropdown",
