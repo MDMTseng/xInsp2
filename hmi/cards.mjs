@@ -69,16 +69,20 @@ class ValueCard extends HTMLElement {
     this.body.textContent = v === undefined ? "—" : (typeof v === "number" ? (+v.toFixed(this.config?.decimals ?? 3)) : String(v)); }
 }
 
-// ---- image: base output image (overlays = v1.1) -----------------------------
+// ---- image: base output image (now backed by xi-image-viewer) ---------------
+// Uses the shared <xi-image-viewer> (ui-components) so the HMI image card gets
+// cursor-anchored zoom / pan / pixel-probe for free — one library, many
+// consumers. setFrame is attached by the element's effect on connect, so feed()
+// guards its presence (the card may feed before the element upgrades).
 class ImageCard extends HTMLElement {
   connectedCallback() { this.body = shell(this, titleOf(this, "Image"));
-    this.body.style.cssText = "display:flex;align-items:center;justify-content:center;padding:2px";
-    this.img = document.createElement("img");
-    this.img.style.cssText = `max-width:100%;max-height:100%;object-fit:${this.config?.fit || "contain"};image-rendering:pixelated`;
-    this.body.appendChild(this.img); }
+    this.body.style.cssText = "padding:0";
+    this.viewer = document.createElement("xi-image-viewer");
+    this.viewer.style.cssText = "width:100%;height:100%;display:block";
+    this.body.appendChild(this.viewer); }
   feed(st) { const it = this.binding && st.vars[this.binding.var];
     const url = it && it.gid != null ? st.images[it.gid] : undefined;
-    if (url && url !== this._u) { this.img.src = url; this._u = url; } }
+    if (url && url !== this._u && typeof this.viewer.setFrame === "function") { this.viewer.setFrame(url); this._u = url; } }
 }
 
 // ---- spc: rolling trend + control lines -------------------------------------

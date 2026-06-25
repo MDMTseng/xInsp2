@@ -16,6 +16,7 @@ import "./components/xi-image-editor.svelte";
 // Shared client/protocol (no build needed; handy for `@xinsp2/components` users).
 export { XiClient } from "./ws-client.mjs";
 export * as protocol from "./protocol.mjs";
+export { parseVars, decodePreviewFrame, bytesToBase64 } from "./protocol.mjs";
 // Auto-webui renderer: descriptor → sections of wired widgets (task #76).
 export { mountPanel, inferDescriptor, CONTROL_TAGS } from "./auto-panel.mjs";
 // Status monitor (export mode A, task #78): read-only tiles fed by vars/preview.
