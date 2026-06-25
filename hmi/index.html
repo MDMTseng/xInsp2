@@ -25,6 +25,9 @@
     <span id="conn">connecting…</span>
   </header>
   <div id="grid"></div>
+  <!-- xi-components (vendored): registers <xi-image-viewer> etc. the cards use.
+       Regenerate via: cd ui-components && npm run build && copy dist → hmi/lib/. -->
+  <script type="module" src="./lib/xi-components.esm.js"></script>
   <script type="module" src="./app.mjs"></script>
 </body>
 </html>

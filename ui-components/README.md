@@ -16,8 +16,10 @@ src/
     xi-slider / xi-number / xi-toggle / xi-radio / xi-dropdown   key-bound controls (value prop + change/input events)
     xi-trace.svelte          watch an output key across runs (update(items); latest/history; sparkline)
     xi-image-viewer.svelte   canvas viewer: wheel-zoom/pan/pixel-probe; tap-out setFrame/fit + pixelpick/viewchange
+    xi-image-editor.svelte   teach editor: draw point/rect/polygon (pull model); tap-out setFrame/setTool + commit/cancel
   lib/
     viewport.mjs     pure pan/zoom math (unit-tested), generalizes imageViewerPanel.ts
+    tools.mjs        teach-tool state machines (point/rect/polygon) + registerTool
     options.mjs      normalize an options array / JSON-string attribute for radio/dropdown
   ws-client.mjs      XiClient — connect + orchestrator verbs + vars/preview subscribe
   protocol.mjs       pure WS decoders (parseVars / decodePreviewFrame)
