@@ -49,8 +49,9 @@ Start at [`write-a-plugin.md`](./write-a-plugin.md) for the task tour and
 
 ## UI patterns (the part people get wrong)
 
-These are about *where logic lives* once a plugin has a webui. The components live
-in `ui-components/` (the `xi-*` web components); see
+These are about *where logic lives* once a plugin has a webui. For HOW to build
+that UI with the `xi-*` web components (playground + wiring + examples), see
+[`plugin-ui.md`](./plugin-ui.md); for the design direction,
 [`../roadmap/webui-and-ui-export.md`](../roadmap/webui-and-ui-export.md).
 
 - **UX flow belongs in the webui (JS), NOT in C++.** A plugin should expose

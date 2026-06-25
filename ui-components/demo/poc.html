@@ -23,6 +23,10 @@
     const log = (m, cls = "") => { const p = $("log"); p.innerHTML += `<span class="${cls}">${m}</span>\n`; };
     let client = null;
 
+    // Playground convenience: ?ws=ws://host:port/ prefills the URL field.
+    const _ws = new URLSearchParams(location.search).get("ws");
+    if (_ws) $("url").value = _ws;
+
     // --- connect + bind a slider to a real instance over WS -------------------
     $("connect").onclick = async () => {
       const url = $("url").value;

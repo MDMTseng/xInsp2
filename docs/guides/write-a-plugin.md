@@ -539,7 +539,14 @@ experiment proves all three cases; the generated plugin README summarises them.
 
 A plugin's instance UI is plain HTML the plugin ships in `ui/index.html`, loaded
 into a VS Code webview (see [`extend-the-ui.md`](./extend-the-ui.md) for the
-host wiring; the `exchange()` contract is covered above). These conventions keep that UI **automatable** — by the
+host wiring; the `exchange()` contract is covered above).
+
+> **Building the UI:** the [`xi-components`](./plugin-ui.md) web-component library
+> gives you a slider/viewer/teach-editor/dashboard toolkit + runnable playground
+> pages — start at [`plugin-ui.md`](./plugin-ui.md). The conventions below keep
+> whatever UI you build **automatable**.
+
+These conventions keep that UI **automatable** — by the
 plugin UI test harness today, and by any generic param-tuning tooling later.
 
 ### `data-param` / `data-action` — stable, name-keyed selectors
