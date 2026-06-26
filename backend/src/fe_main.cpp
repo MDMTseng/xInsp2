@@ -86,6 +86,17 @@ struct FeConfig {
     // one cold compile so a real recompile isn't mistaken for a serving wedge; a
     // genuine wedge is still caught, just ~7 s later.
     int         heartbeat_stale_ms = 15000;
+    // Per-inspect watchdog budget passed to the backend (--watchdog=N). The
+    // serving-loop heartbeat above only catches a wedged SERVING loop; a dispatch
+    // WORKER deadlocked inside a plugin's process() keeps the serving loop (and so
+    // the heartbeat) alive, so without this an unattended line could silently stop
+    // inspecting while the FE shows healthy. The backend's watchdog arms per
+    // inspect (covers continuous workers + cmd:run) and, on overrun, cooperatively
+    // cancels then exits — the FE respawns. Default ON and generous so a real long
+    // frame isn't killed; a genuine hang is caught within the budget. 0 disables
+    // (e.g. a dev running deliberately long inspects). The BE default stays off, so
+    // this is the supervised-deployment fail-safe specifically.
+    int         watchdog_ms = 60000;
     // Extra args appended verbatim to the spawned backend's command line
     // (--be-arg=..., repeatable). Lets an operator pass BE flags through the FE.
     std::vector<std::string> be_args;
@@ -203,6 +214,7 @@ static FeConfig load_config(int argc, char** argv) {
     if (auto v = arg_value(argc, argv, "--boot-timeout-ms"); !v.empty()) try { c.boot_timeout_ms = std::stoi(v); } catch (...) {}
     if (auto v = arg_value(argc, argv, "--heartbeat-file");  !v.empty()) c.heartbeat_file = v;
     if (auto v = arg_value(argc, argv, "--heartbeat-stale-ms"); !v.empty()) try { c.heartbeat_stale_ms = std::stoi(v); } catch (...) {}
+    if (auto v = arg_value(argc, argv, "--watchdog-ms"); !v.empty()) try { c.watchdog_ms = std::stoi(v); } catch (...) {}
     if (auto v = arg_value(argc, argv, "--crash-history"); !v.empty()) c.crash_history = v;
     if (auto v = arg_value(argc, argv, "--preserve-dir");  !v.empty()) c.preserve_dir = v;
     if (auto v = arg_value(argc, argv, "--status-file");   !v.empty()) c.status_file = v;
@@ -347,6 +359,10 @@ static std::string build_cmdline(const FeConfig& c) {
     for (auto& d : c.plugins_dirs) cl += " --plugins-dir=\"" + d + "\"";
     if (c.heartbeat_stale_ms > 0 && !c.heartbeat_file.empty())
         cl += " --heartbeat-file=\"" + c.heartbeat_file + "\"";
+    // Fail-safe for an unattended line: arm the backend's per-inspect watchdog so a
+    // worker wedged in a plugin's process() is caught + respawned (the heartbeat
+    // can't see it). 0 disables.
+    if (c.watchdog_ms > 0)    cl += " --watchdog=" + std::to_string(c.watchdog_ms);
     if (c.working_copy)       cl += " --working-copy";
     for (auto& a : c.be_args)      cl += " " + a;   // verbatim passthrough
     return cl;
@@ -644,6 +660,9 @@ static void print_help() {
         "                       reaches 'ready' in N ms (default 60000; 0=off)\n"
         "  --heartbeat-stale-ms=N  serve-time wedge budget: respawn if the backend\n"
         "                       heartbeat stalls N ms while listening (default 15000; 0=off)\n"
+        "  --watchdog-ms=N      per-inspect budget armed in the backend: catch a\n"
+        "                       dispatch worker wedged in a plugin (the heartbeat\n"
+        "                       can't) and respawn (default 60000; 0=off)\n"
         "  --be-arg=ARG         extra arg appended to the backend command (repeatable)\n"
         "  --working-copy       backend edits a <project>/.xinsp_work scratch;\n"
         "                       a crash respawn resumes it (settings survive)\n"
