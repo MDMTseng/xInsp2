@@ -818,8 +818,10 @@ static bool write_toolchain_override_(const std::string& folder, const std::stri
     char* printed = yyjson_mut_write(d, YYJSON_WRITE_PRETTY, NULL);
     bool ok = false;
     if (printed) {
-        std::ofstream o(pj.string(), std::ios::binary | std::ios::trunc);
-        if (o) { o << printed << "\n"; ok = true; }
+        // Route through atomic_write: a torn write here truncates the canonical
+        // project.json (whole-project config loss). atomic_write leaves the prior
+        // file intact on any failure and only renames the complete new content.
+        if (xi::atomic_write(pj, std::string(printed) + "\n")) ok = true;
         else err = "cannot write project.json";
         free(printed);
     } else err = "failed to serialize project.json";
@@ -1572,6 +1574,17 @@ static void stop_group_pool_() {
 // Stop the pool + timer. Safe to call if nothing was spawned.
 static void stop_dispatch_pool_() {
     g_continuous = false;
+    // Wake any worker parked at a breakpoint. The breakpoint predicate is
+    // `!g_bp_paused || !g_continuous`, but g_continuous is a plain atomic — a
+    // waiter that evaluated the predicate and suspended just BEFORE this store
+    // won't be re-checked unless we notify under g_bp_mu. The lifecycle quiesce
+    // paths (reload / commit / open) clear g_bp_paused + notify g_bp_cv *before*
+    // calling stop_dispatch_pool_, i.e. before g_continuous flips — so without
+    // this, a worker that arms its breakpoint in that window parks forever and
+    // stop_group_pool_'s join() hangs the backend. Centralize the wake here, so
+    // it always follows the g_continuous=false store regardless of caller order.
+    { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
+    g_bp_cv.notify_all();
     // Wake the lane workers + any producer (incl. the timer) parked in a lane's
     // overflow:block BEFORE joining the timer, or the join deadlocks. Also wake
     // anyone parked in a per-lane EmitTurn (ordered mode).
@@ -2971,10 +2984,16 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // mirror (add/overwrite/delete) on the scratch that continuous workers
         // are concurrently reading/writing.
         (void)quiesce_dispatch_for_lifecycle_op_("commit_working_copy");
+        std::string save_fail;
         for (auto& [iname, _] : g_plugin_mgr.project().instances) {
-            g_plugin_mgr.save_instance(iname);
+            if (!g_plugin_mgr.save_instance(iname)) save_fail = iname;
         }
-        if (g_plugin_mgr.commit_working_copy()) {
+        if (!save_fail.empty()) {
+            // An instance config couldn't reach disk (disk full / read-only) — the
+            // scratch we're about to commit is itself stale, so don't claim success.
+            send_rsp_err(srv, id, "failed to persist instance '" + save_fail +
+                         "' before commit (disk full / read-only?)");
+        } else if (g_plugin_mgr.commit_working_copy()) {
             send_rsp_ok(srv, id, "{\"committed\":true,\"canonical\":" +
                         ([]{ std::string s; xp::json_escape_into(s, g_plugin_mgr.canonical_path()); return s; }()) + "}");
         } else {
@@ -3911,7 +3930,12 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (!wd_any_overran(now_ms())) continue;
 
-            // Phase 1: cooperative cancel + grace.
+            // Phase 1: cooperative cancel + grace. Log the attempt so the
+            // escalation is observable (and a hard trip can be proven to have
+            // tried the soft cancel first, not jumped straight to the kill).
+            std::fprintf(stderr,
+                "[xinsp2] watchdog: inspect overran %dms — requesting cooperative cancel\n",
+                g_watchdog_ms.load());
             {
                 std::lock_guard<std::mutex> lk(g_script_mu);
                 if (g_script.set_global_cancel) g_script.set_global_cancel(1);

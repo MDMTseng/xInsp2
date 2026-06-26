@@ -45,10 +45,15 @@ inline bool is_excluded(const std::filesystem::path& rel) {
 
 // Recursively copy `src` -> `dst`, skipping is_excluded paths. Used to seed a
 // fresh working copy from the canonical project.
-inline void copy_tree_excluding(const std::filesystem::path& src,
+// Returns false if any directory-create or file-copy failed: a swallowed error
+// here (disk full, read-only dest, a locked file) would leave a torn tree while
+// the caller reports success — see commit_working_copy.
+inline bool copy_tree_excluding(const std::filesystem::path& src,
                                 const std::filesystem::path& dst) {
     std::error_code ec;
+    bool ok = true;
     std::filesystem::create_directories(dst, ec);
+    if (ec) ok = false;
     for (auto it = std::filesystem::recursive_directory_iterator(
              src, std::filesystem::directory_options::skip_permission_denied, ec);
          !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
@@ -56,14 +61,21 @@ inline void copy_tree_excluding(const std::filesystem::path& src,
         if (ec || rel.empty()) continue;
         if (is_excluded(rel)) { if (it->is_directory()) it.disable_recursion_pending(); continue; }
         auto target = dst / rel;
+        std::error_code op;
         if (it->is_directory()) {
-            std::filesystem::create_directories(target, ec);
+            std::filesystem::create_directories(target, op);
         } else {
-            std::filesystem::create_directories(target.parent_path(), ec);
+            std::filesystem::create_directories(target.parent_path(), op);
+            if (op) { ok = false; continue; }
             std::filesystem::copy_file(it->path(), target,
-                std::filesystem::copy_options::overwrite_existing, ec);
+                std::filesystem::copy_options::overwrite_existing, op);
         }
+        if (op) ok = false;
     }
+    // A failure during iteration itself (not skip_permission_denied) is also a
+    // torn copy — surface it.
+    if (ec) ok = false;
+    return ok;
 }
 
 // Mirror `src` (working copy) onto `dst` (canonical): copy/overwrite every
@@ -71,10 +83,13 @@ inline void copy_tree_excluding(const std::filesystem::path& src,
 // (e.g. a deleted instance) propagate. Excluded paths are left untouched on
 // both sides (the canonical .git stays; build/ is regenerated). Idempotent, so
 // a crash-interrupted commit can be rolled forward by re-running it.
-inline void mirror_tree(const std::filesystem::path& src,
+// Returns false if the add/overwrite copy or any prune-removal failed — the
+// caller must then leave the commit marker in place so the next open rolls the
+// (still-intact) scratch forward, and report the failure rather than success.
+inline bool mirror_tree(const std::filesystem::path& src,
                         const std::filesystem::path& dst) {
     std::error_code ec;
-    copy_tree_excluding(src, dst);   // adds + overwrites
+    bool ok = copy_tree_excluding(src, dst);   // adds + overwrites
     // Prune: remove dst entries with no src counterpart.
     std::vector<std::filesystem::path> to_remove;
     for (auto it = std::filesystem::recursive_directory_iterator(
@@ -85,7 +100,12 @@ inline void mirror_tree(const std::filesystem::path& src,
         if (is_excluded(rel)) { if (it->is_directory()) it.disable_recursion_pending(); continue; }
         if (!std::filesystem::exists(src / rel)) to_remove.push_back(it->path());
     }
-    for (auto& p : to_remove) std::filesystem::remove_all(p, ec);
+    for (auto& p : to_remove) {
+        std::error_code rm;
+        std::filesystem::remove_all(p, rm);
+        if (rm) ok = false;
+    }
+    return ok;
 }
 
 // Append `line` to <dir>/.gitignore if not already present (so the scratch dir

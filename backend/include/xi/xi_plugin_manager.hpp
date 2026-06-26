@@ -1171,7 +1171,15 @@ public:
             std::fprintf(stderr, "[xinsp2] working copy: commit-marker write failed — aborting commit\n");
             return false;
         }
-        xi::wc::mirror_tree(project_.folder_path, canonical_path_);
+        // If the mirror hit a disk error (full disk, read-only canonical, a locked
+        // destination file), the canonical tree is torn. Do NOT remove the marker:
+        // leaving it makes the next open_project roll the (intact) scratch forward
+        // and heal the canonical. Report failure rather than a false "committed".
+        if (!xi::wc::mirror_tree(project_.folder_path, canonical_path_)) {
+            std::fprintf(stderr, "[xinsp2] working copy: commit mirror FAILED (disk error?) "
+                         "— marker kept for roll-forward on next open\n");
+            return false;
+        }
         std::filesystem::remove(marker, ec);   // commit complete -> clear journal
         std::fprintf(stderr, "[xinsp2] working copy: committed to %s\n",
                      canonical_path_.c_str());
@@ -1802,12 +1810,12 @@ public:
     }
 
     // Save an instance's current config to its folder.
+    // Returns false if the instance is unknown OR its on-disk write failed.
     bool save_instance(const std::string& instance_name) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = project_.instances.find(instance_name);
         if (it == project_.instances.end()) return false;
-        save_instance_json(it->second);
-        return true;
+        return save_instance_json(it->second);
     }
 
     // Remove an instance: destroys the runtime object + unregisters from
@@ -2009,7 +2017,12 @@ private:
     // to xi_pm_parse.hpp; validate_config_against_manifest to xi_config_validate.hpp
     // (leaf; both included above). Called unqualified -> resolve in namespace xi.
 
-    void save_project_locked() {
+    // Returns false if the on-disk write failed (disk full / read-only). The
+    // in-memory project is unchanged and atomic_write left the prior file intact
+    // — so this is a stale-disk signal, not corruption — but callers on the
+    // explicit-save path surface it so the user isn't told a save succeeded when
+    // it didn't reach disk.
+    bool save_project_locked() {
         auto pj = std::filesystem::path(project_.folder_path) / "project.json";
         std::string out = "{\n";
         out += "  \"name\": "; pm_json_escape(out, project_.name); out += ",\n";
@@ -2112,11 +2125,13 @@ private:
                 "[xinsp2] save_project_locked: atomic_write failed for %s "
                 "(disk full / read-only?). Project state on disk may be stale.\n",
                 pj.string().c_str());
+            return false;
         }
+        return true;
     }
 
 
-    void save_instance_json(const InstanceInfo& ii) {
+    bool save_instance_json(const InstanceInfo& ii) {
         auto path = std::filesystem::path(ii.folder_path) / "instance.json";
         std::string out = "{\n";
         out += "  \"plugin\": "; pm_json_escape(out, ii.plugin_name); out += ",\n";
@@ -2139,7 +2154,9 @@ private:
                 "[xinsp2] save_instance_json: atomic_write failed for %s "
                 "(disk full / read-only?). Instance config on disk may be stale.\n",
                 path.string().c_str());
+            return false;
         }
+        return true;
     }
 };
 

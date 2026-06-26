@@ -83,7 +83,12 @@ check(winner !== 'timeout', 'backend exited on its own (did not hang)');
 check(exitCode === WATCHDOG_EXIT_CODE,
       `backend exited with watchdog code 0x${WATCHDOG_EXIT_CODE.toString(16)} (got ${exitCode})`);
 check(/watchdog HARD trip/.test(beErr), 'backend logged the hard trip');
-check(/cooperative cancel/.test(beErr) || true, 'cooperative cancel attempted first');
+// The watchdog must attempt a cooperative cancel BEFORE it hard-trips — a
+// backend that jumps straight to the hard trip (skipping the soft-cancel
+// escalation) is a regression. `|| true` here previously made this a no-op.
+check(/cooperative cancel/.test(beErr), 'cooperative cancel attempted first');
+check(beErr.indexOf('cooperative cancel') < beErr.indexOf('watchdog HARD trip'),
+      'cooperative cancel logged before the hard trip');
 
 try { ws.close(); } catch {}
 try { backend.kill(); } catch {}

@@ -9,7 +9,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import WebSocket from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -114,14 +114,28 @@ test('create_instance rejects path-escaping names (no filesystem escape)', async
         c.send({ type: 'cmd', id: 1, name: 'open_project', args: { folder: proj } });
         assert.equal((await c.nextRsp()).ok, true);
 
-        // Names that would escape <project>/instances/ must be refused.
+        // Names that would escape <project>/instances/ must be refused — with a
+        // diagnostic reason, and with nothing written outside the project.
         for (const bad of ['../evil', '..\\evil', 'a/b', 'C:/Windows/Temp/x', 'x..y']) {
             c.send({ type: 'cmd', id: 2, name: 'create_instance', args: { name: bad, plugin: 'mock_camera' } });
             const r = await c.nextRsp();
             assert.equal(r.ok, false, `name ${JSON.stringify(bad)} must be rejected`);
+            assert.match(r.error || '', /invalid instance name/i, `reason for ${JSON.stringify(bad)}`);
         }
+        // Nothing escaped to the parent of the project dir.
+        assert.ok(!existsSync(join(proj, '..', 'evil')), 'no dir escaped above the project');
         // A clean name still works.
         c.send({ type: 'cmd', id: 3, name: 'create_instance', args: { name: 'cam_0', plugin: 'mock_camera' } });
         assert.equal((await c.nextRsp()).ok, true, 'valid name accepted');
+
+        // rename_instance must validate the NEW name too (same path-escape guard).
+        c.send({ type: 'cmd', id: 4, name: 'rename_instance', args: { name: 'cam_0', new_name: '../evil' } });
+        const rr = await c.nextRsp();
+        assert.equal(rr.ok, false, 'rename to a path-escaping name rejected');
+        assert.ok(!existsSync(join(proj, '..', 'evil')), 'rename did not escape above the project');
+        // The original instance is untouched after a rejected rename.
+        c.send({ type: 'cmd', id: 5, name: 'get_project' });
+        const proj2 = await c.nextRsp();
+        assert.ok(JSON.stringify(proj2).includes('cam_0'), 'cam_0 survived the rejected rename');
     });
 });
