@@ -58,6 +58,11 @@ export function mountMonitor(host, { client, items, columns = 3 }) {
     byKey.set(it.key, { type: it.type, el });
   }
 
+  // Subscribe to the image tiles we render so the backend actually encodes +
+  // streams them (it sends nothing unsubscribed); released in destroy().
+  const imageKeys = items.filter((it) => it.type === "image").map((it) => it.key);
+  for (const k of imageKeys) client.subscribeImage?.(k);
+
   const onVars = (v) => {
     const map = v.items || {};
     canonViewers.clear();
@@ -89,7 +94,11 @@ export function mountMonitor(host, { client, items, columns = 3 }) {
   const offVars = client.onVars(onVars);
   const offPreview = client.onPreview(onPreview);
 
-  return { destroy() { offVars(); offPreview(); host.innerHTML = ""; } };
+  return { destroy() {
+    offVars(); offPreview();
+    for (const k of imageKeys) client.unsubscribeImage?.(k);
+    host.innerHTML = "";
+  } };
 }
 
 function fmtValue(v) {

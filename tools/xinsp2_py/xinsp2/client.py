@@ -180,6 +180,12 @@ class Client:
         ev = self._inbox_events.get(timeout=self.timeout)
         if ev.get("name") != "hello":
             raise ProtocolError(f"expected hello event, got {ev}")
+        # Previews are off by default (the backend streams images only to
+        # subscribers). This is a headless dump client, so opt into all.
+        try:
+            self.call("subscribe", {"all": True}, timeout=self.timeout)
+        except Exception:
+            pass
         return ev.get("data", {})
 
     def close(self):
@@ -533,8 +539,11 @@ class Client:
         if vars_msg.get("run_id") != run_id:
             raise ProtocolError(f"vars run_id {vars_msg.get('run_id')} != {run_id}")
 
-        # collect previews — one per image item
-        wanted_gids = {it["gid"] for it in vars_msg["items"] if it["kind"] == "image"}
+        # collect previews — one per DISTINCT image. Images sharing a buffer
+        # report a common canonical "src" gid and the backend sends a single
+        # frame under it, so wait for the canon gids, not every var's gid.
+        wanted_gids = {it.get("src", it["gid"])
+                       for it in vars_msg["items"] if it["kind"] == "image"}
         previews: dict[int, PreviewFrame] = {}
         deadline = (timeout or self.timeout)
         while wanted_gids:

@@ -57,6 +57,10 @@ test('compile + run emits JPEG preview for image variables', async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello
 
+        // Previews are off by default now — opt into all for the headless check.
+        c.send({ type: 'cmd', id: 9, name: 'subscribe', args: { all: true } });
+        await c.nextNonLog();
+
         c.send({ type: 'cmd', id: 1, name: 'compile_and_load', args: { path: scriptPath } });
         const cr = await c.nextNonLog();
         assert.equal(cr.ok, true, 'compile ok');
@@ -101,6 +105,8 @@ void xi_inspect_entry(int frame) {
 `);
     await withBackend(async (c) => {
         await c.nextText(); // hello
+        c.send({ type: 'cmd', id: 9, name: 'subscribe', args: { all: true } });
+        await c.nextNonLog();
         c.send({ type: 'cmd', id: 1, name: 'compile_and_load', args: { path: sp } });
         assert.equal((await c.nextNonLog()).ok, true, 'compile ok');
 
@@ -125,5 +131,38 @@ void xi_inspect_entry(int frame) {
             catch { break; }
         }
         assert.equal(frames, 1, `expected 1 deduped preview frame, got ${frames}`);
+    });
+});
+
+// Default is send-none: with no subscription, a run emits vars but NO image
+// preview bytes (encode + transmit only happen for a watched name).
+test('no subscription → vars arrive but zero preview frames', async () => {
+    await withBackend(async (c) => {
+        await c.nextText(); // hello — note: NO subscribe
+
+        c.send({ type: 'cmd', id: 1, name: 'compile_and_load', args: { path: scriptPath } });
+        assert.equal((await c.nextNonLog()).ok, true, 'compile ok');
+
+        c.send({ type: 'cmd', id: 2, name: 'run' });
+        assert.equal((await c.nextNonLog()).ok, true);
+
+        const vars = await c.nextNonLog();
+        assert.equal(vars.type, 'vars');
+        const imgName = (vars.items.find(i => i.kind === 'image') || {}).name;
+        assert.ok(imgName, 'vars still carry image items');
+
+        // No binary preview frame should arrive. (Check the queue directly rather
+        // than awaiting nextBinary — a timed-out waiter would swallow a later frame.)
+        await sleep(2000);
+        assert.equal(c.binaryQueue.length, 0, 'expected zero preview frames without a subscription');
+
+        // After subscribing by name, the next run sends exactly that image.
+        c.send({ type: 'cmd', id: 3, name: 'subscribe', args: { names: [imgName] } });
+        await c.nextNonLog();
+        c.send({ type: 'cmd', id: 4, name: 'run' });
+        await c.nextNonLog();          // run rsp
+        await c.nextNonLog();          // vars
+        const frame = await c.nextBinary(5000);
+        assert.ok(frame.length > 20, `subscribed name "${imgName}" now streams a preview`);
     });
 });

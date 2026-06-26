@@ -10,6 +10,12 @@ export class ViewerProvider implements vscode.WebviewViewProvider {
     // shift-click / double-click into the rich Image Viewer panel.
     public readonly onMessage = new vscode.EventEmitter<any>();
 
+    // Fires when the viewer's visibility changes (shown/hidden). The extension
+    // uses this to subscribe to image previews only while the viewer is open —
+    // the backend streams nothing unsubscribed.
+    public readonly onDidChangeVisibility = new vscode.EventEmitter<boolean>();
+    get visible(): boolean { return !!this.view?.visible; }
+
     // Last vars seen, kept so a viewer opened AFTER a run still shows the data
     // (the webview asks for state with a 'ready' message when it loads).
     private lastVars?: unknown;
@@ -37,6 +43,7 @@ export class ViewerProvider implements vscode.WebviewViewProvider {
             }
             this.onMessage.fire(m);
         });
+        webviewView.onDidChangeVisibility(() => this.onDidChangeVisibility.fire(webviewView.visible));
     }
 
     postVars(vars: unknown): void {

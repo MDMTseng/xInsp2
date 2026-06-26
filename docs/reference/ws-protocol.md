@@ -750,26 +750,32 @@ is auto-released when the worker is joined for `cmd: stop` /
 
 ### `subscribe` / `unsubscribe`
 
-Controls which VAR-image previews are JPEG-encoded and streamed as
-binary frames after each `run`. Defaults to "send everything"
-(back-compat); set an explicit list to avoid wasting CPU + bandwidth on
-images the viewer isn't showing.
+Controls which VAR-image previews are JPEG-encoded and streamed as binary frames
+after each `run`. **Default: send nothing.** An image is encoded + transmitted
+only while a client has subscribed to its name — the encode is the expensive part,
+so an unwatched image costs zero. A viewer subscribes when it opens an image view
+and unsubscribes when it closes; the `vars` text (scalars / metadata, including the
+`image` items' `gid`/`src`) is always sent regardless.
 
-- `cmd: subscribe`  `args: { "names": ["gray", "edges"] }` — stream
-  preview frames only for vars in the list. Repeatable; each call
-  REPLACES the list. Pass `{ "all": true }` to re-enable send-all. Reply: `data: { "all": bool, "count": int }`.
-- `cmd: unsubscribe` — empty the list. No `preview` binary frames emitted
-  after subsequent runs until `subscribe` is called again. `vars`
-  (metadata) is still sent either way.
+- `cmd: subscribe`  `args: { "names": ["gray", "edges"] }` — stream preview frames
+  only for vars in the list. Repeatable; each call REPLACES the list (so a client
+  ref-counts viewers and sends the union). `args: { "names": [] }` ⇒ send nothing.
+  Pass `{ "all": true }` to send every image (debug / headless dump). Reply:
+  `data: { "all": bool, "count": int }`.
+- `cmd: unsubscribe` — same as `subscribe {names: []}`: stop all preview frames.
+
+The subscription is **sticky across `compile_and_load`** (a viewer open over a
+recompile keeps receiving its image; names the new DLL doesn't expose are inert),
+and **cleared on a fresh connection** (a new client starts with send-nothing).
 
 Example:
 ```json
 { "type": "cmd", "id": 5, "name": "subscribe", "args": { "names": ["gray"] } }
 ```
 
-Large-image inspections (20 MP frames at ~1 MB JPEG each) benefit
-significantly — a 5-var pipeline with a 1-var subscription uses
-~80% less upstream bandwidth.
+Large-image inspections (20 MP frames at ~1 MB JPEG each) benefit most — with no
+viewer open, a pipeline encodes and sends **zero** image bytes; with one image
+shown, only that one is encoded.
 
 ---
 

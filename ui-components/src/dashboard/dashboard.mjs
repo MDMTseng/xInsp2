@@ -70,10 +70,29 @@ export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
     return box;
   }
 
+  // Image cards only render once the backend streams their preview, and the
+  // backend streams nothing unsubscribed. So subscribe to the var of every image
+  // card in the current layout; re-diffed whenever the layout changes.
+  let imgSubs = [];
+  function collectImageVars(node, out) {
+    if (!node) return out;
+    if (isLeaf(node)) { const c = node.card; if (c && c.type === "image" && c.bind && c.bind.var) out.push(c.bind.var); }
+    else if (isTabs(node)) (node.tabs || []).forEach((t) => collectImageVars(t.child || t, out));
+    else if (isSplit(node)) (node.children || []).forEach((c) => collectImageVars(c, out));
+    return out;
+  }
+  function updateImageSubs() {
+    const next = collectImageVars(dashboard && dashboard.layout, []);
+    for (const v of imgSubs) client.unsubscribeImage?.(v);
+    for (const v of next) client.subscribeImage?.(v);
+    imgSubs = next;
+  }
+
   function render() {
     cards = [];
     host.replaceChildren();
     host.style.cssText += ";display:flex;min-width:0;min-height:0";
+    updateImageSubs();
     const lay = dashboard && dashboard.layout;
     if (!lay) return;
     const el = renderNode(lay); el.style.flex = "1 1 0"; el.style.minWidth = "0"; el.style.minHeight = "0";
@@ -117,6 +136,11 @@ export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
   return {
     setDashboard(d) { dashboard = d; render(); },
     state,
-    destroy() { offs.forEach((off) => off()); clearInterval(statsTimer); host.replaceChildren(); },
+    destroy() {
+      offs.forEach((off) => off());
+      for (const v of imgSubs) client.unsubscribeImage?.(v);
+      imgSubs = [];
+      clearInterval(statsTimer); host.replaceChildren();
+    },
   };
 }

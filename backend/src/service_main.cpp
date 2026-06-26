@@ -325,13 +325,15 @@ static bool wd_any_overran(int64_t now_ms) {
     return false;
 }
 
-// Preview subscription (S1). Default: send every image VAR's JPEG after
-// a run (back-compat). Client sets a name allow-list via cmd:subscribe
-// to cut bandwidth for vars nobody is watching. Held under g_sub_mu so
-// the WS thread (who mutates it) and the run dispatch thread (who reads)
-// stay consistent.
+// Preview subscription. **Default: send NOTHING** — an image VAR is JPEG-encoded
+// and streamed only while some viewer is actually showing it (the client sends a
+// name allow-list via cmd:subscribe when it opens an image view, and unsubscribes
+// when it closes). No subscriber ⇒ no dump, no encode, no transmit — the encode
+// is the expensive part, so an unwatched image costs nothing. `subscribe {all:true}`
+// restores send-everything (debug / headless dump). Held under g_sub_mu so the WS
+// thread (who mutates it) and the run dispatch thread (who reads) stay consistent.
 static std::mutex                    g_sub_mu;
-static bool                          g_sub_all = true;
+static bool                          g_sub_all = false;
 static std::unordered_set<std::string> g_sub_names;
 
 // History ring (S4). After every run we stash {run_id, ts_ms, vars_json}
@@ -1748,21 +1750,26 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                        + R"(","abi":1})";
         send_rsp_ok(srv, id, vd);
     } else if (name == "subscribe") {
-        // args: { names: [...] } OR { all: true }
-        bool want_all = parsed->args_json.find("\"all\":true") != std::string::npos;
+        // args: { names: [...] } OR { all: true }. Parse with yyjson — a substring
+        // check on "\"all\":true" is whitespace-sensitive and breaks for clients
+        // (e.g. Python's json.dumps) that emit `"all": true` with a space.
+        bool want_all = false;
         std::unordered_set<std::string> names;
-        if (!want_all) {
-            // Parse the names array. yyjson is simpler than hand-rolled here.
+        {
             yyjson_doc* doc = yyjson_read(parsed->args_json.c_str(),
                                           parsed->args_json.size(), 0);
             if (doc) {
                 yyjson_val* root = yyjson_doc_get_root(doc);
-                yyjson_val* arr = yyjson_obj_get(root, "names");
-                if (yyjson_is_arr(arr)) {
-                    size_t _i, _n; yyjson_val* it;
-                    yyjson_arr_foreach(arr, _i, _n, it) {
-                        const char* s = yyjson_get_str(it);
-                        if (yyjson_is_str(it) && s) names.insert(s);
+                yyjson_val* allv = yyjson_obj_get(root, "all");
+                if (yyjson_is_bool(allv)) want_all = yyjson_get_bool(allv);
+                if (!want_all) {
+                    yyjson_val* arr = yyjson_obj_get(root, "names");
+                    if (yyjson_is_arr(arr)) {
+                        size_t _i, _n; yyjson_val* it;
+                        yyjson_arr_foreach(arr, _i, _n, it) {
+                            const char* s = yyjson_get_str(it);
+                            if (yyjson_is_str(it) && s) names.insert(s);
+                        }
                     }
                 }
                 yyjson_doc_free(doc);
@@ -2167,14 +2174,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // does the owner-sweep + FreeLibrary once any in-flight inspect that
             // snapshotted it returns.
             g_script = std::move(next);
-            // Reset cross-script transient state — the new DLL may expose a
-            // different VAR set, so old subscription names and historical run
-            // snapshots no longer match cleanly. (Only after a successful swap.)
-            {
-                std::lock_guard<std::mutex> sl(g_sub_mu);
-                g_sub_all = true;
-                g_sub_names.clear();
-            }
+            // Reset cross-script transient state. Historical run snapshots no
+            // longer match the new VAR set, so drop them. **Keep the preview
+            // subscription** though — a viewer that's open across a recompile
+            // stays subscribed to its image name, so it keeps receiving previews
+            // without re-subscribing (stale names that the new DLL doesn't expose
+            // are simply inert — they match no var). (Only after a successful swap.)
             {
                 std::lock_guard<std::mutex> hl(g_hist_mu);
                 g_history.clear();
@@ -3819,7 +3824,7 @@ int main(int argc, char** argv) {
         // and at best confuses, at worst hides regressions.
         {
             std::lock_guard<std::mutex> lk(g_sub_mu);
-            g_sub_all = true;
+            g_sub_all = false;   // fresh client gets send-none until it subscribes
             g_sub_names.clear();
         }
         {

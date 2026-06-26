@@ -982,6 +982,22 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Viewer webview (side panel)
     const viewerProvider = new ViewerProvider(context.extensionUri);
+
+    // Preview subscription: the backend sends no image preview unless subscribed,
+    // so subscribe to the viewer's image vars only while the viewer is visible
+    // and unsubscribe when it's hidden. Re-asserted after each vars message and on
+    // visibility change; we dedupe so we only hit the wire when the set changes.
+    let latestImageNames: string[] = [];
+    let sentImageSubs = ' ';   // serialized last-sent set; sentinel = never sent
+    const reconcileImageSubs = () => {
+        const names = viewerProvider.visible ? latestImageNames : [];
+        const key = names.slice().sort().join('\n');
+        if (key === sentImageSubs) return;
+        sentImageSubs = key;
+        if (client?.connected) sendCmd('subscribe', { names }).catch(() => {});
+    };
+    context.subscriptions.push(viewerProvider.onDidChangeVisibility.event(() => reconcileImageSubs()));
+
     // Thumbnail shift-click / double-click in the Viewer panel pops the
     // rich image viewer (pan + cursor-anchored zoom + pick tools).
     context.subscriptions.push(viewerProvider.onMessage.event(async (m: any) => {
@@ -1018,6 +1034,9 @@ export function activate(context: vscode.ExtensionContext) {
         setCtx('connected', true);
         updateHealthStatus(true);
         lastConnected = true;
+        // Fresh connection ⇒ backend forgot our preview subscription; re-assert.
+        sentImageSubs = ' ';
+        reconcileImageSubs();
         setViewBadge(true, lastInstanceCount, lastPluginCount);
         // Pull the plugin list as soon as we're up (feeds the Plugin Browser).
         sendCmd('list_plugins').then((r: any) => {
@@ -1152,6 +1171,12 @@ export function activate(context: vscode.ExtensionContext) {
             }
         } else if (msg.type === 'vars') {
             viewerProvider.postVars(msg);
+            // Track the image var names so we can subscribe to exactly what the
+            // viewer shows (the backend streams no preview unsubscribed).
+            latestImageNames = (msg.items ?? [])
+                .filter((it: any) => it && it.kind === 'image' && typeof it.name === 'string')
+                .map((it: any) => it.name);
+            reconcileImageSubs();
         } else if (msg.type === 'instances') {
             treeProvider.update(msg.instances ?? [], msg.params ?? []);
             // Keep the name->plugin map + script highlighting in sync.

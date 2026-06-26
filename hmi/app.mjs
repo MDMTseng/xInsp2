@@ -212,11 +212,29 @@ function renderNode(node, path = []) {
   return box;
 }
 
+// Preview subscription. The backend streams nothing unsubscribed, so subscribe
+// to the var of every image card in the current layout (re-diffed on layout
+// change, re-asserted on reconnect).
+let activeWs = null, subId = 900000, imgSubs = [];
+function collectImageVars(node, out = []) {
+  if (!node) return out;
+  if (isLeaf(node)) { const c = node.card; if (c && c.type === "image" && c.bind && c.bind.var) out.push(c.bind.var); }
+  else if (isTabs(node)) (node.tabs || []).forEach((t) => collectImageVars(t.child || t, out));
+  else if (isSplit(node)) (node.children || []).forEach((c) => collectImageVars(c, out));
+  return out;
+}
+function pushImageSubs() {
+  if (activeWs && activeWs.readyState === 1)
+    activeWs.send(JSON.stringify({ type: "cmd", id: ++subId, name: "subscribe", args: { names: imgSubs } }));
+}
+function updateImageSubs() { imgSubs = collectImageVars(layout, []); pushImageSubs(); }
+
 function reRender() {
   const root = document.getElementById("grid");
   root.style.cssText += ";display:flex;min-width:0;min-height:0";
   cards = [];
   root.replaceChildren();
+  updateImageSubs();
   if (!layout) return;
   const problems = validate(layout);
   document.getElementById("err").textContent = problems.length ? problems.join("; ") : "";
@@ -271,6 +289,7 @@ function connect() {
   try { ws = new WebSocket(WS_URL); }
   catch (e) { dlog(`WS constructor threw: ${e}`); setConn("● bad url", "#6a1e1e"); return; }
   ws.binaryType = "arraybuffer";
+  activeWs = ws;
   // Poll dispatch_stats so the groups card can show live per-group concurrency.
   // Cheap, so just poll whenever connected (the rsp is ignored if no groups card).
   let statsTimer = 0, cmdId = 1, dashCmdId = -1;
@@ -286,7 +305,7 @@ function connect() {
     dashCmdId = ++cmdId;
     ws.send(JSON.stringify({ type: "cmd", id: dashCmdId, name: "get_dashboard", args: BOARD ? { name: BOARD } : {} }));
   };
-  ws.onopen = () => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); };
+  ws.onopen = () => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); pushImageSubs(); };
   ws.onclose = (e) => { dlog(`WS CLOSE code=${e.code} reason=${e.reason || "-"} clean=${e.wasClean}`); if (statsTimer) { clearInterval(statsTimer); statsTimer = 0; } setConn("● disconnected", "#6a1e1e"); setTimeout(connect, 1500); };
   ws.onerror = () => { dlog("WS ERROR event"); ws.close(); };
   ws.onmessage = (ev) => {

@@ -98,7 +98,17 @@ import { XiClient } from "./xi-components.esm.js";
 const client = await new XiClient("ws://127.0.0.1:7823/").connect({ checkVersion: /\d+\.\d+\.\d+/ });
 slider.addEventListener("change", (e) => client.setInstanceDef("inst0", { threshold: e.detail.value }));
 client.onPreview((f) => viewer.setFrame(f.image || f.dataUrl));
+client.subscribeImage("gray");   // ← REQUIRED: the backend sends no image until subscribed
+// ...and when the view closes: client.unsubscribeImage("gray");
 ```
+
+> **You must subscribe to receive previews.** The backend streams an image only
+> while someone is viewing it (it encodes nothing otherwise — see
+> [`../reference/ws-protocol.md`](../reference/ws-protocol.md) → `subscribe`).
+> `client.subscribeImage(name)` / `unsubscribeImage(name)` are ref-counted and
+> re-asserted on reconnect; call them as your image view mounts / unmounts. The
+> built-in `mountDashboard` / status `monitor` do this automatically for their
+> image cards — you only wire it by hand in a bespoke layout.
 
 > **Decode once when an image is shown in several places.** `XiClient` decodes
 > each preview frame once into a shared `f.image` (a GC-managed `HTMLImageElement`)

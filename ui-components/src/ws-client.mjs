@@ -29,6 +29,30 @@ export class XiClient {
       vars: new Set(), instances: new Set(), log: new Set(),
       event: new Set(), preview: new Set(), hello: new Set(),
     };
+    this._imgSubs = new Map();           // var name -> open-viewer count
+  }
+
+  // --- preview subscription (ref-counted) ---------------------------------
+  // The backend sends NO image previews by default — encode + transmit only
+  // happens for names someone is actually viewing. A component calls
+  // subscribeImage(name) when it shows an image and unsubscribeImage(name) when
+  // it hides/unmounts; we ref-count so M viewers of one name → one subscription,
+  // and push the union to the backend. Re-asserted on (re)connect.
+  subscribeImage(name) {
+    if (!name) return;
+    const n = (this._imgSubs.get(name) || 0) + 1;
+    this._imgSubs.set(name, n);
+    if (n === 1) this._pushImageSubs();
+  }
+  unsubscribeImage(name) {
+    if (!name) return;
+    const n = (this._imgSubs.get(name) || 0) - 1;
+    if (n <= 0) { if (this._imgSubs.delete(name)) this._pushImageSubs(); }
+    else this._imgSubs.set(name, n);
+  }
+  _pushImageSubs() {
+    if (!this.ws || this.ws.readyState !== 1) return;   // re-asserted on connect
+    this.cmd("subscribe", { names: [...this._imgSubs.keys()] }).catch(() => {});
   }
 
   // Open the socket; resolves once it's open. If opts.checkVersion is set, also
@@ -59,6 +83,9 @@ export class XiClient {
               : (opts.checkVersion instanceof RegExp ? opts.checkVersion.test(v) : v === opts.checkVersion);
             if (!ok) { reject(new Error(`backend version mismatch: got ${v}`)); ws.close(); return; }
           }
+          // Re-assert any standing image subscriptions (the backend defaults to
+          // send-none and clears subs for a fresh connection).
+          if (this._imgSubs.size) this._pushImageSubs();
           resolve(this);
         } catch (e) { reject(e); }
       };

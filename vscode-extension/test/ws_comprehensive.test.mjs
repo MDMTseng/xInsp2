@@ -356,6 +356,9 @@ test('get_project returns current state', async () => {
 test('run produces valid JPEG binary preview frames', async () => {
     await withBackend(async (c) => {
         await c.nextText();
+        // Previews are off by default — opt into all for this headless check.
+        c.send({ type: 'cmd', id: 9, name: 'subscribe', args: { all: true } });
+        await c.nextNonLog();
         const cr = await compileScript(c, scriptPath('defect_detection.cpp'));
         assert.equal(cr.ok, true);
 
