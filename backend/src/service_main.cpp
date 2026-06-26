@@ -42,6 +42,7 @@
 #include <xi/xi_plugin_manager.hpp>
 #include <xi/xi_project.hpp>
 #include <xi/xi_trigger_bus.hpp>
+#include <xi/xi_inflight_runs.hpp>   // xi::InflightRuns (detached-run lifetime owner)
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_ws_server.hpp>
@@ -274,14 +275,11 @@ struct EmitTurn {
 // one is currently inside run_one_inspection — only one at a time.
 static std::mutex              g_run_mu;
 
-// Count of detached cmd:run / one-shot inspect threads that have been launched
-// but may not yet hold g_run_mu. Teardown waits on THIS (not just a g_run_mu
-// acquire/release) because a thread that's been detached but hasn't taken the
-// lock yet would slip past the lock and then touch the about-to-be-destroyed
-// srv. Each launch site increments BEFORE detaching and the thread decrements
-// when it finishes; g_shutting_down makes a launch racing teardown bail instead.
-static std::atomic<int>        g_inflight_runs{0};
-static std::atomic<bool>       g_shutting_down{false};
+// Structural owner for the detached cmd:run / one-shot inspect threads — owns the
+// bump-before-detach + bail-if-shutting-down + drain-on-teardown protocol that was
+// the shutdown-window UAF class when hand-copied at every site. Defined + unit-
+// tested in xi_inflight_runs.hpp.
+static xi::InflightRuns g_inflight;
 
 // Crash breadcrumb model + minidump machinery moved to xi_crash_dump.hpp
 // (xi::crash::). These thin forwarders keep the dispatch hot-path call sites
@@ -1616,33 +1614,20 @@ static void stop_dispatch_pool_() {
 // thread_local g_current_trigger makes this thread's inspect see this event.
 static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
     auto evp = std::make_shared<xi::TriggerEvent>(std::move(ev));
-    // Register BEFORE detaching so teardown can wait this out (the lambda runs
-    // on a source plugin's emit thread, which outlives the main-local srv). If
-    // we're already tearing down, don't launch — just release the event handles.
-    g_inflight_runs.fetch_add(1);
-    if (g_shutting_down.load()) {
-        g_inflight_runs.fetch_sub(1);
+    // The lambda runs on a source plugin's emit thread, which outlives the
+    // main-local srv — g_inflight owns the bump/bail/drain so teardown waits it
+    // out. On a bail (tearing down or thread-spawn failure) we release the event's
+    // image/meta handles ourselves.
+    bool launched = g_inflight.launch([srv, evp]() {
+        reserve_fault_stack();
+        xi::install_seh_translator();
+        std::lock_guard<std::mutex> lk(g_run_mu);
+        g_current_trigger = evp.get();
+        run_one_inspection(*srv, /*frame_hint=*/0, /*run_id=*/0, "", /*emit_seq=*/-1);
+        g_current_trigger = nullptr;
         release_trigger_event_(*evp);
-        return;
-    }
-    try {
-        std::thread([srv, evp]() {
-            struct Guard { ~Guard() { g_inflight_runs.fetch_sub(1); } } guard;
-            reserve_fault_stack();
-            xi::install_seh_translator();
-            std::lock_guard<std::mutex> lk(g_run_mu);
-            g_current_trigger = evp.get();
-            run_one_inspection(*srv, /*frame_hint=*/0, /*run_id=*/0, "", /*emit_seq=*/-1);
-            g_current_trigger = nullptr;
-            release_trigger_event_(*evp);
-        }).detach();
-    } catch (const std::system_error&) {
-        // Thread creation failed (resource exhaustion). The Guard never ran, so
-        // undo the counter bump here (else teardown spins the full drain cap) and
-        // release the event's image/meta handles.
-        g_inflight_runs.fetch_sub(1);
-        release_trigger_event_(*evp);
-    }
+    });
+    if (!launched) release_trigger_event_(*evp);
 }
 
 // SINGLE SOURCE OF TRUTH for process-exit teardown. Called from BOTH the
@@ -1661,18 +1646,16 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
 // runs it again as the loop unwinds).
 static void controlled_shutdown_teardown_() {
     // Refuse NEW detached runs first, then drop the bus sink so no source emit
-    // launches another one-shot. (Both checked against g_shutting_down at the
-    // launch sites — a launch racing this either bails or is waited out below.)
-    g_shutting_down.store(true);
+    // launches another one-shot. (g_inflight.launch() checks this — a launch
+    // racing teardown either bails or is waited out by drain() below.)
+    g_inflight.begin_shutdown();
     xi::TriggerBus::instance().clear_sink();
     if (g_continuous.load()) stop_dispatch_pool_();   // joins workers + timer + drains lanes
-    // Drain in-flight detached cmd:run / one-shot threads. A bare g_run_mu
-    // acquire only waits for a thread that already HOLDS the lock; one that's
-    // detached-but-not-yet-locked would slip past and then touch the
-    // about-to-be-destroyed srv. Wait on the counter each launch site bumps
-    // before detaching. Cap the wait (~50 s) so a wedged inspect can't hang exit.
-    for (int i = 0; g_inflight_runs.load() != 0 && i < 50000; ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    // Drain in-flight detached cmd:run / one-shot threads. A bare g_run_mu acquire
+    // only waits for a thread that already HOLDS the lock; one detached-but-not-yet-
+    // locked would slip past and then touch the about-to-be-destroyed srv. drain()
+    // waits on the in-flight count (capped) instead.
+    g_inflight.drain();
     { std::lock_guard<std::mutex> rl(g_run_mu); }     // belt-and-suspenders
     xi::TriggerBus::instance().reset();               // release pending_/follower_latest_ handles
     { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
@@ -2467,15 +2450,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // contract for no real burst gain (bursts arrive via the trigger path).
         crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "run");
         crash_ctx().last_run_id = (int)run_id;
-        // Register before detaching so teardown waits this out (the detached
-        // thread dereferences the main-local srv). Bail if we're shutting down.
-        g_inflight_runs.fetch_add(1);
-        if (g_shutting_down.load()) { g_inflight_runs.fetch_sub(1); return; }
-        try {
-        std::thread([&srv, run_id,
+        // The detached thread dereferences the main-local srv, so g_inflight owns
+        // the bump/bail/drain; teardown waits it out. A launch racing shutdown (or a
+        // spawn failure) just runs nothing — there's no rsp for an async run anyway.
+        g_inflight.launch([&srv, run_id,
                      frame_path = std::move(frame_path),
                      meta_json  = std::move(meta_json)]() {
-            struct Guard { ~Guard() { g_inflight_runs.fetch_sub(1); } } guard;
             reserve_fault_stack();   // BUG 2: dump survives a script stack overflow
             xi::install_seh_translator();
             std::lock_guard<std::mutex> lk(g_run_mu);
@@ -2515,12 +2495,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 g_current_trigger = nullptr;
                 release_trigger_event_(ev);   // release frame handle(s) + meta doc
             }
-        }).detach();
-        } catch (const std::system_error&) {
-            // Thread creation failed — the Guard never runs, so release the
-            // inflight count here (else teardown spins the full drain cap).
-            g_inflight_runs.fetch_sub(1);
-        }
+        });
     } else if (name == "start") {
         // Start continuous trigger mode. The backend runs a timer thread
         // that calls inspect() at a configurable interval. The script's

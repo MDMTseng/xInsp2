@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <xi/xi.hpp>
+#include <xi/xi_inflight_runs.hpp>
 
 // Minimal test harness — each TEST() runs once; failures print and set a flag.
 static int g_failures = 0;
@@ -273,7 +274,44 @@ static void test_instance_basic() {
 
 // ---------- main ----------
 
+// ---- InflightRuns: the detached-run lifetime owner (shutdown-window UAF class) ----
+static void test_inflight_runs() {
+    SECTION("InflightRuns launch / drain / shutdown-bail");
+    xi::InflightRuns rt;
+
+    // A launched run holds the in-flight count until it returns; drain() waits it
+    // out. This is what teardown relies on so srv outlives every detached run.
+    std::atomic<bool> release{false};
+    std::atomic<int>  ran{0};
+    bool ok = rt.launch([&]{
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ran.fetch_add(1);
+    });
+    CHECK(ok);
+    // Busy-wait until the thread is actually in flight (count observed == 1).
+    for (int i = 0; rt.inflight() == 0 && i < 1000; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(rt.inflight() == 1);
+    release.store(true);
+    CHECK(rt.drain(5000));            // drains to zero within the cap
+    CHECK(rt.inflight() == 0);
+    CHECK(ran.load() == 1);
+
+    // After begin_shutdown(), launch() must BAIL (run nothing, return false) so a
+    // late source emit can't start a run against an about-to-die srv.
+    rt.begin_shutdown();
+    CHECK(rt.shutting_down());
+    std::atomic<int> ran2{0};
+    bool ok2 = rt.launch([&]{ ran2.fetch_add(1); });
+    CHECK(!ok2);                      // refused
+    CHECK(rt.inflight() == 0);        // no count leaked by the bail
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK(ran2.load() == 0);          // fn never ran
+    CHECK(rt.drain(100));             // drain is trivially satisfied
+}
+
 int main() {
+    test_inflight_runs();
     test_async_basic();
     test_async_parallel();
     test_async_exception();
