@@ -183,6 +183,34 @@ static void test_parse_edge_cases() {
     }
 }
 
+// strip_quotes must reverse every escape the writers can emit — including the
+// \uXXXX / \b / \f forms used for control chars. Decoding only the
+// \" \\ \n \r \t subset silently corrupted any name/path carrying one (a
+// control char came back as a literal "uXXXX").
+static void test_strip_quotes_unescape() {
+    SECTION("strip_quotes full unescape");
+    auto unq = [](std::string s) { detail::strip_quotes(s); return s; };
+
+    // \uXXXX in the BMP (control char + a 2-byte UTF-8 code point).
+    CHECK(unq("\"a\\u0007b\"") == std::string("a\x07" "b"));
+    CHECK(unq("\"caf\\u00e9\"") == std::string("caf\xC3\xA9"));   // café (U+00E9)
+    // \b and \f.
+    CHECK(unq("\"x\\by\\fz\"") == std::string("x\by\fz"));
+    // A surrogate pair → 4-byte UTF-8 (U+1F600 emoji).
+    CHECK(unq("\"\\ud83d\\ude00\"") == std::string("\xF0\x9F\x98\x80"));
+    // The basic escapes still work, and plain UTF-8 bytes pass through.
+    CHECK(unq("\"say \\\"hi\\\"\\n\"") == std::string("say \"hi\"\n"));
+    CHECK(unq("\"caf\xC3\xA9\"") == std::string("caf\xC3\xA9"));
+    // Malformed \u (too few hex) degrades gracefully without crashing.
+    std::string bad = "\"a\\u12\""; detail::strip_quotes(bad);
+    CHECK(bad.find('a') != std::string::npos);
+
+    // Round-trip through the matching writer: escape then strip recovers it.
+    std::string esc; json_escape_into(esc, std::string("ctrl\x01 caf\xC3\xA9 \t end"));
+    std::string back = esc; detail::strip_quotes(back);
+    CHECK(back == std::string("ctrl\x01 caf\xC3\xA9 \t end"));
+}
+
 int main() {
     test_cmd_encode();
     test_cmd_parse_fixture();
@@ -192,6 +220,7 @@ int main() {
     test_log_event();
     test_preview_header();
     test_parse_edge_cases();
+    test_strip_quotes_unescape();
 
     if (g_failures == 0) {
         std::printf("\nALL PROTOCOL TESTS PASSED\n");

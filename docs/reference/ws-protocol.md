@@ -81,7 +81,7 @@ Snapshot of a `ValueStore` after one `inspect()` call.
 Per-item fields:
 
 - `name` (string, required)
-- `kind` (string, required) — one of `image`, `number`, `boolean`, `string`, `json`, `custom`
+- `kind` (string, required) — one of `image`, `number`, `boolean`, `string`, `json`, `custom`, `record`
 - `value` (any) — inline value, present for non-image kinds. A non-finite
   `number` (NaN / ±Inf) is emitted as the JSON **string** `"NaN"` / `"Infinity"`
   / `"-Infinity"` (JSON has no non-finite numbers; emitting a bare `nan` would be
@@ -100,6 +100,12 @@ Per-item fields:
   times. For a non-duplicated image `src == gid`. (Record sub-images are not
   deduplicated and carry no `src`.)
 - `raw` (bool) — `true` if the image is transmitted uncompressed (BMP), `false` for JPEG (currently always `false` — see *Binary frame layout*)
+- For `kind: "record"` (a `xi::Record` VAR): `data` (object) holds the record's
+  scalar fields; `image_keys` (array) lists its sub-image keys; `images` (object)
+  maps each sub-image key → `gid`. Sub-images are gated by the **record var's**
+  name (subscribe the record name to stream them) and are **not** deduplicated,
+  so they carry no `src`. A consumer that only handles `kind: "image"` will skip
+  record sub-images — map over `images` to render them.
 
 ### `instances` — backend to client
 

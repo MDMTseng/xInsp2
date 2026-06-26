@@ -132,13 +132,26 @@ class RunResult:
 
     def value(self, name: str, default=None):
         v = self.var(name)
-        return default if v is None else v.get("value", default)
+        if v is None:
+            return default
+        val = v.get("value", default)
+        # Restore the quoted non-finite sentinels the backend emits for number
+        # vars (NaN/Infinity can't be bare JSON tokens). Mirrors the C++
+        # nonfinite_from_str; without this a number var reads as the string "NaN".
+        if v.get("kind") == "number" and isinstance(val, str):
+            return {"NaN": float("nan"), "Infinity": float("inf"),
+                    "-Infinity": float("-inf")}.get(val, val)
+        return val
 
     def image(self, name: str) -> PreviewFrame | None:
         v = self.var(name)
         if not v or v.get("kind") != "image":
             return None
-        return self.previews.get(v["gid"])
+        # A mirror var (one buffer VAR'd under several names) carries its own gid
+        # but the single deduped preview frame is keyed by the canonical `src`
+        # gid. Fall back to src so image() works for the non-canonical names too
+        # (snapshot.py already does this; this matched it).
+        return self.previews.get(v["gid"]) or self.previews.get(v.get("src", v["gid"]))
 
 
 class Client:
@@ -514,10 +527,9 @@ class Client:
         `run_id` arrives, then drains exactly the previews referenced
         by that vars message (one per `kind:image` item). Events that
         landed during the run are scooped non-blocking into
-        `RunResult.events`. (Earlier docstring versions claimed this
-        waited for a `run_finished` event — that event is not currently
-        emitted by the backend; the rsp + matching `vars` is the
-        completion signal.)
+        `RunResult.events`. (The backend does emit a `run_finished`
+        event per run, but this method keys completion off the rsp +
+        matching `vars` and does not wait on it.)
 
         IMPORTANT: this drains stale `vars` and `previews` queues but
         DOES NOT drain `events` — earlier calls' events (e.g.

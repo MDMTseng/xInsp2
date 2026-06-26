@@ -33,6 +33,7 @@ enum class VarKindWire : uint8_t {
     String  = 3,
     Json    = 4,
     Custom  = 5,
+    Record  = 6,   // xi::Record VAR: {data, image_keys, images:{key->gid}}
 };
 
 inline const char* to_string(VarKindWire k) {
@@ -43,6 +44,7 @@ inline const char* to_string(VarKindWire k) {
         case VarKindWire::String:  return "string";
         case VarKindWire::Json:    return "json";
         case VarKindWire::Custom:  return "custom";
+        case VarKindWire::Record:  return "record";
     }
     return "unknown";
 }
@@ -54,6 +56,7 @@ inline std::optional<VarKindWire> parse_var_kind(std::string_view s) {
     if (s == "string")  return VarKindWire::String;
     if (s == "json")    return VarKindWire::Json;
     if (s == "custom")  return VarKindWire::Custom;
+    if (s == "record")  return VarKindWire::Record;
     return std::nullopt;
 }
 
@@ -200,6 +203,11 @@ struct VarItem {
     uint32_t     gid  = 0;      // image kind
     bool         raw  = false;  // image kind
 
+    // NOTE: this serializer covers the NON-script (proto::) path only. The LIVE
+    // script vars frame is produced directly by xi_script_support.hpp's DLL
+    // snapshot — which also emits the image `src` canon field and the full
+    // `record` shape (data/image_keys/images). Don't treat this struct as the
+    // complete wire contract; see docs/reference/ws-protocol.md for that.
     std::string to_json() const {
         std::string out = "{\"name\":";
         json_escape_into(out, name);
@@ -224,6 +232,11 @@ struct VarItem {
             case VarKindWire::Boolean:
                 out += ",\"value\":";
                 out += value_bool ? "true" : "false";
+                break;
+            case VarKindWire::Record:
+                // Records are emitted via the script-support snapshot, not here.
+                out += ",\"data\":";
+                out += value_json.empty() ? "{}" : value_json;
                 break;
         }
         out += "}";
@@ -351,20 +364,70 @@ inline const char* extract_value(const char* p, const char* end, std::string& ou
 inline bool strip_quotes(std::string& s) {
     if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
         s = s.substr(1, s.size() - 2);
-        // Un-escape minimal set
+        // Un-escape. The matching writers (json_escape_into / pm_json_escape /
+        // the Record + script-support escapers) emit `\b` `\f` and `\uXXXX` for
+        // control chars — decoding only the \"/\\/\n/\r/\t subset silently
+        // corrupted any name/path carrying a control char or non-ASCII via \u
+        // (e.g. `` came back as the literal "u0007").
         std::string out;
         out.reserve(s.size());
+        auto emit_utf8 = [&out](unsigned cp) {
+            if (cp <= 0x7F) out.push_back((char)cp);
+            else if (cp <= 0x7FF) {
+                out.push_back((char)(0xC0 | (cp >> 6)));
+                out.push_back((char)(0x80 | (cp & 0x3F)));
+            } else if (cp <= 0xFFFF) {
+                out.push_back((char)(0xE0 | (cp >> 12)));
+                out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+                out.push_back((char)(0x80 | (cp & 0x3F)));
+            } else {
+                out.push_back((char)(0xF0 | (cp >> 18)));
+                out.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+                out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+                out.push_back((char)(0x80 | (cp & 0x3F)));
+            }
+        };
+        auto hex4 = [&s](size_t pos, unsigned& v) -> bool {
+            if (pos + 4 > s.size()) return false;
+            v = 0;
+            for (int k = 0; k < 4; ++k) {
+                char c = s[pos + k]; v <<= 4;
+                if      (c >= '0' && c <= '9') v |= (unsigned)(c - '0');
+                else if (c >= 'a' && c <= 'f') v |= (unsigned)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') v |= (unsigned)(c - 'A' + 10);
+                else return false;
+            }
+            return true;
+        };
         for (size_t i = 0; i < s.size(); ++i) {
             if (s[i] == '\\' && i + 1 < s.size()) {
                 char n = s[i + 1];
-                if      (n == '"')  out.push_back('"');
-                else if (n == '\\') out.push_back('\\');
-                else if (n == '/')  out.push_back('/');
-                else if (n == 'n')  out.push_back('\n');
-                else if (n == 'r')  out.push_back('\r');
-                else if (n == 't')  out.push_back('\t');
-                else                out.push_back(n);
-                ++i;
+                if      (n == '"')  { out.push_back('"');  ++i; }
+                else if (n == '\\') { out.push_back('\\'); ++i; }
+                else if (n == '/')  { out.push_back('/');  ++i; }
+                else if (n == 'n')  { out.push_back('\n'); ++i; }
+                else if (n == 'r')  { out.push_back('\r'); ++i; }
+                else if (n == 't')  { out.push_back('\t'); ++i; }
+                else if (n == 'b')  { out.push_back('\b'); ++i; }
+                else if (n == 'f')  { out.push_back('\f'); ++i; }
+                else if (n == 'u') {
+                    unsigned cp;
+                    if (hex4(i + 2, cp)) {
+                        size_t adv = i + 5;   // index of the last hex digit
+                        // Combine a UTF-16 surrogate pair (\uD800-\uDBFF + low).
+                        if (cp >= 0xD800 && cp <= 0xDBFF &&
+                            adv + 2 < s.size() && s[adv + 1] == '\\' && s[adv + 2] == 'u') {
+                            unsigned lo;
+                            if (hex4(adv + 3, lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                adv += 6;
+                            }
+                        }
+                        emit_utf8(cp);
+                        i = adv;              // loop ++i steps past the escape
+                    } else { out.push_back('u'); ++i; }   // malformed — best effort
+                }
+                else { out.push_back(n); ++i; }
             } else {
                 out.push_back(s[i]);
             }

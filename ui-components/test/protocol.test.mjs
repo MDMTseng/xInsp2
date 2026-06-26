@@ -25,6 +25,21 @@ t("parseVars accepts legacy 'vars' key + object input", () => {
   assert.equal(items.x.value, 3);
 });
 
+t("parseVars restores non-finite number sentinels back to JS numbers", () => {
+  const { items } = parseVars({ run_id: 2, items: [
+    { name: "n", kind: "number", value: "NaN" },
+    { name: "p", kind: "number", value: "Infinity" },
+    { name: "m", kind: "number", value: "-Infinity" },
+    { name: "ok", kind: "number", value: 1.5 },
+    { name: "s", kind: "string", value: "NaN" },   // a STRING var "NaN" must stay a string
+  ]});
+  assert.ok(Number.isNaN(items.n.value), "NaN sentinel -> NaN");
+  assert.equal(items.p.value, Infinity);
+  assert.equal(items.m.value, -Infinity);
+  assert.equal(items.ok.value, 1.5);
+  assert.equal(items.s.value, "NaN");             // not touched (kind !== number)
+});
+
 t("decodePreviewFrame reads BE header + builds jpeg data URL", () => {
   // header: gid=100, codec=0 (jpeg), w=320, h=240, ch=3 ; payload = 3 bytes
   const buf = new Uint8Array(20 + 3);

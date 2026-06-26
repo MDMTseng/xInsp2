@@ -2047,6 +2047,21 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload (will resume)\n");
         }
 
+        // Resume continuous exactly as it was before the reload. MUST be called on
+        // every exit path — a bare `return` on a compile error (a typo in the
+        // script, the common case) or a load failure would otherwise leave the
+        // stream stopped and force the client to re-issue cmd:start to recover.
+        auto resume_continuous_if_needed = [&]() {
+            if (!was_continuous) return;
+            bool trig_only = prior_continuous_fps <= 0;
+            int fps = trig_only ? 0 : prior_continuous_fps;
+            g_continuous_fps = fps;
+            g_continuous = true;
+            int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(fps, 1));
+            spawn_group_pool_(&srv, interval_ms);
+            std::fprintf(stderr, "[xinsp2] continuous mode resumed\n");
+        };
+
         // AOT / no-toolchain bundle: a `.dll` path is loaded DIRECTLY (no cl.exe).
         // Resolve relative to the project folder. Otherwise compile the .cpp.
         bool prebuilt = src->size() > 4 &&
@@ -2164,6 +2179,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             lm.level = "error";
             lm.msg = res.build_log;
             srv.send_text(lm.to_json());
+            resume_continuous_if_needed();   // keep streaming the last-good script
             return;
         }
 
@@ -2182,7 +2198,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             std::string err;
             if (!xi::script::load_script(res.dll_path, next, err)) {
                 send_rsp_err(srv, id, err);
-                return;   // old g_script untouched
+                resume_continuous_if_needed();   // old g_script untouched, keep it streaming
+                return;
             }
             // Save persistent state from the OLD DLL before swapping it out.
             // Stamp the OLD DLL's schema version alongside so restore into the
@@ -2337,18 +2354,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // even when NOT continuous (single-shot) — issue/replay works without
         // cmd:start. Continuous mode (below) just adds the free-running timer.
         install_trigger_sink_(&srv);
-        if (was_continuous) {
-            // Preserve trigger-only mode across the reload: g_continuous_fps == 0
-            // means no timer (sources drive it), so resume the same way.
-            bool trig_only = prior_continuous_fps <= 0;
-            int fps = trig_only ? 0 : prior_continuous_fps;
-            g_continuous_fps = fps;
-            g_continuous = true;
-            int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(fps, 1));
-            spawn_group_pool_(&srv, interval_ms);
-            std::fprintf(stderr,
-                "[xinsp2] continuous mode resumed after reload\n");
-        }
+        // Preserve trigger-only mode across the reload (prior_continuous_fps == 0
+        // means no timer — sources drive it). Same path as the error returns above.
+        resume_continuous_if_needed();
 
         // Return success with dll path + diagnostics (warnings only on
         // success; extension still wants them for squiggle).

@@ -7,13 +7,28 @@
 // docs/reference/ws-protocol.md.
 //
 
+// Restore the quoted non-finite sentinels the backend emits for number vars
+// (NaN/Infinity can't be bare JSON tokens). Without this a `kind:"number"` var
+// arrives with a STRING value "NaN" and any chart/threshold comparison silently
+// misreads it. Mirrors the C++ nonfinite_from_str (xi_record.hpp).
+export function restoreNonFinite(v) {
+  if (v === "NaN") return NaN;
+  if (v === "Infinity") return Infinity;
+  if (v === "-Infinity") return -Infinity;
+  return v;
+}
+
 // Parse a `vars` text message into { run_id, items } where items is a
 // name -> item map (item = { name, kind, value?, gid?, raw? }).
 export function parseVars(msg) {
   const o = typeof msg === "string" ? JSON.parse(msg) : msg;
   const list = o.items || o.vars || [];
   const items = {};
-  for (const it of list) items[it.name] = it;
+  for (const it of list) {
+    if (it && it.kind === "number" && typeof it.value === "string")
+      it.value = restoreNonFinite(it.value);
+    items[it.name] = it;
+  }
   return { run_id: o.run_id, items };
 }
 

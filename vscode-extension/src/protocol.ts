@@ -10,7 +10,8 @@ export type VarKind =
     | 'boolean'
     | 'string'
     | 'json'
-    | 'custom';
+    | 'custom'
+    | 'record';
 
 export interface Cmd {
     type: 'cmd';
@@ -72,12 +73,24 @@ export interface VarItemJson {
     value: unknown;
 }
 
+export interface VarItemRecord {
+    name: string;
+    kind: 'record';
+    /** The record's scalar fields as a JSON object. */
+    data: unknown;
+    /** Keys of sub-images carried by the record. */
+    image_keys?: string[];
+    /** Map of sub-image key -> gid (gated by the record var's name, like images). */
+    images?: Record<string, number>;
+}
+
 export type VarItem =
     | VarItemImage
     | VarItemNumber
     | VarItemBoolean
     | VarItemString
-    | VarItemJson;
+    | VarItemJson
+    | VarItemRecord;
 
 export interface Vars {
     type: 'vars';

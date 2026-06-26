@@ -40,6 +40,12 @@ class Client {
     close() { try { this.ws.close(); } catch {} }
 }
 
+// Wait for the next `rsp` message, skipping the vars/log/event traffic that
+// streams continuously once continuous mode is running.
+async function waitRsp(c, ms = 90000) {
+    for (;;) { const m = await c.nextText(ms); if (m.type === 'rsp') return m; }
+}
+
 async function withBackend(fn) {
     const port = randomPort();
     const child = spawn(backendExe, [`--port=${port}`], { stdio: ['ignore', 'inherit', 'inherit'] });
@@ -251,5 +257,58 @@ void xi_inspect_entry(int frame) {
         let frames = 0;
         for (;;) { try { await c.nextBinary(2500); frames++; } catch { break; } }
         assert.equal(frames, 2, `expected 2 record sub-image frames, got ${frames}`);
+    });
+});
+
+// A compile error during a reload must NOT kill a running continuous stream:
+// the backend keeps the last-good script and re-arms continuous on the error
+// path. (Regression for the partial-failure where the two compile_and_load
+// error returns skipped the resume and silently stopped the stream.)
+test('continuous mode survives a compile error — keeps streaming the last-good script', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'xi_resume_'));
+    const good = join(dir, 'good.cpp');
+    writeFileSync(good, `
+#include <xi/xi.hpp>
+#include <xi/xi_image.hpp>
+#include <cstring>
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int frame) {
+    xi::Image a(32, 24, 1);
+    std::memset(a.data(), (unsigned char)(frame & 0xFF), 32 * 24);
+    VAR(out, a);      // self-contained: VARs an image every tick, no source needed
+}
+`);
+    const bad = join(dir, 'bad.cpp');
+    writeFileSync(bad, `
+#include <xi/xi.hpp>
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int frame) { this is not valid c++ ; }
+`);
+    await withBackend(async (c) => {
+        await c.nextText(); // hello
+        c.send({ type: 'cmd', id: 9, name: 'subscribe', args: { all: true } });
+        await waitRsp(c);
+
+        c.send({ type: 'cmd', id: 1, name: 'compile_and_load', args: { path: good } });
+        assert.equal((await waitRsp(c)).ok, true, 'good compile ok');
+
+        // Start continuous with a synthetic timer so frames stream on every tick.
+        c.send({ type: 'cmd', id: 2, name: 'start', args: { fps: 20 } });
+        assert.equal((await waitRsp(c)).ok, true, 'start ok');
+        await c.nextBinary(5000);   // streaming confirmed
+
+        // Recompile a BROKEN script — must fail without stopping the stream.
+        c.send({ type: 'cmd', id: 3, name: 'compile_and_load', args: { path: bad } });
+        assert.equal((await waitRsp(c)).ok, false, 'broken compile reports failure');
+
+        // The last-good script must keep streaming. Check the queue directly so a
+        // timed-out waiter doesn't swallow a frame.
+        c.binaryQueue.length = 0;
+        await sleep(1500);
+        assert.ok(c.binaryQueue.length > 0,
+            'continuous resumed on the last-good script after the failed compile');
+
+        c.send({ type: 'cmd', id: 4, name: 'stop' });
+        await waitRsp(c);
     });
 });

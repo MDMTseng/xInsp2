@@ -1761,7 +1761,17 @@ public:
             return fail("plugin '" + plugin_name + "' has no factory (load_plugin failed?)");
 
         auto inst_folder = std::filesystem::path(project_.folder_path) / "instances" / instance_name;
-        std::filesystem::create_directories(inst_folder);
+        // Use the error_code overload: the throwing one would propagate a
+        // filesystem_error past the (un-try/catch'd) WS command loop and
+        // terminate the whole backend on a benign environment failure (path too
+        // long, instances/ read-only, disk full). Report it as a command error.
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(inst_folder, ec);
+            if (ec)
+                return fail("cannot create instance folder '" + inst_folder.string() +
+                            "': " + ec.message());
+        }
 
         InstanceInfo ii;
         ii.name = instance_name;
@@ -1772,6 +1782,7 @@ public:
         // call host->instance_folder() from inside its constructor.
         InstanceFolderRegistry::instance().set(instance_name, ii.folder_path);
 
+        ImagePoolOwnerId created_owner = 0;   // for a later sweep if a save fails
         {
             // C ABI — create via host API. Pre-allocate the owner
             // id so any host->image_create called from inside the
@@ -1779,14 +1790,22 @@ public:
             // so a half-initialised plugin doesn't leak handles.
             xi_host_api& host = default_host_api();
             ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
+            created_owner = pre_owner;
             void* raw = nullptr;
             try {
                 ImagePool::OwnerGuard og(pre_owner);
                 raw = pi.c_factory(&host, instance_name.c_str());
+            } catch (const std::exception& e) {
+                // A throwing ctor must not terminate the backend (the WS command
+                // loop has no outer catch). Sweep the half-init handles + folder
+                // registry and report it as a command error.
+                ImagePool::instance().release_all_for(pre_owner);
+                InstanceFolderRegistry::instance().clear(instance_name);
+                return fail("plugin '" + plugin_name + "' factory threw: " + e.what());
             } catch (...) {
                 ImagePool::instance().release_all_for(pre_owner);
                 InstanceFolderRegistry::instance().clear(instance_name);
-                throw;
+                return fail("plugin '" + plugin_name + "' factory threw a non-standard exception");
             }
             if (!raw) {
                 ImagePool::instance().release_all_for(pre_owner);
@@ -1801,8 +1820,18 @@ public:
         }
         InstanceRegistry::instance().add(ii.instance);
 
-        // Save instance.json
-        save_instance_json(ii);
+        // Save instance.json. If the write fails (disk full / read-only) don't
+        // commit the instance: leaving it only in project.json (not on disk) would
+        // make the next open_project silently lose the user's config. Sweep the
+        // registries + folder and report the failure. (commit_working_copy applies
+        // the same check on its pre-commit saves.)
+        if (!save_instance_json(ii)) {
+            InstanceRegistry::instance().remove(instance_name);
+            InstanceFolderRegistry::instance().clear(instance_name);
+            ImagePool::instance().release_all_for(created_owner);
+            return fail("cannot write instance config for '" + instance_name +
+                        "' (disk full / read-only?) — instance not created");
+        }
 
         project_.instances[instance_name] = std::move(ii);
         save_project_locked();
@@ -1846,51 +1875,78 @@ public:
         auto it = project_.instances.find(old_name);
         if (it == project_.instances.end()) return false;
         if (project_.instances.count(new_name)) return false;
-        // Move the folder
-        auto old_folder = std::filesystem::path(it->second.folder_path);
-        auto new_folder = old_folder.parent_path() / new_name;
-        if (std::filesystem::exists(new_folder)) return false;
-        std::error_code ec;
-        std::filesystem::rename(old_folder, new_folder, ec);
-        if (ec) return false;
-        // Update registries — InstanceBase::name() is immutable, so we
-        // recreate the instance under the new name via the plugin factory.
-        // Old instance's state is preserved via get_def → set_def.
+
+        // Validate everything that can fail WITHOUT side effects BEFORE touching
+        // the filesystem / registries — a failure here used to leave the folder
+        // already renamed with no rollback, orphaning the old instance.
         auto pit = plugins_.find(it->second.plugin_name);
         if (pit == plugins_.end()) return false;
         auto& pi = pit->second;
+        if (!pi.c_factory) return false;
 
+        auto old_folder = std::filesystem::path(it->second.folder_path);
+        auto new_folder = old_folder.parent_path() / new_name;
+        if (std::filesystem::exists(new_folder)) return false;
+
+        // Capture what we need from the old entry before any mutation.
+        const std::string plugin_name      = it->second.plugin_name;
+        const int         old_max_conc      = it->second.max_concurrency;
+        const std::string old_group         = it->second.group;
         std::string saved_def;
         if (it->second.instance) saved_def = it->second.instance->get_def();
 
-        // Drop old runtime entries before creating new one (same name-map
-        // only has one slot, different keys).
+        // Move the folder. From here, any failure must roll this back so the OLD
+        // instance (still fully registered, untouched below until success) keeps
+        // working.
+        std::error_code ec;
+        std::filesystem::rename(old_folder, new_folder, ec);
+        if (ec) return false;
+        auto rollback_folder = [&]() {
+            std::error_code re; std::filesystem::rename(new_folder, old_folder, re);
+        };
+
+        // InstanceBase::name() is immutable, so recreate under the new name via
+        // the factory; the old instance's config is carried via get_def→set_def.
+        // Register the new folder BEFORE the factory so the ctor can read it.
+        InstanceFolderRegistry::instance().set(new_name, new_folder.string());
+        xi_host_api& host = default_host_api();
+        void* raw = nullptr;
+        try {
+            raw = pi.c_factory(&host, new_name.c_str());
+        } catch (...) {
+            // A throwing ctor must not terminate the backend (no outer catch on
+            // the WS loop). Undo the new-name registration + folder move; the old
+            // instance is still intact.
+            InstanceFolderRegistry::instance().clear(new_name);
+            rollback_folder();
+            return false;
+        }
+        if (!raw) {
+            InstanceFolderRegistry::instance().clear(new_name);
+            rollback_folder();
+            return false;
+        }
+
+        // Factory succeeded — now commit: drop the old runtime entries and swap in
+        // the new instance. Nothing below can fail in a way that leaves a torn
+        // state (a save failing only means a stale disk, surfaced via the bool).
         InstanceRegistry::instance().remove(old_name);
         InstanceFolderRegistry::instance().clear(old_name);
 
         InstanceInfo ii;
         ii.name = new_name;
-        ii.plugin_name = it->second.plugin_name;
+        ii.plugin_name = plugin_name;
         ii.folder_path = new_folder.string();
         // F2: carry over per-instance config that isn't in get_def() — else a
-        // rename silently dropped the concurrency cap + dispatch group (the new
-        // InstanceInfo would default them to 0/"" on disk and at runtime).
-        ii.max_concurrency = it->second.max_concurrency;
-        ii.group           = it->second.group;
-        InstanceFolderRegistry::instance().set(new_name, ii.folder_path);
-        if (pi.c_factory) {
-            xi_host_api& host = default_host_api();
-            void* raw = pi.c_factory(&host, new_name.c_str());
-            if (!raw) { InstanceFolderRegistry::instance().clear(new_name); return false; }
-            ii.instance = std::make_shared<CAbiInstanceAdapter>(
-                new_name, ii.plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency);
-        } else {
-            return false;
-        }
+        // rename silently dropped the concurrency cap + dispatch group.
+        ii.max_concurrency = old_max_conc;
+        ii.group           = old_group;
+        ii.instance = std::make_shared<CAbiInstanceAdapter>(
+            new_name, plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency);
         if (!saved_def.empty()) ii.instance->set_def(saved_def);
         InstanceRegistry::instance().add(ii.instance);
 
-        project_.instances.erase(it);
+        project_.instances.erase(old_name);
         project_.instances[new_name] = std::move(ii);
         save_instance_json(project_.instances[new_name]);
         save_project_locked();
