@@ -265,16 +265,15 @@ private:
             const std::string& inst_name, int max_concurrency) {
         if (!pi.c_factory) return nullptr;
         xi_host_api& host = default_host_api();
-        ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
+        ImagePoolOwnerScope owner;   // sweeps the ctor's images unless adopted below
         void* raw = nullptr;
         try {
-            ImagePool::OwnerGuard og(pre_owner);
-            raw = pi.c_factory(&host, inst_name.c_str());
+            raw = owner.run_factory([&] { return pi.c_factory(&host, inst_name.c_str()); });
         } catch (...) { raw = nullptr; }
-        if (!raw) { ImagePool::instance().release_all_for(pre_owner); return nullptr; }
+        if (!raw) return nullptr;    // owner dtor sweeps
         auto inst = std::make_shared<CAbiInstanceAdapter>(
             inst_name, plugin_name, pi.handle, raw, pi.reentrant, max_concurrency);
-        inst->adopt_owner_id(pre_owner);
+        inst->adopt_owner_id(owner.release());
         return inst;
     }
 
@@ -1637,32 +1636,21 @@ public:
 
                     if (!created && pi.c_factory) {
                         xi_host_api& host = default_host_api();
-                        // Pre-allocate the owner id and install a guard
-                        // around the ctor itself so any host->image_create
-                        // calls inside xi_plugin_create are tagged. If
-                        // the ctor returns null OR throws, sweep — the
-                        // adapter never got built, so its destructor
-                        // can't sweep for us.
-                        ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
-                        void* raw = nullptr;
-                        try {
-                            ImagePool::OwnerGuard og(pre_owner);
-                            raw = pi.c_factory(&host, ii.name.c_str());
-                        } catch (...) {
-                            ImagePool::instance().release_all_for(pre_owner);
-                            throw;
-                        }
+                        // ImagePoolOwnerScope tags the ctor's images and sweeps them
+                        // automatically on a null return OR a throw (its dtor runs as
+                        // the exception unwinds to the per-instance handler below) —
+                        // the adapter never got built, so it can't sweep for us.
+                        ImagePoolOwnerScope owner;
+                        void* raw = owner.run_factory(
+                            [&] { return pi.c_factory(&host, ii.name.c_str()); });
                         if (raw) {
                             auto adapter = std::make_shared<CAbiInstanceAdapter>(
                                 ii.name, *plugin, pi.handle, raw, pi.reentrant, ii.max_concurrency);
-                            // Hand the pre-allocated owner id over to the
-                            // adapter so subsequent process / exchange
-                            // calls keep tagging into the same bucket.
-                            adapter->adopt_owner_id(pre_owner);
+                            // Hand the owner id to the adapter so subsequent process /
+                            // exchange calls keep tagging into the same bucket.
+                            adapter->adopt_owner_id(owner.release());
                             ii.instance = std::move(adapter);
                             created = true;
-                        } else {
-                            ImagePool::instance().release_all_for(pre_owner);
                         }
                     }
                     if (created && ii.instance) {
@@ -1794,38 +1782,33 @@ public:
 
         ImagePoolOwnerId created_owner = 0;   // for a later sweep if a save fails
         {
-            // C ABI — create via host API. Pre-allocate the owner
-            // id so any host->image_create called from inside the
-            // plugin's ctor is tagged. Sweep on null return / throw
-            // so a half-initialised plugin doesn't leak handles.
+            // C ABI — create via host API. ImagePoolOwnerScope tags every image the
+            // ctor allocates and AUTO-SWEEPS them on any early return below (throw /
+            // null) — the leak-on-failed-ctor footgun is now structural, not manual.
             xi_host_api& host = default_host_api();
-            ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
-            created_owner = pre_owner;
+            ImagePoolOwnerScope owner;
+            created_owner = owner.id();   // for the post-adopt save-failure sweep
             void* raw = nullptr;
             try {
-                ImagePool::OwnerGuard og(pre_owner);
-                raw = pi.c_factory(&host, instance_name.c_str());
+                raw = owner.run_factory([&] { return pi.c_factory(&host, instance_name.c_str()); });
             } catch (const std::exception& e) {
                 // A throwing ctor must not terminate the backend (the WS command
-                // loop has no outer catch). Sweep the half-init handles + folder
-                // registry and report it as a command error.
-                ImagePool::instance().release_all_for(pre_owner);
+                // loop has no outer catch). owner sweeps the half-init handles; we
+                // still clear the folder registry and report it as a command error.
                 InstanceFolderRegistry::instance().clear(instance_name);
                 return fail("plugin '" + plugin_name + "' factory threw: " + e.what());
             } catch (...) {
-                ImagePool::instance().release_all_for(pre_owner);
                 InstanceFolderRegistry::instance().clear(instance_name);
                 return fail("plugin '" + plugin_name + "' factory threw a non-standard exception");
             }
             if (!raw) {
-                ImagePool::instance().release_all_for(pre_owner);
                 InstanceFolderRegistry::instance().clear(instance_name);
                 return fail("plugin '" + plugin_name + "' factory returned null "
                             "(constructor failed/rejected the config)");
             }
             auto adapter = std::make_shared<CAbiInstanceAdapter>(
                 instance_name, plugin_name, pi.handle, raw, pi.reentrant, /*max_concurrency=*/0);
-            adapter->adopt_owner_id(pre_owner);
+            adapter->adopt_owner_id(owner.release());   // adapter owns the sweep now
             ii.instance = std::move(adapter);
         }
         InstanceRegistry::instance().add(ii.instance);
@@ -1945,26 +1928,22 @@ public:
         // Register the new folder BEFORE the factory so the ctor can read it.
         InstanceFolderRegistry::instance().set(new_name, new_folder.string());
         xi_host_api& host = default_host_api();
-        // Pre-allocate + OwnerGuard the new owner id so any host->image_create the
-        // ctor issues is tagged and swept on throw/null — without this the ctor's
-        // images get owner 0 (anonymous, never released), leaking on every rename.
-        // Mirrors create_instance / project-load.
-        ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
+        // ImagePoolOwnerScope tags + auto-sweeps the ctor's images so a rename can't
+        // orphan them at owner 0 (the leak this guards against). Mirrors
+        // create_instance / project-load via the one RAII primitive.
+        ImagePoolOwnerScope owner;
         void* raw = nullptr;
         try {
-            ImagePool::OwnerGuard og(pre_owner);
-            raw = pi.c_factory(&host, new_name.c_str());
+            raw = owner.run_factory([&] { return pi.c_factory(&host, new_name.c_str()); });
         } catch (...) {
             // A throwing ctor must not terminate the backend (no outer catch on
-            // the WS loop). Undo the new-name registration + folder move; the old
-            // instance is still intact.
-            ImagePool::instance().release_all_for(pre_owner);
+            // the WS loop). owner sweeps; undo the new-name registration + folder
+            // move so the old instance stays intact.
             InstanceFolderRegistry::instance().clear(new_name);
             rollback_folder();
             return RenameResult::Rejected;
         }
         if (!raw) {
-            ImagePool::instance().release_all_for(pre_owner);
             InstanceFolderRegistry::instance().clear(new_name);
             rollback_folder();
             return RenameResult::Rejected;
@@ -1985,7 +1964,7 @@ public:
         ii.group           = old_group;
         auto adapter = std::make_shared<CAbiInstanceAdapter>(
             new_name, plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency);
-        adapter->adopt_owner_id(pre_owner);   // ctor images now belong to the live adapter
+        adapter->adopt_owner_id(owner.release());   // ctor images now belong to the live adapter
         ii.instance = std::move(adapter);
         if (!saved_def.empty()) ii.instance->set_def(saved_def);
         InstanceRegistry::instance().add(ii.instance);
