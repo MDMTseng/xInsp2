@@ -86,13 +86,13 @@ inline bool encode_jpeg_opencv(const Image& img, int quality, std::vector<uint8_
     cv::Mat mat(img.height, img.width, cv_type,
                 const_cast<uint8_t*>(img.data()), img.stride());
 
-    // OpenCV imencode expects BGR for 3-channel; xi::Image is RGB.
+    // OpenCV imencode expects BGR(A); xi::Image is RGB(A). Swap for BOTH 3- and
+    // 4-channel (the 4-channel case used to skip the swap → red/blue swapped in
+    // the encoded image).
     cv::Mat bgr;
-    if (img.channels == 3) {
-        cv::cvtColor(mat, bgr, cv::COLOR_RGB2BGR);
-    } else {
-        bgr = mat;
-    }
+    if (img.channels == 3)      cv::cvtColor(mat, bgr, cv::COLOR_RGB2BGR);
+    else if (img.channels == 4) cv::cvtColor(mat, bgr, cv::COLOR_RGBA2BGRA);
+    else                        bgr = mat;
 
     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, quality};
     return cv::imencode(".jpg", bgr, out, params);

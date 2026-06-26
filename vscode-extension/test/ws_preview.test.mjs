@@ -84,6 +84,45 @@ test('compile + run emits JPEG preview for image variables', async () => {
     });
 });
 
+// A non-finite double written through a Record (set/push) must serialize as a
+// quoted sentinel, not a bare NaN/Infinity token — else the consumer's parse of
+// the WHOLE vars frame fails and every field silently vanishes.
+test('non-finite doubles in a Record survive as sentinels (frame still parses)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'xi_nan_'));
+    const sp = join(dir, 'nan.cpp');
+    writeFileSync(sp, `
+#include <xi/xi.hpp>
+#include <limits>
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int frame) {
+    double bad = std::numeric_limits<double>::quiet_NaN();
+    double pinf = std::numeric_limits<double>::infinity();
+    VAR(scalar_nan, bad);          // VAR<Number> path
+    xi::Record r;
+    r.set("f", bad);               // Record::set(double)
+    r.push("arr", pinf);           // Record::push(double)
+    VAR(rec, r);
+}
+`);
+    await withBackend(async (c) => {
+        await c.nextText(); // hello
+        c.send({ type: 'cmd', id: 1, name: 'compile_and_load', args: { path: sp } });
+        assert.equal((await c.nextNonLog()).ok, true, 'compile ok');
+        c.send({ type: 'cmd', id: 2, name: 'run' });
+        assert.equal((await c.nextNonLog()).ok, true);
+        // nextNonLog JSON.parses the vars frame — if a bare NaN token leaked it
+        // would throw here. Reaching this line means the frame is valid JSON.
+        const vars = await c.nextNonLog();
+        assert.equal(vars.type, 'vars');
+        const scalar = vars.items.find(i => i.name === 'scalar_nan');
+        assert.equal(scalar.value, 'NaN', 'scalar NaN is the quoted sentinel');
+        const rec = vars.items.find(i => i.name === 'rec');
+        assert.ok(rec && rec.data, 'record var present');
+        assert.equal(rec.data.f, 'NaN', 'Record::set(double) NaN → sentinel');
+        assert.deepEqual(rec.data.arr, ['Infinity'], 'Record::push(double) Inf → sentinel');
+    });
+});
+
 // When one image buffer is VAR'd by several names (the "one frame to every
 // plugin" case), every var shares a canonical "src" gid, and the backend
 // encodes + sends exactly one preview frame for the whole group.

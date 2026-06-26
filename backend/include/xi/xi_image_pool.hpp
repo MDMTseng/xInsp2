@@ -446,9 +446,15 @@ private:
                 return idx;
             }
         }
-        // No free slots — bump high water.
+        // No free slots — bump high water. Saturate the counter at SLOT_COUNT so a
+        // pool that's already exhausted can't keep incrementing past UINT32_MAX,
+        // wrap, and hand back an index that aliases a LIVE slot (which create()
+        // would then overwrite). Saturated → every further alloc cleanly fails.
         uint32_t idx = next_fresh_.fetch_add(1, std::memory_order_relaxed);
-        if (idx >= SLOT_COUNT) return 0xFFFFFFFFu;   // pool exhausted
+        if (idx >= SLOT_COUNT) {
+            next_fresh_.store(SLOT_COUNT, std::memory_order_relaxed);
+            return 0xFFFFFFFFu;   // pool exhausted
+        }
         return idx;
     }
 

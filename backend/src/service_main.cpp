@@ -2279,8 +2279,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 int new_schema = g_script.state_schema_version
                                ? g_script.state_schema_version()
                                : 0;
-                bool drop = (g_persistent_state_schema != 0 &&
-                             new_schema != 0 &&
+                // Drop whenever the NEW script declares a schema version that
+                // differs from the persisted one — INCLUDING the 0→N case (a
+                // script adopting versioning for the first time): the old
+                // unversioned shape would otherwise default-fill into the new
+                // shape, silently mis-shaping state. new_schema==0 (a script that
+                // doesn't version) keeps the legacy "best-effort restore" path.
+                bool drop = (new_schema != 0 &&
                              g_persistent_state_schema != new_schema);
                 if (drop) {
                     std::fprintf(stderr,

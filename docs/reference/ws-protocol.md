@@ -7,8 +7,13 @@ its clients (VS Code extension, browser, CLI, test harness).
 - **Text frames**: UTF-8 JSON objects. Every JSON message has a `type` field.
 - **Binary frames**: image previews only. Layout defined below.
 - **Versioning**: every `cmd` and `rsp` carries no explicit version — breaking
-  schema changes bump the server's `version` string (returned by `cmd: version`).
-  Clients check on connect and fail fast on mismatch.
+  schema changes bump the server's `version` string (returned by `cmd: version`)
+  and the `hello` event's `abi` field. The protocol evolves **additive-only**
+  (new fields like vars' `src`/`group`, new commands), so old clients ignore
+  unknown fields and new clients tolerate missing ones; unknown commands reply
+  `ok:false`. **There is no enforced version gate today** — a client MAY compare
+  `hello.data.abi` against its expectation and refuse, but the shipped clients
+  only log it. A genuinely breaking bump would need clients to opt into the check.
 
 ---
 

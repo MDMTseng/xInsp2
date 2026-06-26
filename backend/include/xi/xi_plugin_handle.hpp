@@ -201,6 +201,22 @@ private:
         }
         if (!dll_) return false;
 
+        // ABI version gate (mirrors xi_cabi_adapter's plugin_abi_compatible — the
+        // manager path gates every load; this standalone loader must too). Refuse
+        // a plugin built against a NEWER ABI than this host: its process() would
+        // dereference an xi_host_api field that lies past the end of our (shorter)
+        // struct — a null-check can't catch it, only this gate can. Missing export
+        // = pre-versioning plugin (assume v1, allowed).
+        if (auto verfn = reinterpret_cast<int(*)()>(GetProcAddress(dll_, "xi_plugin_abi_version"))) {
+            int v = verfn();
+            if (v > XI_ABI_VERSION) {
+                std::fprintf(stderr,
+                    "[xinsp2] PluginHandle '%s': requires ABI v%d but host is v%d — refused\n",
+                    plugin_name.c_str(), v, XI_ABI_VERSION);
+                FreeLibrary(dll_); dll_ = nullptr; return false;
+            }
+        }
+
         // Resolve symbols
         create_fn_  = (xi_plugin_create_fn) GetProcAddress(dll_, "xi_plugin_create");
         destroy_fn_ = (xi_plugin_destroy_fn)GetProcAddress(dll_, "xi_plugin_destroy");

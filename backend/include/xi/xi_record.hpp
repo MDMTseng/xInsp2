@@ -40,11 +40,14 @@
 
 namespace xi {
 
-// Non-finite doubles can't be represented in JSON — they serialise as the
-// literal `null`, which then reads back as the caller's default (typically 0.0),
-// silently turning an invalid measurement into a plausible zero. We store them
-// as explicit string sentinels instead; these helpers convert both ways so a
-// non-finite value survives the Record↔JSON round-trip and stays visible.
+// Non-finite doubles can't be represented in standard JSON. The vendored yyjson
+// writer emits the bare tokens `NaN`/`Infinity` (non-standard) — which our reader
+// and JS `JSON.parse` REJECT, so a single non-finite field would make the parse
+// of the WHOLE record fail and drop every field. We store them as explicit
+// quoted string sentinels instead; these helpers convert both ways so a
+// non-finite value survives the Record↔JSON round-trip and stays visible. Every
+// double-write path (set/push, the typed layer's mut_finite_) must route through
+// these — bypassing them re-opens the whole-frame-drop hazard.
 inline const char* nonfinite_to_str(double v) {
     if (std::isnan(v)) return "NaN";
     return v > 0 ? "Infinity" : "-Infinity";
@@ -313,7 +316,13 @@ public:
     }
     Record& push(const std::string& key, double v) {
         cow_();
-        yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), yyjson_mut_real(doc_, v));
+        // Same non-finite guard as set(double): a bare NaN/Infinity token is
+        // invalid JSON and would make the consumer's parse of the WHOLE record
+        // fail (dropping every field), so emit the quoted sentinel instead.
+        yyjson_mut_val* val = std::isfinite(v)
+            ? yyjson_mut_real(doc_, v)
+            : yyjson_mut_strcpy(doc_, nonfinite_to_str(v));
+        yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), val);
         return *this;
     }
     Record& push(const std::string& key, bool v) {

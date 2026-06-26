@@ -22,6 +22,15 @@
 
 namespace xi {
 
+// Write a double as JSON, but emit the quoted NaN/Infinity sentinel for a
+// non-finite value (same guard as Record::set(double)). A bare NaN/Infinity
+// token is invalid JSON and would make the consumer's parse of the WHOLE record
+// fail — the typed layer must not bypass that protection.
+inline yyjson_mut_val* mut_finite_(yyjson_mut_doc* d, double v) {
+    return std::isfinite(v) ? yyjson_mut_real(d, v)
+                            : yyjson_mut_strcpy(d, nonfinite_to_str(v));
+}
+
 // A read/write proxy for one field of a yyjson object node. Returned by
 // Typed::operator[]. Reads via implicit conversion (so it drops into arithmetic),
 // writes via operator= (write-through to the node). Lives only for the
@@ -42,7 +51,7 @@ public:
     bool        as_bool(bool d = false)         const { return Record::Value(node_)[key_.c_str()].as_bool(d); }
     std::string as_string(const std::string& d = "") const { return Record::Value(node_)[key_.c_str()].as_string(d); }
 
-    Field& operator=(double v)             { set_(yyjson_mut_real(doc_, v));                 return *this; }
+    Field& operator=(double v)             { set_(mut_finite_(doc_, v));                     return *this; }
     Field& operator=(int v)                { set_(yyjson_mut_sint(doc_, v));                 return *this; }
     Field& operator=(bool v)               { set_(yyjson_mut_bool(doc_, v));                 return *this; }
     Field& operator=(const std::string& v) { set_(yyjson_mut_strcpy(doc_, v.c_str()));       return *this; }
@@ -103,7 +112,7 @@ public:
     // Writes the viewed node. A VIEW writes into the SHARED tree, so it mutates
     // the ORIGINAL it was extracted from — by design (like a NumPy view). If you
     // don't want that, .clone() first for an independent copy.
-    Typed& set(const char* k, double v)             { set_node_(k, yyjson_mut_real(mut_doc(), v)); return *this; }
+    Typed& set(const char* k, double v)             { set_node_(k, mut_finite_(mut_doc(), v)); return *this; }
     Typed& set(const char* k, int v)                { set_node_(k, yyjson_mut_sint(mut_doc(), v)); return *this; }
     Typed& set(const char* k, bool v)               { set_node_(k, yyjson_mut_bool(mut_doc(), v)); return *this; }
     Typed& set(const char* k, const std::string& v) { set_node_(k, yyjson_mut_strcpy(mut_doc(), v.c_str())); return *this; }
@@ -267,7 +276,7 @@ private:
     void set_data_(const double* d) {
         yyjson_mut_doc* doc = mut_doc();
         yyjson_mut_val* arr = yyjson_mut_arr(doc);
-        for (int i = 0; i < N * N; ++i) yyjson_mut_arr_add_val(arr, yyjson_mut_real(doc, d[i]));
+        for (int i = 0; i < N * N; ++i) yyjson_mut_arr_add_val(arr, mut_finite_(doc, d[i]));
         set_node_("m", arr);
     }
     void set_identity_() {

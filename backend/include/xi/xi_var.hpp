@@ -29,6 +29,7 @@
 
 #include <any>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -98,7 +99,16 @@ struct VarTraits<T, std::enable_if_t<std::is_arithmetic_v<T> && !std::is_same_v<
                 return;
             }
         }
-        e.inline_json = std::to_string(v);
+        // Full round-trip precision: std::to_string uses %f (6 decimals), which
+        // truncates small magnitudes to "0.000000" and drops precision on the
+        // vars/history wire. %.17g round-trips a double exactly.
+        if constexpr (std::is_floating_point_v<T>) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.17g", (double)v);
+            e.inline_json = buf;
+        } else {
+            e.inline_json = std::to_string(v);
+        }
     }
 };
 

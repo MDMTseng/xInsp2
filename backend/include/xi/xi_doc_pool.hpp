@@ -113,9 +113,25 @@ private:
 
     // Thread-local free-list heads, one per size class. Intrusive: a free
     // block's first sizeof(void*) bytes hold the next-free pointer.
+    //
+    // Wrapped in a struct with a destructor so the pooled blocks are reclaimed
+    // when the OWNING THREAD EXITS. The dispatch model spawns a fresh detached
+    // thread per cmd:run / one-shot inspect, so without this the whole doc's
+    // chunk footprint leaked on every run (and every worker's high-water on every
+    // start/stop). The dtor frees only blocks sitting in the free-list (i.e. ones
+    // already returned to the pool) — live docs aren't on it, so no double-free.
+    struct Heads {
+        void* h[kNumClasses] = {};
+        ~Heads() {
+            for (int c = 0; c < kNumClasses; ++c) {
+                void* blk = h[c];
+                while (blk) { void* next = *static_cast<void**>(blk); std::free(blk); blk = next; }
+            }
+        }
+    };
     static void** free_heads_() {
-        static thread_local void* heads[kNumClasses] = {};
-        return heads;
+        static thread_local Heads heads;
+        return heads.h;
     }
     static void* pop_(int c) {
         void** heads = free_heads_();
