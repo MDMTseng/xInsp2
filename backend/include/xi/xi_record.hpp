@@ -395,7 +395,10 @@ public:
         long long as_int64(long long def = 0) const {
             if (!is_number()) return def;
             double d = yyjson_mut_get_num(node_);
-            if (!(d >= -9.2233720368547758e18 && d <= 9.2233720368547758e18)) return def;
+            // Upper bound is STRICT: 9.2233720368547758e18 rounds to exactly 2^63
+            // (LLONG_MAX = 2^63-1 is not representable as double), and (long long)(2^63)
+            // is itself UB. -2^63 = LLONG_MIN is representable, so the lower bound keeps >=.
+            if (!(d >= -9.2233720368547758e18 && d < 9.2233720368547758e18)) return def;
             return (long long)d;
         }
         double as_double(double def = 0.0) const {
@@ -515,7 +518,8 @@ public:
         yyjson_mut_val* it = get_(key.c_str());
         if (!it || !yyjson_mut_is_num(it)) return def;
         double d = yyjson_mut_get_num(it);
-        if (!(d >= -9.2233720368547758e18 && d <= 9.2233720368547758e18)) return def;
+        // Strict upper bound: 9.2233720368547758e18 == 2^63 as double; (long long)(2^63) is UB.
+        if (!(d >= -9.2233720368547758e18 && d < 9.2233720368547758e18)) return def;
         return (long long)d;
     }
     double get_double(const std::string& key, double def = 0.0) const {

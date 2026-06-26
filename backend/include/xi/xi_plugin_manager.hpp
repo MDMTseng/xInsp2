@@ -254,6 +254,30 @@ private:
         int         max_concurrency = 0;
     };
 
+    // Owner-guarded factory call shared by every (re)instantiation path on the
+    // reload/recompile lanes. Pre-allocates an ImagePool owner id and wraps the
+    // ctor in an OwnerGuard so images the ctor allocates are tagged, then either
+    // adopted by the adapter (success) or swept (throw/null). create_instance and
+    // project-load do the same inline; the reload paths used to skip it, so a
+    // plugin allocating pool images in its ctor leaked them on every hot-reload.
+    std::shared_ptr<CAbiInstanceAdapter> make_adapter_guarded_(
+            PluginInfo& pi, const std::string& plugin_name,
+            const std::string& inst_name, int max_concurrency) {
+        if (!pi.c_factory) return nullptr;
+        xi_host_api& host = default_host_api();
+        ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
+        void* raw = nullptr;
+        try {
+            ImagePool::OwnerGuard og(pre_owner);
+            raw = pi.c_factory(&host, inst_name.c_str());
+        } catch (...) { raw = nullptr; }
+        if (!raw) { ImagePool::instance().release_all_for(pre_owner); return nullptr; }
+        auto inst = std::make_shared<CAbiInstanceAdapter>(
+            inst_name, plugin_name, pi.handle, raw, pi.reentrant, max_concurrency);
+        inst->adopt_owner_id(pre_owner);
+        return inst;
+    }
+
     // Phase 1 of a reload: snapshot every instance's def, then destroy them and
     // FreeLibrary the plugin's old DLL. The instance dtor runs xi_plugin_destroy
     // (joins worker threads / frees a CUDA context) BEFORE we unload, and freeing
@@ -345,14 +369,8 @@ private:
             return false;
         }
 
-        xi_host_api& host = default_host_api();
         for (auto& p : pending) {
-            std::shared_ptr<InstanceBase> inst;
-            if (pi.c_factory) {
-                void* raw = pi.c_factory(&host, p.name.c_str());
-                if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
-                    p.name, plugin_name, pi.handle, raw, pi.reentrant, p.max_concurrency);
-            }
+            auto inst = make_adapter_guarded_(pi, plugin_name, p.name, p.max_concurrency);
             if (!inst) continue;
             if (!p.def_json.empty()) inst->set_def(p.def_json);
             project_.instances[p.name].instance = inst;
@@ -684,14 +702,8 @@ public:
             if (pi_it == plugins_.end()) return;
             auto& pi_old = pi_it->second;
             if (!pi_old.c_factory) return;
-            xi_host_api& host = default_host_api();
             for (auto& p : pending) {
-                std::shared_ptr<InstanceBase> inst;
-                if (pi_old.c_factory) {
-                    void* raw = pi_old.c_factory(&host, p.name.c_str());
-                    if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
-                        p.name, plugin_name, pi_old.handle, raw, pi_old.reentrant, p.max_concurrency);
-                }
+                auto inst = make_adapter_guarded_(pi_old, plugin_name, p.name, p.max_concurrency);
                 if (!inst) continue;
                 if (!p.def_json.empty()) inst->set_def(p.def_json);
                 project_.instances[p.name].instance = inst;
@@ -740,14 +752,8 @@ public:
             // FreeLibrary'd it.
             auto pi_it = plugins_.find(plugin_name);
             if (pi_it != plugins_.end() && pi_it->second.c_factory) {
-                xi_host_api& host = default_host_api();
                 for (auto& p : pending) {
-                    std::shared_ptr<InstanceBase> inst;
-                    if (pi_it->second.c_factory) {
-                        void* raw = pi_it->second.c_factory(&host, p.name.c_str());
-                        if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
-                            p.name, plugin_name, pi_it->second.handle, raw, pi_it->second.reentrant, p.max_concurrency);
-                    }
+                    auto inst = make_adapter_guarded_(pi_it->second, plugin_name, p.name, p.max_concurrency);
                     if (!inst) continue;
                     if (!p.def_json.empty()) inst->set_def(p.def_json);
                     project_.instances[p.name].instance = inst;
@@ -818,14 +824,8 @@ public:
         stamp_loaded_dll_(pi, cres.dll_path);
 
         // 4. Re-instantiate every preserved instance using the new factory.
-        xi_host_api& host = default_host_api();
         for (auto& p : pending) {
-            std::shared_ptr<InstanceBase> inst;
-            if (pi.c_factory) {
-                void* raw = pi.c_factory(&host, p.name.c_str());
-                if (raw) inst = std::make_shared<CAbiInstanceAdapter>(
-                    p.name, plugin_name, pi.handle, raw, pi.reentrant, p.max_concurrency);
-            }
+            auto inst = make_adapter_guarded_(pi, plugin_name, p.name, p.max_concurrency);
             if (!inst) continue;
             if (!p.def_json.empty()) inst->set_def(p.def_json);
             project_.instances[p.name].instance = inst;
@@ -1220,8 +1220,17 @@ public:
                 std::fprintf(stderr, "[xinsp2] working copy: completing interrupted "
                              "commit from %s (canonical may be torn)\n",
                              scratch.string().c_str());
-                xi::wc::mirror_tree(scratch, canon);
-                std::filesystem::remove(marker, ec);
+                // Only clear the journal marker if the roll-forward actually
+                // succeeded. If the disk error that interrupted the original commit
+                // persists (read-only / full), mirror_tree returns false and we KEEP
+                // the marker + scratch so the next open retries — removing it here
+                // would strand a torn canonical with no record to heal it.
+                if (xi::wc::mirror_tree(scratch, canon)) {
+                    std::filesystem::remove(marker, ec);
+                } else {
+                    std::fprintf(stderr, "[xinsp2] working copy: roll-forward FAILED "
+                                 "(disk error?) — keeping commit marker to retry on next open\n");
+                }
             }
         }
 
@@ -1910,26 +1919,33 @@ public:
         // Register the new folder BEFORE the factory so the ctor can read it.
         InstanceFolderRegistry::instance().set(new_name, new_folder.string());
         xi_host_api& host = default_host_api();
+        // Pre-allocate + OwnerGuard the new owner id so any host->image_create the
+        // ctor issues is tagged and swept on throw/null — without this the ctor's
+        // images get owner 0 (anonymous, never released), leaking on every rename.
+        // Mirrors create_instance / project-load.
+        ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
         void* raw = nullptr;
         try {
+            ImagePool::OwnerGuard og(pre_owner);
             raw = pi.c_factory(&host, new_name.c_str());
         } catch (...) {
             // A throwing ctor must not terminate the backend (no outer catch on
             // the WS loop). Undo the new-name registration + folder move; the old
             // instance is still intact.
+            ImagePool::instance().release_all_for(pre_owner);
             InstanceFolderRegistry::instance().clear(new_name);
             rollback_folder();
             return false;
         }
         if (!raw) {
+            ImagePool::instance().release_all_for(pre_owner);
             InstanceFolderRegistry::instance().clear(new_name);
             rollback_folder();
             return false;
         }
 
         // Factory succeeded — now commit: drop the old runtime entries and swap in
-        // the new instance. Nothing below can fail in a way that leaves a torn
-        // state (a save failing only means a stale disk, surfaced via the bool).
+        // the new instance.
         InstanceRegistry::instance().remove(old_name);
         InstanceFolderRegistry::instance().clear(old_name);
 
@@ -1941,16 +1957,22 @@ public:
         // rename silently dropped the concurrency cap + dispatch group.
         ii.max_concurrency = old_max_conc;
         ii.group           = old_group;
-        ii.instance = std::make_shared<CAbiInstanceAdapter>(
+        auto adapter = std::make_shared<CAbiInstanceAdapter>(
             new_name, plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency);
+        adapter->adopt_owner_id(pre_owner);   // ctor images now belong to the live adapter
+        ii.instance = std::move(adapter);
         if (!saved_def.empty()) ii.instance->set_def(saved_def);
         InstanceRegistry::instance().add(ii.instance);
 
         project_.instances.erase(old_name);
         project_.instances[new_name] = std::move(ii);
-        save_instance_json(project_.instances[new_name]);
-        save_project_locked();
-        return true;
+        // Surface a write failure: the runtime + folder are already renamed, so if
+        // project.json/instance.json don't persist the new name the next open is
+        // inconsistent. Report it (the caller turns false into a WS error) rather
+        // than claiming success — consistent with create_instance.
+        bool saved = save_instance_json(project_.instances[new_name]);
+        saved = save_project_locked() && saved;
+        return saved;
     }
 
     ProjectInfo& project() { return project_; }

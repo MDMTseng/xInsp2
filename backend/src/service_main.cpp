@@ -1625,16 +1625,24 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
         release_trigger_event_(*evp);
         return;
     }
-    std::thread([srv, evp]() {
-        struct Guard { ~Guard() { g_inflight_runs.fetch_sub(1); } } guard;
-        reserve_fault_stack();
-        xi::install_seh_translator();
-        std::lock_guard<std::mutex> lk(g_run_mu);
-        g_current_trigger = evp.get();
-        run_one_inspection(*srv, /*frame_hint=*/0, /*run_id=*/0, "", /*emit_seq=*/-1);
-        g_current_trigger = nullptr;
+    try {
+        std::thread([srv, evp]() {
+            struct Guard { ~Guard() { g_inflight_runs.fetch_sub(1); } } guard;
+            reserve_fault_stack();
+            xi::install_seh_translator();
+            std::lock_guard<std::mutex> lk(g_run_mu);
+            g_current_trigger = evp.get();
+            run_one_inspection(*srv, /*frame_hint=*/0, /*run_id=*/0, "", /*emit_seq=*/-1);
+            g_current_trigger = nullptr;
+            release_trigger_event_(*evp);
+        }).detach();
+    } catch (const std::system_error&) {
+        // Thread creation failed (resource exhaustion). The Guard never ran, so
+        // undo the counter bump here (else teardown spins the full drain cap) and
+        // release the event's image/meta handles.
+        g_inflight_runs.fetch_sub(1);
         release_trigger_event_(*evp);
-    }).detach();
+    }
 }
 
 // SINGLE SOURCE OF TRUTH for process-exit teardown. Called from BOTH the
@@ -2121,6 +2129,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 std::fprintf(stderr, "[xinsp2] refused out-of-tree prebuilt DLL: %s\n", p.string().c_str());
                 send_rsp_err(srv, id,
                     "prebuilt DLL must be inside the project folder (out-of-tree path refused)");
+                // This return is past stop_dispatch_pool_() — like the compile/load
+                // failure paths it must re-arm continuous mode or the stream stays
+                // dead until the client re-issues cmd:start.
+                resume_continuous_if_needed();
                 return;
             }
             res.ok = true;
@@ -2471,6 +2483,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // thread dereferences the main-local srv). Bail if we're shutting down.
         g_inflight_runs.fetch_add(1);
         if (g_shutting_down.load()) { g_inflight_runs.fetch_sub(1); return; }
+        try {
         std::thread([&srv, run_id,
                      frame_path = std::move(frame_path),
                      meta_json  = std::move(meta_json)]() {
@@ -2515,6 +2528,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 release_trigger_event_(ev);   // release frame handle(s) + meta doc
             }
         }).detach();
+        } catch (const std::system_error&) {
+            // Thread creation failed — the Guard never runs, so release the
+            // inflight count here (else teardown spins the full drain cap).
+            g_inflight_runs.fetch_sub(1);
+        }
     } else if (name == "start") {
         // Start continuous trigger mode. The backend runs a timer thread
         // that calls inspect() at a configurable interval. The script's
