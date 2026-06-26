@@ -431,12 +431,32 @@ static int run_supervisor(const FeConfig& c) {
     while (!g_stop.load()) {
         Spawned sp = spawn_backend(c, job);
         if (!sp.ok) {
+            // A spawn failure isn't necessarily permanent — an AV scan holding the
+            // exe open (sharing violation), a transient ENOMEM, a momentary path
+            // glitch. Exiting the supervisor here would take an unattended line down
+            // FOREVER on a blip. Treat it like a death: record + backoff + retry,
+            // governed by the SAME consecutive-failure cap so a genuinely broken
+            // install still latches "down" instead of spinning.
             xi::SafeStateEvent ev; ev.reason = xi::SafeStateReason::BackendExit;
-            ev.ts_ms = now_ms();
-            st.state = "down"; st.reason = "BackendExit"; st.backend_pid = 0;
+            ev.ts_ms = now_ms(); ev.backend_rc = -1;
+            bool cap_hit = resp.note_death(c.respawn_max);
+            history.record(ev, resp.consecutive, cap_hit);
+            st.state = "down"; st.reason = "BackendSpawnFailed"; st.backend_pid = 0;
+            st.consecutive = resp.consecutive;
             st.set_event(ev); publish_status(c, st);
-            rc = 1;
-            break;
+            if (g_stop.load()) { rc = 1; break; }
+            if (cap_hit) {
+                std::fprintf(stderr, "[xinsp-fe] backend spawn failed %d consecutive times "
+                             "(cap %d) - staying down; manual restart required\n",
+                             resp.consecutive, c.respawn_max);
+                st.latched = true; st.reason = "RespawnLimitExceeded"; publish_status(c, st);
+                rc = 2;
+                break;
+            }
+            std::fprintf(stderr, "[xinsp-fe] backend spawn failed (failure %d/%d); "
+                         "retrying after %dms\n", resp.consecutive, c.respawn_max, c.respawn_backoff_ms);
+            Sleep((DWORD)c.respawn_backoff_ms);
+            continue;
         }
         std::fprintf(stderr, "[xinsp-fe] backend up pid=%lu\n", sp.pi.dwProcessId);
         st.backend_pid = (int)sp.pi.dwProcessId;

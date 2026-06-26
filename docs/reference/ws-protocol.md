@@ -95,7 +95,13 @@ Per-item fields:
   `ui-components/src/protocol.mjs` and `vscode-extension/src/protocol.ts`,
   `_restore_nonfinite_deep` in `tools/xinsp2_py`); a consumer that skips it reads
   the literal string `"NaN"`, so a threshold compare silently misfires (JS) or
-  raises `TypeError` (Python).
+  raises `TypeError` (Python). **Ambiguity inside record `data`:** the record's
+  JSON carries no per-field type tag, so a *genuine string field* whose value is
+  exactly `"NaN"` / `"Infinity"` / `"-Infinity"` is indistinguishable from a
+  non-finite double and will be restored to the number. This is an accepted
+  trade-off (such literal strings are vanishingly rare in measurement data); if a
+  record field must hold that literal text, wrap or prefix it so it isn't an exact
+  sentinel match.
 - `gid` (int) — present for `image` kind; unique per image var. Matches a binary
   preview frame's `gid` **only for the canonical var of its group** (see `src`).
 - `src` (int) — present for `image` kind; the **canonical gid** of this image's
@@ -907,7 +913,7 @@ in full detail above. One-line purpose per entry; args follow the same
 | `close_project` | Tear down all instances and the dispatch lanes. Does not unload script or plugin DLLs. |
 | `create_instance` `args: { "plugin": "blob_analysis", "name": "det0" }` | Add a new instance to the open project (creates folder, calls `xi_plugin_create`, writes `instance.json`). |
 | `remove_instance` `args: { "name": "det0", "delete_folder"?: bool }` | Remove an instance from the registry and call `xi_plugin_destroy`. `"delete_folder": true` deletes the on-disk folder. Default (`false`) keeps the folder but moves its `instance.json` aside to `instance.json.removed` — open_project discovers instances by folder scan, so the removal still has to persist or the instance would resurrect on reopen; the tombstone keeps the config/assets recoverable. |
-| `rename_instance` `args: { "old": "det0", "new": "detector" }` | Rename an instance (moves its folder, updates the registry). |
+| `rename_instance` `args: { "name": "det0", "new_name": "detector" }` | Rename an instance (moves its folder, updates the registry). On a disk-save failure the runtime is still renamed; the reply is an error noting it may revert on restart (not "rename failed"). |
 | `save_instance_config` `args: { "name": "det0" }` | Write the current `get_def()` output for one instance to `instance.json` without a full `save_project`. |
 | `get_project` | Return the open project's `project.json` content and resolved metadata. |
 | `get_plugin_ui` `args: { "name": "blob_analysis" }` | Return the plugin's `ui/index.html` content (for plugins with `has_ui: true`). Used by the VS Code extension to open the plugin webview. |

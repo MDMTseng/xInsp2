@@ -19,12 +19,15 @@
 // no OpenCV — compiles unchanged on Linux (see docs/roadmap/linux-port.md). The
 // JSONL line builder (crash_history_line) is pure so it can be unit-tested.
 //
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include <xi/xi_safe_state.hpp>
 
@@ -84,21 +87,62 @@ public:
     // path:         JSONL file to append to. Empty -> disabled (record() is a no-op).
     // preserve_dir: if non-empty, copy the BE's .dmp (+ sibling .json) here on each
     //               record so a %TEMP% cleanup / crash-loop overwrite can't lose it.
-    explicit CrashHistory(std::string path, std::string preserve_dir = {})
-        : path_(std::move(path)), preserve_dir_(std::move(preserve_dir)) {}
+    // max_bytes:    rotate the JSONL (keep one .1 generation) once it exceeds this,
+    //               so a chronically flapping line can't fill the disk over weeks.
+    // max_preserved: cap on files kept in preserve_dir; oldest are pruned. Each
+    //               crash copies a .dmp + .json pair, so the dir is bounded too.
+    explicit CrashHistory(std::string path, std::string preserve_dir = {},
+                          std::uintmax_t max_bytes = 4u * 1024 * 1024,
+                          std::size_t max_preserved = 100)
+        : path_(std::move(path)), preserve_dir_(std::move(preserve_dir)),
+          max_bytes_(max_bytes), max_preserved_(max_preserved) {}
 
     bool enabled() const { return !path_.empty(); }
 
     void record(const SafeStateEvent& ev, int consecutive, bool cap_hit) {
         if (path_.empty()) return;
         try {
+            rotate_if_needed_();
             std::ofstream f(path_, std::ios::app);
             if (f) f << crash_history_line(ev, consecutive, cap_hit) << "\n";
         } catch (...) { /* best-effort */ }
-        if (!preserve_dir_.empty() && !ev.dump_path.empty()) preserve_dump_(ev.dump_path);
+        if (!preserve_dir_.empty() && !ev.dump_path.empty()) {
+            preserve_dump_(ev.dump_path);
+            prune_preserved_();
+        }
     }
 
 private:
+    // Roll path_ -> path_.1 (overwriting any prior .1) once it grows past max_bytes_,
+    // so at most ~2*max_bytes_ of history exists. Keeps the most recent generation
+    // intact for forensics while bounding total size.
+    void rotate_if_needed_() {
+        if (max_bytes_ == 0) return;
+        std::error_code ec;
+        auto sz = std::filesystem::file_size(path_, ec);
+        if (ec || sz < max_bytes_) return;
+        std::filesystem::rename(path_, path_ + ".1", ec);  // overwrites prior .1
+    }
+
+    // Keep only the newest max_preserved_ entries in preserve_dir_ (by last-write
+    // time), deleting the oldest. Bounds the dump directory on a flapping line.
+    void prune_preserved_() {
+        if (max_preserved_ == 0) return;
+        std::error_code ec;
+        std::vector<std::pair<std::filesystem::file_time_type, std::filesystem::path>> files;
+        for (auto& e : std::filesystem::directory_iterator(preserve_dir_, ec)) {
+            if (ec) return;
+            if (!e.is_regular_file(ec)) continue;
+            auto t = std::filesystem::last_write_time(e.path(), ec);
+            if (!ec) files.emplace_back(t, e.path());
+        }
+        if (files.size() <= max_preserved_) return;
+        std::sort(files.begin(), files.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (std::size_t i = 0; i + max_preserved_ < files.size(); ++i)
+            std::filesystem::remove(files[i].second, ec);
+    }
+
     void preserve_dump_(const std::string& dmp) {
         std::error_code ec;
         std::filesystem::path src(dmp);
@@ -115,6 +159,8 @@ private:
 
     std::string path_;
     std::string preserve_dir_;
+    std::uintmax_t max_bytes_;
+    std::size_t max_preserved_;
 };
 
 } // namespace xi

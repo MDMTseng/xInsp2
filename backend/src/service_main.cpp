@@ -1781,6 +1781,7 @@ static void drop_inst_state(const std::string& name) {
     g_inst_state.erase(name);
 }
 static void rename_inst_state(const std::string& from, const std::string& to) {
+    if (from == to) return;   // a no-op rename: don't erase the entry under itself
     std::lock_guard<std::mutex> lk(g_inst_state_mu);
     auto it = g_inst_state.find(from);
     if (it == g_inst_state.end()) return;

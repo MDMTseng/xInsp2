@@ -29,13 +29,20 @@ void xi_inspect_entry(int /*frame*/) {
 
     // 1. Pull the cached reference. No file I/O — just hands back the
     //    Image already sitting in the plugin instance's state.
+    // A line gate that reads `defect_present==false` as "good part" would PASS
+    // every camera drop-out / mis-configuration if we emitted false on failure.
+    // So every early (failed) return sets `inspection_valid=false`: a consumer
+    // MUST gate on inspection_valid before trusting defect_present. Only the
+    // real comparison below sets it true. (Same idea as circle_counting's -1
+    // count sentinel — a "this is not a real verdict" signal.)
     auto ref_out = ref.process(xi::Record{});
     bool ref_loaded = ref_out["loaded"].as_bool(false);
     VAR(reference_loaded, ref_loaded);
     if (!ref_loaded) {
-        VAR(error,          ref_out["error"].as_string("reference not loaded"));
-        VAR(defect_present, false);
-        VAR(score,          0.0);
+        VAR(error,            ref_out["error"].as_string("reference not loaded"));
+        VAR(inspection_valid, false);
+        VAR(defect_present,   false);
+        VAR(score,            0.0);
         return;
     }
     auto ref_img = ref_out.get_image("reference");
@@ -44,9 +51,10 @@ void xi_inspect_entry(int /*frame*/) {
     // 2. Load this frame.
     auto src_out = src.process(xi::Record().set("idx", idx));
     if (!src_out["loaded"].as_bool(false)) {
-        VAR(error,          src_out["error"].as_string("frame load failed"));
-        VAR(defect_present, false);
-        VAR(score,          0.0);
+        VAR(error,            src_out["error"].as_string("frame load failed"));
+        VAR(inspection_valid, false);
+        VAR(defect_present,   false);
+        VAR(score,            0.0);
         return;
     }
     auto frame = src_out.get_image("frame");
@@ -58,6 +66,7 @@ void xi_inspect_entry(int /*frame*/) {
         .image("reference", ref_img)
         .image("frame",     frame));
 
+    VAR(inspection_valid, true);   // a real comparison ran — defect_present is trustworthy
     VAR(diff,           out.get_image("diff"));
     VAR(mask,           out.get_image("mask"));
     VAR(defect_present, out["defect_present"].as_bool(false));
