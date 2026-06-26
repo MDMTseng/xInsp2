@@ -71,7 +71,7 @@ const status = (t) => (document.getElementById("status").textContent = t);
 
     // Wire the live preview into the viewer (host owns the wiring — tap-out).
     const viewer = document.getElementById("viewer");
-    client.onPreview((f) => viewer.setFrame(f.dataUrl));
+    client.onPreview((f) => viewer.setFrame(f.image || f.dataUrl));
 
     // An editable control panel bound to a real instance, and a status monitor.
     await mountPanel(document.getElementById("panel"), { client, instance: "INSTANCE_NAME", descriptor: PANEL })

@@ -42,7 +42,9 @@
         log("bound xi-slider → set_instance_def('bind0', {value})", "ok");
 
         // Live frames (if a project is streaming) render in the viewer.
-        client.onPreview((f) => $("viewer").setFrame(f.dataUrl));
+        // Previews are off by default — opt in (demo: take everything).
+        await client.cmd("subscribe", { all: true }).catch(() => {});
+        client.onPreview((f) => $("viewer").setFrame(f.image || f.dataUrl));
       } catch (e) { log("connect failed: " + e.message, "err"); }
     };
 

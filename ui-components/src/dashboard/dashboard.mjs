@@ -82,9 +82,12 @@ export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
     return out;
   }
   function updateImageSubs() {
-    const next = collectImageVars(dashboard && dashboard.layout, []);
-    for (const v of imgSubs) client.unsubscribeImage?.(v);
-    for (const v of next) client.subscribeImage?.(v);
+    // Sub/unsub only the DELTA (unique names) — re-subscribing the whole set on
+    // every render would flap ref-counts and double-send subscribe commands.
+    const next = [...new Set(collectImageVars(dashboard && dashboard.layout, []))];
+    const nextSet = new Set(next), prevSet = new Set(imgSubs);
+    for (const v of imgSubs) if (!nextSet.has(v)) client.unsubscribeImage?.(v);
+    for (const v of next) if (!prevSet.has(v)) client.subscribeImage?.(v);
     imgSubs = next;
   }
 

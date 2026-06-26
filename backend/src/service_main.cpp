@@ -1016,9 +1016,13 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
             while (g_history.size() > g_hist_max) g_history.pop_front();
         }
 
-        // image previews — filtered by subscription. For each
-        // `"name":"X"` followed by `"gid":N`, only emit the JPEG when
-        // the subscription set allows it (or we're in send-all mode).
+        // image previews — subscription-filtered. Parse the snapshot
+        // STRUCTURALLY (yyjson) rather than substring-scanning for `"gid":` /
+        // `"name":` — a json/record VAR embeds arbitrary value text, so a scan
+        // could match a `"gid":N` inside a value (phantom gid, polluting the
+        // dedup set) or pick up a `"name":` inside a value (mis-gating a real
+        // adjacent image). Same class of bug as the old `"all":true` substring
+        // check. Structured parse is exact.
         bool sub_all;
         std::unordered_set<std::string> sub_names;
         {
@@ -1027,64 +1031,18 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
             if (!sub_all) sub_names = g_sub_names;   // copy under lock
         }
 
-        std::string_view snap_view(sbuf.data(), (size_t)n);
-        size_t pos = 0;
-        std::string cur_name;
-        // Image dedup: snapshot tags every image var with a "src" canonical gid
-        // (shared by all vars over the same underlying buffer — the one-frame-to-
-        // every-plugin case). Encode + send a preview once per canonical gid; the
-        // client mirrors that decoded bitmap onto the other vars in the canon
-        // group via their own "src". Skips redundant JPEG encodes here and
-        // redundant decodes on the client.
-        std::unordered_set<uint32_t> sent_canons;
-        while (pos < snap_view.size()) {
-            // Track the latest `"name":"..."` we saw; every later `"gid":`
-            // is assumed to belong to that entry (snapshot emits name
-            // before gid within each item).
-            auto nm = snap_view.find("\"name\":\"", pos);
-            auto gd = snap_view.find("\"gid\":", pos);
-            if (gd == std::string_view::npos) break;
-            if (nm != std::string_view::npos && nm < gd) {
-                nm += 8;
-                auto end = snap_view.find('"', nm);
-                if (end != std::string_view::npos) cur_name = std::string(snap_view.substr(nm, end - nm));
-            }
-            pos = gd + 6;
-            uint32_t gid = (uint32_t)std::atoi(snap_view.data() + pos);
-            // Canonical gid for this image's buffer (the snapshot emits "src"
-            // immediately after "gid"; absent on older snapshots → canon = gid).
-            uint32_t canon = gid;
-            {
-                auto sd  = snap_view.find("\"src\":", pos);
-                auto ngd = snap_view.find("\"gid\":", pos);
-                if (sd != std::string_view::npos && (ngd == std::string_view::npos || sd < ngd))
-                    canon = (uint32_t)std::atoi(snap_view.data() + sd + 6);
-            }
-            if (!sub_all && !sub_names.count(cur_name)) continue;
-            // First subscribed var of a canon group encodes + sends; the rest are
-            // mirrored client-side, so skip them here.
-            if (!sent_canons.insert(canon).second) continue;
-            if (s.dump_image) {
-                // Buffers are thread_local + reused across calls. Without
-                // this, every preview allocated 32 MB of raw + a fresh
-                // JPEG vector + a fresh frame vector PER IMAGE PER FRAME
-                // — at 30 fps × 4 images = 3.8 GB/s of allocator churn,
-                // which dominated the encode time and tail-latency-spiked
-                // the malloc heap. Reuse + size-on-demand keeps the
-                // resident set bounded by the largest image seen so far.
-                static thread_local std::vector<uint8_t> raw;
-                static thread_local std::vector<uint8_t> jpeg;
-                static thread_local std::vector<uint8_t> frame;
+        if (s.dump_image) {
+            // One JPEG encode + send for gid `g`. Reused thread_local buffers keep
+            // a hot run loop from churning the allocator (otherwise 32 MB raw +
+            // jpeg + frame allocated per image per frame — at 30 fps × 4 images
+            // that dominated encode time and spiked the malloc heap).
+            auto emit_one = [&](uint32_t g) {
+                static thread_local std::vector<uint8_t> raw, jpeg, frame;
                 int w = 0, h = 0, c = 0;
-                // First call asks for size via the convention
-                // (negative return = need that much). dump_image still
-                // wants a real buffer — start at 1 MB and grow.
-                if (raw.size() < 1 * 1024 * 1024) raw.resize(1 * 1024 * 1024);
-                int nb = s.dump_image(gid, raw.data(), (int)raw.size(), &w, &h, &c);
-                if (nb < 0) {
-                    raw.resize((size_t)(-nb) + 1024);
-                    nb = s.dump_image(gid, raw.data(), (int)raw.size(), &w, &h, &c);
-                }
+                if (raw.size() < 1u * 1024 * 1024) raw.resize(1u * 1024 * 1024);
+                int nb = s.dump_image(g, raw.data(), (int)raw.size(), &w, &h, &c);
+                if (nb < 0) { raw.resize((size_t)(-nb) + 1024);
+                              nb = s.dump_image(g, raw.data(), (int)raw.size(), &w, &h, &c); }
                 if (nb > 0 && w > 0 && h > 0 && c > 0) {
                     xi::Image img(w, h, c, raw.data());
                     jpeg.clear();
@@ -1092,13 +1050,50 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
                         size_t total = xp::kPreviewHeaderSize + jpeg.size();
                         if (frame.size() < total) frame.resize(total);
                         xp::PreviewHeader hd;
-                        hd.gid = gid; hd.codec = (uint32_t)xp::Codec::JPEG;
+                        hd.gid = g; hd.codec = (uint32_t)xp::Codec::JPEG;
                         hd.width = (uint32_t)w; hd.height = (uint32_t)h; hd.channels = (uint32_t)c;
                         xp::encode_preview_header(hd, frame.data());
                         std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
                         srv.send_binary(frame.data(), total);
                     }
                 }
+            };
+
+            yyjson_doc* doc = yyjson_read(sbuf.data(), (size_t)n, 0);
+            if (doc) {
+                yyjson_val* arr = yyjson_doc_get_root(doc);
+                std::unordered_set<uint32_t> sent_canons;   // dedup by canonical "src"
+                size_t _i, _ni; yyjson_val* item;
+                yyjson_arr_foreach(arr, _i, _ni, item) {
+                    yyjson_val* nv = yyjson_obj_get(item, "name");
+                    const char* nm = yyjson_get_str(nv);
+                    if (!sub_all && !sub_names.count(nm ? nm : "")) continue;
+
+                    const char* kind = yyjson_get_str(yyjson_obj_get(item, "kind"));
+                    if (!kind) continue;
+
+                    if (std::strcmp(kind, "image") == 0) {
+                        yyjson_val* gv = yyjson_obj_get(item, "gid");
+                        if (!yyjson_is_num(gv)) continue;
+                        uint32_t gid = (uint32_t)yyjson_get_num(gv);
+                        // Dedup: vars over one buffer share a canonical "src"; the
+                        // first SUBSCRIBED one encodes, the rest mirror client-side.
+                        yyjson_val* sv = yyjson_obj_get(item, "src");
+                        uint32_t canon = yyjson_is_num(sv) ? (uint32_t)yyjson_get_num(sv) : gid;
+                        if (!sent_canons.insert(canon).second) continue;
+                        emit_one(gid);
+                    } else if (std::strcmp(kind, "record") == 0) {
+                        // Record sub-images: gated by the record var's name, not
+                        // deduped (they carry no canonical src).
+                        yyjson_val* imgs = yyjson_obj_get(item, "images");
+                        if (!yyjson_is_obj(imgs)) continue;
+                        size_t _j, _nj; yyjson_val *ik, *iv;
+                        yyjson_obj_foreach(imgs, _j, _nj, ik, iv) {
+                            if (yyjson_is_num(iv)) emit_one((uint32_t)yyjson_get_num(iv));
+                        }
+                    }
+                }
+                yyjson_doc_free(doc);
             }
         }
     }

@@ -79,7 +79,12 @@ struct ImageCacheEntry {
 };
 
 inline std::vector<ImageCacheEntry>& image_cache() {
-    static std::vector<ImageCacheEntry> v;
+    // thread_local, NOT a shared static: snapshot_vars (writes) and dump_image
+    // (reads) always run on the same worker thread for a given run, but parallel
+    // dispatch lanes run several runs concurrently — a shared cache would race
+    // (clear()/push_back() vs iterate → reallocation UAF). Per-thread is correct
+    // and sufficient. (ValueStore::current() is thread_local for the same reason.)
+    static thread_local std::vector<ImageCacheEntry> v;
     return v;
 }
 
