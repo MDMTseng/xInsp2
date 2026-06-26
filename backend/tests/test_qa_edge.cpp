@@ -248,6 +248,47 @@ int main() {
         CHECK(line.find(R"(\"b\tc\nd)") != std::string::npos);  // " \t \n all escaped
     }
 
+    // ---- CrashHistory: bounded JSONL rotation + preserve-dir pruning --------
+    // Guards the disk-fill bug (record() was pure-append, preserve_dir unbounded);
+    // a chronically flapping line over weeks would otherwise fill the disk.
+    // CH-U1: the JSONL rotates to a single .1 generation once it passes max_bytes.
+    {
+        fs::path d = scratch("ch1");
+        fs::path jsonl = d / "crash-history.jsonl";
+        // Tiny cap so a few records trip rotation; no preserve dir for this case.
+        xi::CrashHistory hist(jsonl.string(), /*preserve_dir=*/std::string(),
+                              /*max_bytes=*/200, /*max_preserved=*/100);
+        SafeStateEvent ev; ev.reason = xi::SafeStateReason::BackendExit;
+        for (int i = 0; i < 40; ++i) CHECK_NOTHROW(hist.record(ev, i, false));
+        // Live file stays bounded (≈ one record past the cap), and a rotated .1
+        // generation exists — so total on-disk is bounded, not 40 records growing.
+        CHECK(fs::exists(jsonl));
+        CHECK(fs::exists(d / "crash-history.jsonl.1"));
+        CHECK(fs::file_size(jsonl) < 600u);   // not the full 40-record history
+    }
+
+    // CH-U2: preserve_dir keeps only the newest max_preserved dump+json pairs.
+    {
+        fs::path d = scratch("ch2");
+        fs::path dumps = d / "dumps";        // a stable preserve dir
+        for (int i = 0; i < 6; ++i) {        // 6 source dumps -> copied + pruned
+            fs::path dmp = d / ("crash-" + std::to_string(i) + ".dmp");
+            write_file(dmp, "MDMP");
+            write_file(fs::path(dmp).replace_extension(".json"), "{}");
+            // A fresh CrashHistory per record (the FE has one long-lived; here we
+            // just exercise the prune). Cap to 4 preserved files.
+            xi::CrashHistory hist((d / "h.jsonl").string(), dumps.string(),
+                                  /*max_bytes=*/4u*1024*1024, /*max_preserved=*/4);
+            SafeStateEvent ev; ev.dump_path = dmp.string();
+            CHECK_NOTHROW(hist.record(ev, i, false));
+        }
+        // 6 records each copy a .dmp+.json (12 files) but the dir is pruned to ≤4.
+        size_t n = 0;
+        std::error_code ec;
+        for (auto& e : fs::directory_iterator(dumps, ec)) { (void)e; ++n; }
+        CHECK(n <= 4);
+    }
+
     // ---- FeStatus::render (pure status snapshot -> JSON) --------------------
     // FS-U1: healthy snapshot, no last_event -> "last_event":null, comms object.
     {
@@ -290,7 +331,7 @@ int main() {
     // Cleanup scratch dirs (best-effort).
     {
         std::error_code ec;
-        for (const char* t : {"u1","u2","u3","u3b","u4","u4b","u5","u6"})
+        for (const char* t : {"u1","u2","u3","u3b","u4","u4b","u5","u6","ch1","ch2"})
             fs::remove_all(fs::temp_directory_path() / ("xinsp2-qa-edge-" + std::string(t)), ec);
     }
 
