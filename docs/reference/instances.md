@@ -72,6 +72,7 @@ Recognised top-level keys (anything else ignored, no error):
 | `plugin` | string | yes | The plugin this instance is bound to. |
 | `config` | object | no | Passed verbatim to `set_def(json)` after construction. |
 | `max_concurrency` | number | no | Per-instance concurrency cap under a parallel dispatch pool. Honoured only for a **reentrant** plugin (`plugin.json reentrant: true`); `0`/absent = unlimited; a non-reentrant plugin is always 1. |
+| `group` | string | no | Dispatch group this source instance's triggers route to (a `project.json` `parallelism.groups[].name`). `""`/absent = `default_group`. Round-tripped by save. |
 | `isolation` | string | no | **Deprecated, ignored** (any value) with a one-time warning — all instances run in-process (process isolation + SHM removed 2026-05; see [`../internals/fe-be.md`](../internals/fe-be.md)). |
 
 `config` need **not** match `get_def()`'s shape — `set_def` ignores unrecognised

@@ -12,6 +12,10 @@
 #include <string_view>
 #include <vector>
 
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__))
+#include <cpuid.h>   // GCC/Clang __cpuid(level, a,b,c,d) — x86 only
+#endif
+
 #include "xi_image.hpp"
 
 #ifdef XINSP2_HAS_OPENCV
@@ -45,7 +49,9 @@ inline CpuVendor detect_cpu_vendor() {
         *reinterpret_cast<int*>(vendor + 0) = info[1]; // EBX
         *reinterpret_cast<int*>(vendor + 4) = info[3]; // EDX
         *reinterpret_cast<int*>(vendor + 8) = info[2]; // ECX
-#elif defined(__GNUC__) || defined(__clang__)
+#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__))
+        // TODO(linux/arm): x86-only CPUID; on ARM this whole vendor probe is moot
+        // (no Intel/AMD distinction) — guarded by arch; <cpuid.h> pulled at top.
         unsigned int eax, ebx, ecx, edx;
         __cpuid(0, eax, ebx, ecx, edx);
         char vendor[13] = {};

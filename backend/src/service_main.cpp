@@ -88,7 +88,7 @@ static std::unordered_map<std::string, std::string> g_param_cache;
 #include <xi/xi_crash_dump.hpp>   // xi::crash:: minidump + breadcrumb forensics (extracted leaf)
 
 using xi::seh_exception;
-using xi::seh_translator;
+// (seh translation installed via xi::install_seh_translator() — portable shim)
 
 // ---- Pipeline graph capture (stage 2) ----------------------------------
 // Opt-in dataflow-graph capture lives in xi_graph_capture.hpp (xi::GraphCapture
@@ -1454,7 +1454,7 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
         for (int i = 0; i < n; ++i) {
             lane->workers.emplace_back([srv_ptr, lane, wi = i] {
                 reserve_fault_stack();
-                _set_se_translator(seh_translator);
+                xi::install_seh_translator();
                 set_os_thread_priority_(lane->cfg.thread_priority);
                 // CPU affinity (empty = unbound). One mask → all workers share it;
                 // N masks → worker wi uses set[wi % N]. Each mask may be multi-core.
@@ -1577,7 +1577,7 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
     auto evp = std::make_shared<xi::TriggerEvent>(std::move(ev));
     std::thread([srv, evp]() {
         reserve_fault_stack();
-        _set_se_translator(seh_translator);
+        xi::install_seh_translator();
         std::lock_guard<std::mutex> lk(g_run_mu);
         g_current_trigger = evp.get();
         run_one_inspection(*srv, /*frame_hint=*/0, /*run_id=*/0, "", /*emit_seq=*/-1);
@@ -2396,7 +2396,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                      frame_path = std::move(frame_path),
                      meta_json  = std::move(meta_json)]() {
             reserve_fault_stack();   // BUG 2: dump survives a script stack overflow
-            _set_se_translator(seh_translator);
+            xi::install_seh_translator();
             std::lock_guard<std::mutex> lk(g_run_mu);
 
             // Stage 1b: build a one-shot record (frame image + meta) and expose
@@ -3640,7 +3640,7 @@ int main(int argc, char** argv) {
     xi::crash::install();
     // SEH → C++ exception translator so try/catch catches segfaults (a separate
     // concern from the dump machinery; owned here, re-set per inspect thread).
-    _set_se_translator(seh_translator);
+    xi::install_seh_translator();
 
     // --test-crash: deliberately trigger a fatal exception so the
     // top-level minidump filter fires. Used by runCrashDump E2E.

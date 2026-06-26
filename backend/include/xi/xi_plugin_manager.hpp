@@ -1161,7 +1161,15 @@ public:
         // next open_project can roll a partial commit forward from it.
         std::error_code ec;
         std::filesystem::path marker = std::filesystem::path(canonical_path_) / kCommitMarker;
-        { std::ofstream mf(marker); mf << "commit in progress\n"; }
+        // F4: the marker MUST be durable on disk before the mirror starts — a bare
+        // ofstream leaves it in the OS cache, so a power loss mid-mirror could tear
+        // the canonical with no marker to drive roll-forward. atomic_write flushes
+        // (FlushFileBuffers + atomic rename). If even the marker can't be written,
+        // abort rather than mirror without a journal.
+        if (!xi::atomic_write(marker, std::string("commit in progress\n"))) {
+            std::fprintf(stderr, "[xinsp2] working copy: commit-marker write failed — aborting commit\n");
+            return false;
+        }
         xi::wc::mirror_tree(project_.folder_path, canonical_path_);
         std::filesystem::remove(marker, ec);   // commit complete -> clear journal
         std::fprintf(stderr, "[xinsp2] working copy: committed to %s\n",
@@ -1838,6 +1846,11 @@ public:
         ii.name = new_name;
         ii.plugin_name = it->second.plugin_name;
         ii.folder_path = new_folder.string();
+        // F2: carry over per-instance config that isn't in get_def() — else a
+        // rename silently dropped the concurrency cap + dispatch group (the new
+        // InstanceInfo would default them to 0/"" on disk and at runtime).
+        ii.max_concurrency = it->second.max_concurrency;
+        ii.group           = it->second.group;
         InstanceFolderRegistry::instance().set(new_name, ii.folder_path);
         if (pi.c_factory) {
             xi_host_api& host = default_host_api();
@@ -1992,7 +2005,57 @@ private:
         pm_json_escape(out, project_.overflow);
         out += ",\"result_order\":";
         pm_json_escape(out, project_.result_order);
+        // Round-trip dispatch groups + default_group (F1 data-loss: omitting them
+        // meant any instance CRUD silently wiped the user's group/priority/affinity
+        // config). cpu_affinity is always written nested ([[...]]) — semantically
+        // identical to the flat form the parser also accepts.
+        if (!project_.groups.empty()) {
+            out += ",\"groups\":[";
+            for (size_t gi = 0; gi < project_.groups.size(); ++gi) {
+                const auto& g = project_.groups[gi];
+                if (gi) out += ",";
+                out += "{\"name\":"; pm_json_escape(out, g.name);
+                out += ",\"max_parallel\":" + std::to_string(g.max_parallel);
+                out += ",\"thread_priority\":"; pm_json_escape(out, g.thread_priority);
+                out += ",\"queue_depth\":" + std::to_string(g.queue_depth);
+                out += ",\"overflow\":"; pm_json_escape(out, g.overflow);
+                out += ",\"result_order\":"; pm_json_escape(out, g.result_order);
+                out += ",\"min_interval_ms\":" + std::to_string(g.min_interval_ms);
+                if (!g.cpu_affinity.empty()) {
+                    out += ",\"cpu_affinity\":[";
+                    for (size_t ai = 0; ai < g.cpu_affinity.size(); ++ai) {
+                        if (ai) out += ",";
+                        out += "[";
+                        for (size_t ci = 0; ci < g.cpu_affinity[ai].size(); ++ci) {
+                            if (ci) out += ",";
+                            out += std::to_string(g.cpu_affinity[ai][ci]);
+                        }
+                        out += "]";
+                    }
+                    out += "]";
+                }
+                out += "}";
+            }
+            out += "]";
+        }
+        if (!project_.default_group.empty()) {
+            out += ",\"default_group\":"; pm_json_escape(out, project_.default_group);
+        }
         out += "},\n";
+        // runtime block (process_priority + timer_fps) — also round-tripped (F1).
+        if (!project_.runtime_priority.empty() || project_.runtime_timer_fps >= 0) {
+            out += "  \"runtime\": {";
+            bool rfirst = true;
+            if (!project_.runtime_priority.empty()) {
+                out += "\"process_priority\":"; pm_json_escape(out, project_.runtime_priority);
+                rfirst = false;
+            }
+            if (project_.runtime_timer_fps >= 0) {
+                if (!rfirst) out += ",";
+                out += "\"timer_fps\":" + std::to_string(project_.runtime_timer_fps);
+            }
+            out += "},\n";
+        }
         out += "  \"instances\": [";
         int i = 0;
         for (auto& [k, v] : project_.instances) {
@@ -2043,6 +2106,11 @@ private:
         // would silently drop a hand-set max_concurrency).
         if (ii.max_concurrency > 0)
             out += "  \"max_concurrency\": " + std::to_string(ii.max_concurrency) + ",\n";
+        // Round-trip the dispatch group (F3: a UI save / create / rename used to
+        // drop it, so the source's triggers silently fell back to default_group).
+        if (!ii.group.empty()) {
+            out += "  \"group\": "; pm_json_escape(out, ii.group); out += ",\n";
+        }
         out += "  \"config\": ";
         out += ii.instance ? ii.instance->get_def() : "{}";
         out += "\n}\n";

@@ -26,10 +26,18 @@
 namespace xi { namespace cli {
 
 inline std::string get_exe_dir() {
+#ifdef _WIN32
     char buf[MAX_PATH];
     DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
     std::filesystem::path p(std::string(buf, n));
     return p.parent_path().string();
+#else
+    // TODO(linux): /proc/self/exe is Linux-only; macOS uses _NSGetExecutablePath.
+    std::error_code ec;
+    auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec) return std::filesystem::current_path().string();
+    return p.parent_path().string();
+#endif
 }
 
 inline int parse_port(int argc, char** argv) {

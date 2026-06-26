@@ -411,6 +411,7 @@
   },
   "scripts": {
     "build": "node esbuild.mjs",
+    "typecheck": "tsc --noEmit",
     "watch": "node esbuild.mjs --watch",
     "test:protocol": "node --test test/protocol.test.mjs",
     "test:integration": "node --test test/ws_basic.test.mjs"

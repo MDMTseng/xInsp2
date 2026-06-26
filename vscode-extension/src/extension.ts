@@ -1644,7 +1644,8 @@ export function activate(context: vscode.ExtensionContext) {
                         const sdkRoot = locateSdkRoot(context.extensionPath, findBackendExe(context),
                             vscode.workspace.getConfiguration('xinsp2').get<string>('sdkPath'));
                         const lint = sdkRoot ? path.join(sdkRoot, 'testing', 'lint_plugin_ui.mjs') : '';
-                        const src = lastProjectFolder ? path.join(lastProjectFolder, 'plugins', pname) : '';
+                        const projForSrc = lastProjectFolder;
+                        const src = (projForSrc && pname) ? path.join(projForSrc, 'plugins', pname) : '';
                         if (lint && fsmod.existsSync(lint) && src && fsmod.existsSync(src)) {
                             const { spawnSync } = require('child_process');
                             const r = spawnSync(process.execPath, [lint, src],
@@ -2438,10 +2439,10 @@ void xi_inspect_entry(int frame) {
             if (!pluginName) {
                 const plugins = await sendCmd('list_plugins');
                 if (!plugins.ok) return;
-                const pick = await vscode.window.showQuickPick(
-                    plugins.data.map((p: any) => ({ label: p.name, description: p.description })),
-                    { placeHolder: 'Select plugin type' }
-                );
+                const pickItems: { label: string; description?: string }[] =
+                    plugins.data.map((p: any) => ({ label: p.name, description: p.description }));
+                const pick = await vscode.window.showQuickPick(pickItems,
+                    { placeHolder: 'Select plugin type' });
                 if (!pick) return;
                 pluginName = pick.label;
             }
