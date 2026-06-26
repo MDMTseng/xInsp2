@@ -232,7 +232,7 @@ listed under each entry.
 `args: {}` → `data: { "version": "0.1.0", "abi": 1, "commit": "abc123" }`
 
 `abi` here is the **WS protocol** version (currently 1) — distinct from the C
-plugin-ABI struct version `XI_ABI_VERSION` (6, see `reference/c-abi.md`).
+plugin-ABI struct version `XI_ABI_VERSION` (7, see `reference/c-abi.md`).
 
 ### `shutdown`
 `args: {}` → `ok: true` then the backend closes the socket and exits.

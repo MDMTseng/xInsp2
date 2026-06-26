@@ -6,7 +6,7 @@
 // system's schannel-less crypto (we bundle a tiny SHA1 for the handshake).
 //
 // Scope: localhost, single client at a time, text + binary frames up to
-// 64 MiB, RFC 6455 handshake. No TLS, no extensions, no fragmentation on
+// 16 MiB (kMaxFrame/kMaxMessage), RFC 6455 handshake. No TLS, no extensions, no fragmentation on
 // send (we always send whole messages in one frame). This is exactly what
 // xInsp2 needs and nothing more.
 //

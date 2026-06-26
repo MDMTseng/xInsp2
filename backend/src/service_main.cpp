@@ -1031,7 +1031,10 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
             if (!sub_all) sub_names = g_sub_names;   // copy under lock
         }
 
-        if (s.dump_image) {
+        // Skip the whole parse+encode when nobody is subscribed (the default
+        // send-none state): no subscriber ⇒ no preview, so don't re-parse the
+        // snapshot or allocate the dedup set every frame for nothing.
+        if (s.dump_image && (sub_all || !sub_names.empty())) {
             // One JPEG encode + send for gid `g`. Reused thread_local buffers keep
             // a hot run loop from churning the allocator (otherwise 32 MB raw +
             // jpeg + frame allocated per image per frame — at 30 fps × 4 images
@@ -1044,7 +1047,9 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
                 if (nb < 0) { raw.resize((size_t)(-nb) + 1024);
                               nb = s.dump_image(g, raw.data(), (int)raw.size(), &w, &h, &c); }
                 if (nb > 0 && w > 0 && h > 0 && c > 0) {
-                    xi::Image img(w, h, c, raw.data());
+                    // Non-owning view over `raw` — encode reads only, and `raw`
+                    // outlives this call, so skip the full-frame deep copy.
+                    xi::Image img = xi::Image::view(w, h, c, raw.data());
                     jpeg.clear();
                     if (xi::encode_jpeg(img, 85, jpeg)) {
                         size_t total = xp::kPreviewHeaderSize + jpeg.size();
@@ -1615,15 +1620,10 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
             // Route by the emitting source instance's "group" (default_group if
             // the source is untagged/unknown, or the synthetic timer tick). A
             // project with no explicit groups resolves to the synthesized default
-            // lane (group "") — see spawn_group_pool_.
-            std::string g;
-            if (!ev.leader_source.empty()) {
-                auto& insts = g_plugin_mgr.project().instances;
-                auto it = insts.find(ev.leader_source);
-                if (it != insts.end()) g = it->second.group;
-            }
-            if (g.empty()) g = g_plugin_mgr.project().default_group;
-            ev.group = g;
+            // lane (group "") — see spawn_group_pool_. instance_group() does the
+            // lookup UNDER PluginManager's lock — this sink runs on a source's emit
+            // thread, concurrent with create/remove/rename_instance.
+            ev.group = g_plugin_mgr.instance_group(ev.leader_source);
             (void)enqueue_to_lane_(std::move(ev));
         } else {
             dispatch_one_shot_(srv, std::move(ev));

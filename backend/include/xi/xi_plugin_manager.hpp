@@ -1860,6 +1860,21 @@ public:
 
     ProjectInfo& project() { return project_; }
 
+    // Thread-safe dispatch-group lookup for the bus sink, which runs on a source
+    // plugin's emit thread concurrently with create/remove/rename_instance (those
+    // mutate project_.instances under mu_). Reading project().instances unlocked
+    // from the sink was a data race (find() vs erase() → UAF). Returns the
+    // instance's group, or default_group when absent/unknown.
+    std::string instance_group(const std::string& name) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!name.empty()) {
+            auto it = project_.instances.find(name);
+            if (it != project_.instances.end() && !it->second.group.empty())
+                return it->second.group;
+        }
+        return project_.default_group;
+    }
+
     std::string to_json() {
         std::lock_guard<std::mutex> lk(mu_);
         std::string out = "{\"name\":";

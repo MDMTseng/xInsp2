@@ -119,9 +119,11 @@ single mutate-and-observe round-trip. For the unknown-command fallthrough use
 "command":"<name>"}` (a misspelled command otherwise looks like a successful
 no-op).
 
-**`xi_plugin_get_def` / `xi_plugin_set_def`** — persisted config (get on save,
-set on load / `cmd:set_instance_def`). Same `<n / -needed>` return contract as
-`exchange`. Keep the JSON small (hundreds of bytes); for bigger data use
+**`xi_plugin_get_def`** — persisted config read (on save). Same `<n / -needed>`
+byte-count return contract as `exchange`. **`xi_plugin_set_def`** — config write
+(on load / `cmd:set_instance_def`) — returns **`0` on success, `<0` on failure**;
+it is NOT a byte count (the `XI_PLUGIN_IMPL` macro maps `bool set_def` → `0`/`-1`).
+Keep the JSON small (hundreds of bytes); for bigger data use
 `host->instance_folder()`.
 
 ---

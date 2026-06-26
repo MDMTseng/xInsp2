@@ -113,6 +113,20 @@ struct Image {
         return img;
     }
 
+    // Non-owning VIEW over an external buffer (no copy, no ownership). The caller
+    // guarantees `data` outlives this Image and every copy. Use on read-only paths
+    // (e.g. JPEG-encoding bytes already sitting in a reused scratch vector) to skip
+    // the deep copy the `(w,h,c,data)` ctor does.
+    static Image view(int w, int h, int c, const uint8_t* data) {
+        Image img;
+        if (!data || w <= 0 || h <= 0 || c <= 0) return img;
+        img.width = w; img.height = h; img.channels = c;
+        img.pixels_ = std::shared_ptr<uint8_t>(const_cast<uint8_t*>(data),
+                                                [](uint8_t*) {});   // no-op deleter
+        img.pixels_size_ = static_cast<size_t>(w) * h * c;
+        return img;
+    }
+
     bool   empty() const { return width == 0 || height == 0 || channels == 0; }
     size_t size()  const { return pixels_size_; }
     uint8_t*       data()       { return pixels_.get(); }

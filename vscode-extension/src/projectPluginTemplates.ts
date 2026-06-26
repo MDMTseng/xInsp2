@@ -39,8 +39,8 @@ export const TEMPLATE_CHOICES: TemplateChoice[] = [
     {
         id: 'expert',
         label: '$(symbol-event)  Expert — stateful source',
-        description: 'Background worker thread that emits trigger frames into the bus',
-        detail: 'A simulated camera. Shows xi::spawn_worker for safe threading, host_api->emit_trigger for pushing into the bus, persistent state across DLL reloads, and exchange() as a control channel (start/stop).',
+        description: 'Background worker thread that emits trigger records',
+        detail: 'A simulated camera. Shows xi::spawn_worker for safe threading, host->emit_record for pushing frames into the dispatch pipeline, persistent state across DLL reloads, and exchange() as a control channel (start/stop).',
     },
 ];
 

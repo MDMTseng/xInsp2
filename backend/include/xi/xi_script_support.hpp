@@ -96,7 +96,13 @@ XI_SCRIPT_EXPORT int xi_script_snapshot_vars(char* buf, int buflen) {
 
     image_cache().clear();
 
-    std::string out = "[";
+    // Reused across runs (clear() keeps capacity) so a hot run loop doesn't
+    // reallocate the snapshot string every frame — mirrors the host's reuse of
+    // vars_msg/sbuf. thread_local: safe under parallel dispatch lanes.
+    static thread_local std::string out;
+    out.clear();
+    if (out.capacity() < 4096) out.reserve(4096);
+    out += "[";
     uint32_t next_gid = 100;
 
     // Image dedup. Every image var gets its OWN gid (so the preview slots stay

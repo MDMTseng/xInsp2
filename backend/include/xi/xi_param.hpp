@@ -103,6 +103,9 @@ class Param : public ParamBase {
 public:
     Param(std::string name, T initial, Range<T> range = {})
         : name_(std::move(name)), value_(initial), range_(range) {
+        // Normalize an inverted range (min>max — an easy typo): left as-is, the
+        // clamp in set() would pin EVERY value to max. Swap so clamping behaves.
+        if (range_.min > range_.max) { T t = range_.min; range_.min = range_.max; range_.max = t; }
         ParamRegistry::instance().add(this);
     }
 

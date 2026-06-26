@@ -166,3 +166,51 @@ test('no subscription → vars arrive but zero preview frames', async () => {
         assert.ok(frame.length > 20, `subscribed name "${imgName}" now streams a preview`);
     });
 });
+
+// A Record VAR carrying images: the sub-images get gids in the vars item's
+// `images` map, are gated by the record var's name, and stream one preview frame
+// each when that name is subscribed.
+test('record VAR with images → preview frame per sub-image, gated by record name', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'xi_rec_'));
+    const sp = join(dir, 'rec.cpp');
+    writeFileSync(sp, `
+#include <xi/xi.hpp>
+#include <xi/xi_image.hpp>
+#include <cstring>
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int frame) {
+    xi::Image a(48, 32, 1); std::memset(a.data(), 90, 48 * 32);
+    xi::Image b(40, 24, 1); std::memset(b.data(), 30, 40 * 24);
+    xi::Record rec;
+    rec.image("a", a).image("b", b);
+    VAR(report, rec);
+}
+`);
+    await withBackend(async (c) => {
+        await c.nextText(); // hello
+        c.send({ type: 'cmd', id: 1, name: 'compile_and_load', args: { path: sp } });
+        assert.equal((await c.nextNonLog()).ok, true, 'compile ok');
+
+        c.send({ type: 'cmd', id: 2, name: 'run' });
+        assert.equal((await c.nextNonLog()).ok, true);
+        const vars = await c.nextNonLog();
+        const rec = vars.items.find(i => i.kind === 'record' && i.name === 'report');
+        assert.ok(rec && rec.images, 'record var carries an images map');
+        const subImgGids = Object.values(rec.images);
+        assert.equal(subImgGids.length, 2, 'two sub-images');
+
+        // Not subscribed yet → no frames.
+        await sleep(2000);
+        assert.equal(c.binaryQueue.length, 0, 'record sub-images gated until subscribed');
+
+        // Subscribe the RECORD var name → both sub-images stream.
+        c.send({ type: 'cmd', id: 3, name: 'subscribe', args: { names: ['report'] } });
+        await c.nextNonLog();
+        c.send({ type: 'cmd', id: 4, name: 'run' });
+        await c.nextNonLog();   // run rsp
+        await c.nextNonLog();   // vars
+        let frames = 0;
+        for (;;) { try { await c.nextBinary(2500); frames++; } catch { break; } }
+        assert.equal(frames, 2, `expected 2 record sub-image frames, got ${frames}`);
+    });
+});

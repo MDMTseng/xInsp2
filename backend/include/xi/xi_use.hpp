@@ -24,6 +24,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -276,6 +277,24 @@ private:
 inline Trigger current_trigger() { return Trigger{}; }
 
 // Proxy object returned by xi::use()
+// A miss on xi::use("name") — process/exchange returns -1 when no instance by
+// that name is registered — used to be silent (empty Record/Image, no log), so a
+// typo'd or not-yet-created instance name looked like "found nothing". Surface it
+// once per name as an error log so it's discoverable.
+inline void warn_use_miss_(const xi_host_api* host, const char* name) {
+    if (!host || !host->log) return;
+    static std::mutex mu;
+    static std::unordered_map<std::string, bool> warned;
+    std::string key = name ? name : "";
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (!warned.emplace(key, true).second) return;   // warned this name already
+    }
+    std::string msg = "xi::use(\"" + key + "\"): no such instance — process/exchange "
+                      "returns empty (typo, or instance not created yet?)";
+    host->log(3, msg.c_str());
+}
+
 class UseProxy {
 public:
     explicit UseProxy(const std::string& name) : name_(name) {}
@@ -321,9 +340,10 @@ public:
         const void* in_doc = (host->doc_retain && host->doc_release)
             ? (const void*)input.share_out(host->doc_retain, host->doc_release)
             : (const void*)input.doc();
-        process_fn(name_.c_str(), in_doc,
+        int prc = process_fn(name_.c_str(), in_doc,
                    nullptr, 0,
                    in_imgs.data(), (int)in_imgs.size(), &output);
+        if (prc == -1) warn_use_miss_(host, name_.c_str());   // no such instance
 
         // Release input handles from the BACKEND pool — plugin's process()
         // copied what it needed.
@@ -357,9 +377,11 @@ public:
 
     std::string exchange(const std::string& cmd) {
         auto exchange_fn = reinterpret_cast<UseExchangeFn>(g_use_exchange_fn_);
+        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
         if (!exchange_fn) return "{}";
         std::vector<char> buf(64 * 1024);
         int n = exchange_fn(name_.c_str(), cmd.c_str(), buf.data(), (int)buf.size());
+        if (n == -1) { warn_use_miss_(host, name_.c_str()); return "{}"; }  // no such instance
         if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
                      n = exchange_fn(name_.c_str(), cmd.c_str(), buf.data(), (int)buf.size()); }
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
