@@ -105,6 +105,29 @@ def _enrich_compile_error(orig: ProtocolError, what: str, target: str) -> Protoc
     return ProtocolError("\n".join(lines), error=orig.error, data=orig.data)
 
 
+_NONFINITE = {"NaN": float("nan"), "Infinity": float("inf"), "-Infinity": float("-inf")}
+
+
+def _restore_nonfinite(v):
+    """Map a single quoted sentinel string to its float; pass anything else through."""
+    return _NONFINITE.get(v, v) if isinstance(v, str) else v
+
+
+def _restore_nonfinite_deep(v):
+    """Recursively restore non-finite sentinels inside a record's `data` (dict/list).
+    A plugin can write a NaN/Inf field into a nested Record; the backend emits it as
+    the quoted string "NaN" deep inside kind:"record" data. Restoring only the
+    top-level number var left these as strings -> `str > float` raised TypeError on a
+    threshold compare. Mirrors restoreNonFiniteDeep in ui-components/src/protocol.mjs."""
+    if isinstance(v, str):
+        return _restore_nonfinite(v)
+    if isinstance(v, list):
+        return [_restore_nonfinite_deep(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _restore_nonfinite_deep(x) for k, x in v.items()}
+    return v
+
+
 @dataclass
 class PreviewFrame:
     gid: int
@@ -139,8 +162,7 @@ class RunResult:
         # vars (NaN/Infinity can't be bare JSON tokens). Mirrors the C++
         # nonfinite_from_str; without this a number var reads as the string "NaN".
         if v.get("kind") == "number" and isinstance(val, str):
-            return {"NaN": float("nan"), "Infinity": float("inf"),
-                    "-Infinity": float("-inf")}.get(val, val)
+            return _restore_nonfinite(val)
         return val
 
     def image(self, name: str) -> PreviewFrame | None:
@@ -574,10 +596,17 @@ class Client:
             except Empty:
                 break
 
+        # Restore non-finite sentinels inside kind:"record" data in place so every
+        # accessor (and direct vars[...] reads) sees real floats, not "NaN" strings.
+        items = vars_msg["items"]
+        for it in items:
+            if it.get("kind") == "record" and isinstance(it.get("data"), (dict, list)):
+                it["data"] = _restore_nonfinite_deep(it["data"])
+
         return RunResult(
             run_id=run_id,
             ms=int(data.get("ms", 0)),
-            vars=vars_msg["items"],
+            vars=items,
             previews=previews,
             events=events,
         )

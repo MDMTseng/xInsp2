@@ -1,6 +1,6 @@
 // Node test for protocol.mjs decoders. Run: node hmi/test/protocol.test.mjs
 import assert from "node:assert";
-import { parseVars, decodePreviewFrame, bytesToBase64 } from "../src/protocol.mjs";
+import { parseVars, decodePreviewFrame, bytesToBase64, restoreNonFiniteDeep } from "../src/protocol.mjs";
 
 let pass = 0;
 const t = (name, fn) => { fn(); console.log("ok -", name); pass++; };
@@ -38,6 +38,32 @@ t("parseVars restores non-finite number sentinels back to JS numbers", () => {
   assert.equal(items.m.value, -Infinity);
   assert.equal(items.ok.value, 1.5);
   assert.equal(items.s.value, "NaN");             // not touched (kind !== number)
+});
+
+t("parseVars restores non-finite sentinels nested inside record data", () => {
+  const { items } = parseVars({ run_id: 3, items: [
+    { name: "meas", kind: "record", data: {
+      ratio: "NaN",
+      bounds: { lo: "-Infinity", hi: "Infinity" },
+      samples: [1.0, "NaN", 2.5],
+      label: "NaN-ish",            // a real string that isn't an exact sentinel — keep it
+      ok: 4,
+    }},
+  ]});
+  const d = items.meas.data;
+  assert.ok(Number.isNaN(d.ratio), "top record field NaN");
+  assert.equal(d.bounds.lo, -Infinity, "nested object field");
+  assert.equal(d.bounds.hi, Infinity);
+  assert.ok(Number.isNaN(d.samples[1]), "array element NaN");
+  assert.equal(d.samples[0], 1.0);
+  assert.equal(d.label, "NaN-ish", "non-sentinel string untouched");
+  assert.equal(d.ok, 4);
+});
+
+t("restoreNonFiniteDeep leaves a plain value / non-sentinel string alone", () => {
+  assert.equal(restoreNonFiniteDeep(5), 5);
+  assert.equal(restoreNonFiniteDeep("hello"), "hello");
+  assert.equal(restoreNonFiniteDeep(null), null);
 });
 
 t("decodePreviewFrame reads BE header + builds jpeg data URL", () => {

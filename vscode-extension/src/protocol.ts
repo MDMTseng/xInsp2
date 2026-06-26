@@ -172,10 +172,43 @@ export function decodePreviewHeader(buf: ArrayBuffer | Uint8Array): PreviewHeade
 
 // ---------- helpers ----------
 
+// Restore the quoted non-finite sentinels the backend emits for doubles
+// (NaN/Infinity/-Infinity can't be bare JSON tokens, so they arrive as strings).
+// VarItemNumber.value is typed `number` but the wire carries "NaN" etc.; without
+// this the value stays a string and any numeric use silently misreads. Mirrors
+// restoreNonFinite in ui-components/src/protocol.mjs + the C++ nonfinite_from_str.
+export function restoreNonFinite(v: unknown): unknown {
+    if (v === 'NaN') { return NaN; }
+    if (v === 'Infinity') { return Infinity; }
+    if (v === '-Infinity') { return -Infinity; }
+    return v;
+}
+
+// Recursively restore sentinels anywhere inside a record's `data` (object/array).
+export function restoreNonFiniteDeep(v: unknown): unknown {
+    if (typeof v === 'string') { return restoreNonFinite(v); }
+    if (Array.isArray(v)) { return v.map(restoreNonFiniteDeep); }
+    if (v && typeof v === 'object') {
+        const o = v as Record<string, unknown>;
+        for (const k of Object.keys(o)) { o[k] = restoreNonFiniteDeep(o[k]); }
+        return o;
+    }
+    return v;
+}
+
 export function parseServerMessage(text: string): ServerMessage {
     const obj = JSON.parse(text);
     if (!obj || typeof obj !== 'object' || typeof obj.type !== 'string') {
         throw new Error('not a protocol message');
+    }
+    if (obj.type === 'vars' && Array.isArray(obj.items)) {
+        for (const it of obj.items) {
+            if (it && it.kind === 'number' && typeof it.value === 'string') {
+                it.value = restoreNonFinite(it.value);
+            } else if (it && it.kind === 'record' && it.data && typeof it.data === 'object') {
+                it.data = restoreNonFiniteDeep(it.data);
+            }
+        }
     }
     return obj as ServerMessage;
 }

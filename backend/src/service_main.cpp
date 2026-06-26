@@ -3647,11 +3647,21 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         auto old_name = xp::get_string_field(parsed->args_json, "name");
         auto new_name = xp::get_string_field(parsed->args_json, "new_name");
         if (!old_name || !new_name) { send_rsp_err(srv, id, "missing name or new_name"); return; }
-        if (g_plugin_mgr.rename_instance(*old_name, *new_name)) {
-            rename_inst_state(*old_name, *new_name);
-            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
-        } else {
+        using RR = xi::PluginManager::RenameResult;
+        RR rr = g_plugin_mgr.rename_instance(*old_name, *new_name);
+        if (rr == RR::Rejected) {
             send_rsp_err(srv, id, "rename failed — name in use or instance missing");
+        } else {
+            // Ok OR NotPersisted: the runtime + folder were renamed, so name-keyed
+            // side state must follow regardless — otherwise g_inst_state stays under
+            // old_name while the registries are under new_name (desync). Only the
+            // disk-save status differs in the reply.
+            rename_inst_state(*old_name, *new_name);
+            if (rr == RR::NotPersisted)
+                send_rsp_err(srv, id, "renamed in memory but could not persist to disk "
+                                      "(disk full / read-only?) — may revert on restart");
+            else
+                send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         }
     } else if (name == "get_project") {
         send_rsp_ok(srv, id, g_plugin_mgr.to_json());

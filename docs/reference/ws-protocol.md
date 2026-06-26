@@ -87,7 +87,15 @@ Per-item fields:
   / `"-Infinity"` (JSON has no non-finite numbers; emitting a bare `nan` would be
   invalid JSON and drop the whole frame). The same sentinel convention applies to
   non-finite doubles in a `Record` — they round-trip back to the non-finite value
-  via `get_double`/`as_double` instead of silently reading as `0.0`.
+  via `get_double`/`as_double` instead of silently reading as `0.0`. **Consumers
+  must restore the sentinel back to a real number**: a top-level `kind: "number"`
+  string value, *and* — because a `Record` can hold a non-finite field at any
+  depth — recursively inside a `kind: "record"` `data` object/array. The shipped
+  clients do this (`restoreNonFinite` / `restoreNonFiniteDeep` in
+  `ui-components/src/protocol.mjs` and `vscode-extension/src/protocol.ts`,
+  `_restore_nonfinite_deep` in `tools/xinsp2_py`); a consumer that skips it reads
+  the literal string `"NaN"`, so a threshold compare silently misfires (JS) or
+  raises `TypeError` (Python).
 - `gid` (int) — present for `image` kind; unique per image var. Matches a binary
   preview frame's `gid` **only for the canonical var of its group** (see `src`).
 - `src` (int) — present for `image` kind; the **canonical gid** of this image's
@@ -898,7 +906,7 @@ in full detail above. One-line purpose per entry; args follow the same
 | `create_project` `args: { "path": "...", "name": "..." }` | Create a new empty project folder with a stub `project.json` and `inspect.cpp`. |
 | `close_project` | Tear down all instances and the dispatch lanes. Does not unload script or plugin DLLs. |
 | `create_instance` `args: { "plugin": "blob_analysis", "name": "det0" }` | Add a new instance to the open project (creates folder, calls `xi_plugin_create`, writes `instance.json`). |
-| `remove_instance` `args: { "name": "det0", "purge"?: bool }` | Remove an instance from the registry and call `xi_plugin_destroy`. Default: keep the on-disk folder. Pass `"purge": true` to delete it. |
+| `remove_instance` `args: { "name": "det0", "delete_folder"?: bool }` | Remove an instance from the registry and call `xi_plugin_destroy`. `"delete_folder": true` deletes the on-disk folder. Default (`false`) keeps the folder but moves its `instance.json` aside to `instance.json.removed` — open_project discovers instances by folder scan, so the removal still has to persist or the instance would resurrect on reopen; the tombstone keeps the config/assets recoverable. |
 | `rename_instance` `args: { "old": "det0", "new": "detector" }` | Rename an instance (moves its folder, updates the registry). |
 | `save_instance_config` `args: { "name": "det0" }` | Write the current `get_def()` output for one instance to `instance.json` without a full `save_project`. |
 | `get_project` | Return the open project's `project.json` content and resolved metadata. |

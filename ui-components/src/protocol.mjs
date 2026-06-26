@@ -18,6 +18,25 @@ export function restoreNonFinite(v) {
   return v;
 }
 
+// Recursively restore the non-finite sentinels anywhere inside a record's `data`
+// object/array. A plugin can write a NaN/Inf field into a nested Record (a
+// divide-by-zero measurement), and the backend emits it as the quoted string
+// "NaN" deep inside kind:"record" data — restoring only the top-level number var
+// left those as strings, so a threshold/plot on a record field silently misread
+// (or threw in Python). Walks plain objects/arrays only; leaves other types.
+export function restoreNonFiniteDeep(v) {
+  if (typeof v === "string") return restoreNonFinite(v);
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) v[i] = restoreNonFiniteDeep(v[i]);
+    return v;
+  }
+  if (v && typeof v === "object") {
+    for (const k of Object.keys(v)) v[k] = restoreNonFiniteDeep(v[k]);
+    return v;
+  }
+  return v;
+}
+
 // Parse a `vars` text message into { run_id, items } where items is a
 // name -> item map (item = { name, kind, value?, gid?, raw? }).
 export function parseVars(msg) {
@@ -27,6 +46,8 @@ export function parseVars(msg) {
   for (const it of list) {
     if (it && it.kind === "number" && typeof it.value === "string")
       it.value = restoreNonFinite(it.value);
+    else if (it && it.kind === "record" && it.data && typeof it.data === "object")
+      it.data = restoreNonFiniteDeep(it.data);
     items[it.name] = it;
   }
   return { run_id: o.run_id, items };

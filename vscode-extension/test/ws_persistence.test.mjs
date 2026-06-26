@@ -103,6 +103,41 @@ test('project.json groups/default_group/runtime + instance group survive a save'
     });
 });
 
+test('remove_instance (keep folder) persists — instance does not resurrect on reopen', async () => {
+    const proj = mkdtempSync(join(tmpdir(), 'xi_rmkeep_'));
+    writeFileSync(join(proj, 'inspect.cpp'),
+        '#include <xi/xi.hpp>\nXI_SCRIPT_EXPORT void xi_inspect_entry(int){}\n');
+    writeFileSync(join(proj, 'project.json'),
+        JSON.stringify({ name: 'rmkeep', script: 'inspect.cpp' }));
+
+    await withBackend(async (c) => {
+        await c.next(); // hello
+        c.send({ type: 'cmd', id: 1, name: 'open_project', args: { folder: proj } });
+        assert.equal((await c.nextRsp()).ok, true, 'open_project ok');
+
+        c.send({ type: 'cmd', id: 2, name: 'create_instance', args: { name: 'cam9', plugin: 'mock_camera' } });
+        assert.equal((await c.nextRsp()).ok, true, 'create ok');
+        assert.ok(existsSync(join(proj, 'instances', 'cam9', 'instance.json')), 'instance.json written');
+
+        // Remove WITHOUT delete_folder (the "Remove (keep folder)" UI path).
+        c.send({ type: 'cmd', id: 3, name: 'remove_instance', args: { name: 'cam9', delete_folder: false } });
+        assert.equal((await c.nextRsp()).ok, true, 'remove ok');
+
+        // Folder kept (assets preserved) but instance.json moved aside so the
+        // open_project folder-scan can't resurrect it.
+        assert.ok(existsSync(join(proj, 'instances', 'cam9')), 'folder kept');
+        assert.ok(!existsSync(join(proj, 'instances', 'cam9', 'instance.json')), 'instance.json moved aside');
+        assert.ok(existsSync(join(proj, 'instances', 'cam9', 'instance.json.removed')), 'tombstone present');
+
+        // Reopen: the removed instance must NOT come back.
+        c.send({ type: 'cmd', id: 4, name: 'open_project', args: { folder: proj } });
+        assert.equal((await c.nextRsp()).ok, true, 'reopen ok');
+        c.send({ type: 'cmd', id: 5, name: 'get_project' });
+        const pj = await c.nextRsp();
+        assert.ok(!JSON.stringify(pj).includes('cam9'), 'removed instance did not resurrect on reopen');
+    });
+});
+
 test('create_instance rejects path-escaping names (no filesystem escape)', async () => {
     const proj = mkdtempSync(join(tmpdir(), 'xi_secname_'));
     writeFileSync(join(proj, 'inspect.cpp'),

@@ -1869,33 +1869,56 @@ public:
         if (delete_folder && !folder.empty()) {
             std::error_code ec;
             std::filesystem::remove_all(folder, ec);
+        } else if (!folder.empty()) {
+            // "keep folder" must still PERSIST the removal. open_project discovers
+            // instances by scanning instances/<name>/instance.json (the project.json
+            // list is write-only / ignored on load), so leaving instance.json in
+            // place would resurrect this instance on the next open. Move it aside to
+            // instance.json.removed: the scan skips a folder with no instance.json,
+            // yet the config + any assets stay on disk for manual recovery, which is
+            // what "keep folder" means. (A later create_instance of the same name
+            // writes a fresh instance.json, shadowing the tombstone.)
+            std::error_code ec;
+            auto ij = std::filesystem::path(folder) / "instance.json";
+            if (std::filesystem::exists(ij, ec))
+                std::filesystem::rename(ij, std::filesystem::path(folder) / "instance.json.removed", ec);
         }
         save_project_locked();
         return true;
     }
 
-    // Rename an instance. Moves the on-disk folder and re-registers under
-    // the new name. Returns false if the new name is in use or taken by
-    // an on-disk folder not tied to any instance.
-    bool rename_instance(const std::string& old_name, const std::string& new_name) {
+    // Result of rename_instance. The caller MUST distinguish Rejected (no mutation
+    // happened — the old instance is untouched) from NotPersisted (the runtime +
+    // on-disk folder were renamed to new_name, only the config save failed): on
+    // NotPersisted the in-memory state IS the new name, so the caller still has to
+    // migrate any side state keyed by name (e.g. g_inst_state) and report a
+    // save-failed warning, NOT "rename failed" — reporting failure while the
+    // runtime moved would desync name-keyed state.
+    enum class RenameResult { Rejected, Ok, NotPersisted };
+
+    // Rename an instance. Moves the on-disk folder and re-registers under the new
+    // name. Rejected if the new name is invalid / in use / the instance is missing
+    // (no side effects); Ok on full success; NotPersisted if the runtime renamed
+    // but the config write failed.
+    RenameResult rename_instance(const std::string& old_name, const std::string& new_name) {
         std::lock_guard<std::mutex> lk(mu_);
-        if (old_name == new_name) return true;
-        if (!is_valid_instance_name(new_name)) return false;   // no path escape via the name
+        if (old_name == new_name) return RenameResult::Ok;
+        if (!is_valid_instance_name(new_name)) return RenameResult::Rejected;   // no path escape via the name
         auto it = project_.instances.find(old_name);
-        if (it == project_.instances.end()) return false;
-        if (project_.instances.count(new_name)) return false;
+        if (it == project_.instances.end()) return RenameResult::Rejected;
+        if (project_.instances.count(new_name)) return RenameResult::Rejected;
 
         // Validate everything that can fail WITHOUT side effects BEFORE touching
         // the filesystem / registries — a failure here used to leave the folder
         // already renamed with no rollback, orphaning the old instance.
         auto pit = plugins_.find(it->second.plugin_name);
-        if (pit == plugins_.end()) return false;
+        if (pit == plugins_.end()) return RenameResult::Rejected;
         auto& pi = pit->second;
-        if (!pi.c_factory) return false;
+        if (!pi.c_factory) return RenameResult::Rejected;
 
         auto old_folder = std::filesystem::path(it->second.folder_path);
         auto new_folder = old_folder.parent_path() / new_name;
-        if (std::filesystem::exists(new_folder)) return false;
+        if (std::filesystem::exists(new_folder)) return RenameResult::Rejected;
 
         // Capture what we need from the old entry before any mutation.
         const std::string plugin_name      = it->second.plugin_name;
@@ -1909,7 +1932,7 @@ public:
         // working.
         std::error_code ec;
         std::filesystem::rename(old_folder, new_folder, ec);
-        if (ec) return false;
+        if (ec) return RenameResult::Rejected;
         auto rollback_folder = [&]() {
             std::error_code re; std::filesystem::rename(new_folder, old_folder, re);
         };
@@ -1935,13 +1958,13 @@ public:
             ImagePool::instance().release_all_for(pre_owner);
             InstanceFolderRegistry::instance().clear(new_name);
             rollback_folder();
-            return false;
+            return RenameResult::Rejected;
         }
         if (!raw) {
             ImagePool::instance().release_all_for(pre_owner);
             InstanceFolderRegistry::instance().clear(new_name);
             rollback_folder();
-            return false;
+            return RenameResult::Rejected;
         }
 
         // Factory succeeded — now commit: drop the old runtime entries and swap in
@@ -1968,11 +1991,12 @@ public:
         project_.instances[new_name] = std::move(ii);
         // Surface a write failure: the runtime + folder are already renamed, so if
         // project.json/instance.json don't persist the new name the next open is
-        // inconsistent. Report it (the caller turns false into a WS error) rather
-        // than claiming success — consistent with create_instance.
+        // inconsistent. Return NotPersisted (NOT Rejected) so the caller still
+        // migrates name-keyed side state to new_name and reports it as a save
+        // failure rather than a rename failure (the rename itself happened).
         bool saved = save_instance_json(project_.instances[new_name]);
         saved = save_project_locked() && saved;
-        return saved;
+        return saved ? RenameResult::Ok : RenameResult::NotPersisted;
     }
 
     ProjectInfo& project() { return project_; }
