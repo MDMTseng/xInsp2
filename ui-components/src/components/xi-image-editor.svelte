@@ -42,15 +42,27 @@
     render();
   }
 
+  // Accept a string/dataUrl (decode here) or an already-decoded drawable shared
+  // by the XiClient (skips a redundant decode when the image is shown in several
+  // components). Borrowed only for drawing — never closed.
+  function isDrawable(s) {
+    return !!s && typeof s !== "string" && !("dataUrl" in s) && (
+      (typeof HTMLImageElement !== "undefined" && s instanceof HTMLImageElement) ||
+      (typeof HTMLCanvasElement !== "undefined" && s instanceof HTMLCanvasElement) ||
+      (typeof OffscreenCanvas !== "undefined" && s instanceof OffscreenCanvas) ||
+      (typeof ImageBitmap !== "undefined" && s instanceof ImageBitmap));
+  }
   function setFrame(src) {
+    if (isDrawable(src)) { useFrame(src); return; }
     const im = new Image();
-    im.onload = () => {
-      const first = !vp.imgW;
-      img = im; vp.imgW = im.naturalWidth || im.width; vp.imgH = im.naturalHeight || im.height;
-      if (first) vpFit(vp);
-      render();
-    };
+    im.onload = () => useFrame(im);
     im.src = typeof src === "string" ? src : src.dataUrl;
+  }
+  function useFrame(im) {
+    const first = !vp.imgW;
+    img = im; vp.imgW = im.naturalWidth || im.width; vp.imgH = im.naturalHeight || im.height;
+    if (first) vpFit(vp);
+    render();
   }
 
   function setTool(id) { active = makeTool(id) || active; render(); }

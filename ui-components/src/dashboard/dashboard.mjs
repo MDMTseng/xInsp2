@@ -97,7 +97,8 @@ export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
     }),
     client.onPreview((f) => {
       const canon = state.gidToCanon && f.gid in state.gidToCanon ? state.gidToCanon[f.gid] : f.gid;
-      state.images[canon] = f.dataUrl;
+      // Shared decoded handle (decoded once in XiClient); dataUrl fallback.
+      state.images[canon] = f.image || f.dataUrl;
       scheduleRender();
     }),
     client.onEvent((m) => {

@@ -313,7 +313,13 @@ function connect() {
     } else {
       try { const f = decodePreviewFrame(ev.data);
         const canon = state.gidToCanon && f.gid in state.gidToCanon ? state.gidToCanon[f.gid] : f.gid;
-        state.images[canon] = f.dataUrl; scheduleRender(); } catch (e) { console.error(e); }
+        // Decode once here and store the GC-managed <img>; the cards' setFrame
+        // draws the shared handle instead of each decoding the dataUrl again.
+        const im = new Image();
+        im.onload  = () => { state.images[canon] = im; scheduleRender(); };
+        im.onerror = () => { state.images[canon] = f.dataUrl; scheduleRender(); };
+        im.src = f.dataUrl;
+      } catch (e) { console.error(e); }
     }
   };
 }

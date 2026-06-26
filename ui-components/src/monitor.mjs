@@ -81,7 +81,10 @@ export function mountMonitor(host, { client, items, columns = 3 }) {
   const onPreview = (f) => {
     const canon = gidToCanon.has(f.gid) ? gidToCanon.get(f.gid) : f.gid;
     const viewers = canonViewers.get(canon);
-    if (viewers) for (const viewer of viewers) viewer.setFrame(f.dataUrl);
+    // f.image is the shared decoded handle (decoded once in XiClient); fall back
+    // to the dataUrl when it isn't there (non-browser).
+    const frame = f.image || f.dataUrl;
+    if (viewers) for (const viewer of viewers) viewer.setFrame(frame);
   };
   const offVars = client.onVars(onVars);
   const offPreview = client.onPreview(onPreview);

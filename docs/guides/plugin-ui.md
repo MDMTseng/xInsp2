@@ -97,8 +97,18 @@ Outside the webview you have a direct WebSocket. Use the shim:
 import { XiClient } from "./xi-components.esm.js";
 const client = await new XiClient("ws://127.0.0.1:7823/").connect({ checkVersion: /\d+\.\d+\.\d+/ });
 slider.addEventListener("change", (e) => client.setInstanceDef("inst0", { threshold: e.detail.value }));
-client.onPreview((f) => viewer.setFrame(f.dataUrl));
+client.onPreview((f) => viewer.setFrame(f.image || f.dataUrl));
 ```
+
+> **Decode once when an image is shown in several places.** `XiClient` decodes
+> each preview frame once into a shared `f.image` (a GC-managed `HTMLImageElement`)
+> and the backend already sends one frame per distinct image (`vars.src` dedup,
+> see [`../reference/ws-protocol.md`](../reference/ws-protocol.md)). Pass
+> `f.image` to `setFrame` so M components draw the one decoded image instead of
+> each re-decoding the JPEG; `setFrame` also accepts a `Canvas`/`ImageBitmap`. Fall
+> back to `f.dataUrl` (it self-decodes) when `f.image` is absent (non-browser).
+> Components only *borrow* the shared handle to draw — never `close()` it; if you
+> need to keep a frame (replay/snapshot), copy it into your own canvas.
 
 ### C. Auto-UI from a manifest descriptor → `mountPanel`
 

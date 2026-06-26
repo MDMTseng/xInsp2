@@ -42,21 +42,36 @@
     host.dispatchEvent(new CustomEvent(type, { detail, bubbles: true, composed: true }));
   }
 
+  // Accept either a string/dataUrl (decode it ourselves) or an already-decoded
+  // drawable (HTMLImageElement/Canvas/OffscreenCanvas/ImageBitmap) shared by the
+  // XiClient — the latter skips a redundant JPEG decode when one image is shown
+  // in several components. We copy it into our own offscreen canvas, so the
+  // shared source is only borrowed for the drawImage; we never close it.
+  // An already-decoded source canvas2d.drawImage can consume directly.
+  function isDrawable(s) {
+    return !!s && typeof s !== "string" && !("dataUrl" in s) && (
+      (typeof HTMLImageElement !== "undefined" && s instanceof HTMLImageElement) ||
+      (typeof HTMLCanvasElement !== "undefined" && s instanceof HTMLCanvasElement) ||
+      (typeof OffscreenCanvas !== "undefined" && s instanceof OffscreenCanvas) ||
+      (typeof ImageBitmap !== "undefined" && s instanceof ImageBitmap));
+  }
   function setFrame(src) {
+    if (isDrawable(src)) { useFrame(src); return; }
     const im = new Image();
-    im.onload = () => {
-      const first = !vp.imgW;
-      img = im;
-      vp.imgW = im.naturalWidth || im.width;
-      vp.imgH = im.naturalHeight || im.height;
-      off = document.createElement("canvas");
-      off.width = vp.imgW;
-      off.height = vp.imgH;
-      off.getContext("2d").drawImage(im, 0, 0);
-      if (first) vpFit(vp);
-      render();
-    };
+    im.onload = () => useFrame(im);
     im.src = typeof src === "string" ? src : src.dataUrl;
+  }
+  function useFrame(im) {
+    const first = !vp.imgW;
+    img = im;
+    vp.imgW = im.naturalWidth || im.width;
+    vp.imgH = im.naturalHeight || im.height;
+    off = document.createElement("canvas");
+    off.width = vp.imgW;
+    off.height = vp.imgH;
+    off.getContext("2d").drawImage(im, 0, 0);
+    if (first) vpFit(vp);
+    render();
   }
 
   function onWheel(e) {

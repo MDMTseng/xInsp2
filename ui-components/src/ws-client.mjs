@@ -69,7 +69,7 @@ export class XiClient {
     const data = ev.data;
     // Binary preview frame.
     if (data instanceof ArrayBuffer || (typeof Buffer !== "undefined" && data instanceof Buffer)) {
-      try { this._emit("preview", decodePreviewFrame(data)); } catch { /* short frame */ }
+      try { this._deliverPreview(decodePreviewFrame(data)); } catch { /* short frame */ }
       return;
     }
     let msg;
@@ -85,6 +85,24 @@ export class XiClient {
     }
     if (msg.type === "vars") { this._emit("vars", parseVars(msg)); return; }
     if (this._listeners[msg.type]) this._emit(msg.type, msg);
+  }
+
+  // Decode each preview frame ONCE here and share the GC-managed <img> to every
+  // consumer (the backend already sends one frame per canon image, so this is one
+  // JPEG decode per image instead of one per component). Consumers hold the
+  // reference while they show it; GC reclaims when nothing references it — no
+  // close, no ring. In non-browser/jsdom (tests) we skip the decode and emit the
+  // dataUrl as before; a consumer there falls back to decoding it itself.
+  _deliverPreview(frame) {
+    const realBrowser = typeof window !== "undefined" && typeof Image !== "undefined"
+      && !/jsdom/i.test((typeof navigator !== "undefined" && navigator.userAgent) || "");
+    if (!realBrowser) { this._emit("preview", frame); return; }
+    const img = new Image();
+    let done = false;
+    const fire = () => { if (done) return; done = true; this._emit("preview", frame); };
+    img.onload  = () => { frame.image = img; fire(); };   // shared decoded handle
+    img.onerror = fire;                                    // fall back to dataUrl
+    img.src = frame.dataUrl;
   }
 
   _parseData(d) {
