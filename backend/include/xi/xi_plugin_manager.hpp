@@ -1126,6 +1126,7 @@ public:
         // assignment.
         // FL r8 P1 reproducer: harness_open_close_cycle.py iter 0.
         project_.instances.clear();
+        inst_state_.clear();   // host-tracked lifecycle state dies with the instances
         // Now safe to drop the previous project's plugins — adapters are
         // gone, no live destroy_fn callers remain.
         for (auto& [pname, _] : project_plugin_origin_) {
@@ -1843,6 +1844,7 @@ public:
         }
 
         project_.instances[instance_name] = std::move(ii);
+        set_state_locked_(instance_name, InstState::Created, "");   // born Created
         save_project_locked();
         return &project_.instances[instance_name];
     }
@@ -1864,6 +1866,7 @@ public:
         if (it == project_.instances.end()) return false;
         InstanceRegistry::instance().remove(instance_name);
         InstanceFolderRegistry::instance().clear(instance_name);
+        inst_state_.erase(instance_name);   // lifecycle state dies with the instance
         std::string folder = it->second.folder_path;
         project_.instances.erase(it);
         if (delete_folder && !folder.empty()) {
@@ -1989,11 +1992,19 @@ public:
 
         project_.instances.erase(old_name);
         project_.instances[new_name] = std::move(ii);
+        // Carry the host-tracked lifecycle state across the rename in the SAME
+        // locked op as the registries (old_name != new_name is guaranteed above).
+        // This is why the WS handler no longer needs a separate rename_inst_state
+        // call — the state can't drift from the instance set anymore.
+        if (auto sit = inst_state_.find(old_name); sit != inst_state_.end()) {
+            inst_state_[new_name] = sit->second;
+            inst_state_.erase(sit);
+        }
         // Surface a write failure: the runtime + folder are already renamed, so if
         // project.json/instance.json don't persist the new name the next open is
         // inconsistent. Return NotPersisted (NOT Rejected) so the caller still
-        // migrates name-keyed side state to new_name and reports it as a save
-        // failure rather than a rename failure (the rename itself happened).
+        // reports it as a save failure rather than a rename failure (the rename
+        // itself happened).
         bool saved = save_instance_json(project_.instances[new_name]);
         saved = save_project_locked() && saved;
         return saved ? RenameResult::Ok : RenameResult::NotPersisted;
@@ -2014,6 +2025,36 @@ public:
                 return it->second.group;
         }
         return project_.default_group;
+    }
+
+    // ---- host-tracked instance lifecycle state -----------------------------
+    // The state map is OWNED here, under the same mu_ as the instance set, so
+    // create/remove/rename migrate it atomically (they hold mu_ and call
+    // set_state_locked_ / erase / re-key inline). That removes the whole class of
+    // "name-keyed side state drifted out of sync with the registries" bugs the
+    // earlier rounds kept hitting (rename desync, rename(x,x) self-delete,
+    // remove leaving a stale entry). Keyed by name to span backend + script-side
+    // instances alike. set_*/get_* below are the public (locking) entry points
+    // used by the WS handlers; CRUD methods use set_state_locked_ while holding mu_.
+    void set_instance_state(const std::string& name, InstState s,
+                            const std::string& err = std::string()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        set_state_locked_(name, s, err);
+    }
+    // Returns true if a state has been recorded for `name` (filling out_*); false
+    // if unknown (the caller may then fall back to "exists ⇒ Created").
+    bool get_instance_state(const std::string& name, InstState& out_state,
+                            std::string& out_err) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = inst_state_.find(name);
+        if (it == inst_state_.end()) return false;
+        out_state = it->second.state;
+        out_err   = it->second.last_error;
+        return true;
+    }
+    void clear_instance_states() {
+        std::lock_guard<std::mutex> lk(mu_);
+        inst_state_.clear();
     }
 
     std::string to_json() {
@@ -2076,9 +2117,21 @@ public:
     }
 
 private:
+    // mu_ MUST be held. Set/overwrite the lifecycle state for `name`; last_error
+    // is kept only for the Faulted state (cleared otherwise), matching the old
+    // free-function semantics in service_main.
+    void set_state_locked_(const std::string& name, InstState s, const std::string& err) {
+        auto& r = inst_state_[name];
+        r.state = s;
+        r.last_error = (s == InstState::Faulted) ? err : std::string();
+    }
+
     std::mutex mu_;
     std::unordered_map<std::string, PluginInfo> plugins_;
     ProjectInfo project_;
+    // Host-tracked instance lifecycle state (see the public set/get above). Guarded
+    // by mu_; migrated inline by create/remove/rename so it never drifts.
+    std::unordered_map<std::string, InstStateRec> inst_state_;
     std::vector<OpenWarning> last_open_warnings_;
     CompileEnv  compile_env_;
     // Names of plugins that came from <project>/plugins/ rather than the

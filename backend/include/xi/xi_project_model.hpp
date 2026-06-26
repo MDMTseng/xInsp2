@@ -18,6 +18,19 @@
 
 namespace xi {
 
+// Host-tracked instance lifecycle state (set_instance_def / prepare / commit_group
+// move it; get_state reads it). Lives here (not in service_main) so the
+// PluginManager can OWN the state map alongside the instance set and migrate it
+// atomically on create/remove/rename — see PluginManager's inst_state_. The state
+// is keyed by name across BOTH backend (plugin-manager) and script-declared
+// instances, which is why it's a name map, not a field on InstanceInfo.
+enum class InstState { Created, Active, Faulted };
+
+struct InstStateRec {
+    InstState   state = InstState::Created;
+    std::string last_error;
+};
+
 struct InstanceInfo {
     std::string          name;
     std::string          plugin_name;

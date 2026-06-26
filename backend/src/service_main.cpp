@@ -1757,7 +1757,14 @@ static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name)
 // set_instance_def and commit_group move the state — once prepare/commit are
 // first-class ABI (task #69) the host will observe them directly and refine this.
 // ---------------------------------------------------------------------------
-enum class InstState { Created, Active, Faulted };
+// The state map itself now lives in the PluginManager, OWNED alongside the
+// instance set under its one mutex, so create/remove/rename migrate it atomically
+// and it can never drift out of sync (the bug class the earlier rounds kept
+// hitting). These free functions are thin pass-throughs kept only so the call
+// sites below read the same as before. drop_inst_state / rename_inst_state are
+// GONE on purpose: remove_instance / rename_instance migrate the state inline, so
+// the WS handlers must NOT do it separately.
+using xi::InstState;
 
 static const char* inst_state_str(InstState s) {
     switch (s) { case InstState::Active: return "active";
@@ -1765,32 +1772,12 @@ static const char* inst_state_str(InstState s) {
                  default: return "created"; }
 }
 
-struct InstStateRec { InstState state = InstState::Created; std::string last_error; };
-static std::mutex                                    g_inst_state_mu;
-static std::unordered_map<std::string, InstStateRec> g_inst_state;
-
 static void set_inst_state(const std::string& name, InstState s,
                            const std::string& err = "") {
-    std::lock_guard<std::mutex> lk(g_inst_state_mu);
-    auto& r = g_inst_state[name];
-    r.state = s;
-    r.last_error = (s == InstState::Faulted) ? err : std::string();
-}
-static void drop_inst_state(const std::string& name) {
-    std::lock_guard<std::mutex> lk(g_inst_state_mu);
-    g_inst_state.erase(name);
-}
-static void rename_inst_state(const std::string& from, const std::string& to) {
-    if (from == to) return;   // a no-op rename: don't erase the entry under itself
-    std::lock_guard<std::mutex> lk(g_inst_state_mu);
-    auto it = g_inst_state.find(from);
-    if (it == g_inst_state.end()) return;
-    g_inst_state[to] = it->second;
-    g_inst_state.erase(it);
+    g_plugin_mgr.set_instance_state(name, s, err);
 }
 static void clear_inst_state() {
-    std::lock_guard<std::mutex> lk(g_inst_state_mu);
-    g_inst_state.clear();
+    g_plugin_mgr.clear_instance_states();
 }
 
 static void handle_command(xi::ws::Server& srv, std::string_view text) {
@@ -2839,12 +2826,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // "created". args: { "name": "cam0" } → data: { state, last_error }.
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        InstState st; std::string err; bool known = false;
-        {
-            std::lock_guard<std::mutex> lk(g_inst_state_mu);
-            auto it = g_inst_state.find(*iname);
-            if (it != g_inst_state.end()) { st = it->second.state; err = it->second.last_error; known = true; }
-        }
+        InstState st; std::string err;
+        bool known = g_plugin_mgr.get_instance_state(*iname, st, err);
         if (!known) {
             // No tracked transition — report "created" if the instance actually
             // exists, else a clean not-found.
@@ -3628,7 +3611,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         std::string create_err;
         auto* ii = g_plugin_mgr.create_instance(*iname, *plugin, &create_err);
         if (ii) {
-            set_inst_state(*iname, InstState::Created);
+            // create_instance records the Created state internally (atomic with the
+            // instance add) — no separate set_inst_state needed.
             send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, create_err.empty() ? "failed to create instance" : create_err);
@@ -3639,7 +3623,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         bool delete_folder =
             parsed->args_json.find("\"delete_folder\":true") != std::string::npos;
         if (g_plugin_mgr.remove_instance(*iname, delete_folder)) {
-            drop_inst_state(*iname);
+            // remove_instance drops the lifecycle state internally (atomic with the
+            // unregister) — no separate drop_inst_state needed.
             send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "instance not found: " + *iname);
@@ -3653,11 +3638,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (rr == RR::Rejected) {
             send_rsp_err(srv, id, "rename failed — name in use or instance missing");
         } else {
-            // Ok OR NotPersisted: the runtime + folder were renamed, so name-keyed
-            // side state must follow regardless — otherwise g_inst_state stays under
-            // old_name while the registries are under new_name (desync). Only the
-            // disk-save status differs in the reply.
-            rename_inst_state(*old_name, *new_name);
+            // Ok OR NotPersisted: the runtime + folder were renamed. rename_instance
+            // already migrated the host-tracked state inside the same locked op, so
+            // there's nothing to sync here — only the disk-save status differs.
             if (rr == RR::NotPersisted)
                 send_rsp_err(srv, id, "renamed in memory but could not persist to disk "
                                       "(disk full / read-only?) — may revert on restart");
