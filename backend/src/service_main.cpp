@@ -1225,6 +1225,11 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         xp::json_escape_into(run_error_what, std::string("script exception: ") + e.what());
     } catch (...) {
         disarm();
+        // Align with the named catches above: also leave a stderr breadcrumb +
+        // push to the recent-errors ring, else an unknown (non-std) throw vanished
+        // from both be_log and cmd:recent_errors.
+        std::fprintf(stderr, "[xinsp2] inspect threw a non-std exception (run_id=%lld)\n", (long long)run_id);
+        emit_error_log(srv, "script threw a non-std exception", run_id);
         run_error_what = "\"what\":\"unknown_exception\"";
     }
 
@@ -1366,6 +1371,18 @@ static std::shared_ptr<GroupLane> lane_for_(const std::string& group) {
     return g_lanes.front();
 }
 
+// Frame drops are reported to a connected client via emit_run_result, but an
+// unattended factory PC with no UI would degrade SILENTLY (be_log stays clean
+// while the system throws away work). Leave a throttled breadcrumb in stderr too.
+// Powers-of-2 throttle: 1,2,4,8,… — visible from the first drop, never spammy.
+static void warn_frame_drop_(uint64_t dropped, const std::string& group, const char* policy) {
+    if (dropped == 0) return;
+    if (dropped == 1 || (dropped & (dropped - 1)) == 0)
+        std::fprintf(stderr,
+            "[xinsp2] WARN dropping frames (group='%s', policy=%s, dropped=%llu) — source out-running processing\n",
+            group.empty() ? "(default)" : group.c_str(), policy, (unsigned long long)dropped);
+}
+
 // Per-lane enqueue with that lane's queue_depth/overflow policy.
 static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     auto rel = [&] { release_trigger_event_(ev); };
@@ -1389,6 +1406,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         ++lane->dropped;
         int64_t aid = ++g_run_id;   // arrival slot of the dropped (new) frame
         std::string ds = ev.leader_source, dg = ev.group;   // the dropped (new) event
+        warn_frame_drop_(lane->dropped.load(), dg, "drop_newest");
         release_trigger_event_(ev);
         lk.unlock();
         // Out-of-band NA marker (not gated — gating would stall the source); the
@@ -1408,6 +1426,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
     release_trigger_event_(front);
     lane->q.pop_front(); ev.arrival_id = ++g_run_id; lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped;
+    warn_frame_drop_(lane->dropped.load(), dg, "drop_oldest");
     lk.unlock();
     if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
         emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);

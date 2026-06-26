@@ -37,8 +37,10 @@
 #include "xi_doc_registry.hpp"  // γ-4: backs host_api.doc_retain/doc_release
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <unordered_map>
 #include <vector>
 
@@ -326,7 +328,23 @@ public:
         };
         api.log            = [](int32_t level, const char* msg) {
             const char* lvl[] = {"DEBUG", "INFO", "WARN", "ERROR"};
-            std::fprintf(stderr, "[%s] %s\n", lvl[level & 3], msg);
+            // Wall-clock timestamp so a backend log line is correlatable with a
+            // client-visible symptom / a crash sidecar (which stamps ts_ms) by time
+            // — a bare "[ERROR] msg" with no time is near-useless in production.
+            auto now = std::chrono::system_clock::now();
+            auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           now.time_since_epoch()).count() % 1000;
+            std::time_t t = std::chrono::system_clock::to_time_t(now);
+            std::tm tmv{};
+#ifdef _WIN32
+            localtime_s(&tmv, &t);
+#else
+            localtime_r(&t, &tmv);   // TODO(linux): localtime_r arg order is (time_t*, tm*)
+#endif
+            char ts[16];
+            std::snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",
+                          tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)ms);
+            std::fprintf(stderr, "[%s %s] %s\n", ts, lvl[level & 3], msg);
         };
         api.instance_folder = [](const char* name, char* buf, int32_t buflen) -> int32_t {
             std::string p = InstanceFolderRegistry::instance().get(name ? name : "");

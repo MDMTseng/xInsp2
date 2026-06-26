@@ -102,3 +102,26 @@ test('project.json groups/default_group/runtime + instance group survive a save'
         assert.equal((await c.nextRsp()).ok, true, 're-open of saved project ok');
     });
 });
+
+test('create_instance rejects path-escaping names (no filesystem escape)', async () => {
+    const proj = mkdtempSync(join(tmpdir(), 'xi_secname_'));
+    writeFileSync(join(proj, 'inspect.cpp'),
+        '#include <xi/xi.hpp>\nXI_SCRIPT_EXPORT void xi_inspect_entry(int){}\n');
+    writeFileSync(join(proj, 'project.json'),
+        JSON.stringify({ name: 'sec', script: 'inspect.cpp' }));
+    await withBackend(async (c) => {
+        await c.next(); // hello
+        c.send({ type: 'cmd', id: 1, name: 'open_project', args: { folder: proj } });
+        assert.equal((await c.nextRsp()).ok, true);
+
+        // Names that would escape <project>/instances/ must be refused.
+        for (const bad of ['../evil', '..\\evil', 'a/b', 'C:/Windows/Temp/x', 'x..y']) {
+            c.send({ type: 'cmd', id: 2, name: 'create_instance', args: { name: bad, plugin: 'mock_camera' } });
+            const r = await c.nextRsp();
+            assert.equal(r.ok, false, `name ${JSON.stringify(bad)} must be rejected`);
+        }
+        // A clean name still works.
+        c.send({ type: 'cmd', id: 3, name: 'create_instance', args: { name: 'cam_0', plugin: 'mock_camera' } });
+        assert.equal((await c.nextRsp()).ok, true, 'valid name accepted');
+    });
+});

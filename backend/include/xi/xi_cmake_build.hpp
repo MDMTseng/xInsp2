@@ -75,6 +75,18 @@ inline int build_cmake_plugin(const std::string& cmake_exe, const std::string& s
                               const std::string& config, const std::string& xinsp_root,
                               const std::string& opencv_dir, std::string& log) {
     auto build_dir = (std::filesystem::path(src_dir) / "build").string();
+    // The command goes through cmd.exe (_popen). `cmake_exe` and `config` come
+    // from the WS client, so reject shell metacharacters (and a `"` that could
+    // break out of quoting) before they reach the shell — command-injection
+    // guard, mirrors the cl.exe driver's is_safe_path. Paths are quoted below;
+    // Windows paths can't contain `"` and `&`/`^` are inert inside quotes.
+    auto unsafe = [](const std::string& s) {
+        return s.find_first_of("&|<>^%!\"`\n\r") != std::string::npos;
+    };
+    if (unsafe(cmake_exe) || unsafe(config)) {
+        log += "[refused: cmake_exe/config contains shell metacharacters]\n";
+        return -1;
+    }
     auto q = [](const std::string& s) { return "\"" + s + "\""; };
     if (!std::filesystem::exists(std::filesystem::path(build_dir) / "CMakeCache.txt")) {
         std::string cfg = q(cmake_exe) + " -S " + q(src_dir) + " -B " + q(build_dir) +
@@ -99,7 +111,7 @@ inline int build_cmake_plugin(const std::string& cmake_exe, const std::string& s
         int rc = run_cmd_capture(cfg, log);
         if (rc != 0) return rc;
     }
-    std::string bld = q(cmake_exe) + " --build " + q(build_dir) + " --config " + config;
+    std::string bld = q(cmake_exe) + " --build " + q(build_dir) + " --config " + q(config);
     log += "[build] " + bld + "\n";
     return run_cmd_capture(bld, log);
 }

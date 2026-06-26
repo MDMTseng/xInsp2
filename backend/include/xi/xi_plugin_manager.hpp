@@ -41,6 +41,7 @@
 #include "xi_instance.hpp"
 #include "xi_config_validate.hpp" // validate_config_against_manifest (opt-in diagnostic, extracted leaf)
 #include "xi_pm_json.hpp"      // pm_json_escape / pm_json_quote (extracted leaf)
+#include <cctype>
 #include "xi_pm_parse.hpp"     // parse_manifest / extract_string / detail_find_key
 #include "xi_plugin_export.hpp" // export_project_plugin_impl (deploy packaging, extracted leaf)
 #include "xi_cmake_build.hpp"  // xi::cmake_build:: host-side cmake invocation (extracted leaf)
@@ -1719,6 +1720,19 @@ public:
         return true;
     }
 
+    // An instance name becomes a folder under <project>/instances/, so it MUST be
+    // a single safe path segment — never a path. Without this an absolute path or
+    // a `..` in the name escapes the project folder (create writes / remove
+    // recursively deletes / rename moves an attacker- or typo-chosen directory).
+    // Allow only identifier-ish chars; reject separators, drive colon, and `..`.
+    static bool is_valid_instance_name(const std::string& n) {
+        if (n.empty() || n.size() > 128) return false;
+        if (n == "." || n.find("..") != std::string::npos) return false;
+        for (unsigned char c : n)
+            if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.')) return false;
+        return true;
+    }
+
     // Create a new instance of a plugin inside the current project.
     InstanceInfo* create_instance(const std::string& instance_name,
                                    const std::string& plugin_name,
@@ -1727,6 +1741,9 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         if (project_.folder_path.empty())
             return fail("no project open — open_project before creating an instance");
+        if (!is_valid_instance_name(instance_name))
+            return fail("invalid instance name '" + instance_name +
+                        "' — use letters/digits/_/-/. only (no path separators or '..')");
 
         auto pit = plugins_.find(plugin_name);
         if (pit == plugins_.end())
@@ -1817,6 +1834,7 @@ public:
     bool rename_instance(const std::string& old_name, const std::string& new_name) {
         std::lock_guard<std::mutex> lk(mu_);
         if (old_name == new_name) return true;
+        if (!is_valid_instance_name(new_name)) return false;   // no path escape via the name
         auto it = project_.instances.find(old_name);
         if (it == project_.instances.end()) return false;
         if (project_.instances.count(new_name)) return false;
