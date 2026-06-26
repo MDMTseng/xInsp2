@@ -690,8 +690,19 @@ private:
 //
 inline std::optional<Record> require(const Record& in,
                                      std::initializer_list<const char*> fields) {
-    for (const char* f : fields)
+    for (const char* f : fields) {
         if (!in.has(f)) return Record::na(std::string("missing field: ") + f);
+        // A field that's PRESENT but holds an NA sub-record ({"$na":...}) must
+        // also short-circuit — otherwise has(f) passes and the plugin reads the
+        // NA object as a 0-filled record (per-field NA didn't propagate). This is
+        // the normal multi-input case: an upstream stage that found nothing
+        // returns Typed::na, which lowers to an NA sub-record under its key.
+        Record sub = in.get_record(f);   // {} (is_na==false) for a non-object field
+        if (sub.is_na()) {
+            std::string r = sub.na_reason();
+            return Record::na(r.empty() ? (std::string("NA field: ") + f) : r);
+        }
+    }
     return std::nullopt;
 }
 

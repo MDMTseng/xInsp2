@@ -5,8 +5,10 @@
 // Standalone, C++20, links against yyjson only.
 //
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 #include <utility>
@@ -293,6 +295,35 @@ static void test_as_record_deep_copy() {
 
 // ---------- Test 16: Image in Record ----------
 
+// require(): a present-but-NA sub-record must short-circuit (per-field NA
+// propagation), and a non-finite double must round-trip as a sentinel, not a
+// bare token that breaks the whole-record parse.
+static void test_require_per_field_na() {
+    SECTION("require per-field NA + non-finite sentinel");
+    xi::Record in;
+    in.set("good", xi::Record().set("x", 1.0));
+    in.set("bad",  xi::Record::na("upstream found nothing"));
+
+    CHECK(!xi::require(in, {"good"}).has_value());            // present + not NA → ok
+    CHECK( xi::require(in, {"missing"}).has_value());         // absent → NA
+    auto na = xi::require(in, {"good", "bad"});               // present but NA → NA
+    CHECK(na.has_value());
+    CHECK(na && na->is_na());
+    CHECK(na && na->na_reason() == "upstream found nothing");
+
+    // Non-finite via set + push round-trips through JSON as a sentinel.
+    xi::Record r;
+    r.set("f", std::nan(""));
+    r.push("arr", std::numeric_limits<double>::infinity());
+    std::string js = r.data_json();
+    CHECK(js.find("NaN") != std::string::npos);
+    CHECK(js.find("Infinity") != std::string::npos);
+    auto rt = xi::Record::from_json_bytes(
+        reinterpret_cast<const uint8_t*>(js.data()), js.size());
+    CHECK(!rt.is_na());                                       // parsed (not a dropped frame)
+    CHECK(rt.get_string("f") == "NaN");
+}
+
 static void test_image_in_record() {
     SECTION("Image in Record");
     xi::Image img(4, 4, 3);
@@ -558,6 +589,7 @@ int main() {
     test_move_semantics();        // 14
     test_as_record_deep_copy();   // 15
     test_image_in_record();       // 16
+    test_require_per_field_na();  // 16b — per-field NA + non-finite sentinel
     test_refcount_cow();          // 17
     test_cross_abi_share();       // 18
     test_cache_input_zero_copy(); // 19
