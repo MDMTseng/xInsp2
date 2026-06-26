@@ -27,6 +27,8 @@
 #include "yyjson.h"
 
 #include <atomic>
+#include <cassert>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -291,8 +293,14 @@ public:
     Record& set(const std::string& key, const char* v) { return set(key, std::string(v ? v : "")); }
 
     // Nest a sub-Record as a JSON object (deep copy into this doc).
+    // KNOWN LIMITATION: only the JSON is copied, NOT the sub-Record's images_ —
+    // so nesting a Record that carries images (e.g. xi::Region's mask) silently
+    // drops those pixels. Warn once so an author hits it loudly instead of
+    // chasing an empty mask. (Proper fix = namespacing sub images into the
+    // parent; deferred.)
     Record& set(const std::string& key, const Record& sub) {
         cow_();
+        warn_sub_images_dropped_(sub, key.c_str());
         yyjson_mut_val* dup = sub.root_ ? yyjson_mut_val_mut_copy(doc_, sub.root_)
                                         : yyjson_mut_obj(doc_);
         put_(key.c_str(), dup);
@@ -303,7 +311,12 @@ public:
     // NOTE: not valid on a frozen/borrowed view — `item` must come from THIS
     // Record's (owned) doc, so callers building `item` must already have an owned
     // doc; cow_() here would orphan an item built against the pre-COW doc.
+    // A frozen Record shares its doc with another copy, so writing here would
+    // corrupt that sibling — assert against it in debug (compiled out in release,
+    // zero hot-path cost). Force ownership first by mutating via a normal setter.
     Record& set_raw(const std::string& key, yyjson_mut_val* item) {
+        assert(!frozen_ && "set_raw on a frozen/shared Record corrupts the sibling copy "
+                           "— mutate it through a normal setter first to force copy-on-write");
         put_(key.c_str(), item);
         return *this;
     }
@@ -337,6 +350,7 @@ public:
     }
     Record& push(const std::string& key, const Record& sub) {
         cow_();
+        warn_sub_images_dropped_(sub, key.c_str());   // see set(key, Record&)
         yyjson_mut_val* dup = sub.root_ ? yyjson_mut_val_mut_copy(doc_, sub.root_)
                                         : yyjson_mut_obj(doc_);
         yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), dup);
@@ -368,14 +382,41 @@ public:
 
         // Terminal reads with defaults
         int    as_int(int def = 0) const {
-            return is_number() ? (int)yyjson_mut_get_num(node_) : def;
+            if (!is_number()) return def;
+            double d = yyjson_mut_get_num(node_);
+            // Clamp before the cast — (int)1e300 / (int)NaN is UB, and a value
+            // past INT range would silently wrap. Out-of-range falls back to def.
+            if (!(d >= (double)INT_MIN && d <= (double)INT_MAX)) return def;
+            return (int)d;
+        }
+        // Full-width integer read (no int32 narrowing) for counts/ids that may
+        // exceed 2^31. as_int() truncates the fractional part and rejects
+        // out-of-int-range values; use this when the value is a large integer.
+        long long as_int64(long long def = 0) const {
+            if (!is_number()) return def;
+            double d = yyjson_mut_get_num(node_);
+            if (!(d >= -9.2233720368547758e18 && d <= 9.2233720368547758e18)) return def;
+            return (long long)d;
         }
         double as_double(double def = 0.0) const {
             if (is_number()) return yyjson_mut_get_num(node_);
             if (node_ && yyjson_mut_is_str(node_)) { double v; if (nonfinite_from_str(yyjson_mut_get_str(node_), v)) return v; }
             return def;
         }
-        bool as_bool(bool def = false) const { return node_ ? yyjson_mut_is_true(node_) : def; }
+        // Consistent with as_int/as_double: a present-but-non-bool falls back to
+        // `def` (not silently false), and a number / "true"/"false" string is
+        // coerced so a value from an external/PLC JSON isn't misread.
+        bool as_bool(bool def = false) const {
+            if (!node_) return def;
+            if (yyjson_mut_is_bool(node_)) return yyjson_mut_get_bool(node_);
+            if (yyjson_mut_is_num(node_))  return yyjson_mut_get_num(node_) != 0.0;
+            if (yyjson_mut_is_str(node_)) {
+                const char* s = yyjson_mut_get_str(node_);
+                if (s && (!std::strcmp(s, "true")  || !std::strcmp(s, "1"))) return true;
+                if (s && (!std::strcmp(s, "false") || !std::strcmp(s, "0"))) return false;
+            }
+            return def;
+        }
         std::string as_string(const std::string& def = "") const {
             const char* s = (node_ && yyjson_mut_is_str(node_)) ? yyjson_mut_get_str(node_) : nullptr;
             return s ? std::string(s) : def;
@@ -461,9 +502,21 @@ public:
     }
 
     // --- Data getters (with defaults) ---
+    // These mirror Value::as_int/as_int64/as_bool exactly (range-clamped int,
+    // present-but-non-bool -> def with number/"true" coercion).
     int get_int(const std::string& key, int def = 0) const {
         yyjson_mut_val* it = get_(key.c_str());
-        return (it && yyjson_mut_is_num(it)) ? (int)yyjson_mut_get_num(it) : def;
+        if (!it || !yyjson_mut_is_num(it)) return def;
+        double d = yyjson_mut_get_num(it);
+        if (!(d >= (double)INT_MIN && d <= (double)INT_MAX)) return def;
+        return (int)d;
+    }
+    long long get_int64(const std::string& key, long long def = 0) const {
+        yyjson_mut_val* it = get_(key.c_str());
+        if (!it || !yyjson_mut_is_num(it)) return def;
+        double d = yyjson_mut_get_num(it);
+        if (!(d >= -9.2233720368547758e18 && d <= 9.2233720368547758e18)) return def;
+        return (long long)d;
     }
     double get_double(const std::string& key, double def = 0.0) const {
         yyjson_mut_val* it = get_(key.c_str());
@@ -473,7 +526,15 @@ public:
     }
     bool get_bool(const std::string& key, bool def = false) const {
         yyjson_mut_val* it = get_(key.c_str());
-        return it ? yyjson_mut_is_true(it) : def;
+        if (!it) return def;
+        if (yyjson_mut_is_bool(it)) return yyjson_mut_get_bool(it);
+        if (yyjson_mut_is_num(it))  return yyjson_mut_get_num(it) != 0.0;
+        if (yyjson_mut_is_str(it)) {
+            const char* s = yyjson_mut_get_str(it);
+            if (s && (!std::strcmp(s, "true")  || !std::strcmp(s, "1"))) return true;
+            if (s && (!std::strcmp(s, "false") || !std::strcmp(s, "0"))) return false;
+        }
+        return def;
     }
     std::string get_string(const std::string& key, const std::string& def = "") const {
         yyjson_mut_val* it = get_(key.c_str());
@@ -620,6 +681,20 @@ private:
     // construction path a sole-owned, writable box, exactly as before.
     DocBox*      box_ = nullptr;
     mutable bool frozen_ = false;
+
+    // One-shot warning when a sub-Record carrying images is nested (its images_
+    // are dropped — see set(key, Record&)). Static flag ⇒ at most one line per
+    // process per TU, never on the hot path for image-less records.
+    static void warn_sub_images_dropped_(const Record& sub, const char* key) {
+        if (sub.images_.empty()) return;
+        static std::atomic<bool> warned{false};
+        if (warned.exchange(true)) return;
+        std::fprintf(stderr,
+            "[xi::Record] WARNING: nesting a sub-Record under '%s' drops its %zu "
+            "image(s) — sub-Record images are not carried into the parent "
+            "(e.g. a Region mask would vanish). Carry the image at the top level.\n",
+            key ? key : "?", sub.images_.size());
+    }
 
     void init_() {
         doc_  = yyjson_mut_doc_new(tls_doc_alc());

@@ -572,6 +572,43 @@ static void test_concurrent_dispatch_balance() {
 
 // ---------- main ----------
 
+// Getter type-coercion + range safety (round-8 SDK-footgun fixes): get_bool /
+// as_bool no longer return false for a present-but-non-bool and coerce
+// number/"true"/"false"; as_int clamps out-of-range instead of UB/wrap and
+// as_int64 reads the full width.
+static void test_getter_coercion_and_range() {
+    SECTION("getter coercion + range");
+    xi::Record r;
+    r.set("b_true", true);
+    r.set("n_one", 1);
+    r.set("n_zero", 0);
+    r.set("s_true", std::string("true"));
+    r.set("s_false", std::string("false"));
+    r.set("s_word", std::string("yes"));   // not a bool token
+
+    // bool: real bool, numeric, and "true"/"false" string all coerce.
+    CHECK(r.get_bool("b_true", false) == true);
+    CHECK(r.get_bool("n_one", false) == true);
+    CHECK(r.get_bool("n_zero", true) == false);
+    CHECK(r.get_bool("s_true", false) == true);
+    CHECK(r.get_bool("s_false", true) == false);
+    // present-but-not-a-bool-token falls back to def (NOT silently false).
+    CHECK(r.get_bool("s_word", true) == true);
+    CHECK(r.get_bool("s_word", false) == false);
+    // missing key falls back to def.
+    CHECK(r.get_bool("absent", true) == true);
+    CHECK(r["n_one"].as_bool(false) == true);
+
+    // int: fractional truncates; out-of-int-range -> def (no wrap/UB); int64 ok.
+    r.set("big", 5000000000.0);   // > INT_MAX
+    r.set("frac", 3.99);
+    CHECK(r.get_int("frac", -1) == 3);
+    CHECK(r.get_int("big", -1) == -1);            // out of int range -> def
+    CHECK(r.get_int64("big", -1) == 5000000000LL); // full width
+    CHECK(r["big"].as_int(-1) == -1);
+    CHECK(r["big"].as_int64(-1) == 5000000000LL);
+}
+
 int main() {
     test_build_all_types();       // 1
     test_nested_record();         // 2
@@ -595,6 +632,7 @@ int main() {
     test_cache_input_zero_copy(); // 19
     test_dispatch_balance_no_leak();    // 20
     test_concurrent_dispatch_balance(); // 21
+    test_getter_coercion_and_range();   // 22 — round-8 getter coercion + range
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");

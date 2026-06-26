@@ -443,9 +443,10 @@ inline void record_to_c(const xi_host_api* host, Record& r, xi_record_out* out,
     out->image_capacity = 0;   // tls-owned, see xi_record_out_free
 }
 
-// Emit a Record as a trigger event WITH routing/context metadata (ABI v5).
+// Emit a Record as a trigger event WITH routing/context metadata.
 //
-// The ONE emit verb (ABI v6): a source hands the host a record (images +
+// The ONE emit verb (added in ABI v6; current XI_ABI_VERSION is higher — see
+// xi_abi.h): a source hands the host a record (images +
 // metadata) under an id; the host stages it and dispatches one inspection. The
 // script reads it back via xi::current_trigger().image()/.meta()/.id_string().
 // The metadata doc is handed over by pointer (zero-serialize) through the same
