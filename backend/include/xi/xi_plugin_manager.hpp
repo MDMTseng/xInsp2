@@ -2180,10 +2180,26 @@ private:
                 yyjson_mut_doc* md = yyjson_doc_mut_copy(nd, nullptr);
                 yyjson_mut_val* mroot = md ? yyjson_mut_doc_get_root(md) : nullptr;
                 if (mroot) {
+                    // The top-level keys THIS writer manages. Must be an EXPLICIT
+                    // allowlist, not "does the key appear in the fresh JSON": some
+                    // managed keys (runtime / plugin_dirs / plugins) are emitted
+                    // CONDITIONALLY (omitted when empty). Inferring ownership from
+                    // presence would treat an intentionally-emptied managed key as
+                    // "unknown" and RESURRECT its old on-disk value — clearing would
+                    // never persist. Anything NOT in this set is owned by another
+                    // writer (params / auto_respawn / watchdog_ms / future) → carry over.
+                    static const char* const kOwned[] = {
+                        "name", "script", "parallelism", "runtime",
+                        "instances", "plugin_dirs", "plugins",
+                    };
                     size_t idx, mx; yyjson_val *k, *v;
                     yyjson_obj_foreach(oroot, idx, mx, k, v) {
                         const char* key = yyjson_get_str(k);
-                        if (!key || yyjson_obj_get(nroot, key)) continue;  // managed → new wins
+                        if (!key) continue;
+                        bool owned = false;
+                        for (const char* o : kOwned) if (std::strcmp(key, o) == 0) { owned = true; break; }
+                        if (owned) continue;                      // managed (even when omitted) → don't resurrect
+                        if (yyjson_obj_get(nroot, key)) continue; // also present in fresh → new wins
                         yyjson_mut_val* mk = yyjson_mut_strcpy(md, key);
                         yyjson_mut_val* mv = yyjson_val_mut_copy(md, v);
                         if (mk && mv) yyjson_mut_obj_add(mroot, mk, mv);
