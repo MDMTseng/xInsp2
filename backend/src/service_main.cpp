@@ -1711,14 +1711,54 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
 // For project plugin DLLs (touched by close/open/recompile/export),
 // no equivalent detached path exists; the dispatch pool is the only
 // in-flight surface.
+// RAII: stop continuous dispatch for a lifecycle op (DLL unload/reload/commit) and
+// RESUME it when the guard goes out of scope. Resume-on-destruction is the default
+// so "quiesce must be symmetric with resume" is guaranteed by the type, not by each
+// handler remembering to respawn — five handlers (recompile/rebuild/commit/discard/
+// export) used to quiesce and never resume, silently stopping the live stream on a
+// hot-recompile. An op that legitimately should NOT resume (the stream ends or is
+// replaced: unload_script / close_project / open_project) calls dismiss().
+// MOVE-ONLY: quiesce_dispatch_for_lifecycle_op_ returns one by value; a moved-from
+// guard won't resume. CALLERS MUST HOLD IT (`auto g = quiesce_...`) for the op's
+// duration — a discarded temporary would resume immediately, before the op runs.
 struct DispatchPoolGuard {
-    bool was_continuous = false;
-    int  prior_fps = 10;
-    bool quiesced = false;
+    bool            was_continuous = false;
+    int             prior_fps = 10;
+    bool            quiesced = false;
+    xi::ws::Server* srv = nullptr;
+    bool            armed_ = true;   // false once resumed/dismissed/moved-from
+
+    DispatchPoolGuard() = default;
+    DispatchPoolGuard(DispatchPoolGuard&& o) noexcept { *this = std::move(o); }
+    DispatchPoolGuard& operator=(DispatchPoolGuard&& o) noexcept {
+        was_continuous = o.was_continuous; prior_fps = o.prior_fps;
+        quiesced = o.quiesced; srv = o.srv; armed_ = o.armed_;
+        o.armed_ = false;
+        return *this;
+    }
+    DispatchPoolGuard(const DispatchPoolGuard&) = delete;
+    DispatchPoolGuard& operator=(const DispatchPoolGuard&) = delete;
+    ~DispatchPoolGuard() { resume(); }
+
+    // Respawn continuous mode at the prior fps if we quiesced it. Idempotent.
+    void resume() {
+        if (!armed_ || !was_continuous || !quiesced) return;
+        armed_ = false;
+        bool trig_only = prior_fps <= 0;
+        g_continuous_fps = trig_only ? 0 : prior_fps;
+        g_continuous = true;
+        int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(prior_fps, 1));
+        spawn_group_pool_(srv, interval_ms);
+        std::fprintf(stderr, "[xinsp2] continuous mode resumed\n");
+    }
+    // The op intentionally leaves dispatch stopped (the stream ended or is replaced).
+    void dismiss() { armed_ = false; }
 };
 
-static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name) {
+static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
+                                                            xi::ws::Server* srv) {
     DispatchPoolGuard g;
+    g.srv = srv;
     if (g_continuous.load()) {
         g.was_continuous = true;
         g.prior_fps = g_continuous_fps.load();
@@ -1728,7 +1768,7 @@ static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name)
         stop_dispatch_pool_();
         g.quiesced = true;
         std::fprintf(stderr,
-            "[xinsp2] stopped continuous mode for %s (will resume if op succeeds)\n",
+            "[xinsp2] stopped continuous mode for %s (resumes when the op completes)\n",
             op_name);
     }
     // (Lane queues are drained + their image handles released inside
@@ -2396,7 +2436,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // P0-AB-1: dispatcher workers snapshot g_script under
         // g_script_mu and may be mid-inspect when unload_script
         // FreeLibrary's the DLL. Drain the pool first.
-        (void)quiesce_dispatch_for_lifecycle_op_("unload_script");
+        { auto g = quiesce_dispatch_for_lifecycle_op_("unload_script", &srv); g.dismiss(); }  // script gone — don't resume
         std::lock_guard<std::mutex> lk(g_script_mu);
         xi::script::unload_script(g_script);
         // Drop the param replay cache — there's no live script to
@@ -2927,7 +2967,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         // DRAIN-BARRIER: after this returns there is provably no process() running
         // (pool stopped + workers joined + in-flight cmd:run drained via g_run_mu).
-        auto guard = quiesce_dispatch_for_lifecycle_op_("commit_group");
+        auto guard = quiesce_dispatch_for_lifecycle_op_("commit_group", &srv);
         std::string results = "[";
         bool any_fail = false;
         for (size_t i = 0; i < targets.size(); ++i) {
@@ -2966,15 +3006,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             results += "}";
         }
         results += "]";
-        // RESUME dispatch at the prior fps (config switch must not halt streaming).
-        if (guard.was_continuous) {
-            bool trig_only = guard.prior_fps <= 0;
-            int fps = trig_only ? 0 : guard.prior_fps;
-            g_continuous_fps = fps;
-            g_continuous = true;
-            int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(fps, 1));
-            spawn_group_pool_(&srv, interval_ms);
-        }
+        // `guard` resumes dispatch at the prior fps when it goes out of scope at
+        // the end of this handler (config switch must not halt streaming).
         std::string data = "{\"results\":" + results + "}";
         if (any_fail) {
             xp::Rsp r; r.id = id; r.ok = false;
@@ -3015,7 +3048,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // / open_project): the commit reads instance configs + does a filesystem
         // mirror (add/overwrite/delete) on the scratch that continuous workers
         // are concurrently reading/writing.
-        (void)quiesce_dispatch_for_lifecycle_op_("commit_working_copy");
+        auto _wc_commit_guard = quiesce_dispatch_for_lifecycle_op_("commit_working_copy", &srv);  // resumes at block end
         std::string save_fail;
         for (auto& [iname, _] : g_plugin_mgr.project().instances) {
             if (!g_plugin_mgr.save_instance(iname)) save_fail = iname;
@@ -3038,7 +3071,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, "no working copy active");
             return;
         }
-        (void)quiesce_dispatch_for_lifecycle_op_("discard_working_copy");
+        auto _wc_discard_guard = quiesce_dispatch_for_lifecycle_op_("discard_working_copy", &srv);  // resumes at block end
         if (g_plugin_mgr.reopen_fresh_working_copy()) {
             send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         } else {
@@ -3282,7 +3315,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // durable. Default false = legacy in-place behaviour.
         bool working_copy = parsed->args_json.find("\"working_copy\":true") != std::string::npos
                           || parsed->args_json.find("\"working_copy\": true") != std::string::npos;
-        (void)quiesce_dispatch_for_lifecycle_op_("open_project");
+        { auto g = quiesce_dispatch_for_lifecycle_op_("open_project", &srv); g.dismiss(); }  // new project drives its own autostart
         // Drop stale bus state from any previously-open project (releases cached
         // handles + the old sink) before tearing it down + opening the new one.
         xi::TriggerBus::instance().clear_sink();
@@ -3340,7 +3373,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // the in-PluginManager teardown order; this fixes the
         // dispatcher-still-running case the dispatcher pool hit when
         // close_project is sent during continuous mode.)
-        (void)quiesce_dispatch_for_lifecycle_op_("close_project");
+        { auto g = quiesce_dispatch_for_lifecycle_op_("close_project", &srv); g.dismiss(); }  // project closed — nothing to stream
         // Drop the bus's captured sink (it points at `srv`) and release any
         // handles cached in pending_/follower_latest_ BEFORE the plugin DLLs are
         // unloaded — otherwise those handles (created via the bridge with
@@ -3364,7 +3397,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         // export_project_plugin recompiles in Release; quiesce so no dispatcher
         // worker is mid-call into the same plugin's instances.
-        (void)quiesce_dispatch_for_lifecycle_op_("export_project_plugin");
+        auto _export_guard = quiesce_dispatch_for_lifecycle_op_("export_project_plugin", &srv);  // resumes at block end
         auto er = g_plugin_mgr.export_project_plugin(*pname, *dest);
         std::string data = "{\"plugin\":";
         xp::json_escape_into(data, *pname);
@@ -3403,7 +3436,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // FreeLibrary's the old DLL. Any in-flight set_def / exchange
         // on those instances from a dispatcher worker would dereference
         // freed code. Drain first.
-        auto guard = quiesce_dispatch_for_lifecycle_op_("recompile_project_plugin");
+        auto guard = quiesce_dispatch_for_lifecycle_op_("recompile_project_plugin", &srv);
         auto rr = g_plugin_mgr.recompile_project_plugin(*pname);
         // Build diagnostics JSON — same shape as compile_and_load.
         std::string diag_json = "[";
@@ -3473,7 +3506,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             }
             yyjson_doc_free(adoc);
         }
-        auto guard = quiesce_dispatch_for_lifecycle_op_("rebuild_plugins");
+        auto guard = quiesce_dispatch_for_lifecycle_op_("rebuild_plugins", &srv);
         auto rep = g_plugin_mgr.rebuild_cmake_plugins(
             cmake_exe ? *cmake_exe : std::string("cmake"),
             config    ? *config    : std::string("Release"),
