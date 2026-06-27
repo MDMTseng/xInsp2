@@ -24,6 +24,7 @@
 //
 
 #include "xi_image.hpp"
+#include "xi_json_escape.hpp"
 #include "yyjson.h"
 
 #include <atomic>
@@ -62,28 +63,9 @@ inline bool nonfinite_from_str(const char* s, double& out) {
     return false;
 }
 
-// Minimal JSON string escape — kept local so this header stays independent
-// of xi_protocol.hpp. Emits the value already wrapped in quotes.
+// JSON string escape (quoted). Forwards to the one primitive in xi_json_escape.hpp.
 inline void append_json_escaped(std::string& out, const std::string& s) {
-    out.push_back('"');
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if ((unsigned char)c < 0x20) {
-                    char b[8];
-                    std::snprintf(b, sizeof(b), "\\u%04x", (unsigned)c);
-                    out += b;
-                } else {
-                    out.push_back(c);
-                }
-        }
-    }
-    out.push_back('"');
+    json_escape_into(out, s);
 }
 
 // yyjson layout stamp (γ). Identifies the yyjson version + the two struct sizes
