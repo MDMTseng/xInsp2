@@ -16,6 +16,7 @@
 
 #include <xi/xi.hpp>
 #include <xi/xi_inflight_runs.hpp>
+#include <xi/xi_working_copy.hpp>
 
 // Minimal test harness — each TEST() runs once; failures print and set a flag.
 static int g_failures = 0;
@@ -310,8 +311,28 @@ static void test_inflight_runs() {
     CHECK(rt.drain(100));             // drain is trivially satisfied
 }
 
+// ---- working-copy exclusion: precise, not "any component named X" ----
+static void test_wc_exclusion() {
+    SECTION("xi::wc::is_excluded is root-anchored / plugins-scoped");
+    using xi::wc::is_excluded;
+    namespace fs = std::filesystem;
+    // Root-anchored infra: excluded.
+    CHECK(is_excluded(fs::path(".xinsp_work") / "project.json"));
+    CHECK(is_excluded(fs::path(".git") / "config"));
+    CHECK(is_excluded(fs::path(".xinsp_commit_pending")));
+    // Plugin CMake build output: excluded (only under plugins/).
+    CHECK(is_excluded(fs::path("plugins") / "det" / "build" / "det.dll"));
+    // USER data that merely shares a name must be PRESERVED (the silent-loss bug):
+    CHECK(!is_excluded(fs::path("instances") / "cam0" / "build" / "asset.bin"));
+    CHECK(!is_excluded(fs::path("build") / "out"));              // a root build/ that isn't a plugin's
+    CHECK(!is_excluded(fs::path("assets") / ".git"));            // coincidental nested name
+    CHECK(!is_excluded(fs::path("plugins") / "det" / "src" / "plugin.cpp"));
+    CHECK(!is_excluded(fs::path("inspect.cpp")));
+}
+
 int main() {
     test_inflight_runs();
+    test_wc_exclusion();
     test_async_basic();
     test_async_parallel();
     test_async_exception();

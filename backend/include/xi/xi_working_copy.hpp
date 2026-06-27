@@ -30,15 +30,24 @@ inline constexpr const char* kWorkingCopyDir = ".xinsp_work";
 // open_project rolls the commit forward from the intact scratch.
 inline constexpr const char* kCommitMarker = ".xinsp_commit_pending";
 
-// True if a path component should be skipped when seeding/mirroring the working
-// copy: the scratch dir itself, VCS metadata, and regenerated build output
-// (recompiled on open, no point copying — and committing it back would clobber
-// the canonical build with the scratch's).
+// True if a project-relative path should be skipped when seeding/mirroring the
+// working copy. PRECISE on purpose: matching these names at ANY depth (the old
+// behaviour) silently dropped a USER directory that happened to share a name —
+// e.g. an asset/data folder named "build" under instances/<x>/ — from BOTH the
+// seed AND the commit prune, i.e. silent data loss the user never sees.
+//   - .xinsp_work / .git / commit-marker: only ever exist at the project ROOT, so
+//     anchor them there.
+//   - "build": the only in-tree build output is a CMake plugin's plugins/<name>/build
+//     (regenerated on rebuild — no point copying, and committing it back would
+//     clobber the canonical build). So exclude "build" ONLY under plugins/.
 inline bool is_excluded(const std::filesystem::path& rel) {
-    for (const auto& part : rel) {
-        std::string s = part.string();
-        if (s == kWorkingCopyDir || s == ".git" || s == "build" ||
-            s == kCommitMarker) return true;
+    if (rel.empty()) return false;
+    const std::string first = rel.begin()->string();
+    if (first == kWorkingCopyDir || first == ".git" || first == kCommitMarker)
+        return true;
+    if (first == "plugins") {
+        for (const auto& part : rel)
+            if (part.string() == "build") return true;
     }
     return false;
 }
