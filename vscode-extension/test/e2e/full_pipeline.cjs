@@ -199,41 +199,6 @@ async function run() {
     await sleep(1000);
     takeScreenshot('streaming_stopped');
 
-    // --- Step 9b: Compile and run plugin_handle_demo.cpp ---
-    // This script calls blob_analysis via PluginHandle internally.
-    // No test-side process calls — everything happens in user C++ code.
-    console.log('\n[step 9b] Compiling plugin_handle_demo.cpp (uses PluginHandle → blob_analysis)...');
-    const pluginDemoPath = path.join(examplesDir, 'plugin_handle_demo.cpp');
-    if (fs.existsSync(pluginDemoPath)) {
-        // Open the script in editor
-        const doc2 = await vscode.workspace.openTextDocument(pluginDemoPath);
-        await vscode.window.showTextDocument(doc2, vscode.ViewColumn.One);
-        await sleep(1000);
-        takeScreenshot('plugin_handle_code');
-
-        // Compile it
-        const compRsp = await sendCmd('compile_and_load', { path: pluginDemoPath });
-        console.log('[step 9b] compile:', compRsp.ok ? 'ok' : compRsp.error);
-        if (compRsp.ok) {
-            // Focus the viewer
-            try { await vscode.commands.executeCommand('xinsp2.viewer.focus'); } catch {}
-            await sleep(2000);
-
-            // Run the inspection — PluginHandle calls blob_analysis internally
-            console.log('[step 9b] Running inspection (PluginHandle → blob_analysis)...');
-            const runRsp = await sendCmd('run');
-            console.log('[step 9b] run:', runRsp.ok ? 'ok' : runRsp.error);
-            await sleep(3000);
-
-            // Run again to make sure viewer has data
-            await sendCmd('run');
-            await sleep(3000);
-            takeScreenshot('plugin_handle_result');
-        } else {
-            takeScreenshot('plugin_handle_compile_failed');
-        }
-    }
-
     // --- Step 10: Save instance configs ---
     console.log('\n[step 10] Saving instance configs...');
     await sendCmd('save_instance_config', { name: 'cam0' });

@@ -89,7 +89,6 @@ cd vscode-extension && node test/runUserJourney.mjs
 |---|---|
 | `runMulticam` | `synced_stereo` gathering plugin emits one record carrying left+right (same `seq`) |
 | `runSubscribe` | preview subscription gates binary frames by name |
-| `runBreakpoint` | `xi::breakpoint("label")` parks worker; `cmd:resume` releases |
 | `runWatchdog` | watchdog kills runaway inspect; backend stays alive |
 | `runRemoteAuth` | `--auth` bearer gate, 401 on bad/missing, constant-time compare |
 | `runHistory` | ring buffer keeps 50; `since_run_id` filter; `set_history_depth` resize |

@@ -80,7 +80,6 @@ That's a full script. Three constructs do the heavy lifting:
 Plus:
 - `xi::Record` — the universal data container (named images + JSON).
 - `xi::async(fn, args...)` — parallel ops (returns `Future<R>`).
-- `xi::breakpoint("label")` — pause script until UI clicks resume.
 - `xi::state()` — persistent JSON dictionary that survives hot-reloads.
 
 ---
@@ -98,9 +97,7 @@ Plus:
               │              │  ├ xi::use(...)             │
               │              │  │   .process(...)          │
               │              │  ├ xi::Param<T> reads       │
-              │              │  ├ VAR(name, value)         │
-              │              │  └ xi::breakpoint(...)?     │
-              │              │       (host pauses worker)   │
+              │              │  └ VAR(name, value)         │
               │              └────────────────────────────┘
               │
               └─ on next save: ─→ get_state() (JSON) ─→ unload DLL ─→
@@ -380,20 +377,6 @@ Survives:
 
 Use for cross-frame counters, calibration results, "have we seen this
 serial number" caches.
-
----
-
-## `xi::breakpoint(label)` — pause for UI
-
-```cpp
-VAR(thresh_img, threshold(gray, t));
-xi::breakpoint("after-threshold");      // worker parks here
-```
-
-When the host's continuous-run mode hits this line, it sends an event
-to the UI and parks the worker. The user clicks **Resume** in the
-status bar (or runs `cmd:resume`) to release. Useful for tuning at a
-specific stage.
 
 ---
 

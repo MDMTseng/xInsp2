@@ -24,7 +24,7 @@
 #include <string>
 
 // Defined (as static) inside xi_script_support.hpp, which is force-included into
-// every user-script DLL. Same pattern as g_breakpoint_fn_.
+// every user-script DLL (same global-callback-pointer pattern as g_use_*_fn_).
 extern void* g_status_fn_;
 
 namespace xi {

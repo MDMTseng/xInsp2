@@ -35,8 +35,8 @@ load-bearing contract that lives only in a comment/convention.
   flag** (theme D). A failed `compile_and_load` replies `ok:false` to the *caller* and
   keeps streaming the last-good DLL, but boot-degraded has a marker and mid-run has
   no equivalent. Add `last_compile_ok` / `running_def_epoch` to `cmd:status`.
-- **P1-7 — script `status()` / breakpoint dropped when no client is connected.** No
-  persistent landing spot; live-WS-only. Buffer the latest, or stamp to fe-status.
+- **P1-7 — script `status()` dropped when no client is connected.** No persistent
+  landing spot; live-WS-only. Buffer the latest, or stamp to fe-status.
 - **P1-8 — drop/high-watermark counters reset at `cmd:start`.** A restart erases the
   "how much did we drop last run" history. Keep a lifetime-cumulative alongside (like
   ImagePool's `total_created_`).

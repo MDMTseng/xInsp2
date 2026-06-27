@@ -332,17 +332,10 @@ static std::mutex                  g_hist_mu;
 static std::deque<HistoryEntry>    g_history;
 static size_t                      g_hist_max = 50;
 
-// Breakpoint coordination (S3). Script thread calls breakpoint_cb()
-// which: (a) emits an event on the WS, (b) blocks on g_bp_cv until
-// the WS thread receives `cmd: resume`. g_bp_paused is the predicate
-// so spurious wakeups don't miss the signal.
-static std::mutex              g_bp_mu;
-static std::condition_variable g_bp_cv;
-static bool                    g_bp_paused = false;
-static std::string             g_bp_last_label;
-// Atomic so emit/status/breakpoint paths (which may run on plugin/replay/worker
-// threads) can load it once and the shutdown null-out can't tear a read. A
-// pointer load is a plain mov on x86-64 — no hot-path cost.
+// Server pointer for emits that happen off the serving thread (status_cb, the
+// dropped-frame markers). Atomic so a worker/plugin thread loads it once and the
+// shutdown null-out can't tear a read. A pointer load is a plain mov on x86-64 —
+// no hot-path cost.
 static std::atomic<xi::ws::Server*> g_srv_for_bp{nullptr};   // set in main
 
 // ---- Trigger access (script callbacks) ---------------------------------
@@ -452,32 +445,6 @@ static void* trigger_meta_cb() {
     return (void*)g_current_trigger->meta_doc;
 }
 
-static void breakpoint_cb(const char* label) {
-    // Called from the script thread. Emit a text event, then block until
-    // the WS thread sets g_bp_paused=false via `cmd: resume`.
-    //
-    // If we're not in continuous mode, don't park — otherwise a single
-    // `cmd: run` would deadlock the WS thread, and stop/unload would
-    // have to re-release after every inspect iteration. Breakpoints
-    // are a continuous-mode feature.
-    auto* srv = g_srv_for_bp.load(std::memory_order_acquire);
-    if (!srv || !g_continuous.load()) return;
-    std::string safe = label ? label : "";
-    // Build event JSON with escaped label.
-    std::string msg = "{\"type\":\"event\",\"name\":\"breakpoint\",\"data\":{\"label\":";
-    xp::json_escape_into(msg, safe);
-    msg += "}}";
-    srv->send_text(msg);
-
-    std::unique_lock<std::mutex> lk(g_bp_mu);
-    g_bp_paused     = true;
-    g_bp_last_label = safe;
-    // Also wake on !g_continuous: a stop/quiesce can flip g_continuous and fire
-    // its g_bp_paused=false+notify in the window between the early check above and
-    // this wait. Without the extra predicate term that notify is missed and the
-    // worker parks forever -> stop_dispatch_pool_'s join hangs the backend.
-    g_bp_cv.wait(lk, []{ return !g_bp_paused || !g_continuous.load(); });
-}
 
 // ---- Status registry -------------------------------------------------------
 // Sticky last-value status per component: instance name, or "@script" for the
@@ -1434,13 +1401,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
             emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", aid, -1, ds, dg);
         return false;
     }
-    if (ov == "block") {
-        lane->cv.wait(lk, [&] { return (int)lane->q.size() < depth || !g_continuous.load(); });
-        if (!g_continuous.load()) { release_trigger_event_(ev); return false; }
-        ev.arrival_id = ++g_run_id;   // claimed at commit (after the block wait)
-        lane->q.push_back(std::move(ev)); lane->cv.notify_one(); return true;
-    }
-    auto& front = lane->q.front();   // drop_oldest
+    auto& front = lane->q.front();   // drop_oldest (the default + fallback)
     int64_t dropped_aid = front.arrival_id;   // the dropped (oldest) frame's slot
     std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
     release_trigger_event_(front);
@@ -1515,13 +1476,10 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                             if (lane->ordered) eseq = lane->seq_next.fetch_add(1);
                         }
                     }
-                    // notify_ALL, not _one: workers AND overflow:block producers wait on
-                    // the same cv. A notify_one after a pop could be eaten by an idle
-                    // sibling worker (which re-checks, sees the queue empty, re-waits)
-                    // while the blocked producer that needs the freed slot is never woken
-                    // — a permanent producer deadlock (a stalled source/timer) with
-                    // overflow:"block" + dispatch_threads>=2. Cheap vs an inspect.
-                    lane->cv.notify_all();
+                    // Only lane WORKERS wait on this cv now (the overflow:block
+                    // producer-park was removed), so notify_one is correct + cheaper:
+                    // one freed slot wakes one worker.
+                    lane->cv.notify_one();
                     if (!have) continue;
                     // Rate limit: CAS-claim a dispatch slot ≥ min_interval after the
                     // lane's previous one, then sleep to it. Surplus events meanwhile
@@ -1595,20 +1553,9 @@ static void stop_group_pool_() {
 // Stop the pool + timer. Safe to call if nothing was spawned.
 static void stop_dispatch_pool_() {
     g_continuous = false;
-    // Wake any worker parked at a breakpoint. The breakpoint predicate is
-    // `!g_bp_paused || !g_continuous`, but g_continuous is a plain atomic — a
-    // waiter that evaluated the predicate and suspended just BEFORE this store
-    // won't be re-checked unless we notify under g_bp_mu. The lifecycle quiesce
-    // paths (reload / commit / open) clear g_bp_paused + notify g_bp_cv *before*
-    // calling stop_dispatch_pool_, i.e. before g_continuous flips — so without
-    // this, a worker that arms its breakpoint in that window parks forever and
-    // stop_group_pool_'s join() hangs the backend. Centralize the wake here, so
-    // it always follows the g_continuous=false store regardless of caller order.
-    { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
-    g_bp_cv.notify_all();
-    // Wake the lane workers + any producer (incl. the timer) parked in a lane's
-    // overflow:block BEFORE joining the timer, or the join deadlocks. Also wake
-    // anyone parked in a per-lane EmitTurn (ordered mode).
+    // Wake the lane workers (so they observe g_continuous=false and exit) BEFORE
+    // joining, or the join deadlocks. Also wake anyone parked in a per-lane EmitTurn
+    // (ordered mode).
     {
         std::vector<std::shared_ptr<GroupLane>> lanes;
         { std::lock_guard<std::mutex> lk(g_lanes_mu); lanes = g_lanes; }
@@ -1697,7 +1644,7 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
 
 }
 
-// Quiesce the dispatcher + timer + breakpoint park before any handler
+// Quiesce the dispatcher + timer before any handler
 // that's about to touch the script DLL or project plugin DLLs (audit
 // P0-AB-1..5). Returns the prior continuous state so the caller can
 // re-arm if it wants. Mirrors the inline block compile_and_load has
@@ -1761,9 +1708,6 @@ static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
     if (g_continuous.load()) {
         g.was_continuous = true;
         g.prior_fps = g_continuous_fps.load();
-        // Release any breakpoint-parked thread so it can finish.
-        { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
-        g_bp_cv.notify_all();
         stop_dispatch_pool_();
         g.quiesced = true;
         std::fprintf(stderr,
@@ -1970,23 +1914,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         out += (armed ? "true" : "false");
         out += "}";
         send_rsp_ok(srv, id, out);
-    } else if (name == "resume") {
-        // S3: unblock a script waiting in xi::breakpoint(). Idempotent —
-        // calling when not paused is a no-op with an informative reply.
-        std::string out;
-        {
-            std::lock_guard<std::mutex> lk(g_bp_mu);
-            if (g_bp_paused) {
-                g_bp_paused = false;
-                out = "{\"resumed\":true,\"label\":";
-                xp::json_escape_into(out, g_bp_last_label);
-                out += "}";
-            } else {
-                out = "{\"resumed\":false}";
-            }
-        }
-        g_bp_cv.notify_all();
-        send_rsp_ok(srv, id, out);
     } else if (name == "history") {
         // S4: return the most recent N vars snapshots (default: all kept).
         // args: { count?: N, since_run_id?: id }
@@ -2091,19 +2018,15 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
 
         // Stop continuous mode before reloading — the worker thread holds
-        // function pointers into the DLL we're about to unload. Also
-        // release any breakpoint that's currently parked, so the worker
-        // can actually finish. Remember whether the run was active so
-        // we can re-arm it after the reload — without this, scripts
-        // that get hot-reloaded mid-run would silently halt and the
-        // caller would have to know to re-issue cmd:start.
+        // function pointers into the DLL we're about to unload. Remember whether
+        // the run was active so we can re-arm it after the reload — without this,
+        // scripts that get hot-reloaded mid-run would silently halt and the caller
+        // would have to know to re-issue cmd:start.
         bool was_continuous = false;
         int  prior_continuous_fps = 10;
         if (g_continuous.load()) {
             was_continuous = true;
             prior_continuous_fps = g_continuous_fps.load();
-            { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
-            g_bp_cv.notify_all();
             stop_dispatch_pool_();
             std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload (will resume)\n");
         }
@@ -2329,11 +2252,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // an empty Record.
             if (g_script.set_trigger_meta_callback) {
                 g_script.set_trigger_meta_callback((void*)trigger_meta_cb);
-            }
-            // S3: breakpoint callback. Scripts without xi_breakpoint.hpp
-            // leave this null and xi::breakpoint() is a no-op.
-            if (g_script.set_breakpoint_callback) {
-                g_script.set_breakpoint_callback((void*)breakpoint_cb);
             }
             // Status callback. Scripts without xi_status.hpp leave this null
             // and xi::status() is a no-op.
@@ -2612,14 +2530,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         send_rsp_ok(srv, id, buf);
     } else if (name == "stop") {
         g_continuous = false;
-        // Force-release any breakpoint parking the worker — otherwise the join
-        // below would deadlock. breakpoint_cb also checks g_continuous, so
-        // subsequent breakpoints in the same inspect() no-op immediately.
-        {
-            std::lock_guard<std::mutex> lk(g_bp_mu);
-            g_bp_paused = false;
-        }
-        g_bp_cv.notify_all();
         xi::TriggerBus::instance().clear_sink();
         stop_dispatch_pool_();   // joins lanes + drains their queues (handles released)
         send_rsp_ok(srv, id, R"({"stopped":true})");
@@ -4000,12 +3910,6 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lk(g_recent_errors_mu);
             g_recent_errors.clear();
         }
-        // Release any breakpoint-parked worker: the client that would have sent
-        // `resume` is gone, so an in-continuous-mode inspect parked on
-        // g_bp_cv would stay wedged and the reconnecting client has no signal to
-        // recover it. Mirror the stop/quiesce release.
-        { std::lock_guard<std::mutex> lk(g_bp_mu); g_bp_paused = false; }
-        g_bp_cv.notify_all();
         // (E-P1-1: the per-instance-death dedup set was removed with
         // process isolation in 2026-05; no set to clear here.)
     };
@@ -4025,7 +3929,7 @@ int main(int argc, char** argv) {
     if (g_watchdog_ms.load() > 0) {
         std::fprintf(stderr, "[xinsp2] watchdog enabled: %d ms per inspect\n", g_watchdog_ms.load());
     }
-    g_srv_for_bp = &srv;   // S3: breakpoint_cb emits events through it
+    g_srv_for_bp = &srv;   // status_cb + dropped-frame markers emit through it
     // Route plugin host_api->set_status into the status registry. Non-capturing
     // so it converts to the StatusSinkFn function pointer.
     xi::status_sink() = [](const char* who, const char* text) {

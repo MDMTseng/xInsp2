@@ -335,11 +335,6 @@ static void* g_trigger_sources_fn_  = nullptr;
 static void* g_trigger_leader_fn_   = nullptr;
 static void* g_trigger_meta_fn_     = nullptr;   // ABI v5: emit_trigger_record metadata doc
 
-// Breakpoint callback (S3). Host sets this so xi::breakpoint(label)
-// inside user script blocks until the WS client sends `cmd: resume`.
-// Signature: void(const char* label).
-static void* g_breakpoint_fn_       = nullptr;
-
 // Status callback. Host sets this so xi::status(text) publishes the script's
 // latest status string to the host status registry. Signature: void(const char*).
 static void* g_status_fn_           = nullptr;
@@ -399,12 +394,6 @@ XI_SCRIPT_EXPORT void xi_script_set_trigger_leader_callback(void* leader_fn) {
 // and xi::Trigger::meta() returns an empty Record.
 XI_SCRIPT_EXPORT void xi_script_set_trigger_meta_callback(void* meta_fn) {
     g_trigger_meta_fn_ = meta_fn;
-}
-
-// Optional: install a breakpoint callback for xi::breakpoint(label).
-// Scripts that don't include xi_breakpoint.hpp leave this null.
-XI_SCRIPT_EXPORT void xi_script_set_breakpoint_callback(void* fn) {
-    g_breakpoint_fn_ = fn;
 }
 
 // Optional: install a status callback for xi::status(text). Scripts that don't
