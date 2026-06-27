@@ -2156,6 +2156,51 @@ private:
     // — so this is a stale-disk signal, not corruption — but callers on the
     // explicit-save path surface it so the user isn't told a save succeeded when
     // it didn't reach disk.
+    // Carry over any top-level project.json keys this writer doesn't manage
+    // (e.g. `params`, and fields another tool/the VS Code extension adds like
+    // `auto_respawn` / `watchdog_ms`). save_project_locked is a FULL rebuild, so
+    // without this it silently DROPS them on every instance CRUD — the same
+    // data-loss class as the F1 groups/runtime fix, but for fields a *different*
+    // writer owns. Merge-not-clobber: the freshly-built JSON wins for keys it
+    // emits; every other top-level key from the existing file survives verbatim.
+    static std::string merge_unknown_top_keys_(const std::string& fresh_json,
+                                               const std::filesystem::path& existing) {
+        std::error_code ec;
+        if (!std::filesystem::exists(existing, ec)) return fresh_json;
+        std::ifstream f(existing, std::ios::binary);
+        std::string old((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (old.empty()) return fresh_json;
+        yyjson_doc* od = yyjson_read(old.data(), old.size(), 0);
+        yyjson_doc* nd = yyjson_read(fresh_json.data(), fresh_json.size(), 0);
+        std::string result = fresh_json;
+        if (od && nd) {
+            yyjson_val* oroot = yyjson_doc_get_root(od);
+            yyjson_val* nroot = yyjson_doc_get_root(nd);
+            if (yyjson_is_obj(oroot) && yyjson_is_obj(nroot)) {
+                yyjson_mut_doc* md = yyjson_doc_mut_copy(nd, nullptr);
+                yyjson_mut_val* mroot = md ? yyjson_mut_doc_get_root(md) : nullptr;
+                if (mroot) {
+                    size_t idx, mx; yyjson_val *k, *v;
+                    yyjson_obj_foreach(oroot, idx, mx, k, v) {
+                        const char* key = yyjson_get_str(k);
+                        if (!key || yyjson_obj_get(nroot, key)) continue;  // managed → new wins
+                        yyjson_mut_val* mk = yyjson_mut_strcpy(md, key);
+                        yyjson_mut_val* mv = yyjson_val_mut_copy(md, v);
+                        if (mk && mv) yyjson_mut_obj_add(mroot, mk, mv);
+                    }
+                    if (char* w = yyjson_mut_write(md, YYJSON_WRITE_PRETTY, nullptr)) {
+                        result.assign(w);
+                        free(w);
+                    }
+                }
+                if (md) yyjson_mut_doc_free(md);
+            }
+        }
+        if (od) yyjson_doc_free(od);
+        if (nd) yyjson_doc_free(nd);
+        return result;
+    }
+
     bool save_project_locked() {
         auto pj = std::filesystem::path(project_.folder_path) / "project.json";
         std::string out = "{\n";
@@ -2251,6 +2296,9 @@ private:
             out += "\n  }";
         }
         out += "\n}\n";
+        // Preserve top-level keys owned by another writer (params / auto_respawn /
+        // watchdog_ms / …) instead of clobbering them on every CRUD.
+        out = merge_unknown_top_keys_(out, pj);
         // D-P1-5: atomic_write may fail (disk full / read-only / etc.).
         // Bubble that up — silently losing project.json was the audit
         // finding. Caller can't really recover, but at least logs it.

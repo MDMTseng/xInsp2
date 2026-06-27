@@ -103,6 +103,42 @@ test('project.json groups/default_group/runtime + instance group survive a save'
     });
 });
 
+test('save_project_locked preserves top-level keys owned by another writer', async () => {
+    // Regression: save_project_locked is a full rebuild; before the merge-not-
+    // clobber fix, any instance CRUD silently dropped keys it doesn't manage
+    // (params, and extension-written fields like auto_respawn / watchdog_ms).
+    const proj = mkdtempSync(join(tmpdir(), 'xi_merge_'));
+    writeFileSync(join(proj, 'inspect.cpp'),
+        '#include <xi/xi.hpp>\nXI_SCRIPT_EXPORT void xi_inspect_entry(int){}\n');
+    writeFileSync(join(proj, 'project.json'), JSON.stringify({
+        name: 'merge_demo',
+        script: 'inspect.cpp',
+        auto_respawn: false,                 // owned by the VS Code extension
+        watchdog_ms: 12345,                  // owned by the VS Code extension
+        params: { sigma: 7.5, mode: 'fast' },// owned by the legacy snapshot writer
+    }, null, 2));
+
+    await withBackend(async (c) => {
+        await c.next(); // hello
+        c.send({ type: 'cmd', id: 1, name: 'open_project', args: { folder: proj } });
+        assert.equal((await c.nextRsp()).ok, true, 'open ok');
+
+        // Any instance CRUD triggers save_project_locked (full rebuild).
+        c.send({ type: 'cmd', id: 2, name: 'create_instance', args: { name: 'cam0', plugin: 'mock_camera' } });
+        assert.equal((await c.nextRsp()).ok, true, 'create ok');
+        await sleep(300);
+
+        const pj = JSON.parse(readFileSync(join(proj, 'project.json'), 'utf8'));
+        // Unknown keys survived the rebuild.
+        assert.equal(pj.auto_respawn, false, 'auto_respawn preserved');
+        assert.equal(pj.watchdog_ms, 12345, 'watchdog_ms preserved');
+        assert.deepEqual(pj.params, { sigma: 7.5, mode: 'fast' }, 'params preserved');
+        // And the managed write still happened (the instance is in the model).
+        c.send({ type: 'cmd', id: 3, name: 'get_project' });
+        assert.ok(JSON.stringify(await c.nextRsp()).includes('cam0'), 'instance created');
+    });
+});
+
 test('remove_instance (keep folder) persists — instance does not resurrect on reopen', async () => {
     const proj = mkdtempSync(join(tmpdir(), 'xi_rmkeep_'));
     writeFileSync(join(proj, 'inspect.cpp'),
