@@ -59,7 +59,6 @@ struct LoadedScript {
                                         void* grab_fn, void* host_api);
     using SetTriggerCallbacksFn = void (*)(void* info_fn, void* image_fn,
                                            void* sources_fn);
-    using SetBreakpointCallbackFn = void (*)(void* fn);
     using SetRunContextFn         = void (*)(const char* frame_path);
     using SetGlobalCancelFn       = void (*)(int set);
     using StateSchemaVersionFn    = int  (*)(void);
@@ -83,7 +82,6 @@ struct LoadedScript {
     // ABI v5: metadata-doc callback (emit_trigger_record). Optional symbol.
     using SetTriggerMetaCallbackFn = void (*)(void* meta_fn);
     SetTriggerMetaCallbackFn set_trigger_meta_callback = nullptr;
-    SetBreakpointCallbackFn set_breakpoint_callback = nullptr;
     using SetStatusCallbackFn = void (*)(void* fn);
     SetStatusCallbackFn set_status_callback = nullptr;
     using SetResultCallbackFn = void (*)(void* fn);
@@ -135,7 +133,6 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_trigger_callbacks = reinterpret_cast<LoadedScript::SetTriggerCallbacksFn>(GetProcAddress(h, "xi_script_set_trigger_callbacks"));
     out.set_trigger_leader_callback = reinterpret_cast<LoadedScript::SetTriggerLeaderCallbackFn>(GetProcAddress(h, "xi_script_set_trigger_leader_callback"));
     out.set_trigger_meta_callback = reinterpret_cast<LoadedScript::SetTriggerMetaCallbackFn>(GetProcAddress(h, "xi_script_set_trigger_meta_callback"));
-    out.set_breakpoint_callback = reinterpret_cast<LoadedScript::SetBreakpointCallbackFn>(GetProcAddress(h, "xi_script_set_breakpoint_callback"));
     out.set_status_callback = reinterpret_cast<LoadedScript::SetStatusCallbackFn>(GetProcAddress(h, "xi_script_set_status_callback"));
     out.set_result_callback = reinterpret_cast<LoadedScript::SetResultCallbackFn>(GetProcAddress(h, "xi_script_set_result_callback"));
     out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));

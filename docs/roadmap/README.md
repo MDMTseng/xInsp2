@@ -17,7 +17,7 @@ re-describing other docs.
 | WS API (incl. `get_instance_def` symmetric read + `cmd:run` record injection) | [`../reference/ws-protocol.md`](../reference/ws-protocol.md) |
 | Sharded refcounted ImagePool, SEH crash isolation, auto-respawn, atomic JSON writes, skip-bad-instance, compile diagnostics | [`../internals/fe-be.md`](../internals/fe-be.md), [`../guides/debug.md`](../guides/debug.md) |
 | In-project plugins, hot reload, export-plugin, SDK scaffold, plugin webviews | [`../guides/write-a-plugin.md`](../guides/write-a-plugin.md) |
-| `xi::state` / `xi::async` / `xi::breakpoint` / hot-reload / script DLL versioning | [`../guides/write-a-script.md`](../guides/write-a-script.md) |
+| `xi::state` / `xi::async` / hot-reload / script DLL versioning | [`../guides/write-a-script.md`](../guides/write-a-script.md) |
 | Replay (buffer_replay plugin), interactive viewer, remote mode | [`../guides/extend-the-ui.md`](../guides/extend-the-ui.md) |
 
 7 plugins shipped under `plugins/`; SDK demo plugins under `sdk/examples/`. Full

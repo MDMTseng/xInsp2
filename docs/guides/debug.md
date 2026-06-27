@@ -49,9 +49,8 @@ What's NOT caught:
    ```
 2. Open the file → look for unguarded dereferences or out-of-range
    indexing on the line you most recently changed.
-3. If it's reproducible: set `xi::breakpoint("right-before-crash")` to
-   pause and step in the VS Code C++ debugger (attach to
-   `xinsp-backend.exe`).
+3. If it's reproducible: attach the VS Code C++ debugger to
+   `xinsp-backend.exe` and set a native breakpoint on the suspect line.
 
 ### Symptom: backend just disappears
 
