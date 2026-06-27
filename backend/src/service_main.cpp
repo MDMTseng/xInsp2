@@ -381,6 +381,23 @@ static inline void release_trigger_event_(const xi::TriggerEvent& ev) {
     xi::DocRegistry::instance().release(ev.meta_doc);
 }
 
+// RAII for "this thread's inspect sees `ev` as its trigger". Sets g_current_trigger
+// for the scope; on destruction clears it back to nullptr AND releases the event's
+// image/meta handles. TriggerEvent has no destructor (the discipline is manual), so
+// every dispatch site used to hand-write `g_current_trigger = &ev; run; = nullptr;
+// release_trigger_event_(ev);`. If run_one_inspection unwound between the set and the
+// manual clear (a translated SEH / bad_alloc escaping the use() boundary),
+// g_current_trigger was left dangling at a popped-stack ev (the next current_trigger
+// callback = UAF) and the event leaked. The dtor makes both impossible and a new
+// dispatch site can't get the sequence wrong.
+struct CurrentTriggerScope {
+    const xi::TriggerEvent& ev_;
+    explicit CurrentTriggerScope(const xi::TriggerEvent& ev) : ev_(ev) { g_current_trigger = &ev; }
+    ~CurrentTriggerScope() { g_current_trigger = nullptr; release_trigger_event_(ev_); }
+    CurrentTriggerScope(const CurrentTriggerScope&) = delete;
+    CurrentTriggerScope& operator=(const CurrentTriggerScope&) = delete;
+};
+
 struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hpp)
     xi_trigger_id id;
     int64_t       timestamp_us;
@@ -1525,10 +1542,8 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                     lane->running.fetch_add(1);
                     int frame_seq = (int)rid;
                     if (!ev.images.empty() || ev.id.hi || ev.id.lo) {
-                        g_current_trigger = &ev;
+                        CurrentTriggerScope trig(ev);   // clears g_current_trigger + releases ev on scope exit
                         run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq, &lane->gate);
-                        g_current_trigger = nullptr;
-                        release_trigger_event_(ev);
                     } else {
                         run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq, &lane->gate);
                     }
@@ -1622,10 +1637,8 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
         reserve_fault_stack();
         xi::install_seh_translator();
         std::lock_guard<std::mutex> lk(g_run_mu);
-        g_current_trigger = evp.get();
+        CurrentTriggerScope trig(*evp);   // clears g_current_trigger + releases evp on scope exit
         run_one_inspection(*srv, /*frame_hint=*/0, /*run_id=*/0, "", /*emit_seq=*/-1);
-        g_current_trigger = nullptr;
-        release_trigger_event_(*evp);
     });
     if (!launched) release_trigger_event_(*evp);
 }
@@ -2488,12 +2501,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             }
             if (inject) {
                 ev.id = { (uint64_t)run_id, 0 };   // synthesized, unique per run
-                g_current_trigger = &ev;
-            }
-            run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
-            if (inject) {
-                g_current_trigger = nullptr;
-                release_trigger_event_(ev);   // release frame handle(s) + meta doc
+                CurrentTriggerScope trig(ev);      // clears g_current_trigger + releases ev on scope exit
+                run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
+            } else {
+                run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
             }
         });
     } else if (name == "start") {
