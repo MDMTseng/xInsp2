@@ -232,13 +232,11 @@ public:
     }
 
 private:
-    // Record the on-disk write-time + size of the DLL we just loaded, so
+    // Record the on-disk write-time of the DLL we just loaded, so
     // reload_changed_plugins() can later tell whether a rebuild produced a new
     // DLL (and only hot-swap the ones that actually moved).
     static void stamp_loaded_dll_(PluginInfo& pi, const std::string& dll_path) {
         std::error_code ec;
-        auto sz = std::filesystem::file_size(dll_path, ec);
-        pi.loaded_dll_size = ec ? 0 : (uint64_t)sz;
         auto wt = std::filesystem::last_write_time(dll_path, ec);
         pi.loaded_dll_mtime = ec ? 0 : (uint64_t)wt.time_since_epoch().count();
     }

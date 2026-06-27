@@ -94,8 +94,9 @@ struct VarTraits<T, std::enable_if_t<std::is_arithmetic_v<T> && !std::is_same_v<
             // stays visibly non-finite rather than silently vanishing. (v != v
             // is the NaN test; matches Record's non-finite handling.)
             if (v != v || v > std::numeric_limits<T>::max() || v < std::numeric_limits<T>::lowest()) {
-                const char* s = (v != v) ? "NaN" : (v > 0 ? "Infinity" : "-Infinity");
-                e.inline_json = std::string("\"") + s + "\"";
+                // Route through the one sentinel authority (xi_record.hpp) so the
+                // vars wire and Record agree byte-for-byte on NaN/±Inf encoding.
+                e.inline_json = std::string("\"") + nonfinite_to_str((double)v) + "\"";
                 return;
             }
         }

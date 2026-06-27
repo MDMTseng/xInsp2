@@ -25,6 +25,8 @@
 #include <atomic>
 #include <cstdio>
 #include <mutex>
+
+#include "xi_json_escape.hpp"
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -154,24 +156,9 @@ public:
         return s;
     }
 
+    // Forwards to the one escape primitive (xi_json_escape.hpp).
     static void escape_json(std::string& out, const std::string& in) {
-        out.push_back('"');
-        for (char c : in) {
-            switch (c) {
-                case '"':  out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n";  break;
-                case '\r': out += "\\r";  break;
-                case '\t': out += "\\t";  break;
-                default:
-                    if ((unsigned char)c < 0x20) {
-                        char b[8];
-                        std::snprintf(b, sizeof(b), "\\u%04x", (unsigned)c);
-                        out += b;
-                    } else out.push_back(c);
-            }
-        }
-        out.push_back('"');
+        json_escape_into(out, in);
     }
 
     bool set_from_json(const std::string& v) override {

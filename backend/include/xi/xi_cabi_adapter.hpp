@@ -116,10 +116,9 @@ struct PluginInfo {
     std::string folder_path;   // absolute path to plugin folder
     std::string ui_path;       // absolute path to ui/ folder (if has_ui)
     HMODULE     handle = nullptr;
-    // Last-loaded DLL stamp (write-time ticks + size) — the change-gate for
-    // reload_changed: a rebuild only triggers a hot-swap when these move.
+    // On-disk write-time of the DLL we loaded — the change-gate for
+    // reload_changed: a rebuild only hot-swaps when a source is newer than this.
     uint64_t    loaded_dll_mtime = 0;
-    uint64_t    loaded_dll_size  = 0;
 
     // Optional. If `plugin.json` has a top-level `manifest` object, its
     // raw JSON text lands here. The backend doesn't validate or reshape

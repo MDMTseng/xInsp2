@@ -22,6 +22,8 @@
 #include <variant>
 #include <vector>
 
+#include "xi_json_escape.hpp"
+
 namespace xi::proto {
 
 // ---------- common enums ----------
@@ -113,33 +115,14 @@ inline PreviewHeader decode_preview_header(const uint8_t in[kPreviewHeaderSize])
 
 // ---------- JSON string escape / unescape ----------
 
+// The escape primitive moved to xi_json_escape.hpp (one copy for the whole
+// backend). These keep the xi::proto:: names the protocol writers use.
 inline void json_escape_into(std::string& out, std::string_view s) {
-    out.reserve(out.size() + s.size() + 2);
-    out.push_back('"');
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned)c);
-                    out += buf;
-                } else {
-                    out.push_back(c);
-                }
-        }
-    }
-    out.push_back('"');
+    ::xi::json_escape_into(out, s);
 }
 
 inline std::string json_escape(std::string_view s) {
-    std::string out;
-    json_escape_into(out, s);
-    return out;
+    return ::xi::json_escape(s);
 }
 
 // ---------- messages ----------
