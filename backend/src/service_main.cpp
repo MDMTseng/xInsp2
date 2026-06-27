@@ -43,6 +43,7 @@
 #include <xi/xi_project.hpp>
 #include <xi/xi_trigger_bus.hpp>
 #include <xi/xi_inflight_runs.hpp>   // xi::InflightRuns (detached-run lifetime owner)
+#include <xi/xi_emit_gate.hpp>       // xi::EmitGate / xi::EmitTurn (ordered-emit gate)
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_ws_server.hpp>
@@ -242,41 +243,13 @@ static std::thread              g_timer_thread;
 // fully parallel; only emission is serialized. In "completion" mode emit_seq is
 // -1 (emit immediately).
 //
-// An EmitGate is the cursor+lock+cv for one ordered stream — each dispatch lane
-// owns its own (so groups don't serialize against each other, only within a
-// group). Non-movable (holds a mutex/cv), so always referenced by pointer.
-struct EmitGate {
-    std::mutex              mu;
-    std::condition_variable cv;
-    int64_t                 next = 0;   // guarded by mu
-};
-
-// RAII emit-order gate. For emit_seq >= 0 (ordered mode) the ctor blocks until
-// it's this sequence's turn on `gate`; the dtor advances the cursor + wakes the
-// next worker — even on an exception or an error path, so a crashed inspect can't
-// stall the stream. emit_seq < 0 (completion mode / cmd:run) is a no-op.
-struct EmitTurn {
-    EmitGate* g_;
-    int64_t   seq_;
-    bool      on_;
-    EmitTurn(EmitGate* gate, int64_t seq) : g_(gate), seq_(seq), on_(gate && seq >= 0) {
-        if (!on_) return;
-        std::unique_lock<std::mutex> lk(g_->mu);
-        g_->cv.wait(lk, [this] {
-            return g_->next == seq_ || !g_continuous.load();
-        });
-    }
-    ~EmitTurn() {
-        if (!on_) return;
-        {
-            std::lock_guard<std::mutex> lk(g_->mu);
-            if (g_->next == seq_) ++g_->next;   // skip if we ran early on stop
-        }
-        g_->cv.notify_all();
-    }
-    EmitTurn(const EmitTurn&) = delete;
-    EmitTurn& operator=(const EmitTurn&) = delete;
-};
+// EmitGate (per-lane cursor) + EmitTurn (the ordered-emit RAII gate) live in
+// xi_emit_gate.hpp so the primitive is unit-testable. EmitTurn is claimed at the top
+// of run_one_inspection, wait_turn()'d before the emit, complete()'d after, and its
+// dtor backstops any early-return — see that header. We pass &g_continuous as the
+// "keep going" flag so a stop unblocks a waiter.
+using xi::EmitGate;
+using xi::EmitTurn;
 // Serialise cmd:run dispatch threads so history / vars arrive in run_id
 // order. Threads queue up here and the watchdog operates on whichever
 // one is currently inside run_one_inspection — only one at a time.
@@ -1152,6 +1125,12 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
                                int64_t emit_seq, EmitGate* gate) {
     if (run_id == 0) run_id = ++g_run_id;
 
+    // Claim the ordered-emit turn NOW (inert — wait_turn() happens at the emit so the
+    // compute stays parallel). Its destructor releases the turn on EVERY exit below,
+    // so an early-return (no script / inspect error / a future one) can't orphan the
+    // sequence and deadlock the lane. No-op for emit_seq < 0.
+    EmitTurn turn(gate, emit_seq, &g_continuous);
+
     xi::script::LoadedScript s;
     {
         std::lock_guard<std::mutex> lk(g_script_mu);
@@ -1274,10 +1253,11 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - t0).count();
     {
-        // Ordered mode: block until it's this frame's turn to emit. The dtor
-        // advances the cursor + wakes the next worker even if we throw here, so
-        // the stream can't deadlock. No-op for emit_seq < 0 (completion mode).
-        EmitTurn turn(gate, emit_seq);
+        // Ordered mode: block until it's this frame's turn to emit, then advance the
+        // cursor (turn.complete()) right after so the next worker can emit promptly.
+        // The turn was claimed at the top of this function; its dtor is the backstop
+        // if anything below throws. No-op for emit_seq < 0 (completion mode).
+        turn.wait_turn();
         if (inspect_ok) {
             emit_vars_and_previews(srv, s, run_id, dt_ms);
             // One Result per run: whatever the script set (default 0 = NA if it
@@ -1296,6 +1276,7 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
             emit_run_result(srv, 0, "inspect error", run_id, dt_ms, rr_source, rr_group);
             emit_run_event("run_error", run_error_what);
         }
+        turn.complete();   // advance the gate now (dtor would otherwise do it at fn exit)
     }
 }
 

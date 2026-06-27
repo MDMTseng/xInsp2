@@ -17,6 +17,7 @@
 #include <xi/xi.hpp>
 #include <xi/xi_inflight_runs.hpp>
 #include <xi/xi_working_copy.hpp>
+#include <xi/xi_emit_gate.hpp>
 
 // Minimal test harness — each TEST() runs once; failures print and set a flag.
 static int g_failures = 0;
@@ -330,9 +331,54 @@ static void test_wc_exclusion() {
     CHECK(!is_excluded(fs::path("inspect.cpp")));
 }
 
+// ---- EmitTurn: ordered emit + early-return backstop (the lane-deadlock guard) ----
+static void test_emit_gate() {
+    SECTION("EmitTurn orders emits + dtor backstops an early return");
+    using xi::EmitGate; using xi::EmitTurn;
+
+    // (1) Out-of-order completion is serialized to ARRIVAL order: seq 1 starts first
+    //     and blocks; seq 0 emits, then seq 1 unblocks and emits second.
+    EmitGate g;
+    std::atomic<int> tick{0};
+    int e0 = -1, e1 = -1;
+    std::thread th([&]() {
+        EmitTurn t1(&g, 1, nullptr);   // nullptr keep_going = never "stop"
+        t1.wait_turn();                // blocks until gate.next == 1
+        e1 = tick.fetch_add(1);
+        t1.complete();
+    });
+    // Let the seq-1 thread reach its wait before seq 0 runs.
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    {
+        EmitTurn t0(&g, 0, nullptr);
+        t0.wait_turn();                // gate.next == 0 → immediate
+        e0 = tick.fetch_add(1);
+        t0.complete();                 // advance → 1, wakes the seq-1 thread
+    }
+    th.join();
+    CHECK(e0 == 0);                     // seq 0 emitted first...
+    CHECK(e1 == 1);                     // ...seq 1 second, despite starting earlier
+    CHECK(g.next == 2);
+
+    // (2) Early-return backstop: a turn that NEVER wait_turn/complete's (an early
+    //     return before the emit) must still advance the cursor from its dtor, or the
+    //     next seq deadlocks. This is the bug the restructure fixes.
+    EmitGate g2;
+    { EmitTurn t0(&g2, 0, nullptr); /* simulate early return: do nothing */ }
+    CHECK(g2.next == 1);               // dtor took turn 0 + advanced
+    { EmitTurn t1(&g2, 1, nullptr); t1.wait_turn(); t1.complete(); }
+    CHECK(g2.next == 2);
+
+    // (3) Completion mode (seq < 0) is a total no-op.
+    EmitGate g3;
+    { EmitTurn tn(&g3, -1, nullptr); tn.wait_turn(); tn.complete(); }
+    CHECK(g3.next == 0);
+}
+
 int main() {
     test_inflight_runs();
     test_wc_exclusion();
+    test_emit_gate();
     test_async_basic();
     test_async_parallel();
     test_async_exception();
