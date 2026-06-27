@@ -265,16 +265,15 @@ private:
             const std::string& inst_name, int max_concurrency) {
         if (!pi.c_factory) return nullptr;
         xi_host_api& host = default_host_api();
-        ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
+        ImagePoolOwnerScope owner;   // sweeps the ctor's images unless adopted below
         void* raw = nullptr;
         try {
-            ImagePool::OwnerGuard og(pre_owner);
-            raw = pi.c_factory(&host, inst_name.c_str());
+            raw = owner.run_factory([&] { return pi.c_factory(&host, inst_name.c_str()); });
         } catch (...) { raw = nullptr; }
-        if (!raw) { ImagePool::instance().release_all_for(pre_owner); return nullptr; }
+        if (!raw) return nullptr;    // owner dtor sweeps
         auto inst = std::make_shared<CAbiInstanceAdapter>(
             inst_name, plugin_name, pi.handle, raw, pi.reentrant, max_concurrency);
-        inst->adopt_owner_id(pre_owner);
+        inst->adopt_owner_id(owner.release());
         return inst;
     }
 
@@ -1126,6 +1125,7 @@ public:
         // assignment.
         // FL r8 P1 reproducer: harness_open_close_cycle.py iter 0.
         project_.instances.clear();
+        inst_state_.clear();   // host-tracked lifecycle state dies with the instances
         // Now safe to drop the previous project's plugins — adapters are
         // gone, no live destroy_fn callers remain.
         for (auto& [pname, _] : project_plugin_origin_) {
@@ -1636,32 +1636,21 @@ public:
 
                     if (!created && pi.c_factory) {
                         xi_host_api& host = default_host_api();
-                        // Pre-allocate the owner id and install a guard
-                        // around the ctor itself so any host->image_create
-                        // calls inside xi_plugin_create are tagged. If
-                        // the ctor returns null OR throws, sweep — the
-                        // adapter never got built, so its destructor
-                        // can't sweep for us.
-                        ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
-                        void* raw = nullptr;
-                        try {
-                            ImagePool::OwnerGuard og(pre_owner);
-                            raw = pi.c_factory(&host, ii.name.c_str());
-                        } catch (...) {
-                            ImagePool::instance().release_all_for(pre_owner);
-                            throw;
-                        }
+                        // ImagePoolOwnerScope tags the ctor's images and sweeps them
+                        // automatically on a null return OR a throw (its dtor runs as
+                        // the exception unwinds to the per-instance handler below) —
+                        // the adapter never got built, so it can't sweep for us.
+                        ImagePoolOwnerScope owner;
+                        void* raw = owner.run_factory(
+                            [&] { return pi.c_factory(&host, ii.name.c_str()); });
                         if (raw) {
                             auto adapter = std::make_shared<CAbiInstanceAdapter>(
                                 ii.name, *plugin, pi.handle, raw, pi.reentrant, ii.max_concurrency);
-                            // Hand the pre-allocated owner id over to the
-                            // adapter so subsequent process / exchange
-                            // calls keep tagging into the same bucket.
-                            adapter->adopt_owner_id(pre_owner);
+                            // Hand the owner id to the adapter so subsequent process /
+                            // exchange calls keep tagging into the same bucket.
+                            adapter->adopt_owner_id(owner.release());
                             ii.instance = std::move(adapter);
                             created = true;
-                        } else {
-                            ImagePool::instance().release_all_for(pre_owner);
                         }
                     }
                     if (created && ii.instance) {
@@ -1793,38 +1782,33 @@ public:
 
         ImagePoolOwnerId created_owner = 0;   // for a later sweep if a save fails
         {
-            // C ABI — create via host API. Pre-allocate the owner
-            // id so any host->image_create called from inside the
-            // plugin's ctor is tagged. Sweep on null return / throw
-            // so a half-initialised plugin doesn't leak handles.
+            // C ABI — create via host API. ImagePoolOwnerScope tags every image the
+            // ctor allocates and AUTO-SWEEPS them on any early return below (throw /
+            // null) — the leak-on-failed-ctor footgun is now structural, not manual.
             xi_host_api& host = default_host_api();
-            ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
-            created_owner = pre_owner;
+            ImagePoolOwnerScope owner;
+            created_owner = owner.id();   // for the post-adopt save-failure sweep
             void* raw = nullptr;
             try {
-                ImagePool::OwnerGuard og(pre_owner);
-                raw = pi.c_factory(&host, instance_name.c_str());
+                raw = owner.run_factory([&] { return pi.c_factory(&host, instance_name.c_str()); });
             } catch (const std::exception& e) {
                 // A throwing ctor must not terminate the backend (the WS command
-                // loop has no outer catch). Sweep the half-init handles + folder
-                // registry and report it as a command error.
-                ImagePool::instance().release_all_for(pre_owner);
+                // loop has no outer catch). owner sweeps the half-init handles; we
+                // still clear the folder registry and report it as a command error.
                 InstanceFolderRegistry::instance().clear(instance_name);
                 return fail("plugin '" + plugin_name + "' factory threw: " + e.what());
             } catch (...) {
-                ImagePool::instance().release_all_for(pre_owner);
                 InstanceFolderRegistry::instance().clear(instance_name);
                 return fail("plugin '" + plugin_name + "' factory threw a non-standard exception");
             }
             if (!raw) {
-                ImagePool::instance().release_all_for(pre_owner);
                 InstanceFolderRegistry::instance().clear(instance_name);
                 return fail("plugin '" + plugin_name + "' factory returned null "
                             "(constructor failed/rejected the config)");
             }
             auto adapter = std::make_shared<CAbiInstanceAdapter>(
                 instance_name, plugin_name, pi.handle, raw, pi.reentrant, /*max_concurrency=*/0);
-            adapter->adopt_owner_id(pre_owner);
+            adapter->adopt_owner_id(owner.release());   // adapter owns the sweep now
             ii.instance = std::move(adapter);
         }
         InstanceRegistry::instance().add(ii.instance);
@@ -1843,6 +1827,7 @@ public:
         }
 
         project_.instances[instance_name] = std::move(ii);
+        set_state_locked_(instance_name, InstState::Created, "");   // born Created
         save_project_locked();
         return &project_.instances[instance_name];
     }
@@ -1864,6 +1849,7 @@ public:
         if (it == project_.instances.end()) return false;
         InstanceRegistry::instance().remove(instance_name);
         InstanceFolderRegistry::instance().clear(instance_name);
+        inst_state_.erase(instance_name);   // lifecycle state dies with the instance
         std::string folder = it->second.folder_path;
         project_.instances.erase(it);
         if (delete_folder && !folder.empty()) {
@@ -1942,26 +1928,22 @@ public:
         // Register the new folder BEFORE the factory so the ctor can read it.
         InstanceFolderRegistry::instance().set(new_name, new_folder.string());
         xi_host_api& host = default_host_api();
-        // Pre-allocate + OwnerGuard the new owner id so any host->image_create the
-        // ctor issues is tagged and swept on throw/null — without this the ctor's
-        // images get owner 0 (anonymous, never released), leaking on every rename.
-        // Mirrors create_instance / project-load.
-        ImagePoolOwnerId pre_owner = ImagePool::alloc_owner_id();
+        // ImagePoolOwnerScope tags + auto-sweeps the ctor's images so a rename can't
+        // orphan them at owner 0 (the leak this guards against). Mirrors
+        // create_instance / project-load via the one RAII primitive.
+        ImagePoolOwnerScope owner;
         void* raw = nullptr;
         try {
-            ImagePool::OwnerGuard og(pre_owner);
-            raw = pi.c_factory(&host, new_name.c_str());
+            raw = owner.run_factory([&] { return pi.c_factory(&host, new_name.c_str()); });
         } catch (...) {
             // A throwing ctor must not terminate the backend (no outer catch on
-            // the WS loop). Undo the new-name registration + folder move; the old
-            // instance is still intact.
-            ImagePool::instance().release_all_for(pre_owner);
+            // the WS loop). owner sweeps; undo the new-name registration + folder
+            // move so the old instance stays intact.
             InstanceFolderRegistry::instance().clear(new_name);
             rollback_folder();
             return RenameResult::Rejected;
         }
         if (!raw) {
-            ImagePool::instance().release_all_for(pre_owner);
             InstanceFolderRegistry::instance().clear(new_name);
             rollback_folder();
             return RenameResult::Rejected;
@@ -1982,18 +1964,26 @@ public:
         ii.group           = old_group;
         auto adapter = std::make_shared<CAbiInstanceAdapter>(
             new_name, plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency);
-        adapter->adopt_owner_id(pre_owner);   // ctor images now belong to the live adapter
+        adapter->adopt_owner_id(owner.release());   // ctor images now belong to the live adapter
         ii.instance = std::move(adapter);
         if (!saved_def.empty()) ii.instance->set_def(saved_def);
         InstanceRegistry::instance().add(ii.instance);
 
         project_.instances.erase(old_name);
         project_.instances[new_name] = std::move(ii);
+        // Carry the host-tracked lifecycle state across the rename in the SAME
+        // locked op as the registries (old_name != new_name is guaranteed above).
+        // This is why the WS handler no longer needs a separate rename_inst_state
+        // call — the state can't drift from the instance set anymore.
+        if (auto sit = inst_state_.find(old_name); sit != inst_state_.end()) {
+            inst_state_[new_name] = sit->second;
+            inst_state_.erase(sit);
+        }
         // Surface a write failure: the runtime + folder are already renamed, so if
         // project.json/instance.json don't persist the new name the next open is
         // inconsistent. Return NotPersisted (NOT Rejected) so the caller still
-        // migrates name-keyed side state to new_name and reports it as a save
-        // failure rather than a rename failure (the rename itself happened).
+        // reports it as a save failure rather than a rename failure (the rename
+        // itself happened).
         bool saved = save_instance_json(project_.instances[new_name]);
         saved = save_project_locked() && saved;
         return saved ? RenameResult::Ok : RenameResult::NotPersisted;
@@ -2014,6 +2004,47 @@ public:
                 return it->second.group;
         }
         return project_.default_group;
+    }
+
+    // ---- host-tracked instance lifecycle state -----------------------------
+    // The state map is OWNED here, under the same mu_ as the instance set, so
+    // create/remove/rename migrate it atomically (they hold mu_ and call
+    // set_state_locked_ / erase / re-key inline). That removes the whole class of
+    // "name-keyed side state drifted out of sync with the registries" bugs the
+    // earlier rounds kept hitting (rename desync, rename(x,x) self-delete,
+    // remove leaving a stale entry). Keyed by name to span backend + script-side
+    // instances alike. set_*/get_* below are the public (locking) entry points
+    // used by the WS handlers; CRUD methods use set_state_locked_ while holding mu_.
+    void set_instance_state(const std::string& name, InstState s,
+                            const std::string& err = std::string()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        set_state_locked_(name, s, err);
+    }
+    // Returns true if a state has been recorded for `name` (filling out_*); false
+    // if unknown (the caller may then fall back to "exists ⇒ Created").
+    bool get_instance_state(const std::string& name, InstState& out_state,
+                            std::string& out_err, long long* out_crash_count = nullptr) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = inst_state_.find(name);
+        if (it == inst_state_.end()) return false;
+        out_state = it->second.state;
+        out_err   = it->second.last_error;
+        if (out_crash_count) *out_crash_count = it->second.crash_count;
+        return true;
+    }
+    // Record a process() fault for `name` (called from a dispatch worker on an SEH/
+    // exception crash — exceptional, so taking mu_ here is fine). Bumps the count and
+    // notes the cause; the instance stays its current state (the config is fine, the
+    // run crashed) but the count makes a crash loop visible via get_state.
+    void note_instance_crash(const std::string& name, const std::string& why) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto& r = inst_state_[name];
+        ++r.crash_count;
+        r.last_error = why;
+    }
+    void clear_instance_states() {
+        std::lock_guard<std::mutex> lk(mu_);
+        inst_state_.clear();
     }
 
     std::string to_json() {
@@ -2076,9 +2107,21 @@ public:
     }
 
 private:
+    // mu_ MUST be held. Set/overwrite the lifecycle state for `name`; last_error
+    // is kept only for the Faulted state (cleared otherwise), matching the old
+    // free-function semantics in service_main.
+    void set_state_locked_(const std::string& name, InstState s, const std::string& err) {
+        auto& r = inst_state_[name];
+        r.state = s;
+        r.last_error = (s == InstState::Faulted) ? err : std::string();
+    }
+
     std::mutex mu_;
     std::unordered_map<std::string, PluginInfo> plugins_;
     ProjectInfo project_;
+    // Host-tracked instance lifecycle state (see the public set/get above). Guarded
+    // by mu_; migrated inline by create/remove/rename so it never drifts.
+    std::unordered_map<std::string, InstStateRec> inst_state_;
     std::vector<OpenWarning> last_open_warnings_;
     CompileEnv  compile_env_;
     // Names of plugins that came from <project>/plugins/ rather than the
@@ -2124,6 +2167,67 @@ private:
     // — so this is a stale-disk signal, not corruption — but callers on the
     // explicit-save path surface it so the user isn't told a save succeeded when
     // it didn't reach disk.
+    // Carry over any top-level project.json keys this writer doesn't manage
+    // (e.g. `params`, and fields another tool/the VS Code extension adds like
+    // `auto_respawn` / `watchdog_ms`). save_project_locked is a FULL rebuild, so
+    // without this it silently DROPS them on every instance CRUD — the same
+    // data-loss class as the F1 groups/runtime fix, but for fields a *different*
+    // writer owns. Merge-not-clobber: the freshly-built JSON wins for keys it
+    // emits; every other top-level key from the existing file survives verbatim.
+    static std::string merge_unknown_top_keys_(const std::string& fresh_json,
+                                               const std::filesystem::path& existing) {
+        std::error_code ec;
+        if (!std::filesystem::exists(existing, ec)) return fresh_json;
+        std::ifstream f(existing, std::ios::binary);
+        std::string old((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (old.empty()) return fresh_json;
+        yyjson_doc* od = yyjson_read(old.data(), old.size(), 0);
+        yyjson_doc* nd = yyjson_read(fresh_json.data(), fresh_json.size(), 0);
+        std::string result = fresh_json;
+        if (od && nd) {
+            yyjson_val* oroot = yyjson_doc_get_root(od);
+            yyjson_val* nroot = yyjson_doc_get_root(nd);
+            if (yyjson_is_obj(oroot) && yyjson_is_obj(nroot)) {
+                yyjson_mut_doc* md = yyjson_doc_mut_copy(nd, nullptr);
+                yyjson_mut_val* mroot = md ? yyjson_mut_doc_get_root(md) : nullptr;
+                if (mroot) {
+                    // The top-level keys THIS writer manages. Must be an EXPLICIT
+                    // allowlist, not "does the key appear in the fresh JSON": some
+                    // managed keys (runtime / plugin_dirs / plugins) are emitted
+                    // CONDITIONALLY (omitted when empty). Inferring ownership from
+                    // presence would treat an intentionally-emptied managed key as
+                    // "unknown" and RESURRECT its old on-disk value — clearing would
+                    // never persist. Anything NOT in this set is owned by another
+                    // writer (params / auto_respawn / watchdog_ms / future) → carry over.
+                    static const char* const kOwned[] = {
+                        "name", "script", "parallelism", "runtime",
+                        "instances", "plugin_dirs", "plugins",
+                    };
+                    size_t idx, mx; yyjson_val *k, *v;
+                    yyjson_obj_foreach(oroot, idx, mx, k, v) {
+                        const char* key = yyjson_get_str(k);
+                        if (!key) continue;
+                        bool owned = false;
+                        for (const char* o : kOwned) if (std::strcmp(key, o) == 0) { owned = true; break; }
+                        if (owned) continue;                      // managed (even when omitted) → don't resurrect
+                        if (yyjson_obj_get(nroot, key)) continue; // also present in fresh → new wins
+                        yyjson_mut_val* mk = yyjson_mut_strcpy(md, key);
+                        yyjson_mut_val* mv = yyjson_val_mut_copy(md, v);
+                        if (mk && mv) yyjson_mut_obj_add(mroot, mk, mv);
+                    }
+                    if (char* w = yyjson_mut_write(md, YYJSON_WRITE_PRETTY, nullptr)) {
+                        result.assign(w);
+                        free(w);
+                    }
+                }
+                if (md) yyjson_mut_doc_free(md);
+            }
+        }
+        if (od) yyjson_doc_free(od);
+        if (nd) yyjson_doc_free(nd);
+        return result;
+    }
+
     bool save_project_locked() {
         auto pj = std::filesystem::path(project_.folder_path) / "project.json";
         std::string out = "{\n";
@@ -2219,6 +2323,9 @@ private:
             out += "\n  }";
         }
         out += "\n}\n";
+        // Preserve top-level keys owned by another writer (params / auto_respawn /
+        // watchdog_ms / …) instead of clobbering them on every CRUD.
+        out = merge_unknown_top_keys_(out, pj);
         // D-P1-5: atomic_write may fail (disk full / read-only / etc.).
         // Bubble that up — silently losing project.json was the audit
         // finding. Caller can't really recover, but at least logs it.

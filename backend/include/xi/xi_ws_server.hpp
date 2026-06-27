@@ -331,6 +331,22 @@ public:
             if (s != INVALID_SOCK) {
                 if (client_ == INVALID_SOCK) {
                     if (do_handshake(s)) {
+                        // Bound the SEND direction too. send_frame does a blocking
+                        // ::send on the dispatch WORKER threads; a slow client (laggy
+                        // UI, MB-sized JPEG previews) filling the TCP send buffer would
+                        // otherwise block ::send forever under tx_mu_ and freeze EVERY
+                        // worker on that lock — a slow viewer stalling the whole
+                        // inspection line. With SO_SNDTIMEO a stuck send fails after a
+                        // bounded wait and send_frame drops the (now desynced) client.
+                        const int kSendTimeoutMs = 1500;
+#ifdef _WIN32
+                        DWORD sto = kSendTimeoutMs;
+                        ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&sto, sizeof(sto));
+#else
+                        struct timeval sto{}; sto.tv_sec = kSendTimeoutMs / 1000;
+                        sto.tv_usec = (kSendTimeoutMs % 1000) * 1000;
+                        ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &sto, sizeof(sto));
+#endif
                         client_ = s;
                         if (on_open) on_open();
                     } else {
@@ -718,14 +734,25 @@ private:
             for (int i = 0; i < 8; ++i) hdr[2 + i] = (uint8_t)((v >> ((7 - i) * 8)) & 0xFF);
             hlen = 10;
         }
+        // A failed/short ::send (incl. an SO_SNDTIMEO timeout from a slow client)
+        // means the WS stream is now desynced — half a frame went out. Don't keep
+        // trying (that freezes this worker, and every other worker on tx_mu_, on a
+        // dead/slow client): shutdown the socket so the poll thread's recv returns
+        // and close_client() runs, and fast-fail. Subsequent send_frame calls hit
+        // ::send on the shut-down socket and error out immediately (no block). The
+        // poll thread owns the actual close (avoids an fd-reuse race with recv).
+        auto drop = [&]() -> bool {
+            if (client_ != INVALID_SOCK) ::shutdown(client_, 2 /* SD_BOTH / SHUT_RDWR */);
+            return false;
+        };
         int s1 = ::send(client_, reinterpret_cast<const char*>(hdr), (int)hlen, 0);
-        if (s1 != (int)hlen) return false;
+        if (s1 != (int)hlen) return drop();
         if (n == 0) return true;
         size_t sent = 0;
         while (sent < n) {
             int chunk = (int)std::min<size_t>(n - sent, 1 << 20);
             int s2 = ::send(client_, reinterpret_cast<const char*>(data + sent), chunk, 0);
-            if (s2 <= 0) return false;
+            if (s2 <= 0) return drop();
             sent += (size_t)s2;
         }
         return true;

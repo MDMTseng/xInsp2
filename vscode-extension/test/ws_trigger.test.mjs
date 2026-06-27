@@ -30,6 +30,10 @@ class Client {
         return new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('timeout')), ms); this.waiters.push({ resolve: v => { clearTimeout(t); res(v); } }); });
     }
     async nextNonLog(ms = 90000) { for (;;) { const m = await this.next(ms); if (m.type !== 'log' && m.type !== 'event') return m; } }
+    // A command's reply is always type:'rsp'. Skip anything else (notably a 'vars'
+    // frame still in flight from continuous dispatch) so reading a response can't
+    // accidentally grab a buffered vars message — a pre-existing harness race.
+    async nextRsp(ms = 90000) { for (;;) { const m = await this.next(ms); if (m.type === 'rsp') return m; } }
     drainText() { const all = [...this.queue]; this.queue = []; return all; }
     close() { try { this.ws.close(); } catch {} }
 }
@@ -53,12 +57,12 @@ test('compile + start continuous triggers multiple inspections', async () => {
 
         // Compile first
         c.send({ type: 'cmd', id: 1, name: 'compile_and_load', args: { path: scriptPath } });
-        const cr = await c.nextNonLog();
+        const cr = await c.nextRsp();
         assert.equal(cr.ok, true, 'compile ok');
 
         // Start continuous at 10fps
         c.send({ type: 'cmd', id: 2, name: 'start', args: { fps: 10 } });
-        const rsp = await c.nextNonLog();
+        const rsp = await c.nextRsp();
         assert.equal(rsp.ok, true);
 
         // Wait for runs
@@ -70,7 +74,7 @@ test('compile + start continuous triggers multiple inspections', async () => {
 
         // Stop
         c.send({ type: 'cmd', id: 3, name: 'stop' });
-        const stopRsp = await c.nextNonLog();
+        const stopRsp = await c.nextRsp();
         assert.equal(stopRsp.ok, true);
 
         await sleep(500);

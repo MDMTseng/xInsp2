@@ -103,10 +103,15 @@ public:
         // Call
         xi_record_out out;
         xi_record_out_init(&out);
-        process_fn_(instance_, &in_rec, &out);
+        int prc = process_fn_(instance_, &in_rec, &out);
 
-        // Release input handles
+        // Release input handles (regardless of outcome)
         for (auto h : in_handles) ImagePool::instance().release(h);
+
+        // A negative return means the plugin's process() failed/faulted; `out` is
+        // then not a trustworthy result (possibly a partial/torn out_doc). Don't
+        // adopt/parse it — that would be a use-after-fault or a silent false-pass.
+        if (prc < 0) { xi_record_out_free(&out); return {}; }
 
         // Unmarshal: γ doc-pointer output when the plugin returned one (we sent
         // a borrowed doc, so it answered with one), else yyjson JSON bytes. The

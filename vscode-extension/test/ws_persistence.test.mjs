@@ -103,6 +103,42 @@ test('project.json groups/default_group/runtime + instance group survive a save'
     });
 });
 
+test('save_project_locked preserves top-level keys owned by another writer', async () => {
+    // Regression: save_project_locked is a full rebuild; before the merge-not-
+    // clobber fix, any instance CRUD silently dropped keys it doesn't manage
+    // (params, and extension-written fields like auto_respawn / watchdog_ms).
+    const proj = mkdtempSync(join(tmpdir(), 'xi_merge_'));
+    writeFileSync(join(proj, 'inspect.cpp'),
+        '#include <xi/xi.hpp>\nXI_SCRIPT_EXPORT void xi_inspect_entry(int){}\n');
+    writeFileSync(join(proj, 'project.json'), JSON.stringify({
+        name: 'merge_demo',
+        script: 'inspect.cpp',
+        auto_respawn: false,                 // owned by the VS Code extension
+        watchdog_ms: 12345,                  // owned by the VS Code extension
+        params: { sigma: 7.5, mode: 'fast' },// owned by the legacy snapshot writer
+    }, null, 2));
+
+    await withBackend(async (c) => {
+        await c.next(); // hello
+        c.send({ type: 'cmd', id: 1, name: 'open_project', args: { folder: proj } });
+        assert.equal((await c.nextRsp()).ok, true, 'open ok');
+
+        // Any instance CRUD triggers save_project_locked (full rebuild).
+        c.send({ type: 'cmd', id: 2, name: 'create_instance', args: { name: 'cam0', plugin: 'mock_camera' } });
+        assert.equal((await c.nextRsp()).ok, true, 'create ok');
+        await sleep(300);
+
+        const pj = JSON.parse(readFileSync(join(proj, 'project.json'), 'utf8'));
+        // Unknown keys survived the rebuild.
+        assert.equal(pj.auto_respawn, false, 'auto_respawn preserved');
+        assert.equal(pj.watchdog_ms, 12345, 'watchdog_ms preserved');
+        assert.deepEqual(pj.params, { sigma: 7.5, mode: 'fast' }, 'params preserved');
+        // And the managed write still happened (the instance is in the model).
+        c.send({ type: 'cmd', id: 3, name: 'get_project' });
+        assert.ok(JSON.stringify(await c.nextRsp()).includes('cam0'), 'instance created');
+    });
+});
+
 test('remove_instance (keep folder) persists — instance does not resurrect on reopen', async () => {
     const proj = mkdtempSync(join(tmpdir(), 'xi_rmkeep_'));
     writeFileSync(join(proj, 'inspect.cpp'),
@@ -135,6 +171,53 @@ test('remove_instance (keep folder) persists — instance does not resurrect on 
         c.send({ type: 'cmd', id: 5, name: 'get_project' });
         const pj = await c.nextRsp();
         assert.ok(!JSON.stringify(pj).includes('cam9'), 'removed instance did not resurrect on reopen');
+    });
+});
+
+test('instance lifecycle state migrates on rename and survives a no-op rename', async () => {
+    // Regression for the single-authority instance-state refactor: get_state must
+    // follow a rename (was a desync), and a rename(x,x) must NOT delete the state
+    // (was a self-delete via rename_inst_state(from==to)).
+    const proj = mkdtempSync(join(tmpdir(), 'xi_state_'));
+    writeFileSync(join(proj, 'inspect.cpp'),
+        '#include <xi/xi.hpp>\nXI_SCRIPT_EXPORT void xi_inspect_entry(int){}\n');
+    writeFileSync(join(proj, 'project.json'),
+        JSON.stringify({ name: 'st', script: 'inspect.cpp' }));
+
+    await withBackend(async (c) => {
+        await c.next(); // hello
+        c.send({ type: 'cmd', id: 1, name: 'open_project', args: { folder: proj } });
+        assert.equal((await c.nextRsp()).ok, true, 'open ok');
+
+        c.send({ type: 'cmd', id: 2, name: 'create_instance', args: { name: 'cam0', plugin: 'mock_camera' } });
+        assert.equal((await c.nextRsp()).ok, true, 'create ok');
+
+        const getState = async (id, nm) => {
+            c.send({ type: 'cmd', id, name: 'get_state', args: { name: nm } });
+            return c.nextRsp();
+        };
+
+        // Created right after create (state recorded atomically by create_instance).
+        let r = await getState(3, 'cam0');
+        assert.equal(r.ok, true, 'get_state cam0 known');
+        assert.match(JSON.stringify(r.data), /"state":"created"/, 'cam0 is created');
+        assert.match(JSON.stringify(r.data), /"crash_count":0/, 'crash_count present, starts at 0');
+
+        // No-op rename must NOT wipe the state entry.
+        c.send({ type: 'cmd', id: 4, name: 'rename_instance', args: { name: 'cam0', new_name: 'cam0' } });
+        assert.equal((await c.nextRsp()).ok, true, 'no-op rename ok');
+        r = await getState(5, 'cam0');
+        assert.equal(r.ok, true, 'cam0 state survived no-op rename');
+        assert.match(JSON.stringify(r.data), /"state":"created"/);
+
+        // Real rename: state follows to the new name, old name is gone.
+        c.send({ type: 'cmd', id: 6, name: 'rename_instance', args: { name: 'cam0', new_name: 'cam9' } });
+        assert.equal((await c.nextRsp()).ok, true, 'real rename ok');
+        r = await getState(7, 'cam9');
+        assert.equal(r.ok, true, 'state migrated to cam9');
+        assert.match(JSON.stringify(r.data), /"state":"created"/);
+        r = await getState(8, 'cam0');
+        assert.equal(r.ok, false, 'old name no longer has state');
     });
 });
 

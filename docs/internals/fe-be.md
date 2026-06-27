@@ -55,6 +55,30 @@ WS port, `service_main` synthesizes the same wire commands a client would send.
 The WS port stays open so a UI can attach later; reply frames are no-ops while no
 client is connected.
 
+## Liveness detection (three layers)
+
+A backend can fail without crashing — it can hang. The FE catches that with three
+independent budgets, each watching a different boundary:
+
+- **Boot hang** (`--boot-timeout-ms`, default 60 s): the BE bound its port but never
+  reached `autostart: ready`. Respawn.
+- **Serving-loop wedge** (`--heartbeat-stale-ms`, default 15 s): the BE writes a
+  monotonic heartbeat from its serving loop; if it stalls while the port still
+  accepts TCP, a synchronous WS handler has wedged `srv.poll()`. Respawn.
+- **Dispatch-worker wedge** (`--watchdog-ms`, default 60 s): the serving-loop
+  heartbeat keeps advancing even when a dispatch **worker** is deadlocked inside a
+  plugin's `process()` — so on an unattended line the inspection could silently
+  stop while the FE shows healthy. The FE arms the BE's per-inspect watchdog
+  (`--watchdog=N`, off in the bare BE), which times each inspect on the worker
+  itself (continuous workers + `cmd:run`); on overrun it cooperatively cancels then
+  exits the process, and the FE respawns. Generous by default so a legitimately
+  long frame isn't killed; `--watchdog-ms=0` disables it (e.g. a dev stepping a
+  long inspect). The arming is the *supervised-deployment* fail-safe — the bare BE
+  default stays off.
+
+All three end in the same place: respawn, rate-limited by the consecutive-failure
+cap, which latches `"down"` when exhausted.
+
 ## Crash history + UI modes
 
 - **FE owns the crash-history timeline** (respawn events, reasons, forensics over

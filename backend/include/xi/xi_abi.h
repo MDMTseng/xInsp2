@@ -123,6 +123,11 @@ extern "C" {
 /* ------------------------------------------------------------------ */
 #define XI_ABI_VERSION 7
 
+/* Expected sizeof(xi_host_api) for the layout guard below (see the ABI LAYOUT
+ * GUARD note after the struct). Bump together with XI_ABI_VERSION on any layout
+ * change. 64-bit host (all function pointers). */
+#define XI_ABI_EXPECTED_SIZE 192  /* 64-bit: 24 function pointers * 8 bytes */
+
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
 /* ------------------------------------------------------------------ */
@@ -317,6 +322,27 @@ typedef struct xi_host_api {
                         const struct xi_record* rec,
                         int64_t ts);
 } xi_host_api;
+
+/* ABI LAYOUT GUARD (host build only). The version gate elsewhere is an int compare
+ * (plugin's requested version <= host's) — it does NOT verify struct layout. So a
+ * well-meaning edit that changes xi_host_api WITHOUT bumping XI_ABI_VERSION (e.g.
+ * deleting the always-null shm_* fields, which shifts every later function pointer)
+ * would still pass the gate for an un-recompiled plugin and hand it a mis-offset
+ * table -> silent call-through-wrong-pointer. This static_assert ties the layout to
+ * the version: if you change the struct you MUST bump XI_ABI_VERSION above and update
+ * the expected size here, which is the conscious "I changed the ABI" step. Fires only
+ * in the C++ host build (where xi_abi.h is edited + the host rebuilt); a C plugin TU
+ * just skips it. To refresh after an intentional change, read the size the compiler
+ * reports when this fails. */
+#if defined(__cplusplus)
+#include <cstddef>
+static_assert(sizeof(xi_host_api) == XI_ABI_EXPECTED_SIZE,
+              "xi_host_api layout changed: bump XI_ABI_VERSION and update "
+              "XI_ABI_EXPECTED_SIZE (see the ABI LAYOUT GUARD note).");
+static_assert(offsetof(xi_host_api, emit_record) == XI_ABI_EXPECTED_SIZE - sizeof(void*),
+              "emit_record is no longer the last field — a field was added/removed "
+              "without updating the ABI guard; bump XI_ABI_VERSION.");
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Record — the universal data container crossing the boundary        */

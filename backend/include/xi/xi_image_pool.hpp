@@ -474,4 +474,45 @@ private:
     }
 };
 
+// RAII owner-tagging scope for instance construction. Encapsulates the
+// alloc → guard-the-factory → adopt-on-success → sweep-on-failure protocol that
+// EVERY instance-creation site (create_instance, rename, project-load, the reload
+// paths) has to get exactly right — forgetting the adopt orphans the ctor's images
+// at owner 0 (never reclaimed → leak), forgetting the sweep leaks on a failed
+// ctor. Making it a single RAII type makes both impossible to forget: the images
+// the factory allocates are tagged, and unless release() hands the id to the
+// adapter, the destructor sweeps them.
+//
+// COLD PATH ONLY — used at instance create/rename/reload, never per frame. The
+// hot process() path uses the adapter's already-set owner_id_ and is untouched,
+// so this adds zero per-frame cost (one atomic fetch_add + a thread_local swap at
+// construction, a bool branch at destruction).
+class ImagePoolOwnerScope {
+public:
+    ImagePoolOwnerScope() : id_(ImagePool::alloc_owner_id()) {}
+    ~ImagePoolOwnerScope() { if (!released_) ImagePool::instance().release_all_for(id_); }
+    ImagePoolOwnerScope(const ImagePoolOwnerScope&) = delete;
+    ImagePoolOwnerScope& operator=(const ImagePoolOwnerScope&) = delete;
+
+    ImagePoolOwnerId id() const { return id_; }
+
+    // Run the plugin factory (or anything that may allocate pool images) with
+    // current_owner == id_, so its images are tagged to this scope. The guard is
+    // scoped to just this call. Returns whatever fn returns.
+    template <class Fn>
+    auto run_factory(Fn&& fn) -> decltype(fn()) {
+        ImagePool::OwnerGuard g(id_);
+        return std::forward<Fn>(fn)();
+    }
+
+    // Hand the owner id off to its new long-lived owner (e.g. the adapter via
+    // adopt_owner_id). After this the scope will NOT sweep — the adapter's dtor
+    // owns the cleanup. Call ONLY once construction has fully succeeded.
+    ImagePoolOwnerId release() { released_ = true; return id_; }
+
+private:
+    ImagePoolOwnerId id_;
+    bool             released_ = false;
+};
+
 } // namespace xi

@@ -15,6 +15,9 @@
 #include <vector>
 
 #include <xi/xi.hpp>
+#include <xi/xi_inflight_runs.hpp>
+#include <xi/xi_working_copy.hpp>
+#include <xi/xi_emit_gate.hpp>
 
 // Minimal test harness — each TEST() runs once; failures print and set a flag.
 static int g_failures = 0;
@@ -273,7 +276,109 @@ static void test_instance_basic() {
 
 // ---------- main ----------
 
+// ---- InflightRuns: the detached-run lifetime owner (shutdown-window UAF class) ----
+static void test_inflight_runs() {
+    SECTION("InflightRuns launch / drain / shutdown-bail");
+    xi::InflightRuns rt;
+
+    // A launched run holds the in-flight count until it returns; drain() waits it
+    // out. This is what teardown relies on so srv outlives every detached run.
+    std::atomic<bool> release{false};
+    std::atomic<int>  ran{0};
+    bool ok = rt.launch([&]{
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ran.fetch_add(1);
+    });
+    CHECK(ok);
+    // Busy-wait until the thread is actually in flight (count observed == 1).
+    for (int i = 0; rt.inflight() == 0 && i < 1000; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(rt.inflight() == 1);
+    release.store(true);
+    CHECK(rt.drain(5000));            // drains to zero within the cap
+    CHECK(rt.inflight() == 0);
+    CHECK(ran.load() == 1);
+
+    // After begin_shutdown(), launch() must BAIL (run nothing, return false) so a
+    // late source emit can't start a run against an about-to-die srv.
+    rt.begin_shutdown();
+    CHECK(rt.shutting_down());
+    std::atomic<int> ran2{0};
+    bool ok2 = rt.launch([&]{ ran2.fetch_add(1); });
+    CHECK(!ok2);                      // refused
+    CHECK(rt.inflight() == 0);        // no count leaked by the bail
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK(ran2.load() == 0);          // fn never ran
+    CHECK(rt.drain(100));             // drain is trivially satisfied
+}
+
+// ---- working-copy exclusion: precise, not "any component named X" ----
+static void test_wc_exclusion() {
+    SECTION("xi::wc::is_excluded is root-anchored / plugins-scoped");
+    using xi::wc::is_excluded;
+    namespace fs = std::filesystem;
+    // Root-anchored infra: excluded.
+    CHECK(is_excluded(fs::path(".xinsp_work") / "project.json"));
+    CHECK(is_excluded(fs::path(".git") / "config"));
+    CHECK(is_excluded(fs::path(".xinsp_commit_pending")));
+    // Plugin CMake build output: excluded (only under plugins/).
+    CHECK(is_excluded(fs::path("plugins") / "det" / "build" / "det.dll"));
+    // USER data that merely shares a name must be PRESERVED (the silent-loss bug):
+    CHECK(!is_excluded(fs::path("instances") / "cam0" / "build" / "asset.bin"));
+    CHECK(!is_excluded(fs::path("build") / "out"));              // a root build/ that isn't a plugin's
+    CHECK(!is_excluded(fs::path("assets") / ".git"));            // coincidental nested name
+    CHECK(!is_excluded(fs::path("plugins") / "det" / "src" / "plugin.cpp"));
+    CHECK(!is_excluded(fs::path("inspect.cpp")));
+}
+
+// ---- EmitTurn: ordered emit + early-return backstop (the lane-deadlock guard) ----
+static void test_emit_gate() {
+    SECTION("EmitTurn orders emits + dtor backstops an early return");
+    using xi::EmitGate; using xi::EmitTurn;
+
+    // (1) Out-of-order completion is serialized to ARRIVAL order: seq 1 starts first
+    //     and blocks; seq 0 emits, then seq 1 unblocks and emits second.
+    EmitGate g;
+    std::atomic<int> tick{0};
+    int e0 = -1, e1 = -1;
+    std::thread th([&]() {
+        EmitTurn t1(&g, 1, nullptr);   // nullptr keep_going = never "stop"
+        t1.wait_turn();                // blocks until gate.next == 1
+        e1 = tick.fetch_add(1);
+        t1.complete();
+    });
+    // Let the seq-1 thread reach its wait before seq 0 runs.
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    {
+        EmitTurn t0(&g, 0, nullptr);
+        t0.wait_turn();                // gate.next == 0 → immediate
+        e0 = tick.fetch_add(1);
+        t0.complete();                 // advance → 1, wakes the seq-1 thread
+    }
+    th.join();
+    CHECK(e0 == 0);                     // seq 0 emitted first...
+    CHECK(e1 == 1);                     // ...seq 1 second, despite starting earlier
+    CHECK(g.next == 2);
+
+    // (2) Early-return backstop: a turn that NEVER wait_turn/complete's (an early
+    //     return before the emit) must still advance the cursor from its dtor, or the
+    //     next seq deadlocks. This is the bug the restructure fixes.
+    EmitGate g2;
+    { EmitTurn t0(&g2, 0, nullptr); /* simulate early return: do nothing */ }
+    CHECK(g2.next == 1);               // dtor took turn 0 + advanced
+    { EmitTurn t1(&g2, 1, nullptr); t1.wait_turn(); t1.complete(); }
+    CHECK(g2.next == 2);
+
+    // (3) Completion mode (seq < 0) is a total no-op.
+    EmitGate g3;
+    { EmitTurn tn(&g3, -1, nullptr); tn.wait_turn(); tn.complete(); }
+    CHECK(g3.next == 0);
+}
+
 int main() {
+    test_inflight_runs();
+    test_wc_exclusion();
+    test_emit_gate();
     test_async_basic();
     test_async_parallel();
     test_async_exception();

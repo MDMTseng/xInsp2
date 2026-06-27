@@ -254,6 +254,45 @@ static void test_large_image() {
     pool.release(h);
 }
 
+// ---------- Test: ImagePoolOwnerScope (RAII owner tagging) ----------
+
+static void test_owner_scope() {
+    SECTION("ImagePoolOwnerScope sweeps on drop, transfers on release");
+    auto& pool = xi::ImagePool::instance();
+
+    // (1) Images allocated inside run_factory are tagged to the scope's owner;
+    //     if the scope is NOT released, its destructor sweeps them (no leak) —
+    //     this is the failed-ctor path that used to leak when a site forgot the
+    //     manual release_all_for.
+    xi::ImagePoolOwnerId leaked_owner = 0;
+    {
+        xi::ImagePoolOwnerScope owner;
+        leaked_owner = owner.id();
+        owner.run_factory([&]() -> void* {
+            pool.create(8, 8, 1);
+            pool.create(8, 8, 1);
+            return nullptr;   // simulate a failed/null ctor
+        });
+        CHECK(pool.stats(owner.id()).handle_count == 2);   // tagged + live in scope
+    }   // not released -> dtor sweeps
+    CHECK(pool.stats(leaked_owner).handle_count == 0);     // swept: no leak
+
+    // (2) After release(), the scope must NOT sweep — ownership moved on (to the
+    //     adapter in production); the images survive.
+    xi::ImagePoolOwnerId kept_owner = 0;
+    {
+        xi::ImagePoolOwnerScope owner;
+        kept_owner = owner.id();
+        owner.run_factory([&]() -> void* { pool.create(8, 8, 1); return (void*)1; });
+        CHECK(pool.stats(owner.id()).handle_count == 1);
+        CHECK(owner.release() == kept_owner);
+    }   // released -> dtor does NOT sweep
+    CHECK(pool.stats(kept_owner).handle_count == 1);       // survived the scope
+
+    pool.release_all_for(kept_owner);                      // cleanup (as the adapter dtor would)
+    CHECK(pool.stats(kept_owner).handle_count == 0);
+}
+
 // ---------- main ----------
 
 int main() {
@@ -267,6 +306,7 @@ int main() {
     test_round_trip();
     test_shard_distribution();
     test_large_image();
+    test_owner_scope();
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");

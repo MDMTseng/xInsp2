@@ -19,6 +19,7 @@
 #include "xi_clock.hpp"
 #include "xi_image_pool.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -126,6 +127,19 @@ public:
         if (ts_us == 0) ts_us = now_us();
         xi_trigger_id id = xi_trigger_id_is_null(id_in) ? make_trigger_id() : id_in;
 
+        // Liveness stamp (monotonic — NTP/DST safe): a source emitting is alive,
+        // even if there's no sink. Lets dispatch_stats expose "ms since the last
+        // frame" globally + per source, so a monitor/FE can detect a CAMERA THAT
+        // STALLED — which otherwise stops the line with zero signal (the timer's
+        // evict_stale was a no-op and nothing tracked last-emit). Stamped on every
+        // emit, before the sink check.
+        {
+            int64_t mono = steady_now_us();
+            last_emit_mono_us_.store(mono, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lk(mu_);
+            source_last_emit_mono_us_[source] = mono;
+        }
+
         TriggerEvent ev;
         ev.id            = id;
         ev.timestamp_us  = ts_us;
@@ -164,8 +178,27 @@ public:
     // dispatch timer's periodic call needs no change.
     void evict_stale() {}
 
+    // Microseconds since ANY source last emitted (monotonic). -1 if nothing has
+    // emitted yet. The "is the line getting frames at all" signal.
+    int64_t last_emit_age_us() const {
+        int64_t last = last_emit_mono_us_.load(std::memory_order_relaxed);
+        return last == 0 ? -1 : (steady_now_us() - last);
+    }
+    // Per-source age snapshot { source -> µs since its last emit }. Lets a monitor
+    // spot which of N cameras stalled.
+    std::vector<std::pair<std::string, int64_t>> source_emit_ages_us() {
+        std::vector<std::pair<std::string, int64_t>> out;
+        int64_t now = steady_now_us();
+        std::lock_guard<std::mutex> lk(mu_);
+        out.reserve(source_last_emit_mono_us_.size());
+        for (auto& [s, t] : source_last_emit_mono_us_) out.emplace_back(s, now - t);
+        return out;
+    }
+
 private:
     std::mutex mu_;
+    std::atomic<int64_t> last_emit_mono_us_{0};
+    std::unordered_map<std::string, int64_t> source_last_emit_mono_us_;  // guarded by mu_
     Sink       sink_;
 };
 
