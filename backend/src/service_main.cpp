@@ -1401,13 +1401,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
             emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", aid, -1, ds, dg);
         return false;
     }
-    if (ov == "block") {
-        lane->cv.wait(lk, [&] { return (int)lane->q.size() < depth || !g_continuous.load(); });
-        if (!g_continuous.load()) { release_trigger_event_(ev); return false; }
-        ev.arrival_id = ++g_run_id;   // claimed at commit (after the block wait)
-        lane->q.push_back(std::move(ev)); lane->cv.notify_one(); return true;
-    }
-    auto& front = lane->q.front();   // drop_oldest
+    auto& front = lane->q.front();   // drop_oldest (the default + fallback)
     int64_t dropped_aid = front.arrival_id;   // the dropped (oldest) frame's slot
     std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
     release_trigger_event_(front);
@@ -1482,13 +1476,10 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                             if (lane->ordered) eseq = lane->seq_next.fetch_add(1);
                         }
                     }
-                    // notify_ALL, not _one: workers AND overflow:block producers wait on
-                    // the same cv. A notify_one after a pop could be eaten by an idle
-                    // sibling worker (which re-checks, sees the queue empty, re-waits)
-                    // while the blocked producer that needs the freed slot is never woken
-                    // — a permanent producer deadlock (a stalled source/timer) with
-                    // overflow:"block" + dispatch_threads>=2. Cheap vs an inspect.
-                    lane->cv.notify_all();
+                    // Only lane WORKERS wait on this cv now (the overflow:block
+                    // producer-park was removed), so notify_one is correct + cheaper:
+                    // one freed slot wakes one worker.
+                    lane->cv.notify_one();
                     if (!have) continue;
                     // Rate limit: CAS-claim a dispatch slot ≥ min_interval after the
                     // lane's previous one, then sleep to it. Surplus events meanwhile
@@ -1562,9 +1553,9 @@ static void stop_group_pool_() {
 // Stop the pool + timer. Safe to call if nothing was spawned.
 static void stop_dispatch_pool_() {
     g_continuous = false;
-    // Wake the lane workers + any producer (incl. the timer) parked in a lane's
-    // overflow:block BEFORE joining the timer, or the join deadlocks. Also wake
-    // anyone parked in a per-lane EmitTurn (ordered mode).
+    // Wake the lane workers (so they observe g_continuous=false and exit) BEFORE
+    // joining, or the join deadlocks. Also wake anyone parked in a per-lane EmitTurn
+    // (ordered mode).
     {
         std::vector<std::shared_ptr<GroupLane>> lanes;
         { std::lock_guard<std::mutex> lk(g_lanes_mu); lanes = g_lanes; }

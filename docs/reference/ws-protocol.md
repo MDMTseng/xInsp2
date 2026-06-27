@@ -388,7 +388,7 @@ health since the most recent `cmd:start`:
 | `queue_depth_now` | current queue size at snapshot time |
 | `queue_depth_cap` | configured `project.parallelism.queue_depth` |
 | `queue_depth_high_watermark` | peak queue depth observed since last `cmd:start` |
-| `overflow` | configured policy: `drop_oldest` / `drop_newest` / `block` |
+| `overflow` | configured policy: `drop_oldest` (default) / `drop_newest` |
 | `dispatch_threads` | configured `project.parallelism.dispatch_threads` |
 | `dropped_oldest` | events dropped under `drop_oldest` since last `cmd:start` |
 | `dropped_newest` | events dropped under `drop_newest` since last `cmd:start` |

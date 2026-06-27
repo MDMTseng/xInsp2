@@ -1382,7 +1382,10 @@ public:
                 if (yyjson_val* k = yyjson_obj_get(par, "overflow");
                     k && yyjson_is_str(k) && yyjson_get_str(k)) {
                     std::string s = yyjson_get_str(k);
-                    if (s == "drop_oldest" || s == "drop_newest" || s == "block") {
+                    // "block" was removed (back-pressuring the source could deadlock a
+                    // producer and isn't a sane factory behaviour — the line wants the
+                    // freshest frame, i.e. drop_oldest).
+                    if (s == "drop_oldest" || s == "drop_newest") {
                         project_.overflow = s;
                     } else {
                         std::fprintf(stderr,
@@ -1429,7 +1432,7 @@ public:
                             grp.queue_depth = std::min(10000, std::max(1, (int)yyjson_get_num(k)));
                         if (yyjson_val* k = yyjson_obj_get(g, "overflow"); k && yyjson_is_str(k) && yyjson_get_str(k)) {
                             grp.overflow = yyjson_get_str(k);
-                            if (grp.overflow != "drop_oldest" && grp.overflow != "drop_newest" && grp.overflow != "block") {
+                            if (grp.overflow != "drop_oldest" && grp.overflow != "drop_newest") {
                                 warn(grp.name, "unknown overflow '" + grp.overflow + "' — using drop_oldest");
                                 grp.overflow = "drop_oldest";
                             }
