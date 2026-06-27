@@ -96,6 +96,10 @@ using xi::seh_exception;
 // singleton). OFF by default → the hot path below pays only a relaxed atomic
 // load. The ws handlers (graph_capture / graph_snapshot) drive it.
 
+// Defined after g_plugin_mgr (declared further down); records a per-instance
+// process() crash so a crash loop is visible via get_state.
+static void note_instance_crash_(const char* name, const char* why);
+
 static int use_process_cb(const char* name,
                           const void* input_doc,
                           const uint8_t* input_data, int32_t input_len,
@@ -147,9 +151,12 @@ static int use_process_cb(const char* name,
         } catch (const seh_exception& e) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') crashed: 0x%08X (%s)\n",
                          name, e.code, e.what());
+            char why[96]; std::snprintf(why, sizeof(why), "process() crashed: 0x%08X", e.code);
+            note_instance_crash_(name, why);   // visible via get_state (crash-loop alerting)
             return -2;
         } catch (...) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') threw exception\n", name);
+            note_instance_crash_(name, "process() threw an exception");
             return -2;
         }
     }
@@ -928,6 +935,11 @@ static void set_project_dll_search_(const std::string& folder) {
 
 // Plugin manager (global)
 static xi::PluginManager g_plugin_mgr;
+
+// (forward-declared above use_process_cb) record a per-instance process() crash.
+static void note_instance_crash_(const char* name, const char* why) {
+    if (name) g_plugin_mgr.note_instance_crash(name, why ? why : "process() crashed");
+}
 
 static std::atomic<bool> g_should_exit{false};
 
@@ -2852,8 +2864,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // "created". args: { "name": "cam0" } → data: { state, last_error }.
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        InstState st; std::string err;
-        bool known = g_plugin_mgr.get_instance_state(*iname, st, err);
+        InstState st; std::string err; long long crashes = 0;
+        bool known = g_plugin_mgr.get_instance_state(*iname, st, err, &crashes);
         if (!known) {
             // No tracked transition — report "created" if the instance actually
             // exists, else a clean not-found.
@@ -2862,6 +2874,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         std::string data = std::string("{\"state\":\"") + inst_state_str(st) + "\",\"last_error\":";
         xp::json_escape_into(data, err);
+        // crash_count: a process() crash leaves the instance Active + returns NA, so
+        // this is how a host detects a per-instance crash loop and alerts.
+        data += ",\"crash_count\":" + std::to_string(crashes);
         data += "}";
         send_rsp_ok(srv, id, data);
     } else if (name == "prepare_instance") {
@@ -3568,6 +3583,24 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         data += ",\"overflow\":\"" + g_plugin_mgr.project().overflow + "\"";
         data += ",\"dispatch_threads\":" + std::to_string(g_plugin_mgr.project().dispatch_threads);
         data += ",\"dropped\":" + std::to_string(dropped);
+        // Source liveness: ms since ANY source last emitted, + per-source ages. The
+        // signal for "a camera stalled" — a stalled source otherwise stops the line
+        // with zero indication. -1 = nothing has emitted yet. A monitor/FE applies a
+        // source-rate-appropriate staleness threshold (auto-alerting on a fixed
+        // threshold is left to the consumer since the expected rate is source-specific).
+        {
+            int64_t age_us = xi::TriggerBus::instance().last_emit_age_us();
+            data += ",\"last_emit_age_ms\":" + (age_us < 0 ? std::string("-1")
+                                              : std::to_string(age_us / 1000));
+            auto ages = xi::TriggerBus::instance().source_emit_ages_us();
+            data += ",\"sources\":[";
+            for (size_t i = 0; i < ages.size(); ++i) {
+                if (i) data += ",";
+                data += "{\"source\":"; xp::json_escape_into(data, ages[i].first);
+                data += ",\"last_emit_age_ms\":" + std::to_string(ages[i].second / 1000) + "}";
+            }
+            data += "]";
+        }
         // Per-group lanes (always ≥1: the default lane when no groups declared).
         if (!lanes.empty()) {
             data += ",\"groups\":[";

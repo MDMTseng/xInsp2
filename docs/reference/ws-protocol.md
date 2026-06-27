@@ -392,8 +392,13 @@ health since the most recent `cmd:start`:
 | `dispatch_threads` | configured `project.parallelism.dispatch_threads` |
 | `dropped_oldest` | events dropped under `drop_oldest` since last `cmd:start` |
 | `dropped_newest` | events dropped under `drop_newest` since last `cmd:start` |
+| `last_emit_age_ms` | ms since ANY source last emitted a record (monotonic); `-1` if none yet. The "is the line still getting frames" signal — a stalled camera otherwise stops the line silently |
+| `sources` | `[{ source, last_emit_age_ms }]` — per-source emit age, to spot WHICH of N cameras stalled |
 
-The three counter fields (`dropped_*`, `queue_depth_high_watermark`)
+A monitor/FE applies a source-rate-appropriate staleness threshold to
+`last_emit_age_ms` (auto-alerting on a fixed threshold is the consumer's call —
+the expected frame rate is source-specific). The three counter fields
+(`dropped_*`, `queue_depth_high_watermark`)
 are reset on every `cmd:start`. Sample after stop for the
 end-of-run total; do not subtract a pre-start snapshot.
 
@@ -583,7 +588,11 @@ UIs that ship their own command vocabulary.
 ### `get_state`
 Orchestrator read: the host-tracked instance state machine.
 `args: { "name": "cam0" }` → `data: { "state": "created"|"active"|"faulted",
-"last_error": "..." }` (`ok: false` if no such instance). Coarse by design — the
+"last_error": "...", "crash_count": N }` (`ok: false` if no such instance).
+`crash_count` counts `process()` faults (SEH crash / thrown exception) for this
+instance — a plugin crash leaves the instance `active` and returns NA, so this is
+how a host detects a per-instance crash LOOP (and alerts) rather than just seeing
+"NA result" every frame. Coarse by design — the
 host records only these three states, driven by the host-visible verbs
 (`create_instance` → `created`; a successful `set_instance_def`/`commit_group` →
 `active`; a failed one → `faulted` with `last_error`). Fine staging/ready

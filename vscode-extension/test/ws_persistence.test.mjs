@@ -201,6 +201,7 @@ test('instance lifecycle state migrates on rename and survives a no-op rename', 
         let r = await getState(3, 'cam0');
         assert.equal(r.ok, true, 'get_state cam0 known');
         assert.match(JSON.stringify(r.data), /"state":"created"/, 'cam0 is created');
+        assert.match(JSON.stringify(r.data), /"crash_count":0/, 'crash_count present, starts at 0');
 
         // No-op rename must NOT wipe the state entry.
         c.send({ type: 'cmd', id: 4, name: 'rename_instance', args: { name: 'cam0', new_name: 'cam0' } });

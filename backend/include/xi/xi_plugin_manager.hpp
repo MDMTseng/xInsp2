@@ -2023,13 +2023,24 @@ public:
     // Returns true if a state has been recorded for `name` (filling out_*); false
     // if unknown (the caller may then fall back to "exists ⇒ Created").
     bool get_instance_state(const std::string& name, InstState& out_state,
-                            std::string& out_err) {
+                            std::string& out_err, long long* out_crash_count = nullptr) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = inst_state_.find(name);
         if (it == inst_state_.end()) return false;
         out_state = it->second.state;
         out_err   = it->second.last_error;
+        if (out_crash_count) *out_crash_count = it->second.crash_count;
         return true;
+    }
+    // Record a process() fault for `name` (called from a dispatch worker on an SEH/
+    // exception crash — exceptional, so taking mu_ here is fine). Bumps the count and
+    // notes the cause; the instance stays its current state (the config is fine, the
+    // run crashed) but the count makes a crash loop visible via get_state.
+    void note_instance_crash(const std::string& name, const std::string& why) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto& r = inst_state_[name];
+        ++r.crash_count;
+        r.last_error = why;
     }
     void clear_instance_states() {
         std::lock_guard<std::mutex> lk(mu_);

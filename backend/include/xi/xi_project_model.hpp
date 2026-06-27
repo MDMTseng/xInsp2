@@ -29,6 +29,11 @@ enum class InstState { Created, Active, Faulted };
 struct InstStateRec {
     InstState   state = InstState::Created;
     std::string last_error;
+    // Count of process() faults (SEH crash / thrown exception) for this instance.
+    // A plugin null-deref'ing every frame on a bad part keeps the instance Active
+    // and just returns NA — so without a count the operator only sees "NA result",
+    // never that it's a crash loop. Surfaced via get_state for alerting.
+    long long   crash_count = 0;
 };
 
 struct InstanceInfo {
