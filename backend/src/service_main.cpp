@@ -2662,37 +2662,37 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, "set_param: missing name");
             return;
         }
-        // Try the loaded script first, then fall back to backend registry.
+        // Parse the value FIRST, so a malformed value isn't misreported as "no such
+        // param" (the three distinct failures — bad value / no such param / value
+        // rejected — used to collapse to one misleading message, so an operator who
+        // typo'd the VALUE format thought they'd typo'd the NAME).
+        std::string val;
+        auto num = xp::get_number_field(parsed->args_json, "value");
+        if (num) { char nb[64]; std::snprintf(nb, sizeof(nb), "%g", *num); val = nb; }
+        else if (parsed->args_json.find("\"value\":true")  != std::string::npos) val = "true";
+        else if (parsed->args_json.find("\"value\":false") != std::string::npos) val = "false";
+        if (val.empty()) {
+            send_rsp_err(srv, id, "set_param: invalid or missing 'value' for '" + *pname +
+                                  "' (expected a number or true/false)");
+            return;
+        }
+        // xi_script_set_param contract: 0 = set, -1 = no such param, -2 = the param
+        // exists but rejected this value (set_from_json failed).
+        int rc = 0; bool called = false;
         {
             std::lock_guard<std::mutex> lk(g_script_mu);
             if (g_script.ok() && g_script.set_param) {
-                // Extract raw value substring as a bare scalar.
-                std::string val;
-                auto num = xp::get_number_field(parsed->args_json, "value");
-                if (num) { char nb[64]; std::snprintf(nb, sizeof(nb), "%g", *num); val = nb; }
-                else {
-                    if (parsed->args_json.find("\"value\":true")  != std::string::npos) val = "true";
-                    if (parsed->args_json.find("\"value\":false") != std::string::npos) val = "false";
-                }
-                if (!val.empty()) {
-                    int rc = g_script.set_param(pname->c_str(), val.c_str());
-                    if (rc == 0) {
-                        // Cache so compile_and_load can replay this
-                        // value into the next DLL load (otherwise the
-                        // new DLL's file-scope default would silently
-                        // overwrite the user's tuned value).
-                        g_param_cache[*pname] = val;
-                        send_rsp_ok(srv, id);
-                        return;
-                    }
-                    // fall through to backend registry on -1 (not found)
-                }
+                called = true;
+                rc = g_script.set_param(pname->c_str(), val.c_str());
+                // Cache an accepted value so compile_and_load replays it into the next
+                // DLL load (else the new DLL's file-scope default silently overwrites it).
+                if (rc == 0) g_param_cache[*pname] = val;
             }
         }
-        // Params live in the script DLL (set via g_script.set_param above). The
-        // backend keeps no xi::ParamRegistry of its own, so an unhandled name
-        // here is simply unknown.
-        send_rsp_err(srv, id, std::string("no such param: ") + *pname);
+        if (!called) { send_rsp_err(srv, id, "set_param: no script loaded"); return; }
+        if (rc == 0) { send_rsp_ok(srv, id); return; }
+        if (rc == -1) { send_rsp_err(srv, id, std::string("no such param: ") + *pname); return; }
+        send_rsp_err(srv, id, "set_param: '" + *pname + "' rejected the value (out of range / wrong type)");
     } else if (name == "list_instances") {
         std::string inst_json, params_json;
         {
@@ -3103,7 +3103,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
         if (!root) { send_rsp_err(srv, id, "invalid JSON in project file"); return; }
 
-        // Restore params
+        // Restore params. Collect any that DON'T apply (unknown name / rejected
+        // value) so a partially-restored recipe isn't reported as a clean success —
+        // otherwise the operator thinks the full recipe loaded while some params
+        // silently kept their old/default values (a fail-reads-as-pass for recipes).
+        std::vector<std::string> param_warnings;
         yyjson_val* params = yyjson_obj_get(root, "params");
         if (params && yyjson_is_arr(params)) {
             size_t _i, _n; yyjson_val* item;
@@ -3124,6 +3128,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     if (g_script.ok() && g_script.set_param) {
                         int rc = g_script.set_param(yyjson_get_str(nm), vbuf);
                         if (rc == 0) g_param_cache[yyjson_get_str(nm)] = vbuf;
+                        else param_warnings.push_back(std::string(yyjson_get_str(nm)) +
+                                 (rc == -1 ? ": no such param" : ": value rejected"));
+                    } else {
+                        param_warnings.push_back(std::string(yyjson_get_str(nm)) + ": no script loaded");
                     }
                 }
             }
@@ -3146,7 +3154,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
 
         yyjson_doc_free(doc);
-        send_rsp_ok(srv, id);
+        // Succeeded-with-warnings: the project loaded, but surface any params that
+        // didn't apply so the caller can tell the operator the recipe was only
+        // partially restored (instead of a silent clean ok).
+        if (param_warnings.empty()) {
+            send_rsp_ok(srv, id);
+        } else {
+            std::string data = "{\"param_warnings\":[";
+            for (size_t i = 0; i < param_warnings.size(); ++i) {
+                if (i) data += ",";
+                xp::json_escape_into(data, param_warnings[i]);
+            }
+            data += "]}";
+            send_rsp_ok(srv, id, data);
+        }
     } else if (name == "list_plugins") {
         auto plugins = g_plugin_mgr.list_plugins();
         std::string out = "[";
