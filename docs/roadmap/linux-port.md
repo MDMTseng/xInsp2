@@ -51,7 +51,7 @@ the port itself; it's a record so we know what to expect.
 |---|---|---|
 | `backend/include/xi/xi_ws_server.hpp` | `winsock2` + `WSAStartup` + `closesocket` | BSD `<sys/socket.h>`; existing `select()` is already POSIX |
 | `backend/include/xi/xi_atomic_io.hpp` | `CreateFileW` + `MoveFileExW` + `FlushFileBuffers` | `open()` + `write()` + `fsync(fd)` + `fsync(dirfd)` + `rename()` |
-| `backend/include/xi/xi_script_loader.hpp` / `xi_plugin_manager.hpp` / `xi_cabi_adapter.hpp` / `xi_plugin_handle.hpp` | `LoadLibraryA`/`LoadLibraryExA` / `GetProcAddress` / `FreeLibrary` / `GetModuleFileNameA` (the `GetProcAddress` symbol resolution + `HMODULE` handle live in `xi_cabi_adapter.hpp` since the manager split; `xi_plugin_handle.hpp` is the standalone loader used by `examples/plugin_handle_demo.cpp`) | `dlopen` / `dlsym` / `dlclose` / `dladdr` |
+| `backend/include/xi/xi_script_loader.hpp` / `xi_plugin_manager.hpp` / `xi_cabi_adapter.hpp` | `LoadLibraryA`/`LoadLibraryExA` / `GetProcAddress` / `FreeLibrary` / `GetModuleFileNameA` (the `GetProcAddress` symbol resolution + `HMODULE` handle live in `xi_cabi_adapter.hpp` since the manager split) | `dlopen` / `dlsym` / `dlclose` / `dladdr` |
 | `backend/include/xi/xi_cli_args.hpp` `get_exe_dir()` | `GetModuleFileNameA` (NOW has an `#else` `read_symlink("/proc/self/exe")` branch) | `/proc/self/exe` (Linux) / `_NSGetExecutablePath` (macOS) |
 | `_strdup` / `_dupenv_s` / `_set_se_translator` | MSVC | `strdup` / `getenv` / signal handler |
 | `MAX_PATH`, `WCHAR`, `wstring` paths | Win32 | `std::filesystem` already portable; drop wide-char conversions |
@@ -237,7 +237,7 @@ work, which has to touch these same sites):
 2. Rewrite the 20 SDK→CORE relative includes (`"xi_foo.hpp"`) to angle form
    (`<xi/xi_foo.hpp>`) so they resolve via the `-I` search path regardless of
    which root each header sits in. (List: `xi.hpp`, `xi_async`, `xi_cv`, `xi_io`,
-   `xi_plugin_handle`, `xi_plugin_support`, `xi_script_support`, `xi_state`,
+   `xi_plugin_support`, `xi_script_support`, `xi_state`,
    `xi_thread`, `xi_types`, `xi_var` → into `xi_image`/`xi_record`/`xi_abi.h`/
    `xi_instance`/`xi_image_pool`/`xi_seh`.)
 3. `sdk/cmake/xinsp2_plugin.cmake`: `XINSP2_INCLUDE` → `sdk/include` (was
