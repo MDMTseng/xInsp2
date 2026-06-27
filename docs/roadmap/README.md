@@ -58,6 +58,12 @@ test surface: [`../../docs/testing.md`](../../docs/testing.md) (→ `testing.md`
 - **VS Code is the IDE; no in-house editor. Headless backend** drives from any WS
   client.
 
+## Known issues / open bug list
+
+[`known-issues.md`](known-issues.md) — what's still open after the 2026-06 hardening
+campaign (latent/edge correctness, observability gaps, design DO-LATERs, won't-fix
+rationale, and the pre-existing backlog), tagged by design theme.
+
 ## Not scheduled (sketches in this folder)
 
 Forward-looking; each graduates into `reference/` or `internals/` when it ships.
