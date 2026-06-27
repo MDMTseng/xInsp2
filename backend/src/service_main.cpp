@@ -3067,10 +3067,15 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     if (yyjson_is_num(val))      std::snprintf(vbuf, sizeof(vbuf), "%g", yyjson_get_num(val));
                     else if (yyjson_is_bool(val)) std::snprintf(vbuf, sizeof(vbuf), "%s", yyjson_get_bool(val) ? "true" : "false");
                     else continue;
-                    // Params live in the script DLL.
+                    // Params live in the script DLL. Also write g_param_cache so a
+                    // later compile_and_load replays THESE loaded values, not a stale
+                    // pre-load cache — without this, editing the script + recompiling
+                    // silently reverted every param to whatever was last set_param'd
+                    // before load_project (the replay shadow had never been refreshed).
                     std::lock_guard<std::mutex> lk(g_script_mu);
                     if (g_script.ok() && g_script.set_param) {
-                        g_script.set_param(yyjson_get_str(nm), vbuf);
+                        int rc = g_script.set_param(yyjson_get_str(nm), vbuf);
+                        if (rc == 0) g_param_cache[yyjson_get_str(nm)] = vbuf;
                     }
                 }
             }
