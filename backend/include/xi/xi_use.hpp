@@ -343,11 +343,24 @@ public:
         int prc = process_fn(name_.c_str(), in_doc,
                    nullptr, 0,
                    in_imgs.data(), (int)in_imgs.size(), &output);
-        if (prc == -1) warn_use_miss_(host, name_.c_str());   // no such instance
-
         // Release input handles from the BACKEND pool — plugin's process()
-        // copied what it needed.
+        // copied what it needed. Done regardless of outcome.
         for (auto h : in_handles) host->image_release(h);
+
+        // A failed call's `output` is NOT a trustworthy result: -1 = no such
+        // instance; -2 = the plugin's process() crashed (SEH) or threw — in which
+        // case it may have written a partial/torn out_doc before faulting. Adopting
+        // or parsing it would be a use-after-fault, and treating a crashed call as a
+        // valid (empty) result is a silent false-pass downstream. Bail with an empty
+        // provenance-tagged Record instead of interpreting output. (Previously only
+        // -1 was special-cased and the crash path fell through to adopt_shared.)
+        if (prc < 0) {
+            if (prc == -1) warn_use_miss_(host, name_.c_str());
+            xi_record_out_free(&output);
+            Record empty;
+            empty.set_src(name_);
+            return empty;
+        }
 
         // γ: adopt the borrowed-doc output by pointer (zero parse) when the
         // plugin returned one; otherwise decode the JSON bytes. The adopted doc
