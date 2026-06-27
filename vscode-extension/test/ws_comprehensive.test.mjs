@@ -225,6 +225,17 @@ test('set_param changes inspection output', async () => {
         const r2 = await runInspection(c);
         const scaled2 = r2.vars.items.find(i => i.name === 'scaled').value;
         assert.equal(scaled2, 20); // frame=1 * 20
+
+        // %g regression: a big integer must parse fully, not truncate. Before the fix
+        // 1000000 -> "%g" -> "1e+06" -> std::stoll stops at 'e' -> the param was set to
+        // 1. user_amp clamps to its max (100), so a correct parse shows scaled==100; the
+        // truncated value would show scaled==1.
+        c.send({ type: 'cmd', id: 11, name: 'set_param',
+                 args: { name: 'user_amp', value: 1000000 } });
+        assert.equal((await c.nextNonLog()).ok, true);
+        const r3 = await runInspection(c);
+        const scaled3 = r3.vars.items.find(i => i.name === 'scaled').value;
+        assert.equal(scaled3, 100, 'big int parsed fully (clamped to 100), not truncated to 1');
     });
 });
 

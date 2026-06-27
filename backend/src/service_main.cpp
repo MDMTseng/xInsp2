@@ -1515,7 +1515,13 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                             if (lane->ordered) eseq = lane->seq_next.fetch_add(1);
                         }
                     }
-                    lane->cv.notify_one();   // wake a producer parked on overflow:block
+                    // notify_ALL, not _one: workers AND overflow:block producers wait on
+                    // the same cv. A notify_one after a pop could be eaten by an idle
+                    // sibling worker (which re-checks, sees the queue empty, re-waits)
+                    // while the blocked producer that needs the freed slot is never woken
+                    // — a permanent producer deadlock (a stalled source/timer) with
+                    // overflow:"block" + dispatch_threads>=2. Cheap vs an inspect.
+                    lane->cv.notify_all();
                     if (!have) continue;
                     // Rate limit: CAS-claim a dispatch slot ≥ min_interval after the
                     // lane's previous one, then sleep to it. Surplus events meanwhile
@@ -2643,18 +2649,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, "set_param: missing name");
             return;
         }
-        // Parse the value FIRST, so a malformed value isn't misreported as "no such
-        // param" (the three distinct failures — bad value / no such param / value
-        // rejected — used to collapse to one misleading message, so an operator who
-        // typo'd the VALUE format thought they'd typo'd the NAME).
+        // Extract the value's RAW JSON token and pass it verbatim to set_from_json.
+        // The old path reformatted the number via "%g", which turned a big integer
+        // (e.g. area_min=1000000) into "1e+06" -> std::stoll stops at 'e' -> the param
+        // was SILENTLY set to 1; floats lost precision too (%g = 6 sig figs). It also
+        // scanned the whole args for "value":true, which could false-match a string
+        // value. find_key returns only the top-level value token (a number / true|false
+        // / "quoted string"), exact and un-reformatted; the param's set_from_json
+        // validates it (rc -2 if it rejects). A missing value isn't a missing param.
         std::string val;
-        auto num = xp::get_number_field(parsed->args_json, "value");
-        if (num) { char nb[64]; std::snprintf(nb, sizeof(nb), "%g", *num); val = nb; }
-        else if (parsed->args_json.find("\"value\":true")  != std::string::npos) val = "true";
-        else if (parsed->args_json.find("\"value\":false") != std::string::npos) val = "false";
-        if (val.empty()) {
-            send_rsp_err(srv, id, "set_param: invalid or missing 'value' for '" + *pname +
-                                  "' (expected a number or true/false)");
+        const char* after = nullptr;
+        if (!xp::detail::find_key(parsed->args_json.data(),
+                                  parsed->args_json.data() + parsed->args_json.size(),
+                                  "value", val, after)) {
+            send_rsp_err(srv, id, "set_param: missing 'value' for '" + *pname + "'");
             return;
         }
         // xi_script_set_param contract: 0 = set, -1 = no such param, -2 = the param
@@ -3097,7 +3105,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 yyjson_val* val = yyjson_obj_get(item, "value");
                 if (nm && yyjson_is_str(nm) && val) {
                     char vbuf[64] = {};
-                    if (yyjson_is_num(val))      std::snprintf(vbuf, sizeof(vbuf), "%g", yyjson_get_num(val));
+                    // Format EXACTLY: an int with %lld (not "%g", which turns a big int
+                    // like 1000000 into "1e+06" -> set_param's stoll yields 1) and a
+                    // real with full precision (%.17g, like VAR's round-trip).
+                    if (yyjson_is_int(val))       std::snprintf(vbuf, sizeof(vbuf), "%lld", (long long)yyjson_get_sint(val));
+                    else if (yyjson_is_real(val)) std::snprintf(vbuf, sizeof(vbuf), "%.17g", yyjson_get_real(val));
                     else if (yyjson_is_bool(val)) std::snprintf(vbuf, sizeof(vbuf), "%s", yyjson_get_bool(val) ? "true" : "false");
                     else continue;
                     // Params live in the script DLL. Also write g_param_cache so a

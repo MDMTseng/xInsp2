@@ -268,7 +268,14 @@ public:
     MatN&  set(int r, int c, double v) {
         yyjson_mut_val* arr = (node_ && yyjson_mut_is_obj(node_)) ? yyjson_mut_obj_get(node_, "m") : nullptr;
         yyjson_mut_val* e   = arr ? yyjson_mut_arr_get(arr, (size_t)(r * N + c)) : nullptr;
-        if (e) yyjson_mut_set_real(e, v);
+        // Route through the non-finite sentinel like every other double write — a raw
+        // NaN/Inf real makes yyjson_mut_write() fail, which silently drops the WHOLE
+        // record's JSON on the wire (the hazard the sentinel exists to prevent). The
+        // sentinel string is a static literal, so set_str (no-copy) is safe.
+        if (e) {
+            if (std::isfinite(v)) yyjson_mut_set_real(e, v);
+            else                  yyjson_mut_set_str(e, nonfinite_to_str(v));
+        }
         return *this;
     }
 
@@ -287,7 +294,12 @@ private:
     double elem_(int idx) const {
         yyjson_mut_val* arr = (node_ && yyjson_mut_is_obj(node_)) ? yyjson_mut_obj_get(node_, "m") : nullptr;
         yyjson_mut_val* e   = arr ? yyjson_mut_arr_get(arr, (size_t)idx) : nullptr;
-        return (e && yyjson_mut_is_num(e)) ? yyjson_mut_get_num(e) : 0.0;
+        if (!e) return 0.0;
+        if (yyjson_mut_is_num(e)) return yyjson_mut_get_num(e);
+        // Restore a non-finite sentinel string (written by set_data_/set) — else an
+        // Inf/NaN element reads back 0.0 (silent wrong matrix value).
+        if (yyjson_mut_is_str(e)) { double v; if (nonfinite_from_str(yyjson_mut_get_str(e), v)) return v; }
+        return 0.0;
     }
 };
 using Mat2 = MatN<2>;
