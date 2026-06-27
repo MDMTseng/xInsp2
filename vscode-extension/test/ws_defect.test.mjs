@@ -64,6 +64,11 @@ test('defect_detection.cpp compiles, runs, produces expected vars', async () => 
         const cr = await c.nextNonLog();
         assert.equal(cr.ok, true, 'compile ok: ' + (cr.error ?? ''));
 
+        // Previews are gated to subscribers (default send-none), so subscribe to all
+        // image vars before the run or no binary preview frames are sent.
+        c.send({ type: 'cmd', id: 99, name: 'subscribe', args: { all: true } });
+        assert.equal((await c.nextNonLog()).ok, true, 'subscribe ok');
+
         c.send({ type: 'cmd', id: 2, name: 'run' });
         const rr = await c.nextNonLog(); // rsp
         assert.equal(rr.ok, true);
