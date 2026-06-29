@@ -48,9 +48,14 @@ load-bearing contract that lives only in a comment/convention.
   `ws_compile_degraded.test.mjs`.
 - **P1-7 — script `status()` dropped when no client is connected.** No persistent
   landing spot; live-WS-only. Buffer the latest, or stamp to fe-status.
-- **P1-8 — drop/high-watermark counters reset at `cmd:start`.** A restart erases the
-  "how much did we drop last run" history. Keep a lifetime-cumulative alongside (like
-  ImagePool's `total_created_`).
+- ~~**P1-8 — drop/high-watermark counters reset at `cmd:start`.**~~ **(FIXED
+  2026-06-27).** `dispatch_stats` now also reports `dropped_lifetime` and
+  `queue_depth_high_watermark_lifetime` — process-global accumulators (like
+  ImagePool's `total_created_`) bumped at the drop / enqueue sites and never reset by
+  `cmd:start` (the per-lane counters still reset because lanes are recreated on spawn).
+  A monitor can answer "total drops over uptime" across run/restart boundaries. Test:
+  `ws_drop_lifetime.test.mjs` (induces real drops with queue_depth=1 + an 80ms inspect,
+  confirms per-run resets while lifetime survives stop/start).
 
 ## Design — DO-LATER (real impact, needs design / has a cost)
 

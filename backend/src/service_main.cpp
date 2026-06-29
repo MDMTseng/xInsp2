@@ -1109,6 +1109,15 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
 // declares groups; with no groups a single synthesized default lane runs everything (the old separate single pool is gone — see lane_for_()).
 // Result ordering is per-lane completion order in v1 (per-group arrival + the
 // `group` wire tag are follow-ups). See docs/internals/dispatch.md.
+// P1-8: lifetime-cumulative dispatch counters. The per-lane dropped/high_watermark
+// reset on every cmd:start (lanes are recreated by spawn_group_pool_), which erases
+// the "how much did we drop last run" history — a restart looks clean. These
+// process-globals persist for the whole backend uptime (like ImagePool's
+// total_created_), so a monitor can see total drops / peak depth across run
+// boundaries. dispatch_stats reports them as *_lifetime alongside the per-run ones.
+static std::atomic<uint64_t> g_dropped_lifetime{0};
+static std::atomic<uint64_t> g_high_watermark_lifetime{0};   // max single-lane depth ever seen
+
 struct GroupLane {
     xi::ProjectInfo::DispatchGroup cfg;
     std::deque<xi::TriggerEvent>   q;
@@ -1240,10 +1249,13 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         lane->q.push_back(std::move(ev));
         uint64_t ns = lane->q.size(), prev = lane->high_watermark.load(std::memory_order_relaxed);
         while (ns > prev && !lane->high_watermark.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
+        // P1-8: also raise the process-lifetime peak (survives cmd:start).
+        uint64_t gprev = g_high_watermark_lifetime.load(std::memory_order_relaxed);
+        while (ns > gprev && !g_high_watermark_lifetime.compare_exchange_weak(gprev, ns, std::memory_order_relaxed)) {}
         lane->cv.notify_one(); return true;
     }
     if (ov == "drop_newest") {
-        ++lane->dropped;
+        ++lane->dropped; ++g_dropped_lifetime;   // P1-8: lifetime total survives cmd:start
         int64_t aid = ++g_run_id;   // arrival slot of the dropped (new) frame
         std::string ds = ev.leader_source, dg = ev.group;   // the dropped (new) event
         warn_frame_drop_(lane->dropped.load(), dg, "drop_newest");
@@ -1259,7 +1271,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     int64_t dropped_aid = front.arrival_id;   // the dropped (oldest) frame's slot
     std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
     release_trigger_event_(front);
-    lane->q.pop_front(); ev.arrival_id = ++g_run_id; lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped;
+    lane->q.pop_front(); ev.arrival_id = ++g_run_id; lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped; ++g_dropped_lifetime;   // P1-8
     warn_frame_drop_(lane->dropped.load(), dg, "drop_oldest");
     lk.unlock();
     if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
@@ -3251,6 +3263,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // before AND after a start will see the AFTER values come back
         // smaller than BEFORE — don't subtract. See docs/reference/ws-protocol.md
         // `dispatch_stats` for the public contract.
+        //
+        // P1-8: `dropped_lifetime` and `queue_depth_high_watermark_lifetime` are the
+        // process-uptime cumulatives — they do NOT reset at cmd:start, so a monitor
+        // can answer "how much have we dropped total" / "peak depth ever" across run
+        // boundaries (the per-run counters above answer "...since this start").
         std::string data;
         // Snapshot the lanes under g_lanes_mu so a concurrent stop can't free
         // them mid-read. A no-groups project has one synthesized default lane, so
@@ -3269,6 +3286,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         data += ",\"overflow\":\"" + g_plugin_mgr.project().overflow + "\"";
         data += ",\"dispatch_threads\":" + std::to_string(g_plugin_mgr.project().dispatch_threads);
         data += ",\"dropped\":" + std::to_string(dropped);
+        // P1-8: process-uptime cumulatives (NOT reset by cmd:start).
+        data += ",\"dropped_lifetime\":" + std::to_string(g_dropped_lifetime.load());
+        data += ",\"queue_depth_high_watermark_lifetime\":" + std::to_string(g_high_watermark_lifetime.load());
         // Source liveness: ms since ANY source last emitted, + per-source ages. The
         // signal for "a camera stalled" — a stalled source otherwise stops the line
         // with zero indication. -1 = nothing has emitted yet. A monitor/FE applies a
