@@ -44,8 +44,6 @@ struct LoadedScript {
     std::shared_ptr<void> module_lifetime;
 
     using InspectFn          = void (*)(int frame);
-    using SnapshotFn         = int  (*)(char* buf, int buflen);
-    using DumpImageFn        = int  (*)(uint32_t gid, uint8_t* out, int cap, int* w, int* h, int* c);
     using ListParamsFn       = int  (*)(char* buf, int buflen);
     using SetParamFn         = int  (*)(const char* name, const char* value_json);
     using ResetFn            = void (*)();
@@ -64,8 +62,6 @@ struct LoadedScript {
     using StateSchemaVersionFn    = int  (*)(void);
 
     InspectFn          inspect          = nullptr;
-    SnapshotFn         snapshot         = nullptr;
-    DumpImageFn        dump_image       = nullptr;
     ListParamsFn       list_params      = nullptr;
     SetParamFn         set_param        = nullptr;
     ResetFn            reset            = nullptr;
@@ -118,8 +114,6 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     // the user's script actually uses the corresponding header. Only
     // `xi_inspect_entry` (line below) triggers load failure if absent.
     out.inspect     = reinterpret_cast<LoadedScript::InspectFn>(GetProcAddress(h, "xi_inspect_entry"));
-    out.snapshot    = reinterpret_cast<LoadedScript::SnapshotFn>(GetProcAddress(h, "xi_script_snapshot_vars"));
-    out.dump_image  = reinterpret_cast<LoadedScript::DumpImageFn>(GetProcAddress(h, "xi_script_dump_image"));
     out.list_params = reinterpret_cast<LoadedScript::ListParamsFn>(GetProcAddress(h, "xi_script_list_params"));
     out.set_param   = reinterpret_cast<LoadedScript::SetParamFn>(GetProcAddress(h, "xi_script_set_param"));
     out.reset            = reinterpret_cast<LoadedScript::ResetFn>(GetProcAddress(h, "xi_script_reset"));

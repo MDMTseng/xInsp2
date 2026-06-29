@@ -143,64 +143,6 @@ static void test_await_all_mixed_void() {
     CHECK(side_effect.load() == 2);
 }
 
-// ---------- xi_var ----------
-
-static void test_var_basic() {
-    SECTION("VAR tracks and binds");
-    xi::ValueStore::current().clear();
-    VAR(x, 42);
-    VAR(y, 3.14);
-    VAR(flag, true);
-    VAR(name, std::string("hello"));
-    CHECK(x == 42);
-    CHECK(y > 3.13 && y < 3.15);
-    CHECK(flag == true);
-    CHECK(name == "hello");
-
-    auto snap = xi::ValueStore::current().snapshot();
-    CHECK(snap.size() == 4);
-    CHECK(snap[0].name == "x");
-    CHECK(snap[0].kind == xi::VarKind::Number);
-    CHECK(snap[0].inline_json == "42");
-    CHECK(snap[1].name == "y");
-    CHECK(snap[1].kind == xi::VarKind::Number);
-    CHECK(snap[2].name == "flag");
-    CHECK(snap[2].kind == xi::VarKind::Boolean);
-    CHECK(snap[2].inline_json == "true");
-    CHECK(snap[3].name == "name");
-    CHECK(snap[3].kind == xi::VarKind::String);
-}
-
-static void test_var_string_literal() {
-    SECTION("VAR with string literal is copied into std::string, not stashed as const char*");
-    xi::ValueStore::current().clear();
-    VAR(greeting, "hello world");
-    auto snap = xi::ValueStore::current().snapshot();
-    CHECK(snap.size() == 1);
-    CHECK(snap[0].kind == xi::VarKind::String);
-    // Payload must own the string — an `any<const char*>` would deserialize wrong.
-    CHECK(snap[0].payload.type() == typeid(std::string));
-    CHECK(std::any_cast<std::string>(snap[0].payload) == "hello world");
-}
-
-static void test_var_thread_local() {
-    SECTION("ValueStore is thread-local");
-    xi::ValueStore::current().clear();
-    VAR(a_main, 1);
-
-    std::atomic<size_t> other_size{0};
-    std::thread t([&] {
-        xi::ValueStore::current().clear();
-        VAR(b_child, 2);
-        VAR(c_child, 3);
-        other_size = xi::ValueStore::current().snapshot().size();
-    });
-    t.join();
-
-    CHECK(other_size.load() == 2);
-    CHECK(xi::ValueStore::current().snapshot().size() == 1);
-}
-
 // ---------- xi_param ----------
 
 static void test_param_basic() {
@@ -387,9 +329,6 @@ int main() {
     test_async_cancel_idempotent();
 
     test_await_all_mixed_void();
-    test_var_basic();
-    test_var_string_literal();
-    test_var_thread_local();
 
     test_param_basic();
     test_param_bool();

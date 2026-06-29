@@ -312,17 +312,6 @@ static bool wd_any_overran(int64_t now_ms) {
     return false;
 }
 
-// Preview subscription. **Default: send NOTHING** — an image VAR is JPEG-encoded
-// and streamed only while some viewer is actually showing it (the client sends a
-// name allow-list via cmd:subscribe when it opens an image view, and unsubscribes
-// when it closes). No subscriber ⇒ no dump, no encode, no transmit — the encode
-// is the expensive part, so an unwatched image costs nothing. `subscribe {all:true}`
-// restores send-everything (debug / headless dump). Held under g_sub_mu so the WS
-// thread (who mutates it) and the run dispatch thread (who reads) stay consistent.
-static std::mutex                    g_sub_mu;
-static bool                          g_sub_all = false;
-static std::unordered_set<std::string> g_sub_names;
-
 // Server pointer for emits that happen off the serving thread (status_cb, the
 // dropped-frame markers). Atomic so a worker/plugin thread loads it once and the
 // shutdown null-out can't tear a read. A pointer load is a plain mov on x86-64 —
@@ -947,121 +936,6 @@ static void send_hello(xi::ws::Server& srv) {
     srv.send_text(e.to_json());
 }
 
-// Shared function: emit vars + binary preview frames from the script's
-// thunks or the built-in demo. Called by `cmd: run` and by the continuous
-// trigger loop.
-static void emit_vars_and_previews(xi::ws::Server& srv,
-                                    xi::script::LoadedScript& s,
-                                    int64_t run_id, int64_t dt_ms) {
-    if (s.ok() && s.snapshot) {
-        // Script path — read from DLL thunks. Buffers are thread_local + reused
-        // (grow-on-demand, never shrink) so a hot run loop doesn't allocate a fresh
-        // 256 KB snapshot vector + a vars-message string every run — same reasoning
-        // as the preview buffers below. thread_local = safe under parallel workers.
-        static thread_local std::vector<char> sbuf(256 * 1024);
-        if (sbuf.size() < 256 * 1024) sbuf.resize(256 * 1024);
-        int n = s.snapshot(sbuf.data(), (int)sbuf.size());
-        if (n < 0) { sbuf.resize((size_t)(-(int64_t)n) + 1024);
-                     n = s.snapshot(sbuf.data(), (int)sbuf.size()); }
-        if (n <= 0) return;
-
-        // vars text message (reused string — clear() keeps the capacity)
-        static thread_local std::string vars_msg;
-        vars_msg.clear();
-        vars_msg += "{\"type\":\"vars\",\"run_id\":";
-        vars_msg += std::to_string(run_id);
-        vars_msg += ",\"items\":";
-        vars_msg.append(sbuf.data(), (size_t)n);
-        vars_msg += "}";
-        srv.send_text(vars_msg);
-
-        // image previews — subscription-filtered. Parse the snapshot
-        // STRUCTURALLY (yyjson) rather than substring-scanning for `"gid":` /
-        // `"name":` — a json/record VAR embeds arbitrary value text, so a scan
-        // could match a `"gid":N` inside a value (phantom gid, polluting the
-        // dedup set) or pick up a `"name":` inside a value (mis-gating a real
-        // adjacent image). Same class of bug as the old `"all":true` substring
-        // check. Structured parse is exact.
-        bool sub_all;
-        std::unordered_set<std::string> sub_names;
-        {
-            std::lock_guard<std::mutex> lk(g_sub_mu);
-            sub_all = g_sub_all;
-            if (!sub_all) sub_names = g_sub_names;   // copy under lock
-        }
-
-        // Skip the whole parse+encode when nobody is subscribed (the default
-        // send-none state): no subscriber ⇒ no preview, so don't re-parse the
-        // snapshot or allocate the dedup set every frame for nothing.
-        if (s.dump_image && (sub_all || !sub_names.empty())) {
-            // One JPEG encode + send for gid `g`. Reused thread_local buffers keep
-            // a hot run loop from churning the allocator (otherwise 32 MB raw +
-            // jpeg + frame allocated per image per frame — at 30 fps × 4 images
-            // that dominated encode time and spiked the malloc heap).
-            auto emit_one = [&](uint32_t g) {
-                static thread_local std::vector<uint8_t> raw, jpeg, frame;
-                int w = 0, h = 0, c = 0;
-                if (raw.size() < 1u * 1024 * 1024) raw.resize(1u * 1024 * 1024);
-                int nb = s.dump_image(g, raw.data(), (int)raw.size(), &w, &h, &c);
-                if (nb < 0) { raw.resize((size_t)(-nb) + 1024);
-                              nb = s.dump_image(g, raw.data(), (int)raw.size(), &w, &h, &c); }
-                if (nb > 0 && w > 0 && h > 0 && c > 0) {
-                    // Non-owning view over `raw` — encode reads only, and `raw`
-                    // outlives this call, so skip the full-frame deep copy.
-                    xi::Image img = xi::Image::view(w, h, c, raw.data());
-                    jpeg.clear();
-                    if (xi::encode_jpeg(img, 85, jpeg)) {
-                        size_t total = xp::kPreviewHeaderSize + jpeg.size();
-                        if (frame.size() < total) frame.resize(total);
-                        xp::PreviewHeader hd;
-                        hd.gid = g; hd.codec = (uint32_t)xp::Codec::JPEG;
-                        hd.width = (uint32_t)w; hd.height = (uint32_t)h; hd.channels = (uint32_t)c;
-                        xp::encode_preview_header(hd, frame.data());
-                        std::memcpy(frame.data() + xp::kPreviewHeaderSize, jpeg.data(), jpeg.size());
-                        srv.send_binary(frame.data(), total);
-                    }
-                }
-            };
-
-            yyjson_doc* doc = yyjson_read(sbuf.data(), (size_t)n, 0);
-            if (doc) {
-                yyjson_val* arr = yyjson_doc_get_root(doc);
-                std::unordered_set<uint32_t> sent_canons;   // dedup by canonical "src"
-                size_t _i, _ni; yyjson_val* item;
-                yyjson_arr_foreach(arr, _i, _ni, item) {
-                    yyjson_val* nv = yyjson_obj_get(item, "name");
-                    const char* nm = yyjson_get_str(nv);
-                    if (!sub_all && !sub_names.count(nm ? nm : "")) continue;
-
-                    const char* kind = yyjson_get_str(yyjson_obj_get(item, "kind"));
-                    if (!kind) continue;
-
-                    if (std::strcmp(kind, "image") == 0) {
-                        yyjson_val* gv = yyjson_obj_get(item, "gid");
-                        if (!yyjson_is_num(gv)) continue;
-                        uint32_t gid = (uint32_t)yyjson_get_num(gv);
-                        // Dedup: vars over one buffer share a canonical "src"; the
-                        // first SUBSCRIBED one encodes, the rest mirror client-side.
-                        yyjson_val* sv = yyjson_obj_get(item, "src");
-                        uint32_t canon = yyjson_is_num(sv) ? (uint32_t)yyjson_get_num(sv) : gid;
-                        if (!sent_canons.insert(canon).second) continue;
-                        emit_one(gid);
-                    } else if (std::strcmp(kind, "record") == 0) {
-                        // Record sub-images: gated by the record var's name, not
-                        // deduped (they carry no canonical src).
-                        yyjson_val* imgs = yyjson_obj_get(item, "images");
-                        if (!yyjson_is_obj(imgs)) continue;
-                        size_t _j, _nj; yyjson_val *ik, *iv;
-                        yyjson_obj_foreach(imgs, _j, _nj, ik, iv) {
-                            if (yyjson_is_num(iv)) emit_one((uint32_t)yyjson_get_num(iv));
-                        }
-                    }
-                }
-                yyjson_doc_free(doc);
-            }
-        }
-    }
-}
 
 // (seh_exception and seh_translator defined above, before use_process_cb)
 
@@ -1207,7 +1081,6 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         // if anything below throws. No-op for emit_seq < 0 (completion mode).
         turn.wait_turn();
         if (inspect_ok) {
-            emit_vars_and_previews(srv, s, run_id, dt_ms);
             // One Result per run: whatever the script set (default 0 = NA if it
             // called no xi::result), emitted before run_finished so consumers
             // can pair them. Ordered with the rest of the stream by the gate.
@@ -1762,46 +1635,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                        + R"(","commit":")" + XINSP2_COMMIT
                        + R"(","abi":1})";
         send_rsp_ok(srv, id, vd);
-    } else if (name == "subscribe") {
-        // args: { names: [...] } OR { all: true }. Parse with yyjson — a substring
-        // check on "\"all\":true" is whitespace-sensitive and breaks for clients
-        // (e.g. Python's json.dumps) that emit `"all": true` with a space.
-        bool want_all = false;
-        std::unordered_set<std::string> names;
-        {
-            yyjson_doc* doc = yyjson_read(parsed->args_json.c_str(),
-                                          parsed->args_json.size(), 0);
-            if (doc) {
-                yyjson_val* root = yyjson_doc_get_root(doc);
-                yyjson_val* allv = yyjson_obj_get(root, "all");
-                if (yyjson_is_bool(allv)) want_all = yyjson_get_bool(allv);
-                if (!want_all) {
-                    yyjson_val* arr = yyjson_obj_get(root, "names");
-                    if (yyjson_is_arr(arr)) {
-                        size_t _i, _n; yyjson_val* it;
-                        yyjson_arr_foreach(arr, _i, _n, it) {
-                            const char* s = yyjson_get_str(it);
-                            if (yyjson_is_str(it) && s) names.insert(s);
-                        }
-                    }
-                }
-                yyjson_doc_free(doc);
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lk(g_sub_mu);
-            g_sub_all = want_all;
-            g_sub_names = std::move(names);
-        }
-        std::string out = "{\"all\":";
-        out += want_all ? "true" : "false";
-        out += ",\"count\":";
-        {
-            std::lock_guard<std::mutex> lk(g_sub_mu);
-            out += std::to_string(g_sub_names.size());
-        }
-        out += "}";
-        send_rsp_ok(srv, id, out);
     } else if (name == "crash_reports") {
         // List crash JSON reports left by previous fatal crashes.
         // Returns the file contents inline (each is small, KB-sized).
@@ -1926,13 +1759,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         out += "]}";
         send_rsp_ok(srv, id, out);
-    } else if (name == "unsubscribe") {
-        {
-            std::lock_guard<std::mutex> lk(g_sub_mu);
-            g_sub_all = false;
-            g_sub_names.clear();
-        }
-        send_rsp_ok(srv, id, R"({"all":false,"count":0})");
     } else if (name == "shutdown") {
         // Controlled teardown while everything is still alive, so nothing runs a
         // bus emit / module_lifetime deleter against a half-destroyed process at
@@ -3816,16 +3642,10 @@ int main(int argc, char** argv) {
     };
     srv.on_close = [&] {
         std::fprintf(stderr, "[xinsp2] client disconnected\n");
-        // E-P1-2: a fresh client should get a fresh server view.
-        // Without these clears the next driver to reconnect inherits
-        // the prior session's subscription set + error ring. None of that
-        // is visible from the new client's perspective and at best confuses,
+        // E-P1-2: a fresh client should get a fresh server view. Without this
+        // clear the next driver to reconnect inherits the prior session's error
+        // ring — not visible from the new client's perspective, at best confuses,
         // at worst hides regressions.
-        {
-            std::lock_guard<std::mutex> lk(g_sub_mu);
-            g_sub_all = false;   // fresh client gets send-none until it subscribes
-            g_sub_names.clear();
-        }
         {
             std::lock_guard<std::mutex> lk(g_recent_errors_mu);
             g_recent_errors.clear();

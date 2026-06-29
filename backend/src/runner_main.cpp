@@ -295,17 +295,12 @@ int main(int argc, char** argv) {
             ++crashed;
             continue;
         }
-        std::vector<char> buf(256 * 1024);
-        int vn = script.snapshot ? script.snapshot(buf.data(), (int)buf.size()) : 0;
-        if (vn < 0) {
-            buf.resize((size_t)(-vn) + 1024);
-            vn = script.snapshot(buf.data(), (int)buf.size());
-        }
+        // VAR value-tracking was removed from core (script output is a preview-
+        // plugin concern now), so the runner no longer dumps per-frame vars — it
+        // just records that the frame ran. result()/state live on their own paths.
         if (i > 0) body += ",";
         body += "{\"frame\":";
         body += std::to_string(i);
-        body += ",\"vars\":";
-        body += (vn > 0 ? std::string(buf.data(), (size_t)vn) : "[]");
         body += "}";
     }
     auto t1 = std::chrono::steady_clock::now();
