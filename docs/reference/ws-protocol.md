@@ -401,12 +401,13 @@ old per-dispatch `vars` message is **removed** (branch
 is the initial one.
 
 `cmd:start` **resets** the per-run dispatch counters used by
-[`dispatch_stats`](#dispatch_stats) — `dropped_oldest`,
-`dropped_newest`, and `queue_depth_high_watermark` all zero. Drivers
+[`dispatch_stats`](#dispatch_stats) — `dropped` and
+`queue_depth_high_watermark` go to zero. Drivers
 that snapshot `dispatch_stats` before *and* after a `cmd:start` and
 subtract will get nonsense across run boundaries. Either record only
 the AFTER snapshot, or treat the field values as scoped to the most
-recent cmd:start window.
+recent cmd:start window. (The `*_lifetime` fields are NOT reset — use
+those for cumulative-over-uptime totals.)
 
 ### `dispatch_stats`
 `args: {}` → `data: { ... }`. Snapshot of the dispatch queue's
@@ -419,17 +420,20 @@ health since the most recent `cmd:start`:
 | `queue_depth_high_watermark` | peak queue depth observed since last `cmd:start` |
 | `overflow` | configured policy: `drop_oldest` (default) / `drop_newest` |
 | `dispatch_threads` | configured `project.parallelism.dispatch_threads` |
-| `dropped_oldest` | events dropped under `drop_oldest` since last `cmd:start` |
-| `dropped_newest` | events dropped under `drop_newest` since last `cmd:start` |
+| `dropped` | events dropped on overflow since last `cmd:start` (aggregate across lanes) |
+| `dropped_lifetime` | events dropped over the whole **backend process uptime** — does NOT reset on `cmd:start` |
+| `queue_depth_high_watermark_lifetime` | peak single-lane queue depth over the whole **process uptime** — does NOT reset on `cmd:start` |
 | `last_emit_age_ms` | ms since ANY source last emitted a record (monotonic); `-1` if none yet. The "is the line still getting frames" signal — a stalled camera otherwise stops the line silently |
 | `sources` | `[{ source, last_emit_age_ms }]` — per-source emit age, to spot WHICH of N cameras stalled |
 
 A monitor/FE applies a source-rate-appropriate staleness threshold to
 `last_emit_age_ms` (auto-alerting on a fixed threshold is the consumer's call —
-the expected frame rate is source-specific). The three counter fields
-(`dropped_*`, `queue_depth_high_watermark`)
-are reset on every `cmd:start`. Sample after stop for the
-end-of-run total; do not subtract a pre-start snapshot.
+the expected frame rate is source-specific). The per-run counters (`dropped`,
+`queue_depth_high_watermark`) are reset on every `cmd:start` — sample after stop
+for the end-of-run total, do not subtract a pre-start snapshot. The `*_lifetime`
+fields are cumulative for the whole backend process, so an unattended monitor can
+answer "how much have we dropped total" across run/restart boundaries (a restart
+no longer reads as a clean line).
 
 ### `list_instances`
 `args: {}` → triggers an `instances` message.
