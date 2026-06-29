@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>xInsp2 · preview_sink</title>
+<style>
+  :root { --bg:#16181d; --panel:#1e2128; --border:#2c313c; --fg:#d7dae0; --muted:#8b93a3; --accent:#5aa9ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--border); }
+  header h1 { font-size:14px; margin:0; font-weight:600; }
+  header h1 small { color:var(--muted); font-weight:400; }
+  #status { margin-left:auto; font-size:12px; color:var(--muted); }
+  #status.ok { color:#5fd08a; }
+  #tabs { display:flex; gap:6px; padding:12px 18px 0; }
+  .tab { padding:6px 14px; border:1px solid var(--border); border-bottom:none; border-radius:7px 7px 0 0;
+         background:var(--panel); color:var(--muted); cursor:pointer; font-weight:500; }
+  .tab.active { color:var(--fg); border-color:var(--accent); box-shadow:inset 0 -2px 0 var(--accent); }
+  .tab .n { color:var(--muted); font-size:11px; }
+  #panel { margin:0 18px 18px; border:1px solid var(--border); border-radius:0 9px 9px 9px; background:var(--panel); padding:14px; }
+  .row { display:flex; align-items:flex-start; gap:10px; padding:7px 4px; border-bottom:1px solid #23262e; }
+  .row:last-child { border-bottom:none; }
+  .key { width:120px; color:var(--muted); font-family:ui-monospace,monospace; flex:none; }
+  .key .ln { color:#5a6373; font-size:10px; }
+  .val { font-family:ui-monospace,monospace; color:#e6c07b; }
+  .imgwrap { flex:1; }
+  .toggle { cursor:pointer; color:var(--accent); user-select:none; font-size:12px; }
+  .imgwrap img { display:block; margin-top:8px; max-width:100%; border:1px solid var(--border); border-radius:6px;
+                 background:repeating-conic-gradient(#2a2e37 0% 25%, #23262e 0% 50%) 50% / 16px 16px; }
+  .imgwrap .meta { color:var(--muted); font-size:11px; margin-top:4px; }
+  .pill { font-size:11px; color:var(--muted); border:1px solid var(--border); border-radius:10px; padding:1px 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>xInsp2 <small>· preview_sink (live binary push)</small></h1>
+  <span class="pill" id="enc">frames: 0</span>
+  <span id="status">connecting…</span>
+</header>
+<div id="tabs"></div>
+<div id="panel"></div>
+
+<script>
+const P = new URLSearchParams(location.search);
+const PORT = P.get('port') || '7777';
+const PROJ = P.get('proj') || '';                       // absolute path on the backend FS
+
+const groups = {};          // pg -> { layout, values, images:{ key:{url,w,h} } }
+let active = null, frameCount = 0;
+const expanded = new Set(); // "pg/key" image slots the user opened
+
+const statusEl = document.getElementById('status');
+const setStatus = (t, ok) => { statusEl.textContent = t; statusEl.className = ok ? 'ok' : ''; };
+
+const ws = new WebSocket('ws://127.0.0.1:' + PORT);
+ws.binaryType = 'arraybuffer';
+let id = 100; const pending = {};
+const call = (name, args, cb) => { const i = id++; if (cb) pending[i] = cb; ws.send(JSON.stringify({ type:'cmd', id:i, name, args: args||{} })); };
+
+ws.onopen = () => {
+  setStatus('connected · driving demo…', true);
+  call('open_project', { folder: PROJ });
+  setTimeout(() => call('compile_and_load', { path: PROJ.replace(/\\/g,'/') + '/inspect.cpp' }), 400);
+  setTimeout(() => call('start', { fps: 4 }), 1400);
+  setInterval(poll, 600);
+};
+ws.onclose = () => setStatus('disconnected');
+ws.onerror = () => setStatus('connection error');
+ws.onmessage = (ev) => {
+  if (typeof ev.data === 'string') { try { handleText(JSON.parse(ev.data)); } catch {} }
+  else handleFrame(new Uint8Array(ev.data));
+};
+
+function handleText(m) {
+  if (m.type === 'rsp' && pending[m.id]) { const cb = pending[m.id]; delete pending[m.id]; cb(m); }
+}
+
+function poll() {
+  call('exchange_instance', { name:'preview', cmd:{ command:'list_groups' } }, (m) => {
+    const d = parse(m.data);
+    for (const pg of Object.keys(d.groups || {})) {
+      groups[pg] = groups[pg] || { images:{} };
+      call('exchange_instance', { name:'preview', cmd:{ command:'get', pg } }, (mm) => {
+        const g = parse(mm.data);
+        if (g.found) { const data = JSON.parse(g.data); groups[pg].layout = data.$layout || []; groups[pg].values = data; }
+        active = active || pg; render();
+      });
+    }
+    active = active || Object.keys(d.groups || {})[0]; render();
+  });
+}
+
+function handleFrame(buf) {
+  if (!(buf[0]===88 && buf[1]===80 && buf[2]===86 && buf[3]===49)) return;  // 'XPV1'
+  const dv = new DataView(buf.buffer, buf.byteOffset);
+  const w = dv.getUint16(4, true), h = dv.getUint16(6, true);
+  const pgLen = buf[10], keyLen = buf[11]; let o = 12;
+  const td = new TextDecoder();
+  const pg  = td.decode(buf.subarray(o, o+pgLen)); o += pgLen;
+  const key = td.decode(buf.subarray(o, o+keyLen)); o += keyLen;
+  const jpeg = buf.subarray(o);
+  const url = URL.createObjectURL(new Blob([jpeg], { type:'image/jpeg' }));
+  const G = groups[pg] = groups[pg] || { images:{} };
+  G.images = G.images || {};
+  if (G.images[key]) URL.revokeObjectURL(G.images[key].url);
+  G.images[key] = { url, w, h, bytes: jpeg.length };
+  frameCount++; document.getElementById('enc').textContent = 'frames: ' + frameCount;
+  active = active || pg;
+  if (pg === active) render();
+}
+
+const parse = (d) => (typeof d === 'string' ? JSON.parse(d || '{}') : (d || {}));
+
+function render() {
+  const tabs = document.getElementById('tabs');
+  tabs.innerHTML = '';
+  for (const pg of Object.keys(groups)) {
+    const t = document.createElement('div');
+    t.className = 'tab' + (pg === active ? ' active' : '');
+    const nImg = Object.keys(groups[pg].images || {}).length;
+    t.innerHTML = pg + ' <span class="n">' + nImg + ' img</span>';
+    t.onclick = () => { active = pg; render(); };
+    tabs.appendChild(t);
+  }
+  const panel = document.getElementById('panel');
+  panel.innerHTML = '';
+  const G = groups[active]; if (!G) return;
+  const layout = G.layout || [];
+  if (!layout.length) { panel.innerHTML = '<div class="row"><span class="key">…</span><span class="val">waiting for first run</span></div>'; return; }
+  for (const e of layout) {
+    const row = document.createElement('div'); row.className = 'row';
+    const k = document.createElement('div'); k.className = 'key';
+    k.innerHTML = e.key + (e.line ? ' <span class="ln">:' + e.line + '</span>' : '');
+    row.appendChild(k);
+    if (e.kind === 'image') {
+      const slot = 'I' + active + '/' + e.key;
+      const wrap = document.createElement('div'); wrap.className = 'imgwrap';
+      const img = G.images && G.images[e.key];
+      const open = expanded.has(slot);
+      const tog = document.createElement('span'); tog.className = 'toggle';
+      tog.textContent = (open ? '▼ hide' : '▶ show') + ' image' + (img ? '' : ' (no frame yet)');
+      tog.onclick = () => { open ? expanded.delete(slot) : expanded.add(slot); render(); };
+      wrap.appendChild(tog);
+      if (open && img) {
+        const el = document.createElement('img'); el.src = img.url;
+        wrap.appendChild(el);
+        const meta = document.createElement('div'); meta.className = 'meta';
+        meta.textContent = img.w + '×' + img.h + ' · jpeg ' + img.bytes + ' B · live push';
+        wrap.appendChild(meta);
+      }
+      row.appendChild(wrap);
+    } else {
+      const v = document.createElement('div'); v.className = 'val';
+      v.textContent = JSON.stringify(G.values ? G.values[e.key] : undefined);
+      row.appendChild(v);
+    }
+    panel.appendChild(row);
+  }
+}
+</script>
+</body>
+</html>
