@@ -99,3 +99,6 @@ examples/*/gw.log
 
 # plugin export packaging scratch (xinsp2 Export Project Plugin)
 **/export_build/
+
+# Agent worktrees (transient, must never be committed into the main repo)
+.claude/worktrees/
