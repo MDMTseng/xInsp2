@@ -103,13 +103,21 @@ private:
     // refcount. The last IN-PROCESS ref then frees via host_release(doc) (= host
     // doc_release) rather than yyjson_mut_doc_free, so the doc lives until the
     // last SIDE drops it. null ⇒ a plain locally-owned doc, freed directly.
-    struct DocBox { yyjson_mut_doc* doc; std::atomic<int> rc; void (*host_release)(void*); };
+    using HostReleaseFn = void (*)(void*);
+    // host_release is ATOMIC: parallel fan-out can dispatch one upstream output to
+    // N use().process() calls, each holding a copy of the same Record that shares
+    // ONE DocBox — so several lanes can call share_out on this box concurrently.
+    // The first-share enroll is claimed via a single CAS (see share_out) so exactly
+    // one lane does the enroll retain; loads/stores elsewhere use it as an atomic.
+    struct DocBox { yyjson_mut_doc* doc; std::atomic<int> rc; std::atomic<HostReleaseFn> host_release; };
     static DocBox* new_box_(yyjson_mut_doc* d) { return new DocBox{ d, 1, nullptr }; }
     void release_box_() {
         if (box_ && box_->rc.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             if (box_->doc) {
-                if (box_->host_release) box_->host_release(box_->doc); // registry decides the real free
-                else                    yyjson_mut_doc_free(box_->doc);
+                if (auto hr = box_->host_release.load(std::memory_order_acquire))
+                    hr(box_->doc);                  // registry decides the real free
+                else
+                    yyjson_mut_doc_free(box_->doc);
             }
             delete box_;
         }
@@ -128,7 +136,8 @@ public:
             box_ = o.box_;
             box_->rc.fetch_add(1, std::memory_order_relaxed);
             doc_ = o.doc_; root_ = o.root_;
-            o.frozen_ = true; frozen_ = true;
+            o.frozen_.store(true, std::memory_order_relaxed);
+            frozen_.store(true, std::memory_order_relaxed);
         } else {
             // o is a borrowed view (no owned box) → make an independent owned
             // copy (reading o.root_ is safe; we allocate our own).
@@ -147,13 +156,14 @@ public:
                 box_ = o.box_;
                 box_->rc.fetch_add(1, std::memory_order_relaxed);
                 doc_ = o.doc_; root_ = o.root_;
-                o.frozen_ = true; frozen_ = true;
+                o.frozen_.store(true, std::memory_order_relaxed);
+                frozen_.store(true, std::memory_order_relaxed);
             } else {
                 doc_  = yyjson_mut_doc_new(tls_doc_alc());
                 root_ = o.root_ ? yyjson_mut_val_mut_copy(doc_, o.root_) : yyjson_mut_obj(doc_);
                 yyjson_mut_doc_set_root(doc_, root_);
                 box_ = new_box_(doc_);
-                frozen_ = false;
+                frozen_.store(false, std::memory_order_relaxed);
             }
         }
         return *this;
@@ -161,7 +171,7 @@ public:
 
     Record(Record&& o) noexcept
         : images_(std::move(o.images_)), doc_(o.doc_), root_(o.root_),
-          box_(o.box_), frozen_(o.frozen_) {
+          box_(o.box_), frozen_(o.frozen_.load(std::memory_order_relaxed)) {
         o.doc_ = nullptr; o.root_ = nullptr; o.box_ = nullptr;
     }
 
@@ -169,7 +179,8 @@ public:
         if (this != &o) {
             images_ = std::move(o.images_);
             release_box_();
-            doc_ = o.doc_; root_ = o.root_; box_ = o.box_; frozen_ = o.frozen_;
+            doc_ = o.doc_; root_ = o.root_; box_ = o.box_;
+            frozen_.store(o.frozen_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             o.doc_ = nullptr; o.root_ = nullptr; o.box_ = nullptr;
         }
         return *this;
@@ -195,10 +206,16 @@ public:
     // owned doc (moved-from); the caller then serializes.
     yyjson_mut_doc* share_out(void (*retain)(void*), void (*release)(void*)) const {
         if (!box_ || !box_->doc || !retain || !release) return nullptr;
-        frozen_ = true;                       // shared ⇒ read-only from here on
-        if (!box_->host_release) {            // first cross-ABI share: enroll this side
+        frozen_.store(true, std::memory_order_relaxed);  // shared ⇒ read-only from here on
+        // First cross-ABI share enrolls this side. In parallel fan-out several lanes
+        // share the SAME box at once, so claim the enroll with a single CAS: only the
+        // winner (host_release nullptr → release) does the enroll retain. A plain
+        // check-then-set would let two lanes both enroll → registry rc gets +2 enroll
+        // refs and the doc never reaches 0 (a per-frame leak).
+        HostReleaseFn expected = nullptr;
+        if (box_->host_release.compare_exchange_strong(
+                expected, release, std::memory_order_acq_rel, std::memory_order_acquire)) {
             retain(box_->doc);                // registry rc += 1 (this side's ref)
-            box_->host_release = release;     // our box now frees via the registry
         }
         retain(box_->doc);                    // +1 RESERVED for the adopting side. This
                                               // keeps the doc alive until adopt_shared
@@ -229,7 +246,7 @@ public:
             r.box_  = new DocBox{ doc, 1, release };  // consume share_out's reserved ref
             r.doc_  = doc;
             r.root_ = yyjson_mut_doc_get_root(doc);
-            r.frozen_ = frozen;
+            r.frozen_.store(frozen, std::memory_order_relaxed);
         }
         return r;
     }
@@ -297,7 +314,8 @@ public:
     // corrupt that sibling — assert against it in debug (compiled out in release,
     // zero hot-path cost). Force ownership first by mutating via a normal setter.
     Record& set_raw(const std::string& key, yyjson_mut_val* item) {
-        assert(!frozen_ && "set_raw on a frozen/shared Record corrupts the sibling copy "
+        assert(!frozen_.load(std::memory_order_relaxed) &&
+                           "set_raw on a frozen/shared Record corrupts the sibling copy "
                            "— mutate it through a normal setter first to force copy-on-write");
         put_(key.c_str(), item);
         return *this;
@@ -666,7 +684,11 @@ private:
     // copy-on-writes (cow_) into a fresh sole-owned doc. Defaults give every
     // construction path a sole-owned, writable box, exactly as before.
     DocBox*      box_ = nullptr;
-    mutable bool frozen_ = false;
+    // Atomic (relaxed): a const source's frozen_ is set when a copy starts sharing
+    // its box, which under parallel fan-out races with the sharing lanes — so reads
+    // and writes go through atomic ops to avoid a data race. relaxed is enough: the
+    // box's rc / host_release (acq_rel) already order the doc handoff.
+    mutable std::atomic<bool> frozen_{false};
 
     // One-shot warning when a sub-Record carrying images is nested (its images_
     // are dropped — see set(key, Record&)). Static flag ⇒ at most one line per
@@ -695,13 +717,13 @@ private:
     // borrowed view) deep-copy into a fresh sole-owned doc so we never write
     // through a tree someone else still reads.
     void cow_() {
-        if (!frozen_) return;
+        if (!frozen_.load(std::memory_order_relaxed)) return;
         // Sole LOCAL owner (rc==1) AND not registry-managed ⇒ unfreeze in place.
         // A registry-managed doc must always deep-copy even at local rc==1: a
         // local rc of 1 says nothing about OTHER sides still reading the doc.
-        if (box_ && !box_->host_release &&
+        if (box_ && !box_->host_release.load(std::memory_order_acquire) &&
             box_->rc.load(std::memory_order_acquire) == 1) {
-            frozen_ = false;
+            frozen_.store(false, std::memory_order_relaxed);
             return;
         }
         yyjson_mut_doc* nd = yyjson_mut_doc_new(tls_doc_alc());
@@ -712,7 +734,7 @@ private:
         box_  = new_box_(nd);
         doc_  = nd;
         root_ = nr;
-        frozen_ = false;
+        frozen_.store(false, std::memory_order_relaxed);
     }
 
     // Deep-copy a yyjson object value into a fresh Record (used by getters/Value).
