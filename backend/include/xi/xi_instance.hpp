@@ -30,6 +30,7 @@
 
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -139,26 +140,40 @@ public:
             ptr_ = std::dynamic_pointer_cast<T>(existing);
             if (!ptr_) {
                 // Same name is bound to a different type — user error.
-                // Leave ptr_ null; first dereference will throw.
+                // Leave ptr_ null; first dereference throws (see checked_).
+                name_ = std::move(name);
                 return;
             }
         } else {
             ptr_ = make_plugin_instance<T>(name);
             if (ptr_) InstanceRegistry::instance().add(ptr_);
+            else      name_ = std::move(name);
         }
     }
 
-    T*       operator->()       { return ptr_.get(); }
-    const T* operator->() const  { return ptr_.get(); }
-    T&       operator*()         { return *ptr_; }
-    const T& operator*() const   { return *ptr_; }
+    // Deref throws instead of UB-on-null when the handle didn't bind (name
+    // already bound to a different type, or creation failed). `if (inst)` /
+    // the bool conversion still lets callers test without throwing.
+    T*       operator->()       { return checked_(); }
+    const T* operator->() const { return checked_(); }
+    T&       operator*()        { return *checked_(); }
+    const T& operator*() const  { return *checked_(); }
 
     explicit operator bool() const { return static_cast<bool>(ptr_); }
 
     std::shared_ptr<T> handle() const { return ptr_; }
 
 private:
+    T* checked_() const {
+        if (!ptr_)
+            throw std::runtime_error(
+                "xi::Instance<T> '" + name_ + "' is unbound — the name is "
+                "already used by a different type, or instance creation failed");
+        return ptr_.get();
+    }
+
     std::shared_ptr<T> ptr_;
+    std::string        name_;  // kept only for the unbound-handle error message
 };
 
 } // namespace xi

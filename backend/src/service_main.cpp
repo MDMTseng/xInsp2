@@ -1164,7 +1164,7 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
     // global wrote. frame_hint doubles as the per-thread frame marker.
     {
         auto& c = crash_ctx();
-        c.last_run_id = (int)run_id;
+        c.last_run_id = run_id;   // int64 — keep the full id in crash reports
         c.last_frame  = frame_hint;
         crash_set(c.last_cmd, sizeof(c.last_cmd), "inspect");
     }

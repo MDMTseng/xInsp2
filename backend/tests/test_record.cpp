@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <xi/xi_record.hpp>
+#include <xi/xi_types.hpp>
 #include <xi/xi_doc_registry.hpp>
 #include "yyjson.h"
 
@@ -324,6 +325,31 @@ static void test_require_per_field_na() {
     CHECK(rt.get_string("f") == "NaN");
 }
 
+// value_opt(): a checked read must tell "field present and 0" apart from
+// "missing / NA", which the silent-downgrade value() can't. (B-fix #5.)
+static void test_typed_na_accessor() {
+    SECTION("Number::value_opt + Typed::has — per-field NA vs genuine 0");
+
+    xi::Number n(42.0);
+    CHECK(n.has("value"));
+    CHECK(n.value_opt().has_value());
+    CHECK(n.value_opt().value() == 42.0);
+    CHECK(n.value() == 42.0);
+
+    // An NA Number: value() downgrades to the default (reads as 0), but
+    // value_opt()/has() surface the NA so it's distinguishable from a real 0.
+    xi::Number na = xi::Number::na("no measurement");
+    CHECK(na.is_na());
+    CHECK(!na.has("value"));
+    CHECK(!na.value_opt().has_value());
+    CHECK(na.value(0.0) == 0.0);
+
+    // A genuine 0 must NOT be mistaken for NA.
+    xi::Number zero(0.0);
+    CHECK(zero.value_opt().has_value());
+    CHECK(zero.value_opt().value() == 0.0);
+}
+
 static void test_image_in_record() {
     SECTION("Image in Record");
     xi::Image img(4, 4, 3);
@@ -627,6 +653,7 @@ int main() {
     test_as_record_deep_copy();   // 15
     test_image_in_record();       // 16
     test_require_per_field_na();  // 16b — per-field NA + non-finite sentinel
+    test_typed_na_accessor();     // 16c — Number::value_opt / Typed::has (B-fix #5)
     test_refcount_cow();          // 17
     test_cross_abi_share();       // 18
     test_cache_input_zero_copy(); // 19

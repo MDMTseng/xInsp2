@@ -74,8 +74,8 @@ struct Context {
     char last_plugin[64]   {};   // plugin name backing it
     char last_phase[32]    {};   // inspect lifecycle phase (reset/inspect/...)
     char last_status[96]   {};   // last xi::status()/set_status text on this thread
-    int  last_run_id       = 0;
-    int  last_frame        = 0;
+    int64_t last_run_id    = 0;  // full run id (wire run_id is int64; don't truncate)
+    int  last_frame        = 0;  // frame hint — int by the xi_inspect_entry(int) ABI
 };
 
 // Per-thread crash breadcrumbs. A single global was racy under dispatch_threads

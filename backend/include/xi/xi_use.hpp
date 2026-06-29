@@ -313,8 +313,14 @@ public:
         // their existing handle (just addref); heap-backed Images
         // allocate a new pool slot and memcpy the bytes in. The
         // receiving plugin sees the handle either way.
-        std::vector<xi_record_image> in_imgs;
-        std::vector<xi_image_handle>  in_handles;
+        // Per-thread scratch, reused across calls to drop two allocations off
+        // the per-frame dispatch path. Safe because use() calls never nest on a
+        // thread: process_fn is a plugin, and a plugin can't call xi::use()
+        // (it's script-side), so it can't re-enter this with the buffers live.
+        static thread_local std::vector<xi_record_image> in_imgs;
+        static thread_local std::vector<xi_image_handle>  in_handles;
+        in_imgs.clear();
+        in_handles.clear();
         for (auto& [key, img] : input.images()) {
             if (img.empty()) continue;
             xi_image_handle h = XI_IMAGE_NULL;
@@ -392,7 +398,11 @@ public:
         auto exchange_fn = reinterpret_cast<UseExchangeFn>(g_use_exchange_fn_);
         auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
         if (!exchange_fn) return "{}";
-        std::vector<char> buf(64 * 1024);
+        // Per-thread scratch, reused (and kept at its high-water size) instead of
+        // a fresh 64KB allocation every call. Same non-nesting safety as
+        // process(): exchange_fn is a plugin and can't re-enter xi::use().
+        static thread_local std::vector<char> buf;
+        if (buf.size() < 64 * 1024) buf.resize(64 * 1024);
         int n = exchange_fn(name_.c_str(), cmd.c_str(), buf.data(), (int)buf.size());
         if (n == -1) { warn_use_miss_(host, name_.c_str()); return "{}"; }  // no such instance
         if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);

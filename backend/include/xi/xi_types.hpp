@@ -17,6 +17,7 @@
 #include "xi_record.hpp"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -96,6 +97,14 @@ public:
     bool is_na() const {
         return node_ && yyjson_mut_is_obj(node_) && yyjson_mut_obj_get(node_, Record::kNaKey) != nullptr;
     }
+    // Does field `k` actually exist on this value? NA-aware: an NA value carries
+    // no real fields, so this is false. Lets an author tell "field present and 0"
+    // apart from "field missing / NA" without the schema-less reads' silent
+    // downgrade to a default. (See value_opt() for the Number-specific form.)
+    bool has(const char* k) const {
+        if (is_na()) return false;
+        return node_ && yyjson_mut_is_obj(node_) && yyjson_mut_obj_get(node_, k) != nullptr;
+    }
     std::string na_reason() const {
         yyjson_mut_val* n = (node_ && yyjson_mut_is_obj(node_)) ? yyjson_mut_obj_get(node_, Record::kNaKey) : nullptr;
         const char* s = (n && yyjson_mut_is_str(n)) ? yyjson_mut_get_str(n) : nullptr;
@@ -170,6 +179,13 @@ public:
     XI_NOMINAL(Number)
     explicit Number(double v) { set("value", v); }
     double value(double def = 0.0) const { return num("value", def); }
+    // Checked read: nullopt when this Number is NA or has no "value" field, so a
+    // missing/NA value is distinguishable from a genuine 0. value() keeps the
+    // silent-downgrade-to-def behaviour for the common case.
+    std::optional<double> value_opt() const {
+        if (!has("value")) return std::nullopt;
+        return num("value");
+    }
 };
 
 class Point : public Typed {

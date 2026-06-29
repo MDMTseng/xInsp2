@@ -70,6 +70,13 @@ load-bearing contract that lives only in a comment/convention.
   today, by convention).
 - **ws_fallback_gate.test.mjs** is skipped (no no-export fixture) → the yyjson-layout
   gate is unguarded by CI.
+- **`xi_inspect_entry(int frame)` hint wraps at 2^31 frames** (~248 days @ 100 fps,
+  ~25 days @ 1 kfps). Diagnostic only — the wire `run_id` is int64 and correct, and
+  the crash breadcrumb `last_run_id` is now int64 too (fixed). Widening the *frame
+  hint* to int64 is deferred because it's the user-facing script entry signature
+  (every script + every doc example + the new-project template write
+  `void xi_inspect_entry(int frame)`); not worth a script-ABI churn for a hint that
+  only goes negative after months of 24/7 uptime. Do it with the next script-ABI bump.
 
 ## Won't fix (under current policy)
 
