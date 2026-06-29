@@ -538,7 +538,9 @@ the wrong version. (A dependency you load yourself **by absolute path** keys on
 the full path and does *not* clash.) Fix: give static deps distinct file names
 (and link each plugin against its own name), static-link, or pin a shared
 version. Same-name side-by-side versioning of a static import would need process
-isolation, which xInsp2 doesn't provide.
+isolation, which xInsp2 doesn't provide. `examples/dll_version_clash/` is a
+runnable demo of all three cases (full-path load, by-name clash, distinct-name
+fix).
 
 **My plugin won't load.** Check:
 1. Backend stderr — usually says exactly which symbol failed to

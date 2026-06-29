@@ -1,0 +1,7 @@
+{
+  "name": "depprobe_a",
+  "description": "Loads dep.dll from its own folder and reports the loaded path+version (DLL collision demo).",
+  "dll": "depprobe_a.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false
+}

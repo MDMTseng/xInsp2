@@ -638,7 +638,9 @@ unlimited (full `dispatch_threads`-wide). Ignored for a non-reentrant plugin
 without throttling the rest. The three modes are: serialized (non-reentrant → 1),
 concurrent (reentrant → N), and capped (reentrant + `max_concurrency: 1` → 1). The
 non-reentrant-serialized vs reentrant-races split is proven by
-`backend/tests/test_set_def_race.cpp`.
+`backend/tests/test_set_def_race.cpp`; `examples/qa_reentrancy/` demonstrates all
+three end-to-end under a live 4-thread dispatch pool (a probe plugin reports the
+max concurrency it observed per instance).
 
 **Other caveats once N > 1 (your responsibility):**
 
