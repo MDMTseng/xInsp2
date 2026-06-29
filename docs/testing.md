@@ -245,6 +245,14 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   itself). `backend/tests/test_prepare_concurrency.cpp` adds the ABI v7 staging
   contract (`prepare` ungated, `commit` gated). Guards against a regression that
   lets a `set_def` into a non-reentrant instance while `process()` is in flight.
+  `examples/qa_reentrancy/` demonstrates the same model end-to-end (`python
+  driver.py` → VERDICT: PASS) — a 4-thread pool pokes serial / parallel / capped
+  probe instances and asserts max concurrency 1 / ≥2 / 1.
+- **Plugin dependency-DLL base-name clash** — `examples/dll_version_clash/`
+  (`python run_experiment.py`) builds two versions of a same-named dependency and
+  proves the Windows loader's one-module-per-base-name rule across three load
+  modes (full-path → no clash, by-name same-name → clash, by-name distinct → no
+  clash).
 - **Per-worker watchdog** — `examples/qa_watchdog/` proves the inspect watchdog
   now fires under `dispatch_threads > 1` (it tracks a deadline slot per worker,
   not one global slot) and that a hard trip (script ignores cooperative cancel)
