@@ -1,1 +1,1 @@
-{ "plugin": "buffer_replay", "isolation": "in_process", "config": { "capacity": 16 } }
+{ "plugin": "cache", "isolation": "in_process", "config": { "capacity": 16 } }

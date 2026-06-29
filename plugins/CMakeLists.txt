@@ -50,6 +50,15 @@ set_target_properties(preview PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/preview
 )
 
+# cache — buffers records in a ring and re-emits a buffered one on exchange
+# (the plugin-side record/replay store; drives the hot-param re-inspect loop).
+add_library(cache SHARED cache/src/cache.cpp)
+target_include_directories(cache PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+set_target_properties(cache PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/cache
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/cache
+)
+
 # config_swap_probe — reference plugin for the orchestrator config-swap design
 # (double-slot prepare/commit via exchange; see
 # docs/roadmap/config-bundles-and-orchestration.md)
