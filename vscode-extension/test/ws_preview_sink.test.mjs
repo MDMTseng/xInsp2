@@ -56,8 +56,18 @@ test('preview_sink: a script surfaces output via use().process, pulled back by e
         console.log('preview_sink get bright:', JSON.stringify(bright));
         assert.equal(bright.found, true, 'bright group found');
         assert.equal(bright.image_count, 1, 'bright carries its image');
-        const bdata = typeof bright.data === 'string' ? bright.data : JSON.stringify(bright.data);
-        assert.ok(bdata.includes('score') && bdata.includes('gain'), 'bright data carries score+gain');
+
+        // `data` is the script's surfaced record (string-embedded JSON). pvar() built
+        // it: score(value), gain(value), synth(image) — the $layout array preserves
+        // that order + tags so the UI renders top-to-bottom.
+        const bd = JSON.parse(typeof bright.data === 'string' ? bright.data : JSON.stringify(bright.data));
+        assert.equal(bd.score, 17, 'score value present');
+        assert.equal(bd.gain, 7, 'gain value present');
+        assert.deepEqual(bd.$layout, [
+            { key: 'score', kind: 'value' },
+            { key: 'gain',  kind: 'value' },
+            { key: 'synth', kind: 'image' },
+        ], '$layout preserves pvar order + tags the image');
 
         const dark = await exch({ command: 'get', pg: 'dark' });
         assert.equal(dark.found, true, 'dark group found');

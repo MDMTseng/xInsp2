@@ -23,9 +23,20 @@ void xi_inspect_entry(int frame) {
     }
 
     // The new output path: surface to TWO preview groups; the UI tabs between them.
+    // pvar() appends each field in order (and tags images), so the UI can render
+    // the group top-to-bottom: a value, a value, then the image.
     xi::preview::Sink pv;
-    pv.process("bright", xi::Record().set("score", score).set("gain", g).image("synth", img));
-    pv.process("dark",   xi::Record().set("score", 255 - score).image("inv", inv));
+
+    xi::Record bright;
+    pvar(bright, "score", score);
+    pvar(bright, "gain",  g);
+    pvar(bright, "synth", img);
+    pv.process("bright", bright);
+
+    xi::Record dark;
+    pvar(dark, "score", 255 - score);
+    pvar(dark, "inv",   inv);
+    pv.process("dark", dark);
 
     // The run's verdict still leaves on its own channel (unaffected by VAR removal).
     if (score >= 0) xi::ok(1, "ok"); else xi::ng(1, "neg");
