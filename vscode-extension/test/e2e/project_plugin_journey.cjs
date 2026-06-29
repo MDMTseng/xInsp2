@@ -11,7 +11,7 @@
 //   8. Create instance of medium plugin
 //   9. Open instance UI panel
 //  10. Open interactive image viewer (no image yet → info toast)
-//  11. Export project plugin → verify dest folder has plugin.json + DLL + cert
+//  11. Export project plugin → verify dest folder has plugin.json + DLL
 //  12. Final state
 //
 // All steps drive through vscode.commands.executeCommand. QuickPick /
@@ -181,10 +181,10 @@ async function run() {
     shot('image_viewer_after_selftest');
 
     // ====== STEP 11 — export easy_thru (capped) ======
-    // Export does Release compile + baseline cert; that can run 60s+ in
-    // the worst case and indefinitely if cert wedges. We race it against
-    // a hard timeout so a slow / hung export doesn't block the rest of
-    // the journey. Disk verification is best-effort: if export didn't
+    // Export does a Release compile; that can run 60s+ in the worst case
+    // and indefinitely if the build wedges. We race it against a hard
+    // timeout so a slow / hung export doesn't block the rest of the
+    // journey. Disk verification is best-effort: if export didn't
     // finish in time we just log and move on.
     console.log('\n[11] export easy_thru (with timeout)');
     const origOpen = vscode.window.showOpenDialog;

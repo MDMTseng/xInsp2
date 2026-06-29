@@ -66,7 +66,7 @@ the port itself; it's a record so we know what to expect.
 | `backend/include/xi/xi_script_compiler.hpp` | `cl.exe` + `vcvars64.bat` + `cmd /C` | `g++` or `clang++` direct spawn; rewrite the diagnostic parser for gcc / clang error format. |
 | Crash forensics — `backend/include/xi/xi_crash_dump.hpp` (`xi::crash::`, extracted 2026-06 from `service_main.cpp`) | `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` + `EnumProcessModules` + `AddVectoredExceptionHandler` + the CRT death-path interceptors. All `#ifdef _WIN32`-gated; on non-Win `install()`/`reserve_fault_stack()` are no-ops and the breadcrumb model (`Context`/`ctx()`/`set()`) stays portable. | Google Breakpad or manual `sigaction` + core-file generation; `dl_iterate_phdr` for module-blame addresses. Replace the `#else` stubs in the leaf. |
 | `backend/include/xi/xi_cmake_build.hpp` (`xi::cmake_build::`, host-side cmake invocation for build:cmake plugins, extracted 2026-06) | `_popen`/`_pclose` via `cmd.exe` in `run_cmd_capture` | `popen(cmd + " 2>&1")` — same shape, no outer-quote wrap. Already `#ifdef _WIN32` + `TODO(linux)` stub. |
-| `backend/src/fe_main.cpp` (the `xinsp-fe` supervisor) | `CreateProcessA` + `WaitForSingleObject`, Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), `SetConsoleCtrlHandler`, Winsock TCP probe. | `posix_spawn`/`fork`+`execv`; `waitpid`/`pidfd`; `prctl(PR_SET_PDEATHSIG)` for the kill-on-parent-death guarantee; `sigaction(SIGINT/SIGTERM)`; POSIX `connect` probe. The whole Win32 path is already gated `#ifdef _WIN32` with a `TODO(linux)` stub `main()`; `xi_safe_state.hpp` + the crash-log parsing are portable. |
+| `backend/src/fe_main.cpp` (the `xinsp-fe` supervisor) | `CreateProcessA` + `WaitForSingleObject`, Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), `SetConsoleCtrlHandler`, Winsock TCP probe. | `posix_spawn`/`fork`+`execv`; `waitpid`/`pidfd`; `prctl(PR_SET_PDEATHSIG)` for the kill-on-parent-death guarantee; `sigaction(SIGINT/SIGTERM)`; POSIX `connect` probe. The whole Win32 path is already gated `#ifdef _WIN32` with a `TODO(linux)` stub `main()`; the crash-log parsing is portable. (PLC line-safe is **not** in the supervisor — it's a comms plugin's own sidecar process, see [`../internals/comms-sidecar.md`](../internals/comms-sidecar.md).) |
 
 ### Hard — different semantics (re-design)
 
@@ -135,7 +135,7 @@ Numbers are for getting each layer *working + smoke-tested*, not hardened.
 |---|---|---|
 | **0. Build green** | CMake on Linux, swap the Easy-tier API shims (sockets, `dlopen`, atomic-io, `_strdup`/`MAX_PATH`/wstring). Backend links + boots, WS answers `ping`. | 2–4 days |
 | **1. Core loop** | `xi_script_compiler` → `clang++`/`g++` spawn + gcc/clang diagnostic parser; load the compiled `.so` (`dlopen`); a trigger runs one `inspect()`; plugins load. This is the heart — once green, the framework "works" headless. | 1–1.5 weeks |
-| **2. Supervisor** | `fe_main.cpp` → `posix_spawn`/`pidfd`/`PR_SET_PDEATHSIG` + signal handlers + POSIX TCP probe. FE drives safe-state on BE death. | 3–5 days |
+| **2. Supervisor** | `fe_main.cpp` → `posix_spawn`/`pidfd`/`PR_SET_PDEATHSIG` + signal handlers + POSIX TCP probe. FE respawns the BE on death + records crash history (PLC line-safe is a comms sidecar, not the FE). | 3–5 days |
 | **3. Crash forensics** | `xi_seh` → `sigaction`+`siglongjmp` for the per-call net; process-level dumps via **Breakpad/Crashpad** (covers Linux+mac+ARM at once) or, as a stop-gap, core-file + `dladdr` module blame. | 3 days (stop-gap) → 2 weeks (Breakpad) |
 | **4. Watchdog** | Redesign — see Hard table. Cooperative checkpoint in the script ABI, or `SIGUSR1`→`siglongjmp` out of the inspect thread. Genuinely a design task, not a port. | 2–4 days design+impl |
 | **ARM Linux delta** | Drop IPP (x86-only); confirm OpenCV ARM build + NEON; native or cross toolchain. Otherwise identical POSIX to x64. | +2–4 days |
@@ -196,7 +196,7 @@ runtime-compile machinery the Linux compile-driver work has to generalise anyway
 
 **Done (source + build, compile-enforced):**
 - `fe/include/xi/` — the FE-supervisor surface (`xi_crash_history`,
-  `xi_crash_report`, `xi_fe_status`, `xi_respawn_policy`, `xi_safe_state`).
+  `xi_crash_report`, `xi_fe_status`, `xi_respawn_policy`).
   Reached **only** by `fe_main.cpp` + the three `test_qa_*` units, via the
   `xi_fe` CMake INTERFACE lib. It is **not** on `xi_core`'s include path, so the
   backend/runner binaries and the runtime script/plugin cl-compiler physically

@@ -148,14 +148,6 @@ async function run() {
     try { await vscode.commands.executeCommand('workbench.action.closeQuickOpen'); } catch {}
     await sleep(400);
 
-    // --- STATE 8: Cert drill-down panel for a plugin
-    try {
-        await vscode.commands.executeCommand('xinsp2.showPluginCert',
-            { label: 'mock_camera' });
-    } catch {}
-    await sleep(2200);
-    shot('8_cert_detail_panel');
-
     // --- STATE 9: Close project → back to the empty welcome
     try { await vscode.commands.executeCommand('xinsp2.closeProject'); } catch {}
     try { await vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}

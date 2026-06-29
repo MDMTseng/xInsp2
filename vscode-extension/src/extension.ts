@@ -1597,8 +1597,7 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Export a project plugin as a deployable folder ---
     // Picks any project-origin plugin from the current registry, asks for
     // the output dir, calls the backend which: (1) compiles Release with
-    // PDB, (2) runs baseline cert, (3) copies plugin.json + DLL + cert
-    // + optional ui/ into <dest>/<name>/. Cert failure aborts the export.
+    // PDB, (2) copies plugin.json + DLL + optional ui/ into <dest>/<name>/.
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.exportProjectPlugin', async (arg?: any) => {
             if (!client?.connected) { vscode.window.showWarningMessage('xInsp2: not connected'); return; }
