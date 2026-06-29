@@ -121,12 +121,12 @@ extern "C" {
 /*       with commit_group (a drain-barrier) for frame-perfect group    */
 /*       switches. See roadmap/config-bundles-and-orchestration.md.     */
 /* ------------------------------------------------------------------ */
-#define XI_ABI_VERSION 7
+#define XI_ABI_VERSION 9   /* v8: + emit_binary; v9: + compress_image (host JPEG cache) */
 
 /* Expected sizeof(xi_host_api) for the layout guard below (see the ABI LAYOUT
  * GUARD note after the struct). Bump together with XI_ABI_VERSION on any layout
  * change. 64-bit host (all function pointers). */
-#define XI_ABI_EXPECTED_SIZE 192  /* 64-bit: 24 function pointers * 8 bytes */
+#define XI_ABI_EXPECTED_SIZE 208  /* 64-bit: 26 function pointers * 8 bytes */
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -321,6 +321,37 @@ typedef struct xi_host_api {
                         xi_trigger_id id,
                         const struct xi_record* rec,
                         int64_t ts);
+
+    /* --------------------------------------------------------------- */
+    /* emit_binary (ABI v8) — push an opaque binary frame straight to    */
+    /* connected WS clients. The host is a dumb byte pipe: it forwards   */
+    /* `len` bytes via the WS server's binary send (the same path the    */
+    /* core once used for image previews). The FRAME FORMAT is the       */
+    /* plugin's contract with its UI — the core does not parse it.       */
+    /* Intended for a preview plugin that JPEG-encodes images and ships  */
+    /* them live (no base64, no poll), tagging each frame with its own   */
+    /* group/key header. Safe to call from a dispatch worker thread      */
+    /* (the WS send is thread-safe). Null on a pre-v8 host — always      */
+    /* null-check; a plugin then falls back to a pull path (exchange).   */
+    void (*emit_binary)(const void* data, int32_t len);
+
+    /* --------------------------------------------------------------- */
+    /* compress_image (ABI v9) — JPEG-encode an image THROUGH a host    */
+    /* cache, so the same frame compressed by several plugins (or the   */
+    /* same plugin repeatedly) is encoded ONCE globally. The host keys  */
+    /* a bounded (N-rotate) cache by a content hash of the pixels:      */
+    /* a hit returns the cached JPEG immediately; a miss encodes + stores.*/
+    /* Lets a preview plugin avoid linking turbojpeg/opencv AND avoids   */
+    /* re-compressing a buffer shared across the pipeline (the global    */
+    /* dedup the old core preview did, now a reusable service).          */
+    /*   pixels/w/h/channels: the source image (8-bit, 1/3/4 ch).        */
+    /*   quality: 1..100.                                                */
+    /*   out/out_cap: JPEG written here; returns bytes written, or       */
+    /*     -needed if out_cap is too small (resize + retry), 0 on error. */
+    /* Null on a pre-v9 host — plugin then encodes itself.               */
+    int32_t (*compress_image)(const void* pixels, int32_t w, int32_t h,
+                              int32_t channels, int32_t quality,
+                              void* out, int32_t out_cap);
 } xi_host_api;
 
 /* ABI LAYOUT GUARD (host build only). The version gate elsewhere is an int compare
@@ -339,8 +370,8 @@ typedef struct xi_host_api {
 static_assert(sizeof(xi_host_api) == XI_ABI_EXPECTED_SIZE,
               "xi_host_api layout changed: bump XI_ABI_VERSION and update "
               "XI_ABI_EXPECTED_SIZE (see the ABI LAYOUT GUARD note).");
-static_assert(offsetof(xi_host_api, emit_record) == XI_ABI_EXPECTED_SIZE - sizeof(void*),
-              "emit_record is no longer the last field — a field was added/removed "
+static_assert(offsetof(xi_host_api, compress_image) == XI_ABI_EXPECTED_SIZE - sizeof(void*),
+              "compress_image is no longer the last field — a field was added/removed "
               "without updating the ABI guard; bump XI_ABI_VERSION.");
 #endif
 

@@ -33,6 +33,8 @@
 #include "xi_image.hpp"
 #include "xi_instance_folders.hpp"
 #include "xi_status_sink.hpp"
+#include "xi_binary_sink.hpp"   // ABI v8: backs host_api.emit_binary (plugin -> WS push)
+#include "xi_compress_sink.hpp" // ABI v9: backs host_api.compress_image (host JPEG cache)
 #include "xi_doc_pool.hpp"      // γ: backs host_api.doc_chunk_* (pooled doc allocator)
 #include "xi_doc_registry.hpp"  // γ-4: backs host_api.doc_retain/doc_release
 
@@ -373,6 +375,18 @@ public:
         // (xi_status_sink.hpp); no-op when no sink is installed (headless).
         api.set_status = [](const char* source, const char* text) {
             if (auto fn = xi::status_sink()) fn(source, text);
+        };
+        // ABI v8: push an opaque binary frame to WS clients via the installed
+        // sink (xi_binary_sink.hpp); no-op when no sink is installed (headless).
+        api.emit_binary = [](const void* data, int32_t len) {
+            if (auto fn = xi::binary_sink()) fn(data, len);
+        };
+        // ABI v9: JPEG-encode through the host cache via the installed sink
+        // (xi_compress_sink.hpp); returns 0 when no encoder is installed.
+        api.compress_image = [](const void* px, int32_t w, int32_t h, int32_t c,
+                                int32_t q, void* out, int32_t cap) -> int32_t {
+            if (auto fn = xi::compress_sink()) return fn(px, w, h, c, q, out, cap);
+            return 0;
         };
         // Host doc allocator (ABI v3, γ) — backs the in-process yyjson doc
         // pass-by-pointer path. A doc built through these is host-owned, so its
