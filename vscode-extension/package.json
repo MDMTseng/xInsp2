@@ -73,11 +73,6 @@
         "icon": "$(debug-continue)"
       },
       {
-        "command": "xinsp2.clearHistory",
-        "title": "xInsp2: Clear Inspection History",
-        "icon": "$(clear-all)"
-      },
-      {
         "command": "xinsp2.openImageViewer",
         "title": "xInsp2: Open Interactive Image Viewer",
         "icon": "$(eye)"

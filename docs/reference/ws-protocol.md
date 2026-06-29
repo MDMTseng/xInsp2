@@ -274,7 +274,7 @@ is `ok: false` with `error: "compile failed"` and `data.diagnostics` carrying
 the structured cl.exe error array. **A failure is non-destructive**: the new DLL
 is loaded into a temporary and only swapped in on success, so a compile error —
 or a DLL that compiles but fails to load — leaves the previously-working script
-(and the client's subscriptions / history) intact rather than wedging to a null
+(and the client's subscriptions) intact rather than wedging to a null
 script.
 
 A `path` ending in `.dll` is loaded directly as a prebuilt AOT script DLL (no
@@ -313,7 +313,7 @@ single-shot). A plain `cmd:run` (neither arg) leaves `current_trigger()` inactiv
 
 `cmd:run` is the **deterministic single-shot** path (UI "Run", step-through). It
 is rejected while continuous mode is active (`"cannot run while continuous mode
-is active"`) and rapid runs are serialized so their `vars`/history arrive in
+is active"`) and rapid runs are serialized so their `vars` arrive in
 `run_id` order. Burst/throughput parallelism is the continuous-mode dispatch
 pool's job (`parallelism.dispatch_threads` + the trigger bus / fps) — `cmd:run`
 does not fan out.
@@ -733,33 +733,6 @@ are also emitted on the `log` channel as `level: warn` during
 > handler has been wired since the FL r6 P2-3 fix (PR #25). Doc
 > updated 2026-05-10.
 
-### `history` / `set_history_depth`
-
-Backend keeps a ring buffer of the last N vars snapshots so a client
-can scrub backward through recent runs without re-executing. Default
-depth is 50.
-
-```json
-{ "type": "cmd", "id": 9, "name": "history", "args": { "count": 5 } }
-```
-
-Reply (newest first):
-
-```json
-{ "depth": 50, "size": 12,
-  "runs": [
-    { "run_id": 12, "ts_ms": 1777..., "vars": [ ... ] },
-    { "run_id": 11, "ts_ms": 1777..., "vars": [ ... ] },
-    ...
-  ] }
-```
-
-Optional `since_run_id`: stop once a run with that id-or-older is hit
-(useful to incrementally pull only new entries).
-
-`cmd: set_history_depth { depth: N }` resizes the ring; entries beyond
-the new cap are dropped immediately. Bounded to [0, 10000].
-
 ### `subscribe` / `unsubscribe`
 
 Controls which VAR-image previews are JPEG-encoded and streamed as binary frames
@@ -788,6 +761,11 @@ Example:
 Large-image inspections (20 MP frames at ~1 MB JPEG each) benefit most — with no
 viewer open, a pipeline encodes and sends **zero** image bytes; with one image
 shown, only that one is encoded.
+
+> The backend keeps **no run-history ring**. Every run pushes a `vars` frame to
+> connected clients, so recent-run scrollback (and SPC-style backfill) is a
+> client-side / plugin concern — a client that wants it keeps its own ring of the
+> frames it received.
 
 ---
 
@@ -908,12 +886,6 @@ in full detail above. One-line purpose per entry; args follow the same
 #### Dispatch stats
 
 `dispatch_stats` is already documented above under `start` / `stop`.
-
-#### History utilities
-
-| Command | Purpose |
-|---|---|
-| `clear_history` | Empty the run-history ring immediately. Reply: `{ "cleared": N }`. |
 
 ---
 

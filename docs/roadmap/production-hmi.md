@@ -56,7 +56,7 @@ flowchart LR
         BE["xinsp-backend.exe (AOT: load-only)"]
         HMI["HMI SPA (kiosk browser)\nsingle WS client"]
         FE -->|spawns headless\n--project --autostart-fps| BE
-        HMI <-->|WS: vars + preview frames\n+ run timing + history| BE
+        HMI <-->|WS: vars + preview frames\n+ run timing| BE
     end
     DEV["VS Code (dev box)"] -->|authors dashboard.json\n+ AOT-builds the bundle| LINE
 ```
@@ -73,7 +73,7 @@ flowchart LR
 | Per-pass values + image refs | `vars` message (`items[]` with values + image `gid`) |
 | Image pixels | binary **preview frames** (gid-keyed) |
 | Cycle time / throughput | `run_finished` event carries `ms` |
-| Backfill charts on connect / SPC windows | **history ring** (`g_history`) + `history` command |
+| Backfill charts on connect / SPC windows | **client-side ring** — the HMI keeps its own ring of the `vars` frames it receives (the backend keeps no history ring) |
 | Crash / down alarms | FE status channel (`fe-status.json`) — PLC line-safe is the comms plugin's sidecar, not the HMI |
 | Headless run + supervise | `--project --autostart-fps` + `xinsp-fe.exe` |
 | Packaging skeleton | `tools/build_release.mjs` (today: dev zip) |
@@ -243,7 +243,7 @@ xinsp2-prod-<project>/
   (`tools/export_bundle.py`, backend `--aot`; see `deployment.md`).
 - **v2** — plugin-ships-`card` + plugin-ships-`overlay`; multi-layer overlay
   stacking.
-- **v3** — history backfill on connect for SPC; alarm acknowledgement; multi-station
+- **v3** — client-side / plugin history backfill for SPC; alarm acknowledgement; multi-station
   / multi-project dashboards; theming.
 
 ## Open details (recommended defaults; revisit during build)
@@ -270,4 +270,4 @@ package launcher (`run.cmd` → `run.sh`) and the kiosk-browser invocation; gate
 - `docs/guides/write-a-plugin.md` — the web stack + data contract the three
   plugin surfaces share.
 - `docs/guides/write-a-script.md` — where verdict/metric/overlay vars are emitted.
-- `docs/reference/ws-protocol.md` — `vars` / preview frames / `run_finished` / `history`.
+- `docs/reference/ws-protocol.md` — `vars` / preview frames / `run_finished`.

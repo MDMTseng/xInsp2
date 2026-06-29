@@ -91,7 +91,6 @@ cd vscode-extension && node test/runUserJourney.mjs
 | `runSubscribe` | preview subscription gates binary frames by name |
 | `runWatchdog` | watchdog kills runaway inspect; backend stays alive |
 | `runRemoteAuth` | `--auth` bearer gate, 401 on bad/missing, constant-time compare |
-| `runHistory` | ring buffer keeps 50; `since_run_id` filter; `set_history_depth` resize |
 | `runHeadlessRunner` | `xinsp-runner.exe` produces JSON report from a project |
 | `runUserJourney` | full 10-step real-user flow (24 screenshots) |
 | `runProjectPluginJourney` | in-project plugin create / edit / typo / fix / instance / export (12 screenshots) |

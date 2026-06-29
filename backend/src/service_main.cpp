@@ -250,7 +250,7 @@ static std::thread              g_timer_thread;
 // "keep going" flag so a stop unblocks a waiter.
 using xi::EmitGate;
 using xi::EmitTurn;
-// Serialise cmd:run dispatch threads so history / vars arrive in run_id
+// Serialise cmd:run dispatch threads so vars arrive in run_id
 // order. Threads queue up here and the watchdog operates on whichever
 // one is currently inside run_one_inspection — only one at a time.
 static std::mutex              g_run_mu;
@@ -322,15 +322,6 @@ static bool wd_any_overran(int64_t now_ms) {
 static std::mutex                    g_sub_mu;
 static bool                          g_sub_all = false;
 static std::unordered_set<std::string> g_sub_names;
-
-// History ring (S4). After every run we stash {run_id, ts_ms, vars_json}
-// in a bounded deque so a client can scroll back through recent runs
-// without re-executing. Default depth 50; client may resize via
-// cmd: set_history_depth.
-struct HistoryEntry { int64_t run_id; int64_t ts_ms; std::string vars_json; };
-static std::mutex                  g_hist_mu;
-static std::deque<HistoryEntry>    g_history;
-static size_t                      g_hist_max = 50;
 
 // Server pointer for emits that happen off the serving thread (status_cb, the
 // dropped-frame markers). Atomic so a worker/plugin thread loads it once and the
@@ -917,7 +908,7 @@ static std::mutex                     g_recent_errors_mu;
 static std::deque<RecentError>        g_recent_errors;
 static constexpr size_t               kRecentErrorsCap = 64;
 
-static int64_t now_ms_() { return xi::wall_ms(); }   // wall: RecentError / history ts
+static int64_t now_ms_() { return xi::wall_ms(); }   // wall: RecentError ts
 
 static void push_recent_error(std::string source, std::string message,
                               int64_t cmd_id = 0, int64_t run_id = 0) {
@@ -983,16 +974,6 @@ static void emit_vars_and_previews(xi::ws::Server& srv,
         vars_msg.append(sbuf.data(), (size_t)n);
         vars_msg += "}";
         srv.send_text(vars_msg);
-
-        // S4: stash this run's vars snapshot in the history ring so a
-        // client can scrub backward through recent runs without re-running.
-        {
-            std::lock_guard<std::mutex> lk(g_hist_mu);
-            int64_t ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            g_history.push_back({ run_id, ts_ms, std::string(sbuf.data(), (size_t)n) });
-            while (g_history.size() > g_hist_max) g_history.pop_front();
-        }
 
         // image previews — subscription-filtered. Parse the snapshot
         // STRUCTURALLY (yyjson) rather than substring-scanning for `"gid":` /
@@ -1914,45 +1895,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         out += (armed ? "true" : "false");
         out += "}";
         send_rsp_ok(srv, id, out);
-    } else if (name == "history") {
-        // S4: return the most recent N vars snapshots (default: all kept).
-        // args: { count?: N, since_run_id?: id }
-        auto cnt_opt = xp::get_number_field(parsed->args_json, "count");
-        auto since_opt = xp::get_number_field(parsed->args_json, "since_run_id");
-        size_t want = cnt_opt ? (size_t)std::max(0, (int)*cnt_opt) : (size_t)-1;
-        int64_t since = since_opt ? (int64_t)*since_opt : 0;
-        std::string out = "{\"depth\":";
-        {
-            std::lock_guard<std::mutex> lk(g_hist_mu);
-            out += std::to_string(g_hist_max);
-            out += ",\"size\":";
-            out += std::to_string(g_history.size());
-            out += ",\"runs\":[";
-            // Walk newest-to-oldest until we've collected `want` or exhausted.
-            size_t emitted = 0;
-            bool first = true;
-            for (auto it = g_history.rbegin(); it != g_history.rend(); ++it) {
-                if (emitted >= want) break;
-                if (it->run_id <= since) break;
-                if (!first) out += ",";
-                first = false;
-                out += "{\"run_id\":" + std::to_string(it->run_id);
-                out += ",\"ts_ms\":" + std::to_string(it->ts_ms);
-                out += ",\"vars\":" + it->vars_json;
-                out += "}";
-                ++emitted;
-            }
-            out += "]}";
-        }
-        send_rsp_ok(srv, id, out);
-    } else if (name == "clear_history") {
-        size_t cleared = 0;
-        {
-            std::lock_guard<std::mutex> lk(g_hist_mu);
-            cleared = g_history.size();
-            g_history.clear();
-        }
-        send_rsp_ok(srv, id, "{\"cleared\":" + std::to_string(cleared) + "}");
     } else if (name == "graph_capture") {
         // Toggle pipeline-graph dataflow capture (stage 2). Default off → no
         // hot-path cost. Enabling clears any prior recording.
@@ -1984,18 +1926,6 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         out += "]}";
         send_rsp_ok(srv, id, out);
-    } else if (name == "set_history_depth") {
-        auto d = xp::get_number_field(parsed->args_json, "depth");
-        if (!d) { send_rsp_err(srv, id, "missing depth"); return; }
-        int n = (int)*d;
-        if (n < 0) n = 0;
-        if (n > 10000) n = 10000;
-        {
-            std::lock_guard<std::mutex> lk(g_hist_mu);
-            g_hist_max = (size_t)n;
-            while (g_history.size() > g_hist_max) g_history.pop_front();
-        }
-        send_rsp_ok(srv, id, "{\"depth\":" + std::to_string(n) + "}");
     } else if (name == "unsubscribe") {
         {
             std::lock_guard<std::mutex> lk(g_sub_mu);
@@ -2179,8 +2109,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             std::lock_guard<std::mutex> lk(g_script_mu);
             // Load the NEW DLL into a temporary first; only swap it in on
             // success. A failed load (bad DLL, missing export) then leaves the
-            // previously-working script — and the client's subscriptions /
-            // history — intact, instead of unloading the old one and wedging to
+            // previously-working script — and the client's subscriptions —
+            // intact, instead of unloading the old one and wedging to
             // a null script. (temp-load-then-swap.)
             xi::script::LoadedScript next;
             std::string err;
@@ -2206,16 +2136,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // does the owner-sweep + FreeLibrary once any in-flight inspect that
             // snapshotted it returns.
             g_script = std::move(next);
-            // Reset cross-script transient state. Historical run snapshots no
-            // longer match the new VAR set, so drop them. **Keep the preview
-            // subscription** though — a viewer that's open across a recompile
-            // stays subscribed to its image name, so it keeps receiving previews
-            // without re-subscribing (stale names that the new DLL doesn't expose
-            // are simply inert — they match no var). (Only after a successful swap.)
-            {
-                std::lock_guard<std::mutex> hl(g_hist_mu);
-                g_history.clear();
-            }
+            // **Keep the preview subscription** across the swap — a viewer that's
+            // open across a recompile stays subscribed to its image name, so it
+            // keeps receiving previews without re-subscribing (stale names that the
+            // new DLL doesn't expose are simply inert — they match no var).
             crash_set(crash_ctx().last_script, sizeof(crash_ctx().last_script),
                       res.dll_path.c_str());
             crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd),
@@ -2409,7 +2333,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Run inspection on a detached thread so a long inspect doesn't block
         // the WS poll loop (and so the watchdog can observe its deadline slot).
         // Serialised on g_run_mu so 8 quick `cmd:run` calls produce
-        // vars/history entries in run_id order.
+        // vars entries in run_id order.
         // SEH translator must be installed inside the thread.
         //
         // cmd:run is INTENTIONALLY serial — it's the deterministic single-shot
@@ -3894,17 +3818,13 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[xinsp2] client disconnected\n");
         // E-P1-2: a fresh client should get a fresh server view.
         // Without these clears the next driver to reconnect inherits
-        // the prior session's subscription set, history ring, error
-        // ring. None of that is visible from the new client's perspective
-        // and at best confuses, at worst hides regressions.
+        // the prior session's subscription set + error ring. None of that
+        // is visible from the new client's perspective and at best confuses,
+        // at worst hides regressions.
         {
             std::lock_guard<std::mutex> lk(g_sub_mu);
             g_sub_all = false;   // fresh client gets send-none until it subscribes
             g_sub_names.clear();
-        }
-        {
-            std::lock_guard<std::mutex> lk(g_hist_mu);
-            g_history.clear();
         }
         {
             std::lock_guard<std::mutex> lk(g_recent_errors_mu);

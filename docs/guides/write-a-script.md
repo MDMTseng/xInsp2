@@ -108,8 +108,7 @@ State that survives the reload:
 - `xi::state()` JSON (persisted by `xi_script_get_state` /
   `xi_script_set_state`).
 - `xi::Param<T>` values (replayed by `xi_script_set_param`).
-- Subscription / history snapshots (host-managed, scoped to the
-  client).
+- Preview subscriptions (host-managed, scoped to the client).
 
 State that does NOT survive:
 - Static / global C++ objects in your script (the DLL is unloaded).

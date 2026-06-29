@@ -1751,20 +1751,6 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showWarningMessage(`xInsp2: resume — ${rsp.error}`);
             }
         }),
-        // --- Clear inspection history --------------------------------------
-        vscode.commands.registerCommand('xinsp2.clearHistory', async () => {
-            if (!client?.connected) return;
-            const ok = await vscode.window.showWarningMessage(
-                'Clear all inspection history snapshots? This cannot be undone.',
-                { modal: true }, 'Clear');
-            if (ok !== 'Clear') return;
-            const rsp = await sendCmd('clear_history');
-            if (rsp.ok) {
-                vscode.window.setStatusBarMessage('xInsp2: history cleared', 2000);
-            } else {
-                vscode.window.showWarningMessage(`xInsp2: clear_history — ${rsp.error}`);
-            }
-        }),
     );
 
     context.subscriptions.push(
