@@ -10,20 +10,25 @@ load-bearing contract that lives only in a comment/convention.
 
 ## Correctness — latent / edge (real, but not currently reachable or needs a rare race)
 
-- **F4 — lane group config is a copy, not a live view** (theme B). `GroupLane.cfg`
-  is copied from `project_.groups` at `spawn_group_pool_`; routing (`lane_for_`)
-  reads the *live* `default_group` but matches the lane's *copied* `cfg.name`. If a
-  group is reconfigured in the model without a stop+respawn, events route to the
-  wrong group. **Latent:** groups are load-only — no runtime "reconfigure groups"
-  command exists today (same shape as the a64c073 merge-allowlist case). Fix when a
-  runtime reconfigure is added: lane holds an immutable shared snapshot of the whole
-  `groups` + `default_group`.
-- **F5 — working-copy "who is authoritative" has no lock** (theme C/B). Opening a
-  working copy rebases all writes to `.xinsp_work` purely by convention; nothing
-  stops a second backend (or the same one with `working_copy:false`) from writing the
-  canonical concurrently, and a later commit's `mirror_tree` would clobber those
-  writes. **Edge:** needs a concurrent second writer. Fix: an advisory lock file
-  (PID+timestamp) at the canonical root, detected on open.
+- ~~**F4 — lane group config is a copy, not a live view**~~ **(FIXED 2026-06-27 —
+  made self-consistent.)** `lane_for_` used to mix the lane's *copied* `cfg.name`
+  with a *live* read of `project_.default_group`. It now reads
+  `g_default_group_snapshot`, captured under `g_lanes_mu` in `spawn_group_pool_`
+  alongside the lane set — so routing can never reference a group name absent from
+  `g_lanes`. Still unreachable today (groups are load-only; `open_project` quiesces +
+  respawns), but the routing is now consistent *by construction* rather than relying
+  on that external invariant — the safe shape for when a runtime "reconfigure groups"
+  command is added. Routing correctness covered by `ws_commit_group`.
+- ~~**F5 — working-copy "who is authoritative" has no lock**~~ **(FIXED 2026-06-27 —
+  advisory.)** `open_project` now drops a `.xinsp_owner` stamp (pid + wall-ms) at the
+  canonical root (new leaf `xi_owner_lock.hpp`; excluded from the seed/commit via
+  `xi::wc::is_excluded`). If a *live* different process already holds the stamp, the
+  open emits a `warn` log + a `recent_errors` entry ("project may already be open in
+  another backend (pid N)…"). Strictly advisory — a stale stamp (dead pid, e.g. a
+  crashed backend) is silently taken over, never refused, so it can't wedge a project.
+  Cross-platform liveness probe (`OpenProcess`/`WaitForSingleObject` on Windows,
+  `kill(pid,0)` + `TODO(linux)`). Test: `ws_owner_lock.test.mjs` (two live backends,
+  second is warned).
 
 ## Observability — unattended-PC signal gaps
 
@@ -46,8 +51,16 @@ load-bearing contract that lives only in a comment/convention.
   running-def generation + recency. Unifies boot-degraded and mid-run degraded onto
   one marker (autostart compiles through the same handler). Test:
   `ws_compile_degraded.test.mjs`.
-- **P1-7 — script `status()` dropped when no client is connected.** No persistent
-  landing spot; live-WS-only. Buffer the latest, or stamp to fe-status.
+- ~~**P1-7 — script `status()` dropped when no client is connected.**~~ **(CLOSED
+  2026-06-27 — already covered, premise stale.)** `set_status_internal` (the sink
+  behind `xi::status()`/`status_cb`) *always* writes the retained `g_status` map
+  under lock regardless of any connected client, and *always* mirrors the text into
+  the crash breadcrumb `last_status`; only the live push event is client-gated. So
+  status is NOT dropped with no client — it's re-pulled on every reconnect (the same
+  retained-map mechanism P1-4 uses) and survives a crash via the crash report. The
+  only uncovered sub-case is a *graceful* backend restart (in-memory map lost), but a
+  freshly-respawned backend has no meaningful prior status, so the "stamp to
+  fe-status" idea buys little. No code change.
 - ~~**P1-8 — drop/high-watermark counters reset at `cmd:start`.**~~ **(FIXED
   2026-06-27).** `dispatch_stats` now also reports `dropped_lifetime` and
   `queue_depth_high_watermark_lifetime` — process-global accumulators (like

@@ -41,6 +41,7 @@
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_plugin_manager.hpp>
 #include <xi/xi_project.hpp>
+#include <xi/xi_owner_lock.hpp>     // F5: advisory single-writer stamp on the project folder
 #include <xi/xi_trigger_bus.hpp>
 #include <xi/xi_inflight_runs.hpp>   // xi::InflightRuns (detached-run lifetime owner)
 #include <xi/xi_emit_gate.hpp>       // xi::EmitGate / xi::EmitTurn (ordered-emit gate)
@@ -1145,6 +1146,14 @@ struct GroupLane {
 // the producer is done. Fixes the lane-lifetime UAF found in v1 hardening.
 static std::vector<std::shared_ptr<GroupLane>> g_lanes;
 static std::mutex                              g_lanes_mu;
+// F4: default_group as captured WHEN the current lane set was spawned (guarded by
+// g_lanes_mu, set in spawn_group_pool_). lane_for_ routes against THIS, not a live
+// model read — so routing can never reference a group name that isn't in g_lanes.
+// Today groups are load-only (open_project quiesces + respawns), so the live value
+// can't diverge from the lanes; reading the snapshot makes that self-consistent by
+// construction instead of by that external invariant — the safe shape for when a
+// runtime "reconfigure groups" command is eventually added.
+static std::string                             g_default_group_snapshot;   // guarded by g_lanes_mu
 
 static void set_os_thread_priority_(const std::string& p) {
 #ifdef _WIN32
@@ -1215,7 +1224,7 @@ static std::shared_ptr<GroupLane> lane_for_(const std::string& group) {
     std::lock_guard<std::mutex> lk(g_lanes_mu);
     if (g_lanes.empty()) return nullptr;
     for (auto& l : g_lanes) if (l->cfg.name == group) return l;
-    const std::string& dg = g_plugin_mgr.project().default_group;
+    const std::string& dg = g_default_group_snapshot;   // F4: spawn-time snapshot, not a live read
     if (!dg.empty()) for (auto& l : g_lanes) if (l->cfg.name == dg) return l;
     return g_lanes.front();
 }
@@ -1283,6 +1292,9 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
     {
         std::lock_guard<std::mutex> lk(g_lanes_mu);
         g_lanes.clear();
+        // F4: capture default_group with this lane set so lane_for_ routes against
+        // a name that exists in g_lanes (the synthesized default lane below is "").
+        g_default_group_snapshot = g_plugin_mgr.project().default_group;
         for (auto& gc : g_plugin_mgr.project().groups) {
             auto lane = std::make_shared<GroupLane>(); lane->cfg = gc; g_lanes.push_back(std::move(lane));
         }
@@ -3034,6 +3046,22 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xi::TriggerBus::instance().clear_sink();
         xi::TriggerBus::instance().reset();
         if (g_plugin_mgr.open_project(*folder, working_copy)) {
+            // F5: advisory single-writer stamp. If another LIVE backend already
+            // owns this canonical, warn — two writers to one project clobber each
+            // other when a working-copy commit mirrors over the canonical. A stale
+            // stamp (the owning pid is gone) is silently taken over; never refuses.
+            {
+                auto prev = xi::ownerlock::read(*folder);
+                if (prev.present && prev.pid != xi::ownerlock::self_pid() &&
+                    xi::ownerlock::pid_alive(prev.pid)) {
+                    std::string s = "project may already be open in another backend (pid "
+                        + std::to_string(prev.pid) + "); concurrent writes can be lost "
+                        "when a working-copy commit mirrors over them";
+                    xp::LogMsg lm; lm.level = "warn"; lm.msg = s; srv.send_text(lm.to_json());
+                    push_recent_error("open_project", s);
+                }
+                xi::ownerlock::write(*folder, xi::wall_ms());
+            }
             auto& proj = g_plugin_mgr.project();
             int inst_count = (int)proj.instances.size();
             std::fprintf(stderr, "[xinsp2] project opened: %s (%d instances)\n",
