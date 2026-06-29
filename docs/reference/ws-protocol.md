@@ -796,6 +796,14 @@ stream* — status is one last-value string per component, overwritten in place)
 - A plugin calls `status("grabbing")` (the `xi::Plugin::status` helper, or the
   `host_api->set_status(source, text)` C ABI). The host keys it by the instance
   name (e.g. `cam0`). ABI-additive — older plugins/hosts simply don't use it.
+- The host itself publishes `@compile` — the health of the last `compile_and_load`.
+  `text == "ok"` after a successful load; a `"degraded: …"` string after a failed
+  attempt (compile error, bad DLL, out-of-tree prebuilt). On a mid-run hot-reload
+  the failure reply (`ok:false`) only reaches the *calling* client and the line keeps
+  streaming the last-good DLL, so this marker is how an unattended operator (or a
+  reconnecting one) detects that the running def is stale/degraded. A later successful
+  recompile clears it back to `"ok"`. The entry's `seq`/`ts_ms` double as a
+  running-def generation + recency stamp.
 - `cmd:status` → `data: { "<source>": { "text": "...", "ts_ms": N, "seq": N }, ... }`
   — a snapshot of every component's latest status.
 - `event: status` → `data: { "source": "...", "text": "...", "seq": N }` — pushed

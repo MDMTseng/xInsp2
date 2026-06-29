@@ -31,10 +31,16 @@ load-bearing contract that lives only in a comment/convention.
   (even ERROR) only `fprintf(stderr)`; on an unattended PC stderr is unwatched, so a
   plugin's self-diagnostics are invisible. Route ERROR/WARN to the WS log + maybe
   crash history.
-- **P1-4 — mid-run recompile failure runs the old def with no persistent degraded
-  flag** (theme D). A failed `compile_and_load` replies `ok:false` to the *caller* and
-  keeps streaming the last-good DLL, but boot-degraded has a marker and mid-run has
-  no equivalent. Add `last_compile_ok` / `running_def_epoch` to `cmd:status`.
+- ~~**P1-4 — mid-run recompile failure runs the old def with no persistent degraded
+  flag**~~ **(FIXED 2026-06-27).** The host now publishes a sticky `@compile` status
+  component: `text=="ok"` after a good `compile_and_load`, `"degraded: …"` after a
+  failed attempt (compile error / bad DLL / out-of-tree prebuilt), cleared back to
+  `ok` on a successful recompile. It rides the retained status map, so a status poll
+  (and a *reconnecting* operator) sees the degraded state even though the `ok:false`
+  reply only reached the calling client; the entry's `seq`/`ts_ms` give the
+  running-def generation + recency. Unifies boot-degraded and mid-run degraded onto
+  one marker (autostart compiles through the same handler). Test:
+  `ws_compile_degraded.test.mjs`.
 - **P1-7 — script `status()` dropped when no client is connected.** No persistent
   landing spot; live-WS-only. Buffer the latest, or stamp to fe-status.
 - **P1-8 — drop/high-watermark counters reset at `cmd:start`.** A restart erases the
