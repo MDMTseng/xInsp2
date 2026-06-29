@@ -27,10 +27,15 @@ load-bearing contract that lives only in a comment/convention.
 
 ## Observability — unattended-PC signal gaps
 
-- **P1-3 — plugin `host->log` / stderr reaches no operator channel.** `api.log`
-  (even ERROR) only `fprintf(stderr)`; on an unattended PC stderr is unwatched, so a
-  plugin's self-diagnostics are invisible. Route ERROR/WARN to the WS log + maybe
-  crash history.
+- ~~**P1-3 — plugin `host->log` / stderr reaches no operator channel.**~~ **(FIXED
+  2026-06-27).** `make_host_api`'s `api.log` still prints to stderr but now also calls
+  through an installed `xi::log_sink()` (new leaf `xi_log_sink.hpp`, same pattern as
+  `xi_status_sink`/`xi_binary_sink`). service_main forwards **WARN/ERROR** to a live
+  WS `log` event, and **ERROR** into the `recent_errors` ring (`source:"plugin"`);
+  DEBUG/INFO stay stderr-only to avoid flooding. Covers both plugin and script host
+  APIs (both built via `make_host_api`). Hot-path cost: one relaxed atomic load +
+  level branch per `log()` call (rare; WARN/ERROR only build a message). Test:
+  `ws_plugin_log_channel.test.mjs`.
 - ~~**P1-4 — mid-run recompile failure runs the old def with no persistent degraded
   flag**~~ **(FIXED 2026-06-27).** The host now publishes a sticky `@compile` status
   component: `text=="ok"` after a good `compile_and_load`, `"degraded: …"` after a

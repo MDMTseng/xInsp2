@@ -463,6 +463,14 @@ this ring is the workaround.
 `ts_ms >= since_ms`. Use the `ts_ms` of the last-known error from a
 previous poll to fetch incrementally.
 
+A plugin's (or script's) own `host_api->log(level, msg)` also feeds these
+channels: **WARN** and **ERROR** lines are forwarded to a live `log` event
+(so they reach a connected operator instead of dying on the backend's
+unwatched stderr), and **ERROR** lines additionally land in this
+`recent_errors` ring (`source: "plugin"`). DEBUG/INFO stay on stderr only.
+This matters on an unattended PC where nobody is watching the console — a
+plugin's self-diagnostics now surface over the WS.
+
 ### `toolchain_health`
 
 `args: {}` → reports the C++ build toolchain for the open project. Each
