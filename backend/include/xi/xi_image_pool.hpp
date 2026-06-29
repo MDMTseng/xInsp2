@@ -34,6 +34,7 @@
 #include "xi_instance_folders.hpp"
 #include "xi_status_sink.hpp"
 #include "xi_binary_sink.hpp"   // ABI v8: backs host_api.emit_binary (plugin -> WS push)
+#include "xi_log_sink.hpp"      // P1-4/P1-3: backs host_api.log (plugin/script -> WS log)
 #include "xi_compress_sink.hpp" // ABI v9: backs host_api.compress_image (host JPEG cache)
 #include "xi_doc_pool.hpp"      // γ: backs host_api.doc_chunk_* (pooled doc allocator)
 #include "xi_doc_registry.hpp"  // γ-4: backs host_api.doc_retain/doc_release
@@ -347,6 +348,15 @@ public:
             std::snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",
                           tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)ms);
             std::fprintf(stderr, "[%s %s] %s\n", ts, lvl[level & 3], msg);
+            // P1-3: also forward to the operator channel (WS log / recent-errors)
+            // via the installed sink, so a plugin's WARN/ERROR isn't lost on an
+            // unwatched stderr. No-op when no sink is installed (headless). The
+            // sink itself decides which levels escalate; we pass the full epoch ms.
+            if (auto fn = xi::log_sink()) {
+                int64_t ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    now.time_since_epoch()).count();
+                fn(level, msg ? msg : "", ts_ms);
+            }
         };
         api.instance_folder = [](const char* name, char* buf, int32_t buflen) -> int32_t {
             std::string p = InstanceFolderRegistry::instance().get(name ? name : "");

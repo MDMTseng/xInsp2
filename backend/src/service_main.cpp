@@ -3730,6 +3730,22 @@ int main(int argc, char** argv) {
         return (int)jpeg.size();
     };
 
+    // P1-3: forward plugin/script host_api->log to the operator channel. stderr is
+    // unwatched on an unattended PC, so a plugin's WARN/ERROR self-diagnostics used
+    // to vanish. WARN/ERROR escalate to the WS log channel (clients see them live +
+    // re-pull via cmd:recent_errors); ERROR also lands in the recent-errors ring.
+    // DEBUG/INFO stay stderr-only (already printed in make_host_api) to avoid
+    // flooding the WS log. Non-capturing → converts to LogSinkFn. Thread-safe:
+    // send_text + push_recent_error may be called from any dispatch worker.
+    xi::log_sink() = [](int32_t level, const char* msg, int64_t /*ts_ms*/) {
+        if (level < 2 || !msg) return;                 // only WARN(2)/ERROR(3) escalate
+        if (auto* s = g_srv_for_bp.load(std::memory_order_acquire)) {
+            xp::LogMsg lm; lm.level = (level >= 3) ? "error" : "warn"; lm.msg = msg;
+            s->send_text(lm.to_json());
+        }
+        if (level >= 3) push_recent_error("plugin", msg);
+    };
+
     // P2.4 watchdog. Always-on monitor thread; acts when any in-flight inspect
     // (wd_arm slot) overruns its deadline. Two-phase, now per-worker-aware:
     //   Phase 1 — cooperative: set the script's GLOBAL cancel flag; xi::ops poll
