@@ -1,0 +1,13 @@
+{
+  "name": "preview_sink",
+  "description": "Keeps the latest record a script surfaces via xi::use(\"preview\").process(...) and returns it on exchange_instance({\"command\":\"get_latest\"}). The post-VAR way to view script output: data flows script -> plugin -> client pull, no core vars frame.",
+  "dll": "preview_sink.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [],
+    "inputs":  [{"name": "any", "kind": "record", "doc": "whatever the script wants to view (data + images)"}],
+    "outputs": [],
+    "exchange": [{"command": "get_latest", "doc": "returns {seen, data, image_count} of the most recent surfaced record"}]
+  }
+}

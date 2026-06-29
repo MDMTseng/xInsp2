@@ -35,7 +35,10 @@ class Client {
         return new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('timeout')), ms); this.w.push({ resolve: v => { clearTimeout(t); res(v); } }); });
     }
     async nextRsp(ms = 90000) { for (;;) { const m = await this.next(ms); if (m.type === 'rsp') return m; } }
-    drainVars() { const v = this.q.filter(m => m.type === 'vars'); this.q = this.q.filter(m => m.type !== 'vars'); return v; }
+    // Count completed runs via the run_finished event (the vars frame was removed
+    // with VAR; run_finished still brackets every inspect, so it's the non-vars
+    // "a frame ran" signal).
+    drainRuns() { const v = this.q.filter(m => m.type === 'event' && m.name === 'run_finished'); this.q = this.q.filter(m => !(m.type === 'event' && m.name === 'run_finished')); return v; }
     close() { try { this.ws.close(); } catch {} }
 }
 
@@ -75,17 +78,17 @@ test('continuous streaming survives a working-copy commit (DispatchPoolGuard res
         assert.equal((await c.nextRsp()).ok, true, 'start ok');
 
         await sleep(800);
-        assert.ok(c.drainVars().length >= 2, 'streaming before the commit');
+        assert.ok(c.drainRuns().length >= 2, 'streaming before the commit');
 
         // commit_working_copy quiesces the dispatch pool. Before the fix it never
         // resumed → the stream stopped here silently.
         c.send({ type: 'cmd', id: 4, name: 'commit_working_copy' });
         assert.equal((await c.nextRsp()).ok, true, 'commit_working_copy ok');
 
-        // The stream must resume on its own. Drain stale frames, then confirm fresh ones.
-        c.drainVars();
+        // The stream must resume on its own. Drain stale runs, then confirm fresh ones.
+        c.drainRuns();
         await sleep(800);
-        assert.ok(c.drainVars().length >= 2, 'streaming RESUMED after the commit (regression: it stopped)');
+        assert.ok(c.drainRuns().length >= 2, 'streaming RESUMED after the commit (regression: it stopped)');
 
         c.send({ type: 'cmd', id: 5, name: 'stop' });
         assert.equal((await c.nextRsp()).ok, true, 'stop ok');

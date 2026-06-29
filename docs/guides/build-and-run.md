@@ -79,7 +79,9 @@ Override with `TURBOJPEG_ROOT` / `IPP_ROOT`.
 
 - **VS Code (fast loop):** open the repo with the xInsp2 extension, open a project
   under `examples/`, hit compile/run — the extension spawns the BE, compiles the
-  script, streams vars to the viewer.
+  script, and reports the run (verdict via `run_result`). (Per-run value/image
+  streaming to a viewer was removed from core — branch `refactor/remove-var-core`;
+  it's becoming a preview-plugin concern.)
 - **Headless (what FE/production does):**
   ```powershell
   backend/build/Release/xinsp-backend.exe --project=examples/qa_group_parallelism --autostart-fps=-1
@@ -88,8 +90,9 @@ Override with `TURBOJPEG_ROOT` / `IPP_ROOT`.
 - **HMI:** `node hmi/serve.mjs` then open the printed URL (or
   `hmi/index.html?ws=ws://127.0.0.1:7823/`).
 - **First change:** edit a project's `inspect.cpp` and re-run — the backend
-  hot-reloads the DLL. Try a `VAR(...)` / `xi::result(...)` in
-  `examples/qa_run_result/inspect.cpp`.
+  hot-reloads the DLL. Try an `xi::result(...)` (the live per-run verdict) in
+  `examples/qa_run_result/inspect.cpp`. (`VAR(...)`/`EMIT(...)` still compile but
+  no longer surface anything — branch `refactor/remove-var-core`.)
 - **Tests:** `python tools/run_qa.py` (all `examples/qa_*/driver.py`); `ctest` for
   the C++ unit tests. See `testing.md`.
 

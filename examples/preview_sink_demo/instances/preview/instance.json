@@ -1,0 +1,1 @@
+{ "plugin": "preview_sink", "isolation": "in_process", "config": {} }

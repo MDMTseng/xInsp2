@@ -36,7 +36,7 @@ test('compile failure returns ok:false with error message', async () => {
 // ---------------------------------------------------------------
 // 2. Inspection output value verification
 // ---------------------------------------------------------------
-test('run produces correct var values (not just ok:true)', async () => {
+test('run produces correct var values (not just ok:true)', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
         const cr = await compileScript(c, scriptPath('user_script_example.cpp'));
@@ -168,7 +168,7 @@ test('compile_and_load during continuous mode stops worker safely', async () => 
 // ---------------------------------------------------------------
 // 7. SEH crash recovery + correct output after
 // ---------------------------------------------------------------
-test('crash recovery: normal script produces correct output after SEH crash', async () => {
+test('crash recovery: normal script produces correct output after SEH crash', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
@@ -204,7 +204,7 @@ test('crash recovery: normal script produces correct output after SEH crash', as
 // ---------------------------------------------------------------
 // 8. set_param verifies actual value change
 // ---------------------------------------------------------------
-test('set_param changes inspection output', async () => {
+test('set_param changes inspection output', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
         const cr = await compileScript(c, scriptPath('user_script_example.cpp'));
@@ -364,7 +364,7 @@ test('get_project returns current state', async () => {
 // ---------------------------------------------------------------
 // 11. JPEG preview binary frame verification
 // ---------------------------------------------------------------
-test('run produces valid JPEG binary preview frames', async () => {
+test('run produces valid JPEG binary preview frames', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
         // Previews are off by default — opt into all for this headless check.

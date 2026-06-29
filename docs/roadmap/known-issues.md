@@ -47,15 +47,14 @@ load-bearing contract that lives only in a comment/convention.
   (theme B, pixel level). After dedup, multiple consumers alias the *same* handle and
   `image_data()` hands back a writable pointer with no COW — a plugin doing an
   in-place op on its input (e.g. `cvtColor(in,in,…)`) silently corrupts the frame for
-  every other consumer + the preview. Full per-frame COW violates speed-first; the
+  every other consumer. Full per-frame COW violates speed-first; the
   low-cost path is a const-input ABI (`image_data` returns const for inputs, output
   forced through `image_create`) — needs an ABI bump + migrating any in-place plugin.
-- **canon-dedup mapping rebuilt independently on backend + each client** (theme B).
-  Backend picks the canonical gid by pointer identity; each client rebuilds
-  `gid→canon` from the vars frame. After a recompile / gid change, a stale client map
-  can route a preview to a blank/wrong tile. Carry `canon` + a run epoch in the
-  binary preview header so the client uses the backend's authority + drops stale
-  frames. (Monitor-display only — pass/fail goes via VAR/PLC, not preview.)
+- ~~**canon-dedup mapping rebuilt independently on backend + each client**~~
+  **(MOOT — branch `refactor/remove-var-core`).** This concerned the `vars` frame +
+  binary preview dedup path, which has been removed from core (image preview is
+  moving to a preview plugin). Left here for history; revisit only if the preview
+  plugin reintroduces backend-side gid dedup.
 - **Non-finite sentinel / json-escape replicated per producer-consumer** (theme A).
   C++ is mostly centralized, but each plugin's `io.hpp` + the JS side re-implement it;
   a new producer that forgets the sentinel emits a bare `NaN` token and the whole
@@ -90,9 +89,9 @@ load-bearing contract that lives only in a comment/convention.
 - **Per-run hot path audited clean**: graph_capture OFF = one relaxed atomic load;
   result()/status() fire only when the script uses them; EmitTurn/watchdog gated;
   crash breadcrumbs ~100-200ns and necessary. No tax-when-unused worth gating. (The
-  one latent idea — a fully headless run, zero clients connected, still calls
-  `s.snapshot()` + formats the vars frame for nobody now that the history ring is
-  gone — is a possible future optimization for unattended production, not yet done.)
+  one latent idea — a fully headless run, zero clients connected, still did
+  per-run snapshot/emit work for nobody — is now moot: the `vars`/preview emit
+  path was removed from core entirely (branch `refactor/remove-var-core`).)
 
 ## Won't fix (under current policy)
 
@@ -101,8 +100,9 @@ load-bearing contract that lives only in a comment/convention.
   the unsupported "same Record instance touched by two threads" usage. Atomizing it
   doesn't fix the real UB, only TSan noise. Revisit only if parallel doc-sharing
   becomes a real path.
-- Per-connection subscription set (multi-client preview stomp) — deployment is
-  single-client.
+- ~~Per-connection subscription set (multi-client preview stomp)~~ — moot:
+  deployment is single-client, and the `subscribe`/preview path was removed from
+  core (branch `refactor/remove-var-core`).
 - Verifying plugin self-declared `reentrant` / `XI_PLUGIN_STAGED` — plugins are
   trusted; this would be a hostile-plugin defense.
 

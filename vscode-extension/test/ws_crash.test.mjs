@@ -121,11 +121,10 @@ test('crash isolation: backend survives all crash types', async () => {
 
         c.send({ type: 'cmd', id: 51, name: 'run' });
         const rr = await c.nextNonLog();
+        // The run rsp ok proves the normal script ran to completion after all the
+        // crashes — that's the crash-isolation guarantee. (Output assertion was via
+        // the removed vars frame; the run completing is the non-vars signal.)
         assert.equal(rr.ok, true, 'normal script runs after crashes');
-
-        const vars = await c.nextNonLog();
-        assert.equal(vars.type, 'vars', 'vars received after crashes');
-        assert.ok(vars.items.length >= 5, 'normal output after crashes');
         console.log('  [crash] normal script works ✓');
     });
 });

@@ -58,6 +58,15 @@ Higher-level helpers (also exported): `mountPanel` (auto-UI from a descriptor),
 
 ## Wiring to the backend — pick your context
 
+> **Image preview removed from core (branch `refactor/remove-var-core`).** The
+> `subscribe`/`unsubscribe` commands and the binary image-preview frames that the
+> `onPreview` / `subscribeImage` flow below relied on have been **removed** from
+> the backend. Control wiring (params via `set_instance_def` / `exchange_instance`)
+> and `status` are unaffected and remain the live path. **Image surfacing for a
+> plugin UI is moving to a preview plugin** — the `preview` message + `subscribeImage`
+> examples below are kept as the prior pattern and the likely shape of what the
+> preview plugin will expose, but they have **no live core source today**.
+
 ### A. Inside a VS Code plugin webview → `vscode.postMessage`
 
 A plugin's `ui/index.html` talks to the backend **through the extension bridge**
@@ -98,27 +107,18 @@ import { XiClient } from "./xi-components.esm.js";
 const client = await new XiClient("ws://127.0.0.1:7823/").connect({ checkVersion: /\d+\.\d+\.\d+/ });
 slider.addEventListener("change", (e) => client.setInstanceDef("inst0", { threshold: e.detail.value }));
 client.onPreview((f) => viewer.setFrame(f.image || f.dataUrl));
-client.subscribeImage("gray");   // ← REQUIRED: the backend sends no image until subscribed
+client.subscribeImage("gray");   // ← legacy: core no longer streams previews (see note below)
 // ...and when the view closes: client.unsubscribeImage("gray");
 ```
 
-> **You must subscribe to receive previews.** The backend streams an image only
-> while someone is viewing it (it encodes nothing otherwise — see
-> [`../reference/ws-protocol.md`](../reference/ws-protocol.md) → `subscribe`).
-> `client.subscribeImage(name)` / `unsubscribeImage(name)` are ref-counted and
-> re-asserted on reconnect; call them as your image view mounts / unmounts. The
-> built-in `mountDashboard` / status `monitor` do this automatically for their
-> image cards — you only wire it by hand in a bespoke layout.
-
-> **Decode once when an image is shown in several places.** `XiClient` decodes
-> each preview frame once into a shared `f.image` (a GC-managed `HTMLImageElement`)
-> and the backend already sends one frame per distinct image (`vars.src` dedup,
-> see [`../reference/ws-protocol.md`](../reference/ws-protocol.md)). Pass
-> `f.image` to `setFrame` so M components draw the one decoded image instead of
-> each re-decoding the JPEG; `setFrame` also accepts a `Canvas`/`ImageBitmap`. Fall
-> back to `f.dataUrl` (it self-decodes) when `f.image` is absent (non-browser).
-> Components only *borrow* the shared handle to draw — never `close()` it; if you
-> need to keep a frame (replay/snapshot), copy it into your own canvas.
+> **Legacy (preview removed from core).** The `subscribe`/preview path the
+> snippet above uses no longer has a backend source: `subscribeImage` /
+> `unsubscribeImage` / `onPreview` mapped onto the removed `subscribe` command and
+> binary preview frame (branch `refactor/remove-var-core`). The control + `status`
+> calls in the same snippet still work; only the image-streaming lines are inert
+> until a preview plugin provides the frames. The decode-once / `vars.src` dedup
+> behavior described next was part of that same removed path — retained here as
+> background for whoever builds the preview plugin.
 
 ### C. Auto-UI from a manifest descriptor → `mountPanel`
 

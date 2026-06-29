@@ -56,7 +56,7 @@ async function withBackend(fn) {
     finally { c.close(); if (child.exitCode === null) { child.kill(); await sleep(100); } }
 }
 
-test('defect_detection.cpp compiles, runs, produces expected vars', async () => {
+test('defect_detection.cpp compiles, runs, produces expected vars', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello
 

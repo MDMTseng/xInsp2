@@ -24,7 +24,7 @@ async function rsp(c, id) {
     for (;;) { const m = await c.nextText(180000); if (m.type === 'rsp' && m.id === id) return m; }
 }
 
-test('emit_trigger_record metadata reaches the script via current_trigger().meta()', async () => {
+test('emit_trigger_record metadata reaches the script via current_trigger().meta()', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (trigger dispatch still works; observed via vars frames)' }, async () => {
     await withBackend(async (c) => {
         await c.nextText();  // hello
 

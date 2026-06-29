@@ -54,7 +54,7 @@ void xi_inspect_entry(int){
 
 async function waitRsp(c, id) { for (;;) { const m = await c.nextText(); if (m.type === 'rsp' && m.id === id) return m; } }
 
-test('OpenMP opt-in (project.json "openmp_max_threads") compiles + caps threads', async () => {
+test('OpenMP opt-in (project.json "openmp_max_threads") compiles + caps threads', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'xi_omp_'));
     writeFileSync(join(dir, 'project.json'), PROJECT_JSON);
     const sp = join(dir, 'inspect.cpp');

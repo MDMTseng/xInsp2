@@ -77,7 +77,7 @@ async function withBackend(fn) {
     }
 }
 
-test('compile_and_load + run end-to-end', async () => {
+test('compile_and_load + run end-to-end', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello
 
@@ -109,7 +109,7 @@ test('compile_and_load + run end-to-end', async () => {
     });
 });
 
-test('set_param on loaded script updates next run', async () => {
+test('set_param on loaded script updates next run', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello
 

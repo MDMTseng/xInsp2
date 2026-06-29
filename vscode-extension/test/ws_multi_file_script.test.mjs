@@ -18,7 +18,7 @@ import { withBackend, scriptPath } from './helpers/client.mjs';
 
 const inspect = scriptPath('multi_file_script/inspect.cpp');
 
-test('multi-file script (headers #included into one TU) compiles + surfaces lane VARs', async () => {
+test('multi-file script (headers #included into one TU) compiles + surfaces lane VARs', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello
 

@@ -79,8 +79,10 @@ auto-generate B.
 One small library, many consumers (dev webui, export A, export B, production HMI):
 
 - **`xi-image-viewer`** — image display with zoom / pan / cursor-anchored zoom /
-  pixel probe, fed by the WS binary preview frames. The pan/zoom math already
-  exists (`imageViewerPanel.ts` + its selftest) — this generalises it.
+  pixel probe. (It was fed by the WS binary preview frames, which have since been
+  removed from core — branch `refactor/remove-var-core`; image previews are moving
+  to a preview plugin that this viewer would consume instead.) The pan/zoom math
+  already exists (`imageViewerPanel.ts` + its selftest) — this generalises it.
 - **Bindable controls** — `xi-slider` / `xi-number` / `xi-toggle` / `xi-radio` /
   `xi-dropdown`, each `key`-bound: a change patches that key via `set_instance_def`
   (or fires an `exchange` command). Persist the binding (`key` name, range,
@@ -146,8 +148,9 @@ Mapping to the two app shapes:
   `xi-components.js` (industrial sites may be offline; support vendored, not just
   npm).
 - **Ship a WS-client shim** with it — so external apps don't reimplement the
-  protocol (connect / `set_instance_def` / `prepare_instance` / `commit_group` /
-  `subscribe` vars).
+  protocol (connect / `set_instance_def` / `prepare_instance` / `commit_group`).
+  (The `subscribe`-vars command this once listed has been removed from core —
+  branch `refactor/remove-var-core`.)
 - **Descriptors-as-data** — export the control-descriptors as JSON so an external
   app can auto-render the same widgets for an instance, or ignore them and place
   widgets by hand.
