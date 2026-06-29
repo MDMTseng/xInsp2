@@ -59,15 +59,27 @@ test('preview_sink: a script surfaces output via use().process, pulled back by e
 
         // `data` is the script's surfaced record (string-embedded JSON). pvar() built
         // it: score(value), gain(value), synth(image) — the $layout array preserves
-        // that order + tags so the UI renders top-to-bottom.
+        // that order, tags the image, and stamps each call's source line.
         const bd = JSON.parse(typeof bright.data === 'string' ? bright.data : JSON.stringify(bright.data));
         assert.equal(bd.score, 17, 'score value present');
         assert.equal(bd.gain, 7, 'gain value present');
-        assert.deepEqual(bd.$layout, [
-            { key: 'score', kind: 'value' },
-            { key: 'gain',  kind: 'value' },
-            { key: 'synth', kind: 'image' },
-        ], '$layout preserves pvar order + tags the image');
+        const L = bd.$layout;
+        assert.equal(L.length, 3, '$layout has the 3 pvar entries in order');
+        assert.deepEqual(L.map(e => [e.key, e.kind]),
+            [['score', 'value'], ['gain', 'value'], ['synth', 'image']], 'order + kinds');
+        assert.ok(L.every(e => typeof e.line === 'number' && e.line > 0), 'each entry stamps a source line');
+        assert.ok(L[0].line < L[2].line, 'line numbers increase with pvar call order');
+
+        // Collapsed by default: `get` returns NO pixels — only the layout + counts.
+        assert.ok(!('b64' in bright), 'get (tab view) carries no image pixels');
+
+        // Expand: the UI lazily fetches an image only when opened.
+        const im = await exch({ command: 'get_image', pg: 'bright', key: 'synth' });
+        assert.equal(im.found, true, 'get_image found the expanded image');
+        assert.deepEqual([im.w, im.h, im.channels], [8, 8, 1], 'image dims round-trip');
+        assert.ok(typeof im.b64 === 'string' && im.b64.length === 88, 'pixels as base64 (64 bytes → 88 chars)');
+        const miss = await exch({ command: 'get_image', pg: 'bright', key: 'nope' });
+        assert.equal(miss.found, false, 'missing image → found:false');
 
         const dark = await exch({ command: 'get', pg: 'dark' });
         assert.equal(dark.found, true, 'dark group found');

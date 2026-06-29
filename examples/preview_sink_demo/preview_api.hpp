@@ -26,26 +26,29 @@ namespace xi { namespace preview {
 // for an "image" — instead of guessing from the bare data object (image keys don't
 // live in the data JSON, so order + kind would otherwise be lost).
 namespace detail {
-inline void layout_push(xi::Record& rec, const std::string& key, const char* kind) {
-    rec.push("$layout", xi::Record().set("key", key).set("kind", std::string(kind)));
+inline void layout_push(xi::Record& rec, const std::string& key, const char* kind, int line) {
+    rec.push("$layout", xi::Record().set("key", key)
+                                    .set("kind", std::string(kind))
+                                    .set("line", line));   // source line of the pvar() call
 }
 }  // namespace detail
 
-inline xi::Record& append(xi::Record& rec, const std::string& key, int v)
-    { rec.set(key, v);              detail::layout_push(rec, key, "value"); return rec; }
-inline xi::Record& append(xi::Record& rec, const std::string& key, double v)
-    { rec.set(key, v);              detail::layout_push(rec, key, "value"); return rec; }
-inline xi::Record& append(xi::Record& rec, const std::string& key, bool v)
-    { rec.set(key, v);              detail::layout_push(rec, key, "value"); return rec; }
-inline xi::Record& append(xi::Record& rec, const std::string& key, const std::string& v)
-    { rec.set(key, v);              detail::layout_push(rec, key, "value"); return rec; }
-inline xi::Record& append(xi::Record& rec, const std::string& key, const char* v)
-    { rec.set(key, std::string(v)); detail::layout_push(rec, key, "value"); return rec; }
-inline xi::Record& append(xi::Record& rec, const std::string& key, const xi::Image& im)
-    { rec.image(key, im);           detail::layout_push(rec, key, "image"); return rec; }
+inline xi::Record& append(xi::Record& rec, const std::string& key, int v, int line)
+    { rec.set(key, v);              detail::layout_push(rec, key, "value", line); return rec; }
+inline xi::Record& append(xi::Record& rec, const std::string& key, double v, int line)
+    { rec.set(key, v);              detail::layout_push(rec, key, "value", line); return rec; }
+inline xi::Record& append(xi::Record& rec, const std::string& key, bool v, int line)
+    { rec.set(key, v);              detail::layout_push(rec, key, "value", line); return rec; }
+inline xi::Record& append(xi::Record& rec, const std::string& key, const std::string& v, int line)
+    { rec.set(key, v);              detail::layout_push(rec, key, "value", line); return rec; }
+inline xi::Record& append(xi::Record& rec, const std::string& key, const char* v, int line)
+    { rec.set(key, std::string(v)); detail::layout_push(rec, key, "value", line); return rec; }
+inline xi::Record& append(xi::Record& rec, const std::string& key, const xi::Image& im, int line)
+    { rec.image(key, im);           detail::layout_push(rec, key, "image", line); return rec; }
 
-// VAR-style sugar over append().
-#define pvar(rec, key, data) ::xi::preview::append((rec), (key), (data))
+// VAR-style sugar over append(); stamps the call's source line so the UI can show
+// "this value came from line N" (teach / debug).
+#define pvar(rec, key, data) ::xi::preview::append((rec), (key), (data), __LINE__)
 
 // Free form:  xi::preview::send("bright", xi::Record().set("score", s).image("img", im));
 inline void send(const std::string& pg_id, xi::Record rec,
