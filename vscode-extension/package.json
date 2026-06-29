@@ -68,11 +68,6 @@
         "icon": "$(debug-restart)"
       },
       {
-        "command": "xinsp2.resume",
-        "title": "xInsp2: Resume Script (breakpoint)",
-        "icon": "$(debug-continue)"
-      },
-      {
         "command": "xinsp2.openImageViewer",
         "title": "xInsp2: Open Interactive Image Viewer",
         "icon": "$(eye)"

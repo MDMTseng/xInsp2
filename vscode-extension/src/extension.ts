@@ -1738,19 +1738,6 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showErrorMessage(`xInsp2: replay failed — ${rsp.error}`);
             }
         }),
-        // --- Breakpoint resume ---------------------------------------------
-        // While script breakpoint is paused, scripts block in xi::breakpoint().
-        // This command resumes them. Bind it to a key in keybindings if you
-        // hit breakpoints frequently.
-        vscode.commands.registerCommand('xinsp2.resume', async () => {
-            if (!client?.connected) return;
-            const rsp = await sendCmd('resume');
-            if (rsp.ok) {
-                vscode.window.setStatusBarMessage('xInsp2: resumed', 1500);
-            } else {
-                vscode.window.showWarningMessage(`xInsp2: resume — ${rsp.error}`);
-            }
-        }),
     );
 
     context.subscriptions.push(
