@@ -63,9 +63,12 @@ degrades cleanly. Always check.
   computed `cv::Mat` lifetime-safely.
 
 **`VAR(name, value)`** declares a local but **no longer emits anything** to the
-client — the per-run value/preview transport was removed from core (branch
-`refactor/remove-var-core`); surfacing values for viewing is moving to a preview
-plugin. The macro still compiles so existing scripts build.
+client — the per-run value/preview transport was removed from core; surfacing
+values for viewing now goes through the shipped `preview` plugin (`xi_preview.hpp`
+/ `PVAR`): `PVAR` stamps the per-field `"$layout"` order array, and
+`xi::preview::Sink::process(pg_id, rec)` / `send()` stamps the reserved key
+`"$pg"` for the preview group. The macro still compiles so existing scripts
+build.
 
 ## Nominal types — names over Record
 

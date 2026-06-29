@@ -80,9 +80,9 @@ load-bearing contract that lives only in a comment/convention.
   low-cost path is a const-input ABI (`image_data` returns const for inputs, output
   forced through `image_create`) — needs an ABI bump + migrating any in-place plugin.
 - ~~**canon-dedup mapping rebuilt independently on backend + each client**~~
-  **(MOOT — branch `refactor/remove-var-core`).** This concerned the `vars` frame +
-  binary preview dedup path, which has been removed from core (image preview is
-  moving to a preview plugin). Left here for history; revisit only if the preview
+  **(MOOT).** This concerned the `vars` frame +
+  binary preview dedup path, which has been removed from core (image preview moved
+  to the shipped `preview` plugin). Left here for history; revisit only if the preview
   plugin reintroduces backend-side gid dedup.
 - **Non-finite sentinel / json-escape replicated per producer-consumer** (theme A).
   C++ is mostly centralized, but each plugin's `io.hpp` + the JS side re-implement it;
@@ -128,7 +128,7 @@ load-bearing contract that lives only in a comment/convention.
   crash breadcrumbs ~100-200ns and necessary. No tax-when-unused worth gating. (The
   one latent idea — a fully headless run, zero clients connected, still did
   per-run snapshot/emit work for nobody — is now moot: the `vars`/preview emit
-  path was removed from core entirely (branch `refactor/remove-var-core`).)
+  path was removed from core entirely.)
 
 ## Won't fix (under current policy)
 
@@ -139,7 +139,7 @@ load-bearing contract that lives only in a comment/convention.
   becomes a real path.
 - ~~Per-connection subscription set (multi-client preview stomp)~~ — moot:
   deployment is single-client, and the `subscribe`/preview path was removed from
-  core (branch `refactor/remove-var-core`).
+  core.
 - Verifying plugin self-declared `reentrant` / `XI_PLUGIN_STAGED` — plugins are
   trusted; this would be a hostile-plugin defense.
 

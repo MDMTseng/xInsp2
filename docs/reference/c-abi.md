@@ -165,13 +165,13 @@ decrements (freed at 0; invalid handles are no-ops). `image_stride(h)` is
 
 ## 4. ABI version + load gate
 
-`XI_ABI_VERSION` is **8**. The struct was append-only through v5; v6 broke that
+`XI_ABI_VERSION` is **9**. The struct was append-only through v5; v6 broke that
 to remove the retired dispatch fields, so **all plugins must be rebuilt against
 the current ABI** (no binary compat with v4/v5 kept — this is pre-stable-release).
-v7 added only OPTIONAL *plugin* exports (not `xi_host_api` fields); v8/v9 **appended**
-`emit_binary` then `compress_image` at the end of `xi_host_api` — additive, so
-existing older plugins still load on a newer host (the gate only refuses a plugin
-asking for a *newer* ABI than the host). History:
+v7 added only OPTIONAL *plugin* exports (not `xi_host_api` fields); v8 then v9
+**appended** `emit_binary` and `compress_image` (the current head) at the end of
+`xi_host_api` — additive, so existing older plugins still load on a newer host
+(the gate only refuses a plugin asking for a *newer* ABI than the host). History:
 
 | ver | added |
 |---|---|

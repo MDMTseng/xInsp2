@@ -58,14 +58,46 @@ Higher-level helpers (also exported): `mountPanel` (auto-UI from a descriptor),
 
 ## Wiring to the backend — pick your context
 
-> **Image preview removed from core (branch `refactor/remove-var-core`).** The
+> **Core image preview removed.** The
 > `subscribe`/`unsubscribe` commands and the binary image-preview frames that the
 > `onPreview` / `subscribeImage` flow below relied on have been **removed** from
 > the backend. Control wiring (params via `set_instance_def` / `exchange_instance`)
 > and `status` are unaffected and remain the live path. **Image surfacing for a
-> plugin UI is moving to a preview plugin** — the `preview` message + `subscribeImage`
-> examples below are kept as the prior pattern and the likely shape of what the
-> preview plugin will expose, but they have **no live core source today**.
+> plugin UI now goes through the shipped `preview` plugin** (`plugins/preview`,
+> `sink:true`): its live contract is the `list_groups` / `get` / `get_image`
+> exchange commands (pull views) plus `XPV1` binary frames pushed via the ABI v8
+> `emit_binary` host call. See
+> [`write-a-script.md`](write-a-script.md) and
+> [`../reference/c-abi.md`](../reference/c-abi.md) (`emit_binary` v8 /
+> `compress_image` v9). The `preview` message + `subscribeImage` examples below are
+> kept as the prior pattern for reference.
+
+#### The `preview` plugin's consumer contract
+
+A viewer drives the `preview` instance with three pull `exchange_instance`
+commands (latest-record-per-group state) plus a live binary push. From
+`plugins/preview/plugin.json` + `src/preview.cpp`:
+
+| Command | Args | Returns |
+|---|---|---|
+| `list_groups` | — | `{ count, groups: { <pg>: { seen, image_count } } }` — drives the UI's group tabs |
+| `get` | `{ pg }` | `{ found, data ($layout + values), image_count }` — the group's latest record |
+| `get_image` | `{ pg, key }` | `{ found, w, h, channels, jpeg_b64 }` — a pull still for one image key |
+
+Live images are also **pushed** as self-describing `XPV1` binary frames via the
+host `emit_binary` call (ABI v8), one per image as a group's record updates. The
+byte layout (little-endian `u16`):
+
+```
+[0..3]  'XPV1' (magic)
+[4..5]  u16 width      [6..7] u16 height
+[8]     u8  channels   [9]    u8  codec (1 = jpeg)
+[10]    u8  pg_len     [11]   u8  key_len
+[12..]  pg bytes | key bytes | jpeg payload
+```
+
+So a frame self-identifies its preview-group (`pg`) and field (`key`) — no
+side-channel needed to route it to the right tab/viewer.
 
 ### A. Inside a VS Code plugin webview → `vscode.postMessage`
 
@@ -114,11 +146,12 @@ client.subscribeImage("gray");   // ← legacy: core no longer streams previews 
 > **Legacy (preview removed from core).** The `subscribe`/preview path the
 > snippet above uses no longer has a backend source: `subscribeImage` /
 > `unsubscribeImage` / `onPreview` mapped onto the removed `subscribe` command and
-> binary preview frame (branch `refactor/remove-var-core`). The control + `status`
-> calls in the same snippet still work; only the image-streaming lines are inert
-> until a preview plugin provides the frames. The decode-once / `vars.src` dedup
+> binary preview frame. The control + `status`
+> calls in the same snippet still work; only these image-streaming lines are inert;
+> live frames now come from the shipped `preview` plugin (`XPV1` via `emit_binary`).
+> The decode-once / `vars.src` dedup
 > behavior described next was part of that same removed path — retained here as
-> background for whoever builds the preview plugin.
+> background.
 
 ### C. Auto-UI from a manifest descriptor → `mountPanel`
 

@@ -4,13 +4,13 @@ This is the live picture of test surface, organisation, and how to run.
 **Update on every test addition.** Replaces the older `TEST_PLAN.md` /
 `TEST_REPORT.md` / `TestAudit.md` trio.
 
-> **Note (branch `refactor/remove-var-core`).** The VAR value-tracking, the
+> **Note.** The VAR value-tracking, the
 > `vars` wire message, the binary image-preview frame, and the
-> `subscribe`/`unsubscribe` commands were removed from the backend. Suites that
+> `subscribe`/`unsubscribe` commands have been removed from the backend. Suites that
 > exercised those paths (e.g. `ws_run_vars`, `ws_preview`, `runSubscribe`, the
 > JPEG-preview assertions in `ws_comprehensive`, the preview-header rows in
 > `test_protocol`, the *JPEG encode* note below) cover **removed** behavior and
-> are expected to be retired or rewritten with that change. They are listed below
+> are legacy — to be retired or rewritten. They are listed below
 > as they stand today; treat preview/vars/subscribe coverage as legacy.
 
 ---
@@ -56,9 +56,11 @@ Run all: `cd vscode-extension && node --test test/*.test.mjs`
 | `protocol.test.mjs` | TS protocol mirror parses C++ fixtures |
 | `backend_mode.test.mjs` | `resolveBackendMode` managed/attach/auto decision (FE/BE ownership) |
 | `ws_basic.test.mjs` | ping / version / hello / shutdown / unknown |
-| `ws_buffer_replay.test.mjs` | replay as plugin composition: a `buffer_replay` plugin captures + re-emits records (host no longer owns record/replay) |
-| `ws_run_vars.test.mjs` | run → vars round-trip with image gid |
-| `ws_preview.test.mjs` | binary preview frame format |
+| `ws_buffer_replay.test.mjs` | replay as plugin composition: the `cache` plugin (instance `buffer` in `buffer_replay_demo`) captures + re-emits records (host no longer owns record/replay) |
+| `ws_ordered_sink.test.mjs` | ordered output sink: `"sink": true` plugin (builds `sdk/examples/comm`) receives `use(sink).process()` in frame-arrival order under `dispatch_threads=4`, host-stamped `$seq` strictly increasing |
+| `ws_preview_sink.test.mjs` | preview plugin (`examples/preview_sink_demo`): PVAR record → `XPV1` `emit_binary` live push + `list_groups`/`get`/`get_image`, content-hash dedup |
+| `ws_run_vars.test.mjs` | *(legacy — removed behavior)* run → vars round-trip with image gid |
+| `ws_preview.test.mjs` | *(legacy — removed behavior)* binary preview frame format |
 | `ws_trigger.test.mjs` | compile + start continuous mode → multiple runs fire |
 | `ws_state.test.mjs` | `xi::state` persists across reload |
 | `ws_compile_reload.test.mjs` | compile_and_load + version increment |
@@ -97,7 +99,7 @@ cd vscode-extension && node test/runUserJourney.mjs
 | Runner | What it proves |
 |---|---|
 | `runMulticam` | `synced_stereo` gathering plugin emits one record carrying left+right (same `seq`) |
-| `runSubscribe` | preview subscription gates binary frames by name |
+| `runSubscribe` | *(legacy — removed behavior)* preview subscription gates binary frames by name |
 | `runWatchdog` | watchdog kills runaway inspect; backend stays alive |
 | `runRemoteAuth` | `--auth` bearer gate, 401 on bad/missing, constant-time compare |
 | `runHeadlessRunner` | `xinsp-runner.exe` produces JSON report from a project |
@@ -223,12 +225,6 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   the PLC link, watches the backend process handle, and signals the PLC to go
   line-safe when the backend dies (the `set_safe_state` ABI verb + the FE
   PLC-delivery sink were removed 2026-06).
-  `examples/dll_version_clash/` — two plugins each depending on a different
-  version of a same-named DLL, in one process. Proves the loader rules: a
-  **by-name** (static-import) dependency collides on base name (second plugin
-  silently gets the first's version), an absolute-path load stays distinct, and
-  distinct file names are the fix. Builds the two dep versions with `cl` (vcvars
-  located via `toolchain_health`) and asserts all three outcomes.
   `examples/script_external_dll/` — a user **script** using an external DLL:
   proves `project.json` `include_dirs` + `link_libs` feed the script compile and
   that the dependency DLL is found at runtime from the project folder (on the DLL
@@ -241,16 +237,14 @@ Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
   `healthy`, never hits the cap — the `crash_then_heal` plugin counts crashes in a
   respawn-surviving marker). (The `qa_soak` full-stack FE+BE+gateway soak was
   retired with the comms gateway.)
-- **Burst-parallelism safety** — `examples/qa_reentrancy/` proves the
-  declared-reentrancy model for the parallel dispatch pool
-  (`parallelism.dispatch_threads > 1`). Under a 4-thread pool it pokes two probe
-  instances every frame and asserts the **non-reentrant** one stays serialized
-  (max concurrency 1, zero overlaps — the host's per-instance lock holds) while
-  the **`reentrant: true`** one runs concurrently (max concurrency ≥ 2), and a
-  third reentrant instance with `instance.json` **`max_concurrency: 1`** is held
-  back to 1 (per-instance concurrency cap). Guards against a regression that lets
-  two workers into a non-reentrant (or capped) instance at once. Windows-only
-  (plugin compile); skip on non-`nt`.
+- **Burst-parallelism safety** — `backend/tests/test_set_def_race.cpp` proves the
+  declared-reentrancy model through the real CallScope admission gate: a
+  **non-reentrant** instance (cap=1) serializes all entry points, so a `set_def`
+  can never race an in-flight `process()` on the same instance (0 torn reads),
+  while a **`reentrant: true`** one runs ungated (races — the plugin must guard
+  itself). `backend/tests/test_prepare_concurrency.cpp` adds the ABI v7 staging
+  contract (`prepare` ungated, `commit` gated). Guards against a regression that
+  lets a `set_def` into a non-reentrant instance while `process()` is in flight.
 - **Per-worker watchdog** — `examples/qa_watchdog/` proves the inspect watchdog
   now fires under `dispatch_threads > 1` (it tracks a deadline slot per worker,
   not one global slot) and that a hard trip (script ignores cooperative cancel)

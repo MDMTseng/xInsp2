@@ -44,7 +44,7 @@ void xi_inspect_entry(int frame) {
 
     // Image ops: call cv:: directly. xi::Image::as_cv_mat() returns a
     // non-owning view over the same bytes; for outputs that you want
-    // the next plugin / VAR to consume zero-copy, use a fresh
+    // the next plugin to consume zero-copy, use a fresh
     // pool-backed Image and write into its as_cv_mat().
     cv::Mat src = img.as_cv_mat();
     cv::Mat gray_mat;
@@ -76,14 +76,16 @@ That's a full script. Three constructs do the heavy lifting:
 |---|---|---|
 | `xi::use("name")` → `xi::UseProxy&` | Proxy to a backend-managed instance (camera, model, etc.) | Instance lives across hot-reloads, persisted by host |
 | `xi::Param<T>` | Tunable scalar with UI slider | Per script DLL, restored from `project.json` on reload |
-| `VAR(name, expr)` | Declares a local; **produces no output today** (dormant stub — see below) | Per `inspect_entry` invocation |
+| `xi::preview::Sink` + `PVAR` | Surface per-run values/images to a UI (replaces VAR) — see [below](#surfacing-output--the-preview-plugin) | Per `inspect_entry` invocation |
+| `VAR(name, expr)` | **Legacy no-op.** Expands to `auto name = expr;` and publishes nothing — see [below](#varname-expr--legacy-no-op) | Per `inspect_entry` invocation |
 
-> **`VAR`/`EMIT` no longer surface anything.** On branch
-> `refactor/remove-var-core` the core's VAR value-tracking, the `vars` wire
-> message, and the JPEG image-preview path were removed. `VAR(...)` / `EMIT(...)`
-> still **compile** (so existing scripts build unchanged) but publish nothing.
-> Surfacing values/images for viewing is becoming a **preview-plugin** concern.
-> The one verdict that *does* leave a run is `xi::result(...)` (see below).
+> **VAR is legacy — surface output through the `preview` plugin.** The core's VAR
+> value-tracking, the `vars` wire message, and the old JPEG image-preview path were
+> **removed**. `VAR(...)` / `EMIT(...)` still **compile** (so existing scripts build
+> unchanged) but publish nothing. To show per-run values/images in a UI, push a
+> `xi::Record` to the **`preview` plugin** with `PVAR(...)` — the shipped path,
+> documented [below](#surfacing-output--the-preview-plugin). The run's pass/fail
+> verdict still leaves via `xi::result(...)` (also below).
 
 Plus:
 - `xi::Record` — the universal data container (named images + JSON).
@@ -170,51 +172,58 @@ or expose it through a plugin's `set_def`.
 
 ---
 
-## `VAR(name, expr)` — a dormant stub (no output today)
+## Surfacing output — the `preview` plugin
 
-> **Status (branch `refactor/remove-var-core`).** `VAR`/`EMIT` no longer
-> surface anything. The core's VAR value-tracking, the `vars` wire message, and
-> the JPEG image-preview path have been **removed** from the backend. The macros
-> remain as **compile-only stubs** so existing scripts keep building, but they do
-> not ship a value or image anywhere. Surfacing per-run values/images for viewing
-> is moving to a **preview plugin** — that's the forward path; the plugin API for
-> it isn't documented yet. For the run's pass/fail verdict use
-> [`xi::result(...)`](#xiresultcode-msg--the-one-per-run-verdict), which is live.
+VAR used to ship per-run values/images to a viewer panel; that path was removed
+from core (see the legacy note below). The shipped replacement is the **`preview`
+plugin**: push a `xi::Record` to it and a UI tabs between named **preview groups**
+(`pg_id`) — per stage / per thread / per camera. Include its SDK header
+`<xi/xi_preview.hpp>`:
 
 ```cpp
-VAR(gray, toGray(img));            // declares `gray` — compiles, no output
-VAR(t,    thresh);                 // declares `t`
-VAR(pass, blob_count <= 3);        // declares `pass`
+#include <xi/xi_preview.hpp>
+
+void xi_inspect_entry(int frame) {
+    // ... compute img, score, gain ...
+
+    xi::Record r;
+    PVAR(r, "frame", frame);     // a value
+    PVAR(r, "score", score);     // a value
+    PVAR(r, "edges", img);       // an image (auto-tagged)
+
+    xi::preview::Sink pv;
+    pv.process("bright", r);     // surface to preview-group "bright"
+}
 ```
 
-`VAR` still behaves as a **local declaration** at compile time: it expands to
-roughly `auto name = expr;`, so `name` becomes a real variable in the enclosing
-scope. That part of the contract is unchanged — what's gone is the "ships a
-snapshot to the viewer panel" half.
+- **`PVAR(rec, key, data)`** appends a value or image to the record *in call
+  order*, stamping the source line. The UI walks the record's `$layout` array to
+  render fields top-to-bottom in the order you wrote them (values inline, images
+  fetched by key) — this is why it's a macro (it captures `__LINE__`).
+- **`xi::preview::Sink::process(pg_id, rec)`** sends the record to the `preview`
+  instance under that group id. (`xi::preview::send(pg_id, rec)` is the free-function
+  form.) Multiple groups per run is fine — call `process()` once per group.
+- PVAR'ing the **same image buffer** under two keys is cheap: the host compresses
+  it once (dedup).
 
-`VAR(string_literal, ...)` — backed by `std::string`. There's no
-lifetime bug: the macro copies into a `std::string` value.
+> **`preview` is an ordered output sink.** Its `plugin.json` declares
+> `"sink": true`, so under parallel dispatch (`parallelism.dispatch_threads > 1`)
+> the host **stages** each `use("preview").process(...)` and flushes it in
+> **frame-arrival order** (stamping `$seq` = the wire `run_id`) instead of
+> worker-completion order. So live previews never tear or reorder across workers,
+> with no extra work in your script. Any plugin you want frame-ordered the same way
+> just sets `"sink": true` — see [`../reference/c-abi.md`](../reference/c-abi.md).
+> Worked script: [`examples/preview_sink_demo`](../../examples/preview_sink_demo).
 
-> **`VAR(name, ...)` declares a local; use `EMIT(name)` to name an
-> existing one.** `VAR` expands to roughly `auto name = expr;`, so
-> `name` becomes a real variable in the enclosing scope —
-> you **cannot** `VAR(count, count)` over a value you already
-> computed, and you **cannot** `VAR(count, …)` *twice* in one scope (it
-> redefines `count`; cl.exe fires C2374). When that happens the backend
-> appends a clear hint to the compile error — *"duplicate VAR(count) at
-> lines X, Y … use EMIT(count)"* — so it's obvious VAR is the cause. For
-> a value you already have, use **`EMIT(name)`**, which references an existing
-> in-scope variable without declaring anything:
->
-> ```cpp
-> int count = blobs.size();
-> EMIT(count);          // names `count` — no redeclaration
-> EMIT(frame);          // works on parameters too
-> ```
->
-> (`VAR_RAW` / `EMIT_RAW` are the matching raw-image variants.) These are the
-> only reasons to use the macros today — the redefinition rule, not output. When
-> the preview plugin lands, this is the surface it will likely hook.
+### `VAR(name, expr)` — legacy no-op
+
+`VAR` / `EMIT` still **compile** so old scripts keep building, but they publish
+nothing — `VAR(name, expr)` expands to roughly `auto name = expr;` (a plain local
+declaration) and `EMIT(name)` is a bare reference. Because `VAR` *declares*, you
+**cannot** `VAR(count, count)` over an existing value or `VAR(count, …)` twice in
+one scope (cl.exe fires C2374; the backend appends a *"duplicate VAR(count) … use
+EMIT"* hint). None of this surfaces anything to a UI anymore — for that, use the
+`preview` plugin above. New scripts have no reason to use `VAR`/`EMIT` at all.
 
 ## `xi::result(code, msg)` — the one per-run verdict
 
@@ -273,8 +282,8 @@ If the run was started with no `frame_path` arg, `current_frame_path()`
 returns an empty string. Scripts that always need a path should error
 out explicitly when they see one.
 
-(Viewing decoded images back in a UI was the job of the now-removed VAR /
-image-preview path; a preview plugin will own that surface going forward.)
+(To view a decoded image back in a UI, push it to the `preview` plugin with
+`PVAR(rec, "name", img)` — see [Surfacing output](#surfacing-output--the-preview-plugin).)
 
 ---
 
@@ -542,8 +551,10 @@ fills:
   are useless.
 - **`drop_newest`**: refuse new, preserve FIFO. Right when downstream
   ordering matters (archival, ML training capture).
-- **`block`**: `emit_record` blocks until room. Back-pressure to
-  the source. Right when the source itself can throttle.
+
+`drop_oldest` and `drop_newest` are the only accepted values. (`block` —
+back-pressuring the source — was removed because it could deadlock a source that
+can't drain; any other value warns to stderr and falls back to `drop_oldest`.)
 
 `result_order` controls how per-frame results land on the wire under N > 1:
 
@@ -624,9 +635,10 @@ The host then admits at most M workers into that instance's entry points at once
 (a counting semaphore; the non-reentrant lock is just the M=1 case). `0`/absent =
 unlimited (full `dispatch_threads`-wide). Ignored for a non-reentrant plugin
 (always 1). Lets one slow/resource-bound instance run narrower than the pool
-without throttling the rest. `examples/qa_reentrancy/` proves all three:
-serialized (non-reentrant → 1), concurrent (reentrant → N), and capped
-(reentrant + `max_concurrency: 1` → 1).
+without throttling the rest. The three modes are: serialized (non-reentrant → 1),
+concurrent (reentrant → N), and capped (reentrant + `max_concurrency: 1` → 1). The
+non-reentrant-serialized vs reentrant-races split is proven by
+`backend/tests/test_set_def_race.cpp`.
 
 **Other caveats once N > 1 (your responsibility):**
 

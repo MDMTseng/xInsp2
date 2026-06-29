@@ -24,9 +24,14 @@ the single plugin-management surface.
 
 ## 1. Make the plugin discoverable
 
-A plugin must be *scanned* before you can instance it. The backend scans a set
-of root folders; any subfolder containing a `plugin.json` registers as a plugin
-and shows up in `list_plugins`. Two ways to add a root:
+A plugin must be **declared** in the project before you can instance it. There is
+**no auto-discovery**: a subfolder containing a `plugin.json` does nothing until
+it's listed in `project.json` `plugins` (the full model is *How plugins are
+declared* in [`write-a-plugin.md`](./write-a-plugin.md)). The backend scans the
+`plugin_dirs` roots only to make plugins **browsable** in the Plugin Browser;
+the Browser's **Add** then writes the `plugins` entry that actually registers the
+plugin — only then does it load and show up in `list_plugins`. Two ways to add a
+search root:
 
 | How | Stored in | Scope |
 |---|---|---|

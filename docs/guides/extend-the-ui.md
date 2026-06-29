@@ -156,9 +156,9 @@ The `imageViewerPanel.ts` standalone viewer + the inline preview widget
 (currently inlined in the project plugin templates) both implement the
 same pan + cursor-anchored zoom math. The widget still takes a JPEG/base64
 frame and draws it — but note the **core image-preview transport that used to
-feed it (`vars`/binary preview frames) has been removed** (branch
-`refactor/remove-var-core`); a preview plugin will be the new frame source. If
-you need a new image preview location:
+feed it (`vars`/binary preview frames) has been removed**; the shipped `preview`
+plugin is the frame source now (it pushes binary preview frames via the ABI v8
+`emit_binary` path). If you need a new image preview location:
 
 1. For a **separate tab**: call `ImageViewerPanel.show(extensionUri,
    { name, width, height, jpegBase64 })`.
