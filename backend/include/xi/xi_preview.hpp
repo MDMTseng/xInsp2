@@ -3,7 +3,7 @@
 //
 //   #include <xi/xi_preview.hpp>
 //   xi::preview::Sink pv;
-//   xi::Record r; pvar(r, "score", s); pvar(r, "edges", im);
+//   xi::Record r; PVAR(r, "score", s); PVAR(r, "edges", im);
 //   pv.process("bright", r);   // surface to preview-group "bright"
 //
 // Surface a Record to a named preview instance under a preview-group id (pg_id),
@@ -21,10 +21,10 @@
 
 namespace xi { namespace preview {
 
-// --- pvar: append a value or image to a preview record, in order -------------
+// --- PVAR: append a value or image to a preview record, in order -------------
 //
-// pvar(rec, "score", blobCount);     // a value
-// pvar(rec, "edges", edgeImage);     // an image (auto-tagged)
+// PVAR(rec, "score", blobCount);     // a value
+// PVAR(rec, "edges", edgeImage);     // an image (auto-tagged)
 //
 // Each call appends {key, kind} to the record's "$layout" array, so a UI can walk
 // the record IN CALL ORDER — read data[key] for a "value", fetch the image[key]
@@ -34,7 +34,7 @@ namespace detail {
 inline void layout_push(xi::Record& rec, const std::string& key, const char* kind, int line) {
     rec.push("$layout", xi::Record().set("key", key)
                                     .set("kind", std::string(kind))
-                                    .set("line", line));   // source line of the pvar() call
+                                    .set("line", line));   // source line of the PVAR() call
 }
 }  // namespace detail
 
@@ -51,9 +51,10 @@ inline xi::Record& append(xi::Record& rec, const std::string& key, const char* v
 inline xi::Record& append(xi::Record& rec, const std::string& key, const xi::Image& im, int line)
     { rec.image(key, im);           detail::layout_push(rec, key, "image", line); return rec; }
 
-// VAR-style sugar over append(); stamps the call's source line so the UI can show
-// "this value came from line N" (teach / debug).
-#define pvar(rec, key, data) ::xi::preview::append((rec), (key), (data), __LINE__)
+// Sugar over append(); stamps the call's source line so the UI can show
+// "this value came from line N" (teach / debug). UPPER-CASE because it's a macro
+// (it must be, to capture __LINE__) — don't let it look like a function/identifier.
+#define PVAR(rec, key, data) ::xi::preview::append((rec), (key), (data), __LINE__)
 
 // Free form:  xi::preview::send("bright", xi::Record().set("score", s).image("img", im));
 inline void send(const std::string& pg_id, xi::Record rec,

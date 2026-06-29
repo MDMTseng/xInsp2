@@ -32,21 +32,21 @@ void xi_inspect_entry(int frame) {
     }
 
     // The new output path: surface to TWO preview groups; the UI tabs between them.
-    // pvar() appends each field in order (and tags images), so the UI renders the
+    // PVAR() appends each field in order (and tags images), so the UI renders the
     // group top-to-bottom: values, then the image.
     xi::preview::Sink pv;
 
     xi::Record bright;
-    pvar(bright, "frame", frame);
-    pvar(bright, "score", score);
-    pvar(bright, "gain",  g);
-    pvar(bright, "gradient", img);
-    pvar(bright, "thumb",    img);   // SAME buffer → host compresses it once (dedup)
+    PVAR(bright, "frame", frame);
+    PVAR(bright, "score", score);
+    PVAR(bright, "gain",  g);
+    PVAR(bright, "gradient", img);
+    PVAR(bright, "thumb",    img);   // SAME buffer → host compresses it once (dedup)
     pv.process("bright", bright);
 
     xi::Record dark;
-    pvar(dark, "frame", frame);
-    pvar(dark, "inverted", inv);     // a distinct image
+    PVAR(dark, "frame", frame);
+    PVAR(dark, "inverted", inv);     // a distinct image
     pv.process("dark", dark);
 
     // The run's verdict still leaves on its own channel (unaffected by VAR removal).
