@@ -82,7 +82,7 @@ const crashScripts = [
     { name: 'cpp_exception',   file: 'cpp_exception.cpp',    expect: 'intentional error' },
 ];
 
-test('crash isolation: backend survives all crash types', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (crash-survival logic still valid; tail asserts a vars frame — revive against a non-vars signal)' }, async () => {
+test('crash isolation: backend survives all crash types', async () => {
     await withBackend(async (c) => {
         await c.next(); // hello
 
@@ -121,11 +121,10 @@ test('crash isolation: backend survives all crash types', { skip: 'vars/preview/
 
         c.send({ type: 'cmd', id: 51, name: 'run' });
         const rr = await c.nextNonLog();
+        // The run rsp ok proves the normal script ran to completion after all the
+        // crashes — that's the crash-isolation guarantee. (Output assertion was via
+        // the removed vars frame; the run completing is the non-vars signal.)
         assert.equal(rr.ok, true, 'normal script runs after crashes');
-
-        const vars = await c.nextNonLog();
-        assert.equal(vars.type, 'vars', 'vars received after crashes');
-        assert.ok(vars.items.length >= 5, 'normal output after crashes');
         console.log('  [crash] normal script works ✓');
     });
 });

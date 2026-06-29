@@ -51,7 +51,11 @@ async function withBackend(fn) {
     finally { c.close(); if (child.exitCode === null) { child.kill(); await sleep(100); } }
 }
 
-test('compile + start continuous triggers multiple inspections', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (continuous dispatch still runs; observed via vars frames)' }, async () => {
+// "a frame ran" is observed via the run_finished event (the vars frame was
+// removed with VAR; run_finished still brackets every inspect).
+const isRun = (m) => m.type === 'event' && m.name === 'run_finished';
+
+test('compile + start continuous triggers multiple inspections', async () => {
     await withBackend(async (c) => {
         await c.next(); // hello
 
@@ -68,9 +72,9 @@ test('compile + start continuous triggers multiple inspections', { skip: 'vars/p
         // Wait for runs
         await sleep(1500);
         const msgs = c.drainText();
-        const varsMsgs = msgs.filter(m => m.type === 'vars');
-        console.log(`received ${varsMsgs.length} vars messages`);
-        assert.ok(varsMsgs.length >= 2, `expected >=2 vars, got ${varsMsgs.length}`);
+        const runMsgs = msgs.filter(isRun);
+        console.log(`received ${runMsgs.length} run_finished events`);
+        assert.ok(runMsgs.length >= 2, `expected >=2 runs, got ${runMsgs.length}`);
 
         // Stop
         c.send({ type: 'cmd', id: 3, name: 'stop' });
@@ -78,7 +82,7 @@ test('compile + start continuous triggers multiple inspections', { skip: 'vars/p
         assert.equal(stopRsp.ok, true);
 
         await sleep(500);
-        const after = c.drainText().filter(m => m.type === 'vars');
-        assert.equal(after.length, 0, 'no vars after stop');
+        const after = c.drainText().filter(isRun);
+        assert.equal(after.length, 0, 'no runs after stop');
     });
 });
