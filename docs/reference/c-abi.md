@@ -187,8 +187,13 @@ v7 added only OPTIONAL *plugin* exports (not `xi_host_api` fields); v8 then v9
 
 **Two load gates** (a plugin failing either is refused at load with a clear
 error, then `FreeLibrary`'d):
-1. **ABI version** — `xi_plugin_abi_version()` asking for a version *newer* than
-   the host is refused.
+1. **ABI version** — `xi_plugin_abi_version()` is bounded on **both** ends: a
+   plugin asking for a version *newer* than the host is refused, and so is one
+   *older* than `XI_ABI_MIN_COMPAT` (currently **6** — the last breaking
+   `xi_host_api` layout change). A pre-v6 (or pre-versioning, treated as v1)
+   plugin would dereference `xi_host_api` at stale offsets, so it is refused
+   rather than loaded with a warning. Bump `XI_ABI_MIN_COMPAT` on every future
+   breaking layout change.
 2. **yyjson layout** (γ-4) — `xi_yyjson_abi()` must match the host's stamp. A
    mismatch (different yyjson build) or no export means the plugin can only run
    the slow JSON-serialize path, so it is **refused unless** `plugin.json` sets

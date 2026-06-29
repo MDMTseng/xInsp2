@@ -242,6 +242,24 @@ private:
         pi.loaded_dll_mtime = ec ? 0 : (uint64_t)wt.time_since_epoch().count();
     }
 
+    // The one DLL-load primitive every load site routes through, so a plugin
+    // resolves its sidecar dependency DLLs the same way no matter how it was
+    // discovered (project compile/recompile/reattach vs. global/auto-load).
+    // LoadLibraryEx with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR searches the plugin's
+    // OWN folder for its dependency DLLs — a plugin can ship extra .dll deps
+    // right next to its plugin DLL. DEFAULT_DIRS keeps the app dir (where
+    // OpenCV/turbojpeg/IPP are deployed) + System32 + AddDllDirectory dirs in
+    // the search set; it deliberately drops CWD/PATH (avoids accidental hijack).
+    // NOTE: same-named DLLs still collide across plugins — Windows keeps one
+    // module per base name per process (see adding-a-plugin.md).
+    // TODO(linux): dlopen resolves deps via RPATH/$ORIGIN + LD_LIBRARY_PATH;
+    // build plugin .so with -Wl,-rpath,$ORIGIN for the same "deps beside me".
+    static HMODULE load_plugin_dll_(const std::string& path) {
+        return LoadLibraryExA(path.c_str(), nullptr,
+                              LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                              LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+    }
+
     // Host-side cmake invocation (newest_source_mtime / run_cmd_capture /
     // build_cmake_plugin) moved to xi_cmake_build.hpp (xi::cmake_build::;
     // included above). rebuild_cmake_plugins below orchestrates them.
@@ -340,9 +358,7 @@ private:
                                    new_dll_path.c_str(), &still) && still != nullptr)
                 stale_module = true;
         }
-        HMODULE h = LoadLibraryExA(new_dll_path.c_str(), nullptr,
-                                   LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
-                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+        HMODULE h = load_plugin_dll_(new_dll_path);
         if (!h) {
             if (err) *err = "LoadLibrary failed on rebuilt DLL — instances for "
                             "this plugin are gone; reopen the project to recover";
@@ -582,19 +598,9 @@ private:
                 // user's own project, not third-party code, so we trust
                 // the source. (Export will run cert.)
                 auto dll_path = std::filesystem::path(pi.folder_path) / pi.dll_name;
-                // LoadLibraryEx with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR so the
-                // plugin's OWN folder is searched for its dependency DLLs — a
-                // plugin can ship extra .dll deps right next to its plugin DLL.
-                // DEFAULT_DIRS keeps the app dir (where OpenCV/turbojpeg/IPP are
-                // deployed) + System32 + AddDllDirectory dirs in the search set;
-                // it deliberately drops CWD/PATH (avoids accidental hijack).
-                // NOTE: same-named DLLs still collide across plugins — Windows
-                // keeps one module per base name per process (see adding-a-plugin.md).
-                // TODO(linux): dlopen resolves deps via RPATH/$ORIGIN + LD_LIBRARY_PATH;
-                // build plugin .so with -Wl,-rpath,$ORIGIN for the same "deps beside me".
-                pi.handle = LoadLibraryExA(dll_path.string().c_str(), nullptr,
-                                           LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
-                                           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+                // Search the plugin's own folder for its dependency DLLs (see
+                // load_plugin_dll_ for the search-flag rationale).
+                pi.handle = load_plugin_dll_(dll_path.string());
                 if (!pi.handle) {
                     last_open_warnings_.push_back(
                         {pname, pname, "DLL built but LoadLibrary failed"});
@@ -789,11 +795,9 @@ public:
         // rather than silently no-op'ing.
         pi.dll_name    = std::filesystem::path(cres.dll_path).filename().string();
         pi.folder_path = std::filesystem::path(cres.dll_path).parent_path().string();
-        // Search the plugin's own folder for its dependency DLLs (see the
-        // matching call in load_project_plugins above for the rationale).
-        pi.handle = LoadLibraryExA(cres.dll_path.c_str(), nullptr,
-                                   LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
-                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+        // Search the plugin's own folder for its dependency DLLs (see
+        // load_plugin_dll_ for the rationale).
+        pi.handle = load_plugin_dll_(cres.dll_path);
         if (!pi.handle) {
             r.error = "LoadLibrary failed on freshly-built DLL — instances "
                       "for this plugin are gone; reopen the project to "
@@ -1028,7 +1032,7 @@ public:
                         "(copy into <project>/plugins/ + open_project) to compile from source, "
                         "or build + certify it for the scan path.");
 
-        pi.handle = LoadLibraryA(dll_path.string().c_str());
+        pi.handle = load_plugin_dll_(dll_path.string());
         if (!pi.handle)
             return fail("plugin '" + name + "': LoadLibrary failed for " + dll_path.string() +
                         " (Windows error " + std::to_string(GetLastError()) + ")");
@@ -1567,7 +1571,7 @@ public:
                     auto& pi2 = pit->second;
                     auto dll_path = std::filesystem::path(pi2.folder_path) / pi2.dll_name;
                     if (std::filesystem::exists(dll_path)) {
-                        pi2.handle = LoadLibraryA(dll_path.string().c_str());
+                        pi2.handle = load_plugin_dll_(dll_path.string());
                         if (pi2.handle) {
                             // P0-D3: ABI compatibility check was missing
                             // on this code path. A stale plugin DLL built
@@ -1608,6 +1612,7 @@ public:
                                     pi2.factory_symbol.c_str());
                                 continue;
                             }
+                            stamp_loaded_dll_(pi2, dll_path.string());   // change-gate for reload_changed
                         }
                     }
                 }

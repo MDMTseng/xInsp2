@@ -123,6 +123,9 @@ extern "C" {
 /* ------------------------------------------------------------------ */
 #define XI_ABI_VERSION 9   /* v8: + emit_binary; v9: + compress_image (host JPEG cache) */
 
+/* Oldest plugin ABI the host loads; bump on every breaking xi_host_api layout change. */
+#define XI_ABI_MIN_COMPAT 6
+
 /* Expected sizeof(xi_host_api) for the layout guard below (see the ABI LAYOUT
  * GUARD note after the struct). Bump together with XI_ABI_VERSION on any layout
  * change. 64-bit host (all function pointers). */

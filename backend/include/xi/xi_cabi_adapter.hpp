@@ -38,8 +38,10 @@ namespace xi {
 // Plugin ABI compatibility check. Two gates, run at load (caller FreeLibrary +
 // skip + record the warning on a false return):
 //   1. ABI VERSION — reads xi_plugin_abi_version(); a plugin requesting a newer
-//      ABI than the host provides is refused. Pre-versioning plugins (no export)
-//      are treated as v1.
+//      ABI than the host provides is refused, as is one OLDER than
+//      XI_ABI_MIN_COMPAT (built against a pre-layout-break xi_host_api — see the
+//      macro in xi_abi.h). A pre-versioning plugin (no export) is treated as v1,
+//      so it too falls below the floor and is refused.
 //   2. yyjson LAYOUT (γ-4) — reads xi_yyjson_abi(); if it doesn't match the
 //      host's stamp (different yyjson build/version) or is absent, the plugin can
 //      only run the slow JSON-serialize path on every dispatch. We REFUSE it by
@@ -58,10 +60,14 @@ inline bool plugin_abi_compatible(HMODULE dll, const std::string& plugin_name,
                               + std::to_string(XI_ABI_VERSION);
         return false;
     }
-    if (!fn) {
-        std::fprintf(stderr,
-            "[xinsp2] '%s': pre-versioning plugin (no xi_plugin_abi_version "
-            "export); assuming v1\n", plugin_name.c_str());
+    if (v < XI_ABI_MIN_COMPAT) {
+        if (err_msg) *err_msg = "plugin '" + plugin_name + "' was built against ABI v"
+                              + std::to_string(v) + ", older than the host's minimum v"
+                              + std::to_string(XI_ABI_MIN_COMPAT) + " (a breaking "
+                                "xi_host_api layout change since then would corrupt "
+                                "memory) — rebuild it against the current ABI v"
+                              + std::to_string(XI_ABI_VERSION);
+        return false;
     }
     // γ-4 yyjson layout gate.
     auto yfn = reinterpret_cast<uint32_t(*)()>(GetProcAddress(dll, "xi_yyjson_abi"));

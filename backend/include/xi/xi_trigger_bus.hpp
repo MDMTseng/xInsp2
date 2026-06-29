@@ -146,7 +146,8 @@ public:
         ev.leader_source = source;
         ev.meta_doc      = meta_doc;            // transfer
         for (int i = 0; i < image_count; ++i) {
-            ImagePool::instance().addref(images[i].handle);
+            xi_image_handle h = images[i].handle;
+            ImagePool::instance().addref(h);
             // A multi-image record is keyed by the record's OWN keys, so the
             // script reads t.image("cam_left") directly. A single image
             // collapses to the emitter name, so t.image("<source>") works.
@@ -156,7 +157,19 @@ public:
             } else {
                 name = source;
             }
-            ev.images.emplace(std::move(name), images[i].handle);
+            // A duplicate (or empty -> source) key in a multi-image record
+            // collides on the map: emplace fails and keeps the first handle.
+            // release_trigger_event_ only iterates STORED handles, so release the
+            // ref we just added or it leaks an ImagePool slot. Warn once so the
+            // offending source gets distinct keys.
+            if (!ev.images.emplace(std::move(name), h).second) {
+                ImagePool::instance().release(h);
+                static std::atomic<bool> warned{false};
+                if (!warned.exchange(true, std::memory_order_relaxed))
+                    std::fprintf(stderr, "[xinsp2] emit('%s'): duplicate/empty image key "
+                                 "dropped — a multi-image record needs distinct keys\n",
+                                 source.c_str());
+            }
         }
 
         Sink to_fire;
@@ -170,12 +183,10 @@ public:
         }
     }
 
-    // No correlation state to drop anymore; kept so lifecycle callers (script
-    // reload / project close) need not change.
+    // No correlation state to drop anymore; kept as no-ops so the lifecycle
+    // callers (script reload / project close) and the dispatch timer's periodic
+    // call in service_main need not change.
     void reset() {}
-
-    // No partial-correlation state to evict anymore; kept as a no-op so the
-    // dispatch timer's periodic call needs no change.
     void evict_stale() {}
 
     // Microseconds since ANY source last emitted (monotonic). -1 if nothing has
