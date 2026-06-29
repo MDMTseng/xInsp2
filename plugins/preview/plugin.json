@@ -1,7 +1,7 @@
 {
   "name": "preview",
   "description": "View a script's output, post-VAR. A script surfaces records via xi::use(\"preview\").process(pg_id, rec) (see <xi/xi_preview.hpp>: pvar). Keeps the latest record per preview-group; JPEG-encodes images through the host cache and PUSHES them live as XPV1 binary frames (host emit_binary). Pull views: list_groups / get / get_image.",
-  "dll": "preview.dll",
+  "dll": "xi-preview.dll",
   "factory": "xi_plugin_create",
   "has_ui": false,
   "manifest": {

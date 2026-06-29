@@ -7,6 +7,10 @@ if(MSVC)
     add_compile_options(/W3 /utf-8)
 endif()
 
+# All plugin DLLs are namespaced with an "xi-" prefix (xi-<name>.dll). Set once
+# here so every SHARED target below inherits it; each plugin.json "dll" matches.
+set(CMAKE_SHARED_LIBRARY_PREFIX "xi-")
+
 set(XI_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
 set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 

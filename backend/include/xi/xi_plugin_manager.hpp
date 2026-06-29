@@ -11,7 +11,7 @@
 // {
 //   "name":        "mock_camera",
 //   "description": "Simulated camera for testing",
-//   "dll":         "mock_camera.dll",
+//   "dll":         "xi-mock_camera.dll",
 //   "factory":     "xi_plugin_create",    // exported C function
 //   "has_ui":      true
 // }

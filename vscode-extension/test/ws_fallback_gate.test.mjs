@@ -23,7 +23,7 @@ import WebSocket from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const backendExe  = resolve(__dirname, '../../backend/build/Release/xinsp-backend.exe');
-const noExportDll = resolve(__dirname, '../../plugins/mock_camera/mock_camera.dll');
+const noExportDll = resolve(__dirname, '../../plugins/mock_camera/xi-mock_camera.dll');
 
 function randomPort() { return 30000 + Math.floor(Math.random() * 20000); }
 
