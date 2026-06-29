@@ -4,6 +4,15 @@ This is the live picture of test surface, organisation, and how to run.
 **Update on every test addition.** Replaces the older `TEST_PLAN.md` /
 `TEST_REPORT.md` / `TestAudit.md` trio.
 
+> **Note (branch `refactor/remove-var-core`).** The VAR value-tracking, the
+> `vars` wire message, the binary image-preview frame, and the
+> `subscribe`/`unsubscribe` commands were removed from the backend. Suites that
+> exercised those paths (e.g. `ws_run_vars`, `ws_preview`, `runSubscribe`, the
+> JPEG-preview assertions in `ws_comprehensive`, the preview-header rows in
+> `test_protocol`, the *JPEG encode* note below) cover **removed** behavior and
+> are expected to be retired or rewritten with that change. They are listed below
+> as they stand today; treat preview/vars/subscribe coverage as legacy.
+
 ---
 
 ## Where the tests live

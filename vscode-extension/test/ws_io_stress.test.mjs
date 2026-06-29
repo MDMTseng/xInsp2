@@ -16,7 +16,7 @@ const PROJECT = resolve(__dirname, '..', '..', 'examples', 'io_stress');
 
 async function waitRsp(c, id) { for (;;) { const m = await c.nextText(); if (m.type === 'rsp' && m.id === id) return m; } }
 
-test('io_stress: rich extract/construct (nested, array, custom type, NA, provenance)', async () => {
+test('io_stress: rich extract/construct (nested, array, custom type, NA, provenance)', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
         c.send({ type: 'cmd', id: 1, name: 'open_project', args: { folder: slash(PROJECT) } });

@@ -49,7 +49,7 @@ void xi_inspect_entry(int){
 
 async function waitRsp(c, id) { for (;;) { const m = await c.nextText(); if (m.type === 'rsp' && m.id === id) return m; } }
 
-test('Region: binary-mask nominal type + cv helpers (area/bbox/round-trip/NA)', async () => {
+test('Region: binary-mask nominal type + cv helpers (area/bbox/round-trip/NA)', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'xi_region_'));
     const sp = join(dir, 'inspect.cpp');
     writeFileSync(sp, SCRIPT);

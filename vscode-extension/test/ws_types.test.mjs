@@ -42,7 +42,7 @@ void xi_inspect_entry(int){
 
 async function waitRsp(c, id) { for (;;) { const m = await c.nextText(); if (m.type === 'rsp' && m.id === id) return m; } }
 
-test('nominal types: accessors, NA, vector handle, Record round-trip', async () => {
+test('nominal types: accessors, NA, vector handle, Record round-trip', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'xi_types_'));
     const sp = join(dir, 'inspect.cpp');
     writeFileSync(sp, SCRIPT);

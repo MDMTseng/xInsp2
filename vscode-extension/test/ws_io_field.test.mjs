@@ -50,7 +50,7 @@ void xi_inspect_entry(int){
 
 async function waitRsp(c, id) { for (;;) { const m = await c.nextText(); if (m.type === 'rsp' && m.id === id) return m; } }
 
-test('Field proxy read-modify-write: obj["x"] = obj["x"] * k + b', async () => {
+test('Field proxy read-modify-write: obj["x"] = obj["x"] * k + b', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
     const sp = join(PROJECT, '.field_probe.cpp');
     writeFileSync(sp, SCRIPT);
     try {

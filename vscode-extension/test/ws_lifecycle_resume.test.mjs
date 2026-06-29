@@ -57,7 +57,7 @@ const SCRIPT =
     'static int g_n = 0;\n' +
     'XI_SCRIPT_EXPORT void xi_inspect_entry(int){ VAR(tick, g_n++); }\n';
 
-test('continuous streaming survives a working-copy commit (DispatchPoolGuard resume)', async () => {
+test('continuous streaming survives a working-copy commit (DispatchPoolGuard resume)', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (DispatchPoolGuard resume still valid; observed via vars stream — revive against a non-vars signal)' }, async () => {
     const proj = mkdtempSync(join(tmpdir(), 'xi_resume_'));
     writeFileSync(join(proj, 'inspect.cpp'), SCRIPT);
     writeFileSync(join(proj, 'project.json'), JSON.stringify({ name: 'resume_demo', script: 'inspect.cpp' }));

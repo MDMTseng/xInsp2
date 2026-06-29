@@ -59,7 +59,7 @@ async function withBackend(fn) {
     finally { c.close(); if (child.exitCode === null) { child.kill(); await sleep(100); } }
 }
 
-test('compile + run emits JPEG preview for image variables', async () => {
+test('compile + run emits JPEG preview for image variables', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello
 
@@ -93,7 +93,7 @@ test('compile + run emits JPEG preview for image variables', async () => {
 // A non-finite double written through a Record (set/push) must serialize as a
 // quoted sentinel, not a bare NaN/Infinity token — else the consumer's parse of
 // the WHOLE vars frame fails and every field silently vanishes.
-test('non-finite doubles in a Record survive as sentinels (frame still parses)', async () => {
+test('non-finite doubles in a Record survive as sentinels (frame still parses)', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'xi_nan_'));
     const sp = join(dir, 'nan.cpp');
     writeFileSync(sp, `
@@ -132,7 +132,7 @@ void xi_inspect_entry(int frame) {
 // When one image buffer is VAR'd by several names (the "one frame to every
 // plugin" case), every var shares a canonical "src" gid, and the backend
 // encodes + sends exactly one preview frame for the whole group.
-test('same buffer VAR\'d 3x → shared src + a single preview frame', async () => {
+test('same buffer VAR\'d 3x → shared src + a single preview frame', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'xi_dedup_'));
     const sp = join(dir, 'dedup.cpp');
     writeFileSync(sp, `
@@ -181,7 +181,7 @@ void xi_inspect_entry(int frame) {
 
 // Default is send-none: with no subscription, a run emits vars but NO image
 // preview bytes (encode + transmit only happen for a watched name).
-test('no subscription → vars arrive but zero preview frames', async () => {
+test('no subscription → vars arrive but zero preview frames', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello — note: NO subscribe
 
@@ -215,7 +215,7 @@ test('no subscription → vars arrive but zero preview frames', async () => {
 // A Record VAR carrying images: the sub-images get gids in the vars item's
 // `images` map, are gated by the record var's name, and stream one preview frame
 // each when that name is subscribed.
-test('record VAR with images → preview frame per sub-image, gated by record name', async () => {
+test('record VAR with images → preview frame per sub-image, gated by record name', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'xi_rec_'));
     const sp = join(dir, 'rec.cpp');
     writeFileSync(sp, `
@@ -264,7 +264,7 @@ void xi_inspect_entry(int frame) {
 // the backend keeps the last-good script and re-arms continuous on the error
 // path. (Regression for the partial-failure where the two compile_and_load
 // error returns skipped the resume and silently stopped the stream.)
-test('continuous mode survives a compile error — keeps streaming the last-good script', async () => {
+test('continuous mode survives a compile error — keeps streaming the last-good script', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'xi_resume_'));
     const good = join(dir, 'good.cpp');
     writeFileSync(good, `

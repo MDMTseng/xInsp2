@@ -5,7 +5,12 @@ its clients (VS Code extension, browser, CLI, test harness).
 
 - **Framing**: WebSocket does framing. One message = one WS frame.
 - **Text frames**: UTF-8 JSON objects. Every JSON message has a `type` field.
-- **Binary frames**: image previews only. Layout defined below.
+- **Binary frames**: none in core today. The image-preview binary frame
+  (and the `vars` message and `subscribe`/`unsubscribe` commands) were
+  **removed** from the backend on branch `refactor/remove-var-core` — script
+  output (scalar VARs + image previews) is becoming a **preview-plugin**
+  concern, not a core transport. The removed shapes are described below, struck
+  through, for reference only.
 - **Versioning**: every `cmd` and `rsp` carries no explicit version — breaking
   schema changes bump the server's `version` string (returned by `cmd: version`)
   and the `hello` event's `abi` field. The protocol evolves **additive-only**
@@ -19,11 +24,17 @@ its clients (VS Code extension, browser, CLI, test harness).
 
 ## Text message types
 
-Exactly six top-level `type` values. All JSON messages look like:
+Five top-level `type` values. All JSON messages look like:
 
 ```json
-{ "type": "<one of cmd|rsp|vars|instances|log|event>", ...fields... }
+{ "type": "<one of cmd|rsp|instances|log|event>", ...fields... }
 ```
+
+> **Removed:** `vars` was a sixth `type`. The backend no longer collects or
+> transports per-run script values, so this message is gone (branch
+> `refactor/remove-var-core`). Its old shape is kept below, struck through, only
+> so existing consumers know what disappeared. The passive `VarKindWire` protocol
+> enum still exists; it does not imply a live `vars` frame.
 
 ### `cmd` — client to backend
 
@@ -53,7 +64,14 @@ Exactly six top-level `type` values. All JSON messages look like:
 false. Both are optional on failure too (an error with no message is legal
 but discouraged).
 
-### `vars` — backend to client
+### ~~`vars` — backend to client~~ (REMOVED)
+
+> **REMOVED (branch `refactor/remove-var-core`).** The backend no longer tracks
+> `VAR()` values or emits a `vars` message — `VAR()`/`EMIT()` still compile but
+> publish nothing. Everything from here to the start of `instances` is retained
+> only to document what the message used to look like; a current client receives
+> none of it. Surfacing values/images for viewing is moving to a **preview
+> plugin**.
 
 Snapshot of a `ValueStore` after one `inspect()` call.
 
@@ -210,7 +228,12 @@ runs at DLL load and wins.)
 
 ---
 
-## Binary frame layout — image preview
+## ~~Binary frame layout — image preview~~ (REMOVED)
+
+> **REMOVED (branch `refactor/remove-var-core`).** The backend no longer encodes
+> or sends image-preview binary frames. The layout below is retained only as a
+> record of the old wire format; no current code path produces it. Image preview
+> is moving to a **preview plugin**.
 
 One WebSocket binary frame per **distinct image** (per `src` group, not per image
 var — see `vars.items[*].src`), sent after the `vars` message that introduces it.
@@ -302,7 +325,12 @@ never executes from an unloaded module.
 ### `run`
 `args: { "frame_path": "..." (optional), "meta": { ... } (optional) }`
 → `data: { "run_id": <int>, "ms": <int> }`
-followed by an asynchronous `vars` message and zero or more binary previews.
+followed by a `run_result` event (and the `run_started`/`run_finished` brackets).
+
+> The old `vars` message + binary previews that used to follow a run are
+> **removed** (branch `refactor/remove-var-core`). A `cmd:run` no longer streams
+> script values back; observe the run via the `run_*` events. Per-run value /
+> image surfacing is moving to a preview plugin.
 
 When `frame_path` and/or `meta` are given, `cmd:run` builds a one-shot **record**
 host-side (`frame_path` → an image under the key `"frame"`; `meta` → the metadata
@@ -367,9 +395,10 @@ Each tick comes from one of two sources:
   must guard `xi::current_trigger().is_active()` because timer-only
   ticks have no record attached.
 
-`vars` messages are emitted on each dispatch, same shape as for
-`cmd:run`. There is no per-frame rsp; the only ack for `start` is the
-initial one.
+A `run_result` event is emitted on each dispatch (same as for `cmd:run`); the
+old per-dispatch `vars` message is **removed** (branch
+`refactor/remove-var-core`). There is no per-frame rsp; the only ack for `start`
+is the initial one.
 
 `cmd:start` **resets** the per-run dispatch counters used by
 [`dispatch_stats`](#dispatch_stats) — `dropped_oldest`,
@@ -540,9 +569,8 @@ should be releasing.
 ```
 
 `total` and `by_owner` are **live snapshots** — they reflect what's
-in the pool right now. Between runs (after `emit_vars_and_previews`
-finishes releasing the run's VAR images), they typically drop to
-zero, which can be confusing. `cumulative` solves that:
+in the pool right now. Between runs (once a run's images are released),
+they typically drop to zero, which can be confusing. `cumulative` solves that:
 
 - `total_created` — every `image_create` since backend startup.
 - `high_water`   — peak `live_now` ever observed.
@@ -733,39 +761,18 @@ are also emitted on the `log` channel as `level: warn` during
 > handler has been wired since the FL r6 P2-3 fix (PR #25). Doc
 > updated 2026-05-10.
 
-### `subscribe` / `unsubscribe`
+### ~~`subscribe` / `unsubscribe`~~ (REMOVED)
 
-Controls which VAR-image previews are JPEG-encoded and streamed as binary frames
-after each `run`. **Default: send nothing.** An image is encoded + transmitted
-only while a client has subscribed to its name — the encode is the expensive part,
-so an unwatched image costs zero. A viewer subscribes when it opens an image view
-and unsubscribes when it closes; the `vars` text (scalars / metadata, including the
-`image` items' `gid`/`src`) is always sent regardless.
+> **REMOVED (branch `refactor/remove-var-core`).** These commands gated which
+> VAR-image previews were encoded and streamed. With the `vars` message and the
+> binary preview frame gone from core, there is nothing to subscribe to —
+> sending `subscribe`/`unsubscribe` now replies `ok:false` (unknown command).
+> Per-run image surfacing (and the encode-only-when-watched optimisation) is
+> moving to a **preview plugin**, which will own its own subscription model.
 
-- `cmd: subscribe`  `args: { "names": ["gray", "edges"] }` — stream preview frames
-  only for vars in the list. Repeatable; each call REPLACES the list (so a client
-  ref-counts viewers and sends the union). `args: { "names": [] }` ⇒ send nothing.
-  Pass `{ "all": true }` to send every image (debug / headless dump). Reply:
-  `data: { "all": bool, "count": int }`.
-- `cmd: unsubscribe` — same as `subscribe {names: []}`: stop all preview frames.
-
-The subscription is **sticky across `compile_and_load`** (a viewer open over a
-recompile keeps receiving its image; names the new DLL doesn't expose are inert),
-and **cleared on a fresh connection** (a new client starts with send-nothing).
-
-Example:
-```json
-{ "type": "cmd", "id": 5, "name": "subscribe", "args": { "names": ["gray"] } }
-```
-
-Large-image inspections (20 MP frames at ~1 MB JPEG each) benefit most — with no
-viewer open, a pipeline encodes and sends **zero** image bytes; with one image
-shown, only that one is encoded.
-
-> The backend keeps **no run-history ring**. Every run pushes a `vars` frame to
-> connected clients, so recent-run scrollback (and SPC-style backfill) is a
-> client-side / plugin concern — a client that wants it keeps its own ring of the
-> frames it received.
+> The backend keeps **no run-history ring**, and no longer pushes any per-run
+> value frame. Recent-run scrollback (and SPC-style backfill) is a client-side /
+> plugin concern.
 
 ---
 
@@ -781,7 +788,7 @@ shown, only that one is encoded.
 ## Status channel
 
 Components publish a short, sticky "what am I doing right now" string (distinct
-from `VAR` per-inspection *values* and from the `log`/`recent_errors` *event
+from per-inspection script *values* and from the `log`/`recent_errors` *event
 stream* — status is one last-value string per component, overwritten in place).
 
 - A script calls `xi::status("waiting for trigger")` (include `<xi/xi_status.hpp>`).
@@ -855,7 +862,7 @@ in full detail above. One-line purpose per entry; args follow the same
 | `graph_capture` `args: { "enable": bool }` | Toggle dataflow edge recording (default off — no hot-path cost). Clears any prior recording on enable. Reply: `{ "capturing": bool }`. |
 | `graph_snapshot` | Reconstruct dataflow edges from the recorded calls by image-handle identity (instance A produced handle H; instance B consumed H → A→B edge). Reply: `{ "capturing": bool, "ran": ["inst", ...], "edges": [{ "from": "A", "to": "B", "keys": ["mask"] }, ...] }`. The `ran` list is in call order; `keys` lists the output-image names that crossed the edge. |
 
-#### Params and preview (out-of-band operations)
+#### Params (out-of-band operations)
 
 | Command | Purpose |
 |---|---|

@@ -6,6 +6,17 @@
 > Phase 2 (multi-client, deeper compose polish) is not scheduled. This doc keeps
 > the design rationale. Assessment date 2026-06-04.
 
+> **Superseded data path (branch `refactor/remove-var-core`).** This design binds
+> HMI cards to the `vars` message + binary **preview frames** the script emitted
+> via `VAR(...)`. That transport has since been **removed from core** — `VAR`/`EMIT`
+> still compile but publish nothing, and `vars`/preview/`subscribe` are gone from
+> the WS protocol. The HMI's per-pass value + image plumbing described below
+> (`vars` items, preview frames, `subscribe`) therefore no longer has a live core
+> source; surfacing script output for the HMI is moving to a **preview plugin**.
+> The one path still live is the `run_result` event (verdict/yield cards). Treat
+> the `VAR`/`vars`/preview references in this doc as the *pre-refactor* design,
+> pending the preview-plugin replacement. Only the verdict cards work as-is today.
+
 ## The gap
 
 Everything today is **dev-side**: VS Code drives the backend, the viewer/instance

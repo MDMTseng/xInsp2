@@ -83,7 +83,7 @@ async function runFrame(c, id) {
     return vars;
 }
 
-test('plugin caches its input across frames (γ-4 v4-4 zero-copy, end-to-end)', { timeout: 180000 }, async () => {
+test('plugin caches its input across frames (γ-4 v4-4 zero-copy, end-to-end)', { timeout: 180000, skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
     const dir = resolve(tmpdir(), `xinsp2_cacheprobe_${Date.now()}`);
     makeProject(dir);
     try {

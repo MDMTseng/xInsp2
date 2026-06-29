@@ -40,7 +40,7 @@ void xi_inspect_entry(int frame) {
     auto img = t.image("frame");
     if (img.empty()) return;
 
-    VAR(input, img);                                 // visible in viewer
+    VAR(input, img);                                 // declares `input` (no output — see note below)
 
     // Image ops: call cv:: directly. xi::Image::as_cv_mat() returns a
     // non-owning view over the same bytes; for outputs that you want
@@ -64,8 +64,9 @@ void xi_inspect_entry(int frame) {
         .image("gray", blur)
         .set("threshold", (int)thresh));             // slider value, no recompile
 
-    VAR(detection, result);
-    VAR(pass, result["blob_count"].as_int() <= 3);
+    int blob_count = result["blob_count"].as_int();
+    if (blob_count <= 3) xi::ok(1, "clean");          // the run's verdict
+    else                 xi::ng(1, "too many blobs"); // (VAR no longer outputs)
 }
 ```
 
@@ -75,7 +76,14 @@ That's a full script. Three constructs do the heavy lifting:
 |---|---|---|
 | `xi::use("name")` → `xi::UseProxy&` | Proxy to a backend-managed instance (camera, model, etc.) | Instance lives across hot-reloads, persisted by host |
 | `xi::Param<T>` | Tunable scalar with UI slider | Per script DLL, restored from `project.json` on reload |
-| `VAR(name, expr)` | Tracked variable sent to viewer panel | Per `inspect_entry` invocation |
+| `VAR(name, expr)` | Declares a local; **produces no output today** (dormant stub — see below) | Per `inspect_entry` invocation |
+
+> **`VAR`/`EMIT` no longer surface anything.** On branch
+> `refactor/remove-var-core` the core's VAR value-tracking, the `vars` wire
+> message, and the JPEG image-preview path were removed. `VAR(...)` / `EMIT(...)`
+> still **compile** (so existing scripts build unchanged) but publish nothing.
+> Surfacing values/images for viewing is becoming a **preview-plugin** concern.
+> The one verdict that *does* leave a run is `xi::result(...)` (see below).
 
 Plus:
 - `xi::Record` — the universal data container (named images + JSON).
@@ -97,7 +105,7 @@ Plus:
               │              │  ├ xi::use(...)             │
               │              │  │   .process(...)          │
               │              │  ├ xi::Param<T> reads       │
-              │              │  └ VAR(name, value)         │
+              │              │  └ xi::result(code, msg)    │
               │              └────────────────────────────┘
               │
               └─ on next save: ─→ get_state() (JSON) ─→ unload DLL ─→
@@ -108,7 +116,6 @@ State that survives the reload:
 - `xi::state()` JSON (persisted by `xi_script_get_state` /
   `xi_script_set_state`).
 - `xi::Param<T>` values (replayed by `xi_script_set_param`).
-- Preview subscriptions (host-managed, scoped to the client).
 
 State that does NOT survive:
 - Static / global C++ objects in your script (the DLL is unloaded).
@@ -163,55 +170,59 @@ or expose it through a plugin's `set_def`.
 
 ---
 
-## `VAR(name, expr)` — variable inspection
+## `VAR(name, expr)` — a dormant stub (no output today)
+
+> **Status (branch `refactor/remove-var-core`).** `VAR`/`EMIT` no longer
+> surface anything. The core's VAR value-tracking, the `vars` wire message, and
+> the JPEG image-preview path have been **removed** from the backend. The macros
+> remain as **compile-only stubs** so existing scripts keep building, but they do
+> not ship a value or image anywhere. Surfacing per-run values/images for viewing
+> is moving to a **preview plugin** — that's the forward path; the plugin API for
+> it isn't documented yet. For the run's pass/fail verdict use
+> [`xi::result(...)`](#xiresultcode-msg--the-one-per-run-verdict), which is live.
 
 ```cpp
-VAR(gray, toGray(img));            // xi::Image
-VAR(t,    thresh);                 // int
-VAR(pass, blob_count <= 3);        // bool
-VAR(blobs, result["blobs"]);       // xi::Record sub-tree (auto-rendered)
+VAR(gray, toGray(img));            // declares `gray` — compiles, no output
+VAR(t,    thresh);                 // declares `t`
+VAR(pass, blob_count <= 3);        // declares `pass`
 ```
 
-Every `VAR(...)` ships a snapshot to the viewer panel after
-`inspect_entry` returns. Renderers exist for number, bool, string,
-image, and Record (recursive tree).
+`VAR` still behaves as a **local declaration** at compile time: it expands to
+roughly `auto name = expr;`, so `name` becomes a real variable in the enclosing
+scope. That part of the contract is unchanged — what's gone is the "ships a
+snapshot to the viewer panel" half.
 
 `VAR(string_literal, ...)` — backed by `std::string`. There's no
 lifetime bug: the macro copies into a `std::string` value.
 
-To surface an intermediate **`cv::Mat`** (a mask, a response image), wrap it with
-**`xi::from_cv_mat(m)`** — it copies into an owning `xi::Image` so there's no
-lifetime trap: `VAR(mask, xi::from_cv_mat(mask_mat));`. See
-[`../reference/data-types.md`](../reference/data-types.md) for `xi::Image` / `imread`
-/ `as_cv_mat` / `from_cv_mat` and the RGB-not-BGR gotcha.
-
-> **`VAR(name, ...)` declares a local; use `EMIT(name)` to surface an
-> existing one.** `VAR` expands to roughly `auto name = expr; <ship to
-> viewer>`, so `name` becomes a real variable in the enclosing scope —
-> you **cannot** `VAR(count, count)` to surface a value you already
+> **`VAR(name, ...)` declares a local; use `EMIT(name)` to name an
+> existing one.** `VAR` expands to roughly `auto name = expr;`, so
+> `name` becomes a real variable in the enclosing scope —
+> you **cannot** `VAR(count, count)` over a value you already
 > computed, and you **cannot** `VAR(count, …)` *twice* in one scope (it
 > redefines `count`; cl.exe fires C2374). When that happens the backend
 > appends a clear hint to the compile error — *"duplicate VAR(count) at
 > lines X, Y … use EMIT(count)"* — so it's obvious VAR is the cause. For
-> a value you already have, use **`EMIT(name)`**, which ships an existing
+> a value you already have, use **`EMIT(name)`**, which references an existing
 > in-scope variable without declaring anything:
 >
 > ```cpp
 > int count = blobs.size();
-> EMIT(count);          // surfaces `count` — no redeclaration
+> EMIT(count);          // names `count` — no redeclaration
 > EMIT(frame);          // works on parameters too
 > ```
 >
-> Rule of thumb: `VAR` to **declare and surface** in one line; `EMIT` to
-> **surface something you already have**. (`EMIT_RAW` skips JPEG preview,
-> like `VAR_RAW`.)
+> (`VAR_RAW` / `EMIT_RAW` are the matching raw-image variants.) These are the
+> only reasons to use the macros today — the redefinition rule, not output. When
+> the preview plugin lands, this is the surface it will likely hook.
 
 ## `xi::result(code, msg)` — the one per-run verdict
 
-`VAR` ships *many* per-run inspection values (debug detail). `xi::result` ships the
-**single verdict record** for the run — the thing MES / PLC / the HMI verdict-yield
-cards consume. Exactly one Result per run (last write wins); a run that calls no
-`xi::result` defaults to `0` (NA).
+`xi::result` ships the **single verdict record** for the run — the thing MES /
+PLC / the HMI verdict-yield cards consume. It is the one script-output path that
+remains live in core (VAR/EMIT no longer surface anything — see above). Exactly
+one Result per run (last write wins); a run that calls no `xi::result` defaults
+to `0` (NA).
 
 ```cpp
 #include <xi/xi_result.hpp>
@@ -243,10 +254,9 @@ SDK's `c.run(frame_path=...)`); the script reads it via
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int) {
-    VAR(frame_path, xi::current_frame_path());
-    VAR(input,      xi::imread(xi::current_frame_path()));
+    auto input = xi::imread(xi::current_frame_path());
     if (input.empty()) {
-        VAR(error, std::string("frame load failed"));
+        xi::ng(1, "frame load failed");
         return;
     }
     // ... pipeline
@@ -263,16 +273,15 @@ If the run was started with no `frame_path` arg, `current_frame_path()`
 returns an empty string. Scripts that always need a path should error
 out explicitly when they see one.
 
-For images, the panel shows a thumbnail; double-click (or shift-click)
-opens the **interactive image viewer** with pan + cursor-anchored zoom +
-Pick Point / Pick Area tools.
+(Viewing decoded images back in a UI was the job of the now-removed VAR /
+image-preview path; a preview plugin will own that surface going forward.)
 
 ---
 
 ## `xi::Record` — the universal container
 
 Named images + JSON metadata. Used as the input + output of
-`Plugin::process`, returned by ops, stored as VARs.
+`Plugin::process`, returned by ops, passed between stages.
 
 ```cpp
 xi::Record r;
@@ -479,11 +488,10 @@ auto t = xi::current_trigger();
 if (!t.is_active()) return;
 
 int64_t now = xi::now_us();
-double queue_wait_us = (double)(t.dequeued_at_us() - t.timestamp_us());
-double inspect_us    = (double)(now              - t.dequeued_at_us());
-
-VAR(queue_wait_us, queue_wait_us);   // queue saturated → grows during surge
-VAR(inspect_us,    inspect_us);      // your code's actual cost
+double queue_wait_us = (double)(t.dequeued_at_us() - t.timestamp_us());  // grows during surge
+double inspect_us    = (double)(now              - t.dequeued_at_us());  // your code's actual cost
+// surface these however you like — a log line, a custom comm/preview plugin —
+// since VAR no longer ships values to a viewer.
 ```
 
 Both clocks are `std::chrono::system_clock` microseconds, so subtraction
@@ -543,7 +551,7 @@ fills:
   but with uneven inspect times the stream is out of frame order (sort
   client-side by `run_id` if you care).
 - **`arrival`**: emit in frame-arrival order. A worker that finishes early
-  waits its turn before emitting, so the `vars`/preview/`run_finished` stream
+  waits its turn before emitting, so the `run_result`/`run_finished` stream
   matches trigger order and `run_id` is monotonic on the wire. Compute still
   runs fully parallel; only emission is gated (a small latency cost). Use it
   when a downstream consumer assumes in-order results. See
@@ -636,12 +644,10 @@ serialized (non-reentrant → 1), concurrent (reentrant → N), and capped
   **exits** so the FE supervisor respawns a clean one — it does **not**
   force-kill a worker (that would leak the per-instance lock). Long ops
   should poll `xi::cancellation_requested()` so a cooperative cancel takes.
-- **`vars` events** arrive interleaved across run_ids in the default
+- **`run_result` events** arrive interleaved across run_ids in the default
   `result_order: "completion"`. Set `result_order: "arrival"` (above) for an
   in-order wire stream, or sort client-side by `run_id`.
 - **`xi::Param<T>`** reads are atomic and safe.
-- **VAR** writes go to a thread-local ValueStore — each dispatcher
-  has its own.
 
 When in doubt, leave `dispatch_threads` at 1.
 
@@ -682,7 +688,7 @@ void xi_inspect_entry(int frame) {
 ```
 
 Saving **any** `inspect*` file recompiles the whole script, and hover / `VAR`
-preview / `xi::use("…")` underlines work in every one of them.
+/ `xi::use("…")` underlines work in every one of them.
 
 **Why headers, not separate `.cpp` files?** A script compiles as a single
 translation unit. The script-support thunks and the `xi::use()` callback globals

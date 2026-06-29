@@ -70,11 +70,13 @@ script** that orchestrates them per frame. The bets:
    parallel).
 4. The **script** `xi_inspect_entry()` runs: reads the record's images, calls
    plugins (`xi::use("det").process(...)` → a `Record`), computes a verdict, emits
-   `VAR(...)` (per-run values) + `xi::result(code, msg)` (the one verdict), and may
-   forward to a PLC via a comm plugin.
+   `xi::result(code, msg)` (the one verdict), and may forward to a PLC via a comm
+   plugin. (`VAR(...)` still compiles but no longer publishes per-run values — that
+   path was removed from core, branch `refactor/remove-var-core`; surfacing values
+   for viewing is becoming a preview-plugin concern.)
 5. Emission is ordered per group (so the stream stays in frame order under parallel
    compute).
-6. The **HMI** renders vars + verdict; the **PLC** gets the verdict. Same
+6. The **HMI** renders the verdict; the **PLC** gets the verdict. Same
    run-result, multiple consumers.
 
 How a trigger becomes a run in detail: [`internals/dispatch.md`](./internals/dispatch.md).
@@ -105,7 +107,8 @@ handling, dispatch pools, script lifecycle, crash filter.
 - **Docs ride with code:** a behavior change updates its matching doc in the same
   commit.
 - **`VAR(name, expr)` declares a local; reusing a name is a redefinition error**
-  (`VAR(x, x)` → C2374). Common first-day gotcha.
+  (`VAR(x, x)` → C2374). Common first-day gotcha. (Note: `VAR`/`EMIT` compile but
+  no longer output anything — branch `refactor/remove-var-core`.)
 
 ## Glossary
 

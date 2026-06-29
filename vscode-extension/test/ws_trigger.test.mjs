@@ -51,7 +51,7 @@ async function withBackend(fn) {
     finally { c.close(); if (child.exitCode === null) { child.kill(); await sleep(100); } }
 }
 
-test('compile + start continuous triggers multiple inspections', async () => {
+test('compile + start continuous triggers multiple inspections', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (continuous dispatch still runs; observed via vars frames)' }, async () => {
     await withBackend(async (c) => {
         await c.next(); // hello
 

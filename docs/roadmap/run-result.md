@@ -116,8 +116,9 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
    writes it. After a successful inspect that set nothing → stays `0` (NA) for
    back-compat (**`XI_SYS_NO_VERDICT` is a v1.1 opt-in**, not the v1 default — so
    existing scripts that never call `RESULT` aren't flooded). Emit a **dedicated
-   `run_result` event** inside the `EmitTurn` (after vars/previews, before
-   `run_finished`).
+   `run_result` event** inside the `EmitTurn` (before `run_finished`). (The
+   `vars`/preview emission that used to precede it in the turn was removed —
+   branch `refactor/remove-var-core`.)
 4. **Drop path** — `enqueue_to_lane_` / legacy overflow emits a `run_result` with
    `XI_SYS_DROPPED` (+ trigger_id/source/group, no run_id) at the drop site →
    one Result per trigger, no gaps.

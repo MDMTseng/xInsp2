@@ -48,7 +48,7 @@ async function withBackend(fn) {
     finally { c.close(); if (child.exitCode === null) { child.kill(); await sleep(100); } }
 }
 
-test('compile + run produces vars with expected shape', async () => {
+test('compile + run produces vars with expected shape', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.next(); // hello
 
@@ -77,7 +77,7 @@ test('compile + run produces vars with expected shape', async () => {
     });
 });
 
-test('set_param updates value, next run uses new value', async () => {
+test('set_param updates value, next run uses new value', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
     await withBackend(async (c) => {
         await c.next(); // hello
 

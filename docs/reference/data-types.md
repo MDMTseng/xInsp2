@@ -59,11 +59,13 @@ degrades cleanly. Always check.
 **OpenCV interop (both directions):**
 - `img.as_cv_mat()` — zero-copy borrow; the Mat must not outlive the Image.
 - `xi::from_cv_mat(m)` — owning copy (8-bit 1/3/4-ch; non-continuous ROI is
-  `clone()`d; empty/non-8-bit → empty Image). The supported way to `VAR`/return a
+  `clone()`d; empty/non-8-bit → empty Image). The supported way to return a
   computed `cv::Mat` lifetime-safely.
 
-**`VAR(name, value)`** emits to the client: scalars, `std::string`, `xi::Image`
-(surfaced as a preview). Wrap an intermediate `cv::Mat` with `from_cv_mat` first.
+**`VAR(name, value)`** declares a local but **no longer emits anything** to the
+client — the per-run value/preview transport was removed from core (branch
+`refactor/remove-var-core`); surfacing values for viewing is moving to a preview
+plugin. The macro still compiles so existing scripts build.
 
 ## Nominal types — names over Record
 

@@ -46,7 +46,7 @@ void xi_inspect_entry(int){
 
 async function waitRsp(c, id) { for (;;) { const m = await c.nextText(); if (m.type === 'rsp' && m.id === id) return m; } }
 
-test('adjusting an extracted value does not affect the original', async () => {
+test('adjusting an extracted value does not affect the original', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
     const { mkdtempSync, writeFileSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     // need the project's plugin/instance, so compile the script inside it
