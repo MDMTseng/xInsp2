@@ -78,6 +78,22 @@ load-bearing contract that lives only in a comment/convention.
   `void xi_inspect_entry(int frame)`); not worth a script-ABI churn for a hint that
   only goes negative after months of 24/7 uptime. Do it with the next script-ABI bump.
 
+## Bounded-in-practice (audited 2026-06-27 tax-when-unused sweep — left as-is)
+
+- **`TriggerBus::source_last_emit_mono_us_` never evicts** (xi_trigger_bus.hpp). A map
+  keyed by emitter source name, stamped every emit; `evict_stale()` is a deliberate
+  no-op. It can't be TTL-evicted because its whole purpose is per-source staleness
+  reporting (`source_emit_ages_us` → "which camera stalled") — evicting a stale source
+  erases exactly the stall signal. Bounded in practice by the stable source set (a
+  fixed camera/emitter roster); only a plugin churning *distinct* source names per
+  frame would grow it, and plugins are trusted. Same posture as the g_status case.
+- **Per-run hot path audited clean**: graph_capture OFF = one relaxed atomic load;
+  result()/status() fire only when the script uses them; EmitTurn/watchdog gated;
+  crash breadcrumbs ~100-200ns and necessary. No tax-when-unused worth gating. (The
+  one latent idea — a fully headless run, zero clients connected, still calls
+  `s.snapshot()` + formats the vars frame for nobody now that the history ring is
+  gone — is a possible future optimization for unattended production, not yet done.)
+
 ## Won't fix (under current policy)
 
 - `frozen_` non-atomic on the Record COW path — the refcount itself is correct

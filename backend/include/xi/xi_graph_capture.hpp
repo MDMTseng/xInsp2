@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -68,6 +69,10 @@ public:
         }
         std::lock_guard<std::mutex> lk(mu_);
         calls_.push_back(std::move(call));
+        // Bound the buffer so capture left on in continuous/production mode can't
+        // grow without limit. The dataflow topology repeats every frame, so a ring
+        // of recent calls still reconstructs the full graph; drop the oldest.
+        while (calls_.size() > kMaxCalls) calls_.pop_front();
     }
 
     struct Edge {
@@ -86,7 +91,7 @@ public:
     // producer wins". The host formats this to wire JSON.
     Snapshot snapshot() const {
         std::vector<Call> calls;
-        { std::lock_guard<std::mutex> lk(mu_); calls = calls_; }
+        { std::lock_guard<std::mutex> lk(mu_); calls.assign(calls_.begin(), calls_.end()); }
 
         std::unordered_map<uint64_t, std::pair<std::string, std::string>> producer;
         std::map<std::pair<std::string, std::string>, std::unordered_set<std::string>> edge_keys;
@@ -119,9 +124,12 @@ private:
         std::vector<uint64_t>    in_handles, out_handles;
         std::vector<std::string> in_keys,    out_keys;
     };
+    // Plenty to reconstruct any real pipeline's topology (which repeats per
+    // frame) while bounding memory if capture is accidentally left enabled.
+    static constexpr size_t kMaxCalls = 8192;
     std::atomic<bool>  on_{false};
     mutable std::mutex mu_;
-    std::vector<Call>  calls_;   // guarded by mu_
+    std::deque<Call>   calls_;   // guarded by mu_ (ring: oldest dropped past kMaxCalls)
 };
 
 } // namespace xi
