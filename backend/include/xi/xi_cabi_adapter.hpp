@@ -113,6 +113,13 @@ struct PluginInfo {
     // on cmake-mode plugins, then hot-reloads whichever DLLs actually changed.
     // See docs/guides/write-a-plugin.md (External libraries & CUDA).
     bool        prebuilt = false;
+    // Ordered output sink (plugin.json `"sink": true` or `"role": "sink"`). A
+    // script's xi::use(<this instance>).process(rec) is then NOT run inline during
+    // inspect — the host STAGES it and flushes after the inspect inside the ordered-
+    // emit gate, so the sink's side effect (comm → PLC, preview push, …) lands in
+    // FRAME order even under parallel dispatch. Fire-and-forget: the process()
+    // reply is dropped. See run_one_inspection / docs/reference/c-abi.md.
+    bool        is_sink = false;
     std::string folder_path;   // absolute path to plugin folder
     std::string ui_path;       // absolute path to ui/ folder (if has_ui)
     HMODULE     handle = nullptr;
@@ -138,9 +145,9 @@ class CAbiInstanceAdapter : public InstanceBase {
 public:
     CAbiInstanceAdapter(std::string name, std::string plugin_name,
                         HMODULE dll, void* inst, bool reentrant = false,
-                        int max_concurrency = 0)
+                        int max_concurrency = 0, bool is_sink = false)
         : name_(std::move(name)), plugin_name_(std::move(plugin_name)),
-          dll_(dll), inst_(inst), reentrant_(reentrant),
+          dll_(dll), inst_(inst), reentrant_(reentrant), is_sink_(is_sink),
           owner_id_(ImagePool::alloc_owner_id()) {
         max_concurrency_ = (max_concurrency > 0 ? max_concurrency : 0);
         // Resolve function pointers
@@ -254,6 +261,7 @@ public:
     void* raw_instance() const { return inst_; }
     xi_plugin_process_fn process_fn() const { return process_fn_; }
     bool reentrant() const { return reentrant_; }
+    bool is_sink()   const { return is_sink_; }   // ordered output sink (see PluginInfo::is_sink)
     // γ: true ⇒ caller may set xi_record.doc (borrowed yyjson doc) instead of
     // serializing to data/len. False ⇒ JSON path (foreign/older plugin).
     bool doc_input_ok() const { return doc_input_ok_; }
@@ -294,6 +302,7 @@ private:
     mutable std::condition_variable cc_cv_;
     mutable int                     cur_calls_ = 0;
     bool reentrant_ = false;
+    bool is_sink_   = false;
     int  max_concurrency_ = 0;     // 0 = unlimited (reentrant only)
     std::string name_;
     std::string plugin_name_;

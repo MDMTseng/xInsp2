@@ -126,6 +126,10 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
     // invokes cl.exe on it. Default (absent / "source") = backend compiles it.
     pi.prebuilt = json_flag_true(content, "prebuilt") ||
                   (extract_string(content, "build").value_or("") == "cmake");
+    // Ordered output sink: `"sink": true` or `"role": "sink"`. The host stages +
+    // gates use(<instance>).process() so the sink's side effect lands in frame order.
+    pi.is_sink = json_flag_true(content, "sink") ||
+                 (extract_string(content, "role").value_or("") == "sink");
     pi.folder_path = folder;
     if (pi.has_ui) {
         pi.ui_path = (std::filesystem::path(folder) / "ui").string();
