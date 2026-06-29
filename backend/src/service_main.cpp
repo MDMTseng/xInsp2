@@ -1831,6 +1831,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 std::fprintf(stderr, "[xinsp2] refused out-of-tree prebuilt DLL: %s\n", p.string().c_str());
                 send_rsp_err(srv, id,
                     "prebuilt DLL must be inside the project folder (out-of-tree path refused)");
+                // P1-4: sticky degraded marker so a status poll sees it after the rsp.
+                set_status_internal("@compile", "degraded: prebuilt DLL refused (out-of-tree)");
                 // This return is past stop_dispatch_pool_() — like the compile/load
                 // failure paths it must re-arm continuous mode or the stream stays
                 // dead until the client re-issues cmd:start.
@@ -1923,6 +1925,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             lm.level = "error";
             lm.msg = res.build_log;
             srv.send_text(lm.to_json());
+            // P1-4: the rsp ok:false only reaches THIS caller; publish a sticky
+            // "@compile" marker so a later status poll (or a reconnecting operator)
+            // can tell the line is running the last-good def in a degraded state.
+            set_status_internal("@compile", "degraded: compile failed");
             resume_continuous_if_needed();   // keep streaming the last-good script
             return;
         }
@@ -1942,6 +1948,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             std::string err;
             if (!xi::script::load_script(res.dll_path, next, err)) {
                 send_rsp_err(srv, id, err);
+                set_status_internal("@compile", "degraded: script load failed");  // P1-4
                 resume_continuous_if_needed();   // old g_script untouched, keep it streaming
                 return;
             }
@@ -2090,6 +2097,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Preserve trigger-only mode across the reload (prior_continuous_fps == 0
         // means no timer — sources drive it). Same path as the error returns above.
         resume_continuous_if_needed();
+
+        // P1-4: the swap succeeded — clear any prior degraded marker. The
+        // "@compile" entry's seq/ts_ms double as a running-def generation+recency
+        // stamp, so a client can tell a fresh good load from a stale "ok".
+        set_status_internal("@compile", "ok");
 
         // Return success with dll path + diagnostics (warnings only on
         // success; extension still wants them for squiggle).
