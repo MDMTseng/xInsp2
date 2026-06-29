@@ -40,6 +40,16 @@ set_target_properties(mock_camera PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera
 )
 
+# preview — view a script's output (post-VAR): keeps the latest record per
+# preview-group, JPEG-encodes images via the host cache + pushes them live
+# (XPV1 binary frames). Script API: <xi/xi_preview.hpp>. See examples/preview_sink_demo.
+add_library(preview SHARED preview/src/preview.cpp)
+target_include_directories(preview PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+set_target_properties(preview PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/preview
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/preview
+)
+
 # config_swap_probe — reference plugin for the orchestrator config-swap design
 # (double-slot prepare/commit via exchange; see
 # docs/roadmap/config-bundles-and-orchestration.md)

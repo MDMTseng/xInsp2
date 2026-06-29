@@ -2,9 +2,6 @@
   "name": "preview_sink_demo",
   "script": "inspect.cpp",
   "instances": [
-    { "name": "preview", "plugin": "preview_sink" }
-  ],
-  "plugins": {
-    "preview_sink": { "path": "preview_sink", "compile": true }
-  }
+    { "name": "preview", "plugin": "preview" }
+  ]
 }

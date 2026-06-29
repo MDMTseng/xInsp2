@@ -6,7 +6,7 @@
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
 #include <xi/xi_result.hpp>   // xi::ok / xi::ng (not in the xi.hpp umbrella)
-#include "preview_api.hpp"    // xi::preview::Sink (ships with the preview_sink plugin)
+#include <xi/xi_preview.hpp>   // the `preview` plugin's script API (SDK)
 
 #include <cstdlib>            // std::abs
 
