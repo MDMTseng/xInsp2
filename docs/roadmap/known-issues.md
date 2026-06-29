@@ -92,10 +92,18 @@ load-bearing contract that lives only in a comment/convention.
 
 ## Minor / residual
 
-- **F7** — `TriggerEvent` drop-paths (lane overflow / teardown drain) still release
-  by hand; `CurrentTriggerScope` only covers the run-sites.
-- **F8** — `spawn_group_pool_` doesn't assert "already stopped" (all callers pair it
-  today, by convention).
+- ~~**F7** — `TriggerEvent` drop-paths release by hand~~ **(FIXED 2026-06-27).**
+  `enqueue_to_lane_` — the multi-exit move-or-release path — now uses a
+  `TriggerEventReleaser` RAII guard (release-by-default, `dismiss()` on hand-off to a
+  queue). Forgetting is now leak-free instead of leak-prone, and a move leaves `ev`
+  empty so a missed dismiss can't double-free. The teardown drain and the
+  `!launched` detached-run path are straight-line single releases (no early-exit
+  risk), left as-is. Drop paths exercised by `ws_drop_lifetime`.
+- ~~**F8** — `spawn_group_pool_` doesn't assert "already stopped"~~ **(FIXED
+  2026-06-27).** It now `assert`s `g_lanes.empty()` at entry (callers must
+  `stop_dispatch_pool_` first) + leaves a stderr BUG breadcrumb in release builds
+  (where `assert` is compiled out) before clearing — so a future caller that skips
+  the stop can't silently double-spawn two worker sets on one source.
 - **ws_fallback_gate.test.mjs** is skipped (no no-export fixture) → the yyjson-layout
   gate is unguarded by CI.
 - **`xi_inspect_entry(int frame)` hint wraps at 2^31 frames** (~248 days @ 100 fps,

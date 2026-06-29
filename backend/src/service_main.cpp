@@ -42,6 +42,7 @@
 #include <xi/xi_plugin_manager.hpp>
 #include <xi/xi_project.hpp>
 #include <xi/xi_owner_lock.hpp>     // F5: advisory single-writer stamp on the project folder
+#include <cassert>
 #include <xi/xi_trigger_bus.hpp>
 #include <xi/xi_inflight_runs.hpp>   // xi::InflightRuns (detached-run lifetime owner)
 #include <xi/xi_emit_gate.hpp>       // xi::EmitGate / xi::EmitTurn (ordered-emit gate)
@@ -350,6 +351,22 @@ struct CurrentTriggerScope {
     ~CurrentTriggerScope() { g_current_trigger = nullptr; release_trigger_event_(ev_); }
     CurrentTriggerScope(const CurrentTriggerScope&) = delete;
     CurrentTriggerScope& operator=(const CurrentTriggerScope&) = delete;
+};
+
+// F7: RAII for the enqueue path's "release the event UNLESS it was handed off to a
+// lane queue" discipline. enqueue_to_lane_ has several early-return / drop exits that
+// must release, and a couple of success exits that move `ev` into the queue and must
+// NOT. The old hand-written `rel()` made FORGETTING = leak; this inverts it —
+// release-by-default, call dismiss() only where ownership is transferred. (A move
+// leaves `ev` empty, so even a missed dismiss() releases nothing — never a
+// double-free.) Same shape as DispatchPoolGuard.
+struct TriggerEventReleaser {
+    xi::TriggerEvent* ev_;   // null ⇒ dismissed (handed off)
+    explicit TriggerEventReleaser(xi::TriggerEvent& ev) : ev_(&ev) {}
+    void dismiss() { ev_ = nullptr; }
+    ~TriggerEventReleaser() { if (ev_) release_trigger_event_(*ev_); }
+    TriggerEventReleaser(const TriggerEventReleaser&) = delete;
+    TriggerEventReleaser& operator=(const TriggerEventReleaser&) = delete;
 };
 
 struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hpp)
@@ -1243,19 +1260,20 @@ static void warn_frame_drop_(uint64_t dropped, const std::string& group, const c
 
 // Per-lane enqueue with that lane's queue_depth/overflow policy.
 static bool enqueue_to_lane_(xi::TriggerEvent ev) {
-    auto rel = [&] { release_trigger_event_(ev); };
-    if (!g_continuous.load()) { rel(); return false; }
+    // F7: releases ev on EVERY exit unless dismiss()'d (i.e. handed to a lane queue).
+    TriggerEventReleaser guard(ev);
+    if (!g_continuous.load()) return false;
     std::shared_ptr<GroupLane> lane = lane_for_(ev.group);
-    if (!lane) { rel(); return false; }
+    if (!lane) return false;
     int depth = lane->cfg.queue_depth < 1 ? 1 : lane->cfg.queue_depth;
     const std::string& ov = lane->cfg.overflow;
     std::unique_lock<std::mutex> lk(lane->mu);
     // Re-check after taking the lane lock: a concurrent stop may have flipped
     // g_continuous + drained; don't push a now-orphaned event (would leak).
-    if (!g_continuous.load()) { rel(); return false; }
+    if (!g_continuous.load()) return false;
     if ((int)lane->q.size() < depth) {
         ev.arrival_id = ++g_run_id;   // arrival/run id in push (== FIFO) order
-        lane->q.push_back(std::move(ev));
+        lane->q.push_back(std::move(ev)); guard.dismiss();   // ownership → queue
         uint64_t ns = lane->q.size(), prev = lane->high_watermark.load(std::memory_order_relaxed);
         while (ns > prev && !lane->high_watermark.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
         // P1-8: also raise the process-lifetime peak (survives cmd:start).
@@ -1268,8 +1286,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         int64_t aid = ++g_run_id;   // arrival slot of the dropped (new) frame
         std::string ds = ev.leader_source, dg = ev.group;   // the dropped (new) event
         warn_frame_drop_(lane->dropped.load(), dg, "drop_newest");
-        release_trigger_event_(ev);
-        lk.unlock();
+        lk.unlock();   // guard releases the dropped (new) ev on return
         // Out-of-band NA marker (not gated — gating would stall the source); the
         // run_id lets a consumer order it against this lane's run results.
         if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
@@ -1279,8 +1296,9 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     auto& front = lane->q.front();   // drop_oldest (the default + fallback)
     int64_t dropped_aid = front.arrival_id;   // the dropped (oldest) frame's slot
     std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
-    release_trigger_event_(front);
-    lane->q.pop_front(); ev.arrival_id = ++g_run_id; lane->q.push_back(std::move(ev)); lane->cv.notify_one(); ++lane->dropped; ++g_dropped_lifetime;   // P1-8
+    release_trigger_event_(front);   // the evicted front (a different event, in-queue)
+    lane->q.pop_front(); ev.arrival_id = ++g_run_id; lane->q.push_back(std::move(ev)); guard.dismiss();   // ev → queue
+    lane->cv.notify_one(); ++lane->dropped; ++g_dropped_lifetime;   // P1-8
     warn_frame_drop_(lane->dropped.load(), dg, "drop_oldest");
     lk.unlock();
     if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
@@ -1291,6 +1309,17 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
 static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
     {
         std::lock_guard<std::mutex> lk(g_lanes_mu);
+        // F8: callers must stop_dispatch_pool_ before (re)spawning — a non-empty
+        // g_lanes here means a prior pool's workers are still running and we'd
+        // silently double-spawn (two worker sets draining one source). All sites
+        // pair stop+spawn today; assert the invariant so a future site can't
+        // regress it silently. Release builds also leave a stderr breadcrumb since
+        // assert() is compiled out there.
+        assert(g_lanes.empty() && "spawn_group_pool_ called without a preceding stop_dispatch_pool_");
+        if (!g_lanes.empty())
+            std::fprintf(stderr, "[xinsp2] BUG: spawn_group_pool_ with %zu live lane(s) — "
+                         "missing stop_dispatch_pool_; clearing (workers may double-run)\n",
+                         g_lanes.size());
         g_lanes.clear();
         // F4: capture default_group with this lane set so lane_for_ routes against
         // a name that exists in g_lanes (the synthesized default lane below is "").
