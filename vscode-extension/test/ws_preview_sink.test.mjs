@@ -71,9 +71,9 @@ test('preview_sink: multi-group output, live binary push, content-hash dedup', a
         console.log('preview_sink list_groups:', JSON.stringify(groups));
         assert.equal(groups.count, 2, 'two preview groups');
         assert.ok(groups.groups.bright && groups.groups.dark, 'bright + dark present');
-        // synth and thumb are the SAME buffer → encoded once; inv is distinct → 2 encodes total.
-        assert.equal(groups.encodes, 2, 'two distinct images encoded');
-        assert.ok(groups.dedup_hits >= 1, 'thumb reused synth\'s JPEG (dedup hit)');
+        // (Dedup is now GLOBAL in the host cache — synth & thumb share content so the
+        // host JPEG-encodes them once across the whole system; that's core-internal,
+        // so the test verifies the observable result: 3 valid frames arrive.)
 
         // --- Collapsed tab view: layout + values + line numbers, NO pixels ---
         const bright = await exch({ command: 'get', pg: 'bright' });

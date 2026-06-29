@@ -142,6 +142,7 @@ struct; null-check tail fields (an older host may leave them `nullptr`).
 | Instance | `instance_folder(name, buf, len)` | Per-instance scratch dir, created before `create()`; never auto-deleted. |
 | Dispatch (v6) | `emit_record(emitter, id, rec, ts)` | **The one dispatch verb.** A source hands the host a record (images + metadata doc); the host dispatches one inspection. The script reads it via `current_trigger().image()/.meta()/.id_string()`. Metadata rides by pointer (zero-serialize). Use the SDK helper `xi::emit_record`. → `internals/dispatch.md`. |
 | Binary push (v8) | `emit_binary(data, len)` | Push an opaque binary frame straight to connected WS clients. The host is a dumb byte pipe — the **frame format is the plugin's contract with its UI** (self-describe: group/key + dims + codec + payload). Intended for a preview plugin shipping JPEG stills live (no base64, no poll). Thread-safe from a worker; null on a pre-v8 host. SDK: `xi::Plugin::emit_binary(...)`. See `examples/preview_sink_demo`. |
+| Compress cache (v9) | `compress_image(px, w, h, c, quality, out, cap)` | JPEG-encode an image **through a host-side N-rotate cache** keyed by a content hash: the same frame compressed by several plugins (or repeatedly) is encoded ONCE globally. Lets a preview plugin avoid linking opencv/turbojpeg and gives free global dedup. Returns bytes written / `-needed` / 0. Pair with `emit_binary` to push the result. |
 | Doc allocator (v3, γ) | `doc_chunk_alloc` / `doc_chunk_realloc` / `doc_chunk_free` | Host-owned pool behind the in-process yyjson doc → `internals/data-layer.md`. |
 | Doc refcount (v4, γ-4) | `doc_retain` / `doc_release` / `doc_refcount` | The doc analogue of `image_addref/release` → `internals/data-layer.md`. |
 | SHM (removed 2026-05) | `shm_*` (5) | Always `nullptr`; kept for binary compat. Fall back to `image_create`. |
@@ -167,10 +168,10 @@ decrements (freed at 0; invalid handles are no-ops). `image_stride(h)` is
 `XI_ABI_VERSION` is **8**. The struct was append-only through v5; v6 broke that
 to remove the retired dispatch fields, so **all plugins must be rebuilt against
 the current ABI** (no binary compat with v4/v5 kept — this is pre-stable-release).
-v7 added only OPTIONAL *plugin* exports (not `xi_host_api` fields); v8 **appended**
-`emit_binary` at the end of `xi_host_api` — additive, so existing v6/v7 plugins
-still load on a v8 host (the gate only refuses a plugin asking for a *newer* ABI
-than the host). History:
+v7 added only OPTIONAL *plugin* exports (not `xi_host_api` fields); v8/v9 **appended**
+`emit_binary` then `compress_image` at the end of `xi_host_api` — additive, so
+existing older plugins still load on a newer host (the gate only refuses a plugin
+asking for a *newer* ABI than the host). History:
 
 | ver | added |
 |---|---|
@@ -182,6 +183,7 @@ than the host). History:
 | 6 | dispatch collapsed to ONE verb `emit_record(emitter,id,rec,ts)`; `emit_trigger`, `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` REMOVED (no v4 compat — rebuild all plugins). Multi-cam = gathering plugin; replay = buffer-replay plugin. |
 | 7 | optional plugin exports `xi_plugin_prepare(inst,def,folder)` + `xi_plugin_commit(inst)` for frame-perfect config swap (opt in via `XI_PLUGIN_STAGED`; prepare ungated, commit gated). PLUGIN exports, not host-api fields — no struct shift, older plugins still load. |
 | 8 | `emit_binary(data, len)` appended to `xi_host_api` — plugin→WS binary push (e.g. live JPEG previews). Additive (last field); v6/v7 plugins still load on a v8 host. |
+| 9 | `compress_image(px,w,h,c,q,out,cap)` appended — host-side JPEG encode through an N-rotate content-hash cache (global dedup). Additive; older plugins still load on a v9 host. |
 
 **Two load gates** (a plugin failing either is refused at load with a clear
 error, then `FreeLibrary`'d):

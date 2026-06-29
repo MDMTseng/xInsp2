@@ -1,41 +1,26 @@
-// preview_sink.cpp — multi-group preview sink with LIVE binary image push (v8).
+// preview_sink.cpp — multi-group preview sink with LIVE binary image push.
 //
 // A script surfaces output via xi::use("preview").process(Record{values + images},
 // tagged with a preview-group id pg_id). This sink:
-//   - pushes each image LIVE to the UI as a self-describing binary frame
-//     (host_api->emit_binary, ABI v8) — JPEG, no base64, no poll;
-//   - skips re-compressing an image it has already encoded (content-hash dedup —
-//     the "same image, don't compress twice" rule the old core preview had);
-//   - keeps the latest record per group for the collapsed tab view (get / list_groups),
-//     and serves a still on demand via get_image (pull fallback).
+//   - JPEG-encodes each image through the HOST cache (host->compress_image, ABI
+//     v9) — so the same frame compressed across plugins is encoded ONCE globally,
+//     and this plugin needs no opencv/turbojpeg of its own;
+//   - PUSHES each as a self-describing binary frame (host->emit_binary, ABI v8);
+//   - keeps the latest record per group for the collapsed tab view + a pull still.
 //
 // BINARY FRAME FORMAT (plugin -> WS; the UI mirrors this):
-//   [0..3]  magic 'X','P','V','1'
-//   [4..5]  width   u16 LE
-//   [6..7]  height  u16 LE
-//   [8]     channels u8
-//   [9]     codec    u8   (1 = jpeg)
-//   [10]    pg_len   u8
-//   [11]    key_len  u8
-//   [12..]  pg_id bytes, then key bytes, then the JPEG payload (rest of frame)
+//   [0..3] 'XPV1' | [4..5] u16 w | [6..7] u16 h | [8] u8 ch | [9] u8 codec(1=jpeg)
+//   | [10] u8 pg_len | [11] u8 key_len | pg bytes | key bytes | jpeg payload
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
-#include <opencv2/imgcodecs.hpp>   // cv::imencode — opencv is on the plugin compile path
 
 #include <cstdint>
-#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace {
-
-uint64_t fnv1a(const uint8_t* p, size_t n) {
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
-    return h;
-}
 
 std::string b64(const uint8_t* p, size_t n) {
     static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -85,16 +70,13 @@ public:
         g.images.clear();
         for (auto& [key, img] : in.images()) {
             if (img.empty()) continue;
-            // OWN a deep copy for the pull fallback (input handles are call-scoped).
-            g.images[key] = xi::Image(img.width, img.height, img.channels, img.data());
-            // Dedup + encode once, then push LIVE to the UI.
-            const std::vector<uint8_t>& jpeg = encode_cached_(img);
+            g.images[key] = xi::Image(img.width, img.height, img.channels, img.data());  // own for pull
+            std::vector<uint8_t> jpeg = compress_(img);   // host cache: encoded once globally
             if (!jpeg.empty())
                 emit_binary(build_frame(pg, key, img.width, img.height, img.channels, jpeg));
         }
         ++g.seen;
-        return xi::Record().set("pg", pg).set("seen", (int64_t)g.seen)
-                           .set("encodes", (int64_t)encodes_).set("dedup_hits", (int64_t)dedup_hits_);
+        return xi::Record().set("pg", pg).set("seen", (int64_t)g.seen);
     }
 
     std::string exchange(const std::string& cmd) override {
@@ -107,9 +89,7 @@ public:
             for (auto& [pg, g] : groups_)
                 groups.set(pg.c_str(), xi::Json::object()
                     .set("seen", (int64_t)g.seen).set("image_count", (int)g.images.size()));
-            return xi::Json::object().set("count", (int)groups_.size())
-                .set("groups", groups)
-                .set("encodes", (int64_t)encodes_).set("dedup_hits", (int64_t)dedup_hits_).dump();
+            return xi::Json::object().set("count", (int)groups_.size()).set("groups", groups).dump();
         }
         if (c == "get" || c == "get_latest") {
             const std::string pg = p["pg"].as_string("default");
@@ -127,7 +107,7 @@ public:
             if (it != groups_.end()) {
                 auto im = it->second.images.find(key);
                 if (im != it->second.images.end()) {
-                    const std::vector<uint8_t>& jpeg = encode_cached_(im->second);
+                    std::vector<uint8_t> jpeg = compress_(im->second);
                     return xi::Json::object().set("found", true).set("pg", pg).set("key", key)
                         .set("w", im->second.width).set("h", im->second.height)
                         .set("channels", im->second.channels)
@@ -152,31 +132,29 @@ private:
     struct Group {
         std::string                       data = "{}";
         long long                         seen = 0;
-        std::map<std::string, xi::Image>  images;   // deep copies for the pull fallback
+        std::map<std::string, xi::Image>  images;
     };
 
-    // Encode an image to JPEG, reusing a cached result for an identical image
-    // (content hash) so the same frame surfaced to many groups/keys compresses
-    // ONCE. Bounded LRU-ish ring (evict oldest hash past kCacheCap). Caller holds mu_.
-    const std::vector<uint8_t>& encode_cached_(const xi::Image& img) {
-        const uint64_t h = fnv1a(img.data(), img.size());
-        auto it = cache_.find(h);
-        if (it != cache_.end()) { ++dedup_hits_; return it->second; }
-        std::vector<uint8_t> jpeg;
-        // as_cv_mat is a non-owning view over the image bytes; imencode reads only.
-        cv::imencode(".jpg", img.as_cv_mat(), jpeg, { cv::IMWRITE_JPEG_QUALITY, 85 });
-        ++encodes_;
-        cache_order_.push_back(h);
-        while (cache_order_.size() > kCacheCap) { cache_.erase(cache_order_.front()); cache_order_.pop_front(); }
-        return cache_.emplace(h, std::move(jpeg)).first->second;
+    // JPEG-encode via the host cache (host->compress_image): identical images are
+    // encoded once globally, and we don't link a codec ourselves.
+    std::vector<uint8_t> compress_(const xi::Image& img) const {
+        const xi_host_api* h = host();
+        if (!h || !h->compress_image || img.empty()) return {};
+        std::vector<uint8_t> jpeg(64 * 1024);
+        int n = h->compress_image(img.data(), img.width, img.height, img.channels, 85,
+                                  jpeg.data(), (int)jpeg.size());
+        if (n < 0) {  // buffer too small — resize to needed and retry
+            jpeg.resize((size_t)(-n));
+            n = h->compress_image(img.data(), img.width, img.height, img.channels, 85,
+                                  jpeg.data(), (int)jpeg.size());
+        }
+        if (n <= 0) return {};
+        jpeg.resize((size_t)n);
+        return jpeg;
     }
 
-    static constexpr size_t kCacheCap = 64;
-    mutable std::mutex                          mu_;
-    std::map<std::string, Group>                groups_;
-    std::map<uint64_t, std::vector<uint8_t>>    cache_;        // content-hash -> jpeg
-    std::deque<uint64_t>                        cache_order_;  // eviction order
-    long long                                   encodes_ = 0, dedup_hits_ = 0;
+    mutable std::mutex            mu_;
+    std::map<std::string, Group>  groups_;
 };
 
 XI_PLUGIN_IMPL(PreviewSink)

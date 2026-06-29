@@ -3683,6 +3683,40 @@ int main(int argc, char** argv) {
         if (auto* s = g_srv_for_bp.load(std::memory_order_acquire))
             s->send_binary(static_cast<const uint8_t*>(data), static_cast<size_t>(len));
     };
+    // ABI v9: JPEG-encode through a process-global N-rotate cache keyed by a
+    // content hash of the pixels — so the SAME image compressed by several plugins
+    // (or repeatedly) is encoded ONCE globally (the dedup the old core preview had,
+    // now a reusable host service). Non-capturing → converts to CompressSinkFn.
+    xi::compress_sink() = [](const void* px, int w, int h, int c, int q,
+                             void* out, int cap) -> int {
+        if (!px || w <= 0 || h <= 0 || c <= 0) return 0;
+        const size_t nbytes = (size_t)w * (size_t)h * (size_t)c;
+        uint64_t key = 1469598103934665603ull;          // FNV-1a over the pixels...
+        const uint8_t* p = static_cast<const uint8_t*>(px);
+        for (size_t i = 0; i < nbytes; ++i) { key ^= p[i]; key *= 1099511628211ull; }
+        key ^= ((uint64_t)w << 40) ^ ((uint64_t)h << 16) ^ (uint64_t)(c * 1000 + q);  // ...+ dims/quality
+        constexpr size_t kCap = 32;
+        static std::mutex cmu;
+        static std::unordered_map<uint64_t, std::vector<uint8_t>> cache;
+        static std::deque<uint64_t> order;
+        std::vector<uint8_t> jpeg;
+        {
+            std::lock_guard<std::mutex> lk(cmu);
+            auto it = cache.find(key);
+            if (it != cache.end()) {
+                jpeg = it->second;                       // cache hit → reuse the encode
+            } else {
+                xi::Image img = xi::Image::view(w, h, c, const_cast<uint8_t*>(p));
+                if (!xi::encode_jpeg(img, q, jpeg) || jpeg.empty()) return 0;
+                order.push_back(key);
+                while (order.size() > kCap) { cache.erase(order.front()); order.pop_front(); }
+                cache.emplace(key, jpeg);
+            }
+        }
+        if ((int)jpeg.size() > cap) return -(int)jpeg.size();
+        std::memcpy(out, jpeg.data(), jpeg.size());
+        return (int)jpeg.size();
+    };
 
     // P2.4 watchdog. Always-on monitor thread; acts when any in-flight inspect
     // (wd_arm slot) overruns its deadline. Two-phase, now per-worker-aware:
