@@ -103,7 +103,11 @@ using xi::seh_exception;
 // process() crash so a crash loop is visible via get_state.
 static void note_instance_crash_(const char* name, const char* why);
 
-static int use_process_cb(const char* name,
+// The inline cross-instance process() path: run the target plugin's process() NOW,
+// on this thread. Used directly for a normal xi::use(x).process() (input wiring) and
+// by the staged-sink flush. A sink target is intercepted by use_process_cb (below)
+// and never reaches here inline mid-inspect.
+static int use_process_inline_(const char* name,
                           const void* input_doc,
                           const uint8_t* input_data, int32_t input_len,
                           const xi_record_image* input_images, int input_image_count,
@@ -164,6 +168,78 @@ static int use_process_cb(const char* name,
         }
     }
     return -1;
+}
+
+// ---- ordered output sinks: stage during inspect, flush in frame order -----------
+// A script's xi::use(<sink>).process(rec) must NOT run inline under parallel dispatch
+// — the sink's side effect (comm → PLC, preview push) would land in COMPLETION order,
+// not frame order. Instead each call is STAGED on the running worker thread and
+// flushed AFTER the inspect, inside the EmitTurn gate (run_one_inspection), in call
+// order — exactly like this run's vars/result emit. Reuses the same resource-
+// ownership discipline as a bus TriggerEvent (release_trigger_event_). thread_local
+// so parallel workers stage independently. (use() is script-only — a plugin can't
+// re-enter it — so staging only ever happens inside an inspect, where the guard +
+// flush bracket g_staged.)
+struct StagedEmit {
+    std::string      target;   // destination sink instance name
+    xi::TriggerEvent rec;      // images map + meta_doc; host owns one ref to each
+};
+static thread_local std::vector<StagedEmit> g_staged;
+
+// Stage a sink call: adopt the input's doc + image refs so they outlive use()'s
+// return (the SDK releases its own refs right after we return), then queue it.
+// Mirrors install_trigger_hook / the bus adopt logic. Returns 0 with an empty reply
+// (sinks are fire-and-forget — the script ignores the return Record).
+static int stage_sink_emit_(const char* name, const void* input_doc,
+                            const uint8_t* input_data, int32_t input_len,
+                            const xi_record_image* input_images, int input_image_count,
+                            xi_record_out* output) {
+    if (output) xi_record_out_init(output);   // empty reply
+    StagedEmit item;
+    item.target = name;
+    if (input_doc) {
+        item.rec.meta_doc = (yyjson_mut_doc*)(void*)input_doc;   // take the share_out'd ref
+    } else if (input_data && input_len > 0) {
+        yyjson_doc* idoc = yyjson_read((const char*)input_data, (size_t)input_len, 0);
+        if (idoc) {
+            item.rec.meta_doc = yyjson_doc_mut_copy(idoc, nullptr);
+            yyjson_doc_free(idoc);
+            if (item.rec.meta_doc) xi::DocRegistry::instance().retain(item.rec.meta_doc);
+        }
+    }
+    // Preserve the record's ORIGINAL image keys exactly — staging replaces an inline
+    // use().process() call, so the sink must see the same keys ("inverted", "edges",
+    // …) the inline path would have delivered. (NOT the bus lone-image→source-name
+    // convention; that's for emit_trigger, not use(sink).process().)
+    for (int i = 0; input_images && i < input_image_count; ++i) {
+        xi_image_handle h = input_images[i].handle;
+        xi::ImagePool::instance().addref(h);
+        std::string key = (input_images[i].key && input_images[i].key[0])
+                            ? std::string(input_images[i].key) : ("img" + std::to_string(i));
+        if (!item.rec.images.emplace(std::move(key), h).second)
+            xi::ImagePool::instance().release(h);   // dup/empty key: drop the extra ref
+    }
+    g_staged.push_back(std::move(item));
+    return 0;
+}
+
+// xi::use().process() entry wired into the script DLL. A declared ORDERED SINK target
+// is staged (frame-ordered flush); every other target runs inline as before.
+static int use_process_cb(const char* name,
+                          const void* input_doc,
+                          const uint8_t* input_data, int32_t input_len,
+                          const xi_record_image* input_images, int input_image_count,
+                          xi_record_out* output) {
+    if (name) {
+        if (auto inst = xi::InstanceRegistry::instance().find(name)) {
+            auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+            if (a && a->is_sink())
+                return stage_sink_emit_(name, input_doc, input_data, input_len,
+                                        input_images, input_image_count, output);
+        }
+    }
+    return use_process_inline_(name, input_doc, input_data, input_len,
+                              input_images, input_image_count, output);
 }
 
 static int use_exchange_cb(const char* name, const char* cmd,
@@ -368,6 +444,69 @@ struct TriggerEventReleaser {
     TriggerEventReleaser(const TriggerEventReleaser&) = delete;
     TriggerEventReleaser& operator=(const TriggerEventReleaser&) = delete;
 };
+
+// ---- staged-sink drain / flush (paired with stage_sink_emit_ above) -------------
+// Drain WITHOUT delivering — release every staged item's image/doc refs. The
+// backstop for paths that staged but won't flush (no script, inspect crash, early
+// return): StagedEmitGuard runs it on scope exit.
+static void drain_staged_emits_() {
+    for (auto& it : g_staged) release_trigger_event_(it.rec);
+    g_staged.clear();
+}
+struct StagedEmitGuard { ~StagedEmitGuard() { drain_staged_emits_(); } };
+
+// Deliver every staged sink call, in call order, to its target's process() via the
+// SEH-guarded inline path. Called inside the EmitTurn gate (after wait_turn) so the
+// deliveries are serialized in frame order. Stamps the run/arrival id ($seq) onto
+// each record so a sink can correlate the packet to its frame. Fire-and-forget: the
+// reply is dropped. On return g_staged is empty so StagedEmitGuard then no-ops.
+static void flush_staged_emits_(int64_t run_id) {
+    // Move out first so g_staged is empty BEFORE any release: a throw mid-flush must
+    // not let StagedEmitGuard re-release an item we already freed (worst case: a leak
+    // of the not-yet-flushed tail under OOM, never a double-free).
+    std::vector<StagedEmit> staged = std::move(g_staged);
+    g_staged.clear();
+    std::vector<xi_record_image> in_imgs;
+    for (auto& it : staged) {
+        try {
+            // Frame correlation: stamp the arrival/run id so the sink can tie this
+            // packet to its frame (host-injected; matches the run_id on the wire
+            // result). Best-effort — skip if the doc isn't an object.
+            if (it.rec.meta_doc) {
+                yyjson_mut_val* root = yyjson_mut_doc_get_root(it.rec.meta_doc);
+                if (root && yyjson_mut_is_obj(root))
+                    yyjson_mut_obj_add_int(it.rec.meta_doc, root, "$seq", run_id);
+            }
+            in_imgs.clear();
+            in_imgs.reserve(it.rec.images.size());
+            for (auto& [k, h] : it.rec.images) in_imgs.push_back(xi_record_image{k.c_str(), h});
+            // Reserve one doc ref for the consumer (adopt or serialize-release both
+            // CONSUME one); our own ref is balanced by release_trigger_event_ below.
+            if (it.rec.meta_doc) xi::DocRegistry::instance().retain(it.rec.meta_doc);
+            xi_record_out output; xi_record_out_init(&output);
+            int prc = use_process_inline_(it.target.c_str(), it.rec.meta_doc, nullptr, 0,
+                                          in_imgs.data(), (int)in_imgs.size(), &output);
+            // prc == -1: target gone before touching the input doc → our reserved ref
+            // wasn't consumed; release it. prc == -2 (crash) may have — don't second-
+            // guess a torn call (mirrors xi_use.hpp).
+            if (it.rec.meta_doc && prc == -1) xi::DocRegistry::instance().release(it.rec.meta_doc);
+            if (prc >= 0) {
+                if (output.out_doc) xi::DocRegistry::instance().release((yyjson_mut_doc*)output.out_doc);
+                for (int i = 0; i < output.image_count; ++i)
+                    if (output.images[i].handle) xi::ImagePool::instance().release(output.images[i].handle);
+            }
+            xi_record_out_free(&output);
+        } catch (const seh_exception& e) {
+            std::fprintf(stderr, "[xinsp2] sink '%s' flush crashed: 0x%08X (%s)\n",
+                         it.target.c_str(), e.code, e.what());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[xinsp2] sink '%s' flush threw: %s\n", it.target.c_str(), e.what());
+        } catch (...) {
+            std::fprintf(stderr, "[xinsp2] sink '%s' flush threw a non-std exception\n", it.target.c_str());
+        }
+        release_trigger_event_(it.rec);   // our owned image + doc refs — every path
+    }
+}
 
 struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hpp)
     xi_trigger_id id;
@@ -971,6 +1110,10 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
     // sequence and deadlock the lane. No-op for emit_seq < 0.
     EmitTurn turn(gate, emit_seq, &g_continuous);
 
+    // Drains any sink calls this inspect staged but didn't flush (no script, crash,
+    // early return). The success path flushes (empties g_staged) so this no-ops.
+    StagedEmitGuard staged_guard;
+
     xi::script::LoadedScript s;
     {
         std::lock_guard<std::mutex> lk(g_script_mu);
@@ -1099,6 +1242,11 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         // if anything below throws. No-op for emit_seq < 0 (completion mode).
         turn.wait_turn();
         if (inspect_ok) {
+            // Deliver this frame's staged sink calls (comm/preview) IN FRAME ORDER —
+            // inside the gate, before the wire result, so a sink's side effect is
+            // serialized with the run's output. A failed inspect skips this; the
+            // guard then drops the partial sends (don't push a crashed frame to PLC).
+            flush_staged_emits_(run_id);
             // One Result per run: whatever the script set (default 0 = NA if it
             // called no xi::result), emitted before run_finished so consumers
             // can pair them. Ordered with the rest of the stream by the gate.

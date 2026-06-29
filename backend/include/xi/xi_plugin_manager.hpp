@@ -124,6 +124,7 @@ public:
             existing->second.description   = info.description;
             existing->second.has_ui        = info.has_ui;
             existing->second.reentrant     = info.reentrant;
+            existing->second.is_sink       = info.is_sink;
             existing->second.prebuilt      = info.prebuilt;
             existing->second.ui_path       = info.ui_path;
             existing->second.folder_path   = info.folder_path;
@@ -270,7 +271,7 @@ private:
         } catch (...) { raw = nullptr; }
         if (!raw) return nullptr;    // owner dtor sweeps
         auto inst = std::make_shared<CAbiInstanceAdapter>(
-            inst_name, plugin_name, pi.handle, raw, pi.reentrant, max_concurrency);
+            inst_name, plugin_name, pi.handle, raw, pi.reentrant, max_concurrency, pi.is_sink);
         inst->adopt_owner_id(owner.release());
         return inst;
     }
@@ -570,6 +571,8 @@ private:
                     pi.reentrant = json_flag_true(mc, "reentrant") ||
                                    json_flag_true(mc, "thread_safe");  // documented alias
                     pi.json_fallback = json_flag_true(mc, "json_fallback");
+                    pi.is_sink = json_flag_true(mc, "sink") ||
+                                 (extract_string(mc, "role").value_or("") == "sink");
                     if (pi.has_ui) pi.ui_path = (entry.path() / "ui").string();
                     std::string mblock;
                     if (detail_find_key(mc, "manifest", mblock)) pi.manifest_json = std::move(mblock);
@@ -1646,7 +1649,7 @@ public:
                             [&] { return pi.c_factory(&host, ii.name.c_str()); });
                         if (raw) {
                             auto adapter = std::make_shared<CAbiInstanceAdapter>(
-                                ii.name, *plugin, pi.handle, raw, pi.reentrant, ii.max_concurrency);
+                                ii.name, *plugin, pi.handle, raw, pi.reentrant, ii.max_concurrency, pi.is_sink);
                             // Hand the owner id to the adapter so subsequent process /
                             // exchange calls keep tagging into the same bucket.
                             adapter->adopt_owner_id(owner.release());
@@ -1808,7 +1811,7 @@ public:
                             "(constructor failed/rejected the config)");
             }
             auto adapter = std::make_shared<CAbiInstanceAdapter>(
-                instance_name, plugin_name, pi.handle, raw, pi.reentrant, /*max_concurrency=*/0);
+                instance_name, plugin_name, pi.handle, raw, pi.reentrant, /*max_concurrency=*/0, pi.is_sink);
             adapter->adopt_owner_id(owner.release());   // adapter owns the sweep now
             ii.instance = std::move(adapter);
         }
@@ -1964,7 +1967,7 @@ public:
         ii.max_concurrency = old_max_conc;
         ii.group           = old_group;
         auto adapter = std::make_shared<CAbiInstanceAdapter>(
-            new_name, plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency);
+            new_name, plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency, pi.is_sink);
         adapter->adopt_owner_id(owner.release());   // ctor images now belong to the live adapter
         ii.instance = std::move(adapter);
         if (!saved_def.empty()) ii.instance->set_def(saved_def);

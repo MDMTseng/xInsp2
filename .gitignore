@@ -102,3 +102,6 @@ examples/*/gw.log
 
 # Agent worktrees (transient, must never be committed into the main repo)
 .claude/worktrees/
+
+# F5 advisory single-writer stamp (per-process, never committed)
+.xinsp_owner

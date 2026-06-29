@@ -1,0 +1,17 @@
+{
+  "name": "comm",
+  "description": "Example ORDERED-SINK plugin — a stand-in for a comm / PLC / MES forwarder. Marked \"sink\": true, so the host STAGES a script's xi::use(\"<this>\").process(rec) and flushes it AFTER the inspect, inside the ordered-emit gate. The records arrive here in FRAME (arrival) order even under parallel dispatch (dispatch_threads > 1), instead of completion order. Each delivery carries the host-stamped \"$seq\" (the frame's arrival id) for correlation / gap detection. A real comm plugin would forward each record to the line here; this demo records the $seq it received, in order, and exposes it via exchange(\"get_received\").",
+  "dll": "comm.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "sink": true,
+  "manifest": {
+    "params": [],
+    "inputs": [{"name": "any", "kind": "record", "doc": "{ key -> data, $seq } — host stamps $seq (frame arrival id)"}],
+    "outputs": [],
+    "exchange": [
+      {"command": "get_received", "doc": "-> {received:[seq,...], count} — the $seq values seen, in delivery order"},
+      {"command": "reset",        "doc": "clear the received log"}
+    ]
+  }
+}
