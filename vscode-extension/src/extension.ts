@@ -8,7 +8,8 @@ import { ViewerProvider } from './viewerProvider';
 import { InstanceCodeLensProvider } from './instanceCodeLens';
 import { PluginRegistry, PluginInfo } from './pluginRegistry';
 import { PREVIEW_HEADER_SIZE } from './protocol';
-import { TEMPLATE_CHOICES, TemplateId, locateSdkRoot, renderPluginFiles }
+import { TEMPLATE_CHOICES, TemplateId, locateSdkRoot, renderPluginFiles,
+         listExamplePlugins, renderExamplePluginFiles }
     from './projectPluginTemplates';
 import { renderProjectSettingsHtml } from './projectSettingsHtml';
 import { renderPluginBrowserHtml, PBModel, PBRoot, PBTreeNode, PBPlugin } from './pluginBrowser';
@@ -1503,14 +1504,38 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showWarningMessage('xInsp2: open a project first (xInsp2: Open Project).');
                 return;
             }
-            // 1. Template
-            const tplPick = await vscode.window.showQuickPick(
-                TEMPLATE_CHOICES.map(c => ({
-                    label: c.label, description: c.description, detail: c.detail, id: c.id,
-                })),
-                { placeHolder: 'Pick a starter template — go from Easy upward', matchOnDetail: true });
+            // Locate the SDK up front — both the tier templates and the
+            // example library live under it. A missing SDK fails the whole flow.
+            let sdkRoot: string;
+            try {
+                sdkRoot = locateSdkRoot(
+                    context.extensionPath,
+                    findBackendExe(context),
+                    vscode.workspace.getConfiguration('xinsp2').get<string>('sdkPath'));
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`xInsp2: ${e.message}`);
+                return;
+            }
+
+            // 1. Pick a starter tier (rendered template) OR an example to copy.
+            type PluginPick = vscode.QuickPickItem & { id?: TemplateId; exDir?: string };
+            const items: PluginPick[] = TEMPLATE_CHOICES.map(c => ({
+                label: c.label, description: c.description, detail: c.detail, id: c.id,
+            }));
+            const examples = listExamplePlugins(sdkRoot);
+            if (examples.length) {
+                items.push({ label: 'From an example (sdk/examples)',
+                             kind: vscode.QuickPickItemKind.Separator });
+                for (const ex of examples) {
+                    items.push({ label: `$(file-code)  ${ex.name}`,
+                                 description: 'copy example', detail: ex.description, exDir: ex.dir });
+                }
+            }
+            const tplPick = await vscode.window.showQuickPick(items,
+                { placeHolder: 'Pick a starter template, or an example to copy', matchOnDetail: true });
             if (!tplPick) return;
-            const tplId = (tplPick as any).id as TemplateId;
+            const tplId = tplPick.id;       // set for a tier pick
+            const exDir = tplPick.exDir;    // set for an example pick
 
             // 2. Name (must be valid folder + C++ identifier-ish)
             const pname = await vscode.window.showInputBox({
@@ -1533,7 +1558,6 @@ export function activate(context: vscode.ExtensionContext) {
             // 4. Materialize files. Project plugins live at
             //    <project>/plugins/<name>/{plugin.json, src/plugin.cpp}.
             const root = path.join(lastProjectFolder, 'plugins', pname);
-            const srcDir = path.join(root, 'src');
             try {
                 const fs = require('fs') as typeof import('fs');
                 if (fs.existsSync(root)) {
@@ -1542,21 +1566,27 @@ export function activate(context: vscode.ExtensionContext) {
                         { modal: true }, 'Overwrite');
                     if (ow !== 'Overwrite') return;
                 }
-                // Render via the SDK's shared template machinery so this
-                // path produces byte-identical output to the SDK CLI.
-                // SDK is auto-located alongside the extension or backend.
-                const sdkRoot = locateSdkRoot(
-                    context.extensionPath,
-                    /*backendExePath*/ findBackendExe(context),
-                    vscode.workspace.getConfiguration('xinsp2').get<string>('sdkPath'));
-                const files = await renderPluginFiles(sdkRoot, tplId, pname,
-                    pdesc || `${tplId} template plugin: ${pname}`);
+                // Two sources, same {relPath -> content} shape:
+                //  - a tier template, rendered via the SDK's shared machinery
+                //    (byte-identical to the SDK CLI), .cpp under src/.
+                //  - an example, copied from sdk/examples with rename-on-copy
+                //    (class + plugin.json name/dll), .cpp at the folder root.
+                let files: Map<string, string>;
+                let cppRel: string;
+                if (exDir) {
+                    const r = renderExamplePluginFiles(exDir, pname, pdesc);
+                    files = r.files; cppRel = r.cppRel;
+                } else {
+                    files = await renderPluginFiles(sdkRoot, tplId!, pname,
+                        pdesc || `${tplId} template plugin: ${pname}`);
+                    cppRel = path.join('src', 'plugin.cpp');
+                }
                 for (const [rel, content] of files) {
                     const full = path.join(root, rel);
                     fs.mkdirSync(path.dirname(full), { recursive: true });
                     fs.writeFileSync(full, content);
                 }
-                const cppPath = path.join(root, 'src', 'plugin.cpp');
+                const cppPath = path.join(root, cppRel);
 
                 // 5. Declare it in project.json so the declarative loader picks it
                 //    up (./plugins is the default search root; compile:true builds +
@@ -1575,7 +1605,7 @@ export function activate(context: vscode.ExtensionContext) {
                 //    the new plugin. We use open_project rather than
                 //    recompile_project_plugin because the plugin is
                 //    brand-new and not yet in plugins_.
-                output.appendLine(`[xinsp2] created project plugin '${pname}' (${tplId} template)`);
+                output.appendLine(`[xinsp2] created project plugin '${pname}' (${exDir ? 'from example' : tplId + ' template'})`);
                 const rsp = await sendCmd('open_project', { folder: lastProjectFolder });
                 if (rsp.ok) {
                     pluginRegistry.update(rsp.data?.plugins || []);

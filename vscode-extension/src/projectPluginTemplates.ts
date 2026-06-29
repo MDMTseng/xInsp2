@@ -88,6 +88,82 @@ export function locateSdkRoot(extensionPath: string,
         + 'or install xInsp2 with the sdk/ folder alongside the extension.');
 }
 
+// ----- "From example" choices (sdk/examples/*) -------------------------
+//
+// The New-Plugin picker offers the 3 tiers above AND every plugin under
+// sdk/examples/. Picking an example COPIES it into the project (rename-on-
+// copy): the class name, plugin.json name/dll, and .cpp filename all become
+// the user's new plugin name. The standalone CMakeLists is dropped — an
+// in-project source plugin is compiled by the backend (compile:true).
+
+export interface ExampleChoice {
+    dir: string;          // absolute path to sdk/examples/<name>
+    name: string;         // example's own plugin name (from plugin.json)
+    description: string;
+}
+
+export function listExamplePlugins(sdkRoot: string): ExampleChoice[] {
+    const exRoot = path.join(sdkRoot, 'examples');
+    let entries: string[] = [];
+    try { entries = fs.readdirSync(exRoot); } catch { return []; }
+    const out: ExampleChoice[] = [];
+    for (const e of entries.sort()) {
+        const dir = path.join(exRoot, e);
+        const pj = path.join(dir, 'plugin.json');
+        try {
+            if (!fs.statSync(dir).isDirectory() || !fs.existsSync(pj)) continue;
+            const m = JSON.parse(fs.readFileSync(pj, 'utf8'));
+            if (!m.name) continue;
+            out.push({ dir, name: m.name, description: m.description || '' });
+        } catch { /* skip unreadable example */ }
+    }
+    return out;
+}
+
+// my_filter / my-filter → MyFilter (a C++ class identifier).
+function toPascalClass(name: string): string {
+    const parts = name.split(/[^A-Za-z0-9]+/).filter(Boolean);
+    const p = parts.map(s => s.charAt(0).toUpperCase() + s.slice(1)).join('');
+    return /^[A-Za-z]/.test(p) ? p : 'Plugin' + p;
+}
+
+// Read sdk/examples/<dir> and rewrite it as a new plugin named `newName`.
+// Returns the same {relPath -> content} shape as renderPluginFiles, with the
+// .cpp at the folder root (the source-plugin convention) — NOT under src/.
+export function renderExamplePluginFiles(
+    exampleDir: string,
+    newName: string,
+    description: string,
+): { files: Map<string, string>; cppRel: string } {
+    const files = new Map<string, string>();
+
+    // Find the example's single .cpp (the plugin source).
+    const cpps = fs.readdirSync(exampleDir).filter(f => f.endsWith('.cpp'));
+    if (cpps.length === 0) throw new Error(`example ${exampleDir} has no .cpp`);
+    const srcRel = cpps[0];
+    let src = fs.readFileSync(path.join(exampleDir, srcRel), 'utf8');
+
+    // Rename the C++ class: XI_PLUGIN_IMPL(<Class>) is the reliable anchor.
+    const m = src.match(/XI_PLUGIN_IMPL\s*\(\s*([A-Za-z_]\w*)\s*\)/);
+    if (m) {
+        const oldClass = m[1];
+        const newClass = toPascalClass(newName);
+        if (oldClass !== newClass)
+            src = src.replace(new RegExp(`\\b${oldClass}\\b`, 'g'), newClass);
+    }
+    files.set(`${newName}.cpp`, src);
+
+    // plugin.json: keep every flag (sink, reentrant, manifest, …) but rename.
+    let pj: any = {};
+    try { pj = JSON.parse(fs.readFileSync(path.join(exampleDir, 'plugin.json'), 'utf8')); } catch { pj = {}; }
+    pj.name = newName;
+    pj.dll  = `${newName}.dll`;
+    if (description) pj.description = description;
+    files.set('plugin.json', JSON.stringify(pj, null, 2) + '\n');
+
+    return { files, cppRel: `${newName}.cpp` };
+}
+
 // ----- Render delegate -------------------------------------------------
 //
 // Imports sdk/scaffold/render.mjs at runtime. Since the bundled
