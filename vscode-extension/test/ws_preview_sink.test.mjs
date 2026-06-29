@@ -25,22 +25,46 @@ test('preview_sink: a script surfaces output via use().process, pulled back by e
         c.send({ type: 'cmd', id: 2, name: 'compile_and_load', args: { path: slash(join(PROJ, 'inspect.cpp')) } });
         assert.equal((await rsp(c, 2)).ok, true, 'compile ok (VAR stub still compiles)');
 
-        // Single-shot run → inspect() pushes a Record into the preview_sink plugin.
+        // Single-shot run → inspect() pushes a Record into TWO preview groups.
         c.send({ type: 'cmd', id: 3, name: 'run' });
         assert.equal((await rsp(c, 3)).ok, true, 'run ok');
 
-        // Pull the latest surfaced record back out of the plugin.
-        c.send({ type: 'cmd', id: 4, name: 'exchange_instance',
-                 args: { name: 'preview', cmd: { command: 'get_latest' } } });
-        const d = (await rsp(c, 4)).data;
-        const got = typeof d === 'string' ? JSON.parse(d || '{}') : (d || {});
-        console.log('preview_sink get_latest:', JSON.stringify(got));
+        let nextId = 4;
+        const exch = async (cmd) => {
+            const id = nextId++;
+            c.send({ type: 'cmd', id, name: 'exchange_instance', args: { name: 'preview', cmd } });
+            const d = (await rsp(c, id)).data;
+            return typeof d === 'string' ? JSON.parse(d || '{}') : (d || {});
+        };
 
-        assert.ok(got.seen >= 1, `plugin received at least one record (seen=${got.seen})`);
-        assert.equal(got.image_count, 1, 'the synthetic image reached the plugin');
-        // `data` is the script's surfaced data JSON (string-embedded).
-        const data = typeof got.data === 'string' ? got.data : JSON.stringify(got.data);
-        assert.ok(data.includes('score'), 'surfaced data carries `score`');
-        assert.ok(data.includes('gain'),  'surfaced data carries `gain`');
+        // cmd:run runs the inspect on a detached thread, so the run rsp can land
+        // before both pv.process() calls do. Poll list_groups until both groups
+        // appear (the UI would do the same — or subscribe to a push).
+        let groups = {};
+        for (let i = 0; i < 50; i++) {
+            groups = await exch({ command: 'list_groups' });
+            if ((groups.count || 0) >= 2) break;
+            await new Promise(r => setTimeout(r, 100));
+        }
+        console.log('preview_sink list_groups:', JSON.stringify(groups));
+        assert.equal(groups.count, 2, 'two preview groups exist');
+        assert.ok(groups.groups.bright, 'group "bright" present');
+        assert.ok(groups.groups.dark,   'group "dark" present');
+
+        // Pull each group independently (what a tab switch does).
+        const bright = await exch({ command: 'get', pg: 'bright' });
+        console.log('preview_sink get bright:', JSON.stringify(bright));
+        assert.equal(bright.found, true, 'bright group found');
+        assert.equal(bright.image_count, 1, 'bright carries its image');
+        const bdata = typeof bright.data === 'string' ? bright.data : JSON.stringify(bright.data);
+        assert.ok(bdata.includes('score') && bdata.includes('gain'), 'bright data carries score+gain');
+
+        const dark = await exch({ command: 'get', pg: 'dark' });
+        assert.equal(dark.found, true, 'dark group found');
+        assert.equal(dark.image_count, 1, 'dark carries its image');
+
+        // A missing group reports not-found (not an error).
+        const none = await exch({ command: 'get', pg: 'nope' });
+        assert.equal(none.found, false, 'unknown group → found:false');
     });
 });
