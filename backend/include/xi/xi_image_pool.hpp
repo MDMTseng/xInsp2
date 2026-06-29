@@ -33,6 +33,7 @@
 #include "xi_image.hpp"
 #include "xi_instance_folders.hpp"
 #include "xi_status_sink.hpp"
+#include "xi_binary_sink.hpp"   // ABI v8: backs host_api.emit_binary (plugin -> WS push)
 #include "xi_doc_pool.hpp"      // γ: backs host_api.doc_chunk_* (pooled doc allocator)
 #include "xi_doc_registry.hpp"  // γ-4: backs host_api.doc_retain/doc_release
 
@@ -373,6 +374,11 @@ public:
         // (xi_status_sink.hpp); no-op when no sink is installed (headless).
         api.set_status = [](const char* source, const char* text) {
             if (auto fn = xi::status_sink()) fn(source, text);
+        };
+        // ABI v8: push an opaque binary frame to WS clients via the installed
+        // sink (xi_binary_sink.hpp); no-op when no sink is installed (headless).
+        api.emit_binary = [](const void* data, int32_t len) {
+            if (auto fn = xi::binary_sink()) fn(data, len);
         };
         // Host doc allocator (ABI v3, γ) — backs the in-process yyjson doc
         // pass-by-pointer path. A doc built through these is host-owned, so its

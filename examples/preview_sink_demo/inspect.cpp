@@ -31,11 +31,12 @@ void xi_inspect_entry(int frame) {
     pvar(bright, "score", score);
     pvar(bright, "gain",  g);
     pvar(bright, "synth", img);
+    pvar(bright, "thumb", img);   // SAME buffer as synth → encoded once (dedup hit)
     pv.process("bright", bright);
 
     xi::Record dark;
     pvar(dark, "score", 255 - score);
-    pvar(dark, "inv",   inv);
+    pvar(dark, "inv",   inv);      // a distinct image → a 2nd encode
     pv.process("dark", dark);
 
     // The run's verdict still leaves on its own channel (unaffected by VAR removal).

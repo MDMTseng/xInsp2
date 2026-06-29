@@ -121,12 +121,12 @@ extern "C" {
 /*       with commit_group (a drain-barrier) for frame-perfect group    */
 /*       switches. See roadmap/config-bundles-and-orchestration.md.     */
 /* ------------------------------------------------------------------ */
-#define XI_ABI_VERSION 7
+#define XI_ABI_VERSION 8   /* v8: + emit_binary (plugin -> WS binary push) */
 
 /* Expected sizeof(xi_host_api) for the layout guard below (see the ABI LAYOUT
  * GUARD note after the struct). Bump together with XI_ABI_VERSION on any layout
  * change. 64-bit host (all function pointers). */
-#define XI_ABI_EXPECTED_SIZE 192  /* 64-bit: 24 function pointers * 8 bytes */
+#define XI_ABI_EXPECTED_SIZE 200  /* 64-bit: 25 function pointers * 8 bytes */
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -321,6 +321,19 @@ typedef struct xi_host_api {
                         xi_trigger_id id,
                         const struct xi_record* rec,
                         int64_t ts);
+
+    /* --------------------------------------------------------------- */
+    /* emit_binary (ABI v8) — push an opaque binary frame straight to    */
+    /* connected WS clients. The host is a dumb byte pipe: it forwards   */
+    /* `len` bytes via the WS server's binary send (the same path the    */
+    /* core once used for image previews). The FRAME FORMAT is the       */
+    /* plugin's contract with its UI — the core does not parse it.       */
+    /* Intended for a preview plugin that JPEG-encodes images and ships  */
+    /* them live (no base64, no poll), tagging each frame with its own   */
+    /* group/key header. Safe to call from a dispatch worker thread      */
+    /* (the WS send is thread-safe). Null on a pre-v8 host — always      */
+    /* null-check; a plugin then falls back to a pull path (exchange).   */
+    void (*emit_binary)(const void* data, int32_t len);
 } xi_host_api;
 
 /* ABI LAYOUT GUARD (host build only). The version gate elsewhere is an int compare
@@ -339,8 +352,8 @@ typedef struct xi_host_api {
 static_assert(sizeof(xi_host_api) == XI_ABI_EXPECTED_SIZE,
               "xi_host_api layout changed: bump XI_ABI_VERSION and update "
               "XI_ABI_EXPECTED_SIZE (see the ABI LAYOUT GUARD note).");
-static_assert(offsetof(xi_host_api, emit_record) == XI_ABI_EXPECTED_SIZE - sizeof(void*),
-              "emit_record is no longer the last field — a field was added/removed "
+static_assert(offsetof(xi_host_api, emit_binary) == XI_ABI_EXPECTED_SIZE - sizeof(void*),
+              "emit_binary is no longer the last field — a field was added/removed "
               "without updating the ABI guard; bump XI_ABI_VERSION.");
 #endif
 

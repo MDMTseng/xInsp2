@@ -3675,6 +3675,14 @@ int main(int argc, char** argv) {
     xi::status_sink() = [](const char* who, const char* text) {
         set_status_internal((who && *who) ? who : "@plugin", text);
     };
+    // ABI v8: route plugin host_api->emit_binary straight to WS clients. The core
+    // is a dumb byte pipe — the frame format is the plugin's contract with its UI.
+    // Non-capturing → converts to the BinarySinkFn function pointer. Thread-safe:
+    // send_binary may be called from a dispatch worker (same as the old preview path).
+    xi::binary_sink() = [](const void* data, int len) {
+        if (auto* s = g_srv_for_bp.load(std::memory_order_acquire))
+            s->send_binary(static_cast<const uint8_t*>(data), static_cast<size_t>(len));
+    };
 
     // P2.4 watchdog. Always-on monitor thread; acts when any in-flight inspect
     // (wd_arm slot) overruns its deadline. Two-phase, now per-worker-aware:

@@ -154,6 +154,18 @@ public:
     const xi_host_api* host() const { return host_; }
     const std::string& name() const { return name_; }
 
+    // ABI v8: push an opaque binary frame straight to connected WS clients. The
+    // host is a dumb byte pipe — the frame FORMAT is this plugin's contract with
+    // its UI (it must self-describe: tag/group/key + dims + codec + payload).
+    // Safe from a dispatch worker thread. No-op on a pre-v8 host (null emit_binary).
+    void emit_binary(const void* data, int len) const {
+        if (host_ && host_->emit_binary && data && len > 0)
+            host_->emit_binary(data, (int32_t)len);
+    }
+    void emit_binary(const std::vector<uint8_t>& frame) const {
+        emit_binary(frame.data(), (int)frame.size());
+    }
+
     // On-disk folder for THIS instance: project/instances/<name>/
     // Already created by the host before this plugin was constructed.
     // Use it to persist files beyond the JSON config returned by get_def.
