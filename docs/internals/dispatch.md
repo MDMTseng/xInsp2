@@ -50,7 +50,9 @@ the `synced_stereo` plugin and the `stereo_sync` example.
 Record/replay is **not** a host facility either. A buffer-replay plugin captures
 records (via its `process()`) into a ring and re-emits them with `emit_record` on
 demand — that's the HDevelop-style "tune a Param, re-inspect the same frame"
-loop. See the `buffer_replay` reference plugin and `examples/buffer_replay_demo`.
+loop. See `examples/buffer_replay_demo` — its `inspect.cpp` drives the `cache`
+reference plugin (instance `buffer`) as the replay ring, with `pulse_src` as the
+live source.
 
 ### Headless injection
 
@@ -104,6 +106,29 @@ memory bandwidth / disk aren't arbitrated by thread priority.
 Cost: a group holds its N threads even when idle (a blocked worker ≈ a stack, no
 CPU) — fine for a handful of priority classes; dozens of groups would want a
 shared pool instead, but that's not the use case.
+
+## 4. Ordered output — `result_order` + staged sinks
+
+Under a parallel pool (`parallelism.dispatch_threads > 1`, or a group's
+`max_parallel > 1`) workers finish out of frame order, so emission has two gates
+that re-impose order without throttling compute:
+
+- **`result_order`** (per-pool / per-group) governs the per-frame **result**
+  stream (`run_result` / `run_*`). `"completion"` (default) emits as each worker
+  finishes — lowest latency, out-of-order on the wire. `"arrival"` claims a gapless
+  seq at dequeue (so it tracks FIFO arrival) and an EmitTurn gate replays emission
+  in that order; compute still runs fully parallel, only emission is serialized, and
+  `run_id` is monotonic on the wire.
+- **Ordered output sinks.** A plugin whose `plugin.json` declares `"sink": true`
+  (alias `"role": "sink"`) is not called inline during inspect; the host **stages**
+  each `use(name).process(rec)` and **flushes** them after the inspect, inside the
+  same arrival-order gate, so deliveries land in **frame-arrival order** under
+  `dispatch_threads > 1`. Each flushed record is stamped with the reserved key
+  `"$seq"` == the wire `run_id`, so the sink can correlate its packet to the frame.
+  The `preview` plugin is a sink (live previews never tear/reorder across workers).
+  See the `sink` row in [`../reference/c-abi.md`](../reference/c-abi.md) and the
+  *Parallel dispatch* section of
+  [`../guides/write-a-script.md`](../guides/write-a-script.md).
 
 ## See also
 

@@ -24,7 +24,7 @@ then export to standalone when you're ready to share.
 
 The repo ships reference plugins to crib from: `plugins/` (source/sink/processor
 basics — `mock_camera`, `blob_analysis`, `data_output`, `json_source`,
-`record_save`, `threshold_op`, `synced_stereo`) and richer worked examples under
+`record_save`, `record_load`, `synced_stereo`, `preview`) and richer worked examples under
 `examples/*/plugins/`.
 
 ---
@@ -40,13 +40,24 @@ If you don't have one:
 
 - Command palette → **xInsp2: New Project Plugin…**
   (or the file-code (📄) action in the **Instances & Params** view's `⋯` menu).
-- Pick a template:
-  | Template | What it shows |
+- Pick a starting point. The picker lists three **templates** (rendered from
+  `sdk/templates/`) and, under a separator, every **example** under
+  `sdk/examples/`:
+  | Starting point | What it shows |
   |---|---|
-  | **Easy** | Pass-through. ~30 lines, every method has a tutorial comment |
-  | **Medium** | Image processor (threshold + binary output) with UI panel + inline image preview (pan / cursor-zoom) |
-  | **Expert** | Stateful synthetic source with a worker thread + UI start/stop controls |
+  | **Easy** (template) | Pass-through. ~30 lines, every method has a tutorial comment |
+  | **Medium** (template) | Image processor (threshold + binary output) with UI panel + inline image preview (pan / cursor-zoom) |
+  | **Expert** (template) | Stateful synthetic source with a worker thread + UI start/stop controls |
+  | *From an example* (`sdk/examples/*`) | Copies a worked example (e.g. `comm`, `invert`, `histogram`, `trigger_source`) as your starting code |
 - Type a plugin name (lowercase + underscores, e.g. `roi_filter`).
+
+> **From-an-example copies with rename.** Picking an example copies its single
+> `.cpp` into `plugins/<name>/<name>.cpp`, renames the C++ class (the
+> `XI_PLUGIN_IMPL(...)` class → PascalCase of your name) and the `plugin.json`
+> `name`/`dll`, and **preserves the example's manifest flags** (`sink`,
+> `reentrant`, `manifest`, …). The example's standalone `CMakeLists.txt` is
+> dropped — an in-project source plugin is compiled by the backend
+> (`compile: true`), not built standalone.
 
 The extension drops files at `<project>/plugins/<name>/`:
 
@@ -527,8 +538,7 @@ the wrong version. (A dependency you load yourself **by absolute path** keys on
 the full path and does *not* clash.) Fix: give static deps distinct file names
 (and link each plugin against its own name), static-link, or pin a shared
 version. Same-name side-by-side versioning of a static import would need process
-isolation, which xInsp2 doesn't provide. The `examples/dll_version_clash`
-experiment proves all three cases; the generated plugin README summarises them.
+isolation, which xInsp2 doesn't provide.
 
 **My plugin won't load.** Check:
 1. Backend stderr — usually says exactly which symbol failed to

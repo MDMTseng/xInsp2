@@ -5,12 +5,16 @@ its clients (VS Code extension, browser, CLI, test harness).
 
 - **Framing**: WebSocket does framing. One message = one WS frame.
 - **Text frames**: UTF-8 JSON objects. Every JSON message has a `type` field.
-- **Binary frames**: none in core today. The image-preview binary frame
-  (and the `vars` message and `subscribe`/`unsubscribe` commands) were
-  **removed** from the backend on branch `refactor/remove-var-core` — script
-  output (scalar VARs + image previews) is becoming a **preview-plugin**
-  concern, not a core transport. The removed shapes are described below, struck
-  through, for reference only.
+- **Binary frames**: the only binary frames are **plugin-originated pushes**.
+  A plugin calls the ABI v8 `emit_binary(data, len)` host service and the core
+  forwards the bytes verbatim to connected clients via `send_binary` — the core
+  is a dumb byte pipe; the frame format is the plugin's contract with its UI
+  (the shipped `preview` plugin uses this to push live JPEG stills). This is
+  distinct from the **removed** core image-preview binary frame (and the `vars`
+  message and `subscribe`/`unsubscribe` commands): script output (scalar VARs +
+  image previews) now goes through the shipped `preview` plugin, not core
+  transport. The removed shapes are described below, struck through, for
+  reference only.
 - **Versioning**: every `cmd` and `rsp` carries no explicit version — breaking
   schema changes bump the server's `version` string (returned by `cmd: version`)
   and the `hello` event's `abi` field. The protocol evolves **additive-only**
@@ -31,8 +35,8 @@ Five top-level `type` values. All JSON messages look like:
 ```
 
 > **Removed:** `vars` was a sixth `type`. The backend no longer collects or
-> transports per-run script values, so this message is gone (branch
-> `refactor/remove-var-core`). Its old shape is kept below, struck through, only
+> transports per-run script values, so this message is gone. Its old shape is
+> kept below, struck through, only
 > so existing consumers know what disappeared. The passive `VarKindWire` protocol
 > enum still exists; it does not imply a live `vars` frame.
 
@@ -66,12 +70,12 @@ but discouraged).
 
 ### ~~`vars` — backend to client~~ (REMOVED)
 
-> **REMOVED (branch `refactor/remove-var-core`).** The backend no longer tracks
+> **REMOVED.** The backend no longer tracks
 > `VAR()` values or emits a `vars` message — `VAR()`/`EMIT()` still compile but
 > publish nothing. Everything from here to the start of `instances` is retained
 > only to document what the message used to look like; a current client receives
-> none of it. Surfacing values/images for viewing is moving to a **preview
-> plugin**.
+> none of it. Surfacing values/images for viewing now goes through the shipped
+> **preview** plugin (PVAR / `xi::preview::Sink`).
 
 Snapshot of a `ValueStore` after one `inspect()` call.
 
@@ -194,7 +198,7 @@ SEH). Drivers waiting for run completion should listen for
 `run_result` carries the run's **one verdict** (script-set via `xi::result`, or
 `0` = NA if unset): `{code, msg, run_id, ms[, source, group]}`. Code convention:
 `>0` ok-class, `0` NA, `-1…` ng-class, `<= -990000` framework system-fail enum.
-It fires once per run (after vars, before `run_finished`) **and** once per
+It fires once per run (before `run_finished`) **and** once per
 **dropped** trigger (queue overflow → `code: -999001` `XI_SYS_DROPPED`, with no
 `run_id`/`ms`) — so a consumer sees one Result per trigger with no gaps. See
 [`roadmap/run-result.md`](../roadmap/run-result.md).
@@ -230,10 +234,12 @@ runs at DLL load and wins.)
 
 ## ~~Binary frame layout — image preview~~ (REMOVED)
 
-> **REMOVED (branch `refactor/remove-var-core`).** The backend no longer encodes
-> or sends image-preview binary frames. The layout below is retained only as a
-> record of the old wire format; no current code path produces it. Image preview
-> is moving to a **preview plugin**.
+> **REMOVED.** The backend no longer encodes
+> or sends the *core* image-preview binary frame. The layout below is retained
+> only as a record of the old wire format; no current code path produces it.
+> Image surfacing is handled by the shipped **preview** plugin, which pushes its
+> own binary frames via the ABI v8 `emit_binary` host call (see
+> [`c-abi.md`](c-abi.md)).
 
 One WebSocket binary frame per **distinct image** (per `src` group, not per image
 var — see `vars.items[*].src`), sent after the `vars` message that introduces it.
@@ -280,7 +286,7 @@ listed under each entry.
 `args: {}` → `data: { "version": "0.1.0", "abi": 1, "commit": "abc123" }`
 
 `abi` here is the **WS protocol** version (currently 1) — distinct from the C
-plugin-ABI struct version `XI_ABI_VERSION` (7, see `reference/c-abi.md`).
+plugin-ABI struct version `XI_ABI_VERSION` (9, see `reference/c-abi.md`).
 
 ### `shutdown`
 `args: {}` → `ok: true` then the backend closes the socket and exits.
@@ -328,9 +334,9 @@ never executes from an unloaded module.
 followed by a `run_result` event (and the `run_started`/`run_finished` brackets).
 
 > The old `vars` message + binary previews that used to follow a run are
-> **removed** (branch `refactor/remove-var-core`). A `cmd:run` no longer streams
+> **removed**. A `cmd:run` no longer streams
 > script values back; observe the run via the `run_*` events. Per-run value /
-> image surfacing is moving to a preview plugin.
+> image surfacing is handled by the shipped `preview` plugin.
 
 When `frame_path` and/or `meta` are given, `cmd:run` builds a one-shot **record**
 host-side (`frame_path` → an image under the key `"frame"`; `meta` → the metadata
@@ -341,8 +347,8 @@ single-shot). A plain `cmd:run` (neither arg) leaves `current_trigger()` inactiv
 
 `cmd:run` is the **deterministic single-shot** path (UI "Run", step-through). It
 is rejected while continuous mode is active (`"cannot run while continuous mode
-is active"`) and rapid runs are serialized so their `vars` arrive in
-`run_id` order. Burst/throughput parallelism is the continuous-mode dispatch
+is active"`) and rapid runs are serialized so their `run_result`/`run_*` events
+arrive in `run_id` order. Burst/throughput parallelism is the continuous-mode dispatch
 pool's job (`parallelism.dispatch_threads` + the trigger bus / fps) — `cmd:run`
 does not fan out.
 
@@ -396,8 +402,7 @@ Each tick comes from one of two sources:
   ticks have no record attached.
 
 A `run_result` event is emitted on each dispatch (same as for `cmd:run`); the
-old per-dispatch `vars` message is **removed** (branch
-`refactor/remove-var-core`). There is no per-frame rsp; the only ack for `start`
+old per-dispatch `vars` message is **removed**. There is no per-frame rsp; the only ack for `start`
 is the initial one.
 
 `cmd:start` **resets** the per-run dispatch counters used by
@@ -775,12 +780,14 @@ are also emitted on the `log` channel as `level: warn` during
 
 ### ~~`subscribe` / `unsubscribe`~~ (REMOVED)
 
-> **REMOVED (branch `refactor/remove-var-core`).** These commands gated which
+> **REMOVED.** These commands gated which
 > VAR-image previews were encoded and streamed. With the `vars` message and the
 > binary preview frame gone from core, there is nothing to subscribe to —
 > sending `subscribe`/`unsubscribe` now replies `ok:false` (unknown command).
 > Per-run image surfacing (and the encode-only-when-watched optimisation) is
-> moving to a **preview plugin**, which will own its own subscription model.
+> handled by the shipped **preview** plugin, which owns its own subscription
+> model (its exchange commands + `emit_binary` push; see
+> [`../guides/write-a-script.md`](../guides/write-a-script.md)).
 
 > The backend keeps **no run-history ring**, and no longer pushes any per-run
 > value frame. Recent-run scrollback (and SPC-style backfill) is a client-side /
