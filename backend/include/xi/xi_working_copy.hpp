@@ -30,6 +30,11 @@ inline constexpr const char* kWorkingCopyDir = ".xinsp_work";
 // open_project rolls the commit forward from the intact scratch.
 inline constexpr const char* kCommitMarker = ".xinsp_commit_pending";
 
+// Advisory single-writer stamp (xi_owner_lock.hpp). Named here so the seed/commit
+// exclusion below can skip it — it's per-process bookkeeping at the canonical root,
+// not project content, so it must never ride into the scratch or back onto canonical.
+inline constexpr const char* kOwnerFile = ".xinsp_owner";
+
 // True if a project-relative path should be skipped when seeding/mirroring the
 // working copy. PRECISE on purpose: matching these names at ANY depth (the old
 // behaviour) silently dropped a USER directory that happened to share a name —
@@ -43,7 +48,8 @@ inline constexpr const char* kCommitMarker = ".xinsp_commit_pending";
 inline bool is_excluded(const std::filesystem::path& rel) {
     if (rel.empty()) return false;
     const std::string first = rel.begin()->string();
-    if (first == kWorkingCopyDir || first == ".git" || first == kCommitMarker)
+    if (first == kWorkingCopyDir || first == ".git" || first == kCommitMarker ||
+        first == kOwnerFile)
         return true;
     if (first == "plugins") {
         for (const auto& part : rel)
