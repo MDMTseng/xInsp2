@@ -3,10 +3,9 @@
   "script": "inspect.cpp",
   "instances": [
     { "name": "src",    "plugin": "pulse_src" },
-    { "name": "buffer", "plugin": "buffer_replay" }
+    { "name": "buffer", "plugin": "cache" }
   ],
   "plugins": {
-    "pulse_src":     { "path": "pulse_src",     "compile": true },
-    "buffer_replay": { "path": "buffer_replay", "compile": true }
+    "pulse_src": { "path": "pulse_src", "compile": true }
   }
 }

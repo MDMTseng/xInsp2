@@ -1,0 +1,14 @@
+{
+  "name": "cache",
+  "description": "Buffers incoming records (images + metadata) in a ring and re-emits a buffered record via emit_record on an exchange command — the plugin-side record/replay store. Drives the hot-param re-inspect loop (capture a frame, tune a Param, replay to re-inspect without re-grabbing).",
+  "dll": "xi-cache.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [
+      {"name": "capacity", "type": "int", "default": 16, "min": 1, "max": 1024}
+    ],
+    "inputs":  [{"name": "img", "kind": "image", "doc": "frame to buffer (any key; passed through)"}],
+    "outputs": []
+  }
+}

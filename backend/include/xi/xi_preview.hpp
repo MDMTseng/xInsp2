@@ -1,10 +1,15 @@
 #pragma once
-// preview_api.hpp — script-side helper for the preview_sink plugin.
+// xi_preview.hpp — script-side API for the `preview` plugin (SDK header).
+//
+//   #include <xi/xi_preview.hpp>
+//   xi::preview::Sink pv;
+//   xi::Record r; pvar(r, "score", s); pvar(r, "edges", im);
+//   pv.process("bright", r);   // surface to preview-group "bright"
 //
 // Surface a Record to a named preview instance under a preview-group id (pg_id),
 // so a UI can tab between groups (per stage / per thread / per camera / ...).
 // The pg_id rides in the record under the reserved key "$pg" — the contract
-// between this helper and the preview_sink plugin.
+// with the `preview` plugin (plugins/preview).
 //
 // xi::Record is already the "construct image + json in order" builder:
 //   xi::Record().set("score", s).set("gain", g).image("edges", im)

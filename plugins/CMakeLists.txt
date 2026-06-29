@@ -7,6 +7,10 @@ if(MSVC)
     add_compile_options(/W3 /utf-8)
 endif()
 
+# All plugin DLLs are namespaced with an "xi-" prefix (xi-<name>.dll). Set once
+# here so every SHARED target below inherits it; each plugin.json "dll" matches.
+set(CMAKE_SHARED_LIBRARY_PREFIX "xi-")
+
 set(XI_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
 set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 
@@ -38,6 +42,25 @@ target_include_directories(mock_camera PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
 set_target_properties(mock_camera PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera
+)
+
+# preview — view a script's output (post-VAR): keeps the latest record per
+# preview-group, JPEG-encodes images via the host cache + pushes them live
+# (XPV1 binary frames). Script API: <xi/xi_preview.hpp>. See examples/preview_sink_demo.
+add_library(preview SHARED preview/src/preview.cpp)
+target_include_directories(preview PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+set_target_properties(preview PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/preview
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/preview
+)
+
+# cache — buffers records in a ring and re-emits a buffered one on exchange
+# (the plugin-side record/replay store; drives the hot-param re-inspect loop).
+add_library(cache SHARED cache/src/cache.cpp)
+target_include_directories(cache PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+set_target_properties(cache PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/cache
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/cache
 )
 
 # config_swap_probe — reference plugin for the orchestrator config-swap design
