@@ -194,11 +194,6 @@
           "id": "xinsp2.instances",
           "name": "Instances & Params",
           "type": "tree"
-        },
-        {
-          "id": "xinsp2.viewer",
-          "name": "Viewer",
-          "type": "webview"
         }
       ]
     },
