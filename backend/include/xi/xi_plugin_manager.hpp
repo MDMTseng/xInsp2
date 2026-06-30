@@ -1243,6 +1243,20 @@ public:
         return it == plugins_.end() ? nullptr : &it->second;
     }
 
+    // Part III G2.1 — resolve a plugin's on-disk location (folder + dll filename)
+    // by name, copying under the lock so the caller never derefs a map pointer that
+    // a concurrent rebuild could invalidate. Used to stamp the crash culprit (so the
+    // FE can quarantine the offending DLL via G1's .xi_certify.json). Returns false
+    // if the plugin isn't registered.
+    bool plugin_location(const std::string& name, std::string& folder, std::string& dll) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = plugins_.find(name);
+        if (it == plugins_.end()) return false;
+        folder = it->second.folder_path;
+        dll    = it->second.dll_name;
+        return true;
+    }
+
     // --- Project management ---
 
     bool create_project(const std::string& folder, const std::string& name) {

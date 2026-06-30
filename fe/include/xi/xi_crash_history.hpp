@@ -73,6 +73,12 @@ inline std::string crash_history_line(const SafeStateEvent& ev,
     o += ",\"phase\":\""     + json_escape(ev.last_phase) + "\"";
     o += ",\"report\":\""    + json_escape(ev.report_path) + "\"";
     o += ",\"dump\":\""      + json_escape(ev.dump_path) + "\"";
+    // Part III G2.1 — which plugin the death was attributed to (empty = not
+    // attributable to a plugin). The whole crash-loop-per-plugin story is now
+    // visible in the JSONL, and `culprit_plugin` is what the per-plugin counter
+    // (xi_respawn_policy.hpp PluginFaultTracker) keys on.
+    o += ",\"culprit_plugin\":\""   + json_escape(ev.culprit_plugin)   + "\"";
+    o += ",\"culprit_instance\":\"" + json_escape(ev.culprit_instance) + "\"";
     o += ",\"consecutive\":" + std::to_string(consecutive);
     o += ",\"cap_hit\":" + std::string(cap_hit ? "true" : "false");
     o += "}";

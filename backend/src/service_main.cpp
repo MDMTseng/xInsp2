@@ -116,6 +116,13 @@ using xi::seh_exception;
 // process() crash so a crash loop is visible via get_state.
 static void note_instance_crash_(const char* name, const char* why);
 
+// Part III G2.1 — stamp the process-global crash culprit (xi::crash::g_culprit)
+// with the instance/plugin the host is about to enter, plus that plugin's
+// folder + dll so the FE can quarantine it on a death. Defined after
+// g_plugin_mgr. Cheap on the dispatch hot path: a per-thread cache means the
+// manager lock is taken only when the active plugin on this thread changes.
+static void stamp_culprit_(const char* instance, const std::string& plugin);
+
 // The inline cross-instance process() path: run the target plugin's process() NOW,
 // on this thread. Used directly for a normal xi::use(x).process() (input wiring) and
 // by the staged-sink flush. A sink target is intercepted by use_process_cb (below)
@@ -132,6 +139,10 @@ static int use_process_inline_(const char* name,
     // Check if it's a C ABI adapter with process_fn
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (adapter && adapter->process_fn()) {
+        // G2.1 — stamp the crash culprit before entering plugin code. If this
+        // process() faults, the FE's crash report names this plugin (cross-checked
+        // against the faulting module) and can quarantine it.
+        stamp_culprit_(name, inst->plugin_name());
         xi_record in_rec{};   // zero-init so the v3 `doc` field is null (JSON path)
         in_rec.images = input_images;
         in_rec.image_count = input_image_count;
@@ -1129,6 +1140,24 @@ static xi::PluginManager g_plugin_mgr;
 // (forward-declared above use_process_cb) record a per-instance process() crash.
 static void note_instance_crash_(const char* name, const char* why) {
     if (name) g_plugin_mgr.note_instance_crash(name, why ? why : "process() crashed");
+}
+
+// (forward-declared above use_process_inline_) Part III G2.1 culprit stamp.
+// The plugin name -> {folder, dll} resolution needs the manager lock, so a
+// thread_local cache resolves it ONCE per (plugin, thread) and re-resolves only
+// when the active plugin changes — the per-frame process() hot path then costs
+// just a string compare + the four strncpy inside set_culprit().
+static void stamp_culprit_(const char* instance, const std::string& plugin) {
+    thread_local std::string t_plugin, t_folder, t_dll;
+    if (plugin != t_plugin) {
+        t_plugin = plugin;
+        t_folder.clear();
+        t_dll.clear();
+        if (!plugin.empty())
+            g_plugin_mgr.plugin_location(plugin, t_folder, t_dll);  // lock only on change
+    }
+    xi::crash::set_culprit(instance ? instance : "", plugin.c_str(),
+                           t_folder.c_str(), t_dll.c_str());
 }
 
 static std::atomic<bool> g_should_exit{false};
@@ -2859,6 +2888,8 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             if (auto inst = xi::InstanceRegistry::instance().find(*in)) {
                 crash_set(crash_ctx().last_plugin, sizeof(crash_ctx().last_plugin),
                           inst->plugin_name().c_str());
+                // G2.1 — exchange() also enters plugin code; attribute a fault here.
+                stamp_culprit_(in->c_str(), inst->plugin_name());
             }
         }
         auto iname = xp::get_string_field(parsed->args_json, "name");
@@ -3828,6 +3859,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             send_rsp_err(srv, id, load_err.empty() ? "failed to load plugin" : load_err);
             return;
         }
+        // G2.1 — create() runs the plugin's factory (untrusted native code); stamp
+        // the culprit so a factory fault is attributed to this plugin.
+        stamp_culprit_(iname->c_str(), *plugin);
         std::string create_err;
         auto* ii = g_plugin_mgr.create_instance(*iname, *plugin, &create_err);
         if (ii) {
