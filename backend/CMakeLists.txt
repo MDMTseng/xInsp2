@@ -411,6 +411,21 @@ add_executable(test_qa_edge tests/test_qa_edge.cpp)
 target_link_libraries(test_qa_edge PRIVATE xi_core xi_fe)
 add_test(NAME qa_edge COMMAND test_qa_edge)
 
+# >>> lv2-capability-handshake (Part II Phase 3) — localized block.
+# Proves the LV2-style required/optional capability handshake: plugin.json
+# requires[]/optional[] parse into PluginInfo (xi_pm_parse.hpp), and
+# plugin_caps_compatible (xi_cabi_adapter.hpp) refuses a plugin whose required
+# interface the host's get_interface door does not publish at version >= min,
+# surfacing a reason; optional ifaces never gate. Self-contained to ease merge
+# with sibling appends.
+add_executable(test_capability_handshake tests/test_capability_handshake.cpp)
+target_link_libraries(test_capability_handshake PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_capability_handshake PRIVATE pthread)
+endif()
+add_test(NAME capability_handshake COMMAND test_capability_handshake)
+# <<< lv2-capability-handshake end.
+
 
 add_executable(xinsp_backend
     src/service_main.cpp
