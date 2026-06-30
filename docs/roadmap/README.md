@@ -76,6 +76,11 @@ Several are platform requests from RFC
   "command-other-instances" host_api; version branch-graph view (RFC #65 FR-2/FR-4).
 - [`run-result.md`](./run-result.md) — per-run signed verdict record (the
   `xi::result` API ships; the full status-band + HMI/PLC wiring is the sketch).
+- [`expose-plugin-and-output-transport.md`](./expose-plugin-and-output-transport.md) —
+  the VAR replacement: rename `preview`→`expose` plugin (the official script
+  data-out surface), unify transport to subscribe-by-group-id → push values+images
+  (pull also), fix the F-6 binary-frame decoder drift. Core owns no data-out / no
+  last-word (comm's sidecar handles line-safe). Answers the v9 vars-removal friction.
 - [`webui-and-ui-export.md`](./webui-and-ui-export.md) — a Web Component library
   (auto-webui from a control-descriptor schema + custom escape hatch) and
   section-based UI export in two shapes (status-observation vs full-app extract).
