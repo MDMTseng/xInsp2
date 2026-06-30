@@ -293,6 +293,83 @@ static void test_owner_scope() {
     CHECK(pool.stats(kept_owner).handle_count == 0);
 }
 
+// ---------- Test: owner-sweep spares still-referenced (zero-copy) handles ----
+
+// Minimal host_api over the singleton ImagePool, so we can drive the real
+// xi::Image::adopt_pool_handle path a consumer instance Q uses to cache a frame
+// zero-copy. Mirrors the wiring ImagePool::make_host_api() would give a plugin.
+static const xi_host_api& test_host_api() {
+    static xi_host_api api = xi::ImagePool::make_host_api();
+    return api;
+}
+
+static void test_owner_sweep_spares_referenced() {
+    SECTION("Owner-sweep spares handles a consumer still holds (zero-copy UAF guard)");
+    auto& pool = xi::ImagePool::instance();
+    const xi_host_api* host = &test_host_api();
+
+    // (A) Producer P allocates a frame under its owner tag and writes a sentinel.
+    xi::ImagePoolOwnerId P = xi::ImagePool::alloc_owner_id();
+    xi_image_handle h = 0;
+    {
+        xi::ImagePool::OwnerGuard g(P);
+        h = pool.create(8, 8, 1);   // refcount=1, owner=P
+    }
+    CHECK(h != 0);
+    {
+        uint8_t* px = pool.data(h);
+        CHECK(px != nullptr);
+        for (size_t i = 0; i < 64; ++i) px[i] = static_cast<uint8_t>(0xA0 + (i & 0x0F));
+    }
+
+    // (B) Consumer Q adopts the SAME handle (addref + caches the raw pixel
+    //     pointer inside the xi::Image), simulating a buffer_replay / accumulator
+    //     instance caching the frame across calls. refcount now 2 (P's ownership
+    //     ref + Q's adopt ref), owner still P. We deliberately do NOT release P's
+    //     create ref here: the owner-sweep is what drops P's ownership claim.
+    xi::Image q_cached = xi::Image::adopt_pool_handle(host, h);
+    CHECK(!q_cached.empty());
+    CHECK(q_cached.width == 8 && q_cached.height == 8 && q_cached.channels == 1);
+
+    // (C) P's adapter is destroyed (hot-recompile / remove / rename): the sweep
+    //     drops P's one ownership ref. Q still holds its adopt ref, so the entry
+    //     must survive (refcount 2 -> 1), not be force-freed.
+    int swept = pool.release_all_for(P);
+    // Q still holds a live ref → nothing reclaimed as a "leak".
+    CHECK(swept == 0);
+
+    // (D) Q's cached image MUST still be valid (no UAF, no freed memory): the
+    //     sentinel bytes survive and remain readable through Q's cached data().
+    CHECK(!q_cached.empty());
+    const uint8_t* qpx = q_cached.data();
+    CHECK(qpx != nullptr);
+    bool sentinel_ok = true;
+    for (size_t i = 0; i < 64; ++i)
+        if (qpx[i] != static_cast<uint8_t>(0xA0 + (i & 0x0F))) { sentinel_ok = false; break; }
+    CHECK(sentinel_ok);
+    // The handle must still resolve through lookup() for Q (slot/gen intact).
+    CHECK(pool.data(h) != nullptr);
+    CHECK(pool.data(h) == qpx);
+
+    // (E) When Q finally drops the frame, it is freed normally (no leak).
+    q_cached = xi::Image{};   // releases Q's last ref
+    CHECK(pool.data(h) == nullptr);
+
+    // COMPLEMENT: an entry P owns with NO external consumer is still reclaimed by
+    // release_all_for(P) — the leak-sweep intent is preserved.
+    xi::ImagePoolOwnerId P2 = xi::ImagePool::alloc_owner_id();
+    xi_image_handle leaked = 0;
+    {
+        xi::ImagePool::OwnerGuard g(P2);
+        leaked = pool.create(8, 8, 1);   // refcount=1, owner=P2, nobody else
+    }
+    CHECK(leaked != 0);
+    CHECK(pool.data(leaked) != nullptr);
+    int swept2 = pool.release_all_for(P2);
+    CHECK(swept2 == 1);                   // sole-owner leak reclaimed
+    CHECK(pool.data(leaked) == nullptr);  // freed
+}
+
 // ---------- main ----------
 
 int main() {
@@ -307,6 +384,7 @@ int main() {
     test_shard_distribution();
     test_large_image();
     test_owner_scope();
+    test_owner_sweep_spares_referenced();
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");

@@ -31,6 +31,18 @@ plugins borrow handles. The data layer gives the yyjson doc the same shape:
 So `xi_record.doc` / `xi_record_out.out_doc` carry a `yyjson_mut_doc*` directly;
 `data`/`len` carry JSON bytes only when the doc pointer is null.
 
+**Owner-sweep respects outstanding refs.** Each pool entry is tagged with the
+owner (instance) that allocated it, so the pool can reclaim a dead instance's
+handles (`ImagePool::release_all_for`, run on destroy / hot-recompile / rename).
+Because the *same* handle is shared zero-copy across instances (producer P's
+`image_addref` → consumer Q's `adopt_pool_handle`), a caching consumer Q can
+legitimately still hold a frame whose owner is P. The sweep therefore drops only
+**P's own ref** per entry (exactly like `release()`): a sole-held entry (genuine
+leak) is reclaimed immediately, while an entry a live consumer still holds
+survives — its owner neutralised to anonymous — and is freed by its last holder.
+The sweep never force-frees a still-referenced entry (which would dangle Q's
+cached `xi::Image`).
+
 ## The host doc-chunk pool (`xi_doc_pool.hpp`)
 
 `DocChunkPool` backs `host_api.doc_chunk_alloc/realloc/free`. A **thread-local,

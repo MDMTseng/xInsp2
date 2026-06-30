@@ -238,18 +238,59 @@ public:
         OwnerGuard& operator=(const OwnerGuard&) = delete;
     };
 
+    // Drop THIS owner's claim on every entry it allocated, then reclaim only
+    // the entries no one else still holds.
+    //
+    // Owner-sweep contract (cold lifecycle path — instance destroy / hot-
+    // recompile / rename; NOT the per-frame hot path):
+    //
+    // This used to force-`delete` every owner==P entry REGARDLESS of refcount,
+    // on the comment's assumption that "owner is gone ⇒ no remaining consumer is
+    // legitimate". That assumption is FALSE under the pool's own zero-copy
+    // cross-instance sharing: when a producer P forwards its pool handle to a
+    // downstream consumer Q, record_to_c does `image_addref` on P's handle and
+    // Q adopts it via record_from_c → adopt_pool_handle (another addref + a
+    // cached raw pixel pointer inside Q's xi::Image). A caching consumer
+    // (buffer_replay / gathering / accumulator) legitimately keeps that ref
+    // across calls on a PoolEntry still tagged owner==P. Force-freeing it when
+    // P's adapter was destroyed left Q with a dangling xi::Image → UAF on the
+    // next replay, or a failed generation check → a silently dropped frame.
+    //
+    // New contract: releasing an owner drops EXACTLY ONE ref per entry — P's own
+    // ownership ref — precisely as if P had called release() on each handle it
+    // allocated:
+    //   * refcount==1 (P is the sole holder — a genuine leak, no external
+    //     consumer): hits zero ⇒ reclaimed immediately. The original leak-sweep
+    //     intent is preserved.
+    //   * refcount>1 (a live external consumer Q still holds it): survives with
+    //     its owner neutralised to anonymous (0) so it is neither re-swept nor
+    //     tied to P's lifetime; the LAST holder frees it via the normal
+    //     release() path. We do NOT clear the slot or bump its generation for a
+    //     spared entry, so Q's outstanding handle still resolves through
+    //     lookup().
+    //
+    // Returns the count of entries actually RECLAIMED (i.e. genuine leaks);
+    // spared still-referenced entries are not counted (they were never leaks).
     int release_all_for(ImagePoolOwnerId owner) {
         if (owner == 0) return 0;
         int swept = 0;
         for (uint32_t i = 0; i < SLOT_COUNT; ++i) {
             PoolEntry* e = slots_[i].entry.load(std::memory_order_acquire);
             if (!e || e->owner != owner) continue;
-            // Force-release this slot regardless of refcount — owner
-            // is gone, no remaining consumer is legitimate.
-            slots_[i].entry.store(nullptr, std::memory_order_release);
-            release_slot_(i);
-            delete e;
-            ++swept;
+            // Drop P's ownership ref — same accounting as release().
+            if (e->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                // Sole holder (leak): clear slot, return to free list, delete.
+                slots_[i].entry.store(nullptr, std::memory_order_release);
+                release_slot_(i);
+                delete e;
+                ++swept;
+            } else {
+                // A live external consumer still references this entry. Orphan
+                // it (anonymous owner) so it outlives P and is freed by its last
+                // holder; leave the slot + generation intact so that handle
+                // still resolves.
+                e->owner = 0;
+            }
         }
         if (swept > 0) live_count_.fetch_sub(swept, std::memory_order_relaxed);
         return swept;
