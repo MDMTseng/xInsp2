@@ -40,7 +40,6 @@ from xinsp2 import Client, ProtocolError
 ROOT = Path(__file__).parent
 PROJECT_JSON   = ROOT / "project.json"
 INSPECT_CPP    = ROOT / "inspect.cpp"
-COLLISION_CPP  = ROOT / "inspect_collision.cpp"
 
 DRIVER_FPS = 200
 SWEEP_DURATION_S = 2.5
@@ -258,51 +257,6 @@ def test_watchdog_warn(c: Client, log_inbox: list) -> dict:
     }
 
 
-# -- Fix-3 specific test: VAR(foo, foo) collision diagnostic ----------
-
-def test_var_shadow(c: Client) -> dict:
-    """Compile inspect_collision.cpp; expect cl.exe C2374. Check that
-    the SDK's ProtocolError surfaces a diagnostic the developer can
-    use to find the xi_var.hpp footgun comment and the gotcha doc."""
-    print("\n=== FIX 3: VAR(name, name) shadow diagnostic ===")
-    err_msg = ""
-    diags = []
-    try:
-        c.compile_and_load(str(COLLISION_CPP))
-        return {"compiled": True, "expected_failure": False}
-    except ProtocolError as e:
-        err_msg = str(e)
-        diags = (e.data or {}).get("diagnostics", []) if isinstance(e.data, dict) else []
-        print(f"  ProtocolError caught (good).")
-        print(f"  message preview: {err_msg.splitlines()[0][:160]}")
-        for d in diags[:6]:
-            if isinstance(d, dict):
-                msg = d.get("message", "")
-                code = d.get("code", "")
-                line = d.get("line", "?")
-                print(f"    {code} L{line}: {msg[:140]}")
-
-    # Reload the working inspect.cpp so subsequent steps don't run on
-    # a half-loaded broken script.
-    c.compile_and_load(str(INSPECT_CPP))
-
-    has_c2374 = ("C2374" in err_msg) or any(
-        isinstance(d, dict) and d.get("code") == "C2374" for d in diags
-    )
-    redef_lang = ("redef" in err_msg.lower()) or any(
-        isinstance(d, dict) and "redef" in (d.get("message") or "").lower()
-        for d in diags
-    )
-
-    return {
-        "compiled":         False,
-        "has_C2374":        has_c2374,
-        "redef_in_msg":     redef_lang,
-        "n_diagnostics":    len(diags),
-        "first_diag":       diags[0] if diags else None,
-    }
-
-
 def main() -> int:
     print("multi_source_surge2 - FL r6 regression sub-round")
     print("Verifying PR #22 fixes via a different driver path.\n")
@@ -324,9 +278,6 @@ def main() -> int:
 
         # ---- watchdog fix verification ----
         wd_result = test_watchdog_warn(c, log_inbox)
-
-        # ---- VAR shadow fix verification ----
-        var_result = test_var_shadow(c)
 
         # ---- summary ----
         print("\n\n=========== SWEEP COMPARISON ===========")
@@ -366,20 +317,15 @@ def main() -> int:
             print(f"  warn text: {wd_result['warn_text']}")
         print(f"  no warn when watchdog=0: {wd_result.get('negative_clean')}")
 
-        print(f"\nFIX 3 (VAR shadow diagnostic):")
-        print(f"  cl.exe failed as expected: {not var_result['compiled']}")
-        print(f"  C2374 in error chain: {var_result.get('has_C2374')}")
-        print(f"  'redefinition' wording in error: {var_result.get('redef_in_msg')}")
-        print(f"  diagnostics count: {var_result.get('n_diagnostics')}")
-
-        # Pass = all three fixes hold AND no sweep returned insane counters.
+        # Pass = both remaining fixes hold AND no sweep returned insane counters.
+        # (Fix-3 VAR(name,name) shadow diagnostic was retired with the v9 removal
+        # of the VAR macro from core — script output now goes via the `expose`
+        # plugin, so there is no VAR footgun left to regression-test.)
         pass_all = (
             all_sane
             and reset_ok
             and wd_result.get("warn_received") is True
             and wd_result.get("negative_clean") is True
-            and var_result.get("compiled") is False
-            and (var_result.get("has_C2374") or var_result.get("redef_in_msg"))
         )
         print("\nVERDICT (mechanical):", "PASS" if pass_all else "FAIL")
 
@@ -387,7 +333,6 @@ def main() -> int:
         out = {
             "sweeps":   sweep_results,
             "watchdog": wd_result,
-            "var":      var_result,
             "verdict":  "PASS" if pass_all else "FAIL",
         }
         (ROOT / "driver_summary.json").write_text(

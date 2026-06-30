@@ -55,21 +55,21 @@ xi::Param<int> g_slow_mode_ms("slow_mode_ms", 0);
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int /*frame*/) {
     auto t = xi::current_trigger();
-    VAR(active, t.is_active());
+    auto active = t.is_active();
     if (!t.is_active()) return;
 
     auto srcs = t.sources();
-    VAR(n_sources, (int)srcs.size());
+    auto n_sources = (int)srcs.size();
     if (srcs.empty()) {
-        VAR(error, std::string("no_sources"));
+        auto error = std::string("no_sources");
         return;
     }
     const std::string& source = srcs[0];
 
     auto img = t.image(source);
-    VAR(has_img, !img.empty());
+    auto has_img = !img.empty();
     if (img.empty() || img.data() == nullptr) {
-        VAR(error, std::string("empty_image:") + source);
+        auto error = std::string("empty_image:") + source;
         return;
     }
 
@@ -79,10 +79,10 @@ void xi_inspect_entry(int /*frame*/) {
 
     int64_t ts_emit = t.timestamp_us();
 
-    VAR(src,        std::string(tag_to_str(src_tag)));
-    VAR(src_name,   source);
-    VAR(seq,        (int)(seq_u64 & 0x7fffffff));
-    VAR(emit_ts_us, (double)ts_emit);
+    auto src =        std::string(tag_to_str(src_tag));
+    auto src_name =   source;
+    auto seq =        (int)(seq_u64 & 0x7fffffff);
+    auto emit_ts_us = (double)ts_emit;
 
     // Per-source per-call sleep override on the sink. source_b
     // can be made deliberately heavy via slow_mode_ms, which is the
@@ -93,7 +93,7 @@ void xi_inspect_entry(int /*frame*/) {
     // backend/include/xi/xi_var.hpp. Inline the expression instead, so the
     // VAR macro owns the binding outright.
     int slow_ms = g_slow_mode_ms.get();
-    VAR(slow_path, (src_tag == TAG_B) && (slow_ms > 0));
+    auto slow_path = (src_tag == TAG_B) && (slow_ms > 0);
 
     auto& det = xi::use("sink");
     auto rec = xi::Record().image("img", img);
@@ -101,13 +101,13 @@ void xi_inspect_entry(int /*frame*/) {
         rec.set("sleep_ms", slow_ms);
     }
     auto out = det.process(rec);
-    VAR(sink_total,   out["processed_total"].as_int(-1));
-    VAR(sink_for_src, out["processed_for_src"].as_int(-1));
+    auto sink_total =   out["processed_total"].as_int(-1);
+    auto sink_for_src = out["processed_for_src"].as_int(-1);
 
     using clk = std::chrono::system_clock;
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
                       clk::now().time_since_epoch()).count();
     int64_t lat = now_us - ts_emit;
     if (lat < 0) lat = 0;
-    VAR(latency_us, (double)lat);
+    auto latency_us = (double)lat;
 }
