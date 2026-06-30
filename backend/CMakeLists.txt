@@ -133,6 +133,25 @@ add_executable(test_record tests/test_record.cpp)
 target_link_libraries(test_record PRIVATE xi_core)
 add_test(NAME record COMMAND test_record)
 
+# Plugin-manifest parse layer (xi_pm_parse.hpp): json_flag_true top-level-only (#22).
+add_executable(test_pm_parse tests/test_pm_parse.cpp)
+target_link_libraries(test_pm_parse PRIVATE xi_core)
+add_test(NAME pm_parse COMMAND test_pm_parse)
+
+# Plugin load/reload teardown (#13 manifest-renamed, #9 compile:false external).
+# A minimal real xi C-ABI plugin DLL + an in-process PluginManager driver.
+add_library(test_teardown_plugin SHARED tests/test_teardown_plugin.cpp)
+target_link_libraries(test_teardown_plugin PRIVATE xi_core)
+add_executable(test_plugin_teardown tests/test_plugin_teardown.cpp)
+target_link_libraries(test_plugin_teardown PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_plugin_teardown PRIVATE Ws2_32)
+endif()
+add_dependencies(test_plugin_teardown test_teardown_plugin)
+target_compile_definitions(test_plugin_teardown PRIVATE
+    TEST_PLUGIN_DLL="$<TARGET_FILE:test_teardown_plugin>")
+add_test(NAME plugin_teardown COMMAND test_plugin_teardown)
+
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
 target_include_directories(test_yyjson PRIVATE

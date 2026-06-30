@@ -289,9 +289,31 @@ destructor, the old DLL won't actually unload — the command **reports that plu
 as failed** ("DLL did not unload … NEW code is NOT active") rather than silently
 running stale code. Clean up threads / `cudaDeviceReset()` in your destructor.
 
+If the rebuild **fails to unload** the old module (stale worker thread / GPU
+context), it is reported failed and the change-gate is **left unstamped** — so the
+*next* Rebuild still sees the plugin as changed and retries the reload, instead of
+deciding "unchanged" and running stale code forever.
+
 > A `build: cmake` plugin needs its DLL built before it can load. On first
 > `open_project` it shows a "no built DLL — run Rebuild Plugins" warning; run the
 > command once and it loads.
+
+> **Manifest flags are re-read on every reload.** `reentrant` (alias `thread_safe`),
+> `sink` / `role`, `json_fallback`, and `factory` are re-parsed from `plugin.json`
+> on **all** load paths — full `open_project`, the `Ctrl+S` cl.exe hot-recompile,
+> *and* the cmake **Rebuild** — not just the first open. Toggle `"reentrant": true`
+> → `false` and Save/Rebuild, and the host immediately starts serializing that
+> instance again (the dispatch admission cap follows the live flag); flip a plugin
+> to `"sink": true` and its `process()` starts landing in frame order. These flags
+> are honoured **only as top-level keys** in `plugin.json` — a `"reentrant":true`
+> written inside a nested `manifest` example block or a description string is
+> ignored (it does **not** disable serialization).
+
+> **Closing or switching projects frees every plugin the project loaded.** That
+> includes compile:false externals resolved from `plugin_dirs` **and** plugins
+> whose manifest `name` differs from their folder name — each is unloaded
+> (`FreeLibrary`) and dropped from the registry, so the next project's same-named
+> plugin loads *its own* DLL rather than reusing a stale handle.
 
 ---
 

@@ -124,24 +124,47 @@ public:
     // registry. An already-loaded plugin of the same name keeps its live handle +
     // factories — we refresh only the metadata that can change between scans, so
     // re-registering doesn't leak the prior HMODULE. mu_ MUST be held.
-    bool register_plugin_folder_locked_(const std::string& folder) {
+    //
+    // track_as_project: this folder is a compile:false EXTERNAL resolved for the
+    // OPEN PROJECT (vs. a global plugins-dir scan). #9: such externals must be
+    // recorded in project_loaded_plugins_ so close/open frees their HMODULE — the
+    // teardown used to only free origin (compiled) plugins, so a compile:false
+    // external survived into the next project and ran its OLD DLL's code.
+    bool register_plugin_folder_locked_(const std::string& folder,
+                                        bool track_as_project = false) {
         auto manifest = std::filesystem::path(folder) / "plugin.json";
         if (!std::filesystem::exists(manifest)) return false;
         auto info = parse_manifest(manifest.string(), folder);
         if (info.name.empty()) return false;
+        std::string key = info.name;   // capture before any move
         auto existing = plugins_.find(info.name);
         if (existing != plugins_.end() && existing->second.handle) {
-            existing->second.description   = info.description;
-            existing->second.has_ui        = info.has_ui;
-            existing->second.reentrant     = info.reentrant;
-            existing->second.is_sink       = info.is_sink;
-            existing->second.prebuilt      = info.prebuilt;
-            existing->second.ui_path       = info.ui_path;
-            existing->second.folder_path   = info.folder_path;
-            existing->second.manifest_json = info.manifest_json;
+            // #9: if the resolved folder/dll MOVED, the loaded handle points at a
+            // DIFFERENT plugin than the one now being registered — keeping it would
+            // run the old DLL's code. Drop + FreeLibrary and fall through to a fresh
+            // registration so the next load_plugin() maps the new DLL.
+            bool moved = (existing->second.folder_path != info.folder_path) ||
+                         (existing->second.dll_name     != info.dll_name);
+            if (moved) {
+                FreeLibrary(existing->second.handle);   // TODO(linux): dlclose
+                existing->second.handle    = nullptr;
+                existing->second.c_factory = nullptr;
+                plugins_[info.name] = std::move(info);
+            } else {
+                existing->second.description   = info.description;
+                existing->second.has_ui        = info.has_ui;
+                existing->second.reentrant     = info.reentrant;
+                existing->second.is_sink       = info.is_sink;
+                existing->second.json_fallback = info.json_fallback;
+                existing->second.prebuilt      = info.prebuilt;
+                existing->second.ui_path       = info.ui_path;
+                existing->second.folder_path   = info.folder_path;
+                existing->second.manifest_json = info.manifest_json;
+            }
         } else {
             plugins_[info.name] = std::move(info);
         }
+        if (track_as_project) project_loaded_plugins_.insert(key);
         return true;
     }
 
@@ -210,7 +233,7 @@ public:
                          ref.label.c_str(), found.string().c_str(), ref.compile ? " (compile)" : "");
             if (ref.compile) {
                 to_compile.emplace_back(found);   // build + register as a trusted project plugin
-            } else if (!register_plugin_folder_locked_(found.string())) {
+            } else if (!register_plugin_folder_locked_(found.string(), /*track_as_project=*/true)) {
                 last_open_warnings_.push_back({ref.label, "",
                     "resolved folder has no valid plugin.json: " + found.string()});
             }
@@ -250,6 +273,33 @@ private:
         std::error_code ec;
         auto wt = std::filesystem::last_write_time(dll_path, ec);
         pi.loaded_dll_mtime = ec ? 0 : (uint64_t)wt.time_since_epoch().count();
+    }
+
+    // Re-read the manifest flags that drive DISPATCH semantics — reentrant
+    // (alias thread_safe), is_sink, json_fallback — plus the factory symbol, from
+    // already-loaded plugin.json text, and apply them onto `pi`. The single source
+    // of truth shared by EVERY (re)load path (full compile, hot recompile, cmake
+    // reattach) so toggling these in plugin.json + Save/Rebuild actually changes
+    // behaviour: a now-non-reentrant plugin starts serializing (effective_cap_→1),
+    // a newly-`sink` plugin starts landing in frame order. Uses the #22-hardened
+    // top-level-only flag/string parse. Cold path (load) — clarity over micro-opt.
+    static void apply_manifest_flags_from_content_(PluginInfo& pi, const std::string& mc) {
+        if (auto f = extract_string(mc, "factory")) pi.factory_symbol = *f;
+        pi.reentrant     = json_flag_true(mc, "reentrant") ||
+                           json_flag_true(mc, "thread_safe");   // documented alias
+        pi.json_fallback = json_flag_true(mc, "json_fallback");
+        pi.is_sink       = json_flag_true(mc, "sink") ||
+                           (extract_string(mc, "role").value_or("") == "sink");
+    }
+    // Convenience: read <folder>/plugin.json and apply. No-op if absent (keeps the
+    // pi's current flags). `folder` = the plugin's SOURCE folder (where plugin.json
+    // lives), NOT its build/ DLL dir.
+    static void apply_manifest_flags_(PluginInfo& pi, const std::string& folder) {
+        auto mpath = std::filesystem::path(folder) / "plugin.json";
+        if (!std::filesystem::exists(mpath)) return;
+        std::ifstream mf(mpath.string());
+        std::stringstream ms; ms << mf.rdbuf();
+        apply_manifest_flags_from_content_(pi, ms.str());
     }
 
     // The one DLL-load primitive every load site routes through, so a plugin
@@ -354,6 +404,17 @@ private:
             return false;
         }
         auto& pi = pi_it->second;
+        // #23: re-read the dispatch-flag manifest (reentrant/is_sink/json_fallback/
+        // factory) from plugin.json BEFORE rebuilding adapters, so a cmake rebuild
+        // after toggling those flags applies the NEW semantics — the prior code
+        // reused the stale `pi` fields, so a now-non-reentrant plugin kept running
+        // unserialized. Source folder = the plugin's origin (where plugin.json
+        // lives), falling back to the DLL's folder for a standalone layout.
+        {
+            auto oit = project_plugin_origin_.find(plugin_name);
+            apply_manifest_flags_(pi, oit != project_plugin_origin_.end()
+                                          ? oit->second : pi.folder_path);
+        }
         // Fail-check, BEFORE reloading: if the old module is still mapped, the
         // FreeLibrary in detach didn't drop its last ref (a lingering worker
         // thread / pinning dependency DLL), so the LoadLibrary below would just
@@ -400,13 +461,19 @@ private:
             project_.instances[p.name].instance = inst;
             InstanceRegistry::instance().add(inst);
         }
-        stamp_loaded_dll_(pi, new_dll_path);   // refresh change-gate
+        // #18: stamp the change-gate ONLY on genuine success — AFTER the
+        // stale_module check. If the old module is still pinned (NEW code is NOT
+        // active), bumping loaded_dll_mtime here would poison the mtime gate so the
+        // next Rebuild sees "unchanged" and never retries the reload → the plugin
+        // runs stale code forever. The LoadLibrary/ABI/factory fail branches above
+        // already return before any stamp; this matches them.
         if (stale_module) {
             if (err) *err = "DLL did not unload (same module base after reload) — "
                             "an instance likely left a worker thread or GPU context "
                             "alive; NEW code is NOT active";
             return false;
         }
+        stamp_loaded_dll_(pi, new_dll_path);   // refresh change-gate (success only)
         return true;
     }
 
@@ -436,6 +503,13 @@ private:
                 // plugin's named DLL.
                 bool prebuilt = false;
                 std::string want_dll = pname + ".dll";
+                // #13: the plugins_ map (which holds the HMODULE) is keyed by the
+                // MANIFEST name, but the drop-prior guard + close/open teardown used
+                // to key by the FOLDER leaf — so a plugin whose plugin.json `name`
+                // differs from its folder leaked its HMODULE and left a stale entry
+                // shadowing the next project. Resolve the manifest name up-front and
+                // use it as the ONE key everywhere below (plugins_, origin, teardown).
+                std::string manifest_name = pname;
                 {
                     auto mpath = entry.path() / "plugin.json";
                     if (std::filesystem::exists(mpath)) {
@@ -445,6 +519,7 @@ private:
                         prebuilt = json_flag_true(mc, "prebuilt") ||
                                    (extract_string(mc, "build").value_or("") == "cmake");
                         if (auto d = extract_string(mc, "dll")) want_dll = *d;
+                        if (auto n = extract_string(mc, "name")) manifest_name = *n;
                     }
                 }
 
@@ -531,13 +606,17 @@ private:
                             PluginInfo stub = std::filesystem::exists(mpath)
                                 ? parse_manifest(mpath.string(), entry.path().string())
                                 : PluginInfo{};
-                            if (stub.name.empty()) stub.name = pname;
+                            if (stub.name.empty()) stub.name = manifest_name;
                             if (stub.dll_name.empty()) stub.dll_name = want_dll;
                             if (stub.factory_symbol.empty()) stub.factory_symbol = "xi_plugin_create";
                             stub.prebuilt = true;
                             stub.description = "Project plugin (cmake, not built): " + pname;
-                            plugins_[pname] = std::move(stub);
-                            project_plugin_origin_[pname] = entry.path().string();
+                            // Key by the manifest name (the plugins_ key everywhere)
+                            // and track it for teardown (#13).
+                            std::string key = stub.name;
+                            plugins_[key] = std::move(stub);
+                            project_plugin_origin_[key] = entry.path().string();
+                            project_loaded_plugins_.insert(key);
                             last_open_warnings_.push_back(
                                 {pname, pname, "build:cmake plugin not built yet — run 'Rebuild Plugins'"});
                             std::fprintf(stderr,
@@ -567,16 +646,18 @@ private:
                 }
 
                 // Drop any prior version of this same project plugin
-                // (e.g., older DLL still loaded from a previous open).
-                auto prev = plugins_.find(pname);
+                // (e.g., older DLL still loaded from a previous open). #13: look it
+                // up by the MANIFEST name — the key that actually holds the handle —
+                // not the folder leaf, or a renamed plugin's old HMODULE survives.
+                auto prev = plugins_.find(manifest_name);
                 if (prev != plugins_.end() && prev->second.handle) {
-                    FreeLibrary(prev->second.handle);
+                    FreeLibrary(prev->second.handle);   // TODO(linux): dlclose
                     prev->second.handle = nullptr;
                     prev->second.c_factory = nullptr;
                 }
 
                 PluginInfo pi;
-                pi.name           = pname;
+                pi.name           = manifest_name;
                 pi.description    = "Project plugin: " + pname;
                 pi.dll_name       = std::filesystem::path(res.dll_path).filename().string();
                 pi.factory_symbol = "xi_plugin_create";
@@ -591,14 +672,11 @@ private:
                     std::string mc = ms.str();
                     if (auto n = extract_string(mc, "name"))        pi.name = *n;
                     if (auto d = extract_string(mc, "description")) pi.description = *d;
-                    if (auto f = extract_string(mc, "factory"))     pi.factory_symbol = *f;
                     pi.has_ui = (mc.find("\"has_ui\":true") != std::string::npos) ||
                                 (mc.find("\"has_ui\": true") != std::string::npos);
-                    pi.reentrant = json_flag_true(mc, "reentrant") ||
-                                   json_flag_true(mc, "thread_safe");  // documented alias
-                    pi.json_fallback = json_flag_true(mc, "json_fallback");
-                    pi.is_sink = json_flag_true(mc, "sink") ||
-                                 (extract_string(mc, "role").value_or("") == "sink");
+                    // reentrant / json_fallback / is_sink / factory via the SHARED
+                    // helper so this path and the reload paths agree (#20/#23).
+                    apply_manifest_flags_from_content_(pi, mc);
                     if (pi.has_ui) pi.ui_path = (entry.path() / "ui").string();
                     std::string mblock;
                     if (detail_find_key(mc, "manifest", mblock)) pi.manifest_json = std::move(mblock);
@@ -642,8 +720,12 @@ private:
                     pi.handle = nullptr;
                     continue;
                 }
-                plugins_[pi.name] = std::move(pi);
-                project_plugin_origin_[pname] = entry.path().string();
+                // #13: key origin + teardown by the SAME manifest name that holds
+                // the handle in plugins_ — not the folder leaf.
+                std::string key = pi.name;
+                plugins_[key] = std::move(pi);
+                project_plugin_origin_[key] = entry.path().string();
+                project_loaded_plugins_.insert(key);
                 ok_count++;
             } catch (const std::exception& e) {
                 last_open_warnings_.push_back(
@@ -805,6 +887,13 @@ public:
         // rather than silently no-op'ing.
         pi.dll_name    = std::filesystem::path(cres.dll_path).filename().string();
         pi.folder_path = std::filesystem::path(cres.dll_path).parent_path().string();
+        // #20: re-read the dispatch-flag manifest from the SOURCE folder before
+        // re-resolving the factory + rebuilding adapters, so a hot recompile after
+        // toggling reentrant/is_sink/json_fallback/factory in plugin.json applies the
+        // NEW semantics (a now-non-reentrant plugin starts serializing). The prior
+        // code reused the stale `pi` flags. Shared helper → agrees with full build +
+        // cmake reattach.
+        apply_manifest_flags_(pi, source_dir);
         // Search the plugin's own folder for its dependency DLLs (see
         // load_plugin_dll_ for the rationale).
         pi.handle = load_plugin_dll_(cres.dll_path);
@@ -1143,13 +1232,20 @@ public:
         inst_state_.clear();   // host-tracked lifecycle state dies with the instances
         // Now safe to drop the previous project's plugins — adapters are
         // gone, no live destroy_fn callers remain.
-        for (auto& [pname, _] : project_plugin_origin_) {
-            auto it = plugins_.find(pname);
+        // #9/#13: free EVERY plugin this project loaded — compiled project plugins
+        // AND compile:false externals AND manifest-renamed ones — by the SAME key
+        // that holds the HMODULE in plugins_ (the manifest name). The prior loop
+        // iterated project_plugin_origin_ (folder-keyed, externals absent) and so
+        // missed renamed handles + every external, leaking the HMODULE and leaving a
+        // stale entry that shadowed the next project's same-named plugin.
+        for (auto& key : project_loaded_plugins_) {
+            auto it = plugins_.find(key);
             if (it != plugins_.end()) {
-                if (it->second.handle) FreeLibrary(it->second.handle);
+                if (it->second.handle) FreeLibrary(it->second.handle);   // TODO(linux): dlclose
                 plugins_.erase(it);
             }
         }
+        project_loaded_plugins_.clear();
         project_plugin_origin_.clear();
         project_ = ProjectInfo{};
     }
@@ -1309,13 +1405,18 @@ public:
 
         // Now safe to drop the previous project's plugins — adapters
         // are gone, no live destroy_fn callers remain.
-        for (auto& [pname, _] : project_plugin_origin_) {
-            auto it = plugins_.find(pname);
+        // #9/#13: free EVERY plugin this project loaded by the manifest-name key
+        // that holds the HMODULE (see close_project for the rationale) — externals
+        // + renamed plugins included, so the prior project leaves no stale entry to
+        // shadow this one's same-named plugin.
+        for (auto& key : project_loaded_plugins_) {
+            auto it = plugins_.find(key);
             if (it != plugins_.end()) {
-                if (it->second.handle) FreeLibrary(it->second.handle);
+                if (it->second.handle) FreeLibrary(it->second.handle);   // TODO(linux): dlclose
                 plugins_.erase(it);
             }
         }
+        project_loaded_plugins_.clear();
         project_plugin_origin_.clear();
         project_.folder_path = folder;
 
@@ -2196,6 +2297,13 @@ private:
     // global plugins directory — flagged so the UI can label them and so
     // we don't re-scan their dll mtime against the global cert.
     std::unordered_map<std::string, std::string> project_plugin_origin_;
+    // #9/#13: every plugin THIS open project caused to load — compiled project
+    // plugins (a superset of project_plugin_origin_'s keys) AND compile:false
+    // externals resolved from plugin_dirs — keyed by the SAME key that holds the
+    // HMODULE in plugins_ (the manifest name, which can differ from the folder
+    // leaf). close/open frees + erases every one by this key, so no project leaks an
+    // HMODULE or leaves a stale entry shadowing the next project's same-named plugin.
+    std::unordered_set<std::string> project_loaded_plugins_;
     // Canonical project dir when a working copy is active (project_.folder_path
     // then points at <canonical>/.xinsp_work). Empty = no working copy.
     std::string canonical_path_;

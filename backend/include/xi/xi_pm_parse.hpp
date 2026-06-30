@@ -27,10 +27,29 @@
 
 namespace xi {
 
+// D-P1-2 (extended to flags): a tolerant boolean-flag probe that honours ONLY a
+// top-level object key. The former implementation was a flat substring scan
+// (`s.find("\"reentrant\":true")`) over the WHOLE manifest, so a `"reentrant":true`
+// buried in a nested `manifest` example block or a description string produced a
+// false positive — silently DISABLING per-instance serialization for a
+// non-reentrant plugin (concurrent process() → data race). yyjson, top-level only,
+// closes that hole (mirrors extract_string's hardening). Accepts a real JSON bool;
+// also tolerates a quoted "true"/"false" string so manifests that stringify the
+// flag still work. Missing / wrong-type / parse-fail → false (treat as off).
 inline bool json_flag_true(const std::string& s, const char* key) {
-    std::string k = std::string("\"") + key + "\"";
-    return s.find(k + ":true") != std::string::npos ||
-           s.find(k + ": true") != std::string::npos;
+    yyjson_doc* doc = yyjson_read(s.c_str(), s.size(), 0);
+    yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    bool result = false;
+    if (root) {
+        yyjson_val* k = yyjson_obj_get(root, key);
+        if (k && yyjson_is_bool(k)) {
+            result = yyjson_get_bool(k);
+        } else if (k && yyjson_is_str(k) && yyjson_get_str(k)) {
+            result = (std::string(yyjson_get_str(k)) == "true");
+        }
+    }
+    if (doc) yyjson_doc_free(doc);
+    return result;
 }
 
 // D-P1-2: top-level top-key extraction. Previously implemented as a

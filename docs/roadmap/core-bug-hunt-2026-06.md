@@ -119,7 +119,15 @@ Consequence: every clean shutdown with an open project crashes during static des
 
 **PoC:** 1) open_project(A); compile_and_load(A/inspect.cpp) where A declares xi::Param<int> thresh{"thresh",50,{0,255}}. 2) set_param("thresh", 200) -> rsp ok; g_param_cache["thresh"]="200". 3) open_project(B); compile_and_load(B/inspect.cpp) where B independently declares xi::Param<int> thresh{"thresh",50,...}. 4) cmd:list_params (or run an inspection) and observe thresh==200 in B, not its default 50 — A's value bled across the project boundary. Same recipe with XI_STATE_SCHEMA unset (schema 0) on both shows A's xi::state() restored into B (g_persistent_state_json never reset). Expected: opening a new project resets the param/state replay shadows the way unload_script does.
 
-## [9] HIGH (votes 3/3, conf 0.79) — External (plugin_dirs, compile:false) plugins are never freed or dropped on close_project/open_project — HMODULE leak + stale entry shadows the next project's same-named plugin with the OLD DLL
+## [9] HIGH (votes 3/3, conf 0.79) — External (plugin_dirs, compile:false) plugins are never freed or dropped on close_project/open_project — HMODULE leak + stale entry shadows the next project's same-named plugin with the OLD DLL — ✅ FIXED 2026-06-30 (cluster C)
+**FIX (cluster C — one cohesive pass on the plugin load/reload subsystem):**
+- **Shared manifest-flag helper** `apply_manifest_flags_(PluginInfo&, folder)` (+ content overload) re-parses reentrant/thread_safe, is_sink (sink/role), json_fallback, factory using the #22-hardened parse. Called from ALL three reload paths — full build `compile_plugin_folders_locked_`, hot recompile `recompile_project_plugin` (#20), cmake reattach `reattach_plugin_from_dll_locked_` (#23) — so a `reentrant:true→false` flip now reaches `effective_cap_` (→1, serialized) on every path, not just full open.
+- **#22:** `json_flag_true` substring scan → top-level-only yyjson (bool + quoted-string tolerant; parse-fail→false), so a nested-manifest/description `"reentrant":true` no longer false-positives.
+- **#18:** moved `stamp_loaded_dll_` to AFTER the `stale_module` early-return — a pinned-module reattach FAIL no longer poisons the mtime gate, so a later Rebuild retries.
+- **#13 + #9:** new `project_loaded_plugins_` set keyed by the MANIFEST name (the key that holds the HMODULE in `plugins_`), populated by every load path incl. compile:false externals; `close_project`/`open_project` teardown both iterate it → FreeLibrary + erase, so a manifest-renamed plugin (#13) and an external (#9) are freed not leaked. The external register-refresh branch now drops+FreeLibrary's the old handle when the folder/dll MOVED instead of keeping a stale handle/c_factory. (Also repaired a latent mis-key: `project_plugin_origin_`/`is_project_plugin`/list-JSON were folder-leaf-keyed vs `plugins_`'s manifest name.)
+- Cross-platform: every FreeLibrary tagged `TODO(linux): dlclose`.
+- Verified: full Release solution + **17/17 ctest green** incl. new `pm_parse` (#22: nested-only→false, top-level/alias→true; revert→FAIL) + `plugin_teardown` (real prebuilt DLL: manifest `renamed_proj`≠folder + compile:false `renamed_ext` both freed+erased on close; revert→survives=FAIL). #20/#23/#18 reload-path placement + adapter wiring (reentrant→effective_cap_) covered by the shared-parse teeth test + argued by inspection (cl.exe/cmake e2e out of unit scope).
+
 **File:** backend/include/xi/xi_plugin_manager.hpp:203
 **Also:** backend/include/xi/xi_plugin_manager.hpp:122-131 (refresh branch keeps stale handle/c_factory), :1136-1143 (close_project frees only origin plugins), :1286-1293 (open_project frees only origin plugins), :1574 (auto-load sets handle for non-origin external)
 
@@ -158,7 +166,7 @@ Worse than a leak: the stale entry causes WRONG CODE to run. If project B declar
 
 **PoC:** Run continuous mode (cmd:start) at e.g. 30fps with dispatch_threads=1 and --watchdog=100. Use a script whose inspect calls a heavy op that polls xi::cancellation_requested() (e.g. examples/cancel_aware_script.cpp pattern) and that occasionally takes ~150ms. When one frame overruns: observe the watchdog log 'requesting cooperative cancel', then verify that EVERY frame dispatched in the following ~1000ms also returns early/NA (the op sees cancellation_requested()==true) even though those frames are individually fast — they only recover after the watchdog resets the flag at +1000ms. Compare run_result codes across the window to see ~1s of spurious cancellations per single slow frame.
 
-## [13] HIGH (votes 3/3, conf 0.68) — Project plugin with manifest "name" override leaks its HMODULE + survives close_project/open_project as a stale entry
+## [13] HIGH (votes 3/3, conf 0.68) — Project plugin with manifest "name" override leaks its HMODULE + survives close_project/open_project as a stale entry — ✅ FIXED 2026-06-30 (cluster C)
 **File:** backend/include/xi/xi_plugin_manager.hpp:635
 **Also:** backend/include/xi/xi_plugin_manager.hpp:582, 561, 636, 1136-1140, 1286-1290, 1026
 
@@ -201,7 +209,7 @@ Worse than a leak: the stale entry causes WRONG CODE to run. If project B declar
 
 **PoC:** In a long-lived backend: loop N times creating a source instance with a unique name (e.g. 'cam_%d'), have it emit one record, then remove/rename it (or close+reopen the project, which calls TriggerBus::reset()). After N iterations, TriggerBus::instance().source_emit_ages_us().size() == N and keeps growing; reset() does not shrink it. Contrast with the pre-last-emit-tracking design where reset() cleared the bus's per-source/correlation state at every reload.
 
-## [18] MED (votes 2/3, conf 0.76) — Stale-module reattach failure still stamps the change-gate → Rebuild Plugins can never re-reload a plugin stuck on old in-memory code
+## [18] MED (votes 2/3, conf 0.76) — Stale-module reattach failure still stamps the change-gate → Rebuild Plugins can never re-reload a plugin stuck on old in-memory code — ✅ FIXED 2026-06-30 (cluster C)
 **File:** backend/include/xi/xi_plugin_manager.hpp:393-399
 **Also:** backend/include/xi/xi_plugin_manager.hpp:909-913 (mtime gate); :944-979 (Phase C)
 
@@ -218,7 +226,7 @@ Worse than a leak: the stale entry causes WRONG CODE to run. If project B declar
 
 **PoC:** 1) Build the SDK trigger_source example, add an instance named e.g. 'src1'. 2) Compile an inspect script: `auto t = xi::current_trigger(); VAR(frame, t.image("frame"));` (verbatim from sdk/README.md:282). 3) Let the source emit `Record().image("frame", img)` — observe `frame` VAR is empty/null because the bus stored the image under key 'src1', not 'frame'. 4) Run the IDENTICAL script via `cmd:run --frame some.png`: now `image("frame")` resolves (service_main.cpp:2406 injected key 'frame') and the VAR is populated. Same script, opposite results, depending solely on frame origin. Confirm in code: xi_trigger_bus.hpp:155 (`image_count > 1` gate) vs service_main.cpp:2406 + :531.
 
-## [20] MED (votes 2/3, conf 0.69) — recompile_project_plugin reuses stale PluginInfo manifest fields (reentrant/is_sink/json_fallback) — hot-recompile never re-reads plugin.json
+## [20] MED (votes 2/3, conf 0.69) — recompile_project_plugin reuses stale PluginInfo manifest fields (reentrant/is_sink/json_fallback) — hot-recompile never re-reads plugin.json — ✅ FIXED 2026-06-30 (cluster C)
 **File:** backend/include/xi/xi_plugin_manager.hpp:666
 **Also:** backend/include/xi/xi_plugin_manager.hpp:291-292, 587-594, 809; backend/include/xi/xi_cabi_adapter.hpp:280
 
@@ -234,7 +242,7 @@ Worse than a leak: the stale entry causes WRONG CODE to run. If project B declar
 
 **PoC:** In an inspection script build one record and emit it to two declared ordered-sink instances with the same object: `auto rec = xi::Record().image("f", img).set("command","weld"); xi::use("plcA").process(rec); xi::use("plcB").process(rec);`. Capture what plcB receives (or dump the staged doc JSON): it contains two "$seq" entries. For the corruption variant, make sinkA a plugin that caches its input doc (Record kept as a member from process()) and reads it on the next frame; under parallel/again-staged frames the cached doc is structurally mutated by a later flush add_int, producing torn reads. Compare against routing each sink its own record (no aliasing) — single $seq, no shared mutation. Fix: COW/clone before stamping (e.g. mutate a per-item copy) or use yyjson_mut_obj_put-style replace on a doc this item solely owns.
 
-## [22] MED (votes 2/3, conf 0.65) — reentrant flag parsed by raw substring scan over the whole plugin.json (incl. nested manifest block) — a false positive silently disables per-instance serialization
+## [22] MED (votes 2/3, conf 0.65) — reentrant flag parsed by raw substring scan over the whole plugin.json (incl. nested manifest block) — a false positive silently disables per-instance serialization — ✅ FIXED 2026-06-30 (cluster C)
 **File:** backend/include/xi/xi_pm_parse.hpp:30-34, :121-122
 **Also:** backend/include/xi/xi_plugin_manager.hpp:587-588; backend/include/xi/xi_cabi_adapter.hpp:280 (effective_cap_)
 
@@ -242,7 +250,7 @@ Worse than a leak: the stale entry causes WRONG CODE to run. If project B declar
 
 **PoC:** Author a normal non-reentrant plugin (no `"reentrant"` top-level key, or `"reentrant": false`) whose plugin.json carries a nested block containing the substring `"reentrant":true` — e.g. a `manifest` example/default object literally written as {... "reentrant":true ...} or a description string mentioning it. Load it, create an instance, run continuous dispatch with parallelism.workers>1. Observe (e.g. via the concurrency_probe pattern in examples/qa_reentrancy) that process() is entered concurrently for the same instance (cur_calls_>1) instead of serialized — confirming the gate was disabled by the mislabel. Contrast with the same plugin whose manifest omits the adjacency: process() is serialized (cur_calls_==1).
 
-## [23] MED (votes 3/3, conf 0.61) — rebuild_cmake_plugins / reattach reuse stale manifest flags (is_sink, reentrant, json_fallback) — editing plugin.json + Rebuild keeps old dispatch semantics
+## [23] MED (votes 3/3, conf 0.61) — rebuild_cmake_plugins / reattach reuse stale manifest flags (is_sink, reentrant, json_fallback) — editing plugin.json + Rebuild keeps old dispatch semantics — ✅ FIXED 2026-06-30 (cluster C)
 **File:** backend/include/xi/xi_plugin_manager.hpp:386-392
 **Also:** backend/include/xi/xi_plugin_manager.hpp:280-295 (make_adapter_guarded_ reads pi.reentrant/pi.is_sink); :370 (gate reads pi.json_fallback); :873-981 (rebuild_cmake_plugins)
 

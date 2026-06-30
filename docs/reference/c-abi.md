@@ -252,6 +252,16 @@ typedef struct {
 | `abi_version` | The `XI_ABI_VERSION` compiled against (written by `cmd:export_project_plugin`); gated per §4. |
 | `manifest` (object) | Machine-readable tunables + IO surface (`params`/`inputs`/`outputs`/`exchange`), passed through verbatim for tooling/agents. |
 
+> **Flags are top-level only, and re-read on every reload.** `reentrant`/
+> `thread_safe`, `sink`/`role`, `json_fallback`, `factory` are parsed as **top-level
+> JSON keys** — a `"reentrant":true` buried inside the nested `manifest` example or a
+> description string is **not** honoured. They are re-parsed on **all** load paths
+> (full open, cl.exe hot-recompile, cmake Rebuild), so toggling one + Save/Rebuild
+> changes the live dispatch behaviour (e.g. `reentrant:false` immediately re-enables
+> per-instance serialization). Closing/switching a project also frees **every**
+> plugin it loaded — externals and manifest-renamed plugins included — so the next
+> project never reuses a stale DLL handle.
+
 **`manifest.params` validation** (on `cmd:open_project`): each instance's
 `config` is walked against the declared params; mismatches emit an
 `open_project_warnings` entry (`unknown_config_key` / `type_mismatch` /
