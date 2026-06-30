@@ -82,6 +82,18 @@ static int         g_persistent_state_schema = 0;
 // same shape as set_param's `value` arg). Protected by g_script_mu.
 static std::unordered_map<std::string, std::string> g_param_cache;
 
+// Cache of every successful script-side `cmd:set_instance_def` def the
+// backend pushed into the live script. Exact sibling of g_param_cache:
+// script-declared xi::Instance objects live in the script DLL's OWN
+// registry and their file-scope ctors re-seed the SOURCE default def on
+// every reload, so without replaying the operator-tuned/taught/calibrated
+// def the hot-recompile loop silently reverts each instance to its source
+// default. Keyed by instance name → def JSON (same shape as set_instance_def's
+// `def` arg). Only the SCRIPT-instance path is cached — backend plugin-manager
+// instances persist via InstanceRegistry across a script recompile. Protected
+// by g_script_mu like g_param_cache.
+static std::unordered_map<std::string, std::string> g_instance_def_cache;
+
 // --- xi::use() callback implementations ---
 // These are called FROM the script DLL back INTO the backend, routing
 // process/exchange/grab to the backend's InstanceRegistry.
@@ -2308,6 +2320,25 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 }
             }
 
+            // Replay any script-instance defs the user tuned on the previous
+            // DLL — exact sibling of the param replay above. The new DLL's
+            // file-scope xi::Instance ctors re-seed each instance with its
+            // SOURCE default def on load; without this the hot-recompile loop
+            // silently reverts every operator-tuned/taught/calibrated instance.
+            // set_instance_def returns non-zero for defs the new DLL doesn't
+            // declare (renamed / deleted) — best-effort, like the param replay,
+            // those entries stay cached and quietly no-op.
+            if (g_script.set_instance_def) {
+                for (auto& [iname, def] : g_instance_def_cache) {
+                    g_script.set_instance_def(iname.c_str(), def.c_str());
+                }
+                if (!g_instance_def_cache.empty()) {
+                    std::fprintf(stderr,
+                        "[xinsp2] replayed %zu instance def(s) into reloaded script\n",
+                        g_instance_def_cache.size());
+                }
+            }
+
             // Restore persistent state into the new DLL — but drop it
             // when the schema versions disagree (and both sides
             // declared one), since set_state's silent default-fill on
@@ -2390,6 +2421,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // replay into, and a future load_project / compile_and_load
         // is free to start clean.
         g_param_cache.clear();
+        g_instance_def_cache.clear();   // sibling replay shadow — same lifetime
         send_rsp_ok(srv, id);
     } else if (name == "run") {
         if (g_continuous.load()) {
@@ -2695,6 +2727,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             std::lock_guard<std::mutex> lk(g_script_mu);
             if (g_script.ok() && g_script.set_instance_def) {
                 int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
+                // Cache an accepted def so compile_and_load replays it into the next
+                // DLL load (else the new DLL's file-scope ctor silently reverts it).
+                if (rc == 0) g_instance_def_cache[*iname] = def_str;
                 if (rc == 0) { set_inst_state(*iname, InstState::Active); send_rsp_ok(srv, id); }
                 else { set_inst_state(*iname, InstState::Faulted, "set_instance_def failed");
                        send_rsp_err(srv, id, "set_instance_def failed"); }
@@ -3099,7 +3134,12 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                         std::lock_guard<std::mutex> lk(g_script_mu);
                         if (g_script.ok() && g_script.set_instance_def) {
                             int rc = g_script.set_instance_def(iname, def_str);
-                            if (rc != 0)
+                            // Mirror the param path above: write g_instance_def_cache so a
+                            // later compile_and_load replays THIS recipe's def, not a stale
+                            // pre-load value — else editing the script + recompiling reverts
+                            // the just-loaded instance to the source default.
+                            if (rc == 0) g_instance_def_cache[iname] = def_str;
+                            else
                                 instance_warnings.push_back(std::string(iname) + ": set_instance_def failed");
                         } else {
                             instance_warnings.push_back(std::string(iname) + ": instance not found");
@@ -3331,6 +3371,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         {
             std::lock_guard<std::mutex> lk(g_script_mu);
             g_param_cache.clear();
+            g_instance_def_cache.clear();   // sibling replay shadow — same project boundary
             g_persistent_state_json = "{}";
             g_persistent_state_schema = 0;
         }
@@ -3421,6 +3462,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         {
             std::lock_guard<std::mutex> lk(g_script_mu);
             g_param_cache.clear();
+            g_instance_def_cache.clear();   // sibling replay shadow — same project boundary
             g_persistent_state_json = "{}";
             g_persistent_state_schema = 0;
         }

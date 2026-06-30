@@ -1,0 +1,7 @@
+{
+  "name": "qa_instance_def_recompile",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": [],
+  "plugins": {}
+}
