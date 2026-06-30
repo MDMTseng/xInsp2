@@ -3,7 +3,7 @@
 Standalone — does not go through the backend WS. Mirrors the path the
 e2e suites use (`vscode-extension/test/e2e/index.cjs:takeScreenshot`)
 so AI agents can see what the VS Code window looks like alongside the
-VAR / preview data they get from the SDK.
+run outcomes they get from the SDK.
 
 Captures the full primary screen, not just the VS Code window — that's
 the same trade the e2e tests make. Assumes the user has VS Code open

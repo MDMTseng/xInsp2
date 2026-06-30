@@ -30,26 +30,27 @@ with Client() as c:
     run = c.run(frame_path=r"C:\path\to\frame.jpg")
 
     print(f"run {run.run_id} took {run.ms} ms")
-    print("count:", run.value("count"))
-    gray = run.image("gray")
-    print(f"gray: {gray.width}x{gray.height} {gray.codec_name}")
+    print("verdict:", run.verdict)
+    print("events:", run.events)
 
     snap = dump_run(run, "snapshots")
     print("dumped to", snap.folder)
 ```
 
+This client is **generic and content-agnostic**. It drives
+compile / set_param / run and reads back the run outcome (verdict,
+timing, events). It does NOT collect or decode VARs or image previews —
+that domain model now lives behind the owning plugin's own webUI. To talk
+to a specific plugin instance generically, use `exchange_instance`.
+
 ## Snapshot format
 
 ```
 snapshots/run-000017/
-    report.json       run metadata + every non-image VAR
-    vars/gray.jpg     image previews (jpg/bmp/png by codec)
-    vars/edges.jpg
-    vars/report.json  one file per `kind:json` VAR
+    report.json       run_id, ms, verdict, raw run data, event log
 ```
 
-Designed so an AI agent can `Read` `report.json` for shape, then read
-specific image files only when needed — keeps context small.
+Designed so an AI agent can `Read` `report.json` for the run outcome.
 
 ## Patterns for AI workflows
 

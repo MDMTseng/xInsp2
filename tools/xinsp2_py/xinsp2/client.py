@@ -6,7 +6,6 @@ by an AI agent (or a human at a REPL). Spec: docs/reference/ws-protocol.md.
 from __future__ import annotations
 
 import json
-import struct
 import threading
 from dataclasses import dataclass, field
 from queue import Queue, Empty
@@ -51,8 +50,8 @@ class CmdTimeoutError(TimeoutError):
 
 class ConnectionLostError(ConnectionError):
     """Raised when the SDK detects the WS connection has dropped, e.g.
-    `next_vars()` is called after the read loop exited. Callers
-    looping on `next_vars()` should treat this as a stop signal."""
+    a `call()` is issued after the read loop exited. Callers looping on
+    the connection should treat this as a stop signal."""
     pass
 
 
@@ -105,75 +104,26 @@ def _enrich_compile_error(orig: ProtocolError, what: str, target: str) -> Protoc
     return ProtocolError("\n".join(lines), error=orig.error, data=orig.data)
 
 
-_NONFINITE = {"NaN": float("nan"), "Infinity": float("inf"), "-Infinity": float("-inf")}
-
-
-def _restore_nonfinite(v):
-    """Map a single quoted sentinel string to its float; pass anything else through."""
-    return _NONFINITE.get(v, v) if isinstance(v, str) else v
-
-
-def _restore_nonfinite_deep(v):
-    """Recursively restore non-finite sentinels inside a record's `data` (dict/list).
-    A plugin can write a NaN/Inf field into a nested Record; the backend emits it as
-    the quoted string "NaN" deep inside kind:"record" data. Restoring only the
-    top-level number var left these as strings -> `str > float` raised TypeError on a
-    threshold compare. Mirrors restoreNonFiniteDeep in ui-components/src/protocol.mjs."""
-    if isinstance(v, str):
-        return _restore_nonfinite(v)
-    if isinstance(v, list):
-        return [_restore_nonfinite_deep(x) for x in v]
-    if isinstance(v, dict):
-        return {k: _restore_nonfinite_deep(x) for k, x in v.items()}
-    return v
-
-
-@dataclass
-class PreviewFrame:
-    gid: int
-    codec: int           # 0=JPEG, 1=BMP, 2=PNG
-    width: int
-    height: int
-    channels: int
-    payload: bytes
-
-    @property
-    def codec_name(self) -> str:
-        return {0: "jpeg", 1: "bmp", 2: "png"}.get(self.codec, f"unknown({self.codec})")
-
-
 @dataclass
 class RunResult:
+    """Outcome of one `inspect()` run.
+
+    Generic and content-agnostic: it carries the run identity, timing,
+    the raw `rsp.data` payload the backend returned (which includes the
+    `verdict` when the script set one), and any events that landed during
+    the run. This client does NOT collect or decode VARs or image
+    previews — that domain model now lives behind the owning plugin's
+    own webUI. Read `data` / `verdict` for the run outcome.
+    """
     run_id: int
     ms: int
-    vars: list[dict]                  # raw items array from `vars` message
-    previews: dict[int, PreviewFrame] # gid -> PreviewFrame
+    data: dict = field(default_factory=dict)   # raw rsp.data for the run
     events: list[dict] = field(default_factory=list)
 
-    def var(self, name: str) -> dict | None:
-        return next((v for v in self.vars if v["name"] == name), None)
-
-    def value(self, name: str, default=None):
-        v = self.var(name)
-        if v is None:
-            return default
-        val = v.get("value", default)
-        # Restore the quoted non-finite sentinels the backend emits for number
-        # vars (NaN/Infinity can't be bare JSON tokens). Mirrors the C++
-        # nonfinite_from_str; without this a number var reads as the string "NaN".
-        if v.get("kind") == "number" and isinstance(val, str):
-            return _restore_nonfinite(val)
-        return val
-
-    def image(self, name: str) -> PreviewFrame | None:
-        v = self.var(name)
-        if not v or v.get("kind") != "image":
-            return None
-        # A mirror var (one buffer VAR'd under several names) carries its own gid
-        # but the single deduped preview frame is keyed by the canonical `src`
-        # gid. Fall back to src so image() works for the non-canonical names too
-        # (snapshot.py already does this; this matched it).
-        return self.previews.get(v["gid"]) or self.previews.get(v.get("src", v["gid"]))
+    @property
+    def verdict(self):
+        """The script's verdict if it set one, else None."""
+        return self.data.get("verdict")
 
 
 class Client:
@@ -183,8 +133,6 @@ class Client:
         self._ws: websocket.WebSocket | None = None
         self._next_id = 1
         self._rsp_waiters: dict[int, Queue] = {}
-        self._inbox_vars: Queue = Queue()
-        self._inbox_previews: Queue = Queue()
         self._inbox_events: Queue = Queue()
         self._inbox_logs: Queue = Queue()
         self._reader: threading.Thread | None = None
@@ -215,12 +163,6 @@ class Client:
         ev = self._inbox_events.get(timeout=self.timeout)
         if ev.get("name") != "hello":
             raise ProtocolError(f"expected hello event, got {ev}")
-        # Previews are off by default (the backend streams images only to
-        # subscribers). This is a headless dump client, so opt into all.
-        try:
-            self.call("subscribe", {"all": True}, timeout=self.timeout)
-        except Exception:
-            pass
         return ev.get("data", {})
 
     def close(self):
@@ -511,82 +453,26 @@ class Client:
             args["since_ms"] = since_ms
         return self.call("recent_errors", args)
 
-    def next_vars(self, timeout: float | None = None) -> dict | None:
-        """Pop the next `vars` message from the queue, blocking up to
-        `timeout` seconds. Returns the raw vars dict (`{"type":"vars",
-        "run_id":N,"items":[...]}`) or `None` on timeout.
-
-        Raises `ConnectionLostError` if the WS read loop has already
-        exited. Loop callers should treat that as a stop signal —
-        without it a `while next_vars(1) is not None` after disconnect
-        would spin forever returning None.
-
-        Use this to consume the stream produced by `cmd:start`
-        (continuous mode), which doesn't follow the request/reply
-        shape of `cmd:run`. The caller is responsible for wiring any
-        per-frame logic — the SDK doesn't auto-correlate previews
-        here. For the typical "drive 100 frames continuously and
-        score them" pattern see the hot_reload_run / stereo_sync
-        example drivers.
-        """
-        if self._read_loop_dead and self._inbox_vars.empty():
-            raise ConnectionLostError(
-                "WS connection is closed; no further vars will arrive"
-            )
-        try:
-            return self._inbox_vars.get(timeout=timeout or self.timeout)
-        except Empty:
-            if self._read_loop_dead:
-                raise ConnectionLostError(
-                    "WS closed while waiting for vars"
-                ) from None
-            return None
-
     def run(self, frame_path: str | None = None, timeout: float | None = None) -> RunResult:
-        """Run one inspect() and collect the resulting vars + previews.
+        """Run one inspect() and return its outcome.
 
-        Synchronisation: blocks until the `vars` message for this run's
-        `run_id` arrives, then drains exactly the previews referenced
-        by that vars message (one per `kind:image` item). Events that
-        landed during the run are scooped non-blocking into
-        `RunResult.events`. (The backend does emit a `run_finished`
-        event per run, but this method keys completion off the rsp +
-        matching `vars` and does not wait on it.)
+        Blocks on the `cmd:run` reply, which carries the run identity,
+        timing, and verdict. Events that landed during the run are then
+        scooped non-blocking into `RunResult.events`. (The backend also
+        emits a `run_finished` event per run; this method keys completion
+        off the rsp and does not wait on it.)
 
-        IMPORTANT: this drains stale `vars` and `previews` queues but
-        DOES NOT drain `events` — earlier calls' events (e.g.
-        `state_dropped` after a `compile_and_load`) stay queued so the
-        caller can read them out via `_inbox_events.get_nowait()`.
-        Vars/previews are drained because they're tightly coupled to a
-        specific run_id and stale ones would mismatch.
+        This is a GENERIC driver: it does not collect or decode VARs or
+        image previews. Read `RunResult.verdict` / `RunResult.data` for
+        the outcome; consume binary/preview streams via the owning
+        plugin's own UI, or via `exchange_instance` for plugin telemetry.
+
+        `_inbox_events` is deliberately left intact between runs — earlier
+        calls' events (e.g. `state_dropped` after a `compile_and_load`)
+        stay queued so the caller can read them out.
         """
-        self._drain(self._inbox_vars)
-        self._drain(self._inbox_previews)
-        # Note: _inbox_events deliberately left intact — see docstring.
-
         args = {"frame_path": frame_path} if frame_path else {}
         data = self.call("run", args, timeout=timeout or self.timeout)
-        run_id = data["run_id"]
-
-        # vars message
-        vars_msg = self._inbox_vars.get(timeout=timeout or self.timeout)
-        if vars_msg.get("run_id") != run_id:
-            raise ProtocolError(f"vars run_id {vars_msg.get('run_id')} != {run_id}")
-
-        # collect previews — one per DISTINCT image. Images sharing a buffer
-        # report a common canonical "src" gid and the backend sends a single
-        # frame under it, so wait for the canon gids, not every var's gid.
-        wanted_gids = {it.get("src", it["gid"])
-                       for it in vars_msg["items"] if it["kind"] == "image"}
-        previews: dict[int, PreviewFrame] = {}
-        deadline = (timeout or self.timeout)
-        while wanted_gids:
-            try:
-                pf: PreviewFrame = self._inbox_previews.get(timeout=deadline)
-            except Empty:
-                break
-            previews[pf.gid] = pf
-            wanted_gids.discard(pf.gid)
 
         # collect any events that landed during the run
         events = []
@@ -596,18 +482,10 @@ class Client:
             except Empty:
                 break
 
-        # Restore non-finite sentinels inside kind:"record" data in place so every
-        # accessor (and direct vars[...] reads) sees real floats, not "NaN" strings.
-        items = vars_msg["items"]
-        for it in items:
-            if it.get("kind") == "record" and isinstance(it.get("data"), (dict, list)):
-                it["data"] = _restore_nonfinite_deep(it["data"])
-
         return RunResult(
-            run_id=run_id,
+            run_id=data["run_id"],
             ms=int(data.get("ms", 0)),
-            vars=items,
-            previews=previews,
+            data=data,
             events=events,
         )
 
@@ -638,9 +516,9 @@ class Client:
         except Exception:
             return
         finally:
-            # Signal callers waiting on next_vars / call() that the
-            # connection is gone. Without this they'd block until their
-            # individual timeouts expire and then return None forever.
+            # Signal callers blocked in call() that the connection is
+            # gone. Without this they'd block until their individual
+            # timeouts expire.
             self._read_loop_dead = True
             # Wake any pending rsp-waiters with a synthetic shutdown
             # marker so call() can raise ConnectionLostError instead of
@@ -658,8 +536,6 @@ class Client:
             q = self._rsp_waiters.get(msg.get("id"))
             if q is not None:
                 q.put(msg)
-        elif t == "vars":
-            self._inbox_vars.put(msg)
         elif t == "event":
             self._inbox_events.put(msg)
         elif t == "log":
@@ -674,9 +550,8 @@ class Client:
             self._inbox_events.put({"name": "instances", "data": msg})
 
     def _handle_binary(self, data: bytes):
-        if len(data) < 20:
-            return
-        gid, codec, w, h, ch = struct.unpack(">IIIII", data[:20])
-        self._inbox_previews.put(PreviewFrame(
-            gid=gid, codec=codec, width=w, height=h, channels=ch, payload=data[20:],
-        ))
+        # Binary frames (e.g. plugin preview streams) are opaque to this
+        # generic client and intentionally dropped. The owning plugin's
+        # webUI decodes its own binary payloads; the core/client stays
+        # content-agnostic.
+        return
