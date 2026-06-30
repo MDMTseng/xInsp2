@@ -135,24 +135,9 @@ static void test_log_event() {
     CHECK(s2.find("\"ms\":42") != std::string::npos);
 }
 
-static void test_preview_header() {
-    SECTION("preview header encode/decode");
-    PreviewHeader h;
-    h.gid = 100;
-    h.codec = static_cast<uint32_t>(Codec::JPEG);
-    h.width = 4000;
-    h.height = 5000;
-    h.channels = 3;
-
-    uint8_t buf[kPreviewHeaderSize];
-    encode_preview_header(h, buf);
-    PreviewHeader back = decode_preview_header(buf);
-    CHECK(back.gid == h.gid);
-    CHECK(back.codec == h.codec);
-    CHECK(back.width == h.width);
-    CHECK(back.height == h.height);
-    CHECK(back.channels == h.channels);
-}
+// (test_preview_header removed: the core-side gid/codec preview header was
+// deleted with the v9 vars/preview-core teardown; the `expose` plugin frames its
+// own XEX1 output and the core no longer owns a binary preview header type.)
 
 static void test_parse_edge_cases() {
     SECTION("parse_cmd edge cases");
@@ -218,7 +203,6 @@ int main() {
     test_rsp_err();
     test_vars_encode();
     test_log_event();
-    test_preview_header();
     test_parse_edge_cases();
     test_strip_quotes_unescape();
 

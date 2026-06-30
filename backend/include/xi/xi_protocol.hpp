@@ -62,56 +62,11 @@ inline std::optional<VarKindWire> parse_var_kind(std::string_view s) {
     return std::nullopt;
 }
 
-enum class Codec : uint32_t {
-    JPEG = 0,
-    BMP  = 1,
-    PNG  = 2,
-};
-
-// ---------- binary preview header ----------
-
-struct PreviewHeader {
-    uint32_t gid;
-    uint32_t codec;      // Codec
-    uint32_t width;
-    uint32_t height;
-    uint32_t channels;
-};
-
-static constexpr size_t kPreviewHeaderSize = 20;
-
-// Big-endian helpers — WebSocket is byte-oriented but we fix endianness so
-// multiple clients (JS, Python, C++) agree.
-inline void write_u32_be(uint8_t* p, uint32_t v) {
-    p[0] = static_cast<uint8_t>((v >> 24) & 0xFF);
-    p[1] = static_cast<uint8_t>((v >> 16) & 0xFF);
-    p[2] = static_cast<uint8_t>((v >> 8)  & 0xFF);
-    p[3] = static_cast<uint8_t>( v        & 0xFF);
-}
-inline uint32_t read_u32_be(const uint8_t* p) {
-    return (static_cast<uint32_t>(p[0]) << 24) |
-           (static_cast<uint32_t>(p[1]) << 16) |
-           (static_cast<uint32_t>(p[2]) << 8)  |
-            static_cast<uint32_t>(p[3]);
-}
-
-inline void encode_preview_header(const PreviewHeader& h, uint8_t out[kPreviewHeaderSize]) {
-    write_u32_be(out + 0,  h.gid);
-    write_u32_be(out + 4,  h.codec);
-    write_u32_be(out + 8,  h.width);
-    write_u32_be(out + 12, h.height);
-    write_u32_be(out + 16, h.channels);
-}
-
-inline PreviewHeader decode_preview_header(const uint8_t in[kPreviewHeaderSize]) {
-    PreviewHeader h;
-    h.gid      = read_u32_be(in + 0);
-    h.codec    = read_u32_be(in + 4);
-    h.width    = read_u32_be(in + 8);
-    h.height   = read_u32_be(in + 12);
-    h.channels = read_u32_be(in + 16);
-    return h;
-}
+// NOTE: the old binary "preview header" (gid/codec/w/h/ch, 20-byte big-endian)
+// and its Codec enum were removed with the v9 vars/preview-core teardown. The
+// `expose` plugin now frames its own output as a self-describing XEX1 binary
+// frame (magic + msgpack; see plugins/expose/src/expose.cpp); the core is a dumb
+// byte pipe for it (host emit_binary → broadcast), so no core-side header type.
 
 // ---------- JSON string escape / unescape ----------
 
