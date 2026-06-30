@@ -1,6 +1,7 @@
 """multi_source_surge2 driver - FL r6 regression sub-round.
 
-Goal: verify the three PR #22 fixes hold via a different driver path.
+Goal: verify the two surviving PR #22 dispatch fixes hold via a
+different driver path.
 
   Fix 1 (P1-1): dispatch_stats counters reset on cmd:start. Drive 5
                 start/stop sweeps with different N/queue settings,
@@ -12,26 +13,26 @@ Goal: verify the three PR #22 fixes hold via a different driver path.
                 Set the watchdog via cmd:set_watchdog_ms, then start
                 with N=4 and capture the log inbox via on_log().
 
-  Fix 3 (P2-1): VAR(foo, foo) collision. Compile inspect_collision.cpp
-                on purpose, capture the cl.exe diagnostic via the
-                SDK's enriched ProtocolError, and check whether the
-                xi_var.hpp footgun comment + writing-a-script gotcha
-                are reachable from the resulting error.
+(A former Fix 3 about the VAR(name,name) shadow was retired when the
+VAR macro was deleted from core — script output now flows through the
+owning plugin's own UI, so there is no VAR footgun left to regress.)
 
 Topology is deliberately different from multi_source_surge/:
   - 2 sources (steady source_a, bursty source_b), 1 sink
   - 5 sweeps with different N/queue/overflow combos
   - source_b under slow_mode (heavy sleep_ms via xi::Param) for the
     watchdog test
+
+Throughput is measured generically: the backend emits a `run_finished`
+event per dispatched inspect, so we count those over each sweep window
+(via the generic client's events inbox) instead of decoding VARs.
 """
 from __future__ import annotations
 
 import json
-import statistics
 import sys
 import threading
 import time
-from collections import Counter, defaultdict
 from pathlib import Path
 from queue import Empty
 
@@ -76,21 +77,25 @@ def drain_q(q):
         pass
 
 
-def collect_vars(c: Client, duration_s: float) -> list[dict]:
-    events = []
+def count_run_finished(c: Client, duration_s: float) -> int:
+    """Count run-completion events over the sweep window.
+
+    Continuous mode (cmd:start) emits a `run_finished` lifecycle event
+    per dispatched inspect on the generic client's events inbox. Counting
+    them over the window gives inspects/sec without the removed VAR model.
+    Other lifecycle events (run_started / run_result) are ignored.
+    """
+    finished = 0
     deadline = time.time() + duration_s
     while time.time() < deadline:
         rem = deadline - time.time()
         try:
-            ev = c._inbox_vars.get(timeout=min(0.2, max(0.02, rem)))
+            ev = c._inbox_events.get(timeout=min(0.2, max(0.02, rem)))
         except Empty:
             continue
-        flat = {}
-        for it in ev.get("items") or []:
-            flat[it["name"]] = it.get("value")
-        flat["_run_id"] = ev.get("run_id")
-        events.append(flat)
-    return events
+        if ev.get("name") == "run_finished":
+            finished += 1
+    return finished
 
 
 def schedule_surges(c: Client, t0: float, plan):
@@ -132,14 +137,15 @@ def run_sweep(c: Client, label: str, n: int, q: int, overflow: str,
         print(f"  set slow_mode_ms={slow_ms}")
 
     time.sleep(0.3)
-    drain_q(c._inbox_vars)
-    drain_q(c._inbox_previews)
+    # Clear any lifecycle events from compile/open so the window count
+    # only reflects this sweep's run_finished events.
+    drain_q(c._inbox_events)
     log_pre_len = len(log_inbox)
 
     c.call("start", {"fps": DRIVER_FPS})
     t0 = time.time()
     schedule_surges(c, t0, surges)
-    events = collect_vars(c, SWEEP_DURATION_S)
+    finished = count_run_finished(c, SWEEP_DURATION_S)
     elapsed = time.time() - t0
     c.call("stop")
     time.sleep(0.2)
@@ -150,32 +156,26 @@ def run_sweep(c: Client, label: str, n: int, q: int, overflow: str,
     # Catch any log lines that landed during start/run.
     new_logs = log_inbox[log_pre_len:]
 
-    active = [e for e in events if e.get("active") is True and "seq" in e]
-    by_src = Counter(e.get("src") or "?" for e in active)
-    lats = [float(e["latency_us"]) for e in active
-            if isinstance(e.get("latency_us"), (int, float))]
-
-    drops = (stats_after.get("dropped_oldest", 0) or 0) + \
-            (stats_after.get("dropped_newest", 0) or 0)
+    # Real dispatch_stats fields (see backend service_main.cpp dispatch_stats):
+    #   dropped                     — single per-run overflow counter (>=0)
+    #   queue_depth_high_watermark  — peak depth this run, in [0, cap]
+    drops = stats_after.get("dropped", 0) or 0
     qmax = stats_after.get("queue_depth_high_watermark", 0) or 0
-
-    # Reset semantics check: every counter field MUST be a non-negative
-    # integer; the high-watermark MUST be in [0, queue_depth_cap]. If
-    # any sweep returns a negative or > cap value we have a reset bug.
     cap = stats_after.get("queue_depth_cap", q) or q
+
+    # Reset semantics check: the overflow counter MUST be a non-negative
+    # integer and the high-watermark MUST be in [0, queue_depth_cap]. A
+    # negative or > cap value after a fresh start means the cmd:start
+    # reset misbehaved.
     sane = (
-        isinstance(stats_after.get("dropped_oldest"), int) and stats_after["dropped_oldest"] >= 0 and
-        isinstance(stats_after.get("dropped_newest"), int) and stats_after["dropped_newest"] >= 0 and
+        isinstance(stats_after.get("dropped"), int) and stats_after["dropped"] >= 0 and
         isinstance(qmax, int) and 0 <= qmax <= cap
     )
 
-    print(f"  active inspects: {len(active)} ({len(active)/elapsed:.1f}/s)  by_src: {dict(by_src)}")
+    thr = finished / elapsed if elapsed else 0.0
+    print(f"  run_finished events: {finished} ({thr:.1f}/s)")
     print(f"  dispatch_stats AFTER: {stats_after}")
     print(f"  per-run drops={drops}  qmax={qmax}/{cap}  sane_counters={sane}")
-    if lats:
-        p95 = sorted(lats)[max(0, int(len(lats)*0.95)-1)]
-        print(f"  latency_us mean/median/p95: {statistics.mean(lats):.0f} / "
-              f"{statistics.median(lats):.0f} / {p95:.0f}")
     if new_logs:
         warn_lines = [m for m in new_logs if m.get("level") == "warn"]
         print(f"  log lines during sweep: {len(new_logs)} total, {len(warn_lines)} warn")
@@ -184,13 +184,10 @@ def run_sweep(c: Client, label: str, n: int, q: int, overflow: str,
 
     return {
         "label": label, "n": n, "q": q, "overflow": overflow, "slow_ms": slow_ms,
-        "active": len(active), "throughput": len(active) / elapsed if elapsed else 0.0,
-        "by_src": dict(by_src),
+        "finished": finished, "throughput": thr,
         "drops": drops, "qmax": qmax, "qcap": cap,
         "sane_counters": sane,
         "stats_after": stats_after,
-        "lat_mean": statistics.mean(lats) if lats else None,
-        "lat_p95": (sorted(lats)[max(0, int(len(lats)*0.95)-1)] if lats else None),
         "new_log_warns": [m for m in new_logs if m.get("level") == "warn"],
     }
 
@@ -259,7 +256,7 @@ def test_watchdog_warn(c: Client, log_inbox: list) -> dict:
 
 def main() -> int:
     print("multi_source_surge2 - FL r6 regression sub-round")
-    print("Verifying PR #22 fixes via a different driver path.\n")
+    print("Verifying the two surviving PR #22 dispatch fixes via a different driver path.\n")
 
     # Capture every log message globally; the watchdog warn must
     # actually arrive at the SDK, not just stderr.
@@ -281,20 +278,17 @@ def main() -> int:
 
         # ---- summary ----
         print("\n\n=========== SWEEP COMPARISON ===========")
-        hdr = ("Sweep", "N", "q", "overflow", "active",
+        hdr = ("Sweep", "N", "q", "overflow", "finished",
                "thr/s", "drops", "qmax/qcap", "sane")
         print("  ".join(f"{h:>16}" for h in hdr))
         for r in sweep_results:
             print("  ".join(f"{x:>16}" for x in (
-                r["label"], r["n"], r["q"], r["overflow"], r["active"],
+                r["label"], r["n"], r["q"], r["overflow"], r["finished"],
                 f"{r['throughput']:.1f}", r["drops"],
                 f"{r['qmax']}/{r['qcap']}", r["sane_counters"],
             )))
 
         all_sane = all(r["sane_counters"] for r in sweep_results)
-        # Exactly one sweep (S5 drop_newest under sustained surge) is
-        # expected to log dropped_newest; others should be 0 there.
-        # We don't assert exact numbers - just consistency.
 
         # Verify per-sweep counter resets actually reset:
         # any sweep with no surge should have qmax LOW relative to
@@ -317,10 +311,10 @@ def main() -> int:
             print(f"  warn text: {wd_result['warn_text']}")
         print(f"  no warn when watchdog=0: {wd_result.get('negative_clean')}")
 
-        # Pass = both remaining fixes hold AND no sweep returned insane counters.
-        # (Fix-3 VAR(name,name) shadow diagnostic was retired with the v9 removal
-        # of the VAR macro from core — script output now goes via the `expose`
-        # plugin, so there is no VAR footgun left to regression-test.)
+        # Pass = both surviving fixes hold AND no sweep returned insane counters.
+        # (The former Fix-3 VAR(name,name) shadow diagnostic was retired with the
+        # removal of the VAR macro from core — script output now goes via the
+        # owning plugin's own UI, so there is no VAR footgun left to regression-test.)
         pass_all = (
             all_sane
             and reset_ok
