@@ -5,6 +5,10 @@
     {
       "name": "cam",
       "plugin": "local_image_source"
+    },
+    {
+      "name": "expose",
+      "plugin": "expose"
     }
   ],
   "plugins": {

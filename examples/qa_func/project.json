@@ -2,7 +2,9 @@
   "name": "qa_func",
   "script": "inspect.cpp",
   "params": [],
-  "instances": [],
+  "instances": [
+    { "name": "expose", "plugin": "expose" }
+  ],
   "plugins": {
     "raw_thread_crash": {
       "path": "raw_thread_crash",

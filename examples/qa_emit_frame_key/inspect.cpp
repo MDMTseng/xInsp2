@@ -1,20 +1,20 @@
 // qa_emit_frame_key — BUG #19 regression e2e.
 //
 // The "cam" source (local_image_source) emits a SINGLE image as
-// Record().image("frame", img). This script reads it two ways and reports the
-// width each read yields via xi::result() (VAR/EMIT are no-ops in this core, so
-// the run_result event is the wire channel):
-//   fw : t.image("frame")           — the documented contract (must be non-zero
-//                                      from a LIVE source AND via cmd:run inject)
-//   nw : t.image(<instance name>)   — legacy instance-name read; the reader-side
-//                                      sole-image fallback must still resolve it
-// Verdict: ok(1,"fw=W nw=W") when BOTH reads got the frame; ng(2,...) otherwise.
+// Record().image("frame", img). This script reads it two ways and surfaces the
+// result through the `expose` plugin on channel "qa" (VAR/EMIT are no-ops in
+// this core; expose is the official data-out surface). Per frame it pushes:
+//   values:  fw = width of t.image("frame")            — the documented contract
+//                 (must be non-zero from a LIVE source AND via cmd:run inject)
+//            nw = width of t.image(<instance name>)     — legacy instance-name
+//                 read; the reader-side sole-image fallback must still resolve it
+//   image:   the frame read via image("frame"), RE-EMITTED keyed "frame" — the
+//            consumer asserts it arrives keyed "frame" (not the instance name).
 // Before the fix a live source stored the lone frame under the INSTANCE NAME, so
-// fw was 0 from the live path (yet non-zero via cmd:run) — the silent contradiction.
+// fw was 0 from the live path (yet non-zero via cmd:run) — the silent
+// contradiction; AND nothing keyed "frame" would reach the consumer.
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
-#include <xi/xi_result.hpp>
-#include <cstdio>
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int /*frame*/) {
@@ -26,8 +26,9 @@ void xi_inspect_entry(int /*frame*/) {
     int fw = byframe.empty() ? 0 : (int)byframe.width;
     int nw = byname.empty()  ? 0 : (int)byname.width;
 
-    char msg[64];
-    std::snprintf(msg, sizeof(msg), "fw=%d nw=%d", fw, nw);
-    if (fw > 0 && nw > 0) xi::ok(1, msg);
-    else                  xi::ng(2, msg);
+    xi::Record rec;
+    rec.set("fw", fw).set("nw", nw);
+    if (!byframe.empty()) rec.image("frame", byframe);   // re-emit keyed "frame"
+    rec.set("$channel", "qa");
+    xi::use("expose").process(rec);
 }
