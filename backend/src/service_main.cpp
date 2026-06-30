@@ -679,6 +679,21 @@ static void* trigger_meta_cb() {
     return (void*)g_current_trigger->meta_doc;
 }
 
+// ---- Image-pool owner get/set thunks (C1) ----------------------------------
+// Bridge the backend's ImagePool owner thread_local across the ABI seam so SDK
+// code (xi::async / xi::parallel_for) can carry the owner onto worker threads.
+// owner_set is a plain assignment, NOT an OwnerGuard — the SDK side wraps it in
+// its own RAII (OwnerScope: capture prev via owner_get, restore on exit), so a
+// raw setter is exactly the primitive it needs. Both run ON the calling thread,
+// so they read/write THAT thread's owner slot — which is the whole point: a
+// worker thread installs the parent's owner before it creates pool images.
+static uint32_t owner_get_cb() {
+    return (uint32_t)xi::ImagePool::current_owner();
+}
+static void owner_set_cb(uint32_t id) {
+    xi::ImagePool::current_owner_ref() = (xi::ImagePoolOwnerId)id;
+}
+
 
 // ---- Status registry -------------------------------------------------------
 // Sticky last-value status per component: instance name, or "@script" for the
@@ -2357,6 +2372,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // and xi::status() is a no-op.
             if (g_script.set_status_callback) {
                 g_script.set_status_callback((void*)status_cb);
+            }
+            // C1: image-pool owner get/set thunks. Lets xi::async / xi::parallel_for
+            // carry the inspect-thread owner onto worker threads so their pool
+            // images stay attributed (instead of anonymous owner=0). Optional
+            // symbol — older scripts don't export it and propagation is a no-op.
+            if (g_script.set_owner_callbacks) {
+                g_script.set_owner_callbacks((void*)owner_get_cb, (void*)owner_set_cb);
             }
             // Result callback. Scripts without xi_result.hpp leave this null
             // and xi::result() is a no-op (run_result then defaults to NA).
