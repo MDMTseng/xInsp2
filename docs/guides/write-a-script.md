@@ -76,15 +76,16 @@ That's a full script. Three constructs do the heavy lifting:
 |---|---|---|
 | `xi::use("name")` → `xi::UseProxy&` | Proxy to a backend-managed instance (camera, model, etc.) | Instance lives across hot-reloads, persisted by host |
 | `xi::Param<T>` | Tunable scalar with UI slider | Per script DLL, restored from `project.json` on reload |
-| `xi::preview::Sink` + `PVAR` | Surface per-run values/images to a UI (replaces VAR) — see [below](#surfacing-output--the-preview-plugin) | Per `inspect_entry` invocation |
+| `xi::use("expose").process(rec)` | Surface per-run values/images to a UI (replaces VAR) — see [below](#surfacing-output--the-expose-plugin) | Per `inspect_entry` invocation |
 | `VAR(name, expr)` | **Legacy no-op.** Expands to `auto name = expr;` and publishes nothing — see [below](#varname-expr--legacy-no-op) | Per `inspect_entry` invocation |
 
-> **VAR is legacy — surface output through the `preview` plugin.** The core's VAR
+> **VAR is legacy — surface output through the `expose` plugin.** The core's VAR
 > value-tracking, the `vars` wire message, and the old JPEG image-preview path were
 > **removed**. `VAR(...)` / `EMIT(...)` still **compile** (so existing scripts build
-> unchanged) but publish nothing. To show per-run values/images in a UI, push a
-> `xi::Record` to the **`preview` plugin** with `PVAR(...)` — the shipped path,
-> documented [below](#surfacing-output--the-preview-plugin). The run's pass/fail
+> unchanged) but publish nothing. To show per-run values/images in a UI, build a
+> plain `xi::Record` and push it to the **`expose` plugin** with
+> `xi::use("expose").process(rec)` — the shipped data-out surface, documented
+> [below](#surfacing-output--the-expose-plugin). The run's pass/fail
 > verdict still leaves via `xi::result(...)` (also below).
 
 Plus:
@@ -172,48 +173,48 @@ or expose it through a plugin's `set_def`.
 
 ---
 
-## Surfacing output — the `preview` plugin
+## Surfacing output — the `expose` plugin
 
 VAR used to ship per-run values/images to a viewer panel; that path was removed
-from core (see the legacy note below). The shipped replacement is the **`preview`
-plugin**: push a `xi::Record` to it and a UI tabs between named **preview groups**
-(`pg_id`) — per stage / per thread / per camera. Include its SDK header
-`<xi/xi_preview.hpp>`:
+from core (see the legacy note below). The shipped replacement is the **`expose`
+plugin** — the official script data-out surface: build a plain `xi::Record`, tag it
+with a **channel id**, and push it. A UI tabs between channels — per stage / per
+thread / per camera. There is **no special header and no macro** — `expose` is
+called like any other plugin via the generic `xi::use("expose").process(rec)`:
 
 ```cpp
-#include <xi/xi_preview.hpp>
-
 void xi_inspect_entry(int frame) {
     // ... compute img, score, gain ...
 
     xi::Record r;
-    PVAR(r, "frame", frame);     // a value
-    PVAR(r, "score", score);     // a value
-    PVAR(r, "edges", img);       // an image (auto-tagged)
+    r.set("frame", frame);          // a value
+    r.set("score", score);          // a value
+    r.image("edges", img);          // an image, tagged by key
+    r.set("$channel", "bright");    // channel id (string) — reserved key
 
-    xi::preview::Sink pv;
-    pv.process("bright", r);     // surface to preview-group "bright"
+    xi::use("expose").process(r);   // generic plugin call
 }
 ```
 
-- **`PVAR(rec, key, data)`** appends a value or image to the record *in call
-  order*, stamping the source line. The UI walks the record's `$layout` array to
-  render fields top-to-bottom in the order you wrote them (values inline, images
-  fetched by key) — this is why it's a macro (it captures `__LINE__`).
-- **`xi::preview::Sink::process(pg_id, rec)`** sends the record to the `preview`
-  instance under that group id. (`xi::preview::send(pg_id, rec)` is the free-function
-  form.) Multiple groups per run is fine — call `process()` once per group.
-- PVAR'ing the **same image buffer** under two keys is cheap: the host compresses
-  it once (dedup).
+- **The record *is* the payload.** Build it with the ordinary `xi::Record` API
+  (`set(...)` for values, `image(...)` for images). **Display order = the record's
+  own key order** — the host preserves insertion order, so fields render
+  top-to-bottom in the order you wrote them. No `__LINE__` / `$layout` machinery.
+- **`"$channel"`** (reserved key, a string) selects the output channel; it is
+  **created implicitly** on first send — no pre-declaration. The host also stamps
+  `"$seq"` (= the run id) for ordering. The plugin strips both from the published
+  record. Multiple channels per run is fine — set a different `"$channel"` and call
+  `process()` again.
+- Attaching the **same image buffer** under two keys is cheap: the host
+  JPEG-compresses it once (dedup).
 
-> **`preview` is an ordered output sink.** Its `plugin.json` declares
+> **`expose` is an ordered output sink.** Its `plugin.json` declares
 > `"sink": true`, so under parallel dispatch (`parallelism.dispatch_threads > 1`)
-> the host **stages** each `use("preview").process(...)` and flushes it in
+> the host **stages** each `use("expose").process(...)` and flushes it in
 > **frame-arrival order** (stamping `$seq` = the wire `run_id`) instead of
-> worker-completion order. So live previews never tear or reorder across workers,
+> worker-completion order. So live output never tears or reorders across workers,
 > with no extra work in your script. Any plugin you want frame-ordered the same way
 > just sets `"sink": true` — see [`../reference/c-abi.md`](../reference/c-abi.md).
-> Worked script: [`examples/preview_sink_demo`](../../examples/preview_sink_demo).
 
 ### `VAR(name, expr)` — legacy no-op
 
@@ -223,7 +224,7 @@ declaration) and `EMIT(name)` is a bare reference. Because `VAR` *declares*, you
 **cannot** `VAR(count, count)` over an existing value or `VAR(count, …)` twice in
 one scope (cl.exe fires C2374; the backend appends a *"duplicate VAR(count) … use
 EMIT"* hint). None of this surfaces anything to a UI anymore — for that, use the
-`preview` plugin above. New scripts have no reason to use `VAR`/`EMIT` at all.
+`expose` plugin above. New scripts have no reason to use `VAR`/`EMIT` at all.
 
 ## `xi::result(code, msg)` — the one per-run verdict
 
@@ -282,8 +283,8 @@ If the run was started with no `frame_path` arg, `current_frame_path()`
 returns an empty string. Scripts that always need a path should error
 out explicitly when they see one.
 
-(To view a decoded image back in a UI, push it to the `preview` plugin with
-`PVAR(rec, "name", img)` — see [Surfacing output](#surfacing-output--the-preview-plugin).)
+(To view a decoded image back in a UI, push it to the `expose` plugin with
+`r.image("name", img)` — see [Surfacing output](#surfacing-output--the-expose-plugin).)
 
 ---
 
@@ -499,8 +500,8 @@ if (!t.is_active()) return;
 int64_t now = xi::now_us();
 double queue_wait_us = (double)(t.dequeued_at_us() - t.timestamp_us());  // grows during surge
 double inspect_us    = (double)(now              - t.dequeued_at_us());  // your code's actual cost
-// surface these however you like — a log line, a custom comm/preview plugin —
-// since VAR no longer ships values to a viewer.
+// surface these however you like — a log line, the `expose` plugin, a custom
+// comm plugin — since VAR no longer ships values to a viewer.
 ```
 
 Both clocks are `std::chrono::system_clock` microseconds, so subtraction

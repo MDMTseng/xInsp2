@@ -78,8 +78,9 @@ Several are platform requests from RFC
   `xi::result` API ships; the full status-band + HMI/PLC wiring is the sketch).
 - [`expose-plugin-and-output-transport.md`](./expose-plugin-and-output-transport.md) —
   the VAR replacement: rename `preview`→`expose` plugin (the official script
-  data-out surface), unify transport to subscribe-by-group-id → push values+images
-  (pull also), fix the F-6 binary-frame decoder drift. Core owns no data-out / no
+  data-out surface), unify transport to subscribe-by-channel-id → push one atomic
+  `XEX1` frame (values+images, pull also), fix the F-6 binary-frame decoder drift.
+  Core owns no data-out / no
   last-word (comm's sidecar handles line-safe). Answers the v9 vars-removal friction.
 - [`webui-and-ui-export.md`](./webui-and-ui-export.md) — a Web Component library
   (auto-webui from a control-descriptor schema + custom escape hatch) and

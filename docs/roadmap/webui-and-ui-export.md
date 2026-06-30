@@ -80,8 +80,9 @@ One small library, many consumers (dev webui, export A, export B, production HMI
 
 - **`xi-image-viewer`** — image display with zoom / pan / cursor-anchored zoom /
   pixel probe. (It was fed by the WS binary preview frames, which have since been
-  removed from core — branch `refactor/remove-var-core`; image previews are moving
-  to a preview plugin that this viewer would consume instead.) The pan/zoom math
+  removed from core — branch `refactor/remove-var-core`; script images now come
+  from the shipped `expose` plugin's `XEX1` frames, which this viewer consumes
+  instead.) The pan/zoom math
   already exists (`imageViewerPanel.ts` + its selftest) — this generalises it.
 - **Bindable controls** — `xi-slider` / `xi-number` / `xi-toggle` / `xi-radio` /
   `xi-dropdown`, each `key`-bound: a change patches that key via `set_instance_def`
