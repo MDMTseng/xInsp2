@@ -44,14 +44,15 @@ set_target_properties(mock_camera PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera
 )
 
-# preview — view a script's output (post-VAR): keeps the latest record per
-# preview-group, JPEG-encodes images via the host cache + pushes them live
-# (XPV1 binary frames). Script API: <xi/xi_preview.hpp>. See examples/preview_sink_demo.
-add_library(preview SHARED preview/src/preview.cpp)
-target_include_directories(preview PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
-set_target_properties(preview PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/preview
-    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/preview
+# expose — the official script data-out surface (post-VAR): keeps the latest
+# record per channel, JPEG-encodes images via the host cache + pushes the whole
+# record as one atomic XEX1 binary frame for SUBSCRIBED channels. Script API:
+# <xi/xi_expose.hpp>. See examples/preview_sink_demo.
+add_library(expose SHARED expose/src/expose.cpp)
+target_include_directories(expose PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+set_target_properties(expose PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/expose
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/expose
 )
 
 # cache — buffers records in a ring and re-emits a buffered one on exchange

@@ -2,6 +2,6 @@
   "name": "preview_sink_demo",
   "script": "inspect.cpp",
   "instances": [
-    { "name": "preview", "plugin": "preview" }
+    { "name": "expose", "plugin": "expose" }
   ]
 }

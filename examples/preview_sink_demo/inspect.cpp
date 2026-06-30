@@ -1,12 +1,14 @@
 // preview_sink_demo — surfacing script output AFTER VAR was removed from core,
-// into MULTIPLE preview groups (pg_id) a UI can tab between.
+// into MULTIPLE expose CHANNELS a UI can tab between.
 //
 // VAR(name, value) still compiles but no longer publishes anything. To view what
-// the script computed, push a Record to the preview_sink plugin under a pg_id.
+// the script computed, push a Record to the `expose` plugin under a channel id —
+// the generic xi::use("expose").process(rec); no special header. The channel
+// rides in the record under the reserved key "$channel"; the record's own key
+// order IS the display order (no PVAR / layout macro).
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
 #include <xi/xi_result.hpp>   // xi::ok / xi::ng (not in the xi.hpp umbrella)
-#include <xi/xi_preview.hpp>   // the `preview` plugin's script API (SDK)
 
 #include <cstdlib>            // std::abs
 
@@ -31,23 +33,20 @@ void xi_inspect_entry(int frame) {
         inv.data()[y * W + x] = (uint8_t)(255 - px);
     }
 
-    // The new output path: surface to TWO preview groups; the UI tabs between them.
-    // PVAR() appends each field in order (and tags images), so the UI renders the
-    // group top-to-bottom: values, then the image.
-    xi::preview::Sink pv;
-
+    // The new output path: surface to TWO channels; the UI tabs between them.
+    // Record fields append in order (images tagged by key), so the UI renders the
+    // channel top-to-bottom: values, then the image. "$channel" selects the channel.
     xi::Record bright;
-    PVAR(bright, "frame", frame);
-    PVAR(bright, "score", score);
-    PVAR(bright, "gain",  g);
-    PVAR(bright, "gradient", img);
-    PVAR(bright, "thumb",    img);   // SAME buffer → host compresses it once (dedup)
-    pv.process("bright", bright);
+    bright.set("frame", frame).set("score", score).set("gain", g)
+          .image("gradient", img)
+          .image("thumb", img);            // SAME buffer → host compresses it once (dedup)
+    bright.set("$channel", "bright");
+    xi::use("expose").process(bright);
 
     xi::Record dark;
-    PVAR(dark, "frame", frame);
-    PVAR(dark, "inverted", inv);     // a distinct image
-    pv.process("dark", dark);
+    dark.set("frame", frame).image("inverted", inv);   // a distinct image
+    dark.set("$channel", "dark");
+    xi::use("expose").process(dark);
 
     // The run's verdict still leaves on its own channel (unaffected by VAR removal).
     if (score >= 0) xi::ok(1, "ok"); else xi::ng(1, "neg");

@@ -1,0 +1,20 @@
+{
+  "name": "expose",
+  "description": "The official script data-out surface (the VAR replacement). A script surfaces records via xi::expose::send(channel, rec) (see <xi/xi_expose.hpp>). Keeps the latest record per channel; for SUBSCRIBED channels JPEG-encodes images through the host cache and PUSHES the whole record as one atomic XEX1 binary frame (host emit_binary). Subscription is tracked here (exchange subscribe/unsubscribe) since the core broadcasts; clients filter by channel. Pull views: list_channels / get.",
+  "dll": "xi-expose.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "sink": true,
+  "_sink_doc": "ordered output sink: the host stages use(\"expose\").process() and flushes it in frame order, so live output stays in frame order under parallel dispatch (dispatch_threads>1) instead of completion order.",
+  "manifest": {
+    "params": [],
+    "inputs":  [{"name": "any", "kind": "record", "doc": "values + images to expose, tagged by channel ($channel)"}],
+    "outputs": [],
+    "exchange": [
+      {"command": "subscribe",     "doc": "args {channels:[...]} -> { ok, subscribed:[...] } — gate which channels get encoded + pushed"},
+      {"command": "unsubscribe",   "doc": "args {channels:[...]} -> { ok, subscribed:[...] }"},
+      {"command": "list_channels", "doc": "{ count, channels: { name: {seen, image_count, subscribed} } } — UI tabs"},
+      {"command": "get",           "doc": "args {channel} -> { found, channel, seq, frame_b64 } (the same XEX1 frame, base64'd, built on demand)"}
+    ]
+  }
+}
