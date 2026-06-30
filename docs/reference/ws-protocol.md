@@ -751,7 +751,12 @@ library / DLL" and [`examples/script_external_dll`](../../examples/script_extern
 **Working-copy mode.** `open_project` accepts `"working_copy": true`: the
 backend then operates on a `<project>/.xinsp_work` scratch copy (resume if
 present, else seed from the canonical project), so edits are transactional and
-crash-durable. The reply data then carries `"working_copy": true`,
+crash-durable. If seeding the scratch fails (disk full, a locked/denied file),
+the open is **aborted** (`open_project` returns an error) and the partial scratch
+is removed — a torn seed must never become an authoritative, committable working
+copy, or the eventual commit's mirror would prune the canonical files that merely
+failed to copy in (silent data loss). Removing the partial scratch also keeps a
+later crash-resume from adopting it. The reply data then carries `"working_copy": true`,
 `"canonical_path"`, and `"working_dir"`. Two paired commands:
 - `commit_working_copy` `args: {}` → mirror the scratch back onto the canonical
   project (add + overwrite + delete-removed). Reply `{ "committed": true, "canonical": "<dir>" }`.

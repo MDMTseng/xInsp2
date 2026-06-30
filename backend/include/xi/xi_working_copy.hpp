@@ -93,6 +93,30 @@ inline bool copy_tree_excluding(const std::filesystem::path& src,
     return ok;
 }
 
+// Seed a FRESH working-copy scratch at `scratch` from the canonical project
+// `canon`. Returns true only if the scratch is a COMPLETE copy that is safe to
+// present to the user as authoritative.
+//
+// THE INVARIANT THIS GUARDS: a torn seed must never become a committable scratch.
+// copy_tree_excluding can leave a half-populated tree on a disk error (full disk,
+// locked / permission-denied file) that still happens to carry project.json. If
+// the caller accepted that as authoritative, the user would edit it and the
+// eventual commit's mirror_tree would PRUNE the canonical files that merely failed
+// to copy in — silent data loss. So on a failed copy we tear the partial scratch
+// back DOWN (remove_all) and return false, ensuring nothing — not the immediate
+// open, not a later crash-resume / resume-existing path — can adopt it as a
+// working copy. Mirrors how commit_working_copy honours mirror_tree's bool.
+inline bool seed_working_copy(const std::filesystem::path& canon,
+                              const std::filesystem::path& scratch) {
+    std::error_code ec;
+    std::filesystem::remove_all(scratch, ec);   // clear any partial seed first
+    if (!copy_tree_excluding(canon, scratch)) {
+        std::filesystem::remove_all(scratch, ec);   // never leave a torn, committable scratch
+        return false;
+    }
+    return true;
+}
+
 // Mirror `src` (working copy) onto `dst` (canonical): copy/overwrite every
 // file, then delete files/dirs in `dst` that aren't in `src` — so removals
 // (e.g. a deleted instance) propagate. Excluded paths are left untouched on

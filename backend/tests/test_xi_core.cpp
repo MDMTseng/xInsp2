@@ -290,6 +290,74 @@ static void test_wc_exclusion() {
     CHECK(!is_excluded(fs::path("inspect.cpp")));
 }
 
+// ---- working-copy seed: a torn copy must NOT become a committable scratch ----
+// BUG: open_project(working_copy=true) used to DISCARD copy_tree_excluding's
+// bool; a copy that failed deep (disk full / locked file) but happened to land
+// project.json passed the exists() guard and became authoritative. The user
+// edits it, commit's mirror_tree then PRUNES the canonical files that merely
+// failed to copy — silent data loss. The fix: seed_working_copy() honours the
+// copy result, tears the partial scratch DOWN, and returns false so open aborts.
+static void test_wc_seed_fail() {
+    SECTION("xi::wc seed honours copy failure; torn scratch never authoritative");
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    // Unique temp root so the test is hermetic + re-runnable.
+    fs::path base = fs::temp_directory_path() /
+                    ("xi_wc_seed_" + std::to_string((unsigned long long)
+                        std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::remove_all(base, ec);
+
+    // --- (A) copy_tree_excluding reports false on a TORN copy, and the torn tree
+    //     can still carry project.json — exactly the dangerous state the old guard
+    //     accepted. Portable fault: pre-stage dst/data as a regular FILE so copying
+    //     the source's data/ directory onto it fails, while project.json copies. ---
+    {
+        fs::path canon = base / "canon";
+        fs::create_directories(canon / "data", ec);
+        { std::ofstream(canon / "project.json") << "{\"name\":\"p\"}"; }
+        { std::ofstream(canon / "data" / "big.bin") << "payload"; }
+        fs::path dst = base / "dst_torn";
+        fs::create_directories(dst, ec);
+        { std::ofstream(dst / "data") << "I am a file blocking the dir"; }  // collision
+        bool ok = xi::wc::copy_tree_excluding(canon, dst);
+        CHECK(ok == false);                               // copy was torn → reported
+        CHECK(fs::exists(dst / "project.json"));          // ...yet project.json landed
+        // ^ the precise torn-but-passes-exists() state the seed wrapper must reject.
+    }
+
+    // --- (B) seed_working_copy: FAILED seed → false AND no committable scratch
+    //     left behind. Portable fault: target the scratch under a path component
+    //     that is a regular FILE, so the scratch can never be created. ---
+    {
+        fs::path canon = base / "canon2";
+        fs::create_directories(canon, ec);
+        { std::ofstream(canon / "project.json") << "{\"name\":\"p\"}"; }
+        fs::path blocker = base / "blocker";            // a FILE, not a dir
+        { std::ofstream(blocker) << "x"; }
+        fs::path scratch = blocker / ".xinsp_work";     // uncreatable (parent is a file)
+        bool ok = xi::wc::seed_working_copy(canon, scratch);
+        CHECK(ok == false);                              // seed aborted
+        CHECK(!fs::exists(scratch / "project.json"));    // nothing committable left
+    }
+
+    // --- (C) successful seed → true, scratch fully populated (no regression). ---
+    {
+        fs::path canon = base / "canon3";
+        fs::create_directories(canon / "instances" / "cam0", ec);
+        { std::ofstream(canon / "project.json") << "{\"name\":\"p\"}"; }
+        { std::ofstream(canon / "inspect.cpp") << "// script"; }
+        { std::ofstream(canon / "instances" / "cam0" / "def.json") << "{}"; }
+        fs::path scratch = canon / ".xinsp_work";
+        bool ok = xi::wc::seed_working_copy(canon, scratch);
+        CHECK(ok == true);
+        CHECK(fs::exists(scratch / "project.json"));
+        CHECK(fs::exists(scratch / "inspect.cpp"));
+        CHECK(fs::exists(scratch / "instances" / "cam0" / "def.json"));
+    }
+
+    fs::remove_all(base, ec);
+}
+
 // ---- EmitTurn: ordered emit + early-return backstop (the lane-deadlock guard) ----
 static void test_emit_gate() {
     SECTION("EmitTurn orders emits + dtor backstops an early return");
@@ -362,6 +430,7 @@ static void test_emit_gate() {
 int main() {
     test_inflight_runs();
     test_wc_exclusion();
+    test_wc_seed_fail();
     test_emit_gate();
     test_async_basic();
     test_async_parallel();

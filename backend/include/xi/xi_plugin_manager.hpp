@@ -1262,9 +1262,22 @@ public:
             if (!std::filesystem::exists(canon / "project.json")) return false;
             std::filesystem::path scratch = canon / kWorkingCopyDir;
             if (!std::filesystem::exists(scratch / "project.json")) {
-                std::error_code ec;
-                std::filesystem::remove_all(scratch, ec);   // clear any partial seed
-                xi::wc::copy_tree_excluding(canon, scratch);
+                // Honour the seed result the SAME way commit_working_copy honours
+                // mirror_tree's: a swallowed copy failure (disk full, locked/denied
+                // file) would leave a TORN scratch that still happens to carry
+                // project.json — the exists() guard below would then accept it as
+                // authoritative, the user edits it, and the eventual commit's
+                // mirror_tree PRUNES the canonical files that merely failed to copy
+                // in. That's silent data loss. seed_working_copy returns false on a
+                // failed copy AND has already removed the partial scratch (so no
+                // later crash-resume / resume-existing path can adopt it) — we then
+                // abort the working-copy open rather than present a torn scratch.
+                if (!xi::wc::seed_working_copy(canon, scratch)) {
+                    std::fprintf(stderr, "[xinsp2] working copy: seed of %s FAILED "
+                                 "(disk full / locked file?) — removed partial scratch, "
+                                 "aborting working-copy open\n", scratch.string().c_str());
+                    return false;
+                }
                 std::fprintf(stderr, "[xinsp2] working copy: seeded %s from project\n",
                              scratch.string().c_str());
             } else {
