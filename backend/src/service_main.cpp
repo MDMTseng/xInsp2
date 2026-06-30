@@ -3435,6 +3435,25 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xp::json_escape_into(out, dir);
         out += ",\"count\":" + std::to_string(n) + "}";
         send_rsp_ok(srv, id, out);
+    } else if (name == "unquarantine_plugin") {
+        // Part III G2.3 — operator un-quarantine. Clears the G1 .xi_certify.json
+        // verdict (crashed/quarantined) for a plugin so the next scan re-certifies
+        // it from scratch. Accepts {"name": "<plugin>"} (resolved to its folder via
+        // the last scan) or {"dir": "<folder>"}. Re-scans the default plugins dir
+        // afterwards so a now-clean plugin is re-armed without a restart.
+        auto pname = xp::get_string_field(parsed->args_json, "name");
+        auto pdir  = xp::get_string_field(parsed->args_json, "dir");
+        std::string key = pname ? *pname : (pdir ? *pdir : std::string());
+        if (key.empty()) { send_rsp_err(srv, id, "missing name or dir"); return; }
+        bool cleared = g_plugin_mgr.unquarantine_plugin(key);
+        if (!cleared) { send_rsp_err(srv, id, "no quarantine found for: " + key); return; }
+        int rearmed = 0;
+        if (!g_plugins_dir.empty() && std::filesystem::exists(g_plugins_dir))
+            rearmed = g_plugin_mgr.scan_plugins(g_plugins_dir);
+        std::string out = "{\"unquarantined\":";
+        xp::json_escape_into(out, key);
+        out += ",\"rearmed\":" + std::to_string(rearmed) + "}";
+        send_rsp_ok(srv, id, out);
     } else if (name == "load_plugin") {
         auto pname = xp::get_string_field(parsed->args_json, "name");
         if (!pname) { send_rsp_err(srv, id, "missing name"); return; }
