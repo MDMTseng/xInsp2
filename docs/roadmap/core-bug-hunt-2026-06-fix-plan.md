@@ -222,6 +222,24 @@ set — they share the close/open/recompile/reattach code and a partial fix invi
   trigger the owning Record's `cow_()` (deep-copy a frozen/registry-managed doc into a sole-owned
   one) and re-resolve the node into the copied doc, exactly as `Record::set()` does. Keep the
   rc==1 fast path (no copy) so non-frozen writes stay zero-cost (speed-first).
+- **CRITICAL nuance (researched this session — get this right):** the discriminator is the
+  Record's **frozen / registry-managed flag** (`box_->host_release` set, i.e. the doc crossed the
+  ABI), NOT the `shared_ptr<Record>` refcount. An in-process VIEW write is DELIBERATELY supposed
+  to mutate the shared tree (the doc comment at xi_types.hpp:120-123 + `.clone()` escape hatch say
+  so) — do NOT COW just because multiple Typed views share `root_`. Only COW when the underlying
+  doc is frozen/registry-managed. After a COW the doc pointer changes, so `node_` must be
+  re-resolved: for an OWNED Typed (`node_ == root_->json()`) just reset `node_ = root_->json()`
+  after cow; the hard case is a **VIEW into a frozen doc** (node_ is a sub-node) — re-resolving
+  the sub-node into the copied tree needs a path/locator. Note the common reachable case (the
+  PoC: `xi::Roi(current_trigger().meta())`) is an OWNED Typed via the XI_NOMINAL `Typed(Record)`
+  ctor, so the OWNED path covers it; decide explicitly what a VIEW-into-frozen write should do
+  (cow+re-resolve, or document it as requiring `.clone()` first, or assert). Expose a `cow_` hook
+  on Record usable from Typed (friend or a public `materialize_unfrozen()`), since Typed lives
+  outside Record.
+- **Field too:** `Field::set_` has the same defect and holds only `(doc_, node_, key_)` — it has
+  no back-pointer to the Record, so it can't COW on its own. Route Field writes through the owning
+  Typed (have `Typed::operator[]` hand Field enough context, or make Field defer to a Typed method)
+  rather than mutating `node_` directly.
 - **Files:** `xi_types.hpp` Typed::set_node_ (~146-150), Field::set_ (~63-67); reuse
   `xi_record.hpp` cow_ contract (~719-738).
 - **Verify:** e2e/unit — `auto r = xi::Roi(current_trigger().meta()); r["x"]=999;` must NOT mutate

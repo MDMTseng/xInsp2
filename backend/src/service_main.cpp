@@ -3289,6 +3289,22 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // handles + the old sink) before tearing it down + opening the new one.
         xi::TriggerBus::instance().clear_sink();
         xi::TriggerBus::instance().reset();
+        // Reset the script replay shadows on the PROJECT boundary, mirroring
+        // unload_script's clear. open_project does NOT unload the inspection
+        // script DLL (script lifecycle is independent of the project's plugin
+        // DLLs), so without this the next project's compile_and_load would
+        // (a) capture the PRIOR project's xi::state() into g_persistent_state_*
+        // from the still-live old g_script, then (b) replay the prior project's
+        // g_param_cache values over any same-named Param the new project
+        // declares (e.g. "thresh") — running project B's inspections with
+        // project A's tuned values / carried state and silently mis-verdicting.
+        // A fresh project starts from its own file-scope defaults.
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            g_param_cache.clear();
+            g_persistent_state_json = "{}";
+            g_persistent_state_schema = 0;
+        }
         if (g_plugin_mgr.open_project(*folder, working_copy)) {
             // F5: advisory single-writer stamp. If another LIVE backend already
             // owns this canonical, warn — two writers to one project clobber each
@@ -3368,6 +3384,17 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         xi::TriggerBus::instance().reset();
         g_plugin_mgr.close_project();
         clear_inst_state();   // instances are gone — drop host-tracked state
+        // Reset the script replay shadows on the PROJECT boundary, mirroring
+        // unload_script's clear. Closing a project doesn't unload the script
+        // DLL, but the operator-tuned param cache + persisted xi::state() belong
+        // to the project just closed — leaving them in place would leak A's
+        // values/state into whatever project is opened next (see open_project).
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            g_param_cache.clear();
+            g_persistent_state_json = "{}";
+            g_persistent_state_schema = 0;
+        }
         send_rsp_ok(srv, id, "{\"closed\":true}");
     } else if (name == "export_project_plugin") {
         // Package a project plugin as a deployable folder. Compiles Release;
