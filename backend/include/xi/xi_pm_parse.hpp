@@ -116,6 +116,43 @@ inline bool detail_find_key(const std::string& json, const std::string& key,
     return found;
 }
 
+// Parse an LV2-style capability-handshake array (`requires` / `optional`) from a
+// plugin.json: a top-level array of `{"iface":"xi.imaging","min":1}` objects.
+// `min` is optional and defaults to 1 (the lowest published interface version);
+// an entry with no/blank `iface` string is skipped. Missing key / wrong type /
+// parse-fail → empty (treat as "no declared capabilities", the common case).
+// Top-level only (same hardening as extract_string/json_flag_true) so an example
+// buried in a nested `manifest` block can't fabricate a requirement.
+inline std::vector<IfaceReq> parse_iface_reqs(const std::string& json,
+                                              const char* key) {
+    std::vector<IfaceReq> out;
+    yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
+    yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    if (root) {
+        yyjson_val* arr = yyjson_obj_get(root, key);
+        if (arr && yyjson_is_arr(arr)) {
+            size_t idx, max; yyjson_val* el;
+            yyjson_arr_foreach(arr, idx, max, el) {
+                if (!yyjson_is_obj(el)) continue;
+                yyjson_val* ifv = yyjson_obj_get(el, "iface");
+                if (!ifv || !yyjson_is_str(ifv) || !yyjson_get_str(ifv)) continue;
+                IfaceReq r;
+                r.iface = yyjson_get_str(ifv);
+                if (r.iface.empty()) continue;
+                yyjson_val* mn = yyjson_obj_get(el, "min");
+                if (mn && yyjson_is_int(mn) && yyjson_get_int(mn) > 0)
+                    r.min = (uint32_t)yyjson_get_int(mn);
+                else if (mn && yyjson_is_num(mn) && yyjson_get_num(mn) >= 1.0)
+                    r.min = (uint32_t)yyjson_get_num(mn);
+                // else: absent / non-positive / wrong-type → default min = 1.
+                out.push_back(std::move(r));
+            }
+        }
+    }
+    if (doc) yyjson_doc_free(doc);
+    return out;
+}
+
 inline PluginInfo parse_manifest(const std::string& path, const std::string& folder) {
     PluginInfo pi;
     std::ifstream f(path);
@@ -149,6 +186,10 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
     // gates use(<instance>).process() so the sink's side effect lands in frame order.
     pi.is_sink = json_flag_true(content, "sink") ||
                  (extract_string(content, "role").value_or("") == "sink");
+    // LV2-style capability handshake: required interfaces gate the load; optional
+    // ones are advisory (the plugin null-checks them at runtime). See parse_iface_reqs.
+    pi.required_ifaces = parse_iface_reqs(content, "requires");
+    pi.optional_ifaces = parse_iface_reqs(content, "optional");
     pi.folder_path = folder;
     if (pi.has_ui) {
         pi.ui_path = (std::filesystem::path(folder) / "ui").string();

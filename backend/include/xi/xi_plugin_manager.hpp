@@ -411,6 +411,10 @@ private:
         pi.json_fallback = json_flag_true(mc, "json_fallback");
         pi.is_sink       = json_flag_true(mc, "sink") ||
                            (extract_string(mc, "role").value_or("") == "sink");
+        // Refresh the LV2-style capability handshake too, so a rebuilt plugin that
+        // newly declares (or drops) a required interface is re-gated on reload.
+        pi.required_ifaces = parse_iface_reqs(mc, "requires");
+        pi.optional_ifaces = parse_iface_reqs(mc, "optional");
     }
     // Convenience: read <folder>/plugin.json and apply. No-op if absent (keeps the
     // pi's current flags). `folder` = the plugin's SOURCE folder (where plugin.json
@@ -560,6 +564,15 @@ private:
 
         std::string aerr;
         if (!plugin_abi_compatible(pi.handle, plugin_name, pi.json_fallback, &aerr)) {
+            FreeLibrary(pi.handle);
+            pi.handle = nullptr;
+            if (err) *err = aerr + " — instances for this plugin are gone; "
+                                   "reopen the project to recover";
+            return false;
+        }
+        // LV2-style capability handshake on the rebuilt DLL (the manifest was
+        // re-read above, so a newly-declared required interface re-gates here too).
+        if (!plugin_caps_compatible(pi, &default_host_api(), plugin_name, &aerr)) {
             FreeLibrary(pi.handle);
             pi.handle = nullptr;
             if (err) *err = aerr + " — instances for this plugin are gone; "
@@ -827,6 +840,14 @@ private:
                         pi.handle = nullptr;
                         continue;
                     }
+                    // LV2-style capability handshake — same refuse-with-reason path.
+                    if (!plugin_caps_compatible(pi, &default_host_api(), pname, &err)) {
+                        last_open_warnings_.push_back({pname, pname, err});
+                        std::fprintf(stderr, "[xinsp2] %s\n", err.c_str());
+                        FreeLibrary(pi.handle);
+                        pi.handle = nullptr;
+                        continue;
+                    }
                 }
                 pi.c_factory = reinterpret_cast<PluginInfo::CFactoryFn>(
                     GetProcAddress(pi.handle, pi.factory_symbol.c_str()));
@@ -1027,6 +1048,15 @@ public:
         {
             std::string err;
             if (!plugin_abi_compatible(pi.handle, plugin_name, pi.json_fallback, &err)) {
+                r.error = err + " — instances for this plugin are gone; "
+                                "reopen the project to recover";
+                FreeLibrary(pi.handle);
+                pi.handle = nullptr;
+                return r;
+            }
+            // LV2-style capability handshake on the freshly-built DLL (manifest
+            // re-read just above) — refuse with reason on an unsatisfied require.
+            if (!plugin_caps_compatible(pi, &default_host_api(), plugin_name, &err)) {
                 r.error = err + " — instances for this plugin are gone; "
                                 "reopen the project to recover";
                 FreeLibrary(pi.handle);
@@ -1260,6 +1290,18 @@ public:
         {
             std::string aerr;
             if (!plugin_abi_compatible(pi.handle, name, pi.json_fallback, &aerr)) {
+                std::fprintf(stderr, "[xinsp2] %s\n", aerr.c_str());
+                FreeLibrary(pi.handle);
+                pi.handle = nullptr;
+                return fail(aerr);
+            }
+            // LV2-style required/optional capability handshake (core_fix_plan.md
+            // §12 Phase 3). Validate the manifest's `requires[]` against the same
+            // host table the factory will receive (default_host_api's get_interface
+            // door); a missing/too-old required interface refuses via the same
+            // refuse-with-reason channel as the ABI gate above. Optional ifaces are
+            // not gated — the plugin null-checks them at runtime.
+            if (!plugin_caps_compatible(pi, &default_host_api(), name, &aerr)) {
                 std::fprintf(stderr, "[xinsp2] %s\n", aerr.c_str());
                 FreeLibrary(pi.handle);
                 pi.handle = nullptr;
@@ -1871,6 +1913,19 @@ public:
                                 pi2.handle = nullptr;
                                 last_open_warnings_.push_back(
                                     {inst_name, *plugin, "plugin ABI mismatch: " + err});
+                                std::fprintf(stderr,
+                                    "[xinsp2] skip instance '%s': %s\n",
+                                    inst_name.c_str(), err.c_str());
+                                continue;
+                            }
+                            // LV2-style capability handshake — same refuse-with-reason
+                            // surfacing as the ABI gate just above (skip the instance,
+                            // record the reason in last_open_warnings_).
+                            if (!plugin_caps_compatible(pi2, &default_host_api(), *plugin, &err)) {
+                                FreeLibrary(pi2.handle);
+                                pi2.handle = nullptr;
+                                last_open_warnings_.push_back(
+                                    {inst_name, *plugin, "plugin capability gate: " + err});
                                 std::fprintf(stderr,
                                     "[xinsp2] skip instance '%s': %s\n",
                                     inst_name.c_str(), err.c_str());

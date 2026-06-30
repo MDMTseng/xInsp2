@@ -91,6 +91,18 @@ inline bool plugin_abi_compatible(HMODULE dll, const std::string& plugin_name,
     return true;
 }
 
+// One {iface, min} entry of a plugin.json `requires[]` / `optional[]` array —
+// the LV2-style capability handshake (core_fix_plan.md §11 LV2 row / §12 Phase
+// 3). `iface` is a capability id resolved through the host's get_interface door
+// (e.g. "xi.imaging"); `min` is the lowest interface version the plugin accepts.
+// A REQUIRED entry the host can't satisfy (no such id, or only an older version)
+// refuses the load with a reason; an OPTIONAL entry never gates — the plugin
+// null-checks it at runtime (mirrors LV2_Feature required vs optional).
+struct IfaceReq {
+    std::string iface;
+    uint32_t    min = 1;
+};
+
 struct PluginInfo {
     std::string name;
     std::string description;
@@ -141,10 +153,58 @@ struct PluginInfo {
     // accepts via exchange_instance. See docs/reference/c-abi.md.
     std::string manifest_json;
 
+    // LV2-style capability handshake (core_fix_plan.md §11/§12 Phase 3). Parsed
+    // from plugin.json's optional `"requires":[{"iface","min"}]` (gated at load)
+    // and `"optional":[...]` (NOT gated — runtime null-check). Empty for the vast
+    // majority of plugins, which depend only on the always-present legacy surface.
+    std::vector<IfaceReq> required_ifaces;
+    std::vector<IfaceReq> optional_ifaces;
+
     // New C ABI factory: void* (host_api, name)
     using CFactoryFn = void* (*)(const xi_host_api* host, const char* name);
     CFactoryFn c_factory = nullptr;
 };
+
+// Does the host publish capability `id` at some version >= `min` through its
+// get_interface door? The door answers an EXACT (id, version); a published
+// (id, vN) is frozen forever and additive, so a bounded upward probe from `min`
+// honours the LV2 ">= min" semantics (and tolerates an interface that was born
+// above the requested min). No host / no door → not published (refuse).
+inline bool host_publishes_iface(const xi_host_api* host,
+                                 const std::string& id, uint32_t min) {
+    if (!host || !host->get_interface || id.empty()) return false;
+    // 256-wide window: trivial at load time, bounded, and far beyond any
+    // plausible live interface-version count.
+    for (uint32_t v = min; v < min + 256u; ++v)
+        if (host->get_interface(id.c_str(), v) != nullptr) return true;
+    return false;
+}
+
+// LV2-style required/optional capability handshake, run at load right after the
+// ABI gate (core_fix_plan.md §11 LV2 row / §12 Phase 3). Every REQUIRED
+// {iface,min} must be published by the host's get_interface door at a version
+// >= min; a missing or too-old required interface is a CLEAN REFUSE with a
+// reason, surfaced through the same err_msg channel as plugin_abi_compatible (so
+// the loader's existing refuse-with-reason path carries it). OPTIONAL interfaces
+// are NEVER gated here — the plugin null-checks them at runtime via
+// get_interface. Returns true (load) when every required capability is present.
+inline bool plugin_caps_compatible(const PluginInfo& pi, const xi_host_api* host,
+                                   const std::string& plugin_name,
+                                   std::string* err_msg = nullptr) {
+    for (const auto& r : pi.required_ifaces) {
+        if (!host_publishes_iface(host, r.iface, r.min)) {
+            if (err_msg) *err_msg =
+                "plugin '" + plugin_name + "' requires capability '" + r.iface
+                + "@" + std::to_string(r.min) + "' but the host does not publish it "
+                  "(missing capability, or only an older version than requested) — "
+                  "rebuild against a host that provides '" + r.iface + "@"
+                + std::to_string(r.min) + "', or drop it from the plugin.json "
+                  "\"requires\" list if the capability is in fact optional";
+            return false;
+        }
+    }
+    return true;
+}
 
 // Adapter: wraps a C ABI plugin instance as an InstanceBase
 class CAbiInstanceAdapter : public InstanceBase {
