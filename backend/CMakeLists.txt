@@ -234,6 +234,19 @@ add_executable(test_abi_freeze tests/test_abi_freeze.cpp)
 target_link_libraries(test_abi_freeze PRIVATE xi_core)
 add_test(NAME abi_freeze COMMAND test_abi_freeze)
 
+# >>> host-api-segregation Phase 2 (xi.preview carve) — localized append block.
+# Proves the carved xi.preview@1 interface (resolved via host->get_interface)
+# compresses byte-for-byte identically to the legacy compress_image field, and
+# that the SDK xi::Plugin::compress() wrapper resolves-then-caches with a
+# legacy-field fallback. Kept self-contained to ease merge with sibling appends.
+add_executable(test_preview_interface tests/test_preview_interface.cpp)
+target_link_libraries(test_preview_interface PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_preview_interface PRIVATE pthread)
+endif()
+add_test(NAME preview_interface COMMAND test_preview_interface)
+# <<< host-api-segregation Phase 2 end.
+
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
 target_include_directories(test_yyjson PRIVATE
@@ -552,3 +565,28 @@ if(XINSP2_SANITIZE_ADDRESS AND MSVC)
             "not found next to ${CMAKE_CXX_COMPILER}; tests may fail to start.")
     endif()
 endif()
+
+# ============================================================================
+# Part III G1 — scan/certification isolation (core_fix_plan.md §17-18 G1).
+# APPENDED block (kept self-contained so it stays separable from sibling-agent
+# appends). A crash fixture whose factory faults + a driver that is BOTH the
+# test and the certify child (self-reexec via --certify-plugin): the good
+# (golden) plugin certifies ok and registers; the bad one certifies `crashed`
+# in a throwaway child and is skipped by scan_plugins.
+# ============================================================================
+add_library(certify_crash_plugin SHARED tests/certify_crash_plugin.cpp)
+target_link_libraries(certify_crash_plugin PRIVATE xi_core)
+
+add_executable(test_certify tests/test_certify.cpp)
+target_link_libraries(test_certify PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_certify PRIVATE Ws2_32)
+endif()
+add_dependencies(test_certify certify_crash_plugin golden_plugin)
+target_compile_definitions(test_certify PRIVATE
+    CRASH_PLUGIN_DLL="$<TARGET_FILE:certify_crash_plugin>"
+    GOLDEN_PLUGIN_DLL="$<TARGET_FILE:golden_plugin>")
+add_test(NAME certify COMMAND test_certify)
+# ============================================================================
+# End Part III G1 block.
+# ============================================================================
