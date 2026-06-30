@@ -31,6 +31,13 @@ static int g_failures = 0;
 
 #define SECTION(name) std::printf("[test] %s\n", name)
 
+// Read a whole file into a string (test helper; "" if absent/unreadable).
+static std::string read_file(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    std::stringstream ss; ss << f.rdbuf();
+    return ss.str();
+}
+
 // ---------- xi_async ----------
 
 static int slow_add(int a, int b, int delay_ms) {
@@ -358,6 +365,81 @@ static void test_wc_seed_fail() {
     fs::remove_all(base, ec);
 }
 
+// ---- working-copy discard must not destroy crash recovery (bug #14) ----------
+// BUG: reopen_fresh_working_copy() (the Discard handler) did close → remove_all
+// (scratch) → reopen, with NO check of the commit-pending marker. If a prior
+// commit was interrupted (kCommitMarker present + canonical left torn/partial),
+// the intact scratch is the ONLY source that can heal the canonical. Removing it
+// before open_project's roll-forward ran left the torn canonical permanently
+// unrecoverable. The fix factors the heal into xi::wc::roll_forward_pending_commit
+// and Discard calls it BEFORE remove_all, completing the interrupted commit.
+static void test_wc_discard_completes_pending_commit() {
+    SECTION("Discard heals a torn canonical from scratch before dropping it");
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path base = fs::temp_directory_path() /
+                    ("xi_wc_rf_" + std::to_string((unsigned long long)
+                        std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::remove_all(base, ec);
+
+    // Replicate the EXACT Discard sequence (reopen_fresh_working_copy): heal a
+    // pending commit from the scratch FIRST, and only drop the scratch if the heal
+    // succeeded. The load-bearing call is the production helper.
+    auto discard_like = [](const fs::path& canon) {
+        std::error_code e;
+        if (xi::wc::roll_forward_pending_commit(canon))
+            fs::remove_all(canon / ".xinsp_work", e);
+    };
+
+    // --- (A) WITH a pending marker: an interrupted commit left the canonical TORN
+    //     (old project.json bytes, a committed file missing) while the scratch is a
+    //     COMPLETE snapshot of the new state. Discard must COMPLETE the commit
+    //     (heal canonical from scratch), not destroy the only recovery source. ---
+    {
+        fs::path canon = base / "canonA";
+        fs::create_directories(canon, ec);
+        // Torn canonical: stale project.json, and the new file never made it in.
+        { std::ofstream(canon / "project.json") << "{\"name\":\"OLD-torn\"}"; }
+        // Intact scratch (the snapshot the interrupted commit was mirroring FROM).
+        fs::path scratch = canon / ".xinsp_work";
+        fs::create_directories(scratch / "instances" / "cam0", ec);
+        { std::ofstream(scratch / "project.json") << "{\"name\":\"NEW-complete\"}"; }
+        { std::ofstream(scratch / "inspect.cpp") << "// new script"; }
+        { std::ofstream(scratch / "instances" / "cam0" / "def.json") << "{\"v\":1}"; }
+        // Plant the commit-pending journal marker (commit was interrupted).
+        { std::ofstream(canon / ".xinsp_commit_pending") << "commit in progress\n"; }
+
+        discard_like(canon);
+
+        // Canonical is HEALED to the scratch's complete content (commit completed).
+        CHECK(read_file(canon / "project.json") == "{\"name\":\"NEW-complete\"}");
+        CHECK(fs::exists(canon / "inspect.cpp"));                       // new file restored
+        CHECK(fs::exists(canon / "instances" / "cam0" / "def.json"));  // ...no data lost
+        // Marker cleared (commit no longer pending) and scratch dropped (discard done).
+        CHECK(!fs::exists(canon / ".xinsp_commit_pending"));
+        CHECK(!fs::exists(scratch));
+    }
+
+    // --- (B) NO pending marker (the normal case): Discard just drops the scratch;
+    //     the canonical is untouched. No regression — heal is a no-op. ---
+    {
+        fs::path canon = base / "canonB";
+        fs::create_directories(canon, ec);
+        { std::ofstream(canon / "project.json") << "{\"name\":\"canonical\"}"; }
+        fs::path scratch = canon / ".xinsp_work";
+        fs::create_directories(scratch, ec);
+        { std::ofstream(scratch / "project.json") << "{\"name\":\"uncommitted-edit\"}"; }
+        // No .xinsp_commit_pending marker.
+
+        discard_like(canon);
+
+        CHECK(read_file(canon / "project.json") == "{\"name\":\"canonical\"}");  // untouched
+        CHECK(!fs::exists(scratch));                                              // edits dropped
+    }
+
+    fs::remove_all(base, ec);
+}
+
 // ---- EmitTurn: ordered emit + early-return backstop (the lane-deadlock guard) ----
 static void test_emit_gate() {
     SECTION("EmitTurn orders emits + dtor backstops an early return");
@@ -431,6 +513,7 @@ int main() {
     test_inflight_runs();
     test_wc_exclusion();
     test_wc_seed_fail();
+    test_wc_discard_completes_pending_commit();
     test_emit_gate();
     test_async_basic();
     test_async_parallel();

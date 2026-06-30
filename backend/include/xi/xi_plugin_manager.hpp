@@ -1213,7 +1213,29 @@ public:
         // close_project()/open_project() each take mu_ — don't hold it here.
         close_project();
         std::error_code ec;
-        std::filesystem::remove_all(std::filesystem::path(canon) / kWorkingCopyDir, ec);
+        // CRASH-RECOVERY GUARD (bug #14). Discard's contract is "throw away my
+        // UNCOMMITTED working-copy edits". A *pending commit* (kCommitMarker
+        // present) is NOT uncommitted edits — it is a half-applied commit the user
+        // already asked for, with the canonical possibly torn and the intact scratch
+        // its ONLY heal source. Blindly remove_all(scratch) here (the old behaviour)
+        // destroys that snapshot before open_project's roll-forward can heal the
+        // canonical → the torn canonical becomes permanently unrecoverable.
+        //
+        // So COMPLETE the interrupted commit from the scratch FIRST, via the same
+        // heal used on open. (Rolling the commit BACK isn't possible — the
+        // pre-commit canonical bytes are already partially overwritten — so
+        // completing the commit the user requested is the correct, least-surprising
+        // behaviour.) Only once the canonical is healed (or there was no pending
+        // commit) is it safe to drop the scratch and re-seed a fresh working copy.
+        // If the heal mirror itself fails (persistent disk error), KEEP the scratch
+        // + marker so the reopen below (and future opens) can retry the
+        // roll-forward — never discard the only recovery source.
+        if (xi::wc::roll_forward_pending_commit(canon)) {
+            std::filesystem::remove_all(std::filesystem::path(canon) / kWorkingCopyDir, ec);
+        } else {
+            std::fprintf(stderr, "[xinsp2] working copy: discard KEPT scratch — pending "
+                         "commit heal failed; reopen will retry roll-forward\n");
+        }
         return open_project(canon, /*working_copy=*/true);   // re-seeds from canonical
     }
 
@@ -1224,30 +1246,11 @@ public:
         // anything: if the canonical carries the commit-pending marker, a prior
         // commit was cut short (crash/power loss) and the canonical tree may be
         // torn. The scratch is a complete, untouched snapshot, so re-running the
-        // (idempotent) mirror finishes the commit and heals the canonical.
-        {
-            std::filesystem::path canon = folder_arg;
-            std::filesystem::path marker = canon / kCommitMarker;
-            std::filesystem::path scratch = canon / kWorkingCopyDir;
-            std::error_code ec;
-            if (std::filesystem::exists(marker) &&
-                std::filesystem::exists(scratch / "project.json")) {
-                std::fprintf(stderr, "[xinsp2] working copy: completing interrupted "
-                             "commit from %s (canonical may be torn)\n",
-                             scratch.string().c_str());
-                // Only clear the journal marker if the roll-forward actually
-                // succeeded. If the disk error that interrupted the original commit
-                // persists (read-only / full), mirror_tree returns false and we KEEP
-                // the marker + scratch so the next open retries — removing it here
-                // would strand a torn canonical with no record to heal it.
-                if (xi::wc::mirror_tree(scratch, canon)) {
-                    std::filesystem::remove(marker, ec);
-                } else {
-                    std::fprintf(stderr, "[xinsp2] working copy: roll-forward FAILED "
-                                 "(disk error?) — keeping commit marker to retry on next open\n");
-                }
-            }
-        }
+        // (idempotent) mirror finishes the commit and heals the canonical. The
+        // heal step is factored into xi::wc::roll_forward_pending_commit so the
+        // Discard path (reopen_fresh_working_copy) heals via the SAME logic
+        // before it drops the scratch.
+        xi::wc::roll_forward_pending_commit(folder_arg);
 
         // Working-copy mode: operate on a scratch copy at <project>/.xinsp_work
         // so edits never touch the canonical project until an explicit commit

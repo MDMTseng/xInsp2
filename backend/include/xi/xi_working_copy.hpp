@@ -11,6 +11,7 @@
 //
 // TODO(linux): std::filesystem only — already portable.
 //
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -145,6 +146,46 @@ inline bool mirror_tree(const std::filesystem::path& src,
         if (rm) ok = false;
     }
     return ok;
+}
+
+// Roll forward an interrupted working-copy commit so the canonical is never left
+// torn. If `canon` carries the commit-pending marker AND the scratch holds a
+// complete project.json, a prior commit_working_copy was cut short (crash / power
+// loss) — the canonical tree may be partially overwritten while the scratch stays
+// a complete, untouched snapshot. Re-run the idempotent mirror to FINISH the
+// commit and heal the canonical, then clear the marker.
+//
+// This is the single source of truth for the heal step, shared by open_project
+// (heal-on-open) AND the Discard path (reopen_fresh_working_copy): Discard must
+// NOT drop the scratch while it is the only thing that can heal a torn canonical,
+// so it calls this first.
+//
+// Returns true if there was nothing pending OR the roll-forward completed
+// (canonical healed, marker cleared). Returns false ONLY if a pending commit
+// existed but the heal mirror failed (persistent disk error: read-only / full) —
+// in that case the marker + scratch are KEPT so the next open retries, and the
+// caller MUST NOT drop the scratch (it is still the only recovery source).
+inline bool roll_forward_pending_commit(const std::filesystem::path& canon) {
+    std::filesystem::path marker  = canon / kCommitMarker;
+    std::filesystem::path scratch = canon / kWorkingCopyDir;
+    if (!std::filesystem::exists(marker) ||
+        !std::filesystem::exists(scratch / "project.json"))
+        return true;   // no interrupted commit pending — nothing to heal
+    std::fprintf(stderr, "[xinsp2] working copy: completing interrupted commit "
+                 "from %s (canonical may be torn)\n", scratch.string().c_str());
+    // Only clear the journal marker if the roll-forward actually succeeded. If the
+    // disk error that interrupted the original commit persists (read-only / full),
+    // mirror_tree returns false and we KEEP the marker + scratch so the next open
+    // retries — removing it here would strand a torn canonical with no record to
+    // heal it.
+    if (mirror_tree(scratch, canon)) {
+        std::error_code ec;
+        std::filesystem::remove(marker, ec);
+        return true;
+    }
+    std::fprintf(stderr, "[xinsp2] working copy: roll-forward FAILED (disk error?) "
+                 "— keeping commit marker to retry on next open\n");
+    return false;
 }
 
 // Append `line` to <dir>/.gitignore if not already present (so the scratch dir
