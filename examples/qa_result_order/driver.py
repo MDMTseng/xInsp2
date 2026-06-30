@@ -1,18 +1,26 @@
 """qa_result_order — arrival-ordered result emission under a parallel pool.
 
-Under parallelism.dispatch_threads > 1, per-frame results (vars) are emitted as
-each worker FINISHES by default ("completion"), so with uneven inspect times the
-wire stream is out of frame order. parallelism.result_order:"arrival" makes the
+Under parallelism.dispatch_threads > 1, per-frame results are emitted as each
+worker FINISHES by default ("completion"), so with uneven inspect times the wire
+stream is out of frame order. parallelism.result_order:"arrival" makes the
 backend replay them in frame-arrival order (compute still runs parallel; only
 emission is gated). run_id is now assigned at dequeue, so it tracks arrival
 order and the wire stream's run_id must be monotonic in arrival mode.
 
+Output path (post VAR-purge): the SDK is generic and no longer decodes VARs, so
+the script surfaces each frame through the `expose` sink on channel "order".
+`expose` is itself an ORDERED sink: the host stages process() and flushes it
+under the per-lane emit gate, stamping the wire run_id onto each XEX1 frame as
+its `seq`. The driver subscribes to "order", collects the XEX1 frames in arrival
+order via the shared xex1 decoder, and reads each frame's `seq` (= wire run_id)
+— the exact quantity the old `vars` run_id carried.
+
 This driver runs the SAME uneven-timing script (every 5th frame slow) under both
-modes with dispatch_threads=4, collecting the run_id of each `vars` message in
-receive order. Asserts:
+modes with dispatch_threads=4, collecting each frame's `seq` in receive order.
+Asserts:
   * completion mode -> reordered (inversions > 0), proving the workload really
     does run concurrently and finish out of order under this pool, and
-  * arrival mode    -> run_id strictly increasing (zero inversions) on that same
+  * arrival mode    -> seq strictly increasing (zero inversions) on that same
     reordering workload.
 (The queue high-watermark is reported but not asserted: 4 workers drain the
 timer faster than it fills, so concurrency shows up as out-of-order completions,
@@ -34,7 +42,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "xinsp2_py"))
+sys.path.insert(0, str(ROOT.parent / "lib"))   # examples/lib (shared xex1 decoder)
 from xinsp2 import Client  # noqa: E402
+from xex1 import collect_frames, subscribe  # noqa: E402
 
 SUF = ".exe" if os.name == "nt" else ""
 BE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{SUF}"
@@ -46,6 +56,17 @@ def port_open(p, timeout=0.3):
         with socket.create_connection(("127.0.0.1", p), timeout): return True
     except OSError:
         return False
+
+
+def _harvest(c, run_ids: list[int]) -> None:
+    """Decode every XEX1 frame queued on the binary inbox (arrival order) and
+    append each frame's `seq` (= wire run_id) to run_ids."""
+    for fr in collect_frames(c):
+        if fr.get("channel") != "order":
+            continue
+        seq = fr.get("seq")
+        if isinstance(seq, int):
+            run_ids.append(seq)
 
 
 def run_mode(proj: Path, port: int):
@@ -64,21 +85,21 @@ def run_mode(proj: Path, port: int):
         with Client(url=f"ws://127.0.0.1:{port}/", timeout=60) as c:
             c.open_project(str(proj), timeout=300)
             c.compile_and_load(str(proj / "inspect.cpp"), timeout=180)
+            subscribe(c, ["order"])         # gate expose to push the "order" channel
+            c.drain_binary()                # drop any frames from before the window
             c.call("start", {"fps": 120})   # push hard so the queue backs up
             t_end = time.time() + COLLECT_S
             while time.time() < t_end:
-                v = c.next_vars(timeout=0.5)
-                if not v:
-                    continue
-                rid = v.get("run_id")
-                if isinstance(rid, int):
-                    run_ids.append(rid)
+                time.sleep(0.05)
+                _harvest(c, run_ids)
+            try: c.call("stop")
+            except Exception: pass
+            time.sleep(0.2)
+            _harvest(c, run_ids)            # drain any in-flight frames after stop
             try:
                 hwm = int(c.call("dispatch_stats").get("queue_depth_high_watermark", 0))
             except Exception:
                 hwm = 0
-            try: c.call("stop")
-            except Exception: pass
     finally:
         try:
             import websocket

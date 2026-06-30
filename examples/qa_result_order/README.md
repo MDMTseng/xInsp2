@@ -1,17 +1,24 @@
 # qa_result_order — arrival-ordered results under a parallel pool
 
-Under `parallelism.dispatch_threads > 1`, per-frame results (`vars` + previews +
-`run_finished`) are emitted as each worker **finishes** by default
-(`result_order: "completion"`) — so with uneven inspect times the wire stream is
-out of frame order. `result_order: "arrival"` makes the backend replay results
-in **frame-arrival order**: a worker that finishes early waits its turn before
-emitting. Compute still runs fully parallel; only emission is gated. (`run_id` is
-assigned at dequeue, so it tracks arrival order and is monotonic on the wire in
-arrival mode.)
+Under `parallelism.dispatch_threads > 1`, per-frame results are emitted as each
+worker **finishes** by default (`result_order: "completion"`) — so with uneven
+inspect times the wire stream is out of frame order. `result_order: "arrival"`
+makes the backend replay results in **frame-arrival order**: a worker that
+finishes early waits its turn before emitting. Compute still runs fully parallel;
+only emission is gated. (`run_id` is assigned at dequeue, so it tracks arrival
+order and is monotonic on the wire in arrival mode.)
+
+Output path (post VAR-purge): the SDK no longer decodes VARs, so the script
+surfaces each frame through the **`expose` sink** on channel `order`. `expose` is
+itself an ordered sink — the host stages `use("expose").process(rec)` and flushes
+it under the same per-lane emit gate, stamping the wire `run_id` onto each XEX1
+frame as its `seq`. The driver subscribes to `order`, collects the XEX1 frames in
+arrival order (shared `examples/lib/xex1.py` decoder), and reads each frame's
+`seq` (= wire `run_id`).
 
 `driver.py` runs the same uneven-timing script (every 5th frame slow,
-`dispatch_threads=4`) under both modes and records each `vars` message's `run_id`
-in receive order:
+`dispatch_threads=4`) under both modes and records each XEX1 frame's `seq`
+(= `run_id`) in receive order:
 
 - **completion** → reorders (inversions > 0), proving the workload really does
   finish out of order under this pool;

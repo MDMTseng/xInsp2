@@ -112,10 +112,12 @@ debug an empty-bus symptom. **Docs path was sufficient.**
   the same plugin to agree on a tid without any IPC. Wrote it once,
   worked first try (after the duplicate-using fix); 100 / 100 match
   rate.
-- The Python client's `_inbox_vars` queue surfaces every continuous-
-  mode `vars` message; `start` / `stop` cmds work as advertised. No
-  threading work needed in the driver beyond a simple `while
-  monotonic() < deadline` drain loop.
+- The `expose` sink pushes one XEX1 binary frame per continuous-mode
+  inspect cycle on the subscribed `pairs` channel; the generic Python
+  client surfaces them on `drain_binary()` and the shared
+  `examples/lib/xex1.py` decoder turns each into `{values, seq, ...}`.
+  `start` / `stop` cmds work as advertised. No threading work needed in
+  the driver beyond a simple `while monotonic() < deadline` drain loop.
 - 100 bus cycles in 5.0 s (exactly 20 Hz). Wall-clock-driven scheduling
   + `sleep_until` next boundary kept jitter low enough that no cycle
   was lost across the soak.

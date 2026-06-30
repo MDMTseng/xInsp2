@@ -14,31 +14,33 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from queue import Empty
-
-from xinsp2 import Client, ProtocolError
 
 ROOT = Path(__file__).parent
+REPO_ROOT = ROOT.parents[1]
+sys.path.insert(0, str(REPO_ROOT / "tools" / "xinsp2_py"))
+sys.path.insert(0, str(ROOT.parent / "lib"))   # examples/lib (shared xex1 decoder)
+
+from xinsp2 import Client, ProtocolError  # noqa: E402
+from xex1 import collect_frames, subscribe  # noqa: E402
+
 INSPECT_CPP = ROOT / "inspect.cpp"
 
 
 def collect_vars(c: Client, duration_s: float) -> list[dict]:
-    """Block for `duration_s` seconds while consuming `vars` events
-    posted by the backend's continuous-mode worker. Returns a list of
-    flattened {name: value} dicts, one per observed inspect cycle."""
+    """Block for `duration_s` seconds while consuming XEX1 frames pushed by
+    the `expose` sink on channel "pairs" (one per continuous-mode inspect
+    cycle). Returns a list of flattened {name: value} dicts — the frame's
+    decoded values, with the wire run_id under `_run_id` — one per cycle."""
     events: list[dict] = []
     deadline = time.time() + duration_s
     while time.time() < deadline:
-        remaining = deadline - time.time()
-        try:
-            ev = c._inbox_vars.get(timeout=min(0.5, max(0.05, remaining)))
-        except Empty:
-            continue
-        flat = {}
-        for it in ev.get("items") or []:
-            flat[it["name"]] = it.get("value")
-        flat["_run_id"] = ev.get("run_id")
-        events.append(flat)
+        time.sleep(0.05)
+        for fr in collect_frames(c):
+            if fr.get("channel") != "pairs":
+                continue
+            flat = dict(fr.get("values") or {})
+            flat["_run_id"] = fr.get("seq")
+            events.append(flat)
     return events
 
 
@@ -105,6 +107,10 @@ def main() -> int:
             return 1
         print("  script compiled")
 
+        # Gate the expose sink to push the "pairs" channel as XEX1 binary frames.
+        subscribe(c, ["pairs"])
+        c.drain_binary()
+
         # NOTE: project.json's `trigger_policy` block is the canonical
         # way to set the policy. We deliberately DO NOT call
         # `cmd:set_trigger_policy` here — its arg-parser uses a literal
@@ -126,13 +132,9 @@ def main() -> int:
         c.call("stop")
         s1 = summarise(events, "correlation")
 
-        # Drain any in-flight vars after stop
+        # Drain any in-flight frames after stop
         time.sleep(0.2)
-        try:
-            while True:
-                c._inbox_vars.get_nowait()
-        except Empty:
-            pass
+        c.drain_binary()
 
         # ---- 5 s soak ----
         print("\n--- 5 s soak ---")
