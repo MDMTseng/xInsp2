@@ -38,6 +38,7 @@
 #include "xi_atomic_io.hpp"
 #include "xi_clock.hpp"        // wall_ms() — portable timestamp for .corrupt-<ts> quarantine names
 #include "xi_cabi_adapter.hpp" // plugin_abi_compatible / PluginInfo / CAbiInstanceAdapter
+#include "xi_certify.hpp"     // Part III G1: scan/certification isolation (child-process certify + verdict cache)
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
 #include "xi_config_validate.hpp" // validate_config_against_manifest (opt-in diagnostic, extracted leaf)
@@ -115,9 +116,49 @@ public:
         if (!std::filesystem::exists(plugins_dir)) return 0;
         for (auto& entry : std::filesystem::directory_iterator(plugins_dir)) {
             if (!entry.is_directory()) continue;
-            if (register_plugin_folder_locked_(entry.path().string())) count++;
+            const std::string folder = entry.path().string();
+            // Part III G1.3 — gate discovery on the cached certify verdict. A
+            // plugin whose last certification CRASHED a throwaway child process
+            // (its DllMain/factory faulted) is SKIPPED + surfaced, so scanning
+            // itself can never re-arm a known-bad DLL inside the backend. Only
+            // the `crashed` verdict gates — abi_mismatch/unknown still register
+            // (the real load path refuses the former with a reason; the latter
+            // means "not yet certifiable", e.g. a source-only plugin not built).
+            auto manifest = std::filesystem::path(folder) / "plugin.json";
+            if (std::filesystem::exists(manifest)) {
+                auto info = parse_manifest(manifest.string(), folder);
+                if (!info.name.empty() &&
+                    certify_folder_locked_(folder, info) == certify::Verdict::crashed) {
+                    std::string reason =
+                        "plugin '" + info.name + "' SKIPPED at discovery: certification "
+                        "crashed a throwaway child process (malformed DLL — DllMain or "
+                        "factory faults). Fix + rebuild the DLL to re-certify.";
+                    std::fprintf(stderr, "[xinsp2] %s\n", reason.c_str());
+                    last_certify_warnings_.push_back({info.name, info.name, reason});
+                    continue;   // do NOT register/arm a known-bad DLL
+                }
+            }
+            if (register_plugin_folder_locked_(folder)) count++;
         }
         return count;
+    }
+
+    // The exe used to certify a plugin in a throwaway child (any binary that
+    // handles `--certify-plugin <dir>`: the backend, the runner, or a test
+    // driver). Empty (the default) DISABLES running new certifications — scan
+    // then still honours any verdict already cached on disk (so a known-bad DLL
+    // stays gated) but never spawns a child. Set it at startup before scanning.
+    void set_certify_exe(const std::string& exe) {
+        std::lock_guard<std::mutex> lk(mu_);
+        certify_exe_ = exe;
+    }
+
+    // Certify warnings from the most recent scan_plugins (plugins skipped because
+    // their cached verdict was `crashed`). Separate from open_warnings() — those
+    // are per-open_project and get cleared each open; these survive discovery.
+    std::vector<OpenWarning> certify_warnings() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return last_certify_warnings_;
     }
 
     // Register a single plugin folder (one that contains plugin.json) into the
@@ -266,6 +307,36 @@ public:
     }
 
 private:
+    // Part III G1.1/G1.2 — certify a plugin folder, cached by DLL content hash.
+    // Re-certifies (spawns a throwaway child via certify_exe_) ONLY when the DLL
+    // hash is missing/changed; otherwise reuses the verdict cached next to the
+    // manifest, so a normal startup isn't slowed. Returns `unknown` (never
+    // gating) when there is no built DLL yet, or when no certify_exe_ is wired
+    // and no cache exists. mu_ MUST be held.
+    certify::Verdict certify_folder_locked_(const std::string& folder,
+                                            const PluginInfo& info) {
+        auto dll_path = (std::filesystem::path(folder) / info.dll_name).string();
+        std::string hash = xi::sha256::sha256_file(dll_path);
+        if (hash.empty()) return certify::Verdict::unknown;   // source-only / unbuilt — nothing to certify
+
+        certify::CacheEntry cached;
+        if (certify::read_cache(folder, cached) &&
+            cached.dll == info.dll_name && cached.sha256 == hash) {
+            return certify::verdict_from_str(cached.verdict);  // G1.2 — hash unchanged, reuse
+        }
+
+        if (certify_exe_.empty()) return certify::Verdict::unknown;   // certification disabled
+
+#ifdef _WIN32
+        auto verdict = certify::run_certify_subprocess(certify_exe_, folder);
+        if (verdict != certify::Verdict::unknown)   // don't cache a spawn failure
+            certify::write_cache(folder, { info.dll_name, hash, certify::verdict_str(verdict) });
+        return verdict;
+#else
+        return certify::Verdict::unknown;
+#endif
+    }
+
     // Record the on-disk write-time of the DLL we just loaded, so
     // reload_changed_plugins() can later tell whether a rebuild produced a new
     // DLL (and only hot-swap the ones that actually moved).
@@ -2283,6 +2354,12 @@ private:
     // by mu_; migrated inline by create/remove/rename so it never drifts.
     std::unordered_map<std::string, InstStateRec> inst_state_;
     std::vector<OpenWarning> last_open_warnings_;
+    // Part III G1 — path to the binary that handles `--certify-plugin <dir>`
+    // (self, in practice). Empty disables spawning new certifications; cached
+    // verdicts on disk are still honoured. Plugins skipped this scan because
+    // their cached verdict was `crashed`.
+    std::string certify_exe_;
+    std::vector<OpenWarning> last_certify_warnings_;
     // BUG#4 quarantine: project.json existed but failed to parse on the last
     // open_project. While true, save_project_locked REFUSES the full-rebuild
     // write (it would clobber extension-owned keys — params / auto_respawn /
