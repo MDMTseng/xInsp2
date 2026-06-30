@@ -333,6 +333,7 @@ exception at the await site rather than crashing the backend.
 |---|---|---|
 | Run several independent operators at once | `xi::async` (above) | no |
 | Parallelize one operator's inner loop | `cv::parallel_for_(cv::Range(0,h), …)` — uses OpenCV's thread pool | no |
+| A parallel pixel/row loop, **fault-safe** | `xi::parallel_for(n, body)` (below) — SEH-safe, cancellable, owner-attributed | yes (`/openmp`) |
 | Process a list of ROIs/blobs each | `std::for_each(std::execution::par, …)` (`#include <execution>`) | no |
 | Plain `#pragma omp` syntax | **OpenMP** (opt-in, below) | yes |
 
@@ -375,6 +376,70 @@ would just block. Either set a higher count on *that* loop only with a per-pragm
 `#pragma omp parallel for num_threads(32)` (overrides the global cap), or better,
 use `xi::async` — one task per concurrent wait, not tied to core count. Keep the
 global `openmp_max_threads` sized for the CPU-bound default.
+
+### Parallelism safety — three rules for worker threads
+
+Your `inspect` runs on the **inspect thread**. Three pieces of ambient context
+live in *thread-local* state on that thread and **do not cross** into the worker
+threads `xi::async` or `#pragma omp` spawn. Get them wrong and the failure modes
+range from silent-wrong-output to a backend crash:
+
+1. **Read the trigger on the inspect thread; parallel regions consume captured
+   locals.** `xi::current_trigger()` / `t.image(...)` are valid *only* on the
+   inspect thread. Calling them from a worker fails loud (an abort with a named
+   message in debug, a logged error in release). Snapshot first and capture by
+   value with **`xi::trigger_snapshot()`**:
+
+   ```cpp
+   auto snap = xi::trigger_snapshot();                 // inspect thread
+   xi::parallel_for(rows, [&, snap](int y){            // any worker thread
+       cv::Mat g = snap.image("gray").as_cv_mat();
+       process_row(g, y);
+   });
+   ```
+
+   The snapshot addref's each image, so the pixels stay valid for the whole
+   region; its accessors touch no thread-local.
+
+2. **A C++ exception must not cross a `#pragma omp` boundary** — OpenMP requires
+   it caught inside the same structured block. A hardware fault (access
+   violation, divide-by-zero) is *SEH*, not a C++ exception, and a worker thread
+   the OpenMP runtime spawned has no SEH translator → an escaping fault
+   **terminates the whole backend**.
+
+3. **Pool images created on a worker are tagged anonymous (`owner=0`)** — still
+   thread-safe, but outside the per-owner leak sweep, so a genuinely leaked one
+   isn't reclaimed until process exit and shows as "anonymous" in
+   `image_pool_stats`.
+
+**`xi::parallel_for(n, body)` handles all three for you** — prefer it over a
+hand-written `#pragma omp parallel for`:
+
+```cpp
+#include <xi/xi.hpp>      // xi::parallel_for comes in via the umbrella
+
+auto snap = xi::trigger_snapshot();
+xi::parallel_for(h, [&, snap](int y) {
+    // runs across the OpenMP pool; faults here are caught and rethrown
+    // on the inspect thread, not propagated out of the omp region.
+    process_row(y);
+});
+```
+
+It installs the SEH translator on each worker, polls
+`xi::cancellation_requested()` and skips remaining iterations on a watchdog
+cancel, catches every fault inside the region and rethrows the first one on the
+inspect thread, and re-installs the inspect-thread image-pool owner per worker so
+parallel-created images stay attributed. `xi::async` already does the same
+(SEH + owner propagation) for independent-branch fan-out. Needs `/openmp`
+(`"openmp_max_threads"` set); without it `xi::parallel_for` runs serially with
+identical semantics.
+
+> Raw `#pragma omp` still works and is faster to type, but you own rules 1–3
+> yourself. The script-load **pool warmup** installs a translator on the
+> persistent OpenMP team so common-case raw regions are covered, but nested /
+> dynamic / grown teams spawn fresh untranslated threads — route fault-prone
+> loops through `xi::parallel_for`.
 
 ---
 
