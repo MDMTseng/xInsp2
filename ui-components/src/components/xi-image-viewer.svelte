@@ -4,9 +4,9 @@
   // Canvas image viewer: wheel = cursor-anchored zoom, drag = pan, click = pixel
   // probe. The pan/zoom math lives in ../lib/viewport.mjs (unit-tested). Tap-out
   // API attached to the host element: setFrame(src) / fit() / oneToOne(); events
-  // `pixelpick` ({x,y,rgb}) and `viewchange` ({scale}). The host wires
-  // XiClient.onPreview → viewer.setFrame(frame.dataUrl) — the component stays
-  // WS-agnostic.
+  // `pixelpick` ({x,y,rgb}) and `viewchange` ({scale}). The host feeds it via
+  // viewer.setFrame(src) from whatever frame source it decodes — the component
+  // stays WS-agnostic.
   import {
     createViewport, screenToImage, fit as vpFit, oneToOne as vpOneToOne, zoomAt, panBy,
   } from "../lib/viewport.mjs";

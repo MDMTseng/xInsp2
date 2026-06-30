@@ -1,14 +1,11 @@
 {
   "title": "xInsp2 HMI — local auto source",
   "layout": {
-    "dir": "row", "weights": [3, 1],
+    "dir": "row", "weights": [1, 1, 1],
     "children": [
-      { "card": { "type": "image", "bind": { "var": "frame" }, "config": { "title": "cam (auto-updating local folder)", "fit": "contain" } } },
-      { "dir": "col", "weights": [1, 1, 1], "children": [
-        { "card": { "type": "verdict", "bind": { "result": true }, "config": { "title": "Verdict" } } },
-        { "card": { "type": "value",   "bind": { "var": "brightness" }, "config": { "title": "brightness", "decimals": 3 } } },
-        { "card": { "type": "yield",   "bind": { "result": true }, "config": { "title": "Yield", "warn": 50 } } }
-      ] }
+      { "card": { "type": "verdict", "bind": { "result": true }, "config": { "title": "Verdict" } } },
+      { "card": { "type": "yield",   "bind": { "result": true }, "config": { "title": "Yield", "warn": 50 } } },
+      { "card": { "type": "throughput", "config": { "title": "Throughput" } } }
     ]
   }
 }

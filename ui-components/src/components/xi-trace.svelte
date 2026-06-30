@@ -4,10 +4,10 @@
 
 <script>
   // Watch an output key across inspection runs (the "key trace"). Stays WS-
-  // agnostic: the host wires XiClient.onVars(v => trace.update(v.items)); this
-  // component picks its `key`, shows the latest value, and sparklines numeric
-  // history. Tap-out: method update(items); readable `latest` / `history`; emits
-  // `sample` {value} on each new value.
+  // agnostic: the host feeds it via update(items) (a name->item map it builds
+  // from whatever stream it owns); this component picks its `key`, shows the
+  // latest value, and sparklines numeric history. Tap-out: method update(items);
+  // readable `latest` / `history`; emits `sample` {value} on each new value.
   let { key = "", label = "", max = 60 } = $props();
   const host = $host();
   let canvas;

@@ -2,11 +2,13 @@
 // app.mjs — HMI host (v1, RUN mode): connect WS, decode the stream, lay out the
 // dashboard grid, and feed each card. Compose/drag-drop + save_dashboard = v1.1.
 //
-// Cards, the layout engine, and the protocol decoders now live in the shared
-// ui-components library (vendored bundle) — one source, used by the standalone
-// HMI here and by external apps via `import { mountDashboard } from "@xinsp2/
-// components"`. This page keeps its own compose-mode editor below.
-import { parseVars, decodePreviewFrame, CARDS,
+// Cards and the layout engine now live in the shared ui-components library
+// (vendored bundle) — one source, used by the standalone HMI here and by external
+// apps via `import { mountDashboard } from "@xinsp2/components"`. This page keeps
+// its own compose-mode editor below. The HMI is a GENERIC dashboard host: it
+// consumes only the run_result / run_finished / status events + dispatch_stats —
+// no preview/vars/gid decoding (a plugin's own webUI owns those frames).
+import { CARDS,
          isLeaf, isSplit, isTabs, weightsOf, validate,
          getNode, addSibling, setCard, setWeights, removePane,
          wrapInTabs, addTab, removeTab, renameTab, setActive } from "./lib/xi-components.esm.js";
@@ -19,7 +21,7 @@ const WS_URL = qs.get("ws") ||
   `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 const DASH = qs.get("dashboard") || "./dashboard.json";
 
-const state = { run_id: -1, vars: {}, images: {}, run_ms: null, status: null, result: null, groups: [] };
+const state = { run_id: -1, run_ms: null, status: null, result: null, groups: [] };
 let cards = [];
 let raf = 0;
 
@@ -212,29 +214,11 @@ function renderNode(node, path = []) {
   return box;
 }
 
-// Preview subscription. The backend streams nothing unsubscribed, so subscribe
-// to the var of every image card in the current layout (re-diffed on layout
-// change, re-asserted on reconnect).
-let activeWs = null, subId = 900000, imgSubs = [];
-function collectImageVars(node, out = []) {
-  if (!node) return out;
-  if (isLeaf(node)) { const c = node.card; if (c && c.type === "image" && c.bind && c.bind.var) out.push(c.bind.var); }
-  else if (isTabs(node)) (node.tabs || []).forEach((t) => collectImageVars(t.child || t, out));
-  else if (isSplit(node)) (node.children || []).forEach((c) => collectImageVars(c, out));
-  return out;
-}
-function pushImageSubs() {
-  if (activeWs && activeWs.readyState === 1)
-    activeWs.send(JSON.stringify({ type: "cmd", id: ++subId, name: "subscribe", args: { names: imgSubs } }));
-}
-function updateImageSubs() { imgSubs = collectImageVars(layout, []); pushImageSubs(); }
-
 function reRender() {
   const root = document.getElementById("grid");
   root.style.cssText += ";display:flex;min-width:0;min-height:0";
   cards = [];
   root.replaceChildren();
-  updateImageSubs();
   if (!layout) return;
   const problems = validate(layout);
   document.getElementById("err").textContent = problems.length ? problems.join("; ") : "";
@@ -289,7 +273,6 @@ function connect() {
   try { ws = new WebSocket(WS_URL); }
   catch (e) { dlog(`WS constructor threw: ${e}`); setConn("● bad url", "#6a1e1e"); return; }
   ws.binaryType = "arraybuffer";
-  activeWs = ws;
   // Poll dispatch_stats so the groups card can show live per-group concurrency.
   // Cheap, so just poll whenever connected (the rsp is ignored if no groups card).
   let statsTimer = 0, cmdId = 1, dashCmdId = -1;
@@ -305,40 +288,30 @@ function connect() {
     dashCmdId = ++cmdId;
     ws.send(JSON.stringify({ type: "cmd", id: dashCmdId, name: "get_dashboard", args: BOARD ? { name: BOARD } : {} }));
   };
-  ws.onopen = () => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); pushImageSubs(); };
+  ws.onopen = () => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); };
   ws.onclose = (e) => { dlog(`WS CLOSE code=${e.code} reason=${e.reason || "-"} clean=${e.wasClean}`); if (statsTimer) { clearInterval(statsTimer); statsTimer = 0; } setConn("● disconnected", "#6a1e1e"); setTimeout(connect, 1500); };
   ws.onerror = () => { dlog("WS ERROR event"); ws.close(); };
   ws.onmessage = (ev) => {
-    if (typeof ev.data === "string") {
-      let m; try { m = JSON.parse(ev.data); } catch { return; }
-      if (m.type === "vars") { const { run_id, items } = parseVars(m); state.run_id = run_id; state.vars = items;
-        // Map each image var's gid → canonical "src" gid so a single deduped
-        // preview frame (one buffer VAR'd by many plugins) fans out to all of them.
-        const g2c = {};
-        for (const nm of Object.keys(items || {})) { const it = items[nm]; if (it && it.gid != null) g2c[it.gid] = it.src != null ? it.src : it.gid; }
-        state.gidToCanon = g2c; scheduleRender(); }
-      else if (m.type === "event" && m.name === "run_finished" && m.data) { if (typeof m.data.ms === "number") state.run_ms = m.data.ms; }
-      // The one per-run verdict (see docs/roadmap/run-result.md). Carries its own
-      // run_id (absent on a dropped frame) so cards can count distinct runs.
-      else if (m.type === "event" && m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
-      else if (m.type === "event" && (m.name === "safe_state" || m.name === "status")) { state.status = m.data; scheduleRender(); }
-      // dispatch_stats reply → feed the groups card.
-      else if (m.type === "rsp" && m.data && Array.isArray(m.data.groups)) { state.groups = m.data.groups; scheduleRender(); }
-      // get_dashboard reply → the project's own dashboard wins over the static one.
-      else if (m.type === "rsp" && m.id === dashCmdId) {
-        if (m.data?.found && m.data.dashboard) { dlog("dashboard from BE (project)"); applyDash(m.data.dashboard); }
-        else dlog("BE has no project dashboard — keeping static");
-      }
-    } else {
-      try { const f = decodePreviewFrame(ev.data);
-        const canon = state.gidToCanon && f.gid in state.gidToCanon ? state.gidToCanon[f.gid] : f.gid;
-        // Decode once here and store the GC-managed <img>; the cards' setFrame
-        // draws the shared handle instead of each decoding the dataUrl again.
-        const im = new Image();
-        im.onload  = () => { state.images[canon] = im; scheduleRender(); };
-        im.onerror = () => { state.images[canon] = f.dataUrl; scheduleRender(); };
-        im.src = f.dataUrl;
-      } catch (e) { console.error(e); }
+    // Generic dashboard host: only text events/replies are consumed. Binary
+    // frames (a plugin's own previews) are ignored here — the plugin's webUI
+    // owns that decode; this page carries no preview/vars/gid wiring.
+    if (typeof ev.data !== "string") return;
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.type === "event" && m.name === "run_finished" && m.data) {
+      if (typeof m.data.run_id === "number") state.run_id = m.data.run_id;
+      if (typeof m.data.ms === "number") state.run_ms = m.data.ms;
+      scheduleRender();
+    }
+    // The one per-run verdict (see docs/roadmap/run-result.md). Carries its own
+    // run_id (absent on a dropped frame) so cards can count distinct runs.
+    else if (m.type === "event" && m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
+    else if (m.type === "event" && (m.name === "safe_state" || m.name === "status")) { state.status = m.data; scheduleRender(); }
+    // dispatch_stats reply → feed the groups card.
+    else if (m.type === "rsp" && m.data && Array.isArray(m.data.groups)) { state.groups = m.data.groups; scheduleRender(); }
+    // get_dashboard reply → the project's own dashboard wins over the static one.
+    else if (m.type === "rsp" && m.id === dashCmdId) {
+      if (m.data?.found && m.data.dashboard) { dlog("dashboard from BE (project)"); applyDash(m.data.dashboard); }
+      else dlog("BE has no project dashboard — keeping static");
     }
   };
 }

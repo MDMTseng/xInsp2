@@ -2,10 +2,13 @@
 // cards.mjs — built-in HMI cards as web components (xInsp2 production HMI v1).
 //
 // Contract (see docs/roadmap/production-hmi.md):
-//   - host sets  el.binding = { var: "name", source? }  and  el.config = {...}
-//   - host calls el.feed({ run_id, vars, images, run_ms, status }) on each update
+//   - host sets  el.binding = {...}  and  el.config = {...}
+//   - host calls el.feed({ run_id, run_ms, status, result, groups }) on each update
 //   - cards never open their own WS; they only render what they're fed.
-// state.vars is a name->item map; state.images is a gid->dataUrl map.
+//
+// These are the GENERIC cards — they read the run_result / run_ms / dispatch_stats
+// streams only. They carry NO preview/vars/gid coupling; a plugin webUI that wants
+// per-VAR value/image/SPC tiles renders those itself from frames it decodes.
 //
 
 const css = `
@@ -22,8 +25,7 @@ function shell(el, title) {
     <div class="hd">${title || ""}</div><div class="body"></div>`;
   return el.shadowRoot.querySelector(".body");
 }
-const titleOf = (el, fallback) => (el.config && el.config.title) || (el.binding && el.binding.var) || fallback;
-const val = (st, b) => (b && st.vars[b.var] ? st.vars[b.var].value : undefined);
+const titleOf = (el, fallback) => (el.config && el.config.title) || fallback;
 
 // Interpret a run_result code into a verdict bucket (see docs/roadmap/run-result.md):
 // >0 ok-class, 0 NA, -1..-989999 ng-class, <=-990000 framework system-fail.
@@ -34,10 +36,8 @@ function classifyResult(code) {
   if (code < 0)            return { kind: "ng",   label: code < -1 ? `NG${-code}` : "NG", color: "#ff5b5b" };
   return                          { kind: "na",   label: "NA",  color: "#ffb454" };  // 0
 }
-// A card consumes the run_result stream when bound `{result:true}` or left unbound.
-const usesResult = (b) => !b || b.result === true || !b.var;
 
-// ---- verdict: big OK/NG tile ------------------------------------------------
+// ---- verdict: big OK/NG tile (run_result) -----------------------------------
 class VerdictCard extends HTMLElement {
   connectedCallback() { this.body = shell(this, titleOf(this, "Verdict"));
     this.body.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center";
@@ -45,82 +45,13 @@ class VerdictCard extends HTMLElement {
     this.sub = document.createElement("div"); this.sub.style.cssText = "font-size:12px;color:#888;max-width:96%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
     this.body.append(this.big, this.sub); }
   feed(st) {
-    const b = this.binding || {};
-    if (usesResult(b)) {                       // run_result mode (the per-run verdict)
-      const r = st.result, c = classifyResult(r ? r.code : null);
-      this.big.textContent = c.label; this.big.style.color = c.color;
-      this.sub.textContent = r && r.msg ? r.msg : "";
-      return;
-    }
-    const v = val(st, b);                       // legacy: bound to a bool/string var
-    const ok = v === true || v === "OK" || v === "ok" || v === "PASS";
-    const ng = v === false || v === "NG" || v === "ng" || v === "FAIL";
-    this.big.textContent = v === undefined ? "—" : (ok ? "OK" : ng ? "NG" : String(v));
-    this.big.style.color = ok ? "#3ad17a" : ng ? "#ff5b5b" : "#ccc";
-    this.sub.textContent = "";
+    const r = st.result, c = classifyResult(r ? r.code : null);
+    this.big.textContent = c.label; this.big.style.color = c.color;
+    this.sub.textContent = r && r.msg ? r.msg : "";
   }
 }
 
-// ---- value: single readout --------------------------------------------------
-class ValueCard extends HTMLElement {
-  connectedCallback() { this.body = shell(this, titleOf(this, "Value"));
-    this.body.style.cssText = "display:flex;align-items:center;justify-content:center;font-size:clamp(16px,5vw,40px);font-weight:600"; }
-  feed(st) { const v = val(st, this.binding);
-    this.body.textContent = v === undefined ? "—" : (typeof v === "number" ? (+v.toFixed(this.config?.decimals ?? 3)) : String(v)); }
-}
-
-// ---- image: base output image (now backed by xi-image-viewer) ---------------
-// Uses the shared <xi-image-viewer> (ui-components) so the HMI image card gets
-// cursor-anchored zoom / pan / pixel-probe for free — one library, many
-// consumers. setFrame is attached by the element's effect on connect, so feed()
-// guards its presence (the card may feed before the element upgrades).
-class ImageCard extends HTMLElement {
-  connectedCallback() { this.body = shell(this, titleOf(this, "Image"));
-    this.body.style.cssText = "padding:0";
-    this.viewer = document.createElement("xi-image-viewer");
-    this.viewer.style.cssText = "width:100%;height:100%;display:block";
-    this.body.appendChild(this.viewer); }
-  feed(st) { const it = this.binding && st.vars[this.binding.var];
-    // Images dedup by canonical gid ("src" — shared when one buffer is VAR'd by
-    // many plugins); the preview is stored under canon, so read by canon.
-    const ckey = it ? (it.src != null ? it.src : it.gid) : undefined;
-    const url = it && ckey != null ? st.images[ckey] : undefined;
-    if (url && url !== this._u && typeof this.viewer.setFrame === "function") { this.viewer.setFrame(url); this._u = url; } }
-}
-
-// ---- spc: rolling trend + control lines -------------------------------------
-class SpcCard extends HTMLElement {
-  connectedCallback() { this.body = shell(this, titleOf(this, "SPC")); this.buf = []; this.last = -1;
-    this.cv = document.createElement("canvas"); this.cv.style.cssText = "width:100%;height:100%";
-    this.body.appendChild(this.cv); }
-  feed(st) {
-    if (st.run_id !== this.last) { this.last = st.run_id;
-      const v = val(st, this.binding);
-      if (typeof v === "number") { this.buf.push(v); const w = this.config?.window || 100; if (this.buf.length > w) this.buf.shift(); }
-    }
-    this.draw();
-  }
-  draw() {
-    const c = this.cv, b = c.getBoundingClientRect(); if (!b.width) return;
-    c.width = b.width; c.height = b.height; const g = c.getContext("2d");
-    g.clearRect(0, 0, c.width, c.height);
-    if (!this.buf.length) return;
-    const mean = this.config?.mean ?? this.buf.reduce((a, x) => a + x, 0) / this.buf.length;
-    const ucl = this.config?.ucl, lcl = this.config?.lcl;
-    let lo = Math.min(...this.buf), hi = Math.max(...this.buf);
-    if (ucl != null) hi = Math.max(hi, ucl); if (lcl != null) lo = Math.min(lo, lcl);
-    const pad = (hi - lo) * 0.1 || 1; lo -= pad; hi += pad;
-    const Y = (v) => c.height - ((v - lo) / (hi - lo)) * c.height;
-    const line = (v, col, dash) => { if (v == null) return; g.strokeStyle = col; g.setLineDash(dash || []);
-      g.beginPath(); g.moveTo(0, Y(v)); g.lineTo(c.width, Y(v)); g.stroke(); g.setLineDash([]); };
-    line(mean, "#666"); line(ucl, "#ff5b5b", [4, 3]); line(lcl, "#ff5b5b", [4, 3]);
-    g.strokeStyle = "#4aa0f0"; g.lineWidth = 1.5; g.beginPath();
-    this.buf.forEach((v, i) => { const x = (i / Math.max(1, this.buf.length - 1)) * c.width;
-      i ? g.lineTo(x, Y(v)) : g.moveTo(x, Y(v)); }); g.stroke();
-  }
-}
-
-// ---- throughput: parts/min + cycle time -------------------------------------
+// ---- throughput: parts/min + cycle time (run_ms) ----------------------------
 class ThroughputCard extends HTMLElement {
   connectedCallback() { this.body = shell(this, this.config?.title || "Throughput"); this.buf = []; this.last = -1;
     this.body.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px";
@@ -136,7 +67,7 @@ class ThroughputCard extends HTMLElement {
   }
 }
 
-// ---- yield: OK/NG counts + pass-rate % --------------------------------------
+// ---- yield: OK/NG counts + pass-rate % (run_result) -------------------------
 class YieldCard extends HTMLElement {
   connectedCallback() { this.body = shell(this, this.config?.title || "Yield"); this.ok = 0; this.ng = 0; this.last = -1;
     this.body.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px";
@@ -144,16 +75,11 @@ class YieldCard extends HTMLElement {
     this.sub = document.createElement("div"); this.sub.style.cssText = "font-size:12px;color:#888";
     this.body.append(this.big, this.sub); }
   feed(st) {
-    const b = this.binding || {};
-    if (usesResult(b)) {                        // count from run_result (inspected runs)
-      const r = st.result;
-      if (r && r.run_id != null && r.run_id !== this.last) { this.last = r.run_id;
-        const c = classifyResult(r.code);
-        if (c.kind === "ok") this.ok++; else if (c.kind === "ng") this.ng++;
-        else if (c.kind === "na") this.na = (this.na || 0) + 1; }
-    } else if (st.run_id !== this.last) {        // legacy: bound to a bool/string var
-      this.last = st.run_id; const v = val(st, b);
-      if (v !== undefined) { const ok = v === true || v === "OK" || v === "ok" || v === "PASS"; ok ? this.ok++ : this.ng++; } }
+    const r = st.result;                          // count from run_result (inspected runs)
+    if (r && r.run_id != null && r.run_id !== this.last) { this.last = r.run_id;
+      const c = classifyResult(r.code);
+      if (c.kind === "ok") this.ok++; else if (c.kind === "ng") this.ng++;
+      else if (c.kind === "na") this.na = (this.na || 0) + 1; }
     const n = this.ok + this.ng, pct = n ? (100 * this.ok / n) : 0;
     this.big.textContent = `${pct.toFixed(1)}%`; this.big.style.color = pct >= (this.config?.warn ?? 95) ? "#3ad17a" : "#ffb454";
     this.sub.textContent = `OK ${this.ok} / NG ${this.ng}` + (this.na ? ` · NA ${this.na}` : "");
@@ -199,7 +125,6 @@ class GroupsCard extends HTMLElement {
 }
 
 export const CARDS = {
-  verdict: VerdictCard, value: ValueCard, image: ImageCard,
-  spc: SpcCard, throughput: ThroughputCard, yield: YieldCard, groups: GroupsCard,
+  verdict: VerdictCard, throughput: ThroughputCard, yield: YieldCard, groups: GroupsCard,
 };
 for (const [k, C] of Object.entries(CARDS)) customElements.define(`xi-card-${k}`, C);

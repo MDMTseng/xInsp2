@@ -12,7 +12,7 @@ import { isLeaf, isSplit, isTabs, weightsOf } from "./layout.mjs";
 export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
   const doc = host.ownerDocument || globalThis.document;
   const raf = globalThis.requestAnimationFrame || ((cb) => setTimeout(cb, 16));
-  const state = { run_id: -1, vars: {}, images: {}, run_ms: null, status: null, result: null, groups: [] };
+  const state = { run_id: -1, run_ms: null, status: null, result: null, groups: [] };
   let cards = [], rafId = 0;
 
   function scheduleRender() {
@@ -70,32 +70,10 @@ export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
     return box;
   }
 
-  // Image cards only render once the backend streams their preview, and the
-  // backend streams nothing unsubscribed. So subscribe to the var of every image
-  // card in the current layout; re-diffed whenever the layout changes.
-  let imgSubs = [];
-  function collectImageVars(node, out) {
-    if (!node) return out;
-    if (isLeaf(node)) { const c = node.card; if (c && c.type === "image" && c.bind && c.bind.var) out.push(c.bind.var); }
-    else if (isTabs(node)) (node.tabs || []).forEach((t) => collectImageVars(t.child || t, out));
-    else if (isSplit(node)) (node.children || []).forEach((c) => collectImageVars(c, out));
-    return out;
-  }
-  function updateImageSubs() {
-    // Sub/unsub only the DELTA (unique names) — re-subscribing the whole set on
-    // every render would flap ref-counts and double-send subscribe commands.
-    const next = [...new Set(collectImageVars(dashboard && dashboard.layout, []))];
-    const nextSet = new Set(next), prevSet = new Set(imgSubs);
-    for (const v of imgSubs) if (!nextSet.has(v)) client.unsubscribeImage?.(v);
-    for (const v of next) if (!prevSet.has(v)) client.subscribeImage?.(v);
-    imgSubs = next;
-  }
-
   function render() {
     cards = [];
     host.replaceChildren();
     host.style.cssText += ";display:flex;min-width:0;min-height:0";
-    updateImageSubs();
     const lay = dashboard && dashboard.layout;
     if (!lay) return;
     const el = renderNode(lay); el.style.flex = "1 1 0"; el.style.minWidth = "0"; el.style.minHeight = "0";
@@ -103,28 +81,15 @@ export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
     scheduleRender();
   }
 
-  // Live streams (built on the shared XiClient — the HMI's own protocol/WS too).
+  // Live streams (built on the shared generic XiClient). The dashboard cards are
+  // fed only by the run_result / run_finished / status events + dispatch_stats.
   const offs = [
-    client.onVars((v) => {
-      state.run_id = v.run_id; state.vars = v.items;
-      // Map each image var's gid → its canonical gid so a single deduped preview
-      // frame resolves to the canon key the cards read from.
-      const g2c = {};
-      for (const name of Object.keys(v.items || {})) {
-        const it = v.items[name];
-        if (it && it.gid != null) g2c[it.gid] = it.src != null ? it.src : it.gid;
-      }
-      state.gidToCanon = g2c;
-      scheduleRender();
-    }),
-    client.onPreview((f) => {
-      const canon = state.gidToCanon && f.gid in state.gidToCanon ? state.gidToCanon[f.gid] : f.gid;
-      // Shared decoded handle (decoded once in XiClient); dataUrl fallback.
-      state.images[canon] = f.image || f.dataUrl;
-      scheduleRender();
-    }),
     client.onEvent((m) => {
-      if (m.name === "run_finished" && m.data && typeof m.data.ms === "number") state.run_ms = m.data.ms;
+      if (m.name === "run_finished" && m.data) {
+        if (typeof m.data.run_id === "number") state.run_id = m.data.run_id;
+        if (typeof m.data.ms === "number") state.run_ms = m.data.ms;
+        scheduleRender();
+      }
       else if (m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
       else if (m.name === "safe_state" || m.name === "status") { state.status = m.data; scheduleRender(); }
     }),
@@ -141,8 +106,6 @@ export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
     state,
     destroy() {
       offs.forEach((off) => off());
-      for (const v of imgSubs) client.unsubscribeImage?.(v);
-      imgSubs = [];
       clearInterval(statsTimer); host.replaceChildren();
     },
   };

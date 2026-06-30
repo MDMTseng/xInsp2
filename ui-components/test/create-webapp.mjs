@@ -17,7 +17,7 @@ test("createWebapp scaffolds a runnable library-import project", () => {
 
     const app = readFileSync(join(outDir, "app.mjs"), "utf8");
     assert.match(app, /from "\.\/xi-components\.esm\.js"/, "imports the library");
-    assert.match(app, /mountPanel|mountMonitor/, "composes panel + monitor");
+    assert.match(app, /mountPanel/, "composes a control panel");
     assert.match(app, /ws:\/\/plc-host:7823\//, "ws url baked in");
     assert.match(app, /checkVersion/, "version-pinned connect");
 

@@ -4,27 +4,25 @@
     "active": 0,
     "tabs": [
       { "name": "Overview", "child": {
-        "dir": "col", "weights": [3, 1],
+        "dir": "col", "weights": [2, 1],
         "children": [
-          { "dir": "row", "weights": [2, 5, 2], "children": [
-            { "card": { "type": "verdict", "bind": { "result": true }, "config": { "title": "Result" } } },
-            { "card": { "type": "image", "bind": { "var": "result" }, "config": { "title": "Inspection" } } },
-            { "dir": "col", "weights": [1, 1], "children": [
-              { "card": { "type": "spc", "bind": { "var": "fg_pct" }, "config": { "title": "fg_pct (SPC)", "window": 120, "ucl": 0.6, "lcl": 0.4 } } },
-              { "card": { "type": "yield", "bind": { "result": true }, "config": { "title": "Yield", "warn": 90 } } }
-            ] }
-          ] },
           { "dir": "row", "weights": [1, 1], "children": [
-            { "card": { "type": "throughput", "config": { "title": "Throughput" } } },
-            { "card": { "type": "value", "bind": { "var": "fg_pct" }, "config": { "title": "fg_pct", "decimals": 3 } } }
+            { "card": { "type": "verdict", "bind": { "result": true }, "config": { "title": "Result" } } },
+            { "card": { "type": "yield", "bind": { "result": true }, "config": { "title": "Yield", "warn": 90 } } }
+          ] },
+          { "dir": "row", "weights": [1], "children": [
+            { "card": { "type": "throughput", "config": { "title": "Throughput" } } }
           ] }
         ]
       } },
-      { "name": "Trends", "child": {
-        "dir": "row", "weights": [3, 1],
+      { "name": "Groups", "child": {
+        "dir": "col", "weights": [3, 1],
         "children": [
-          { "card": { "type": "spc", "bind": { "var": "fg_pct" }, "config": { "title": "fg_pct (long window)", "window": 300, "ucl": 0.6, "lcl": 0.4 } } },
-          { "card": { "type": "yield", "bind": { "result": true }, "config": { "title": "Yield" } } }
+          { "card": { "type": "groups", "config": { "title": "Dispatch groups — live running / max_parallel" } } },
+          { "dir": "row", "weights": [1, 1], "children": [
+            { "card": { "type": "verdict", "bind": { "result": true }, "config": { "title": "Last result" } } },
+            { "card": { "type": "throughput", "config": { "title": "Throughput" } } }
+          ] }
         ]
       } }
     ]
