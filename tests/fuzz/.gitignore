@@ -1,0 +1,4 @@
+# Per-run fuzz artifacts (written next to the harnesses)
+_results_*.json
+_run_smoke_summary.json
+_run_all_summary.json
