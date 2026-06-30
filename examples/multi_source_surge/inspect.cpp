@@ -10,25 +10,25 @@
 //        source_variable  → detector_slow
 //   3. Each detector sleeps inside process() — the work that
 //      dispatch_threads is meant to overlap.
-//   4. Emit VARs naming the source so the driver can attribute every
-//      inspect end-to-end:
-//        src                — short string identifying source
-//        seq                — frame seq from source
-//        latency_us         — now - emit_ts (end-to-end)
-//        queue_wait_us      — dequeued_at - emit_ts (time spent in queue)
-//        inspect_us         — now - dequeued_at (time inside this script)
-//        used_fast / used_slow — booleans
-//        fast_total / slow_total — detector's running counter for THIS src
+//   4. Surface a tiny per-inspect record to the `expose` sink (channel
+//      "runs") so the driver can confirm fan-in correctness — that every
+//      source got routed and which detector(s) each inspect used:
+//        src                — short string identifying the source
+//        seq                — frame seq from the source
+//        used_fast/used_slow — which detector(s) ran
+//      (The former latency/queue/inspect-timing VARs were pure
+//      observability and were dropped with the VAR model; throughput is
+//      now measured from the backend's `run_finished` events.)
 //
 // Reentrancy: no script-level mutable state. xi::current_trigger() is
 // thread-local (each dispatch thread sees its own slot via the host
 // trigger callbacks). Two detector instances are reentrant by
-// construction (atomic counters + small mutex on per-src map).
+// construction (atomic counters + small mutex on per-src map). The
+// expose sink is reentrant (mutex-guarded).
 
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
 
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -61,67 +61,40 @@ const char* tag_to_str(uint64_t t) {
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int /*frame*/) {
     auto t = xi::current_trigger();
-    VAR(active, t.is_active());
     if (!t.is_active()) return;
 
     // Find the source name in this trigger's set. POLICY_ANY means
-    // exactly one entry on each event; we still iterate to be robust
-    // and to surface a friction point if the assumption breaks.
+    // exactly one entry on each event; we still iterate to be robust.
     auto srcs = t.sources();
-    VAR(n_sources, (int)srcs.size());
-    if (srcs.empty()) {
-        VAR(error, std::string("no_sources"));
-        return;
-    }
+    if (srcs.empty()) return;
     const std::string& source = srcs[0];
 
     auto img = t.image(source);
-    VAR(has_img, !img.empty());
-    if (img.empty() || img.data() == nullptr) {
-        VAR(error, std::string("empty_image:") + source);
-        return;
-    }
+    if (img.empty() || img.data() == nullptr) return;
 
     uint64_t seq_u64 = 0, src_tag = 0;
     std::memcpy(&seq_u64, img.data(),     sizeof(seq_u64));
     std::memcpy(&src_tag, img.data() + 8, sizeof(src_tag));
 
-    int64_t ts_emit    = t.timestamp_us();
-    int64_t ts_dequeue = t.dequeued_at_us();
-
-    VAR(src,            std::string(tag_to_str(src_tag)));
-    VAR(src_name,       source);
-    VAR(seq,            (int)(seq_u64 & 0x7fffffff));
-    VAR(emit_ts_us,     (double)ts_emit);
-    VAR(dequeue_ts_us,  (double)ts_dequeue);
-
     bool route_fast = (src_tag == TAG_STEADY) || (src_tag == TAG_BURST);
     bool route_slow = (src_tag == TAG_BURST)  || (src_tag == TAG_VARIABLE);
 
-    VAR(used_fast, route_fast);
-    VAR(used_slow, route_slow);
-
     if (route_fast) {
         auto& det = xi::use("detector_fast");
-        auto out = det.process(xi::Record().image("img", img));
-        VAR(fast_total,   out["processed_total"].as_int(-1));
-        VAR(fast_for_src, out["processed_for_src"].as_int(-1));
+        (void)det.process(xi::Record().image("img", img));
     }
     if (route_slow) {
         auto& det = xi::use("detector_slow");
-        auto out = det.process(xi::Record().image("img", img));
-        VAR(slow_total,   out["processed_total"].as_int(-1));
-        VAR(slow_for_src, out["processed_for_src"].as_int(-1));
+        (void)det.process(xi::Record().image("img", img));
     }
 
-    int64_t now      = xi::now_us();
-    int64_t lat_v    = now - ts_emit;     // end-to-end
-    int64_t qwait_v  = (ts_dequeue > 0) ? (ts_dequeue - ts_emit) : 0;
-    int64_t insp_v   = (ts_dequeue > 0) ? (now - ts_dequeue) : lat_v;
-    if (lat_v < 0)   lat_v   = 0;
-    if (qwait_v < 0) qwait_v = 0;
-    if (insp_v < 0)  insp_v  = 0;
-    VAR(latency_us,    (double)lat_v);
-    VAR(queue_wait_us, (double)qwait_v);
-    VAR(inspect_us,    (double)insp_v);
+    // Surface per-inspect attribution for the driver's fan-in check.
+    xi::Record rec;
+    rec.set("src",       std::string(tag_to_str(src_tag)))
+       .set("src_name",  source)
+       .set("seq",       (int)(seq_u64 & 0x7fffffff))
+       .set("used_fast", route_fast)
+       .set("used_slow", route_slow)
+       .set("$channel",  "runs");
+    xi::use("expose").process(rec);
 }

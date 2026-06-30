@@ -1,11 +1,17 @@
 // inspect.cpp — parallel_inspect_demo: simulates a slow per-frame
 // CV pipeline (sleep_for 100ms) so the parallel-dispatch effect is
-// directly visible in latency.
+// directly visible in throughput.
 //
 // Each trigger event fires xi_inspect_entry on whichever dispatcher
 // thread the host's pool picked. With N sources firing in lockstep
 // (simulated hardware-synchronized cameras) and dispatch_threads=N,
 // the wall-clock inspect time is ~100ms total instead of ~N*100ms.
+//
+// VAR was removed from core. To let the driver count *active* inspects
+// (the slow 100 ms ones — the metric this demo is about, as opposed to
+// the cheap inactive timer ticks that also fire run_finished), each
+// active inspect pushes one tiny record to the `expose` sink on channel
+// "runs". The driver subscribes and counts the decoded XEX1 frames.
 
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
@@ -16,13 +22,7 @@
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int /*frame*/) {
     auto t = xi::current_trigger();
-    VAR(active, t.is_active());
     if (!t.is_active()) return;
-
-    int64_t t_start = xi::now_us();
-    VAR(src,         t.primary_source());
-    VAR(emit_ts_us,  (double)t.timestamp_us());
-    VAR(start_ts_us, (double)t_start);
 
     // Simulate 100 ms of CV work. Real workloads use cv::Canny / template
     // match / a deep model — same shape: CPU-bound for tens to hundreds
@@ -30,7 +30,8 @@ void xi_inspect_entry(int /*frame*/) {
     // wall-clock cost when N triggers arrive simultaneously.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    int64_t t_end = xi::now_us();
-    VAR(end_ts_us, (double)t_end);
-    VAR(inspect_us, (double)(t_end - t_start));
+    // Mark this active inspect as completed for the driver's rate count.
+    xi::Record rec;
+    rec.set("src", t.primary_source()).set("$channel", "runs");
+    xi::use("expose").process(rec);
 }

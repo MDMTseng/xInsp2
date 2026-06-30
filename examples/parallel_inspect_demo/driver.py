@@ -21,6 +21,14 @@ If dispatch_threads=1, the pipeline tops out at ~10 inspects/sec
 (serialised on a 100 ms stage). With dispatch_threads=3, three
 inspects run in parallel and we expect ~30 inspects/sec.
 
+Throughput is measured by counting *active* inspects (the slow 100 ms
+ones — the metric this demo is about). The per-event VAR model was
+removed from core, so each active inspect pushes a tiny record to the
+`expose` sink on channel "runs"; the driver subscribes and counts the
+decoded XEX1 frames. (Counting raw `run_finished` events would also
+sweep in the cheap inactive timer ticks that fire between source events,
+diluting the rate this demo is meant to show.)
+
 Run from this dir:
 
     python driver.py
@@ -28,15 +36,15 @@ Run from this dir:
 from __future__ import annotations
 
 import json
-import statistics
 import subprocess
 import sys
 import time
-from collections import Counter
 from pathlib import Path
-from queue import Empty
 
 from xinsp2 import Client
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from xex1 import collect_frames, subscribe   # noqa: E402
 
 ROOT = Path(__file__).parent
 INSPECT_CPP = ROOT / "inspect.cpp"
@@ -54,10 +62,7 @@ def set_dispatch_threads(n: int) -> None:
 
 
 def drain(c: Client) -> None:
-    for q in (c._inbox_vars, c._inbox_previews):
-        try:
-            while True: q.get_nowait()
-        except Empty: pass
+    c.drain_binary()
 
 
 def measure(label: str, n_threads: int) -> dict:
@@ -73,50 +78,42 @@ def measure(label: str, n_threads: int) -> dict:
         with Client() as c:
             c.open_project(str(ROOT), timeout=180)
             c.compile_and_load(str(INSPECT_CPP))
+            # Subscribe so the expose sink pushes a frame per active
+            # inspect (subscription is reset by open_project).
+            subscribe(c, ["runs"])
             time.sleep(0.3)
             drain(c)
 
             c.call("start", {"fps": 100})
             time.sleep(0.5)
+            # Clear warmup frames so the window count only reflects this
+            # measurement.
             drain(c)
 
             t0 = time.monotonic()
-            arrivals: list[float] = []
-            inspect_us_samples: list[float] = []
-            by_src: Counter = Counter()
+            # Count active inspects via the expose "runs" frames — one per
+            # 100 ms inspect; that IS the effective rate.
+            n = 0
             deadline = t0 + COLLECT_S
             while time.monotonic() < deadline:
-                rem = deadline - time.monotonic()
-                try:
-                    ev = c._inbox_vars.get(timeout=min(0.05, max(0.005, rem)))
-                except Empty:
-                    continue
-                items = {it["name"]: it.get("value")
-                         for it in (ev.get("items") or [])}
-                if items.get("active") is True:
-                    arrivals.append(time.monotonic())
-                    src = items.get("src")
-                    if src: by_src[src] += 1
-                    iu = items.get("inspect_us")
-                    if isinstance(iu, (int, float)): inspect_us_samples.append(iu)
+                for fr in collect_frames(c):
+                    if fr.get("channel") == "runs":
+                        n += 1
+                time.sleep(0.02)
 
             c.call("stop")
+            # Catch any trailing frames before tearing down.
+            for fr in collect_frames(c):
+                if fr.get("channel") == "runs":
+                    n += 1
             c.call("close_project")
 
             elapsed = time.monotonic() - t0
-            n = len(arrivals)
             rate = n / elapsed if elapsed > 0 else 0
-            print(f"  active inspects   : {n}")
+            print(f"  active inspects   : {n}  (per-call work ~{INSPECT_MS} ms)")
             print(f"  effective rate    : {rate:.1f}/s")
-            print(f"  by_src            : {dict(by_src)}")
-            if inspect_us_samples:
-                im = statistics.mean(inspect_us_samples) / 1000
-                ip = sorted(inspect_us_samples)[
-                         int(len(inspect_us_samples) * 0.95)] / 1000
-                print(f"  inspect_us mean   : {im:.1f} ms (~{INSPECT_MS} expected)")
-                print(f"  inspect_us p95    : {ip:.1f} ms")
             return {"n_threads": n_threads, "elapsed_s": elapsed,
-                    "active": n, "rate_hz": rate, "by_src": dict(by_src)}
+                    "active": n, "rate_hz": rate}
     finally:
         proc.terminate()
         try: proc.wait(timeout=3)

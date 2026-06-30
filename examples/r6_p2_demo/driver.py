@@ -22,6 +22,9 @@ from queue import Empty
 
 from xinsp2 import Client
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from xex1 import collect_frames, pull_latest, subscribe   # noqa: E402
+
 ROOT = Path(__file__).parent
 COLLECT_S = 1.5
 
@@ -104,8 +107,12 @@ def main() -> int:
             results.append(("P2-4 exchange_unknown_command", FAIL,
                             f"call raised: {e!r}"))
 
-        # P2-2 + P2-5: run for a moment, collect VAR events, assert the
-        # script-side accessors returned the right values.
+        # P2-2 + P2-5: run for a moment and assert the script-side
+        # accessors returned the right values. VAR was removed from core,
+        # so the script now pushes each active trigger's accessor values
+        # to the `expose` sink on channel "probe"; we subscribe and decode
+        # the XEX1 frames here.
+        subscribe(c, ["probe"])
         c.call("start", {"fps": 1})
 
         primary_seen   = set()
@@ -113,21 +120,31 @@ def main() -> int:
         has_other_seen = set()
         n_sources_seen = set()
 
+        def absorb(values: dict) -> None:
+            if "primary"   in values: primary_seen.add(values["primary"])
+            if "has_main"  in values: has_main_seen.add(values["has_main"])
+            if "has_other" in values: has_other_seen.add(values["has_other"])
+            if "n_sources" in values: n_sources_seen.add(values["n_sources"])
+
         deadline = time.monotonic() + COLLECT_S
         while time.monotonic() < deadline:
-            try:
-                ev = c._inbox_vars.get(timeout=0.1)
-            except Empty:
-                continue
-            items = {it["name"]: it.get("value") for it in (ev.get("items") or [])}
-            if items.get("active") is not True:
-                continue
-            if "primary"   in items: primary_seen.add(items["primary"])
-            if "has_main"  in items: has_main_seen.add(items["has_main"])
-            if "has_other" in items: has_other_seen.add(items["has_other"])
-            if "n_sources" in items: n_sources_seen.add(items["n_sources"])
+            for fr in collect_frames(c):
+                if fr.get("channel") == "probe":
+                    absorb(fr.get("values") or {})
+            time.sleep(0.05)
 
         c.call("stop")
+
+        # Drain any frames that landed after the last poll, and fall back
+        # to a direct pull if the live binary stream delivered nothing
+        # (e.g. fps=1 produced only a frame or two).
+        for fr in collect_frames(c):
+            if fr.get("channel") == "probe":
+                absorb(fr.get("values") or {})
+        if not primary_seen:
+            fr = pull_latest(c, "probe")
+            if fr:
+                absorb(fr.get("values") or {})
 
         results.append(("P2-2 primary_source == src_main",
                         OK if primary_seen == {"src_main"} else FAIL,

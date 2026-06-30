@@ -25,17 +25,18 @@ Two parallelism configurations:
     sweep A — dispatch_threads=1, queue_depth=32  (serial baseline)
     sweep B — dispatch_threads=8, queue_depth=128 (wide parallel)
 
-For each sweep:
-    1. Edit project.json's parallelism block.
-    2. open_project (force re-read parallelism + re-instantiate).
-    3. compile_and_load inspect.cpp.
-    4. Snapshot dispatch_stats.
-    5. cmd:start fps=200  (timer thread tick rate; not the source's fps).
-    6. Drain vars events for DURATION_S, scheduling burst commands at
-       the timestamps above via exchange_instance.
-    7. cmd:stop.
-    8. Snapshot dispatch_stats.
-    9. Per-source / per-detector accounting.
+Measurement
+-----------
+The per-event VAR model was removed from core, so throughput and
+attribution are gathered two generic ways:
+
+  * Throughput  — the backend emits a `run_finished` lifecycle event per
+    dispatched inspect; we count those over the sweep window (generic
+    client events inbox).
+  * Fan-in / routing — inspect.cpp pushes a tiny record per active
+    inspect to the `expose` sink (channel "runs") carrying src + which
+    detector(s) ran. We subscribe to "runs" and decode the XEX1 frames
+    via examples/lib/xex1.py to confirm every source got routed.
 
 Outputs
 -------
@@ -45,15 +46,17 @@ interpretation lives in RESULTS.md, friction points in FRICTION.md.
 from __future__ import annotations
 
 import json
-import statistics
 import sys
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from queue import Empty
 
 from xinsp2 import Client, ProtocolError
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from xex1 import collect_frames, subscribe   # noqa: E402
 
 ROOT = Path(__file__).parent
 PROJECT_JSON = ROOT / "project.json"
@@ -87,29 +90,42 @@ def write_parallelism(dispatch_threads: int, queue_depth: int,
 
 
 def drain(c: Client) -> None:
-    for q in (c._inbox_vars, c._inbox_previews):
-        try:
-            while True:
-                q.get_nowait()
-        except Empty:
-            pass
+    """Clear lifecycle events and any queued binary (expose) frames."""
+    try:
+        while True:
+            c._inbox_events.get_nowait()
+    except Empty:
+        pass
+    c.drain_binary()
 
 
-def collect_vars(c: Client, duration_s: float) -> list[dict]:
-    events = []
+def collect_window(c: Client, duration_s: float) -> tuple[int, list[dict]]:
+    """Run the sweep window: count `run_finished` events for throughput and
+    decode the `expose` "runs" frames for per-source attribution.
+
+    Returns (run_finished_count, frames) where each frame is the decoded
+    XEX1 record {channel, seq, values, images}.
+    """
+    finished = 0
+    frames: list[dict] = []
     deadline = time.time() + duration_s
     while time.time() < deadline:
         rem = deadline - time.time()
         try:
-            ev = c._inbox_vars.get(timeout=min(0.2, max(0.02, rem)))
+            ev = c._inbox_events.get(timeout=min(0.1, max(0.02, rem)))
         except Empty:
-            continue
-        flat = {}
-        for it in ev.get("items") or []:
-            flat[it["name"]] = it.get("value")
-        flat["_run_id"] = ev.get("run_id")
-        events.append(flat)
-    return events
+            ev = None
+        if ev is not None and ev.get("name") == "run_finished":
+            finished += 1
+        # Drain whatever expose frames have arrived so far.
+        for fr in collect_frames(c):
+            if fr.get("channel") == "runs":
+                frames.append(fr)
+    # Catch any trailing frames.
+    for fr in collect_frames(c):
+        if fr.get("channel") == "runs":
+            frames.append(fr)
+    return finished, frames
 
 
 def schedule_surges(c: Client, t0: float, plan: list[tuple]) -> threading.Thread:
@@ -130,85 +146,54 @@ def schedule_surges(c: Client, t0: float, plan: list[tuple]) -> threading.Thread
     return th
 
 
-def summarise(events: list[dict], stats_before: dict, stats_after: dict,
+def summarise(finished: int, frames: list[dict], stats_after: dict,
               duration_s: float, label: str) -> dict:
-    active_events = [e for e in events
-                     if e.get("active") is True and "seq" in e]
-    n_total  = len(events)
-    n_active = len(active_events)
-    n_inactive = sum(1 for e in events if e.get("active") is False)
+    """Reduce the run_finished count + decoded expose frames into the
+    sweep's headline metrics. `active` == number of expose frames, since
+    each active inspect pushes exactly one."""
+    values = [fr.get("values") or {} for fr in frames]
+    n_active = len(values)
 
-    by_src = Counter(e.get("src") or "?" for e in active_events)
-    seq_per_src: dict[str, list[int]] = defaultdict(list)
-    for e in active_events:
-        s = e.get("src") or "?"
-        if isinstance(e.get("seq"), (int, float)):
-            seq_per_src[s].append(int(e["seq"]))
+    by_src = Counter(v.get("src") or "?" for v in values)
+    seq_per_src: dict[str, list[int]] = {}
+    for v in values:
+        s = v.get("src") or "?"
+        if isinstance(v.get("seq"), (int, float)):
+            seq_per_src.setdefault(s, []).append(int(v["seq"]))
 
-    n_used_fast = sum(1 for e in active_events if e.get("used_fast") is True)
-    n_used_slow = sum(1 for e in active_events if e.get("used_slow") is True)
-    n_used_both = sum(1 for e in active_events
-                      if e.get("used_fast") is True and e.get("used_slow") is True)
-
-    lats = [float(e["latency_us"]) for e in active_events
-            if isinstance(e.get("latency_us"), (int, float))]
-    qwaits = [float(e["queue_wait_us"]) for e in active_events
-              if isinstance(e.get("queue_wait_us"), (int, float))]
-    insps  = [float(e["inspect_us"]) for e in active_events
-              if isinstance(e.get("inspect_us"), (int, float))]
-
-    def _stats(xs):
-        if not xs:
-            return None, None, None
-        return (statistics.mean(xs),
-                statistics.median(xs),
-                sorted(xs)[max(0, int(len(xs)*0.95)-1)])
+    n_used_fast = sum(1 for v in values if v.get("used_fast") is True)
+    n_used_slow = sum(1 for v in values if v.get("used_slow") is True)
+    n_used_both = sum(1 for v in values
+                      if v.get("used_fast") is True and v.get("used_slow") is True)
 
     # cmd:start resets the drop counters and the high watermark (see
     # backend/src/service_main.cpp `name == "start"`); stats_after's
-    # values therefore represent *this sweep* in isolation. We don't
-    # subtract stats_before — that would underflow when the previous
-    # sweep accumulated drops the current cmd:start has since cleared.
-    drops = stats_after.get("dropped_oldest", 0) + \
-            stats_after.get("dropped_newest", 0)
-    qmax = stats_after.get("queue_depth_high_watermark", 0)
-    qcap = stats_after.get("queue_depth_cap", 0)
+    # values therefore represent *this sweep* in isolation. The real
+    # dispatch_stats fields are `dropped` (single overflow counter) and
+    # `queue_depth_high_watermark` / `queue_depth_cap`.
+    drops = stats_after.get("dropped", 0) or 0
+    qmax = stats_after.get("queue_depth_high_watermark", 0) or 0
+    qcap = stats_after.get("queue_depth_cap", 0) or 0
 
-    throughput = n_active / duration_s if duration_s > 0 else 0.0
+    throughput = finished / duration_s if duration_s > 0 else 0.0
 
     print(f"[{label}]")
-    print(f"  vars events received           : {n_total}")
-    print(f"  active inspects (with seq)     : {n_active}")
-    print(f"  inactive (timer-only ticks)    : {n_inactive}")
+    print(f"  run_finished events (window)   : {finished}")
+    print(f"  active inspects (expose frames): {n_active}")
     print(f"  by source                      : {dict(by_src)}")
     print(f"  used fast / slow / both        : {n_used_fast} / {n_used_slow} / {n_used_both}")
-    if lats:
-        print(f"  latency_us    mean / median / p95: "
-              f"{statistics.mean(lats):.0f} / "
-              f"{statistics.median(lats):.0f} / "
-              f"{sorted(lats)[max(0, int(len(lats)*0.95)-1)]:.0f}")
-    if qwaits:
-        m, md, p95 = _stats(qwaits)
-        print(f"  queue_wait_us mean / median / p95: "
-              f"{m:.0f} / {md:.0f} / {p95:.0f}")
-    if insps:
-        m, md, p95 = _stats(insps)
-        print(f"  inspect_us    mean / median / p95: "
-              f"{m:.0f} / {md:.0f} / {p95:.0f}")
-    print(f"  throughput (active / sec)      : {throughput:.1f}")
+    print(f"  throughput (run_finished / sec): {throughput:.1f}")
     print(f"  dispatch_stats AFTER           : {stats_after}")
     print(f"  drops during sweep             : {drops}")
     print(f"  queue peak / cap               : {qmax} / {qcap}")
 
-    # Sequence-attribution sanity: each source's seqs should be
-    # monotonically issued; we check unique-count vs max-min span to
-    # catch routing bugs (a frame attributed to wrong source).
+    # Sequence-attribution sanity: each source's seqs should be unique
+    # within the window; duplicates would point at a routing/fan-in bug.
     attr_warnings = []
     for s, seqs in seq_per_src.items():
         if not seqs:
             continue
         uniq = len(set(seqs))
-        # We're sampling under drops; check the basic monotonic property.
         if uniq != len(seqs):
             attr_warnings.append(f"  {s}: {len(seqs) - uniq} duplicate seq values")
     if attr_warnings:
@@ -218,7 +203,7 @@ def summarise(events: list[dict], stats_before: dict, stats_after: dict,
 
     return {
         "label":       label,
-        "events":      n_total,
+        "finished":    finished,
         "active":      n_active,
         "by_src":      dict(by_src),
         "used_fast":   n_used_fast,
@@ -228,17 +213,7 @@ def summarise(events: list[dict], stats_before: dict, stats_after: dict,
         "drops":       drops,
         "qmax":        qmax,
         "qcap":        qcap,
-        "lat_mean":    statistics.mean(lats) if lats else None,
-        "lat_median":  statistics.median(lats) if lats else None,
-        "lat_p95":     (sorted(lats)[max(0, int(len(lats)*0.95)-1)] if lats else None),
-        "qwait_mean":   _stats(qwaits)[0],
-        "qwait_median": _stats(qwaits)[1],
-        "qwait_p95":    _stats(qwaits)[2],
-        "inspect_mean":   _stats(insps)[0],
-        "inspect_median": _stats(insps)[1],
-        "inspect_p95":    _stats(insps)[2],
         "stats_after": stats_after,
-        "stats_before": stats_before,
     }
 
 
@@ -250,13 +225,17 @@ def run_sweep(c: Client, label: str, dispatch_threads: int, queue_depth: int) ->
     inst_names = [i.get('name') for i in (info.get('instances') or [])]
     print(f"  reopened. instances: {inst_names}")
     expect = {"source_steady", "source_burst", "source_variable",
-              "detector_fast", "detector_slow"}
+              "detector_fast", "detector_slow", "expose"}
     missing = expect - set(inst_names)
     if missing:
         print(f"  WARNING: missing instances: {missing}")
 
     c.compile_and_load(str(INSPECT_CPP))
     print("  inspect.cpp compiled")
+
+    # Subscribe to the expose channel so the sink pushes per-inspect
+    # frames (subscription is reset by open_project — re-arm every sweep).
+    subscribe(c, ["runs"])
 
     # Let sources warm up.
     time.sleep(0.3)
@@ -272,7 +251,7 @@ def run_sweep(c: Client, label: str, dispatch_threads: int, queue_depth: int) ->
     c.call("start", {"fps": DRIVER_FPS})
     t0 = time.time()
     schedule_surges(c, t0, SURGE_PLAN)
-    events = collect_vars(c, DURATION_S)
+    finished, frames = collect_window(c, DURATION_S)
     elapsed = time.time() - t0
     c.call("stop")
 
@@ -284,7 +263,7 @@ def run_sweep(c: Client, label: str, dispatch_threads: int, queue_depth: int) ->
         stats_after = {}
 
     drain(c)
-    return summarise(events, stats_before, stats_after, elapsed, label)
+    return summarise(finished, frames, stats_after, elapsed, label)
 
 
 def main() -> int:
@@ -300,8 +279,7 @@ def main() -> int:
 
         print("\n\n=========== COMPARISON TABLE ===========\n")
         hdr = ("Sweep", "N", "Q", "active", "thr/s", "drops",
-               "qmax", "lat_mean_us", "lat_p95_us",
-               "qwait_p95", "inspect_p95")
+               "qmax", "fast", "slow", "both")
         print("  ".join(f"{h:>14}" for h in hdr))
         for (label, n, q, r) in results:
             row = (label[:14],
@@ -310,10 +288,9 @@ def main() -> int:
                    f"{r['throughput']:.1f}",
                    f"{r['drops']}",
                    f"{r['qmax']}",
-                   f"{r['lat_mean']:.0f}" if r['lat_mean'] is not None else "-",
-                   f"{r['lat_p95']:.0f}"  if r['lat_p95']  is not None else "-",
-                   f"{r['qwait_p95']:.0f}"   if r.get('qwait_p95')   is not None else "-",
-                   f"{r['inspect_p95']:.0f}" if r.get('inspect_p95') is not None else "-")
+                   f"{r['used_fast']}",
+                   f"{r['used_slow']}",
+                   f"{r['used_both']}")
             print("  ".join(f"{x:>14}" for x in row))
 
         print("\n=========== PER-SOURCE BREAKDOWN ===========\n")
@@ -328,25 +305,24 @@ def main() -> int:
 
         # Hot-reload sanity: recompile inspect.cpp mid-run with N=8/q=128
         # already loaded (last sweep), then drive a small post-reload
-        # window to confirm dispatch keeps flowing across all 5 instances.
+        # window to confirm dispatch keeps flowing across all sources.
         print("\n=========== HOT-RELOAD CHECK ===========\n")
         try:
+            subscribe(c, ["runs"])
             c.call("start", {"fps": DRIVER_FPS})
             time.sleep(0.4)
             t_reload = time.time()
             c.compile_and_load(str(INSPECT_CPP))
             dt = time.time() - t_reload
             print(f"  compile_and_load mid-run took {dt*1000:.0f} ms")
+            subscribe(c, ["runs"])   # re-arm: compile may reset subscription
             drain(c)
-            ev = collect_vars(c, 1.0)
+            _finished, frames = collect_window(c, 1.0)
             c.call("stop")
-            srcs_seen = Counter(e.get("src") for e in ev
-                                if e.get("active") is True)
+            srcs_seen = Counter((fr.get("values") or {}).get("src")
+                                for fr in frames)
             print(f"  post-reload by_src: {dict(srcs_seen)}")
-            ok_reload = (
-                sum(1 for e in ev if e.get("active") is True) > 5
-                and len(srcs_seen) >= 3
-            )
+            ok_reload = (len(frames) > 5 and len(srcs_seen) >= 3)
             print(f"  hot-reload OK: {ok_reload}")
         except ProtocolError as e:
             print(f"  hot-reload FAILED: {e}")
