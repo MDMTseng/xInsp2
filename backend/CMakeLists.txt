@@ -247,6 +247,19 @@ endif()
 add_test(NAME preview_interface COMMAND test_preview_interface)
 # <<< host-api-segregation Phase 2 end.
 
+# >>> host-api-segregation Phase 3 (xi.imaging/doc/emit/log carve) — localized block.
+# Proves each remaining domain interface resolves via host->get_interface and is
+# byte-for-byte identical to the legacy xi_host_api fields it groups, and that the
+# SDK xi::Plugin wrappers resolve-then-cache with a legacy-field fallback on a
+# simulated pre-v10 host. Kept self-contained to ease merge with sibling appends.
+add_executable(test_interface_domains tests/test_interface_domains.cpp)
+target_link_libraries(test_interface_domains PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_interface_domains PRIVATE pthread)
+endif()
+add_test(NAME interface_domains COMMAND test_interface_domains)
+# <<< host-api-segregation Phase 3 end.
+
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
 target_include_directories(test_yyjson PRIVATE
@@ -589,4 +602,33 @@ target_compile_definitions(test_certify PRIVATE
 add_test(NAME certify COMMAND test_certify)
 # ============================================================================
 # End Part III G1 block.
+# ============================================================================
+
+# ============================================================================
+# Part III G2 — per-plugin crash attribution + auto-disable (core_fix_plan §18 G2).
+# APPENDED block (kept self-contained so it stays separable from sibling-agent
+# appends). Unit-pins the pure attribution + counter + quarantine-load-gate logic:
+#   * crash_history_line/enrich culprit fields, PluginFaultTracker budget,
+#   * the REAL scan_plugins quarantine gate (reusing G1's .xi_certify.json),
+#   * un-quarantine + hash-gated auto-clear,
+#   * an ASan/XINSP2_STRESS_SCALE race on the process-global culprit stamp.
+# Reuses the golden_plugin DLL as a stand-in for a quarantined plugin folder.
+# ============================================================================
+add_executable(test_qa_quarantine tests/test_qa_quarantine.cpp)
+target_link_libraries(test_qa_quarantine PRIVATE xi_core xi_fe)
+if(WIN32)
+    target_link_libraries(test_qa_quarantine PRIVATE Ws2_32)
+endif()
+add_dependencies(test_qa_quarantine golden_plugin)
+target_compile_definitions(test_qa_quarantine PRIVATE
+    GOLDEN_PLUGIN_DLL="$<TARGET_FILE:golden_plugin>")
+add_test(NAME qa_quarantine COMMAND test_qa_quarantine)
+# A heavier stress run of the culprit-stamp race (ASan build picks this up; TSan
+# is unavailable on this box — OQ-1). Labelled "stress" like the sibling heavy
+# variants so the normal suite stays fast.
+add_test(NAME qa_quarantine_heavy COMMAND test_qa_quarantine)
+set_tests_properties(qa_quarantine_heavy PROPERTIES
+    LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
+# ============================================================================
+# End Part III G2 block.
 # ============================================================================

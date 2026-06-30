@@ -127,15 +127,35 @@ public:
             auto manifest = std::filesystem::path(folder) / "plugin.json";
             if (std::filesystem::exists(manifest)) {
                 auto info = parse_manifest(manifest.string(), folder);
-                if (!info.name.empty() &&
-                    certify_folder_locked_(folder, info) == certify::Verdict::crashed) {
-                    std::string reason =
-                        "plugin '" + info.name + "' SKIPPED at discovery: certification "
-                        "crashed a throwaway child process (malformed DLL — DllMain or "
-                        "factory faults). Fix + rebuild the DLL to re-certify.";
-                    std::fprintf(stderr, "[xinsp2] %s\n", reason.c_str());
-                    last_certify_warnings_.push_back({info.name, info.name, reason});
-                    continue;   // do NOT register/arm a known-bad DLL
+                if (!info.name.empty()) {
+                    // G1.3 `crashed` (certify child faulted at discovery) AND G2.2
+                    // `quarantined` (the FE attributed N runtime crashes to this
+                    // plugin) BOTH gate discovery through this one cache+gate — a
+                    // known-bad DLL is never armed inside the backend. The two
+                    // differ only in the operator-facing reason. Rebuilding the DLL
+                    // (new content hash) clears either (G1.2 / G2.3).
+                    auto verdict = certify_folder_locked_(folder, info);
+                    if (verdict == certify::Verdict::crashed) {
+                        std::string reason =
+                            "plugin '" + info.name + "' SKIPPED at discovery: certification "
+                            "crashed a throwaway child process (malformed DLL — DllMain or "
+                            "factory faults). Fix + rebuild the DLL to re-certify.";
+                        std::fprintf(stderr, "[xinsp2] %s\n", reason.c_str());
+                        last_certify_warnings_.push_back({info.name, info.name, reason});
+                        gated_folders_[info.name] = folder;   // G2.3 un-quarantine lookup
+                        continue;   // do NOT register/arm a known-bad DLL
+                    }
+                    if (verdict == certify::Verdict::quarantined) {
+                        std::string reason =
+                            "plugin '" + info.name + "' QUARANTINED + disabled: it was "
+                            "attributed repeated backend crashes at runtime. The line stays "
+                            "up with this plugin off. Rebuild the DLL (or un-quarantine via "
+                            "cmd:unquarantine_plugin) once it is fixed.";
+                        std::fprintf(stderr, "[xinsp2] %s\n", reason.c_str());
+                        last_certify_warnings_.push_back({info.name, info.name, reason});
+                        gated_folders_[info.name] = folder;   // G2.3 un-quarantine lookup
+                        continue;   // do NOT register/arm a quarantined DLL
+                    }
                 }
             }
             if (register_plugin_folder_locked_(folder)) count++;
@@ -159,6 +179,36 @@ public:
     std::vector<OpenWarning> certify_warnings() {
         std::lock_guard<std::mutex> lk(mu_);
         return last_certify_warnings_;
+    }
+
+    // Part III G2.3 — operator un-quarantine. Clears the certify/quarantine verdict
+    // for a gated plugin (by name, resolved to its folder via the last scan, or by
+    // an explicit folder) by REMOVING G1's .xi_certify.json — the next scan then
+    // re-certifies from scratch (a still-bad DLL re-gates itself; a genuinely-fixed
+    // one arms). This is the manual override; the automatic path is a DLL rebuild,
+    // whose new content hash already invalidates the cached verdict (G1.2). Returns
+    // true if a cache file was found + removed. Reuses the ONE quarantine mechanism
+    // (Invariant §20.3) — no separate enable flag.
+    bool unquarantine_plugin(const std::string& name_or_folder) {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::string folder;
+        if (auto it = gated_folders_.find(name_or_folder); it != gated_folders_.end())
+            folder = it->second;
+        else if (std::filesystem::exists(std::filesystem::path(name_or_folder) / "plugin.json"))
+            folder = name_or_folder;   // caller passed the folder directly
+        else if (auto* pi = (plugins_.count(name_or_folder) ? &plugins_[name_or_folder] : nullptr))
+            folder = pi->folder_path;  // a currently-registered plugin
+        if (folder.empty()) return false;
+        std::error_code ec;
+        bool removed = std::filesystem::remove(certify::cache_path(folder), ec);
+        gated_folders_.erase(name_or_folder);
+        // Drop the stale gate warning(s) for this plugin so a follow-up scan's
+        // surface is clean.
+        last_certify_warnings_.erase(
+            std::remove_if(last_certify_warnings_.begin(), last_certify_warnings_.end(),
+                           [&](const OpenWarning& w) { return w.plugin == name_or_folder; }),
+            last_certify_warnings_.end());
+        return removed || true;   // folder resolved = success even if no cache existed
     }
 
     // Register a single plugin folder (one that contains plugin.json) into the
@@ -1241,6 +1291,20 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         auto it = plugins_.find(name);
         return it == plugins_.end() ? nullptr : &it->second;
+    }
+
+    // Part III G2.1 — resolve a plugin's on-disk location (folder + dll filename)
+    // by name, copying under the lock so the caller never derefs a map pointer that
+    // a concurrent rebuild could invalidate. Used to stamp the crash culprit (so the
+    // FE can quarantine the offending DLL via G1's .xi_certify.json). Returns false
+    // if the plugin isn't registered.
+    bool plugin_location(const std::string& name, std::string& folder, std::string& dll) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = plugins_.find(name);
+        if (it == plugins_.end()) return false;
+        folder = it->second.folder_path;
+        dll    = it->second.dll_name;
+        return true;
     }
 
     // --- Project management ---
@@ -2360,6 +2424,10 @@ private:
     // their cached verdict was `crashed`.
     std::string certify_exe_;
     std::vector<OpenWarning> last_certify_warnings_;
+    // Part III G2.3 — name -> folder for plugins gated out at the last scan
+    // (crashed or quarantined), so cmd:unquarantine_plugin can find the folder to
+    // clear even though the plugin was never registered into plugins_.
+    std::unordered_map<std::string, std::string> gated_folders_;
     // BUG#4 quarantine: project.json existed but failed to parse on the last
     // open_project. While true, save_project_locked REFUSES the full-rebuild
     // write (it would clobber extension-owned keys — params / auto_respawn /

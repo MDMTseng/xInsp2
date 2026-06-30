@@ -65,8 +65,11 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
   A **fresh agent worktree** whose CMake configure does *not* detect turbojpeg falls back to the stb encoder
   (~17 ms) → the gate trips as a **false positive**. Confirmed harmless: two independent Phase 2 tracks both
   tripped `perf_jpeg` on code paths neither touched; it passes on the master build dir (turbojpeg present).
-- **Default proceeding:** treat a `perf_jpeg` red in a *fresh-worktree* build as a config artifact; **verify perf
-  on the master build dir** (turbojpeg detected) at each gate. Done so for Gate C.
+- **Precise cause (confirmed Phase 3):** a fresh worktree configures with **`XINSP2_HAS_TURBOJPEG=OFF`** (and
+  `XINSP2_HAS_IPP=OFF`) by default → bench_jpeg uses the OpenCV/stb encoder (~17 ms) vs the libjpeg-turbo
+  baseline (2.75 ms), tripping the gate ~+511%.
+- **Default proceeding:** treat a `perf_jpeg` red in a *fresh-worktree* build as a config artifact; **build each
+  gate with `-DXINSP2_HAS_TURBOJPEG=ON -DXINSP2_HAS_IPP=ON`** (the canonical/master config). Done for Gate C/D.
 - **Follow-up fix (small, backlog):** record the encoder backend in the baseline file and have `perf_gate.cmake`
   **skip-with-warning** (not fail) when the measured backend differs from the baseline's; or pin the backend in CI.
 - **Flips if:** user wants the gate hardened now rather than backlogged.
