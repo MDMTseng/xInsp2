@@ -20,6 +20,11 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
   verification will lean on ASan + stress-scale until one of (a)/(b) is chosen.
 - **Flips if:** user stands up a Linux CI lane or installs clang-cl/LLVM.
 - **Impacts:** Tier 0 T0.1 (done, ASan); Tier 1 T1.3 (TSan stress on Part III G2 — degraded to ASan+stress).
+- **WIDER CONSEQUENCE (confirmed Phase 2):** the **same** missing-clang also blocks **Tier 1 T1.1/T1.2
+  in-process libFuzzer** (`-fsanitize=fuzzer` needs clang/clang-cl). So the genuine Cluster-2 gap —
+  coverage-guided in-proc fuzz of `parse_cmd`/yyjson/ABI/`get_interface` — **cannot be closed on this box**.
+  It is gated on the same (a) Linux CI lane or (b) install LLVM decision. Until then, in-proc parsers are
+  covered only by the black-box WS smoke (Tier 0 T0.2), which cannot reach the in-proc C-ABI `get_interface`.
 
 ## OQ-2 — Push to origin vs stay local
 - **Default:** keep all completed work **local on `master`** (now ahead of `origin/master`); do **not** push.
@@ -54,6 +59,17 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
   *negotiation* (today: reports version, no gate), Record cross-plugin *static* schema contract.
 - **Default:** backlog after the three correctness nets (Part IV §27.5). Do not gold-plate.
 - **Flips if:** a concrete need appears (e.g. production-line monitoring requirement, a client-compat break).
+
+## OQ-8 — perf gate is sensitive to the JPEG encoder backend (Tier 0 T0.3 follow-up)
+- **Observed (Phase 2, 2026-07-01):** `perf_jpeg`'s baseline (2745 µs) was captured with **libjpeg-turbo/IPP** detected.
+  A **fresh agent worktree** whose CMake configure does *not* detect turbojpeg falls back to the stb encoder
+  (~17 ms) → the gate trips as a **false positive**. Confirmed harmless: two independent Phase 2 tracks both
+  tripped `perf_jpeg` on code paths neither touched; it passes on the master build dir (turbojpeg present).
+- **Default proceeding:** treat a `perf_jpeg` red in a *fresh-worktree* build as a config artifact; **verify perf
+  on the master build dir** (turbojpeg detected) at each gate. Done so for Gate C.
+- **Follow-up fix (small, backlog):** record the encoder backend in the baseline file and have `perf_gate.cmake`
+  **skip-with-warning** (not fail) when the measured backend differs from the baseline's; or pin the backend in CI.
+- **Flips if:** user wants the gate hardened now rather than backlogged.
 
 ---
 
