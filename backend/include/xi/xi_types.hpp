@@ -32,6 +32,8 @@ inline yyjson_mut_val* mut_finite_(yyjson_mut_doc* d, double v) {
                             : yyjson_mut_strcpy(d, nonfinite_to_str(v));
 }
 
+class Typed;  // Field write-through routes through its owning Typed (defined below).
+
 // A read/write proxy for one field of a yyjson object node. Returned by
 // Typed::operator[]. Reads via implicit conversion (so it drops into arithmetic),
 // writes via operator= (write-through to the node). Lives only for the
@@ -41,10 +43,15 @@ inline yyjson_mut_val* mut_finite_(yyjson_mut_doc* d, double v) {
 //   roi["x"] = roi["x"] * 0.533 + 45;   // read-modify-write
 //   double w = roi["w"];                 // read
 //
+// A Field has NO doc/Record back-pointer of its own to COW with, so a WRITE
+// defers to the owning Typed's set() — which crosses the Record copy-on-write
+// boundary (a frozen/shared doc is copied first instead of corrupted). The write
+// operator=s are therefore defined out-of-line, after Typed. Reads stay inline
+// (they only touch the cached node, no mutation).
 class Field {
 public:
-    Field(yyjson_mut_doc* doc, yyjson_mut_val* node, const char* key)
-        : doc_(doc), node_(node), key_(key) {}
+    Field(Typed* owner, yyjson_mut_val* node, std::string key)
+        : owner_(owner), node_(node), key_(std::move(key)) {}
 
     operator double() const { return Record::Value(node_)[key_.c_str()].as_double(0); }
     double      as_double(double d = 0)         const { return Record::Value(node_)[key_.c_str()].as_double(d); }
@@ -52,21 +59,18 @@ public:
     bool        as_bool(bool d = false)         const { return Record::Value(node_)[key_.c_str()].as_bool(d); }
     std::string as_string(const std::string& d = "") const { return Record::Value(node_)[key_.c_str()].as_string(d); }
 
-    Field& operator=(double v)             { set_(mut_finite_(doc_, v));                     return *this; }
-    Field& operator=(int v)                { set_(yyjson_mut_sint(doc_, v));                 return *this; }
-    Field& operator=(bool v)               { set_(yyjson_mut_bool(doc_, v));                 return *this; }
-    Field& operator=(const std::string& v) { set_(yyjson_mut_strcpy(doc_, v.c_str()));       return *this; }
-    Field& operator=(const char* v)        { set_(yyjson_mut_strcpy(doc_, v ? v : ""));      return *this; }
-    Field& operator=(const Field& o)       { return *this = static_cast<double>(o); }   // value copy
+    // Write-through — routes through Typed::set so a frozen/shared doc COWs first
+    // (see Field doc-comment + Typed::prepare_write_). Defined after Typed.
+    Field& operator=(double v);
+    Field& operator=(int v);
+    Field& operator=(bool v);
+    Field& operator=(const std::string& v);
+    Field& operator=(const char* v);
+    Field& operator=(const Field& o) { return *this = static_cast<double>(o); }   // value copy
 
 private:
-    void set_(yyjson_mut_val* item) {
-        if (!node_ || !item || !yyjson_mut_is_obj(node_)) return;
-        yyjson_mut_obj_remove_key(node_, key_.c_str());
-        yyjson_mut_obj_put(node_, yyjson_mut_strcpy(doc_, key_.c_str()), item);
-    }
-    yyjson_mut_doc* doc_;
-    yyjson_mut_val* node_;
+    Typed*          owner_;   // owning Typed (for COW-correct write-through)
+    yyjson_mut_val* node_;    // the object node these reads view
     std::string     key_;
 };
 
@@ -118,17 +122,22 @@ public:
     Typed&      set_src(const std::string& id) { src_ = id; return *this; }
 
     // --- WRITE-THROUGH setters ---------------------------------------------
-    // Writes the viewed node. A VIEW writes into the SHARED tree, so it mutates
-    // the ORIGINAL it was extracted from — by design (like a NumPy view). If you
-    // don't want that, .clone() first for an independent copy.
-    Typed& set(const char* k, double v)             { set_node_(k, mut_finite_(mut_doc(), v)); return *this; }
-    Typed& set(const char* k, int v)                { set_node_(k, yyjson_mut_sint(mut_doc(), v)); return *this; }
-    Typed& set(const char* k, bool v)               { set_node_(k, yyjson_mut_bool(mut_doc(), v)); return *this; }
-    Typed& set(const char* k, const std::string& v) { set_node_(k, yyjson_mut_strcpy(mut_doc(), v.c_str())); return *this; }
+    // Writes the viewed node. COW-correct: prepare_write_() crosses the Record
+    // copy-on-write boundary FIRST (so a frozen/shared/registry-managed doc — e.g.
+    // current_trigger().meta() — is copied before mutation, never corrupted in
+    // place), then the new value is built into the POST-copy doc it returns. A
+    // NON-frozen value stays write-through into its shared tree (NumPy-view
+    // semantics) at zero added cost; .clone() first for an independent copy.
+    Typed& set(const char* k, double v)             { yyjson_mut_doc* d = prepare_write_(); set_node_(k, mut_finite_(d, v));            return *this; }
+    Typed& set(const char* k, int v)                { yyjson_mut_doc* d = prepare_write_(); set_node_(k, yyjson_mut_sint(d, v));        return *this; }
+    Typed& set(const char* k, bool v)               { yyjson_mut_doc* d = prepare_write_(); set_node_(k, yyjson_mut_bool(d, v));        return *this; }
+    Typed& set(const char* k, const std::string& v) { yyjson_mut_doc* d = prepare_write_(); set_node_(k, yyjson_mut_strcpy(d, v.c_str())); return *this; }
 
     // Field proxy: read (implicit) + write (operator=), so e.g.
     //   roi["x"] = roi["x"] * 0.533 + 45;
-    Field operator[](const char* key) const { return Field(mut_doc(), node_, key); }
+    // The Field carries a back-pointer to THIS Typed so its operator= can COW
+    // (const_cast: operator[] is const but already hands out a writable proxy).
+    Field operator[](const char* key) const { return Field(const_cast<Typed*>(this), node_, key); }
 
 protected:
     yyjson_mut_doc* mut_doc() const { return root_ ? root_->doc() : nullptr; }
@@ -142,6 +151,33 @@ protected:
         T t(root_, n);
         t.set_src(src_);
         return t;
+    }
+    // Copy-on-write boundary for DIRECT-tree writes (set()/Field/MatN::set), the
+    // typed-layer analogue of Record::set's cow_(). Returns the doc the new value
+    // must be built into (it may CHANGE after a copy), having re-pointed node_ at
+    // the writable tree. Speed-first: the non-frozen path is one relaxed flag load
+    // + a pointer re-seat, NO copy.
+    //
+    //   OWNED  (node_ == root_->json()): COW the whole Record (materialize_unfrozen
+    //          reuses Record::cow_) and re-seat node_ at the possibly-new root.
+    //   VIEW into a FROZEN doc: a sub-node of a doc shared across the ABI. We can't
+    //          mutate the shared tree in place (the other side still reads it) and
+    //          can't cheaply re-resolve this interior node into a copy, so DETACH —
+    //          become an OWNED standalone copy of just this sub-node (an implicit
+    //          .clone()). Writes land in our private copy; the frozen original is
+    //          untouched. (Decision: detach beats corrupt-or-crash; the documented
+    //          NumPy write-through holds only while the original is unfrozen.)
+    //   VIEW into an UNFROZEN doc: write through the shared tree in place (the
+    //          deliberate NumPy-view semantics), no copy.
+    yyjson_mut_doc* prepare_write_() {
+        if (!root_) return nullptr;
+        if (node_ == root_->json()) {
+            node_ = root_->materialize_unfrozen();           // OWNED: COW + re-seat
+        } else if (root_->is_frozen()) {
+            root_ = std::make_shared<Record>(Record::Value(node_).as_record());  // VIEW-into-frozen: detach
+            node_ = root_->json();
+        }
+        return mut_doc();
     }
     void set_node_(const char* k, yyjson_mut_val* item) {
         if (!node_ || !item || !yyjson_mut_is_obj(node_)) return;
@@ -157,6 +193,15 @@ protected:
     yyjson_mut_val*          node_ = nullptr;
     std::string             src_;
 };
+
+// Field write-through (out-of-line: needs Typed complete). Each routes through
+// Typed::set, which COWs a frozen/shared doc before mutating — so writing through
+// roi["x"] respects the same copy-on-write boundary roi.set("x", …) does.
+inline Field& Field::operator=(double v)             { if (owner_) owner_->set(key_.c_str(), v);                 return *this; }
+inline Field& Field::operator=(int v)                { if (owner_) owner_->set(key_.c_str(), v);                 return *this; }
+inline Field& Field::operator=(bool v)               { if (owner_) owner_->set(key_.c_str(), v);                 return *this; }
+inline Field& Field::operator=(const std::string& v) { if (owner_) owner_->set(key_.c_str(), v);                 return *this; }
+inline Field& Field::operator=(const char* v)        { if (owner_) owner_->set(key_.c_str(), std::string(v ? v : "")); return *this; }
 
 // Boilerplate every nominal type wants: default ctor, wrap-a-Record, typed NA.
 // Fully qualified so plugin/toolbox authors can use it in their OWN namespace.
@@ -282,6 +327,7 @@ public:
     static constexpr int dim = N;
     double at(int r, int c) const { return elem_(r * N + c); }
     MatN&  set(int r, int c, double v) {
+        prepare_write_();   // COW out of a frozen/shared doc before mutating in place; re-seats node_
         yyjson_mut_val* arr = (node_ && yyjson_mut_is_obj(node_)) ? yyjson_mut_obj_get(node_, "m") : nullptr;
         yyjson_mut_val* e   = arr ? yyjson_mut_arr_get(arr, (size_t)(r * N + c)) : nullptr;
         // Route through the non-finite sentinel like every other double write — a raw
