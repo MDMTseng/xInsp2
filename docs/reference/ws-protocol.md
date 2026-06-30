@@ -691,6 +691,17 @@ values, but **do NOT recompile the inspection script** — call
 N project-local plugins compile each plugin under `cl.exe` and can
 take 30–120 s; clients should pass a long timeout for this command.
 
+**Partial-restore reporting.** `load_project` is a *succeeded-with-warnings*
+operation: a clean restore replies `ok: true` with no data, but if any saved
+Param value or instance `def` failed to apply the reply carries
+`data: { "param_warnings": [...], "instance_warnings": [...] }` (arrays of
+`"<name>: <reason>"` strings). A non-empty list means the recipe was only
+partially restored — the client MUST surface it rather than treat the load as a
+clean success. This exists to avoid a *fail-reads-as-pass*: instance defs
+include script-declared `xi::Instance` objects (resolved via the script DLL's
+own registry), so a dropped def would otherwise let a line run on default
+thresholds/models while the operator believes the saved recipe applied.
+
 **IntelliSense config.** The `.vscode/c_cpp_properties.json` that lets the
 Microsoft C/C++ extension resolve `<xi/...>` and OpenCV is written by the **VS
 Code extension** (NOT the backend core): on open it reads the resolved compile

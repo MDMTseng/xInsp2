@@ -1,0 +1,7 @@
+{
+  "name": "qa_recipe_script_instance",
+  "script": "inspect.cpp",
+  "params": [],
+  "instances": [],
+  "plugins": {}
+}

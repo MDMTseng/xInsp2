@@ -47,7 +47,7 @@ solution directions + a subagent assignment/sequencing plan are in
 **`core-bug-hunt-2026-06-fix-plan.md`** (clusters: A persistence #1/#4/#5/#8/#14/#16, C plugin
 load/reload #9/#13/#18/#20/#22/#23, D-residual record/image #10/#11, E dispatch #12/#17/#19).
 
-## [1] HIGH (votes 3/3, conf 0.89) — load_project silently drops script-instance configs from a saved recipe (fail-reads-as-pass round-trip)
+## [1] ✅ FIXED (2026-06-30) HIGH (votes 3/3, conf 0.89) — load_project silently drops script-instance configs from a saved recipe (fail-reads-as-pass round-trip)
 **File:** backend/src/service_main.cpp:3007-3020
 **Also:** backend/src/service_main.cpp:2618-2636 (set_instance_def handler, which DOES have the script fallback); backend/src/service_main.cpp:2564-2601 (list_instances emits script instance defs into the recipe)
 
@@ -109,7 +109,7 @@ Consequence: every clean shutdown with an open project crashes during static des
 
 **PoC:** Open a project that has at least one plugin instance (any source/operator instance → project_.instances non-empty), then send cmd:shutdown (or flip g_should_exit). The backend prints 'shutdown complete', returns 0, and faults in ~PluginManager: either destroy_fn_ called into a FreeLibrary'd module, or release_all_for touching the already-destroyed ImagePool. Observe the access violation + spurious minidump/sidecar produced by the still-installed crash filter. Fix mirrors close_project: have controlled_shutdown_teardown_ call g_plugin_mgr.close_project() (or have ~PluginManager clear project_.instances before the FreeLibrary loop), and gate release_all_for on g_image_pool_alive.
 
-## [8] HIGH (votes 3/3, conf 0.79) — Project switch leaks prior project's tuned Param values and persistent state into the next project's script
+## [8] ✅ FIXED (2026-06-30) HIGH (votes 3/3, conf 0.79) — Project switch leaks prior project's tuned Param values and persistent state into the next project's script
 **File:** backend/src/service_main.cpp:2325
 **Also:** backend/src/service_main.cpp:69-83 (globals), 2233-2242 (param replay), 2249-2278 (state save/restore), 3202-3287 (open_project), 3288-3304 (close_project), 2156-2168 (state save)
 

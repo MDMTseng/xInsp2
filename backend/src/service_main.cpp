@@ -3070,7 +3070,16 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             }
         }
 
-        // Restore instance configs
+        // Restore instance configs. Like the params above, collect any that DON'T
+        // apply so a partial restore isn't reported as a clean ok. Critically, the
+        // instances saved by list_instances include SCRIPT-declared xi::Instance
+        // objects, which live in the script DLL's OWN registry — NOT the backend
+        // InstanceRegistry singleton. find() can't see them, so resolving through
+        // the backend registry alone would silently drop every script-instance def
+        // (the recipe loads green while the line runs on default thresholds/models:
+        // a fail-reads-as-pass). So mirror the set_instance_def handler: try the
+        // backend registry first, then fall through to g_script.set_instance_def.
+        std::vector<std::string> instance_warnings;
         yyjson_val* instances = yyjson_obj_get(root, "instances");
         if (instances && yyjson_is_arr(instances)) {
             size_t _i, _n; yyjson_val* item;
@@ -3078,9 +3087,24 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 yyjson_val* nm = yyjson_obj_get(item, "name");
                 yyjson_val* def = yyjson_obj_get(item, "def");
                 if (nm && yyjson_is_str(nm) && def) {
+                    const char* iname = yyjson_get_str(nm);
                     char* def_str = yyjson_val_write(def, 0, NULL);
-                    auto inst = xi::InstanceRegistry::instance().find(yyjson_get_str(nm));
-                    if (inst) inst->set_def(def_str);
+                    auto inst = xi::InstanceRegistry::instance().find(iname);
+                    if (inst) {
+                        if (!inst->set_def(def_str))
+                            instance_warnings.push_back(std::string(iname) + ": set_def returned false");
+                    } else {
+                        // Not a backend plugin-manager instance — try the script DLL's
+                        // own registry (where script-declared instances live).
+                        std::lock_guard<std::mutex> lk(g_script_mu);
+                        if (g_script.ok() && g_script.set_instance_def) {
+                            int rc = g_script.set_instance_def(iname, def_str);
+                            if (rc != 0)
+                                instance_warnings.push_back(std::string(iname) + ": set_instance_def failed");
+                        } else {
+                            instance_warnings.push_back(std::string(iname) + ": instance not found");
+                        }
+                    }
                     free(def_str);
                 }
             }
@@ -3090,13 +3114,18 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Succeeded-with-warnings: the project loaded, but surface any params that
         // didn't apply so the caller can tell the operator the recipe was only
         // partially restored (instead of a silent clean ok).
-        if (param_warnings.empty()) {
+        if (param_warnings.empty() && instance_warnings.empty()) {
             send_rsp_ok(srv, id);
         } else {
             std::string data = "{\"param_warnings\":[";
             for (size_t i = 0; i < param_warnings.size(); ++i) {
                 if (i) data += ",";
                 xp::json_escape_into(data, param_warnings[i]);
+            }
+            data += "],\"instance_warnings\":[";
+            for (size_t i = 0; i < instance_warnings.size(); ++i) {
+                if (i) data += ",";
+                xp::json_escape_into(data, instance_warnings[i]);
             }
             data += "]}";
             send_rsp_ok(srv, id, data);
