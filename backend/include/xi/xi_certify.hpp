@@ -67,7 +67,13 @@
 
 namespace xi::certify {
 
-enum class Verdict { ok, abi_mismatch, crashed, unknown };
+// `quarantined` (Part III G2.2) reuses this SAME cache file + scan gate as the
+// G1 `crashed` verdict, but is written by the FE SUPERVISOR after a plugin is
+// attributed N runtime crashes (not by the discovery-time certify child). It is
+// keyed by the same DLL content hash, so rebuilding the DLL (a new hash) clears
+// it automatically (G1.2 re-certifies on hash change) — that is G2.3's auto
+// un-quarantine. One mechanism, two writers (Invariant §20.3).
+enum class Verdict { ok, abi_mismatch, crashed, quarantined, unknown };
 
 // Child exit codes. `crashed` is intentionally NOT a fixed code — it is whatever
 // abnormal value a hard fault terminates the child with, so any exit that is
@@ -80,6 +86,7 @@ inline const char* verdict_str(Verdict v) {
         case Verdict::ok:           return "ok";
         case Verdict::abi_mismatch: return "abi_mismatch";
         case Verdict::crashed:      return "crashed";
+        case Verdict::quarantined:  return "quarantined";
         default:                    return "unknown";
     }
 }
@@ -88,6 +95,7 @@ inline Verdict verdict_from_str(const std::string& s) {
     if (s == "ok")           return Verdict::ok;
     if (s == "abi_mismatch") return Verdict::abi_mismatch;
     if (s == "crashed")      return Verdict::crashed;
+    if (s == "quarantined")  return Verdict::quarantined;
     return Verdict::unknown;
 }
 

@@ -4161,6 +4161,13 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, dir.c_str());
     }
 
+    // G1.3 / G2.2 — surface any plugin gated out at discovery (certify crashed, or
+    // FE-quarantined) into the recent-errors ring so cmd:recent_errors + the
+    // extension toast tell the operator WHICH plugin is disabled and why (not just
+    // a silently-missing plugin). The scan already logged each to stderr.
+    for (auto& w : g_plugin_mgr.certify_warnings())
+        push_recent_error("plugin", w.reason);
+
     std::fprintf(stderr, "[xinsp2] include_dir=%s\n", g_include_dir.c_str());
     std::fprintf(stderr, "[xinsp2] work_dir=%s\n",    g_work_dir.c_str());
     std::fprintf(stderr, "[xinsp2] plugins_dir=%s\n",  g_plugins_dir.c_str());
