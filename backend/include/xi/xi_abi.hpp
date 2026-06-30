@@ -158,8 +158,17 @@ public:
     // host is a dumb byte pipe — the frame FORMAT is this plugin's contract with
     // its UI (it must self-describe: tag/group/key + dims + codec + payload).
     // Safe from a dispatch worker thread. No-op on a pre-v8 host (null emit_binary).
+    //
+    // ABI v10 capability segregation (Phase 3): resolves the frozen `xi.emit@1`
+    // interface via host->get_interface ONCE and caches it; falls back to the
+    // legacy host->emit_binary field on a pre-v10 host. Both reach the identical
+    // host byte pipe.
     void emit_binary(const void* data, int len) const {
-        if (host_ && host_->emit_binary && data && len > 0)
+        if (!(data && len > 0)) return;
+        if (const xi_emit_v1* ev = emit_iface()) {
+            if (ev->emit_binary) { ev->emit_binary(data, (int32_t)len); return; }
+        }
+        if (host_ && host_->emit_binary)
             host_->emit_binary(data, (int32_t)len);
     }
     void emit_binary(const std::vector<uint8_t>& frame) const {
@@ -186,7 +195,13 @@ public:
     // Publish this instance's latest status string (host keeps it last-value
     // and serves it via cmd:status). No-op on an older host. Keep it short and
     // human: status("grabbing"), status("model loaded, 3 ROIs").
+    //
+    // ABI v10 capability segregation (Phase 3): set_status now lives in the frozen
+    // `xi.log@1` interface; resolve-then-cache with a legacy-field fallback.
     void status(const std::string& text) const {
+        if (const xi_log_v1* lv = log_iface()) {
+            if (lv->set_status) { lv->set_status(name_.c_str(), text.c_str()); return; }
+        }
         if (host_ && host_->set_status) host_->set_status(name_.c_str(), text.c_str());
     }
 
@@ -208,6 +223,49 @@ public:
         if (host_ && host_->compress_image)
             return host_->compress_image(px, w, h, ch, quality, out, out_cap);
         return 0;
+    }
+
+    // --- Phase 3 capability wrappers: xi.imaging@1 / xi.doc@1 ----------------
+    // Each resolves its frozen interface ONCE via host->get_interface (cached),
+    // and falls back to the legacy xi_host_api field on a pre-v10 host. Both
+    // paths reach the identical host primitive — neither is privileged.
+
+    // Decode an image file (PNG/JPEG/BMP/...) into a fresh pool handle (refcount
+    // 1; caller releases). XI_IMAGE_NULL on failure / no decoder. xi.imaging@1.
+    xi_image_handle read_image_file(const char* path) const {
+        if (const xi_imaging_v1* iv = imaging_iface()) {
+            if (iv->read_image_file) return iv->read_image_file(path);
+        }
+        if (host_ && host_->read_image_file) return host_->read_image_file(path);
+        return XI_IMAGE_NULL;
+    }
+
+    // Host-owned doc chunk allocator (xi.doc@1) — backs a yyjson_mut_doc that is
+    // safe to hand across the DLL boundary (its free routes back to the host).
+    void*   doc_chunk_alloc(size_t n) const {
+        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_chunk_alloc) return dv->doc_chunk_alloc(n); }
+        return host_ && host_->doc_chunk_alloc ? host_->doc_chunk_alloc(n) : nullptr;
+    }
+    void*   doc_chunk_realloc(void* p, size_t n) const {
+        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_chunk_realloc) return dv->doc_chunk_realloc(p, n); }
+        return host_ && host_->doc_chunk_realloc ? host_->doc_chunk_realloc(p, n) : nullptr;
+    }
+    void    doc_chunk_free(void* p) const {
+        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_chunk_free) { dv->doc_chunk_free(p); return; } }
+        if (host_ && host_->doc_chunk_free) host_->doc_chunk_free(p);
+    }
+    // Host-side doc refcount (xi.doc@1) — the doc analogue of image_addref/release.
+    void    doc_retain(void* doc) const {
+        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_retain) { dv->doc_retain(doc); return; } }
+        if (host_ && host_->doc_retain) host_->doc_retain(doc);
+    }
+    void    doc_release(void* doc) const {
+        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_release) { dv->doc_release(doc); return; } }
+        if (host_ && host_->doc_release) host_->doc_release(doc);
+    }
+    int32_t doc_refcount(void* doc) const {
+        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_refcount) return dv->doc_refcount(doc); }
+        return host_ && host_->doc_refcount ? host_->doc_refcount(doc) : 0;
     }
 
     // Override these in your plugin:
@@ -270,7 +328,13 @@ public:
 protected:
     HostImage create_image(int w, int h, int ch) {
         if (!host_) return {};
-        xi_image_handle handle = host_->image_create(w, h, ch);
+        // Phase 3: prefer the frozen xi.imaging@1 interface, fall back to the
+        // legacy image_create field on a pre-v10 host (identical pool create).
+        xi_image_handle handle = XI_IMAGE_NULL;
+        if (const xi_imaging_v1* iv = imaging_iface())
+            handle = iv->image_create((int32_t)w, (int32_t)h, (int32_t)ch);
+        else if (host_->image_create)
+            handle = host_->image_create((int32_t)w, (int32_t)h, (int32_t)ch);
         // from_image_handle: takes ownership of the existing refcount=1
         // without calling addref again
         return HostImage::from_handle(host_, handle);
@@ -289,12 +353,16 @@ protected:
         return Image::create_in_pool(host_, w, h, ch);
     }
 
-    void log_info(const std::string& msg) {
-        if (host_ && host_->log) host_->log(1, msg.c_str());
+    // Phase 3: log lives in the frozen xi.log@1 interface; resolve-then-cache
+    // with a legacy-field fallback (both reach the host log + operator channel).
+    void log_at(int32_t level, const std::string& msg) const {
+        if (const xi_log_v1* lv = log_iface()) {
+            if (lv->log) { lv->log(level, msg.c_str()); return; }
+        }
+        if (host_ && host_->log) host_->log(level, msg.c_str());
     }
-    void log_error(const std::string& msg) {
-        if (host_ && host_->log) host_->log(3, msg.c_str());
-    }
+    void log_info(const std::string& msg)  { log_at(1, msg); }
+    void log_error(const std::string& msg) { log_at(3, msg); }
 
     const xi_host_api* host_;
     std::string name_;
@@ -315,6 +383,55 @@ private:
     }
     mutable bool                 preview_resolved_ = false;
     mutable const xi_preview_v1* preview_          = nullptr;
+
+    // Phase 3 resolve-once caches for the carved domains — same shape as
+    // preview_iface(): probe host->get_interface at most once per instance, then
+    // cache the process-stable, host-owned pointer (or nullptr on a pre-v10 host,
+    // distinguished from "not yet looked up" by the paired `_resolved_` flag).
+    const xi_imaging_v1* imaging_iface() const {
+        if (!imaging_resolved_) {
+            imaging_resolved_ = true;
+            if (host_ && host_->get_interface)
+                imaging_ = static_cast<const xi_imaging_v1*>(
+                    host_->get_interface("xi.imaging", 1));
+        }
+        return imaging_;
+    }
+    const xi_doc_v1* doc_iface() const {
+        if (!doc_resolved_) {
+            doc_resolved_ = true;
+            if (host_ && host_->get_interface)
+                doc_ = static_cast<const xi_doc_v1*>(
+                    host_->get_interface("xi.doc", 1));
+        }
+        return doc_;
+    }
+    const xi_emit_v1* emit_iface() const {
+        if (!emit_resolved_) {
+            emit_resolved_ = true;
+            if (host_ && host_->get_interface)
+                emit_ = static_cast<const xi_emit_v1*>(
+                    host_->get_interface("xi.emit", 1));
+        }
+        return emit_;
+    }
+    const xi_log_v1* log_iface() const {
+        if (!log_resolved_) {
+            log_resolved_ = true;
+            if (host_ && host_->get_interface)
+                log_ = static_cast<const xi_log_v1*>(
+                    host_->get_interface("xi.log", 1));
+        }
+        return log_;
+    }
+    mutable bool                 imaging_resolved_ = false;
+    mutable const xi_imaging_v1* imaging_          = nullptr;
+    mutable bool                 doc_resolved_     = false;
+    mutable const xi_doc_v1*     doc_              = nullptr;
+    mutable bool                 emit_resolved_    = false;
+    mutable const xi_emit_v1*    emit_             = nullptr;
+    mutable bool                 log_resolved_     = false;
+    mutable const xi_log_v1*     log_              = nullptr;
 };
 
 // --- γ: host doc allocator bridge ---
