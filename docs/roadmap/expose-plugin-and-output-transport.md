@@ -148,3 +148,35 @@ Mechanical but broad — `preview` → `expose`, `tab`/`pg_id` → `channel id`,
 5. **Push gating** — only channels with a subscriber are encoded + pushed. Subscription is tracked **in the plugin** via `exchange subscribe/unsubscribe` (Option 1), since the core's `emit_binary` is a dumb broadcast pipe with no server-side routing. Frames broadcast; clients filter by `channel`.
 6. **Image encoding** — **all JPEG**; non-8-bit/lossless is a different plugin's job.
 7. **Magic** — **`XEX1`** (clean break from `XPV1`).
+
+## 10. Client API (post-migration contract)
+
+The pre-v9 `vars` + `gid` + per-image-name preview model is **removed** from every
+client; all consumers move to channels + the atomic XEX1 frame.
+
+**Decoded frame (both languages), from `XEX1` bytes:**
+```
+{ v:1, channel:<str>, seq:<int>, values:<parsed JSON object/dict>,
+  images: [ { key:<str>, /* JS */ dataUrl:"data:image/jpeg;base64,…"
+                          /* Py */ jpeg:<bytes> } ] }
+```
+
+**Subscription (over the plugin's `exchange`, never a backend WS command):**
+- `subscribe(channels)`   → `exchange_instance("expose", {command:"subscribe",   channels:[…]})`
+- `unsubscribe(channels)` → `… {command:"unsubscribe", channels:[…]}`
+- `get(channel)` (pull latest) → `… {command:"get", channel}` → `{found, channel, seq, frame_b64}` (base64 of the same XEX1 frame; decode it with the same decoder).
+- `list_channels()` → tabs metadata.
+
+**JS (`ui-components`):** `protocol.mjs` exposes `decodeExposeFrame(buf)`. `ws-client.mjs`
+drops `parseVars`/`_deliverVars`/`_deliverPreview`/gid; on a binary message it
+`decodeExposeFrame` → keeps `latestByChannel` + fires an `onExpose(frame)` callback.
+The dashboard renders one tab per channel (values table + image grid by key). The
+`hmi` bundle (`hmi/lib/xi-components.esm.js`) is **regenerated** from this source.
+
+**Python (`tools/xinsp2_py`):** `ExposeFrame{channel, seq, values:dict, images:dict[key]->bytes}`
+replaces `PreviewFrame{gid,…}`. `client.subscribe/unsubscribe(channels)`,
+`client.get_expose(channel)`; `run()` collects the latest frame per channel into
+`RunResult.frames: dict[channel]->ExposeFrame`, with `RunResult.image(channel, key)`.
+`next_vars()` / gid correlation removed. `screenshot.py` / `snapshot.py` follow.
+
+**vscode-extension:** `protocol.ts` / `viewerProvider.ts` decode XEX1 + render by channel.
