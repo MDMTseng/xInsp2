@@ -207,6 +207,60 @@ typedef struct xi_preview_v1 {
                         int32_t quality, void* out, int32_t out_cap);
 } xi_preview_v1;
 
+/* xi.imaging@1 — the image-pool capability domain, carved out of the v9 monolith
+ * (core_fix_plan.md §12 Phase 3). Refcounted image HANDLES + the host file
+ * reader. Every entry is the SAME function pointer the legacy xi_host_api field
+ * holds (the host derives this struct from its own table), so a caller reaching
+ * a pixel through xi.imaging@1 and one calling host->image_data hit the byte-for-
+ * byte same path. Field order frozen forever; a change ships as xi_imaging_v2.
+ *   read_image_file is null when the host installed no decoder — null-check. */
+typedef struct xi_imaging_v1 {
+    xi_image_handle (*image_create)(int32_t w, int32_t h, int32_t channels);
+    void            (*image_addref)(xi_image_handle h);
+    void            (*image_release)(xi_image_handle h);
+    uint8_t*        (*image_data)(xi_image_handle h);
+    int32_t         (*image_width)(xi_image_handle h);
+    int32_t         (*image_height)(xi_image_handle h);
+    int32_t         (*image_channels)(xi_image_handle h);
+    int32_t         (*image_stride)(xi_image_handle h);
+    xi_image_handle (*read_image_file)(const char* path);
+} xi_imaging_v1;
+
+/* xi.doc@1 — the in-process JSON-doc capability domain (ABI v3/v4 γ fields),
+ * carved as a frozen interface. The host-owned chunk allocator behind a
+ * yyjson_mut_doc (so its free routes back to the host and the doc is safe to
+ * hand across the DLL boundary) plus the doc refcount (the doc analogue of
+ * image_addref/release). Same pointers as the legacy doc_* fields; field order
+ * matches the host table (alloc, realloc, free, retain, release, refcount). */
+typedef struct xi_doc_v1 {
+    void*   (*doc_chunk_alloc)(size_t size);
+    void*   (*doc_chunk_realloc)(void* ptr, size_t size);
+    void    (*doc_chunk_free)(void* ptr);
+    void    (*doc_retain)(void* doc);
+    void    (*doc_release)(void* doc);
+    int32_t (*doc_refcount)(void* doc);
+} xi_doc_v1;
+
+/* xi.emit@1 — the dispatch/output capability domain. emit_record (the one
+ * plugin-facing dispatch verb: stage + dispatch a whole record) + emit_binary
+ * (push an opaque binary frame straight to WS clients). Same pointers as the
+ * legacy emit_record/emit_binary fields; either may be null when the host did
+ * not wire it (no trigger hook / headless) — always null-check before calling. */
+typedef struct xi_emit_v1 {
+    void (*emit_record)(const char* emitter, xi_trigger_id id,
+                        const struct xi_record* rec, int64_t ts);
+    void (*emit_binary)(const void* data, int32_t len);
+} xi_emit_v1;
+
+/* xi.log@1 — the operator/UI text-I/O capability domain. log (a leveled line to
+ * the backend log + operator channel) + set_status (latest sticky status string
+ * per source, served via cmd:status). Same pointers as the legacy log/set_status
+ * fields. set_status is null on a headless host (no sink installed) — null-check. */
+typedef struct xi_log_v1 {
+    void (*log)(int32_t level, const char* msg);
+    void (*set_status)(const char* source, const char* text);
+} xi_log_v1;
+
 /* ------------------------------------------------------------------ */
 /* Host API — function table provided by the backend to every plugin  */
 /* ------------------------------------------------------------------ */
@@ -404,6 +458,14 @@ typedef struct xi_host_api {
     /*       legacy field through the door).                             */
     /*   get_interface("xi.preview", 1) -> const xi_preview_v1*  (the     */
     /*       compress_image capability, carved in Phase 2).              */
+    /*   get_interface("xi.imaging", 1) -> const xi_imaging_v1*  (image   */
+    /*       pool + read_image_file, carved in Phase 3).                  */
+    /*   get_interface("xi.doc", 1)     -> const xi_doc_v1*  (the in-proc */
+    /*       doc allocator + refcount, Phase 3).                          */
+    /*   get_interface("xi.emit", 1)    -> const xi_emit_v1*  (emit_record*/
+    /*       + emit_binary, Phase 3).                                     */
+    /*   get_interface("xi.log", 1)     -> const xi_log_v1*  (log +       */
+    /*       set_status, Phase 3).                                        */
     /* Null on a pre-v10 host — always null-check before calling; a       */
     /* caller then falls back to the legacy field (e.g. compress_image). */
     const void* (*get_interface)(const char* id, uint32_t version);
