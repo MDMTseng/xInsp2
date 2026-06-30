@@ -411,6 +411,43 @@ static std::atomic<xi::ws::Server*> g_srv_for_bp{nullptr};   // set in main
 // dispatch threads can each have their own current trigger.
 static thread_local const xi::TriggerEvent* g_current_trigger = nullptr;
 
+// A1: owning thread id of the in-flight CurrentTriggerScope — NON-thread-local
+// (unlike g_current_trigger above) so any thread can tell "is a trigger active
+// somewhere?" apart from "is one active on MY thread?". GetCurrentThreadId() is
+// never 0 for a live thread, so 0 unambiguously means "no trigger in flight".
+//
+// This disambiguates the two cases a trigger thunk's `!g_current_trigger` branch
+// used to conflate (see Problem A in docs/internals/core_fix_plan.md):
+//   * g_inspect_tid == 0  → genuinely no trigger (plain cmd:run, timer tick):
+//     keep the historical empty / XI_IMAGE_NULL semantics.
+//   * g_inspect_tid != 0  → a trigger IS active, but the caller is on a DIFFERENT
+//     thread — an xi::async task or #pragma omp body that read the ambient
+//     trigger off the inspect thread. That is the silent-bug class; fail loud.
+static std::atomic<unsigned long> g_inspect_tid{0};   // GetCurrentThreadId(), 0 = none
+
+// A1: invoked from a trigger thunk's "no current trigger" branch. If a trigger is
+// actually in flight (on another thread), the caller used current_trigger() off
+// the inspect thread — abort with a named message in debug, log-once in release.
+// If no trigger is in flight at all, returns quietly so the thunk preserves its
+// pre-existing empty / XI_IMAGE_NULL semantics (legitimate cmd:run / timer paths).
+static void warn_trigger_off_thread_() {
+    if (g_inspect_tid.load(std::memory_order_acquire) == 0) return;   // genuinely no trigger
+    static constexpr const char* kMsg =
+        "[xinsp2] current_trigger() called off the inspect thread — read the "
+        "trigger ON the inspect thread and capture into the parallel body "
+        "(use xi::trigger_snapshot() / xi::parallel_for; see the Parallelism "
+        "section of docs/guides/write-a-script.md)";
+#ifndef NDEBUG
+    std::fprintf(stderr, "FATAL: %s\n", kMsg);
+    std::fflush(stderr);
+    std::abort();
+#else
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr, "ERROR: %s\n", kMsg);
+#endif
+}
+
 // Release every host resource a finished trigger event owns: image handle refs
 // (ImagePool) + the ABI-v5 metadata doc ref (DocRegistry). Call exactly once
 // per event when it's done — dispatched or dropped — mirroring the bus's own
@@ -431,8 +468,17 @@ static inline void release_trigger_event_(const xi::TriggerEvent& ev) {
 // dispatch site can't get the sequence wrong.
 struct CurrentTriggerScope {
     const xi::TriggerEvent& ev_;
-    explicit CurrentTriggerScope(const xi::TriggerEvent& ev) : ev_(ev) { g_current_trigger = &ev; }
-    ~CurrentTriggerScope() { g_current_trigger = nullptr; release_trigger_event_(ev_); }
+    explicit CurrentTriggerScope(const xi::TriggerEvent& ev) : ev_(ev) {
+        g_current_trigger = &ev;
+        // A1: publish the owning thread id so a trigger thunk fired on another
+        // thread can tell "wrong thread" (loud bug) from "no trigger" (legit).
+        g_inspect_tid.store(GetCurrentThreadId(), std::memory_order_release);
+    }
+    ~CurrentTriggerScope() {
+        g_inspect_tid.store(0, std::memory_order_release);
+        g_current_trigger = nullptr;
+        release_trigger_event_(ev_);
+    }
     CurrentTriggerScope(const CurrentTriggerScope&) = delete;
     CurrentTriggerScope& operator=(const CurrentTriggerScope&) = delete;
 };
@@ -554,7 +600,7 @@ struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hp
 
 static void trigger_info_cb(CurrentTriggerInfoC* out) {
     if (!out) return;
-    if (!g_current_trigger) { *out = {{0,0}, 0, 0, 0, 0}; return; }
+    if (!g_current_trigger) { warn_trigger_off_thread_(); *out = {{0,0}, 0, 0, 0, 0}; return; }
     out->id             = g_current_trigger->id;
     out->timestamp_us   = g_current_trigger->timestamp_us;
     out->is_active      = 1;
@@ -563,7 +609,8 @@ static void trigger_info_cb(CurrentTriggerInfoC* out) {
 }
 
 static xi_image_handle trigger_image_cb(const char* source) {
-    if (!g_current_trigger || !source) return XI_IMAGE_NULL;
+    if (!g_current_trigger) { warn_trigger_off_thread_(); return XI_IMAGE_NULL; }
+    if (!source) return XI_IMAGE_NULL;
     auto it = g_current_trigger->images.find(source);
     if (it == g_current_trigger->images.end()) {
         // Reader-side sole-image fallback (cold path — only on an exact-key
@@ -585,7 +632,8 @@ static xi_image_handle trigger_image_cb(const char* source) {
 }
 
 static int32_t trigger_sources_cb(char* buf, int32_t buflen) {
-    if (!g_current_trigger || !buf) return 0;
+    if (!g_current_trigger) { warn_trigger_off_thread_(); return 0; }
+    if (!buf) return 0;
     std::string out;
     bool first = true;
     for (auto& [src, h] : g_current_trigger->images) {
@@ -606,7 +654,8 @@ static int32_t trigger_sources_cb(char* buf, int32_t buflen) {
 // should consult sources(). Same -needed_bytes convention as
 // trigger_sources_cb so scripts can resize and retry.
 static int32_t trigger_leader_cb(char* buf, int32_t buflen) {
-    if (!g_current_trigger || !buf) return 0;
+    if (!g_current_trigger) { warn_trigger_off_thread_(); return 0; }
+    if (!buf) return 0;
     const std::string& s = g_current_trigger->leader_source;
     int32_t n = (int32_t)s.size();
     if (n == 0) return 0;
@@ -624,7 +673,8 @@ static int32_t trigger_leader_cb(char* buf, int32_t buflen) {
 // balancing this reserve; the worker still holds the event's own ref until
 // release_trigger_event_. Returns null when the trigger carries no metadata.
 static void* trigger_meta_cb() {
-    if (!g_current_trigger || !g_current_trigger->meta_doc) return nullptr;
+    if (!g_current_trigger) { warn_trigger_off_thread_(); return nullptr; }
+    if (!g_current_trigger->meta_doc) return nullptr;
     xi::DocRegistry::instance().retain(g_current_trigger->meta_doc);
     return (void*)g_current_trigger->meta_doc;
 }
