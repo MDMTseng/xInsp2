@@ -357,6 +357,26 @@ typedef struct xi_host_api {
                               void* out, int32_t out_cap);
 } xi_host_api;
 
+/* ------------------------------------------------------------------ *
+ * FROZEN SIGNATURE — xi_host_api@9.                                   *
+ *                                                                    *
+ * As of ADR-001 (docs/internals/adr-001-host-api-freeze.md) the v9   *
+ * layout of xi_host_api is FROZEN: a published (interface, vN) is     *
+ * frozen forever; any add/change/remove ships as v10, never as an     *
+ * in-place edit of the v9 fields. Do NOT add, remove, reorder, or     *
+ * retype any field above to "fix" a build — that breaks every plugin  *
+ * compiled against v9.                                                *
+ *                                                                    *
+ * Two guards enforce this (both fail the BUILD — there is no CI       *
+ * runner in this repo):                                               *
+ *   1. The static_asserts just below (size + last-field anchor).      *
+ *   2. backend/tests/test_abi_freeze.cpp — the full canonical         *
+ *      signature: every field's offset AND exact fn-pointer type, in  *
+ *      order. backend/tests/test_golden_plugin.cpp additionally loads *
+ *      a v9 plugin through the real path and runs process() once.     *
+ * See core_fix_plan.md §10-12.                                        *
+ * ------------------------------------------------------------------ */
+
 /* ABI LAYOUT GUARD (host build only). The version gate elsewhere is an int compare
  * (plugin's requested version <= host's) — it does NOT verify struct layout. So a
  * well-meaning edit that changes xi_host_api WITHOUT bumping XI_ABI_VERSION (e.g.

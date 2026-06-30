@@ -1,0 +1,387 @@
+//
+// test_parallel_safety.cpp — behavioral regression tests for the three
+// parallel-region concurrency hazards fixed in Part I of the core fix plan
+// (docs/roadmap/core-bug-hunt-2026-06-fix-plan.md companion + the W1 commits).
+// These three hazards previously had ZERO test coverage.
+//
+//   B (OpenMP / SEH)  — xi::parallel_for must catch a hardware fault AND an
+//                       ordinary std::exception INSIDE the omp region and
+//                       rethrow on the calling thread, never terminating the
+//                       process.  (xi_parallel.hpp)
+//   C (image owner)   — an image created on a worker thread (via xi::async /
+//                       xi::parallel_for) must inherit the PARENT inspect
+//                       thread's image-pool owner, not anonymous (owner=0), so
+//                       the per-owner leak sweep reclaims it.  (xi_async.hpp C2,
+//                       xi_parallel.hpp C3, owner thunks C1)
+//   A (trigger)       — xi::trigger_snapshot() captures the trigger BY VALUE on
+//                       the inspect thread (addref'd images + frozen meta) so it
+//                       can be read safely from ANY other thread, surviving the
+//                       end of the originating dispatch.  (xi_use.hpp A2)
+//
+// Harness: the inline CHECK/SECTION style used by the neighboring test_*.cpp
+// (test_xi_core / test_image_pool / test_golden_plugin), NOT xi_test.hpp —
+// xi_test.hpp signals failure by THROWING, which is unsafe from inside the
+// worker threads these tests assert on (and collides with the B test, which
+// deliberately throws out of a parallel region). g_failures is atomic so a
+// CHECK fired on a worker thread is race-free.
+//
+// Build: this target is compiled WITH /openmp (see backend/CMakeLists.txt) so
+// the B + C tests exercise the REAL multi-threaded OpenMP path in
+// xi::parallel_for, not the serial #else fallback. /EHa (set project-wide) is
+// what makes _set_se_translator able to convert the SEH fault into a catchable
+// xi::seh_exception.
+//
+
+#include <xi/xi.hpp>             // xi::async, xi::parallel_for, xi::seh_exception
+#include <xi/xi_use.hpp>         // xi::trigger_snapshot / TriggerSnapshot
+#include <xi/xi_image_pool.hpp>  // ImagePool + make_host_api + OwnerGuard
+#include <xi/xi_doc_registry.hpp>// DocRegistry refcount leak-check (A meta path)
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
+
+// ---- harness ---------------------------------------------------------------
+static std::atomic<int> g_failures{0};
+#define CHECK(cond)                                                            \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+            g_failures.fetch_add(1);                                          \
+        }                                                                      \
+    } while (0)
+#define SECTION(name) std::printf("[test] %s\n", name)
+
+// xi_use.hpp declares these as extern (the script DLL defines them static via
+// xi_script_support.hpp). This unit test plays the role of the host: it OWNS
+// the storage and points the trigger thunks at its own canned state. (The owner
+// thunks g_owner_get_fn_/g_owner_set_fn_ are inline-defined in xi_async.hpp —
+// we only assign them, below.)
+void* g_use_process_fn_   = nullptr;
+void* g_use_exchange_fn_  = nullptr;
+void* g_use_grab_fn_      = nullptr;
+void* g_use_host_api_     = nullptr;
+void* g_trigger_info_fn_  = nullptr;
+void* g_trigger_image_fn_ = nullptr;
+void* g_trigger_sources_fn_ = nullptr;
+void* g_trigger_leader_fn_  = nullptr;
+void* g_trigger_meta_fn_    = nullptr;
+
+// A single host_api over the live singleton ImagePool — exactly what the backend
+// hands a script/plugin (image_* + doc_* all route to the real pool/registry).
+static const xi_host_api& host_api() {
+    static xi_host_api api = xi::ImagePool::make_host_api();
+    return api;
+}
+
+// ===========================================================================
+// B — xi::parallel_for SEH + std::exception containment + completeness
+// ===========================================================================
+
+// A runtime-null pointer the optimizer can't constant-fold away, so the store
+// genuinely faults (access violation) instead of being elided as UB.
+static int* volatile g_null_ptr = nullptr;
+
+static void test_parallel_for_seh_fault_surfaces() {
+    SECTION("B1: parallel_for surfaces an SEH hardware fault on the calling thread");
+    xi::clear_cancel();   // make sure no stale cancel from another test poisons the loop
+
+    std::atomic<int> ran{0};
+    bool caught_seh = false;
+    unsigned int code = 0;
+    bool caught_other = false;
+    try {
+        xi::parallel_for(2000, [&](int i) {
+            ran.fetch_add(1, std::memory_order_relaxed);
+            if (i == 1234) {
+                // Hardware fault on exactly one iteration. parallel_for installs
+                // the SEH translator per omp worker, so this becomes a catchable
+                // xi::seh_exception INSIDE the region (not a process kill).
+                *g_null_ptr = 0xDEAD;
+            }
+        });
+    } catch (const xi::seh_exception& e) {
+        caught_seh = true;
+        code = e.code;
+    } catch (...) {
+        caught_other = true;
+    }
+    // Reaching here at all proves the process was NOT terminated by the fault.
+    CHECK(caught_seh);
+    CHECK(!caught_other);
+    CHECK(code == 0xC0000005u);   // EXCEPTION_ACCESS_VIOLATION
+    // At least the faulting iteration ran; others may have drained early.
+    CHECK(ran.load() >= 1);
+    std::printf("  surfaced SEH code=0x%08X after %d iterations\n", code, ran.load());
+}
+
+static void test_parallel_for_cpp_exception_surfaces() {
+    SECTION("B2: parallel_for surfaces a plain std::exception (the catch(...) gap fix)");
+    xi::clear_cancel();
+
+    bool caught = false;
+    bool wrong = false;
+    try {
+        xi::parallel_for(256, [&](int i) {
+            if (i == 7) throw std::runtime_error("body boom");
+        });
+    } catch (const std::runtime_error& e) {
+        caught = (std::string(e.what()) == "body boom");
+    } catch (...) {
+        wrong = true;   // escaped as something else — the gap fix would be broken
+    }
+    CHECK(caught);
+    CHECK(!wrong);
+}
+
+static void test_parallel_for_all_iterations_run() {
+    SECTION("B3: a normal parallel_for body runs every iteration exactly once");
+    xi::clear_cancel();
+
+    constexpr int N = 4096;
+    std::atomic<int> count{0};
+    std::vector<int> seen(N, 0);
+    xi::parallel_for(N, [&](int i) {
+        count.fetch_add(1, std::memory_order_relaxed);
+        seen[i] = 1;   // distinct index per iteration — no data race
+    });
+    CHECK(count.load() == N);
+    bool all = true;
+    for (int i = 0; i < N; ++i) if (!seen[i]) all = false;
+    CHECK(all);
+}
+
+// ===========================================================================
+// C — worker-thread image-pool owner propagation (async + parallel_for)
+// ===========================================================================
+
+// Owner thunks: identical to service_main.cpp's owner_get_cb/owner_set_cb —
+// read/write THIS thread's ImagePool owner slot.
+static uint32_t test_owner_get() { return (uint32_t)xi::ImagePool::current_owner(); }
+static void     test_owner_set(uint32_t id) {
+    xi::ImagePool::current_owner_ref() = (xi::ImagePoolOwnerId)id;
+}
+
+static void wire_owner_thunks() {
+    g_owner_get_fn_ = (void*)&test_owner_get;
+    g_owner_set_fn_ = (void*)&test_owner_set;
+}
+
+static void test_async_propagates_owner() {
+    SECTION("C2: xi::async-created pool image is attributed to the PARENT owner");
+    wire_owner_thunks();
+    const xi_host_api& host = host_api();
+    auto& pool = xi::ImagePool::instance();
+
+    xi::ImagePoolOwnerId P = xi::ImagePool::alloc_owner_id();
+    xi_image_handle h = 0;
+    {
+        // Inspect thread runs under owner P (as the dispatch worker does via
+        // ImagePool::OwnerGuard around the script inspect).
+        xi::ImagePool::OwnerGuard g(P);
+        // The image is created on a DIFFERENT (worker) thread. Pre-fix it would
+        // be tagged owner=0 (anonymous) and dropped from P's leak sweep.
+        auto f = xi::async([&host]() -> xi_image_handle {
+            return host.image_create(8, 8, 1);
+        });
+        h = f;   // await
+    }
+    CHECK(h != 0);
+    // THE FIX: the worker-created image is attributed to P, not anonymous.
+    // (P is a freshly alloc'd owner id, so stats(P) counts ONLY this image.)
+    CHECK(pool.stats(P).handle_count == 1);   // pre-fix: 0 (it would be owner=0)
+
+    // And P's sweep reclaims it (sole owner → genuine leak reclaimed).
+    int swept = pool.release_all_for(P);
+    CHECK(swept == 1);
+    CHECK(pool.data(h) == nullptr);
+}
+
+static void test_parallel_for_propagates_owner() {
+    SECTION("C3: xi::parallel_for-created pool images are attributed to the PARENT owner");
+    wire_owner_thunks();
+    const xi_host_api& host = host_api();
+    auto& pool = xi::ImagePool::instance();
+
+    constexpr int N = 8;
+    xi::ImagePoolOwnerId P = xi::ImagePool::alloc_owner_id();
+    std::vector<xi_image_handle> hs(N, 0);
+    {
+        xi::ImagePool::OwnerGuard g(P);
+        xi::clear_cancel();
+        xi::parallel_for(N, [&](int i) {
+            hs[i] = host.image_create(4, 4, 1);   // on an omp worker thread
+        });
+    }
+    for (int i = 0; i < N; ++i) CHECK(hs[i] != 0);
+    // Every worker-created image inherited P (OwnerScope re-installs it per omp
+    // worker inside the region). Pre-fix all N would be owner=0.
+    CHECK(pool.stats(P).handle_count == N);
+
+    int swept = pool.release_all_for(P);
+    CHECK(swept == N);
+    CHECK(pool.stats(P).handle_count == 0);
+}
+
+// ===========================================================================
+// A — xi::trigger_snapshot() cross-thread (A2)
+// ===========================================================================
+//
+// We play the host: the trigger thunks read canned state below (mirroring the
+// ref semantics of service_main.cpp's trigger_*_cb). A1's off-thread fail-loud
+// (g_inspect_tid + warn_trigger_off_thread_) lives in service_main.cpp and is
+// only meaningful with the real dispatch worker + CurrentTriggerScope, so it is
+// exercised at INTEGRATION level — see the note in the report. Here we test the
+// unit-testable A2 surface: the snapshot round-trips correctly off-thread and
+// keeps its images + meta alive past the end of the originating dispatch.
+
+static bool                                         g_trig_active = false;
+static std::unordered_map<std::string, xi_image_handle> g_trig_images;
+static xi::CurrentTriggerInfo                       g_trig_info{};
+static yyjson_mut_doc*                              g_trig_meta = nullptr;
+
+static void test_trigger_info_fn(xi::CurrentTriggerInfo* out) {
+    if (!out) return;
+    if (!g_trig_active) { *out = xi::CurrentTriggerInfo{}; return; }
+    *out = g_trig_info;
+    out->is_active = 1;
+}
+static xi_image_handle test_trigger_image_fn(const char* source) {
+    if (!g_trig_active || !source) return XI_IMAGE_NULL;
+    auto it = g_trig_images.find(source);
+    if (it == g_trig_images.end()) {
+        if (g_trig_images.size() == 1) it = g_trig_images.begin();   // sole-image fallback
+        else return XI_IMAGE_NULL;
+    }
+    host_api().image_addref(it->second);   // reserve a ref for the caller (== trigger_image_cb)
+    return it->second;
+}
+static int32_t test_trigger_sources_fn(char* buf, int32_t buflen) {
+    if (!g_trig_active || !buf) return 0;
+    std::string out; bool first = true;
+    for (auto& [s, h] : g_trig_images) { if (!first) out.push_back('\n'); first = false; out += s; }
+    int32_t n = (int32_t)out.size();
+    if (buflen < n + 1) return -n;
+    std::memcpy(buf, out.data(), n); buf[n] = 0;
+    return n;
+}
+static void* test_trigger_meta_fn() {
+    if (!g_trig_active || !g_trig_meta) return nullptr;
+    host_api().doc_retain(g_trig_meta);    // reserve a ref for the script's adopt_shared
+    return (void*)g_trig_meta;
+}
+
+static void test_trigger_snapshot_cross_thread() {
+    SECTION("A2: trigger_snapshot round-trips cross-thread + outlives the dispatch");
+    const xi_host_api& host = host_api();
+
+    g_use_host_api_       = (void*)&host;
+    g_trigger_info_fn_    = (void*)&test_trigger_info_fn;
+    g_trigger_image_fn_   = (void*)&test_trigger_image_fn;
+    g_trigger_sources_fn_ = (void*)&test_trigger_sources_fn;
+    g_trigger_meta_fn_    = (void*)&test_trigger_meta_fn;
+
+    // --- host sets up an in-flight trigger: one image + a metadata doc ---
+    xi_image_handle h = host.image_create(8, 8, 1);   // the "ev.images" ref (rc=1)
+    {
+        uint8_t* px = host.image_data(h);
+        for (size_t i = 0; i < 64; ++i) px[i] = (uint8_t)(0x50 + (i & 0x0F));
+    }
+    g_trig_images["cam"] = h;
+
+    yyjson_mut_doc* d = yyjson_mut_doc_new(nullptr);   // the "ev.meta_doc"
+    yyjson_mut_val* root = yyjson_mut_obj(d);
+    yyjson_mut_doc_set_root(d, root);
+    yyjson_mut_obj_add_strcpy(d, root, "cmd", "inspect");
+    yyjson_mut_obj_add_int(d, root, "lane", 7);
+    host.doc_retain(d);                                // host/dispatch holds rc=1
+    g_trig_meta = d;
+
+    g_trig_info = xi::CurrentTriggerInfo{};
+    g_trig_info.id            = xi_trigger_id{0x1234ull, 0xABCDull};
+    g_trig_info.timestamp_us  = 4242;
+    g_trig_info.dequeued_at_us = 99;
+    g_trig_active = true;
+
+    // --- INSPECT THREAD: take the snapshot (reads thread_local host state) ---
+    xi::TriggerSnapshot snap = xi::trigger_snapshot();
+    CHECK(snap.is_active());
+    CHECK(snap.sources().size() == 1);
+    CHECK(snap.has_source("cam"));
+
+    // --- Simulate the dispatch ENDING: the host drops its image + meta refs
+    //     and tears down the ambient trigger. The snapshot's own addref'd image
+    //     ref + frozen-Record meta ref must keep both alive on their own. ---
+    host.image_release(h);     // image rc 2 -> 1 (only the snapshot holds it now)
+    host.doc_release(d);       // meta  rc 2 -> 1 (only the snapshot's Record holds it)
+    g_trig_active = false;
+    g_trig_images.clear();
+    g_trig_meta = nullptr;
+
+    // --- A DIFFERENT thread reads the snapshot. It touches NO thread_local and
+    //     NO thunk — everything is by-value/addref'd into the snapshot. ---
+    std::thread worker([&]() {
+        // id / timestamps round-trip
+        CHECK(snap.id().hi == 0x1234ull);
+        CHECK(snap.id().lo == 0xABCDull);
+        CHECK(snap.timestamp_us() == 4242);
+        CHECK(snap.dequeued_at_us() == 99);
+
+        // image: still valid, correct geometry, sentinel pixels intact (the
+        // held addref kept the pool entry alive past host.image_release above)
+        xi::Image img = snap.image("cam");
+        CHECK(!img.empty());
+        CHECK(img.width == 8 && img.height == 8 && img.channels == 1);
+        const uint8_t* px = img.data();
+        CHECK(px != nullptr);
+        bool sentinel_ok = (px != nullptr);
+        if (px) for (size_t i = 0; i < 64; ++i)
+            if (px[i] != (uint8_t)(0x50 + (i & 0x0F))) { sentinel_ok = false; break; }
+        CHECK(sentinel_ok);
+        // sole-image fallback: any key resolves a single-image snapshot
+        CHECK(!snap.image("anything-else").empty());
+
+        // meta: frozen Record read off-thread, survived host.doc_release above
+        const xi::Record& m = snap.meta();
+        CHECK(m["cmd"].as_string() == "inspect");
+        CHECK(m["lane"].as_int() == 7);
+    });
+    worker.join();
+
+    // --- Drop the snapshot: its held refs are the LAST, so both the pool image
+    //     and the meta doc are now reclaimed (no leak, no double-free). ---
+    {
+        xi::TriggerSnapshot dead = std::move(snap);
+        (void)dead;   // dead dies here
+    }
+    CHECK(xi::ImagePool::instance().data(h) == nullptr);          // image reclaimed
+    CHECK(xi::DocRegistry::instance().refcount(d) == 0);          // meta doc freed (no leak)
+}
+
+// ===========================================================================
+
+int main() {
+    // B — most self-contained; do thoroughly.
+    test_parallel_for_seh_fault_surfaces();
+    test_parallel_for_cpp_exception_surfaces();
+    test_parallel_for_all_iterations_run();
+
+    // C — owner propagation onto worker threads.
+    test_async_propagates_owner();
+    test_parallel_for_propagates_owner();
+
+    // A — trigger snapshot cross-thread (A2). A1 fail-loud is integration-level.
+    test_trigger_snapshot_cross_thread();
+
+    int f = g_failures.load();
+    if (f == 0) {
+        std::printf("\nALL TESTS PASSED\n");
+        return 0;
+    }
+    std::fprintf(stderr, "\n%d FAILURES\n", f);
+    return 1;
+}

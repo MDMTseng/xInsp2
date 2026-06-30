@@ -17,6 +17,7 @@
 //
 
 #include "xi_async.hpp"
+#include "xi_parallel.hpp"
 #include "xi_image.hpp"
 #include "xi_io.hpp"
 #include "xi_param.hpp"

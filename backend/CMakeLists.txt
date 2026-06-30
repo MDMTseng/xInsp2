@@ -152,6 +152,31 @@ target_compile_definitions(test_plugin_teardown PRIVATE
     TEST_PLUGIN_DLL="$<TARGET_FILE:test_teardown_plugin>")
 add_test(NAME plugin_teardown COMMAND test_plugin_teardown)
 
+# --- ABI Phase 0 safety nets (docs/internals/adr-001-host-api-freeze.md) ----
+# Golden-plugin compat test: a minimal REAL xi C-ABI plugin pinned to ABI v9 /
+# min-compat 6 (golden_plugin), loaded through the genuine plugin-load path
+# (plugin_abi_compatible -> CAbiInstanceAdapter) and run once, asserting stable
+# process() behaviour. THE single most important ABI safety net — source-built
+# (not a committed blob), so it always tracks the live headers.
+add_library(golden_plugin SHARED tests/golden_plugin.cpp)
+target_link_libraries(golden_plugin PRIVATE xi_core)
+add_executable(test_golden_plugin tests/test_golden_plugin.cpp)
+target_link_libraries(test_golden_plugin PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_golden_plugin PRIVATE Ws2_32)
+endif()
+add_dependencies(test_golden_plugin golden_plugin)
+target_compile_definitions(test_golden_plugin PRIVATE
+    GOLDEN_PLUGIN_DLL="$<TARGET_FILE:golden_plugin>")
+add_test(NAME golden_plugin COMMAND test_golden_plugin)
+
+# ABI freeze-signature guard: declares xi_host_api@9 frozen and fails the BUILD
+# if its published layout changes (per-field offset + fn-pointer type, in order).
+# Mostly compile-time static_assert; the test target makes it part of the build.
+add_executable(test_abi_freeze tests/test_abi_freeze.cpp)
+target_link_libraries(test_abi_freeze PRIVATE xi_core)
+add_test(NAME abi_freeze COMMAND test_abi_freeze)
+
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
 target_include_directories(test_yyjson PRIVATE
@@ -219,6 +244,23 @@ if(NOT MSVC)
     target_link_libraries(test_image_pool PRIVATE pthread)
 endif()
 add_test(NAME image_pool COMMAND test_image_pool)
+
+# Parallel-region safety regression tests (Part I hazards A/B/C — trigger
+# snapshot, OpenMP/SEH containment, worker-thread image-owner propagation).
+# Built WITH /openmp so xi::parallel_for exercises the REAL multi-threaded
+# OpenMP path (per-omp-thread SEH translator + owner re-install), not its serial
+# #else fallback. /EHa (project-wide) lets _set_se_translator convert the SEH
+# fault into a catchable xi::seh_exception.
+add_executable(test_parallel_safety tests/test_parallel_safety.cpp)
+target_link_libraries(test_parallel_safety PRIVATE xi_core)
+if(MSVC)
+    target_compile_options(test_parallel_safety PRIVATE /openmp)
+else()
+    target_compile_options(test_parallel_safety PRIVATE -fopenmp)
+    target_link_libraries(test_parallel_safety PRIVATE pthread)
+    target_link_options(test_parallel_safety PRIVATE -fopenmp)
+endif()
+add_test(NAME parallel_safety COMMAND test_parallel_safety)
 
 add_executable(test_image_pool_stress tests/test_image_pool_stress.cpp)
 target_link_libraries(test_image_pool_stress PRIVATE xi_core)

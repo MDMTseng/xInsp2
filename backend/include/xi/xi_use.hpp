@@ -276,6 +276,91 @@ private:
 // Per-call helper. Cheap to construct — internal info is fetched lazily.
 inline Trigger current_trigger() { return Trigger{}; }
 
+// xi::TriggerSnapshot — a by-value, thread-safe copy of the current trigger's
+// images + meta, captured ON THE INSPECT THREAD for safe use inside parallel
+// regions (xi::async / xi::parallel_for / raw #pragma omp).
+//
+// current_trigger() reads thread_local host state through the trigger thunks and
+// is ONLY valid on the inspect thread (Invariant 6.1). A worker thread that calls
+// it gets a loud, named error (A1) — or, on an older host, a silent empty result.
+// The blessed fix is to snapshot on the inspect thread and capture the snapshot
+// BY VALUE into the parallel body:
+//
+//   auto snap = xi::trigger_snapshot();                              // inspect thread
+//   xi::parallel_for(n, [snap](int i){ work(snap.image("gray")); }); // any thread, safe
+//
+// Each image is held as a pool-backed xi::Image whose shared_ptr keeps one pool
+// ref alive for the life of the snapshot (and every copy) — so the pixels stay
+// valid across the whole region regardless of when the inspect's own trigger refs
+// are dropped. Accessors touch NO thread_local; copies are cheap (shared_ptr +
+// frozen-Record refcount bumps) and safe to read concurrently from many threads.
+class TriggerSnapshot {
+public:
+    bool is_active() const { return active_; }
+
+    // Named source's image (empty Image if absent). Mirrors the host thunk's
+    // single-image fallback: a one-image trigger resolves by ANY key.
+    Image image(const std::string& source) const {
+        auto it = images_.find(source);
+        if (it != images_.end()) return it->second;
+        if (images_.size() == 1)  return images_.begin()->second;
+        return {};
+    }
+
+    std::vector<std::string> sources() const {
+        std::vector<std::string> out;
+        out.reserve(images_.size());
+        for (auto& [k, v] : images_) out.push_back(k);
+        return out;
+    }
+    bool has_source(const char* name) const {
+        return name && images_.find(name) != images_.end();
+    }
+
+    // The trigger's metadata Record (frozen, see Trigger::meta()). Held by value
+    // so it stays valid for the life of the snapshot, off any thread.
+    const Record& meta() const { return meta_; }
+
+    xi_trigger_id id() const           { return info_.id; }
+    int64_t       timestamp_us() const { return info_.timestamp_us; }
+    int64_t       dequeued_at_us() const { return info_.dequeued_at_us; }
+    std::string   id_string() const {
+        char buf[40];
+        std::snprintf(buf, sizeof(buf), "%016llx%016llx",
+                      (unsigned long long)info_.id.hi,
+                      (unsigned long long)info_.id.lo);
+        return buf;
+    }
+
+private:
+    friend TriggerSnapshot trigger_snapshot();
+    std::unordered_map<std::string, Image> images_;
+    Record                                 meta_;
+    CurrentTriggerInfo                     info_{};
+    bool                                   active_ = false;
+};
+
+// Capture the current trigger's images + meta into a by-value snapshot. MUST be
+// called on the inspect thread (where the trigger is ambient); the result is then
+// safe to capture into any worker thread. Returns an inactive snapshot when no
+// trigger is in flight (plain cmd:run / timer tick).
+inline TriggerSnapshot trigger_snapshot() {
+    TriggerSnapshot s;
+    Trigger t;
+    if (!t.is_active()) return s;            // reads thread_local — inspect thread only
+    s.active_                = true;
+    s.info_.id              = t.id();
+    s.info_.timestamp_us    = t.timestamp_us();
+    s.info_.dequeued_at_us  = t.dequeued_at_us();
+    s.info_.is_active       = 1;
+    for (auto& src : t.sources()) {
+        Image img = t.image(src);            // addref'd pool view, held by the snapshot
+        if (!img.empty()) s.images_.emplace(src, std::move(img));
+    }
+    s.meta_ = t.meta();                      // frozen Record — own ref, survives dispatch
+    return s;
+}
+
 // Proxy object returned by xi::use()
 // A miss on xi::use("name") — process/exchange returns -1 when no instance by
 // that name is registered — used to be silent (empty Record/Image, no log), so a

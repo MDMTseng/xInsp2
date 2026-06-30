@@ -23,13 +23,63 @@
 #include "xi_seh.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 
+// Image-pool owner get/set thunks, injected by the host into the script DLL via
+// xi_script_set_owner_callbacks (see C1). xi::async (C2) and xi::parallel_for
+// (C3) carry the inspect-thread owner onto the worker threads they spawn by
+// reading/writing these. Null on an older host / non-script TU ⇒ the wrappers
+// below are silent no-ops and worker-created images stay anonymous (owner=0),
+// exactly as before.
+//
+// These are `inline` (one shared, zero-initialised definition per module) rather
+// than the `extern`-here / `static`-in-xi_script_support.hpp idiom used for the
+// g_use_*/g_trigger_* globals. That idiom only works because those globals are
+// ODR-used EXCLUSIVELY from script TUs (which include xi_script_support.hpp's
+// static definitions). The owner thunks differ: detail::owner_get() below is
+// ODR-used UNCONDITIONALLY from xi::async / xi::parallel_for, which NON-script
+// TUs instantiate too (unit tests, a plugin op-library using xi::async). An
+// `extern` with no definition reachable from those TUs is an unresolved-external
+// link error. `inline` gives every such TU its own zero-initialised copy and the
+// exported setter writes the script DLL's copy that the script's async reads —
+// same module, so it stays consistent. (Global scope to match the setter, which
+// writes ::g_owner_*_fn_.)
+inline void* g_owner_get_fn_ = nullptr;
+inline void* g_owner_set_fn_ = nullptr;
+
 namespace xi {
+
+namespace detail {
+using OwnerGetFn = uint32_t (*)();
+using OwnerSetFn = void     (*)(uint32_t);
+
+// Read the image-pool owner active on THIS thread (0 if no host wired the thunk).
+inline uint32_t owner_get() {
+    auto fn = reinterpret_cast<OwnerGetFn>(::g_owner_get_fn_);
+    return fn ? fn() : 0u;
+}
+// Install `id` as the image-pool owner on THIS thread (no-op if unwired).
+inline void owner_set(uint32_t id) {
+    auto fn = reinterpret_cast<OwnerSetFn>(::g_owner_set_fn_);
+    if (fn) fn(id);
+}
+
+// RAII: install `id` as this thread's image-pool owner for the scope, restore the
+// previous owner on exit. Symmetric with the cancel-token / inspect-ticket Scope
+// — used by xi::async and xi::parallel_for to attribute worker-created images.
+struct OwnerScope {
+    uint32_t prev;
+    explicit OwnerScope(uint32_t id) : prev(owner_get()) { owner_set(id); }
+    ~OwnerScope() { owner_set(prev); }
+    OwnerScope(const OwnerScope&) = delete;
+    OwnerScope& operator=(const OwnerScope&) = delete;
+};
+} // namespace detail
 
 // Cancellation token. Shared between a Future<T> and the worker
 // task it spawned. Caller-side `cancel()` flips the bit; worker-
@@ -243,11 +293,18 @@ auto async(F&& f, Args&&... args)
     // trip's cancel).
     uint64_t parent_ticket = current_inspect_ticket_ref();
 
+    // C2: capture the image-pool owner active at spawn (the script during inspect,
+    // or an instance if spawned inside process()) so async-created pool images are
+    // attributed to it instead of anonymous (owner=0). Re-installed via OwnerScope
+    // in the closure below. Zero cost when unwired (owner_get() returns 0).
+    uint32_t parent_owner = detail::owner_get();
+
     auto closure =
         [fn  = std::forward<F>(f),
          tup = std::make_tuple(std::forward<Args>(args)...),
          tok = token,
-         parent_ticket]() mutable -> R {
+         parent_ticket,
+         parent_owner]() mutable -> R {
             // Install SEH translator on the worker thread so segfaults
             // become seh_exception and propagate through std::promise
             // to the .get() / await site.
@@ -269,6 +326,9 @@ auto async(F&& f, Args&&... args)
                     current_inspect_ticket_ref() = prev_ticket;
                 }
             } scope(tok.get(), parent_ticket);
+            // C2: re-install the parent's image-pool owner for the duration of the
+            // user callable so any pool image it creates is attributed correctly.
+            detail::OwnerScope owner_scope(parent_owner);
             return std::apply(std::move(fn), std::move(tup));
         };
 
