@@ -484,6 +484,66 @@ public:
         return &iface;
     }
 
+    // xi.imaging@1 / xi.doc@1 / xi.emit@1 / xi.log@1 — the remaining capability
+    // domains carved out of the v9 monolith (Phase 3). Each is a frozen struct
+    // whose entries are COPIED from the canonical host table, so every interface
+    // fn-pointer is byte-for-byte the SAME pointer as the legacy xi_host_api
+    // field (the door and the field hit one code path; an old plugin keeps using
+    // the field forever). Process-stable address (Meyers singleton), built lazily
+    // from canonical_host_api() — no static-init ordering hazard, no recursion
+    // (building the table only STORES &get_interface_impl, never calls it).
+    static const xi_imaging_v1* imaging_v1_iface() {
+        static const xi_imaging_v1 iface = [] {
+            const xi_host_api* h = canonical_host_api();
+            xi_imaging_v1 i{};
+            i.image_create    = h->image_create;
+            i.image_addref    = h->image_addref;
+            i.image_release   = h->image_release;
+            i.image_data      = h->image_data;
+            i.image_width     = h->image_width;
+            i.image_height    = h->image_height;
+            i.image_channels  = h->image_channels;
+            i.image_stride    = h->image_stride;
+            i.read_image_file = h->read_image_file;
+            return i;
+        }();
+        return &iface;
+    }
+    static const xi_doc_v1* doc_v1_iface() {
+        static const xi_doc_v1 iface = [] {
+            const xi_host_api* h = canonical_host_api();
+            xi_doc_v1 i{};
+            i.doc_chunk_alloc   = h->doc_chunk_alloc;
+            i.doc_chunk_realloc = h->doc_chunk_realloc;
+            i.doc_chunk_free    = h->doc_chunk_free;
+            i.doc_retain        = h->doc_retain;
+            i.doc_release       = h->doc_release;
+            i.doc_refcount      = h->doc_refcount;
+            return i;
+        }();
+        return &iface;
+    }
+    static const xi_emit_v1* emit_v1_iface() {
+        static const xi_emit_v1 iface = [] {
+            const xi_host_api* h = canonical_host_api();
+            xi_emit_v1 i{};
+            i.emit_record = h->emit_record;   // may be null until the trigger hook wires it
+            i.emit_binary = h->emit_binary;
+            return i;
+        }();
+        return &iface;
+    }
+    static const xi_log_v1* log_v1_iface() {
+        static const xi_log_v1 iface = [] {
+            const xi_host_api* h = canonical_host_api();
+            xi_log_v1 i{};
+            i.log        = h->log;
+            i.set_status = h->set_status;
+            return i;
+        }();
+        return &iface;
+    }
+
     // The canonical, process-stable host table — built ONCE. get_interface
     // ("xi.legacy", 9) hands this back so a caller can reach the whole v9
     // surface through the door (core_fix_plan.md §12 Phase 1: "register the
@@ -504,6 +564,14 @@ public:
             return canonical_host_api();        // the whole v9 surface, one pointer
         if (std::strcmp(id, "xi.preview") == 0 && version == 1)
             return preview_v1_iface();
+        if (std::strcmp(id, "xi.imaging") == 0 && version == 1)
+            return imaging_v1_iface();
+        if (std::strcmp(id, "xi.doc") == 0 && version == 1)
+            return doc_v1_iface();
+        if (std::strcmp(id, "xi.emit") == 0 && version == 1)
+            return emit_v1_iface();
+        if (std::strcmp(id, "xi.log") == 0 && version == 1)
+            return log_v1_iface();
         return nullptr;
     }
 
