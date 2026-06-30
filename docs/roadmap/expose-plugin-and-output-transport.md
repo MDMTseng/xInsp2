@@ -127,11 +127,10 @@ Mechanical but broad — `preview` → `expose`, `tab`/`pg_id` → `channel id`,
 - **Delete** `backend/include/xi/xi_preview.hpp` — no replacement header (scripts call `xi::use("expose").process(rec)` directly; channel via `rec.set("$channel", …)`; drop `PVAR` + the `$layout`/`__LINE__` ordering). Plugin-owned headers are the rule for any future plugin that needs one.
 - Transport: subscription per-channel-id (string, implicit), tracked **in the plugin** via `exchange` `subscribe`/`unsubscribe` (NOT a backend WS command — core stays a dumb byte pipe); **gate the JPEG-encode + emit on having a subscriber**; keep latest-per-channel for pull. msgpack is **hand-rolled** (minimal, fixed-shape encoder/decoder, no new dependency on any of the 3 sides) — still valid msgpack wire format.
 - Frame: emit the single `XEX1` + msgpack frame (`{v, channel, seq, json, images[]}`); JSON-string values; JPEG-encode each image on the publish path.
-- F-6 / decoders: write the **`XEX1` decoder** in JS (`ui-components/src/protocol.mjs`) + Python (`tools/xinsp2_py/xinsp2/client.py`) — `JSON.parse`/`json.loads` the `json` field, JPEG-decode each image — with a magic/version gate, landed with a producer→JS→Python round-trip test.
-- Clients: `subscribeImage(name)` → `subscribeChannel(channel)`; the webui consumer; `ws-protocol.md` (also correct the stale "subscribe/unsubscribe removed" note).
-- The 2026-06 preview features carry over under the new name: **subscription gating** (send-none-until-subscribed) and **decode-once** (one JPEG decode per frame shared across components).
+- F-6 / decoder: the **`XEX1` decoder** lives in the plugin's own webUI (`plugins/expose/ui/index.html`), NOT in any client lib — `JSON.parse` the `json` field, JPEG-decode each image, magic/version gate. (Final architecture §10: expose is a pure plugin; core/extension/ui-components/hmi/python carry zero expose code.)
+- Subscription gating (send-none-until-subscribed) lives in the plugin (`exchange subscribe`).
 - Docs: `write-a-script.md` "Surfacing output", `reference/ws-protocol.md`, `roadmap/run-result.md` cross-ref; this doc → `internals/` on ship.
-- `VAR`/`ValueStore` tombstone + `#pragma` deprecation (integrator F-1) lands alongside.
+- `VAR`/`EMIT` + `xi_var.hpp` **deleted** from core (hard removal, integrator F-1); legacy scripts must migrate to `xi::use("expose")`.
 
 ## 8. Non-goals / deferred
 - **Peer protocols** (msgpack peer wire, multi-PLC, safe-state telegrams): the plugin maker's, per `comms-deferred`. Not in `expose`, not in core.
@@ -149,34 +148,30 @@ Mechanical but broad — `preview` → `expose`, `tab`/`pg_id` → `channel id`,
 6. **Image encoding** — **all JPEG**; non-8-bit/lossless is a different plugin's job.
 7. **Magic** — **`XEX1`** (clean break from `XPV1`).
 
-## 10. Client API (post-migration contract)
+## 10. Where the code lives — expose is a PURE plugin (final architecture)
 
-The pre-v9 `vars` + `gid` + per-image-name preview model is **removed** from every
-client; all consumers move to channels + the atomic XEX1 frame.
+**Decision (supersedes the earlier "every client decodes XEX1" sketch):** `expose`
+is a *pure, self-contained plugin*. The XEX1 decoder + channel rendering live **only
+in the plugin's own webUI** (`plugins/expose/ui/index.html`, `has_ui:true`), hosted
+generically by whatever already hosts plugin webUIs (the VS Code `get_plugin_ui` →
+`<folder>/ui/index.html` path, or a direct WebSocket). The pre-v9 `vars` + `gid` +
+per-image-name preview model is **removed**, and **no expose/preview/VAR code lives in
+core, the vscode-extension, ui-components, hmi, or the Python client** — they are all
+generic.
 
-**Decoded frame (both languages), from `XEX1` bytes:**
-```
-{ v:1, channel:<str>, seq:<int>, values:<parsed JSON object/dict>,
-  images: [ { key:<str>, /* JS */ dataUrl:"data:image/jpeg;base64,…"
-                          /* Py */ jpeg:<bytes> } ] }
-```
+| Layer | What it carries about expose |
+|---|---|
+| **core** (backend) | **nothing** — generic `emit_binary` broadcast + `compress_image` + sink `$seq` ordering only. No `vars` wire, no `PreviewHeader`, no `xi_var.hpp`/VAR. |
+| **`expose` plugin** | **everything**: the C++ sink (XEX1 encode, channel gating, latest-per-channel) **and** its own `ui/` webUI (self-contained XEX1 decoder + channel render). |
+| **vscode-extension** | generic plugin-webUI host (`get_plugin_ui`); zero expose/preview/vars code. |
+| **ui-components** | generic `xi-*` components + a generic `XiClient` (`onBinary` raw passthrough, no decode). |
+| **hmi** | generic dashboard host; ignores binary frames. |
+| **Python client** | generic WS client (`exchange_instance` talks to any plugin); no expose decode. |
 
-**Subscription (over the plugin's `exchange`, never a backend WS command):**
-- `subscribe(channels)`   → `exchange_instance("expose", {command:"subscribe",   channels:[…]})`
-- `unsubscribe(channels)` → `… {command:"unsubscribe", channels:[…]}`
-- `get(channel)` (pull latest) → `… {command:"get", channel}` → `{found, channel, seq, frame_b64}` (base64 of the same XEX1 frame; decode it with the same decoder).
-- `list_channels()` → tabs metadata.
-
-**JS (`ui-components`):** `protocol.mjs` exposes `decodeExposeFrame(buf)`. `ws-client.mjs`
-drops `parseVars`/`_deliverVars`/`_deliverPreview`/gid; on a binary message it
-`decodeExposeFrame` → keeps `latestByChannel` + fires an `onExpose(frame)` callback.
-The dashboard renders one tab per channel (values table + image grid by key). The
-`hmi` bundle (`hmi/lib/xi-components.esm.js`) is **regenerated** from this source.
-
-**Python (`tools/xinsp2_py`):** `ExposeFrame{channel, seq, values:dict, images:dict[key]->bytes}`
-replaces `PreviewFrame{gid,…}`. `client.subscribe/unsubscribe(channels)`,
-`client.get_expose(channel)`; `run()` collects the latest frame per channel into
-`RunResult.frames: dict[channel]->ExposeFrame`, with `RunResult.image(channel, key)`.
-`next_vars()` / gid correlation removed. `screenshot.py` / `snapshot.py` follow.
-
-**vscode-extension:** `protocol.ts` / `viewerProvider.ts` decode XEX1 + render by channel.
+**Wire contract (unchanged, the plugin's webUI implements it):**
+- Decoded frame: `{ v:1, channel, seq, values:<parsed json>, images:[{key, jpeg/dataUrl}] }`.
+- Subscription over the plugin `exchange` (never a backend WS command):
+  `exchange_instance("expose", {command:"subscribe"|"unsubscribe", channels:[…]})`;
+  `{command:"get", channel}` → `{found, channel, seq, frame_b64}`; `{command:"list_channels"}`.
+- An external consumer (non-first-party) that wants the data just speaks the same
+  exchange + decodes XEX1 itself — the format is public; the first-party tree stays clean.
