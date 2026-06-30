@@ -429,7 +429,7 @@ health since the most recent `cmd:start`:
 | `dropped_lifetime` | events dropped over the whole **backend process uptime** — does NOT reset on `cmd:start` |
 | `queue_depth_high_watermark_lifetime` | peak single-lane queue depth over the whole **process uptime** — does NOT reset on `cmd:start` |
 | `last_emit_age_ms` | ms since ANY source last emitted a record (monotonic); `-1` if none yet. The "is the line still getting frames" signal — a stalled camera otherwise stops the line silently |
-| `sources` | `[{ source, last_emit_age_ms }]` — per-source emit age, to spot WHICH of N cameras stalled |
+| `sources` | `[{ source, last_emit_age_ms }]` — per-source emit age, to spot WHICH of N cameras stalled. Scoped to the current project: the per-source list is pruned on a project/script-reload boundary (so source names from a closed project don't linger), then repopulates as the new project's sources emit |
 
 A monitor/FE applies a source-rate-appropriate staleness threshold to
 `last_emit_age_ms` (auto-alerting on a fixed threshold is the consumer's call —

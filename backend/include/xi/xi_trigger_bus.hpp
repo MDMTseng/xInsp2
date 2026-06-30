@@ -191,10 +191,24 @@ public:
         }
     }
 
-    // No correlation state to drop anymore; kept as no-ops so the lifecycle
-    // callers (script reload / project close) and the dispatch timer's periodic
-    // call in service_main need not change.
-    void reset() {}
+    // Lifecycle reset (script reload / project close). There is no correlation
+    // state to drop anymore, but emit() stamps a per-source liveness entry into
+    // source_last_emit_mono_us_, and that map otherwise persists for every
+    // distinct source name ever seen — an unbounded host leak under
+    // rename / create-remove / reopen workflows. The lifecycle callers invoke
+    // reset() at exactly the project/script boundary where those source names go
+    // out of scope, so prune the map here. Same mutex as the other map accessors.
+    void reset() {
+        std::lock_guard<std::mutex> lk(mu_);
+        source_last_emit_mono_us_.clear();
+    }
+    // Periodic timer call (cold). Intentionally a no-op: the per-source map is
+    // the camera-stall signal (source_emit_ages_us reports "µs since last emit"),
+    // so age-based eviction here would delete an entry precisely when a source
+    // has stalled the longest — destroying the very signal it exists to surface.
+    // Unbounded growth is bounded instead by reset() at lifecycle boundaries,
+    // where source names actually go out of scope. Kept so the timer caller in
+    // service_main need not change.
     void evict_stale() {}
 
     // Microseconds since ANY source last emitted (monotonic). -1 if nothing has

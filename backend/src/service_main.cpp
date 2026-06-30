@@ -1715,7 +1715,7 @@ static void controlled_shutdown_teardown_() {
     // waits on the in-flight count (capped) instead.
     g_inflight.drain();
     { std::lock_guard<std::mutex> rl(g_run_mu); }     // belt-and-suspenders
-    xi::TriggerBus::instance().reset();               // release pending_/follower_latest_ handles
+    xi::TriggerBus::instance().reset();               // prune the per-source emit-time map (source names go out of scope here)
     { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
     // Close the open project (if any) NOW — while the ImagePool singleton is still
     // alive — so plugin instances are destroyed in the correct order (instances first,
@@ -3354,8 +3354,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         bool working_copy = parsed->args_json.find("\"working_copy\":true") != std::string::npos
                           || parsed->args_json.find("\"working_copy\": true") != std::string::npos;
         { auto g = quiesce_dispatch_for_lifecycle_op_("open_project", &srv); g.dismiss(); }  // new project drives its own autostart
-        // Drop stale bus state from any previously-open project (releases cached
-        // handles + the old sink) before tearing it down + opening the new one.
+        // Drop stale bus state from any previously-open project (the old sink +
+        // the per-source emit-time map, whose source names belong to the project
+        // we're replacing) before tearing it down + opening the new one.
         xi::TriggerBus::instance().clear_sink();
         xi::TriggerBus::instance().reset();
         // Reset the script replay shadows on the PROJECT boundary, mirroring
@@ -3445,11 +3446,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // dispatcher-still-running case the dispatcher pool hit when
         // close_project is sent during continuous mode.)
         { auto g = quiesce_dispatch_for_lifecycle_op_("close_project", &srv); g.dismiss(); }  // project closed — nothing to stream
-        // Drop the bus's captured sink (it points at `srv`) and release any
-        // handles cached in pending_/follower_latest_ BEFORE the plugin DLLs are
-        // unloaded — otherwise those handles (created via the bridge with
-        // owner=0) leak across every open→emit→close cycle and the stale sink
-        // can fire into a torn-down project.
+        // Drop the bus's captured sink (it points at `srv`) BEFORE the plugin
+        // DLLs are unloaded — otherwise the stale sink can fire into a torn-down
+        // project. reset() also prunes the per-source emit-time map, whose source
+        // names belong to the project being closed (otherwise they accumulate
+        // across every open→emit→close cycle).
         xi::TriggerBus::instance().clear_sink();
         xi::TriggerBus::instance().reset();
         g_plugin_mgr.close_project();
