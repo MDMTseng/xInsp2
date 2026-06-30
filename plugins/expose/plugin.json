@@ -1,9 +1,9 @@
 {
   "name": "expose",
-  "description": "The official script data-out surface (the VAR replacement). A script surfaces records via xi::expose::send(channel, rec) (see <xi/xi_expose.hpp>). Keeps the latest record per channel; for SUBSCRIBED channels JPEG-encodes images through the host cache and PUSHES the whole record as one atomic XEX1 binary frame (host emit_binary). Subscription is tracked here (exchange subscribe/unsubscribe) since the core broadcasts; clients filter by channel. Pull views: list_channels / get.",
+  "description": "The official script data-out surface (the VAR replacement). A script surfaces records via the generic xi::use(\"expose\").process(rec) with rec.set(\"$channel\", id) — no special header. Keeps the latest record per channel; for SUBSCRIBED channels JPEG-encodes images through the host cache and PUSHES the whole record as one atomic XEX1 binary frame (host emit_binary). Subscription is tracked here (exchange subscribe/unsubscribe) since the core broadcasts; clients filter by channel. Self-contained webUI (ui/index.html, has_ui). Pull views: list_channels / get.",
   "dll": "xi-expose.dll",
   "factory": "xi_plugin_create",
-  "has_ui": false,
+  "has_ui": true,
   "sink": true,
   "_sink_doc": "ordered output sink: the host stages use(\"expose\").process() and flushes it in frame order, so live output stays in frame order under parallel dispatch (dispatch_threads>1) instead of completion order.",
   "manifest": {
