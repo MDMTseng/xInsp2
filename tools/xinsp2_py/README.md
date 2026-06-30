@@ -19,6 +19,20 @@ Backend must be running on `ws://127.0.0.1:7823/`. Two ways to get one:
   doesn't start it for you. If you see `ConnectionRefusedError`, that's
   what's missing.
 
+## Output: the `expose` model
+
+Scripts surface output through the **`expose`** plugin (the VAR replacement):
+a `xi::Record` of scalar values + images is pushed to a named **channel**
+(string). Each record is delivered to clients as ONE atomic binary frame —
+magic `XEX1` + a minimal msgpack body `{v, channel, seq, json, images[]}`.
+The SDK decodes it into an `ExposeFrame{channel, seq, values, images}` where
+`images` maps each key to its JPEG bytes.
+
+Subscription is **per channel**, tracked inside the plugin over its
+`exchange` (not a backend WS command). Subscribe first, then each `run()`
+pushes a frame for every subscribed channel; you can also pull the latest on
+demand with `get_expose`.
+
 ## Quick start
 
 ```python
@@ -27,25 +41,34 @@ from xinsp2 import Client, dump_run
 with Client() as c:
     c.compile_and_load(r"C:\path\to\inspection.cpp")
     c.set_param("sigma", 3.5)
+
+    c.subscribe(["lane"])                       # subscribe channels you want pushed
     run = c.run(frame_path=r"C:\path\to\frame.jpg")
 
     print(f"run {run.run_id} took {run.ms} ms")
-    print("count:", run.value("count"))
-    gray = run.image("gray")
-    print(f"gray: {gray.width}x{gray.height} {gray.codec_name}")
+    frame = run.expose("lane")                  # ExposeFrame | None
+    if frame:
+        print("values:", frame.values)          # the scalar dict (count, score, ...)
+        jpeg = run.image("lane", "gray")         # bytes | None
+        print("gray jpeg bytes:", len(jpeg or b""))
 
     snap = dump_run(run, "snapshots")
     print("dumped to", snap.folder)
+
+    # Pull the latest for a channel without subscribing:
+    latest = c.get_expose("lane")               # ExposeFrame | None
+    # Channel metadata (seen counts, subscription state):
+    meta = c.list_channels()
 ```
 
 ## Snapshot format
 
 ```
 snapshots/run-000017/
-    report.json       run metadata + every non-image VAR
-    vars/gray.jpg     image previews (jpg/bmp/png by codec)
-    vars/edges.jpg
-    vars/report.json  one file per `kind:json` VAR
+    report.json            run metadata + per-channel values + image manifest
+    lane/values.json       the channel's scalar values dict
+    lane/gray.jpg          each exposed image (always JPEG)
+    lane/edges.jpg
 ```
 
 Designed so an AI agent can `Read` `report.json` for shape, then read

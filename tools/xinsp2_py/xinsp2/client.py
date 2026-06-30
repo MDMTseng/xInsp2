@@ -5,8 +5,8 @@ by an AI agent (or a human at a REPL). Spec: docs/reference/ws-protocol.md.
 """
 from __future__ import annotations
 
+import base64
 import json
-import struct
 import threading
 from dataclasses import dataclass, field
 from queue import Queue, Empty
@@ -50,9 +50,9 @@ class CmdTimeoutError(TimeoutError):
 
 
 class ConnectionLostError(ConnectionError):
-    """Raised when the SDK detects the WS connection has dropped, e.g.
-    `next_vars()` is called after the read loop exited. Callers
-    looping on `next_vars()` should treat this as a stop signal."""
+    """Raised when the SDK detects the WS connection has dropped, e.g. a
+    `call()` is issued after the read loop exited. Callers looping on the
+    client should treat this as a stop signal."""
     pass
 
 
@@ -128,52 +128,206 @@ def _restore_nonfinite_deep(v):
     return v
 
 
-@dataclass
-class PreviewFrame:
-    gid: int
-    codec: int           # 0=JPEG, 1=BMP, 2=PNG
-    width: int
-    height: int
-    channels: int
-    payload: bytes
+# ---- msgpack decoder (minimal subset for the XEX1 frame) -----------------
+#
+# Hand-rolled to avoid a `msgpack` pip dependency. Decodes exactly the subset
+# the `expose` plugin's encoder emits (plugins/expose/src/expose.cpp): fixmap,
+# fixarray/array16/array32, fixstr/str8/str16/str32, bin8/bin16/bin32,
+# positive-fixint/uint8/uint16/uint32/uint64, plus nil/bool (and negative
+# fixint, which costs nothing to accept). All multi-byte fields big-endian.
+# It is NOT a general msgpack decoder — float/int64-signed/ext are out of
+# scope because the producer never emits them inside this frame.
 
-    @property
-    def codec_name(self) -> str:
-        return {0: "jpeg", 1: "bmp", 2: "png"}.get(self.codec, f"unknown({self.codec})")
+class MsgpackError(ValueError):
+    """Raised when the XEX1 msgpack body is malformed or uses a type
+    outside the fixed subset the `expose` frame is defined over."""
+    pass
+
+
+def _mp_decode(data: bytes, i: int) -> tuple[Any, int]:
+    """Decode one msgpack value at offset `i`; return (value, next_offset)."""
+    if i >= len(data):
+        raise MsgpackError("unexpected end of msgpack body")
+    b = data[i]
+    i += 1
+
+    # positive fixint
+    if b <= 0x7F:
+        return b, i
+    # negative fixint
+    if b >= 0xE0:
+        return b - 0x100, i
+    # fixstr
+    if 0xA0 <= b <= 0xBF:
+        n = b & 0x1F
+        return _mp_take_str(data, i, n)
+    # fixmap
+    if 0x80 <= b <= 0x8F:
+        return _mp_map(data, i, b & 0x0F)
+    # fixarray
+    if 0x90 <= b <= 0x9F:
+        return _mp_array(data, i, b & 0x0F)
+
+    if b == 0xC0:  # nil
+        return None, i
+    if b == 0xC2:  # false
+        return False, i
+    if b == 0xC3:  # true
+        return True, i
+
+    if b == 0xCC:  # uint8
+        return data[i], i + 1
+    if b == 0xCD:  # uint16
+        return int.from_bytes(data[i:i + 2], "big"), i + 2
+    if b == 0xCE:  # uint32
+        return int.from_bytes(data[i:i + 4], "big"), i + 4
+    if b == 0xCF:  # uint64
+        return int.from_bytes(data[i:i + 8], "big"), i + 8
+
+    if b == 0xD9:  # str8
+        n = data[i]; i += 1
+        return _mp_take_str(data, i, n)
+    if b == 0xDA:  # str16
+        n = int.from_bytes(data[i:i + 2], "big"); i += 2
+        return _mp_take_str(data, i, n)
+    if b == 0xDB:  # str32
+        n = int.from_bytes(data[i:i + 4], "big"); i += 4
+        return _mp_take_str(data, i, n)
+
+    if b == 0xC4:  # bin8
+        n = data[i]; i += 1
+        return _mp_take_bin(data, i, n)
+    if b == 0xC5:  # bin16
+        n = int.from_bytes(data[i:i + 2], "big"); i += 2
+        return _mp_take_bin(data, i, n)
+    if b == 0xC6:  # bin32
+        n = int.from_bytes(data[i:i + 4], "big"); i += 4
+        return _mp_take_bin(data, i, n)
+
+    if b == 0xDC:  # array16
+        n = int.from_bytes(data[i:i + 2], "big"); i += 2
+        return _mp_array(data, i, n)
+    if b == 0xDD:  # array32
+        n = int.from_bytes(data[i:i + 4], "big"); i += 4
+        return _mp_array(data, i, n)
+
+    raise MsgpackError(f"unsupported msgpack tag 0x{b:02X} at offset {i - 1}")
+
+
+def _mp_take_str(data: bytes, i: int, n: int) -> tuple[str, int]:
+    end = i + n
+    if end > len(data):
+        raise MsgpackError("msgpack str overruns body")
+    return data[i:end].decode("utf-8"), end
+
+
+def _mp_take_bin(data: bytes, i: int, n: int) -> tuple[bytes, int]:
+    end = i + n
+    if end > len(data):
+        raise MsgpackError("msgpack bin overruns body")
+    return data[i:end], end
+
+
+def _mp_array(data: bytes, i: int, n: int) -> tuple[list, int]:
+    out = []
+    for _ in range(n):
+        v, i = _mp_decode(data, i)
+        out.append(v)
+    return out, i
+
+
+def _mp_map(data: bytes, i: int, n: int) -> tuple[dict, int]:
+    out = {}
+    for _ in range(n):
+        k, i = _mp_decode(data, i)
+        v, i = _mp_decode(data, i)
+        out[k] = v
+    return out, i
+
+
+@dataclass
+class ExposeFrame:
+    """One decoded `XEX1` record from the `expose` plugin.
+
+    `values` is the record's scalar tree (`json.loads` of the frame's `json`
+    field, with non-finite sentinels restored). `images` maps each image key
+    to its JPEG-encoded bytes.
+    """
+    channel: str
+    seq: int
+    values: dict
+    images: dict[str, bytes] = field(default_factory=dict)
+    v: int = 1
+
+    def image(self, key: str) -> bytes | None:
+        """JPEG bytes for one image key, or None if the frame has no such key."""
+        return self.images.get(key)
+
+
+def decode_xex1(data: bytes) -> ExposeFrame:
+    """Decode a single atomic `XEX1` binary frame into an `ExposeFrame`.
+
+    Wire shape (see plugins/expose/src/expose.cpp):
+        [0..3] ASCII magic 'XEX1', then a msgpack map
+        { v:1, channel:<str>, seq:<uint>, json:<str>, images:[{key,jpeg}] }
+
+    Raises `MsgpackError` if the magic/version gate fails or the body is
+    malformed. The magic + `v` gate is what kills the F-6 stale-decoder drift.
+    """
+    if len(data) < 4 or data[:4] != b"XEX1":
+        raise MsgpackError(
+            f"not an XEX1 frame (magic={data[:4]!r}); refusing to decode"
+        )
+    body, _ = _mp_decode(data, 4)
+    if not isinstance(body, dict):
+        raise MsgpackError("XEX1 body is not a msgpack map")
+    v = body.get("v", 1)
+    if v != 1:
+        raise MsgpackError(f"unsupported XEX1 frame version {v!r} (decoder handles v=1)")
+    raw_json = body.get("json", "{}")
+    values = json.loads(raw_json) if raw_json else {}
+    if isinstance(values, (dict, list)):
+        values = _restore_nonfinite_deep(values)
+    images: dict[str, bytes] = {}
+    for ent in body.get("images") or []:
+        if isinstance(ent, dict) and "key" in ent and isinstance(ent.get("jpeg"), (bytes, bytearray)):
+            images[ent["key"]] = bytes(ent["jpeg"])
+    return ExposeFrame(
+        channel=body.get("channel", "default"),
+        seq=int(body.get("seq", 0)),
+        values=values if isinstance(values, dict) else {"_": values},
+        images=images,
+        v=int(v),
+    )
 
 
 @dataclass
 class RunResult:
+    """Result of one `run()`: the latest `expose` frame collected per channel.
+
+    The pre-v9 `vars`/`gid`/per-image-name model is gone — output now arrives
+    as atomic XEX1 frames, one per subscribed channel (subscribe first via
+    `client.subscribe(...)`). `frames` is empty for a run whose channels have
+    no subscriber.
+    """
     run_id: int
     ms: int
-    vars: list[dict]                  # raw items array from `vars` message
-    previews: dict[int, PreviewFrame] # gid -> PreviewFrame
+    frames: dict[str, ExposeFrame] = field(default_factory=dict)
     events: list[dict] = field(default_factory=list)
 
-    def var(self, name: str) -> dict | None:
-        return next((v for v in self.vars if v["name"] == name), None)
+    def expose(self, channel: str) -> ExposeFrame | None:
+        """The latest `ExposeFrame` for `channel`, or None if not present."""
+        return self.frames.get(channel)
 
-    def value(self, name: str, default=None):
-        v = self.var(name)
-        if v is None:
-            return default
-        val = v.get("value", default)
-        # Restore the quoted non-finite sentinels the backend emits for number
-        # vars (NaN/Infinity can't be bare JSON tokens). Mirrors the C++
-        # nonfinite_from_str; without this a number var reads as the string "NaN".
-        if v.get("kind") == "number" and isinstance(val, str):
-            return _restore_nonfinite(val)
-        return val
+    def values(self, channel: str) -> dict | None:
+        """Convenience: the scalar values dict for `channel`, or None."""
+        f = self.frames.get(channel)
+        return f.values if f else None
 
-    def image(self, name: str) -> PreviewFrame | None:
-        v = self.var(name)
-        if not v or v.get("kind") != "image":
-            return None
-        # A mirror var (one buffer VAR'd under several names) carries its own gid
-        # but the single deduped preview frame is keyed by the canonical `src`
-        # gid. Fall back to src so image() works for the non-canonical names too
-        # (snapshot.py already does this; this matched it).
-        return self.previews.get(v["gid"]) or self.previews.get(v.get("src", v["gid"]))
+    def image(self, channel: str, key: str) -> bytes | None:
+        """JPEG bytes for image `key` on `channel`, or None if absent."""
+        f = self.frames.get(channel)
+        return f.image(key) if f else None
 
 
 class Client:
@@ -183,8 +337,7 @@ class Client:
         self._ws: websocket.WebSocket | None = None
         self._next_id = 1
         self._rsp_waiters: dict[int, Queue] = {}
-        self._inbox_vars: Queue = Queue()
-        self._inbox_previews: Queue = Queue()
+        self._inbox_frames: Queue = Queue()   # decoded ExposeFrame (XEX1 binary)
         self._inbox_events: Queue = Queue()
         self._inbox_logs: Queue = Queue()
         self._reader: threading.Thread | None = None
@@ -215,12 +368,10 @@ class Client:
         ev = self._inbox_events.get(timeout=self.timeout)
         if ev.get("name") != "hello":
             raise ProtocolError(f"expected hello event, got {ev}")
-        # Previews are off by default (the backend streams images only to
-        # subscribers). This is a headless dump client, so opt into all.
-        try:
-            self.call("subscribe", {"all": True}, timeout=self.timeout)
-        except Exception:
-            pass
+        # Output (`expose` frames) is subscription-gated in the plugin, not a
+        # backend-WS subscribe. Opt into channels explicitly via
+        # `client.subscribe([...])` (see docs/roadmap/expose-plugin-and-output-
+        # transport.md §4) — nothing to do here.
         return ev.get("data", {})
 
     def close(self):
@@ -461,6 +612,55 @@ class Client:
             raise UnknownCommandError(name, cmd_name, rsp)
         return rsp
 
+    # ---- expose: subscription + pull ---------------------------------
+    #
+    # Output rides the `expose` plugin (the VAR replacement). Subscription is
+    # tracked IN THE PLUGIN over its `exchange` channel — NOT a backend WS
+    # command — because the core's `emit_binary` is a dumb broadcast pipe
+    # (docs/roadmap/expose-plugin-and-output-transport.md §4 / §10). Subscribed
+    # channels are JPEG-encoded + pushed as XEX1 frames each run; the SDK
+    # filters the broadcast by channel. Pull-latest stays available via
+    # `get_expose`.
+
+    EXPOSE_INSTANCE = "expose"
+
+    def subscribe(self, channels: str | list[str], *, instance: str | None = None) -> dict:
+        """Subscribe one or more `expose` channels so each run pushes their
+        XEX1 frame. Returns the plugin's `{ok, subscribed:[...]}` reply."""
+        chans = [channels] if isinstance(channels, str) else list(channels)
+        return self.exchange_instance(
+            instance or self.EXPOSE_INSTANCE,
+            {"command": "subscribe", "channels": chans},
+        )
+
+    def unsubscribe(self, channels: str | list[str], *, instance: str | None = None) -> dict:
+        """Stop pushing the given `expose` channel(s). Returns the plugin's
+        `{ok, subscribed:[...]}` reply."""
+        chans = [channels] if isinstance(channels, str) else list(channels)
+        return self.exchange_instance(
+            instance or self.EXPOSE_INSTANCE,
+            {"command": "unsubscribe", "channels": chans},
+        )
+
+    def list_channels(self, *, instance: str | None = None) -> dict:
+        """Channel metadata from the `expose` plugin:
+        `{count, channels:{name:{seen, image_count, subscribed}}}`."""
+        return self.exchange_instance(
+            instance or self.EXPOSE_INSTANCE, {"command": "list_channels"})
+
+    def get_expose(self, channel: str, *, instance: str | None = None) -> ExposeFrame | None:
+        """Pull the latest frame for `channel` on demand (no subscription
+        needed). Decodes the plugin's base64 `frame_b64` with the SAME XEX1
+        decoder used for the pushed frames. Returns None if the channel has
+        never been written (`found:false`)."""
+        rsp = self.exchange_instance(
+            instance or self.EXPOSE_INSTANCE,
+            {"command": "get", "channel": channel},
+        )
+        if not isinstance(rsp, dict) or not rsp.get("found"):
+            return None
+        return decode_xex1(base64.b64decode(rsp["frame_b64"]))
+
     # ---- runtime control ---------------------------------------------
 
     def resume(self) -> dict:
@@ -511,82 +711,48 @@ class Client:
             args["since_ms"] = since_ms
         return self.call("recent_errors", args)
 
-    def next_vars(self, timeout: float | None = None) -> dict | None:
-        """Pop the next `vars` message from the queue, blocking up to
-        `timeout` seconds. Returns the raw vars dict (`{"type":"vars",
-        "run_id":N,"items":[...]}`) or `None` on timeout.
+    def run(self, frame_path: str | None = None, timeout: float | None = None,
+            settle: float = 0.25) -> RunResult:
+        """Run one inspect() and collect the latest `expose` frame per channel.
 
-        Raises `ConnectionLostError` if the WS read loop has already
-        exited. Loop callers should treat that as a stop signal —
-        without it a `while next_vars(1) is not None` after disconnect
-        would spin forever returning None.
+        Output now arrives as atomic XEX1 binary frames pushed by the `expose`
+        plugin — one per *subscribed* channel, stamped with `seq == run_id`.
+        So **subscribe first** (`client.subscribe([...])`); a run whose
+        channels have no subscriber yields an empty `RunResult.frames`.
 
-        Use this to consume the stream produced by `cmd:start`
-        (continuous mode), which doesn't follow the request/reply
-        shape of `cmd:run`. The caller is responsible for wiring any
-        per-frame logic — the SDK doesn't auto-correlate previews
-        here. For the typical "drive 100 frames continuously and
-        score them" pattern see the hot_reload_run / stereo_sync
-        example drivers.
+        Synchronisation: stale frames are drained, `cmd:run` is issued, then
+        frames carrying this run's `seq` are collected, keyed by channel
+        (latest wins). Because there is no per-run "done" marker for the push
+        path (frames just broadcast), collection ends after `settle` seconds
+        with no further matching frame. Events that landed during the run are
+        scooped non-blocking into `RunResult.events`.
+
+        Stale frames (`seq < run_id`) are dropped; `_inbox_events` is left
+        intact so earlier events (e.g. `state_dropped`) remain readable.
         """
-        if self._read_loop_dead and self._inbox_vars.empty():
-            raise ConnectionLostError(
-                "WS connection is closed; no further vars will arrive"
-            )
-        try:
-            return self._inbox_vars.get(timeout=timeout or self.timeout)
-        except Empty:
-            if self._read_loop_dead:
-                raise ConnectionLostError(
-                    "WS closed while waiting for vars"
-                ) from None
-            return None
-
-    def run(self, frame_path: str | None = None, timeout: float | None = None) -> RunResult:
-        """Run one inspect() and collect the resulting vars + previews.
-
-        Synchronisation: blocks until the `vars` message for this run's
-        `run_id` arrives, then drains exactly the previews referenced
-        by that vars message (one per `kind:image` item). Events that
-        landed during the run are scooped non-blocking into
-        `RunResult.events`. (The backend does emit a `run_finished`
-        event per run, but this method keys completion off the rsp +
-        matching `vars` and does not wait on it.)
-
-        IMPORTANT: this drains stale `vars` and `previews` queues but
-        DOES NOT drain `events` — earlier calls' events (e.g.
-        `state_dropped` after a `compile_and_load`) stay queued so the
-        caller can read them out via `_inbox_events.get_nowait()`.
-        Vars/previews are drained because they're tightly coupled to a
-        specific run_id and stale ones would mismatch.
-        """
-        self._drain(self._inbox_vars)
-        self._drain(self._inbox_previews)
+        self._drain(self._inbox_frames)
         # Note: _inbox_events deliberately left intact — see docstring.
 
         args = {"frame_path": frame_path} if frame_path else {}
         data = self.call("run", args, timeout=timeout or self.timeout)
         run_id = data["run_id"]
 
-        # vars message
-        vars_msg = self._inbox_vars.get(timeout=timeout or self.timeout)
-        if vars_msg.get("run_id") != run_id:
-            raise ProtocolError(f"vars run_id {vars_msg.get('run_id')} != {run_id}")
-
-        # collect previews — one per DISTINCT image. Images sharing a buffer
-        # report a common canonical "src" gid and the backend sends a single
-        # frame under it, so wait for the canon gids, not every var's gid.
-        wanted_gids = {it.get("src", it["gid"])
-                       for it in vars_msg["items"] if it["kind"] == "image"}
-        previews: dict[int, PreviewFrame] = {}
-        deadline = (timeout or self.timeout)
-        while wanted_gids:
+        # Collect the XEX1 frames broadcast for this run. Key by channel,
+        # keeping the frame whose seq matches this run_id (latest wins).
+        frames: dict[str, ExposeFrame] = {}
+        while True:
             try:
-                pf: PreviewFrame = self._inbox_previews.get(timeout=deadline)
+                fr: ExposeFrame = self._inbox_frames.get(timeout=settle)
             except Empty:
                 break
-            previews[pf.gid] = pf
-            wanted_gids.discard(pf.gid)
+            if fr.seq < run_id:
+                continue           # stale frame from a prior run
+            if fr.seq > run_id:
+                # A frame from a later run arrived (shouldn't happen in the
+                # blocking single-run flow) — push it back and stop.
+                self._inbox_frames.put(fr)
+                break
+            frames[fr.channel] = fr
 
         # collect any events that landed during the run
         events = []
@@ -596,18 +762,10 @@ class Client:
             except Empty:
                 break
 
-        # Restore non-finite sentinels inside kind:"record" data in place so every
-        # accessor (and direct vars[...] reads) sees real floats, not "NaN" strings.
-        items = vars_msg["items"]
-        for it in items:
-            if it.get("kind") == "record" and isinstance(it.get("data"), (dict, list)):
-                it["data"] = _restore_nonfinite_deep(it["data"])
-
         return RunResult(
             run_id=run_id,
             ms=int(data.get("ms", 0)),
-            vars=items,
-            previews=previews,
+            frames=frames,
             events=events,
         )
 
@@ -638,7 +796,7 @@ class Client:
         except Exception:
             return
         finally:
-            # Signal callers waiting on next_vars / call() that the
+            # Signal callers waiting on call() / run() that the
             # connection is gone. Without this they'd block until their
             # individual timeouts expire and then return None forever.
             self._read_loop_dead = True
@@ -658,8 +816,6 @@ class Client:
             q = self._rsp_waiters.get(msg.get("id"))
             if q is not None:
                 q.put(msg)
-        elif t == "vars":
-            self._inbox_vars.put(msg)
         elif t == "event":
             self._inbox_events.put(msg)
         elif t == "log":
@@ -674,9 +830,11 @@ class Client:
             self._inbox_events.put({"name": "instances", "data": msg})
 
     def _handle_binary(self, data: bytes):
-        if len(data) < 20:
+        # Every binary WS message is an atomic XEX1 `expose` frame (broadcast;
+        # we filter by channel). A frame that fails the magic/version gate or
+        # is otherwise malformed is dropped rather than killing the read loop.
+        try:
+            frame = decode_xex1(data)
+        except Exception:
             return
-        gid, codec, w, h, ch = struct.unpack(">IIIII", data[:20])
-        self._inbox_previews.put(PreviewFrame(
-            gid=gid, codec=codec, width=w, height=h, channels=ch, payload=data[20:],
-        ))
+        self._inbox_frames.put(frame)
