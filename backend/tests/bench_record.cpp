@@ -164,7 +164,31 @@ static double best_us(F&& op, int L = 2000, int R = 25) {
     return best;
 }
 
-int main() {
+// --- perf-gate mode -------------------------------------------------------
+// The in-process hot metric is the yyjson serialize+parse round-trip (the tax
+// every cross-plugin Record marshalling pays). Emit it for the N=50 payload as
+// machine-readable INTEGER nanoseconds for tests/perf_gate.cmake.
+static int gate_main() {
+    cJSON* tree = make_matches(50);
+    yyjson_mut_doc* yd = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_doc_set_root(yd, cj2yy(yd, tree));
+    char* js = cJSON_PrintUnformatted(tree); std::string json_str = js; cJSON_free(js);
+
+    double yy_ser = best_us([&]{ size_t l; char* s = yyjson_mut_write(yd, 0, &l); free(s); });
+    double yy_par = best_us([&]{ yyjson_doc* d = yyjson_read(json_str.data(), json_str.size(), 0); yyjson_doc_free(d); });
+    double rt_us = yy_ser + yy_par;
+
+    std::printf("GATE record_yyjson_roundtrip_ns_n50 %lld\n", (long long)(rt_us * 1000.0 + 0.5));
+    std::fflush(stdout);
+    yyjson_mut_doc_free(yd);
+    cJSON_Delete(tree);
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "--gate") == 0) return gate_main();
+
     std::printf("Record round-trip — cJSON vs yyjson vs MPack vs CWPack (per op, microseconds; min-of-batches)\n");
     std::printf("serialize = cJSON-tree -> wire ; parse = wire -> navigable form (cwpack/tight = streaming walk)\n\n");
 

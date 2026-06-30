@@ -339,12 +339,32 @@ add_test(NAME set_def_race_heavy COMMAND test_set_def_race
 set_tests_properties(set_def_race_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
-# Throughput micro-benchmark (not a ctest — run manually to measure alloc cost).
+# ---- Perf-regression gate (T0.3) ---------------------------------------
+# Promote the bench_* micro-benchmarks from "run manually" to ctest gates: each
+# runs the bench in --gate mode, parses its integer timing metrics, and FAILS if
+# any metric regresses past the threshold vs a committed per-machine baseline.
+# Override the threshold with -DXINSP2_PERF_THRESHOLD_PCT=NN at configure time.
+# The raw benches stay runnable standalone (no args = the usual verbose report).
+set(XINSP2_PERF_THRESHOLD_PCT 25 CACHE STRING
+    "Perf-gate regression threshold in percent (slower-is-worse)")
+set(_perf_baseline_dir ${CMAKE_CURRENT_SOURCE_DIR}/tests/perf_baselines)
+function(_xinsp_perf_gate test_name bench_target baseline_name)
+    add_test(NAME ${test_name}
+        COMMAND ${CMAKE_COMMAND}
+            -DBENCH_EXE=$<TARGET_FILE:${bench_target}>
+            -DBASELINE=${_perf_baseline_dir}/${baseline_name}
+            -DTHRESHOLD_PCT=${XINSP2_PERF_THRESHOLD_PCT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/perf_gate.cmake)
+    set_tests_properties(${test_name} PROPERTIES LABELS "perf" TIMEOUT 300)
+endfunction()
+
+# Throughput micro-benchmark — also gated as `perf_image_pool` (see below).
 add_executable(bench_image_pool tests/bench_image_pool.cpp)
 target_link_libraries(bench_image_pool PRIVATE xi_core)
 if(NOT MSVC)
     target_link_libraries(bench_image_pool PRIVATE pthread)
 endif()
+_xinsp_perf_gate(perf_image_pool bench_image_pool image_pool.txt)
 
 add_executable(test_sha256 tests/test_sha256.cpp)
 target_link_libraries(test_sha256 PRIVATE xi_core)
@@ -438,6 +458,7 @@ if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
     target_include_directories(bench_jpeg PRIVATE ${TURBOJPEG_INCLUDE_DIR})
     target_link_libraries(bench_jpeg PRIVATE ${TURBOJPEG_LIB})
 endif()
+_xinsp_perf_gate(perf_jpeg bench_jpeg jpeg.txt)
 
 # Record serialization micro-bench: cJSON vs yyjson vs MPack vs CWPack.
 # ALL four are bench-only third-party sources now (cJSON was removed from the
@@ -455,6 +476,9 @@ if(EXISTS ${_serde}/yyjson/yyjson.c AND EXISTS ${_serde}/mpack/mpack.c
         ${_serde}/cwpack/cwpack.c)
     target_include_directories(bench_record PRIVATE
         ${_serde}/cjson ${_serde}/yyjson ${_serde}/mpack ${_serde}/cwpack)
+    # Gate it too — but only when the serde sources are present (this branch).
+    # A clean checkout without them simply has no perf_record test.
+    _xinsp_perf_gate(perf_record bench_record record.txt)
 endif()
 
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
