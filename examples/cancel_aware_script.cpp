@@ -3,15 +3,21 @@
 //
 // cv:: calls (cv::GaussianBlur, cv::threshold, cv::Sobel, …) cannot
 // be cancelled mid-call, so any user loop that runs for > a few
-// seconds should poll the global cancel flag itself between op calls.
-// The check is one atomic load — call it on a reasonable cadence
+// seconds should poll xi::cancellation_requested() itself between op
+// calls. The check is one atomic load — call it on a reasonable cadence
 // (every N rows, every chunk boundary, between independent passes).
 //
+// The cancel is epoch-scoped: it targets only the inspect(s) already
+// running when the watchdog tripped. A fresh frame the dispatch pool
+// starts during the grace is NOT cancelled — so polling here only ever
+// aborts the actually-overrunning run, never the next healthy one.
+//
 // When watchdog trips:
-//   1. Backend sets the global cancel flag via the script DLL's
-//      xi_script_set_global_cancel(1) thunk.
-//   2. xi::cancellation_requested() returns true on every thread.
-//   3. This script sees the flag, emits a `cancelled` VAR and exits.
+//   1. Backend arms the cooperative cancel via the script DLL's
+//      xi_script_set_global_cancel(1) thunk (scoped to the in-flight run).
+//   2. xi::cancellation_requested() returns true on every thread running
+//      that inspect (and its xi::async sub-tasks).
+//   3. This script sees it, emits a `cancelled` VAR and exits.
 //   4. The cooperative phase succeeded; backend logs
 //      "cooperative cancel succeeded" and skips TerminateThread.
 //
