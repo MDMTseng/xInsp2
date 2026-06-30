@@ -187,6 +187,27 @@ typedef struct {
 struct xi_record;
 
 /* ------------------------------------------------------------------ */
+/* Segregated capability interfaces (ABI v10+, core_fix_plan.md §11-12).*/
+/* Each is a SMALL, INDEPENDENTLY-FROZEN struct of function pointers,    */
+/* resolved by id+version through xi_host_api::get_interface (below).   */
+/* A published (id, vN) is frozen forever — any change ships as vN+1,   */
+/* never an in-place edit (mirrors the xi_host_api@9 freeze).           */
+/* ------------------------------------------------------------------ */
+
+/* xi.preview@1 — the JPEG-encode-with-host-cache capability, carved as the
+ * first segregated interface out of the v9 monolith's compress_image field
+ * (core_fix_plan.md §12 Phase 2). Identical contract + identical host code
+ * path as compress_image: a content-addressed cache encodes a given image
+ * ONCE globally.
+ *   compress(px, w, h, ch, quality, out, out_cap) -> bytes written, or
+ *     -needed if out_cap is too small (resize + retry), 0 on error / no
+ *     encoder installed. quality 1..100; px is 8-bit, 1/3/4 channel. */
+typedef struct xi_preview_v1 {
+    int32_t (*compress)(const void* px, int32_t w, int32_t h, int32_t ch,
+                        int32_t quality, void* out, int32_t out_cap);
+} xi_preview_v1;
+
+/* ------------------------------------------------------------------ */
 /* Host API — function table provided by the backend to every plugin  */
 /* ------------------------------------------------------------------ */
 
@@ -381,8 +402,8 @@ typedef struct xi_host_api {
     /*   get_interface("xi.legacy", 9)  -> const xi_host_api*  (this very */
     /*       table — the whole v9 surface, so a caller can reach any      */
     /*       legacy field through the door).                             */
-    /* Frozen per-capability interfaces (xi.preview@1, …) are carved      */
-    /* behind this door in Phase 2+.                                     */
+    /*   get_interface("xi.preview", 1) -> const xi_preview_v1*  (the     */
+    /*       compress_image capability, carved in Phase 2).              */
     /* Null on a pre-v10 host — always null-check before calling; a       */
     /* caller then falls back to the legacy field (e.g. compress_image). */
     const void* (*get_interface)(const char* id, uint32_t version);

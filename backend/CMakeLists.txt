@@ -234,6 +234,19 @@ add_executable(test_abi_freeze tests/test_abi_freeze.cpp)
 target_link_libraries(test_abi_freeze PRIVATE xi_core)
 add_test(NAME abi_freeze COMMAND test_abi_freeze)
 
+# >>> host-api-segregation Phase 2 (xi.preview carve) — localized append block.
+# Proves the carved xi.preview@1 interface (resolved via host->get_interface)
+# compresses byte-for-byte identically to the legacy compress_image field, and
+# that the SDK xi::Plugin::compress() wrapper resolves-then-caches with a
+# legacy-field fallback. Kept self-contained to ease merge with sibling appends.
+add_executable(test_preview_interface tests/test_preview_interface.cpp)
+target_link_libraries(test_preview_interface PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_preview_interface PRIVATE pthread)
+endif()
+add_test(NAME preview_interface COMMAND test_preview_interface)
+# <<< host-api-segregation Phase 2 end.
+
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
 target_include_directories(test_yyjson PRIVATE

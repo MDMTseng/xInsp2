@@ -456,7 +456,7 @@ public:
         // ABI v10: the capability-query door. A plugin resolves a frozen,
         // segregated interface by id+version through this one pointer
         // (core_fix_plan.md §12 Phase 1). Registrations live in
-        // get_interface_impl: "xi.legacy"@9 (the whole table) for now.
+        // get_interface_impl: "xi.legacy"@9 (the whole table) + "xi.preview"@1.
         api.get_interface = &get_interface_impl;
         return api;
     }
@@ -472,6 +472,16 @@ public:
                                        void* out, int32_t cap) {
         if (auto fn = xi::compress_sink()) return fn(px, w, h, c, q, out, cap);
         return 0;
+    }
+
+    // xi.preview@1 — the first segregated interface carved out of the v9
+    // monolith (Phase 2). A single-entry, frozen struct wrapping the SAME
+    // compress_image_impl as the legacy field, so the door and the field
+    // compress byte-for-byte identically. Process-stable address (Meyers
+    // singleton); the host hands plugins a borrowed pointer they cache once.
+    static const xi_preview_v1* preview_v1_iface() {
+        static const xi_preview_v1 iface = { &compress_image_impl };
+        return &iface;
     }
 
     // The canonical, process-stable host table — built ONCE. get_interface
@@ -492,6 +502,8 @@ public:
         if (!id) return nullptr;
         if (std::strcmp(id, "xi.legacy") == 0 && version == 9)
             return canonical_host_api();        // the whole v9 surface, one pointer
+        if (std::strcmp(id, "xi.preview") == 0 && version == 1)
+            return preview_v1_iface();
         return nullptr;
     }
 
