@@ -36,6 +36,7 @@
 
 #include "xi_abi.h"
 #include "xi_atomic_io.hpp"
+#include "xi_clock.hpp"        // wall_ms() — portable timestamp for .corrupt-<ts> quarantine names
 #include "xi_cabi_adapter.hpp" // plugin_abi_compatible / PluginInfo / CAbiInstanceAdapter
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
@@ -1505,11 +1506,35 @@ public:
         // want project plugins to win over global ones with the same name.
         // (last_open_warnings_ was reset at the top of open_project so group-parse
         // warnings, compile failures, and bad instances all accumulate together.)
+        // Record the malformed verdict for the lifetime of this open so the
+        // save path can refuse the destructive rebuild (BUG#4). A clean open
+        // sets this back to false (local default), so the flag never sticks
+        // across a later good open.
+        project_json_malformed_ = project_json_malformed;
         if (project_json_malformed) {
             last_open_warnings_.push_back({"", "",
-                "project.json is not valid JSON - loaded with defaults "
-                "(check for a syntax error or truncation)"});
-            std::fprintf(stderr, "[xinsp2] project.json malformed - loaded with defaults\n");
+                "project.json is not valid JSON - opened READ-ONLY/degraded; "
+                "saves are blocked until it is fixed (check for a syntax error "
+                "or truncation). Original bytes preserved as project.json.corrupt-<ts>."});
+            std::fprintf(stderr, "[xinsp2] project.json malformed - opened degraded; saves blocked\n");
+            // Preserve the recoverable original bytes BEFORE any later save can
+            // overwrite project.json. Copy verbatim to a timestamped sibling so
+            // the user (or a tool) can recover the extension-owned keys. Portable
+            // timestamp via xi::wall_ms() (no platform-specific time call). Done
+            // once here at open — the save path only refuses, it never copies.
+            std::error_code qec;
+            auto corrupt = pj;
+            corrupt += ".corrupt-" + std::to_string(xi::wall_ms());
+            std::filesystem::copy_file(pj, corrupt,
+                std::filesystem::copy_options::overwrite_existing, qec);
+            if (qec) {
+                std::fprintf(stderr,
+                    "[xinsp2] project.json: could not write quarantine copy %s (%s)\n",
+                    corrupt.string().c_str(), qec.message().c_str());
+            } else {
+                std::fprintf(stderr, "[xinsp2] project.json: preserved original bytes as %s\n",
+                             corrupt.string().c_str());
+            }
         }
         // Declarative plugin model: EVERY plugin (local + external) comes from the
         // project.json `plugins` declarations, resolved against `plugin_dirs`. There
@@ -2141,6 +2166,15 @@ private:
     // by mu_; migrated inline by create/remove/rename so it never drifts.
     std::unordered_map<std::string, InstStateRec> inst_state_;
     std::vector<OpenWarning> last_open_warnings_;
+    // BUG#4 quarantine: project.json existed but failed to parse on the last
+    // open_project. While true, save_project_locked REFUSES the full-rebuild
+    // write (it would clobber extension-owned keys — params / auto_respawn /
+    // watchdog_ms — and destroy the recoverable original bytes). The project
+    // stays open in a degraded/read-only-ish mode (like a compile failure) and
+    // the corrupt bytes are preserved as project.json.corrupt-<ts>. Reset to
+    // false only by a *fresh successful open* of a well-formed project.json —
+    // not by a save (saves are blocked while this is set).
+    bool project_json_malformed_ = false;
     CompileEnv  compile_env_;
     // Names of plugins that came from <project>/plugins/ rather than the
     // global plugins directory — flagged so the UI can label them and so
@@ -2248,6 +2282,23 @@ private:
 
     bool save_project_locked() {
         auto pj = std::filesystem::path(project_.folder_path) / "project.json";
+        // BUG#4 quarantine guard: if project.json was non-empty-but-unparseable
+        // at open, a full rebuild here would (a) drop extension-owned top-level
+        // keys (params / auto_respawn / watchdog_ms) — merge_unknown_top_keys_
+        // can't carry them over because it re-reads the SAME corrupt file and
+        // yyjson_read returns null — and (b) overwrite the only recoverable copy
+        // of the user's bytes. Refuse the destructive write and keep the project
+        // degraded until a fresh open of a valid file clears the flag. The
+        // original bytes were already preserved as project.json.corrupt-<ts> at
+        // open. This mirrors the compile-fail path: stay up, don't clobber.
+        if (project_json_malformed_) {
+            std::fprintf(stderr,
+                "[xinsp2] save_project_locked: refusing to overwrite malformed "
+                "project.json for %s — fix the file and reopen (original bytes "
+                "preserved as project.json.corrupt-<ts>).\n",
+                pj.string().c_str());
+            return false;
+        }
         std::string out = "{\n";
         out += "  \"name\": "; pm_json_escape(out, project_.name); out += ",\n";
         out += "  \"script\": ";

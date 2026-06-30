@@ -702,6 +702,34 @@ include script-declared `xi::Instance` objects (resolved via the script DLL's
 own registry), so a dropped def would otherwise let a line run on default
 thresholds/models while the operator believes the saved recipe applied.
 
+**Corrupt `project.json` is quarantined, not silently rebuilt.** If
+`project.json` exists but is **non-empty and unparseable** (e.g. a trailing comma
+or a truncated write), `open_project` does NOT refuse the project — it opens in a
+**degraded / read-only** mode (analogous to a compile failure: the process stays
+up so headless autostart never hard-crashes on a bad file) with all parallelism /
+runtime / groups defaulted, and surfaces an `open_project_warnings` entry whose
+reason begins `"project.json is not valid JSON - opened READ-ONLY/degraded; saves
+are blocked …"`. Two guarantees protect the on-disk bytes:
+
+- **Bytes preserved.** The original file is copied verbatim to a sibling
+  `project.json.corrupt-<ts>` (timestamp from the portable monotonic clock helper)
+  at open time, so the operator's recoverable content is never lost.
+- **Destructive saves blocked.** While the degraded flag is set, any instance CRUD
+  (`create_instance` / `remove_instance` / `rename_instance`) is allowed to update
+  the *instance* folders, but the full `project.json` rebuild is **refused** — it
+  would otherwise overwrite the file with a defaults-only document and drop the
+  top-level keys this backend does not emit but another writer owns (the VS Code
+  extension's `params`, `auto_respawn`, `watchdog_ms`). The flag is cleared only by
+  a *fresh successful `open_project`* of a now-valid file; a save never clears it.
+
+  In `working_copy` mode the same guarantee holds end-to-end: the scratch
+  `project.json` is never overwritten, so `commit_working_copy` mirrors the
+  original bytes back onto the canonical (and carries the `.corrupt-<ts>` copy
+  with it) — the corruption is contained, never propagated as data loss.
+
+  To recover: fix (or restore from `project.json.corrupt-<ts>`) the JSON on disk
+  and `open_project` again. See [`examples/qa_corrupt_project_json`](../../examples/qa_corrupt_project_json).
+
 **IntelliSense config.** The `.vscode/c_cpp_properties.json` that lets the
 Microsoft C/C++ extension resolve `<xi/...>` and OpenCV is written by the **VS
 Code extension** (NOT the backend core): on open it reads the resolved compile
