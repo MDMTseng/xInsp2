@@ -29,14 +29,20 @@
 #include <xi/xi_abi.h>        // XI_ABI_VERSION, xi_host_api
 #include <xi/xi_record.hpp>   // xi::yyjson_layout_stamp()
 
-// The golden plugin is the v9 contract incarnate. If the ABI version is bumped
-// (e.g. the Phase 1 get_interface append), this assert fires as a deliberate
-// checkpoint: do NOT silently re-pin the golden — add a NEW golden for the new
-// version and keep this one running against min-compat to prove old plugins
-// still load. See ADR-001.
-static_assert(XI_ABI_VERSION == 9,
-              "golden_plugin is pinned to ABI v9; a version bump must add a new "
-              "golden, not mutate this one (see ADR-001 / core_fix_plan.md §12).");
+// The golden plugin is the v9 contract incarnate — pinned at v9 by a LITERAL,
+// deliberately decoupled from the host's current XI_ABI_VERSION. As the host ABI
+// advances (Phase 1 appended get_interface → v10), this plugin stays a v9 binary
+// so the compat test proves the real thing: an OLD (v9 / min-compat 6) plugin
+// still loads + runs unchanged against the NEWER host. Do NOT bump this to track
+// the header; if a future capability needs exercising, add a SEPARATE golden for
+// that version and keep this one frozen at v9. See ADR-001 / core_fix_plan.md §12.
+static constexpr int kGoldenAbiVersion = 9;
+static_assert(XI_ABI_VERSION >= kGoldenAbiVersion,
+              "host ABI regressed below the golden's pinned v9 — the golden must "
+              "remain loadable (v9 <= host version).");
+static_assert(kGoldenAbiVersion >= XI_ABI_MIN_COMPAT,
+              "golden's pinned v9 fell below the host min-compat floor — it would "
+              "no longer load; the freeze contract is broken (ADR-001).");
 
 namespace {
 
@@ -51,7 +57,10 @@ struct GoldenInstance {
 extern "C" {
 
 __declspec(dllexport) int xi_plugin_abi_version(void) {
-    return XI_ABI_VERSION;
+    // Pinned literal — this is a v9 plugin regardless of how new the host headers
+    // are (see kGoldenAbiVersion above). The loader gate accepts it on any host
+    // with XI_ABI_MIN_COMPAT <= 9 <= XI_ABI_VERSION.
+    return kGoldenAbiVersion;
 }
 
 __declspec(dllexport) uint32_t xi_yyjson_abi(void) {

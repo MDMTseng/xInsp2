@@ -42,10 +42,12 @@ int main() {
     std::printf("[test] golden-plugin ABI v%d compat — load + process() through "
                 "the real adapter\n", XI_ABI_VERSION);
 
-    // The golden contract this test guards. Pinned here so a careless ABI edit
-    // that bumps the version without consciously revisiting the golden net fails
-    // the build (not just the run). See ADR-001.
-    static_assert(XI_ABI_VERSION == 9, "golden test is pinned to ABI v9");
+    // The golden contract this test guards. The golden plugin is a v9 binary
+    // (golden_plugin.cpp pins kGoldenAbiVersion = 9); this test now runs it
+    // against a v10+ host to prove an OLD plugin still loads + runs unchanged
+    // after the Phase 1 get_interface append. Pinned here so a careless ABI edit
+    // fails the build, not just the run. See ADR-001 / core_fix_plan.md §12.
+    static_assert(XI_ABI_VERSION >= 10, "golden test now proves v9-plugin-on-v10-host");
     static_assert(XI_ABI_MIN_COMPAT == 6, "golden test assumes min-compat 6");
 
     HMODULE dll = LoadLibraryA(GOLDEN_PLUGIN_DLL);
@@ -53,6 +55,19 @@ int main() {
         std::fprintf(stderr, "FAIL: LoadLibrary(%s) failed (err %lu)\n",
                      GOLDEN_PLUGIN_DLL, GetLastError());
         return 2;
+    }
+
+    // (0) Prove this really is the OLD-plugin-on-NEW-host scenario: the golden
+    // exports v9, the host headers are v10+ with the get_interface door present.
+    auto abi_ver = reinterpret_cast<int (*)()>(
+        GetProcAddress(dll, "xi_plugin_abi_version"));
+    CHECK(abi_ver != nullptr);
+    if (abi_ver) {
+        int gv = abi_ver();
+        std::printf("  golden reports ABI v%d; host is v%d (min-compat %d)\n",
+                    gv, XI_ABI_VERSION, XI_ABI_MIN_COMPAT);
+        CHECK(gv == 9);                 // a genuine v9 plugin
+        CHECK(gv < XI_ABI_VERSION);     // strictly older than the host — the point
     }
 
     // (1) Real ABI gate — the same call the loader makes. A golden plugin that
@@ -71,6 +86,8 @@ int main() {
     // (2) A real host_api backed by the live ImagePool — exactly what the backend
     // hands a plugin at create().
     static xi_host_api host = xi::ImagePool::make_host_api();
+    CHECK(host.get_interface != nullptr);          // v10 door present on the host
+    CHECK(host.get_interface("xi.legacy", 9) != nullptr);  // legacy surface published
     void* inst = create(&host, "golden0");
     CHECK(inst != nullptr);
 
