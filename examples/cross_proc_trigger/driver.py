@@ -10,7 +10,18 @@ needed to fall back to "in_process".
 Topology
 --------
 One process-isolated source emitting at 60 Hz; the inspect script
-emits one VAR per trigger so the driver can count.
+surfaces one record per trigger to the `expose` sink (channel "trig")
+so the driver can count them.
+
+Data path
+---------
+The Python SDK is now generic and no longer collects script VARs. The
+inspect script pushes its per-trigger record (active, src, seq) to the
+`expose` plugin; this driver subscribes to channel "trig", drains the
+raw binary WS frames, and decodes them with the shared XEX1 decoder
+(examples/lib/xex1.py). The `expose` instance is in_process (host side),
+so decoding/pushing those frames does NOT issue a backend->worker RPC
+into the isolated source — the silent-window invariant below is intact.
 
 Acceptance window
 -----------------
@@ -30,40 +41,48 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from queue import Empty
+
+# Shared XEX1 / expose-frame decoder (examples/lib/xex1.py).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from xex1 import collect_frames, subscribe  # noqa: E402
 
 from xinsp2 import Client, ProtocolError
 
 ROOT = Path(__file__).parent
 INSPECT_CPP = ROOT / "inspect.cpp"
 
+CHANNEL         = "trig"
 SILENT_WINDOW_S = 1.0
 EXPECTED_FPS    = 60
 MIN_EVENTS      = 50   # 60 fps minus warmup / dispatch overhead
 
 
 def drain(c: Client) -> None:
-    for q in (c._inbox_vars, c._inbox_previews):
-        try:
-            while True:
-                q.get_nowait()
-        except Empty:
-            pass
+    c.drain_binary()
 
 
 def collect_vars(c: Client, duration_s: float) -> list[dict]:
+    """Decode expose frames pushed on CHANNEL for `duration_s`.
+
+    Returns one flat dict per frame — the decoded "values" (active, src,
+    seq) with the wire seq stashed under "_run_id".
+    """
     events: list[dict] = []
     deadline = time.time() + duration_s
     while time.time() < deadline:
-        rem = deadline - time.time()
-        try:
-            ev = c._inbox_vars.get(timeout=min(0.1, max(0.01, rem)))
-        except Empty:
+        for frame in collect_frames(c):
+            if frame.get("channel") != CHANNEL:
+                continue
+            flat = dict(frame.get("values") or {})
+            flat["_run_id"] = frame.get("seq")
+            events.append(flat)
+        time.sleep(0.005)
+    # Final sweep for frames that landed right at the deadline.
+    for frame in collect_frames(c):
+        if frame.get("channel") != CHANNEL:
             continue
-        flat: dict = {}
-        for it in ev.get("items") or []:
-            flat[it["name"]] = it.get("value")
-        flat["_run_id"] = ev.get("run_id")
+        flat = dict(frame.get("values") or {})
+        flat["_run_id"] = frame.get("seq")
         events.append(flat)
     return events
 
@@ -89,6 +108,12 @@ def main() -> int:
 
         c.compile_and_load(str(INSPECT_CPP))
         print("  inspect.cpp compiled")
+
+        # Subscribe to the expose channel so the sink pushes frames
+        # (subscription gating). This exchange goes to the in_process
+        # `expose` instance, NOT the isolated source worker, so it does
+        # not perturb the silent-window measurement below.
+        subscribe(c, [CHANNEL])
 
         # Let the worker's plugin thread spin up before we draw the
         # baseline. The plugin's run_loop_ starts in the constructor;

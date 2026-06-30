@@ -1,5 +1,11 @@
 # burst_pipeline — PLAN
 
+> **Historical plan.** Written when scripts surfaced data via `VAR()`.
+> The SDK vars-purge later removed VAR collection; the script now pushes
+> its computed values to the `expose` plugin (channel `"pipe"`) and the
+> driver decodes the XEX1 frames. References to "VAR" below describe the
+> original design — see RESULTS.md for the current data path.
+
 ## Goal
 
 A realistic two-plugin pipeline (heavy source + light classifier) used

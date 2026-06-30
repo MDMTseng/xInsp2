@@ -20,6 +20,10 @@
     {
       "name": "classifier",
       "plugin": "light_classifier"
+    },
+    {
+      "name": "expose",
+      "plugin": "expose"
     }
   ],
   "plugins": {

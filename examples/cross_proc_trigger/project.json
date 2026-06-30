@@ -16,6 +16,10 @@
     {
       "name": "source_iso",
       "plugin": "burst_source"
+    },
+    {
+      "name": "expose",
+      "plugin": "expose"
     }
   ],
   "plugins": {
