@@ -190,6 +190,26 @@ public:
         if (host_ && host_->set_status) host_->set_status(name_.c_str(), text.c_str());
     }
 
+    // JPEG-encode an image through the host's content-addressed cache (the same
+    // image encoded by several plugins, or repeatedly, is encoded ONCE globally).
+    // Returns bytes written into `out`, or -needed if `out_cap` is too small
+    // (resize + retry), 0 on error / no encoder available.
+    //
+    // ABI v10 capability segregation (core_fix_plan.md §12 Phase 2): resolves the
+    // frozen `xi.preview@1` interface via host->get_interface ONCE and caches it;
+    // falls back to the legacy host->compress_image field when the host is pre-v10
+    // (no get_interface) or doesn't publish xi.preview. New plugins ride the
+    // segregated interface; old plugins and pre-v10 hosts keep working via the
+    // field — neither path is privileged, both hit the identical host encoder.
+    int compress(const void* px, int w, int h, int ch, int quality,
+                 void* out, int out_cap) const {
+        if (const xi_preview_v1* pv = preview_iface())
+            return pv->compress(px, w, h, ch, quality, out, out_cap);
+        if (host_ && host_->compress_image)
+            return host_->compress_image(px, w, h, ch, quality, out, out_cap);
+        return 0;
+    }
+
     // Override these in your plugin:
     virtual Record process(const Record& input) { (void)input; return {}; }
     virtual std::string exchange(const std::string& cmd_json) { (void)cmd_json; return "{}"; }
@@ -278,6 +298,23 @@ protected:
 
     const xi_host_api* host_;
     std::string name_;
+
+private:
+    // Resolve-once cache for the xi.preview@1 interface (used by compress()).
+    // get_interface returns a process-stable, host-owned pointer, so caching it
+    // once per instance is safe. `resolved_` distinguishes "not yet looked up"
+    // from "looked up, absent" so a pre-v10 host is probed at most once.
+    const xi_preview_v1* preview_iface() const {
+        if (!preview_resolved_) {
+            preview_resolved_ = true;
+            if (host_ && host_->get_interface)
+                preview_ = static_cast<const xi_preview_v1*>(
+                    host_->get_interface("xi.preview", 1));
+        }
+        return preview_;
+    }
+    mutable bool                 preview_resolved_ = false;
+    mutable const xi_preview_v1* preview_          = nullptr;
 };
 
 // --- γ: host doc allocator bridge ---
