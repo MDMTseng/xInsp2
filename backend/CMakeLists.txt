@@ -170,6 +170,13 @@ target_compile_definitions(test_golden_plugin PRIVATE
     GOLDEN_PLUGIN_DLL="$<TARGET_FILE:golden_plugin>")
 add_test(NAME golden_plugin COMMAND test_golden_plugin)
 
+# ABI freeze-signature guard: declares xi_host_api@9 frozen and fails the BUILD
+# if its published layout changes (per-field offset + fn-pointer type, in order).
+# Mostly compile-time static_assert; the test target makes it part of the build.
+add_executable(test_abi_freeze tests/test_abi_freeze.cpp)
+target_link_libraries(test_abi_freeze PRIVATE xi_core)
+add_test(NAME abi_freeze COMMAND test_abi_freeze)
+
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
 target_include_directories(test_yyjson PRIVATE
