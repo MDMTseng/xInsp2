@@ -13,6 +13,7 @@
 #include "xi_image.hpp"
 #include "xi_record.hpp"
 #include "xi_script.hpp"
+#include "xi_seh.hpp"     // B2 warmup installs the SEH translator on the omp pool
 #include "xi_state.hpp"
 
 #include <cstdio>
@@ -34,6 +35,19 @@ inline int apply_omp_thread_cap_() {
 #ifdef XI_OMP_MAX_THREADS
     if ((XI_OMP_MAX_THREADS) > 0) omp_set_num_threads((XI_OMP_MAX_THREADS));
 #endif
+    // B2: warm up MSVC vcomp's PERSISTENT thread pool at DLL load and install the
+    // SEH translator on each worker once. vcomp reuses these threads for later
+    // regions, so a subsequent RAW `#pragma omp parallel` (one NOT routed through
+    // xi::parallel_for, which installs its own per-region) inherits a translator
+    // and its hardware faults become catchable instead of terminating the whole
+    // backend. Done after the thread cap so the team is sized to the project's
+    // ceiling. Not airtight — nested parallelism, omp_set_dynamic, or a later
+    // grown num_threads spawns fresh untranslated threads (those fall back to the
+    // crash_dump VEH → minidump). A best-effort floor, not a guarantee.
+    #pragma omp parallel
+    {
+        xi::install_seh_translator();
+    }
     return 0;
 }
 inline int g_omp_cap_applied_ = apply_omp_thread_cap_();  // runs at DLL load
@@ -189,6 +203,19 @@ static void* g_trigger_meta_fn_     = nullptr;   // ABI v5: emit_trigger_record 
 // latest status string to the host status registry. Signature: void(const char*).
 static void* g_status_fn_           = nullptr;
 
+// Image-pool owner get/set thunks (C1). The owner tag that attributes a
+// pool-created image to a script/instance for the per-owner leak sweep lives in
+// a thread_local INSIDE the backend's ImagePool — invisible across the ABI seam.
+// The host injects these two thunks so SDK code (xi::async / xi::parallel_for)
+// can read the owner active on the inspect thread and re-install it on a worker
+// thread, keeping worker-created images attributed instead of anonymous
+// (owner=0). Null on an older host ⇒ owner propagation is a silent no-op
+// (degrades to owner=0, the prior behaviour). Signatures (cast in xi_async.hpp):
+//   owner_get : uint32_t(void)
+//   owner_set : void(uint32_t)
+static void* g_owner_get_fn_        = nullptr;
+static void* g_owner_set_fn_        = nullptr;
+
 // Result callback. Host sets this so xi::result(code,msg) records the one per-run
 // verdict. Signature: void(int code, const char* msg).
 static void* g_result_fn_           = nullptr;
@@ -250,6 +277,16 @@ XI_SCRIPT_EXPORT void xi_script_set_trigger_meta_callback(void* meta_fn) {
 // include xi_status.hpp leave this null.
 XI_SCRIPT_EXPORT void xi_script_set_status_callback(void* fn) {
     g_status_fn_ = fn;
+}
+
+// C1: install the image-pool owner get/set thunks. Separate symbol (same
+// back-compat reasoning as the leader/meta callbacks) so an older host that
+// doesn't know about owner propagation simply leaves both null and worker-thread
+// images stay anonymous (owner=0) exactly as before. get_fn: uint32_t(void),
+// set_fn: void(uint32_t).
+XI_SCRIPT_EXPORT void xi_script_set_owner_callbacks(void* get_fn, void* set_fn) {
+    g_owner_get_fn_ = get_fn;
+    g_owner_set_fn_ = set_fn;
 }
 
 // Optional: install a result callback for xi::result(code,msg). Scripts that

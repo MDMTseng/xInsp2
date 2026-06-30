@@ -80,6 +80,10 @@ struct LoadedScript {
     SetTriggerMetaCallbackFn set_trigger_meta_callback = nullptr;
     using SetStatusCallbackFn = void (*)(void* fn);
     SetStatusCallbackFn set_status_callback = nullptr;
+    // C1: image-pool owner get/set thunks. Optional symbol — older scripts lack
+    // it and worker-created images stay anonymous (owner=0).
+    using SetOwnerCallbacksFn = void (*)(void* get_fn, void* set_fn);
+    SetOwnerCallbacksFn set_owner_callbacks = nullptr;
     using SetResultCallbackFn = void (*)(void* fn);
     SetResultCallbackFn set_result_callback = nullptr;
     SetRunContextFn    set_run_context  = nullptr;
@@ -134,6 +138,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_trigger_leader_callback = reinterpret_cast<LoadedScript::SetTriggerLeaderCallbackFn>(GetProcAddress(h, "xi_script_set_trigger_leader_callback"));
     out.set_trigger_meta_callback = reinterpret_cast<LoadedScript::SetTriggerMetaCallbackFn>(GetProcAddress(h, "xi_script_set_trigger_meta_callback"));
     out.set_status_callback = reinterpret_cast<LoadedScript::SetStatusCallbackFn>(GetProcAddress(h, "xi_script_set_status_callback"));
+    out.set_owner_callbacks = reinterpret_cast<LoadedScript::SetOwnerCallbacksFn>(GetProcAddress(h, "xi_script_set_owner_callbacks"));
     out.set_result_callback = reinterpret_cast<LoadedScript::SetResultCallbackFn>(GetProcAddress(h, "xi_script_set_result_callback"));
     out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
     out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
