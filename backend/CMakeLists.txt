@@ -245,6 +245,23 @@ if(NOT MSVC)
 endif()
 add_test(NAME image_pool COMMAND test_image_pool)
 
+# Parallel-region safety regression tests (Part I hazards A/B/C — trigger
+# snapshot, OpenMP/SEH containment, worker-thread image-owner propagation).
+# Built WITH /openmp so xi::parallel_for exercises the REAL multi-threaded
+# OpenMP path (per-omp-thread SEH translator + owner re-install), not its serial
+# #else fallback. /EHa (project-wide) lets _set_se_translator convert the SEH
+# fault into a catchable xi::seh_exception.
+add_executable(test_parallel_safety tests/test_parallel_safety.cpp)
+target_link_libraries(test_parallel_safety PRIVATE xi_core)
+if(MSVC)
+    target_compile_options(test_parallel_safety PRIVATE /openmp)
+else()
+    target_compile_options(test_parallel_safety PRIVATE -fopenmp)
+    target_link_libraries(test_parallel_safety PRIVATE pthread)
+    target_link_options(test_parallel_safety PRIVATE -fopenmp)
+endif()
+add_test(NAME parallel_safety COMMAND test_parallel_safety)
+
 add_executable(test_image_pool_stress tests/test_image_pool_stress.cpp)
 target_link_libraries(test_image_pool_stress PRIVATE xi_core)
 if(NOT MSVC)
