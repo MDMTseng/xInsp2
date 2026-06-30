@@ -13,6 +13,7 @@
 #include "xi_image.hpp"
 #include "xi_record.hpp"
 #include "xi_script.hpp"
+#include "xi_seh.hpp"     // B2 warmup installs the SEH translator on the omp pool
 #include "xi_state.hpp"
 
 #include <cstdio>
@@ -34,6 +35,19 @@ inline int apply_omp_thread_cap_() {
 #ifdef XI_OMP_MAX_THREADS
     if ((XI_OMP_MAX_THREADS) > 0) omp_set_num_threads((XI_OMP_MAX_THREADS));
 #endif
+    // B2: warm up MSVC vcomp's PERSISTENT thread pool at DLL load and install the
+    // SEH translator on each worker once. vcomp reuses these threads for later
+    // regions, so a subsequent RAW `#pragma omp parallel` (one NOT routed through
+    // xi::parallel_for, which installs its own per-region) inherits a translator
+    // and its hardware faults become catchable instead of terminating the whole
+    // backend. Done after the thread cap so the team is sized to the project's
+    // ceiling. Not airtight — nested parallelism, omp_set_dynamic, or a later
+    // grown num_threads spawns fresh untranslated threads (those fall back to the
+    // crash_dump VEH → minidump). A best-effort floor, not a guarantee.
+    #pragma omp parallel
+    {
+        xi::install_seh_translator();
+    }
     return 0;
 }
 inline int g_omp_cap_applied_ = apply_omp_thread_cap_();  // runs at DLL load
