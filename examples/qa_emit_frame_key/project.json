@@ -1,0 +1,16 @@
+{
+  "name": "qa_emit_frame_key",
+  "script": "inspect.cpp",
+  "instances": [
+    {
+      "name": "cam",
+      "plugin": "local_image_source"
+    }
+  ],
+  "plugins": {
+    "local_image_source": {
+      "path": "local_image_source",
+      "compile": true
+    }
+  }
+}

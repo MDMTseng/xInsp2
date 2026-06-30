@@ -1,0 +1,7 @@
+{
+  "name": "local_image_source",
+  "description": "Load images from a local folder; pick one in the webui (thumbnail grid) to issue it as a trigger, or set config auto_ms>0 to auto-emit the folder on a timer (cycles + re-scans, so dropped/edited files auto-update).",
+  "dll": "local_image_source.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true
+}

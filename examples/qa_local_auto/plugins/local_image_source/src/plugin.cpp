@@ -11,8 +11,9 @@
 //   - The EMITTER owns the trigger id: we pass XI_TRIGGER_NULL so the bus mints a
 //     fresh, collision-free id per issue. The file's own identity (its filename)
 //     is the source's key/provenance, kept separate from the dispatch id.
-//   - The image rides ON the trigger (emit_trigger carries it); the script reads
-//     it back via xi::current_trigger().image("<this instance's name>").
+//   - The image rides ON the trigger (emit_record carries it under key "frame");
+//     the script reads it back via xi::current_trigger().image("frame") — the
+//     same key cmd:run/replay inject under, so one script works against both.
 //
 // exchange() commands (from ui/index.html):
 //   "get_status"            -> { dir, files:[{name,w,h,thumb}], issued_name, ... }

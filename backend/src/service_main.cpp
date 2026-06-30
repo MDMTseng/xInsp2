@@ -569,7 +569,18 @@ static void trigger_info_cb(CurrentTriggerInfoC* out) {
 static xi_image_handle trigger_image_cb(const char* source) {
     if (!g_current_trigger || !source) return XI_IMAGE_NULL;
     auto it = g_current_trigger->images.find(source);
-    if (it == g_current_trigger->images.end()) return XI_IMAGE_NULL;
+    if (it == g_current_trigger->images.end()) {
+        // Reader-side sole-image fallback (cold path — only on an exact-key
+        // MISS, so the hot emit path stays allocation-free with NO second map
+        // entry per frame). A single-image event resolves by ANY key: the
+        // record's own key (e.g. "frame" — the documented contract + cmd:run
+        // inject) AND the emitter instance name (legacy reads) both land on the
+        // lone frame. A multi-image event keeps strict exact-key routing.
+        if (g_current_trigger->images.size() == 1)
+            it = g_current_trigger->images.begin();
+        else
+            return XI_IMAGE_NULL;
+    }
     // Caller (script) releases via host_api->image_release after copying
     // pixels — addref so our own release on dispatch-end doesn't free it
     // out from under them.

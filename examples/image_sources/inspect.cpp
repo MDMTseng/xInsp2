@@ -23,8 +23,10 @@ void xi_inspect_entry(int /*frame*/) {
     VAR(trigger_id, t.id_string());
 
     // The input image arrives ON the trigger from whichever source issued this
-    // pass — `local` (a file click) or `cache` (a replay). One read, either way.
-    auto img = t.image(src);
+    // pass — `local` (a file click) or `cache` (a replay). Both emit the frame
+    // under key "frame", so one read works either way (a single-image event also
+    // resolves by the source name via the host's sole-image fallback).
+    auto img = t.image("frame");
     if (img.empty()) { VAR(loaded, false); return; }
     VAR(loaded, true);
     VAR(width, img.width);

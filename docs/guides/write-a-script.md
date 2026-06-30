@@ -435,7 +435,7 @@ See the `synced_stereo` reference plugin for a worked gathering source.
 | `t.id()` / `t.id_string()`| 128-bit trigger id (struct or 32-char hex)                            |
 | `t.timestamp_us()`        | μs since Unix epoch when the source called `host->emit_record`        |
 | `t.dequeued_at_us()`      | μs (same clock) when the dispatcher worker popped this event          |
-| `t.image(name)`           | the named image in the record, zero-copy view                         |
+| `t.image(name)`           | the named image in the record, zero-copy view (a single-image record resolves under `"frame"`, its source name, or any key) |
 | `t.sources()`             | list of image names present in this record                            |
 | `t.has_source(name)`      | `true` if `name` appears in `sources()`; routing without manual hash  |
 | `t.meta()`                | routing/context metadata the source attached, as a read-only `Record` (empty if none) |
