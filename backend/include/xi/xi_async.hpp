@@ -30,17 +30,27 @@
 #include <type_traits>
 #include <utility>
 
-// Image-pool owner get/set thunks, injected by the host into the script DLL
-// (defined in xi_script_support.hpp; see C1). Declared here so xi::async (C2)
-// and xi::parallel_for (C3) can carry the inspect-thread owner onto the worker
-// threads they spawn. Null on an older host / non-script TU ⇒ the wrappers below
-// are silent no-ops and worker-created images stay anonymous (owner=0), exactly
-// as before. (Global scope to match the static defs, same idiom as the
-// g_use_*/g_trigger_* externs in xi_use.hpp; only ODR-used when async/parallel
-// is actually instantiated, so a plugin that never uses them never references
-// these symbols.)
-extern void* g_owner_get_fn_;
-extern void* g_owner_set_fn_;
+// Image-pool owner get/set thunks, injected by the host into the script DLL via
+// xi_script_set_owner_callbacks (see C1). xi::async (C2) and xi::parallel_for
+// (C3) carry the inspect-thread owner onto the worker threads they spawn by
+// reading/writing these. Null on an older host / non-script TU ⇒ the wrappers
+// below are silent no-ops and worker-created images stay anonymous (owner=0),
+// exactly as before.
+//
+// These are `inline` (one shared, zero-initialised definition per module) rather
+// than the `extern`-here / `static`-in-xi_script_support.hpp idiom used for the
+// g_use_*/g_trigger_* globals. That idiom only works because those globals are
+// ODR-used EXCLUSIVELY from script TUs (which include xi_script_support.hpp's
+// static definitions). The owner thunks differ: detail::owner_get() below is
+// ODR-used UNCONDITIONALLY from xi::async / xi::parallel_for, which NON-script
+// TUs instantiate too (unit tests, a plugin op-library using xi::async). An
+// `extern` with no definition reachable from those TUs is an unresolved-external
+// link error. `inline` gives every such TU its own zero-initialised copy and the
+// exported setter writes the script DLL's copy that the script's async reads —
+// same module, so it stays consistent. (Global scope to match the setter, which
+// writes ::g_owner_*_fn_.)
+inline void* g_owner_get_fn_ = nullptr;
+inline void* g_owner_set_fn_ = nullptr;
 
 namespace xi {
 

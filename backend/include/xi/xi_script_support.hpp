@@ -213,8 +213,13 @@ static void* g_status_fn_           = nullptr;
 // (degrades to owner=0, the prior behaviour). Signatures (cast in xi_async.hpp):
 //   owner_get : uint32_t(void)
 //   owner_set : void(uint32_t)
-static void* g_owner_get_fn_        = nullptr;
-static void* g_owner_set_fn_        = nullptr;
+//
+// The STORAGE for g_owner_get_fn_ / g_owner_set_fn_ lives in xi_async.hpp (as
+// inline globals — see the rationale there: they're ODR-used from generic async
+// code that non-script TUs also instantiate, so they cannot use the
+// extern-here / static-there idiom the g_use_*/g_trigger_* globals use). It is
+// already visible here via the xi.hpp include above; the setter below just
+// assigns the pointers.
 
 // Result callback. Host sets this so xi::result(code,msg) records the one per-run
 // verdict. Signature: void(int code, const char* msg).
