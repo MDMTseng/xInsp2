@@ -374,6 +374,8 @@ Principle refs: Interface Segregation (SOLID); Hyrum's Law (narrow explicit cont
 
 **Phase 4 — retire the monolith (free cleanup):** once all first-party plugins + SDK wrappers use interfaces, stop feeding new capabilities to legacy; after the deprecation window, **stop publishing `get_interface("xi.legacy",9)`**. This is "stop answering a query id," **not** a layout change → zero reshuffle, no forced sync. The dead `shm_*` stubs vanish for free (they only lived in the legacy struct, which no longer ships).
 
+> **CAVEAT surfaced in Phase 3 (Track A2) — resolve before/within Phase 4:** the `get_interface` door is currently backed by the **canonical (default) host table** (`make_host_api`/`canonical_host_api()`), NOT the per-instance runtime-wired table. So **stateless** host services (`xi.imaging`/`xi.doc`/`xi.log`/`xi.preview`) resolve correctly, but the **`xi.emit`** pointers (`emit_record`/trigger-wired) are the canonical *default* (null until `install_trigger_hook` wires the live per-instance table). The byte-for-byte carve test holds only because both sides are null. **Before plugins consume `xi.emit@1` via the door, the door must be backed by the live wired table** (or `xi.emit` kept on the existing instance-wired path). Today no caller hits this (the only compress caller was `expose.cpp`); it bites the moment emit/trigger goes through the door.
+
 **Net:** add/change/remove a capability stops being a global event; freeze lands at one-capability granularity; each plugin's dependency surface = exactly the interfaces it queried (directly serves the minimal-core goal).
 
 ## 13. Touch list (Part II)
