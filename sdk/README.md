@@ -287,6 +287,13 @@ void xi_inspect_entry(int frame) {
 `t.image(key)` fetches an image by the key the source used; `t.sources()`
 lists every source that contributed; `t.meta()` returns the metadata doc.
 
+For the common **single-image** source — `Record().image("frame", img)` — the
+frame is stored under that key (`"frame"`), so `t.image("frame")` works
+identically whether the frame arrived from a live source, a `cmd:run --frame`
+inject, or a replay. As a convenience, a single-image event also resolves under
+**any** key, so a legacy script reading by the source's instance name still gets
+the frame. Multi-image records are matched strictly by key (`"cam_left"` etc.).
+
 ### Correlating multiple sources
 
 Bus correlation policies were removed — there is no `set_trigger_policy`.

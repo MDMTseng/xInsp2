@@ -46,9 +46,12 @@ struct TriggerEvent {
     // uses it as the run_id; a dropped frame's marker carries it too. 0 until
     // the dispatcher assigns it.
     int64_t        arrival_id = 0;
-    // Image key → handle. The key is the record's own key for a multi-image
-    // record (e.g. "cam_left"/"cam_right"), or the emitter name for a single
-    // image. Caller releases each handle after use.
+    // Image key → handle. The key is the record's own key whenever the source
+    // supplied one (e.g. "cam_left"/"cam_right", or "frame" for a single image
+    // emitted as Record().image("frame", img)); a keyless image falls back to
+    // the emitter name. A single-image event additionally resolves by ANY key
+    // via the reader-side fallback (see trigger_image_cb). Caller releases each
+    // handle after use.
     std::unordered_map<std::string, xi_image_handle> images;
     // The emitting instance's name — current_trigger().primary_source().
     std::string    leader_source;
@@ -156,11 +159,16 @@ public:
         for (int i = 0; i < image_count; ++i) {
             xi_image_handle h = images[i].handle;
             ImagePool::instance().addref(h);
-            // A multi-image record is keyed by the record's OWN keys, so the
-            // script reads t.image("cam_left") directly. A single image
-            // collapses to the emitter name, so t.image("<source>") works.
+            // Key every image by the record's OWN key when the source gave one
+            // (multi-image "cam_left"/"cam_right", AND a single image emitted as
+            // Record().image("frame", img) — the documented contract that
+            // cmd:run/replay also use). A keyless image collapses to the emitter
+            // name so legacy t.image("<source>") still works. Choosing the key is
+            // free — still exactly ONE string per image, no extra map entry; the
+            // reader-side sole-image fallback (trigger_image_cb) lets a single
+            // frame resolve by EITHER the record key or the instance name.
             std::string name;
-            if (image_count > 1 && images[i].key && images[i].key[0]) {
+            if (images[i].key && images[i].key[0]) {
                 name = images[i].key;
             } else {
                 name = source;

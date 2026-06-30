@@ -12,8 +12,7 @@ void xi_inspect_entry(int /*frame*/) {
     auto t = xi::current_trigger();
     if (!t.is_active()) return;                 // ignore any non-source tick
 
-    const std::string src = t.primary_source();
-    xi::Image img = t.image(src);               // trigger image is keyed by source name
+    xi::Image img = t.image("frame");           // source emits Record().image("frame", img)
     if (img.empty()) { xi::ng(2, "no image"); return; }
     VAR(frame, img);                            // HMI image card binds var "frame"
 
