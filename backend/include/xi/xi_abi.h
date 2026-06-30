@@ -121,7 +121,18 @@ extern "C" {
 /*       with commit_group (a drain-barrier) for frame-perfect group    */
 /*       switches. See roadmap/config-bundles-and-orchestration.md.     */
 /* ------------------------------------------------------------------ */
-#define XI_ABI_VERSION 9   /* v8: + emit_binary; v9: + compress_image (host JPEG cache) */
+/*   8 — + emit_binary (push an opaque binary frame straight to WS clients).      */
+/*   9 — + compress_image (host JPEG-encode + content-addressed cache).            */
+/*  10 — + get_interface(id, version): the CLAP-style capability-query door.       */
+/*       This is the LAST legal monolith append (core_fix_plan.md §12 Phase 1):    */
+/*       the v9 prefix is FROZEN (ADR-001) — v10 == v9 + one appended pointer at   */
+/*       the struct tail. The host registers the entire current table as           */
+/*       get_interface("xi.legacy", 9) and carves frozen per-capability interfaces */
+/*       (xi.preview@1, …) behind the same door; old plugins, which never see this */
+/*       field, are completely unaffected. From here, capabilities evolve as       */
+/*       segregated, independently-frozen interfaces rather than monolith appends. */
+/* ------------------------------------------------------------------ */
+#define XI_ABI_VERSION 10  /* v8: + emit_binary; v9: + compress_image; v10: + get_interface */
 
 /* Oldest plugin ABI the host loads; bump on every breaking xi_host_api layout change. */
 #define XI_ABI_MIN_COMPAT 6
@@ -129,7 +140,7 @@ extern "C" {
 /* Expected sizeof(xi_host_api) for the layout guard below (see the ABI LAYOUT
  * GUARD note after the struct). Bump together with XI_ABI_VERSION on any layout
  * change. 64-bit host (all function pointers). */
-#define XI_ABI_EXPECTED_SIZE 208  /* 64-bit: 26 function pointers * 8 bytes */
+#define XI_ABI_EXPECTED_SIZE 216  /* 64-bit: 27 function pointers * 8 bytes */
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -355,17 +366,43 @@ typedef struct xi_host_api {
     int32_t (*compress_image)(const void* pixels, int32_t w, int32_t h,
                               int32_t channels, int32_t quality,
                               void* out, int32_t out_cap);
+
+    /* --------------------------------------------------------------- */
+    /* get_interface (ABI v10) — the capability-query door. Resolve a    */
+    /* segregated, independently-frozen interface by string id + version */
+    /* (CLAP-style host->get_extension): returns a borrowed, host-owned  */
+    /* pointer to the interface struct, or NULL if the host does not     */
+    /* publish that (id, version). The pointer is valid for the life of  */
+    /* the host (do not free); cache it once per id.                     */
+    /*                                                                   */
+    /* This is the LAST monolith append (core_fix_plan.md §12 Phase 1).  */
+    /* All future capabilities arrive as frozen interfaces behind this   */
+    /* door, not as new xi_host_api fields. Registered ids:              */
+    /*   get_interface("xi.legacy", 9)  -> const xi_host_api*  (this very */
+    /*       table — the whole v9 surface, so a caller can reach any      */
+    /*       legacy field through the door).                             */
+    /* Frozen per-capability interfaces (xi.preview@1, …) are carved      */
+    /* behind this door in Phase 2+.                                     */
+    /* Null on a pre-v10 host — always null-check before calling; a       */
+    /* caller then falls back to the legacy field (e.g. compress_image). */
+    const void* (*get_interface)(const char* id, uint32_t version);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ *
- * FROZEN SIGNATURE — xi_host_api@9.                                   *
+ * FROZEN SIGNATURE — xi_host_api, v9 prefix + v10 tail append.        *
  *                                                                    *
  * As of ADR-001 (docs/internals/adr-001-host-api-freeze.md) the v9   *
  * layout of xi_host_api is FROZEN: a published (interface, vN) is     *
- * frozen forever; any add/change/remove ships as v10, never as an     *
- * in-place edit of the v9 fields. Do NOT add, remove, reorder, or     *
- * retype any field above to "fix" a build — that breaks every plugin  *
- * compiled against v9.                                                *
+ * frozen forever; any add/change/remove ships as the NEXT version,    *
+ * never as an in-place edit of the existing fields. v10 == the frozen *
+ * v9 prefix (image_create … compress_image, offsets 0..200) + ONE     *
+ * appended pointer (get_interface) at offset 208. Do NOT add, remove, *
+ * reorder, or retype any field at or before compress_image to "fix" a *
+ * build — that breaks every plugin compiled against v9.               *
+ *                                                                    *
+ * get_interface is the query door (core_fix_plan.md §12 Phase 1): the *
+ * LAST legal monolith append. Future capabilities arrive as frozen    *
+ * per-interface structs behind it, NOT as new xi_host_api fields.     *
  *                                                                    *
  * Two guards enforce this (both fail the BUILD — there is no CI       *
  * runner in this repo):                                               *
@@ -393,9 +430,15 @@ typedef struct xi_host_api {
 static_assert(sizeof(xi_host_api) == XI_ABI_EXPECTED_SIZE,
               "xi_host_api layout changed: bump XI_ABI_VERSION and update "
               "XI_ABI_EXPECTED_SIZE (see the ABI LAYOUT GUARD note).");
-static_assert(offsetof(xi_host_api, compress_image) == XI_ABI_EXPECTED_SIZE - sizeof(void*),
-              "compress_image is no longer the last field — a field was added/removed "
+static_assert(offsetof(xi_host_api, get_interface) == XI_ABI_EXPECTED_SIZE - sizeof(void*),
+              "get_interface is no longer the last field — a field was added/removed "
               "without updating the ABI guard; bump XI_ABI_VERSION.");
+/* The v9 prefix is frozen forever: compress_image stays the last v9 field, at the
+ * fixed offset it has always had (208 - 2*ptr = 200). get_interface (v10) appends
+ * after it. If this fires, a v9 field moved — that breaks every v9 plugin. */
+static_assert(offsetof(xi_host_api, compress_image) == XI_ABI_EXPECTED_SIZE - 2 * sizeof(void*),
+              "the frozen v9 prefix moved: compress_image must remain the last v9 "
+              "field (v10 = v9 prefix + appended get_interface).");
 #endif
 
 /* ------------------------------------------------------------------ */

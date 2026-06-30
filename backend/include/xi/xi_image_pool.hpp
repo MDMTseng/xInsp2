@@ -434,11 +434,9 @@ public:
         };
         // ABI v9: JPEG-encode through the host cache via the installed sink
         // (xi_compress_sink.hpp); returns 0 when no encoder is installed.
-        api.compress_image = [](const void* px, int32_t w, int32_t h, int32_t c,
-                                int32_t q, void* out, int32_t cap) -> int32_t {
-            if (auto fn = xi::compress_sink()) return fn(px, w, h, c, q, out, cap);
-            return 0;
-        };
+        // Routed through compress_image_impl so the legacy field and the carved
+        // xi.preview@1 interface (get_interface, below) share the IDENTICAL path.
+        api.compress_image = &compress_image_impl;
         // Host doc allocator (ABI v3, γ) — backs the in-process yyjson doc
         // pass-by-pointer path. A doc built through these is host-owned, so its
         // free routes back to the host and is safe to drop from either side of
@@ -455,7 +453,46 @@ public:
         api.doc_refcount = [](void* d) -> int32_t {
             return (int32_t)xi::DocRegistry::instance().refcount((yyjson_mut_doc*)d);
         };
+        // ABI v10: the capability-query door. A plugin resolves a frozen,
+        // segregated interface by id+version through this one pointer
+        // (core_fix_plan.md §12 Phase 1). Registrations live in
+        // get_interface_impl: "xi.legacy"@9 (the whole table) for now.
+        api.get_interface = &get_interface_impl;
         return api;
+    }
+
+    // ---- capability-query door (ABI v10, core_fix_plan.md §11-12) -----
+
+    // The JPEG-encode-with-host-cache capability, shared VERBATIM by the legacy
+    // compress_image field and the carved xi.preview@1 interface, so both reach
+    // the identical host code path (the installed content-addressed compress
+    // sink). Returns 0 when no encoder is installed.
+    static int32_t compress_image_impl(const void* px, int32_t w, int32_t h,
+                                       int32_t c, int32_t q,
+                                       void* out, int32_t cap) {
+        if (auto fn = xi::compress_sink()) return fn(px, w, h, c, q, out, cap);
+        return 0;
+    }
+
+    // The canonical, process-stable host table — built ONCE. get_interface
+    // ("xi.legacy", 9) hands this back so a caller can reach the whole v9
+    // surface through the door (core_fix_plan.md §12 Phase 1: "register the
+    // entire current host table as xi.legacy@9"). Lazily built on first query,
+    // so constructing the table itself never recurses through the door.
+    static const xi_host_api* canonical_host_api() {
+        static const xi_host_api api = make_host_api();
+        return &api;
+    }
+
+    // The {id, version} -> const void* registry resolver wired into every
+    // table's get_interface. A small, lock-free lookup (no map, no static-init
+    // ordering hazard); extend with one branch per carved interface. A published
+    // (id, vN) is frozen forever — a changed capability is a NEW (id, vN+1).
+    static const void* get_interface_impl(const char* id, uint32_t version) {
+        if (!id) return nullptr;
+        if (std::strcmp(id, "xi.legacy") == 0 && version == 9)
+            return canonical_host_api();        // the whole v9 surface, one pointer
+        return nullptr;
     }
 
     using ReadImageFileFn = xi_image_handle (*)(const char* path);
