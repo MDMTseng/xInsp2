@@ -115,6 +115,59 @@ static_assert(offsetof(xi_host_api, compress_image) == 200,
 
 #undef XI_FREEZE_FIELD
 
+// ---- Carved capability interfaces — frozen per-interface signatures ---------
+// ADDITIVE (does NOT touch the v9/v10 host-api pins above). Phase 3 carves the
+// remaining domains out of the monolith into segregated, independently-frozen
+// structs reached through get_interface. Each published (id, vN) is frozen
+// FOREVER: a change ships as vN+1, never an in-place edit. These pins make any
+// reorder/retype of a carved interface a COMPILE error — the same discipline the
+// v9 prefix gets. (The "matches the legacy field byte-for-byte" runtime proof is
+// in test_interface_domains.cpp; here we freeze the struct SHAPE.)
+#define XI_FREEZE_IFACE(type, field, off, ...)                                   \
+    static_assert(offsetof(type, field) == (off),                               \
+                  #type "::" #field " moved — a published interface is frozen"); \
+    static_assert(std::is_same<decltype(type::field), __VA_ARGS__>::value,      \
+                  #type "::" #field " retyped — a published interface is frozen")
+
+// xi.preview@1 (carved Phase 2) — single entry.
+static_assert(sizeof(xi_preview_v1) == 1 * sizeof(void*), "xi_preview_v1 size changed (frozen @1)");
+XI_FREEZE_IFACE(xi_preview_v1, compress, 0,
+                int32_t (*)(const void*, int32_t, int32_t, int32_t, int32_t, void*, int32_t));
+
+// xi.imaging@1 — image pool (8) + read_image_file (1) = 9 entries.
+static_assert(sizeof(xi_imaging_v1) == 9 * sizeof(void*), "xi_imaging_v1 size changed (frozen @1)");
+XI_FREEZE_IFACE(xi_imaging_v1, image_create,    0,  xi_image_handle (*)(int32_t, int32_t, int32_t));
+XI_FREEZE_IFACE(xi_imaging_v1, image_addref,    8,  void            (*)(xi_image_handle));
+XI_FREEZE_IFACE(xi_imaging_v1, image_release,   16, void            (*)(xi_image_handle));
+XI_FREEZE_IFACE(xi_imaging_v1, image_data,      24, uint8_t*        (*)(xi_image_handle));
+XI_FREEZE_IFACE(xi_imaging_v1, image_width,     32, int32_t         (*)(xi_image_handle));
+XI_FREEZE_IFACE(xi_imaging_v1, image_height,    40, int32_t         (*)(xi_image_handle));
+XI_FREEZE_IFACE(xi_imaging_v1, image_channels,  48, int32_t         (*)(xi_image_handle));
+XI_FREEZE_IFACE(xi_imaging_v1, image_stride,    56, int32_t         (*)(xi_image_handle));
+XI_FREEZE_IFACE(xi_imaging_v1, read_image_file, 64, xi_image_handle (*)(const char*));
+
+// xi.doc@1 — host doc allocator (3) + refcount (3) = 6 entries.
+static_assert(sizeof(xi_doc_v1) == 6 * sizeof(void*), "xi_doc_v1 size changed (frozen @1)");
+XI_FREEZE_IFACE(xi_doc_v1, doc_chunk_alloc,   0,  void*   (*)(size_t));
+XI_FREEZE_IFACE(xi_doc_v1, doc_chunk_realloc, 8,  void*   (*)(void*, size_t));
+XI_FREEZE_IFACE(xi_doc_v1, doc_chunk_free,    16, void    (*)(void*));
+XI_FREEZE_IFACE(xi_doc_v1, doc_retain,        24, void    (*)(void*));
+XI_FREEZE_IFACE(xi_doc_v1, doc_release,       32, void    (*)(void*));
+XI_FREEZE_IFACE(xi_doc_v1, doc_refcount,      40, int32_t (*)(void*));
+
+// xi.emit@1 — emit_record + emit_binary = 2 entries.
+static_assert(sizeof(xi_emit_v1) == 2 * sizeof(void*), "xi_emit_v1 size changed (frozen @1)");
+XI_FREEZE_IFACE(xi_emit_v1, emit_record, 0, void (*)(const char*, xi_trigger_id,
+                                                     const struct xi_record*, int64_t));
+XI_FREEZE_IFACE(xi_emit_v1, emit_binary, 8, void (*)(const void*, int32_t));
+
+// xi.log@1 — log + set_status = 2 entries.
+static_assert(sizeof(xi_log_v1) == 2 * sizeof(void*), "xi_log_v1 size changed (frozen @1)");
+XI_FREEZE_IFACE(xi_log_v1, log,        0, void (*)(int32_t, const char*));
+XI_FREEZE_IFACE(xi_log_v1, set_status, 8, void (*)(const char*, const char*));
+
+#undef XI_FREEZE_IFACE
+
 int main() {
     // Everything load-bearing is checked at compile time above; reaching here means
     // the frozen v9 prefix is intact AND get_interface is the lone v10 append.

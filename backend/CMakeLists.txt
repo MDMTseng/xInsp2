@@ -247,6 +247,19 @@ endif()
 add_test(NAME preview_interface COMMAND test_preview_interface)
 # <<< host-api-segregation Phase 2 end.
 
+# >>> host-api-segregation Phase 3 (xi.imaging/doc/emit/log carve) — localized block.
+# Proves each remaining domain interface resolves via host->get_interface and is
+# byte-for-byte identical to the legacy xi_host_api fields it groups, and that the
+# SDK xi::Plugin wrappers resolve-then-cache with a legacy-field fallback on a
+# simulated pre-v10 host. Kept self-contained to ease merge with sibling appends.
+add_executable(test_interface_domains tests/test_interface_domains.cpp)
+target_link_libraries(test_interface_domains PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_interface_domains PRIVATE pthread)
+endif()
+add_test(NAME interface_domains COMMAND test_interface_domains)
+# <<< host-api-segregation Phase 3 end.
+
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
 target_include_directories(test_yyjson PRIVATE
