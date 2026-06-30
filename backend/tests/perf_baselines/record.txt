@@ -1,0 +1,3 @@
+# perf baseline for bench_record.exe
+# captured by perf_gate.cmake UPDATE_BASELINE=ON — slower-is-worse integer metrics
+record_yyjson_roundtrip_ns_n50 8247

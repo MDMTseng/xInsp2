@@ -480,6 +480,100 @@ plugin's core.
 
 ---
 
+## Plugin lifecycle & threading contract
+
+Every plugin C-ABI export runs in a specific **lifecycle state**, on a specific
+**thread**, under a specific **serialization guarantee**, and with a specific
+**ambient-context** rule. None of this was written down before — and an unwritten
+contract is exactly what produced the parallel-region context bugs (a worker thread
+the plugin spawns does *not* inherit the host's ambient `current_trigger` /
+image-pool owner). This section **is** that contract, source-verified against
+`xi_abi.h` and `xi_cabi_adapter.hpp`.
+
+**The states an instance moves through:**
+
+- **pre-create** — the DLL is loaded and ABI-gated, but no instance object exists yet.
+- **live** — the instance exists; the host may call it. Config ops, `process`, and
+  the staging swap all happen here.
+- **destroyed** — `destroy` has run; no further call is legal.
+
+**The serialization gate (`CallScope`).** The adapter wraps most entry points in a
+per-instance admission gate (`xi_cabi_adapter.hpp:293-311`). For a **non-reentrant**
+plugin (the default) the gate admits **one** call at a time *across*
+`process` / `exchange` / `get_def` / `set_def` / `commit` — so a live config change
+can't tear an in-flight `process`. A **reentrant** plugin (`"reentrant": true`)
+lifts the gate (up to `max_concurrency`, or unlimited) and owns its own locking.
+`prepare` is the one entry that runs **outside** the gate on purpose.
+
+**The ambient-context rule.** While a gated call runs, the adapter holds an
+`ImagePool::OwnerGuard` (`xi_cabi_adapter.hpp:212,222,229,244,258,268`) so any image
+the plugin allocates via `host->image_create` is tagged to this instance and swept
+on destroy. The dispatch worker that runs `process` *also* set the script's
+`current_trigger` ambient. **Both are `thread_local`** — they live only on the
+thread the host called you on. A worker thread you spawn inside `process`
+(`std::thread`, an `xi::async` / OpenMP body) inherits **neither**: images it creates
+are tagged `owner=0` (anonymous — outside the per-owner leak sweep) and
+`current_trigger()` reads empty there. Read ambient state on the host's thread; hand
+captured values into your own threads.
+
+### The contract table
+
+| Export | Legal state | Thread | Serialization | Ambient context |
+|---|---|---|---|---|
+| `xi_plugin_abi_version` | pre-create (load gate) | control thread, before any instance exists | n/a (pure constant) | none |
+| `xi_plugin_create` | pre-create → live | control thread (`create_instance` / `open_project` / rename / rebuild) — never a dispatch worker | implicit: the instance isn't visible to dispatch until `create` returns | `ImagePoolOwnerScope` active — ctor images are owner-tagged & swept (`xi_plugin_manager.hpp:345,1803`). No trigger. |
+| `xi_plugin_process` | live | a **dispatch worker** thread (`service_main.cpp:159-163`); for a `sink`, staged & flushed in the ordered-emit gate | **gated** by `CallScope` — serialized per instance **unless** `reentrant=true` (`xi_cabi_adapter.hpp:242-248,286`) | `OwnerGuard(owner_id_)` set by the adapter (`:244`); the worker also holds the script's `current_trigger`. Both `thread_local` — do **not** cross into threads you spawn. |
+| `xi_plugin_exchange` | live | the caller's thread — control thread for a UI command (`service_main.cpp:262,2876`), or the inspect thread for a script `xi::use().exchange()` | **gated** by `CallScope` (`xi_cabi_adapter.hpp:227-234`) | `OwnerGuard(owner_id_)` (`:229`). No trigger guarantee. |
+| `xi_plugin_get_def` | live | control thread (project save) | **gated** by `CallScope` (`xi_cabi_adapter.hpp:210-217`) | `OwnerGuard(owner_id_)` (`:212`). |
+| `xi_plugin_set_def` | live | control thread (load / `set_instance_def` — `service_main.cpp:2804,3214`) | **gated** by `CallScope` (`xi_cabi_adapter.hpp:220-224`) — serialized vs `process` | `OwnerGuard(owner_id_)` (`:222`). |
+| `xi_plugin_prepare` (v7, opt) | live (background) | control thread (`prepare_instance` — `service_main.cpp:2953`) | **UNGATED — no `CallScope`** — runs **concurrent with `process`** so the load never stalls the pipeline (`xi_cabi_adapter.hpp:250-260`; `xi_abi.h:107-119`) | `OwnerGuard(owner_id_)` only (`:258`). **Contract: touch the staging slot ONLY, never live state.** |
+| `xi_plugin_commit` (v7, opt) | live | control thread (`commit` / `commit_group` — `service_main.cpp:3046`) | **gated** by `CallScope` (`xi_cabi_adapter.hpp:262-270`); under `commit_group`, dispatch is drained first, so uncontended | `OwnerGuard(owner_id_)` (`:268`). |
+| `xi_plugin_destroy` | live → destroyed | control thread (`remove_instance` / close / rebuild / shutdown), in `~CAbiInstanceAdapter` (`xi_cabi_adapter.hpp:177-194`) | **not** gated, but the host removes the instance from dispatch first, so no `process` can be in flight | none around `destroy_fn`; the dtor then runs `release_all_for(owner_id_)` to sweep leaked images (`:188`). |
+
+> "Control thread" = whichever backend thread is servicing the WS command (or
+> `open_project` / shutdown). The point that matters is the **gate**, not the exact
+> thread: `process` is the only export that runs on a dispatch worker, and config
+> ops are serialized against it for a non-reentrant instance.
+
+> The two v7 exports (`prepare` / `commit`) exist only if the plugin opted in with
+> `XI_PLUGIN_STAGED`. Without them, a heavy config change is a plain gated `set_def`
+> (see *Heavy config changes* above). The asymmetry is the whole point:
+> **`prepare` is ungated and concurrent with `process`; `commit` is gated.** That is
+> sound only because `prepare` touches the staging slot alone.
+
+### Parallelism invariants (for plugin authors)
+
+These hold regardless of plugin type (T0–T3) and mirror the script-side rules in
+[`write-a-script.md`](./write-a-script.md):
+
+1. **Ambient context is `thread_local` and lives on the host's call thread.** A
+   thread you spawn inside `process` (or any export) does **not** inherit
+   `current_trigger` or the image-pool owner. Read what you need on the host thread
+   and capture it by value into the worker.
+2. **A pool image created on a worker thread you spawn is tagged `owner=0`**
+   (anonymous) — thread-safe and fine on the happy path (balanced refcounts), but
+   **outside** the per-owner leak sweep that runs on `destroy`. To keep it
+   attributed, allocate on the host's call thread, or set an `ImagePool::OwnerGuard`
+   in the worker (`xi_image_pool.hpp:137,226`).
+3. **A C++ exception must not cross a `#pragma omp` region boundary** — OpenMP
+   requires it caught inside the same structured block. Catch inside, set a flag,
+   rethrow on the call thread.
+4. **`process` may run concurrently with `prepare`.** If you exported
+   `XI_PLUGIN_STAGED`, `prepare` runs with no gate while `process` is in flight — so
+   `prepare` must write only the staging slot and `process` must read only live
+   state. The canonical lock-free shape (atomic `shared_ptr<const Config>`) gives you
+   this for free.
+5. **Reentrancy is about `process`-vs-`process`, not config swaps.** The `CallScope`
+   gate already serializes config ops (`set_def` / `commit`) against `process` for a
+   non-reentrant instance; opting into `reentrant=true` is what makes N `process`
+   calls overlap, and then shared mutable state is your responsibility.
+
+(These restate, plugin-author-side, the host invariants in
+[`../internals/core_fix_plan.md`](../internals/core_fix_plan.md) Part I §6 and
+Part III §20.)
+
+---
+
 ## Common questions
 
 **Where does instance state persist?**

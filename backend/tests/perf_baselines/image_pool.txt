@@ -1,0 +1,4 @@
+# perf baseline for bench_image_pool.exe
+# captured by perf_gate.cmake UPDATE_BASELINE=ON — slower-is-worse integer metrics
+image_pool_ns_per_create_16x16x1 97
+image_pool_ns_per_create_320x240x3 6495

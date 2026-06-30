@@ -42,13 +42,27 @@
 
 #define SECTION(name) std::fprintf(stderr, "\n[section] %s\n", name)
 
+// Iteration multiplier for the high-iteration stress mode. The default suite
+// runs scale=1 (fast); the `image_pool_stress_heavy` ctest sets
+// XINSP2_STRESS_SCALE so the same churn/ABA/refcount paths get hammered far
+// harder — the practical race-detection net on MSVC, which has no TSan. Read
+// once, clamped to >=1.
+static int stress_scale() {
+    static int s = [] {
+        const char* e = std::getenv("XINSP2_STRESS_SCALE");
+        int v = e ? std::atoi(e) : 1;
+        return v > 0 ? v : 1;
+    }();
+    return s;
+}
+
 // ---------- 1: Mass churn forcing slot reuse via free list ----------
 
 static void test_churn_slot_reuse() {
     SECTION("Mass churn forces slot reuse; no double-allocation");
     auto& pool = xi::ImagePool::instance();
     constexpr int THREADS = 8;
-    constexpr int OPS_PER = 5'000;
+    const int OPS_PER = 5'000 * stress_scale();
 
     std::atomic<int> ok_creates{0};
     std::atomic<int> ok_releases{0};
@@ -102,7 +116,8 @@ static void test_stale_handle_rejection() {
 
     // 200 cycles of create+release on the same low-index slot pumps
     // the generation counter well past the stale handle's value.
-    for (int i = 0; i < 200; ++i) {
+    const int reuse_cycles = 200 * stress_scale();
+    for (int i = 0; i < reuse_cycles; ++i) {
         xi_image_handle h = pool.create(2, 2, 1);
         CHECK(h != 0);
         // Stale handle MUST NOT lookup the current occupant.
@@ -174,7 +189,7 @@ static void test_concurrent_addref_release_balanced() {
     SECTION("Many threads addref+release; refcount stays balanced");
     auto& pool = xi::ImagePool::instance();
     constexpr int THREADS = 8;
-    constexpr int OPS_PER = 10'000;
+    const int OPS_PER = 10'000 * stress_scale();
 
     xi_image_handle h = pool.create(16, 16, 1);
     CHECK(h != 0);
@@ -204,7 +219,7 @@ static void test_mixed_churn() {
     SECTION("Mixed create/release interleaving — no lost slots, no dupes");
     auto& pool = xi::ImagePool::instance();
     constexpr int THREADS = 8;
-    constexpr int CYCLES  = 2'000;
+    const int CYCLES  = 2'000 * stress_scale();
 
     std::atomic<int> alive{0};
     std::vector<std::thread> threads;
