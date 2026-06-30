@@ -3,21 +3,15 @@
 Layout (one folder per run):
 
     <out>/run-000017/
-        report.json                    — run_id, ms, per-channel values + image
-                                         manifest, event log
-        <channel>/values.json          — the channel's scalar values dict
-        <channel>/<key>.jpg            — each exposed image (always JPEG)
+        report.json        — run_id, ms, vars (without binary), event log
+        vars/<name>.<ext>  — image previews decoded by codec extension
+        vars/<name>.json   — non-image VARs as one file each (for grep-ability)
 
 The AI agent can then `Read` these files like any other source artifact.
-
-Output is organised by `expose` channel (string id) and image key, matching
-the post-v9 atomic XEX1 frame model (the old `vars`/`gid`/codec model is gone;
-`expose` images are always JPEG).
 """
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,46 +24,41 @@ class RunSnapshot:
     report_path: Path
 
 
-def _safe(name: str) -> str:
-    """Make a channel/key id safe to use as a folder/file name."""
-    return re.sub(r"[^A-Za-z0-9._-]", "_", name) or "_"
-
-
 def dump_run(run: RunResult, out_dir: str | Path, *, prefix: str = "run") -> RunSnapshot:
     out = Path(out_dir) / f"{prefix}-{run.run_id:06d}"
-    out.mkdir(parents=True, exist_ok=True)
+    vars_dir = out / "vars"
+    vars_dir.mkdir(parents=True, exist_ok=True)
 
-    report_channels = {}
-    for channel, frame in run.frames.items():
-        ch_dir = out / _safe(channel)
-        ch_dir.mkdir(parents=True, exist_ok=True)
-
-        # scalar values
-        values_path = ch_dir / "values.json"
-        values_path.write_text(json.dumps(frame.values, indent=2), encoding="utf-8")
-
-        # images (always JPEG)
-        images = []
-        for key, jpeg in frame.images.items():
-            img_path = ch_dir / f"{_safe(key)}.jpg"
-            img_path.write_bytes(jpeg)
-            images.append({
-                "key": key,
-                "bytes": len(jpeg),
-                "file": str(img_path.relative_to(out)),
+    report_vars = []
+    for item in run.vars:
+        kind = item["kind"]
+        name = item["name"]
+        if kind == "image":
+            # Images sharing one buffer report a canonical "src" gid; the backend
+            # sends a single preview frame under it. Fall back to canon so deduped
+            # vars still resolve to the same image.
+            pf = run.previews.get(item["gid"]) or run.previews.get(item.get("src", item["gid"]))
+            if pf is None:
+                report_vars.append({**item, "missing_preview": True})
+                continue
+            ext = {0: "jpg", 1: "bmp", 2: "png"}.get(pf.codec, "bin")
+            img_path = vars_dir / f"{name}.{ext}"
+            img_path.write_bytes(pf.payload)
+            report_vars.append({
+                "name": name, "kind": "image",
+                "width": pf.width, "height": pf.height, "channels": pf.channels,
+                "codec": pf.codec_name, "file": str(img_path.relative_to(out)),
             })
-
-        report_channels[channel] = {
-            "seq": frame.seq,
-            "values": frame.values,
-            "values_file": str(values_path.relative_to(out)),
-            "images": images,
-        }
+        else:
+            report_vars.append({k: v for k, v in item.items() if k != "gid"})
+            if kind == "json":
+                (vars_dir / f"{name}.json").write_text(
+                    json.dumps(item.get("value"), indent=2), encoding="utf-8")
 
     report = {
         "run_id": run.run_id,
         "ms": run.ms,
-        "channels": report_channels,
+        "vars": report_vars,
         "events": run.events,
     }
     report_path = out / "report.json"
