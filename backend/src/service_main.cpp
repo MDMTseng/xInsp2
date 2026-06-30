@@ -40,6 +40,7 @@
 #include <xi/xi_jpeg.hpp>
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_plugin_manager.hpp>
+#include <xi/xi_certify.hpp>      // Part III G1: --certify-plugin child mode (scan/certification isolation)
 #include <xi/xi_project.hpp>
 #include <xi/xi_owner_lock.hpp>     // F5: advisory single-writer stamp on the project folder
 #include <cassert>
@@ -3952,6 +3953,24 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 
 
 int main(int argc, char** argv) {
+    // Part III G1.1 — certify mode: load a plugin DLL + call its factory once in
+    // THIS throwaway child process, exit with a verdict code (0 ok / 42
+    // abi_mismatch / abnormal = crashed). Crash-isolation for discovery: a
+    // malformed DLL faults HERE, never in the scanning backend. Handled BEFORE
+    // install_seh_translator() so a fault reaches the minidump filter rather than
+    // being translated to a catchable exception + swallowed.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--certify-plugin") {
+            const char* dir = (i + 1 < argc) ? argv[i + 1] : nullptr;
+            xi::crash::install();   // a crashed certify still yields a minidump
+            int code = dir ? xi::certify::certify_in_process(dir)
+                           : xi::certify::kExitAbiMismatch;
+            std::fflush(stderr);
+            std::fflush(stdout);
+            return code;
+        }
+    }
+
     // Install the crash-forensics handlers (minidump filter + CRT death-path
     // interceptors + first-chance logger + fault-stack reserve). Lives in the
     // extracted leaf xi_crash_dump.hpp.
@@ -4083,6 +4102,15 @@ int main(int argc, char** argv) {
             if (!p.has_parent_path() || p.parent_path() == p) break;
             p = p.parent_path();
         }
+    }
+    // G1.3 — certify each discovered plugin in a throwaway child (this same
+    // backend exe, --certify-plugin mode) before arming it during the scan. A DLL
+    // that crashes certification is skipped + surfaced (g_plugin_mgr.certify_
+    // warnings()), so discovery can never load a known-bad DLL into the backend.
+    {
+        char exe[MAX_PATH];
+        DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        if (n) g_plugin_mgr.set_certify_exe(std::string(exe, n));
     }
     if (!g_plugins_dir.empty()) {
         int n = g_plugin_mgr.scan_plugins(g_plugins_dir);

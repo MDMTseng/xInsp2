@@ -25,6 +25,8 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <xi/xi_abi.hpp>
+#include <xi/xi_certify.hpp>     // Part III G1: --certify-plugin child mode + verdict subprocess
+#include <xi/xi_crash_dump.hpp>  // xi::crash::install() — a crashed certify still yields a minidump
 #include <xi/xi_image.hpp>
 #include <xi/xi_image_pool.hpp>
 #include <xi/xi_instance.hpp>
@@ -164,15 +166,36 @@ static void print_usage() {
 
 // --- main ---------------------------------------------------------------
 
-static std::string get_exe_dir() {
+static std::string get_exe_path() {
     char buf[MAX_PATH]; DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n == 0) return {};
-    std::string s(buf, n);
+    return (n == 0) ? std::string{} : std::string(buf, n);
+}
+
+static std::string get_exe_dir() {
+    std::string s = get_exe_path();
+    if (s.empty()) return {};
     auto slash = s.find_last_of("\\/");
     return (slash == std::string::npos) ? "." : s.substr(0, slash);
 }
 
 int main(int argc, char** argv) {
+    // Part III G1.1 — certify mode: load a plugin DLL + call its factory once in
+    // THIS throwaway child process, then exit with a verdict code (0 ok / 42
+    // abi_mismatch / abnormal = crashed). Crash-isolation for discovery: a
+    // malformed DLL faults HERE, never in the scanning backend. Handled first,
+    // before the SEH translator install below, so a fault reaches the minidump
+    // filter (xi::crash::install) rather than being translated + swallowed.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--certify-plugin") {
+            const char* dir = (i + 1 < argc) ? argv[i + 1] : nullptr;
+            xi::crash::install();   // a crashed certify still yields a minidump
+            int code = dir ? xi::certify::certify_in_process(dir)
+                           : xi::certify::kExitAbiMismatch;
+            std::fflush(stderr);
+            std::fflush(stdout);
+            return code;
+        }
+    }
     for (int i = 1; i < argc; ++i) {
         std::string_view a = argv[i];
         if (a == "--version" || a == "-v") {
@@ -215,6 +238,10 @@ int main(int argc, char** argv) {
 
     // Scan plugins: built-in + any --plugins-dir the user gave us.
     xi::PluginManager pm;
+    // G1.3 — certify each discovered plugin in a throwaway child (this same exe,
+    // --certify-plugin mode) before arming it. A DLL that crashes certification
+    // is skipped, surfaced via pm.certify_warnings(), and never loaded here.
+    pm.set_certify_exe(get_exe_path());
     int n = pm.scan_plugins(plugins_dir);
     std::fprintf(stderr, "[runner] scanned %d plugins from %s\n", n, plugins_dir.c_str());
     for (auto& d : args.extra_plugins) {
