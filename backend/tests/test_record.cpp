@@ -596,6 +596,112 @@ static void test_concurrent_dispatch_balance() {
     CHECK(reg.live_count() == base);
 }
 
+// ---------- Test 23: Typed/Field write-through honours Record COW (bug #10) ----------
+//
+// xi::Typed/Field mutate the yyjson tree directly. A write through a Typed whose
+// Record is FROZEN (shared/registry-managed across the ABI, e.g.
+// current_trigger().meta()) must COPY-ON-WRITE first, not corrupt the doc the
+// other side still reads. A non-frozen write must stay copy-free (speed-first).
+
+static void test_typed_field_cow() {
+    SECTION("Typed/Field write-through COWs a frozen doc (bug #10)");
+    auto retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+    auto release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
+    auto& reg = xi::DocRegistry::instance();
+    size_t base = reg.live_count();
+
+    // (a) OWNED Typed into a FROZEN registry-managed doc → write COWs; the shared
+    //     original (read via the producer that still shares the same doc) is
+    //     UNCHANGED, the doc pointer moved (a copy happened), the Typed sees 999.
+    {
+        xi::Record producer;
+        producer.set("x", 1).set("y", 2);
+        yyjson_mut_doc* raw = producer.share_out(retain, release);
+        auto meta = std::make_shared<xi::Record>(
+            xi::Record::adopt_shared(raw, release, /*frozen=*/true));
+        xi::Typed t(meta, meta->json());          // OWNED into the frozen doc
+        yyjson_mut_doc* before = meta->doc();
+        CHECK(before == raw);
+
+        t.set("x", 999);                          // Typed::set → prepare_write_ → COW
+        CHECK(meta->doc() != before);             // a COPY happened (doc relocated)
+        CHECK(meta->get_int("x") == 999);         // the Typed's private copy reflects it
+        CHECK(producer.get_int("x") == 1);        // the FROZEN original is UNTOUCHED
+        CHECK(producer.get_int("y") == 2);
+
+        meta.reset();
+        producer = xi::Record();
+    }
+
+    // (b) The exact PoC shape: xi::Roi(current_trigger().meta()). A by-value
+    //     Typed(Record) ctor → OWNED. Field write (roi["w"] = …) must COW too.
+    {
+        xi::Record producer;
+        producer.set("x", 10).set("w", 20);
+        yyjson_mut_doc* raw = producer.share_out(retain, release);
+        xi::Record meta = xi::Record::adopt_shared(raw, release, /*frozen=*/true);
+
+        xi::Roi roi(meta);                        // OWNED Typed wrapping a frozen Record
+        roi["w"] = 777;                           // Field write-through
+        roi.set("x", 555);                        // Typed::set write-through
+        CHECK((int)roi["w"].as_int() == 777);     // Roi's private copy updated
+        CHECK(roi.x() == 555);
+        CHECK(producer.get_int("w") == 20);       // original frozen doc UNCHANGED
+        CHECK(producer.get_int("x") == 10);
+        CHECK(meta.get_int("w") == 20);           // the other adopted copy too
+
+        producer = xi::Record();
+        meta = xi::Record();
+    }
+
+    // (c) VIEW into a FROZEN doc → write DETACHES (implicit clone) into a private
+    //     copy of the sub-node; the frozen original sub-object is untouched.
+    {
+        xi::Record producer;
+        producer.set("sub", xi::Record().set("v", 1));
+        yyjson_mut_doc* raw = producer.share_out(retain, release);
+        auto meta = std::make_shared<xi::Record>(
+            xi::Record::adopt_shared(raw, release, /*frozen=*/true));
+        yyjson_mut_val* sub = yyjson_mut_obj_get(meta->json(), "sub");
+        CHECK(sub != nullptr);
+
+        xi::Typed view(meta, sub);                // VIEW into a sub-node of the frozen doc
+        view.set("v", 9);                         // must detach, not corrupt
+        CHECK(view["v"].as_int() == 9);           // detached private copy reflects it
+        CHECK(producer.get_record("sub").get_int("v") == 1);  // original untouched
+
+        meta.reset();
+        producer = xi::Record();
+    }
+
+    CHECK(reg.live_count() == base);              // no registry leak across the COWs
+
+    // (d) NON-frozen OWNED write stays COPY-FREE (speed-first): same doc pointer,
+    //     mutated in place.
+    {
+        auto root = std::make_shared<xi::Record>();
+        root->set("x", 1);
+        xi::Typed t(root, root->json());          // OWNED, NOT frozen
+        yyjson_mut_doc* before = root->doc();
+        t.set("x", 9);
+        CHECK(root->doc() == before);             // NO copy — wrote in place
+        CHECK(root->get_int("x") == 9);
+    }
+
+    // (e) NON-frozen VIEW writes through to the shared tree (NumPy semantics), no
+    //     copy — proves the fast path is preserved for views too.
+    {
+        auto root = std::make_shared<xi::Record>();
+        root->set("sub", xi::Record().set("v", 1));
+        yyjson_mut_val* sub = yyjson_mut_obj_get(root->json(), "sub");
+        yyjson_mut_doc* before = root->doc();
+        xi::Typed view(root, sub);                // VIEW into an UNFROZEN doc
+        view.set("v", 9);
+        CHECK(root->doc() == before);             // no copy
+        CHECK((*root)["sub"]["v"].as_int() == 9); // wrote through to the shared tree
+    }
+}
+
 // ---------- main ----------
 
 // Getter type-coercion + range safety (round-8 SDK-footgun fixes): get_bool /
@@ -660,6 +766,7 @@ int main() {
     test_dispatch_balance_no_leak();    // 20
     test_concurrent_dispatch_balance(); // 21
     test_getter_coercion_and_range();   // 22 — round-8 getter coercion + range
+    test_typed_field_cow();             // 23 — Typed/Field write-through COW (bug #10)
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");

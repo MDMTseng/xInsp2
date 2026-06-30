@@ -251,6 +251,22 @@ public:
         return r;
     }
 
+    // --- COW hook for the typed-IO layer (xi::Typed / Field) -----------------
+    //
+    // xi::Typed/Field mutate this Record's yyjson tree DIRECTLY (write-through),
+    // so they must cross the SAME copy-on-write boundary Record::set() does — else
+    // a write through a Typed whose Record is frozen (shared/borrowed/registry-
+    // managed across the ABI, e.g. current_trigger().meta()) would corrupt the doc
+    // the OTHER side still reads. materialize_unfrozen() forces this Record out of
+    // a frozen/shared doc into a sole-owned, writable one (reusing cow_), then
+    // returns the (possibly NEW) root node so a caller holding a node pointer into
+    // the old tree can re-resolve. No-op and zero-cost when not frozen (the common
+    // per-frame path — one relaxed load + early return, exactly like Record::set).
+    yyjson_mut_val* materialize_unfrozen() { cow_(); return root_; }
+    // Is this Record frozen (shares/borrows its doc read-only, or is registry-
+    // managed across the ABI)? A direct-tree write must COW first.
+    bool is_frozen() const { return frozen_.load(std::memory_order_relaxed); }
+
     // --- Image builder ---
     Record& image(const std::string& key, Image img) {
         images_[key] = std::move(img);

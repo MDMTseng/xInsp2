@@ -28,6 +28,27 @@ the shared tree; `.clone()` first when you want an independent copy. (Note: the 
 layer's COW means a write to a *frozen/shared* Record copies first — see
 [`data-layer.md`](./data-layer.md); a freshly-extracted owned Record is writable.)
 
+`xi::Typed`/`Field` writes (`set()`, `roi["x"] = …`, `MatN::set`) honour that same
+copy-on-write boundary: they route through `Typed::prepare_write_()`, which calls
+`Record::materialize_unfrozen()` (the public hook over `Record::cow_`) **before**
+touching the tree. So writing through a Typed whose Record is **frozen** — shared,
+borrowed, or registry-managed across the ABI, e.g. `current_trigger().meta()` — no
+longer mutates the doc the other side still reads; it copies first. The fast path is
+unchanged: a non-frozen write is one relaxed flag-load + a pointer re-seat, **no
+copy**. Two cases:
+
+- **OWNED** Typed (`node_ == root_->json()`): COWs the whole Record and re-seats
+  `node_` at the (possibly new) root. This is the common reachable path
+  (`xi::Roi(current_trigger().meta())` is an OWNED Typed via the `Typed(Record)`
+  ctor).
+- **VIEW into a frozen doc** (an interior sub-node of a cross-ABI shared tree): the
+  interior node can't be cheaply re-resolved into a copy, so the write **detaches**
+  — the view becomes an OWNED standalone copy of just that sub-node (an implicit
+  `.clone()`). The write lands in the private copy; the frozen original is untouched.
+  A *non-frozen* view still writes through in place (the NumPy semantics above) — the
+  detach only happens when the original is frozen, where in-place mutation would
+  corrupt the other side.
+
 ## Per-plugin `io.hpp` — extractor + constructor facades
 
 Each plugin ships a header-only `io.hpp` (alongside `plugin.json`) the script
