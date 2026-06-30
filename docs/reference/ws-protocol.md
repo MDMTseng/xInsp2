@@ -751,12 +751,36 @@ library / DLL" and [`examples/script_external_dll`](../../examples/script_extern
 **Working-copy mode.** `open_project` accepts `"working_copy": true`: the
 backend then operates on a `<project>/.xinsp_work` scratch copy (resume if
 present, else seed from the canonical project), so edits are transactional and
-crash-durable. The reply data then carries `"working_copy": true`,
+crash-durable. If seeding the scratch fails (disk full, a locked/denied file),
+the open is **aborted** (`open_project` returns an error) and the partial scratch
+is removed — a torn seed must never become an authoritative, committable working
+copy, or the eventual commit's mirror would prune the canonical files that merely
+failed to copy in (silent data loss). Removing the partial scratch also keeps a
+later crash-resume from adopting it. The reply data then carries `"working_copy": true`,
 `"canonical_path"`, and `"working_dir"`. Two paired commands:
 - `commit_working_copy` `args: {}` → mirror the scratch back onto the canonical
   project (add + overwrite + delete-removed). Reply `{ "committed": true, "canonical": "<dir>" }`.
+  The commit is journaled with a `.xinsp_commit_pending` marker written (durably)
+  before the mirror and cleared after it, so an interruption (crash / power loss
+  mid-mirror) leaves a torn canonical that is detectable and recoverable.
 - `discard_working_copy` `args: {}` → delete the scratch, re-seed from canonical,
   reopen. Reply is the project JSON (same shape as `open_project`).
+
+**Crash recovery + Discard.** A surviving `.xinsp_commit_pending` marker means a
+prior commit was interrupted: the canonical tree may be torn, and the intact
+scratch (never modified by the mirror) is the **only** source that can heal it.
+`open_project` rolls such a commit *forward* on open — it re-runs the idempotent
+mirror (scratch → canonical) to complete the commit, then clears the marker.
+**`discard_working_copy` honours this first.** Discard's contract is "throw away
+my *uncommitted* edits", but a pending commit is **not** uncommitted edits — it
+is a half-applied commit the user already requested. So Discard **completes the
+interrupted commit from the scratch before dropping it**, never leaving the
+canonical torn (rolling the commit *back* is impossible — the pre-commit
+canonical bytes are already partially overwritten). Only once the canonical is
+healed (or there was no pending commit) does Discard remove the scratch and
+re-seed a fresh working copy. If the heal mirror itself fails (persistent disk
+error), the scratch + marker are kept so a later open retries — the only recovery
+source is never discarded.
 
 See [`guides/deploy.md`](../guides/deploy.md). The
 headless `--working-copy` flag opts autostart into the same mode (so an FE

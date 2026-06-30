@@ -11,6 +11,7 @@
 //
 // TODO(linux): std::filesystem only — already portable.
 //
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -93,6 +94,30 @@ inline bool copy_tree_excluding(const std::filesystem::path& src,
     return ok;
 }
 
+// Seed a FRESH working-copy scratch at `scratch` from the canonical project
+// `canon`. Returns true only if the scratch is a COMPLETE copy that is safe to
+// present to the user as authoritative.
+//
+// THE INVARIANT THIS GUARDS: a torn seed must never become a committable scratch.
+// copy_tree_excluding can leave a half-populated tree on a disk error (full disk,
+// locked / permission-denied file) that still happens to carry project.json. If
+// the caller accepted that as authoritative, the user would edit it and the
+// eventual commit's mirror_tree would PRUNE the canonical files that merely failed
+// to copy in — silent data loss. So on a failed copy we tear the partial scratch
+// back DOWN (remove_all) and return false, ensuring nothing — not the immediate
+// open, not a later crash-resume / resume-existing path — can adopt it as a
+// working copy. Mirrors how commit_working_copy honours mirror_tree's bool.
+inline bool seed_working_copy(const std::filesystem::path& canon,
+                              const std::filesystem::path& scratch) {
+    std::error_code ec;
+    std::filesystem::remove_all(scratch, ec);   // clear any partial seed first
+    if (!copy_tree_excluding(canon, scratch)) {
+        std::filesystem::remove_all(scratch, ec);   // never leave a torn, committable scratch
+        return false;
+    }
+    return true;
+}
+
 // Mirror `src` (working copy) onto `dst` (canonical): copy/overwrite every
 // file, then delete files/dirs in `dst` that aren't in `src` — so removals
 // (e.g. a deleted instance) propagate. Excluded paths are left untouched on
@@ -121,6 +146,46 @@ inline bool mirror_tree(const std::filesystem::path& src,
         if (rm) ok = false;
     }
     return ok;
+}
+
+// Roll forward an interrupted working-copy commit so the canonical is never left
+// torn. If `canon` carries the commit-pending marker AND the scratch holds a
+// complete project.json, a prior commit_working_copy was cut short (crash / power
+// loss) — the canonical tree may be partially overwritten while the scratch stays
+// a complete, untouched snapshot. Re-run the idempotent mirror to FINISH the
+// commit and heal the canonical, then clear the marker.
+//
+// This is the single source of truth for the heal step, shared by open_project
+// (heal-on-open) AND the Discard path (reopen_fresh_working_copy): Discard must
+// NOT drop the scratch while it is the only thing that can heal a torn canonical,
+// so it calls this first.
+//
+// Returns true if there was nothing pending OR the roll-forward completed
+// (canonical healed, marker cleared). Returns false ONLY if a pending commit
+// existed but the heal mirror failed (persistent disk error: read-only / full) —
+// in that case the marker + scratch are KEPT so the next open retries, and the
+// caller MUST NOT drop the scratch (it is still the only recovery source).
+inline bool roll_forward_pending_commit(const std::filesystem::path& canon) {
+    std::filesystem::path marker  = canon / kCommitMarker;
+    std::filesystem::path scratch = canon / kWorkingCopyDir;
+    if (!std::filesystem::exists(marker) ||
+        !std::filesystem::exists(scratch / "project.json"))
+        return true;   // no interrupted commit pending — nothing to heal
+    std::fprintf(stderr, "[xinsp2] working copy: completing interrupted commit "
+                 "from %s (canonical may be torn)\n", scratch.string().c_str());
+    // Only clear the journal marker if the roll-forward actually succeeded. If the
+    // disk error that interrupted the original commit persists (read-only / full),
+    // mirror_tree returns false and we KEEP the marker + scratch so the next open
+    // retries — removing it here would strand a torn canonical with no record to
+    // heal it.
+    if (mirror_tree(scratch, canon)) {
+        std::error_code ec;
+        std::filesystem::remove(marker, ec);
+        return true;
+    }
+    std::fprintf(stderr, "[xinsp2] working copy: roll-forward FAILED (disk error?) "
+                 "— keeping commit marker to retry on next open\n");
+    return false;
 }
 
 // Append `line` to <dir>/.gitignore if not already present (so the scratch dir
