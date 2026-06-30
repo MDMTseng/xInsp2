@@ -83,10 +83,19 @@ public:
     }
 
     ~PluginManager() {
-        // Release every loaded plugin DLL on process shutdown. In practice
-        // the OS would reclaim these, but freeing explicitly keeps leak
-        // detectors clean and avoids surprises if a plugin registers
-        // static destructors.
+        // Destroy instances FIRST, while their plugin DLLs are still mapped:
+        // ~CAbiInstanceAdapter calls the plugin's destroy_fn (a code pointer INTO the
+        // DLL), so a FreeLibrary before that is a call into unmapped memory — an
+        // access violation on what should be a clean exit (the still-armed crash
+        // filter then fabricates a spurious minidump). close_project() already does
+        // this order at runtime; this is the static-destruction / never-closed-project
+        // BACKSTOP (controlled_shutdown_teardown_ now calls close_project for the
+        // normal path, but an exit that skips it must still not invert the order).
+        // The adapter's ImagePool sweep is itself guarded by g_image_pool_alive for
+        // the case the pool singleton was already torn down before us.
+        project_.instances.clear();
+        inst_state_.clear();
+        // Now release every loaded plugin DLL — no live destroy_fn callers remain.
         for (auto& [name, pi] : plugins_) {
             if (pi.handle) {
                 FreeLibrary(pi.handle);

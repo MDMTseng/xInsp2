@@ -39,7 +39,7 @@ public:
     template <class Fn>
     bool launch(Fn&& fn) {
         count_.fetch_add(1);
-        if (shutting_.load()) { count_.fetch_sub(1); return false; }
+        if (shutting_.load() || paused_.load() > 0) { count_.fetch_sub(1); return false; }
         try {
             std::thread([this, fn = std::forward<Fn>(fn)]() mutable {
                 struct Guard { InflightRuns* s; ~Guard() { s->count_.fetch_sub(1); } } guard{this};
@@ -53,9 +53,19 @@ public:
     }
 
     // Teardown: refuse new launches (call BEFORE dropping the emit sink so a late
-    // source emit bails instead of launching).
+    // source emit bails instead of launching). TERMINAL — never reversed.
     void begin_shutdown() { shutting_.store(true); }
     bool shutting_down() const { return shutting_.load(); }
+
+    // REVERSIBLE launch pause for a lifecycle op that FreeLibrary's plugin DLLs
+    // (close/open/recompile/rebuild/export). Same Dekker handshake as begin_shutdown
+    // — pause() sets the flag, then drain() reads the count, so a source emit racing
+    // the op either bumps-then-bails or is waited out — but un-doable and nestable
+    // (counter), and kept DISTINCT from shutting_ so a lifecycle unpause can never
+    // clear a terminal process-shutdown. Pair pause()+drain() before the DLL unload;
+    // unpause() after (the lifecycle guard owns this).
+    void pause()   { paused_.fetch_add(1); }
+    void unpause() { paused_.fetch_sub(1); }
 
     // Number of detached runs that have been launched but not yet finished.
     int  inflight() const { return count_.load(); }
@@ -71,6 +81,7 @@ public:
 private:
     std::atomic<int>  count_{0};
     std::atomic<bool> shutting_{false};
+    std::atomic<int>  paused_{0};      // reversible lifecycle pause (see pause())
 };
 
 } // namespace xi

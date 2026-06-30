@@ -1,0 +1,11 @@
+{
+  "name": "sink_shared_doc",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "sinkA", "plugin": "count_sink" },
+    { "name": "sinkB", "plugin": "count_sink" }
+  ],
+  "plugins": {
+    "count_sink": { "path": "count_sink", "compile": true }
+  }
+}

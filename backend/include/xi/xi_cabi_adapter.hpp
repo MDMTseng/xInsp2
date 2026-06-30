@@ -178,7 +178,13 @@ public:
         if (destroy_fn_ && inst_) destroy_fn_(inst_);
         // Sweep any image handles the plugin allocated and forgot to
         // release. Without this, plugin crashes / careless authors leak
-        // ImagePool entries forever.
+        // ImagePool entries forever. GUARD g_image_pool_alive: if this adapter is
+        // destroyed during STATIC destruction (a never-closed project reaching
+        // ~PluginManager) the ImagePool Meyers singleton may already be gone —
+        // ImagePool::instance() would return (and re-flag alive on) a destroyed
+        // object and release_all_for would iterate freed slots. Skip the sweep then;
+        // the process is exiting and the OS reclaims the pool memory anyway.
+        if (!g_image_pool_alive.load(std::memory_order_acquire)) return;
         int swept = ImagePool::instance().release_all_for(owner_id_);
         if (swept > 0) {
             std::fprintf(stderr,

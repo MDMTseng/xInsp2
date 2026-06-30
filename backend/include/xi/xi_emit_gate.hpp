@@ -47,14 +47,23 @@ struct EmitTurn {
     EmitTurn(EmitGate* gate, int64_t seq, const std::atomic<bool>* keep_going = nullptr)
         : g_(gate), seq_(seq), keep_going_(keep_going), on_(gate && seq >= 0) {}
 
-    // Block until it's this seq's turn (or the lane stopped). Idempotent.
-    void wait_turn() {
-        if (!on_ || waited_) return;
-        waited_ = true;
+    // Block until it's this seq's turn (or the lane stopped). Returns true if it is
+    // GENUINELY this seq's turn, false if it woke because the lane stopped before its
+    // turn arrived — a caller doing an ordered SIDE EFFECT (e.g. flushing staged sink
+    // deliveries to a PLC) must skip it on a false, since a stop wakes every parked
+    // seq at once and they'd otherwise run out of order / concurrently. Plain wire
+    // emits can ignore the result (out-of-order on a stop is harmless). Idempotent:
+    // a second call re-reads the verdict under the lock without re-waiting.
+    bool wait_turn() {
+        if (!on_) return true;                 // completion mode / no gate: always "our turn"
         std::unique_lock<std::mutex> lk(g_->mu);
-        g_->cv.wait(lk, [this] {
-            return g_->next == seq_ || (keep_going_ && !keep_going_->load());
-        });
+        if (!waited_) {
+            waited_ = true;
+            g_->cv.wait(lk, [this] {
+                return g_->next == seq_ || (keep_going_ && !keep_going_->load());
+            });
+        }
+        return g_->next == seq_;
     }
     // Advance the cursor so the next seq proceeds. Idempotent. Takes our turn first
     // if wait_turn() wasn't called (an early-return path). Skips the advance if we

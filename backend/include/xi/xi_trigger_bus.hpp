@@ -107,6 +107,14 @@ public:
         sink_ = nullptr;
     }
 
+    // True if a primary sink is currently installed. Lets a lifecycle op that clears
+    // the sink decide whether to RESTORE one on completion (don't fabricate a sink
+    // where none existed — e.g. quiescing with no script loaded).
+    bool has_sink() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return static_cast<bool>(sink_);
+    }
+
     // emit_record routes here. meta_doc (ABI v6): the event's metadata doc, a
     // host-owned yyjson_mut_doc*. OWNERSHIP IS TRANSFERRED — the caller hands
     // one ref and the bus consumes it (stores it on the dispatched event, or

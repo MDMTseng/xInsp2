@@ -361,7 +361,22 @@ public:
         // provenance-tagged Record instead of interpreting output. (Previously only
         // -1 was special-cased and the crash path fell through to adopt_shared.)
         if (prc < 0) {
-            if (prc == -1) warn_use_miss_(host, name_.c_str());
+            if (prc == -1) {
+                warn_use_miss_(host, name_.c_str());
+                // The instance was never found, so use_process_inline_ returned at
+                // its first line WITHOUT touching the shared doc — the ref share_out
+                // RESERVED for the adopting side (xi_record.hpp share_out) is
+                // unconsumed. Release it here or it (and the host-owned doc + its
+                // pooled chunks) leak on EVERY call — a per-frame unbounded leak when
+                // a script use()'s a renamed/typo'd instance under continuous dispatch.
+                // Scoped to the share_out path: in_doc is the registry pointer only
+                // when doc_retain/doc_release were present (else it's a borrowed
+                // input.doc() we must NOT release). The JSON-fallback and adopt paths
+                // already balance their ref; -2 (crash) is left alone (a torn call may
+                // or may not have adopted — don't risk a double-release).
+                if (host->doc_retain && host->doc_release && in_doc)
+                    host->doc_release(const_cast<void*>(in_doc));
+            }
             xi_record_out_free(&output);
             Record empty;
             empty.set_src(name_);

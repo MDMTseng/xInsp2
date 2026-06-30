@@ -241,6 +241,23 @@ static void test_inflight_runs() {
     CHECK(rt.inflight() == 0);
     CHECK(ran.load() == 1);
 
+    // Reversible pause (lifecycle quiesce): while paused launch() bails like a
+    // shutdown, but unpause() restores it — and it NESTS (a counter), unlike the
+    // terminal begin_shutdown. This is what lets a lifecycle op refuse one-shots
+    // while it FreeLibrary's a DLL, then re-enable them.
+    rt.pause();
+    CHECK(!rt.launch([]{}));          // paused → refused
+    CHECK(rt.inflight() == 0);        // bail leaked no count
+    rt.pause();                       // nest a second level
+    rt.unpause();                     // back to one level — still paused
+    CHECK(!rt.launch([]{}));
+    rt.unpause();                     // fully unpaused
+    std::atomic<int> ran3{0};
+    bool ok3 = rt.launch([&]{ ran3.fetch_add(1); });
+    CHECK(ok3);                       // runs again
+    CHECK(rt.drain(5000));
+    CHECK(ran3.load() == 1);
+
     // After begin_shutdown(), launch() must BAIL (run nothing, return false) so a
     // late source emit can't start a run against an about-to-die srv.
     rt.begin_shutdown();
@@ -311,10 +328,35 @@ static void test_emit_gate() {
     { EmitTurn t1(&g2, 1, nullptr); t1.wait_turn(); t1.complete(); }
     CHECK(g2.next == 2);
 
-    // (3) Completion mode (seq < 0) is a total no-op.
+    // (3) Completion mode (seq < 0) is a total no-op. wait_turn() reports "our turn"
+    //     (true) so an ungated cmd:run still flushes its staged sinks.
     EmitGate g3;
-    { EmitTurn tn(&g3, -1, nullptr); tn.wait_turn(); tn.complete(); }
+    { EmitTurn tn(&g3, -1, nullptr); CHECK(tn.wait_turn() == true); tn.complete(); }
     CHECK(g3.next == 0);
+
+    // (4) wait_turn() VERDICT (the $seq/ordered-sink fix): on its genuine turn it
+    //     returns true; if the lane STOPS before its turn (keep_going flips false, which
+    //     wakes every parked seq at once) it returns false, so a caller doing an ordered
+    //     side effect (flushing staged sink deliveries) skips it instead of firing out of
+    //     order. seq 0 with next==0 is immediately our turn.
+    EmitGate g4;
+    CHECK((EmitTurn(&g4, 0, nullptr).wait_turn()) == true);   // next==seq → our turn
+    // A later seq parks (next==0, not its turn); flipping keep_going false wakes it with
+    // next still 0, so it is NOT its turn → false.
+    EmitGate g5;
+    std::atomic<bool> keep_going{true};
+    bool verdict = true;
+    std::thread sth([&]() {
+        EmitTurn t5(&g5, 5, &keep_going);   // waits for next==5 OR stop
+        verdict = t5.wait_turn();
+        t5.complete();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));   // let it park
+    keep_going.store(false);
+    { std::lock_guard<std::mutex> lk(g5.mu); g5.cv.notify_all(); }   // mirror stop_group_pool_
+    sth.join();
+    CHECK(verdict == false);            // woke for the stop, not its turn → skip the flush
+    CHECK(g5.next == 0);               // complete() did NOT advance (next != seq)
 }
 
 int main() {

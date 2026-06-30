@@ -1,0 +1,17 @@
+{
+  "name": "count_sink",
+  "description": "Ordered-sink PoC: counts how many '$seq' keys the host stamped into its input doc. >1 means the staged-flush double-stamped a SHARED doc (the bug).",
+  "dll": "count_sink.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "sink": true,
+  "manifest": {
+    "params": [],
+    "inputs": [],
+    "outputs": [],
+    "exchange": [
+      { "command": "stats", "doc": "-> { max_seq_keys, calls }" },
+      { "command": "reset", "doc": "zero the counters" }
+    ]
+  }
+}

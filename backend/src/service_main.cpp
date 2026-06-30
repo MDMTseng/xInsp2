@@ -468,28 +468,53 @@ static void flush_staged_emits_(int64_t run_id) {
     g_staged.clear();
     std::vector<xi_record_image> in_imgs;
     for (auto& it : staged) {
+        // Non-null iff we delivered a PRIVATE COW copy this iteration: released on every
+        // exit path below (declared out here so a throw mid-flush can't leak it).
+        yyjson_mut_doc* copy_ref = nullptr;
         try {
-            // Frame correlation: stamp the arrival/run id so the sink can tie this
-            // packet to its frame (host-injected; matches the run_id on the wire
-            // result). Best-effort — skip if the doc isn't an object.
-            if (it.rec.meta_doc) {
-                yyjson_mut_val* root = yyjson_mut_doc_get_root(it.rec.meta_doc);
-                if (root && yyjson_mut_is_obj(root))
-                    yyjson_mut_obj_add_int(it.rec.meta_doc, root, "$seq", run_id);
+            // Pick the doc to deliver. it.rec.meta_doc is registry-refcounted and may be
+            // SHARED: a script can stage the SAME Record to several sinks (each share_out's
+            // the one underlying doc), or build the record from a borrowed trigger/plugin
+            // doc still held elsewhere. Stamping $seq into a shared doc would (a) mutate a
+            // doc a concurrent holder reads and (b) double-stamp when two staged items point
+            // at it. So COW only when actually shared (rc>1); the common single-sink path
+            // (rc==1, sole owner) stamps in place with no copy — speed-first. (rc can only
+            // fall, never rise, behind our back here: we hold the sole non-shared ref and
+            // don't hand the doc out before stamping, so the rc==1 fast path is safe.)
+            yyjson_mut_doc* deliver = it.rec.meta_doc;
+            if (deliver && xi::DocRegistry::instance().refcount(deliver) > 1) {
+                if (yyjson_mut_doc* copy = yyjson_mut_doc_mut_copy(deliver, nullptr)) {
+                    xi::DocRegistry::instance().retain(copy);   // register at rc=1 (our ref)
+                    deliver  = copy;
+                    copy_ref = copy;
+                }
+                // Copy failed (OOM): fall through and stamp the original — a best-effort
+                // $seq beats dropping the frame; the duplicate-key risk is the lesser evil.
+            }
+            // Frame correlation: stamp the arrival/run id with PUT semantics — remove any
+            // existing $seq first so a re-stamp (or a doc that already carried $seq) can't
+            // accumulate duplicate keys. Best-effort — skip if the doc isn't an object.
+            if (deliver) {
+                yyjson_mut_val* root = yyjson_mut_doc_get_root(deliver);
+                if (root && yyjson_mut_is_obj(root)) {
+                    yyjson_mut_obj_remove_str(root, "$seq");
+                    yyjson_mut_obj_add_int(deliver, root, "$seq", run_id);
+                }
             }
             in_imgs.clear();
             in_imgs.reserve(it.rec.images.size());
             for (auto& [k, h] : it.rec.images) in_imgs.push_back(xi_record_image{k.c_str(), h});
             // Reserve one doc ref for the consumer (adopt or serialize-release both
-            // CONSUME one); our own ref is balanced by release_trigger_event_ below.
-            if (it.rec.meta_doc) xi::DocRegistry::instance().retain(it.rec.meta_doc);
+            // CONSUME one); our own ref (original via release_trigger_event_ below, or the
+            // COW copy via copy_ref) balances the other.
+            if (deliver) xi::DocRegistry::instance().retain(deliver);
             xi_record_out output; xi_record_out_init(&output);
-            int prc = use_process_inline_(it.target.c_str(), it.rec.meta_doc, nullptr, 0,
+            int prc = use_process_inline_(it.target.c_str(), deliver, nullptr, 0,
                                           in_imgs.data(), (int)in_imgs.size(), &output);
             // prc == -1: target gone before touching the input doc → our reserved ref
             // wasn't consumed; release it. prc == -2 (crash) may have — don't second-
             // guess a torn call (mirrors xi_use.hpp).
-            if (it.rec.meta_doc && prc == -1) xi::DocRegistry::instance().release(it.rec.meta_doc);
+            if (deliver && prc == -1) xi::DocRegistry::instance().release(deliver);
             if (prc >= 0) {
                 if (output.out_doc) xi::DocRegistry::instance().release((yyjson_mut_doc*)output.out_doc);
                 for (int i = 0; i < output.image_count; ++i)
@@ -504,7 +529,10 @@ static void flush_staged_emits_(int64_t run_id) {
         } catch (...) {
             std::fprintf(stderr, "[xinsp2] sink '%s' flush threw a non-std exception\n", it.target.c_str());
         }
-        release_trigger_event_(it.rec);   // our owned image + doc refs — every path
+        // Our COW ref (if any) — the consumer ref was reserved+consumed above; this drops
+        // OUR ref, freeing the copy. The original meta_doc is released untouched next.
+        if (copy_ref) xi::DocRegistry::instance().release(copy_ref);
+        release_trigger_event_(it.rec);   // our owned image + ORIGINAL doc refs — every path
     }
 }
 
@@ -1240,13 +1268,17 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         // cursor (turn.complete()) right after so the next worker can emit promptly.
         // The turn was claimed at the top of this function; its dtor is the backstop
         // if anything below throws. No-op for emit_seq < 0 (completion mode).
-        turn.wait_turn();
+        bool my_turn = turn.wait_turn();
         if (inspect_ok) {
             // Deliver this frame's staged sink calls (comm/preview) IN FRAME ORDER —
             // inside the gate, before the wire result, so a sink's side effect is
             // serialized with the run's output. A failed inspect skips this; the
             // guard then drops the partial sends (don't push a crashed frame to PLC).
-            flush_staged_emits_(run_id);
+            // On a STOP wake (my_turn false: the lane stopped before this seq's turn,
+            // so every parked seq woke at once) also skip — flushing here would deliver
+            // out of frame order and concurrently to the same sink. The staged guard
+            // drops them, matching the crash path ("don't push this frame to the PLC").
+            if (my_turn) flush_staged_emits_(run_id);
             // One Result per run: whatever the script set (default 0 = NA if it
             // called no xi::result), emitted before run_finished so consumers
             // can pair them. Ordered with the rest of the stream by the gate.
@@ -1673,6 +1705,14 @@ static void controlled_shutdown_teardown_() {
     { std::lock_guard<std::mutex> rl(g_run_mu); }     // belt-and-suspenders
     xi::TriggerBus::instance().reset();               // release pending_/follower_latest_ handles
     { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
+    // Close the open project (if any) NOW — while the ImagePool singleton is still
+    // alive — so plugin instances are destroyed in the correct order (instances first,
+    // THEN FreeLibrary) and their image-handle sweep runs against a live pool. The
+    // normal exit paths (cmd:shutdown, g_should_exit epilogue) otherwise never called
+    // close_project, leaving ~PluginManager to do it at static destruction — after
+    // FreeLibrary (destroy_fn into unmapped code) and after ImagePool was torn down
+    // (release_all_for on a destroyed singleton). Idempotent: no-op if already closed.
+    g_plugin_mgr.close_project();
     g_srv_for_bp = nullptr;                            // last: every emitter is quiesced now
 }
 
@@ -1728,12 +1768,15 @@ struct DispatchPoolGuard {
     bool            quiesced = false;
     xi::ws::Server* srv = nullptr;
     bool            armed_ = true;   // false once resumed/dismissed/moved-from
+    bool            paused_launches_ = false;  // we g_inflight.pause()'d — dtor MUST unpause
+    bool            restore_sink_    = false;  // we cleared the bus sink — resume re-installs it
 
     DispatchPoolGuard() = default;
     DispatchPoolGuard(DispatchPoolGuard&& o) noexcept { *this = std::move(o); }
     DispatchPoolGuard& operator=(DispatchPoolGuard&& o) noexcept {
         was_continuous = o.was_continuous; prior_fps = o.prior_fps;
         quiesced = o.quiesced; srv = o.srv; armed_ = o.armed_;
+        paused_launches_ = o.paused_launches_; restore_sink_ = o.restore_sink_;
         o.armed_ = false;
         return *this;
     }
@@ -1741,25 +1784,49 @@ struct DispatchPoolGuard {
     DispatchPoolGuard& operator=(const DispatchPoolGuard&) = delete;
     ~DispatchPoolGuard() { resume(); }
 
-    // Respawn continuous mode at the prior fps if we quiesced it. Idempotent.
+    // Op done, stream continues: re-enable detached launches, re-install the one-shot
+    // sink, and respawn continuous mode at the prior fps if we quiesced it. Idempotent.
     void resume() {
-        if (!armed_ || !was_continuous || !quiesced) return;
+        if (!armed_) return;
         armed_ = false;
-        bool trig_only = prior_fps <= 0;
-        g_continuous_fps = trig_only ? 0 : prior_fps;
-        g_continuous = true;
-        int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(prior_fps, 1));
-        spawn_group_pool_(srv, interval_ms);
-        std::fprintf(stderr, "[xinsp2] continuous mode resumed\n");
+        // ALWAYS re-enable launches (even a non-continuous project needs one-shots
+        // for issue/replay) and restore the sink we cleared.
+        if (paused_launches_) { g_inflight.unpause(); paused_launches_ = false; }
+        if (restore_sink_ && srv) { install_trigger_sink_(srv); restore_sink_ = false; }
+        if (was_continuous && quiesced) {
+            bool trig_only = prior_fps <= 0;
+            g_continuous_fps = trig_only ? 0 : prior_fps;
+            g_continuous = true;
+            int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(prior_fps, 1));
+            spawn_group_pool_(srv, interval_ms);
+            std::fprintf(stderr, "[xinsp2] continuous mode resumed\n");
+        }
     }
-    // The op intentionally leaves dispatch stopped (the stream ended or is replaced).
-    void dismiss() { armed_ = false; }
+    // The op intentionally leaves dispatch stopped (the stream ended or is replaced:
+    // unload_script / close_project / open_project). Do NOT re-install the sink or
+    // respawn continuous — BUT still re-enable launches (the next project needs them).
+    void dismiss() {
+        armed_ = false;
+        if (paused_launches_) { g_inflight.unpause(); paused_launches_ = false; }
+    }
 };
 
 static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
                                                             xi::ws::Server* srv) {
     DispatchPoolGuard g;
     g.srv = srv;
+    // Stop NEW detached one-shot / cmd:run launches and drop the bus sink BEFORE the
+    // op FreeLibrary's any plugin DLL. A one-shot dispatch runs on a SOURCE plugin's
+    // own emit thread (bus sink -> dispatch_one_shot_ -> g_inflight.launch), NOT this
+    // handler thread — so without this a source emitting mid-op could launch an
+    // inspect that calls into a DLL being unloaded (use-after-unload). clear_sink stops
+    // future fires; pause()+drain() is the Dekker handshake that also catches an emit
+    // already past the sink read but not yet counted. The guard reverses both (resume
+    // re-installs the sink + unpauses; dismiss unpauses without re-installing).
+    g_inflight.pause();
+    g.paused_launches_ = true;
+    g.restore_sink_    = xi::TriggerBus::instance().has_sink();   // only restore if one existed
+    xi::TriggerBus::instance().clear_sink();
     if (g_continuous.load()) {
         g.was_continuous = true;
         g.prior_fps = g_continuous_fps.load();
@@ -1771,11 +1838,11 @@ static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
     }
     // (Lane queues are drained + their image handles released inside
     // stop_dispatch_pool_ -> stop_group_pool_ above, before the DLLs unload.)
-    // Wait out any in-flight detached cmd:run / one-shot inspect: they hold
-    // g_run_mu for the whole inspect and call into plugin/script DLLs this
-    // lifecycle op is about to FreeLibrary. New runs can't start meanwhile —
-    // cmd:run/one-shot dispatch is on this same (poll) thread. Acquire+release
-    // is enough: it blocks until the running inspect releases g_run_mu.
+    // Wait out any in-flight detached cmd:run / one-shot inspect already running:
+    // they hold g_run_mu for the whole inspect and call into the plugin/script DLLs
+    // this op is about to FreeLibrary. drain() waits on the in-flight count (paused
+    // above so none can start meanwhile); the g_run_mu acquire is belt-and-suspenders.
+    g_inflight.drain();
     { std::lock_guard<std::mutex> lk(g_run_mu); }
     return g;
 }
@@ -4041,6 +4108,19 @@ int main(int argc, char** argv) {
             std::_Exit(WATCHDOG_EXIT_CODE);
         }
     });
+    // Stop+join the always-on watchdog on ANY exit from here down — the bind-fail
+    // `return 1` just below and the debug `--hang-*` `return 0`s all sit AFTER the
+    // thread was spawned. A joinable std::thread destroyed at static teardown (the
+    // file-scope g_watchdog_thread) invokes std::terminate, which the still-armed
+    // crash filter turns into a spurious minidump + abnormal exit — the FE reads a
+    // routine port-in-use as a backend CRASH. The normal epilogue joins too; this
+    // then no-ops (joinable()==false).
+    struct WatchdogJoiner {
+        ~WatchdogJoiner() {
+            g_watchdog_run = false;
+            if (g_watchdog_thread.joinable()) g_watchdog_thread.join();
+        }
+    } wd_joiner_;
     if (!srv.start(port)) {
         std::fprintf(stderr, "[xinsp2] failed to bind %s:%d\n", host.c_str(), port);
         return 1;
