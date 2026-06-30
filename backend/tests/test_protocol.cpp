@@ -90,32 +90,9 @@ static void test_rsp_err() {
     CHECK(s.find("\"error\":\"unknown command: xyz\"") != std::string::npos);
 }
 
-static void test_vars_encode() {
-    SECTION("Vars::to_json");
-    Vars v;
-    v.run_id = 17;
-    v.items.push_back({"gray",  VarKindWire::Image,   "",      "",    false, 100, false});
-    v.items.push_back({"count", VarKindWire::Number,  "42",    "",    false, 0,   false});
-    VarItem s;
-    s.name = "label";
-    s.kind = VarKindWire::String;
-    s.value_str = "ok";
-    v.items.push_back(s);
-    VarItem b;
-    b.name = "flag";
-    b.kind = VarKindWire::Boolean;
-    b.value_bool = true;
-    v.items.push_back(b);
-
-    std::string out = v.to_json();
-    CHECK(out.find("\"type\":\"vars\"")       != std::string::npos);
-    CHECK(out.find("\"run_id\":17")           != std::string::npos);
-    CHECK(out.find("\"gray\"")                != std::string::npos);
-    CHECK(out.find("\"gid\":100")             != std::string::npos);
-    CHECK(out.find("\"value\":42")            != std::string::npos);
-    CHECK(out.find("\"value\":\"ok\"")        != std::string::npos);
-    CHECK(out.find("\"value\":true")          != std::string::npos);
-}
+// (test_vars_encode removed: the `vars` wire — Vars/VarItem/VarKindWire — was
+// deleted with the v9 vars/value-store teardown; script output is now the
+// `expose` plugin's XEX1 binary frame, not a core protocol type.)
 
 static void test_log_event() {
     SECTION("Log + Event");
@@ -201,7 +178,6 @@ int main() {
     test_cmd_parse_fixture();
     test_rsp_ok();
     test_rsp_err();
-    test_vars_encode();
     test_log_event();
     test_parse_edge_cases();
     test_strip_quotes_unescape();
