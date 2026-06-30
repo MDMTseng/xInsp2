@@ -8,14 +8,18 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
 ---
 
 ## OQ-1 — Race detection on Windows (MSVC has no ThreadSanitizer)
-- **Default:** ASan via MSVC `/fsanitize=address` for memory safety; for *races*, strengthen the
-  probabilistic stress probes (`race_probe`, `test_set_def_race`, `test_image_pool_stress`) into a
-  higher-iteration suite, and attempt a `clang-cl -fsanitize=thread` config — accept it only if it
-  genuinely builds+runs on Windows.
-- **Why deferrable:** real TSan most likely needs a **Linux CI lane** (repo already has a
-  `docs/roadmap/linux-port.md` direction + TODO(linux) markers). That is a larger infra decision.
-- **Flips if:** user wants a Linux CI lane stood up now, or accepts a clang-only test-suite build.
-- **Impacts:** Tier 0 T0.1; Tier 1 T1.3 (TSan stress on Part III G2).
+- **CONFIRMED (2026-07-01, Tier 0 T0.1):** MSVC 19.50 has **no TSan and no UBSan**; **clang-cl is not
+  installed** in this VS (only clang-format/clang-tidy ship). So on this machine, real TSan is not available.
+- **Implemented default:** **ASan works and is live** (`-DXINSP2_SANITIZE=address`, verified to trap a real
+  heap-overflow). For races: `XINSP2_STRESS_SCALE` high-iteration ctests (`image_pool_stress_heavy`,
+  `set_def_race_heavy`) runnable **under ASan** to catch the UAF/heap-corruption class that races produce.
+  `-DXINSP2_SANITIZE=undefined|thread` hard-error honestly rather than pretending.
+- **STILL OPEN (for user):** real data-race detection (TSan) needs either **(a) a Linux CI lane**
+  (repo has `docs/roadmap/linux-port.md` + TODO(linux) markers) or **(b) installing LLVM/clang-cl** on the
+  Windows build box for a `-fsanitize=thread` config. Proceeding without it; Part III G2 (T1.3) race
+  verification will lean on ASan + stress-scale until one of (a)/(b) is chosen.
+- **Flips if:** user stands up a Linux CI lane or installs clang-cl/LLVM.
+- **Impacts:** Tier 0 T0.1 (done, ASan); Tier 1 T1.3 (TSan stress on Part III G2 — degraded to ASan+stress).
 
 ## OQ-2 — Push to origin vs stay local
 - **Default:** keep all completed work **local on `master`** (now ahead of `origin/master`); do **not** push.
