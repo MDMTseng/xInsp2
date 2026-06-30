@@ -1,0 +1,7 @@
+{
+  "name": "hot_reload_run2",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "expose", "plugin": "expose" }
+  ]
+}

@@ -14,7 +14,11 @@ ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 SDK = REPO / "tools" / "xinsp2_py"
 sys.path.insert(0, str(SDK))
+sys.path.insert(0, str(REPO / "examples" / "lib"))
 from xinsp2 import Client  # noqa: E402
+from xex1 import collect_frames, subscribe  # noqa: E402
+
+CHANNEL = "pass"
 
 BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
 FRAMES = REPO / "examples" / "object_count_solve" / "frames"   # a folder of PNGs
@@ -51,16 +55,21 @@ def main() -> int:
                 return {}
 
         def wait_pass(expect_src: str, timeout: float = 10.0) -> dict | None:
-            # Drain vars until a pass with loaded=true and source==expect_src.
+            # Drain expose frames until a pass with loaded=true and
+            # source==expect_src. Returns the frame's `values` dict.
             deadline = time.time() + timeout
             while time.time() < deadline:
-                v = c.next_vars(timeout=2)
-                if v is None:
-                    continue
-                items = {it["name"]: it for it in v.get("items", v.get("vars", []))}
-                if items.get("loaded", {}).get("value") is True and \
-                   expect_src in str(items.get("source", {}).get("value")):
-                    return items
+                got = False
+                for fr in collect_frames(c):
+                    if fr.get("channel") != CHANNEL:
+                        continue
+                    vals = fr.get("values", {})
+                    if vals.get("loaded") is True and \
+                       expect_src in str(vals.get("source")):
+                        return vals
+                    got = True
+                if not got:
+                    time.sleep(0.05)
             return None
 
         # Point the source at the frames folder (what "Set folder" does in the UI).
@@ -77,20 +86,25 @@ def main() -> int:
 
         print("compile_and_load inspect.cpp")
         c.compile_and_load(str(ROOT / "inspect.cpp"), timeout=300)
+        # The script routes its per-pass output to the `expose` sink under
+        # channel "pass"; subscribe so the sink encodes + pushes XEX1 frames.
+        subscribe(c, [CHANNEL])
+        c.drain_binary()
         # NOTE: no cmd:start — issuing/replaying a trigger runs a single pass on
         # its own (trigger-driven dispatch). Continuous mode is NOT required.
         time.sleep(0.3)
 
         # --- local source: issue a file -> a pass runs on it (which feeds the cache) ---
         print("LOCAL: issue index 0 (== clicking the first thumbnail)")
+        c.drain_binary()
         exch("local", {"command": "issue", "index": 0})
         got = wait_pass("local")
         if got is None:
             failures.append("local issue never produced a pass (source=local, loaded=true)")
         else:
-            w = got.get("width", {}).get("value")
-            print(f"  pass ran: source=local {w}x{got.get('height',{}).get('value')} "
-                  f"tid={got.get('trigger_id',{}).get('value','')[:12]}")
+            w = got.get("width")
+            print(f"  pass ran: source=local {w}x{got.get('height')} "
+                  f"tid={str(got.get('trigger_id',''))[:12]}")
             if not (isinstance(w, (int, float)) and w > 0):
                 failures.append(f"bad width: {w!r}")
 
@@ -104,14 +118,15 @@ def main() -> int:
             failures.append("cache captured nothing after a pass")
         else:
             print("CACHE: replay index 0 (== clicking a cached thumbnail)")
+            c.drain_binary()
             exch("cache", {"command": "replay", "index": 0})
             rep = wait_pass("cache")
             if rep is None:
                 failures.append("cache replay never produced a pass (source=cache, loaded=true)")
             else:
-                print(f"  replay ran: source=cache {rep.get('width',{}).get('value')}x"
-                      f"{rep.get('height',{}).get('value')} "
-                      f"tid={rep.get('trigger_id',{}).get('value','')[:12]}")
+                print(f"  replay ran: source=cache {rep.get('width')}x"
+                      f"{rep.get('height')} "
+                      f"tid={str(rep.get('trigger_id',''))[:12]}")
         try: c.close()
         except Exception: pass
     finally:

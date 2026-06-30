@@ -6,6 +6,11 @@
 // trigger, and surfaces it. No detection logic — this just proves the
 // "pick/replay an image -> a pass runs on it" loop.
 //
+// Output path: VAR was removed from the core SDK. The script surfaces its
+// per-pass values + preview images to the `expose` sink under channel
+// "pass" via xi::use("expose").process(rec) (rec.set("$channel","pass")).
+// The driver subscribes to that channel and decodes the XEX1 frames.
+//
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
 
@@ -14,24 +19,31 @@
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int /*frame*/) {
     auto t = xi::current_trigger();
-    VAR(active, t.is_active());
     if (!t.is_active()) return;
 
     // The source that issued this pass (its instance name).
     std::string src = t.primary_source();
-    VAR(source, src);
-    VAR(trigger_id, t.id_string());
+
+    xi::Record rec;
+    rec.set("active", true)
+       .set("source", src)
+       .set("trigger_id", t.id_string());
 
     // The input image arrives ON the trigger from whichever source issued this
     // pass — `local` (a file click) or `cache` (a replay). Both emit the frame
     // under key "frame", so one read works either way (a single-image event also
     // resolves by the source name via the host's sole-image fallback).
     auto img = t.image("frame");
-    if (img.empty()) { VAR(loaded, false); return; }
-    VAR(loaded, true);
-    VAR(width, img.width);
-    VAR(height, img.height);
-    VAR(input, img);     // raw input, surfaced as a preview
+    if (img.empty()) {
+        rec.set("loaded", false);
+        rec.set("$channel", "pass");
+        xi::use("expose").process(rec);
+        return;
+    }
+    rec.set("loaded", true)
+       .set("width", img.width)
+       .set("height", img.height)
+       .image("input", img);     // raw input, surfaced as a preview
 
     // 1. Capture the input into the cache FIRST (so it can be replayed later) —
     //    but NOT when this pass already IS a cache replay (would re-store it).
@@ -44,5 +56,8 @@ void xi_inspect_entry(int /*frame*/) {
     auto bin = xi::use("binarize")
                    .process(xi::Record().image("frame", img))
                    .get_image("binary");
-    if (!bin.empty()) VAR(binary, bin);
+    if (!bin.empty()) rec.image("binary", bin);
+
+    rec.set("$channel", "pass");
+    xi::use("expose").process(rec);
 }
