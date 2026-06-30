@@ -32,8 +32,8 @@
 
 #include <yyjson.h>
 // (The SDK umbrella <xi/xi.hpp> is intentionally NOT included — it pulls the
-//  script-side SDK headers (xi_var/xi_param/xi_io/xi_state/xi_result/xi_async)
-//  the backend binary never needs. Only the core headers it actually uses are
+//  script-side SDK headers (xi_param/xi_io/xi_state/xi_result/xi_async) the
+//  backend binary never needs. Only the core headers it actually uses are
 //  included below.)
 #include <xi/xi_image.hpp>
 #include <xi/xi_cli_args.hpp>
@@ -2262,10 +2262,10 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // does the owner-sweep + FreeLibrary once any in-flight inspect that
             // snapshotted it returns.
             g_script = std::move(next);
-            // **Keep the preview subscription** across the swap — a viewer that's
-            // open across a recompile stays subscribed to its image name, so it
-            // keeps receiving previews without re-subscribing (stale names that the
-            // new DLL doesn't expose are simply inert — they match no var).
+            // Output-sink subscriptions live entirely in the plugin (e.g. the
+            // `expose` plugin tracks subscribed channels) — the core holds no
+            // per-viewer subscription state across a recompile swap; binary frames
+            // are a plain broadcast (emit_binary) and the plugin/its UI own routing.
             crash_set(crash_ctx().last_script, sizeof(crash_ctx().last_script),
                       res.dll_path.c_str());
             crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd),
