@@ -2,7 +2,7 @@
 // create-webapp.mjs — scaffold an external LIBRARY-IMPORT webapp (export mode B,
 // task #79). B is bespoke: rather than auto-generating a full app, we seed an
 // external project that owns its repo/stack and imports the components, with WS
-// pre-wired (version-pinned) and an example composition (panel + viewer + monitor)
+// pre-wired (version-pinned) and an example composition (control panel + viewer)
 // the integrator then develops. The component bundle is vendored so the scaffold
 // runs offline immediately; the README shows the npm-package route too. See
 // docs/roadmap/webui-and-ui-export.md (consumption models, shape B).
@@ -38,7 +38,6 @@ const INDEX_HTML = (name) => `<!doctype html>
   <section class="app">
     <div id="panel"></div>
     <xi-image-viewer id="viewer"></xi-image-viewer>
-    <div id="monitor"></div>
   </section>
 </body>
 </html>
@@ -46,7 +45,7 @@ const INDEX_HTML = (name) => `<!doctype html>
 
 const APP_MJS = (url) => `// app.mjs — this app owns the composition. The components are library-imported;
 // swap the relative bundle for "@xinsp2/components" once you add a build step.
-import { XiClient, mountPanel, mountMonitor } from "./xi-components.esm.js";
+import { XiClient, mountPanel } from "./xi-components.esm.js";
 
 // Descriptor-as-data: the UI schema is just JSON this app owns (could be fetched
 // from the plugin's manifest instead). Edit freely.
@@ -55,10 +54,6 @@ const PANEL = [{
     { type: "slider", key: "threshold", label: "Threshold", min: 0, max: 255 },
   ],
 }];
-const MONITOR = [
-  { type: "value", key: "count", label: "Count" },
-  { type: "trace", key: "rate", label: "Rate" },
-];
 
 const status = (t) => (document.getElementById("status").textContent = t);
 
@@ -67,16 +62,15 @@ const status = (t) => (document.getElementById("status").textContent = t);
     // Version binding: pin the protocol; fail fast on a mismatched backend.
     const client = await new XiClient("${url}").connect({ checkVersion: /\\d+\\.\\d+\\.\\d+/ });
     status("connected ${url}");
-    await client.cmd("subscribe", { all: true }).catch(() => {});
 
-    // Wire the live preview into the viewer (host owns the wiring — tap-out).
+    // The <xi-image-viewer> is a generic component — feed it from whatever frame
+    // source your app/plugin decodes (e.g. client.onBinary(buf => ...)). The WS
+    // client is transport-generic and does NOT decode application frames for you.
     const viewer = document.getElementById("viewer");
-    client.onPreview((f) => viewer.setFrame(f.image || f.dataUrl));
 
-    // An editable control panel bound to a real instance, and a status monitor.
+    // An editable control panel bound to a real instance.
     await mountPanel(document.getElementById("panel"), { client, instance: "INSTANCE_NAME", descriptor: PANEL })
       .catch((e) => console.warn("panel:", e.message));
-    mountMonitor(document.getElementById("monitor"), { client, items: MONITOR });
   } catch (e) { status("connect failed: " + e.message); }
 })();
 `;
@@ -106,8 +100,8 @@ Open the page; it connects to \`${url}\` (edit in app.mjs).
 - \`xi-components.esm.js\` is vendored so this runs offline with no install. For a
   build pipeline, install \`@xinsp2/components\` and import from it instead.
 - \`app.mjs\` owns the composition: an \`mountPanel\` control panel (descriptor =
-  plain JSON you edit), an \`xi-image-viewer\` fed by the WS preview stream, and an
-  \`mountMonitor\` status wall.
+  plain JSON you edit) and a generic \`xi-image-viewer\` you feed from whatever
+  frame source your app/plugin decodes.
 - The WS connection pins the protocol version (\`checkVersion\`) and fails fast on a
   mismatched backend.
 

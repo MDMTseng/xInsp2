@@ -40,11 +40,7 @@
         await client.cmd("create_instance", { name: "bind0", plugin: "config_swap_probe" }).catch(() => {});
         await client.setInstanceDef("bind0", { value: Number($("s").value) });
         log("bound xi-slider → set_instance_def('bind0', {value})", "ok");
-
-        // Live frames (if a project is streaming) render in the viewer.
-        // Previews are off by default — opt in (demo: take everything).
-        await client.cmd("subscribe", { all: true }).catch(() => {});
-        client.onPreview((f) => $("viewer").setFrame(f.image || f.dataUrl));
+        log("use 'Generate frame' for a synthetic image (the viewer is generic)", "ok");
       } catch (e) { log("connect failed: " + e.message, "err"); }
     };
 
@@ -80,9 +76,9 @@
 <body>
   <h1>xi-components PoC — <code>xi-image-viewer</code> + <code>xi-slider</code> over WS</h1>
   <p>End-to-end: the slider drives a real instance via <code>set_instance_def</code>
-     (round-trip logged); the viewer renders frames fed from WS
-     <code>onPreview</code> (or a synthetic frame) with cursor-anchored zoom, pan,
-     and pixel probe — all tap-out, no iframe.</p>
+     (round-trip logged); the viewer renders a synthetic frame with cursor-anchored
+     zoom, pan, and pixel probe — all tap-out, no iframe. (Live plugin output is the
+     <code>expose</code> plugin's own webUI, not this generic component demo.)</p>
 
   <div class="bar">
     <input type="text" id="url" value="ws://127.0.0.1:7823/" />

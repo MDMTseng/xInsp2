@@ -4,9 +4,10 @@
 // Frame counter. Increments xi::state()["count"] each call. Reads a
 // tunable threshold via xi::Param<int>. No external image source.
 //
-// VAR(name, expr) declares a local `name` in the enclosing scope, so
-// we can't have an existing `int count` AND a `VAR(count, count)`. We
-// inline reads of state directly inside the VAR macro args.
+// Output path: VAR was removed from the core SDK. The script surfaces its
+// values to the `expose` sink under channel "main" via
+// xi::use("expose").process(rec); the driver subscribes + decodes the
+// XEX1 frames.
 //
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
@@ -20,7 +21,10 @@ void xi_inspect_entry(int /*frame*/) {
 
     int t_val = threshold_p;
 
-    VAR(count, next);
-    VAR(threshold, t_val);
-    VAR(triggered, next >= t_val);
+    xi::Record rec;
+    rec.set("count", next)
+       .set("threshold", t_val)
+       .set("triggered", next >= t_val);
+    rec.set("$channel", "main");
+    xi::use("expose").process(rec);
 }

@@ -3,6 +3,11 @@ hot_reload_run2 driver.
 
 Validates xi::state(), xi::Param<T>, and continuous-mode auto-resume
 across a compile_and_load swap of inspect.cpp.
+
+Output path: VAR was removed from the core SDK. The script surfaces its
+per-run values to the `expose` sink under channel "main"; the driver
+subscribes to that channel and drains+decodes the XEX1 binary frames the
+sink pushes (one per run) via examples/lib/xex1.py.
 """
 from __future__ import annotations
 
@@ -11,43 +16,45 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from queue import Empty
 
-# Ensure SDK importable
+# Ensure SDK + shared XEX1 decoder importable
 HERE = Path(__file__).parent.resolve()
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT / "tools" / "xinsp2_py"))
+sys.path.insert(0, str(ROOT / "examples" / "lib"))
 
 from xinsp2 import Client  # noqa: E402
+from xex1 import collect_frames, subscribe  # noqa: E402
 
 INSPECT_CPP = HERE / "inspect.cpp"
 V1 = HERE / "inspect_v1.cpp"
 V2 = HERE / "inspect_v2.cpp"
 
+CHANNEL = "main"
+
 
 def collect_vars(client, duration_s: float, sink: list) -> None:
-    """Drain `vars` messages from the SDK inbox for `duration_s`.
+    """Drain expose XEX1 frames from the SDK binary inbox for `duration_s`.
 
-    Records (wall_ms, count, threshold, version) per event.
+    Records (wall_ms, count, threshold, version) per frame.
     """
     deadline = time.monotonic() + duration_s
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        try:
-            msg = client._inbox_vars.get(timeout=remaining)
-        except Empty:
-            return
-        items = {it["name"]: it for it in msg.get("items", [])}
-        rec = {
-            "wall_ms": int(time.monotonic() * 1000),
-            "run_id": msg.get("run_id"),
-            "count": items.get("count", {}).get("value"),
-            "threshold": items.get("threshold", {}).get("value"),
-            "version": items.get("version", {}).get("value"),  # None on v1
-        }
-        sink.append(rec)
+    while time.monotonic() < deadline:
+        got = False
+        for fr in collect_frames(client):
+            if fr.get("channel") != CHANNEL:
+                continue
+            vals = fr.get("values", {})
+            sink.append({
+                "wall_ms": int(time.monotonic() * 1000),
+                "run_id": fr.get("seq"),
+                "count": vals.get("count"),
+                "threshold": vals.get("threshold"),
+                "version": vals.get("version"),  # None on v1
+            })
+            got = True
+        if not got:
+            time.sleep(0.02)
 
 
 def main() -> int:
@@ -60,11 +67,19 @@ def main() -> int:
     with Client() as c:
         print("[driver] connected", flush=True)
         c.ping()
+
+        # Open the project so the `expose` instance exists (the script routes
+        # output through xi::use("expose")).
+        c.open_project(str(HERE).replace("\\", "/"))
+        print("[driver] project opened (expose instance ready)", flush=True)
+
         rsp1 = c.compile_and_load(str(INSPECT_CPP).replace("\\", "/"))
         print(f"[driver] v1 loaded: {rsp1.get('dll')}", flush=True)
 
-        # Drain stale vars (none expected, but be safe)
-        c._drain(c._inbox_vars)
+        # Subscribe so the sink encodes + pushes its frames for this channel.
+        subscribe(c, [CHANNEL])
+        # Drain stale frames/events (none expected, but be safe)
+        c.drain_binary()
         c._drain(c._inbox_events)
 
         c.call("start", {"fps": 20})
@@ -187,9 +202,9 @@ def main() -> int:
     lines = []
     lines.append("# hot_reload_run2 — FL測試 r4 regression\n")
     lines.append("## Outcome")
-    lines.append(f"- Total vars events: {total}")
-    lines.append(f"- Pre-reload events: {len(pre)}")
-    lines.append(f"- Post-reload events: {len(post)}")
+    lines.append(f"- Total expose frames: {total}")
+    lines.append(f"- Pre-reload frames: {len(pre)}")
+    lines.append(f"- Post-reload frames: {len(post)}")
     lines.append(
         f"- xi::state() count survived reload: {'yes' if state_survived else 'no'}"
         f"  (last_pre={last_pre_count}, first_post={first_post_count})"
@@ -199,11 +214,11 @@ def main() -> int:
         f"  (last_pre={last_pre_thresh}, first_post={first_post_thresh})"
     )
     lines.append(
-        f"- v2 version VAR appeared within 5 events of reload: "
+        f"- v2 version field appeared within 5 frames of reload: "
         f"{'yes' if v2_within else 'no'} (offset={v2_after})"
     )
     lines.append(
-        f"- Largest gap in vars stream: {max_gap_ms} ms"
+        f"- Largest gap in expose-frame stream: {max_gap_ms} ms"
         f" (straddles reload boundary: {'yes' if gap_straddles_reload else 'no'})"
     )
     lines.append(
@@ -263,15 +278,16 @@ def main() -> int:
     lines.append("- What worked: confirmed in `service_main.cpp` line 1337.")
     lines.append("- Time lost: ~1 minute (would have been zero without the brief).")
     lines.append("")
-    lines.append("### F-3: SDK has no first-class continuous-mode vars iterator")
+    lines.append("### F-3: SDK has no first-class continuous-mode output iterator")
     lines.append("- Severity: P2")
     lines.append("- Root cause: missing feature")
-    lines.append("- What I tried: `Client.run()` is single-shot; no `iter_vars()` / "
-                 "  `subscribe_vars()`. Calling `c.run()` during `cmd:start` would "
+    lines.append("- What I tried: `Client.run()` is single-shot; no `iter_frames()` / "
+                 "  `subscribe_frames()`. Calling `c.run()` during `cmd:start` would "
                  "  send a stray `cmd:run` and fight the worker.")
-    lines.append("- What worked: pull `c._inbox_vars.get(timeout=...)` directly. "
-                 "  Functional but uses a private attribute and a writer of "
-                 "  external code would feel uneasy about it.")
+    lines.append("- What worked: subscribe the `expose` channel and drain "
+                 "  `c.drain_binary()` (decoded by examples/lib/xex1.py) directly. "
+                 "  Functional, but there is no first-class helper that yields "
+                 "  decoded frames as they arrive in continuous mode.")
     lines.append("- Time lost: ~5 minutes")
     lines.append("")
     lines.append("## What was smooth")

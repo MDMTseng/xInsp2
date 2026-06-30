@@ -11,11 +11,15 @@
 > via `VAR(...)`. That transport has since been **removed from core** — `VAR`/`EMIT`
 > still compile but publish nothing, and `vars`/preview/`subscribe` are gone from
 > the WS protocol. The HMI's per-pass value + image plumbing described below
-> (`vars` items, preview frames, `subscribe`) therefore no longer has a live core
-> source; surfacing script output for the HMI is moving to a **preview plugin**.
-> The one path still live is the `run_result` event (verdict/yield cards). Treat
-> the `VAR`/`vars`/preview references in this doc as the *pre-refactor* design,
-> pending the preview-plugin replacement. Only the verdict cards work as-is today.
+> (`vars` items, preview frames, `subscribe` by image name + `gid`) therefore no
+> longer has a live core source; surfacing script output for the HMI now goes
+> through the shipped **`expose` plugin** — the script builds a `xi::Record`, tags
+> it with a string `"$channel"`, and calls `xi::use("expose").process(rec)`; the
+> HMI subscribes per channel over the plugin's `exchange` and renders one atomic
+> `XEX1` frame (values + JPEG images) per channel. The one core path still live is
+> the `run_result` event (verdict/yield cards). Treat the `VAR`/`vars`/preview/`gid`
+> references in this doc as the *pre-refactor* design; the `expose` channel model
+> replaces them. Only the verdict cards work as-is today.
 
 ## The gap
 

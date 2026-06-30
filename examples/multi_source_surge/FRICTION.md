@@ -1,5 +1,15 @@
 # multi_source_surge — FL測試 round 6 friction log
 
+> **Historical note (post vars-purge).** This log was written when the
+> script surfaced data via the per-event `VAR` macro. `VAR` was since
+> removed from core: the script now pushes records to the `expose` sink
+> and the driver decodes XEX1 frames (`examples/lib/xex1.py`), counting
+> `run_finished` events for throughput. The items below that are about
+> `VAR` itself (**P2-1**) or script-computed `latency_us` (**P1-2**) are
+> therefore moot — the timing VARs were dropped and there is no `VAR`
+> macro to shadow a local any more. They are kept here as a record of
+> what the original run hit.
+
 Format per item: **symptom -> minimum repro -> root cause guess ->
 who fixes**.
 

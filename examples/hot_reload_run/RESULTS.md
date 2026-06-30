@@ -1,13 +1,19 @@
 # hot_reload_run — FL測試 round 4
 
+> Note: this run predates the VAR→`expose` migration. The numbers below
+> were captured when the script still published via `vars` events. The
+> driver now collects the same values as `expose` XEX1 frames (channel
+> `main`); the acceptance logic and findings are unchanged — only the
+> transport differs. Re-run the driver to refresh these numbers.
+
 ## Outcome
-- Total vars events: 64
-- Pre-reload events: 31
-- Post-reload events: 32
+- Total expose frames: 64
+- Pre-reload frames: 31
+- Post-reload frames: 32
 - xi::state() count survived reload: yes  (last_pre=31, first_post=33)
 - xi::Param<int> threshold survived: **no**  (set to 137 pre-reload, observed as 100 — the v2 file-scope default — first frame post-reload)
-- v2 version VAR appeared within 5 events of reload: yes  (appeared at event idx +0 after compile_and_load returned)
-- Largest gap in vars stream: ~4000 ms  (around reload boundary — confirmed straddling t_pre_reload..t_reload_returned; the reload itself took 3937 ms wall-clock and the run was *fully stopped* across that window — see F-2)
+- v2 version field appeared within 5 frames of reload: yes  (appeared at frame idx +0 after compile_and_load returned)
+- Largest gap in expose-frame stream: ~4000 ms  (around reload boundary — confirmed straddling t_pre_reload..t_reload_returned; the reload itself took 3937 ms wall-clock and the run was *fully stopped* across that window — see F-2)
 - Backend ping() after stop: ok
 - VERDICT: **FAIL**
 
@@ -15,11 +21,11 @@
 
 The reload boundary is *not* a graceful continuation. It's a stop / unload / compile / load / reset sequence. Concretely:
 
-1. The instant `compile_and_load` is received, `service_main.cpp:1086` flips `g_continuous = false`, joins the worker thread, and tears down continuous mode entirely. The vars stream **stops**. There is no overlap, no last-tick-of-old-DLL-then-first-tick-of-new-DLL hand-off.
-2. Compile takes ~4 seconds wall-clock (cl.exe cold) — during this entire window, *zero* vars events are emitted. That is a 4000 ms gap, not "a small documented gap."
-3. After load_script() succeeds, `g_persistent_state_json` is restored into the new DLL via `g_script.set_state(...)` — `xi::state()` is preserved as documented. The count went from 31 (last pre-reload) up to 32 inside the reload window (one solitary event), then 33 immediately when the new DLL started ticking (we re-issued cmd:start). Continuity of state: confirmed.
+1. The instant `compile_and_load` is received, `service_main.cpp:1086` flips `g_continuous = false`, joins the worker thread, and tears down continuous mode entirely. The expose-frame stream **stops**. There is no overlap, no last-tick-of-old-DLL-then-first-tick-of-new-DLL hand-off.
+2. Compile takes ~4 seconds wall-clock (cl.exe cold) — during this entire window, *zero* expose frames are emitted. That is a 4000 ms gap, not "a small documented gap."
+3. After load_script() succeeds, `g_persistent_state_json` is restored into the new DLL via `g_script.set_state(...)` — `xi::state()` is preserved as documented. The count went from 31 (last pre-reload) up to 32 inside the reload window (one solitary frame), then 33 immediately when the new DLL started ticking (we re-issued cmd:start). Continuity of state: confirmed.
 4. **`xi::Param<T>` is NOT restored across compile_and_load.** The new DLL came up with `threshold=100` (the v2 file-scope default), even though the live value at the moment of reload was `137` (set via `cmd:set_param`). The backend keeps no in-memory cache of "current Param values" to replay into the freshly loaded DLL — only `cmd:load_project` / `cmd:compare_variants` / explicit `cmd:set_param` invoke the script's `set_param` callback.
-5. **Continuous mode (`cmd:start`) does not resume automatically.** After compile_and_load returns, the timer thread is dead. The driver had to issue `cmd:start fps=20` again. Without that, the post-reload phase would have collected zero vars events and the case would have failed even harder.
+5. **Continuous mode (`cmd:start`) does not resume automatically.** After compile_and_load returns, the timer thread is dead. The driver had to issue `cmd:start fps=20` again. Without that, the post-reload phase would have collected zero expose frames and the case would have failed even harder.
 
 What the docs predicted vs what happened:
 - `docs/guides/write-a-script.md` lifecycle box says the reload sequence is `get_state → unload → load → set_state → restore params → ready`. Step "restore params" is documented but **does not happen** in `cmd:compile_and_load` — only in `cmd:load_project`. The text underneath ("`xi::Param<T>` values (replayed by `xi_script_set_param`)") is misleading: the replay only happens on project load, not on save/recompile.
@@ -31,7 +37,7 @@ What the docs predicted vs what happened:
 ### F-1: xi::Param<T> values lost across compile_and_load
 - Severity: **P0 / Bug**
 - Root cause: missing feature (Param replay during compile_and_load)
-- What I tried: Set `threshold=137` via `c.set_param("threshold", 137)` while v1 was running, verified it landed (last_pre_threshold=137 in vars), then triggered `compile_and_load(v2)`. First post-reload vars message had `threshold=100`.
+- What I tried: Set `threshold=137` via `c.set_param("threshold", 137)` while v1 was running, verified it landed (last_pre_threshold=137 in the expose frames), then triggered `compile_and_load(v2)`. First post-reload expose frame had `threshold=100`.
 - What worked: Workaround — the driver could re-issue the set_param after every compile_and_load. But that requires the client to track *every* Param it has ever touched, and there is no protocol signal that a reload happened in band with the cmd response (you'd have to react to the rsp).
 - Repro:
     1. Compile any script with `xi::Param<int> threshold{"threshold", 100, ...}`.
@@ -64,8 +70,8 @@ What the docs predicted vs what happened:
 
 ## What was smooth
 
-- The Python SDK's threading model: `_inbox_vars` is just a Queue; spawning a daemon thread to drain it while the main flow drives `start`/`compile_and_load`/`stop` was zero friction.
+- The Python SDK's threading model: `_inbox_binary` is just a Queue; spawning a daemon thread to drain it (via `xex1.collect_frames`) while the main flow drives `start`/`compile_and_load`/`stop` was zero friction.
 - `xi::state()` survived the reload exactly as documented. The count went 30 → 31 → 32 → 33 across the boundary; no off-by-one, no schema confusion (no `XI_STATE_SCHEMA` declared on either side, so the schema-mismatch path didn't fire — as expected).
 - `compile_and_load`'s diagnostic enrichment was excellent — the `C2374 redefinition` error came back with file/line/severity already parsed (`_enrich_compile_error` in client.py), no need to dig through cl.exe stderr.
-- The `version` VAR appeared in the very first post-reload event (offset +0), so the reload was deterministic enough — once the new DLL is loaded, every subsequent inspect call uses it. No half-loaded states observed.
+- The `version` field appeared in the very first post-reload expose frame (offset +0), so the reload was deterministic enough — once the new DLL is loaded, every subsequent inspect call uses it. No half-loaded states observed.
 - `c.ping()` after `c.call("stop")` worked first try; the backend recovered cleanly from the whole stop/reload/restart/stop sequence.

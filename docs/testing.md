@@ -5,13 +5,15 @@ This is the live picture of test surface, organisation, and how to run.
 `TEST_REPORT.md` / `TestAudit.md` trio.
 
 > **Note.** The VAR value-tracking, the
-> `vars` wire message, the binary image-preview frame, and the
-> `subscribe`/`unsubscribe` commands have been removed from the backend. Suites that
-> exercised those paths (e.g. `ws_run_vars`, `ws_preview`, `runSubscribe`, the
+> `vars` wire message, the core binary image-preview frame, and the core
+> `subscribe`/`unsubscribe` commands have been removed from the backend. Script
+> data-out now goes through the shipped `expose` plugin (per-channel subscription
+> over `exchange` + one atomic `XEX1` frame per record). Suites that
+> exercised the old core paths (e.g. `ws_run_vars`, `ws_preview`, `runSubscribe`, the
 > JPEG-preview assertions in `ws_comprehensive`, the preview-header rows in
 > `test_protocol`, the *JPEG encode* note below) cover **removed** behavior and
 > are legacy — to be retired or rewritten. They are listed below
-> as they stand today; treat preview/vars/subscribe coverage as legacy.
+> as they stand today; treat the old preview/vars/subscribe coverage as legacy.
 
 ---
 
@@ -58,7 +60,7 @@ Run all: `cd vscode-extension && node --test test/*.test.mjs`
 | `ws_basic.test.mjs` | ping / version / hello / shutdown / unknown |
 | `ws_buffer_replay.test.mjs` | replay as plugin composition: the `cache` plugin (instance `buffer` in `buffer_replay_demo`) captures + re-emits records (host no longer owns record/replay) |
 | `ws_ordered_sink.test.mjs` | ordered output sink: `"sink": true` plugin (builds `sdk/examples/comm`) receives `use(sink).process()` in frame-arrival order under `dispatch_threads=4`, host-stamped `$seq` strictly increasing |
-| `ws_preview_sink.test.mjs` | preview plugin (`examples/preview_sink_demo`): PVAR record → `XPV1` `emit_binary` live push + `list_groups`/`get`/`get_image`, content-hash dedup |
+| `ws_expose_sink.test.mjs` | `expose` plugin: `xi::use("expose").process(rec)` (record tagged with `"$channel"`) → one atomic `XEX1` `emit_binary` frame per subscribed channel + `subscribe`/`unsubscribe`/`get`/`list_channels` exchange commands, content-hash image dedup |
 | `ws_run_vars.test.mjs` | *(legacy — removed behavior)* run → vars round-trip with image gid |
 | `ws_preview.test.mjs` | *(legacy — removed behavior)* binary preview frame format |
 | `ws_trigger.test.mjs` | compile + start continuous mode → multiple runs fire |

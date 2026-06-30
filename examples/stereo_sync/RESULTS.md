@@ -52,7 +52,8 @@ What this does NOT mean:
   in `pending_`. The script's `xi::current_trigger().is_active()` is
   only true when the framework actually dispatched a complete event.
   My script defensively checks `left.empty() || right.empty()` and
-  would `VAR(half_trigger, true)` if it ever happened. Across the 120
+  would expose `half_trigger=true` on the `pairs` channel if it ever
+  happened. Across the 120
   paired dispatches across both runs, that branch never fired. Good.
 - **`Any` policy is one-frame-fires-immediately.** I tested this
   briefly. Each emit dispatches by itself; only one camera's image is
@@ -81,10 +82,11 @@ What surprised me, in order of impact:
    `required:[]` back to disk**, so subsequent `open_project` calls
    inherit the broken state until you hand-edit project.json. **F-2,
    P1.**
-3. **Non-bus-driven dispatches still come through as `vars` events.**
+3. **Non-bus-driven dispatches still surface as `expose` frames.**
    When `start` is on, the worker thread fires inspect on a timer
-   fallback even when no bus event is queued. Those dispatches show up
-   as `active==False` with no images. The script must handle this —
+   fallback even when no bus event is queued. Those dispatches push an
+   XEX1 frame on channel `pairs` with `active==False` and no images. The
+   script must handle this —
    my driver counts them separately as `no_trigger_ticks` and excludes
    them from the matched-rate. Mildly annoying but documented in
    `service_main.cpp` line 1420.
@@ -234,8 +236,8 @@ What surprised me, in order of impact:
 
 - **`xi::current_trigger()` and `t.image("cam_left")` ergonomics.**
   Once the bus actually dispatched events, the script side is
-  beautiful. Three lines to read the pair, three lines of `VAR` to
-  ship metrics back. Zero plumbing.
+  beautiful. Three lines to read the pair, then one `xi::Record` pushed
+  to `expose` (channel `pairs`) to ship the metrics back. Zero plumbing.
 - **Project-plugin compile + hot-load.** The backend builds my
   `synced_cam.dll` from `plugins/synced_cam/src/plugin.cpp` on
   `open_project` with no ceremony. Diagnostics on compile-failure

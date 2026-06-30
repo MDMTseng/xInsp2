@@ -18,18 +18,18 @@ src/
     xi-image-viewer.svelte   canvas viewer: wheel-zoom/pan/pixel-probe; tap-out setFrame/fit + pixelpick/viewchange
     xi-image-editor.svelte   teach editor: draw point/rect/polygon (pull model); tap-out setFrame/setTool + commit/cancel
   dashboard/         the HMI dashboard, importable (one source, used by hmi/ + external apps)
-    cards.mjs        xi-card-* dashboard cards (verdict/value/image/spc/yield/throughput/groups)
+    cards.mjs        xi-card-* dashboard cards (verdict/yield/throughput/groups — run_result/run_ms/dispatch_stats)
     layout.mjs       N-ary split/tabs layout engine (pure)
     dashboard.mjs    mountDashboard(host,{client,dashboard}) — render cards from a config + feed from WS
   lib/
     viewport.mjs     pure pan/zoom math (unit-tested), generalizes imageViewerPanel.ts
     tools.mjs        teach-tool state machines (point/rect/polygon) + registerTool
     options.mjs      normalize an options array / JSON-string attribute for radio/dropdown
-  ws-client.mjs      XiClient — connect + orchestrator verbs + vars/preview subscribe
-  protocol.mjs       pure WS decoders (parseVars / decodePreviewFrame)
+  ws-client.mjs      XiClient — generic transport: connect + version check + cmd/exchange +
+                     event/log/instances subscriptions + onBinary(raw bytes) passthrough
   auto-panel.mjs     mountPanel(host,{client,instance,descriptor?}) — descriptor → wired
                      widget sections; inferDescriptor(def) for a zero-config panel
-  index.js           registers all xi-* elements; re-exports XiClient + protocol + mountPanel
+  index.js           registers all xi-* elements; re-exports XiClient + mountPanel + dashboard
 demo/
   index.html         drop-in usage of <xi-slider> (vanilla)
   poc.html           end-to-end PoC: viewer + slider wired to a live backend over WS
@@ -102,32 +102,26 @@ const client = await new XiClient(url).connect();
 mountDashboard(document.getElementById("dash"), {
   client,
   dashboard: { title: "Line 1", layout: { dir: "row", weights: [1, 1], children: [
-    { card: { type: "value", bind: { var: "fg_pct" } } },
-    { card: { type: "image", bind: { var: "result" } } },
+    { card: { type: "verdict", bind: { result: true } } },
+    { card: { type: "yield", bind: { result: true } } },
   ] } },
 });
 ```
 
 It renders the `xi-card-*` cards via the layout engine and feeds them from the
-WS streams (vars / preview / run_result / dispatch_stats). RUN mode (read-only);
-the standalone `hmi/` keeps its own compose editor and now sources the cards,
-layout, and protocol decoders from this same library (one source).
+generic WS streams (run_result / run_finished / status / dispatch_stats). RUN
+mode (read-only); the standalone `hmi/` keeps its own compose editor and sources
+the cards + layout from this same library (one source). The cards carry **no**
+preview/vars/gid coupling — a plugin's own webUI renders per-frame value/image
+tiles from frames it decodes itself.
 
-## UI export — two shapes
+## UI export — library-import scaffold
 
-- **A — status monitor (generic, auto).** `export/build-monitor.mjs` emits a
-  self-contained static folder: a read-only `mountMonitor` wall (value tiles,
-  `xi-trace` sparklines, `xi-image-viewer` fed by the preview stream) + the
-  vendored bundle. `collectStatusItems(descriptors)` flattens a project's
-  `status` sections into the item list.
-  ```
-  node export/build-monitor.mjs config.json out/    # → out/index.html + bundle
-  ```
-- **B — full app (bespoke, library-import).** `export/create-webapp.mjs` scaffolds
-  an **external** webapp project that owns its stack and imports the components,
-  with WS pre-wired (version-pinned) and an example composition (panel + viewer +
-  monitor) you then develop. The bundle is vendored (runs offline); swap for the
-  `@xinsp2/components` npm package when you add a build step.
-  ```
-  node export/create-webapp.mjs my-hmi/ "Line 1 HMI" ws://plc:7823/
-  ```
+`export/create-webapp.mjs` scaffolds an **external** webapp project that owns its
+stack and imports the components, with WS pre-wired (version-pinned) and an
+example composition (control panel + generic `xi-image-viewer`) you then develop.
+The bundle is vendored (runs offline); swap for the `@xinsp2/components` npm
+package when you add a build step.
+```
+node export/create-webapp.mjs my-hmi/ "Line 1 HMI" ws://plc:7823/
+```

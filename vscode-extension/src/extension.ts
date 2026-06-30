@@ -4,10 +4,8 @@ import * as net from 'net';
 import { spawn, ChildProcess } from 'child_process';
 import { WsClient } from './wsClient';
 import { InstanceTreeProvider } from './instanceTree';
-import { ViewerProvider } from './viewerProvider';
 import { InstanceCodeLensProvider } from './instanceCodeLens';
 import { PluginRegistry, PluginInfo } from './pluginRegistry';
-import { PREVIEW_HEADER_SIZE } from './protocol';
 import { TEMPLATE_CHOICES, TemplateId, locateSdkRoot, renderPluginFiles,
          listExamplePlugins, renderExamplePluginFiles }
     from './projectPluginTemplates';
@@ -973,56 +971,6 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // Preview variable command (for CodeLens click on VAR lines)
-    context.subscriptions.push(
-        vscode.commands.registerCommand('xinsp2.previewVar', (varName: string) => {
-            viewerProvider.highlightVar(varName);
-            try { vscode.commands.executeCommand('xinsp2.viewer.focus'); } catch {}
-        })
-    );
-
-    // Viewer webview (side panel)
-    const viewerProvider = new ViewerProvider(context.extensionUri);
-
-    // Preview subscription: the backend sends no image preview unless subscribed,
-    // so subscribe to the viewer's image vars only while the viewer is visible
-    // and unsubscribe when it's hidden. Re-asserted after each vars message and on
-    // visibility change; we dedupe so we only hit the wire when the set changes.
-    let sentImageSub = '';   // '' (unknown) | 'all' | 'none'
-    // (subscribe ALL while the viewer is visible, none while hidden)
-    const reconcileImageSubs = () => {
-        const want = viewerProvider.visible ? 'all' : 'none';
-        if (want === sentImageSub) return;
-        sentImageSub = want;
-        if (client?.connected)
-            sendCmd('subscribe', want === 'all' ? { all: true } : { names: [] }).catch(() => {});
-    };
-    context.subscriptions.push(viewerProvider.onDidChangeVisibility.event(() => reconcileImageSubs()));
-
-    // Thumbnail shift-click / double-click in the Viewer panel pops the
-    // rich image viewer (pan + cursor-anchored zoom + pick tools).
-    context.subscriptions.push(viewerProvider.onMessage.event(async (m: any) => {
-        if (m && m.type === 'openInteractive' && m.src) {
-            // src is a data URL like "data:image/jpeg;base64,...". Strip
-            // the prefix so we can re-pack into ImageMessage shape.
-            const i = String(m.src).indexOf('base64,');
-            if (i < 0) return;
-            const b64 = String(m.src).slice(i + 7);
-            // We don't get width/height here; ImageViewerPanel will
-            // discover them from the bitmap once it decodes. Stub w/h
-            // are overwritten on bitmap load.
-            const ImageViewerPanelMod = require('./imageViewerPanel');
-            ImageViewerPanelMod.ImageViewerPanel.show(context.extensionUri, {
-                name: m.name || 'image', width: 0, height: 0, jpegBase64: b64,
-            });
-        }
-    }));
-    context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider('xinsp2.viewer', viewerProvider, {
-            webviewOptions: { retainContextWhenHidden: true },
-        })
-    );
-
     // WS client — local spawn by default, or remote when xinsp2.remoteUrl is set.
     output.appendLine(isRemote
         ? `[xinsp2] remote mode → ${wsUrl}${authSecret ? ' (auth)' : ''}`
@@ -1035,9 +983,6 @@ export function activate(context: vscode.ExtensionContext) {
         setCtx('connected', true);
         updateHealthStatus(true);
         lastConnected = true;
-        // Fresh connection ⇒ backend forgot our preview subscription; re-assert.
-        sentImageSub = '';
-        reconcileImageSubs();
         setViewBadge(true, lastInstanceCount, lastPluginCount);
         // Pull the plugin list as soon as we're up (feeds the Plugin Browser).
         sendCmd('list_plugins').then((r: any) => {
@@ -1170,8 +1115,6 @@ export function activate(context: vscode.ExtensionContext) {
                 pendingRsp.delete(msg.id);
                 handler(msg);
             }
-        } else if (msg.type === 'vars') {
-            viewerProvider.postVars(msg);
         } else if (msg.type === 'instances') {
             treeProvider.update(msg.instances ?? [], msg.params ?? []);
             // Keep the name->plugin map + script highlighting in sync.
@@ -1202,55 +1145,21 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    client.on('binary', (buf: Buffer) => {
-        if (buf.length < PREVIEW_HEADER_SIZE) return;
-        const gid      = buf.readUInt32BE(0);
-        const _codec   = buf.readUInt32BE(4);
-        const width    = buf.readUInt32BE(8);
-        const height   = buf.readUInt32BE(12);
-        const _ch      = buf.readUInt32BE(16);
-        const jpegBuf  = buf.subarray(PREVIEW_HEADER_SIZE);
-        const b64      = jpegBuf.toString('base64');
-
-        if ((gid >= 8000 && gid < 9000) || (gid >= 9000 && gid < 10000)) {
-            // Config preview — route to the specific panel
-            const panel = previewGidToPanel.get(gid);
-            if (panel) {
-                panel.webview.postMessage({
-                    type: 'preview',
-                    width, height,
-                    jpeg: b64,
-                });
-            }
-        } else {
-            viewerProvider.postPreview(gid, width, height, b64);
-            // Also remember the most-recent preview so the
-            // xinsp2.openImageViewer command can re-show it in the
-            // rich viewer (with pan/zoom + pick tools).
-            lastPreview = { gid, width, height, b64,
-                            name: lastPreviewName.get(gid) || `gid:${gid}` };
-        }
-    });
-
-    // Cache the most-recent preview message so the user can pop it
-    // open in the interactive viewer after-the-fact.
-    let lastPreview: { gid: number; width: number; height: number; b64: string; name: string } | null = null;
-    const lastPreviewName = new Map<number, string>();
-
-    // Expose openImageViewer to the user — palette + later wired into
-    // viewer thumbnails. Picks the most recent image if no arg given.
+    // Generic interactive image viewer (pan/zoom + pick tools). Plugin webUIs
+    // that want to surface an image hand it an explicit { name, width, height,
+    // jpeg } payload — the extension carries no preview/gid decoding of its own.
     context.subscriptions.push(
-        vscode.commands.registerCommand('xinsp2.openImageViewer', (arg?: { gid?: number, name?: string, width?: number, height?: number, jpeg?: string }) => {
-            const src = arg && arg.jpeg
-                ? { name: arg.name || 'image', width: arg.width!, height: arg.height!, jpegBase64: arg.jpeg }
-                : (lastPreview
-                    ? { name: lastPreview.name, width: lastPreview.width, height: lastPreview.height, jpegBase64: lastPreview.b64 }
-                    : null);
-            if (!src) {
-                vscode.window.showInformationMessage('No image to view yet — run an inspection or preview an instance first.');
+        vscode.commands.registerCommand('xinsp2.openImageViewer', (arg?: { name?: string, width?: number, height?: number, jpeg?: string }) => {
+            if (!arg || !arg.jpeg) {
+                vscode.window.showInformationMessage('No image to view — invoke from a plugin UI with image data.');
                 return;
             }
-            ImageViewerPanel.show(context.extensionUri, src);
+            ImageViewerPanel.show(context.extensionUri, {
+                name: arg.name || 'image',
+                width: arg.width ?? 0,
+                height: arg.height ?? 0,
+                jpegBase64: arg.jpeg,
+            });
         }),
     );
 
@@ -1315,12 +1224,6 @@ export function activate(context: vscode.ExtensionContext) {
             if (!client?.connected) {
                 vscode.window.showWarningMessage('xInsp2: not connected to backend');
                 return;
-            }
-            // First run: reveal the Viewer so its webview resolves and the vars
-            // (which arrive async) have somewhere to land. Only when it hasn't
-            // been opened yet, so we don't steal focus on every iteration.
-            if (!viewerProvider.isResolved()) {
-                try { await vscode.commands.executeCommand('xinsp2.viewer.focus'); } catch {}
             }
             try {
                 const rsp = await sendCmd('run');
@@ -2463,7 +2366,6 @@ void xi_inspect_entry(int frame) {
 
     // Open a plugin's web UI in a webview panel for a specific instance
     const pluginUIPanels = new Map<string, vscode.WebviewPanel>();
-    const previewGidToPanel = new Map<number, vscode.WebviewPanel>();
 
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.openInstanceUI', async (arg1?: any, arg2?: string) => {
@@ -2567,9 +2469,6 @@ void xi_inspect_entry(int frame) {
             pluginUIPanels.set(instanceName, panel);
             panel.onDidDispose(() => {
                 pluginUIPanels.delete(instanceName);
-                for (const [gid, p] of previewGidToPanel) {
-                    if (p === panel) previewGidToPanel.delete(gid);
-                }
             });
 
             // Wire postMessage ↔ exchange_instance + preview polling
@@ -2632,8 +2531,6 @@ void xi_inspect_entry(int frame) {
         // Ordered nodes + VAR chips (the script glue between plugin stages).
         extractPipelineItems: () => extractPipelineItems(),
         revealVarSite: (name: string) => revealVarSite(name),
-        viewerVarCount: () => viewerProvider.lastVarCount(),
-        viewerResolved: () => viewerProvider.isResolved(),
         // Pipeline graph (stage 2) — run once with capture, return reconstructed edges.
         captureGraphEdges: (framePath?: string) => captureGraphEdges(framePath),
         captureAndRenderGraph: () => captureAndRenderGraph(),
@@ -2650,9 +2547,6 @@ void xi_inspect_entry(int frame) {
         registerPluginPanel: (name: string, panel: vscode.WebviewPanel) => {
             pluginUIPanels.set(name, panel);
             panel.onDidDispose(() => pluginUIPanels.delete(name));
-        },
-        registerPreviewGid: (gid: number, panel: vscode.WebviewPanel) => {
-            previewGidToPanel.set(gid, panel);
         },
         // Simulates a user clicking a button inside the plugin's webview UI:
         // runs the same path as panel.webview.onDidReceiveMessage, including

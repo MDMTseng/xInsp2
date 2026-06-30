@@ -90,32 +90,9 @@ static void test_rsp_err() {
     CHECK(s.find("\"error\":\"unknown command: xyz\"") != std::string::npos);
 }
 
-static void test_vars_encode() {
-    SECTION("Vars::to_json");
-    Vars v;
-    v.run_id = 17;
-    v.items.push_back({"gray",  VarKindWire::Image,   "",      "",    false, 100, false});
-    v.items.push_back({"count", VarKindWire::Number,  "42",    "",    false, 0,   false});
-    VarItem s;
-    s.name = "label";
-    s.kind = VarKindWire::String;
-    s.value_str = "ok";
-    v.items.push_back(s);
-    VarItem b;
-    b.name = "flag";
-    b.kind = VarKindWire::Boolean;
-    b.value_bool = true;
-    v.items.push_back(b);
-
-    std::string out = v.to_json();
-    CHECK(out.find("\"type\":\"vars\"")       != std::string::npos);
-    CHECK(out.find("\"run_id\":17")           != std::string::npos);
-    CHECK(out.find("\"gray\"")                != std::string::npos);
-    CHECK(out.find("\"gid\":100")             != std::string::npos);
-    CHECK(out.find("\"value\":42")            != std::string::npos);
-    CHECK(out.find("\"value\":\"ok\"")        != std::string::npos);
-    CHECK(out.find("\"value\":true")          != std::string::npos);
-}
+// (test_vars_encode removed: the `vars` wire — Vars/VarItem/VarKindWire — was
+// deleted with the v9 vars/value-store teardown; script output is now the
+// `expose` plugin's XEX1 binary frame, not a core protocol type.)
 
 static void test_log_event() {
     SECTION("Log + Event");
@@ -135,24 +112,9 @@ static void test_log_event() {
     CHECK(s2.find("\"ms\":42") != std::string::npos);
 }
 
-static void test_preview_header() {
-    SECTION("preview header encode/decode");
-    PreviewHeader h;
-    h.gid = 100;
-    h.codec = static_cast<uint32_t>(Codec::JPEG);
-    h.width = 4000;
-    h.height = 5000;
-    h.channels = 3;
-
-    uint8_t buf[kPreviewHeaderSize];
-    encode_preview_header(h, buf);
-    PreviewHeader back = decode_preview_header(buf);
-    CHECK(back.gid == h.gid);
-    CHECK(back.codec == h.codec);
-    CHECK(back.width == h.width);
-    CHECK(back.height == h.height);
-    CHECK(back.channels == h.channels);
-}
+// (test_preview_header removed: the core-side gid/codec preview header was
+// deleted with the v9 vars/preview-core teardown; the `expose` plugin frames its
+// own XEX1 output and the core no longer owns a binary preview header type.)
 
 static void test_parse_edge_cases() {
     SECTION("parse_cmd edge cases");
@@ -216,9 +178,7 @@ int main() {
     test_cmd_parse_fixture();
     test_rsp_ok();
     test_rsp_err();
-    test_vars_encode();
     test_log_event();
-    test_preview_header();
     test_parse_edge_cases();
     test_strip_quotes_unescape();
 

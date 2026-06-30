@@ -125,7 +125,7 @@ that re-impose order without throttling compute:
   same arrival-order gate, so deliveries land in **frame-arrival order** under
   `dispatch_threads > 1`. Each flushed record is stamped with the reserved key
   `"$seq"` == the wire `run_id`, so the sink can correlate its packet to the frame.
-  The `preview` plugin is a sink (live previews never tear/reorder across workers).
+  The `expose` plugin is a sink (live output never tears/reorders across workers).
   See the `sink` row in [`../reference/c-abi.md`](../reference/c-abi.md) and the
   *Parallel dispatch* section of
   [`../guides/write-a-script.md`](../guides/write-a-script.md).

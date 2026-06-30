@@ -3,6 +3,11 @@
 Validates that compile_and_load while a cmd:start continuous run is
 active preserves xi::state() and xi::Param<T> values, and that the
 run continues across the reload boundary.
+
+Output path: VAR was removed from the core SDK, so the script surfaces
+its per-run values to the `expose` sink under channel "main". The driver
+subscribes to that channel, then drains + decodes the XEX1 binary frames
+the sink pushes (one per run) via examples/lib/xex1.py.
 """
 from __future__ import annotations
 
@@ -11,39 +16,40 @@ import shutil
 import sys
 import threading
 import time
-from queue import Empty
 
-# Locate the SDK
+# Locate the SDK and the shared XEX1 decoder.
 HERE = os.path.dirname(os.path.abspath(__file__))
 SDK = os.path.normpath(os.path.join(HERE, "..", "..", "tools", "xinsp2_py"))
 sys.path.insert(0, SDK)
+sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "lib")))
 
 from xinsp2.client import Client, ProtocolError  # noqa: E402
+from xex1 import collect_frames, subscribe  # noqa: E402
 
 V1_SRC = os.path.join(HERE, "inspect_v1.cpp")
 V2_SRC = os.path.join(HERE, "inspect_v2.cpp")
 LIVE = os.path.join(HERE, "inspect.cpp")
 
+CHANNEL = "main"
 THRESHOLD_SENTINEL = 137  # arbitrary mid-range value to verify Param survives
 
 
-def items_by_name(items):
-    return {it["name"]: it for it in items}
-
-
-def vars_drainer(c: Client, sink: list, stop_evt: threading.Event):
-    """Background thread: pull every `vars` message off the SDK's queue,
-    timestamp it, append to `sink`."""
+def frames_drainer(c: Client, sink: list, stop_evt: threading.Event):
+    """Background thread: drain + decode every XEX1 frame the expose sink
+    pushes, timestamp it, append to `sink`."""
     while not stop_evt.is_set():
-        try:
-            msg = c._inbox_vars.get(timeout=0.05)
-        except Empty:
-            continue
-        sink.append({
-            "ts": time.monotonic(),
-            "run_id": msg.get("run_id"),
-            "items": msg.get("items", []),
-        })
+        got = False
+        for fr in collect_frames(c):
+            if fr.get("channel") != CHANNEL:
+                continue
+            sink.append({
+                "ts": time.monotonic(),
+                "seq": fr.get("seq"),
+                "values": fr.get("values", {}),
+            })
+            got = True
+        if not got:
+            time.sleep(0.02)
 
 
 def main():
@@ -53,17 +59,27 @@ def main():
     with Client() as c:
         print("[driver] connected", c.version())
 
+        # Open the project so the `expose` instance is created (the script
+        # routes output through xi::use("expose")).
+        c.open_project(HERE.replace("\\", "/"))
+        print("[driver] project opened (expose instance ready)")
+
         c.compile_and_load(LIVE.replace("\\", "/"))
         print("[driver] v1 compiled+loaded")
+
+        # Subscribe to the channel so the sink encodes + pushes its frames.
+        subscribe(c, [CHANNEL])
+        c.drain_binary()  # clear anything queued before we start measuring
+        print(f"[driver] subscribed to expose channel {CHANNEL!r}")
 
         # Bump threshold to a sentinel so we can verify it survives.
         c.set_param("threshold", THRESHOLD_SENTINEL)
         print(f"[driver] set threshold = {THRESHOLD_SENTINEL}")
 
-        # Start a background drainer for `vars` messages.
+        # Start a background drainer for expose frames.
         sink: list = []
         stop_evt = threading.Event()
-        t = threading.Thread(target=vars_drainer, args=(c, sink, stop_evt), daemon=True)
+        t = threading.Thread(target=frames_drainer, args=(c, sink, stop_evt), daemon=True)
         t.start()
 
         # Begin continuous mode.
@@ -71,10 +87,10 @@ def main():
         t_started = time.monotonic()
         print("[driver] cmd:start fps=20 issued")
 
-        # Collect ~2 s of vars events pre-reload.
+        # Collect ~2 s of frames pre-reload.
         time.sleep(2.0)
         n_pre_observed = len(sink)
-        print(f"[driver] pre-reload vars events: {n_pre_observed}")
+        print(f"[driver] pre-reload frames: {n_pre_observed}")
 
         # Swap on-disk source to v2 and call compile_and_load again.
         shutil.copyfile(V2_SRC, LIVE)
@@ -93,7 +109,7 @@ def main():
               f"(took {(t_reload_returned - t_pre_reload)*1000:.0f} ms)")
 
         # If backend stopped continuous mode on reload, restart it so we can
-        # still collect post-reload events; record that we had to.
+        # still collect post-reload frames; record that we had to.
         had_to_restart = False
         try:
             # ping/no-op probe — try start again; backend rejects if already running.
@@ -105,7 +121,7 @@ def main():
             # already running: the framework kept it up
             print(f"[driver] cmd:start after reload rejected (good): {e}")
 
-        # Collect ~2 s of vars events post-reload.
+        # Collect ~2 s of frames post-reload.
         time.sleep(2.0)
 
         # Stop, drain.
@@ -136,7 +152,7 @@ def main():
     post = [e for e in sink if e["ts"] >= t_reload_returned]
     boundary = [e for e in sink if t_pre_reload <= e["ts"] < t_reload_returned]
 
-    print(f"total vars events: {total}")
+    print(f"total expose frames: {total}")
     print(f"  pre-reload  ({t_pre_reload - t_started:.2f}s window): {len(pre)}")
     print(f"  during reload ({(t_reload_returned-t_pre_reload)*1000:.0f}ms gap): {len(boundary)}")
     print(f"  post-reload ({(sink[-1]['ts'] - t_reload_returned) if sink else 0:.2f}s window): {len(post)}")
@@ -144,17 +160,17 @@ def main():
     last_pre_count = None
     last_pre_threshold = None
     if pre:
-        last_items = items_by_name(pre[-1]["items"])
-        last_pre_count = last_items.get("count", {}).get("value")
-        last_pre_threshold = last_items.get("threshold", {}).get("value")
+        last_vals = pre[-1]["values"]
+        last_pre_count = last_vals.get("count")
+        last_pre_threshold = last_vals.get("threshold")
     print(f"last pre-reload count = {last_pre_count}, threshold = {last_pre_threshold}")
 
     first_post_count = None
     first_post_threshold = None
     if post:
-        first_items = items_by_name(post[0]["items"])
-        first_post_count = first_items.get("count", {}).get("value")
-        first_post_threshold = first_items.get("threshold", {}).get("value")
+        first_vals = post[0]["values"]
+        first_post_count = first_vals.get("count")
+        first_post_threshold = first_vals.get("threshold")
     print(f"first post-reload count = {first_post_count}, threshold = {first_post_threshold}")
 
     state_survived = (last_pre_count is not None and first_post_count is not None
@@ -165,9 +181,7 @@ def main():
     # version=2 first appearance among post events
     v2_offset = None
     for i, e in enumerate(post):
-        items = items_by_name(e["items"])
-        v = items.get("version", {}).get("value")
-        if v == 2:
+        if e["values"].get("version") == 2:
             v2_offset = i
             break
 
@@ -185,17 +199,17 @@ def main():
 
     print(f"state survived: {state_survived}")
     print(f"param survived: {param_survived}")
-    print(f"v2 version VAR appeared at post-event idx {v2_offset}")
+    print(f"v2 version field appeared at post-frame idx {v2_offset}")
     print(f"largest gap: {largest_gap_ms:.0f} ms (around reload? {largest_gap_around_reload})")
     print(f"ping after stop: {'ok' if ping_ok else 'FAIL'}")
     print(f"had to manually restart cmd:start after reload? {had_to_restart}")
 
     # acceptance
     acceptance = {
-        ">=30 vars events":           total >= 30,
+        ">=30 expose frames":         total >= 30,
         "state survived (count)":     state_survived,
         "param survived (threshold)": param_survived,
-        "version=2 within 5 events":  (v2_offset is not None and v2_offset < 5),
+        "version=2 within 5 frames":  (v2_offset is not None and v2_offset < 5),
         "ping ok after stop":         ping_ok,
     }
     print()

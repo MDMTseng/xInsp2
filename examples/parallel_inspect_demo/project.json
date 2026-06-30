@@ -24,6 +24,10 @@
     {
       "name": "cam_right",
       "plugin": "burst_source"
+    },
+    {
+      "name": "expose",
+      "plugin": "expose"
     }
   ],
   "plugins": {

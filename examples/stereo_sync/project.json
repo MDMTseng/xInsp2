@@ -5,6 +5,10 @@
     {
       "name": "stereo",
       "plugin": "synced_cam"
+    },
+    {
+      "name": "expose",
+      "plugin": "expose"
     }
   ],
   "plugins": {

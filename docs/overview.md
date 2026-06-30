@@ -73,7 +73,8 @@ script** that orchestrates them per frame. The bets:
    `xi::result(code, msg)` (the one verdict), and may forward to a PLC via a comm
    plugin. (`VAR(...)` still compiles but no longer publishes per-run values — that
    path was removed from core; surfacing per-run values/images for viewing is now
-   the shipped `preview` plugin's job — `PVAR` + `xi::preview::Sink`, see
+   the shipped `expose` plugin's job — build a `xi::Record` and call
+   `xi::use("expose").process(rec)`, see
    [`guides/write-a-script.md`](guides/write-a-script.md).)
 5. Emission is ordered per group (so the stream stays in frame order under parallel
    compute).
@@ -109,7 +110,7 @@ handling, dispatch pools, script lifecycle, crash filter.
   commit.
 - **`VAR(name, expr)` declares a local; reusing a name is a redefinition error**
   (`VAR(x, x)` → C2374). Common first-day gotcha. (Note: `VAR`/`EMIT` compile but
-  no longer output anything — per-run output goes through the `preview` plugin.)
+  no longer output anything — per-run output goes through the `expose` plugin.)
 
 ## Glossary
 

@@ -16,6 +16,10 @@
     {
       "name": "src_main",
       "plugin": "burst_source"
+    },
+    {
+      "name": "expose",
+      "plugin": "expose"
     }
   ],
   "plugins": {

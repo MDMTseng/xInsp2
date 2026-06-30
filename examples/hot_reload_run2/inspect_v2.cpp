@@ -3,6 +3,11 @@
 //
 // Same state field + same Param. Adds version=2 and half_count.
 //
+// Output path: VAR was removed from the core SDK. The script surfaces its
+// values to the `expose` sink under channel "main" via
+// xi::use("expose").process(rec); the driver subscribes + decodes the
+// XEX1 frames.
+//
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
 
@@ -15,9 +20,12 @@ void xi_inspect_entry(int /*frame*/) {
 
     int t_val = threshold_p;
 
-    VAR(count, next);
-    VAR(threshold, t_val);
-    VAR(triggered, next >= t_val);
-    VAR(version, 2);
-    VAR(half_count, next / 2);
+    xi::Record rec;
+    rec.set("count", next)
+       .set("threshold", t_val)
+       .set("triggered", next >= t_val)
+       .set("version", 2)
+       .set("half_count", next / 2);
+    rec.set("$channel", "main");
+    xi::use("expose").process(rec);
 }

@@ -81,9 +81,9 @@ load-bearing contract that lives only in a comment/convention.
   forced through `image_create`) — needs an ABI bump + migrating any in-place plugin.
 - ~~**canon-dedup mapping rebuilt independently on backend + each client**~~
   **(MOOT).** This concerned the `vars` frame +
-  binary preview dedup path, which has been removed from core (image preview moved
-  to the shipped `preview` plugin). Left here for history; revisit only if the preview
-  plugin reintroduces backend-side gid dedup.
+  binary preview dedup path, which has been removed from core (script data-out moved
+  to the shipped `expose` plugin). Left here for history; revisit only if the `expose`
+  plugin reintroduces backend-side per-image dedup.
 - **Non-finite sentinel / json-escape replicated per producer-consumer** (theme A).
   C++ is mostly centralized, but each plugin's `io.hpp` + the JS side re-implement it;
   a new producer that forgets the sentinel emits a bare `NaN` token and the whole
@@ -128,7 +128,8 @@ load-bearing contract that lives only in a comment/convention.
   crash breadcrumbs ~100-200ns and necessary. No tax-when-unused worth gating. (The
   one latent idea — a fully headless run, zero clients connected, still did
   per-run snapshot/emit work for nobody — is now moot: the `vars`/preview emit
-  path was removed from core entirely.)
+  path was removed from core entirely; script data-out is now the `expose` plugin,
+  which only encodes a channel when it has a subscriber.)
 
 ## Won't fix (under current policy)
 
@@ -138,8 +139,8 @@ load-bearing contract that lives only in a comment/convention.
   doesn't fix the real UB, only TSan noise. Revisit only if parallel doc-sharing
   becomes a real path.
 - ~~Per-connection subscription set (multi-client preview stomp)~~ — moot:
-  deployment is single-client, and the `subscribe`/preview path was removed from
-  core.
+  deployment is single-client, and the core `subscribe`/preview path was removed
+  from core; `expose` tracks its channel subscriptions plugin-side.
 - Verifying plugin self-declared `reentrant` / `XI_PLUGIN_STAGED` — plugins are
   trusted; this would be a hostile-plugin defense.
 

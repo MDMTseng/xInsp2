@@ -29,16 +29,19 @@ index.html?ws=ws://<host>:<port>/&dashboard=./dashboard.json
 | File | Role |
 |---|---|
 | `index.html` | shell: top bar + connection badge + grid container |
-| `app.mjs` | WS host — connect, decode the stream, lay out the grid, `feed()` cards |
-| `protocol.mjs` | pure decoders (vars message + 20-byte preview frame header) — unit-tested |
-| `layout.mjs` | the recursive split-pane tree (pure: classify / traverse / validate) — unit-tested |
-| `cards.mjs` | built-in cards as web components: `verdict` `value` `image` `spc` `throughput` `yield` `groups` |
-| `dashboard.json` | the layout: a **split-pane tree** of `{split:"row"\|"col",ratio,a,b}` nodes with `{card:{type,bind,config}}` leaves |
+| `app.mjs` | WS host — connect, consume the generic event stream, lay out the grid, `feed()` cards |
+| `lib/xi-components.esm.js` | vendored ui-components bundle: the `xi-*` elements, cards, and layout engine |
+| `dashboard.json` | the layout: a **split-pane tree** of `{dir:"row"\|"col",weights,children}` nodes with `{card:{type,bind,config}}` leaves |
 | `demo/` | a source-less project whose script emits a synthetic live stream |
 
-**Data model:** the inspection *script* computes everything (verdict, metrics,
-image) and emits them as `VAR`s. Cards just **bind to a var name** — no logic in
-the HMI. To change a verdict rule, change the script.
+The cards, layout engine, and `XiClient` now live in the shared
+[`ui-components`](../ui-components/) library; the HMI vendors the built bundle.
+
+**Data model:** the HMI is a **generic dashboard host** — it consumes only the
+`run_result` / `run_finished` / `status` events and `dispatch_stats`, and feeds
+the built-in `verdict` / `yield` / `throughput` / `groups` cards. It carries
+**no** preview/vars/gid decoding: a plugin's own webUI renders per-frame
+value/image tiles from the binary frames it decodes itself.
 
 **Dashboard source:** on connect the HMI asks the backend for the *project's*
 dashboard (`cmd:get_dashboard` → `<project>/dashboard.json`, or
@@ -48,13 +51,13 @@ So in production the HMI needs **only the BE WS URL** — it pulls the dashboard
 the data from the backend, no filesystem coupling.
 
 ```
-test:  node hmi/test/protocol.test.mjs && node hmi/test/layout.test.mjs
+test:  cd ui-components && npm test      # cards/layout/client tests live with the library
 ```
 
 ## Scope
 
 - **v1.0:** RUN mode — render a split-pane `dashboard.json` against a live
-  backend; the six built-in cards; bind-to-var.
+  backend; the built-in generic cards (`verdict` / `yield` / `throughput` / `groups`).
 - **v1.1 (this):** Compose mode — toggle **✎ Compose** in the header, then per
   pane: **+⬌ / +⬍** add a pane (an N-pane row/column, each weight set by dragging
   the blue dividers), **⊞** wrap the pane in **tabs/pages** (add `+` / remove `✕` /

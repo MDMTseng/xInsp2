@@ -1,5 +1,15 @@
 # burst_pipeline — FL測試 round 5
 
+> **Migration note (SDK vars-purge).** The Python SDK is now generic and no
+> longer collects script VARs or image previews. The inspect script was
+> re-instrumented to surface its computed values (`active`, `seq`,
+> `latency_us`, `kind`, ...) to the `expose` plugin on channel `"pipe"`,
+> and the driver now subscribes to that channel and decodes the XEX1
+> frames (via `examples/lib/xex1.py`) instead of reading VAR events. The
+> measured numbers below are unchanged in meaning — each decoded frame is
+> one inspect, exactly as each VAR event was. Friction entries F-1 and F-3
+> below are historical (they refer to the original VAR-based authoring).
+
 ## Outcome — three sweeps
 
 Each sweep: 2.0 s `cmd:start fps=60`, source emits 320x240 grayscale,
@@ -61,7 +71,7 @@ signal. As-is, polling `queue_depth_max` adds nothing that isn't in
 project.json. See F-2.
 
 **Plugin reentrance under N=4 worked silently.** No data races
-observed (every seq stamp landed in its own VAR; no torn reads), but
+observed (every seq stamp landed in its own expose frame; no torn reads), but
 that's because both my plugins are written reentrancy-safe (only state
 is `std::atomic<int>` counter). I'm certain a plugin author would
 write a non-atomic counter on first attempt and not notice the
@@ -73,7 +83,7 @@ acknowledgement but it leaves a footgun.
 **What a real production user would need that's missing:**
 - A `queue_depth_high_watermark` value in dispatch_stats (real
   observed peak), separate from the configured cap.
-- A live `vars/sec` rate published by the dispatcher (not derivable
+- A live `frames/sec` rate published by the dispatcher (not derivable
   cheaply from the wire because clients drain at their own pace).
 - An optional warning when `dispatch_threads > 1` is enabled while
   any in-flight plugin instance lacks `manifest.thread_safe: true` —

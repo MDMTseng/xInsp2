@@ -1,0 +1,5 @@
+{
+  "plugin": "expose",
+  "isolation": "in_process",
+  "config": {}
+}

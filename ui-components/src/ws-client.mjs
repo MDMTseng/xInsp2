@@ -1,17 +1,14 @@
 //
-// ws-client.mjs — the shared WS-client shim for the xInsp2 UI component library
-// (task #72). Framework-agnostic: the xi-* web components AND any external webapp
-// (library-import) use this so nobody reimplements the protocol.
+// ws-client.mjs — the shared, GENERIC WS-client shim for the xInsp2 UI component
+// library. Framework-agnostic: the xi-* web components AND any external webapp /
+// plugin webUI (library-import) use this so nobody reimplements the transport.
 //
-// Covers: connect + fail-fast version check, request/response correlation, the
-// orchestrator/config verbs, `vars`/`instances`/`log`/`event` subscriptions, and
-// decoded binary preview frames. Browser-first (uses the global WebSocket); a
-// node test can inject one via opts.WebSocketImpl.
+// It owns ONLY the generic protocol surface: connect + fail-fast version check,
+// request/response correlation (`cmd`/`exchange` + convenience verbs), the
+// `instances`/`log`/`event` text subscriptions, and a raw binary passthrough
+// (`onBinary`). It does NOT decode application frames — a plugin's own webUI
+// decodes the binary frames it asked for. See docs/reference/ws-protocol.md.
 //
-// See docs/roadmap/webui-and-ui-export.md + docs/reference/ws-protocol.md.
-//
-
-import { parseVars, decodePreviewFrame } from "./protocol.mjs";
 
 export class XiClient {
   /**
@@ -26,33 +23,9 @@ export class XiClient {
     this._id = 0;
     this._pending = new Map();          // id -> {resolve, reject}
     this._listeners = {                 // type -> Set<cb>
-      vars: new Set(), instances: new Set(), log: new Set(),
-      event: new Set(), preview: new Set(), hello: new Set(),
+      instances: new Set(), log: new Set(), event: new Set(), hello: new Set(),
+      binary: new Set(),
     };
-    this._imgSubs = new Map();           // var name -> open-viewer count
-  }
-
-  // --- preview subscription (ref-counted) ---------------------------------
-  // The backend sends NO image previews by default — encode + transmit only
-  // happens for names someone is actually viewing. A component calls
-  // subscribeImage(name) when it shows an image and unsubscribeImage(name) when
-  // it hides/unmounts; we ref-count so M viewers of one name → one subscription,
-  // and push the union to the backend. Re-asserted on (re)connect.
-  subscribeImage(name) {
-    if (!name) return;
-    const n = (this._imgSubs.get(name) || 0) + 1;
-    this._imgSubs.set(name, n);
-    if (n === 1) this._pushImageSubs();
-  }
-  unsubscribeImage(name) {
-    if (!name) return;
-    const n = (this._imgSubs.get(name) || 0) - 1;
-    if (n <= 0) { if (this._imgSubs.delete(name)) this._pushImageSubs(); }
-    else this._imgSubs.set(name, n);
-  }
-  _pushImageSubs() {
-    if (!this.ws || this.ws.readyState !== 1) return;   // re-asserted on connect
-    this.cmd("subscribe", { names: [...this._imgSubs.keys()] }).catch(() => {});
   }
 
   // Open the socket; resolves once it's open. If opts.checkVersion is set, also
@@ -83,9 +56,6 @@ export class XiClient {
               : (opts.checkVersion instanceof RegExp ? opts.checkVersion.test(v) : v === opts.checkVersion);
             if (!ok) { reject(new Error(`backend version mismatch: got ${v}`)); ws.close(); return; }
           }
-          // Re-assert any standing image subscriptions (the backend defaults to
-          // send-none and clears subs for a fresh connection).
-          if (this._imgSubs.size) this._pushImageSubs();
           resolve(this);
         } catch (e) { reject(e); }
       };
@@ -94,9 +64,10 @@ export class XiClient {
 
   _onMessage(ev) {
     const data = ev.data;
-    // Binary preview frame.
+    // Raw binary frame — hand the bytes straight through; consumers decode their
+    // own application frames (this client stays protocol-generic).
     if (data instanceof ArrayBuffer || (typeof Buffer !== "undefined" && data instanceof Buffer)) {
-      try { this._deliverPreview(decodePreviewFrame(data)); } catch { /* short frame */ }
+      this._emit("binary", data);
       return;
     }
     let msg;
@@ -110,26 +81,7 @@ export class XiClient {
       }
       return;
     }
-    if (msg.type === "vars") { this._emit("vars", parseVars(msg)); return; }
     if (this._listeners[msg.type]) this._emit(msg.type, msg);
-  }
-
-  // Decode each preview frame ONCE here and share the GC-managed <img> to every
-  // consumer (the backend already sends one frame per canon image, so this is one
-  // JPEG decode per image instead of one per component). Consumers hold the
-  // reference while they show it; GC reclaims when nothing references it — no
-  // close, no ring. In non-browser/jsdom (tests) we skip the decode and emit the
-  // dataUrl as before; a consumer there falls back to decoding it itself.
-  _deliverPreview(frame) {
-    const realBrowser = typeof window !== "undefined" && typeof Image !== "undefined"
-      && !/jsdom/i.test((typeof navigator !== "undefined" && navigator.userAgent) || "");
-    if (!realBrowser) { this._emit("preview", frame); return; }
-    const img = new Image();
-    let done = false;
-    const fire = () => { if (done) return; done = true; this._emit("preview", frame); };
-    img.onload  = () => { frame.image = img; fire(); };   // shared decoded handle
-    img.onerror = fire;                                    // fall back to dataUrl
-    img.src = frame.dataUrl;
   }
 
   _parseData(d) {
@@ -175,11 +127,11 @@ export class XiClient {
     set.add(cb);
     return () => set.delete(cb);
   }
-  onVars(cb)      { return this.on("vars", cb); }
   onInstances(cb) { return this.on("instances", cb); }
   onLog(cb)       { return this.on("log", cb); }
   onEvent(cb)     { return this.on("event", cb); }
-  onPreview(cb)   { return this.on("preview", cb); }
+  // Raw binary passthrough: handler(data) gets the ArrayBuffer/Buffer untouched.
+  onBinary(cb)    { return this.on("binary", cb); }
 
   _emit(type, payload) { for (const cb of this._listeners[type]) { try { cb(payload); } catch { /* listener threw */ } } }
 

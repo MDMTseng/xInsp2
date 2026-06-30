@@ -2,6 +2,6 @@
   "name": "qa_result_order_completion",
   "script": "inspect.cpp",
   "params": [],
-  "instances": [],
+  "instances": [ { "name": "expose", "plugin": "expose" } ],
   "parallelism": { "dispatch_threads": 4, "queue_depth": 200, "overflow": "drop_oldest", "result_order": "completion" }
 }

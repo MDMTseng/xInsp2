@@ -36,6 +36,24 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 SDK = REPO_ROOT / "tools" / "xinsp2_py"
 sys.path.insert(0, str(SDK))
+# Shared XEX1 decoder for the `expose` plugin (the VAR replacement). The SDK is
+# generic and decodes no plugin payloads; scripts now surface values/images via
+# xi::use("expose").process(rec) and a consumer pulls them back here.
+sys.path.insert(0, str(ROOT.parents[0] / "lib"))
+from xex1 import pull_latest, subscribe  # noqa: E402
+
+
+def _pull_value(c, channel, key, retries=20, delay=0.1):
+    """Poll the expose `get` view for channel until `key` appears (or give up).
+    Robust against the binary push racing the cmd:run rsp."""
+    for _ in range(retries):
+        fr = pull_latest(c, channel)
+        if fr is not None:
+            vals = fr.get("values") or {}
+            if key in vals:
+                return vals.get(key)
+        time.sleep(delay)
+    return None
 
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 BACKEND_EXE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{EXE_SUFFIX}"
@@ -171,8 +189,13 @@ def case_AS_I1() -> list[str]:
 
 def case_AS_I2() -> list[str]:
     """AS-I2 — --autostart-fps=N starts CONTINUOUS mode. A late client sees
-    vars frames flowing on their own (no cmd:run), proving the timer pump is
-    running."""
+    inspects completing on their own (no cmd:run), proving the timer pump is
+    running.
+
+    VAR/`vars` frames were purged from the core, so we no longer watch
+    `_inbox_vars`; instead we count the `run_finished` lifecycle events the
+    backend brackets every continuous tick with — unsolicited proof the pump
+    is turning."""
     from xinsp2 import Client  # noqa: E402
     f: list[str] = []
     port = 7851
@@ -188,16 +211,23 @@ def case_AS_I2() -> list[str]:
         txt = read_log(log)
         if "autostart: start 10 fps" not in txt:
             f.append("AS-I2: log missing 'autostart: start 10 fps'")
-        # Attach a passive client and watch unsolicited vars accumulate. The
-        # backend pushes a 'vars' message per continuous frame; the client
-        # buffers them in _inbox_vars. We never call run() (that would drain).
+        # Attach a passive client and watch unsolicited run_finished events
+        # accumulate. The backend emits one per continuous tick (broadcast), so
+        # they land in _inbox_events without us calling run().
         with Client(url=f"ws://127.0.0.1:{port}/", timeout=30.0) as c:
             time.sleep(0.5)
-            c._drain(c._inbox_vars)             # zero the baseline
-            time.sleep(2.0)                      # ~20 frames at 10 fps
-            got = c._inbox_vars.qsize()
+            c._drain(c._inbox_events)            # zero the baseline
+            time.sleep(2.0)                      # ~20 ticks at 10 fps
+            got = 0
+            while True:
+                try:
+                    ev = c._inbox_events.get_nowait()
+                except Exception:
+                    break
+                if ev.get("name") == "run_finished":
+                    got += 1
         if got < 3:
-            f.append(f"AS-I2: continuous mode not pumping vars (saw {got} in 2s, want >=3)")
+            f.append(f"AS-I2: continuous mode not pumping (saw {got} run_finished in 2s, want >=3)")
         if proc.poll() is not None:
             f.append(f"AS-I2: backend exited (rc={proc.returncode})")
     finally:
@@ -208,7 +238,8 @@ def case_AS_I2() -> list[str]:
 def case_AS_I3() -> list[str]:
     """AS-I3 — --script override. Starting with --script=alt_inspect.cpp must
     compile THAT file, not project.json's inspect.cpp. Proven by the 'script'
-    VAR: alt_inspect stamps 2, the default stamps 1."""
+    value surfaced via the `expose` plugin: alt_inspect stamps 2, the default
+    stamps 1 (the script reads it back through xi::use("expose"))."""
     from xinsp2 import Client  # noqa: E402
     f: list[str] = []
     port = 7852
@@ -224,10 +255,11 @@ def case_AS_I3() -> list[str]:
         if "alt_inspect.cpp" not in txt:
             f.append("AS-I3: log does not name alt_inspect.cpp as the compiled script")
         with Client(url=f"ws://127.0.0.1:{port}/", timeout=30.0) as c:
-            r = c.run(timeout=30)
-            marker = r.value("script", None)
+            subscribe(c, ["qa"])
+            c.run(timeout=30)
+            marker = _pull_value(c, "qa", "script")
         if marker != 2:
-            f.append(f"AS-I3: override script not active (script VAR={marker}, want 2)")
+            f.append(f"AS-I3: override script not active (script value={marker}, want 2)")
         if proc.poll() is not None:
             f.append(f"AS-I3: backend exited (rc={proc.returncode})")
     finally:
@@ -289,9 +321,10 @@ def case_AS_I7() -> list[str]:
                 f.append("AS-I7: late client got no version reply")
             if not c.ping():
                 f.append("AS-I7: late client ping failed")
-            r = c.run(timeout=30)
-            if r.value("count", None) is None:
-                f.append("AS-I7: late client run() returned no count VAR")
+            subscribe(c, ["qa"])
+            c.run(timeout=30)
+            if _pull_value(c, "qa", "count") is None:
+                f.append("AS-I7: late client run() surfaced no count value via expose")
     finally:
         safe_kill(proc, "xinsp-backend.exe")
     return f

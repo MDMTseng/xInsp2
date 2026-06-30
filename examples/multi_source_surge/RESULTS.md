@@ -27,16 +27,27 @@ Three concurrent stressors on the same project:
 ## Numbers
 
 Two parallelism sweeps; each runs `cmd:start fps=200` (driver-timer
-tick, sources have their own fps) and drives both surges. Last
+tick, sources have their own fps) and drives both surges.
+
+The per-event VAR model was removed from core, so this driver no longer
+reads script-side latency VARs. Throughput is counted from the backend's
+`run_finished` lifecycle events (one per dispatched inspect), and
+per-source attribution comes from a tiny per-inspect record the script
+pushes to the `expose` sink (channel `runs`), decoded via
+`examples/lib/xex1.py`. The end-to-end latency columns are gone with the
+VARs; the queue/drop columns now read the real `dispatch_stats` fields
+(`dropped`, `queue_depth_high_watermark`, `queue_depth_cap`). Last
 representative run:
 
-| Sweep | N | Q | active inspects | drops (this sweep) | qmax | lat_mean_us | lat_p95_us | thr/s |
-|---|---|---|---|---|---|---|---|---|
-| A-serial-N1-q32   | 1 |  32 | 175 | 619 |  32 | 193,413 | 234,415 |  43.7 |
-| B-parallel-N8-q128| 8 | 128 | 552 |  71 | 128 | 159,545 | 615,369 | 137.8 |
+| Sweep | N | Q | active inspects | run_finished/s | drops (this sweep) | qmax |
+|---|---|---|---|---|---|---|
+| A-serial-N1-q32   | 1 |  32 | 175 |  43.7 | 619 |  32 |
+| B-parallel-N8-q128| 8 | 128 | 552 | 137.8 |  71 | 128 |
 
-**Speedup (B vs A): 3.15x.** Wider queue + 8 dispatch threads turn
-~3.5x more frames into completed inspects and shrink drops by ~9x.
+**Speedup (B vs A): 3.15x** on `run_finished`/s. Wider queue + 8
+dispatch threads turn ~3.5x more frames into completed inspects and
+shrink drops by ~9x. (`active inspects` = expose frames decoded = one
+per active inspect.)
 
 ### Per-source attribution (active inspects only)
 
@@ -49,7 +60,10 @@ representative run:
 `inspect.cpp` (burst goes to both detectors, others go to one)
 holds across N=1 and N=8. `used_fast == steady + burst` and
 `used_slow == burst + variable` — the four arithmetic invariants
-all match. Per-source attribution **survives** parallel dispatch.
+all match. Per-source attribution **survives** parallel dispatch, even
+though it now travels out of the script via the `expose` sink rather
+than a VAR (the `src` / `used_fast` / `used_slow` fields are decoded
+from the `runs` channel's XEX1 frames).
 
 ### Hot-reload mid-run
 
@@ -107,19 +121,25 @@ record `before = dispatch_stats(); start(); ...; after =
 dispatch_stats()` and subtract, you get nonsense whenever the
 previous sweep accumulated drops the new `cmd:start` cleared. **This
 bit me for one full run** — sweep B reported drops = -548 (negative)
-the first time. The fix is either (a) document that drop counters
-are scoped to the most recent cmd:start window and don't subtract,
-or (b) carry a `since_start_id` so callers can detect the reset.
-See FRICTION.md P1-3.
+the first time. This driver reads the post-stop snapshot as the
+per-sweep total and does not subtract. The real field is `dropped`
+(a single per-run overflow counter); the lifetime totals live on
+`dropped_lifetime` / `queue_depth_high_watermark_lifetime` if you need
+them. The fix is either (a) document that drop counters are scoped to
+the most recent cmd:start window and don't subtract, or (b) carry a
+`since_start_id` so callers can detect the reset. See FRICTION.md P1-3.
 
-### `VAR(name, expr)` collides with locals named `name`
+### Script output now flows through the `expose` sink, not VAR
 
-Because `VAR(x, expr)` expands to `auto x = ...track("x", (expr))`,
-you can't write `VAR(src_name, src_name)` to surface a local
-variable — the macro re-declares it. I had to rename my local to
-`source` and write `VAR(src_name, source)`. This is a footgun with
-no compile-time hint pointing you at the cause; cl.exe just barfs
-"redefinition: multiple initialization." Detail in FRICTION.md P2-1.
+The per-event `VAR(name, expr)` model was removed from core. To get the
+per-source attribution out of the script we push a small `xi::Record`
+to the `expose` plugin instance each active inspect
+(`xi::use("expose").process(rec)` with the channel under the reserved
+`"$channel"` key). The driver subscribes to that channel and decodes the
+self-describing XEX1 binary frames with the shared
+`examples/lib/xex1.py` helper. This also retired the old
+`VAR(name, name)` shadow footgun — there is no macro re-declaring a
+local any more. Detail in FRICTION.md.
 
 ### Hot-reload across multiple instances is solid
 

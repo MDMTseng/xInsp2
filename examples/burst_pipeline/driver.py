@@ -10,14 +10,22 @@ For each sweep:
   - open_project (forces backend to re-read parallelism config).
   - compile_and_load inspect.cpp.
   - Snapshot dispatch_stats (baseline).
+  - subscribe to the expose channel "pipe".
   - cmd:start fps=60.
-  - Drain vars events for 2.0 s.
+  - Collect (decode) expose frames for 2.0 s.
   - Snapshot dispatch_stats (final).
   - cmd:stop, drain residue.
   - Print per-sweep summary.
 
 Compute throughput, drops, mean/median latency_us, then a comparison
 table at the end.
+
+Data path: the Python SDK is now generic and no longer collects script
+VARs. The inspect script surfaces what it computes (active, seq,
+latency_us, kind, ...) to the `expose` plugin on channel "pipe"; this
+driver subscribes to that channel, drains the raw binary WS frames, and
+decodes them with the shared XEX1 decoder (examples/lib/xex1.py). Each
+decoded frame's "values" dict is what we used to read out of VARs.
 """
 from __future__ import annotations
 
@@ -26,7 +34,10 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from queue import Empty
+
+# Shared XEX1 / expose-frame decoder (examples/lib/xex1.py).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from xex1 import collect_frames, subscribe  # noqa: E402
 
 from xinsp2 import Client, ProtocolError
 
@@ -34,6 +45,7 @@ ROOT = Path(__file__).parent
 PROJECT_JSON = ROOT / "project.json"
 INSPECT_CPP  = ROOT / "inspect.cpp"
 
+CHANNEL    = "pipe"
 DURATION_S = 2.0
 FPS        = 60
 
@@ -50,29 +62,34 @@ def write_parallelism(dispatch_threads: int, queue_depth: int,
 
 
 def collect_vars(c: Client, duration_s: float) -> list[dict]:
-    events = []
+    """Decode expose frames pushed on CHANNEL for `duration_s`.
+
+    Returns one flat dict per frame — the frame's decoded "values"
+    (active, seq, latency_us, ...) with the wire seq stashed under
+    "_run_id" for parity with the old VAR-event shape.
+    """
+    events: list[dict] = []
     deadline = time.time() + duration_s
     while time.time() < deadline:
-        rem = deadline - time.time()
-        try:
-            ev = c._inbox_vars.get(timeout=min(0.5, max(0.05, rem)))
-        except Empty:
+        for frame in collect_frames(c):
+            if frame.get("channel") != CHANNEL:
+                continue
+            flat = dict(frame.get("values") or {})
+            flat["_run_id"] = frame.get("seq")
+            events.append(flat)
+        time.sleep(0.01)
+    # Final sweep for frames that landed right at the deadline.
+    for frame in collect_frames(c):
+        if frame.get("channel") != CHANNEL:
             continue
-        flat = {}
-        for it in ev.get("items") or []:
-            flat[it["name"]] = it.get("value")
-        flat["_run_id"] = ev.get("run_id")
+        flat = dict(frame.get("values") or {})
+        flat["_run_id"] = frame.get("seq")
         events.append(flat)
     return events
 
 
 def drain(c: Client) -> None:
-    for q in (c._inbox_vars, c._inbox_previews):
-        try:
-            while True:
-                q.get_nowait()
-        except Empty:
-            pass
+    c.drain_binary()
 
 
 def summarise(events: list[dict], stats_before: dict, stats_after: dict,
@@ -101,7 +118,7 @@ def summarise(events: list[dict], stats_before: dict, stats_after: dict,
     throughput = n_active / duration_s if duration_s > 0 else 0.0
 
     print(f"[{label}]")
-    print(f"  vars events received           : {n_total}")
+    print(f"  expose frames received         : {n_total}")
     print(f"  active inspects (with seq)     : {n_active}")
     print(f"  inactive (timer-only ticks)    : {n_inactive}")
     print(f"  unique seq values              : {len(seqs_sorted)}")
@@ -142,6 +159,12 @@ def run_sweep(c: Client, label: str, dispatch_threads: int, queue_depth: int) ->
 
     c.compile_and_load(str(INSPECT_CPP))
     print("  inspect.cpp compiled")
+
+    # Subscribe to the expose channel so the sink actually pushes frames
+    # (subscription gating: no subscriber -> no encode, no push). The
+    # project was just reopened, so the expose instance is fresh and its
+    # subscription set is empty until we (re)subscribe here.
+    subscribe(c, [CHANNEL])
 
     # Let the source warm up before starting (it auto-runs at instance
     # ctor; give it ~200 ms to push frames into the bus).

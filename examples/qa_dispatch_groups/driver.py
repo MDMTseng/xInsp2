@@ -58,11 +58,20 @@ def main() -> int:
         c.compile_and_load(str(ROOT / "inspect.cpp"), timeout=300)
         c.call("start", {"fps": 20})
 
-        # let lanes run a bit
+        # Let lanes run a bit. VAR() is a no-op in this core (the vars wire
+        # channel was purged), so we no longer count `vars` frames. Instead we
+        # count `run_finished` events — the backend brackets every inspect with
+        # run_started/run_finished, so one per completed grouped continuous tick.
+        # That an inspect COMPLETED is the proof a lane actually ran.
         ran = 0
-        for _ in range(20):
-            if c.next_vars(timeout=1): ran += 1
-            if ran >= 5: break
+        end = time.time() + 20.0
+        while time.time() < end and ran < 5:
+            try:
+                ev = c._inbox_events.get(timeout=max(0.05, end - time.time()))
+            except Exception:
+                break
+            if ev.get("name") == "run_finished":
+                ran += 1
 
         st = c.call("dispatch_stats")
         print("dispatch_stats:", {k: st.get(k) for k in ("dispatch_threads",)}, "groups=", st.get("groups"))
@@ -80,8 +89,8 @@ def main() -> int:
             for g in groups:
                 for f in ("running", "queue_now", "high_watermark", "dropped"):
                     if f not in g: fails.append(f"group {g.get('name')} missing field {f}")
-        if ran < 1: fails.append("no vars flowed under grouped continuous mode")
-        print(f"  vars seen: {ran}")
+        if ran < 1: fails.append("no inspects completed under grouped continuous mode")
+        print(f"  inspects completed (run_finished): {ran}")
         c.call("stop")
         c.call("close_project")
         c.close()
@@ -180,8 +189,11 @@ def main() -> int:
     # odd fast) makes completions scramble. In "arrival" mode the gate must still
     # emit run_result in run_id order (0 inversions); a "completion" control proves
     # the workload really does scramble (so arrival's 0 isn't vacuous).
+    # VAR was purged; the ordering check keys off run_result events (emitted per
+    # inspect by run_id), so the body just needs the anti-correlated sleep that
+    # scrambles completion order.
     SLOW_VAR = ("#include <xi/xi.hpp>\n#include <thread>\n#include <chrono>\n"
-                "XI_SCRIPT_EXPORT void xi_inspect_entry(int frame){ VAR(frame_n,frame);"
+                "XI_SCRIPT_EXPORT void xi_inspect_entry(int frame){"
                 " std::this_thread::sleep_for(std::chrono::milliseconds(frame%2==0?60:8)); }\n")
 
     def order_run(sub, result_order, port):

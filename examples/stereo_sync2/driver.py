@@ -16,24 +16,22 @@ from __future__ import annotations
 import os
 import sys
 import time
-from queue import Empty
 
-# Make the SDK importable when running directly: python driver.py
+# Make the SDK + shared xex1 decoder importable when running directly.
 _THIS = os.path.dirname(os.path.abspath(__file__))
 _SDK  = os.path.normpath(os.path.join(_THIS, "..", "..", "tools", "xinsp2_py"))
-if _SDK not in sys.path:
-    sys.path.insert(0, _SDK)
+_LIB  = os.path.normpath(os.path.join(_THIS, "..", "lib"))   # examples/lib
+for _p in (_SDK, _LIB):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from xinsp2.client import Client, ProtocolError  # noqa: E402
+from xex1 import collect_frames, subscribe       # noqa: E402
 
 
 PROJECT_DIR = _THIS.replace("\\", "/")
 SCRIPT_PATH = os.path.join(PROJECT_DIR, "inspect.cpp").replace("\\", "/")
 SOAK_SECONDS = 5.0
-
-
-def _vars_to_dict(items):
-    return {it["name"]: it.get("value") for it in items}
 
 
 def main():
@@ -51,11 +49,10 @@ def main():
         print("[driver] compile_and_load ...")
         c.compile_and_load(SCRIPT_PATH)
 
-        # 3. Drain stale messages so we only count the soak window.
-        for q in (c._inbox_vars, c._inbox_previews):
-            while True:
-                try: q.get_nowait()
-                except Empty: break
+        # 3. Gate the expose sink to push the "pairs" channel, then drain stale
+        #    binary frames so we only count the soak window.
+        subscribe(c, ["pairs"])
+        c.drain_binary()
 
         # 4. Start continuous mode. fps is the timer-fallback rate; with
         #    the trigger bus active it just upper-bounds the wait, so a
@@ -63,16 +60,15 @@ def main():
         print("[driver] start (continuous) ...")
         c.call("start", {"fps": 30})
 
-        # 5. Observe vars for SOAK_SECONDS.
+        # 5. Observe expose frames (channel "pairs") for SOAK_SECONDS — one
+        #    XEX1 frame per continuous-mode inspect cycle.
         cycles = []
         deadline = time.monotonic() + SOAK_SECONDS
         while time.monotonic() < deadline:
-            try:
-                msg = c._inbox_vars.get(timeout=0.2)
-            except Empty:
-                continue
-            d = _vars_to_dict(msg.get("items", []))
-            cycles.append(d)
+            time.sleep(0.05)
+            for fr in collect_frames(c):
+                if fr.get("channel") == "pairs":
+                    cycles.append(dict(fr.get("values") or {}))
 
         # 6. Stop.
         print("[driver] stop ...")

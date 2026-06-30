@@ -26,92 +26,16 @@
 
 namespace xi::proto {
 
-// ---------- common enums ----------
+// NOTE: the `vars` wire enum (VarKindWire) + VarItem/Vars structs were removed
+// with the v9 vars/value-store teardown — nothing emits a `vars` frame anymore.
+// Script output now leaves as the `expose` plugin's self-framed XEX1 binary
+// frame (plugins/expose/src/expose.cpp), not a core protocol type.
 
-enum class VarKindWire : uint8_t {
-    Image   = 0,
-    Number  = 1,
-    Boolean = 2,
-    String  = 3,
-    Json    = 4,
-    Custom  = 5,
-    Record  = 6,   // xi::Record VAR: {data, image_keys, images:{key->gid}}
-};
-
-inline const char* to_string(VarKindWire k) {
-    switch (k) {
-        case VarKindWire::Image:   return "image";
-        case VarKindWire::Number:  return "number";
-        case VarKindWire::Boolean: return "boolean";
-        case VarKindWire::String:  return "string";
-        case VarKindWire::Json:    return "json";
-        case VarKindWire::Custom:  return "custom";
-        case VarKindWire::Record:  return "record";
-    }
-    return "unknown";
-}
-
-inline std::optional<VarKindWire> parse_var_kind(std::string_view s) {
-    if (s == "image")   return VarKindWire::Image;
-    if (s == "number")  return VarKindWire::Number;
-    if (s == "boolean") return VarKindWire::Boolean;
-    if (s == "string")  return VarKindWire::String;
-    if (s == "json")    return VarKindWire::Json;
-    if (s == "custom")  return VarKindWire::Custom;
-    if (s == "record")  return VarKindWire::Record;
-    return std::nullopt;
-}
-
-enum class Codec : uint32_t {
-    JPEG = 0,
-    BMP  = 1,
-    PNG  = 2,
-};
-
-// ---------- binary preview header ----------
-
-struct PreviewHeader {
-    uint32_t gid;
-    uint32_t codec;      // Codec
-    uint32_t width;
-    uint32_t height;
-    uint32_t channels;
-};
-
-static constexpr size_t kPreviewHeaderSize = 20;
-
-// Big-endian helpers — WebSocket is byte-oriented but we fix endianness so
-// multiple clients (JS, Python, C++) agree.
-inline void write_u32_be(uint8_t* p, uint32_t v) {
-    p[0] = static_cast<uint8_t>((v >> 24) & 0xFF);
-    p[1] = static_cast<uint8_t>((v >> 16) & 0xFF);
-    p[2] = static_cast<uint8_t>((v >> 8)  & 0xFF);
-    p[3] = static_cast<uint8_t>( v        & 0xFF);
-}
-inline uint32_t read_u32_be(const uint8_t* p) {
-    return (static_cast<uint32_t>(p[0]) << 24) |
-           (static_cast<uint32_t>(p[1]) << 16) |
-           (static_cast<uint32_t>(p[2]) << 8)  |
-            static_cast<uint32_t>(p[3]);
-}
-
-inline void encode_preview_header(const PreviewHeader& h, uint8_t out[kPreviewHeaderSize]) {
-    write_u32_be(out + 0,  h.gid);
-    write_u32_be(out + 4,  h.codec);
-    write_u32_be(out + 8,  h.width);
-    write_u32_be(out + 12, h.height);
-    write_u32_be(out + 16, h.channels);
-}
-
-inline PreviewHeader decode_preview_header(const uint8_t in[kPreviewHeaderSize]) {
-    PreviewHeader h;
-    h.gid      = read_u32_be(in + 0);
-    h.codec    = read_u32_be(in + 4);
-    h.width    = read_u32_be(in + 8);
-    h.height   = read_u32_be(in + 12);
-    h.channels = read_u32_be(in + 16);
-    return h;
-}
+// NOTE: the old binary "preview header" (gid/codec/w/h/ch, 20-byte big-endian)
+// and its Codec enum were removed with the v9 vars/preview-core teardown. The
+// `expose` plugin now frames its own output as a self-describing XEX1 binary
+// frame (magic + msgpack; see plugins/expose/src/expose.cpp); the core is a dumb
+// byte pipe for it (host emit_binary → broadcast), so no core-side header type.
 
 // ---------- JSON string escape / unescape ----------
 
@@ -172,74 +96,6 @@ struct Rsp {
             json_escape_into(out, error);
         }
         out += "}";
-        return out;
-    }
-};
-
-struct VarItem {
-    std::string  name;
-    VarKindWire  kind;
-    // One of these is populated depending on kind:
-    std::string  value_json;    // number / json / custom (raw JSON)
-    std::string  value_str;     // string kind
-    bool         value_bool = false;
-    uint32_t     gid  = 0;      // image kind
-    bool         raw  = false;  // image kind
-
-    // NOTE: this serializer covers the NON-script (proto::) path only. The LIVE
-    // script vars frame is produced directly by xi_script_support.hpp's DLL
-    // snapshot — which also emits the image `src` canon field and the full
-    // `record` shape (data/image_keys/images). Don't treat this struct as the
-    // complete wire contract; see docs/reference/ws-protocol.md for that.
-    std::string to_json() const {
-        std::string out = "{\"name\":";
-        json_escape_into(out, name);
-        out += ",\"kind\":\"";
-        out += to_string(kind);
-        out += "\"";
-        switch (kind) {
-            case VarKindWire::Image:
-                out += ",\"gid\":"; out += std::to_string(gid);
-                out += ",\"raw\":"; out += raw ? "true" : "false";
-                break;
-            case VarKindWire::Number:
-            case VarKindWire::Json:
-            case VarKindWire::Custom:
-                out += ",\"value\":";
-                out += value_json.empty() ? "null" : value_json;
-                break;
-            case VarKindWire::String:
-                out += ",\"value\":";
-                json_escape_into(out, value_str);
-                break;
-            case VarKindWire::Boolean:
-                out += ",\"value\":";
-                out += value_bool ? "true" : "false";
-                break;
-            case VarKindWire::Record:
-                // Records are emitted via the script-support snapshot, not here.
-                out += ",\"data\":";
-                out += value_json.empty() ? "{}" : value_json;
-                break;
-        }
-        out += "}";
-        return out;
-    }
-};
-
-struct Vars {
-    int64_t                run_id;
-    std::vector<VarItem>   items;
-
-    std::string to_json() const {
-        std::string out = "{\"type\":\"vars\",\"run_id\":";
-        out += std::to_string(run_id);
-        out += ",\"items\":[";
-        for (size_t i = 0; i < items.size(); ++i) {
-            if (i) out += ",";
-            out += items[i].to_json();
-        }
-        out += "]}";
         return out;
     }
 };

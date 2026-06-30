@@ -81,8 +81,8 @@ Override with `TURBOJPEG_ROOT` / `IPP_ROOT`.
   under `examples/`, hit compile/run — the extension spawns the BE, compiles the
   script, and reports the run (verdict via `run_result`). (Per-run value/image
   streaming to a viewer was removed from core; it's now handled by the shipped
-  `preview` plugin — `PVAR`, see [`write-a-script.md`](write-a-script.md) or
-  `examples/preview_sink_demo`.)
+  `expose` plugin — `xi::use("expose").process(rec)`, see
+  [`write-a-script.md`](write-a-script.md).)
 - **Headless (what FE/production does):**
   ```powershell
   backend/build/Release/xinsp-backend.exe --project=examples/qa_group_parallelism --autostart-fps=-1
@@ -93,7 +93,7 @@ Override with `TURBOJPEG_ROOT` / `IPP_ROOT`.
 - **First change:** edit a project's `inspect.cpp` and re-run — the backend
   hot-reloads the DLL. Try an `xi::result(...)` (the live per-run verdict) in
   `examples/qa_run_result/inspect.cpp`. (`VAR(...)`/`EMIT(...)` still compile but
-  no longer surface anything — per-run output goes through the `preview` plugin.)
+  no longer surface anything — per-run output goes through the `expose` plugin.)
 - **Tests:** `python tools/run_qa.py` (all `examples/qa_*/driver.py`); `ctest` for
   the C++ unit tests. See `testing.md`.
 

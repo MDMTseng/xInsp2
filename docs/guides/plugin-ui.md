@@ -62,42 +62,39 @@ Higher-level helpers (also exported): `mountPanel` (auto-UI from a descriptor),
 > `subscribe`/`unsubscribe` commands and the binary image-preview frames that the
 > `onPreview` / `subscribeImage` flow below relied on have been **removed** from
 > the backend. Control wiring (params via `set_instance_def` / `exchange_instance`)
-> and `status` are unaffected and remain the live path. **Image surfacing for a
-> plugin UI now goes through the shipped `preview` plugin** (`plugins/preview`,
-> `sink:true`): its live contract is the `list_groups` / `get` / `get_image`
-> exchange commands (pull views) plus `XPV1` binary frames pushed via the ABI v8
-> `emit_binary` host call. See
-> [`write-a-script.md`](write-a-script.md) and
-> [`../reference/c-abi.md`](../reference/c-abi.md) (`emit_binary` v8 /
+> and `status` are unaffected and remain the live path. **Output surfacing for a
+> plugin UI now goes through the shipped `expose` plugin** (`plugins/expose`,
+> `sink:true`): its live contract is the `subscribe` / `unsubscribe` / `get` /
+> `list_channels` exchange commands plus one atomic `XEX1` binary frame per
+> channel pushed via the ABI v8 `emit_binary` host call. See
+> [`write-a-script.md`](write-a-script.md),
+> [`../reference/ws-protocol.md`](../reference/ws-protocol.md) (*The `expose`
+> plugin*), and [`../reference/c-abi.md`](../reference/c-abi.md) (`emit_binary` v8 /
 > `compress_image` v9). The `preview` message + `subscribeImage` examples below are
 > kept as the prior pattern for reference.
 
-#### The `preview` plugin's consumer contract
+#### The `expose` plugin's consumer contract
 
-A viewer drives the `preview` instance with three pull `exchange_instance`
-commands (latest-record-per-group state) plus a live binary push. From
-`plugins/preview/plugin.json` + `src/preview.cpp`:
+A viewer drives the `expose` instance over `exchange_instance` (subscription +
+pull) and receives a live binary push. Output is organised by string **channel
+id** (created implicitly on first send); a channel is the unit of subscription and
+of the UI tab. From `plugins/expose/plugin.json` + `src/expose.cpp`:
 
 | Command | Args | Returns |
 |---|---|---|
-| `list_groups` | — | `{ count, groups: { <pg>: { seen, image_count } } }` — drives the UI's group tabs |
-| `get` | `{ pg }` | `{ found, data ($layout + values), image_count }` — the group's latest record |
-| `get_image` | `{ pg, key }` | `{ found, w, h, channels, jpeg_b64 }` — a pull still for one image key |
+| `subscribe` | `{ channels: [...] }` | `ok` — start pushing frames for these channels |
+| `unsubscribe` | `{ channels: [...] }` | `ok` — stop pushing them |
+| `get` | `{ channel }` | `{ found, channel, seq, frame_b64 }` — base64 of the latest `XEX1` frame (pull) |
+| `list_channels` | — | channel/tab metadata for the UI tabs |
 
-Live images are also **pushed** as self-describing `XPV1` binary frames via the
-host `emit_binary` call (ABI v8), one per image as a group's record updates. The
-byte layout (little-endian `u16`):
-
-```
-[0..3]  'XPV1' (magic)
-[4..5]  u16 width      [6..7] u16 height
-[8]     u8  channels   [9]    u8  codec (1 = jpeg)
-[10]    u8  pg_len     [11]   u8  key_len
-[12..]  pg bytes | key bytes | jpeg payload
-```
-
-So a frame self-identifies its preview-group (`pg`) and field (`key`) — no
-side-channel needed to route it to the right tab/viewer.
+Per run, for each **subscribed** channel, the plugin pushes one self-contained
+`XEX1` binary frame (magic `XEX1` + msgpack `{v, channel, seq, json, images:[{key,
+jpeg}]}`) via the host `emit_binary` call (ABI v8). Values ride as a JSON string
+(`json`) in record key order; each image is JPEG-compressed in `images[]`. A frame
+self-identifies its `channel`, so a client filters broadcast frames to the right
+tab with no side-channel. Full frame spec:
+[`../reference/ws-protocol.md`](../reference/ws-protocol.md) (*The `expose`
+plugin*).
 
 ### A. Inside a VS Code plugin webview → `vscode.postMessage`
 
@@ -138,18 +135,18 @@ Outside the webview you have a direct WebSocket. Use the shim:
 import { XiClient } from "./xi-components.esm.js";
 const client = await new XiClient("ws://127.0.0.1:7823/").connect({ checkVersion: /\d+\.\d+\.\d+/ });
 slider.addEventListener("change", (e) => client.setInstanceDef("inst0", { threshold: e.detail.value }));
-client.onPreview((f) => viewer.setFrame(f.image || f.dataUrl));
-client.subscribeImage("gray");   // ← legacy: core no longer streams previews (see note below)
-// ...and when the view closes: client.unsubscribeImage("gray");
+client.onExpose((f) => viewer.setFrame(f.images[0]?.dataUrl));
+client.subscribe(["lane"]);   // ← expose channels (see note below)
+// ...and when the view closes: client.unsubscribe(["lane"]);
 ```
 
 > **Legacy (preview removed from core).** The `subscribe`/preview path the
-> snippet above uses no longer has a backend source: `subscribeImage` /
-> `unsubscribeImage` / `onPreview` mapped onto the removed `subscribe` command and
-> binary preview frame. The control + `status`
-> calls in the same snippet still work; only these image-streaming lines are inert;
-> live frames now come from the shipped `preview` plugin (`XPV1` via `emit_binary`).
-> The decode-once / `vars.src` dedup
+> snippet above replaces no longer has a backend source: the old `subscribeImage` /
+> `unsubscribeImage` / `onPreview` helpers mapped onto the removed core `subscribe`
+> command and binary preview frame. The control + `status`
+> calls still work; live frames now come from the shipped `expose` plugin — its
+> `subscribe`/`unsubscribe`/`get` exchange commands and the atomic `XEX1` frame
+> (`onExpose` / `decodeExposeFrame`). The decode-once / per-record dedup
 > behavior described next was part of that same removed path — retained here as
 > background.
 

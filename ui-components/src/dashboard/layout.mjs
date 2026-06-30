@@ -18,7 +18,7 @@ export const isSplit = (n) => !!(n && (n.dir === "row" || n.dir === "col") && Ar
 // child at a time behind a tab strip. Nests anywhere (a pane or the whole root).
 export const isTabs  = (n) => !!(n && Array.isArray(n.tabs) && n.tabs.length >= 1 && n.tabs.every((t) => t && t.child));
 
-export const emptyCard = () => ({ type: "value", bind: {}, config: { title: "(empty)" } });
+export const emptyCard = () => ({ type: "verdict", bind: {}, config: { title: "(empty)" } });
 
 // Raw (positive) weights aligned to children; missing/invalid → 1.
 function rawWeights(node) {

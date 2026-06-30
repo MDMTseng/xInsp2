@@ -27,8 +27,14 @@ python driver.py
 ```
 
 Driver runs the project twice — once with `dispatch_threads=1`
-(serial), once with `dispatch_threads=3` (parallel) — and reports
-inspect rate over a 4 s window.
+(serial), once with `dispatch_threads=3` (parallel) — and reports the
+active-inspect rate over a 4 s window. The per-event VAR model was
+removed from core, so each active (100 ms) inspect pushes one record to
+the `expose` sink on channel `runs`; the driver subscribes and counts
+the decoded XEX1 frames (`examples/lib/xex1.py`). Counting only active
+inspects — not raw `run_finished` events, which also fire for the cheap
+inactive timer ticks between source emits — is what makes the parallel
+speedup legible.
 
 ## Headline numbers (Win11, Release backend, 2026-05-10)
 
@@ -36,13 +42,14 @@ inspect rate over a 4 s window.
 |-----------------------|--------------|----------------|
 | active inspects (4 s) | 37           | 111            |
 | rate                  | 8.9 /s       | 26.5 /s        |
-| inspect_us mean       | 107.5 ms     | 107.5 ms       |
-| inspect_us p95        | 109.6 ms     | 109.7 ms       |
 
 **Speedup: 2.98×** (theoretical max with 3 threads: 3.00×).
 
-`inspect_us` is identical across modes — each inspect still takes
-~100 ms; they just run on parallel threads in the N=3 case.
+Each inspect still takes ~100 ms in both modes; in the N=3 case they
+just run on parallel threads, so ~3× as many complete per second. The
+per-call cost is no longer surfaced as a VAR (`inspect_us`) — it is
+fixed by the `sleep_for(100 ms)` in `inspect.cpp` — so the active-
+inspect rate is the observable that matters here.
 
 ## What this confirms
 

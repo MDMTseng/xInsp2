@@ -9,12 +9,12 @@ its clients (VS Code extension, browser, CLI, test harness).
   A plugin calls the ABI v8 `emit_binary(data, len)` host service and the core
   forwards the bytes verbatim to connected clients via `send_binary` — the core
   is a dumb byte pipe; the frame format is the plugin's contract with its UI
-  (the shipped `preview` plugin uses this to push live JPEG stills). This is
-  distinct from the **removed** core image-preview binary frame (and the `vars`
-  message and `subscribe`/`unsubscribe` commands): script output (scalar VARs +
-  image previews) now goes through the shipped `preview` plugin, not core
-  transport. The removed shapes are described below, struck through, for
-  reference only.
+  (the shipped `expose` plugin uses this to push one atomic `XEX1` frame per run —
+  values + JPEG images — see *The `expose` plugin* below). This is distinct from
+  the **removed** core image-preview binary frame (and the `vars` message and the
+  old core `subscribe`/`unsubscribe` commands): script output (scalar values +
+  images) now goes through the shipped `expose` plugin, not core transport. The
+  removed shapes are described below, struck through, for reference only.
 - **Versioning**: every `cmd` and `rsp` carries no explicit version — breaking
   schema changes bump the server's `version` string (returned by `cmd: version`)
   and the `hello` event's `abi` field. The protocol evolves **additive-only**
@@ -75,7 +75,8 @@ but discouraged).
 > publish nothing. Everything from here to the start of `instances` is retained
 > only to document what the message used to look like; a current client receives
 > none of it. Surfacing values/images for viewing now goes through the shipped
-> **preview** plugin (PVAR / `xi::preview::Sink`).
+> **expose** plugin — build a `xi::Record`, tag it with `"$channel"`, and call
+> `xi::use("expose").process(rec)`. See *The `expose` plugin* below.
 
 Snapshot of a `ValueStore` after one `inspect()` call.
 
@@ -237,9 +238,9 @@ runs at DLL load and wins.)
 > **REMOVED.** The backend no longer encodes
 > or sends the *core* image-preview binary frame. The layout below is retained
 > only as a record of the old wire format; no current code path produces it.
-> Image surfacing is handled by the shipped **preview** plugin, which pushes its
-> own binary frames via the ABI v8 `emit_binary` host call (see
-> [`c-abi.md`](c-abi.md)).
+> Image surfacing is handled by the shipped **expose** plugin, which pushes its
+> own atomic `XEX1` binary frame via the ABI v8 `emit_binary` host call (see *The
+> `expose` plugin* below and [`c-abi.md`](c-abi.md)).
 
 One WebSocket binary frame per **distinct image** (per `src` group, not per image
 var — see `vars.items[*].src`), sent after the `vars` message that introduces it.
@@ -270,6 +271,82 @@ Rationale for including width/height/channels in the header: JPEG decoders
 on the UI side need dimensions up front for layout, and embedding them lets
 the client allocate image buffers before decoding. BMP already has this
 metadata in-band; for JPEG we want it out-of-band for speed.
+
+---
+
+## The `expose` plugin (script data-out)
+
+`expose` is the shipped replacement for the removed `vars` message + core image
+preview — the official surface for getting arbitrary script values + images out
+for a UI or external program. A script builds a plain `xi::Record`, tags it with a
+string **channel id** under the reserved key `"$channel"`, and calls
+`xi::use("expose").process(rec)`. Output is organised by channel (created
+implicitly on first send); a channel is the unit of subscription and of the UI
+tab. The host also stamps `"$seq"` (= the run id) for ordering; the plugin strips
+both reserved keys from the published payload. See
+[`../guides/write-a-script.md`](../guides/write-a-script.md) for the script side.
+
+The transport has two halves: **subscription** rides the plugin's `exchange`
+(there is **no** backend WS subscribe command — the core's `emit_binary` is a dumb
+broadcast pipe with no server-side routing), and **delivery** is one atomic
+`XEX1` binary frame per record.
+
+### Subscription — over `exchange_instance`, not a backend command
+
+A consumer subscribes by channel id; the plugin only JPEG-encodes + pushes a
+channel's record when that channel has a subscriber (no subscriber → no encode, no
+push). Frames still broadcast on the wire; each client filters by the frame's
+`channel`. All four verbs go through `exchange_instance` (see below) against the
+`expose` instance:
+
+```json
+{ "type":"cmd", "name":"exchange_instance",
+  "args": { "name":"expose", "cmd": { "command":"subscribe",   "channels":["lane","high"] } } }
+{ "type":"cmd", "name":"exchange_instance",
+  "args": { "name":"expose", "cmd": { "command":"unsubscribe", "channels":["lane"] } } }
+{ "type":"cmd", "name":"exchange_instance",
+  "args": { "name":"expose", "cmd": { "command":"get", "channel":"lane" } } }
+{ "type":"cmd", "name":"exchange_instance",
+  "args": { "name":"expose", "cmd": { "command":"list_channels" } } }
+```
+
+- `subscribe` / `unsubscribe` — add/remove channel ids from the push set.
+- `get` (pull latest) — returns `{ found, channel, seq, frame_b64 }`, where
+  `frame_b64` is base64 of the **same `XEX1` frame**; decode it with the same
+  decoder. `expose` keeps exactly one latest frame per channel (plugin state, not
+  core). A late joiner is blank until the next run (snapshot-on-subscribe is not
+  done) — it can `get` the latest explicitly.
+- `list_channels` — returns channel/tab metadata.
+
+### The `XEX1` binary frame (one record = one atomic frame)
+
+Per run, for **each subscribed channel**, the plugin pushes one self-contained
+binary frame via `emit_binary` (broadcast, ordered by `$seq`). No cross-message
+reassembly — a consumer always receives a whole record atomically.
+
+```
+[ magic "XEX1" ][ msgpack body ]
+
+body = {
+  v:       1,                     // version — decoder gate
+  channel: "lane",
+  seq:     <run_id>,              // ordered-sink $seq, ordering/correlation
+  json:    "<record scalars serialized to a JSON string>",  // original key order
+  images:  [ { key: "edges", jpeg: <bin> }, ... ]           // each image JPEG-compressed
+}
+```
+
+- **values:** the record's scalar tree is dumped to a single JSON string (the
+  decoder does one `JSON.parse` / `json.loads`); key order is the record's
+  insertion order = display order.
+- **images:** all JPEG, carried as msgpack `bin`. JPEG is lossy / 8-bit
+  gray|BGR — `expose` is the lightweight, preview-oriented surface;
+  non-8-bit / lossless image transport is out of scope (use a purpose-built
+  plugin). Image keys in the record correspond to entries in `images[]`.
+- **version gate:** a decoder checks the `XEX1` magic + `v` and rejects anything
+  else (closes the old XPV1-vs-header decoder drift). Stock decoders live in
+  `ui-components/src/protocol.mjs` (`decodeExposeFrame`) and
+  `tools/xinsp2_py/xinsp2/client.py`.
 
 ---
 
@@ -336,7 +413,8 @@ followed by a `run_result` event (and the `run_started`/`run_finished` brackets)
 > The old `vars` message + binary previews that used to follow a run are
 > **removed**. A `cmd:run` no longer streams
 > script values back; observe the run via the `run_*` events. Per-run value /
-> image surfacing is handled by the shipped `preview` plugin.
+> image surfacing is handled by the shipped `expose` plugin (one atomic `XEX1`
+> frame per subscribed channel — see *The `expose` plugin* below).
 
 When `frame_path` and/or `meta` are given, `cmd:run` builds a one-shot **record**
 host-side (`frame_path` → an image under the key `"frame"`; `meta` → the metadata
@@ -847,10 +925,10 @@ are also emitted on the `log` channel as `level: warn` during
 > VAR-image previews were encoded and streamed. With the `vars` message and the
 > binary preview frame gone from core, there is nothing to subscribe to —
 > sending `subscribe`/`unsubscribe` now replies `ok:false` (unknown command).
-> Per-run image surfacing (and the encode-only-when-watched optimisation) is
-> handled by the shipped **preview** plugin, which owns its own subscription
-> model (its exchange commands + `emit_binary` push; see
-> [`../guides/write-a-script.md`](../guides/write-a-script.md)).
+> Per-run output surfacing (and the encode-only-when-watched optimisation) is
+> handled by the shipped **expose** plugin, which owns its own subscription
+> model — its `exchange_instance` commands + `emit_binary` `XEX1` push, **not** a
+> backend WS command. See *The `expose` plugin* below.
 
 > The backend keeps **no run-history ring**, and no longer pushes any per-run
 > value frame. Recent-run scrollback (and SPC-style backfill) is a client-side /

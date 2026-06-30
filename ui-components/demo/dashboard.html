@@ -26,7 +26,6 @@
     (async () => {
       const client = await new XiClient(url).connect({ checkVersion: /\d+\.\d+\.\d+/ });
       status("connected");
-      await client.cmd("subscribe", { all: true }).catch(() => {});
       mountDashboard(document.getElementById("dash"), { client, dashboard: DASH });
     })().catch((e) => status("fail: " + e.message));
   </script>
