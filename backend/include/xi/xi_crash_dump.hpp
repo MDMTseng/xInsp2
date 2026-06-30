@@ -122,6 +122,40 @@ inline void set_phase(const char* phase) {
     set(c.last_phase, sizeof(c.last_phase), phase);
 }
 
+// ---- process-global "current culprit" (Part III G2.1) -----------------------
+//
+// The per-thread breadcrumb above pinpoints the faulting THREAD; this is a
+// single process-wide stamp of the plugin/instance the host most recently
+// ENTERED (create / process / exchange), mirroring Part I A1's g_inspect_tid
+// (a non-thread-local atomic/struct). Two reasons it is process-global and
+// separate from the per-thread slot:
+//   1. it also carries the plugin's FOLDER + DLL, so the FE can quarantine the
+//      offender (write G1's .xi_certify.json) without a plugin registry of its
+//      own — the per-thread breadcrumb only has the plugin name;
+//   2. it is a fallback when the fault lands on an UNMANAGED thread the plugin
+//      spawned itself (no breadcrumb slot of its own).
+// Plain char buffers + plain set() like Context — signal-safe (no alloc/lock),
+// bounded-racy under concurrent dispatch. The FE cross-checks the stamped DLL
+// against the faulting module before attributing, so a stale/racing stamp can
+// only FAIL to attribute, never MIS-attribute a script/core crash to a plugin.
+struct Culprit {
+    char instance[64] {};
+    char plugin[64]   {};
+    char folder[260]  {};
+    char dll[96]      {};
+};
+inline Culprit g_culprit;
+
+// Stamp the current culprit. null args clear the corresponding field. Called at
+// the host->plugin call boundary (service_main.cpp). Cheap: four strncpy.
+inline void set_culprit(const char* instance, const char* plugin,
+                        const char* folder, const char* dll) {
+    set(g_culprit.instance, sizeof(g_culprit.instance), instance ? instance : "");
+    set(g_culprit.plugin,   sizeof(g_culprit.plugin),   plugin   ? plugin   : "");
+    set(g_culprit.folder,   sizeof(g_culprit.folder),   folder   ? folder   : "");
+    set(g_culprit.dll,      sizeof(g_culprit.dll),      dll      ? dll      : "");
+}
+
 #ifdef _WIN32
 // ---- dump machinery (Windows-only) ------------------------------------------
 
@@ -291,6 +325,18 @@ inline LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
         out += ",\"last_status\":";  json_escape(out, c.last_status);
         out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
         out += ",\"last_frame\":"  + std::to_string(c.last_frame);
+        out += "}";
+    }
+    // `culprit` (Part III G2.1) = the process-global plugin/instance the host
+    // last entered, plus that plugin's folder + dll. The FE reads this to
+    // attribute the death to a plugin and (cross-checked against `module`)
+    // quarantine it via G1's .xi_certify.json. Empty fields = not attributable.
+    {
+        out += ",\"culprit\":{";
+        out += "\"instance\":";  json_escape(out, g_culprit.instance);
+        out += ",\"plugin\":";   json_escape(out, g_culprit.plugin);
+        out += ",\"folder\":";   json_escape(out, g_culprit.folder);
+        out += ",\"dll\":";      json_escape(out, g_culprit.dll);
         out += "}";
     }
     // `threads` = every claimed breadcrumb slot, so a multi-dispatch crash shows

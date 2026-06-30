@@ -80,6 +80,34 @@ inline void enrich_from_crash_report(const std::string& be_log, SafeStateEvent& 
         if (yyjson_val* ph = yyjson_obj_get(ctx, "last_phase"); yyjson_is_str(ph))
             ev.last_phase = yyjson_get_str(ph);
     }
+    // Part III G2.1 — per-plugin attribution. The backend stamps a process-global
+    // `culprit` {instance, plugin, folder, dll} = the plugin it last entered. We
+    // attribute the death to that plugin ONLY when the faulting MODULE (the DLL the
+    // instruction pointer was actually in, from blame_module) matches the culprit's
+    // dll — so a crash in the script or the core itself is never mis-blamed on the
+    // last plugin the host happened to touch. When they match we also carry the
+    // folder + dll forward so the supervisor can quarantine it via G1's mechanism.
+    if (yyjson_val* cul = yyjson_obj_get(root, "culprit")) {
+        auto cstr = [&](const char* k) -> std::string {
+            yyjson_val* v = yyjson_obj_get(cul, k);
+            const char* s = yyjson_get_str(v);
+            return (yyjson_is_str(v) && s) ? std::string(s) : std::string();
+        };
+        std::string c_plugin   = cstr("plugin");
+        std::string c_instance = cstr("instance");
+        std::string c_folder   = cstr("folder");
+        std::string c_dll      = cstr("dll");
+        // faulting_module is "<dll>+0x<off>" (or "<unknown>"); match on the dll
+        // basename so a callee offset / path noise doesn't defeat the check.
+        bool dll_matches = !c_dll.empty() &&
+            ev.faulting_module.find(c_dll) != std::string::npos;
+        if (dll_matches) {
+            ev.culprit_plugin   = c_plugin;
+            ev.culprit_instance = c_instance;
+            ev.culprit_folder   = c_folder;
+            ev.culprit_dll      = c_dll;
+        }
+    }
     // If context didn't name a phase (crash on an unmanaged thread), fall back
     // to the most informative thread breadcrumb in threads[].
     if (ev.last_phase.empty()) {

@@ -23,7 +23,8 @@
 #include <xi/xi_crash_report.hpp>     // xi::enrich_from_crash_report (unit-tested)
 #include <xi/xi_crash_history.hpp>    // xi::CrashHistory (structured BE-death JSONL)
 #include <xi/xi_fe_status.hpp>        // xi::FeStatus (live status snapshot -> JSON file)
-#include <xi/xi_respawn_policy.hpp>   // xi::RespawnTracker (unit-tested)
+#include <xi/xi_respawn_policy.hpp>   // xi::RespawnTracker + PluginFaultTracker (unit-tested)
+#include <xi/xi_sha256.hpp>          // xi::sha256::sha256_file (quarantine cache key)
 
 #include <algorithm>
 #include <atomic>
@@ -281,6 +282,31 @@ static long long read_heartbeat(const std::string& path) {
 // xi::enrich_from_crash_report — extracted so it can be unit-tested
 // (backend/tests/test_qa_edge.cpp) against crafted fixtures. The FE just calls it.
 
+// Part III G2.2 — quarantine the plugin a death was attributed to by writing G1's
+// .xi_certify.json into its folder with verdict "quarantined", keyed by the DLL's
+// CURRENT content hash. The backend's scan_plugins gate then disables that plugin
+// on the next open (keeping the line up), and a later DLL rebuild — a new hash —
+// auto-clears it (G2.3 / G1.2). One mechanism, two writers (Invariant §20.3).
+//
+// The FE writes the schema directly rather than calling certify::write_cache: that
+// header pulls the ImagePool/OpenCV stack the FE deliberately doesn't link. The
+// {dll, sha256, verdict} schema is the cross-process contract certify::read_cache
+// parses. Best-effort + total: a read-only folder / vanished DLL just means the
+// plugin isn't quarantined this time (the supervisor still respawns).
+static bool quarantine_plugin(const std::string& folder, const std::string& dll) {
+    if (folder.empty() || dll.empty()) return false;
+    std::string dll_path = (fs::path(folder) / dll).string();
+    std::string sha = xi::sha256::sha256_file(dll_path);
+    if (sha.empty()) return false;   // DLL gone/unreadable — no hash to pin a verdict to
+    std::string js = "{\"dll\":\"" + dll + "\",\"sha256\":\"" + sha +
+                     "\",\"verdict\":\"quarantined\"}\n";
+    std::string cache = (fs::path(folder) / ".xi_certify.json").string();
+    std::ofstream f(cache, std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f << js;
+    return (bool)f;
+}
+
 #ifdef _WIN32
 // ----------------------------------------------------------------------------
 // Win32 supervisor
@@ -442,6 +468,7 @@ static int run_supervisor(const FeConfig& c) {
     }
 
     xi::RespawnTracker resp;         // consecutive-failure cap (latches "down")
+    xi::PluginFaultTracker plugin_faults;  // G2.2 per-plugin crash budget (quarantine)
     int  rc = 0;
 
     while (!g_stop.load()) {
@@ -601,14 +628,43 @@ static int run_supervisor(const FeConfig& c) {
         ev.ts_ms      = now_ms();
         xi::enrich_from_crash_report(c.be_log, ev);
 
+        // ---- G2.2 per-plugin crash attribution + auto-quarantine ----
+        // If the crash report attributed this death to a plugin (culprit cross-
+        // checked against the faulting module), feed the per-plugin budget. When a
+        // plugin TRIPS its budget we quarantine it (write G1's .xi_certify.json) AND
+        // forgive the whole-backend consecutive counter — the offender is disabled
+        // on the next respawn, so the supervisor's lever graduates from "latch the
+        // whole line safe" to "drop the one bad plugin, keep the line up"
+        // (Invariant §20.2). A death NOT attributable to a plugin (script/core
+        // crash) flows through the normal whole-BE cap unchanged.
+        bool quarantined_this_death = false;
+        if (!ev.culprit_plugin.empty() && plugin_faults.note_fault(ev.culprit_plugin, ev.ts_ms)) {
+            bool wrote = quarantine_plugin(ev.culprit_folder, ev.culprit_dll);
+            quarantined_this_death = true;
+            std::fprintf(stderr, "[xinsp-fe] plugin '%s' attributed %d crash(es) -> "
+                         "QUARANTINED%s; respawning with it disabled (line stays up)\n",
+                         ev.culprit_plugin.c_str(), plugin_faults.count(ev.culprit_plugin),
+                         wrote ? "" : " (cache write failed — gate may not apply)");
+            st.reason = "PluginQuarantined:" + ev.culprit_plugin;
+            // Forgive the whole-line cap: the next BE comes up without this plugin,
+            // so its prior deaths must not count toward latching the entire line.
+            resp.reset();
+        }
+
         // ---- respawn unless too many CONSECUTIVE failures (xi::RespawnTracker) ----
         // Counts deaths without a sustained-healthy recovery — so a recurring
-        // fault latches safe whether its deaths are fast or slow.
+        // fault latches safe whether its deaths are fast or slow. (A death that
+        // just quarantined its culprit reset the counter above, so note_death here
+        // starts that plugin's removal from a clean slate.)
         bool cap_hit = resp.note_death(c.respawn_max);
         // Append the structured crash record now that we know the consecutive
         // count and whether this death tripped the cap.
         history.record(ev, resp.consecutive, cap_hit);
-        st.state = "down"; st.reason = xi::to_string(death_reason);
+        st.state = "down";
+        // Preserve the "PluginQuarantined:<id>" reason set above so the status
+        // channel tells the operator the line is recovering by disabling a plugin,
+        // not just that the BE died.
+        if (!quarantined_this_death) st.reason = xi::to_string(death_reason);
         st.consecutive = resp.consecutive; st.backend_pid = 0;
         st.set_event(ev); publish_status(c, st);
         if (cap_hit) {

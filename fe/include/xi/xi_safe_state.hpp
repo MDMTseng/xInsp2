@@ -54,6 +54,17 @@ struct SafeStateEvent {
     std::string     report_path;        // path to the .json crash report, if any
     std::string     dump_path;          // path to the .dmp minidump, if any
     int64_t         ts_ms        = 0;   // wall-clock ms when the FE observed the death
+    // Part III G2.1 — per-plugin crash attribution. The backend stamps a
+    // process-global "current culprit" (the plugin/instance it most recently
+    // entered) into the crash report; enrich_from_crash_report joins it to the
+    // faulting module so the FE knows WHICH plugin caused the death and can
+    // quarantine it (vs. only "the backend died"). Empty when the fault wasn't
+    // attributable to a plugin (e.g. a crash in the script or the core itself).
+    std::string     culprit_plugin;     // attributed plugin id (name), if any
+    std::string     culprit_instance;   // instance being serviced at the fault
+    std::string     culprit_folder;     // that plugin's folder (so the FE can
+                                        //   quarantine it via G1's .xi_certify.json)
+    std::string     culprit_dll;        // dll filename within that folder
 };
 
 } // namespace xi
