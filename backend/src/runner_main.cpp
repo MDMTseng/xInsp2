@@ -295,8 +295,8 @@ int main(int argc, char** argv) {
             ++crashed;
             continue;
         }
-        // VAR value-tracking was removed from core (script output is a preview-
-        // plugin concern now), so the runner no longer dumps per-frame vars — it
+        // VAR value-tracking was removed from core (script output is the `expose`
+        // plugin's concern now), so the runner no longer dumps per-frame vars — it
         // just records that the frame ran. result()/state live on their own paths.
         if (i > 0) body += ",";
         body += "{\"frame\":";

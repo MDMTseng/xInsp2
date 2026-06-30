@@ -122,7 +122,7 @@ struct PluginInfo {
     // Ordered output sink (plugin.json `"sink": true` or `"role": "sink"`). A
     // script's xi::use(<this instance>).process(rec) is then NOT run inline during
     // inspect — the host STAGES it and flushes after the inspect inside the ordered-
-    // emit gate, so the sink's side effect (comm → PLC, preview push, …) lands in
+    // emit gate, so the sink's side effect (comm → PLC, expose push, …) lands in
     // FRAME order even under parallel dispatch. Fire-and-forget: the process()
     // reply is dropped. See run_one_inspection / docs/reference/c-abi.md.
     bool        is_sink = false;

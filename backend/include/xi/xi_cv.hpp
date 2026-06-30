@@ -28,12 +28,12 @@ inline cv::Mat to_cv(const Image& img) { return img.as_cv_mat().clone(); }
 // Naming-symmetric alias of from_cv_mat().
 inline Image to_image(const cv::Mat& m) { return from_cv_mat(m); }
 
-// Encode an Image to a compressed preview buffer (".jpg"/".jpeg"/".png"). Bakes
-// in the RGB->BGR flip OpenCV's encoders expect, so a preview built from an RGB
-// overlay comes out with the right colours (DM-2 / DM-12).
-inline std::vector<unsigned char> encode_preview(const Image& img,
-                                                 const std::string& ext = ".jpg",
-                                                 int quality = 85) {
+// Encode an Image to a compressed buffer (".jpg"/".jpeg"/".png"). Bakes in the
+// RGB->BGR flip OpenCV's encoders expect, so an image built from an RGB overlay
+// comes out with the right colours (DM-2 / DM-12). Generic — no "preview" notion.
+inline std::vector<unsigned char> encode_image(const Image& img,
+                                               const std::string& ext = ".jpg",
+                                               int quality = 85) {
     cv::Mat enc;
     cv::Mat rgb = img.as_cv_mat();
     if (rgb.channels() == 3) cv::cvtColor(rgb, enc, cv::COLOR_RGB2BGR);

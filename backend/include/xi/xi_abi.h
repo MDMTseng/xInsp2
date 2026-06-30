@@ -328,25 +328,25 @@ typedef struct xi_host_api {
     /* --------------------------------------------------------------- */
     /* emit_binary (ABI v8) — push an opaque binary frame straight to    */
     /* connected WS clients. The host is a dumb byte pipe: it forwards   */
-    /* `len` bytes via the WS server's binary send (the same path the    */
-    /* core once used for image previews). The FRAME FORMAT is the       */
-    /* plugin's contract with its UI — the core does not parse it.       */
-    /* Intended for a preview plugin that JPEG-encodes images and ships  */
-    /* them live (no base64, no poll), tagging each frame with its own   */
-    /* group/key header. Safe to call from a dispatch worker thread      */
-    /* (the WS send is thread-safe). Null on a pre-v8 host — always      */
-    /* null-check; a plugin then falls back to a pull path (exchange).   */
+    /* `len` bytes via the WS server's binary send and does NOT parse    */
+    /* them. The FRAME FORMAT is entirely the plugin's contract with its */
+    /* own UI/consumer (e.g. an output plugin that ships images live —   */
+    /* no base64, no poll — with a self-describing header it defines).   */
+    /* Safe to call from a dispatch worker thread (the WS send is        */
+    /* thread-safe). Null on a pre-v8 host — always null-check; a plugin */
+    /* then falls back to a pull path (exchange).                        */
     void (*emit_binary)(const void* data, int32_t len);
 
     /* --------------------------------------------------------------- */
-    /* compress_image (ABI v9) — JPEG-encode an image THROUGH a host    */
-    /* cache, so the same frame compressed by several plugins (or the   */
-    /* same plugin repeatedly) is encoded ONCE globally. The host keys  */
-    /* a bounded (N-rotate) cache by a content hash of the pixels:      */
-    /* a hit returns the cached JPEG immediately; a miss encodes + stores.*/
-    /* Lets a preview plugin avoid linking turbojpeg/opencv AND avoids   */
-    /* re-compressing a buffer shared across the pipeline (the global    */
-    /* dedup the old core preview did, now a reusable service).          */
+    /* compress_image (ABI v9) — a generic JPEG-encode host service with */
+    /* a content-addressed cache: the same image compressed by several   */
+    /* plugins (or the same plugin repeatedly) is encoded ONCE globally. */
+    /* The host keys a bounded (N-rotate) cache by a content hash of the */
+    /* pixels: a hit returns the cached JPEG immediately; a miss encodes */
+    /* + stores. Convenience only — a plugin that needs JPEG can use this*/
+    /* instead of linking its own codec, and shares the encode of a      */
+    /* buffer reused across the pipeline. Plugin-agnostic; the host does */
+    /* not know or care what the bytes are for.                          */
     /*   pixels/w/h/channels: the source image (8-bit, 1/3/4 ch).        */
     /*   quality: 1..100.                                                */
     /*   out/out_cap: JPEG written here; returns bytes written, or       */

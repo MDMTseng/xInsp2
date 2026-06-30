@@ -184,7 +184,7 @@ static int use_process_inline_(const char* name,
 
 // ---- ordered output sinks: stage during inspect, flush in frame order -----------
 // A script's xi::use(<sink>).process(rec) must NOT run inline under parallel dispatch
-// — the sink's side effect (comm → PLC, preview push) would land in COMPLETION order,
+// — the sink's side effect (comm → PLC, expose push) would land in COMPLETION order,
 // not frame order. Instead each call is STAGED on the running worker thread and
 // flushed AFTER the inspect, inside the EmitTurn gate (run_one_inspection), in call
 // order — exactly like this run's vars/result emit. Reuses the same resource-
@@ -743,7 +743,7 @@ static void emit_run_result(xi::ws::Server& srv, int code, const std::string& ms
 // "go safe" case is the plugin's own sidecar process (it watches the BE and
 // sends the line-safe message on death). See docs/archive/comms-gateway.md.
 
-// Forward-declare: runs one inspection cycle and emits vars+previews.
+// Forward-declare: runs one inspection cycle (drives sinks + emits the run result).
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
 // frame_path (optional) is plumbed to the script via
 // `xi_script_set_run_context`; readable inside the script as
@@ -1295,7 +1295,7 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         // if anything below throws. No-op for emit_seq < 0 (completion mode).
         bool my_turn = turn.wait_turn();
         if (inspect_ok) {
-            // Deliver this frame's staged sink calls (comm/preview) IN FRAME ORDER —
+            // Deliver this frame's staged sink calls (comm/expose/…) IN FRAME ORDER —
             // inside the gate, before the wire result, so a sink's side effect is
             // serialized with the run's output. A failed inspect skips this; the
             // guard then drops the partial sends (don't push a crashed frame to PLC).
@@ -4094,15 +4094,15 @@ int main(int argc, char** argv) {
     // ABI v8: route plugin host_api->emit_binary straight to WS clients. The core
     // is a dumb byte pipe — the frame format is the plugin's contract with its UI.
     // Non-capturing → converts to the BinarySinkFn function pointer. Thread-safe:
-    // send_binary may be called from a dispatch worker (same as the old preview path).
+    // send_binary may be called from a dispatch worker (any sink's binary push path).
     xi::binary_sink() = [](const void* data, int len) {
         if (auto* s = g_srv_for_bp.load(std::memory_order_acquire))
             s->send_binary(static_cast<const uint8_t*>(data), static_cast<size_t>(len));
     };
-    // ABI v9: JPEG-encode through a process-global N-rotate cache keyed by a
-    // content hash of the pixels — so the SAME image compressed by several plugins
-    // (or repeatedly) is encoded ONCE globally (the dedup the old core preview had,
-    // now a reusable host service). Non-capturing → converts to CompressSinkFn.
+    // ABI v9: a generic JPEG-encode host service — process-global N-rotate cache
+    // keyed by a content hash of the pixels, so the SAME image compressed by
+    // several plugins (or repeatedly) is encoded ONCE globally. Plugin-agnostic
+    // convenience. Non-capturing → converts to CompressSinkFn.
     xi::compress_sink() = [](const void* px, int w, int h, int c, int q,
                              void* out, int cap) -> int {
         if (!px || w <= 0 || h <= 0 || c <= 0) return 0;

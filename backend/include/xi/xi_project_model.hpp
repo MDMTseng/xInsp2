@@ -76,8 +76,8 @@ struct ProjectInfo {
     // "drop_newest" (keep FIFO; archival) / "block" (back-pressure the source).
     std::string   overflow         = "drop_oldest";
 
-    // `parallelism.result_order`: how per-frame results (vars + previews +
-    // run_finished) are ordered on the wire under N>1. "completion" (default;
+    // `parallelism.result_order`: how per-frame output (ordered-sink flushes +
+    // run_result + run_finished) is ordered on the wire under N>1. "completion" (default;
     // emit as each worker finishes) / "arrival" (emit in frame-arrival order via
     // the lane's emit gate). Only meaningful when there's real concurrency.
     std::string   result_order     = "completion";
