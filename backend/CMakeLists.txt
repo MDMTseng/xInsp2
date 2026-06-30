@@ -35,6 +35,63 @@ else()
     add_compile_options(-Wall -Wextra)
 endif()
 
+# ---- Sanitizers (T0.1) --------------------------------------------------
+# XINSP2_SANITIZE selects an instrumented build of the whole tree (tests +
+# benches + binaries). Semicolon/comma list, e.g. -DXINSP2_SANITIZE=address or
+# -DXINSP2_SANITIZE=address,undefined.
+#
+# TOOLCHAIN REALITY on this target (MSVC 19.50, VS 2026):
+#   * address    — SUPPORTED. MSVC ships /fsanitize=address (ASan). Wired below.
+#   * undefined  — NOT AVAILABLE on MSVC (no UBSan). Honored only under Clang/GCC;
+#                  requesting it on MSVC is a hard configure error (no silent lie).
+#   * thread     — NOT AVAILABLE. MSVC has no ThreadSanitizer, and clang-cl is not
+#                  installed in this VS (only clang-format/clang-tidy ship). TSan
+#                  is therefore impossible here; we hard-error rather than pretend.
+#                  Race coverage instead comes from the high-iteration stress
+#                  ctests (image_pool_stress_heavy / set_def_race_heavy), which can
+#                  additionally be run under -DXINSP2_SANITIZE=address to catch the
+#                  use-after-free / heap-corruption class that data races produce.
+set(XINSP2_SANITIZE "" CACHE STRING
+    "Sanitizers: comma/semicolon list of {address,undefined,thread} ('' = none)")
+if(XINSP2_SANITIZE)
+    string(REPLACE "," ";" _san_list "${XINSP2_SANITIZE}")
+    list(REMOVE_DUPLICATES _san_list)
+    set(XINSP2_SANITIZE_ADDRESS OFF)   # surfaced to the rest of the file
+    foreach(_san IN LISTS _san_list)
+        string(TOLOWER "${_san}" _san)
+        if(MSVC)
+            if(_san STREQUAL "address")
+                set(XINSP2_SANITIZE_ADDRESS ON)
+                add_compile_options(/fsanitize=address /Zi)
+                # ASan is incompatible with the /RTC runtime checks (Debug) and
+                # with incremental linking — strip/disable both so any config works.
+                string(REGEX REPLACE "/RTC[1csu]*" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+                string(REGEX REPLACE "/RTC[1csu]*" "" CMAKE_C_FLAGS_DEBUG   "${CMAKE_C_FLAGS_DEBUG}")
+                add_link_options(/INCREMENTAL:NO)
+                message(STATUS "XINSP2_SANITIZE: MSVC AddressSanitizer (/fsanitize=address) enabled")
+            elseif(_san STREQUAL "undefined")
+                message(FATAL_ERROR "XINSP2_SANITIZE=undefined: MSVC has no UBSan. "
+                    "Use a Clang/GCC build for UBSan, or drop 'undefined'.")
+            elseif(_san STREQUAL "thread")
+                message(FATAL_ERROR "XINSP2_SANITIZE=thread: MSVC has no ThreadSanitizer and "
+                    "clang-cl is not installed in this VS. TSan is unavailable on this toolchain; "
+                    "use the *_heavy stress ctests (optionally with XINSP2_SANITIZE=address) for race coverage.")
+            else()
+                message(FATAL_ERROR "XINSP2_SANITIZE: unknown sanitizer '${_san}'")
+            endif()
+        else()
+            # Clang/GCC: address/undefined/thread all map to -fsanitize=.
+            if(_san MATCHES "^(address|undefined|thread)$")
+                add_compile_options(-fsanitize=${_san} -fno-omit-frame-pointer -g)
+                add_link_options(-fsanitize=${_san})
+                message(STATUS "XINSP2_SANITIZE: ${_san} sanitizer enabled (-fsanitize=${_san})")
+            else()
+                message(FATAL_ERROR "XINSP2_SANITIZE: unknown sanitizer '${_san}'")
+            endif()
+        endif()
+    endforeach()
+endif()
+
 # OpenCV is mandatory (image operators); IPP / turbojpeg stay opt-in
 # accelerators for the JPEG-encode path only.
 option(XINSP2_HAS_IPP        "Link Intel IPP for JPEG encode acceleration" OFF)
@@ -269,6 +326,19 @@ if(NOT MSVC)
 endif()
 add_test(NAME image_pool_stress COMMAND test_image_pool_stress)
 
+# High-iteration race-stress (T0.1, race coverage). Same binaries, but
+# XINSP2_STRESS_SCALE multiplies the churn/ABA/refcount/CallScope hammering. On
+# MSVC (no TSan) this is the systematic-ish net; run it under
+# -DXINSP2_SANITIZE=address to also trap the UAF/heap-corruption class a race
+# produces. Labeled "stress" so it can be selected/excluded (ctest -L stress).
+add_test(NAME image_pool_stress_heavy COMMAND test_image_pool_stress)
+set_tests_properties(image_pool_stress_heavy PROPERTIES
+    LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
+add_test(NAME set_def_race_heavy COMMAND test_set_def_race
+         WORKING_DIRECTORY $<TARGET_FILE_DIR:test_set_def_race>)
+set_tests_properties(set_def_race_heavy PROPERTIES
+    LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
+
 # Throughput micro-benchmark (not a ctest — run manually to measure alloc cost).
 add_executable(bench_image_pool tests/bench_image_pool.cpp)
 target_link_libraries(bench_image_pool PRIVATE xi_core)
@@ -439,3 +509,22 @@ function(_xinsp_deploy_dlls tgt)
 endfunction()
 _xinsp_deploy_dlls(xinsp_backend)
 _xinsp_deploy_dlls(xinsp_runner)
+
+# ---- ASan runtime deployment (T0.1) ------------------------------------
+# An MSVC /fsanitize=address /MD build needs clang_rt.asan_dynamic-x86_64.dll
+# (ships next to cl.exe) on the DLL search path at runtime. All test exes land
+# in the same per-config output dir, so copying it next to one target makes it
+# resolvable for the whole ctest suite without touching PATH.
+if(XINSP2_SANITIZE_ADDRESS AND MSVC)
+    get_filename_component(_cl_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    file(GLOB _asan_dlls "${_cl_dir}/clang_rt.asan_dynamic-x86_64.dll")
+    if(_asan_dlls)
+        add_custom_command(TARGET test_xi_core POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_asan_dlls} "$<TARGET_FILE_DIR:test_xi_core>/")
+        message(STATUS "XINSP2_SANITIZE: deploying ASan runtime ${_asan_dlls}")
+    else()
+        message(WARNING "XINSP2_SANITIZE=address: clang_rt.asan_dynamic-x86_64.dll "
+            "not found next to ${CMAKE_CXX_COMPILER}; tests may fail to start.")
+    endif()
+endif()

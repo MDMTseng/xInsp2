@@ -40,7 +40,16 @@ static long long run_round(HMODULE dll, bool reentrant) {
     // ignores it and forces cap = 1.
     CAbiInstanceAdapter adapter("probe0", "race_probe", dll, inst, reentrant, /*max_concurrency=*/0);
 
-    const long long N = 400000;
+    // XINSP2_STRESS_SCALE multiplies the process()/set_def churn for the
+    // high-iteration `set_def_race_heavy` ctest (MSVC has no TSan, so the
+    // CallScope serialization contract is verified by hammering, not by a race
+    // detector). Default 1 keeps the normal-suite run fast.
+    long long scale = 1;
+    if (const char* e = std::getenv("XINSP2_STRESS_SCALE")) {
+        long long v = std::atoll(e);
+        if (v > 0) scale = v;
+    }
+    const long long N = 400000 * scale;
     std::atomic<bool> stop{false};
 
     std::thread proc([&] {
