@@ -199,18 +199,21 @@ private:
         return f;
     }
 
-    // JPEG-encode via the host cache (host->compress_image): identical images are
-    // encoded once globally, and we don't link a codec ourselves.
+    // JPEG-encode via the host cache, through the SDK xi::Plugin::compress()
+    // wrapper: identical images are encoded once globally, and we don't link a
+    // codec ourselves. compress() resolves the frozen xi.preview@1 interface
+    // (ABI v10 capability segregation) once and caches it, falling back to the
+    // legacy host->compress_image field on a pre-v10 host — same host encoder,
+    // same bytes, same -needed/0 return convention.
     std::vector<uint8_t> compress_(const xi::Image& img) const {
-        const xi_host_api* h = host();
-        if (!h || !h->compress_image || img.empty()) return {};
+        if (img.empty()) return {};
         std::vector<uint8_t> jpeg(64 * 1024);
-        int n = h->compress_image(img.data(), img.width, img.height, img.channels, 85,
-                                  jpeg.data(), (int)jpeg.size());
+        int n = compress(img.data(), img.width, img.height, img.channels, 85,
+                         jpeg.data(), (int)jpeg.size());
         if (n < 0) {  // buffer too small — resize to needed and retry
             jpeg.resize((size_t)(-n));
-            n = h->compress_image(img.data(), img.width, img.height, img.channels, 85,
-                                  jpeg.data(), (int)jpeg.size());
+            n = compress(img.data(), img.width, img.height, img.channels, 85,
+                         jpeg.data(), (int)jpeg.size());
         }
         if (n <= 0) return {};
         jpeg.resize((size_t)n);

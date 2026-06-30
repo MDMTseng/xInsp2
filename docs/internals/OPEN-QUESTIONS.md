@@ -76,6 +76,15 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
 
 ---
 
+### Status snapshot (end of autonomous run, 2026-07-01)
+- **Part II Phase 4 (retire monolith) precondition is now MET:** Track B3 confirmed `expose` was the **only**
+  first-party plugin calling a raw carved host field; it's migrated to the SDK wrapper, and all other plugins
+  already use SDK helpers. So Phase 4's "all first-party plugins use interfaces" gate is satisfied. **The sole
+  remaining Phase 4 blocker is removing the dead `shm_*` stubs from `xi_host_api`, which is an ABI MAJOR break
+  (not additive) — needs user sign-off** (a v11 with min-compat raised, dropping pre-v6 plugins).
+- **Part III G3.2 (debug illegal-transition asserts)** deferred to backlog (A3 kept the handshake PR focused).
+  The contract is documented (G3.1); the asserts that enforce it are the open follow-up.
+
 ### Resolved (recorded for trail)
 - **II-vs-III ordering** → **parallel tracks** after Tier 0 (user: "能平行就平行", 2026-07-01).
 - **Gated pipeline vs single auto-workflow** → **gated, phase-by-phase** with build+test gates (user-approved).
