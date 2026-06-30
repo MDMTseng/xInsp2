@@ -652,12 +652,16 @@ max concurrency it observed per instance).
   counters / caches are not — guard them with atomics or a mutex.
 - **Watchdog now covers every worker** (it tracks a deadline slot per
   in-flight inspect, not a single slot). On a deadline breach it asks the
-  script to cancel cooperatively — but that flag is **global**, so under
-  N > 1 it aborts *every* in-flight frame that round (healthy workers just
-  re-run next tick). If the script ignores cooperative cancel, the backend
-  **exits** so the FE supervisor respawns a clean one — it does **not**
-  force-kill a worker (that would leak the per-instance lock). Long ops
-  should poll `xi::cancellation_requested()` so a cooperative cancel takes.
+  script to cancel cooperatively. The cancel is **epoch-scoped**: it targets
+  only the inspects already in flight when the watchdog tripped, so under
+  N > 1 it aborts every *currently-running* frame that round (the intended
+  "something's wedged, bail" signal) — but a **fresh frame the pool starts
+  during the 1000 ms grace is *not* cancelled** (it would only re-run and
+  abort for nothing). Healthy workers re-run next tick. If the targeted
+  inspect ignores cooperative cancel, the backend **exits** so the FE
+  supervisor respawns a clean one — it does **not** force-kill a worker
+  (that would leak the per-instance lock). Long ops should poll
+  `xi::cancellation_requested()` so a cooperative cancel takes.
 - **`run_result` events** arrive interleaved across run_ids in the default
   `result_order: "completion"`. Set `result_order: "arrival"` (above) for an
   in-order wire stream, or sort client-side by `run_id`.

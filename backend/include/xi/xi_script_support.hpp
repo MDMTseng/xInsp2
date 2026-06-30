@@ -272,13 +272,27 @@ XI_SCRIPT_EXPORT void xi_script_set_run_context(const char* frame_path) {
     g_run_frame_path_[n] = 0;
 }
 
-// Watchdog cancel flag setter — host sets this when inspect overruns
-// its deadline; script's `xi::cancellation_requested()` returns true
-// while it's set. Long-running ops poll this and exit early. Host
-// clears it after the inspect returns (or after watchdog falls back
-// to TerminateThread).
+// Watchdog cooperative-cancel arm/clear — host calls this when an inspect
+// overruns its deadline (set != 0) and again to clear (set == 0). The cancel is
+// EPOCH-SCOPED: arming targets only the inspects already in flight (those whose
+// start-ticket, drawn in xi_script_inspect_begin below, is below the counter's
+// high-water at this call). A fresh inspect dispatched DURING the grace draws a
+// higher ticket and does NOT observe this trip — so one slow frame no longer
+// poisons the second of unrelated frames that follow it. Long-running ops poll
+// `xi::cancellation_requested()` and exit early when their inspect is targeted.
 XI_SCRIPT_EXPORT void xi_script_set_global_cancel(int set) {
-    xi::global_cancel_flag().store(set != 0, std::memory_order_relaxed);
+    if (set) xi::arm_cancel();
+    else     xi::clear_cancel();
+}
+
+// Inspect-start hook — host calls this on the dispatch thread immediately
+// before invoking xi_inspect_entry, so the inspect (and any xi::async sub-task
+// it spawns) draws a fresh cancel ticket. Without it (older host that never
+// calls this) the ticket stays 0 and cancellation_requested() falls back to the
+// legacy "cancel reaches everything while armed" behaviour. Optional symbol:
+// hosts GetProcAddress it and null-check (see xi_script_loader.hpp).
+XI_SCRIPT_EXPORT void xi_script_inspect_begin(void) {
+    xi::begin_inspect();
 }
 
 // --- Persistent state thunks ---

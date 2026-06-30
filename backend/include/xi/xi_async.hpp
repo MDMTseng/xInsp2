@@ -60,23 +60,85 @@ inline CancelToken*& current_cancel_token_ref() {
     return p;
 }
 
-// Global "cancel everything" flag. Set by the host's watchdog when
-// an inspect overruns its deadline; cleared after the inspect
-// returns (cooperative path) or after the watchdog falls back to
-// TerminateThread. Lives in the calling TU (script DLL or backend)
-// — backend toggles the script DLL's copy via the exported
-// `xi_script_set_global_cancel(int)` thunk in xi_script_support.hpp.
+// Watchdog cooperative-cancel, scoped by inspect EPOCH.
 //
-// `cancellation_requested()` returns true when EITHER the per-task
-// token is set OR the global flag is. Long-running ops only need
-// to poll one accessor.
-inline std::atomic<bool>& global_cancel_flag() {
-    static std::atomic<bool> f{false};
-    return f;
+// The host's watchdog cancels the inspect(s) that were ALREADY in flight when
+// it tripped — NOT a fresh inspect that the dispatch pool starts during the
+// 1000ms grace. The old design held a single global bool for the whole grace,
+// so every heavy frame dispatched in that ~1s window observed the stale request
+// and aborted (≈30 spurious cancellations per slow frame at 30fps). We scope
+// the cancel with a monotonic ticket instead:
+//
+//   - cancel_ticket_counter(): strictly-increasing source of inspect tickets.
+//   - begin_inspect(): each inspect draws a fresh ticket at start (host calls
+//     the `xi_script_inspect_begin` thunk on the dispatch thread before
+//     s.inspect()), installed thread-local so the inspect — and any xi::async
+//     sub-task it spawns — share one cancel scope.
+//   - arm_cancel(): the watchdog snapshots the counter's high-water as the
+//     cutoff and marks cancel active. Every inspect whose start-ticket is
+//     BELOW the cutoff (i.e. was in flight at trip time) sees the cancel; an
+//     inspect that draws its ticket after the snapshot (>= cutoff) does NOT.
+//   - clear_cancel(): the watchdog clears `active` once the targeted inspects
+//     have returned. (A genuinely-stuck inspect still overruns next watchdog
+//     tick → a fresh arm_cancel with a higher cutoff re-targets it, and the
+//     hard-trip escalation still exits the process — see service_main.cpp.)
+//
+// These live in the calling TU (script DLL or backend): the backend drives the
+// script DLL's copies via the exported thunks in xi_script_support.hpp.
+//
+// `cancellation_requested()` returns true when the per-inspect cancel applies
+// OR the per-task xi::async token is set. It is on the hot inspect poll path:
+// the cost is one relaxed bool load (early-out when no cancel is armed) plus,
+// only while a cancel IS armed, two relaxed uint64 loads — no locks.
+inline std::atomic<uint64_t>& cancel_ticket_counter() {
+    static std::atomic<uint64_t> c{1};   // 0 reserved: "no ticket / legacy"
+    return c;
+}
+inline std::atomic<uint64_t>& cancel_cutoff() {
+    static std::atomic<uint64_t> c{0};
+    return c;
+}
+inline std::atomic<bool>& cancel_active() {
+    static std::atomic<bool> a{false};
+    return a;
+}
+
+// This thread's current inspect ticket (0 = not inside a ticketed inspect).
+// xi::async copies it into the worker so sub-tasks share the parent's scope.
+inline uint64_t& current_inspect_ticket_ref() {
+    static thread_local uint64_t t = 0;
+    return t;
+}
+
+// Draw a fresh, strictly-increasing ticket for an inspect about to run and
+// install it on this thread. Returns the ticket. Called once per inspect start.
+inline uint64_t begin_inspect() {
+    uint64_t t = cancel_ticket_counter().fetch_add(1, std::memory_order_relaxed);
+    current_inspect_ticket_ref() = t;
+    return t;
+}
+
+// Watchdog trip: target every inspect in flight RIGHT NOW (start-ticket below
+// the current high-water) — but never one that starts afterwards. Idempotent.
+inline void arm_cancel() {
+    cancel_cutoff().store(cancel_ticket_counter().load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
+    cancel_active().store(true, std::memory_order_relaxed);
+}
+inline void clear_cancel() {
+    cancel_active().store(false, std::memory_order_relaxed);
 }
 
 inline bool cancellation_requested() {
-    if (global_cancel_flag().load(std::memory_order_relaxed)) return true;
+    if (cancel_active().load(std::memory_order_relaxed)) {
+        uint64_t my = current_inspect_ticket_ref();
+        // my == 0 ⇒ no ticket was drawn (legacy script lacking the
+        // inspect-begin hook, or code running outside any inspect). Treat it as
+        // "in flight" so the watchdog's cooperative cancel still reaches such
+        // code — preserves the pre-epoch global-cancel behaviour for them.
+        if (my == 0 || my < cancel_cutoff().load(std::memory_order_relaxed))
+            return true;
+    }
     auto* t = current_cancel_token_ref();
     return t && t->cancelled.load(std::memory_order_relaxed);
 }
@@ -175,24 +237,38 @@ auto async(F&& f, Args&&... args)
 
     auto token = std::make_shared<CancelToken>();
 
+    // Capture the spawning inspect's ticket so the worker shares its cancel
+    // scope (the worker runs on a fresh thread whose thread_local ticket would
+    // otherwise be 0 = "legacy/in-flight" and wrongly observe an unrelated
+    // trip's cancel).
+    uint64_t parent_ticket = current_inspect_ticket_ref();
+
     auto closure =
         [fn  = std::forward<F>(f),
          tup = std::make_tuple(std::forward<Args>(args)...),
-         tok = token]() mutable -> R {
+         tok = token,
+         parent_ticket]() mutable -> R {
             // Install SEH translator on the worker thread so segfaults
             // become seh_exception and propagate through std::promise
             // to the .get() / await site.
             xi::install_seh_translator();
-            // Make this token visible to `xi::cancellation_requested()`
-            // for the duration of the user callable. RAII restore on
-            // any exit path.
+            // Make this token + the parent inspect's ticket visible to
+            // `xi::cancellation_requested()` for the duration of the user
+            // callable. RAII restore on any exit path.
             struct Scope {
                 CancelToken* prev;
-                explicit Scope(CancelToken* t) : prev(current_cancel_token_ref()) {
-                    current_cancel_token_ref() = t;
+                uint64_t     prev_ticket;
+                Scope(CancelToken* t, uint64_t ticket)
+                    : prev(current_cancel_token_ref()),
+                      prev_ticket(current_inspect_ticket_ref()) {
+                    current_cancel_token_ref()   = t;
+                    current_inspect_ticket_ref() = ticket;
                 }
-                ~Scope() { current_cancel_token_ref() = prev; }
-            } scope(tok.get());
+                ~Scope() {
+                    current_cancel_token_ref()   = prev;
+                    current_inspect_ticket_ref() = prev_ticket;
+                }
+            } scope(tok.get(), parent_ticket);
             return std::apply(std::move(fn), std::move(tup));
         };
 

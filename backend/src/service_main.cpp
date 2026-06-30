@@ -393,14 +393,10 @@ static int wd_arm(int64_t deadline) {
     return -1;
 }
 static void wd_disarm(int slot) { if (slot >= 0) g_wd_deadlines[slot].store(0); }
-// True if any slot's deadline is in the past (an inspect overran its budget).
-static bool wd_any_overran(int64_t now_ms) {
-    for (int i = 0; i < WD_SLOTS; ++i) {
-        int64_t dl = g_wd_deadlines[i].load();
-        if (dl != 0 && now_ms >= dl) return true;
-    }
-    return false;
-}
+// (The watchdog loop scans the slots inline now — it needs the per-slot deadline
+// values to snapshot which inspects it targeted, so a fresh frame that overruns
+// during the grace isn't mistaken for the originally-stuck one. See the monitor
+// thread below.)
 
 // Server pointer for emits that happen off the serving thread (status_cb, the
 // dropped-frame markers). Atomic so a worker/plugin thread loads it once and the
@@ -1242,6 +1238,12 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         crash_set_phase("reset");
         if (s.reset) s.reset();
         crash_set_phase("inspect");
+        // Draw this inspect's watchdog cancel ticket (epoch) on the dispatch
+        // thread BEFORE running it. The watchdog's cooperative cancel targets
+        // only inspects whose ticket predates a trip, so a fresh frame started
+        // during the 1000ms grace (higher ticket) is not poisoned by an earlier
+        // slow frame's trip. Older scripts lack this thunk → legacy behaviour.
+        if (s.inspect_begin) s.inspect_begin();
         s.inspect(frame_hint);
         crash_set_phase("done");
         disarm();
@@ -4138,13 +4140,19 @@ int main(int argc, char** argv) {
 
     // P2.4 watchdog. Always-on monitor thread; acts when any in-flight inspect
     // (wd_arm slot) overruns its deadline. Two-phase, now per-worker-aware:
-    //   Phase 1 — cooperative: set the script's GLOBAL cancel flag; xi::ops poll
-    //     xi::cancellation_requested() and bail. 1000 ms grace (big ops — 20 MP
-    //     gaussian, matchTemplate, contour walks — need a few hundred ms to
-    //     finish their current chunk; 100 ms tripped healthy scripts). Under N>1
-    //     the flag is global, so it aborts every in-flight frame this round —
-    //     the intended "something's wedged, bail" signal; healthy workers re-run
-    //     next tick.
+    //   Phase 1 — cooperative: arm the script's EPOCH-scoped cancel
+    //     (set_global_cancel(1)); xi::ops poll xi::cancellation_requested() and
+    //     bail. 1000 ms grace (big ops — 20 MP gaussian, matchTemplate, contour
+    //     walks — need a few hundred ms to finish their current chunk; 100 ms
+    //     tripped healthy scripts). The arm targets only inspects ALREADY in
+    //     flight at trip time (ticket below the high-water snapshot): under N>1
+    //     it aborts every currently-running frame this round — the intended
+    //     "something's wedged, bail" signal — but a FRESH frame the pool starts
+    //     during the grace draws a higher ticket and is NOT cancelled, so one
+    //     slow frame no longer poisons ~a second of unrelated frames. Healthy
+    //     workers re-run next tick. (Pre-fix the flag was a held global bool, so
+    //     every heavy frame dispatched in the grace window aborted spuriously —
+    //     core-bug-hunt 2026-06 #12.)
     //   Phase 2 — hard trip: if any slot is STILL overrun after the grace, the
     //     script ignored cooperative cancel. We do NOT TerminateThread — a kill
     //     mid process() would leak the per-instance lock (deadlocking that
@@ -4157,9 +4165,25 @@ int main(int argc, char** argv) {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
         };
+        // Snapshot of the slot deadlines that were overrun when we armed a
+        // cooperative cancel. After the grace we hard-trip ONLY if one of THESE
+        // same inspects is still stuck (same slot still holds the same deadline)
+        // — i.e. it ignored the cooperative cancel it was actually targeted by.
+        // A different inspect overrunning by then (a fresh frame that started
+        // during the grace, which the epoch-scoped cancel deliberately did NOT
+        // target) is left for the next loop iteration to give its OWN
+        // cooperative round, rather than being hard-killed without warning.
+        int64_t wd_snap[WD_SLOTS];
         while (g_watchdog_run.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if (!wd_any_overran(now_ms())) continue;
+            int64_t now = now_ms();
+            bool any_overran = false;
+            for (int i = 0; i < WD_SLOTS; ++i) {
+                int64_t dl = g_wd_deadlines[i].load();
+                if (dl != 0 && now >= dl) { wd_snap[i] = dl; any_overran = true; }
+                else                       { wd_snap[i] = 0; }
+            }
+            if (!any_overran) continue;
 
             // Phase 1: cooperative cancel + grace. Log the attempt so the
             // escalation is observable (and a hard trip can be proven to have
@@ -4173,8 +4197,17 @@ int main(int argc, char** argv) {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-            // Did every overrun inspect return (slot freed / re-armed fresh)?
-            if (!wd_any_overran(now_ms())) {
+            // Did every inspect we TARGETED return? (Its slot is now free or
+            // re-armed by a different inspect with a different deadline.) Match
+            // on slot index AND deadline value so a fresh inspect reusing the
+            // slot is not mistaken for the original stuck one.
+            bool still_stuck = false;
+            for (int i = 0; i < WD_SLOTS; ++i) {
+                if (wd_snap[i] != 0 && g_wd_deadlines[i].load() == wd_snap[i]) {
+                    still_stuck = true; break;
+                }
+            }
+            if (!still_stuck) {
                 {
                     std::lock_guard<std::mutex> lk(g_script_mu);
                     if (g_script.set_global_cancel) g_script.set_global_cancel(0);

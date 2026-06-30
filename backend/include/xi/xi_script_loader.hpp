@@ -84,6 +84,12 @@ struct LoadedScript {
     SetResultCallbackFn set_result_callback = nullptr;
     SetRunContextFn    set_run_context  = nullptr;
     SetGlobalCancelFn  set_global_cancel = nullptr;
+    // Inspect-start hook: draws this inspect's cancel ticket so the watchdog's
+    // cooperative cancel is scoped to inspects in flight at trip time, not
+    // fresh ones dispatched during the grace. Optional symbol (older scripts
+    // lack it → legacy global-cancel behaviour).
+    using InspectBeginFn = void (*)(void);
+    InspectBeginFn     inspect_begin    = nullptr;
     StateSchemaVersionFn state_schema_version = nullptr;
 
     bool ok() const { return handle && inspect; }
@@ -131,6 +137,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_result_callback = reinterpret_cast<LoadedScript::SetResultCallbackFn>(GetProcAddress(h, "xi_script_set_result_callback"));
     out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
     out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
+    out.inspect_begin     = reinterpret_cast<LoadedScript::InspectBeginFn>(GetProcAddress(h, "xi_script_inspect_begin"));
     out.state_schema_version = reinterpret_cast<LoadedScript::StateSchemaVersionFn>(GetProcAddress(h, "xi_script_state_schema_version"));
     if (!out.inspect) {
         err = "script missing xi_inspect_entry export";
