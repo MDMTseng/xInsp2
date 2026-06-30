@@ -44,7 +44,34 @@ static xi::Image make_gradient(int w, int h) {
     return img;
 }
 
+// --- perf-gate mode -------------------------------------------------------
+// Fixed 1920x1080 workload, best-of-R per-encode time emitted as machine-
+// readable INTEGER microseconds for tests/perf_gate.cmake. Whatever encoder
+// the build dispatched to (turbojpeg/IPP/OpenCV/stb) is what gets baselined.
+static int gate_main() {
+    const int w = 1920, h = 1080;
+    auto img = make_gradient(w, h);
+    std::vector<uint8_t> jpeg;
+    for (int i = 0; i < 5; ++i) (void)xi::encode_jpeg(img, 85, jpeg);   // warm up
+    const int L = 15;
+    double best_us = 1e30;
+    for (int b = 0; b < 8; ++b) {
+        auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < L; ++i) (void)xi::encode_jpeg(img, 85, jpeg);
+        auto t1 = std::chrono::steady_clock::now();
+        double us = std::chrono::duration<double, std::micro>(t1 - t0).count() / L;
+        if (us < best_us) best_us = us;
+    }
+    std::printf("encoder: %s\n", dispatch_label());
+    std::printf("GATE jpeg_us_per_encode_1920x1080 %lld\n", (long long)(best_us + 0.5));
+    std::fflush(stdout);
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i)
+        if (std::string_view(argv[i]) == "--gate") return gate_main();
+
     int iters = (argc > 1) ? std::atoi(argv[1]) : 50;
     int w     = (argc > 2) ? std::atoi(argv[2]) : 1920;
     int h     = (argc > 3) ? std::atoi(argv[3]) : 1080;

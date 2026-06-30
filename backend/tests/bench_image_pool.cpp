@@ -65,7 +65,48 @@ static double run(int W, int H, int C, int threads, long iters_per_thread) {
     return per_sec;
 }
 
-int main() {
+// --- perf-gate mode -------------------------------------------------------
+// Single-threaded, best-of-R measurement (min strips scheduler noise) emitted
+// as machine-readable INTEGER nanoseconds for tests/perf_gate.cmake. Integer
+// units let the gate compare against a baseline with pure integer CMake math.
+static long long measure_ns(int W, int H, int C, long iters) {
+    auto& pool = xi::ImagePool::instance();
+    auto t0 = clk::now();
+    for (long i = 0; i < iters; ++i) {
+        xi_image_handle h = pool.create(W, H, C);
+        if (h) {
+            uint8_t* p = pool.data(h);
+            if (p) std::memset(p, (int)(i & 0xff), (size_t)W * H * C);
+            pool.release(h);
+        }
+    }
+    double secs = std::chrono::duration<double>(clk::now() - t0).count();
+    return (long long)(secs * 1e9 / iters + 0.5);
+}
+static long long best_ns(int W, int H, int C, long iters, int R) {
+    measure_ns(W, H, C, iters);                       // warm up
+    long long best = (long long)1e18;
+    for (int r = 0; r < R; ++r) {
+        long long n = measure_ns(W, H, C, iters);
+        if (n < best) best = n;
+    }
+    return best;
+}
+static int gate_main() {
+    // Tiny isolates pool/slot+alloc overhead; the typical CV frame is the
+    // realistic per-inspect cost. Both reported; either regressing trips the gate.
+    long long tiny  = best_ns(16, 16, 1, 200000, 8);
+    long long frame = best_ns(320, 240, 3, 20000, 8);
+    std::printf("GATE image_pool_ns_per_create_16x16x1 %lld\n", tiny);
+    std::printf("GATE image_pool_ns_per_create_320x240x3 %lld\n", frame);
+    std::fflush(stdout);
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "--gate") == 0) return gate_main();
+
     std::printf("ImagePool create/release throughput (memset full buffer each iter):\n");
     std::fflush(stdout);
     run(320, 240, 3, 1, 5000);   // warm up
