@@ -152,6 +152,24 @@ target_compile_definitions(test_plugin_teardown PRIVATE
     TEST_PLUGIN_DLL="$<TARGET_FILE:test_teardown_plugin>")
 add_test(NAME plugin_teardown COMMAND test_plugin_teardown)
 
+# --- ABI Phase 0 safety nets (docs/internals/adr-001-host-api-freeze.md) ----
+# Golden-plugin compat test: a minimal REAL xi C-ABI plugin pinned to ABI v9 /
+# min-compat 6 (golden_plugin), loaded through the genuine plugin-load path
+# (plugin_abi_compatible -> CAbiInstanceAdapter) and run once, asserting stable
+# process() behaviour. THE single most important ABI safety net — source-built
+# (not a committed blob), so it always tracks the live headers.
+add_library(golden_plugin SHARED tests/golden_plugin.cpp)
+target_link_libraries(golden_plugin PRIVATE xi_core)
+add_executable(test_golden_plugin tests/test_golden_plugin.cpp)
+target_link_libraries(test_golden_plugin PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_golden_plugin PRIVATE Ws2_32)
+endif()
+add_dependencies(test_golden_plugin golden_plugin)
+target_compile_definitions(test_golden_plugin PRIVATE
+    GOLDEN_PLUGIN_DLL="$<TARGET_FILE:golden_plugin>")
+add_test(NAME golden_plugin COMMAND test_golden_plugin)
+
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
 target_include_directories(test_yyjson PRIVATE
