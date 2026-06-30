@@ -135,6 +135,8 @@ class Client:
         self._rsp_waiters: dict[int, Queue] = {}
         self._inbox_events: Queue = Queue()
         self._inbox_logs: Queue = Queue()
+        self._inbox_binary: Queue = Queue()        # raw binary WS frames (opaque bytes)
+        self._on_binary: Callable[[bytes], None] | None = None
         self._reader: threading.Thread | None = None
         self._closed = False
         self._read_loop_dead = False
@@ -550,8 +552,30 @@ class Client:
             self._inbox_events.put({"name": "instances", "data": msg})
 
     def _handle_binary(self, data: bytes):
-        # Binary frames (e.g. plugin preview streams) are opaque to this
-        # generic client and intentionally dropped. The owning plugin's
-        # webUI decodes its own binary payloads; the core/client stays
-        # content-agnostic.
-        return
+        # Binary frames are OPAQUE to this generic client — it does not interpret
+        # any plugin's payload format. They're queued raw (bytes) on _inbox_binary
+        # so a caller that knows a plugin's format can drain + decode them itself
+        # (e.g. an `expose` consumer decoding XEX1). The client stays content-
+        # agnostic; on_binary, if set, also gets the raw bytes.
+        self._inbox_binary.put(data)
+        cb = self._on_binary
+        if cb is not None:
+            try:
+                cb(data)
+            except Exception:
+                pass
+
+    def on_binary(self, cb):
+        """Register a callback fired with each raw binary WS frame (bytes).
+        Generic passthrough — no decoding. Pass None to clear."""
+        self._on_binary = cb
+
+    def drain_binary(self) -> list[bytes]:
+        """Pop all raw binary frames queued since the last drain."""
+        out: list[bytes] = []
+        try:
+            while True:
+                out.append(self._inbox_binary.get_nowait())
+        except Empty:
+            pass
+        return out
