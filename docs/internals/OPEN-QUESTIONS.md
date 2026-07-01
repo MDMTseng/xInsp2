@@ -20,7 +20,7 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
   verification will lean on ASan + stress-scale until one of (a)/(b) is chosen.
 - **Flips if:** user stands up a Linux CI lane or installs clang-cl/LLVM.
 - **Impacts:** Tier 0 T0.1 (done, ASan); Tier 1 T1.3 (TSan stress on Part III G2 — degraded to ASan+stress).
-- **Race-hotspot inventory (what to test + gaps):** see `core_fix_plan.md` §28 — the concrete surfaces (image
+- **Race-hotspot inventory (what to test + gaps):** see `../archive/core_fix_plan-2026-07.md` §28 (the plan is now implemented + archived; residue in `core_fix_plan.md`) — the concrete surfaces (image
   pool, DocRegistry/COW, dispatch queue+EmitGate, set_def/prepare vs process, hot-reload swap, culprit stamp,
   owner propagation, watchdog, status), which have tests vs the GAPS, and the two actions (Windows gap-fills
   now; Linux TSan lane later).
