@@ -2080,160 +2080,39 @@ static void clear_inst_state() {
     g_plugin_mgr.clear_instance_states();
 }
 
-static void handle_command(xi::ws::Server& srv, std::string_view text) {
-    auto parsed = xp::parse_cmd(text);
-    if (!parsed) {
-        xp::LogMsg lm;
-        lm.level = "error";
-        lm.msg   = std::string("malformed cmd: ") + std::string(text.substr(0, 128));
-        srv.send_text(lm.to_json());
-        return;
-    }
+// ============================================================================
+// WS command handlers  (TASTE refactor, lens 2#2): the former handle_command
+// if/else-if god-chain, split into one named handler per command + a dispatch
+// table (g_cmd_table).  Each handler body is byte-identical to the arm it came
+// from; only the control-flow wrapper changed.  Grouped by capability below.
+// Uniform signature: (xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed)
+// -- bodies reference srv / id / parsed->args_json exactly as the arms did.
+// ============================================================================
 
-    const auto& name = parsed->name;
-    const int64_t id = parsed->id;
-
-    if (name == "ping") {
+// ---- lifecycle -------------------------------------------------------------
+static void cmd_ping_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         char buf[128];
         std::snprintf(buf, sizeof(buf), R"({"pong":true,"ts":%.3f})", now_seconds());
         send_rsp_ok(srv, id, buf);
-    } else if (name == "version") {
+}
+
+static void cmd_version_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         std::string vd = std::string(R"({"version":")") + XINSP2_VERSION
                        + R"(","commit":")" + XINSP2_COMMIT
                        + R"(","abi":1})";
         send_rsp_ok(srv, id, vd);
-    } else if (name == "crash_reports") {
-        // List crash JSON reports left by previous fatal crashes.
-        // Returns the file contents inline (each is small, KB-sized).
-        namespace fs = std::filesystem;
-        auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
-        std::string out = "{\"reports\":[";
-        bool first = true;
-        std::error_code ec;
-        if (fs::exists(dir, ec)) {
-            std::vector<fs::directory_entry> entries;
-            for (auto& e : fs::directory_iterator(dir, ec)) {
-                if (e.path().extension() == ".json") entries.push_back(e);
-            }
-            // Sort newest-first by mtime
-            std::sort(entries.begin(), entries.end(),
-                [](auto& a, auto& b) {
-                    std::error_code ec2;
-                    return fs::last_write_time(a.path(), ec2) > fs::last_write_time(b.path(), ec2);
-                });
-            for (auto& e : entries) {
-                std::ifstream f(e.path(), std::ios::binary);
-                std::stringstream ss; ss << f.rdbuf();
-                std::string body = ss.str();
-                while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) body.pop_back();
-                if (body.empty() || body[0] != '{') continue;
-                if (!first) out += ",";
-                first = false;
-                out += "{\"file\":";
-                xp::json_escape_into(out, e.path().filename().string());
-                out += ",\"report\":";
-                out += body;
-                out += "}";
-            }
-        }
-        out += "]}";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "clear_crash_reports") {
-        namespace fs = std::filesystem;
-        auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
-        int n = 0;
-        std::error_code ec;
-        if (fs::exists(dir, ec)) {
-            for (auto& e : fs::directory_iterator(dir, ec)) {
-                fs::remove(e.path(), ec);
-                ++n;
-            }
-        }
-        send_rsp_ok(srv, id, "{\"removed\":" + std::to_string(n) + "}");
-    } else if (name == "set_watchdog_ms") {
-        // P2.4. Set the wall-clock budget (ms) for a single inspect()
-        // call. 0 disables. Tripping the watchdog does not auto-reset —
-        // the next inspect re-arms with the new budget.
-        auto ms_opt = xp::get_number_field(parsed->args_json, "ms");
-        int ms = ms_opt ? (int)*ms_opt : 0;
-        if (ms < 0) ms = 0;
-        if (ms > 600000) ms = 600000;     // 10-minute hard cap
-        g_watchdog_ms = ms;
-        std::string out = "{\"ms\":" + std::to_string(ms);
-        out += ",\"trips\":" + std::to_string(g_watchdog_trips.load()) + "}";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "set_process_priority") {
-        // Live process priority (Win). class: high|above|normal|below|realtime.
-        // Mirrors --priority / project.json runtime.process_priority.
-        auto c = xp::get_string_field(parsed->args_json, "class");
-        std::string cls = c ? *c : "";
-        if (apply_process_priority_(cls)) {
-            send_rsp_ok(srv, id, "{\"process_priority\":\"" + cls + "\"}");
-        } else {
-            send_rsp_err(srv, id, "bad priority class (high|above|normal|below|realtime)");
-        }
-    } else if (name == "set_timer_fps") {
-        // Live synthetic-tick rate. fps <= 0 = trigger-only (no ticks). Takes
-        // effect on the next timer loop while continuous mode is running; persisted
-        // by the UI to project.json runtime.timer_fps.
-        auto f = xp::get_number_field(parsed->args_json, "fps");
-        int fps = f ? (int)*f : 0;
-        // max(1,..) so a high fps (>1000) doesn't round to 0, which the timer
-        // loop reads as "off" (the opposite of what was asked). fps<=0 = off.
-        int iv = fps > 0 ? std::max(1, 1000 / fps) : 0;
-        g_timer_interval_ms.store(iv);
-        std::string out = "{\"fps\":" + std::to_string(fps) +
-                          ",\"interval_ms\":" + std::to_string(iv) + "}";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "watchdog_status") {
-        std::string out = "{\"ms\":" + std::to_string(g_watchdog_ms.load());
-        out += ",\"trips\":" + std::to_string(g_watchdog_trips.load());
-        out += ",\"armed\":";
-        // armed == at least one inspect slot is currently in flight.
-        bool armed = false;
-        for (int i = 0; i < WD_SLOTS; ++i) if (g_wd_deadlines[i].load() != 0) { armed = true; break; }
-        out += (armed ? "true" : "false");
-        out += "}";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "graph_capture") {
-        // Toggle pipeline-graph dataflow capture (stage 2). Default off → no
-        // hot-path cost. Enabling clears any prior recording.
-        bool enable = parsed->args_json.find("\"enable\":true")  != std::string::npos ||
-                      parsed->args_json.find("\"enable\": true") != std::string::npos;
-        xi::GraphCapture::instance().set(enable);
-        send_rsp_ok(srv, id, std::string("{\"capturing\":") + (enable ? "true" : "false") + "}");
-    } else if (name == "graph_snapshot") {
-        // Reconstruct dataflow EDGES (xi::GraphCapture owns the algorithm) and
-        // format the result to wire JSON. Returns the instances that actually
-        // ran + the edges.
-        auto snap = xi::GraphCapture::instance().snapshot();
-        std::string out = "{\"capturing\":";
-        out += snap.capturing ? "true" : "false";
-        out += ",\"ran\":[";
-        for (size_t i = 0; i < snap.ran.size(); ++i) {
-            if (i) out += ",";
-            out += xp::json_escape(snap.ran[i]);     // json_escape() already wraps in quotes
-        }
-        out += "],\"edges\":[";
-        bool first = true;
-        for (auto& e : snap.edges) {
-            if (!first) out += ","; first = false;
-            out += "{\"from\":" + xp::json_escape(e.from) +
-                   ",\"to\":"   + xp::json_escape(e.to) + ",\"keys\":[";
-            bool k1 = true;
-            for (auto& k : e.keys) { if (!k1) out += ","; k1 = false; out += xp::json_escape(k); }
-            out += "]}";
-        }
-        out += "]}";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "shutdown") {
+}
+
+static void cmd_shutdown_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Controlled teardown while everything is still alive, so nothing runs a
         // bus emit / module_lifetime deleter against a half-destroyed process at
         // static-destruction time. Single source of truth (see the function).
         controlled_shutdown_teardown_();
         send_rsp_ok(srv, id);
         g_should_exit = true;
-    } else if (name == "compile_and_load") {
+}
+
+static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto src = xp::get_string_field(parsed->args_json, "path");
         if (!src) {
             send_rsp_err(srv, id, "compile_and_load: missing path");
@@ -2672,7 +2551,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (was_continuous) data += ",\"resumed_continuous\":true";
         data += "}";
         send_rsp_ok(srv, id, data);
-    } else if (name == "unload_script") {
+}
+
+static void cmd_unload_script_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // P0-AB-1: dispatcher workers snapshot g_script under
         // g_script_mu and may be mid-inspect when unload_script
         // FreeLibrary's the DLL. Drain the pool first.
@@ -2685,648 +2566,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         g_param_cache.clear();
         g_instance_def_cache.clear();   // sibling replay shadow — same lifetime
         send_rsp_ok(srv, id);
-    } else if (name == "run") {
-        if (g_continuous.load()) {
-            send_rsp_err(srv, id, "cannot run while continuous mode is active — stop first");
-            return;
-        }
-        // No script loaded: return a clear error NOW, before the ok+detached-run
-        // path. `run` sends its rsp before vars, so without this a no-script run
-        // would reply ok, then silently emit no vars — a headless driver waiting
-        // for vars times out with an empty error and drops the WS. open_project
-        // does not compile the project's script (that's compile_and_load's job),
-        // so this is the common headless gotcha. (Reported bug BUG-3.)
-        if (!g_script.ok()) {
-            send_rsp_err(srv, id, "no script loaded — call compile_and_load first");
-            return;
-        }
-        int64_t run_id = ++g_run_id;
+}
 
-        // Optional `frame_path` arg — plumbed to the script via
-        // `xi::current_frame_path()`. Was previously parsed by tests /
-        // SDKs but ignored by this handler ("phantom argument"). Now
-        // wired end to end.
-        std::string frame_path;
-        if (auto fp = xp::get_string_field(parsed->args_json, "frame_path")) {
-            frame_path = *fp;
-        }
-
-        // Stage 1b — optional inline `meta` object: its raw JSON is parsed into a
-        // metadata doc and injected into this run's current_trigger() so a
-        // headless cmd:run feeds the script the same record (frame image + meta)
-        // a source's emit_record would, with no source plugin needed.
-        std::string meta_json;
-        {
-            std::string m; const char* after = nullptr;
-            if (xp::detail::find_key(parsed->args_json.data(),
-                                     parsed->args_json.data() + parsed->args_json.size(),
-                                     "meta", m, after)) {
-                meta_json = std::move(m);
-            }
-        }
-
-        // Send rsp first (tests expect rsp before vars).
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":0})", (long long)run_id);
-        send_rsp_ok(srv, id, buf);
-
-        // Run inspection on a detached thread so a long inspect doesn't block
-        // the WS poll loop (and so the watchdog can observe its deadline slot).
-        // Serialised on g_run_mu so 8 quick `cmd:run` calls produce
-        // vars entries in run_id order.
-        // SEH translator must be installed inside the thread.
-        //
-        // cmd:run is INTENTIONALLY serial — it's the deterministic single-shot
-        // path (UI "Run", driver step-through) and is rejected outright while
-        // continuous mode is active (above). Burst/throughput parallelism is the
-        // continuous-mode dispatch pool's job (parallelism.dispatch_threads +
-        // emit_trigger / fps); fanning out cmd:run would break this run_id-order
-        // contract for no real burst gain (bursts arrive via the trigger path).
-        crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "run");
-        crash_ctx().last_run_id = (int)run_id;
-        // The detached thread dereferences the main-local srv, so g_inflight owns
-        // the bump/bail/drain; teardown waits it out. A launch racing shutdown (or a
-        // spawn failure) just runs nothing — there's no rsp for an async run anyway.
-        g_inflight.launch([&srv, run_id,
-                     frame_path = std::move(frame_path),
-                     meta_json  = std::move(meta_json)]() {
-            reserve_fault_stack();   // BUG 2: dump survives a script stack overflow
-            xi::install_seh_translator();
-            std::lock_guard<std::mutex> lk(g_run_mu);
-
-            // Stage 1b: build a one-shot record (frame image + meta) and expose
-            // it as this run's current_trigger — the same path the dispatch
-            // worker uses (thread_local g_current_trigger). Only injected when
-            // there's something to inject, so a plain cmd:run keeps the previous
-            // "no trigger" behaviour (current_trigger().is_active() == false).
-            xi::TriggerEvent ev;
-            bool inject = false;
-            if (!frame_path.empty()) {
-                if (auto fn = xi::ImagePool::read_image_file_fn()) {
-                    if (xi_image_handle h = fn(frame_path.c_str())) {
-                        ev.images["frame"] = h;   // read under current_trigger().image("frame")
-                        inject = true;
-                    }
-                }
-            }
-            if (!meta_json.empty()) {
-                if (yyjson_doc* idoc = yyjson_read(meta_json.data(), meta_json.size(), 0)) {
-                    yyjson_mut_doc* meta = yyjson_doc_mut_copy(idoc, nullptr);
-                    yyjson_doc_free(idoc);
-                    if (meta) {
-                        xi::DocRegistry::instance().addref(meta);   // register at rc=1
-                        ev.meta_doc = xi::DocRef::adopt(meta);
-                        inject = true;
-                    }
-                }
-            }
-            if (inject) {
-                ev.id = { (uint64_t)run_id, 0 };   // synthesized, unique per run
-                CurrentTriggerScope trig(ev);      // clears g_current_trigger + releases ev on scope exit
-                run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
-            } else {
-                run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
-            }
-        });
-    } else if (name == "start") {
-        // Start continuous trigger mode. The backend runs a timer thread
-        // that calls inspect() at a configurable interval. The script's
-        // own ImageSource (if any) runs its acquisition thread inside
-        // the DLL — the backend doesn't manage it.
-        if (g_continuous.load()) {
-            send_rsp_ok(srv, id, R"({"already":true})");
-            return;
-        }
-
-        // Parse optional fps from args (default 10). fps <= 0 means TRIGGER-ONLY:
-        // start continuous (spawn the lanes) but run NO synthetic timer tick — the
-        // project's sources are the only dispatch driver. (Avoids loading the
-        // default group with timer ticks; see docs/internals/dispatch.md.)
-        // fps here is the SYNTHETIC-TIMER-TICK rate, NOT a real inspection driver —
-        // see "CONTINUOUS RUN HAS TWO DRIVERS" at the top of this file. fps>0 ticks
-        // a source-less script; fps<=0 = trigger-only (sources drive, the normal
-        // case). An EXPLICIT fps seeds the live timer rate; if absent, keep whatever
-        // g_timer_interval_ms already holds (project.json runtime.timer_fps, a prior
-        // set_timer_fps, or the default 10fps) — so a project's saved pref isn't
-        // clobbered by a bare start.
-        int  fps = 10;
-        bool trigger_only = false;
-        bool fps_explicit = false;
-        auto fps_val = xp::get_number_field(parsed->args_json, "fps");
-        if (fps_val) {
-            fps_explicit = true;
-            // Clamp the WS-supplied double before the cast: (int)1e300 is UB.
-            if (*fps_val > 0) fps = (int)std::min(*fps_val, 100000.0);
-            else trigger_only = true;
-        }
-
-        // Stop any existing pool before starting a new one. (A-P1-2: any events
-        // that arrived since the last stop are drained + their handles released
-        // inside stop_group_pool_, so the new run never fires on stale images.)
-        if (g_timer_thread.joinable()) {
-            stop_dispatch_pool_();
-        }
-
-        g_continuous_fps = trigger_only ? 0 : fps;
-        g_continuous = true;
-
-        // Seed the live timer rate (0 = trigger-only). Only when fps was explicit;
-        // otherwise keep the existing g_timer_interval_ms (runtime/prior/default).
-        if (fps_explicit) g_timer_interval_ms.store(trigger_only ? 0 : std::max(1, 1000 / std::max(fps, 1)));
-        int interval_ms = g_timer_interval_ms.load();
-
-        // Bus-driven dispatch: with g_continuous now true the sink enqueues to
-        // the worker pool (single-shot otherwise). Timer thread emits synthetic
-        // events on schedule for scripts without trigger sources.
-        install_trigger_sink_(&srv);
-        spawn_group_pool_(&srv, interval_ms);
-
-        // The watchdog now tracks a per-inspect slot, so it protects every
-        // worker under N>1 (no longer bypassed). On a hard trip the backend
-        // exits for the FE to respawn; under N>1 the cooperative-cancel phase
-        // is global (aborts all in-flight frames that round). See
-        // run_one_inspection() + docs/guides/write-a-script.md.
-
-        int n_threads = std::max(1, g_plugin_mgr.project().dispatch_threads);
-        char buf[64];
-        std::snprintf(buf, sizeof(buf),
-                      R"({"started":true,"dispatch_threads":%d})", n_threads);
-        send_rsp_ok(srv, id, buf);
-    } else if (name == "stop") {
-        g_continuous = false;
-        xi::TriggerBus::instance().clear_sink();
-        stop_dispatch_pool_();   // joins lanes + drains their queues (handles released)
-        send_rsp_ok(srv, id, R"({"stopped":true})");
-    } else if (name == "list_params") {
-        // If a script is loaded, delegate to its own registry thunk so we
-        // see the DLL's params. Otherwise report the backend's own.
-        std::string params_json;
-        {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.list_params) {
-                std::vector<char> buf(64 * 1024);
-                int n = g_script.list_params(buf.data(), (int)buf.size());
-                if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);  // widen: -INT_MIN is UB
-                             n = g_script.list_params(buf.data(), (int)buf.size()); }
-                if (n > 0) params_json.assign(buf.data(), (size_t)n);
-            }
-        }
-        if (params_json.empty()) params_json = "[]";   // params live in the script DLL
-        std::string out = "{\"type\":\"instances\",\"instances\":[],\"params\":";
-        out += params_json;
-        out += "}";
-        send_rsp_ok(srv, id, "{}");
-        srv.send_text(out);
-    } else if (name == "set_param") {
-        auto pname = xp::get_string_field(parsed->args_json, "name");
-        if (!pname) {
-            send_rsp_err(srv, id, "set_param: missing name");
-            return;
-        }
-        // Extract the value's RAW JSON token and pass it verbatim to set_from_json.
-        // The old path reformatted the number via "%g", which turned a big integer
-        // (e.g. area_min=1000000) into "1e+06" -> std::stoll stops at 'e' -> the param
-        // was SILENTLY set to 1; floats lost precision too (%g = 6 sig figs). It also
-        // scanned the whole args for "value":true, which could false-match a string
-        // value. find_key returns only the top-level value token (a number / true|false
-        // / "quoted string"), exact and un-reformatted; the param's set_from_json
-        // validates it (rc -2 if it rejects). A missing value isn't a missing param.
-        std::string val;
-        const char* after = nullptr;
-        if (!xp::detail::find_key(parsed->args_json.data(),
-                                  parsed->args_json.data() + parsed->args_json.size(),
-                                  "value", val, after)) {
-            send_rsp_err(srv, id, "set_param: missing 'value' for '" + *pname + "'");
-            return;
-        }
-        // xi_script_set_param contract: 0 = set, -1 = no such param, -2 = the param
-        // exists but rejected this value (set_from_json failed).
-        int rc = 0; bool called = false;
-        {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.set_param) {
-                called = true;
-                rc = g_script.set_param(pname->c_str(), val.c_str());
-                // Cache an accepted value so compile_and_load replays it into the next
-                // DLL load (else the new DLL's file-scope default silently overwrites it).
-                if (rc == 0) g_param_cache[*pname] = val;
-            }
-        }
-        if (!called) { send_rsp_err(srv, id, "set_param: no script loaded"); return; }
-        if (rc == 0) { send_rsp_ok(srv, id); return; }
-        if (rc == -1) { send_rsp_err(srv, id, std::string("no such param: ") + *pname); return; }
-        send_rsp_err(srv, id, "set_param: '" + *pname + "' rejected the value (out of range / wrong type)");
-    } else if (name == "list_instances") {
-        std::string inst_json, params_json;
-        {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok()) {
-                std::vector<char> buf(64 * 1024);
-                if (g_script.list_instances) {
-                    int n = g_script.list_instances(buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_script.list_instances(buf.data(), (int)buf.size()); }
-                    if (n > 0) inst_json.assign(buf.data(), (size_t)n);
-                }
-                if (g_script.list_params) {
-                    int n = g_script.list_params(buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_script.list_params(buf.data(), (int)buf.size()); }
-                    if (n > 0) params_json.assign(buf.data(), (size_t)n);
-                }
-            }
-        }
-        // Also include backend-managed instances (from PluginManager)
-        auto& proj = g_plugin_mgr.project();
-        std::string backend_inst = "[";
-        int bi = 0;
-        for (auto& [k, v] : proj.instances) {
-            if (bi++) backend_inst += ",";
-            backend_inst += "{\"name\":\"" + v.name + "\",\"plugin\":\"" + v.plugin_name + "\"}";
-        }
-        backend_inst += "]";
-
-        // Merge: script instances + backend instances
-        std::string merged_inst;
-        if (!inst_json.empty() && inst_json != "[]" && bi > 0) {
-            // Both have entries — merge arrays
-            merged_inst = inst_json.substr(0, inst_json.size() - 1) + "," + backend_inst.substr(1);
-        } else if (bi > 0) {
-            merged_inst = backend_inst;
-        } else {
-            merged_inst = inst_json.empty() ? "[]" : inst_json;
-        }
-
-        std::string out = "{\"type\":\"instances\",\"instances\":";
-        out += merged_inst;
-        out += ",\"params\":";
-        out += params_json.empty() ? "[]" : params_json;
-        out += "}";
-        send_rsp_ok(srv, id, "{}");
-        srv.send_text(out);
-    } else if (name == "set_instance_def") {
-        auto iname = xp::get_string_field(parsed->args_json, "name");
-        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        // Extract the def object as a raw JSON substring
-        std::string def_str;
-        const char* after;
-        if (xp::detail::find_key(parsed->args_json.data(),
-                                  parsed->args_json.data() + parsed->args_json.size(),
-                                  "def", def_str, after)) {
-            // def_str is the raw JSON value
-        } else {
-            def_str = "{}";
-        }
-        // Try backend's InstanceRegistry first (plugin-manager instances)
-        auto inst = xi::InstanceRegistry::instance().find(*iname);
-        if (inst) {
-            // set_def enters plugin code (C-ABI) — guard like exchange_instance so a
-            // throwing/faulting plugin returns a clean error instead of terminating.
-            try {
-                if (inst->set_def(def_str)) {
-                    set_inst_state(*iname, InstState::Active);
-                    send_rsp_ok(srv, id);
-                } else {
-                    set_inst_state(*iname, InstState::Faulted, "set_def returned false");
-                    send_rsp_err(srv, id, "set_def returned false");
-                }
-            } catch (const seh_exception& e) {
-                char msg[256];
-                std::snprintf(msg, sizeof(msg), "set_def '%s' crashed: 0x%08X (%s)",
-                             iname->c_str(), e.code, e.what());
-                set_inst_state(*iname, InstState::Faulted, msg);
-                send_rsp_err(srv, id, msg);
-            } catch (const std::exception& e) {
-                std::string em = std::string("set_def error: ") + e.what();
-                set_inst_state(*iname, InstState::Faulted, em);
-                send_rsp_err(srv, id, em);
-            }
-        } else {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.set_instance_def) {
-                try {
-                    int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
-                    // Cache an accepted def so compile_and_load replays it into the next
-                    // DLL load (else the new DLL's file-scope ctor silently reverts it).
-                    if (rc == 0) g_instance_def_cache[*iname] = def_str;
-                    if (rc == 0) { set_inst_state(*iname, InstState::Active); send_rsp_ok(srv, id); }
-                    else { set_inst_state(*iname, InstState::Faulted, "set_instance_def failed");
-                           send_rsp_err(srv, id, "set_instance_def failed"); }
-                } catch (const seh_exception& e) {
-                    char msg[256];
-                    std::snprintf(msg, sizeof(msg), "script set_instance_def '%s' crashed: 0x%08X (%s)",
-                                 iname->c_str(), e.code, e.what());
-                    set_inst_state(*iname, InstState::Faulted, msg);
-                    send_rsp_err(srv, id, msg);
-                } catch (const std::exception& e) {
-                    std::string em = std::string("script set_instance_def error: ") + e.what();
-                    set_inst_state(*iname, InstState::Faulted, em);
-                    send_rsp_err(srv, id, em);
-                }
-            } else {
-                send_rsp_err(srv, id, "instance not found: " + *iname);
-            }
-        }
-    } else if (name == "get_instance_def") {
-        // Symmetric read of set_instance_def: returns the instance's full def
-        // JSON (incl. any assets the plugin round-trips, e.g. image_png_b64), so
-        // a host can snapshot an instance without scraping exchange:get_status.
-        // Loop over list_instances to snapshot a whole project (the foundation
-        // for portable product/instrument config bundles).
-        auto iname = xp::get_string_field(parsed->args_json, "name");
-        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        // Backend's InstanceRegistry first (plugin-manager instances).
-        auto inst = xi::InstanceRegistry::instance().find(*iname);
-        if (inst) {
-            // get_def enters plugin code (C-ABI) — guard like exchange_instance.
-            try {
-                std::string def = inst->get_def();
-                send_rsp_ok(srv, id, def.empty() ? "{}" : def);
-            } catch (const seh_exception& e) {
-                char msg[256];
-                std::snprintf(msg, sizeof(msg), "get_def '%s' crashed: 0x%08X (%s)",
-                             iname->c_str(), e.code, e.what());
-                send_rsp_err(srv, id, msg);
-            } catch (const std::exception& e) {
-                send_rsp_err(srv, id, std::string("get_def error: ") + e.what());
-            }
-        } else {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.get_instance_def) {
-                try {
-                    std::vector<char> buf(256 * 1024);
-                    int n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
-                    if (n < 0 && n != -1) {   // -needed → grow + retry (-1 = not found)
-                        buf.resize((size_t)(-(int64_t)n) + 1024);
-                        n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
-                    }
-                    if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
-                    else        send_rsp_err(srv, id, "instance not found: " + *iname);
-                } catch (const seh_exception& e) {
-                    char msg[256];
-                    std::snprintf(msg, sizeof(msg), "script get_instance_def '%s' crashed: 0x%08X (%s)",
-                                 iname->c_str(), e.code, e.what());
-                    send_rsp_err(srv, id, msg);
-                } catch (const std::exception& e) {
-                    send_rsp_err(srv, id, std::string("script get_instance_def error: ") + e.what());
-                }
-            } else {
-                send_rsp_err(srv, id, "instance not found: " + *iname);
-            }
-        }
-    } else if (name == "exchange_instance") {
-        // Crash-blame: capture which instance/plugin we're about to talk to.
-        if (auto in = xp::get_string_field(parsed->args_json, "name")) {
-            crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "exchange_instance");
-            crash_set(crash_ctx().last_instance, sizeof(crash_ctx().last_instance), in->c_str());
-            if (auto inst = xi::InstanceRegistry::instance().find(*in)) {
-                crash_set(crash_ctx().last_plugin, sizeof(crash_ctx().last_plugin),
-                          inst->plugin_name().c_str());
-                // G2.1 — exchange() also enters plugin code; attribute a fault here.
-                stamp_culprit_(in->c_str(), inst->plugin_name());
-            }
-        }
-        auto iname = xp::get_string_field(parsed->args_json, "name");
-        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        std::string cmd_str;
-        const char* after;
-        if (xp::detail::find_key(parsed->args_json.data(),
-                                  parsed->args_json.data() + parsed->args_json.size(),
-                                  "cmd", cmd_str, after)) {
-        } else {
-            cmd_str = "{}";
-        }
-        auto inst = xi::InstanceRegistry::instance().find(*iname);
-        if (inst) {
-            try {
-                std::string result = inst->exchange(cmd_str);
-                send_rsp_ok(srv, id, result);
-            } catch (const seh_exception& e) {
-                char msg[256];
-                std::snprintf(msg, sizeof(msg), "exchange '%s' crashed: 0x%08X (%s)",
-                             iname->c_str(), e.code, e.what());
-                send_rsp_err(srv, id, msg);
-            } catch (const std::exception& e) {
-                send_rsp_err(srv, id, std::string("exchange error: ") + e.what());
-            }
-        } else {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.exchange_instance) {
-                try {
-                    std::vector<char> rsp(256 * 1024);
-                    int n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
-                                                       rsp.data(), (int)rsp.size());
-                    if (n < 0) { rsp.resize((size_t)(-(int64_t)n) + 1024);
-                                 n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
-                                                                rsp.data(), (int)rsp.size()); }
-                    if (n >= 0) send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
-                    else        send_rsp_err(srv, id, "exchange_instance failed");
-                } catch (const seh_exception& e) {
-                    char msg[256];
-                    std::snprintf(msg, sizeof(msg), "script exchange '%s' crashed: 0x%08X (%s)",
-                                 iname->c_str(), e.code, e.what());
-                    send_rsp_err(srv, id, msg);
-                }
-            } else {
-                send_rsp_err(srv, id, "instance not found: " + *iname);
-            }
-        }
-    } else if (name == "get_state") {
-        // Orchestrator read (task #67): the host-tracked instance state machine
-        // (created / active / faulted) + last error. Coarse by design — fine
-        // staging/ready sub-state is plugin-side (exchange get_status). An
-        // instance that exists but has had no host-visible transition yet reads
-        // "created". args: { "name": "cam0" } → data: { state, last_error }.
-        auto iname = xp::get_string_field(parsed->args_json, "name");
-        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        InstState st; std::string err; long long crashes = 0;
-        bool known = g_plugin_mgr.get_instance_state(*iname, st, err, &crashes);
-        if (!known) {
-            // No tracked transition — report "created" if the instance actually
-            // exists, else a clean not-found.
-            if (xi::InstanceRegistry::instance().find(*iname)) { st = InstState::Created; }
-            else { send_rsp_err(srv, id, "instance not found: " + *iname); return; }
-        }
-        std::string data = std::string("{\"state\":\"") + inst_state_str(st) + "\",\"last_error\":";
-        xp::json_escape_into(data, err);
-        // crash_count: a process() crash leaves the instance Active + returns NA, so
-        // this is how a host detects a per-instance crash loop and alerts.
-        data += ",\"crash_count\":" + std::to_string(crashes);
-        data += "}";
-        send_rsp_ok(srv, id, data);
-    } else if (name == "prepare_instance") {
-        // Orchestrator STAGE (ABI v7, task #69): load a new config's heavy assets
-        // into an instance's BACKGROUND staging slot, off the critical path — the
-        // live config keeps running. Pair with commit_group to swap them in
-        // frame-perfectly. For a plugin that opted into XI_PLUGIN_STAGED this calls
-        // its ungated prepare() (concurrent with process); otherwise it falls back
-        // to a gated set_def (immediate swap — the tier-1 path). Script-side
-        // instances keep the exchange convention.
-        // args: { "name": "cam0", "def": { ... }, "folder"?: "..." }
-        auto iname = xp::get_string_field(parsed->args_json, "name");
-        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        std::string def_str;
-        const char* after;
-        if (!xp::detail::find_key(parsed->args_json.data(),
-                                  parsed->args_json.data() + parsed->args_json.size(),
-                                  "def", def_str, after)) {
-            def_str = "{}";
-        }
-        auto folder = xp::get_string_field(parsed->args_json, "folder");
-        auto inst = xi::InstanceRegistry::instance().find(*iname);
-        if (inst) {
-            bool ok = false;
-            try { ok = inst->prepare(def_str, folder ? *folder : std::string()); }
-            catch (const std::exception& e) {
-                set_inst_state(*iname, InstState::Faulted, e.what());
-                send_rsp_err(srv, id, std::string("prepare error: ") + e.what());
-                return;
-            }
-            if (ok) send_rsp_ok(srv, id);
-            else { set_inst_state(*iname, InstState::Faulted, "prepare returned false");
-                   send_rsp_err(srv, id, "prepare returned false"); }
-        } else {
-            // Script-side: exchange convention {command:"prepare", def, folder}.
-            std::string cmd = "{\"command\":\"prepare\",\"def\":" + def_str;
-            if (folder) { cmd += ",\"folder\":"; xp::json_escape_into(cmd, *folder); }
-            cmd += "}";
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.exchange_instance) {
-                // Script-side prepare enters plugin code — guard like the backend
-                // path above (and exchange_instance) so a throw/fault isn't fatal.
-                try {
-                    std::vector<char> buf(64 * 1024);
-                    int n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
-                                                       buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                                 n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
-                                                                buf.data(), (int)buf.size()); }
-                    if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
-                    else        send_rsp_err(srv, id, "prepare failed");
-                } catch (const seh_exception& e) {
-                    char msg[256];
-                    std::snprintf(msg, sizeof(msg), "script prepare '%s' crashed: 0x%08X (%s)",
-                                 iname->c_str(), e.code, e.what());
-                    send_rsp_err(srv, id, msg);
-                } catch (const std::exception& e) {
-                    send_rsp_err(srv, id, std::string("script prepare error: ") + e.what());
-                }
-            } else {
-                send_rsp_err(srv, id, "instance not found: " + *iname);
-            }
-        }
-    } else if (name == "commit_group") {
-        // Orchestrator DRAIN-BARRIER (RFC #65 / config-swap design, tasks #66/#69).
-        // Commit a GROUP of instances atomically w.r.t. inspection runs: quiesce
-        // dispatch + drain in-flight runs so NO process() is mid-flight, call the
-        // first-class commit() slot on every target in that one no-process window
-        // (so no run ever sees a half-committed group), then resume dispatch at the
-        // prior fps — a config switch must not stop the camera stream. Reuses the
-        // same quiesce primitive as recompile/rebuild. The expensive asset load has
-        // already happened off the barrier via `prepare_instance`; commit() is just
-        // a cheap pointer swap, so this barrier is one in-flight run (~ms).
-        //
-        // Addressing (task #68): an explicit name array AND/OR selectors that the
-        // host expands against existing instance properties — no new schema:
-        //   "instances": ["a","b"]   explicit names (covers script-side too)
-        //   "group":  "line1"        all backend instances in that dispatch group
-        //   "plugin": "binarize"     all backend instances of that plugin type
-        // The union is deduped. (If config-switch cohorts ever need to cut ACROSS
-        // dispatch groups, add a dedicated per-instance tag then; reusing `group`
-        // + `plugin` is the zero-schema choice that covers the common cases.)
-        // args: { instances?, group?, plugin? }
-        // See docs/roadmap/config-bundles-and-orchestration.md.
-        std::vector<std::string> targets;
-        std::unordered_set<std::string> seen;
-        auto add_target = [&](const std::string& n) {
-            if (seen.insert(n).second) targets.push_back(n);
-        };
-        if (yyjson_doc* adoc = yyjson_read(parsed->args_json.c_str(),
-                                           parsed->args_json.size(), 0)) {
-            yyjson_val* arr = yyjson_obj_get(yyjson_doc_get_root(adoc), "instances");
-            if (yyjson_is_arr(arr)) {
-                size_t _i, _n; yyjson_val* it;
-                yyjson_arr_foreach(arr, _i, _n, it) {
-                    const char* s = yyjson_get_str(it);
-                    if (yyjson_is_str(it) && s) add_target(s);
-                }
-            }
-            yyjson_doc_free(adoc);
-        }
-        auto group_sel  = xp::get_string_field(parsed->args_json, "group");
-        auto plugin_sel = xp::get_string_field(parsed->args_json, "plugin");
-        if (group_sel || plugin_sel) {
-            for (auto& [iname, ii] : g_plugin_mgr.project().instances) {
-                if (group_sel  && ii.group       != *group_sel)  continue;
-                if (plugin_sel && ii.plugin_name != *plugin_sel) continue;
-                add_target(iname);
-            }
-        }
-        if (targets.empty()) {
-            send_rsp_err(srv, id, "no targets — pass instances[], group, or plugin");
-            return;
-        }
-        // DRAIN-BARRIER: after this returns there is provably no process() running
-        // (pool stopped + workers joined + in-flight cmd:run drained via g_run_mu).
-        auto guard = quiesce_dispatch_for_lifecycle_op_("commit_group", &srv);
-        std::string results = "[";
-        bool any_fail = false;
-        for (size_t i = 0; i < targets.size(); ++i) {
-            if (i) results += ",";
-            results += "{\"name\":"; xp::json_escape_into(results, targets[i]);
-            std::string r; bool ok = false;
-            auto inst = xi::InstanceRegistry::instance().find(targets[i]);
-            if (inst) {
-                // First-class commit() slot (ABI v7): swap staging → live. The
-                // result echoes the now-live def. A plugin with no double-slot
-                // gets the InstanceBase no-op (it already swapped in set_def).
-                try { inst->commit(); r = inst->get_def(); ok = true; }
-                catch (const std::exception& e) {
-                    r = std::string("{\"error\":\"") + e.what() + "\"}";
-                }
-            } else {
-                // Script-side instances keep the exchange convention.
-                std::lock_guard<std::mutex> lk(g_script_mu);
-                if (g_script.ok() && g_script.exchange_instance) {
-                    // Script-side commit enters plugin code — guard like the backend
-                    // inst->commit() path above so a throw/fault isn't fatal (record
-                    // it as a per-target failure and keep committing the rest).
-                    try {
-                        const char* commit_cmd = R"({"command":"commit"})";
-                        std::vector<char> buf(64 * 1024);
-                        int n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
-                                                           buf.data(), (int)buf.size());
-                        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                                     n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
-                                                                    buf.data(), (int)buf.size()); }
-                        if (n >= 0) { r.assign(buf.data(), (size_t)n); ok = true; }
-                    } catch (const seh_exception& e) {
-                        char em[256];
-                        std::snprintf(em, sizeof(em), "{\"error\":\"commit crashed: 0x%08X\"}", e.code);
-                        r = em;
-                    } catch (const std::exception& e) {
-                        r = std::string("{\"error\":\"") + e.what() + "\"}";
-                    }
-                }
-                if (!ok) r = "{\"error\":\"instance not found\"}";
-            }
-            if (!ok) any_fail = true;
-            set_inst_state(targets[i], ok ? InstState::Active : InstState::Faulted,
-                           ok ? "" : "commit failed");
-            results += ",\"ok\":"; results += ok ? "true" : "false";
-            results += ",\"result\":"; results += r.empty() ? "null" : r;
-            results += "}";
-        }
-        results += "]";
-        // `guard` resumes dispatch at the prior fps when it goes out of scope at
-        // the end of this handler (config switch must not halt streaming).
-        std::string data = "{\"results\":" + results + "}";
-        if (any_fail) {
-            xp::Rsp r; r.id = id; r.ok = false;
-            r.error = "one or more commits failed"; r.data_json = data;
-            srv.send_text(r.to_json());
-        } else {
-            send_rsp_ok(srv, id, data);
-        }
-    } else if (name == "save_project") {
+static void cmd_save_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto path = xp::get_string_field(parsed->args_json, "path");
         if (!path) { send_rsp_err(srv, id, "missing path"); return; }
         std::string params_json, inst_json;
@@ -3350,7 +2592,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "failed to write " + *path);
         }
-    } else if (name == "commit_working_copy") {
+}
+
+static void cmd_commit_working_copy_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Mirror the <project>/.xinsp_work scratch back onto the canonical
         // project — the UI "Save Project" action. Persist any live instance
         // configs to the scratch first so the commit captures them.
@@ -3374,7 +2618,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "no working copy active (open with working_copy:true)");
         }
-    } else if (name == "discard_working_copy") {
+}
+
+static void cmd_discard_working_copy_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Blow away the scratch + re-seed from canonical, then reopen. Same
         // teardown constraint as open_project — drain the dispatch pool first.
         if (!g_plugin_mgr.has_working_copy()) {
@@ -3387,7 +2633,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "discard failed");
         }
-    } else if (name == "load_project") {
+}
+
+static void cmd_load_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto path = xp::get_string_field(parsed->args_json, "path");
         if (!path) { send_rsp_err(srv, id, "missing path"); return; }
         std::string content = xi::project::read_text(*path);
@@ -3511,182 +2759,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             data += "]}";
             send_rsp_ok(srv, id, data);
         }
-    } else if (name == "list_plugins") {
-        auto plugins = g_plugin_mgr.list_plugins();
-        std::string out = "[";
-        auto esc = [](const std::string& s) {
-            std::string o; for (char c : s) { if (c=='\\'||c=='"') o.push_back('\\'); o.push_back(c); } return o;
-        };
-        for (size_t i = 0; i < plugins.size(); ++i) {
-            if (i) out += ",";
-            auto& p = plugins[i];
-            out += "{\"name\":\"" + esc(p.name) + "\",\"description\":\"" + esc(p.description) + "\"";
-            out += ",\"folder\":\"" + esc(p.folder_path) + "\"";
-            out += ",\"has_ui\":" + std::string(p.has_ui ? "true" : "false");
-            out += ",\"loaded\":" + std::string(p.handle ? "true" : "false");
-            // cmake/prebuilt plugins get the per-item "Rebuild" action in the
-            // extension's Plugin Browser (rebuild_plugins {plugins:[name]}).
-            out += ",\"prebuilt\":" + std::string(p.prebuilt ? "true" : "false");
-            // Same origin field as to_json — the extension's Plugin Browser relies
-            // on it to badge project plugins, e2e journey asserts it.
-            bool is_proj = g_plugin_mgr.is_project_plugin(p.name);
-            out += ",\"origin\":\"" + std::string(is_proj ? "project" : "global") + "\"";
-            // Optional `manifest` block from plugin.json (free-form;
-            // see docs/reference/c-abi.md). AI agents and doc
-            // tools read this to discover params / inputs / outputs /
-            // exchange surface without grepping plugin source.
-            if (!p.manifest_json.empty()) {
-                out += ",\"manifest\":" + p.manifest_json;
-            }
-            out += "}";
-        }
-        out += "]";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "recent_errors") {
-        // Return error events captured by the cross-channel ring
-        // (rsp.error / log level=error / async event etc).
-        // Optional `since_ms` arg filters out older entries — useful
-        // for "any errors since I sent my last cmd?" polling.
-        auto since_opt = xp::get_number_field(parsed->args_json, "since_ms");
-        int64_t since = since_opt ? (int64_t)*since_opt : 0;
-        std::string out = "[";
-        {
-            std::lock_guard<std::mutex> lk(g_recent_errors_mu);
-            int n = 0;
-            for (auto& e : g_recent_errors) {
-                if (e.ts_ms < since) continue;
-                if (n++) out += ",";
-                out += "{\"ts_ms\":" + std::to_string(e.ts_ms);
-                out += ",\"source\":"; xp::json_escape_into(out, e.source);
-                out += ",\"message\":"; xp::json_escape_into(out, e.message);
-                if (e.cmd_id) out += ",\"cmd_id\":" + std::to_string(e.cmd_id);
-                if (e.run_id) out += ",\"run_id\":" + std::to_string(e.run_id);
-                out += "}";
-            }
-        }
-        out += "]";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "status") {
-        // Snapshot of every component's latest sticky status. Clients call this
-        // on EVERY (re)connect — that re-pull over the retained map is what
-        // guarantees the latest status always arrives, even across reconnects
-        // and backend respawns; the `status` push event is just a low-latency
-        // accelerator between snapshots.
-        std::string out = "{";
-        {
-            std::lock_guard<std::mutex> lk(g_status_mu);
-            int n = 0;
-            for (auto& [who, e] : g_status) {
-                if (n++) out += ",";
-                xp::json_escape_into(out, who);
-                out += ":{\"text\":"; xp::json_escape_into(out, e.text);
-                out += ",\"ts_ms\":" + std::to_string(e.ts_ms);
-                out += ",\"seq\":" + std::to_string(e.seq) + "}";
-            }
-        }
-        out += "}";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "image_pool_stats") {
-        // Per-owner ImagePool footprint. Owner IDs alone are
-        // meaningless to humans — we look them up against the
-        // running project's instances + script so the reply names
-        // who is holding the memory. Anonymous (owner == 0) is
-        // collapsed under "label":"<host>".
-        auto totals   = xi::ImagePool::instance().stats();
-        auto by_owner = xi::ImagePool::instance().stats_by_owner();
+}
 
-        // Build owner_id → label map.
-        std::unordered_map<xi::ImagePoolOwnerId, std::string> labels;
-        labels[0] = "<host>";
-        {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.owner_id != 0) {
-                labels[g_script.owner_id] =
-                    "script:" + std::filesystem::path(g_script.path).filename().string();
-            }
-        }
-        for (auto& [iname, ii] : g_plugin_mgr.project().instances) {
-            if (auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(ii.instance.get())) {
-                labels[a->owner_id()] = "instance:" + ii.name + " (" + ii.plugin_name + ")";
-            }
-            // All instances are in-process CAbiInstanceAdapters now;
-            // process-isolation + SHM were removed 2026-05.
-        }
-
-        auto label_for = [&](xi::ImagePoolOwnerId o) -> std::string {
-            auto it = labels.find(o);
-            if (it != labels.end()) return it->second;
-            return "owner:" + std::to_string(o) + " (orphan)";
-        };
-
-        // Cumulative diagnostics: total_created and high_water never
-        // decrement, so they expose activity even when live counts are
-        // zero between runs (the agent feedback loop hit this — live
-        // snapshots looked empty mid-test, hiding real allocation).
-        auto cum = xi::ImagePool::instance().cumulative();
-        std::string out = "{\"total\":{\"handles\":"
-                        + std::to_string(totals.handle_count)
-                        + ",\"bytes\":"
-                        + std::to_string(totals.total_bytes)
-                        + "},\"cumulative\":{\"total_created\":"
-                        + std::to_string(cum.total_created)
-                        + ",\"high_water\":"
-                        + std::to_string(cum.high_water)
-                        + ",\"live_now\":"
-                        + std::to_string(cum.live_now)
-                        + "},\"by_owner\":[";
-        for (size_t i = 0; i < by_owner.size(); ++i) {
-            if (i) out += ",";
-            out += "{\"owner\":"   + std::to_string(by_owner[i].owner)
-                +  ",\"label\":";
-            xp::json_escape_into(out, label_for(by_owner[i].owner));
-            out +=  ",\"handles\":" + std::to_string(by_owner[i].handle_count)
-                +  ",\"bytes\":"    + std::to_string(by_owner[i].total_bytes)
-                +  "}";
-        }
-        out += "]}";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "rescan_plugins") {
-        // Optional arg: {"dir": "<path>"} scans that one dir (additive).
-        // No arg: re-scan the default plugins_dir.
-        auto dir_opt = xp::get_string_field(parsed->args_json, "dir");
-        const std::string& dir = dir_opt ? *dir_opt : g_plugins_dir;
-        int n = 0;
-        if (!dir.empty() && std::filesystem::exists(dir)) {
-            n = g_plugin_mgr.scan_plugins(dir);
-        }
-        std::string out = "{\"scanned\":";
-        xp::json_escape_into(out, dir);
-        out += ",\"count\":" + std::to_string(n) + "}";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "unquarantine_plugin") {
-        // Part III G2.3 — operator un-quarantine. Clears the G1 .xi_certify.json
-        // verdict (crashed/quarantined) for a plugin so the next scan re-certifies
-        // it from scratch. Accepts {"name": "<plugin>"} (resolved to its folder via
-        // the last scan) or {"dir": "<folder>"}. Re-scans the default plugins dir
-        // afterwards so a now-clean plugin is re-armed without a restart.
-        auto pname = xp::get_string_field(parsed->args_json, "name");
-        auto pdir  = xp::get_string_field(parsed->args_json, "dir");
-        std::string key = pname ? *pname : (pdir ? *pdir : std::string());
-        if (key.empty()) { send_rsp_err(srv, id, "missing name or dir"); return; }
-        bool cleared = g_plugin_mgr.unquarantine_plugin(key);
-        if (!cleared) { send_rsp_err(srv, id, "no quarantine found for: " + key); return; }
-        int rearmed = 0;
-        if (!g_plugins_dir.empty() && std::filesystem::exists(g_plugins_dir))
-            rearmed = g_plugin_mgr.scan_plugins(g_plugins_dir);
-        std::string out = "{\"unquarantined\":";
-        xp::json_escape_into(out, key);
-        out += ",\"rearmed\":" + std::to_string(rearmed) + "}";
-        send_rsp_ok(srv, id, out);
-    } else if (name == "load_plugin") {
-        auto pname = xp::get_string_field(parsed->args_json, "name");
-        if (!pname) { send_rsp_err(srv, id, "missing name"); return; }
-        if (g_plugin_mgr.load_plugin(*pname)) {
-            send_rsp_ok(srv, id);
-        } else {
-            send_rsp_err(srv, id, "failed to load plugin: " + *pname);
-        }
-    } else if (name == "create_project") {
+static void cmd_create_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         auto pname  = xp::get_string_field(parsed->args_json, "name");
         if (!folder || !pname) { send_rsp_err(srv, id, "missing folder or name"); return; }
@@ -3695,7 +2770,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "failed to create project");
         }
-    } else if (name == "open_project") {
+}
+
+static void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Accept either `folder` (historical) or `path` (matches what
         // the protocol doc + Python SDK / load_project use). Same arg,
         // different name; this defuses the inconsistency the AI agent
@@ -3799,7 +2876,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "failed to open project in " + *folder);
         }
-    } else if (name == "close_project") {
+}
+
+static void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // P0-AB-3: must drain dispatch pool BEFORE close_project tears
         // down instances and FreeLibrary's plugin DLLs. (PR #33 fixed
         // the in-PluginManager teardown order; this fixes the
@@ -3828,156 +2907,689 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             g_persistent_state_schema = 0;
         }
         send_rsp_ok(srv, id, "{\"closed\":true}");
-    } else if (name == "export_project_plugin") {
-        // Package a project plugin as a deployable folder. Compiles Release;
-        // the destination contains a self-contained plugin.json + DLL that can
-        // be dropped into another project's plugins folder.
-        auto pname = xp::get_string_field(parsed->args_json, "plugin");
-        auto dest  = xp::get_string_field(parsed->args_json, "dest");
-        if (!pname || !dest) { send_rsp_err(srv, id, "missing plugin or dest"); return; }
-        if (!g_plugin_mgr.is_project_plugin(*pname)) {
-            send_rsp_err(srv, id, "not a project plugin: " + *pname);
+}
+
+// ---- dispatch-control ------------------------------------------------------
+static void cmd_set_timer_fps_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Live synthetic-tick rate. fps <= 0 = trigger-only (no ticks). Takes
+        // effect on the next timer loop while continuous mode is running; persisted
+        // by the UI to project.json runtime.timer_fps.
+        auto f = xp::get_number_field(parsed->args_json, "fps");
+        int fps = f ? (int)*f : 0;
+        // max(1,..) so a high fps (>1000) doesn't round to 0, which the timer
+        // loop reads as "off" (the opposite of what was asked). fps<=0 = off.
+        int iv = fps > 0 ? std::max(1, 1000 / fps) : 0;
+        g_timer_interval_ms.store(iv);
+        std::string out = "{\"fps\":" + std::to_string(fps) +
+                          ",\"interval_ms\":" + std::to_string(iv) + "}";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        if (g_continuous.load()) {
+            send_rsp_err(srv, id, "cannot run while continuous mode is active — stop first");
             return;
         }
-        // export_project_plugin recompiles in Release; quiesce so no dispatcher
-        // worker is mid-call into the same plugin's instances.
-        auto _export_guard = quiesce_dispatch_for_lifecycle_op_("export_project_plugin", &srv);  // resumes at block end
-        auto er = g_plugin_mgr.export_project_plugin(*pname, *dest);
-        std::string data = "{\"plugin\":";
-        xp::json_escape_into(data, *pname);
-        data += ",\"dest\":";
-        xp::json_escape_into(data, er.dest_dir);
-        data += "}";
-        if (er.ok) {
-            send_rsp_ok(srv, id, data);
-        } else {
-            xp::Rsp r;
-            r.id = id;
-            r.ok = false;
-            r.error = er.error;
-            r.data_json = data;
-            srv.send_text(r.to_json());
-            if (!er.build_log.empty()) {
-                xp::LogMsg lm;
-                lm.level = "error";
-                lm.msg = er.build_log;
-                srv.send_text(lm.to_json());
-            }
-        }
-    } else if (name == "recompile_project_plugin") {
-        // Hot-rebuild a single project-local plugin. The extension calls
-        // this from a file watcher when the user edits plugin source.
-        // On success the plugin's instances are re-instantiated with
-        // their previous defs intact; on failure the old DLL stays
-        // loaded so running inspection isn't disrupted.
-        auto pname = xp::get_string_field(parsed->args_json, "plugin");
-        if (!pname) { send_rsp_err(srv, id, "missing plugin"); return; }
-        if (!g_plugin_mgr.is_project_plugin(*pname)) {
-            send_rsp_err(srv, id, "not a project plugin: " + *pname);
+        // No script loaded: return a clear error NOW, before the ok+detached-run
+        // path. `run` sends its rsp before vars, so without this a no-script run
+        // would reply ok, then silently emit no vars — a headless driver waiting
+        // for vars times out with an empty error and drops the WS. open_project
+        // does not compile the project's script (that's compile_and_load's job),
+        // so this is the common headless gotcha. (Reported bug BUG-3.)
+        if (!g_script.ok()) {
+            send_rsp_err(srv, id, "no script loaded — call compile_and_load first");
             return;
         }
-        // P0-AB-4: recompile resets each instance pointer then
-        // FreeLibrary's the old DLL. Any in-flight set_def / exchange
-        // on those instances from a dispatcher worker would dereference
-        // freed code. Drain first.
-        auto guard = quiesce_dispatch_for_lifecycle_op_("recompile_project_plugin", &srv);
-        auto rr = g_plugin_mgr.recompile_project_plugin(*pname);
-        // Build diagnostics JSON — same shape as compile_and_load.
-        std::string diag_json = "[";
-        for (size_t i = 0; i < rr.diagnostics.size(); ++i) {
-            auto& d = rr.diagnostics[i];
-            if (i) diag_json += ",";
-            diag_json += "{\"file\":";  xp::json_escape_into(diag_json, d.file);
-            diag_json += ",\"line\":" + std::to_string(d.line);
-            diag_json += ",\"col\":"  + std::to_string(d.col);
-            diag_json += ",\"severity\":"; xp::json_escape_into(diag_json, d.severity);
-            diag_json += ",\"code\":";    xp::json_escape_into(diag_json, d.code);
-            diag_json += ",\"message\":"; xp::json_escape_into(diag_json, d.message);
-            diag_json += "}";
+        int64_t run_id = ++g_run_id;
+
+        // Optional `frame_path` arg — plumbed to the script via
+        // `xi::current_frame_path()`. Was previously parsed by tests /
+        // SDKs but ignored by this handler ("phantom argument"). Now
+        // wired end to end.
+        std::string frame_path;
+        if (auto fp = xp::get_string_field(parsed->args_json, "frame_path")) {
+            frame_path = *fp;
         }
-        diag_json += "]";
-        std::string data = "{\"plugin\":";
-        xp::json_escape_into(data, *pname);
-        data += ",\"diagnostics\":" + diag_json;
-        data += ",\"reattached\":[";
-        for (size_t i = 0; i < rr.reattached_instances.size(); ++i) {
-            if (i) data += ",";
-            xp::json_escape_into(data, rr.reattached_instances[i]);
-        }
-        data += "]}";
-        if (rr.ok) {
-            send_rsp_ok(srv, id, data);
-        } else {
-            xp::Rsp r;
-            r.id = id;
-            r.ok = false;
-            r.error = rr.error;
-            r.data_json = data;
-            srv.send_text(r.to_json());
-            if (!rr.build_log.empty()) {
-                xp::LogMsg lm;
-                lm.level = "error";
-                lm.msg = rr.build_log;
-                srv.send_text(lm.to_json());
+
+        // Stage 1b — optional inline `meta` object: its raw JSON is parsed into a
+        // metadata doc and injected into this run's current_trigger() so a
+        // headless cmd:run feeds the script the same record (frame image + meta)
+        // a source's emit_record would, with no source plugin needed.
+        std::string meta_json;
+        {
+            std::string m; const char* after = nullptr;
+            if (xp::detail::find_key(parsed->args_json.data(),
+                                     parsed->args_json.data() + parsed->args_json.size(),
+                                     "meta", m, after)) {
+                meta_json = std::move(m);
             }
         }
-    } else if (name == "rebuild_plugins") {
-        // `xInsp2: Rebuild Plugins`. For every cmake/prebuilt plugin whose source
-        // changed, the backend unloads it (releasing the DLL file lock), runs its
-        // own CMake build, then loads the rebuilt DLL and restores each instance's
-        // def. Unchanged plugins (incl. CUDA/heavy-state ones you didn't touch)
-        // are skipped. The unload→build→load ordering is why CMake runs host-side
-        // (Windows can't overwrite a loaded DLL; CMake emits a fixed-name DLL).
+
+        // Send rsp first (tests expect rsp before vars).
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), R"({"run_id":%lld,"ms":0})", (long long)run_id);
+        send_rsp_ok(srv, id, buf);
+
+        // Run inspection on a detached thread so a long inspect doesn't block
+        // the WS poll loop (and so the watchdog can observe its deadline slot).
+        // Serialised on g_run_mu so 8 quick `cmd:run` calls produce
+        // vars entries in run_id order.
+        // SEH translator must be installed inside the thread.
         //
-        // Optional args: {"cmake":"<path>", "config":"Release",
-        //                 "plugins":["a","b"]}. `plugins` restricts the rebuild to
-        // those names (the extension passes it to rebuild just what you're editing);
-        // omitted = every cmake plugin.
+        // cmd:run is INTENTIONALLY serial — it's the deterministic single-shot
+        // path (UI "Run", driver step-through) and is rejected outright while
+        // continuous mode is active (above). Burst/throughput parallelism is the
+        // continuous-mode dispatch pool's job (parallelism.dispatch_threads +
+        // emit_trigger / fps); fanning out cmd:run would break this run_id-order
+        // contract for no real burst gain (bursts arrive via the trigger path).
+        crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "run");
+        crash_ctx().last_run_id = (int)run_id;
+        // The detached thread dereferences the main-local srv, so g_inflight owns
+        // the bump/bail/drain; teardown waits it out. A launch racing shutdown (or a
+        // spawn failure) just runs nothing — there's no rsp for an async run anyway.
+        g_inflight.launch([&srv, run_id,
+                     frame_path = std::move(frame_path),
+                     meta_json  = std::move(meta_json)]() {
+            reserve_fault_stack();   // BUG 2: dump survives a script stack overflow
+            xi::install_seh_translator();
+            std::lock_guard<std::mutex> lk(g_run_mu);
+
+            // Stage 1b: build a one-shot record (frame image + meta) and expose
+            // it as this run's current_trigger — the same path the dispatch
+            // worker uses (thread_local g_current_trigger). Only injected when
+            // there's something to inject, so a plain cmd:run keeps the previous
+            // "no trigger" behaviour (current_trigger().is_active() == false).
+            xi::TriggerEvent ev;
+            bool inject = false;
+            if (!frame_path.empty()) {
+                if (auto fn = xi::ImagePool::read_image_file_fn()) {
+                    if (xi_image_handle h = fn(frame_path.c_str())) {
+                        ev.images["frame"] = h;   // read under current_trigger().image("frame")
+                        inject = true;
+                    }
+                }
+            }
+            if (!meta_json.empty()) {
+                if (yyjson_doc* idoc = yyjson_read(meta_json.data(), meta_json.size(), 0)) {
+                    yyjson_mut_doc* meta = yyjson_doc_mut_copy(idoc, nullptr);
+                    yyjson_doc_free(idoc);
+                    if (meta) {
+                        xi::DocRegistry::instance().addref(meta);   // register at rc=1
+                        ev.meta_doc = xi::DocRef::adopt(meta);
+                        inject = true;
+                    }
+                }
+            }
+            if (inject) {
+                ev.id = { (uint64_t)run_id, 0 };   // synthesized, unique per run
+                CurrentTriggerScope trig(ev);      // clears g_current_trigger + releases ev on scope exit
+                run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
+            } else {
+                run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
+            }
+        });
+}
+
+static void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Start continuous trigger mode. The backend runs a timer thread
+        // that calls inspect() at a configurable interval. The script's
+        // own ImageSource (if any) runs its acquisition thread inside
+        // the DLL — the backend doesn't manage it.
+        if (g_continuous.load()) {
+            send_rsp_ok(srv, id, R"({"already":true})");
+            return;
+        }
+
+        // Parse optional fps from args (default 10). fps <= 0 means TRIGGER-ONLY:
+        // start continuous (spawn the lanes) but run NO synthetic timer tick — the
+        // project's sources are the only dispatch driver. (Avoids loading the
+        // default group with timer ticks; see docs/internals/dispatch.md.)
+        // fps here is the SYNTHETIC-TIMER-TICK rate, NOT a real inspection driver —
+        // see "CONTINUOUS RUN HAS TWO DRIVERS" at the top of this file. fps>0 ticks
+        // a source-less script; fps<=0 = trigger-only (sources drive, the normal
+        // case). An EXPLICIT fps seeds the live timer rate; if absent, keep whatever
+        // g_timer_interval_ms already holds (project.json runtime.timer_fps, a prior
+        // set_timer_fps, or the default 10fps) — so a project's saved pref isn't
+        // clobbered by a bare start.
+        int  fps = 10;
+        bool trigger_only = false;
+        bool fps_explicit = false;
+        auto fps_val = xp::get_number_field(parsed->args_json, "fps");
+        if (fps_val) {
+            fps_explicit = true;
+            // Clamp the WS-supplied double before the cast: (int)1e300 is UB.
+            if (*fps_val > 0) fps = (int)std::min(*fps_val, 100000.0);
+            else trigger_only = true;
+        }
+
+        // Stop any existing pool before starting a new one. (A-P1-2: any events
+        // that arrived since the last stop are drained + their handles released
+        // inside stop_group_pool_, so the new run never fires on stale images.)
+        if (g_timer_thread.joinable()) {
+            stop_dispatch_pool_();
+        }
+
+        g_continuous_fps = trigger_only ? 0 : fps;
+        g_continuous = true;
+
+        // Seed the live timer rate (0 = trigger-only). Only when fps was explicit;
+        // otherwise keep the existing g_timer_interval_ms (runtime/prior/default).
+        if (fps_explicit) g_timer_interval_ms.store(trigger_only ? 0 : std::max(1, 1000 / std::max(fps, 1)));
+        int interval_ms = g_timer_interval_ms.load();
+
+        // Bus-driven dispatch: with g_continuous now true the sink enqueues to
+        // the worker pool (single-shot otherwise). Timer thread emits synthetic
+        // events on schedule for scripts without trigger sources.
+        install_trigger_sink_(&srv);
+        spawn_group_pool_(&srv, interval_ms);
+
+        // The watchdog now tracks a per-inspect slot, so it protects every
+        // worker under N>1 (no longer bypassed). On a hard trip the backend
+        // exits for the FE to respawn; under N>1 the cooperative-cancel phase
+        // is global (aborts all in-flight frames that round). See
+        // run_one_inspection() + docs/guides/write-a-script.md.
+
+        int n_threads = std::max(1, g_plugin_mgr.project().dispatch_threads);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf),
+                      R"({"started":true,"dispatch_threads":%d})", n_threads);
+        send_rsp_ok(srv, id, buf);
+}
+
+static void cmd_stop_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        g_continuous = false;
+        xi::TriggerBus::instance().clear_sink();
+        stop_dispatch_pool_();   // joins lanes + drains their queues (handles released)
+        send_rsp_ok(srv, id, R"({"stopped":true})");
+}
+
+static void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Crash-blame: capture which instance/plugin we're about to talk to.
+        if (auto in = xp::get_string_field(parsed->args_json, "name")) {
+            crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "exchange_instance");
+            crash_set(crash_ctx().last_instance, sizeof(crash_ctx().last_instance), in->c_str());
+            if (auto inst = xi::InstanceRegistry::instance().find(*in)) {
+                crash_set(crash_ctx().last_plugin, sizeof(crash_ctx().last_plugin),
+                          inst->plugin_name().c_str());
+                // G2.1 — exchange() also enters plugin code; attribute a fault here.
+                stamp_culprit_(in->c_str(), inst->plugin_name());
+            }
+        }
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        std::string cmd_str;
+        const char* after;
+        if (xp::detail::find_key(parsed->args_json.data(),
+                                  parsed->args_json.data() + parsed->args_json.size(),
+                                  "cmd", cmd_str, after)) {
+        } else {
+            cmd_str = "{}";
+        }
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        if (inst) {
+            try {
+                std::string result = inst->exchange(cmd_str);
+                send_rsp_ok(srv, id, result);
+            } catch (const seh_exception& e) {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg), "exchange '%s' crashed: 0x%08X (%s)",
+                             iname->c_str(), e.code, e.what());
+                send_rsp_err(srv, id, msg);
+            } catch (const std::exception& e) {
+                send_rsp_err(srv, id, std::string("exchange error: ") + e.what());
+            }
+        } else {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.exchange_instance) {
+                try {
+                    std::vector<char> rsp(256 * 1024);
+                    int n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
+                                                       rsp.data(), (int)rsp.size());
+                    if (n < 0) { rsp.resize((size_t)(-(int64_t)n) + 1024);
+                                 n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
+                                                                rsp.data(), (int)rsp.size()); }
+                    if (n >= 0) send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
+                    else        send_rsp_err(srv, id, "exchange_instance failed");
+                } catch (const seh_exception& e) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg), "script exchange '%s' crashed: 0x%08X (%s)",
+                                 iname->c_str(), e.code, e.what());
+                    send_rsp_err(srv, id, msg);
+                }
+            } else {
+                send_rsp_err(srv, id, "instance not found: " + *iname);
+            }
+        }
+}
+
+static void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Orchestrator STAGE (ABI v7, task #69): load a new config's heavy assets
+        // into an instance's BACKGROUND staging slot, off the critical path — the
+        // live config keeps running. Pair with commit_group to swap them in
+        // frame-perfectly. For a plugin that opted into XI_PLUGIN_STAGED this calls
+        // its ungated prepare() (concurrent with process); otherwise it falls back
+        // to a gated set_def (immediate swap — the tier-1 path). Script-side
+        // instances keep the exchange convention.
+        // args: { "name": "cam0", "def": { ... }, "folder"?: "..." }
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        std::string def_str;
+        const char* after;
+        if (!xp::detail::find_key(parsed->args_json.data(),
+                                  parsed->args_json.data() + parsed->args_json.size(),
+                                  "def", def_str, after)) {
+            def_str = "{}";
+        }
+        auto folder = xp::get_string_field(parsed->args_json, "folder");
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        if (inst) {
+            bool ok = false;
+            try { ok = inst->prepare(def_str, folder ? *folder : std::string()); }
+            catch (const std::exception& e) {
+                set_inst_state(*iname, InstState::Faulted, e.what());
+                send_rsp_err(srv, id, std::string("prepare error: ") + e.what());
+                return;
+            }
+            if (ok) send_rsp_ok(srv, id);
+            else { set_inst_state(*iname, InstState::Faulted, "prepare returned false");
+                   send_rsp_err(srv, id, "prepare returned false"); }
+        } else {
+            // Script-side: exchange convention {command:"prepare", def, folder}.
+            std::string cmd = "{\"command\":\"prepare\",\"def\":" + def_str;
+            if (folder) { cmd += ",\"folder\":"; xp::json_escape_into(cmd, *folder); }
+            cmd += "}";
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.exchange_instance) {
+                // Script-side prepare enters plugin code — guard like the backend
+                // path above (and exchange_instance) so a throw/fault isn't fatal.
+                try {
+                    std::vector<char> buf(64 * 1024);
+                    int n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
+                                                       buf.data(), (int)buf.size());
+                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
+                                 n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
+                                                                buf.data(), (int)buf.size()); }
+                    if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
+                    else        send_rsp_err(srv, id, "prepare failed");
+                } catch (const seh_exception& e) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg), "script prepare '%s' crashed: 0x%08X (%s)",
+                                 iname->c_str(), e.code, e.what());
+                    send_rsp_err(srv, id, msg);
+                } catch (const std::exception& e) {
+                    send_rsp_err(srv, id, std::string("script prepare error: ") + e.what());
+                }
+            } else {
+                send_rsp_err(srv, id, "instance not found: " + *iname);
+            }
+        }
+}
+
+static void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Orchestrator DRAIN-BARRIER (RFC #65 / config-swap design, tasks #66/#69).
+        // Commit a GROUP of instances atomically w.r.t. inspection runs: quiesce
+        // dispatch + drain in-flight runs so NO process() is mid-flight, call the
+        // first-class commit() slot on every target in that one no-process window
+        // (so no run ever sees a half-committed group), then resume dispatch at the
+        // prior fps — a config switch must not stop the camera stream. Reuses the
+        // same quiesce primitive as recompile/rebuild. The expensive asset load has
+        // already happened off the barrier via `prepare_instance`; commit() is just
+        // a cheap pointer swap, so this barrier is one in-flight run (~ms).
         //
-        // Same quiesce constraint as recompile: this resets instance pointers and
-        // FreeLibrary's DLLs — drain dispatch first.
-        auto cmake_exe = xp::get_string_field(parsed->args_json, "cmake");
-        auto config    = xp::get_string_field(parsed->args_json, "config");
-        std::vector<std::string> only;
-        if (yyjson_doc* adoc = yyjson_read(parsed->args_json.c_str(), parsed->args_json.size(), 0)) {
-            yyjson_val* arr = yyjson_obj_get(yyjson_doc_get_root(adoc), "plugins");
+        // Addressing (task #68): an explicit name array AND/OR selectors that the
+        // host expands against existing instance properties — no new schema:
+        //   "instances": ["a","b"]   explicit names (covers script-side too)
+        //   "group":  "line1"        all backend instances in that dispatch group
+        //   "plugin": "binarize"     all backend instances of that plugin type
+        // The union is deduped. (If config-switch cohorts ever need to cut ACROSS
+        // dispatch groups, add a dedicated per-instance tag then; reusing `group`
+        // + `plugin` is the zero-schema choice that covers the common cases.)
+        // args: { instances?, group?, plugin? }
+        // See docs/roadmap/config-bundles-and-orchestration.md.
+        std::vector<std::string> targets;
+        std::unordered_set<std::string> seen;
+        auto add_target = [&](const std::string& n) {
+            if (seen.insert(n).second) targets.push_back(n);
+        };
+        if (yyjson_doc* adoc = yyjson_read(parsed->args_json.c_str(),
+                                           parsed->args_json.size(), 0)) {
+            yyjson_val* arr = yyjson_obj_get(yyjson_doc_get_root(adoc), "instances");
             if (yyjson_is_arr(arr)) {
                 size_t _i, _n; yyjson_val* it;
                 yyjson_arr_foreach(arr, _i, _n, it) {
                     const char* s = yyjson_get_str(it);
-                    if (yyjson_is_str(it) && s) only.emplace_back(s);
+                    if (yyjson_is_str(it) && s) add_target(s);
                 }
             }
             yyjson_doc_free(adoc);
         }
-        auto guard = quiesce_dispatch_for_lifecycle_op_("rebuild_plugins", &srv);
-        auto rep = g_plugin_mgr.rebuild_cmake_plugins(
-            cmake_exe ? *cmake_exe : std::string("cmake"),
-            config    ? *config    : std::string("Release"),
-            only);
-        std::string data = "{\"plugins\":[";
-        bool any_fail = false;
-        for (size_t i = 0; i < rep.items.size(); ++i) {
-            auto& it = rep.items[i];
-            if (i) data += ",";
-            data += "{\"plugin\":"; xp::json_escape_into(data, it.name);
-            data += ",\"status\":"; xp::json_escape_into(data, it.status);
-            data += ",\"detail\":"; xp::json_escape_into(data, it.detail);
-            data += "}";
-            if (it.status == "failed") any_fail = true;
+        auto group_sel  = xp::get_string_field(parsed->args_json, "group");
+        auto plugin_sel = xp::get_string_field(parsed->args_json, "plugin");
+        if (group_sel || plugin_sel) {
+            for (auto& [iname, ii] : g_plugin_mgr.project().instances) {
+                if (group_sel  && ii.group       != *group_sel)  continue;
+                if (plugin_sel && ii.plugin_name != *plugin_sel) continue;
+                add_target(iname);
+            }
         }
-        data += "]}";
-        // Partial failures (failed[]) are still a completed run — return ok with
-        // the per-plugin report; the client surfaces failures.
-        send_rsp_ok(srv, id, data);
-        if (any_fail)
-            for (auto& it : rep.items)
-                if (it.status == "failed") {
-                    xp::LogMsg lm; lm.level = "error";
-                    lm.msg = "rebuild_plugins: " + it.name + ": " + it.detail;
-                    srv.send_text(lm.to_json());
+        if (targets.empty()) {
+            send_rsp_err(srv, id, "no targets — pass instances[], group, or plugin");
+            return;
+        }
+        // DRAIN-BARRIER: after this returns there is provably no process() running
+        // (pool stopped + workers joined + in-flight cmd:run drained via g_run_mu).
+        auto guard = quiesce_dispatch_for_lifecycle_op_("commit_group", &srv);
+        std::string results = "[";
+        bool any_fail = false;
+        for (size_t i = 0; i < targets.size(); ++i) {
+            if (i) results += ",";
+            results += "{\"name\":"; xp::json_escape_into(results, targets[i]);
+            std::string r; bool ok = false;
+            auto inst = xi::InstanceRegistry::instance().find(targets[i]);
+            if (inst) {
+                // First-class commit() slot (ABI v7): swap staging → live. The
+                // result echoes the now-live def. A plugin with no double-slot
+                // gets the InstanceBase no-op (it already swapped in set_def).
+                try { inst->commit(); r = inst->get_def(); ok = true; }
+                catch (const std::exception& e) {
+                    r = std::string("{\"error\":\"") + e.what() + "\"}";
                 }
-    } else if (name == "dispatch_stats") {
+            } else {
+                // Script-side instances keep the exchange convention.
+                std::lock_guard<std::mutex> lk(g_script_mu);
+                if (g_script.ok() && g_script.exchange_instance) {
+                    // Script-side commit enters plugin code — guard like the backend
+                    // inst->commit() path above so a throw/fault isn't fatal (record
+                    // it as a per-target failure and keep committing the rest).
+                    try {
+                        const char* commit_cmd = R"({"command":"commit"})";
+                        std::vector<char> buf(64 * 1024);
+                        int n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
+                                                           buf.data(), (int)buf.size());
+                        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
+                                     n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
+                                                                    buf.data(), (int)buf.size()); }
+                        if (n >= 0) { r.assign(buf.data(), (size_t)n); ok = true; }
+                    } catch (const seh_exception& e) {
+                        char em[256];
+                        std::snprintf(em, sizeof(em), "{\"error\":\"commit crashed: 0x%08X\"}", e.code);
+                        r = em;
+                    } catch (const std::exception& e) {
+                        r = std::string("{\"error\":\"") + e.what() + "\"}";
+                    }
+                }
+                if (!ok) r = "{\"error\":\"instance not found\"}";
+            }
+            if (!ok) any_fail = true;
+            set_inst_state(targets[i], ok ? InstState::Active : InstState::Faulted,
+                           ok ? "" : "commit failed");
+            results += ",\"ok\":"; results += ok ? "true" : "false";
+            results += ",\"result\":"; results += r.empty() ? "null" : r;
+            results += "}";
+        }
+        results += "]";
+        // `guard` resumes dispatch at the prior fps when it goes out of scope at
+        // the end of this handler (config switch must not halt streaming).
+        std::string data = "{\"results\":" + results + "}";
+        if (any_fail) {
+            xp::Rsp r; r.id = id; r.ok = false;
+            r.error = "one or more commits failed"; r.data_json = data;
+            srv.send_text(r.to_json());
+        } else {
+            send_rsp_ok(srv, id, data);
+        }
+}
+
+// ---- observability ---------------------------------------------------------
+static void cmd_crash_reports_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // List crash JSON reports left by previous fatal crashes.
+        // Returns the file contents inline (each is small, KB-sized).
+        namespace fs = std::filesystem;
+        auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
+        std::string out = "{\"reports\":[";
+        bool first = true;
+        std::error_code ec;
+        if (fs::exists(dir, ec)) {
+            std::vector<fs::directory_entry> entries;
+            for (auto& e : fs::directory_iterator(dir, ec)) {
+                if (e.path().extension() == ".json") entries.push_back(e);
+            }
+            // Sort newest-first by mtime
+            std::sort(entries.begin(), entries.end(),
+                [](auto& a, auto& b) {
+                    std::error_code ec2;
+                    return fs::last_write_time(a.path(), ec2) > fs::last_write_time(b.path(), ec2);
+                });
+            for (auto& e : entries) {
+                std::ifstream f(e.path(), std::ios::binary);
+                std::stringstream ss; ss << f.rdbuf();
+                std::string body = ss.str();
+                while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) body.pop_back();
+                if (body.empty() || body[0] != '{') continue;
+                if (!first) out += ",";
+                first = false;
+                out += "{\"file\":";
+                xp::json_escape_into(out, e.path().filename().string());
+                out += ",\"report\":";
+                out += body;
+                out += "}";
+            }
+        }
+        out += "]}";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_clear_crash_reports_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        namespace fs = std::filesystem;
+        auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
+        int n = 0;
+        std::error_code ec;
+        if (fs::exists(dir, ec)) {
+            for (auto& e : fs::directory_iterator(dir, ec)) {
+                fs::remove(e.path(), ec);
+                ++n;
+            }
+        }
+        send_rsp_ok(srv, id, "{\"removed\":" + std::to_string(n) + "}");
+}
+
+static void cmd_set_watchdog_ms_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // P2.4. Set the wall-clock budget (ms) for a single inspect()
+        // call. 0 disables. Tripping the watchdog does not auto-reset —
+        // the next inspect re-arms with the new budget.
+        auto ms_opt = xp::get_number_field(parsed->args_json, "ms");
+        int ms = ms_opt ? (int)*ms_opt : 0;
+        if (ms < 0) ms = 0;
+        if (ms > 600000) ms = 600000;     // 10-minute hard cap
+        g_watchdog_ms = ms;
+        std::string out = "{\"ms\":" + std::to_string(ms);
+        out += ",\"trips\":" + std::to_string(g_watchdog_trips.load()) + "}";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_watchdog_status_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        std::string out = "{\"ms\":" + std::to_string(g_watchdog_ms.load());
+        out += ",\"trips\":" + std::to_string(g_watchdog_trips.load());
+        out += ",\"armed\":";
+        // armed == at least one inspect slot is currently in flight.
+        bool armed = false;
+        for (int i = 0; i < WD_SLOTS; ++i) if (g_wd_deadlines[i].load() != 0) { armed = true; break; }
+        out += (armed ? "true" : "false");
+        out += "}";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_graph_capture_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Toggle pipeline-graph dataflow capture (stage 2). Default off → no
+        // hot-path cost. Enabling clears any prior recording.
+        bool enable = parsed->args_json.find("\"enable\":true")  != std::string::npos ||
+                      parsed->args_json.find("\"enable\": true") != std::string::npos;
+        xi::GraphCapture::instance().set(enable);
+        send_rsp_ok(srv, id, std::string("{\"capturing\":") + (enable ? "true" : "false") + "}");
+}
+
+static void cmd_graph_snapshot_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Reconstruct dataflow EDGES (xi::GraphCapture owns the algorithm) and
+        // format the result to wire JSON. Returns the instances that actually
+        // ran + the edges.
+        auto snap = xi::GraphCapture::instance().snapshot();
+        std::string out = "{\"capturing\":";
+        out += snap.capturing ? "true" : "false";
+        out += ",\"ran\":[";
+        for (size_t i = 0; i < snap.ran.size(); ++i) {
+            if (i) out += ",";
+            out += xp::json_escape(snap.ran[i]);     // json_escape() already wraps in quotes
+        }
+        out += "],\"edges\":[";
+        bool first = true;
+        for (auto& e : snap.edges) {
+            if (!first) out += ","; first = false;
+            out += "{\"from\":" + xp::json_escape(e.from) +
+                   ",\"to\":"   + xp::json_escape(e.to) + ",\"keys\":[";
+            bool k1 = true;
+            for (auto& k : e.keys) { if (!k1) out += ","; k1 = false; out += xp::json_escape(k); }
+            out += "]}";
+        }
+        out += "]}";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_get_state_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Orchestrator read (task #67): the host-tracked instance state machine
+        // (created / active / faulted) + last error. Coarse by design — fine
+        // staging/ready sub-state is plugin-side (exchange get_status). An
+        // instance that exists but has had no host-visible transition yet reads
+        // "created". args: { "name": "cam0" } → data: { state, last_error }.
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        InstState st; std::string err; long long crashes = 0;
+        bool known = g_plugin_mgr.get_instance_state(*iname, st, err, &crashes);
+        if (!known) {
+            // No tracked transition — report "created" if the instance actually
+            // exists, else a clean not-found.
+            if (xi::InstanceRegistry::instance().find(*iname)) { st = InstState::Created; }
+            else { send_rsp_err(srv, id, "instance not found: " + *iname); return; }
+        }
+        std::string data = std::string("{\"state\":\"") + inst_state_str(st) + "\",\"last_error\":";
+        xp::json_escape_into(data, err);
+        // crash_count: a process() crash leaves the instance Active + returns NA, so
+        // this is how a host detects a per-instance crash loop and alerts.
+        data += ",\"crash_count\":" + std::to_string(crashes);
+        data += "}";
+        send_rsp_ok(srv, id, data);
+}
+
+static void cmd_recent_errors_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Return error events captured by the cross-channel ring
+        // (rsp.error / log level=error / async event etc).
+        // Optional `since_ms` arg filters out older entries — useful
+        // for "any errors since I sent my last cmd?" polling.
+        auto since_opt = xp::get_number_field(parsed->args_json, "since_ms");
+        int64_t since = since_opt ? (int64_t)*since_opt : 0;
+        std::string out = "[";
+        {
+            std::lock_guard<std::mutex> lk(g_recent_errors_mu);
+            int n = 0;
+            for (auto& e : g_recent_errors) {
+                if (e.ts_ms < since) continue;
+                if (n++) out += ",";
+                out += "{\"ts_ms\":" + std::to_string(e.ts_ms);
+                out += ",\"source\":"; xp::json_escape_into(out, e.source);
+                out += ",\"message\":"; xp::json_escape_into(out, e.message);
+                if (e.cmd_id) out += ",\"cmd_id\":" + std::to_string(e.cmd_id);
+                if (e.run_id) out += ",\"run_id\":" + std::to_string(e.run_id);
+                out += "}";
+            }
+        }
+        out += "]";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_status_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Snapshot of every component's latest sticky status. Clients call this
+        // on EVERY (re)connect — that re-pull over the retained map is what
+        // guarantees the latest status always arrives, even across reconnects
+        // and backend respawns; the `status` push event is just a low-latency
+        // accelerator between snapshots.
+        std::string out = "{";
+        {
+            std::lock_guard<std::mutex> lk(g_status_mu);
+            int n = 0;
+            for (auto& [who, e] : g_status) {
+                if (n++) out += ",";
+                xp::json_escape_into(out, who);
+                out += ":{\"text\":"; xp::json_escape_into(out, e.text);
+                out += ",\"ts_ms\":" + std::to_string(e.ts_ms);
+                out += ",\"seq\":" + std::to_string(e.seq) + "}";
+            }
+        }
+        out += "}";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_image_pool_stats_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Per-owner ImagePool footprint. Owner IDs alone are
+        // meaningless to humans — we look them up against the
+        // running project's instances + script so the reply names
+        // who is holding the memory. Anonymous (owner == 0) is
+        // collapsed under "label":"<host>".
+        auto totals   = xi::ImagePool::instance().stats();
+        auto by_owner = xi::ImagePool::instance().stats_by_owner();
+
+        // Build owner_id → label map.
+        std::unordered_map<xi::ImagePoolOwnerId, std::string> labels;
+        labels[0] = "<host>";
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.owner_id != 0) {
+                labels[g_script.owner_id] =
+                    "script:" + std::filesystem::path(g_script.path).filename().string();
+            }
+        }
+        for (auto& [iname, ii] : g_plugin_mgr.project().instances) {
+            if (auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(ii.instance.get())) {
+                labels[a->owner_id()] = "instance:" + ii.name + " (" + ii.plugin_name + ")";
+            }
+            // All instances are in-process CAbiInstanceAdapters now;
+            // process-isolation + SHM were removed 2026-05.
+        }
+
+        auto label_for = [&](xi::ImagePoolOwnerId o) -> std::string {
+            auto it = labels.find(o);
+            if (it != labels.end()) return it->second;
+            return "owner:" + std::to_string(o) + " (orphan)";
+        };
+
+        // Cumulative diagnostics: total_created and high_water never
+        // decrement, so they expose activity even when live counts are
+        // zero between runs (the agent feedback loop hit this — live
+        // snapshots looked empty mid-test, hiding real allocation).
+        auto cum = xi::ImagePool::instance().cumulative();
+        std::string out = "{\"total\":{\"handles\":"
+                        + std::to_string(totals.handle_count)
+                        + ",\"bytes\":"
+                        + std::to_string(totals.total_bytes)
+                        + "},\"cumulative\":{\"total_created\":"
+                        + std::to_string(cum.total_created)
+                        + ",\"high_water\":"
+                        + std::to_string(cum.high_water)
+                        + ",\"live_now\":"
+                        + std::to_string(cum.live_now)
+                        + "},\"by_owner\":[";
+        for (size_t i = 0; i < by_owner.size(); ++i) {
+            if (i) out += ",";
+            out += "{\"owner\":"   + std::to_string(by_owner[i].owner)
+                +  ",\"label\":";
+            xp::json_escape_into(out, label_for(by_owner[i].owner));
+            out +=  ",\"handles\":" + std::to_string(by_owner[i].handle_count)
+                +  ",\"bytes\":"    + std::to_string(by_owner[i].total_bytes)
+                +  "}";
+        }
+        out += "]}";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_dispatch_stats_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Snapshot of queue health. Useful for drivers / agents that
         // want to know if their source is overproducing.
         //
@@ -4069,7 +3681,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         data += "}";
         send_rsp_ok(srv, id, data);
-    } else if (name == "metrics") {
+}
+
+static void cmd_metrics_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // OQ-7a observability export (core_fix_plan §21 / §27.5 "don't gold-plate").
         // The minimal, honest metrics surface: monotonic per-frame counters
         // (total/ok/error) + a fixed-bucket per-frame latency histogram, recorded
@@ -4081,7 +3695,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         std::string data;
         xi::MetricsRegistry::instance().snapshot_json(data);
         send_rsp_ok(srv, id, data);
-    } else if (name == "open_project_warnings") {
+}
+
+static void cmd_open_project_warnings_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Returns the per-instance warnings collected during the most
         // recent open_project. open_project itself succeeds even when
         // individual instances fail (skip-bad-instance), so this is
@@ -4103,7 +3719,235 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         }
         data += "]}";
         send_rsp_ok(srv, id, data);
-    } else if (name == "create_instance") {
+}
+
+// ---- project-CRUD ----------------------------------------------------------
+static void cmd_list_params_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // If a script is loaded, delegate to its own registry thunk so we
+        // see the DLL's params. Otherwise report the backend's own.
+        std::string params_json;
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.list_params) {
+                std::vector<char> buf(64 * 1024);
+                int n = g_script.list_params(buf.data(), (int)buf.size());
+                if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);  // widen: -INT_MIN is UB
+                             n = g_script.list_params(buf.data(), (int)buf.size()); }
+                if (n > 0) params_json.assign(buf.data(), (size_t)n);
+            }
+        }
+        if (params_json.empty()) params_json = "[]";   // params live in the script DLL
+        std::string out = "{\"type\":\"instances\",\"instances\":[],\"params\":";
+        out += params_json;
+        out += "}";
+        send_rsp_ok(srv, id, "{}");
+        srv.send_text(out);
+}
+
+static void cmd_set_param_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        auto pname = xp::get_string_field(parsed->args_json, "name");
+        if (!pname) {
+            send_rsp_err(srv, id, "set_param: missing name");
+            return;
+        }
+        // Extract the value's RAW JSON token and pass it verbatim to set_from_json.
+        // The old path reformatted the number via "%g", which turned a big integer
+        // (e.g. area_min=1000000) into "1e+06" -> std::stoll stops at 'e' -> the param
+        // was SILENTLY set to 1; floats lost precision too (%g = 6 sig figs). It also
+        // scanned the whole args for "value":true, which could false-match a string
+        // value. find_key returns only the top-level value token (a number / true|false
+        // / "quoted string"), exact and un-reformatted; the param's set_from_json
+        // validates it (rc -2 if it rejects). A missing value isn't a missing param.
+        std::string val;
+        const char* after = nullptr;
+        if (!xp::detail::find_key(parsed->args_json.data(),
+                                  parsed->args_json.data() + parsed->args_json.size(),
+                                  "value", val, after)) {
+            send_rsp_err(srv, id, "set_param: missing 'value' for '" + *pname + "'");
+            return;
+        }
+        // xi_script_set_param contract: 0 = set, -1 = no such param, -2 = the param
+        // exists but rejected this value (set_from_json failed).
+        int rc = 0; bool called = false;
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.set_param) {
+                called = true;
+                rc = g_script.set_param(pname->c_str(), val.c_str());
+                // Cache an accepted value so compile_and_load replays it into the next
+                // DLL load (else the new DLL's file-scope default silently overwrites it).
+                if (rc == 0) g_param_cache[*pname] = val;
+            }
+        }
+        if (!called) { send_rsp_err(srv, id, "set_param: no script loaded"); return; }
+        if (rc == 0) { send_rsp_ok(srv, id); return; }
+        if (rc == -1) { send_rsp_err(srv, id, std::string("no such param: ") + *pname); return; }
+        send_rsp_err(srv, id, "set_param: '" + *pname + "' rejected the value (out of range / wrong type)");
+}
+
+static void cmd_list_instances_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        std::string inst_json, params_json;
+        {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok()) {
+                std::vector<char> buf(64 * 1024);
+                if (g_script.list_instances) {
+                    int n = g_script.list_instances(buf.data(), (int)buf.size());
+                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_script.list_instances(buf.data(), (int)buf.size()); }
+                    if (n > 0) inst_json.assign(buf.data(), (size_t)n);
+                }
+                if (g_script.list_params) {
+                    int n = g_script.list_params(buf.data(), (int)buf.size());
+                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_script.list_params(buf.data(), (int)buf.size()); }
+                    if (n > 0) params_json.assign(buf.data(), (size_t)n);
+                }
+            }
+        }
+        // Also include backend-managed instances (from PluginManager)
+        auto& proj = g_plugin_mgr.project();
+        std::string backend_inst = "[";
+        int bi = 0;
+        for (auto& [k, v] : proj.instances) {
+            if (bi++) backend_inst += ",";
+            backend_inst += "{\"name\":\"" + v.name + "\",\"plugin\":\"" + v.plugin_name + "\"}";
+        }
+        backend_inst += "]";
+
+        // Merge: script instances + backend instances
+        std::string merged_inst;
+        if (!inst_json.empty() && inst_json != "[]" && bi > 0) {
+            // Both have entries — merge arrays
+            merged_inst = inst_json.substr(0, inst_json.size() - 1) + "," + backend_inst.substr(1);
+        } else if (bi > 0) {
+            merged_inst = backend_inst;
+        } else {
+            merged_inst = inst_json.empty() ? "[]" : inst_json;
+        }
+
+        std::string out = "{\"type\":\"instances\",\"instances\":";
+        out += merged_inst;
+        out += ",\"params\":";
+        out += params_json.empty() ? "[]" : params_json;
+        out += "}";
+        send_rsp_ok(srv, id, "{}");
+        srv.send_text(out);
+}
+
+static void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        // Extract the def object as a raw JSON substring
+        std::string def_str;
+        const char* after;
+        if (xp::detail::find_key(parsed->args_json.data(),
+                                  parsed->args_json.data() + parsed->args_json.size(),
+                                  "def", def_str, after)) {
+            // def_str is the raw JSON value
+        } else {
+            def_str = "{}";
+        }
+        // Try backend's InstanceRegistry first (plugin-manager instances)
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        if (inst) {
+            // set_def enters plugin code (C-ABI) — guard like exchange_instance so a
+            // throwing/faulting plugin returns a clean error instead of terminating.
+            try {
+                if (inst->set_def(def_str)) {
+                    set_inst_state(*iname, InstState::Active);
+                    send_rsp_ok(srv, id);
+                } else {
+                    set_inst_state(*iname, InstState::Faulted, "set_def returned false");
+                    send_rsp_err(srv, id, "set_def returned false");
+                }
+            } catch (const seh_exception& e) {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg), "set_def '%s' crashed: 0x%08X (%s)",
+                             iname->c_str(), e.code, e.what());
+                set_inst_state(*iname, InstState::Faulted, msg);
+                send_rsp_err(srv, id, msg);
+            } catch (const std::exception& e) {
+                std::string em = std::string("set_def error: ") + e.what();
+                set_inst_state(*iname, InstState::Faulted, em);
+                send_rsp_err(srv, id, em);
+            }
+        } else {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.set_instance_def) {
+                try {
+                    int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
+                    // Cache an accepted def so compile_and_load replays it into the next
+                    // DLL load (else the new DLL's file-scope ctor silently reverts it).
+                    if (rc == 0) g_instance_def_cache[*iname] = def_str;
+                    if (rc == 0) { set_inst_state(*iname, InstState::Active); send_rsp_ok(srv, id); }
+                    else { set_inst_state(*iname, InstState::Faulted, "set_instance_def failed");
+                           send_rsp_err(srv, id, "set_instance_def failed"); }
+                } catch (const seh_exception& e) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg), "script set_instance_def '%s' crashed: 0x%08X (%s)",
+                                 iname->c_str(), e.code, e.what());
+                    set_inst_state(*iname, InstState::Faulted, msg);
+                    send_rsp_err(srv, id, msg);
+                } catch (const std::exception& e) {
+                    std::string em = std::string("script set_instance_def error: ") + e.what();
+                    set_inst_state(*iname, InstState::Faulted, em);
+                    send_rsp_err(srv, id, em);
+                }
+            } else {
+                send_rsp_err(srv, id, "instance not found: " + *iname);
+            }
+        }
+}
+
+static void cmd_get_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Symmetric read of set_instance_def: returns the instance's full def
+        // JSON (incl. any assets the plugin round-trips, e.g. image_png_b64), so
+        // a host can snapshot an instance without scraping exchange:get_status.
+        // Loop over list_instances to snapshot a whole project (the foundation
+        // for portable product/instrument config bundles).
+        auto iname = xp::get_string_field(parsed->args_json, "name");
+        if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        // Backend's InstanceRegistry first (plugin-manager instances).
+        auto inst = xi::InstanceRegistry::instance().find(*iname);
+        if (inst) {
+            // get_def enters plugin code (C-ABI) — guard like exchange_instance.
+            try {
+                std::string def = inst->get_def();
+                send_rsp_ok(srv, id, def.empty() ? "{}" : def);
+            } catch (const seh_exception& e) {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg), "get_def '%s' crashed: 0x%08X (%s)",
+                             iname->c_str(), e.code, e.what());
+                send_rsp_err(srv, id, msg);
+            } catch (const std::exception& e) {
+                send_rsp_err(srv, id, std::string("get_def error: ") + e.what());
+            }
+        } else {
+            std::lock_guard<std::mutex> lk(g_script_mu);
+            if (g_script.ok() && g_script.get_instance_def) {
+                try {
+                    std::vector<char> buf(256 * 1024);
+                    int n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                    if (n < 0 && n != -1) {   // -needed → grow + retry (-1 = not found)
+                        buf.resize((size_t)(-(int64_t)n) + 1024);
+                        n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                    }
+                    if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
+                    else        send_rsp_err(srv, id, "instance not found: " + *iname);
+                } catch (const seh_exception& e) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg), "script get_instance_def '%s' crashed: 0x%08X (%s)",
+                                 iname->c_str(), e.code, e.what());
+                    send_rsp_err(srv, id, msg);
+                } catch (const std::exception& e) {
+                    send_rsp_err(srv, id, std::string("script get_instance_def error: ") + e.what());
+                }
+            } else {
+                send_rsp_err(srv, id, "instance not found: " + *iname);
+            }
+        }
+}
+
+static void cmd_create_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto iname  = xp::get_string_field(parsed->args_json, "name");
         auto plugin = xp::get_string_field(parsed->args_json, "plugin");
         if (!iname || !plugin) { send_rsp_err(srv, id, "missing name or plugin"); return; }
@@ -4126,7 +3970,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, create_err.empty() ? "failed to create instance" : create_err);
         }
-    } else if (name == "remove_instance") {
+}
+
+static void cmd_remove_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         bool delete_folder =
@@ -4138,7 +3984,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "instance not found: " + *iname);
         }
-    } else if (name == "rename_instance") {
+}
+
+static void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto old_name = xp::get_string_field(parsed->args_json, "name");
         auto new_name = xp::get_string_field(parsed->args_json, "new_name");
         if (!old_name || !new_name) { send_rsp_err(srv, id, "missing name or new_name"); return; }
@@ -4156,9 +4004,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             else
                 send_rsp_ok(srv, id, g_plugin_mgr.to_json());
         }
-    } else if (name == "get_project") {
+}
+
+static void cmd_get_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         send_rsp_ok(srv, id, g_plugin_mgr.to_json());
-    } else if (name == "save_instance_config") {
+}
+
+static void cmd_save_instance_config_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         if (g_plugin_mgr.save_instance(*iname)) {
@@ -4166,21 +4018,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         } else {
             send_rsp_err(srv, id, "instance not found: " + *iname);
         }
-    } else if (name == "get_plugin_ui") {
-        // Return the path to the plugin's UI folder so the extension can
-        // load it into a webview.
-        auto plugin = xp::get_string_field(parsed->args_json, "plugin");
-        if (!plugin) { send_rsp_err(srv, id, "missing plugin"); return; }
-        auto* pi = g_plugin_mgr.find_plugin(*plugin);
-        if (pi && pi->has_ui) {
-            std::string data = "{\"ui_path\":";
-            xp::json_escape_into(data, pi->ui_path);
-            data += "}";
-            send_rsp_ok(srv, id, data);
-        } else {
-            send_rsp_err(srv, id, "no UI for plugin: " + *plugin);
-        }
-    } else if (name == "get_dashboard") {
+}
+
+static void cmd_get_dashboard_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Serve the project's HMI dashboard so the HMI only ever needs the BE WS
         // URL (no filesystem coupling). Reads <project>/dashboard[.<name>].json.
         // args: { name?: string }. data: { found, name, dashboard:<verbatim JSON> }.
@@ -4200,12 +4040,279 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         if (found) out += ",\"dashboard\":" + content;   // verbatim file (already JSON)
         out += "}";
         send_rsp_ok(srv, id, out);
-    } else if (name == "toolchain_health") {
+}
+
+// ---- plugin-mgmt -----------------------------------------------------------
+static void cmd_set_process_priority_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Live process priority (Win). class: high|above|normal|below|realtime.
+        // Mirrors --priority / project.json runtime.process_priority.
+        auto c = xp::get_string_field(parsed->args_json, "class");
+        std::string cls = c ? *c : "";
+        if (apply_process_priority_(cls)) {
+            send_rsp_ok(srv, id, "{\"process_priority\":\"" + cls + "\"}");
+        } else {
+            send_rsp_err(srv, id, "bad priority class (high|above|normal|below|realtime)");
+        }
+}
+
+static void cmd_list_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        auto plugins = g_plugin_mgr.list_plugins();
+        std::string out = "[";
+        auto esc = [](const std::string& s) {
+            std::string o; for (char c : s) { if (c=='\\'||c=='"') o.push_back('\\'); o.push_back(c); } return o;
+        };
+        for (size_t i = 0; i < plugins.size(); ++i) {
+            if (i) out += ",";
+            auto& p = plugins[i];
+            out += "{\"name\":\"" + esc(p.name) + "\",\"description\":\"" + esc(p.description) + "\"";
+            out += ",\"folder\":\"" + esc(p.folder_path) + "\"";
+            out += ",\"has_ui\":" + std::string(p.has_ui ? "true" : "false");
+            out += ",\"loaded\":" + std::string(p.handle ? "true" : "false");
+            // cmake/prebuilt plugins get the per-item "Rebuild" action in the
+            // extension's Plugin Browser (rebuild_plugins {plugins:[name]}).
+            out += ",\"prebuilt\":" + std::string(p.prebuilt ? "true" : "false");
+            // Same origin field as to_json — the extension's Plugin Browser relies
+            // on it to badge project plugins, e2e journey asserts it.
+            bool is_proj = g_plugin_mgr.is_project_plugin(p.name);
+            out += ",\"origin\":\"" + std::string(is_proj ? "project" : "global") + "\"";
+            // Optional `manifest` block from plugin.json (free-form;
+            // see docs/reference/c-abi.md). AI agents and doc
+            // tools read this to discover params / inputs / outputs /
+            // exchange surface without grepping plugin source.
+            if (!p.manifest_json.empty()) {
+                out += ",\"manifest\":" + p.manifest_json;
+            }
+            out += "}";
+        }
+        out += "]";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_rescan_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Optional arg: {"dir": "<path>"} scans that one dir (additive).
+        // No arg: re-scan the default plugins_dir.
+        auto dir_opt = xp::get_string_field(parsed->args_json, "dir");
+        const std::string& dir = dir_opt ? *dir_opt : g_plugins_dir;
+        int n = 0;
+        if (!dir.empty() && std::filesystem::exists(dir)) {
+            n = g_plugin_mgr.scan_plugins(dir);
+        }
+        std::string out = "{\"scanned\":";
+        xp::json_escape_into(out, dir);
+        out += ",\"count\":" + std::to_string(n) + "}";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_unquarantine_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Part III G2.3 — operator un-quarantine. Clears the G1 .xi_certify.json
+        // verdict (crashed/quarantined) for a plugin so the next scan re-certifies
+        // it from scratch. Accepts {"name": "<plugin>"} (resolved to its folder via
+        // the last scan) or {"dir": "<folder>"}. Re-scans the default plugins dir
+        // afterwards so a now-clean plugin is re-armed without a restart.
+        auto pname = xp::get_string_field(parsed->args_json, "name");
+        auto pdir  = xp::get_string_field(parsed->args_json, "dir");
+        std::string key = pname ? *pname : (pdir ? *pdir : std::string());
+        if (key.empty()) { send_rsp_err(srv, id, "missing name or dir"); return; }
+        bool cleared = g_plugin_mgr.unquarantine_plugin(key);
+        if (!cleared) { send_rsp_err(srv, id, "no quarantine found for: " + key); return; }
+        int rearmed = 0;
+        if (!g_plugins_dir.empty() && std::filesystem::exists(g_plugins_dir))
+            rearmed = g_plugin_mgr.scan_plugins(g_plugins_dir);
+        std::string out = "{\"unquarantined\":";
+        xp::json_escape_into(out, key);
+        out += ",\"rearmed\":" + std::to_string(rearmed) + "}";
+        send_rsp_ok(srv, id, out);
+}
+
+static void cmd_load_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        auto pname = xp::get_string_field(parsed->args_json, "name");
+        if (!pname) { send_rsp_err(srv, id, "missing name"); return; }
+        if (g_plugin_mgr.load_plugin(*pname)) {
+            send_rsp_ok(srv, id);
+        } else {
+            send_rsp_err(srv, id, "failed to load plugin: " + *pname);
+        }
+}
+
+static void cmd_export_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Package a project plugin as a deployable folder. Compiles Release;
+        // the destination contains a self-contained plugin.json + DLL that can
+        // be dropped into another project's plugins folder.
+        auto pname = xp::get_string_field(parsed->args_json, "plugin");
+        auto dest  = xp::get_string_field(parsed->args_json, "dest");
+        if (!pname || !dest) { send_rsp_err(srv, id, "missing plugin or dest"); return; }
+        if (!g_plugin_mgr.is_project_plugin(*pname)) {
+            send_rsp_err(srv, id, "not a project plugin: " + *pname);
+            return;
+        }
+        // export_project_plugin recompiles in Release; quiesce so no dispatcher
+        // worker is mid-call into the same plugin's instances.
+        auto _export_guard = quiesce_dispatch_for_lifecycle_op_("export_project_plugin", &srv);  // resumes at block end
+        auto er = g_plugin_mgr.export_project_plugin(*pname, *dest);
+        std::string data = "{\"plugin\":";
+        xp::json_escape_into(data, *pname);
+        data += ",\"dest\":";
+        xp::json_escape_into(data, er.dest_dir);
+        data += "}";
+        if (er.ok) {
+            send_rsp_ok(srv, id, data);
+        } else {
+            xp::Rsp r;
+            r.id = id;
+            r.ok = false;
+            r.error = er.error;
+            r.data_json = data;
+            srv.send_text(r.to_json());
+            if (!er.build_log.empty()) {
+                xp::LogMsg lm;
+                lm.level = "error";
+                lm.msg = er.build_log;
+                srv.send_text(lm.to_json());
+            }
+        }
+}
+
+static void cmd_recompile_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Hot-rebuild a single project-local plugin. The extension calls
+        // this from a file watcher when the user edits plugin source.
+        // On success the plugin's instances are re-instantiated with
+        // their previous defs intact; on failure the old DLL stays
+        // loaded so running inspection isn't disrupted.
+        auto pname = xp::get_string_field(parsed->args_json, "plugin");
+        if (!pname) { send_rsp_err(srv, id, "missing plugin"); return; }
+        if (!g_plugin_mgr.is_project_plugin(*pname)) {
+            send_rsp_err(srv, id, "not a project plugin: " + *pname);
+            return;
+        }
+        // P0-AB-4: recompile resets each instance pointer then
+        // FreeLibrary's the old DLL. Any in-flight set_def / exchange
+        // on those instances from a dispatcher worker would dereference
+        // freed code. Drain first.
+        auto guard = quiesce_dispatch_for_lifecycle_op_("recompile_project_plugin", &srv);
+        auto rr = g_plugin_mgr.recompile_project_plugin(*pname);
+        // Build diagnostics JSON — same shape as compile_and_load.
+        std::string diag_json = "[";
+        for (size_t i = 0; i < rr.diagnostics.size(); ++i) {
+            auto& d = rr.diagnostics[i];
+            if (i) diag_json += ",";
+            diag_json += "{\"file\":";  xp::json_escape_into(diag_json, d.file);
+            diag_json += ",\"line\":" + std::to_string(d.line);
+            diag_json += ",\"col\":"  + std::to_string(d.col);
+            diag_json += ",\"severity\":"; xp::json_escape_into(diag_json, d.severity);
+            diag_json += ",\"code\":";    xp::json_escape_into(diag_json, d.code);
+            diag_json += ",\"message\":"; xp::json_escape_into(diag_json, d.message);
+            diag_json += "}";
+        }
+        diag_json += "]";
+        std::string data = "{\"plugin\":";
+        xp::json_escape_into(data, *pname);
+        data += ",\"diagnostics\":" + diag_json;
+        data += ",\"reattached\":[";
+        for (size_t i = 0; i < rr.reattached_instances.size(); ++i) {
+            if (i) data += ",";
+            xp::json_escape_into(data, rr.reattached_instances[i]);
+        }
+        data += "]}";
+        if (rr.ok) {
+            send_rsp_ok(srv, id, data);
+        } else {
+            xp::Rsp r;
+            r.id = id;
+            r.ok = false;
+            r.error = rr.error;
+            r.data_json = data;
+            srv.send_text(r.to_json());
+            if (!rr.build_log.empty()) {
+                xp::LogMsg lm;
+                lm.level = "error";
+                lm.msg = rr.build_log;
+                srv.send_text(lm.to_json());
+            }
+        }
+}
+
+static void cmd_rebuild_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // `xInsp2: Rebuild Plugins`. For every cmake/prebuilt plugin whose source
+        // changed, the backend unloads it (releasing the DLL file lock), runs its
+        // own CMake build, then loads the rebuilt DLL and restores each instance's
+        // def. Unchanged plugins (incl. CUDA/heavy-state ones you didn't touch)
+        // are skipped. The unload→build→load ordering is why CMake runs host-side
+        // (Windows can't overwrite a loaded DLL; CMake emits a fixed-name DLL).
+        //
+        // Optional args: {"cmake":"<path>", "config":"Release",
+        //                 "plugins":["a","b"]}. `plugins` restricts the rebuild to
+        // those names (the extension passes it to rebuild just what you're editing);
+        // omitted = every cmake plugin.
+        //
+        // Same quiesce constraint as recompile: this resets instance pointers and
+        // FreeLibrary's DLLs — drain dispatch first.
+        auto cmake_exe = xp::get_string_field(parsed->args_json, "cmake");
+        auto config    = xp::get_string_field(parsed->args_json, "config");
+        std::vector<std::string> only;
+        if (yyjson_doc* adoc = yyjson_read(parsed->args_json.c_str(), parsed->args_json.size(), 0)) {
+            yyjson_val* arr = yyjson_obj_get(yyjson_doc_get_root(adoc), "plugins");
+            if (yyjson_is_arr(arr)) {
+                size_t _i, _n; yyjson_val* it;
+                yyjson_arr_foreach(arr, _i, _n, it) {
+                    const char* s = yyjson_get_str(it);
+                    if (yyjson_is_str(it) && s) only.emplace_back(s);
+                }
+            }
+            yyjson_doc_free(adoc);
+        }
+        auto guard = quiesce_dispatch_for_lifecycle_op_("rebuild_plugins", &srv);
+        auto rep = g_plugin_mgr.rebuild_cmake_plugins(
+            cmake_exe ? *cmake_exe : std::string("cmake"),
+            config    ? *config    : std::string("Release"),
+            only);
+        std::string data = "{\"plugins\":[";
+        bool any_fail = false;
+        for (size_t i = 0; i < rep.items.size(); ++i) {
+            auto& it = rep.items[i];
+            if (i) data += ",";
+            data += "{\"plugin\":"; xp::json_escape_into(data, it.name);
+            data += ",\"status\":"; xp::json_escape_into(data, it.status);
+            data += ",\"detail\":"; xp::json_escape_into(data, it.detail);
+            data += "}";
+            if (it.status == "failed") any_fail = true;
+        }
+        data += "]}";
+        // Partial failures (failed[]) are still a completed run — return ok with
+        // the per-plugin report; the client surfaces failures.
+        send_rsp_ok(srv, id, data);
+        if (any_fail)
+            for (auto& it : rep.items)
+                if (it.status == "failed") {
+                    xp::LogMsg lm; lm.level = "error";
+                    lm.msg = "rebuild_plugins: " + it.name + ": " + it.detail;
+                    srv.send_text(lm.to_json());
+                }
+}
+
+static void cmd_get_plugin_ui_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Return the path to the plugin's UI folder so the extension can
+        // load it into a webview.
+        auto plugin = xp::get_string_field(parsed->args_json, "plugin");
+        if (!plugin) { send_rsp_err(srv, id, "missing plugin"); return; }
+        auto* pi = g_plugin_mgr.find_plugin(*plugin);
+        if (pi && pi->has_ui) {
+            std::string data = "{\"ui_path\":";
+            xp::json_escape_into(data, pi->ui_path);
+            data += "}";
+            send_rsp_ok(srv, id, data);
+        } else {
+            send_rsp_err(srv, id, "no UI for plugin: " + *plugin);
+        }
+}
+
+static void cmd_toolchain_health_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // C++ toolchain health check for the open project. Reports each
         // component's resolved path + source (override/env/default/none) +
         // whether it exists, so the config UI can warn on missing/wrong paths.
         send_rsp_ok(srv, id, xi::toolchain::health_json(g_project_folder, g_include_dir_default));
-    } else if (name == "set_toolchain_override") {
+}
+
+static void cmd_set_toolchain_override_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Pin (or clear) one toolchain path in the project's project.json
         // "toolchain" block. args: { key: "opencv"|"turbojpeg"|"ipp"|"vcvars"|
         // "include", path: "<dir-or-file>" }  (empty path clears the override).
@@ -4235,6 +4342,83 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         data += xi::toolchain::health_json(g_project_folder, g_include_dir_default);
         data += "}";
         send_rsp_ok(srv, id, data);
+}
+
+// Dispatch table: command name -> handler.  Replaces the if/else-if chain.
+using HandlerFn = void(*)(xi::ws::Server&, int64_t, const xp::ParsedCmd*);
+static const std::unordered_map<std::string_view, HandlerFn> g_cmd_table = {
+    {"ping", cmd_ping_},
+    {"version", cmd_version_},
+    {"crash_reports", cmd_crash_reports_},
+    {"clear_crash_reports", cmd_clear_crash_reports_},
+    {"set_watchdog_ms", cmd_set_watchdog_ms_},
+    {"set_process_priority", cmd_set_process_priority_},
+    {"set_timer_fps", cmd_set_timer_fps_},
+    {"watchdog_status", cmd_watchdog_status_},
+    {"graph_capture", cmd_graph_capture_},
+    {"graph_snapshot", cmd_graph_snapshot_},
+    {"shutdown", cmd_shutdown_},
+    {"compile_and_load", cmd_compile_and_load_},
+    {"unload_script", cmd_unload_script_},
+    {"run", cmd_run_},
+    {"start", cmd_start_},
+    {"stop", cmd_stop_},
+    {"list_params", cmd_list_params_},
+    {"set_param", cmd_set_param_},
+    {"list_instances", cmd_list_instances_},
+    {"set_instance_def", cmd_set_instance_def_},
+    {"get_instance_def", cmd_get_instance_def_},
+    {"exchange_instance", cmd_exchange_instance_},
+    {"get_state", cmd_get_state_},
+    {"prepare_instance", cmd_prepare_instance_},
+    {"commit_group", cmd_commit_group_},
+    {"save_project", cmd_save_project_},
+    {"commit_working_copy", cmd_commit_working_copy_},
+    {"discard_working_copy", cmd_discard_working_copy_},
+    {"load_project", cmd_load_project_},
+    {"list_plugins", cmd_list_plugins_},
+    {"recent_errors", cmd_recent_errors_},
+    {"status", cmd_status_},
+    {"image_pool_stats", cmd_image_pool_stats_},
+    {"rescan_plugins", cmd_rescan_plugins_},
+    {"unquarantine_plugin", cmd_unquarantine_plugin_},
+    {"load_plugin", cmd_load_plugin_},
+    {"create_project", cmd_create_project_},
+    {"open_project", cmd_open_project_},
+    {"close_project", cmd_close_project_},
+    {"export_project_plugin", cmd_export_project_plugin_},
+    {"recompile_project_plugin", cmd_recompile_project_plugin_},
+    {"rebuild_plugins", cmd_rebuild_plugins_},
+    {"dispatch_stats", cmd_dispatch_stats_},
+    {"metrics", cmd_metrics_},
+    {"open_project_warnings", cmd_open_project_warnings_},
+    {"create_instance", cmd_create_instance_},
+    {"remove_instance", cmd_remove_instance_},
+    {"rename_instance", cmd_rename_instance_},
+    {"get_project", cmd_get_project_},
+    {"save_instance_config", cmd_save_instance_config_},
+    {"get_plugin_ui", cmd_get_plugin_ui_},
+    {"get_dashboard", cmd_get_dashboard_},
+    {"toolchain_health", cmd_toolchain_health_},
+    {"set_toolchain_override", cmd_set_toolchain_override_},
+};
+
+static void handle_command(xi::ws::Server& srv, std::string_view text) {
+    auto parsed = xp::parse_cmd(text);
+    if (!parsed) {
+        xp::LogMsg lm;
+        lm.level = "error";
+        lm.msg   = std::string("malformed cmd: ") + std::string(text.substr(0, 128));
+        srv.send_text(lm.to_json());
+        return;
+    }
+
+    const auto& name = parsed->name;
+    const int64_t id = parsed->id;
+
+    auto it = g_cmd_table.find(name);
+    if (it != g_cmd_table.end()) {
+        it->second(srv, id, &*parsed);
     } else {
         send_rsp_err(srv, id, std::string("unknown command: ") + name);
     }
