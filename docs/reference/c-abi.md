@@ -123,6 +123,21 @@ the project still opens).
 
 **`xi_plugin_destroy(inst)`** — mirror of create; free what create allocated.
 
+> **Exceptions never cross the ABI boundary.** `XI_PLUGIN_IMPL` (and
+> `XI_PLUGIN_STAGED`) wrap **every** per-call export body in `try { … } catch
+> (…)`, so a C++ exception thrown from your `process` / `exchange` / `get_def` /
+> `set_def` / `prepare` / `commit` / destructor is caught **inside the plugin's own
+> runtime** and converted to a safe sentinel — the host is never unwound through.
+> This matters most for a **prebuilt** plugin built against a different MSVC runtime
+> than the host: unwinding a C++ exception across the DLL boundary is UB, and this
+> in-plugin catch is what makes the boundary effectively `noexcept`. On a caught
+> throw: `process` leaves `output` empty, `exchange`/`get_def` return an empty
+> result, `set_def`/`prepare` return the "rejected" sentinel, and the throw is
+> logged to stderr. It is still a **bug** to throw out of an export — this is
+> defense-in-depth, not a supported error channel; return a clean error/`false`
+> instead. (The host ALSO guards its own call sites, so a same-runtime throw was
+> already survivable; this closes the cross-runtime UB gap.)
+
 **`xi_plugin_process(inst, input, output)`** — the hot path, once per cycle.
 - `input->images` — `{key, handle}` array; read pixels via `host->image_data(h)`.
   Handles are **zero-copy views** over the pool, valid for the call's duration.

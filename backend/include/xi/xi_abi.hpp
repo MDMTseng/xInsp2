@@ -31,7 +31,9 @@
 #include "xi_image.hpp"
 #include "xi_record.hpp"   // wire codec is yyjson JSON (Record::from_json_bytes / data_json)
 
+#include <cstdio>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <string>
 #include <vector>
@@ -689,48 +691,84 @@ void* xi_plugin_create(const xi_host_api* host, const char* name) {            \
                                                                                \
 extern "C" __declspec(dllexport)                                               \
 void xi_plugin_destroy(void* inst) {                                           \
-    delete static_cast<ClassName*>(inst);                                       \
+    /* A destructor throwing across the C ABI is UB — swallow it in-plugin. */  \
+    try { delete static_cast<ClassName*>(inst); }                               \
+    catch (...) { std::fprintf(stderr, "[xinsp2] plugin destructor threw\n"); } \
 }                                                                              \
                                                                                \
+/* B2 defense-in-depth: every per-call export catches C++ exceptions HERE, in   */ \
+/* the plugin's OWN runtime. A throw that escaped across the extern "C" boundary */ \
+/* into the host unwinds correctly only for a source-mode plugin (same CRT as   */ \
+/* the host); a PREBUILT plugin built against a different MSVC runtime unwinding */ \
+/* across the DLL boundary is UB. Catching in-plugin makes the boundary noexcept */ \
+/* in practice: the throw is caught in the same runtime that raised it, and the  */ \
+/* host sees a safe sentinel instead of a corrupt unwind. Catch bodies allocate  */ \
+/* nothing (a bad_alloc catch must not re-throw).                                */ \
 extern "C" __declspec(dllexport)                                               \
 void xi_plugin_process(void* inst,                                             \
                        const xi_record* input,                                 \
                        xi_record_out* output) {                                \
     auto* self = static_cast<ClassName*>(inst);                                \
-    /* γ: build the input view / output doc under the host doc allocator, and  */ \
-    /* return by doc-pointer when the input arrived as one (symmetric path).   */ \
-    xi::HostDocAlcScope _xi_alc(self->host());                                 \
-    xi::Record in_rec = xi::record_from_c(self->host(), input);                \
-    xi::Record out_rec = self->process(in_rec);                                \
-    xi::record_to_c(self->host(), out_rec, output, input->doc != nullptr);     \
+    try {                                                                      \
+        /* γ: build the input view / output doc under the host doc allocator,  */ \
+        /* return by doc-pointer when the input arrived as one (symmetric).    */ \
+        xi::HostDocAlcScope _xi_alc(self->host());                             \
+        xi::Record in_rec = xi::record_from_c(self->host(), input);            \
+        xi::Record out_rec = self->process(in_rec);                            \
+        xi::record_to_c(self->host(), out_rec, output, input->doc != nullptr); \
+    } catch (const std::exception& e) {                                        \
+        std::fprintf(stderr, "[xinsp2] plugin process() threw: %s\n", e.what()); \
+    } catch (...) {                                                            \
+        std::fprintf(stderr, "[xinsp2] plugin process() threw (non-std)\n");   \
+    } /* on throw: output stays host-initialised (empty) — no crash */         \
 }                                                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \
 int xi_plugin_exchange(void* inst, const char* cmd,                            \
                        char* rsp, int rsplen) {                                \
     auto* self = static_cast<ClassName*>(inst);                                \
-    std::string r = self->exchange(cmd);                                       \
-    int n = (int)r.size();                                                     \
-    if (rsplen < n + 1) return -n;                                             \
-    std::memcpy(rsp, r.data(), r.size());                                      \
-    rsp[r.size()] = 0;                                                         \
-    return n;                                                                  \
+    try {                                                                      \
+        std::string r = self->exchange(cmd);                                   \
+        int n = (int)r.size();                                                 \
+        if (rsplen < n + 1) return -n;                                         \
+        std::memcpy(rsp, r.data(), r.size());                                  \
+        rsp[r.size()] = 0;                                                     \
+        return n;                                                              \
+    } catch (const std::exception& e) {                                        \
+        std::fprintf(stderr, "[xinsp2] plugin exchange() threw: %s\n", e.what()); \
+    } catch (...) {                                                            \
+        std::fprintf(stderr, "[xinsp2] plugin exchange() threw (non-std)\n");  \
+    }                                                                          \
+    return 0; /* safe sentinel: empty response, host won't re-grow the buf */  \
 }                                                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \
 int xi_plugin_get_def(void* inst, char* buf, int buflen) {                     \
     auto* self = static_cast<ClassName*>(inst);                                \
-    std::string d = self->get_def();                                           \
-    int n = (int)d.size();                                                     \
-    if (buflen < n + 1) return -n;                                             \
-    std::memcpy(buf, d.data(), d.size());                                      \
-    buf[d.size()] = 0;                                                         \
-    return n;                                                                  \
+    try {                                                                      \
+        std::string d = self->get_def();                                       \
+        int n = (int)d.size();                                                 \
+        if (buflen < n + 1) return -n;                                         \
+        std::memcpy(buf, d.data(), d.size());                                  \
+        buf[d.size()] = 0;                                                     \
+        return n;                                                              \
+    } catch (const std::exception& e) {                                        \
+        std::fprintf(stderr, "[xinsp2] plugin get_def() threw: %s\n", e.what()); \
+    } catch (...) {                                                            \
+        std::fprintf(stderr, "[xinsp2] plugin get_def() threw (non-std)\n");   \
+    }                                                                          \
+    return 0; /* safe sentinel: empty def */                                   \
 }                                                                              \
                                                                                \
 extern "C" __declspec(dllexport)                                               \
 int xi_plugin_set_def(void* inst, const char* json) {                          \
-    return static_cast<ClassName*>(inst)->set_def(json) ? 0 : -1;              \
+    try { return static_cast<ClassName*>(inst)->set_def(json) ? 0 : -1; }      \
+    catch (const std::exception& e) {                                          \
+        std::fprintf(stderr, "[xinsp2] plugin set_def() threw: %s\n", e.what()); \
+    } catch (...) {                                                            \
+        std::fprintf(stderr, "[xinsp2] plugin set_def() threw (non-std)\n");   \
+    }                                                                          \
+    return -1; /* sentinel: config rejected */                                 \
 }                                                                              \
                                                                                \
 /* ABI version stamp — host loader checks this against its own        */ \
@@ -762,10 +800,22 @@ uint32_t xi_yyjson_abi(void) {                                                 \
 #define XI_PLUGIN_STAGED(ClassName)                                            \
 extern "C" __declspec(dllexport)                                               \
 int xi_plugin_prepare(void* inst, const char* def_json, const char* folder) {  \
-    return static_cast<ClassName*>(inst)->prepare(def_json ? def_json : "",     \
+    try {                                                                      \
+        return static_cast<ClassName*>(inst)->prepare(def_json ? def_json : "", \
                                                   folder ? folder : "") ? 0 : -1; \
+    } catch (const std::exception& e) {                                        \
+        std::fprintf(stderr, "[xinsp2] plugin prepare() threw: %s\n", e.what()); \
+    } catch (...) {                                                            \
+        std::fprintf(stderr, "[xinsp2] plugin prepare() threw (non-std)\n");   \
+    }                                                                          \
+    return -1; /* sentinel: staging failed -> host keeps the live config */    \
 }                                                                              \
 extern "C" __declspec(dllexport)                                               \
 void xi_plugin_commit(void* inst) {                                            \
-    static_cast<ClassName*>(inst)->commit();                                   \
+    try { static_cast<ClassName*>(inst)->commit(); }                           \
+    catch (const std::exception& e) {                                          \
+        std::fprintf(stderr, "[xinsp2] plugin commit() threw: %s\n", e.what()); \
+    } catch (...) {                                                            \
+        std::fprintf(stderr, "[xinsp2] plugin commit() threw (non-std)\n");    \
+    }                                                                          \
 }
