@@ -543,6 +543,7 @@ static void flush_staged_emits_(int64_t run_id) {
     struct RecordOutGuard {
         xi_record_out* out;
         bool release_refs = false;   // armed once prc>=0: the returned refs are ours to drop
+        explicit RecordOutGuard(xi_record_out* o) : out(o) {}
         ~RecordOutGuard() {
             try {
                 if (release_refs) {
