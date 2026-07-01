@@ -239,6 +239,37 @@ target_compile_definitions(test_golden_plugin PRIVATE
     STALE_V10_PLUGIN_DLL="$<TARGET_FILE:stale_plugin_v10>")
 add_test(NAME golden_plugin COMMAND test_golden_plugin)
 
+# --- OQ-7: static cross-plugin Record field contract ------------------------
+# Opt-in producer/consumer schema declared via the optional xi_plugin_record_schema
+# export (ABI-additive; xi_host_api untouched — see xi_record_schema.hpp). Four
+# fixtures from one source (SCHEMA_ROLE) + a test that drives the real adapter
+# load path and validates matched / wrong-type / missing-field pipelines.
+add_library(schema_producer          SHARED tests/schema_fixture_plugin.cpp)
+target_compile_definitions(schema_producer          PRIVATE SCHEMA_ROLE=0)
+add_library(schema_consumer_ok       SHARED tests/schema_fixture_plugin.cpp)
+target_compile_definitions(schema_consumer_ok       PRIVATE SCHEMA_ROLE=1)
+add_library(schema_consumer_badtype  SHARED tests/schema_fixture_plugin.cpp)
+target_compile_definitions(schema_consumer_badtype  PRIVATE SCHEMA_ROLE=2)
+add_library(schema_consumer_missing  SHARED tests/schema_fixture_plugin.cpp)
+target_compile_definitions(schema_consumer_missing  PRIVATE SCHEMA_ROLE=3)
+foreach(t schema_producer schema_consumer_ok schema_consumer_badtype schema_consumer_missing)
+    target_link_libraries(${t} PRIVATE xi_core)
+endforeach()
+
+add_executable(test_record_schema tests/test_record_schema.cpp)
+target_link_libraries(test_record_schema PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_record_schema PRIVATE Ws2_32)
+endif()
+add_dependencies(test_record_schema
+    schema_producer schema_consumer_ok schema_consumer_badtype schema_consumer_missing)
+target_compile_definitions(test_record_schema PRIVATE
+    PRODUCER_DLL="$<TARGET_FILE:schema_producer>"
+    CONSUMER_OK_DLL="$<TARGET_FILE:schema_consumer_ok>"
+    CONSUMER_BADTYPE_DLL="$<TARGET_FILE:schema_consumer_badtype>"
+    CONSUMER_MISSING_DLL="$<TARGET_FILE:schema_consumer_missing>")
+add_test(NAME record_schema COMMAND test_record_schema)
+
 # ABI freeze-signature guard: declares xi_host_api@9 frozen and fails the BUILD
 # if its published layout changes (per-field offset + fn-pointer type, in order).
 # Mostly compile-time static_assert; the test target makes it part of the build.

@@ -674,6 +674,21 @@ typedef int   (*xi_plugin_set_def_fn)(void* inst, const char* json);
 typedef int   (*xi_plugin_prepare_fn)(void* inst, const char* def_json, const char* folder);
 typedef void  (*xi_plugin_commit_fn)(void* inst);
 
+/* OPTIONAL (null if the plugin didn't opt in). A STATIC declaration of the
+ * cross-plugin Record fields this plugin produces / consumes, for wire/load-time
+ * contract validation (see xi_record_schema.hpp; core_fix_plan.md §21 / OQ-7).
+ * NOT part of xi_host_api — a plugin-side export resolved via GetProcAddress
+ * exactly like prepare/commit, so it is ABI-ADDITIVE and leaves the frozen v11
+ * xi_host_api layout untouched (docs/internals/adr-001-host-api-freeze.md).
+ *   xi_plugin_record_schema(buf, buflen) -> bytes written (or, if the buffer is
+ *     too small, the NEGATED required size, same convention as get_def). Writes
+ *     a small JSON:
+ *       {"produces":[{"key":"score","type":"double"}],
+ *        "consumes":[{"key":"gray","type":"image"}]}
+ *   Types: int|double|bool|string|image|record|array|any. Purely declarative;
+ *   a plugin that does not export it keeps its current (schemaless) behaviour. */
+typedef int   (*xi_plugin_record_schema_fn)(char* buf, int buflen);
+
 #ifdef __cplusplus
 }
 #endif
