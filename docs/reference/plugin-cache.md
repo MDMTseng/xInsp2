@@ -51,11 +51,24 @@ Every command returns the post-mutation `get_def()`:
 
 | Command | Effect |
 |---|---|
-| `{"command":"replay_last","n":k}` | re-emit the last `k` buffered records (default 1, clamped to ring size), oldest-first |
-| `{"command":"replay_all"}` | re-emit every buffered record, oldest-first |
+| `{"command":"replay_last","n":k}` | re-emit the last `k` buffered records (default 1, clamped to ring size), oldest-first, **back-to-back** |
+| `{"command":"replay_all"}` | re-emit every buffered record, oldest-first, back-to-back |
 | `{"command":"replay","index":i}` | re-emit the record at ring index `i` |
-| `{"command":"clear"}` | empty the ring |
+| `{"command":"replay_timed","speed":s,"n":k}` | **TIMED replay** — re-emit the buffered records (all, or the last `k`) on a background thread, paced by the ORIGINAL inter-capture gaps, scaled by `speed` (>1 faster, default 1.0). Returns immediately; `get_def().replaying` is `true` until it finishes |
+| `{"command":"stop_replay"}` | cancel an in-flight timed replay |
+| `{"command":"clear"}` | cancel any timed replay and empty the ring |
 | `{"command":"set_capacity","value":v}` | resize the ring (evicts oldest if it shrinks) |
+
+`get_def()` reports `{"capacity", "count", "replaying"}`; poll `replaying` to
+detect when a `replay_timed` run has drained.
+
+### Timed vs back-to-back
+`replay_all`/`replay_last` fire as fast as dispatch accepts them — good for the
+hot-param re-inspect loop (you want the answer immediately). `replay_timed`
+reproduces the **arrival cadence** (each capture's gap, optionally time-scaled) —
+good for exercising load/timing behaviour (queue pressure, overflow) against a
+recorded traffic shape. Neither reproduces byte-identical ordering; that is
+on-disk deterministic replay, a separate feature.
 
 Re-emission uses `xi::emit_record` with the cache instance's name as the source
 and a **fresh** trigger id + `ts = now` (a replay is a new dispatch event, not a

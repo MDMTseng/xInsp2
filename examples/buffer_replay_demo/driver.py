@@ -63,6 +63,19 @@ def wait_stable_count(c: Client, timeout=8.0) -> int:
     return prev
 
 
+def timed_replay_elapsed(c: Client, speed: float, timeout=12.0) -> float:
+    """Kick a replay_timed (background, paced) and return its wall duration,
+    measured by polling the plugin's `replaying` flag true->false."""
+    c.exchange_instance("buffer", {"command": "replay_timed", "speed": speed})
+    t0 = time.monotonic()
+    # wait until it reports replaying (or already finished a fast one)
+    while time.monotonic() - t0 < 1.0 and not get_def(c).get("replaying"):
+        time.sleep(0.005)
+    while time.monotonic() - t0 < timeout and get_def(c).get("replaying"):
+        time.sleep(0.01)
+    return time.monotonic() - t0
+
+
 def replay_at_thresh(c: Client, thr: int, timeout=6.0) -> dict:
     """Set thresh, replay the last buffered frame, and return the fresh 'runs'
     result for that replay (polls until the frame carries our thresh)."""
@@ -127,7 +140,21 @@ def main() -> int:
             check(int(get_def(c).get("count", -1)) == n,
                   "replays did not grow the ring (no re-buffer)")
 
-            # 4. clear empties the ring.
+            # 4. TIMED replay: capture 4 frames ~120 ms apart, then replay paced.
+            c.exchange_instance("buffer", {"command": "clear"})
+            GAP, N = 0.12, 4
+            for _ in range(N):
+                c.exchange_instance("src", {"command": "fire", "n": 1})
+                time.sleep(GAP)
+            wait_stable_count(c)
+            span = GAP * (N - 1)                       # expected ~0.36 s at speed 1
+            e1 = timed_replay_elapsed(c, speed=1.0)
+            e8 = timed_replay_elapsed(c, speed=8.0)
+            print(f"[driver] timed replay: speed1={e1:.2f}s (span~{span:.2f}s), speed8={e8:.2f}s")
+            check(e1 >= span * 0.6, f"timed replay is PACED, not instant ({e1:.2f}s >= {span*0.6:.2f}s)")
+            check(e8 < e1, f"speed factor compresses the replay ({e8:.2f}s < {e1:.2f}s)")
+
+            # 5. clear empties the ring.
             c.exchange_instance("buffer", {"command": "clear"})
             check(int(get_def(c).get("count", -1)) == 0, "clear empties the ring")
 
