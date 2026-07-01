@@ -2494,7 +2494,22 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // those entries stay cached and quietly no-op.
             if (g_script.set_instance_def) {
                 for (auto& [iname, def] : g_instance_def_cache) {
-                    g_script.set_instance_def(iname.c_str(), def.c_str());
+                    // Replaying a cached def enters the freshly-swapped DLL's plugin
+                    // code while we hold g_run_mu + g_script_mu. A plugin that throws
+                    // (or faults, via the SEH translator) on an old/incompatible cached
+                    // def must NOT terminate the backend mid-swap — log + skip it and
+                    // keep replaying the rest. Do NOT touch the held locks in the catch.
+                    try {
+                        g_script.set_instance_def(iname.c_str(), def.c_str());
+                    } catch (const seh_exception& e) {
+                        std::fprintf(stderr,
+                            "[xinsp2] replay set_instance_def '%s' crashed: 0x%08X (%s) — skipped\n",
+                            iname.c_str(), e.code, e.what());
+                    } catch (const std::exception& e) {
+                        std::fprintf(stderr,
+                            "[xinsp2] replay set_instance_def '%s' threw: %s — skipped\n",
+                            iname.c_str(), e.what());
+                    }
                 }
                 if (!g_instance_def_cache.empty()) {
                     std::fprintf(stderr,
@@ -2530,7 +2545,24 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     if (xi::script::migrate_state(g_script, g_persistent_state_json,
                                                   g_persistent_state_schema, new_schema,
                                                   migrated)) {
-                        g_script.set_state(migrated.c_str());
+                        // set_state enters plugin code under g_run_mu + g_script_mu;
+                        // a throwing/faulting plugin must not terminate the swap. On
+                        // failure, drop the migrated state and continue (no lock touch).
+                        bool state_ok = true;
+                        try {
+                            g_script.set_state(migrated.c_str());
+                        } catch (const seh_exception& e) {
+                            state_ok = false;
+                            std::fprintf(stderr,
+                                "[xinsp2] replay set_state (migrated) crashed: 0x%08X (%s) — skipped\n",
+                                e.code, e.what());
+                        } catch (const std::exception& e) {
+                            state_ok = false;
+                            std::fprintf(stderr,
+                                "[xinsp2] replay set_state (migrated) threw: %s — skipped\n", e.what());
+                        }
+                        if (!state_ok) { g_persistent_state_json = "{}"; }
+                        else {
                         g_persistent_state_json = migrated;
                         std::fprintf(stderr,
                             "[xinsp2] state schema changed (v%d → v%d) — migrated prior state "
@@ -2544,6 +2576,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                                        + "}}";
                         srv.send_text(ev);
                         g_persistent_state_schema = new_schema;
+                        }
                     } else {
                     std::fprintf(stderr,
                         "[xinsp2] state schema changed (v%d → v%d) — dropping prior state\n",
@@ -2558,9 +2591,20 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     g_persistent_state_json = "{}";
                     }
                 } else {
-                    g_script.set_state(g_persistent_state_json.c_str());
-                    std::fprintf(stderr, "[xinsp2] state restored (%zu bytes, schema v%d)\n",
-                                 g_persistent_state_json.size(), new_schema);
+                    // set_state enters plugin code under g_run_mu + g_script_mu; a
+                    // throwing/faulting plugin must not terminate the swap — log + skip.
+                    try {
+                        g_script.set_state(g_persistent_state_json.c_str());
+                        std::fprintf(stderr, "[xinsp2] state restored (%zu bytes, schema v%d)\n",
+                                     g_persistent_state_json.size(), new_schema);
+                    } catch (const seh_exception& e) {
+                        std::fprintf(stderr,
+                            "[xinsp2] replay set_state (restore) crashed: 0x%08X (%s) — skipped\n",
+                            e.code, e.what());
+                    } catch (const std::exception& e) {
+                        std::fprintf(stderr,
+                            "[xinsp2] replay set_state (restore) threw: %s — skipped\n", e.what());
+                    }
                 }
             }
         }
@@ -2905,23 +2949,49 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Try backend's InstanceRegistry first (plugin-manager instances)
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
-            if (inst->set_def(def_str)) {
-                set_inst_state(*iname, InstState::Active);
-                send_rsp_ok(srv, id);
-            } else {
-                set_inst_state(*iname, InstState::Faulted, "set_def returned false");
-                send_rsp_err(srv, id, "set_def returned false");
+            // set_def enters plugin code (C-ABI) — guard like exchange_instance so a
+            // throwing/faulting plugin returns a clean error instead of terminating.
+            try {
+                if (inst->set_def(def_str)) {
+                    set_inst_state(*iname, InstState::Active);
+                    send_rsp_ok(srv, id);
+                } else {
+                    set_inst_state(*iname, InstState::Faulted, "set_def returned false");
+                    send_rsp_err(srv, id, "set_def returned false");
+                }
+            } catch (const seh_exception& e) {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg), "set_def '%s' crashed: 0x%08X (%s)",
+                             iname->c_str(), e.code, e.what());
+                set_inst_state(*iname, InstState::Faulted, msg);
+                send_rsp_err(srv, id, msg);
+            } catch (const std::exception& e) {
+                std::string em = std::string("set_def error: ") + e.what();
+                set_inst_state(*iname, InstState::Faulted, em);
+                send_rsp_err(srv, id, em);
             }
         } else {
             std::lock_guard<std::mutex> lk(g_script_mu);
             if (g_script.ok() && g_script.set_instance_def) {
-                int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
-                // Cache an accepted def so compile_and_load replays it into the next
-                // DLL load (else the new DLL's file-scope ctor silently reverts it).
-                if (rc == 0) g_instance_def_cache[*iname] = def_str;
-                if (rc == 0) { set_inst_state(*iname, InstState::Active); send_rsp_ok(srv, id); }
-                else { set_inst_state(*iname, InstState::Faulted, "set_instance_def failed");
-                       send_rsp_err(srv, id, "set_instance_def failed"); }
+                try {
+                    int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
+                    // Cache an accepted def so compile_and_load replays it into the next
+                    // DLL load (else the new DLL's file-scope ctor silently reverts it).
+                    if (rc == 0) g_instance_def_cache[*iname] = def_str;
+                    if (rc == 0) { set_inst_state(*iname, InstState::Active); send_rsp_ok(srv, id); }
+                    else { set_inst_state(*iname, InstState::Faulted, "set_instance_def failed");
+                           send_rsp_err(srv, id, "set_instance_def failed"); }
+                } catch (const seh_exception& e) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg), "script set_instance_def '%s' crashed: 0x%08X (%s)",
+                                 iname->c_str(), e.code, e.what());
+                    set_inst_state(*iname, InstState::Faulted, msg);
+                    send_rsp_err(srv, id, msg);
+                } catch (const std::exception& e) {
+                    std::string em = std::string("script set_instance_def error: ") + e.what();
+                    set_inst_state(*iname, InstState::Faulted, em);
+                    send_rsp_err(srv, id, em);
+                }
             } else {
                 send_rsp_err(srv, id, "instance not found: " + *iname);
             }
@@ -2937,19 +3007,38 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
         // Backend's InstanceRegistry first (plugin-manager instances).
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
-            std::string def = inst->get_def();
-            send_rsp_ok(srv, id, def.empty() ? "{}" : def);
+            // get_def enters plugin code (C-ABI) — guard like exchange_instance.
+            try {
+                std::string def = inst->get_def();
+                send_rsp_ok(srv, id, def.empty() ? "{}" : def);
+            } catch (const seh_exception& e) {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg), "get_def '%s' crashed: 0x%08X (%s)",
+                             iname->c_str(), e.code, e.what());
+                send_rsp_err(srv, id, msg);
+            } catch (const std::exception& e) {
+                send_rsp_err(srv, id, std::string("get_def error: ") + e.what());
+            }
         } else {
             std::lock_guard<std::mutex> lk(g_script_mu);
             if (g_script.ok() && g_script.get_instance_def) {
-                std::vector<char> buf(256 * 1024);
-                int n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
-                if (n < 0 && n != -1) {   // -needed → grow + retry (-1 = not found)
-                    buf.resize((size_t)(-(int64_t)n) + 1024);
-                    n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                try {
+                    std::vector<char> buf(256 * 1024);
+                    int n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                    if (n < 0 && n != -1) {   // -needed → grow + retry (-1 = not found)
+                        buf.resize((size_t)(-(int64_t)n) + 1024);
+                        n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                    }
+                    if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
+                    else        send_rsp_err(srv, id, "instance not found: " + *iname);
+                } catch (const seh_exception& e) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg), "script get_instance_def '%s' crashed: 0x%08X (%s)",
+                                 iname->c_str(), e.code, e.what());
+                    send_rsp_err(srv, id, msg);
+                } catch (const std::exception& e) {
+                    send_rsp_err(srv, id, std::string("script get_instance_def error: ") + e.what());
                 }
-                if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
-                else        send_rsp_err(srv, id, "instance not found: " + *iname);
             } else {
                 send_rsp_err(srv, id, "instance not found: " + *iname);
             }
@@ -3072,14 +3161,25 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             cmd += "}";
             std::lock_guard<std::mutex> lk(g_script_mu);
             if (g_script.ok() && g_script.exchange_instance) {
-                std::vector<char> buf(64 * 1024);
-                int n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
-                                                   buf.data(), (int)buf.size());
-                if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                             n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
-                                                            buf.data(), (int)buf.size()); }
-                if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
-                else        send_rsp_err(srv, id, "prepare failed");
+                // Script-side prepare enters plugin code — guard like the backend
+                // path above (and exchange_instance) so a throw/fault isn't fatal.
+                try {
+                    std::vector<char> buf(64 * 1024);
+                    int n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
+                                                       buf.data(), (int)buf.size());
+                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
+                                 n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
+                                                                buf.data(), (int)buf.size()); }
+                    if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
+                    else        send_rsp_err(srv, id, "prepare failed");
+                } catch (const seh_exception& e) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg), "script prepare '%s' crashed: 0x%08X (%s)",
+                                 iname->c_str(), e.code, e.what());
+                    send_rsp_err(srv, id, msg);
+                } catch (const std::exception& e) {
+                    send_rsp_err(srv, id, std::string("script prepare error: ") + e.what());
+                }
             } else {
                 send_rsp_err(srv, id, "instance not found: " + *iname);
             }
@@ -3157,14 +3257,25 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 // Script-side instances keep the exchange convention.
                 std::lock_guard<std::mutex> lk(g_script_mu);
                 if (g_script.ok() && g_script.exchange_instance) {
-                    const char* commit_cmd = R"({"command":"commit"})";
-                    std::vector<char> buf(64 * 1024);
-                    int n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
-                                                       buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                                 n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
-                                                                buf.data(), (int)buf.size()); }
-                    if (n >= 0) { r.assign(buf.data(), (size_t)n); ok = true; }
+                    // Script-side commit enters plugin code — guard like the backend
+                    // inst->commit() path above so a throw/fault isn't fatal (record
+                    // it as a per-target failure and keep committing the rest).
+                    try {
+                        const char* commit_cmd = R"({"command":"commit"})";
+                        std::vector<char> buf(64 * 1024);
+                        int n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
+                                                           buf.data(), (int)buf.size());
+                        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
+                                     n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
+                                                                    buf.data(), (int)buf.size()); }
+                        if (n >= 0) { r.assign(buf.data(), (size_t)n); ok = true; }
+                    } catch (const seh_exception& e) {
+                        char em[256];
+                        std::snprintf(em, sizeof(em), "{\"error\":\"commit crashed: 0x%08X\"}", e.code);
+                        r = em;
+                    } catch (const std::exception& e) {
+                        r = std::string("{\"error\":\"") + e.what() + "\"}";
+                    }
                 }
                 if (!ok) r = "{\"error\":\"instance not found\"}";
             }
@@ -3316,6 +3427,9 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     const char* iname = yyjson_get_str(nm);
                     char* def_str = yyjson_val_write(def, 0, NULL);
                     auto inst = xi::InstanceRegistry::instance().find(iname);
+                    // set_def / set_instance_def enter plugin code — a throwing/faulting
+                    // plugin must degrade to a recipe warning, not terminate the backend.
+                    try {
                     if (inst) {
                         if (!inst->set_def(def_str))
                             instance_warnings.push_back(std::string(iname) + ": set_def returned false");
@@ -3335,6 +3449,13 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                         } else {
                             instance_warnings.push_back(std::string(iname) + ": instance not found");
                         }
+                    }
+                    } catch (const seh_exception& e) {
+                        char msg[128];
+                        std::snprintf(msg, sizeof(msg), ": set_def crashed 0x%08X", e.code);
+                        instance_warnings.push_back(std::string(iname) + msg);
+                    } catch (const std::exception& e) {
+                        instance_warnings.push_back(std::string(iname) + ": set_def threw: " + e.what());
                     }
                     free(def_str);
                 }
