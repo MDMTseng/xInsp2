@@ -706,6 +706,20 @@ fills:
 back-pressuring the source — was removed because it could deadlock a source that
 can't drain; any other value warns to stderr and falls back to `drop_oldest`.)
 
+`max_inflight` (default 64) bounds the **trigger-driven one-shot** path — the
+non-continuous dispatch a source drives before `cmd:start`, where each emit
+launches a detached inspect that serializes on the run lock. `queue_depth` bounds
+the *continuous* lane; `max_inflight` bounds this *other* path so a source that
+out-runs the serialized drain can't accumulate unbounded in-flight inspects (each
+pinning image + meta refs). At the cap a new one-shot is **dropped-newest**, its
+frame refs released, and an `XI_SYS_DROPPED` marker emitted — same bounded
+semantics as the lane overflow above. `< 1`/absent → the default (**not**
+unlimited); capped at 10000.
+
+```json
+{ "parallelism": { "max_inflight": 64 } }
+```
+
 `result_order` controls how per-frame results land on the wire under N > 1:
 
 - **`completion`** (default): emit as each worker finishes — lowest latency,
