@@ -2,11 +2,17 @@
 // test_golden_plugin.cpp — the golden-plugin ABI compatibility test (Phase 0).
 //
 // THE single most important ABI safety net (see docs/internals/adr-001-host-api-
-// freeze.md). It loads the GOLDEN plugin (golden_plugin.cpp, pinned to ABI v9 /
-// min-compat 6) through the REAL plugin-load path and runs process() once,
-// asserting byte-for-byte stable behaviour. Run it on every ABI change: if a
-// move breaks how a valid plugin loads or how process() sees the host, this
-// breaks first.
+// freeze.md). It loads the GOLDEN plugin (golden_plugin.cpp, re-pinned to the
+// current ABI v11 / min-compat 11) through the REAL plugin-load path and runs
+// process() once, asserting byte-for-byte stable behaviour. Run it on every ABI
+// change: if a move breaks how a valid plugin loads or how process() sees the
+// host, this breaks first.
+//
+// Phase 4 addition: it ALSO loads two DELIBERATELY STALE fixtures (stale_plugin,
+// reporting v9 and v10 — the old shm-bearing layout) and asserts the raised
+// min-compat gate now REFUSES them. That proves the authorized major break
+// (core_fix_plan.md §12 Phase 4) actually bites: a pre-v11 plugin can no longer
+// load against the reshuffled v11 table.
 //
 // Path exercised, end to end:
 //   1. plugin_abi_compatible(dll, …)      — the real ABI-version + yyjson gate.
@@ -28,6 +34,12 @@
 #ifndef GOLDEN_PLUGIN_DLL
 #define GOLDEN_PLUGIN_DLL "golden_plugin.dll"
 #endif
+#ifndef STALE_V9_PLUGIN_DLL
+#define STALE_V9_PLUGIN_DLL "stale_plugin_v9.dll"
+#endif
+#ifndef STALE_V10_PLUGIN_DLL
+#define STALE_V10_PLUGIN_DLL "stale_plugin_v10.dll"
+#endif
 
 static int g_failures = 0;
 #define CHECK(cond)                                                            \
@@ -38,17 +50,44 @@ static int g_failures = 0;
         }                                                                      \
     } while (0)
 
+// Load a deliberately-stale (pre-v11) plugin DLL and assert the real ABI gate
+// REFUSES it — the raised min-compat floor (Phase 4) turning away an old
+// shm-bearing-layout plugin. Returns nothing; bumps g_failures on any surprise.
+static void expect_stale_refused(const char* dll_path, int expect_reported_ver) {
+    HMODULE sdll = LoadLibraryA(dll_path);
+    if (!sdll) {
+        std::fprintf(stderr, "FAIL: LoadLibrary(%s) failed (err %lu)\n",
+                     dll_path, GetLastError());
+        ++g_failures;
+        return;
+    }
+    auto sver = reinterpret_cast<int (*)()>(GetProcAddress(sdll, "xi_plugin_abi_version"));
+    CHECK(sver != nullptr);
+    if (sver) CHECK(sver() == expect_reported_ver);   // genuinely reports the stale version
+
+    // The REAL gate the loader uses. A pre-v11 plugin must be refused with a
+    // reason naming the min-compat floor.
+    std::string gate_err;
+    bool ok = xi::plugin_abi_compatible(sdll, "stale", /*json_fallback_opt_in=*/false,
+                                        &gate_err);
+    CHECK(!ok);                       // REFUSED — the break bites
+    CHECK(!gate_err.empty());         // and it says why
+    std::printf("  stale v%d plugin refused as expected: %s\n",
+                expect_reported_ver, gate_err.c_str());
+    FreeLibrary(sdll);
+}
+
 int main() {
     std::printf("[test] golden-plugin ABI v%d compat — load + process() through "
                 "the real adapter\n", XI_ABI_VERSION);
 
-    // The golden contract this test guards. The golden plugin is a v9 binary
-    // (golden_plugin.cpp pins kGoldenAbiVersion = 9); this test now runs it
-    // against a v10+ host to prove an OLD plugin still loads + runs unchanged
-    // after the Phase 1 get_interface append. Pinned here so a careless ABI edit
-    // fails the build, not just the run. See ADR-001 / core_fix_plan.md §12.
-    static_assert(XI_ABI_VERSION >= 10, "golden test now proves v9-plugin-on-v10-host");
-    static_assert(XI_ABI_MIN_COMPAT == 6, "golden test assumes min-compat 6");
+    // The golden contract this test guards. Post Phase 4 the golden plugin is a
+    // CURRENT (v11 / min-compat 11) binary (golden_plugin.cpp pins
+    // kGoldenAbiVersion = XI_ABI_MIN_COMPAT); this test proves a current plugin
+    // still loads + runs, and (below) that a stale pre-v11 plugin is refused.
+    // Pinned here so a careless ABI edit fails the build, not just the run.
+    static_assert(XI_ABI_VERSION == 11, "Phase 4 baseline: host is v11");
+    static_assert(XI_ABI_MIN_COMPAT == 11, "Phase 4 raised min-compat to 11");
 
     HMODULE dll = LoadLibraryA(GOLDEN_PLUGIN_DLL);
     if (!dll) {
@@ -57,8 +96,9 @@ int main() {
         return 2;
     }
 
-    // (0) Prove this really is the OLD-plugin-on-NEW-host scenario: the golden
-    // exports v9, the host headers are v10+ with the get_interface door present.
+    // (0) The golden is a CURRENT (v11) plugin sitting exactly at the min-compat
+    // floor — the oldest still-loadable version. It proves a current plugin loads;
+    // the stale fixtures below prove pre-v11 plugins are refused.
     auto abi_ver = reinterpret_cast<int (*)()>(
         GetProcAddress(dll, "xi_plugin_abi_version"));
     CHECK(abi_ver != nullptr);
@@ -66,8 +106,8 @@ int main() {
         int gv = abi_ver();
         std::printf("  golden reports ABI v%d; host is v%d (min-compat %d)\n",
                     gv, XI_ABI_VERSION, XI_ABI_MIN_COMPAT);
-        CHECK(gv == 9);                 // a genuine v9 plugin
-        CHECK(gv < XI_ABI_VERSION);     // strictly older than the host — the point
+        CHECK(gv == XI_ABI_MIN_COMPAT); // pinned to the floor (v11)
+        CHECK(gv <= XI_ABI_VERSION);    // loadable on this host
     }
 
     // (1) Real ABI gate — the same call the loader makes. A golden plugin that
@@ -86,8 +126,11 @@ int main() {
     // (2) A real host_api backed by the live ImagePool — exactly what the backend
     // hands a plugin at create().
     static xi_host_api host = xi::ImagePool::make_host_api();
-    CHECK(host.get_interface != nullptr);          // v10 door present on the host
-    CHECK(host.get_interface("xi.legacy", 9) != nullptr);  // legacy surface published
+    CHECK(host.get_interface != nullptr);          // query door present on the host
+    // Phase 4: xi.legacy@9 is RETIRED — the whole-table view is no longer
+    // published, so the door now returns null for it (carved interfaces remain).
+    CHECK(host.get_interface("xi.legacy", 9) == nullptr);
+    CHECK(host.get_interface("xi.imaging", 1) != nullptr);   // carved capability still there
     void* inst = create(&host, "golden0");
     CHECK(inst != nullptr);
 
@@ -137,6 +180,12 @@ int main() {
     }
 
     FreeLibrary(dll);
+
+    // (5) Phase 4 — prove the break BITES: stale pre-v11 plugins (v9 and v10,
+    // the old shm-bearing layout) are now REFUSED by the raised min-compat gate.
+    std::printf("[test] Phase-4 break — stale pre-v11 plugins must be REFUSED\n");
+    expect_stale_refused(STALE_V9_PLUGIN_DLL, 9);
+    expect_stale_refused(STALE_V10_PLUGIN_DLL, 10);
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");

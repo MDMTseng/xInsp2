@@ -217,14 +217,26 @@ add_test(NAME plugin_teardown COMMAND test_plugin_teardown)
 # (not a committed blob), so it always tracks the live headers.
 add_library(golden_plugin SHARED tests/golden_plugin.cpp)
 target_link_libraries(golden_plugin PRIVATE xi_core)
+
+# Phase 4 stale fixtures: deliberately-stale plugins reporting a PRE-v11 ABI
+# (v9 and v10 — the old shm-bearing layout) from one source (STALE_PLUGIN_ABI).
+# The golden test loads them through the real ABI gate and asserts the raised
+# min-compat floor REFUSES them, proving the authorized break bites.
+add_library(stale_plugin_v9 SHARED tests/stale_plugin.cpp)
+target_compile_definitions(stale_plugin_v9 PRIVATE STALE_PLUGIN_ABI=9)
+add_library(stale_plugin_v10 SHARED tests/stale_plugin.cpp)
+target_compile_definitions(stale_plugin_v10 PRIVATE STALE_PLUGIN_ABI=10)
+
 add_executable(test_golden_plugin tests/test_golden_plugin.cpp)
 target_link_libraries(test_golden_plugin PRIVATE xi_core)
 if(WIN32)
     target_link_libraries(test_golden_plugin PRIVATE Ws2_32)
 endif()
-add_dependencies(test_golden_plugin golden_plugin)
+add_dependencies(test_golden_plugin golden_plugin stale_plugin_v9 stale_plugin_v10)
 target_compile_definitions(test_golden_plugin PRIVATE
-    GOLDEN_PLUGIN_DLL="$<TARGET_FILE:golden_plugin>")
+    GOLDEN_PLUGIN_DLL="$<TARGET_FILE:golden_plugin>"
+    STALE_V9_PLUGIN_DLL="$<TARGET_FILE:stale_plugin_v9>"
+    STALE_V10_PLUGIN_DLL="$<TARGET_FILE:stale_plugin_v10>")
 add_test(NAME golden_plugin COMMAND test_golden_plugin)
 
 # ABI freeze-signature guard: declares xi_host_api@9 frozen and fails the BUILD
