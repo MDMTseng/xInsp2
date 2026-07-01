@@ -363,6 +363,106 @@ static void test_trigger_snapshot_cross_thread() {
 }
 
 // ===========================================================================
+// A4 — explicit-trigger entry: xi_trigger_view -> xi::Trigger is self-contained
+// ===========================================================================
+//
+// The A4 root cure passes the trigger EXPLICITLY: the host fills a C-ABI
+// xi_trigger_view and the SDK (inside xi_inspect_entry_tv) builds a xi::Trigger
+// from it. Unlike the ambient current_trigger() path, that Trigger touches NO
+// thread_local and NO thunk — so it is valid on ANY thread and safe to capture
+// by value into a parallel body, and survives past the end of the originating
+// dispatch (its own addref'd image ref + frozen-meta ref keep both alive). This
+// is the same guarantee A2's trigger_snapshot gives, but delivered by the entry
+// itself so the script never reaches for the ambient trigger at all.
+
+static void test_explicit_trigger_view_cross_thread() {
+    SECTION("A4: xi_trigger_view -> xi::Trigger self-contained + cross-thread safe");
+    const xi_host_api& host = host_api();
+
+    // --- host sets up an in-flight trigger: one image + a metadata doc (the refs
+    //     the dispatch's CurrentTriggerScope would hold) ---
+    xi_image_handle h = host.image_create(8, 8, 1);
+    { uint8_t* px = host.image_data(h); for (size_t i = 0; i < 64; ++i) px[i] = (uint8_t)(0xA0 + (i & 0x0F)); }
+
+    yyjson_mut_doc* d = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_val* root = yyjson_mut_obj(d);
+    yyjson_mut_doc_set_root(d, root);
+    yyjson_mut_obj_add_strcpy(d, root, "cmd", "explicit");
+    yyjson_mut_obj_add_int(d, root, "lane", 3);
+    host.doc_retain(d);                         // dispatch holds rc=1
+
+    // --- host fills the explicit view (borrowed handle + borrowed doc) and the
+    //     SDK constructs the Trigger from it — exactly what run_one_inspection +
+    //     xi_inspect_entry_tv do ---
+    xi_trigger_view_image imgs[1] = { { "cam", h } };
+    xi_trigger_view view{};
+    view.is_active      = 1;
+    view.id             = xi_trigger_id{ 0x11ull, 0x22ull };
+    view.timestamp_us   = 777;
+    view.dequeued_at_us = 42;
+    view.images         = imgs;
+    view.image_count    = 1;
+    view.leader_source  = "cam";
+    view.meta_doc       = d;
+    view.host           = &host;
+
+    xi::Trigger t(&view);
+    CHECK(t.is_active());
+    CHECK(t.id().hi == 0x11ull && t.id().lo == 0x22ull);
+    CHECK(t.timestamp_us() == 777);
+    CHECK(t.dequeued_at_us() == 42);
+    CHECK(t.primary_source() == "cam");
+    CHECK(t.has_source("cam"));
+    CHECK(t.sources().size() == 1);
+
+    // --- dispatch ENDS: host drops its image + meta refs. The Trigger's own
+    //     addref'd image ref + frozen-Record meta ref must keep both alive. ---
+    host.image_release(h);   // rc 2 -> 1 (only the Trigger holds it now)
+    host.doc_release(d);     // rc 2 -> 1 (only the Trigger's Record holds it)
+
+    // --- a DIFFERENT thread reads a BY-VALUE copy (as a parallel body would). No
+    //     thread_local, no thunk — everything came in through the explicit view. ---
+    xi::Trigger tcopy = t;   // cheap shared_ptr copy
+    std::thread worker([&]() {
+        xi::Image img = tcopy.image("cam");
+        CHECK(!img.empty());
+        CHECK(img.width == 8 && img.height == 8 && img.channels == 1);
+        const uint8_t* px = img.data();
+        bool sentinel_ok = (px != nullptr);
+        if (px) for (size_t i = 0; i < 64; ++i)
+            if (px[i] != (uint8_t)(0xA0 + (i & 0x0F))) { sentinel_ok = false; break; }
+        CHECK(sentinel_ok);
+        CHECK(!tcopy.image("anything-else").empty());   // sole-image fallback
+        const xi::Record& m = tcopy.meta();
+        CHECK(m["cmd"].as_string() == "explicit");
+        CHECK(m["lane"].as_int() == 3);
+    });
+    worker.join();
+
+    // --- drop both Trigger copies: their held refs are the LAST, so the pool
+    //     image and the meta doc are reclaimed (no leak, no double-free). ---
+    { xi::Trigger a = std::move(t); xi::Trigger b = std::move(tcopy); (void)a; (void)b; }
+    CHECK(xi::ImagePool::instance().data(h) == nullptr);          // image reclaimed
+    CHECK(xi::DocRegistry::instance().refcount(d) == 0);          // meta doc freed (no leak)
+}
+
+// An INACTIVE view (plain cmd:run / timer tick: g_current_trigger == nullptr on
+// the host) must yield an inactive Trigger — no crash, mirrors the old path's
+// current_trigger().is_active() == false.
+static void test_explicit_trigger_view_inactive() {
+    SECTION("A4: an inactive/empty xi_trigger_view yields an inactive Trigger");
+    xi::Trigger none(nullptr);
+    CHECK(!none.is_active());
+    CHECK(none.image("cam").empty());
+    CHECK(none.sources().empty());
+
+    xi_trigger_view view{};   // is_active=0, host=null
+    xi::Trigger t(&view);
+    CHECK(!t.is_active());
+    CHECK(t.image("cam").empty());
+}
+
+// ===========================================================================
 
 int main() {
     // B — most self-contained; do thoroughly.
@@ -376,6 +476,11 @@ int main() {
 
     // A — trigger snapshot cross-thread (A2). A1 fail-loud is integration-level.
     test_trigger_snapshot_cross_thread();
+
+    // A4 — explicit-trigger entry: the host-filled view builds a self-contained
+    // Trigger that is safe off-thread and outlives the dispatch.
+    test_explicit_trigger_view_cross_thread();
+    test_explicit_trigger_view_inactive();
 
     int f = g_failures.load();
     if (f == 0) {
