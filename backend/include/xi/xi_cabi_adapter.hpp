@@ -30,6 +30,8 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -207,6 +209,46 @@ inline bool plugin_caps_compatible(const PluginInfo& pi, const xi_host_api* host
     return true;
 }
 
+// ===========================================================================
+// G3.2 — debug-build lifecycle×thread contract enforcement (core_fix_plan-2026-07
+// §18 G3.2). The G3.1 contract (docs/guides/write-a-plugin.md § "Plugin lifecycle
+// & threading contract") is machine-checked here, but ONLY in Debug: the whole
+// apparatus lives behind `#ifndef NDEBUG` and compiles to nothing in Release.
+//
+// What is *actually* illegal (and not otherwise prevented) is narrow. The
+// `CallScope` admission gate already SERIALIZES cross-thread config-vs-process on
+// a non-reentrant instance — a `set_def` arriving on the control thread while a
+// dispatch worker runs `process` simply BLOCKS; it is legal and safe (proven by
+// tests/test_set_def_race.cpp). The one transition the gate cannot make safe is a
+// SAME-THREAD re-entry into a non-reentrant instance's gated export — e.g. a
+// plugin's `process()` body re-entering the host to call `set_def()` / `commit()`
+// / `process()` on its OWN instance. `CallScope` (cap=1) would then wait on a slot
+// this very thread holds → a silent DEADLOCK. This guard converts that hang into a
+// loud, catchable contract violation. It is exactly the plan's two named cases:
+//   • "set_def() during process() on a non-reentrant instance" — process→set_def
+//   • "process() before commit() (out-of-order lifecycle)"     — process→commit /
+//     process→process re-entry, an out-of-order nested lifecycle call.
+// A `reentrant=true` instance lifts the gate and owns its locking, so re-entry is
+// NOT flagged there.
+#ifndef NDEBUG
+// Swappable violation sink. Default aborts (like assert); tests install a recorder
+// so an illegal transition can be verified without killing the process.
+using LifecycleViolationFn = void (*)(const char* what, const char* detail);
+inline LifecycleViolationFn& lifecycle_violation_handler() {
+    static LifecycleViolationFn fn = nullptr;   // null → default abort
+    return fn;
+}
+inline void raise_lifecycle_violation(const char* what, const char* detail) {
+    if (LifecycleViolationFn h = lifecycle_violation_handler()) { h(what, detail); return; }
+    std::fprintf(stderr,
+        "[xinsp2] FATAL: plugin lifecycle contract violation: %s (%s)\n"
+        "  a non-reentrant instance was re-entered on the same thread; see "
+        "docs/guides/write-a-plugin.md \"Plugin lifecycle & threading contract\"\n",
+        what, detail);
+    std::abort();
+}
+#endif // NDEBUG
+
 // Adapter: wraps a C ABI plugin instance as an InstanceBase
 class CAbiInstanceAdapter : public InstanceBase {
 public:
@@ -281,6 +323,9 @@ public:
     // release_all_for then knows what to sweep.
     std::string get_def() const override {
         if (!get_def_fn_ || !inst_) return "{}";
+#ifndef NDEBUG
+        LcGate lc(this, "get_def"); if (!lc.ok()) return "{}";
+#endif
         ImagePool::OwnerGuard g(owner_id_);
         CallScope cs(this);
         std::vector<char> buf(4096);
@@ -291,6 +336,9 @@ public:
 
     bool set_def(const std::string& j) override {
         if (!set_def_fn_ || !inst_) return false;
+#ifndef NDEBUG
+        LcGate lc(this, "set_def"); if (!lc.ok()) return false;
+#endif
         ImagePool::OwnerGuard g(owner_id_);
         CallScope cs(this);
         return set_def_fn_(inst_, j.c_str()) == 0;
@@ -298,6 +346,9 @@ public:
 
     std::string exchange(const std::string& cmd_json) override {
         if (!exchange_fn_ || !inst_) return "{}";
+#ifndef NDEBUG
+        LcGate lc(this, "exchange"); if (!lc.ok()) return "{}";
+#endif
         ImagePool::OwnerGuard g(owner_id_);
         CallScope cs(this);
         std::vector<char> buf(64 * 1024);
@@ -313,6 +364,9 @@ public:
     // The caller owns the SEH try/catch boundary (use_process_cb).
     int process(const xi_record* in, xi_record_out* out) {
         if (!process_fn_ || !inst_) return -1;
+#ifndef NDEBUG
+        LcGate lc(this, "process"); if (!lc.ok()) return -1;
+#endif
         ImagePool::OwnerGuard og(owner_id_);
         CallScope cs(this);
         process_fn_(inst_, in, out);
@@ -337,6 +391,9 @@ public:
     // No export → no-op (a plugin with no double-slot already swapped in set_def).
     void commit() override {
         if (!commit_fn_ || !inst_) return;
+#ifndef NDEBUG
+        LcGate lc(this, "commit"); if (!lc.ok()) return;
+#endif
         ImagePool::OwnerGuard g(owner_id_);
         CallScope cs(this);
         commit_fn_(inst_);
@@ -387,6 +444,46 @@ private:
         CallScope(const CallScope&) = delete;
         CallScope& operator=(const CallScope&) = delete;
     };
+
+#ifndef NDEBUG
+    // G3.2 debug lifecycle guard. Per-thread stack of the instances this thread is
+    // currently inside a GATED export on. A gated entry that finds THIS instance
+    // already on THIS thread's stack (and the instance is non-reentrant) is the
+    // deadlock-inducing same-thread re-entry the contract forbids. thread_local ⇒
+    // no locks, and cross-thread concurrency (legal, gate-serialized) never
+    // appears on another thread's stack, so it is correctly NOT flagged.
+    static std::vector<const void*>& lc_tls_stack_() {
+        thread_local std::vector<const void*> s;
+        return s;
+    }
+    // Returns true if the gated entry is legal (caller proceeds into CallScope and
+    // must pair it with lc_leave_()). Returns false after raising a violation —
+    // the caller must BAIL immediately, never entering CallScope (which would
+    // deadlock on the slot this thread already holds).
+    bool lc_enter_(const char* who) const {
+        if (!reentrant_) {
+            for (const void* p : lc_tls_stack_())
+                if (p == this) { raise_lifecycle_violation("non-reentrant re-entry", who);
+                                 return false; }
+        }
+        lc_tls_stack_().push_back(this);
+        return true;
+    }
+    void lc_leave_() const {
+        auto& s = lc_tls_stack_();
+        for (auto it = s.rbegin(); it != s.rend(); ++it)
+            if (*it == this) { s.erase(std::next(it).base()); return; }
+    }
+    // RAII: on legal entry pushes/pops the thread's gated stack; `ok()` is false
+    // when the entry was an illegal re-entry (violation already raised).
+    struct LcGate {
+        const CAbiInstanceAdapter* a_; bool ok_;
+        LcGate(const CAbiInstanceAdapter* a, const char* who) : a_(a), ok_(a->lc_enter_(who)) {}
+        ~LcGate() { if (ok_) a_->lc_leave_(); }
+        bool ok() const { return ok_; }
+        LcGate(const LcGate&) = delete; LcGate& operator=(const LcGate&) = delete;
+    };
+#endif // NDEBUG
 
     mutable std::mutex              cc_mu_;
     mutable std::condition_variable cc_cv_;
