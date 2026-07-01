@@ -2472,6 +2472,30 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                 bool drop = (new_schema != 0 &&
                              g_persistent_state_schema != new_schema);
                 if (drop) {
+                    // G4 / OQ-5: before dropping, give the NEW DLL a chance to
+                    // migrate the prior state forward via its opt-in code_change
+                    // hook. If it carries state across the schema change, restore
+                    // the migrated shape instead of dropping. Absent hook (or a
+                    // decline) falls through to the unchanged drop path below.
+                    std::string migrated;
+                    if (xi::script::migrate_state(g_script, g_persistent_state_json,
+                                                  g_persistent_state_schema, new_schema,
+                                                  migrated)) {
+                        g_script.set_state(migrated.c_str());
+                        g_persistent_state_json = migrated;
+                        std::fprintf(stderr,
+                            "[xinsp2] state schema changed (v%d → v%d) — migrated prior state "
+                            "(%zu bytes) via code_change hook\n",
+                            g_persistent_state_schema, new_schema, migrated.size());
+                        std::string ev = "{\"type\":\"event\",\"name\":\"state_migrated\","
+                                         "\"data\":{\"old_schema\":"
+                                       + std::to_string(g_persistent_state_schema)
+                                       + ",\"new_schema\":"
+                                       + std::to_string(new_schema)
+                                       + "}}";
+                        srv.send_text(ev);
+                        g_persistent_state_schema = new_schema;
+                    } else {
                     std::fprintf(stderr,
                         "[xinsp2] state schema changed (v%d → v%d) — dropping prior state\n",
                         g_persistent_state_schema, new_schema);
@@ -2483,6 +2507,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                                    + "}}";
                     srv.send_text(ev);
                     g_persistent_state_json = "{}";
+                    }
                 } else {
                     g_script.set_state(g_persistent_state_json.c_str());
                     std::fprintf(stderr, "[xinsp2] state restored (%zu bytes, schema v%d)\n",

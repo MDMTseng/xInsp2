@@ -382,4 +382,27 @@ XI_SCRIPT_EXPORT int xi_script_state_schema_version(void) {
     return xi::state_schema_version();
 }
 
+// G4 / OQ-5 — code_change-style state-migration hook. Called by the host on a
+// schema-version mismatch (see xi_script_loader.hpp::migrate_state) BEFORE it
+// would otherwise drop the prior state. `old_json`/`old_schema` are the retiring
+// DLL's persisted state; on success writes the migrated (new-shape) JSON into
+// `buf` and returns its length (get_state's buffer convention: a negative return
+// -N means "buffer too small, need N"). Returns 0 — "decline, drop as usual" —
+// when no migrator was registered via xi::set_state_migrate OR the migrator
+// returned "". This export is always present in a recompiled script; a script
+// with no migrator is indistinguishable (return 0) from one lacking the symbol,
+// so the host's fallback-to-drop path is identical either way.
+XI_SCRIPT_EXPORT int xi_script_code_change(const char* old_json, int old_schema,
+                                           int new_schema, char* buf, int buflen) {
+    auto& fn = xi::state_migrate_fn();
+    if (!fn) return 0;                              // no migrator -> host drops
+    std::string out = fn(old_json ? old_json : "{}", old_schema, new_schema);
+    if (out.empty()) return 0;                      // declined -> host drops
+    int needed = (int)out.size();
+    if (buflen < needed + 1) return -needed;        // grow-and-retry (like get_state)
+    std::memcpy(buf, out.data(), out.size());
+    buf[out.size()] = 0;
+    return needed;
+}
+
 #endif // XI_SCRIPT_NO_DEFAULT_THUNKS

@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace xi::script {
 
@@ -95,6 +96,13 @@ struct LoadedScript {
     using InspectBeginFn = void (*)(void);
     InspectBeginFn     inspect_begin    = nullptr;
     StateSchemaVersionFn state_schema_version = nullptr;
+    // G4 / OQ-5: optional code_change-style state-migration hook. Present when
+    // the (new) script exports xi_script_code_change; the host calls it on a
+    // schema mismatch to carry prior state forward instead of dropping. Null
+    // for older scripts / scripts built without xi_script_support -> host drops.
+    using CodeChangeFn = int (*)(const char* old_json, int old_schema,
+                                 int new_schema, char* buf, int buflen);
+    CodeChangeFn       code_change      = nullptr;
 
     bool ok() const { return handle && inspect; }
 };
@@ -144,6 +152,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
     out.inspect_begin     = reinterpret_cast<LoadedScript::InspectBeginFn>(GetProcAddress(h, "xi_script_inspect_begin"));
     out.state_schema_version = reinterpret_cast<LoadedScript::StateSchemaVersionFn>(GetProcAddress(h, "xi_script_state_schema_version"));
+    out.code_change          = reinterpret_cast<LoadedScript::CodeChangeFn>(GetProcAddress(h, "xi_script_code_change"));
     if (!out.inspect) {
         err = "script missing xi_inspect_entry export";
         FreeLibrary(h);
@@ -173,6 +182,29 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
             if (m) FreeLibrary(static_cast<HMODULE>(m));
         } catch (...) { /* deleter must not throw */ }
     });
+    return true;
+}
+
+// G4 / OQ-5 — attempt a code_change-style state migration across a hot-reload.
+// `s` is the already-loaded NEW script; `old_json`/`old_schema` describe the
+// retiring DLL's persisted state. On success returns true and fills `out` with
+// the migrated (new-shape) JSON for the host to set_state. Returns false when
+// the hook is absent OR declines (returns 0) — the caller then DROPS the prior
+// state, preserving the pre-G4 drop-on-mismatch behaviour unchanged. Uses
+// get_state's grow-and-retry buffer convention (negative return = -required).
+inline bool migrate_state(const LoadedScript& s, const std::string& old_json,
+                          int old_schema, int new_schema, std::string& out) {
+    if (!s.code_change) return false;
+    std::vector<char> buf(64 * 1024);
+    int n = s.code_change(old_json.c_str(), old_schema, new_schema,
+                          buf.data(), (int)buf.size());
+    if (n < 0) {
+        buf.resize((size_t)(-(int64_t)n) + 1024);
+        n = s.code_change(old_json.c_str(), old_schema, new_schema,
+                          buf.data(), (int)buf.size());
+    }
+    if (n <= 0) return false;   // absent-shaped / declined -> caller drops
+    out.assign(buf.data(), (size_t)n);
     return true;
 }
 
