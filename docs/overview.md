@@ -20,6 +20,13 @@ script** that orchestrates them per frame. The bets:
   respawning and records crash history; line safety is a comms plugin's own
   crash-watching sidecar process.
 
+> **These bets are non-negotiable.** They are stated as the project's **spine** —
+> *speed-first, minimal core, functionality-as-plugins* — in
+> [the README's **Core principles**](../README.md#core-principles--the-spine-do-not-drift),
+> the canonical home. Before adding anything, apply the test: **"Can this be a
+> plugin?" If yes, it must be.** Grow the core only for the smallest primitive a
+> plugin genuinely cannot live without.
+
 ## The 60-second mental model
 
 | Concept | What it is |

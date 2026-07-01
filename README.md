@@ -14,6 +14,42 @@ C++, edited in VS Code, wired over WebSockets.**
 
 ---
 
+## Core principles — the spine (do not drift)
+
+**Read this before adding anything.** These are non-negotiable; every design
+decision is measured against them. When they conflict with convenience,
+convenience loses.
+
+1. **Speed-first.** This is a machine-vision hot path. Zero-copy (images *and*
+   JSON move by pointer through refcounted pools), no I/O or allocation on the
+   per-frame path, measure before you trade it away. Ergonomic sugar never costs
+   throughput.
+
+2. **Minimal core.** The core does only what *nothing else can*: dispatch,
+   lifecycle, crash-safety, refcounted pools, the frozen ABI. It holds **zero
+   plugin-specific knowledge** — it never knows what `expose`, `cache`, or any
+   camera *is*. Keep it small; resist every urge to grow it.
+
+3. **Functionality-first, realized as plugins.** New capability is a **plugin**
+   (or plugin composition), not a core feature. Multi-camera sync, record/replay,
+   history/analytics, orchestration — all are plugins composed over the existing
+   ABI. The core is a dumb hub; the plugins do the work.
+
+> **The test — apply it to every proposed change:**
+> *"Can this be a plugin?"* If yes, it **must** be. Touch the core **only** when
+> the capability genuinely cannot live outside it — and even then, add the
+> **smallest** primitive that unblocks the plugin, never the feature itself.
+
+**ABI corollary:** the `xi_host_api` layout is **frozen**. A new host capability
+ships as a **carved `get_interface(id, version)` interface**, never as a new struct
+field. Breaking the layout is a deliberate, versioned, once-in-a-major event — not
+a casual add. (See [`docs/internals/adr-001-host-api-freeze.md`](docs/internals/adr-001-host-api-freeze.md).)
+
+If a change makes the core bigger, slower, or plugin-aware, it is probably wrong —
+stop and find the plugin-shaped version.
+
+---
+
 ## The model
 
 ```cpp
