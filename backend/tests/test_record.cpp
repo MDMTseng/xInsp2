@@ -431,7 +431,7 @@ static void test_refcount_cow() {
 static void test_cross_abi_share() {
     SECTION("cross-ABI share/adopt (γ-4 v4)");
     auto& reg = xi::DocRegistry::instance();
-    auto retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+    auto retain  = [](void* d) { xi::DocRegistry::instance().addref((yyjson_mut_doc*)d); };
     auto release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
     size_t base = reg.live_count();
 
@@ -496,7 +496,7 @@ static void test_cross_abi_share() {
 static void test_cache_input_zero_copy() {
     SECTION("zero-copy cache of borrowed input (γ-4 v4-4)");
     auto& reg = xi::DocRegistry::instance();
-    auto retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+    auto retain  = [](void* d) { xi::DocRegistry::instance().addref((yyjson_mut_doc*)d); };
     auto release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
     size_t base = reg.live_count();
 
@@ -537,7 +537,7 @@ static void test_cache_input_zero_copy() {
 
 static void test_dispatch_balance_no_leak() {
     SECTION("1000 full dispatch rounds → registry balanced (γ-4 v4-4)");
-    auto retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+    auto retain  = [](void* d) { xi::DocRegistry::instance().addref((yyjson_mut_doc*)d); };
     auto release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
     auto& reg = xi::DocRegistry::instance();
     size_t base = reg.live_count();
@@ -566,7 +566,7 @@ static void test_dispatch_balance_no_leak() {
 
 static void test_concurrent_dispatch_balance() {
     SECTION("concurrent dispatch + cache/COW stays balanced (γ-4 v4-4)");
-    auto retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+    auto retain  = [](void* d) { xi::DocRegistry::instance().addref((yyjson_mut_doc*)d); };
     auto release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
     auto& reg = xi::DocRegistry::instance();
     size_t base = reg.live_count();
@@ -605,7 +605,7 @@ static void test_concurrent_dispatch_balance() {
 
 static void test_typed_field_cow() {
     SECTION("Typed/Field write-through COWs a frozen doc (bug #10)");
-    auto retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+    auto retain  = [](void* d) { xi::DocRegistry::instance().addref((yyjson_mut_doc*)d); };
     auto release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
     auto& reg = xi::DocRegistry::instance();
     size_t base = reg.live_count();

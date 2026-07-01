@@ -443,7 +443,7 @@ public:
         // Host doc refcount (ABI v4, γ-4) — lets a yyjson doc handed across the
         // ABI be held by more than one side without a deep copy (the doc
         // analogue of image_addref/image_release).
-        api.doc_retain  = [](void* d) { xi::DocRegistry::instance().retain((yyjson_mut_doc*)d); };
+        api.doc_retain  = [](void* d) { xi::DocRegistry::instance().addref((yyjson_mut_doc*)d); };
         api.doc_release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
         api.doc_refcount = [](void* d) -> int32_t {
             return (int32_t)xi::DocRegistry::instance().refcount((yyjson_mut_doc*)d);

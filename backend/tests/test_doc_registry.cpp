@@ -40,9 +40,9 @@ static void test_retain_release() {
     yyjson_mut_doc* d = make_doc();
 
     CHECK(reg.refcount(d) == 0);          // not registered yet
-    reg.retain(d);
+    reg.addref(d);
     CHECK(reg.refcount(d) == 1);          // first share registers at 1
-    reg.retain(d);
+    reg.addref(d);
     CHECK(reg.refcount(d) == 2);          // second holder
     reg.release(d);
     CHECK(reg.refcount(d) == 1);          // still one holder, NOT freed
@@ -69,7 +69,7 @@ static void test_release_unregistered() {
 static void test_null_safe() {
     SECTION("null doc tolerated");
     auto& reg = xi::DocRegistry::instance();
-    reg.retain(nullptr);
+    reg.addref(nullptr);
     reg.release(nullptr);
     CHECK(reg.refcount(nullptr) == 0);
 }
@@ -85,8 +85,8 @@ static void test_many_docs_no_leak() {
     for (int i = 0; i < 200; ++i) {
         yyjson_mut_doc* d = make_doc();
         docs.push_back(d);
-        reg.retain(d);
-        reg.retain(d);                    // rc=2 each
+        reg.addref(d);
+        reg.addref(d);                    // rc=2 each
     }
     CHECK(reg.live_count() == base + 200);
 
@@ -114,8 +114,8 @@ static void test_concurrent() {
         workers.emplace_back([&, t] {
             for (int i = 0; i < PER; ++i) {
                 yyjson_mut_doc* d = make_doc();
-                reg.retain(d);            // rc=1
-                reg.retain(d);            // rc=2
+                reg.addref(d);            // rc=1
+                reg.addref(d);            // rc=2
                 reg.release(d);           // rc=1
                 reg.release(d);           // rc=0 → freed
             }

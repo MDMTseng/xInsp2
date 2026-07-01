@@ -232,7 +232,7 @@ static int stage_sink_emit_(const char* name, const void* input_doc,
             yyjson_mut_doc* m = yyjson_doc_mut_copy(idoc, nullptr);
             yyjson_doc_free(idoc);
             if (m) {
-                xi::DocRegistry::instance().retain(m);   // register at rc=1
+                xi::DocRegistry::instance().addref(m);   // register at rc=1
                 item.rec.meta_doc = xi::DocRef::adopt(m);
             }
         }
@@ -581,7 +581,7 @@ static void flush_staged_emits_(int64_t run_id) {
             yyjson_mut_doc* deliver = it.rec.meta_doc.get();
             if (deliver && xi::DocRegistry::instance().refcount(deliver) > 1) {
                 if (yyjson_mut_doc* copy = yyjson_mut_doc_mut_copy(deliver, nullptr)) {
-                    xi::DocRegistry::instance().retain(copy);   // register at rc=1 (our ref)
+                    xi::DocRegistry::instance().addref(copy);   // register at rc=1 (our ref)
                     deliver  = copy;
                     copy_ref = copy;
                 }
@@ -604,7 +604,7 @@ static void flush_staged_emits_(int64_t run_id) {
             // Reserve one doc ref for the consumer (adopt or serialize-release both
             // CONSUME one); our own ref (original via release_trigger_event_ below, or the
             // COW copy via copy_ref) balances the other.
-            if (deliver) xi::DocRegistry::instance().retain(deliver);
+            if (deliver) xi::DocRegistry::instance().addref(deliver);
             xi_record_out output; xi_record_out_init(&output);
             RecordOutGuard out_guard{&output};   // frees + drops the returned refs on ALL paths
             int prc = use_process_inline_(it.target.c_str(), deliver, nullptr, 0,
@@ -715,7 +715,7 @@ static int32_t trigger_leader_cb(char* buf, int32_t buflen) {
 static void* trigger_meta_cb() {
     if (!g_current_trigger) { warn_trigger_off_thread_(); return nullptr; }
     if (!g_current_trigger->meta_doc) return nullptr;
-    xi::DocRegistry::instance().retain(g_current_trigger->meta_doc.get());
+    xi::DocRegistry::instance().addref(g_current_trigger->meta_doc.get());
     return (void*)g_current_trigger->meta_doc.get();
 }
 
@@ -2723,7 +2723,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     yyjson_mut_doc* meta = yyjson_doc_mut_copy(idoc, nullptr);
                     yyjson_doc_free(idoc);
                     if (meta) {
-                        xi::DocRegistry::instance().retain(meta);   // register at rc=1
+                        xi::DocRegistry::instance().addref(meta);   // register at rc=1
                         ev.meta_doc = xi::DocRef::adopt(meta);
                         inject = true;
                     }

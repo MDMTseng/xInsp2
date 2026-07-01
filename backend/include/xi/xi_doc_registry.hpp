@@ -36,8 +36,10 @@ public:
     }
 
     // Bump the refcount for `doc`, creating the entry at 1 if it is not yet
-    // registered (the first side to share an owned doc registers it).
-    void retain(yyjson_mut_doc* doc) {
+    // registered (the first side to share an owned doc registers it). Named
+    // `addref` to match ImagePool::addref — one refcount verb for both handle
+    // domains (the ABI field stays `doc_retain`, frozen; this is the C++ method).
+    void addref(yyjson_mut_doc* doc) {
         if (!doc) return;
         Shard& sh = shard_for_(doc);
         std::lock_guard<std::mutex> lk(sh.mu);

@@ -267,7 +267,7 @@ inline void install_trigger_hook(xi_host_api& api) {
             if (idoc) {
                 meta = yyjson_doc_mut_copy(idoc, nullptr);   // host-owned (default alc)
                 yyjson_doc_free(idoc);
-                if (meta) DocRegistry::instance().retain(meta);   // register at rc=1
+                if (meta) DocRegistry::instance().addref(meta);   // register at rc=1
             }
         }
         TriggerBus::instance().emit(emitter ? emitter : "", id, ts,
