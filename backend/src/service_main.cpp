@@ -224,13 +224,17 @@ static int stage_sink_emit_(const char* name, const void* input_doc,
     StagedEmit item;
     item.target = name;
     if (input_doc) {
-        item.rec.meta_doc = (yyjson_mut_doc*)(void*)input_doc;   // take the share_out'd ref
+        // take the share_out'd ref (already reserved for us — adopt, no retain)
+        item.rec.meta_doc = xi::DocRef::adopt((yyjson_mut_doc*)(void*)input_doc);
     } else if (input_data && input_len > 0) {
         yyjson_doc* idoc = yyjson_read((const char*)input_data, (size_t)input_len, 0);
         if (idoc) {
-            item.rec.meta_doc = yyjson_doc_mut_copy(idoc, nullptr);
+            yyjson_mut_doc* m = yyjson_doc_mut_copy(idoc, nullptr);
             yyjson_doc_free(idoc);
-            if (item.rec.meta_doc) xi::DocRegistry::instance().retain(item.rec.meta_doc);
+            if (m) {
+                xi::DocRegistry::instance().retain(m);   // register at rc=1
+                item.rec.meta_doc = xi::DocRef::adopt(m);
+            }
         }
     }
     // Preserve the record's ORIGINAL image keys exactly — staging replaces an inline
@@ -466,9 +470,9 @@ static void warn_trigger_off_thread_() {
 // (ImagePool) + the ABI-v5 metadata doc ref (DocRegistry). Call exactly once
 // per event when it's done — dispatched or dropped — mirroring the bus's own
 // per-drop-site discipline so a metadata doc carried on the bus can't leak.
-static inline void release_trigger_event_(const xi::TriggerEvent& ev) {
+static inline void release_trigger_event_(xi::TriggerEvent& ev) {
     for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
-    xi::DocRegistry::instance().release(ev.meta_doc);
+    ev.meta_doc.reset();   // release the event's doc ref + null it (dtor then no-ops)
 }
 
 // RAII for "this thread's inspect sees `ev` as its trigger". Sets g_current_trigger
@@ -481,8 +485,8 @@ static inline void release_trigger_event_(const xi::TriggerEvent& ev) {
 // callback = UAF) and the event leaked. The dtor makes both impossible and a new
 // dispatch site can't get the sequence wrong.
 struct CurrentTriggerScope {
-    const xi::TriggerEvent& ev_;
-    explicit CurrentTriggerScope(const xi::TriggerEvent& ev) : ev_(ev) {
+    xi::TriggerEvent& ev_;   // non-const: dtor reset()s the event's DocRef
+    explicit CurrentTriggerScope(xi::TriggerEvent& ev) : ev_(ev) {
         g_current_trigger = &ev;
         // A1: publish the owning thread id so a trigger thunk fired on another
         // thread can tell "wrong thread" (loud bug) from "no trigger" (legit).
@@ -574,7 +578,7 @@ static void flush_staged_emits_(int64_t run_id) {
             // (rc==1, sole owner) stamps in place with no copy — speed-first. (rc can only
             // fall, never rise, behind our back here: we hold the sole non-shared ref and
             // don't hand the doc out before stamping, so the rc==1 fast path is safe.)
-            yyjson_mut_doc* deliver = it.rec.meta_doc;
+            yyjson_mut_doc* deliver = it.rec.meta_doc.get();
             if (deliver && xi::DocRegistry::instance().refcount(deliver) > 1) {
                 if (yyjson_mut_doc* copy = yyjson_mut_doc_mut_copy(deliver, nullptr)) {
                     xi::DocRegistry::instance().retain(copy);   // register at rc=1 (our ref)
@@ -711,8 +715,8 @@ static int32_t trigger_leader_cb(char* buf, int32_t buflen) {
 static void* trigger_meta_cb() {
     if (!g_current_trigger) { warn_trigger_off_thread_(); return nullptr; }
     if (!g_current_trigger->meta_doc) return nullptr;
-    xi::DocRegistry::instance().retain(g_current_trigger->meta_doc);
-    return (void*)g_current_trigger->meta_doc;
+    xi::DocRegistry::instance().retain(g_current_trigger->meta_doc.get());
+    return (void*)g_current_trigger->meta_doc.get();
 }
 
 // ---- Image-pool owner get/set thunks (C1) ----------------------------------
@@ -1256,7 +1260,7 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
                 view.image_count  = (int32_t)view_imgs.size();
                 leader            = g_current_trigger->leader_source;
                 view.leader_source = leader.c_str();
-                view.meta_doc     = (void*)g_current_trigger->meta_doc;
+                view.meta_doc     = (void*)g_current_trigger->meta_doc.get();
             }
             view.host = script_host_api_();
             s.inspect_tv(&view, frame_hint);
@@ -1475,6 +1479,28 @@ static void warn_frame_drop_(uint64_t dropped, const std::string& group, const c
             group.empty() ? "(default)" : group.c_str(), policy, (unsigned long long)dropped);
 }
 
+// Shared drop accounting for the two back-pressure paths that discard a frame:
+// the continuous lane's drop_newest branch (enqueue_to_lane_) and the one-shot
+// max_inflight cap (dispatch_one_shot_). Both re-derived the identical tail:
+// release the dropped event's image + doc refs, warn (throttled), then emit the
+// out-of-band XI_SYS_DROPPED marker. Consolidated here so the marker shape can't
+// drift between the two. The bits that genuinely DIFFER stay at the call sites and
+// ride in as params: `warn_count` is the counter the throttle reads (the per-LANE
+// dropped total for a lane — read under the lane lock — vs the process-lifetime
+// total for the capless one-shot path), `aid` is the arrival slot (claimed under
+// the lane lock for drop_newest, so it stays at the call site to preserve ordering),
+// and `policy`/`reason` carry each site's exact marker payload byte-for-byte. The
+// counter bumps (g_dropped_lifetime, and lane->dropped for the lane path) also
+// stay at the call sites — the two paths bump different counter SETS and the lane
+// counter must be touched under the lane lock.
+static void account_dropped_frame_(xi::TriggerEvent& ev, uint64_t warn_count,
+                                   int64_t aid, const char* policy, const char* reason) {
+    release_trigger_event_(ev);            // the dropped event's image + doc refs
+    warn_frame_drop_(warn_count, ev.group, policy);
+    if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
+        emit_run_result(*srv, XI_SYS_DROPPED, reason, aid, -1, ev.leader_source, ev.group);
+}
+
 // Per-lane enqueue with that lane's queue_depth/overflow policy.
 static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     // F7: releases ev on EVERY exit unless dismiss()'d (i.e. handed to a lane queue).
@@ -1501,13 +1527,12 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     if (ov == "drop_newest") {
         ++lane->dropped; ++g_dropped_lifetime;   // P1-8: lifetime total survives cmd:start
         int64_t aid = ++g_run_id;   // arrival slot of the dropped (new) frame
-        std::string ds = ev.leader_source, dg = ev.group;   // the dropped (new) event
-        warn_frame_drop_(lane->dropped.load(), dg, "drop_newest");
-        lk.unlock();   // guard releases the dropped (new) ev on return
+        uint64_t wc = lane->dropped.load();   // throttle reads the per-lane total (under lock)
+        lk.unlock();
+        guard.dismiss();   // account_dropped_frame_ releases the dropped (new) ev
         // Out-of-band NA marker (not gated — gating would stall the source); the
         // run_id lets a consumer order it against this lane's run results.
-        if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
-            emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_newest)", aid, -1, ds, dg);
+        account_dropped_frame_(ev, wc, aid, "drop_newest", "dropped: queue full (drop_newest)");
         return false;
     }
     auto& front = lane->q.front();   // drop_oldest (the default + fallback)
@@ -1714,18 +1739,18 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
         // ourselves (the CurrentTriggerScope that normally does it never ran) — the
         // same release-on-drop discipline the continuous lane path uses, so a
         // dropped one-shot leaks no ImagePool/DocRegistry handles.
-        release_trigger_event_(*evp);
-        // At the in-flight cap this is an OVERFLOW drop-newest: mirror the continuous
-        // GroupLane drop_newest path (enqueue_to_lane_) — bump the lifetime dropped
-        // counter and emit an out-of-band XI_SYS_DROPPED marker so the drop is
-        // observable/counted (a bare shutdown/pause bail is not a drop, so no marker).
         if (dropped_over_cap) {
+            // At the in-flight cap this is an OVERFLOW drop-newest: mirror the
+            // continuous GroupLane drop_newest path via the shared helper — bump the
+            // lifetime dropped counter and emit an out-of-band XI_SYS_DROPPED marker
+            // (release happens inside the helper) so the drop is observable/counted.
             int64_t aid = ++g_run_id;              // arrival slot of the dropped (new) frame
             ++g_dropped_lifetime;                  // P1-8: lifetime total survives cmd:start
-            warn_frame_drop_(g_dropped_lifetime.load(), evp->group, "max_inflight");
-            if (auto* s = g_srv_for_bp.load(std::memory_order_acquire))
-                emit_run_result(*s, XI_SYS_DROPPED, "dropped: max in-flight one-shots reached",
-                                aid, -1, evp->leader_source, evp->group);
+            account_dropped_frame_(*evp, g_dropped_lifetime.load(), aid, "max_inflight",
+                                   "dropped: max in-flight one-shots reached");
+        } else {
+            // A bare shutdown/pause bail is not a drop (no marker) — just release.
+            release_trigger_event_(*evp);
         }
     }
 }
@@ -2699,7 +2724,7 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
                     yyjson_doc_free(idoc);
                     if (meta) {
                         xi::DocRegistry::instance().retain(meta);   // register at rc=1
-                        ev.meta_doc = meta;
+                        ev.meta_doc = xi::DocRef::adopt(meta);
                         inject = true;
                     }
                 }
