@@ -127,6 +127,7 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
   evolve the freeze guard to v11, rebuild all in-tree plugins. Old-layout plugins refused (acceptable — all
   first-party plugins are rebuildable in-tree).
 - **OQ-2 → push as a BRANCH** (not master). Open for review; do not move `origin/master`.
+  **DONE (2026-07-01):** pushed `origin/review/core-roadmap-v11-2026-07` @ `9c93afc` (master's full 77-commit lead: v11 大破大立, clang-cl libFuzzer/UBSan, OQ-9 OpenCV decouple, §28 race nets). `origin/master` left at `1bdc092`. PR: https://github.com/MDMTseng/xInsp2/pull/new/review/core-roadmap-v11-2026-07
 - **All other OQs (OQ-3, OQ-5, OQ-6, OQ-7, OQ-8, G3.2) → keep documented, user decides later.**
 - **OQ-4** → already implemented (runner `--certify-plugin` mode); effectively closed.
 
