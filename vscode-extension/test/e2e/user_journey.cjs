@@ -409,11 +409,12 @@ async function run() {
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& cam = xi::use("cam0");
     auto& det = xi::use("det0");
     auto& saver = xi::use("saver0");
 
-    auto img = cam.grab(500);
+    // Push model: read the pushed frame from the current trigger (no grab()).
+    auto t = xi::current_trigger();
+    auto img = t.is_active() ? t.image("cam0") : xi::Image{};
     if (img.empty()) {
         img = xi::Image(320, 240, 1);
         std::memset(img.data(), 0, 320 * 240);

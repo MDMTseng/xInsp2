@@ -342,19 +342,10 @@ public:
     virtual void commit() {}
 
 protected:
-    HostImage create_image(int w, int h, int ch) {
-        if (!host_) return {};
-        // Phase 3: prefer the frozen xi.imaging@1 interface, fall back to the
-        // legacy image_create field on a pre-v10 host (identical pool create).
-        xi_image_handle handle = XI_IMAGE_NULL;
-        if (const xi_imaging_v1* iv = imaging_iface())
-            handle = iv->image_create((int32_t)w, (int32_t)h, (int32_t)ch);
-        else if (host_->image_create)
-            handle = host_->image_create((int32_t)w, (int32_t)h, (int32_t)ch);
-        // from_image_handle: takes ownership of the existing refcount=1
-        // without calling addref again
-        return HostImage::from_handle(host_, handle);
-    }
+    // NOTE: the redundant `create_image` (returned a handle-based HostImage) was
+    // removed in a v11 API cleanup — `pool_image` below is the sole author-facing
+    // allocator. HostImage's named ctors (from_handle/from_image/share_handle) and
+    // xi::Image::create_in_pool remain for the SDK's internal marshalling.
 
     // Allocate a fresh pool slot and return it as a refcounted xi::Image
     // view. Bytes written via the Image's `data()` (or via a cv::Mat from

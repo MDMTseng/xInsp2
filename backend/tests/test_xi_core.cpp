@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <xi/xi.hpp>
+#include <xi/xi_instance.hpp>   // xi::Instance<T> / InstanceBase (no longer in the xi.hpp umbrella)
 #include <xi/xi_inflight_runs.hpp>
 #include <xi/xi_working_copy.hpp>
 #include <xi/xi_emit_gate.hpp>

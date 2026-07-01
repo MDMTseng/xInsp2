@@ -148,9 +148,11 @@ void xi_inspect_entry(int /*frame*/) {
         }
     }
 
-    // 6) Persist state.
+    // 6) Persist state. set_value deep-copies the built array node into the state
+    //    Record's doc (the safe replacement for the old raw same-doc splice).
     xi::state().set("frame_seq",  frame_seq_v + 1);
-    xi::state().set_raw("window", build_window(xi::state().doc(), window));
+    xi::state().set_value("window",
+                          xi::Record::Value(build_window(xi::state().doc(), window)));
 
     // 7) Emit per-frame VARs.
     VAR(count,             count_v);

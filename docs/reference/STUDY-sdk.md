@@ -187,7 +187,7 @@ Instances and plugins **do not reload**; only the script reloads. Instances surv
 | Signature | File:Line | Purpose |
 |---|---|---|
 | `Image pool_image(int w, int h, int ch)` | `xi_abi.hpp:268–270` | Allocate fresh slot in host pool, return as refcounted Image. Write cv:: output directly into `as_cv_mat()`. Zero-copy when returned from `process()`. |
-| `HostImage create_image(int w, int h, int ch)` | `xi_abi.hpp:251–257` | Allocate host-backed image. Returns HostImage (handle-based). |
+| _(removed v11)_ `create_image` | — | The redundant handle-based allocator was removed; `pool_image` is the sole author-facing image allocator. |
 
 #### Logging & Helpers
 
@@ -421,7 +421,7 @@ gated). See `docs/internals/core_fix_plan.md`.
 | Example | File | Pattern | Key Primitives |
 |---|---|---|---|
 | `user_script_example.cpp` | `.cpp` | Basic params, VAR (legacy) | `xi::Param`, `VAR(name, expr)` |
-| `use_demo.cpp` | `.cpp` | Instance access, xi::use() | `xi::use("inst").grab()`, `xi::state()` |
+| `use_demo.cpp` | `.cpp` | Instance access, xi::use() + push-model frame read | `xi::use("inst")`, `xi::current_trigger().image(...)`, `xi::state()` |
 | `defect_detection.cpp` | `.cpp` | Threshold + blob count verdict | `xi::ng()`, `xi::ok()` |
 | `multi_file_script` | `*/inspect.cpp` + `inspect_*.hpp` | Split logic across headers | Include pattern; each header calls xi:: primitives |
 | `script_external_dll` | `inspect.cpp` | Link external library | `project.json`: `include_dirs`, `link_libs` |

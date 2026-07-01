@@ -472,7 +472,9 @@ return out;
 ```
 
 `push(key, …)` appends to (and creates) an array; `set(key, const Record&)` nests
-an object; `set_raw(key, yyjson_mut_val*)` is the escape hatch. See
+an object (its images are merged in under `"<key>.<imgkey>"`, not dropped);
+`set_value(key, Value)` deep-copies any value from another Record (the safe
+cross-doc copy verb that replaced the old raw `set_raw` escape hatch). See
 [`reference/data-types.md`](../reference/data-types.md).
 
 ### Test `process()` headlessly — `xi_run_plugin`

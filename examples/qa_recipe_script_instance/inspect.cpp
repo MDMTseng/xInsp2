@@ -9,6 +9,7 @@
 // while the script instance silently kept its default).
 //
 #include <xi/xi.hpp>
+#include <xi/xi_instance.hpp>   // xi::Instance<T> / InstanceBase (no longer in the xi.hpp umbrella)
 
 // A trivial script-declared plugin holding one tunable int.
 class Scaler : public xi::InstanceBase {

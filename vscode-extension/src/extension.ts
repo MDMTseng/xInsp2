@@ -2177,10 +2177,12 @@ export function activate(context: vscode.ExtensionContext) {
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& cam = xi::use("mock_camera0");
     auto& det = xi::use("blob_analysis0");
 
-    auto img = cam.grab(500);
+    // Frames arrive by PUSH — the camera source emits into the trigger bus;
+    // read the current trigger instead of pulling with grab().
+    auto t = xi::current_trigger();
+    auto img = t.is_active() ? t.image("mock_camera0") : xi::Image{};
     if (img.empty()) {
         img = xi::Image(320, 240, 1);
         std::memset(img.data(), 0, 320*240);
