@@ -1834,16 +1834,35 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
     auto evp = std::make_shared<xi::TriggerEvent>(std::move(ev));
     // The lambda runs on a source plugin's emit thread, which outlives the
     // main-local srv — g_inflight owns the bump/bail/drain so teardown waits it
-    // out. On a bail (tearing down or thread-spawn failure) we release the event's
-    // image/meta handles ourselves.
+    // out. On a bail (tearing down or thread-spawn failure) OR a cap drop we
+    // release the event's image/meta handles ourselves.
+    bool dropped_over_cap = false;
     bool launched = g_inflight.launch([srv, evp]() {
         reserve_fault_stack();
         xi::install_seh_translator();
         std::lock_guard<std::mutex> lk(g_run_mu);
         CurrentTriggerScope trig(*evp);   // clears g_current_trigger + releases evp on scope exit
         run_one_inspection(*srv, /*frame_hint=*/0, /*run_id=*/0, "", /*emit_seq=*/-1);
-    });
-    if (!launched) release_trigger_event_(*evp);
+    }, &dropped_over_cap);
+    if (!launched) {
+        // B1: on ANY non-launch we must release the dropped event's image/meta refs
+        // ourselves (the CurrentTriggerScope that normally does it never ran) — the
+        // same release-on-drop discipline the continuous lane path uses, so a
+        // dropped one-shot leaks no ImagePool/DocRegistry handles.
+        release_trigger_event_(*evp);
+        // At the in-flight cap this is an OVERFLOW drop-newest: mirror the continuous
+        // GroupLane drop_newest path (enqueue_to_lane_) — bump the lifetime dropped
+        // counter and emit an out-of-band XI_SYS_DROPPED marker so the drop is
+        // observable/counted (a bare shutdown/pause bail is not a drop, so no marker).
+        if (dropped_over_cap) {
+            int64_t aid = ++g_run_id;              // arrival slot of the dropped (new) frame
+            ++g_dropped_lifetime;                  // P1-8: lifetime total survives cmd:start
+            warn_frame_drop_(g_dropped_lifetime.load(), evp->group, "max_inflight");
+            if (auto* s = g_srv_for_bp.load(std::memory_order_acquire))
+                emit_run_result(*s, XI_SYS_DROPPED, "dropped: max in-flight one-shots reached",
+                                aid, -1, evp->leader_source, evp->group);
+        }
+    }
 }
 
 // SINGLE SOURCE OF TRUTH for process-exit teardown. Called from BOTH the
@@ -1871,7 +1890,32 @@ static void controlled_shutdown_teardown_() {
     // only waits for a thread that already HOLDS the lock; one detached-but-not-yet-
     // locked would slip past and then touch the about-to-be-destroyed srv. drain()
     // waits on the in-flight count (capped) instead.
-    g_inflight.drain();
+    //
+    // T1: if drain() TIMES OUT (a wedged inspect — infinite loop / blocking plugin —
+    // still in flight after the cap), we must NOT proceed into teardown: close_project
+    // below FreeLibrary's the plugin DLLs and g_srv_for_bp is nulled while that thread
+    // is still inside run_one_inspection(*srv)/process_fn_ → UAF / access-violation.
+    // With the watchdog DISABLED (default g_watchdog_ms{0}) nothing else would have
+    // killed the process, so this path is reachable. Do exactly what the watchdog's
+    // HARD-trip does: log, flush, and std::_Exit(WATCHDOG_EXIT_CODE) — a crash-safe
+    // hard exit (skips static dtors / atexit a wedged worker could deadlock) that the
+    // FE supervisor respawns. A clean teardown here is unsafe precisely BECAUSE a
+    // thread is wedged; the hard exit is the correct trade.
+    if (!g_inflight.drain()) {
+        int stuck = g_inflight.inflight();
+        std::fprintf(stderr,
+            "[xinsp2] shutdown drain TIMED OUT with %d wedged in-flight inspect(s) — "
+            "hard-exiting instead of tearing down (would UAF: FreeLibrary + srv destroy "
+            "under a live detached run); FE supervisor respawns (rc=0x%04X)\n",
+            stuck, WATCHDOG_EXIT_CODE);
+        if (auto* s = g_srv_for_bp.load(std::memory_order_acquire))
+            emit_error_log(*s,
+                "shutdown drain timed out with " + std::to_string(stuck) +
+                " wedged in-flight inspect(s); backend hard-exiting for respawn");
+        std::fflush(stderr);
+        std::fflush(stdout);
+        std::_Exit(WATCHDOG_EXIT_CODE);
+    }
     { std::lock_guard<std::mutex> rl(g_run_mu); }     // belt-and-suspenders
     xi::TriggerBus::instance().reset();               // prune the per-source emit-time map (source names go out of scope here)
     { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
@@ -1892,6 +1936,10 @@ static void controlled_shutdown_teardown_() {
 // cmd:start — the trigger-driven model (continuous is just an optional free-running
 // timer on top).
 static void install_trigger_sink_(xi::ws::Server* srv) {
+    // B1: apply the project's one-shot in-flight ceiling. Installed on every
+    // compile_and_load, so a project's parallelism.max_inflight takes effect
+    // WITHOUT needing cmd:start (one-shot dispatch works pre-start). <=0 → default.
+    g_inflight.set_cap(g_plugin_mgr.project().max_inflight);
     xi::TriggerBus::instance().set_sink([srv](xi::TriggerEvent ev) {
         if (g_continuous.load()) {
             // Route by the emitting source instance's "group" (default_group if

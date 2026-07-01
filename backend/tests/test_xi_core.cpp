@@ -320,6 +320,36 @@ static void test_inflight_runs() {
     CHECK(rt.drain(5000));
     CHECK(ran3.load() == 1);
 
+    // B1: max-in-flight cap. Fire K >> cap blocking runs; count must stay <= cap
+    // and every over-cap launch must report drop-newest (dropped_over_cap=true,
+    // returns false) — this is the bound that stops a fast source from spawning
+    // unbounded detached threads / pinned frames.
+    {
+        xi::InflightRuns capped;
+        capped.set_cap(4);
+        CHECK(capped.cap() == 4);
+        capped.set_cap(0);                                     // 0 → default, not unlimited
+        CHECK(capped.cap() == xi::InflightRuns::kDefaultCap);
+        capped.set_cap(4);
+        std::atomic<bool> hold{true};
+        std::atomic<int>  launched{0}, dropped{0};
+        for (int i = 0; i < 64; ++i) {
+            bool over = false;
+            bool ok = capped.launch([&]{
+                while (hold.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }, &over);
+            if (ok)        ++launched;
+            if (over)      ++dropped;   // over-cap → drop-newest
+            CHECK(capped.inflight() <= 4);    // never exceeds the cap
+        }
+        CHECK(launched.load() <= 4);
+        CHECK(dropped.load() >= 60);          // the rest were dropped-newest
+        CHECK(capped.inflight() <= 4);
+        hold.store(false);
+        CHECK(capped.drain(5000));
+        CHECK(capped.inflight() == 0);
+    }
+
     // After begin_shutdown(), launch() must BAIL (run nothing, return false) so a
     // late source emit can't start a run against an about-to-die srv.
     rt.begin_shutdown();
