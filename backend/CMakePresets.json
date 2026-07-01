@@ -1,0 +1,35 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "fuzz",
+      "displayName": "clang-cl libFuzzer + ASan",
+      "description": "In-process coverage-guided fuzzing with ASan. Requires LLVM/clang-cl. SEPARATE from the default MSVC build — do not use for the shipped binaries.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-fuzz",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "C:/Program Files/LLVM/bin/clang-cl.exe",
+        "CMAKE_CXX_COMPILER": "C:/Program Files/LLVM/bin/clang-cl.exe",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded",
+        "XINSP2_FUZZ": "ON",
+        "XINSP2_FUZZ_SANITIZER": "address"
+      }
+    },
+    {
+      "name": "fuzz-ubsan",
+      "inherits": "fuzz",
+      "displayName": "clang-cl libFuzzer + UBSan",
+      "description": "Fuzz harnesses built with fuzzer,undefined so UBSan reports surface as crashes during fuzzing. Also builds the UBSan unit-test subset.",
+      "binaryDir": "${sourceDir}/build-fuzz-ubsan",
+      "cacheVariables": {
+        "XINSP2_FUZZ_SANITIZER": "undefined"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "fuzz", "configurePreset": "fuzz" },
+    { "name": "fuzz-ubsan", "configurePreset": "fuzz-ubsan" }
+  ]
+}
