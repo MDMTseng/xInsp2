@@ -16,6 +16,7 @@
 #include <xi/xi_abi.h>
 #include <xi/xi_abi.hpp>          // xi::Plugin (SDK wrappers)
 #include <xi/xi_image_pool.hpp>   // xi::ImagePool::make_host_api
+#include <xi/xi_trigger_bus.hpp>  // xi::install_trigger_hook (wires emit_record)
 #include <xi/xi_binary_sink.hpp>
 #include <xi/xi_status_sink.hpp>
 
@@ -97,18 +98,37 @@ int main() {
         }
     }
 
-    // ---- (3) xi.emit@1 resolves and matches ----------------------------------
+    // ---- (3) xi.emit@1 resolves; emit_binary matches, emit_record is a LIVE door
     {
         const auto* ev = static_cast<const xi_emit_v1*>(host.get_interface("xi.emit", 1));
         CHECK(ev != nullptr);
         if (ev) {
-            // emit_record is wired at runtime by install_trigger_hook into the
-            // LIVE table, not the canonical one — so on a bare make_host_api()
-            // table both are null and still match byte-for-byte (consistent with
-            // xi.legacy@9's emit_record).
-            CHECK(ev->emit_record == host.emit_record);
             CHECK(ev->emit_binary == host.emit_binary);
+            // emit_record is served as a STABLE forwarder (not the raw field): the
+            // door hands out a NON-NULL pointer even on a bare table, so a future
+            // plugin that trusts the door never gets the old permanent null. The
+            // forwarder reads a slot install_trigger_hook publishes (see 3b).
+            CHECK(ev->emit_record != nullptr);
         }
+    }
+
+    // ---- (3b) on a FULLY WIRED table the door's emit_record reaches the bus ----
+    // install_trigger_hook wires host.emit_record AND publishes it into the slot
+    // the door's forwarder reads. The freeze-guard proves every carved entry still
+    // tracks its struct-field twin (emit_record functionally: slot == wired field).
+    {
+        xi_host_api wired = xi::ImagePool::make_host_api();
+        xi::install_trigger_hook(wired);
+        CHECK(wired.emit_record != nullptr);
+        const auto* ev = static_cast<const xi_emit_v1*>(wired.get_interface("xi.emit", 1));
+        CHECK(ev != nullptr);
+        if (ev) {
+            CHECK(ev->emit_record != nullptr);            // the stable forwarder
+            CHECK(ev->emit_binary == wired.emit_binary);  // still the same field
+        }
+        // The forwarder's target (published slot) now equals the wired field, and
+        // every other carved entry equals its struct field — freeze-guard green.
+        CHECK(xi::ImagePool::door_matches_fields(wired));
     }
 
     // ---- (4) xi.log@1 resolves and matches -----------------------------------
