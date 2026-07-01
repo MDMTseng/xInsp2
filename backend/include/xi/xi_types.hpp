@@ -374,7 +374,7 @@ using Mat4 = MatN<4>;
 // image that travels on the Record's image channel (key "mask"), with only light
 // metadata (frame w/h) mirrored into json for cheap reads. Because the bytes live
 // in images_, a Region is zero-copy through the in-process ImagePool and goes
-// straight to OpenCV via `mask().as_cv_mat()`.
+// straight to OpenCV via the opt-in `xi::as_cv_mat(mask())` (<xi/xi_cv.hpp>).
 //
 // This is the BINARY case (CV_8U, 1-channel, nonzero = inside). OpenCV helpers
 // (to_cv / region_from_mask / area / bbox) live in the opt-in xi_types_cv.hpp.

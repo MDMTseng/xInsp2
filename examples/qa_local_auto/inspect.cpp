@@ -3,6 +3,7 @@
 // auto-update). This script reads each emitted image, surfaces it for the HMI image
 // card, and emits a brightness-based verdict.
 #include <xi/xi.hpp>
+#include <xi/xi_cv.hpp>
 #include <xi/xi_use.hpp>
 #include <xi/xi_result.hpp>
 #include <opencv2/opencv.hpp>
@@ -16,7 +17,7 @@ void xi_inspect_entry(int /*frame*/) {
     if (img.empty()) { xi::ng(2, "no image"); return; }
     VAR(frame, img);                            // HMI image card binds var "frame"
 
-    cv::Mat m = img.as_cv_mat();
+    cv::Mat m = xi::as_cv_mat(img);
     double brightness = cv::mean(m)[0] / 255.0;
     EMIT(brightness);   // surface the existing var (VAR(x,x) would redeclare → C2374)
 

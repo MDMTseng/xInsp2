@@ -20,6 +20,7 @@
 //
 
 #include <xi/xi_json.hpp>
+#include <xi/xi_cv.hpp>
 
 class RegionCounter : public xi::Plugin {
 public:
@@ -42,10 +43,10 @@ public:
         if (close_r > 0) {
             int k = 2 * close_r + 1;
             auto kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k));
-            cv::morphologyEx(mask.as_cv_mat(), cleaned.as_cv_mat(),
+            cv::morphologyEx(xi::as_cv_mat(mask), xi::as_cv_mat(cleaned),
                              cv::MORPH_CLOSE, kernel);
         } else {
-            mask.as_cv_mat().copyTo(cleaned.as_cv_mat());
+            xi::as_cv_mat(mask).copyTo(xi::as_cv_mat(cleaned));
         }
 
         // connectedComponentsWithStats labels every 8-connected component of
@@ -53,7 +54,7 @@ public:
         // label 0 reserved for background.
         cv::Mat labels, stats, centroids;
         int n_labels = cv::connectedComponentsWithStats(
-            cleaned.as_cv_mat(), labels, stats, centroids, 8, CV_32S);
+            xi::as_cv_mat(cleaned), labels, stats, centroids, 8, CV_32S);
 
         int n_count = 0, n_small = 0, n_big = 0;
         for (int i = 1; i < n_labels; ++i) {  // skip background

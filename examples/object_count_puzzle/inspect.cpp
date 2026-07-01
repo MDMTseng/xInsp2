@@ -23,6 +23,7 @@
 //
 
 #include <xi/xi.hpp>
+#include <xi/xi_cv.hpp>
 
 #include <string>
 #include <vector>
@@ -46,7 +47,7 @@ void xi_inspect_entry(int /*frame*/) {
     VAR(frame_path, path);
 
     // --- to single-channel gray ---
-    cv::Mat src = frame.as_cv_mat();
+    cv::Mat src = xi::as_cv_mat(frame);
     cv::Mat gray;
     if (frame.channels == 1) {
         gray = src.clone();
@@ -156,7 +157,7 @@ void xi_inspect_entry(int /*frame*/) {
     // Build a uint8 mask Image for preview.
     xi::Image maskImg(mask.cols, mask.rows, 1);
     if (!maskImg.empty()) {
-        cv::Mat mv = maskImg.as_cv_mat();
+        cv::Mat mv = xi::as_cv_mat(maskImg);
         mask.copyTo(mv);
         VAR(maskpreview, maskImg);
     }

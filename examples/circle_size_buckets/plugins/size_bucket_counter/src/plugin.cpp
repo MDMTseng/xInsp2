@@ -28,6 +28,7 @@
 //
 
 #include <xi/xi_json.hpp>
+#include <xi/xi_cv.hpp>
 
 class SizeBucketCounter : public xi::Plugin {
 public:
@@ -54,15 +55,15 @@ public:
         if (close_r > 0) {
             int k = 2 * close_r + 1;
             auto kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k));
-            cv::morphologyEx(mask.as_cv_mat(), cleaned.as_cv_mat(),
+            cv::morphologyEx(xi::as_cv_mat(mask), xi::as_cv_mat(cleaned),
                              cv::MORPH_CLOSE, kernel);
         } else {
-            mask.as_cv_mat().copyTo(cleaned.as_cv_mat());
+            xi::as_cv_mat(mask).copyTo(xi::as_cv_mat(cleaned));
         }
 
         cv::Mat labels, stats, centroids;
         int n_labels = cv::connectedComponentsWithStats(
-            cleaned.as_cv_mat(), labels, stats, centroids, 8, CV_32S);
+            xi::as_cv_mat(cleaned), labels, stats, centroids, 8, CV_32S);
 
         int n_small = 0, n_med = 0, n_large = 0;
         int rej_small = 0, rej_big = 0;

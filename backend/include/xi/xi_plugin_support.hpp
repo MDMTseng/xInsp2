@@ -20,12 +20,17 @@
 
 // Note on operators: xInsp2 used to ship its own xi::ops library
 // (gaussian, erode, threshold, ...). That has been removed; plugins
-// call OpenCV directly via xi::Image::as_cv_mat() (a non-owning view
-// over pool memory) and xi::Image::create_in_pool(host(), w, h, c)
+// call OpenCV directly via the free xi::as_cv_mat(img) (a non-owning
+// view over pool memory) and xi::Image::create_in_pool(host(), w, h, c)
 // for outputs. See docs/guides/write-a-plugin.md.
+//
+// This convenience header still hands plugin authors OpenCV — but via the
+// opt-in <xi/xi_cv.hpp> (which brings both OpenCV and xi::as_cv_mat /
+// xi::from_cv_mat). The mandatory umbrella xi.hpp is itself CV-free; only
+// this plugin-dev force-include and xi_cv.hpp pull OpenCV in.
 
 #include "xi_abi.hpp"
 #include "xi_image.hpp"
 #include "xi_record.hpp"
 
-#include <opencv2/opencv.hpp>
+#include "xi_cv.hpp"

@@ -19,7 +19,7 @@
 //       xi::Record process(const xi::Record& input) override {
 //           auto src  = input.get_image("frame");
 //           auto gray = xi::Image::create_in_pool(host(), src.width, src.height, 1);
-//           cv::cvtColor(src.as_cv_mat(), gray.as_cv_mat(), cv::COLOR_RGB2GRAY);
+//           cv::cvtColor(xi::as_cv_mat(src), xi::as_cv_mat(gray), cv::COLOR_RGB2GRAY);  // needs <xi/xi_cv.hpp>
 //           return xi::Record().image("gray", gray).set("done", true);
 //       }
 //   };
@@ -341,13 +341,13 @@ protected:
     }
 
     // Allocate a fresh pool slot and return it as a refcounted xi::Image
-    // view. Bytes written via the Image's `data()` (or via cv::Mat from
-    // `as_cv_mat()`) land directly in pool memory — no heap-to-pool copy
-    // when this Image is returned from process(). This is the standard
-    // way for plugins to produce an output image:
+    // view. Bytes written via the Image's `data()` (or via a cv::Mat from
+    // the opt-in `xi::as_cv_mat()`) land directly in pool memory — no
+    // heap-to-pool copy when this Image is returned from process(). This is
+    // the standard way for plugins to produce an output image:
     //
     //   auto dst = pool_image(src.width, src.height, 1);
-    //   cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0,0}, 2.0);
+    //   cv::GaussianBlur(xi::as_cv_mat(src), xi::as_cv_mat(dst), {0,0}, 2.0);  // <xi/xi_cv.hpp>
     //   return xi::Record().image("blurred", dst);
     Image pool_image(int w, int h, int ch) {
         return Image::create_in_pool(host_, w, h, ch);

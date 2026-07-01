@@ -7,6 +7,7 @@
 //
 
 #include <xi/xi.hpp>
+#include <xi/xi_cv.hpp>
 #include <xi/xi_record.hpp>
 #include <xi/xi_use.hpp>
 
@@ -33,7 +34,7 @@ void xi_inspect_entry(int frame) {
 
     VAR(input, img);
     cv::Mat gray_mat;
-    cv::cvtColor(img.as_cv_mat(), gray_mat, cv::COLOR_RGB2GRAY);
+    cv::cvtColor(xi::as_cv_mat(img), gray_mat, cv::COLOR_RGB2GRAY);
     cv::Mat bin;
     cv::threshold(gray_mat, bin, (int)thresh, 255, cv::THRESH_BINARY);
 
