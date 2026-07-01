@@ -21,13 +21,53 @@
 #include "xi_clock.hpp"
 #include "xi_record.hpp"   // wire codec is yyjson JSON (Record::from_json_bytes / data_json)
 #include "xi_image.hpp"
+#include "xi_script.hpp"   // XI_SCRIPT_EXPORT (A4 entry export macro)
 
 #include <chrono>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// ─── A4: explicit-trigger entry (parameterize the entry signature) ──────────
+//
+// The legacy entry `xi_inspect_entry(int frame)` reads the current trigger from
+// an AMBIENT thread_local (via the g_trigger_*_fn_ thunks). That seam is the
+// root of Problem A (core_fix_plan-2026-07 §1): a worker thread that calls
+// current_trigger() reads a nullptr thread_local and silently gets nothing.
+//
+// The A4 cure passes the trigger EXPLICITLY. The host fills this C-ABI,
+// SELF-CONTAINED view and hands it to the new entry
+// `xi_inspect_entry_tv(const xi_trigger_view*, int)`. Everything the script
+// needs (image handles + meta doc + host_api to resolve them) is in the struct
+// — no thunk, no thread_local — so the xi::Trigger built from it is valid on
+// ANY thread and safe to capture by value into xi::async / xi::parallel_for.
+//
+// Defined at global scope (C-ABI, like xi_host_api / xi_record_image), so both
+// the backend (which fills it) and the script (which consumes it) name it the
+// same. The `images` array + `meta_doc` are BORROWED for the duration of the
+// entry call: the host holds the underlying pool/doc refs; the SDK Trigger
+// addref's/retain's its own before the call returns.
+struct xi_trigger_view_image {
+    const char*     key;     // source name (or "<source>/<image>" for multi-frame)
+    xi_image_handle handle;  // borrowed host pool ref (SDK addref's its own)
+};
+
+struct xi_trigger_view {
+    int32_t                       is_active;      // 0 ⇒ no trigger (plain cmd:run / timer)
+    int32_t                       _pad0;
+    xi_trigger_id                 id;
+    int64_t                       timestamp_us;
+    int64_t                       dequeued_at_us;
+    const xi_trigger_view_image*  images;         // borrowed, valid for the call only
+    int32_t                       image_count;
+    int32_t                       _pad1;
+    const char*                   leader_source;  // may be null/empty
+    void*                         meta_doc;       // yyjson_mut_doc*, borrowed (host holds a ref)
+    const xi_host_api*            host;           // pool + doc access; null ⇒ inactive
+};
 
 // Defined in xi_script_support.hpp (force-included by the compiler)
 extern void* g_use_process_fn_;
@@ -111,9 +151,53 @@ using TriggerMetaFn    = void* (*)();
 //
 class Trigger {
 public:
+    // A4: self-contained backing for an EXPLICIT (view-constructed) Trigger.
+    // Held by shared_ptr so Trigger copies are cheap and every copy keeps the
+    // images (pool refs) + meta (frozen doc ref) alive — safe to capture into a
+    // parallel body by value. Null on a default-constructed (ambient) Trigger,
+    // in which case the accessors fall back to the thread_local thunks (legacy
+    // current_trigger() path).
+    struct Data {
+        std::unordered_map<std::string, Image> images;
+        Record                                 meta;
+        CurrentTriggerInfo                     info{};
+        std::string                            leader;
+        bool                                   active = false;
+    };
+
     Trigger() = default;
 
+    // A4: build an explicit, self-contained Trigger from a host-filled view.
+    // Addref's each image + retains the meta doc into its OWN refs, so the
+    // resulting Trigger (and every copy) stays valid on any thread and past the
+    // end of the originating dispatch — no thread_local, no thunk.
+    explicit Trigger(const xi_trigger_view* v) {
+        if (!v || !v->is_active || !v->host) return;
+        auto d = std::make_shared<Data>();
+        d->active                = true;
+        d->info.id               = v->id;
+        d->info.timestamp_us     = v->timestamp_us;
+        d->info.dequeued_at_us   = v->dequeued_at_us;
+        d->info.is_active        = 1;
+        if (v->leader_source) d->leader = v->leader_source;
+        for (int i = 0; i < v->image_count; ++i) {
+            xi_image_handle h = v->images ? v->images[i].handle : XI_IMAGE_NULL;
+            if (h == XI_IMAGE_NULL || !v->images[i].key) continue;
+            Image img = Image::adopt_pool_handle(v->host, h);   // addref → our own ref
+            if (!img.empty()) d->images.emplace(v->images[i].key, std::move(img));
+        }
+        if (v->meta_doc && v->host->doc_retain && v->host->doc_release) {
+            // Retain our own ref (host keeps its), then adopt_shared FROZEN — the
+            // Record consumes this reserved ref and doc_release's it when it dies.
+            v->host->doc_retain(v->meta_doc);
+            d->meta = Record::adopt_shared((yyjson_mut_doc*)v->meta_doc,
+                                           v->host->doc_release, /*frozen=*/true);
+        }
+        data_ = std::move(d);
+    }
+
     bool is_active() const {
+        if (data_) return data_->active;
         auto info_fn = reinterpret_cast<TriggerInfoFn>(g_trigger_info_fn_);
         if (!info_fn) return false;
         CurrentTriggerInfo info{};
@@ -124,8 +208,8 @@ public:
         return true;
     }
 
-    xi_trigger_id id() const          { ensure(); return info_.id; }
-    int64_t       timestamp_us() const { ensure(); return info_.timestamp_us; }
+    xi_trigger_id id() const          { if (data_) return data_->info.id;           ensure(); return info_.id; }
+    int64_t       timestamp_us() const { if (data_) return data_->info.timestamp_us; ensure(); return info_.timestamp_us; }
 
     // Microseconds (system_clock, same base as timestamp_us) when the
     // dispatcher worker pulled this event off the internal queue. Useful
@@ -138,9 +222,16 @@ public:
     // 0 if the host hasn't stamped one (e.g. single-shot cmd:run path
     // before this field was introduced, or synthetic timer ticks with
     // no trigger). Always check is_active() first.
-    int64_t       dequeued_at_us() const { ensure(); return info_.dequeued_at_us; }
+    int64_t       dequeued_at_us() const { if (data_) return data_->info.dequeued_at_us; ensure(); return info_.dequeued_at_us; }
 
     std::string id_string() const {
+        if (data_) {
+            char buf[40];
+            std::snprintf(buf, sizeof(buf), "%016llx%016llx",
+                          (unsigned long long)data_->info.id.hi,
+                          (unsigned long long)data_->info.id.lo);
+            return buf;
+        }
         ensure();
         char buf[40];
         std::snprintf(buf, sizeof(buf), "%016llx%016llx",
@@ -157,6 +248,12 @@ public:
     // "<source>/<image_name>"; for the common single-frame case the
     // key is just the source name.
     Image image(const std::string& source) const {
+        if (data_) {
+            auto it = data_->images.find(source);
+            if (it != data_->images.end()) return it->second;
+            if (data_->images.size() == 1) return data_->images.begin()->second;  // sole-image fallback
+            return {};
+        }
         auto fn = reinterpret_cast<TriggerImageFn>(g_trigger_image_fn_);
         auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
         if (!fn || !host) return {};
@@ -175,6 +272,12 @@ public:
     // heap allocation (common case is <100 bytes) and silent truncation
     // for projects with many or long source names.
     std::vector<std::string> sources() const {
+        if (data_) {
+            std::vector<std::string> out;
+            out.reserve(data_->images.size());
+            for (auto& [k, v] : data_->images) out.push_back(k);
+            return out;
+        }
         auto fn = reinterpret_cast<TriggerSourcesFn>(g_trigger_sources_fn_);
         if (!fn) return {};
         char stack_buf[512];
@@ -208,6 +311,11 @@ public:
     // Falls back to the first sources() entry when the host has no
     // leader callback (older backends) or returns empty.
     std::string primary_source() const {
+        if (data_) {
+            if (!data_->leader.empty()) return data_->leader;
+            auto srcs = sources();
+            return srcs.empty() ? std::string{} : srcs.front();
+        }
         auto fn = reinterpret_cast<TriggerLeaderFn>(g_trigger_leader_fn_);
         if (fn) {
             char stack_buf[256];
@@ -242,6 +350,7 @@ public:
     // Record is FROZEN (the host still holds its own ref): reads are free,
     // a mutation copy-on-writes into the script's own doc.
     Record meta() const {
+        if (data_) return data_->meta;
         auto fn   = reinterpret_cast<TriggerMetaFn>(g_trigger_meta_fn_);
         auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
         if (!fn || !host || !host->doc_release) return Record();
@@ -257,6 +366,7 @@ public:
     // without re-implementing string compare or hashing in the hot path.
     bool has_source(const char* name) const {
         if (!name) return false;
+        if (data_) return data_->images.find(name) != data_->images.end();
         for (auto& s : sources()) if (s == name) return true;
         return false;
     }
@@ -269,6 +379,8 @@ private:
         info_fn(&info_);
         loaded_ = true;
     }
+    // Explicit (A4) backing — non-null ⇒ view-constructed, thread-safe, no thunk.
+    std::shared_ptr<const Data> data_;
     mutable CurrentTriggerInfo info_{};
     mutable bool               loaded_ = false;
 };
@@ -540,3 +652,36 @@ inline UseProxy& use(const std::string& name) {
 }
 
 } // namespace xi
+
+// ─── A4 entry macro ─────────────────────────────────────────────────────────
+//
+// The blessed way for a script to opt into the EXPLICIT-trigger entry. Write:
+//
+//   #include <xi/xi.hpp>
+//   #include <xi/xi_use.hpp>
+//
+//   XI_INSPECT_ENTRY(t, frame) {
+//       if (t.is_active()) {
+//           auto snap = t;                                   // cheap copy, self-contained
+//           xi::parallel_for(n, [snap](int i){ work(snap.image("cam")); });  // safe on any thread
+//       }
+//   }
+//
+// This expands to the exported C entry `xi_inspect_entry_tv(const xi_trigger_view*, int)`
+// that the host resolves in preference to the legacy `xi_inspect_entry(int)`.
+// The host fills the view and passes it explicitly; the macro builds a
+// self-contained xi::Trigger from it and hands it to the user body by const ref.
+// There is NO ambient thread_local seam on this path — `t` is valid on any
+// thread and safe to capture by value into parallel regions.
+//
+// Legacy scripts that keep `void xi_inspect_entry(int frame)` are unaffected and
+// continue to run through the ambient path (compat: the host falls back to the
+// old symbol when the new one is absent).
+#define XI_INSPECT_ENTRY(tvar, fvar)                                            \
+    static void xi_inspect_entry_impl_(const ::xi::Trigger&, int);             \
+    XI_SCRIPT_EXPORT void xi_inspect_entry_tv(const ::xi_trigger_view* xi_tv_, \
+                                              int xi_frame_) {                 \
+        ::xi::Trigger tvar##_obj_(xi_tv_);                                     \
+        xi_inspect_entry_impl_(tvar##_obj_, xi_frame_);                        \
+    }                                                                          \
+    static void xi_inspect_entry_impl_(const ::xi::Trigger& tvar, int fvar)

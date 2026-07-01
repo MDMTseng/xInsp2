@@ -12,8 +12,12 @@ tracks only what is **still open**.
 
 **What landed** (see the archive for detail + the git log / tests for proof):
 - **Part I** — parallel-region context safety: A1 fail-loud, A2 `trigger_snapshot()`,
-  B1 `xi::parallel_for`, B2 load-time OMP warmup, C1/C2/C3 owner propagation
-  (`test_parallel_safety`, `xi_parallel.hpp`, owner thunks).
+  **A4 explicit-trigger entry** (`xi_inspect_entry_tv(const xi_trigger_view*, int)` +
+  the `XI_INSPECT_ENTRY(t, frame)` macro — the host passes a self-contained trigger,
+  the ambient thread_local seam is gone from the user contract; legacy
+  `xi_inspect_entry(int)` still supported), B1 `xi::parallel_for`, B2 load-time OMP
+  warmup, C1/C2/C3 owner propagation (`test_parallel_safety`, `xi_parallel.hpp`,
+  owner thunks).
 - **Part II** — core minimization + host-API evolution: Phases 0–4, i.e. freeze guard +
   golden plugin → `get_interface` door → `xi.preview` carve → per-domain interfaces →
   **retire the monolith (ABI v11 大破大立)**.
@@ -29,13 +33,19 @@ tracks only what is **still open**.
 
 | Item | From | State | Flips / unblocks when |
 |---|---|---|---|
-| **A4 — parameterize the entry signature** (`xi_inspect_entry(const Trigger&, int)`), eliminating the `thread_local` ambient-trigger bug class entirely. | archive §1.3 A4 | Long-term; a signature migration across every script (separate ABI/SDK change). A1+A2 already make the hazard *detectable*, so this is the root cure, not urgent. | A stated goal to remove the ambient-trigger seam for good. |
 | **G3.2 — debug illegal-transition asserts** in `CAbiInstanceAdapter` (e.g. `process` before `commit`, `set_def` during `process` on a non-reentrant instance). | archive §18 G3.2 | Deferred (the contract is documented in G3.1; the asserts that *enforce* it are the follow-up). | Want the lifecycle×thread contract machine-checked, not just written. |
 | **G4 — `code_change`-style state-migration hook** instead of drop-on-mismatch. | archive §18 G4 | Deferred (`OQ-5`). | Cross-version state continuity becomes a stated requirement. |
 | **§28 action 2 — Linux CI lane → real TSan** (also unlocks UBSan/libFuzzer at scale). | archive §28 | **Blocked on `OQ-1`.** Windows has no reliable TSan; the race nets currently lean on ASan + `XINSP2_STRESS_SCALE`. | User stands up a Linux CI lane. |
 | **OQ-7 partial gaps** — observability export (metrics/latency histograms), WS protocol *negotiation*, Record cross-plugin *static* schema contract. | archive §21, §27.5 | Backlogged; "don't gold-plate" (archive Invariant §27.5). | A concrete need appears (e.g. a production-line monitoring requirement, a client-compat break). |
 
 ### Deliberate non-gaps (recorded so they aren't re-chased)
+- **A4 in-repo example migration** — the SDK entry, host wiring, loader, and compat
+  fallback all landed and are proven (`test_parallel_safety` A4 cases + a real
+  force-include compile of a migrated script exporting `xi_inspect_entry_tv`). The
+  ~90 `examples/*/inspect.cpp` scripts were **intentionally left on the legacy
+  `xi_inspect_entry(int)` path** (one, `parallel_inspect_demo`, migrated as the
+  reference) — legacy is supported forever, so bulk migration is churn, not a fix.
+  New scripts should use `XI_INSPECT_ENTRY(t, frame)`.
 - **GroupLane deque / drop-policy** race — covered black-box by the r8 surge tests; the
   EmitGate primitive it feeds now has a dedicated probe (archive §28 Tier-1).
 - **status coalesce map** — a `static` mutex-guarded `std::map` in `service_main.cpp`

@@ -19,9 +19,11 @@
 #include <chrono>
 #include <thread>
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int /*frame*/) {
-    auto t = xi::current_trigger();
+// A4: explicit-trigger entry. The host passes the trigger in (no ambient
+// thread_local), so `t` is self-contained and safe to capture by value into a
+// parallel region — the exact hazard this demo's cousins used to hit.
+XI_INSPECT_ENTRY(t, /*frame*/ frame) {
+    (void)frame;
     if (!t.is_active()) return;
 
     // Simulate 100 ms of CV work. Real workloads use cv::Canny / template

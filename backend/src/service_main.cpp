@@ -706,6 +706,20 @@ static void owner_set_cb(uint32_t id) {
     xi::ImagePool::current_owner_ref() = (xi::ImagePoolOwnerId)id;
 }
 
+// The single script-facing host_api (image_* + doc_* over the live singleton
+// ImagePool, with the trigger/emit hook installed). Shared by set_use_callbacks
+// (wired into the script's g_use_host_api_) AND the A4 explicit-trigger entry
+// (put into the xi_trigger_view so the SDK can resolve the passed image/meta
+// handles). One instance so both paths address the same pool/registry.
+static const xi_host_api* script_host_api_() {
+    static xi_host_api use_host = [] {
+        auto a = xi::ImagePool::make_host_api();
+        xi::install_trigger_hook(a);
+        return a;
+    }();
+    return &use_host;
+}
+
 
 // ---- Status registry -------------------------------------------------------
 // Sticky last-value status per component: instance name, or "@script" for the
@@ -1350,7 +1364,37 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         // during the 1000ms grace (higher ticket) is not poisoned by an earlier
         // slow frame's trip. Older scripts lack this thunk → legacy behaviour.
         if (s.inspect_begin) s.inspect_begin();
-        s.inspect(frame_hint);
+        // A4: prefer the EXPLICIT-trigger entry when the script exports it. The
+        // host builds a self-contained xi_trigger_view from the current trigger
+        // (read once, HERE, on the inspect thread) and passes it in — so the
+        // script never reaches for the ambient thread_local. Image handles + meta
+        // doc are BORROWED (the dispatch's CurrentTriggerScope holds the refs);
+        // the SDK Trigger addref's/retains its own before this call returns.
+        // g_current_trigger == nullptr (plain cmd:run / timer tick) ⇒ an inactive
+        // view, mirroring current_trigger().is_active() == false on the old path.
+        if (s.inspect_tv) {
+            xi_trigger_view view{};
+            std::vector<xi_trigger_view_image> view_imgs;
+            std::string leader;
+            if (g_current_trigger) {
+                view.is_active      = 1;
+                view.id             = g_current_trigger->id;
+                view.timestamp_us   = g_current_trigger->timestamp_us;
+                view.dequeued_at_us = g_current_trigger->dequeued_at_us;
+                view_imgs.reserve(g_current_trigger->images.size());
+                for (auto& kv : g_current_trigger->images)
+                    view_imgs.push_back({ kv.first.c_str(), kv.second });
+                view.images       = view_imgs.data();
+                view.image_count  = (int32_t)view_imgs.size();
+                leader            = g_current_trigger->leader_source;
+                view.leader_source = leader.c_str();
+                view.meta_doc     = (void*)g_current_trigger->meta_doc;
+            }
+            view.host = script_host_api_();
+            s.inspect_tv(&view, frame_hint);
+        } else {
+            s.inspect(frame_hint);
+        }
         crash_set_phase("done");
         disarm();
         inspect_ok = true;
@@ -2370,12 +2414,11 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             // plugins only see that pool via their own host_api, so script-side
             // ImagePool handles would be invisible to them.
             if (g_script.set_use_callbacks) {
-                static xi_host_api use_host = []{ auto a = xi::ImagePool::make_host_api(); xi::install_trigger_hook(a); return a; }();
                 g_script.set_use_callbacks(
                     (void*)use_process_cb,
                     (void*)use_exchange_cb,
                     (void*)use_grab_cb,
-                    (void*)&use_host);
+                    (void*)script_host_api_());
             }
             // Phase 3: trigger access callbacks. Older scripts that don't
             // import xi_script_set_trigger_callbacks just stay null and

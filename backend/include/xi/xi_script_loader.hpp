@@ -21,6 +21,11 @@
 #include <memory>
 #include <string>
 
+// A4: the explicit-trigger entry takes a pointer to this host-filled C-ABI view
+// (full definition in xi_use.hpp). Forward-declared here so the loader needs
+// only the pointer type for its function-pointer typedef.
+struct xi_trigger_view;
+
 namespace xi::script {
 
 struct LoadedScript {
@@ -44,6 +49,10 @@ struct LoadedScript {
     std::shared_ptr<void> module_lifetime;
 
     using InspectFn          = void (*)(int frame);
+    // A4: explicit-trigger entry. The host fills a xi_trigger_view and passes it
+    // in, eliminating the ambient thread_local seam. Resolved in preference to
+    // `inspect` when present; a script exports EITHER this or the legacy entry.
+    using InspectTvFn        = void (*)(const ::xi_trigger_view* tv, int frame);
     using ListParamsFn       = int  (*)(char* buf, int buflen);
     using SetParamFn         = int  (*)(const char* name, const char* value_json);
     using ResetFn            = void (*)();
@@ -62,6 +71,7 @@ struct LoadedScript {
     using StateSchemaVersionFn    = int  (*)(void);
 
     InspectFn          inspect          = nullptr;
+    InspectTvFn        inspect_tv       = nullptr;   // A4 explicit-trigger entry (preferred)
     ListParamsFn       list_params      = nullptr;
     SetParamFn         set_param        = nullptr;
     ResetFn            reset            = nullptr;
@@ -96,7 +106,7 @@ struct LoadedScript {
     InspectBeginFn     inspect_begin    = nullptr;
     StateSchemaVersionFn state_schema_version = nullptr;
 
-    bool ok() const { return handle && inspect; }
+    bool ok() const { return handle && (inspect || inspect_tv); }
 };
 
 inline bool load_script(const std::string& dll_path, LoadedScript& out, std::string& err) {
@@ -124,6 +134,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     // the user's script actually uses the corresponding header. Only
     // `xi_inspect_entry` (line below) triggers load failure if absent.
     out.inspect     = reinterpret_cast<LoadedScript::InspectFn>(GetProcAddress(h, "xi_inspect_entry"));
+    out.inspect_tv  = reinterpret_cast<LoadedScript::InspectTvFn>(GetProcAddress(h, "xi_inspect_entry_tv"));
     out.list_params = reinterpret_cast<LoadedScript::ListParamsFn>(GetProcAddress(h, "xi_script_list_params"));
     out.set_param   = reinterpret_cast<LoadedScript::SetParamFn>(GetProcAddress(h, "xi_script_set_param"));
     out.reset            = reinterpret_cast<LoadedScript::ResetFn>(GetProcAddress(h, "xi_script_reset"));
@@ -144,8 +155,8 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
     out.inspect_begin     = reinterpret_cast<LoadedScript::InspectBeginFn>(GetProcAddress(h, "xi_script_inspect_begin"));
     out.state_schema_version = reinterpret_cast<LoadedScript::StateSchemaVersionFn>(GetProcAddress(h, "xi_script_state_schema_version"));
-    if (!out.inspect) {
-        err = "script missing xi_inspect_entry export";
+    if (!out.inspect && !out.inspect_tv) {
+        err = "script missing xi_inspect_entry / xi_inspect_entry_tv export";
         FreeLibrary(h);
         out.handle = nullptr;
         return false;
