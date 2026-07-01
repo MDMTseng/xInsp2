@@ -17,6 +17,7 @@
 
 #include "xi_abi.h"
 #include "xi_clock.hpp"
+#include "xi_doc_registry.hpp"
 #include "xi_image_pool.hpp"
 
 #include <atomic>
@@ -61,12 +62,13 @@ struct TriggerEvent {
     // ABI v6: routing/context metadata from emit_record, carried by POINTER
     // (zero-serialize) across the async dispatch — a host-owned yyjson_mut_doc*
     // refcounted through DocRegistry, exactly as the image handles ride the
-    // ImagePool refcount. NULL when the record carried no metadata. Owned like
-    // the images: whoever holds this event owns one ref and MUST
-    // DocRegistry::release() it at every drop/consume site (TriggerEvent has no
-    // destructor — the discipline is manual). The script reads it as a borrowed
-    // read-only view via current_trigger().meta().
-    yyjson_mut_doc* meta_doc = nullptr;
+    // ImagePool refcount. NULL when the record carried no metadata. Ownership is
+    // now TYPED: a move-only DocRef owns the event's one registry ref and releases
+    // it in its destructor, so the ref can't leak or double-free across the async
+    // dispatch. release_trigger_event_() still reset()s it at the drop/consume site
+    // (releasing the images alongside); the destructor is the backstop. The script
+    // reads it as a borrowed read-only view via current_trigger().meta().
+    DocRef meta_doc;
 };
 
 #ifndef XI_NOW_US_DEFINED
@@ -154,7 +156,7 @@ public:
         ev.id            = id;
         ev.timestamp_us  = ts_us;
         ev.leader_source = source;
-        ev.meta_doc      = meta_doc;            // transfer
+        ev.meta_doc      = DocRef::adopt(meta_doc);   // transfer the caller's ref (no retain)
         for (int i = 0; i < image_count; ++i) {
             xi_image_handle h = images[i].handle;
             ImagePool::instance().addref(h);
@@ -194,7 +196,7 @@ public:
             to_fire(std::move(ev));
         } else {
             for (auto& [n, h] : ev.images) ImagePool::instance().release(h);
-            DocRegistry::instance().release(ev.meta_doc);
+            ev.meta_doc.reset();   // release the event's doc ref (dtor would too)
         }
     }
 

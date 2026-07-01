@@ -105,4 +105,53 @@ private:
     }
 };
 
+// Move-only RAII owner of ONE DocRegistry ref on a yyjson_mut_doc*. Replaces the
+// hand-rolled "whoever holds this doc owns one ref and MUST DocRegistry::release()
+// it at every drop/consume site" discipline that TriggerEvent::meta_doc used to
+// carry as a raw pointer (the same class of manual-per-path-release bug the
+// TriggerEventReleaser / CurrentTriggerScope guards exist to kill). Semantics
+// mirror that protocol EXACTLY so the retain/release COUNT is unchanged:
+//   - adopt(doc): take ownership of an ALREADY-HELD ref — NO retain. The emit /
+//     stage / cmd:run paths hand over a ref that share_out reserved or that a
+//     retain-at-create just registered, so adopting must not add a ref.
+//   - reset() / dtor: DocRegistry::release() the held ref exactly once, then null
+//     — so a dtor that runs after an explicit reset() is a no-op (no double
+//     release). This is what lets release_trigger_event_() keep releasing at the
+//     drop site while the struct still gains an implicit destructor as a backstop.
+//   - move: transfers the ref; the moved-from DocRef is null (releases nothing) —
+//     so `sink(std::move(ev))` moves the doc ref out without a double free.
+//   - copy: deleted — a ref cannot be duplicated without an explicit retain.
+class DocRef {
+public:
+    DocRef() noexcept = default;
+
+    // Adopt an existing ref (no retain). NAMED so "no retain here" is unmistakable
+    // at every call site that transfers a reserved/registered ref into the event.
+    static DocRef adopt(yyjson_mut_doc* doc) noexcept { return DocRef(doc); }
+
+    DocRef(DocRef&& o) noexcept : doc_(o.doc_) { o.doc_ = nullptr; }
+    DocRef& operator=(DocRef&& o) noexcept {
+        if (this != &o) { reset(); doc_ = o.doc_; o.doc_ = nullptr; }
+        return *this;
+    }
+    DocRef(const DocRef&)            = delete;
+    DocRef& operator=(const DocRef&) = delete;
+    ~DocRef() { reset(); }
+
+    // Release the held ref (if any) and null. Effectively noexcept — the registry
+    // release only locks a shard + frees the doc (returns chunks to a pool); it
+    // never throws in practice (same assumption the drop guards already make).
+    void reset() noexcept {
+        if (doc_) { DocRegistry::instance().release(doc_); doc_ = nullptr; }
+    }
+
+    // Borrowed read of the underlying pointer — does NOT change the refcount.
+    yyjson_mut_doc* get() const noexcept { return doc_; }
+    explicit operator bool() const noexcept { return doc_ != nullptr; }
+
+private:
+    explicit DocRef(yyjson_mut_doc* doc) noexcept : doc_(doc) {}
+    yyjson_mut_doc* doc_ = nullptr;
+};
+
 } // namespace xi
