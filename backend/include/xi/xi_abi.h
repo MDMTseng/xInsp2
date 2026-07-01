@@ -132,15 +132,33 @@ extern "C" {
 /*       field, are completely unaffected. From here, capabilities evolve as       */
 /*       segregated, independently-frozen interfaces rather than monolith appends. */
 /* ------------------------------------------------------------------ */
-#define XI_ABI_VERSION 10  /* v8: + emit_binary; v9: + compress_image; v10: + get_interface */
+/*  11 — RETIRE THE MONOLITH (core_fix_plan.md §12 Phase 4, "大破大立"). A         */
+/*       DELIBERATE, USER-AUTHORIZED MAJOR ABI BREAK (not additive):               */
+/*         (a) the five dead shm_* stubs (always null since the 2026-05 process-   */
+/*             isolation removal) are DELETED from xi_host_api — every field after */
+/*             instance_folder shifts down 5 pointers (40 bytes);                  */
+/*         (b) get_interface("xi.legacy", 9) is NO LONGER PUBLISHED — the whole-   */
+/*             table legacy view is retired. The carved interfaces (xi.imaging/    */
+/*             doc/emit/log/preview@1) remain the capability path; the struct      */
+/*             fields (minus shm) remain for direct callers;                       */
+/*         (c) XI_ABI_MIN_COMPAT is raised 6 → 11, so every pre-v11 plugin (which  */
+/*             sees the old shm-bearing layout) is REFUSED at load rather than     */
+/*             handed a mis-offset table. All in-tree plugins rebuild against v11. */
+/*       The v11 layout is the NEW frozen baseline — the ADR-001 freeze discipline */
+/*       resumes here (test_abi_freeze.cpp is re-snapshot to v11).                 */
+/* ------------------------------------------------------------------ */
+#define XI_ABI_VERSION 11  /* v9: + compress_image; v10: + get_interface; v11: shm_* removed, xi.legacy retired */
 
-/* Oldest plugin ABI the host loads; bump on every breaking xi_host_api layout change. */
-#define XI_ABI_MIN_COMPAT 6
+/* Oldest plugin ABI the host loads; bump on every breaking xi_host_api layout
+ * change. Raised 6 → 11 in Phase 4: removing the shm_* block reshuffles offsets,
+ * so a pre-v11 plugin's compiled-in table view no longer matches — it must be
+ * refused (authorized break; all first-party plugins rebuild against v11). */
+#define XI_ABI_MIN_COMPAT 11
 
 /* Expected sizeof(xi_host_api) for the layout guard below (see the ABI LAYOUT
  * GUARD note after the struct). Bump together with XI_ABI_VERSION on any layout
  * change. 64-bit host (all function pointers). */
-#define XI_ABI_EXPECTED_SIZE 216  /* 64-bit: 27 function pointers * 8 bytes */
+#define XI_ABI_EXPECTED_SIZE 176  /* 64-bit: 22 function pointers * 8 bytes (v10's 27 − 5 shm_*) */
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -292,32 +310,17 @@ typedef struct xi_host_api {
     int32_t (*instance_folder)(const char* instance_name, char* buf, int32_t buflen);
 
     /* --------------------------------------------------------------- */
-    /* SHM zero-copy buffer pool — RETAINED FOR ABI STABILITY ONLY.   */
-    /* SHM and the out-of-process comms gateway were removed 2026-05.  */
-    /* ALL five function pointers below are NULL on current hosts and  */
-    /* will remain NULL until/unless SHM is re-introduced. Plugins     */
-    /* MUST null-check before calling (as the original contract         */
-    /* already required). Fields are kept in place — removing them     */
-    /* would shift every subsequent function pointer and break binary   */
-    /* compatibility with plugins compiled against ABI v1/v2.          */
-    /*                                                                  */
-    /* Historical note: these were intended to allow a worker process   */
-    /* or different plugin to deref image buffers without a memcpy.     */
-    /* The opt-in design (null == unavailable) means existing code      */
-    /* that already null-checks continues to work with no change.       */
-    /*                                                                  */
-    /*   size_bytes for shm_alloc_buffer: opaque byte buffer (e.g.     */
-    /*     ML weights, big metadata). image_data() returns the start.  */
-    /*                                                                  */
-    /* Refcount semantics (when non-null) match image_addref/release.   */
+    /* [ABI v11 — the five always-null shm_* stubs were REMOVED here.]  */
+    /* They were leftovers of the process-isolation layer (SHM + the    */
+    /* out-of-process comms gateway) removed 2026-05, retained NULL     */
+    /* only for the v1..v10 layout-stability contract. Phase 4          */
+    /* (core_fix_plan.md §12) retired the monolith: xi.legacy is no     */
+    /* longer published and XI_ABI_MIN_COMPAT is raised to 11, so no    */
+    /* pre-v11 plugin's table view survives — the dead block is deleted */
+    /* outright. Every field after instance_folder shifts down by 5     */
+    /* pointers (40 bytes) vs v10. See the ABI LAYOUT GUARD note below   */
+    /* and test_abi_freeze.cpp for the fresh v11 baseline.              */
     /* --------------------------------------------------------------- */
-    xi_image_handle (*shm_create_image)(int32_t w, int32_t h, int32_t channels);
-    xi_image_handle (*shm_alloc_buffer)(int32_t size_bytes);
-    void            (*shm_addref)(xi_image_handle h);
-    void            (*shm_release)(xi_image_handle h);
-    /* Returns 1 if the handle came from the SHM region, 0 if heap.   */
-    /* Always returns 0 on current hosts (shm_is_shm_handle is null).  */
-    int32_t         (*shm_is_shm_handle)(xi_image_handle h);
 
     /* --------------------------------------------------------------- */
     /* File I/O (host-provided so plugins / scripts don't have to vendor
@@ -450,12 +453,13 @@ typedef struct xi_host_api {
     /* publish that (id, version). The pointer is valid for the life of  */
     /* the host (do not free); cache it once per id.                     */
     /*                                                                   */
-    /* This is the LAST monolith append (core_fix_plan.md §12 Phase 1).  */
-    /* All future capabilities arrive as frozen interfaces behind this   */
-    /* door, not as new xi_host_api fields. Registered ids:              */
-    /*   get_interface("xi.legacy", 9)  -> const xi_host_api*  (this very */
-    /*       table — the whole v9 surface, so a caller can reach any      */
-    /*       legacy field through the door).                             */
+    /* This is the query door (core_fix_plan.md §12 Phase 1). All future */
+    /* capabilities arrive as frozen interfaces behind this door, not as */
+    /* new xi_host_api fields. Registered ids:                           */
+    /*   [ xi.legacy@9 was RETIRED in Phase 4 (v11) — the whole-table    */
+    /*     legacy view is no longer published; get_interface("xi.legacy",*/
+    /*     9) now returns NULL. Reach capabilities via the carved         */
+    /*     interfaces below, or the struct fields directly. ]            */
     /*   get_interface("xi.preview", 1) -> const xi_preview_v1*  (the     */
     /*       compress_image capability, carved in Phase 2).              */
     /*   get_interface("xi.imaging", 1) -> const xi_imaging_v1*  (image   */
@@ -472,38 +476,38 @@ typedef struct xi_host_api {
 } xi_host_api;
 
 /* ------------------------------------------------------------------ *
- * FROZEN SIGNATURE — xi_host_api, v9 prefix + v10 tail append.        *
+ * FROZEN SIGNATURE — xi_host_api, v11 (the NEW frozen baseline).       *
  *                                                                    *
- * As of ADR-001 (docs/internals/adr-001-host-api-freeze.md) the v9   *
- * layout of xi_host_api is FROZEN: a published (interface, vN) is     *
- * frozen forever; any add/change/remove ships as the NEXT version,    *
- * never as an in-place edit of the existing fields. v10 == the frozen *
- * v9 prefix (image_create … compress_image, offsets 0..200) + ONE     *
- * appended pointer (get_interface) at offset 208. Do NOT add, remove, *
- * reorder, or retype any field at or before compress_image to "fix" a *
- * build — that breaks every plugin compiled against v9.               *
+ * Phase 4 (core_fix_plan.md §12) intentionally BROKE the old v9-prefix *
+ * freeze: the dead shm_* block was removed and xi.legacy retired (an   *
+ * authorized major break). From v11 onward the freeze discipline of    *
+ * ADR-001 resumes: the v11 layout below is fixed and will not be       *
+ * edited in place; any add/change/remove of a host capability ships as *
+ * the NEXT version, and NEW capabilities arrive as frozen per-interface *
+ * structs behind get_interface, NOT as new xi_host_api fields.         *
  *                                                                    *
- * get_interface is the query door (core_fix_plan.md §12 Phase 1): the *
- * LAST legal monolith append. Future capabilities arrive as frozen    *
- * per-interface structs behind it, NOT as new xi_host_api fields.     *
+ * v11 layout = image_create … compress_image (offsets 0..160) +        *
+ * get_interface at offset 168 (the last field). get_interface remains  *
+ * the query door (Phase 1); it is the ONLY sanctioned struct field for *
+ * a capability from here — everything else is a carved interface.      *
  *                                                                    *
- * Two guards enforce this (both fail the BUILD — there is no CI       *
- * runner in this repo):                                               *
- *   1. The static_asserts just below (size + last-field anchor).      *
- *   2. backend/tests/test_abi_freeze.cpp — the full canonical         *
- *      signature: every field's offset AND exact fn-pointer type, in  *
- *      order. backend/tests/test_golden_plugin.cpp additionally loads *
- *      a v9 plugin through the real path and runs process() once.     *
- * See core_fix_plan.md §10-12.                                        *
+ * Two guards enforce this (both fail the BUILD — there is no CI        *
+ * runner in this repo):                                                *
+ *   1. The static_asserts just below (size + last-field anchor).       *
+ *   2. backend/tests/test_abi_freeze.cpp — the full canonical v11      *
+ *      signature: every field's offset AND exact fn-pointer type, in   *
+ *      order. backend/tests/test_golden_plugin.cpp additionally loads  *
+ *      a v11 plugin through the real path and runs process() once, and *
+ *      asserts a stale pre-v11 plugin is REFUSED by the min-compat gate.*
+ * See core_fix_plan.md §10-12.                                         *
  * ------------------------------------------------------------------ */
 
 /* ABI LAYOUT GUARD (host build only). The version gate elsewhere is an int compare
  * (plugin's requested version <= host's) — it does NOT verify struct layout. So a
- * well-meaning edit that changes xi_host_api WITHOUT bumping XI_ABI_VERSION (e.g.
- * deleting the always-null shm_* fields, which shifts every later function pointer)
- * would still pass the gate for an un-recompiled plugin and hand it a mis-offset
- * table -> silent call-through-wrong-pointer. This static_assert ties the layout to
- * the version: if you change the struct you MUST bump XI_ABI_VERSION above and update
+ * well-meaning edit that changes xi_host_api WITHOUT bumping XI_ABI_VERSION would
+ * still pass the gate for an un-recompiled plugin and hand it a mis-offset table ->
+ * silent call-through-wrong-pointer. This static_assert ties the layout to the
+ * version: if you change the struct you MUST bump XI_ABI_VERSION above and update
  * the expected size here, which is the conscious "I changed the ABI" step. Fires only
  * in the C++ host build (where xi_abi.h is edited + the host rebuilt); a C plugin TU
  * just skips it. To refresh after an intentional change, read the size the compiler
@@ -516,9 +520,9 @@ static_assert(sizeof(xi_host_api) == XI_ABI_EXPECTED_SIZE,
 static_assert(offsetof(xi_host_api, get_interface) == XI_ABI_EXPECTED_SIZE - sizeof(void*),
               "get_interface is no longer the last field — a field was added/removed "
               "without updating the ABI guard; bump XI_ABI_VERSION.");
-/* The v9 prefix is frozen forever: compress_image stays the last v9 field, at the
- * fixed offset it has always had (208 - 2*ptr = 200). get_interface (v10) appends
- * after it. If this fires, a v9 field moved — that breaks every v9 plugin. */
+/* v11 baseline: compress_image is the last non-door field at offset 160
+ * (176 - 2*ptr); get_interface appends after it at 168. If this fires, a v11
+ * field moved — that breaks every v11 plugin. */
 static_assert(offsetof(xi_host_api, compress_image) == XI_ABI_EXPECTED_SIZE - 2 * sizeof(void*),
               "the frozen v9 prefix moved: compress_image must remain the last v9 "
               "field (v10 = v9 prefix + appended get_interface).");

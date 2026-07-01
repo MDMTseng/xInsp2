@@ -412,15 +412,10 @@ public:
         // so a host that never installs the hook leaves it null (the SDK helper
         // null-checks).
         api.emit_record = nullptr;
-        // SHM removed 2026-05 (FE/BE in-process split): no shared-memory
-        // region exists. Per the ABI contract these stay null and plugins
-        // fall back to image_create / the host ImagePool (zero-copy via
-        // pointers within the single backend process).
-        api.shm_create_image  = nullptr;
-        api.shm_alloc_buffer  = nullptr;
-        api.shm_addref        = nullptr;
-        api.shm_release       = nullptr;
-        api.shm_is_shm_handle = nullptr;
+        // (ABI v11: the five always-null shm_* fields were removed from
+        // xi_host_api in Phase 4 — nothing to null here anymore. SHM was
+        // removed 2026-05; plugins use image_create / the host ImagePool,
+        // zero-copy via pointers within the single backend process.)
         api.read_image_file = read_image_file_fn();
         // Routes to the backend's status registry via the installed sink
         // (xi_status_sink.hpp); no-op when no sink is installed (headless).
@@ -456,7 +451,8 @@ public:
         // ABI v10: the capability-query door. A plugin resolves a frozen,
         // segregated interface by id+version through this one pointer
         // (core_fix_plan.md §12 Phase 1). Registrations live in
-        // get_interface_impl: "xi.legacy"@9 (the whole table) + "xi.preview"@1.
+        // get_interface_impl: the carved xi.preview/imaging/doc/emit/log@1
+        // interfaces (xi.legacy@9 was retired in Phase 4).
         api.get_interface = &get_interface_impl;
         return api;
     }
@@ -544,11 +540,12 @@ public:
         return &iface;
     }
 
-    // The canonical, process-stable host table — built ONCE. get_interface
-    // ("xi.legacy", 9) hands this back so a caller can reach the whole v9
-    // surface through the door (core_fix_plan.md §12 Phase 1: "register the
-    // entire current host table as xi.legacy@9"). Lazily built on first query,
-    // so constructing the table itself never recurses through the door.
+    // The canonical, process-stable host table — built ONCE. It backs the carved
+    // interface builders below (imaging/doc/emit/log copy their fn-pointers from
+    // it, so each interface entry is byte-for-byte the same pointer as the struct
+    // field). Since Phase 4 it is NO LONGER handed out through the door — the
+    // xi.legacy@9 whole-table view was retired (core_fix_plan.md §12). Lazily built
+    // on first use, so constructing the table itself never recurses through the door.
     static const xi_host_api* canonical_host_api() {
         static const xi_host_api api = make_host_api();
         return &api;
@@ -560,8 +557,12 @@ public:
     // (id, vN) is frozen forever — a changed capability is a NEW (id, vN+1).
     static const void* get_interface_impl(const char* id, uint32_t version) {
         if (!id) return nullptr;
-        if (std::strcmp(id, "xi.legacy") == 0 && version == 9)
-            return canonical_host_api();        // the whole v9 surface, one pointer
+        // xi.legacy@9 was RETIRED in Phase 4 (core_fix_plan.md §12): the whole-
+        // table legacy view is no longer published (a "stop answering a query id"
+        // change, not a layout change). Callers reach capabilities via the carved
+        // interfaces below or the struct fields directly. canonical_host_api()
+        // still exists — it backs the carved interface builders — but it is no
+        // longer handed out through the door.
         if (std::strcmp(id, "xi.preview") == 0 && version == 1)
             return preview_v1_iface();
         if (std::strcmp(id, "xi.imaging") == 0 && version == 1)
