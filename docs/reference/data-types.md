@@ -32,6 +32,21 @@ r.has_image("edges");            // true
 - **Provenance** (`$src` / `$prov`, reserved keys) records where data came from.
 - Copies are cheap (a refcount bump) until mutated (copy-on-write) — see data-layer.
 
+### Reserved Record keys
+
+The framework reserves the `$`-prefixed key namespace. Don't name a plain field
+`na`/`src`/`prov`/`channel`/`seq` (they'd collide). Each has a named
+`constexpr` in `xi::Record` — prefer the constant over the literal in
+first-party code.
+
+| Key | Constant | Meaning |
+|---|---|---|
+| `$na` | `Record::kNaKey` | Not-available marker: `{"$na":"reason"}` (see `na()` / `is_na()` / `na_reason()`). |
+| `$src` | `Record::kSrcKey` | Producing source/operator id (`set_src()` / `src()`). |
+| `$prov` | `Record::kProvKey` | Per-field provenance map: field → source id (`set_prov()` / `prov_of()`). |
+| `$channel` | `Record::kChannelKey` | Staged-emit / `expose` sink lane selector (which channel a record surfaces on). |
+| `$seq` | `Record::kSeqKey` | Host-stamped arrival/run id, used to order sink deliveries. |
+
 ## `xi::Image`
 
 An owning, refcounted 8-bit image buffer (`xi_image.hpp`).

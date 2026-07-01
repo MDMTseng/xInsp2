@@ -642,7 +642,15 @@ auto rec = xi::Record()
     .set("command", "inspect_top")     // ← rides along as metadata
     .set("recipe", 7);
 xi::emit_record(host(), name().c_str(), rec);   // id auto, ts = now
+// or, the member sibling that fills host()/name() for you:
+emit(rec);                                       // == the line above
 ```
+
+The `emit(rec)` member (sibling of the free `xi::emit_record`, and of the
+output-verb member `emit_binary`) forwards to the free function with the
+plugin's own `host()`/`name()` — same staging, same optional `id`/`ts`
+defaults — so a source can't pass the wrong emitter name. The free function
+stays for out-of-class callers.
 
 The metadata travels with the frame and the script reads it back with
 `xi::current_trigger().meta()` — no side-channel queue. It's handed over by

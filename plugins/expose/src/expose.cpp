@@ -86,8 +86,10 @@ class ExposeSink : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    static constexpr const char* kChannelKey = "$channel";
-    static constexpr const char* kSeqKey     = "$seq";
+    // Reserved keys — sourced from the central registry (xi::Record) so this
+    // sink can't drift from the framework's staged-emit contract.
+    static constexpr const char* kChannelKey = xi::Record::kChannelKey;
+    static constexpr const char* kSeqKey     = xi::Record::kSeqKey;
 
     xi::Record process(const xi::Record& in) override {
         xi::Json j = xi::Json::parse(in.data_json());
