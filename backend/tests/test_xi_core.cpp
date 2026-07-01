@@ -303,6 +303,31 @@ static void test_inflight_runs() {
     CHECK(rt.inflight() == 0);
     CHECK(ran.load() == 1);
 
+    // T1: drain() must return FALSE when a run stays in flight past the timeout.
+    // This is the exact signal controlled_shutdown_teardown_ acts on — a wedged
+    // inspect that won't drain makes drain() report failure, and teardown then
+    // hard-exits (std::_Exit(WATCHDOG_EXIT_CODE)) rather than proceed into the
+    // close_project/FreeLibrary + srv-destroy that would UAF against the live run.
+    {
+        xi::InflightRuns wedged;
+        std::atomic<bool> stuck_release{false};
+        std::atomic<int>  stuck_ran{0};
+        bool okw = wedged.launch([&]{
+            while (!stuck_release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            stuck_ran.fetch_add(1);
+        });
+        CHECK(okw);
+        for (int i = 0; wedged.inflight() == 0 && i < 1000; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        CHECK(wedged.inflight() == 1);
+        CHECK(!wedged.drain(100));         // still held past the cap → reports failure
+        CHECK(wedged.inflight() == 1);     // and the run really is still stuck
+        stuck_release.store(true);         // control: once freed a normal drain succeeds
+        CHECK(wedged.drain(5000));         // (so the false above wasn't spurious)
+        CHECK(wedged.inflight() == 0);
+        CHECK(stuck_ran.load() == 1);
+    }
+
     // Reversible pause (lifecycle quiesce): while paused launch() bails like a
     // shutdown, but unpause() restores it — and it NESTS (a counter), unlike the
     // terminal begin_shutdown. This is what lets a lifecycle op refuse one-shots

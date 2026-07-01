@@ -270,6 +270,23 @@ target_compile_definitions(test_record_schema PRIVATE
     CONSUMER_MISSING_DLL="$<TARGET_FILE:schema_consumer_missing>")
 add_test(NAME record_schema COMMAND test_record_schema)
 
+# B2 — a plugin operator that throws must not unwind across the extern "C" ABI
+# boundary. XI_PLUGIN_IMPL wraps every per-call export in try/catch (defense-in-
+# depth for prebuilt / cross-CRT plugins where such an unwind is UB). The fixture
+# throws from every operator; the test drives the raw exports + the real adapter
+# and asserts each returns a safe sentinel with no terminate.
+add_library(throwing_plugin SHARED tests/throwing_plugin.cpp)
+target_link_libraries(throwing_plugin PRIVATE xi_core)
+add_executable(test_plugin_exception tests/test_plugin_exception.cpp)
+target_link_libraries(test_plugin_exception PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_plugin_exception PRIVATE Ws2_32)
+endif()
+add_dependencies(test_plugin_exception throwing_plugin)
+target_compile_definitions(test_plugin_exception PRIVATE
+    THROWING_DLL="$<TARGET_FILE:throwing_plugin>")
+add_test(NAME plugin_exception COMMAND test_plugin_exception)
+
 # ABI freeze-signature guard: declares xi_host_api@9 frozen and fails the BUILD
 # if its published layout changes (per-field offset + fn-pointer type, in order).
 # Mostly compile-time static_assert; the test target makes it part of the build.
