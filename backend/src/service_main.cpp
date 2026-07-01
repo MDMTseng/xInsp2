@@ -684,11 +684,10 @@ static int32_t trigger_sources_cb(char* buf, int32_t buflen) {
     return n;
 }
 
-// P2-2: expose TriggerEvent::leader_source to scripts. For policy=any the
-// leader is whichever instance emitted; for leader_followers it's the
-// configured leader; for all_required it's typically empty and the script
-// should consult sources(). Same -needed_bytes convention as
-// trigger_sources_cb so scripts can resize and retry.
+// P2-2: expose TriggerEvent::leader_source to scripts. leader_source is
+// simply the emitting instance's name (the source that emit_record'd this
+// event); scripts consult sources() for the full set. Same -needed_bytes
+// convention as trigger_sources_cb so scripts can resize and retry.
 static int32_t trigger_leader_cb(char* buf, int32_t buflen) {
     if (!g_current_trigger) { warn_trigger_off_thread_(); return 0; }
     if (!buf) return 0;
