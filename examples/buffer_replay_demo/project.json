@@ -3,7 +3,8 @@
   "script": "inspect.cpp",
   "instances": [
     { "name": "src",    "plugin": "pulse_src" },
-    { "name": "buffer", "plugin": "cache" }
+    { "name": "buffer", "plugin": "cache" },
+    { "name": "expose", "plugin": "expose" }
   ],
   "plugins": {
     "pulse_src": { "path": "pulse_src", "compile": true }
