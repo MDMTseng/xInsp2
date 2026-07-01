@@ -47,6 +47,17 @@ Run all: `ctest --test-dir backend/build -C Release`
 
 All exit with `ALL TESTS PASSED`.
 
+**Non-C++ gates in the same ctest run:**
+- `doc_coverage` (`tools/check_doc_coverage.py`) — a freeze guard for
+  developer-facing docs. Derives the public surface (plugin/script C-ABI exports
+  the host resolves, the authoring `XI_*` macros, and the WS commands) from the
+  source of truth and **fails** if any item is undocumented in `docs/guides` or
+  `docs/reference` (internal residue + `docs/archive` deliberately don't count) and
+  not listed in `docs/.doc-coverage-allow` with a reason. This is what stops a new
+  export/command/macro from shipping while the guides lag. Run standalone:
+  `python tools/check_doc_coverage.py`. Skipped only if no Python3 is found.
+- `perf_*` — the perf-regression gates (see *Performance baseline* below).
+
 ---
 
 ## Node integration suites (`node --test`)

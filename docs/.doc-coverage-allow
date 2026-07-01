@@ -1,0 +1,12 @@
+# doc-coverage allow-list — EXPLICIT opt-outs from tools/check_doc_coverage.py
+#
+# Each line: `symbol: reason`. A symbol here is public surface (a resolved C-ABI
+# export or a WS command) that is DELIBERATELY not documented in docs/guides or
+# docs/reference — SDK-internal plumbing a user never authors by hand, or an
+# internal/debug WS verb not meant for external clients. The reason is the point:
+# it makes "we chose not to document this" explicit and reviewable, instead of a
+# silent gap. If you add a public developer-facing feature, DOCUMENT it — do not
+# add it here.
+#
+# The checker flags a stale entry (symbol no longer in the source surface), so
+# prune this file when an export/command is removed.

@@ -1050,6 +1050,13 @@ in full detail above. One-line purpose per entry; args follow the same
 | `set_watchdog_ms` `args: { "ms": N }` | Set the per-inspect wall-clock budget in ms (0 = disabled). Reply: `{ "ms": N, "trips": N }`. |
 | `watchdog_status` | Current watchdog config and trip count. Reply: `{ "ms": N, "trips": N, "armed": bool }`. |
 
+#### Runtime tuning (live, mirrors `project.json` `runtime.*`)
+
+| Command | Purpose |
+|---|---|
+| `set_process_priority` `args: { "class": "high" }` | Set the live OS process priority class: `high` \| `above` \| `normal` \| `below` \| `realtime`. Mirrors the `--priority` flag / `project.json` `runtime.process_priority`. Reply: `{ "process_priority": "<class>" }`. |
+| `set_timer_fps` `args: { "fps": N }` | Set the live synthetic-tick rate for continuous mode (`fps <= 0` = trigger-only, no ticks). Takes effect on the next timer loop while running; the UI persists it to `project.json` `runtime.timer_fps`. |
+
 #### Pipeline graph capture
 
 | Command | Purpose |
@@ -1071,6 +1078,7 @@ in full detail above. One-line purpose per entry; args follow the same
 | `load_plugin` `args: { "name": "...", "folder"?: "..." }` | Force-load (or reload) a specific plugin by name. Typically used after `rescan_plugins` found a new plugin. |
 | `rebuild_plugins` `args: { "cmake"?: "...", "config"?: "Release", "plugins"?: ["a","b"] }` | For every `build: cmake` plugin whose source changed (or just the named `plugins`): unload it, run its own CMake build, then reload the DLL and restore instances. Runs in three phases — unload all changed, **build them in parallel**, reload each — so a multi-plugin round is fast and each is unloaded only briefly. Reply `data: { "plugins": [{ "plugin", "status": "rebuilt"\|"unchanged"\|"failed", "detail" }] }`. Unchanged plugins (sources older than their built DLL) are skipped. The unload→build→load order is required on Windows (a loaded DLL can't be overwritten; CMake emits a fixed-name DLL) — which is why CMake runs host-side. A plugin that didn't truly unload (lingering worker thread / GPU context) is reported `failed` rather than silently left on stale code. |
 | `export_project_plugin` `args: { "name": "..." }` | Package a compiled project-local plugin (DLL + manifest) for distribution; stamps `abi_version` in the exported `plugin.json`. |
+| `unquarantine_plugin` `args: { "name": "..." }` or `{ "dir": "..." }` | Operator un-quarantine (Part III G2.3). Clears the certify verdict (crashed/quarantined) in a plugin's `.xi_certify.json` so the next scan re-certifies it from scratch, then re-scans so a now-clean plugin is re-armed without a restart. Resolve by plugin `name` (via the last scan) or explicit folder `dir`. |
 
 #### Project and instance CRUD
 

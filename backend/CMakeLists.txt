@@ -793,6 +793,26 @@ set_tests_properties(qa_quarantine_heavy PROPERTIES
 # End Part III G2 block.
 # ============================================================================
 
+# ---- Doc-coverage gate ------------------------------------------------------
+# A freeze guard for DEVELOPER-FACING docs (the analogue of test_abi_freeze, for
+# docs). Public surface — the plugin/script C-ABI exports the host resolves, the
+# authoring XI_* macros, and the WS commands — kept shipping while docs/guides and
+# docs/reference lagged (A4, G4/OQ-5, OQ-7a/b all landed in code + internal residue
+# rounds before the guides were updated). This check derives that surface from the
+# source of truth and fails if any item is undocumented in docs/guides|reference
+# (internal residue + archive deliberately don't count) and not explicitly
+# allow-listed. Pure-stdlib Python; if no interpreter is found the gate is skipped
+# with a notice so a Python-less configure still succeeds.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME doc_coverage
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_doc_coverage.py)
+    set_tests_properties(doc_coverage PROPERTIES LABELS "docs")
+else()
+    message(STATUS "doc_coverage ctest skipped: no Python3 interpreter found")
+endif()
+
 # ============================================================================
 # BEGIN fuzz/UBSan (clang-cl) — Cluster-2 / T1.1-T1.2 / OQ-1. Separable,
 # agent-owned. Do not interleave with the blocks above. OFF by default: a plain
