@@ -126,12 +126,10 @@ int main() {
     CHECK(host.get_interface("xi.nope", 1) == nullptr);
     CHECK(host.get_interface(nullptr, 1) == nullptr);
 
-    // (6) xi.legacy@9 hands back a usable whole-table view whose compress_image
-    // is the very same entry.
-    const auto* legacy_tbl = static_cast<const xi_host_api*>(
-        host.get_interface("xi.legacy", 9));
-    CHECK(legacy_tbl != nullptr);
-    CHECK(legacy_tbl && legacy_tbl->compress_image == host.compress_image);
+    // (6) xi.legacy@9 was RETIRED in Phase 4 — the door no longer answers it.
+    // The compress capability lives on via xi.preview@1 (proven above) and the
+    // struct field directly.
+    CHECK(host.get_interface("xi.legacy", 9) == nullptr);
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");

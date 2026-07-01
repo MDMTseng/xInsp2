@@ -5,16 +5,18 @@
 // changes illegitimately. This is the freeze-signature guard from
 // core_fix_plan.md §12 / ADR-001. The rule it encodes:
 //
-//     The v9 fields are frozen FOREVER; v10 == the v9 prefix + one appended
-//     pointer (get_interface). A published (interface, vN) never changes
-//     in place — a new capability ships as the next version.
+//     v11 is the NEW frozen baseline. Phase 4 deliberately BROKE the old v9-
+//     prefix freeze (removed the dead shm_* block, retired xi.legacy, raised
+//     min-compat to 11 — an authorized major break). From v11 onward a
+//     published layout never changes in place — a new capability ships as the
+//     next version or a carved interface behind get_interface.
 //
 // So this file pins TWO things at once:
-//   (a) the 26 v9 fields — every OFFSET and exact fn-pointer TYPE, in order,
-//       UNCHANGED from the Phase-0 table. This proves the v9 prefix never
-//       moved when v10 appended get_interface (an old v9 plugin's view of the
-//       table is byte-identical).
-//   (b) the v10 append — get_interface at offset 208, version == 10, size 216.
+//   (a) the 22 v11 fields — every OFFSET and exact fn-pointer TYPE, in order.
+//       These are the v10 offsets MINUS the removed shm_* block (every field
+//       after instance_folder shifted down 5 pointers / 40 bytes).
+//   (b) the pins: get_interface at offset 168 (last field), version == 11,
+//       size 176, min-compat 11.
 //
 // Why per-field and not just sizeof: sizeof catches a size delta, but a same-
 // size reorder or retype (swapping two void(*)(...) fields, or widening an
@@ -25,9 +27,9 @@
 // the normal test build — there is no CI runner in this repo, so the freeze
 // guard IS this test. main() is a thin runtime confirmation for ctest.
 //
-// To evolve the ABI legitimately: do NOT edit the v9 table below to make a
+// To evolve the ABI legitimately: do NOT edit the v11 table below to make a
 // change pass. Carve a frozen per-capability interface (xi.preview@1, …) behind
-// get_interface and pin IT with its own freeze table — the v9 prefix stays put.
+// get_interface and pin IT with its own freeze table — the v11 baseline stays put.
 //
 #include <xi/xi_abi.h>
 
@@ -37,28 +39,30 @@
 #include <type_traits>
 
 // ---- Version + size pins ------------------------------------------------
-// v10 = v9 prefix + one appended pointer (get_interface). The v9 prefix is
-// frozen forever; min-compat stays 6 (old plugins still load — the append is
-// invisible to them).
-static_assert(XI_ABI_VERSION == 10,
-              "xi_host_api is at v10 (v9 + appended get_interface); a further "
-              "change ships as a carved interface, not a field (ADR-001).");
-static_assert(XI_ABI_MIN_COMPAT == 6, "min-compat floor changed (ADR-001).");
-static_assert(XI_ABI_EXPECTED_SIZE == 216, "expected size changed (ADR-001).");
+// v11 is the NEW frozen baseline (core_fix_plan.md §12 Phase 4): the dead shm_*
+// block is gone and xi.legacy is retired — an authorized major break that
+// invalidated the old v9-prefix pins. From here the freeze resumes: 22 fields,
+// 176 bytes, min-compat raised to 11 (pre-v11 plugins refused).
+static_assert(XI_ABI_VERSION == 11,
+              "xi_host_api is at v11 (shm_* removed, xi.legacy retired — the new "
+              "frozen baseline); a further change ships as a carved interface or "
+              "the next version, not an in-place field edit (ADR-001).");
+static_assert(XI_ABI_MIN_COMPAT == 11, "min-compat floor changed — v11 raised it to 11 (ADR-001).");
+static_assert(XI_ABI_EXPECTED_SIZE == 176, "expected size changed — v11 is 176 (22 ptrs) (ADR-001).");
 static_assert(sizeof(xi_host_api) == XI_ABI_EXPECTED_SIZE,
-              "xi_host_api size changed — only the v10 get_interface append is "
-              "legal beyond the frozen v9 prefix (ADR-001).");
+              "xi_host_api size changed — the v11 layout is frozen (ADR-001).");
 static_assert(sizeof(void*) == 8, "freeze table assumes a 64-bit (8-byte ptr) host.");
 
-// ---- Canonical v9 signature: per-field { offset, type } -----------------
-// FROZEN — do not edit to make a layout change pass. These 26 fields are the v9
-// prefix and must keep their EXACT offsets + types under v10 (the append goes
-// AFTER them). See the file header.
+// ---- Canonical v11 signature: per-field { offset, type } ----------------
+// FROZEN — do not edit to make a layout change pass. These 22 fields ARE the v11
+// baseline; a change ships as the next version or a carved interface, never an
+// in-place edit. Offsets are the v10 layout MINUS the removed shm_* block (every
+// field after instance_folder shifted down 5 pointers / 40 bytes). See header.
 #define XI_FREEZE_FIELD(field, off, ...)                                        \
     static_assert(offsetof(xi_host_api, field) == (off),                        \
-                  "xi_host_api::" #field " moved — v9 prefix is frozen");       \
+                  "xi_host_api::" #field " moved — the v11 layout is frozen");  \
     static_assert(std::is_same<decltype(xi_host_api::field), __VA_ARGS__>::value, \
-                  "xi_host_api::" #field " retyped — v9 signature is frozen")
+                  "xi_host_api::" #field " retyped — the v11 signature is frozen")
 
 // Image pool (offsets 0..56)
 XI_FREEZE_FIELD(image_create,    0,   xi_image_handle (*)(int32_t, int32_t, int32_t));
@@ -74,44 +78,40 @@ XI_FREEZE_FIELD(image_stride,    56,  int32_t         (*)(xi_image_handle));
 XI_FREEZE_FIELD(log,             64,  void            (*)(int32_t, const char*));
 XI_FREEZE_FIELD(instance_folder, 72,  int32_t         (*)(const char*, char*, int32_t));
 
-// SHM stubs — retained NULL for layout stability (80..112)
-XI_FREEZE_FIELD(shm_create_image,  80,  xi_image_handle (*)(int32_t, int32_t, int32_t));
-XI_FREEZE_FIELD(shm_alloc_buffer,  88,  xi_image_handle (*)(int32_t));
-XI_FREEZE_FIELD(shm_addref,        96,  void            (*)(xi_image_handle));
-XI_FREEZE_FIELD(shm_release,       104, void            (*)(xi_image_handle));
-XI_FREEZE_FIELD(shm_is_shm_handle, 112, int32_t         (*)(xi_image_handle));
+// [ v11: the shm_* block (was 80..112 in v10) is REMOVED. read_image_file now
+//   sits where shm_create_image used to, at offset 80. ]
 
-// File I/O + status (120..128)
-XI_FREEZE_FIELD(read_image_file, 120, xi_image_handle (*)(const char*));
-XI_FREEZE_FIELD(set_status,      128, void            (*)(const char*, const char*));
+// File I/O + status (80..88)
+XI_FREEZE_FIELD(read_image_file, 80,  xi_image_handle (*)(const char*));
+XI_FREEZE_FIELD(set_status,      88,  void            (*)(const char*, const char*));
 
-// Doc allocator (ABI v3) + refcount (ABI v4) (136..176)
-XI_FREEZE_FIELD(doc_chunk_alloc,   136, void* (*)(size_t));
-XI_FREEZE_FIELD(doc_chunk_realloc, 144, void* (*)(void*, size_t));
-XI_FREEZE_FIELD(doc_chunk_free,    152, void  (*)(void*));
-XI_FREEZE_FIELD(doc_retain,        160, void  (*)(void*));
-XI_FREEZE_FIELD(doc_release,       168, void  (*)(void*));
-XI_FREEZE_FIELD(doc_refcount,      176, int32_t (*)(void*));
+// Doc allocator (ABI v3) + refcount (ABI v4) (96..136)
+XI_FREEZE_FIELD(doc_chunk_alloc,   96,  void* (*)(size_t));
+XI_FREEZE_FIELD(doc_chunk_realloc, 104, void* (*)(void*, size_t));
+XI_FREEZE_FIELD(doc_chunk_free,    112, void  (*)(void*));
+XI_FREEZE_FIELD(doc_retain,        120, void  (*)(void*));
+XI_FREEZE_FIELD(doc_release,       128, void  (*)(void*));
+XI_FREEZE_FIELD(doc_refcount,      136, int32_t (*)(void*));
 
-// Dispatch + outputs (ABI v6/v8/v9) (184..200)
-XI_FREEZE_FIELD(emit_record,    184, void    (*)(const char*, xi_trigger_id,
+// Dispatch + outputs (ABI v6/v8/v9) (144..160)
+XI_FREEZE_FIELD(emit_record,    144, void    (*)(const char*, xi_trigger_id,
                                                  const struct xi_record*, int64_t));
-XI_FREEZE_FIELD(emit_binary,    192, void    (*)(const void*, int32_t));
-XI_FREEZE_FIELD(compress_image, 200, int32_t (*)(const void*, int32_t, int32_t,
+XI_FREEZE_FIELD(emit_binary,    152, void    (*)(const void*, int32_t));
+XI_FREEZE_FIELD(compress_image, 160, int32_t (*)(const void*, int32_t, int32_t,
                                                  int32_t, int32_t, void*, int32_t));
 
-// ---- v10 append: the capability-query door (core_fix_plan.md §12 Phase 1) ----
-// The ONE legal monolith append. It sits AFTER the frozen v9 prefix at offset
-// 208 (= XI_ABI_EXPECTED_SIZE - sizeof(void*)); compress_image stays the last v9
-// field at 200. Future capabilities are carved as frozen interfaces behind this
-// door, NOT appended here.
-XI_FREEZE_FIELD(get_interface, 208, const void* (*)(const char*, uint32_t));
-static_assert(offsetof(xi_host_api, get_interface) == 208,
-              "get_interface (v10 append) must sit at offset 208, right after the "
-              "frozen v9 prefix (compress_image @ 200).");
-static_assert(offsetof(xi_host_api, compress_image) == 200,
-              "the v9 prefix moved: compress_image must remain the LAST v9 field "
-              "at offset 200 under the v10 append.");
+// ---- the capability-query door (core_fix_plan.md §12 Phase 1) ----------------
+// get_interface remains the last field, now at offset 168 (= XI_ABI_EXPECTED_SIZE
+// - sizeof(void*)) after the shm_* removal shifted everything down. compress_image
+// is the last non-door field at 160. Future capabilities are carved as frozen
+// interfaces behind this door, NOT appended here.
+XI_FREEZE_FIELD(get_interface, 168, const void* (*)(const char*, uint32_t));
+static_assert(offsetof(xi_host_api, get_interface) == 168,
+              "get_interface must sit at offset 168 (the last field) in the v11 "
+              "layout, right after compress_image @ 160.");
+static_assert(offsetof(xi_host_api, compress_image) == 160,
+              "the v11 layout moved: compress_image must remain the last non-door "
+              "field at offset 160.");
 
 #undef XI_FREEZE_FIELD
 
@@ -170,9 +170,9 @@ XI_FREEZE_IFACE(xi_log_v1, set_status, 8, void (*)(const char*, const char*));
 
 int main() {
     // Everything load-bearing is checked at compile time above; reaching here means
-    // the frozen v9 prefix is intact AND get_interface is the lone v10 append.
+    // the frozen v11 layout is intact (get_interface the last field, shm_* gone).
     std::printf("[test] xi_host_api@%d freeze guard: %zu fields, %zu bytes "
-                "(v9 prefix frozen + get_interface @ %zu) — FROZEN\n",
+                "(v11 baseline frozen; get_interface @ %zu) — FROZEN\n",
                 XI_ABI_VERSION, sizeof(xi_host_api) / sizeof(void*), sizeof(xi_host_api),
                 offsetof(xi_host_api, get_interface));
     std::printf("ALL TESTS PASSED\n");

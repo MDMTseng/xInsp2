@@ -12,8 +12,8 @@
 //      channel as the ABI gate (plugin_abi_compatible). OPTIONAL interfaces never
 //      gate — the plugin null-checks them at runtime.
 //
-// Host published interfaces (ImagePool::make_host_api, all @1): xi.legacy@9,
-// xi.imaging@1, xi.doc@1, xi.emit@1, xi.log@1, xi.preview@1.
+// Host published interfaces (ImagePool::make_host_api, all @1): xi.imaging@1,
+// xi.doc@1, xi.emit@1, xi.log@1, xi.preview@1. (xi.legacy@9 retired in Phase 4.)
 //
 #include <xi/xi_cabi_adapter.hpp>   // PluginInfo / IfaceReq / plugin_caps_compatible
 #include <xi/xi_pm_parse.hpp>       // parse_manifest / parse_iface_reqs
@@ -124,7 +124,7 @@ static void test_caps_gate() {
     // host_publishes_iface honours ">= min" via the exact-match door.
     CHECK(xi::host_publishes_iface(&host, "xi.imaging", 1));
     CHECK(xi::host_publishes_iface(&host, "xi.doc", 1));
-    CHECK(xi::host_publishes_iface(&host, "xi.legacy", 9));   // probe window reaches 9
+    CHECK(!xi::host_publishes_iface(&host, "xi.legacy", 9));  // xi.legacy retired in Phase 4
     CHECK(!xi::host_publishes_iface(&host, "xi.imaging", 2)); // host only publishes @1
     CHECK(!xi::host_publishes_iface(&host, "xi.nope", 1));    // unknown id
 
