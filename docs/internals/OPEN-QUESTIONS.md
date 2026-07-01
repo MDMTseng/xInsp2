@@ -89,9 +89,19 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
   shed, and costs ~6× JPEG encode (2.7 ms→~17 ms here). The dependency-minimal JPEG path is **stb** (already
   present). Keep turbojpeg as a lean, focused **optional fast path**; make OpenCV **optional as a backend**, not
   required. i.e. stb default → turbojpeg optional accel → OpenCV optional.
-- **Default:** NOT started — awaiting user go (breaking-ish refactor of the plugin-facing headers). Sequence
-  AFTER Gate F (Phase 4 + OQ-1) lands, since it touches `xi_image.hpp`/`xi.hpp`.
-- **Flips if:** user says go on the OpenCV opt-in cut (recommended), and/or still wants turbojpeg removed anyway.
+- **DONE (2026-07-01, on v11):** `as_cv_mat`/`from_cv_mat` moved to opt-in `xi_cv.hpp` as free functions;
+  `xi.hpp` + `xi_image.hpp` are OpenCV-free; 21 call-sites migrated; `find_package(OpenCV)` dropped from
+  `plugins/CMakeLists.txt`. **Proof:** all 10 in-tree plugin DLLs build with **OpenCV absent** (plugins
+  CMakeCache has zero OpenCV); backend 31/31 ctest green; freeze guard unchanged. turbojpeg **kept** (only
+  real codec caller is `xi_jpeg.hpp`; the rest is optional toolchain plumbing — see below).
+- **Process note:** the OQ-9 agent branched off a stale `1bdc092`/v9 base and didn't re-root — its clean 30
+  files were taken verbatim onto v11, the 4 conflict files (all comment/one-line-include) hand-merged, then
+  re-verified on v11. Lesson: agent worktrees can seed off an old base; always confirm ABI v11 / 31 tests
+  before trusting an agent's "green".
+- **Still open (turbojpeg removal):** NOT recommended (kept). If ever removed: codec is 1 `#ifdef` branch in
+  `xi_jpeg.hpp`; plumbing spans ~8 files (`CMakeLists.txt`, `xi_script_compiler.hpp`, `xi_plugin_manager.hpp`,
+  `xi_project_model.hpp`, `service_main.cpp` toolchain block, `runner_main.cpp`, `xi_plugin_export.hpp`). OFF
+  by default → zero footprint when unused.
 
 ---
 
