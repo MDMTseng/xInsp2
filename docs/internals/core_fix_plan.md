@@ -564,3 +564,34 @@ Cheap, broadly protective; each protects every subsequent change.
 3. **Fuzz findings carry their era** — a survey against removed code is not a live finding. Prune obsolete targets when salvaging; never let a stale "CRITICAL" gate present work.
 4. **Tooling failures fail the build** — sanitizer races, fuzz crashes, and perf regressions are build-breaking, not advisory (the repo's CI-less substitute, same as the freeze guard).
 5. **Don't gold-plate the partial gaps** — observability export, WS protocol negotiation, and Record schema contracts are real but lower priority than the three correctness nets; sequence them after, only if a concrete need appears.
+
+## 28. Data-race test surface (backs OQ-1 / T1.3 — recorded 2026-07-01, decide later)
+
+Races live in the **shared mutable state that multiple dispatch workers touch concurrently** (the cost of the §5.1 speed-over-isolation bet). "Test data race" concretely = run the concurrency tests below **under TSan** (probabilistic → systematic). TSan is **Linux-only** here (OQ-1); Windows ASan + `XINSP2_STRESS_SCALE` catches only the *memory-corruption subset* (UAF/double-free) a race produces, not a pure unsynchronized read/write.
+
+### Tier 1 — shared refcounted pools + dispatch (highest value)
+| Hotspot | Shared state / race | Existing test |
+|---|---|---|
+| **Image pool** | lock-free lookup + mutex-guarded create/release + per-entry refcount atomics + generation/ABA; `release_all_for(owner)` sweep vs concurrent create | `test_image_pool_stress` (+ `image_pool_stress_heavy`) |
+| **DocRegistry + Record COW** | 16-shard refcount map; cross-ABI shared-doc `retain`/`release`/`share_out`/`adopt_shared` balance; frozen-doc first-mutation COW (fan-out read + one mutate) | `test_doc_registry`, `test_record`, `test_doc_pool` |
+| **Dispatch queue + EmitGate** | GroupLane deque enqueue(source) vs dequeue(worker) + drop policy (drop_oldest/newest) + high-watermark atomic; EmitGate `seq_next` CAS + emission-cursor advance (ordered emit) | ⚠️ **GAP — no dedicated race test** |
+
+### Tier 2 — lifecycle / config concurrency
+| Hotspot | Race | Existing test |
+|---|---|---|
+| **set_def vs process** (CallScope) | non-reentrant instance config "tear" — process reads half-written config | `test_set_def_race` + `race_probe` (+ `set_def_race_heavy`) |
+| **prepare vs process** | prepare runs OUTSIDE the gate, concurrent with process, mutating instance state while process reads | `test_prepare_concurrency` |
+| **Hot-reload g_script swap** | `g_script_mu` swap; in-flight inspect snapshots the shared_ptr; deferred FreeLibrary | ⚠️ **GAP — no dedicated test** |
+| **param/instance cache** | set_param vs a run reading params (10 kHz storm) | r8 `set_param_storm` (black-box only) |
+
+### Tier 3 — newer / ambient
+| Hotspot | Race | Existing test |
+|---|---|---|
+| **G2 culprit stamp** | `g_culprit` (process-global) stamped at boundary, read by crash handler on the faulting thread | `qa_quarantine_heavy` (ASan/stress) |
+| **C1/C2 owner propagation** | owner get/set across async/parallel_for; OwnerScope install/restore | ⚠️ functional only (`test_parallel_safety`), no high-stress race |
+| **watchdog cancel flag** | watchdog thread sets global cancel; inspect polls it | ⚠️ GAP |
+| **status registry** | `set_status` coalesce map written by many plugin threads | ⚠️ GAP |
+
+### Two actions (sequence later)
+1. **Windows-doable now:** fill the Tier-1/2 gaps — a race probe for **dispatch queue + EmitGate** and for **hot-reload g_script swap** (the two highest-value missing ones), plus owner-propagation / watchdog / status under `XINSP2_STRESS_SCALE`. Catches the corruption subset today.
+2. **Needs OQ-1 decision:** stand up a **Linux CI lane** and run all the above concurrency tests under **TSan** — the only way to catch pure data races (unsynchronized read/write without corruption). Same lane also unlocks real UBSan/libFuzzer at scale.
