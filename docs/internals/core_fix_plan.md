@@ -574,24 +574,24 @@ Races live in the **shared mutable state that multiple dispatch workers touch co
 |---|---|---|
 | **Image pool** | lock-free lookup + mutex-guarded create/release + per-entry refcount atomics + generation/ABA; `release_all_for(owner)` sweep vs concurrent create | `test_image_pool_stress` (+ `image_pool_stress_heavy`) |
 | **DocRegistry + Record COW** | 16-shard refcount map; cross-ABI shared-doc `retain`/`release`/`share_out`/`adopt_shared` balance; frozen-doc first-mutation COW (fan-out read + one mutate) | `test_doc_registry`, `test_record`, `test_doc_pool` |
-| **Dispatch queue + EmitGate** | GroupLane deque enqueue(source) vs dequeue(worker) + drop policy (drop_oldest/newest) + high-watermark atomic; EmitGate `seq_next` CAS + emission-cursor advance (ordered emit) | ⚠️ **GAP — no dedicated race test** |
+| **Dispatch queue + EmitGate** | GroupLane deque enqueue(source) vs dequeue(worker) + drop policy (drop_oldest/newest) + high-watermark atomic; EmitGate `seq_next` CAS + emission-cursor advance (ordered emit) | ✅ `test_emit_gate` (+ `emit_gate_heavy`) — ordered-emit + dtor backstop + stop-wakes-waiters. *(GroupLane deque/drop-policy itself is still black-box via the r8 surge tests; EmitGate primitive is now dedicated.)* |
 
 ### Tier 2 — lifecycle / config concurrency
 | Hotspot | Race | Existing test |
 |---|---|---|
 | **set_def vs process** (CallScope) | non-reentrant instance config "tear" — process reads half-written config | `test_set_def_race` + `race_probe` (+ `set_def_race_heavy`) |
 | **prepare vs process** | prepare runs OUTSIDE the gate, concurrent with process, mutating instance state while process reads | `test_prepare_concurrency` |
-| **Hot-reload g_script swap** | `g_script_mu` swap; in-flight inspect snapshots the shared_ptr; deferred FreeLibrary | ⚠️ **GAP — no dedicated test** |
+| **Hot-reload g_script swap** | `g_script_mu` swap; in-flight inspect snapshots the shared_ptr; deferred FreeLibrary | ✅ `test_hot_reload_swap` (+ `_heavy`) — real loader, snapshot-by-value readers vs reload writer, distinct on-disk copies so FreeLibrary truly unmaps |
 | **param/instance cache** | set_param vs a run reading params (10 kHz storm) | r8 `set_param_storm` (black-box only) |
 
 ### Tier 3 — newer / ambient
 | Hotspot | Race | Existing test |
 |---|---|---|
 | **G2 culprit stamp** | `g_culprit` (process-global) stamped at boundary, read by crash handler on the faulting thread | `qa_quarantine_heavy` (ASan/stress) |
-| **C1/C2 owner propagation** | owner get/set across async/parallel_for; OwnerScope install/restore | ⚠️ functional only (`test_parallel_safety`), no high-stress race |
-| **watchdog cancel flag** | watchdog thread sets global cancel; inspect polls it | ⚠️ GAP |
-| **status registry** | `set_status` coalesce map written by many plugin threads | ⚠️ GAP |
+| **C1/C2 owner propagation** | owner get/set across async/parallel_for; OwnerScope install/restore | ✅ `test_owner_cancel_stress` (+ `_heavy`) — 6 concurrent owner epochs hammering async+parallel_for; exact per-owner attribution + sweep |
+| **watchdog cancel flag** | watchdog thread sets global cancel; inspect polls it | ✅ `test_owner_cancel_stress` — epoch semantics (in-flight cancelled / post-trip spared) + arm/clear-vs-begin/poll contention (ticket-counter integrity) |
+| **status registry** | `set_status` coalesce map written by many plugin threads | ⚠️ GAP (deliberate): `static` mutex-guarded `std::map` in `service_main.cpp` (`set_status_internal`), not header-isolatable; already the solved lock pattern. Covered black-box by `qa_*` WS tests; not gold-plated with an exe-linked harness. |
 
 ### Two actions (sequence later)
-1. **Windows-doable now:** fill the Tier-1/2 gaps — a race probe for **dispatch queue + EmitGate** and for **hot-reload g_script swap** (the two highest-value missing ones), plus owner-propagation / watchdog / status under `XINSP2_STRESS_SCALE`. Catches the corruption subset today.
+1. **Windows-doable now — ✅ DONE (2026-07-01):** filled the Tier-1/2/3 gaps — `test_emit_gate` (dispatch/EmitGate ordered-emit), `test_hot_reload_swap` (g_script swap), and `test_owner_cancel_stress` (owner propagation + watchdog epoch-cancel), each with an `XINSP2_STRESS_SCALE` `_heavy` variant. Catches the corruption subset today. Only remaining sub-gap: the GroupLane deque/drop-policy itself (black-box via r8 surge) and the status coalesce map (mutex-guarded, deliberately black-box — see Tier-3 note).
 2. **Needs OQ-1 decision:** stand up a **Linux CI lane** and run all the above concurrency tests under **TSan** — the only way to catch pure data races (unsynchronized read/write without corruption). Same lane also unlocks real UBSan/libFuzzer at scale.
