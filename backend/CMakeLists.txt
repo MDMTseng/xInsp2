@@ -377,6 +377,20 @@ add_test(NAME set_def_race_heavy COMMAND test_set_def_race
 set_tests_properties(set_def_race_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
+# Ordered-emit gate probe (§28 Tier-1 GAP: dispatch queue + EmitGate). Header-only
+# primitive (xi_emit_gate.hpp) so it links nothing but the test itself; exercises
+# the parallel-compute/ordered-emit invariant, the dtor backstop, and the
+# stop-wakes-waiters teardown path. Heavy variant scales the frame count.
+add_executable(test_emit_gate tests/test_emit_gate.cpp)
+target_include_directories(test_emit_gate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(NOT MSVC)
+    target_link_libraries(test_emit_gate PRIVATE pthread)
+endif()
+add_test(NAME emit_gate COMMAND test_emit_gate)
+add_test(NAME emit_gate_heavy COMMAND test_emit_gate)
+set_tests_properties(emit_gate_heavy PROPERTIES
+    LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
+
 # ---- Perf-regression gate (T0.3) ---------------------------------------
 # Promote the bench_* micro-benchmarks from "run manually" to ctest gates: each
 # runs the bench in --gate mode, parses its integer timing metrics, and FAILS if
