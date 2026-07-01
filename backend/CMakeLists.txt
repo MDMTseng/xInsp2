@@ -295,6 +295,23 @@ target_include_directories(test_doc_registry PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME doc_registry COMMAND test_doc_registry)
 
+# OQ-7a observability export (xi_metrics.hpp) — frame counters + latency
+# histogram. Drives record_frame from many threads and asserts counters/buckets
+# advance and the JSON snapshot parses (yyjson). Heavy variant hammers the
+# lock-free counters for the concurrency smoke.
+add_executable(test_metrics tests/test_metrics.cpp)
+target_link_libraries(test_metrics PRIVATE yyjson)
+target_include_directories(test_metrics PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(NOT MSVC)
+    target_link_libraries(test_metrics PRIVATE pthread)
+endif()
+add_test(NAME metrics COMMAND test_metrics)
+add_test(NAME metrics_heavy COMMAND test_metrics)
+set_tests_properties(metrics_heavy PROPERTIES
+    LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
+
 add_executable(test_protocol tests/test_protocol.cpp)
 target_link_libraries(test_protocol PRIVATE xi_core)
 add_test(NAME protocol COMMAND test_protocol)
