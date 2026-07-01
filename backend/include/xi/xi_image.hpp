@@ -4,9 +4,10 @@
 //
 // A minimal, value-semantic image container used by operators and by
 // VAR() tracking. Deliberately NOT a cv::Mat wrapper — xi::Image is
-// dependency-free so the core headers stay self-contained. Operators that
-// want cv::Mat can borrow a non-owning view via `Image::as_cv_mat()` once
-// OpenCV is pulled in by a specific op library.
+// dependency-free (NO OpenCV) so the mandatory umbrella (xi.hpp) stays
+// CV-free. Operators that want cv::Mat opt in via `#include <xi/xi_cv.hpp>`
+// and borrow a non-owning view with the free function `xi::as_cv_mat(img)`
+// (and copy back with `xi::from_cv_mat(mat)`).
 //
 // Layout is row-major, interleaved channels, uint8 pixels. That covers
 // ~99% of machine-vision inspection needs. Floating-point and multi-plane
@@ -24,8 +25,6 @@
 //
 
 #include "xi_abi.h"
-
-#include <opencv2/core.hpp>
 
 #include <atomic>
 #include <cstdint>
@@ -133,23 +132,9 @@ struct Image {
     const uint8_t* data() const { return pixels_.get(); }
     int    stride() const { return width * channels; }
 
-    // Non-owning cv::Mat view over the same bytes (no allocation, no
-    // copy). Plugin code typically:
-    //
-    //   auto src = input.get_image("src");
-    //   auto dst = xi::Image::create_in_pool(host(), w, h, 1);
-    //   cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0,0}, 2.0);
-    //   return xi::Record().image("blurred", dst);
-    //
-    // Both Mats are non-owning — they hold pointers into pool memory
-    // owned by the xi::Image's shared_ptr. The Mat must not outlive
-    // the xi::Image.
-    cv::Mat as_cv_mat() const {
-        if (empty()) return {};
-        int type = CV_8UC(channels);
-        return cv::Mat(height, width, type, const_cast<uint8_t*>(data()),
-                       static_cast<size_t>(stride()));
-    }
+    // A cv::Mat view over these bytes is available as the free function
+    // `xi::as_cv_mat(img)` in the opt-in header <xi/xi_cv.hpp> — kept out
+    // of this header so xi::Image (and the xi.hpp umbrella) needs no OpenCV.
 
     // Pool-backed introspection — non-zero only when this Image is a
     // zero-copy view over a host handle. Used by record_to_c and
@@ -164,21 +149,8 @@ private:
     xi_image_handle          pool_handle_ = XI_IMAGE_NULL;
 };
 
-// Copy a cv::Mat into an OWNING xi::Image — the inverse of Image::as_cv_mat().
-// Use this to VAR / record / return an intermediate cv::Mat (e.g. a threshold
-// mask or a background-subtraction response) without worrying about the Mat
-// outliving the Image: the bytes are copied into the Image's own buffer.
-//
-// Supports 8-bit 1/3/4-channel mats; a non-continuous (ROI / sub-mat) is cloned
-// first so rows are packed. Returns an empty Image for an empty or non-8-bit mat
-// (convert depth first, e.g. `m.convertTo(tmp, CV_8U)`), so callers can check
-// .empty() rather than getting a malformed image.
-inline Image from_cv_mat(const cv::Mat& m) {
-    if (m.empty() || m.depth() != CV_8U) return Image{};
-    int c = m.channels();
-    if (c != 1 && c != 3 && c != 4) return Image{};
-    cv::Mat src = m.isContinuous() ? m : m.clone();
-    return Image(src.cols, src.rows, c, src.data);
-}
+// cv::Mat -> owning xi::Image is the free function `xi::from_cv_mat(mat)`,
+// defined in the opt-in header <xi/xi_cv.hpp> (kept out of here so this
+// header stays OpenCV-free).
 
 } // namespace xi

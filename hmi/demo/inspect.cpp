@@ -4,6 +4,7 @@
 // Run continuous (the HMI runner uses --autostart-fps) and point the HMI at it.
 //
 #include <xi/xi.hpp>
+#include <xi/xi_cv.hpp>
 #include <xi/xi_use.hpp>
 #include <xi/xi_result.hpp>
 #include <cmath>

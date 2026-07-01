@@ -26,6 +26,7 @@
 //
 
 #include <xi/xi_json.hpp>
+#include <xi/xi_cv.hpp>
 #include <algorithm>
 #include <cstdint>
 
@@ -51,18 +52,18 @@ public:
 
         // RGB → HSV. xi::imread uses host's stb_image, which yields RGB.
         cv::Mat hsv;
-        cv::cvtColor(src.as_cv_mat(), hsv, cv::COLOR_RGB2HSV);
+        cv::cvtColor(xi::as_cv_mat(src), hsv, cv::COLOR_RGB2HSV);
 
         // mask = (H in [hlo,hhi]) AND (S >= S_FLOOR) AND (V >= V_FLOOR).
         xi::Image mask = pool_image(src.width, src.height, 1);
         cv::Scalar lo_s(hlo,  S_FLOOR, V_FLOOR);
         cv::Scalar hi_s(hhi,  255,     255);
-        cv::inRange(hsv, lo_s, hi_s, mask.as_cv_mat());
+        cv::inRange(hsv, lo_s, hi_s, xi::as_cv_mat(mask));
 
         // Connected components (8-connected). stats[i,4] = area; label 0 is bg.
         cv::Mat labels, stats, centroids;
         int n_labels = cv::connectedComponentsWithStats(
-            mask.as_cv_mat(), labels, stats, centroids, 8, CV_32S);
+            xi::as_cv_mat(mask), labels, stats, centroids, 8, CV_32S);
 
         int n_count = 0;
         for (int i = 1; i < n_labels; ++i) {

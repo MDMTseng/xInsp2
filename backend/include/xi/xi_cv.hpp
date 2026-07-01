@@ -5,11 +5,17 @@
 // xi::Image stores pixels RGB-ordered; OpenCV defaults to BGR. These wrap the
 // conversions so each plugin doesn't re-derive them (was DM-12: every plugin
 // hand-rolled image<->Mat copies and re-remembered the RGB->BGR-before-encode
-// rule). For the zero-copy path use Image::as_cv_mat() (non-owning view) and
-// Plugin::pool_image() directly — see docs/guides/write-a-plugin.md.
+// rule). For the zero-copy path use the free `xi::as_cv_mat(img)` (non-owning
+// view) and Plugin::pool_image() directly — see docs/guides/write-a-plugin.md.
+//
+// This is the ONE opt-in header where xi::Image meets OpenCV: including it is
+// what pulls <opencv2/*> into a plugin/script. The mandatory umbrella xi.hpp
+// (and xi_image.hpp) is deliberately OpenCV-free — a no-CV routine that only
+// does #include <xi/xi.hpp> compiles with OpenCV OFF the include path.
 //
 #include "xi_image.hpp"
 
+#include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 
@@ -18,10 +24,46 @@
 
 namespace xi {
 
+// Non-owning cv::Mat VIEW over an Image's bytes (no allocation, no copy). This
+// is the zero-copy bridge that used to be Image::as_cv_mat(); it now lives here
+// as a free function so xi::Image itself needs no OpenCV. Plugin code typically:
+//
+//   auto src = input.get_image("src");
+//   auto dst = xi::Image::create_in_pool(host(), w, h, 1);
+//   cv::GaussianBlur(xi::as_cv_mat(src), xi::as_cv_mat(dst), {0,0}, 2.0);
+//   return xi::Record().image("blurred", dst);
+//
+// Both Mats are non-owning — they hold pointers into pool memory owned by the
+// xi::Image's shared_ptr. The Mat must not outlive the xi::Image.
+inline cv::Mat as_cv_mat(const Image& img) {
+    if (img.empty()) return {};
+    int type = CV_8UC(img.channels);
+    return cv::Mat(img.height, img.width, type,
+                   const_cast<uint8_t*>(img.data()),
+                   static_cast<size_t>(img.stride()));
+}
+
+// Copy a cv::Mat into an OWNING xi::Image — the inverse of xi::as_cv_mat().
+// Use this to record / return an intermediate cv::Mat (e.g. a threshold mask or
+// a background-subtraction response) without worrying about the Mat outliving
+// the Image: the bytes are copied into the Image's own buffer.
+//
+// Supports 8-bit 1/3/4-channel mats; a non-continuous (ROI / sub-mat) is cloned
+// first so rows are packed. Returns an empty Image for an empty or non-8-bit mat
+// (convert depth first, e.g. `m.convertTo(tmp, CV_8U)`), so callers can check
+// .empty() rather than getting a malformed image.
+inline Image from_cv_mat(const cv::Mat& m) {
+    if (m.empty() || m.depth() != CV_8U) return Image{};
+    int c = m.channels();
+    if (c != 1 && c != 3 && c != 4) return Image{};
+    cv::Mat src = m.isContinuous() ? m : m.clone();
+    return Image(src.cols, src.rows, c, src.data);
+}
+
 // Owning cv::Mat COPY of an Image (RGB order, like the bytes). Use this when you
 // need a Mat that outlives the Image; for an in-place op prefer the zero-copy
-// non-owning `Image::as_cv_mat()`.
-inline cv::Mat to_cv(const Image& img) { return img.as_cv_mat().clone(); }
+// non-owning `xi::as_cv_mat(img)`.
+inline cv::Mat to_cv(const Image& img) { return as_cv_mat(img).clone(); }
 
 // cv::Mat -> owning xi::Image. The Mat must already be in xInsp2's RGB order
 // (e.g. one produced by as_cv_mat / to_cv, NOT a raw cv::imread which is BGR).
@@ -35,7 +77,7 @@ inline std::vector<unsigned char> encode_image(const Image& img,
                                                const std::string& ext = ".jpg",
                                                int quality = 85) {
     cv::Mat enc;
-    cv::Mat rgb = img.as_cv_mat();
+    cv::Mat rgb = as_cv_mat(img);
     if (rgb.channels() == 3) cv::cvtColor(rgb, enc, cv::COLOR_RGB2BGR);
     else                     enc = rgb;
     std::vector<unsigned char> buf;

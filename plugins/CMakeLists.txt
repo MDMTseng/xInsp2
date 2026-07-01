@@ -14,19 +14,12 @@ set(CMAKE_SHARED_LIBRARY_PREFIX "xi-")
 set(XI_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
 set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 
-# OpenCV — xi_image.hpp (pulled via xi_abi) includes <opencv2/core.hpp>, so every
-# plugin needs it. Auto-detect typical Windows installs if not already set.
-if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
-    foreach(_d "C:/opencv/opencv/build" "C:/opencv/build"
-               "C:/opencv/opencv/build/x64/vc16/lib")
-        if(EXISTS "${_d}/OpenCVConfig.cmake")
-            set(OpenCV_DIR "${_d}")
-        endif()
-    endforeach()
-endif()
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
-include_directories(${OpenCV_INCLUDE_DIRS})
-link_libraries(${OpenCV_LIBS})
+# OpenCV — NO LONGER a mandatory dependency (OQ-9). xi_image.hpp / xi_abi.hpp
+# are now OpenCV-free; the cv:: bridge lives in the opt-in <xi/xi_cv.hpp>. None
+# of the in-tree plugins below do any CV, so they build with OpenCV absent.
+# A plugin that wants cv:: just #includes <xi/xi_cv.hpp> and adds OpenCV to its
+# own target (find_package(OpenCV ...) + target_link_libraries) — see the
+# example plugins under examples/*/plugins for the pattern.
 
 # yyjson — Record's DOM/codec and the only JSON lib plugins use. Every plugin
 # includes xi_record (via xi_abi), so

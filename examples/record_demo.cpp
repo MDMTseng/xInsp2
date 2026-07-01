@@ -3,6 +3,7 @@
 //
 
 #include <xi/xi.hpp>
+#include <xi/xi_cv.hpp>
 #include <xi/xi_image.hpp>
 #include <xi/xi_record.hpp>
 
@@ -25,7 +26,7 @@ XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
     auto img = make_test_image(frame, 320, 240);
     cv::Mat gm;
-    cv::cvtColor(img.as_cv_mat(), gm, cv::COLOR_RGB2GRAY);
+    cv::cvtColor(xi::as_cv_mat(img), gm, cv::COLOR_RGB2GRAY);
     xi::Image gray(gm.cols, gm.rows, 1, gm.data);
 
     // Step 1: preprocess — record with images + metadata

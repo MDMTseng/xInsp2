@@ -20,6 +20,7 @@
 //
 
 #include <xi/xi_json.hpp>
+#include <xi/xi_cv.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -56,21 +57,21 @@ public:
 
         // 1) absolute difference
         xi::Image diff = pool_image(W, H, 1);
-        cv::absdiff(frame.as_cv_mat(), ref.as_cv_mat(), diff.as_cv_mat());
+        cv::absdiff(xi::as_cv_mat(frame), xi::as_cv_mat(ref), xi::as_cv_mat(diff));
 
         // 2) blur (gaussian on diff to suppress per-pixel noise)
         xi::Image blurred = pool_image(W, H, 1);
         if (blur_r > 0) {
             int k = 2 * blur_r + 1;
-            cv::GaussianBlur(diff.as_cv_mat(), blurred.as_cv_mat(),
+            cv::GaussianBlur(xi::as_cv_mat(diff), xi::as_cv_mat(blurred),
                              cv::Size(k, k), 0);
         } else {
-            diff.as_cv_mat().copyTo(blurred.as_cv_mat());
+            xi::as_cv_mat(diff).copyTo(xi::as_cv_mat(blurred));
         }
 
         // 3) threshold
         xi::Image mask = pool_image(W, H, 1);
-        cv::threshold(blurred.as_cv_mat(), mask.as_cv_mat(),
+        cv::threshold(xi::as_cv_mat(blurred), xi::as_cv_mat(mask),
                       thresh, 255, cv::THRESH_BINARY);
 
         // 4) morphological close (helps thin scratches survive)
@@ -78,16 +79,16 @@ public:
         if (close_r > 0) {
             int k = 2 * close_r + 1;
             auto kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k));
-            cv::morphologyEx(mask.as_cv_mat(), cleaned.as_cv_mat(),
+            cv::morphologyEx(xi::as_cv_mat(mask), xi::as_cv_mat(cleaned),
                              cv::MORPH_CLOSE, kernel);
         } else {
-            mask.as_cv_mat().copyTo(cleaned.as_cv_mat());
+            xi::as_cv_mat(mask).copyTo(xi::as_cv_mat(cleaned));
         }
 
         // 5) connected components with stats — area + bbox per label.
         cv::Mat labels, stats, centroids;
         int n_labels = cv::connectedComponentsWithStats(
-            cleaned.as_cv_mat(), labels, stats, centroids, 8, CV_32S);
+            xi::as_cv_mat(cleaned), labels, stats, centroids, 8, CV_32S);
 
         // 6) area filter — find LARGEST in [min_a, max_a]
         int largest_area = 0;

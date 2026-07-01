@@ -39,6 +39,7 @@
 //
 
 #include <xi/xi_json.hpp>
+#include <xi/xi_cv.hpp>
 
 #include <cstdint>
 #include <vector>
@@ -68,16 +69,16 @@ public:
         xi::Image blurred = pool_image(src.width, src.height, 1);
         if (blur_r > 0) {
             int k = 2 * blur_r + 1;
-            cv::GaussianBlur(src.as_cv_mat(), blurred.as_cv_mat(),
+            cv::GaussianBlur(xi::as_cv_mat(src), xi::as_cv_mat(blurred),
                              cv::Size(k, k), 0);
         } else {
-            src.as_cv_mat().copyTo(blurred.as_cv_mat());
+            xi::as_cv_mat(src).copyTo(xi::as_cv_mat(blurred));
         }
 
         xi::Image bg = pool_image(src.width, src.height, 1);
         {
             int k = 2 * block_r + 1;
-            cv::boxFilter(blurred.as_cv_mat(), bg.as_cv_mat(), -1,
+            cv::boxFilter(xi::as_cv_mat(blurred), xi::as_cv_mat(bg), -1,
                           cv::Size(k, k));
         }
 
@@ -97,16 +98,16 @@ public:
         if (close_r > 0) {
             int k = 2 * close_r + 1;
             auto kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k));
-            cv::morphologyEx(mask.as_cv_mat(), cleaned.as_cv_mat(),
+            cv::morphologyEx(xi::as_cv_mat(mask), xi::as_cv_mat(cleaned),
                              cv::MORPH_CLOSE, kernel);
         } else {
-            mask.as_cv_mat().copyTo(cleaned.as_cv_mat());
+            xi::as_cv_mat(mask).copyTo(xi::as_cv_mat(cleaned));
         }
 
         // 4) Connected components with centroids built in.
         cv::Mat labels, stats, centroids;
         int n_labels = cv::connectedComponentsWithStats(
-            cleaned.as_cv_mat(), labels, stats, centroids, 8, CV_32S);
+            xi::as_cv_mat(cleaned), labels, stats, centroids, 8, CV_32S);
 
         int n_small = 0, n_big = 0, n_count = 0;
         xi::Json arr = xi::Json::array();

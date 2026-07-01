@@ -23,6 +23,7 @@
 //
 
 #include <xi/xi_abi.hpp>
+#include <xi/xi_cv.hpp>
 #include <xi/xi_json.hpp>
 #include <xi/xi_image.hpp>
 
@@ -133,7 +134,7 @@ private:
     std::string thumb_(const xi::Image& img) {
         if (img.empty()) return "";
         const int TW = 140;
-        cv::Mat src = img.as_cv_mat(), small;
+        cv::Mat src = xi::as_cv_mat(img), small;
         if (img.width > TW) {
             int th = std::max(1, img.height * TW / img.width);
             cv::resize(src, small, cv::Size(TW, th), 0, 0, cv::INTER_AREA);

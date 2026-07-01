@@ -9,6 +9,7 @@
 //
 
 #include <xi/xi.hpp>
+#include <xi/xi_cv.hpp>
 #include <xi/xi_image.hpp>
 
 #include <vector>
@@ -40,7 +41,7 @@ void xi_inspect_entry(int frame) {
 
     VAR(input, rgb);
 
-    cv::Mat src = rgb.as_cv_mat();
+    cv::Mat src = xi::as_cv_mat(rgb);
 
     cv::Mat gray;
     cv::cvtColor(src, gray, cv::COLOR_RGB2GRAY);

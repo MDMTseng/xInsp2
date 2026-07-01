@@ -11,6 +11,12 @@
 
 #include "xi.hpp"
 #include "xi_image.hpp"
+// The script compile path force-includes OpenCV (opencv2/opencv.hpp PCH) and
+// treats it as mandatory, so scripts keep the cv:: convenience — bring in the
+// opt-in bridge here so xi::as_cv_mat(img) / xi::from_cv_mat(m) are available
+// to scripts without an explicit include. (The xi.hpp umbrella itself stays
+// OpenCV-free; only this script force-include and xi_cv.hpp pull OpenCV.)
+#include "xi_cv.hpp"
 #include "xi_record.hpp"
 #include "xi_script.hpp"
 #include "xi_seh.hpp"     // B2 warmup installs the SEH translator on the omp pool

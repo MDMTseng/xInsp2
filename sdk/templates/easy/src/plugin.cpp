@@ -51,7 +51,7 @@ public:
     //
     //   auto src = in.get_image("src");
     //   auto dst = pool_image(src.width, src.height, 1);
-    //   cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0, 0}, 2.0);
+    //   cv::GaussianBlur(xi::as_cv_mat(src), xi::as_cv_mat(dst), {0, 0}, 2.0);
     //   return xi::Record().image("blurred", dst);
     //
     // `pool_image` (inherited from xi::Plugin) allocates a fresh slot in

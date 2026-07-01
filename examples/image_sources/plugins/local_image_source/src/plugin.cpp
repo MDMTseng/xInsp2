@@ -23,6 +23,7 @@
 //
 
 #include <xi/xi_abi.hpp>
+#include <xi/xi_cv.hpp>
 #include <xi/xi_json.hpp>
 #include <xi/xi_image.hpp>     // xi::Image (+ as_cv_mat). JPEG via cv::imencode
                                // (OpenCV is linked; xi::encode_jpeg's stb fallback
@@ -258,7 +259,7 @@ private:
         if (img.empty()) return;
         w = img.width; h = img.height;
         const int TW = 140;
-        cv::Mat src = img.as_cv_mat();   // view into img (alive for this scope)
+        cv::Mat src = xi::as_cv_mat(img);   // view into img (alive for this scope)
         cv::Mat small;
         if (img.width > TW) {
             int th = std::max(1, img.height * TW / img.width);

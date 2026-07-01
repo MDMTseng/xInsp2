@@ -15,6 +15,7 @@
 // build a cv::Mat from the components yourself.
 //
 #include "xi_types.hpp"
+#include "xi_cv.hpp"   // free as_cv_mat / from_cv_mat for the Region <-> Mat bridge
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>   // boundingRect for Region::bbox
@@ -50,11 +51,11 @@ inline MatN<N> from_cv(const cv::Matx<double, N, N>& m) {
 // --- Region <-> cv::Mat ---------------------------------------------------
 //
 // A Region IS a binary mask image, so the bridge is direct: to_cv hands back a
-// NON-OWNING cv::Mat over the mask's bytes (like Image::as_cv_mat — it aliases
+// NON-OWNING cv::Mat over the mask's bytes (like xi::as_cv_mat — it aliases
 // the region's pixels, so the Region must outlive the Mat), and region_from_mask
 // copies a CV_8U 1-ch mask into an owning Region. area / bbox are the two reads
 // you almost always want; do everything else in OpenCV on the Mat.
-inline cv::Mat to_cv(const Region& r) { return r.mask().as_cv_mat(); }
+inline cv::Mat to_cv(const Region& r) { return as_cv_mat(r.mask()); }
 
 inline Region region_from_mask(const cv::Mat& m) { return Region(from_cv_mat(m)); }
 
