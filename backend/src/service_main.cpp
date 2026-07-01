@@ -61,32 +61,107 @@
 
 namespace xp = xi::proto;
 
-static std::atomic<int64_t> g_run_id{0};
+// ---- Engine: the host's process-wide mutable state -------------------------
+// Stage 1 of the Engine refactor (behavior-preserving). The host's mutable
+// file-scope globals are grouped as members of ONE struct with a single
+// file-scope instance `g_eng`, giving the host a NAME and one place that IS its
+// state. This does NOT change construction/destruction TIMING (g_eng is a
+// file-scope static, constructed pre-main exactly as the old globals were, so
+// the --certify-plugin early-return path is unaffected) and does NOT move
+// teardown logic here: controlled_shutdown_teardown_ remains the real,
+// order-sensitive cleanup; g_eng's member dtors are the same idempotent
+// backstop the old static-global dtors were. thread_local globals
+// (g_staged, g_current_trigger, g_run_result), const/constexpr statics
+// (g_cmd_table, WATCHDOG_EXIT_CODE, WD_SLOTS, kResultSystemBand,
+// kRecentErrorsCap), and the Meyers singletons (ImagePool/DocRegistry) are
+// intentionally NOT members — see the classification in the refactor notes.
+static constexpr int WD_SLOTS = 64;   // max concurrent in-flight inspects tracked (Engine::wd_deadlines size)
+
+// Latest status per component (see set_status_internal). Defined here so Engine
+// can hold `std::map<std::string, StatusEntry> status;` by value.
+struct StatusEntry { std::string text; int64_t ts_ms = 0; uint64_t seq = 0; };
+
+// Ring of recently-surfaced errors (see push_recent_error). Defined here so
+// Engine can hold `std::deque<RecentError> recent_errors;` by value.
+struct RecentError {
+    int64_t     ts_ms = 0;
+    std::string source;     // "rsp" / "log" / "event"
+    std::string message;
+    int64_t     cmd_id  = 0;   // 0 if unknown
+    int64_t     run_id  = 0;   // 0 if unknown
+};
+
+// GroupLane is fully defined further down (it depends on EmitGate etc.). Engine
+// only holds shared_ptr<GroupLane>, so a forward declaration is sufficient here.
+struct GroupLane;
+
+struct Engine {
+    std::atomic<int64_t> run_id{0};
+    xi::script::LoadedScript script;
+    std::mutex script_mu;
+    std::string persistent_state_json = "{}";
+    int persistent_state_schema = 0;
+    std::unordered_map<std::string, std::string> param_cache;
+    std::unordered_map<std::string, std::string> instance_def_cache;
+    std::atomic<bool> continuous{false};
+    std::atomic<int> continuous_fps{10};
+    std::atomic<int> timer_interval_ms{100};
+    std::thread timer_thread;
+    std::mutex run_mu;
+    xi::InflightRuns inflight;
+    std::atomic<int> watchdog_ms{0};
+    std::atomic<int64_t> wd_deadlines[WD_SLOTS];
+    std::atomic<int> watchdog_trips{0};
+    std::thread watchdog_thread;
+    std::atomic<bool> watchdog_run{false};
+    std::atomic<xi::ws::Server*> srv_for_bp{nullptr};
+    std::atomic<unsigned long> inspect_tid{0};
+    std::mutex status_mu;
+    std::map<std::string, StatusEntry> status;
+    std::atomic<uint64_t> status_seq{0};
+    std::string include_dir;
+    std::string work_dir;
+    std::string plugins_dir;
+    std::string opencv_dir;
+    std::string turbojpeg_root;
+    std::string ipp_root;
+    std::string tc_vcvars;
+    std::string project_folder;
+    std::string include_dir_default;
+    DLL_DIRECTORY_COOKIE proj_dll_dir = nullptr;
+    xi::PluginManager plugin_mgr;
+    std::atomic<bool> should_exit{false};
+    std::atomic<bool> teardown_done{false};
+    std::mutex recent_errors_mu;
+    std::deque<RecentError> recent_errors;
+    std::atomic<uint64_t> dropped_lifetime{0};
+    std::atomic<uint64_t> high_watermark_lifetime{0};
+    std::vector<std::shared_ptr<GroupLane>> lanes;
+    std::mutex lanes_mu;
+    std::string default_group_snapshot;
+};
+static Engine g_eng;
+
 
 // Loaded user script state. When null, cmd:run returns an error.
-static xi::script::LoadedScript g_script;
 
-static std::mutex               g_script_mu;
 
 // Persistent cross-frame state — survives DLL reloads.
-static std::string g_persistent_state_json = "{}";
-// Schema version of the DLL that wrote g_persistent_state_json. The
+// Schema version of the DLL that wrote g_eng.persistent_state_json. The
 // next DLL's xi_script_state_schema_version() is compared against
 // this on restore — mismatch (and both non-zero) drops the state
 // rather than letting set_state default-fill into a different shape.
 // 0 means "unversioned" — restore proceeds without the check.
-static int         g_persistent_state_schema = 0;
 
 // Cache of every successful `cmd:set_param` value the backend pushed
 // into the live script. compile_and_load replays these into the new
 // DLL via xi_script_set_param so user-tuned slider values aren't
 // silently reset to file-scope defaults across a recompile. Keyed by
 // param name → JSON-encoded scalar (number / bool / string token,
-// same shape as set_param's `value` arg). Protected by g_script_mu.
-static std::unordered_map<std::string, std::string> g_param_cache;
+// same shape as set_param's `value` arg). Protected by g_eng.script_mu.
 
 // Cache of every successful script-side `cmd:set_instance_def` def the
-// backend pushed into the live script. Exact sibling of g_param_cache:
+// backend pushed into the live script. Exact sibling of g_eng.param_cache:
 // script-declared xi::Instance objects live in the script DLL's OWN
 // registry and their file-scope ctors re-seed the SOURCE default def on
 // every reload, so without replaying the operator-tuned/taught/calibrated
@@ -94,8 +169,7 @@ static std::unordered_map<std::string, std::string> g_param_cache;
 // default. Keyed by instance name → def JSON (same shape as set_instance_def's
 // `def` arg). Only the SCRIPT-instance path is cached — backend plugin-manager
 // instances persist via InstanceRegistry across a script recompile. Protected
-// by g_script_mu like g_param_cache.
-static std::unordered_map<std::string, std::string> g_instance_def_cache;
+// by g_eng.script_mu like g_eng.param_cache.
 
 // --- xi::use() callback implementations ---
 // These are called FROM the script DLL back INTO the backend, routing
@@ -114,14 +188,14 @@ using xi::seh_exception;
 // singleton). OFF by default → the hot path below pays only a relaxed atomic
 // load. The ws handlers (graph_capture / graph_snapshot) drive it.
 
-// Defined after g_plugin_mgr (declared further down); records a per-instance
+// Defined after g_eng.plugin_mgr (declared further down); records a per-instance
 // process() crash so a crash loop is visible via get_state.
 static void note_instance_crash_(const char* name, const char* why);
 
 // Part III G2.1 — stamp the process-global crash culprit (xi::crash::g_culprit)
 // with the instance/plugin the host is about to enter, plus that plugin's
 // folder + dll so the FE can quarantine it on a death. Defined after
-// g_plugin_mgr. Cheap on the dispatch hot path: a per-thread cache means the
+// g_eng.plugin_mgr. Cheap on the dispatch hot path: a per-thread cache means the
 // manager lock is taken only when the active plugin on this thread changes.
 static void stamp_culprit_(const char* instance, const std::string& plugin);
 
@@ -310,7 +384,7 @@ static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
 //      run without a source/trigger is, semantically, meaningless.
 //
 //   2. The SYNTHETIC TIMER TICK (a convenience). A timer thread injects an EMPTY
-//      trigger every g_timer_interval_ms so a SOURCE-LESS script still ticks (the
+//      trigger every g_eng.timer_interval_ms so a SOURCE-LESS script still ticks (the
 //      dev edit→run loop, the no-camera HMI demo). It's NOT a real inspection
 //      driver — there's no image/trigger behind it; xi::current_trigger() is
 //      inactive. Set it to 0 (cmd:start {fps:0} / --autostart-fps=-1 /
@@ -325,25 +399,21 @@ static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
 //
 // When running in continuous mode (cmd: start), a worker thread waits for
 // trigger signals from image sources and calls inspect() for each frame.
-static std::atomic<bool>       g_continuous{false};
 // FPS the most recent cmd:start was launched with. compile_and_load
 // captures this to re-arm continuous mode at the same rate after the
 // reload completes — without it, mid-run hot-reload would silently
 // halt the stream.
-static std::atomic<int>        g_continuous_fps{10};
 // Live timer-tick interval (ms). The continuous timer thread reads this every
 // loop, so the synthetic-tick rate can be retuned WHILE RUNNING (cmd:set_timer_fps)
 // — 0 = trigger-only (no ticks). Seeded from cmd:start's fps / project.json
 // runtime.timer_fps. Default 100 (10fps) matches the historical default.
-static std::atomic<int>        g_timer_interval_ms{100};
 // Reserve stack headroom so the crash filter can dump after a script
 // STACK_OVERFLOW; called at the top of each inspect-running thread. Forwards to
 // the extracted forensics leaf (xi_crash_dump.hpp).
 static void reserve_fault_stack() { xi::crash::reserve_fault_stack(); }
-// Synthetic-tick timer thread (`g_timer_thread`): pushes an empty event at the
+// Synthetic-tick timer thread (`g_eng.timer_thread`): pushes an empty event at the
 // configured fps so scripts without a trigger source still get periodic
 // dispatch. The worker threads themselves are per-lane (see GroupLane).
-static std::thread              g_timer_thread;
 // Result ordering (parallelism.result_order / per-group result_order). When
 // ordered, each popped event gets a gapless emit sequence (assigned at dequeue
 // under the lane lock so it follows arrival order) and an EmitTurn gate makes
@@ -354,20 +424,18 @@ static std::thread              g_timer_thread;
 // EmitGate (per-lane cursor) + EmitTurn (the ordered-emit RAII gate) live in
 // xi_emit_gate.hpp so the primitive is unit-testable. EmitTurn is claimed at the top
 // of run_one_inspection, wait_turn()'d before the emit, complete()'d after, and its
-// dtor backstops any early-return — see that header. We pass &g_continuous as the
+// dtor backstops any early-return — see that header. We pass &g_eng.continuous as the
 // "keep going" flag so a stop unblocks a waiter.
 using xi::EmitGate;
 using xi::EmitTurn;
 // Serialise cmd:run dispatch threads so vars arrive in run_id
 // order. Threads queue up here and the watchdog operates on whichever
 // one is currently inside run_one_inspection — only one at a time.
-static std::mutex              g_run_mu;
 
 // Structural owner for the detached cmd:run / one-shot inspect threads — owns the
 // bump-before-detach + bail-if-shutting-down + drain-on-teardown protocol that was
 // the shutdown-window UAF class when hand-copied at every site. Defined + unit-
 // tested in xi_inflight_runs.hpp.
-static xi::InflightRuns g_inflight;
 
 // Crash breadcrumb model + minidump machinery moved to xi_crash_dump.hpp
 // (xi::crash::). These thin forwarders keep the dispatch hot-path call sites
@@ -390,14 +458,8 @@ inline void crash_set_phase(const char* phase) { xi::crash::set_phase(phase); }
 // would leak the per-instance lock + risk heap corruption), so the backend
 // exits and the FE supervisor respawns a clean one. See docs/guides/writing-a-
 // script.md (Parallel dispatch) + internals/fe-be.md.
-static std::atomic<int>        g_watchdog_ms{0};
-static constexpr int           WD_SLOTS = 64;     // max concurrent in-flight inspects tracked
 // Per-slot inspect deadline (steady_clock epoch-ms); 0 = free. Written by the
 // dispatch/run thread that owns the slot, read by the watchdog thread.
-static std::atomic<int64_t>    g_wd_deadlines[WD_SLOTS];
-static std::atomic<int>        g_watchdog_trips{0};
-static std::thread             g_watchdog_thread;
-static std::atomic<bool>       g_watchdog_run{false};
 static const int               WATCHDOG_EXIT_CODE = 0x5744;  // 'WD' — backend self-exit on a hard trip
 
 // Claim a free watchdog slot for `deadline` (steady-clock epoch-ms). Returns the
@@ -406,11 +468,11 @@ static const int               WATCHDOG_EXIT_CODE = 0x5744;  // 'WD' — backend
 static int wd_arm(int64_t deadline) {
     for (int i = 0; i < WD_SLOTS; ++i) {
         int64_t expect = 0;
-        if (g_wd_deadlines[i].compare_exchange_strong(expect, deadline)) return i;
+        if (g_eng.wd_deadlines[i].compare_exchange_strong(expect, deadline)) return i;
     }
     return -1;
 }
-static void wd_disarm(int slot) { if (slot >= 0) g_wd_deadlines[slot].store(0); }
+static void wd_disarm(int slot) { if (slot >= 0) g_eng.wd_deadlines[slot].store(0); }
 // (The watchdog loop scans the slots inline now — it needs the per-slot deadline
 // values to snapshot which inspects it targeted, so a fresh frame that overruns
 // during the grace isn't mistaken for the originally-stuck one. See the monitor
@@ -420,7 +482,6 @@ static void wd_disarm(int slot) { if (slot >= 0) g_wd_deadlines[slot].store(0); 
 // dropped-frame markers). Atomic so a worker/plugin thread loads it once and the
 // shutdown null-out can't tear a read. A pointer load is a plain mov on x86-64 —
 // no hot-path cost.
-static std::atomic<xi::ws::Server*> g_srv_for_bp{nullptr};   // set in main
 
 // ---- Trigger access (script callbacks) ---------------------------------
 // Set by the worker thread (or run_one_inspection) before invoking the
@@ -436,12 +497,11 @@ static thread_local const xi::TriggerEvent* g_current_trigger = nullptr;
 //
 // This disambiguates the two cases a trigger thunk's `!g_current_trigger` branch
 // used to conflate (see Problem A in docs/internals/core_fix_plan.md):
-//   * g_inspect_tid == 0  → genuinely no trigger (plain cmd:run, timer tick):
+//   * g_eng.inspect_tid == 0  → genuinely no trigger (plain cmd:run, timer tick):
 //     keep the historical empty / XI_IMAGE_NULL semantics.
-//   * g_inspect_tid != 0  → a trigger IS active, but the caller is on a DIFFERENT
+//   * g_eng.inspect_tid != 0  → a trigger IS active, but the caller is on a DIFFERENT
 //     thread — an xi::async task or #pragma omp body that read the ambient
 //     trigger off the inspect thread. That is the silent-bug class; fail loud.
-static std::atomic<unsigned long> g_inspect_tid{0};   // GetCurrentThreadId(), 0 = none
 
 // A1: invoked from a trigger thunk's "no current trigger" branch. If a trigger is
 // actually in flight (on another thread), the caller used current_trigger() off
@@ -449,7 +509,7 @@ static std::atomic<unsigned long> g_inspect_tid{0};   // GetCurrentThreadId(), 0
 // If no trigger is in flight at all, returns quietly so the thunk preserves its
 // pre-existing empty / XI_IMAGE_NULL semantics (legitimate cmd:run / timer paths).
 static void warn_trigger_off_thread_() {
-    if (g_inspect_tid.load(std::memory_order_acquire) == 0) return;   // genuinely no trigger
+    if (g_eng.inspect_tid.load(std::memory_order_acquire) == 0) return;   // genuinely no trigger
     static constexpr const char* kMsg =
         "[xinsp2] current_trigger() called off the inspect thread — read the "
         "trigger ON the inspect thread and capture into the parallel body "
@@ -490,10 +550,10 @@ struct CurrentTriggerScope {
         g_current_trigger = &ev;
         // A1: publish the owning thread id so a trigger thunk fired on another
         // thread can tell "wrong thread" (loud bug) from "no trigger" (legit).
-        g_inspect_tid.store(GetCurrentThreadId(), std::memory_order_release);
+        g_eng.inspect_tid.store(GetCurrentThreadId(), std::memory_order_release);
     }
     ~CurrentTriggerScope() {
-        g_inspect_tid.store(0, std::memory_order_release);
+        g_eng.inspect_tid.store(0, std::memory_order_release);
         g_current_trigger = nullptr;
         release_trigger_event_(ev_);
     }
@@ -755,10 +815,6 @@ static const xi_host_api* script_host_api_() {
 // clients re-pull on every connect) + a best-effort `status` push event, and
 // mirrored into the per-thread crash breadcrumb so the LAST status survives a
 // crash into the report.
-struct StatusEntry { std::string text; int64_t ts_ms = 0; uint64_t seq = 0; };
-static std::mutex                         g_status_mu;
-static std::map<std::string, StatusEntry> g_status;
-static std::atomic<uint64_t>              g_status_seq{0};
 
 static int64_t status_now_ms() { return xi::wall_ms(); }   // wall: status ts
 
@@ -770,13 +826,13 @@ static void set_status_internal(const std::string& who, const char* text) {
     crash_set(crash_ctx().last_status, sizeof(crash_ctx().last_status), t.c_str());
     uint64_t seq;
     {
-        std::lock_guard<std::mutex> lk(g_status_mu);
-        auto it = g_status.find(who);
-        if (it != g_status.end() && it->second.text == t) return;  // coalesce
-        seq = ++g_status_seq;
-        g_status[who] = StatusEntry{t, status_now_ms(), seq};
+        std::lock_guard<std::mutex> lk(g_eng.status_mu);
+        auto it = g_eng.status.find(who);
+        if (it != g_eng.status.end() && it->second.text == t) return;  // coalesce
+        seq = ++g_eng.status_seq;
+        g_eng.status[who] = StatusEntry{t, status_now_ms(), seq};
     }
-    if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire)) {
+    if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire)) {
         std::string msg = "{\"type\":\"event\",\"name\":\"status\",\"data\":{\"source\":";
         xp::json_escape_into(msg, who);
         msg += ",\"text\":";
@@ -818,7 +874,7 @@ static constexpr int kResultSystemBand = -990000;
 // surfaces instead of masquerading as a real verdict.
 static void result_cb(int code, const char* msg) {
     if (code <= kResultSystemBand) {
-        if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire)) {
+        if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire)) {
             xp::LogMsg lm;
             lm.level = "warn";
             lm.msg = "xi::result(" + std::to_string(code) + ") uses a reserved system "
@@ -877,24 +933,15 @@ static void run_one_inspection(xi::ws::Server& srv,
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
-static std::string g_include_dir;
-static std::string g_work_dir;
-static std::string g_plugins_dir;
 // Accelerator install roots, probed once at startup. Empty string =
 // not installed → user scripts fall back to portable C++ for that path.
-static std::string g_opencv_dir;
-static std::string g_turbojpeg_root;
-static std::string g_ipp_root;
 // vcvars64.bat override (empty = let the compiler auto-find via auto_find_vcvars).
-static std::string g_tc_vcvars;
 // Canonical folder of the currently-open project (the one the user edits — NOT
 // any .xinsp_work scratch). Set on open_project; used to read/write the
 // per-project "toolchain" override block in its project.json.
-static std::string g_project_folder;
 // The xi include dir derived from the exe location at startup. Kept separate from
-// g_include_dir so a project override can point elsewhere yet we can always fall
+// g_eng.include_dir so a project override can point elsewhere yet we can always fall
 // back to the shipped headers.
-static std::string g_include_dir_default;
 
 // IntelliSense config: the C/C++ extension (Microsoft) has no way to know our
 // compile flags — inspect.cpp / plugin .cpp are compiled by the backend, not by
@@ -930,17 +977,17 @@ static std::string g_include_dir_default;
 // open_project and after set_toolchain_override so the next compile + the
 // generated IntelliSense config both pick up the override immediately.
 static void resolve_toolchain_(const std::string& folder) {
-    auto r = xi::toolchain::resolve(folder, g_include_dir_default);
-    g_include_dir    = r.include_dir;
-    g_opencv_dir     = r.opencv_dir;
-    g_turbojpeg_root = r.turbojpeg_root;
-    g_ipp_root       = r.ipp_root;
-    g_tc_vcvars      = r.vcvars;
+    auto r = xi::toolchain::resolve(folder, g_eng.include_dir_default);
+    g_eng.include_dir    = r.include_dir;
+    g_eng.opencv_dir     = r.opencv_dir;
+    g_eng.turbojpeg_root = r.turbojpeg_root;
+    g_eng.ipp_root       = r.ipp_root;
+    g_eng.tc_vcvars      = r.vcvars;
     std::fprintf(stderr, "[xinsp2] toolchain resolved: opencv=%s turbojpeg=%s ipp=%s vcvars=%s\n",
-                 g_opencv_dir.empty() ? "none" : g_opencv_dir.c_str(),
-                 g_turbojpeg_root.empty() ? "none" : g_turbojpeg_root.c_str(),
-                 g_ipp_root.empty() ? "none" : g_ipp_root.c_str(),
-                 g_tc_vcvars.empty() ? "auto" : g_tc_vcvars.c_str());
+                 g_eng.opencv_dir.empty() ? "none" : g_eng.opencv_dir.c_str(),
+                 g_eng.turbojpeg_root.empty() ? "none" : g_eng.turbojpeg_root.c_str(),
+                 g_eng.ipp_root.empty() ? "none" : g_eng.ipp_root.c_str(),
+                 g_eng.tc_vcvars.empty() ? "auto" : g_eng.tc_vcvars.c_str());
 }
 
 // ---- script external dependencies (project.json include_dirs / link_libs) ----
@@ -1004,24 +1051,22 @@ static void read_script_deps_(const std::string& folder,
 // which honours dirs added via AddDllDirectory. Re-pointed on each open_project.
 // TODO(linux): equivalent is building the script .so with -Wl,-rpath plus
 // dlopen; AddDllDirectory has no portable analogue.
-static DLL_DIRECTORY_COOKIE g_proj_dll_dir = nullptr;
 static void set_project_dll_search_(const std::string& folder) {
-    if (g_proj_dll_dir) { RemoveDllDirectory(g_proj_dll_dir); g_proj_dll_dir = nullptr; }
+    if (g_eng.proj_dll_dir) { RemoveDllDirectory(g_eng.proj_dll_dir); g_eng.proj_dll_dir = nullptr; }
     if (folder.empty()) return;
     int wn = MultiByteToWideChar(CP_UTF8, 0, folder.c_str(), -1, nullptr, 0);
     if (wn <= 0) return;
     std::wstring w((size_t)wn, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, folder.c_str(), -1, w.data(), wn);
     if (!w.empty() && w.back() == L'\0') w.pop_back();
-    g_proj_dll_dir = AddDllDirectory(w.c_str());
+    g_eng.proj_dll_dir = AddDllDirectory(w.c_str());
 }
 
 // Plugin manager (global)
-static xi::PluginManager g_plugin_mgr;
 
 // (forward-declared above use_process_cb) record a per-instance process() crash.
 static void note_instance_crash_(const char* name, const char* why) {
-    if (name) g_plugin_mgr.note_instance_crash(name, why ? why : "process() crashed");
+    if (name) g_eng.plugin_mgr.note_instance_crash(name, why ? why : "process() crashed");
 }
 
 // (forward-declared above use_process_inline_) Part III G2.1 culprit stamp.
@@ -1036,17 +1081,15 @@ static void stamp_culprit_(const char* instance, const std::string& plugin) {
         t_folder.clear();
         t_dll.clear();
         if (!plugin.empty())
-            g_plugin_mgr.plugin_location(plugin, t_folder, t_dll);  // lock only on change
+            g_eng.plugin_mgr.plugin_location(plugin, t_folder, t_dll);  // lock only on change
     }
     xi::crash::set_culprit(instance ? instance : "", plugin.c_str(),
                            t_folder.c_str(), t_dll.c_str());
 }
 
-static std::atomic<bool> g_should_exit{false};
 // T2: set at the end of controlled_shutdown_teardown_ so the console-control
 // handler can wait for a clean teardown before the OS force-terminates on a
 // window close / logoff / shutdown (which give only a short grace window).
-static std::atomic<bool> g_teardown_done{false};
 
 // CLI/env arg parsing (get_exe_dir / parse_port / parse_host / parse_watchdog_ms
 // / parse_auth_secret / parse_str_flag / has_flag / parse_autostart_fps /
@@ -1071,15 +1114,6 @@ static void send_rsp_ok(xi::ws::Server& srv, int64_t id, std::string data_json =
 // run_id on the async two. Until that's fixed protocol-wide, this
 // ring lets the client pull "anything error-shaped that happened
 // in the last minute" with a single query.
-struct RecentError {
-    int64_t     ts_ms = 0;
-    std::string source;     // "rsp" / "log" / "event"
-    std::string message;
-    int64_t     cmd_id  = 0;   // 0 if unknown
-    int64_t     run_id  = 0;   // 0 if unknown
-};
-static std::mutex                     g_recent_errors_mu;
-static std::deque<RecentError>        g_recent_errors;
 static constexpr size_t               kRecentErrorsCap = 64;
 
 static int64_t now_ms_() { return xi::wall_ms(); }   // wall: RecentError ts
@@ -1087,9 +1121,9 @@ static int64_t now_ms_() { return xi::wall_ms(); }   // wall: RecentError ts
 static void push_recent_error(std::string source, std::string message,
                               int64_t cmd_id = 0, int64_t run_id = 0) {
     RecentError e{ now_ms_(), std::move(source), std::move(message), cmd_id, run_id };
-    std::lock_guard<std::mutex> lk(g_recent_errors_mu);
-    g_recent_errors.push_back(std::move(e));
-    while (g_recent_errors.size() > kRecentErrorsCap) g_recent_errors.pop_front();
+    std::lock_guard<std::mutex> lk(g_eng.recent_errors_mu);
+    g_eng.recent_errors.push_back(std::move(e));
+    while (g_eng.recent_errors.size() > kRecentErrorsCap) g_eng.recent_errors.pop_front();
 }
 
 static void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err) {
@@ -1157,7 +1191,7 @@ struct RunOutcome {
 };
 
 // ---- COMPUTE half: script invocation + SEH boundary + crash breadcrumb + watchdog --
-// Snapshots the script under g_script_mu, arms the watchdog slot, stamps this thread's
+// Snapshots the script under g_eng.script_mu, arms the watchdog slot, stamps this thread's
 // crash breadcrumb, then runs reset()+inspect() inside the SEH/std::exception/... catch
 // boundary, recording ok/error + latency into `out`. The inspect_tv-vs-inspect selection
 // stays exactly as-is (invariant 5). The watchdog is disarmed on EVERY exit path — the
@@ -1171,8 +1205,8 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
                                     int64_t run_id, const std::string& frame_path,
                                     RunOutcome& out) {
     {
-        std::lock_guard<std::mutex> lk(g_script_mu);
-        out.s = g_script;
+        std::lock_guard<std::mutex> lk(g_eng.script_mu);
+        out.s = g_eng.script;
     }
     xi::script::LoadedScript& s = out.s;
 
@@ -1207,7 +1241,7 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
     // respawns) rather than TerminateThread'ing a worker (which would leak the
     // per-instance lock + risk heap corruption).
     int wd_slot = -1;
-    int wd_ms = g_watchdog_ms.load();
+    int wd_ms = g_eng.watchdog_ms.load();
     if (wd_ms > 0) {
         // D-P1-10: deadline must use steady_clock (monotonic) — a system_clock
         // NTP/DST jump would skip every deadline or hang the watchdog forever.
@@ -1368,7 +1402,7 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
 static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
                                int64_t run_id, const std::string& frame_path,
                                int64_t emit_seq, EmitGate* gate) {
-    if (run_id == 0) run_id = ++g_run_id;
+    if (run_id == 0) run_id = ++g_eng.run_id;
 
     // INVARIANT 1: claim the ordered-emit turn NOW — BEFORE compute — so claim order ==
     // arrival order (the gate replays emission in claim order). Inert until wait_turn()
@@ -1376,7 +1410,7 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
     // EVERY exit below (early-return / a future throw) so an orphaned seq can't deadlock
     // the lane. No-op for emit_seq < 0. Kept in the driver: its lifetime spans compute
     // AND emit, so it must not be split across the two halves.
-    EmitTurn turn(gate, emit_seq, &g_continuous);
+    EmitTurn turn(gate, emit_seq, &g_eng.continuous);
 
     // INVARIANT 2: drains any sink calls this inspect staged but didn't flush (no script,
     // crash, STOP-wake skip). The success path flushes (empties g_staged) so this no-ops.
@@ -1405,8 +1439,6 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
 // process-globals persist for the whole backend uptime (like ImagePool's
 // total_created_), so a monitor can see total drops / peak depth across run
 // boundaries. dispatch_stats reports them as *_lifetime alongside the per-run ones.
-static std::atomic<uint64_t> g_dropped_lifetime{0};
-static std::atomic<uint64_t> g_high_watermark_lifetime{0};   // max single-lane depth ever seen
 
 struct GroupLane {
     xi::ProjectInfo::DispatchGroup cfg;
@@ -1429,20 +1461,17 @@ struct GroupLane {
     // min_interval apart across the lane (surplus events coalesce via drop_oldest).
     std::atomic<int64_t>           next_allowed_us{0};
 };
-// Lanes are shared_ptr + guarded by g_lanes_mu so a producer (an emit thread /
+// Lanes are shared_ptr + guarded by g_eng.lanes_mu so a producer (an emit thread /
 // the timer) that grabbed a lane can't have it destroyed under it by a concurrent
 // stop_group_pool_ — the shared_ptr keeps the GroupLane (its mutex/cv) alive until
 // the producer is done. Fixes the lane-lifetime UAF found in v1 hardening.
-static std::vector<std::shared_ptr<GroupLane>> g_lanes;
-static std::mutex                              g_lanes_mu;
 // F4: default_group as captured WHEN the current lane set was spawned (guarded by
-// g_lanes_mu, set in spawn_group_pool_). lane_for_ routes against THIS, not a live
-// model read — so routing can never reference a group name that isn't in g_lanes.
+// g_eng.lanes_mu, set in spawn_group_pool_). lane_for_ routes against THIS, not a live
+// model read — so routing can never reference a group name that isn't in g_eng.lanes.
 // Today groups are load-only (open_project quiesces + respawns), so the live value
 // can't diverge from the lanes; reading the snapshot makes that self-consistent by
 // construction instead of by that external invariant — the safe shape for when a
 // runtime "reconfigure groups" command is eventually added.
-static std::string                             g_default_group_snapshot;   // guarded by g_lanes_mu
 
 static void set_os_thread_priority_(const std::string& p) {
 #ifdef _WIN32
@@ -1506,16 +1535,16 @@ static void warn_oversubscribe_(int total_workers) {
             total_workers, hw);
 }
 
-// Resolve a group name to its lane (holding g_lanes_mu). Unknown/typo'd group →
+// Resolve a group name to its lane (holding g_eng.lanes_mu). Unknown/typo'd group →
 // the default_group lane, then the first lane — never silently the front (#5).
 // Returns a shared_ptr so the caller keeps the lane alive past a concurrent stop.
 static std::shared_ptr<GroupLane> lane_for_(const std::string& group) {
-    std::lock_guard<std::mutex> lk(g_lanes_mu);
-    if (g_lanes.empty()) return nullptr;
-    for (auto& l : g_lanes) if (l->cfg.name == group) return l;
-    const std::string& dg = g_default_group_snapshot;   // F4: spawn-time snapshot, not a live read
-    if (!dg.empty()) for (auto& l : g_lanes) if (l->cfg.name == dg) return l;
-    return g_lanes.front();
+    std::lock_guard<std::mutex> lk(g_eng.lanes_mu);
+    if (g_eng.lanes.empty()) return nullptr;
+    for (auto& l : g_eng.lanes) if (l->cfg.name == group) return l;
+    const std::string& dg = g_eng.default_group_snapshot;   // F4: spawn-time snapshot, not a live read
+    if (!dg.empty()) for (auto& l : g_eng.lanes) if (l->cfg.name == dg) return l;
+    return g_eng.lanes.front();
 }
 
 // Frame drops are reported to a connected client via emit_run_result, but an
@@ -1541,14 +1570,14 @@ static void warn_frame_drop_(uint64_t dropped, const std::string& group, const c
 // total for the capless one-shot path), `aid` is the arrival slot (claimed under
 // the lane lock for drop_newest, so it stays at the call site to preserve ordering),
 // and `policy`/`reason` carry each site's exact marker payload byte-for-byte. The
-// counter bumps (g_dropped_lifetime, and lane->dropped for the lane path) also
+// counter bumps (g_eng.dropped_lifetime, and lane->dropped for the lane path) also
 // stay at the call sites — the two paths bump different counter SETS and the lane
 // counter must be touched under the lane lock.
 static void account_dropped_frame_(xi::TriggerEvent& ev, uint64_t warn_count,
                                    int64_t aid, const char* policy, const char* reason) {
     release_trigger_event_(ev);            // the dropped event's image + doc refs
     warn_frame_drop_(warn_count, ev.group, policy);
-    if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
+    if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire))
         emit_run_result(*srv, XI_SYS_DROPPED, reason, aid, -1, ev.leader_source, ev.group);
 }
 
@@ -1556,28 +1585,28 @@ static void account_dropped_frame_(xi::TriggerEvent& ev, uint64_t warn_count,
 static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     // F7: releases ev on EVERY exit unless dismiss()'d (i.e. handed to a lane queue).
     TriggerEventReleaser guard(ev);
-    if (!g_continuous.load()) return false;
+    if (!g_eng.continuous.load()) return false;
     std::shared_ptr<GroupLane> lane = lane_for_(ev.group);
     if (!lane) return false;
     int depth = lane->cfg.queue_depth < 1 ? 1 : lane->cfg.queue_depth;
     const std::string& ov = lane->cfg.overflow;
     std::unique_lock<std::mutex> lk(lane->mu);
     // Re-check after taking the lane lock: a concurrent stop may have flipped
-    // g_continuous + drained; don't push a now-orphaned event (would leak).
-    if (!g_continuous.load()) return false;
+    // g_eng.continuous + drained; don't push a now-orphaned event (would leak).
+    if (!g_eng.continuous.load()) return false;
     if ((int)lane->q.size() < depth) {
-        ev.arrival_id = ++g_run_id;   // arrival/run id in push (== FIFO) order
+        ev.arrival_id = ++g_eng.run_id;   // arrival/run id in push (== FIFO) order
         lane->q.push_back(std::move(ev)); guard.dismiss();   // ownership → queue
         uint64_t ns = lane->q.size(), prev = lane->high_watermark.load(std::memory_order_relaxed);
         while (ns > prev && !lane->high_watermark.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
         // P1-8: also raise the process-lifetime peak (survives cmd:start).
-        uint64_t gprev = g_high_watermark_lifetime.load(std::memory_order_relaxed);
-        while (ns > gprev && !g_high_watermark_lifetime.compare_exchange_weak(gprev, ns, std::memory_order_relaxed)) {}
+        uint64_t gprev = g_eng.high_watermark_lifetime.load(std::memory_order_relaxed);
+        while (ns > gprev && !g_eng.high_watermark_lifetime.compare_exchange_weak(gprev, ns, std::memory_order_relaxed)) {}
         lane->cv.notify_one(); return true;
     }
     if (ov == "drop_newest") {
-        ++lane->dropped; ++g_dropped_lifetime;   // P1-8: lifetime total survives cmd:start
-        int64_t aid = ++g_run_id;   // arrival slot of the dropped (new) frame
+        ++lane->dropped; ++g_eng.dropped_lifetime;   // P1-8: lifetime total survives cmd:start
+        int64_t aid = ++g_eng.run_id;   // arrival slot of the dropped (new) frame
         uint64_t wc = lane->dropped.load();   // throttle reads the per-lane total (under lock)
         lk.unlock();
         guard.dismiss();   // account_dropped_frame_ releases the dropped (new) ev
@@ -1590,43 +1619,43 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     int64_t dropped_aid = front.arrival_id;   // the dropped (oldest) frame's slot
     std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
     release_trigger_event_(front);   // the evicted front (a different event, in-queue)
-    lane->q.pop_front(); ev.arrival_id = ++g_run_id; lane->q.push_back(std::move(ev)); guard.dismiss();   // ev → queue
-    lane->cv.notify_one(); ++lane->dropped; ++g_dropped_lifetime;   // P1-8
+    lane->q.pop_front(); ev.arrival_id = ++g_eng.run_id; lane->q.push_back(std::move(ev)); guard.dismiss();   // ev → queue
+    lane->cv.notify_one(); ++lane->dropped; ++g_eng.dropped_lifetime;   // P1-8
     warn_frame_drop_(lane->dropped.load(), dg, "drop_oldest");
     lk.unlock();
-    if (auto* srv = g_srv_for_bp.load(std::memory_order_acquire))
+    if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire))
         emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);
     return true;
 }
 
 static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
     {
-        std::lock_guard<std::mutex> lk(g_lanes_mu);
+        std::lock_guard<std::mutex> lk(g_eng.lanes_mu);
         // F8: callers must stop_dispatch_pool_ before (re)spawning — a non-empty
-        // g_lanes here means a prior pool's workers are still running and we'd
+        // g_eng.lanes here means a prior pool's workers are still running and we'd
         // silently double-spawn (two worker sets draining one source). All sites
         // pair stop+spawn today; assert the invariant so a future site can't
         // regress it silently. Release builds also leave a stderr breadcrumb since
         // assert() is compiled out there.
-        assert(g_lanes.empty() && "spawn_group_pool_ called without a preceding stop_dispatch_pool_");
-        if (!g_lanes.empty())
+        assert(g_eng.lanes.empty() && "spawn_group_pool_ called without a preceding stop_dispatch_pool_");
+        if (!g_eng.lanes.empty())
             std::fprintf(stderr, "[xinsp2] BUG: spawn_group_pool_ with %zu live lane(s) — "
                          "missing stop_dispatch_pool_; clearing (workers may double-run)\n",
-                         g_lanes.size());
-        g_lanes.clear();
+                         g_eng.lanes.size());
+        g_eng.lanes.clear();
         // F4: capture default_group with this lane set so lane_for_ routes against
-        // a name that exists in g_lanes (the synthesized default lane below is "").
-        g_default_group_snapshot = g_plugin_mgr.project().default_group;
-        for (auto& gc : g_plugin_mgr.project().groups) {
-            auto lane = std::make_shared<GroupLane>(); lane->cfg = gc; g_lanes.push_back(std::move(lane));
+        // a name that exists in g_eng.lanes (the synthesized default lane below is "").
+        g_eng.default_group_snapshot = g_eng.plugin_mgr.project().default_group;
+        for (auto& gc : g_eng.plugin_mgr.project().groups) {
+            auto lane = std::make_shared<GroupLane>(); lane->cfg = gc; g_eng.lanes.push_back(std::move(lane));
         }
-        if (g_lanes.empty()) {
+        if (g_eng.lanes.empty()) {
             // No explicit groups: synthesize ONE default lane from the project's
             // parallelism settings, so every project runs on the unified lane
             // path (the legacy single pool is gone). name "" matches an untagged
             // event's empty group via lane_for_(); the timer tick also targets
             // default_group (== "" here) -> this lane.
-            const auto& p = g_plugin_mgr.project();
+            const auto& p = g_eng.plugin_mgr.project();
             xi::ProjectInfo::DispatchGroup def;
             def.name         = "";
             def.max_parallel = p.dispatch_threads < 1 ? 1 : p.dispatch_threads;
@@ -1634,14 +1663,14 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
             def.overflow     = p.overflow;
             def.result_order = p.result_order;
             auto lane = std::make_shared<GroupLane>(); lane->cfg = def;
-            g_lanes.push_back(std::move(lane));
+            g_eng.lanes.push_back(std::move(lane));
         }
     }
     std::fprintf(stderr, "[xinsp2] continuous mode (grouped): %zu group(s), %dms timer\n",
-                 g_lanes.size(), interval_ms);
-    { int total = 0; for (auto& lp : g_lanes) total += (lp->cfg.max_parallel < 1 ? 1 : lp->cfg.max_parallel);
+                 g_eng.lanes.size(), interval_ms);
+    { int total = 0; for (auto& lp : g_eng.lanes) total += (lp->cfg.max_parallel < 1 ? 1 : lp->cfg.max_parallel);
       warn_oversubscribe_(total); }
-    for (auto& lp : g_lanes) {
+    for (auto& lp : g_eng.lanes) {
         std::shared_ptr<GroupLane> lane = lp;   // workers hold a ref → lane outlives them
         int n = lane->cfg.max_parallel < 1 ? 1 : lane->cfg.max_parallel;
         // Arrival-ordered emission only when asked AND there's real concurrency
@@ -1660,19 +1689,19 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                 const auto& aff = lane->cfg.cpu_affinity;
                 if (!aff.empty())
                     set_os_thread_affinity_(aff.size() == 1 ? aff[0] : aff[(size_t)wi % aff.size()]);
-                while (g_continuous.load()) {
+                while (g_eng.continuous.load()) {
                     xi::TriggerEvent ev; bool have = false; int64_t rid = 0; int64_t eseq = -1;
                     {
                         std::unique_lock<std::mutex> lk(lane->mu);
-                        lane->cv.wait(lk, [lane] { return !lane->q.empty() || !g_continuous.load(); });
-                        if (!g_continuous.load()) break;
+                        lane->cv.wait(lk, [lane] { return !lane->q.empty() || !g_eng.continuous.load(); });
+                        if (!g_eng.continuous.load()) break;
                         if (!lane->q.empty()) {
                             ev = std::move(lane->q.front()); lane->q.pop_front(); have = true;
                             // run_id was claimed at ENQUEUE (push == FIFO order) so kept
                             // and dropped frames share one arrival sequence; read it back
                             // (fallback if unset). The emit seq (gate ordering) is still
                             // claimed here (ordered mode) — drops leave no gate gap.
-                            rid = ev.arrival_id ? ev.arrival_id : ++g_run_id;
+                            rid = ev.arrival_id ? ev.arrival_id : ++g_eng.run_id;
                             if (lane->ordered) eseq = lane->seq_next.fetch_add(1);
                         }
                     }
@@ -1692,7 +1721,7 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                         int64_t now = xi::steady_now_us(), prev = lane->next_allowed_us.load(std::memory_order_relaxed), slot;
                         do { slot = prev > now ? prev : now; }
                         while (!lane->next_allowed_us.compare_exchange_weak(prev, slot + iv, std::memory_order_acq_rel));
-                        for (int64_t w = slot - xi::steady_now_us(); w > 0 && g_continuous.load(); w = slot - xi::steady_now_us())
+                        for (int64_t w = slot - xi::steady_now_us(); w > 0 && g_eng.continuous.load(); w = slot - xi::steady_now_us())
                             std::this_thread::sleep_for(std::chrono::microseconds(w > 20000 ? 20000 : w));
                     }
                     ev.dequeued_at_us = xi::now_us();
@@ -1710,20 +1739,20 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
         }
     }
     // Timer ticks feed the default group's lane. Always spawned; reads the LIVE
-    // g_timer_interval_ms each loop so the rate is retunable mid-run and 0 =
+    // g_eng.timer_interval_ms each loop so the rate is retunable mid-run and 0 =
     // trigger-only (the default group isn't loaded with synthetic ticks).
     (void)interval_ms;
-    g_timer_thread = std::thread([] {
-        const std::string dg = g_plugin_mgr.project().default_group;
-        while (g_continuous.load()) {
-            int iv = g_timer_interval_ms.load();
+    g_eng.timer_thread = std::thread([] {
+        const std::string dg = g_eng.plugin_mgr.project().default_group;
+        while (g_eng.continuous.load()) {
+            int iv = g_eng.timer_interval_ms.load();
             if (iv <= 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(iv));
-            if (!g_continuous.load()) break;
-            if (g_timer_interval_ms.load() <= 0) continue;
+            if (!g_eng.continuous.load()) break;
+            if (g_eng.timer_interval_ms.load() <= 0) continue;
             xi::TriggerEvent ev; ev.group = dg;
             (void)enqueue_to_lane_(std::move(ev));
         }
@@ -1732,12 +1761,12 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
 
 static void stop_group_pool_() {
     // Snapshot the lanes (under the lock) so producers can keep routing into the
-    // shared_ptrs while we tear down; new enqueues already bail on !g_continuous.
+    // shared_ptrs while we tear down; new enqueues already bail on !g_eng.continuous.
     std::vector<std::shared_ptr<GroupLane>> lanes;
-    { std::lock_guard<std::mutex> lk(g_lanes_mu); lanes = g_lanes; }
+    { std::lock_guard<std::mutex> lk(g_eng.lanes_mu); lanes = g_eng.lanes; }
     for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
     for (auto& lp : lanes) for (auto& t : lp->workers) if (t.joinable()) t.join();
-    // Workers are gone + g_continuous is false → drain leftover queued events and
+    // Workers are gone + g_eng.continuous is false → drain leftover queued events and
     // release their image handles before the lanes are dropped (release-before-
     // FreeLibrary; #3 leak fix).
     for (auto& lp : lanes) {
@@ -1745,43 +1774,43 @@ static void stop_group_pool_() {
         for (auto& ev : lp->q) release_trigger_event_(ev);
         lp->q.clear();
     }
-    { std::lock_guard<std::mutex> lk(g_lanes_mu); g_lanes.clear(); }
+    { std::lock_guard<std::mutex> lk(g_eng.lanes_mu); g_eng.lanes.clear(); }
 }
 
 // Stop the pool + timer. Safe to call if nothing was spawned.
 static void stop_dispatch_pool_() {
-    g_continuous = false;
-    // Wake the lane workers (so they observe g_continuous=false and exit) BEFORE
+    g_eng.continuous = false;
+    // Wake the lane workers (so they observe g_eng.continuous=false and exit) BEFORE
     // joining, or the join deadlocks. Also wake anyone parked in a per-lane EmitTurn
     // (ordered mode).
     {
         std::vector<std::shared_ptr<GroupLane>> lanes;
-        { std::lock_guard<std::mutex> lk(g_lanes_mu); lanes = g_lanes; }
+        { std::lock_guard<std::mutex> lk(g_eng.lanes_mu); lanes = g_eng.lanes; }
         for (auto& lp : lanes) {
             { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
             { std::lock_guard<std::mutex> lk(lp->gate.mu); lp->gate.cv.notify_all(); }
         }
     }
-    if (g_timer_thread.joinable()) g_timer_thread.join();
+    if (g_eng.timer_thread.joinable()) g_eng.timer_thread.join();
     stop_group_pool_();
 }
 
 // Trigger-driven dispatch WITHOUT continuous mode: a source emitting a trigger
 // (e.g. a webui "issue"/"replay" click) runs exactly ONE inspect on it. The emit
 // usually arrives on the WS thread (inside a plugin's exchange), so we run the
-// inspect on a detached thread, not inline. Serialized by g_run_mu; the
+// inspect on a detached thread, not inline. Serialized by g_eng.run_mu; the
 // thread_local g_current_trigger makes this thread's inspect see this event.
 static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
     auto evp = std::make_shared<xi::TriggerEvent>(std::move(ev));
     // The lambda runs on a source plugin's emit thread, which outlives the
-    // main-local srv — g_inflight owns the bump/bail/drain so teardown waits it
+    // main-local srv — g_eng.inflight owns the bump/bail/drain so teardown waits it
     // out. On a bail (tearing down or thread-spawn failure) OR a cap drop we
     // release the event's image/meta handles ourselves.
     bool dropped_over_cap = false;
-    bool launched = g_inflight.launch([srv, evp]() {
+    bool launched = g_eng.inflight.launch([srv, evp]() {
         reserve_fault_stack();
         xi::install_seh_translator();
-        std::lock_guard<std::mutex> lk(g_run_mu);
+        std::lock_guard<std::mutex> lk(g_eng.run_mu);
         CurrentTriggerScope trig(*evp);   // clears g_current_trigger + releases evp on scope exit
         run_one_inspection(*srv, /*frame_hint=*/0, /*run_id=*/0, "", /*emit_seq=*/-1);
     }, &dropped_over_cap);
@@ -1795,9 +1824,9 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
             // continuous GroupLane drop_newest path via the shared helper — bump the
             // lifetime dropped counter and emit an out-of-band XI_SYS_DROPPED marker
             // (release happens inside the helper) so the drop is observable/counted.
-            int64_t aid = ++g_run_id;              // arrival slot of the dropped (new) frame
-            ++g_dropped_lifetime;                  // P1-8: lifetime total survives cmd:start
-            account_dropped_frame_(*evp, g_dropped_lifetime.load(), aid, "max_inflight",
+            int64_t aid = ++g_eng.run_id;              // arrival slot of the dropped (new) frame
+            ++g_eng.dropped_lifetime;                  // P1-8: lifetime total survives cmd:start
+            account_dropped_frame_(*evp, g_eng.dropped_lifetime.load(), aid, "max_inflight",
                                    "dropped: max in-flight one-shots reached");
         } else {
             // A bare shutdown/pause bail is not a drop (no marker) — just release.
@@ -1822,34 +1851,34 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
 // runs it again as the loop unwinds).
 static void controlled_shutdown_teardown_() {
     // Refuse NEW detached runs first, then drop the bus sink so no source emit
-    // launches another one-shot. (g_inflight.launch() checks this — a launch
+    // launches another one-shot. (g_eng.inflight.launch() checks this — a launch
     // racing teardown either bails or is waited out by drain() below.)
-    g_inflight.begin_shutdown();
+    g_eng.inflight.begin_shutdown();
     xi::TriggerBus::instance().clear_sink();
-    if (g_continuous.load()) stop_dispatch_pool_();   // joins workers + timer + drains lanes
-    // Drain in-flight detached cmd:run / one-shot threads. A bare g_run_mu acquire
+    if (g_eng.continuous.load()) stop_dispatch_pool_();   // joins workers + timer + drains lanes
+    // Drain in-flight detached cmd:run / one-shot threads. A bare g_eng.run_mu acquire
     // only waits for a thread that already HOLDS the lock; one detached-but-not-yet-
     // locked would slip past and then touch the about-to-be-destroyed srv. drain()
     // waits on the in-flight count (capped) instead.
     //
     // T1: if drain() TIMES OUT (a wedged inspect — infinite loop / blocking plugin —
     // still in flight after the cap), we must NOT proceed into teardown: close_project
-    // below FreeLibrary's the plugin DLLs and g_srv_for_bp is nulled while that thread
+    // below FreeLibrary's the plugin DLLs and g_eng.srv_for_bp is nulled while that thread
     // is still inside run_one_inspection(*srv)/process_fn_ → UAF / access-violation.
-    // With the watchdog DISABLED (default g_watchdog_ms{0}) nothing else would have
+    // With the watchdog DISABLED (default g_eng.watchdog_ms{0}) nothing else would have
     // killed the process, so this path is reachable. Do exactly what the watchdog's
     // HARD-trip does: log, flush, and std::_Exit(WATCHDOG_EXIT_CODE) — a crash-safe
     // hard exit (skips static dtors / atexit a wedged worker could deadlock) that the
     // FE supervisor respawns. A clean teardown here is unsafe precisely BECAUSE a
     // thread is wedged; the hard exit is the correct trade.
-    if (!g_inflight.drain()) {
-        int stuck = g_inflight.inflight();
+    if (!g_eng.inflight.drain()) {
+        int stuck = g_eng.inflight.inflight();
         std::fprintf(stderr,
             "[xinsp2] shutdown drain TIMED OUT with %d wedged in-flight inspect(s) — "
             "hard-exiting instead of tearing down (would UAF: FreeLibrary + srv destroy "
             "under a live detached run); FE supervisor respawns (rc=0x%04X)\n",
             stuck, WATCHDOG_EXIT_CODE);
-        if (auto* s = g_srv_for_bp.load(std::memory_order_acquire))
+        if (auto* s = g_eng.srv_for_bp.load(std::memory_order_acquire))
             emit_error_log(*s,
                 "shutdown drain timed out with " + std::to_string(stuck) +
                 " wedged in-flight inspect(s); backend hard-exiting for respawn");
@@ -1857,19 +1886,19 @@ static void controlled_shutdown_teardown_() {
         std::fflush(stdout);
         std::_Exit(WATCHDOG_EXIT_CODE);
     }
-    { std::lock_guard<std::mutex> rl(g_run_mu); }     // belt-and-suspenders
+    { std::lock_guard<std::mutex> rl(g_eng.run_mu); }     // belt-and-suspenders
     xi::TriggerBus::instance().reset();               // prune the per-source emit-time map (source names go out of scope here)
-    { std::lock_guard<std::mutex> lk(g_script_mu); xi::script::unload_script(g_script); }
+    { std::lock_guard<std::mutex> lk(g_eng.script_mu); xi::script::unload_script(g_eng.script); }
     // Close the open project (if any) NOW — while the ImagePool singleton is still
     // alive — so plugin instances are destroyed in the correct order (instances first,
     // THEN FreeLibrary) and their image-handle sweep runs against a live pool. The
-    // normal exit paths (cmd:shutdown, g_should_exit epilogue) otherwise never called
+    // normal exit paths (cmd:shutdown, g_eng.should_exit epilogue) otherwise never called
     // close_project, leaving ~PluginManager to do it at static destruction — after
     // FreeLibrary (destroy_fn into unmapped code) and after ImagePool was torn down
     // (release_all_for on a destroyed singleton). Idempotent: no-op if already closed.
-    g_plugin_mgr.close_project();
-    g_srv_for_bp = nullptr;                            // last: every emitter is quiesced now
-    g_teardown_done.store(true);                       // T2: unblock a waiting console handler
+    g_eng.plugin_mgr.close_project();
+    g_eng.srv_for_bp = nullptr;                            // last: every emitter is quiesced now
+    g_eng.teardown_done.store(true);                       // T2: unblock a waiting console handler
 }
 
 // T2 — orderly shutdown on an abrupt console exit (window close, Ctrl+C/Break,
@@ -1877,7 +1906,7 @@ static void controlled_shutdown_teardown_() {
 // entirely (the OS default handler ExitProcess'es: no plugin destructors, so a
 // comm/PLC plugin's "go-safe on close" never fires, and the still-armed crash
 // filter can turn the kill into a spurious minidump the FE reads as a crash).
-// The handler just flips g_should_exit — the main serve loop polls it every 100ms
+// The handler just flips g_eng.should_exit — the main serve loop polls it every 100ms
 // and runs the SAME controlled_shutdown_teardown_ path. For the close-class events
 // the OS force-terminates shortly after the handler returns, so we BLOCK (bounded)
 // until teardown signals done, keeping the process alive long enough to tear down
@@ -1894,13 +1923,13 @@ static BOOL WINAPI console_ctrl_handler_(DWORD type) {
             std::fprintf(stderr, "[xinsp2] console control event %lu — clean shutdown\n",
                          (unsigned long)type);
             std::fflush(stderr);
-            g_should_exit.store(true);
+            g_eng.should_exit.store(true);
             const bool close_class = (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT);
             if (close_class) {
                 // ~4.5s budget (< the OS's default ~5s CTRL_CLOSE window) for main()
                 // to run teardown. If teardown hard-exits on a wedged drain (T1), the
                 // process is already gone; this loop just falls through on timeout.
-                for (int i = 0; i < 450 && !g_teardown_done.load(); ++i)
+                for (int i = 0; i < 450 && !g_eng.teardown_done.load(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
             return TRUE;   // handled — suppress the default terminate
@@ -1920,16 +1949,16 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
     // B1: apply the project's one-shot in-flight ceiling. Installed on every
     // compile_and_load, so a project's parallelism.max_inflight takes effect
     // WITHOUT needing cmd:start (one-shot dispatch works pre-start). <=0 → default.
-    g_inflight.set_cap(g_plugin_mgr.project().max_inflight);
+    g_eng.inflight.set_cap(g_eng.plugin_mgr.project().max_inflight);
     xi::TriggerBus::instance().set_sink([srv](xi::TriggerEvent ev) {
-        if (g_continuous.load()) {
+        if (g_eng.continuous.load()) {
             // Route by the emitting source instance's "group" (default_group if
             // the source is untagged/unknown, or the synthetic timer tick). A
             // project with no explicit groups resolves to the synthesized default
             // lane (group "") — see spawn_group_pool_. instance_group() does the
             // lookup UNDER PluginManager's lock — this sink runs on a source's emit
             // thread, concurrent with create/remove/rename_instance.
-            ev.group = g_plugin_mgr.instance_group(ev.leader_source);
+            ev.group = g_eng.plugin_mgr.instance_group(ev.leader_source);
             (void)enqueue_to_lane_(std::move(ev));
         } else {
             dispatch_one_shot_(srv, std::move(ev));
@@ -1946,8 +1975,8 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
 //
 // IMPORTANT: this only quiesces the bus-driven dispatcher pool. Any
 // detached cmd:run threads are not joined here — those snapshot the
-// script under g_script_mu and the destructive caller still holds
-// g_script_mu (or equivalent) while the inspect runs to completion.
+// script under g_eng.script_mu and the destructive caller still holds
+// g_eng.script_mu (or equivalent) while the inspect runs to completion.
 // For project plugin DLLs (touched by close/open/recompile/export),
 // no equivalent detached path exists; the dispatch pool is the only
 // in-flight surface.
@@ -1967,7 +1996,7 @@ struct DispatchPoolGuard {
     bool            quiesced = false;
     xi::ws::Server* srv = nullptr;
     bool            armed_ = true;   // false once resumed/dismissed/moved-from
-    bool            paused_launches_ = false;  // we g_inflight.pause()'d — dtor MUST unpause
+    bool            paused_launches_ = false;  // we g_eng.inflight.pause()'d — dtor MUST unpause
     bool            restore_sink_    = false;  // we cleared the bus sink — resume re-installs it
 
     DispatchPoolGuard() = default;
@@ -1990,12 +2019,12 @@ struct DispatchPoolGuard {
         armed_ = false;
         // ALWAYS re-enable launches (even a non-continuous project needs one-shots
         // for issue/replay) and restore the sink we cleared.
-        if (paused_launches_) { g_inflight.unpause(); paused_launches_ = false; }
+        if (paused_launches_) { g_eng.inflight.unpause(); paused_launches_ = false; }
         if (restore_sink_ && srv) { install_trigger_sink_(srv); restore_sink_ = false; }
         if (was_continuous && quiesced) {
             bool trig_only = prior_fps <= 0;
-            g_continuous_fps = trig_only ? 0 : prior_fps;
-            g_continuous = true;
+            g_eng.continuous_fps = trig_only ? 0 : prior_fps;
+            g_eng.continuous = true;
             int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(prior_fps, 1));
             spawn_group_pool_(srv, interval_ms);
             std::fprintf(stderr, "[xinsp2] continuous mode resumed\n");
@@ -2006,7 +2035,7 @@ struct DispatchPoolGuard {
     // respawn continuous — BUT still re-enable launches (the next project needs them).
     void dismiss() {
         armed_ = false;
-        if (paused_launches_) { g_inflight.unpause(); paused_launches_ = false; }
+        if (paused_launches_) { g_eng.inflight.unpause(); paused_launches_ = false; }
     }
 };
 
@@ -2016,19 +2045,19 @@ static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
     g.srv = srv;
     // Stop NEW detached one-shot / cmd:run launches and drop the bus sink BEFORE the
     // op FreeLibrary's any plugin DLL. A one-shot dispatch runs on a SOURCE plugin's
-    // own emit thread (bus sink -> dispatch_one_shot_ -> g_inflight.launch), NOT this
+    // own emit thread (bus sink -> dispatch_one_shot_ -> g_eng.inflight.launch), NOT this
     // handler thread — so without this a source emitting mid-op could launch an
     // inspect that calls into a DLL being unloaded (use-after-unload). clear_sink stops
     // future fires; pause()+drain() is the Dekker handshake that also catches an emit
     // already past the sink read but not yet counted. The guard reverses both (resume
     // re-installs the sink + unpauses; dismiss unpauses without re-installing).
-    g_inflight.pause();
+    g_eng.inflight.pause();
     g.paused_launches_ = true;
     g.restore_sink_    = xi::TriggerBus::instance().has_sink();   // only restore if one existed
     xi::TriggerBus::instance().clear_sink();
-    if (g_continuous.load()) {
+    if (g_eng.continuous.load()) {
         g.was_continuous = true;
-        g.prior_fps = g_continuous_fps.load();
+        g.prior_fps = g_eng.continuous_fps.load();
         stop_dispatch_pool_();
         g.quiesced = true;
         std::fprintf(stderr,
@@ -2038,11 +2067,11 @@ static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
     // (Lane queues are drained + their image handles released inside
     // stop_dispatch_pool_ -> stop_group_pool_ above, before the DLLs unload.)
     // Wait out any in-flight detached cmd:run / one-shot inspect already running:
-    // they hold g_run_mu for the whole inspect and call into the plugin/script DLLs
+    // they hold g_eng.run_mu for the whole inspect and call into the plugin/script DLLs
     // this op is about to FreeLibrary. drain() waits on the in-flight count (paused
-    // above so none can start meanwhile); the g_run_mu acquire is belt-and-suspenders.
-    g_inflight.drain();
-    { std::lock_guard<std::mutex> lk(g_run_mu); }
+    // above so none can start meanwhile); the g_eng.run_mu acquire is belt-and-suspenders.
+    g_eng.inflight.drain();
+    { std::lock_guard<std::mutex> lk(g_eng.run_mu); }
     return g;
 }
 
@@ -2074,10 +2103,10 @@ static const char* inst_state_str(InstState s) {
 
 static void set_inst_state(const std::string& name, InstState s,
                            const std::string& err = "") {
-    g_plugin_mgr.set_instance_state(name, s, err);
+    g_eng.plugin_mgr.set_instance_state(name, s, err);
 }
 static void clear_inst_state() {
-    g_plugin_mgr.clear_instance_states();
+    g_eng.plugin_mgr.clear_instance_states();
 }
 
 // ============================================================================
@@ -2109,7 +2138,7 @@ static void cmd_shutdown_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // static-destruction time. Single source of truth (see the function).
         controlled_shutdown_teardown_();
         send_rsp_ok(srv, id);
-        g_should_exit = true;
+        g_eng.should_exit = true;
 }
 
 static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
@@ -2126,9 +2155,9 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
         // would have to know to re-issue cmd:start.
         bool was_continuous = false;
         int  prior_continuous_fps = 10;
-        if (g_continuous.load()) {
+        if (g_eng.continuous.load()) {
             was_continuous = true;
-            prior_continuous_fps = g_continuous_fps.load();
+            prior_continuous_fps = g_eng.continuous_fps.load();
             stop_dispatch_pool_();
             std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload (will resume)\n");
         }
@@ -2141,8 +2170,8 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
             if (!was_continuous) return;
             bool trig_only = prior_continuous_fps <= 0;
             int fps = trig_only ? 0 : prior_continuous_fps;
-            g_continuous_fps = fps;
-            g_continuous = true;
+            g_eng.continuous_fps = fps;
+            g_eng.continuous = true;
             int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(fps, 1));
             spawn_group_pool_(&srv, interval_ms);
             std::fprintf(stderr, "[xinsp2] continuous mode resumed\n");
@@ -2155,7 +2184,7 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
         xi::script::CompileResult res;
         if (prebuilt) {
             std::filesystem::path p(*src);
-            if (p.is_relative() && !g_project_folder.empty()) p = std::filesystem::path(g_project_folder) / p;
+            if (p.is_relative() && !g_eng.project_folder.empty()) p = std::filesystem::path(g_eng.project_folder) / p;
             // Containment: a prebuilt DLL MUST resolve inside the open project
             // folder. Without this an absolute/UNC `.dll` path loads an
             // arbitrary DLL — its DllMain / static initializers execute
@@ -2165,9 +2194,9 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
             // rejects out-of-tree paths.
             std::error_code ec1, ec2;
             auto canon_dll  = std::filesystem::weakly_canonical(p, ec1);
-            auto canon_proj = g_project_folder.empty()
+            auto canon_proj = g_eng.project_folder.empty()
                 ? std::filesystem::path{}
-                : std::filesystem::weakly_canonical(std::filesystem::path(g_project_folder), ec2);
+                : std::filesystem::weakly_canonical(std::filesystem::path(g_eng.project_folder), ec2);
             bool contained = !canon_proj.empty() && !ec1 && !ec2;
             if (contained) {
                 auto rel = canon_dll.lexically_relative(canon_proj);
@@ -2191,14 +2220,14 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
         } else {
         xi::script::CompileRequest req;
         req.source_path     = *src;
-        req.output_dir      = (std::filesystem::path(g_work_dir) / "script_build").string();
-        req.include_dir     = g_include_dir;
-        req.opencv_dir      = g_opencv_dir;
-        req.turbojpeg_root  = g_turbojpeg_root;
-        req.ipp_root        = g_ipp_root;
-        req.vcvars_path     = g_tc_vcvars;   // empty = compiler auto-finds vcvars64.bat
+        req.output_dir      = (std::filesystem::path(g_eng.work_dir) / "script_build").string();
+        req.include_dir     = g_eng.include_dir;
+        req.opencv_dir      = g_eng.opencv_dir;
+        req.turbojpeg_root  = g_eng.turbojpeg_root;
+        req.ipp_root        = g_eng.ipp_root;
+        req.vcvars_path     = g_eng.tc_vcvars;   // empty = compiler auto-finds vcvars64.bat
         // Project-declared external deps (project.json include_dirs / link_libs).
-        read_script_deps_(g_project_folder, req.include_dirs, req.link_libs, req.openmp_max_threads);
+        read_script_deps_(g_eng.project_folder, req.include_dirs, req.link_libs, req.openmp_max_threads);
         // Fast dev compile (/Od) by default — the interactive edit→run loop wants
         // fast COMPILE, not fast runtime. A client benchmarking / the autostart
         // boot path passes "optimize":true to get /O2. (Both spacings, like has_ui.)
@@ -2281,10 +2310,10 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
 
         {
             // Wait out any in-flight detached cmd:run before swapping the script
-            // DLL (it holds g_run_mu for the whole inspect and runs from the old
-            // module). Order is g_run_mu -> g_script_mu, matching the run path.
-            std::lock_guard<std::mutex> rl(g_run_mu);
-            std::lock_guard<std::mutex> lk(g_script_mu);
+            // DLL (it holds g_eng.run_mu for the whole inspect and runs from the old
+            // module). Order is g_eng.run_mu -> g_eng.script_mu, matching the run path.
+            std::lock_guard<std::mutex> rl(g_eng.run_mu);
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
             // Load the NEW DLL into a temporary first; only swap it in on
             // success. A failed load (bad DLL, missing export) then leaves the
             // previously-working script — and the client's subscriptions —
@@ -2295,26 +2324,26 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
             if (!xi::script::load_script(res.dll_path, next, err)) {
                 send_rsp_err(srv, id, err);
                 set_status_internal("@compile", "degraded: script load failed");  // P1-4
-                resume_continuous_if_needed();   // old g_script untouched, keep it streaming
+                resume_continuous_if_needed();   // old g_eng.script untouched, keep it streaming
                 return;
             }
             // Save persistent state from the OLD DLL before swapping it out.
             // Stamp the OLD DLL's schema version alongside so restore into the
             // new DLL can detect a shape mismatch.
-            if (g_script.ok() && g_script.get_state) {
+            if (g_eng.script.ok() && g_eng.script.get_state) {
                 std::vector<char> buf(256 * 1024);
-                int n = g_script.get_state(buf.data(), (int)buf.size());
+                int n = g_eng.script.get_state(buf.data(), (int)buf.size());
                 if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                             n = g_script.get_state(buf.data(), (int)buf.size()); }
-                if (n > 0) g_persistent_state_json.assign(buf.data(), (size_t)n);
-                g_persistent_state_schema = g_script.state_schema_version
-                                          ? g_script.state_schema_version()
+                             n = g_eng.script.get_state(buf.data(), (int)buf.size()); }
+                if (n > 0) g_eng.persistent_state_json.assign(buf.data(), (size_t)n);
+                g_eng.persistent_state_schema = g_eng.script.state_schema_version
+                                          ? g_eng.script.state_schema_version()
                                           : 0;
             }
             // Swap: move-assign drops the old module's last ref — its deleter
             // does the owner-sweep + FreeLibrary once any in-flight inspect that
             // snapshotted it returns.
-            g_script = std::move(next);
+            g_eng.script = std::move(next);
             // Output-sink subscriptions live entirely in the plugin (e.g. the
             // `expose` plugin tracks subscribed channels) — the core holds no
             // per-viewer subscription state across a recompile swap; binary frames
@@ -2327,8 +2356,8 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
             // host_api lets the script allocate/read images in the BACKEND pool —
             // plugins only see that pool via their own host_api, so script-side
             // ImagePool handles would be invisible to them.
-            if (g_script.set_use_callbacks) {
-                g_script.set_use_callbacks(
+            if (g_eng.script.set_use_callbacks) {
+                g_eng.script.set_use_callbacks(
                     (void*)use_process_cb,
                     (void*)use_exchange_cb,
                     (void*)use_grab_cb,
@@ -2337,8 +2366,8 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
             // Phase 3: trigger access callbacks. Older scripts that don't
             // import xi_script_set_trigger_callbacks just stay null and
             // xi::current_trigger().is_active() returns false.
-            if (g_script.set_trigger_callbacks) {
-                g_script.set_trigger_callbacks(
+            if (g_eng.script.set_trigger_callbacks) {
+                g_eng.script.set_trigger_callbacks(
                     (void*)trigger_info_cb,
                     (void*)trigger_image_cb,
                     (void*)trigger_sources_cb);
@@ -2346,31 +2375,31 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
             // Optional newer symbol — scripts compiled before P2-2
             // simply don't export it and t.primary_source() falls back
             // to sources().front().
-            if (g_script.set_trigger_leader_callback) {
-                g_script.set_trigger_leader_callback((void*)trigger_leader_cb);
+            if (g_eng.script.set_trigger_leader_callback) {
+                g_eng.script.set_trigger_leader_callback((void*)trigger_leader_cb);
             }
             // ABI v5: metadata-doc callback. Scripts compiled before this symbol
             // existed simply don't export it and current_trigger().meta() returns
             // an empty Record.
-            if (g_script.set_trigger_meta_callback) {
-                g_script.set_trigger_meta_callback((void*)trigger_meta_cb);
+            if (g_eng.script.set_trigger_meta_callback) {
+                g_eng.script.set_trigger_meta_callback((void*)trigger_meta_cb);
             }
             // Status callback. Scripts without xi_status.hpp leave this null
             // and xi::status() is a no-op.
-            if (g_script.set_status_callback) {
-                g_script.set_status_callback((void*)status_cb);
+            if (g_eng.script.set_status_callback) {
+                g_eng.script.set_status_callback((void*)status_cb);
             }
             // C1: image-pool owner get/set thunks. Lets xi::async / xi::parallel_for
             // carry the inspect-thread owner onto worker threads so their pool
             // images stay attributed (instead of anonymous owner=0). Optional
             // symbol — older scripts don't export it and propagation is a no-op.
-            if (g_script.set_owner_callbacks) {
-                g_script.set_owner_callbacks((void*)owner_get_cb, (void*)owner_set_cb);
+            if (g_eng.script.set_owner_callbacks) {
+                g_eng.script.set_owner_callbacks((void*)owner_get_cb, (void*)owner_set_cb);
             }
             // Result callback. Scripts without xi_result.hpp leave this null
             // and xi::result() is a no-op (run_result then defaults to NA).
-            if (g_script.set_result_callback) {
-                g_script.set_result_callback((void*)result_cb);
+            if (g_eng.script.set_result_callback) {
+                g_eng.script.set_result_callback((void*)result_cb);
             }
             // Replay any param values the user set on the previous
             // DLL. The new DLL's xi::Param<T> file-scope ctors run on
@@ -2381,14 +2410,14 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
             // those entries stay in the cache but quietly no-op until
             // the user hits set_param again, which is the right
             // failure mode (no false positives, no spurious errors).
-            if (g_script.set_param) {
-                for (auto& [pname, pval] : g_param_cache) {
-                    g_script.set_param(pname.c_str(), pval.c_str());
+            if (g_eng.script.set_param) {
+                for (auto& [pname, pval] : g_eng.param_cache) {
+                    g_eng.script.set_param(pname.c_str(), pval.c_str());
                 }
-                if (!g_param_cache.empty()) {
+                if (!g_eng.param_cache.empty()) {
                     std::fprintf(stderr,
                         "[xinsp2] replayed %zu param value(s) into reloaded script\n",
-                        g_param_cache.size());
+                        g_eng.param_cache.size());
                 }
             }
 
@@ -2400,15 +2429,15 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
             // set_instance_def returns non-zero for defs the new DLL doesn't
             // declare (renamed / deleted) — best-effort, like the param replay,
             // those entries stay cached and quietly no-op.
-            if (g_script.set_instance_def) {
-                for (auto& [iname, def] : g_instance_def_cache) {
+            if (g_eng.script.set_instance_def) {
+                for (auto& [iname, def] : g_eng.instance_def_cache) {
                     // Replaying a cached def enters the freshly-swapped DLL's plugin
-                    // code while we hold g_run_mu + g_script_mu. A plugin that throws
+                    // code while we hold g_eng.run_mu + g_eng.script_mu. A plugin that throws
                     // (or faults, via the SEH translator) on an old/incompatible cached
                     // def must NOT terminate the backend mid-swap — log + skip it and
                     // keep replaying the rest. Do NOT touch the held locks in the catch.
                     try {
-                        g_script.set_instance_def(iname.c_str(), def.c_str());
+                        g_eng.script.set_instance_def(iname.c_str(), def.c_str());
                     } catch (const seh_exception& e) {
                         std::fprintf(stderr,
                             "[xinsp2] replay set_instance_def '%s' crashed: 0x%08X (%s) — skipped\n",
@@ -2419,10 +2448,10 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
                             iname.c_str(), e.what());
                     }
                 }
-                if (!g_instance_def_cache.empty()) {
+                if (!g_eng.instance_def_cache.empty()) {
                     std::fprintf(stderr,
                         "[xinsp2] replayed %zu instance def(s) into reloaded script\n",
-                        g_instance_def_cache.size());
+                        g_eng.instance_def_cache.size());
                 }
             }
 
@@ -2431,9 +2460,9 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
             // declared one), since set_state's silent default-fill on
             // a shape change would confuse the new code more than
             // starting fresh would.
-            if (g_script.set_state && g_persistent_state_json.size() > 2) {
-                int new_schema = g_script.state_schema_version
-                               ? g_script.state_schema_version()
+            if (g_eng.script.set_state && g_eng.persistent_state_json.size() > 2) {
+                int new_schema = g_eng.script.state_schema_version
+                               ? g_eng.script.state_schema_version()
                                : 0;
                 // Drop whenever the NEW script declares a schema version that
                 // differs from the persisted one — INCLUDING the 0→N case (a
@@ -2442,7 +2471,7 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
                 // shape, silently mis-shaping state. new_schema==0 (a script that
                 // doesn't version) keeps the legacy "best-effort restore" path.
                 bool drop = (new_schema != 0 &&
-                             g_persistent_state_schema != new_schema);
+                             g_eng.persistent_state_schema != new_schema);
                 if (drop) {
                     // G4 / OQ-5: before dropping, give the NEW DLL a chance to
                     // migrate the prior state forward via its opt-in code_change
@@ -2450,15 +2479,15 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
                     // the migrated shape instead of dropping. Absent hook (or a
                     // decline) falls through to the unchanged drop path below.
                     std::string migrated;
-                    if (xi::script::migrate_state(g_script, g_persistent_state_json,
-                                                  g_persistent_state_schema, new_schema,
+                    if (xi::script::migrate_state(g_eng.script, g_eng.persistent_state_json,
+                                                  g_eng.persistent_state_schema, new_schema,
                                                   migrated)) {
-                        // set_state enters plugin code under g_run_mu + g_script_mu;
+                        // set_state enters plugin code under g_eng.run_mu + g_eng.script_mu;
                         // a throwing/faulting plugin must not terminate the swap. On
                         // failure, drop the migrated state and continue (no lock touch).
                         bool state_ok = true;
                         try {
-                            g_script.set_state(migrated.c_str());
+                            g_eng.script.set_state(migrated.c_str());
                         } catch (const seh_exception& e) {
                             state_ok = false;
                             std::fprintf(stderr,
@@ -2469,42 +2498,42 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
                             std::fprintf(stderr,
                                 "[xinsp2] replay set_state (migrated) threw: %s — skipped\n", e.what());
                         }
-                        if (!state_ok) { g_persistent_state_json = "{}"; }
+                        if (!state_ok) { g_eng.persistent_state_json = "{}"; }
                         else {
-                        g_persistent_state_json = migrated;
+                        g_eng.persistent_state_json = migrated;
                         std::fprintf(stderr,
                             "[xinsp2] state schema changed (v%d → v%d) — migrated prior state "
                             "(%zu bytes) via code_change hook\n",
-                            g_persistent_state_schema, new_schema, migrated.size());
+                            g_eng.persistent_state_schema, new_schema, migrated.size());
                         std::string ev = "{\"type\":\"event\",\"name\":\"state_migrated\","
                                          "\"data\":{\"old_schema\":"
-                                       + std::to_string(g_persistent_state_schema)
+                                       + std::to_string(g_eng.persistent_state_schema)
                                        + ",\"new_schema\":"
                                        + std::to_string(new_schema)
                                        + "}}";
                         srv.send_text(ev);
-                        g_persistent_state_schema = new_schema;
+                        g_eng.persistent_state_schema = new_schema;
                         }
                     } else {
                     std::fprintf(stderr,
                         "[xinsp2] state schema changed (v%d → v%d) — dropping prior state\n",
-                        g_persistent_state_schema, new_schema);
+                        g_eng.persistent_state_schema, new_schema);
                     std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
                                      "\"data\":{\"old_schema\":"
-                                   + std::to_string(g_persistent_state_schema)
+                                   + std::to_string(g_eng.persistent_state_schema)
                                    + ",\"new_schema\":"
                                    + std::to_string(new_schema)
                                    + "}}";
                     srv.send_text(ev);
-                    g_persistent_state_json = "{}";
+                    g_eng.persistent_state_json = "{}";
                     }
                 } else {
-                    // set_state enters plugin code under g_run_mu + g_script_mu; a
+                    // set_state enters plugin code under g_eng.run_mu + g_eng.script_mu; a
                     // throwing/faulting plugin must not terminate the swap — log + skip.
                     try {
-                        g_script.set_state(g_persistent_state_json.c_str());
+                        g_eng.script.set_state(g_eng.persistent_state_json.c_str());
                         std::fprintf(stderr, "[xinsp2] state restored (%zu bytes, schema v%d)\n",
-                                     g_persistent_state_json.size(), new_schema);
+                                     g_eng.persistent_state_json.size(), new_schema);
                     } catch (const seh_exception& e) {
                         std::fprintf(stderr,
                             "[xinsp2] replay set_state (restore) crashed: 0x%08X (%s) — skipped\n",
@@ -2554,17 +2583,17 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
 }
 
 static void cmd_unload_script_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        // P0-AB-1: dispatcher workers snapshot g_script under
-        // g_script_mu and may be mid-inspect when unload_script
+        // P0-AB-1: dispatcher workers snapshot g_eng.script under
+        // g_eng.script_mu and may be mid-inspect when unload_script
         // FreeLibrary's the DLL. Drain the pool first.
         { auto g = quiesce_dispatch_for_lifecycle_op_("unload_script", &srv); g.dismiss(); }  // script gone — don't resume
-        std::lock_guard<std::mutex> lk(g_script_mu);
-        xi::script::unload_script(g_script);
+        std::lock_guard<std::mutex> lk(g_eng.script_mu);
+        xi::script::unload_script(g_eng.script);
         // Drop the param replay cache — there's no live script to
         // replay into, and a future load_project / compile_and_load
         // is free to start clean.
-        g_param_cache.clear();
-        g_instance_def_cache.clear();   // sibling replay shadow — same lifetime
+        g_eng.param_cache.clear();
+        g_eng.instance_def_cache.clear();   // sibling replay shadow — same lifetime
         send_rsp_ok(srv, id);
 }
 
@@ -2573,15 +2602,15 @@ static void cmd_save_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
         if (!path) { send_rsp_err(srv, id, "missing path"); return; }
         std::string params_json, inst_json;
         {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok()) {
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            if (g_eng.script.ok()) {
                 std::vector<char> buf(64 * 1024);
-                if (g_script.list_params) {
-                    int n = g_script.list_params(buf.data(), (int)buf.size());
+                if (g_eng.script.list_params) {
+                    int n = g_eng.script.list_params(buf.data(), (int)buf.size());
                     if (n > 0) params_json.assign(buf.data(), (size_t)n);
                 }
-                if (g_script.list_instances) {
-                    int n = g_script.list_instances(buf.data(), (int)buf.size());
+                if (g_eng.script.list_instances) {
+                    int n = g_eng.script.list_instances(buf.data(), (int)buf.size());
                     if (n > 0) inst_json.assign(buf.data(), (size_t)n);
                 }
             }
@@ -2604,17 +2633,17 @@ static void cmd_commit_working_copy_(xi::ws::Server& srv, int64_t id, const xp::
         // are concurrently reading/writing.
         auto _wc_commit_guard = quiesce_dispatch_for_lifecycle_op_("commit_working_copy", &srv);  // resumes at block end
         std::string save_fail;
-        for (auto& [iname, _] : g_plugin_mgr.project().instances) {
-            if (!g_plugin_mgr.save_instance(iname)) save_fail = iname;
+        for (auto& [iname, _] : g_eng.plugin_mgr.project().instances) {
+            if (!g_eng.plugin_mgr.save_instance(iname)) save_fail = iname;
         }
         if (!save_fail.empty()) {
             // An instance config couldn't reach disk (disk full / read-only) — the
             // scratch we're about to commit is itself stale, so don't claim success.
             send_rsp_err(srv, id, "failed to persist instance '" + save_fail +
                          "' before commit (disk full / read-only?)");
-        } else if (g_plugin_mgr.commit_working_copy()) {
+        } else if (g_eng.plugin_mgr.commit_working_copy()) {
             send_rsp_ok(srv, id, "{\"committed\":true,\"canonical\":" +
-                        ([]{ std::string s; xp::json_escape_into(s, g_plugin_mgr.canonical_path()); return s; }()) + "}");
+                        ([]{ std::string s; xp::json_escape_into(s, g_eng.plugin_mgr.canonical_path()); return s; }()) + "}");
         } else {
             send_rsp_err(srv, id, "no working copy active (open with working_copy:true)");
         }
@@ -2623,13 +2652,13 @@ static void cmd_commit_working_copy_(xi::ws::Server& srv, int64_t id, const xp::
 static void cmd_discard_working_copy_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Blow away the scratch + re-seed from canonical, then reopen. Same
         // teardown constraint as open_project — drain the dispatch pool first.
-        if (!g_plugin_mgr.has_working_copy()) {
+        if (!g_eng.plugin_mgr.has_working_copy()) {
             send_rsp_err(srv, id, "no working copy active");
             return;
         }
         auto _wc_discard_guard = quiesce_dispatch_for_lifecycle_op_("discard_working_copy", &srv);  // resumes at block end
-        if (g_plugin_mgr.reopen_fresh_working_copy()) {
-            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+        if (g_eng.plugin_mgr.reopen_fresh_working_copy()) {
+            send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "discard failed");
         }
@@ -2666,15 +2695,15 @@ static void cmd_load_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
                     else if (yyjson_is_real(val)) std::snprintf(vbuf, sizeof(vbuf), "%.17g", yyjson_get_real(val));
                     else if (yyjson_is_bool(val)) std::snprintf(vbuf, sizeof(vbuf), "%s", yyjson_get_bool(val) ? "true" : "false");
                     else continue;
-                    // Params live in the script DLL. Also write g_param_cache so a
+                    // Params live in the script DLL. Also write g_eng.param_cache so a
                     // later compile_and_load replays THESE loaded values, not a stale
                     // pre-load cache — without this, editing the script + recompiling
                     // silently reverted every param to whatever was last set_param'd
                     // before load_project (the replay shadow had never been refreshed).
-                    std::lock_guard<std::mutex> lk(g_script_mu);
-                    if (g_script.ok() && g_script.set_param) {
-                        int rc = g_script.set_param(yyjson_get_str(nm), vbuf);
-                        if (rc == 0) g_param_cache[yyjson_get_str(nm)] = vbuf;
+                    std::lock_guard<std::mutex> lk(g_eng.script_mu);
+                    if (g_eng.script.ok() && g_eng.script.set_param) {
+                        int rc = g_eng.script.set_param(yyjson_get_str(nm), vbuf);
+                        if (rc == 0) g_eng.param_cache[yyjson_get_str(nm)] = vbuf;
                         else param_warnings.push_back(std::string(yyjson_get_str(nm)) +
                                  (rc == -1 ? ": no such param" : ": value rejected"));
                     } else {
@@ -2692,7 +2721,7 @@ static void cmd_load_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
         // the backend registry alone would silently drop every script-instance def
         // (the recipe loads green while the line runs on default thresholds/models:
         // a fail-reads-as-pass). So mirror the set_instance_def handler: try the
-        // backend registry first, then fall through to g_script.set_instance_def.
+        // backend registry first, then fall through to g_eng.script.set_instance_def.
         std::vector<std::string> instance_warnings;
         yyjson_val* instances = yyjson_obj_get(root, "instances");
         if (instances && yyjson_is_arr(instances)) {
@@ -2713,14 +2742,14 @@ static void cmd_load_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
                     } else {
                         // Not a backend plugin-manager instance — try the script DLL's
                         // own registry (where script-declared instances live).
-                        std::lock_guard<std::mutex> lk(g_script_mu);
-                        if (g_script.ok() && g_script.set_instance_def) {
-                            int rc = g_script.set_instance_def(iname, def_str);
-                            // Mirror the param path above: write g_instance_def_cache so a
+                        std::lock_guard<std::mutex> lk(g_eng.script_mu);
+                        if (g_eng.script.ok() && g_eng.script.set_instance_def) {
+                            int rc = g_eng.script.set_instance_def(iname, def_str);
+                            // Mirror the param path above: write g_eng.instance_def_cache so a
                             // later compile_and_load replays THIS recipe's def, not a stale
                             // pre-load value — else editing the script + recompiling reverts
                             // the just-loaded instance to the source default.
-                            if (rc == 0) g_instance_def_cache[iname] = def_str;
+                            if (rc == 0) g_eng.instance_def_cache[iname] = def_str;
                             else
                                 instance_warnings.push_back(std::string(iname) + ": set_instance_def failed");
                         } else {
@@ -2765,8 +2794,8 @@ static void cmd_create_project_(xi::ws::Server& srv, int64_t id, const xp::Parse
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         auto pname  = xp::get_string_field(parsed->args_json, "name");
         if (!folder || !pname) { send_rsp_err(srv, id, "missing folder or name"); return; }
-        if (g_plugin_mgr.create_project(*folder, *pname)) {
-            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+        if (g_eng.plugin_mgr.create_project(*folder, *pname)) {
+            send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "failed to create project");
         }
@@ -2801,19 +2830,19 @@ static void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
         // script DLL (script lifecycle is independent of the project's plugin
         // DLLs), so without this the next project's compile_and_load would
         // (a) capture the PRIOR project's xi::state() into g_persistent_state_*
-        // from the still-live old g_script, then (b) replay the prior project's
-        // g_param_cache values over any same-named Param the new project
+        // from the still-live old g_eng.script, then (b) replay the prior project's
+        // g_eng.param_cache values over any same-named Param the new project
         // declares (e.g. "thresh") — running project B's inspections with
         // project A's tuned values / carried state and silently mis-verdicting.
         // A fresh project starts from its own file-scope defaults.
         {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            g_param_cache.clear();
-            g_instance_def_cache.clear();   // sibling replay shadow — same project boundary
-            g_persistent_state_json = "{}";
-            g_persistent_state_schema = 0;
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            g_eng.param_cache.clear();
+            g_eng.instance_def_cache.clear();   // sibling replay shadow — same project boundary
+            g_eng.persistent_state_json = "{}";
+            g_eng.persistent_state_schema = 0;
         }
-        if (g_plugin_mgr.open_project(*folder, working_copy)) {
+        if (g_eng.plugin_mgr.open_project(*folder, working_copy)) {
             // F5: advisory single-writer stamp. If another LIVE backend already
             // owns this canonical, warn — two writers to one project clobber each
             // other when a working-copy commit mirrors over the canonical. A stale
@@ -2830,7 +2859,7 @@ static void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
                 }
                 xi::ownerlock::write(*folder, xi::wall_ms());
             }
-            auto& proj = g_plugin_mgr.project();
+            auto& proj = g_eng.plugin_mgr.project();
             int inst_count = (int)proj.instances.size();
             std::fprintf(stderr, "[xinsp2] project opened: %s (%d instances)\n",
                          proj.name.c_str(), inst_count);
@@ -2839,7 +2868,7 @@ static void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
             // continuous mode runs.
             apply_process_priority_(proj.runtime_priority);
             if (proj.runtime_timer_fps >= 0)
-                g_timer_interval_ms.store(proj.runtime_timer_fps > 0 ? std::max(1, 1000 / proj.runtime_timer_fps) : 0);
+                g_eng.timer_interval_ms.store(proj.runtime_timer_fps > 0 ? std::max(1, 1000 / proj.runtime_timer_fps) : 0);
             for (auto& [k, v] : proj.instances) {
                 std::fprintf(stderr, "[xinsp2]   instance: %s (%s)\n",
                              k.c_str(), v.plugin_name.c_str());
@@ -2847,7 +2876,7 @@ static void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
             // Surface skip-bad-instance warnings to the user. The project
             // open still succeeds; bad instances are simply absent from
             // the runtime registry. Extension can show a toast.
-            auto warns = g_plugin_mgr.open_warnings();
+            auto warns = g_eng.plugin_mgr.open_warnings();
             if (!warns.empty()) {
                 std::string s = "project opened with " + std::to_string(warns.size())
                               + " skipped instance(s):";
@@ -2864,7 +2893,7 @@ static void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
             // Remember the canonical folder + apply any per-project toolchain
             // override (project.json "toolchain" block) so the compiler and the
             // IntelliSense config below both pick up the user's path fixes.
-            g_project_folder = *folder;
+            g_eng.project_folder = *folder;
             resolve_toolchain_(*folder);
             // Put the project folder on the DLL search path so a script's
             // statically-linked external dep DLL can live in the project folder.
@@ -2872,7 +2901,7 @@ static void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
             // (IDE IntelliSense config: the VS Code extension writes
             // <project>/.vscode/c_cpp_properties.json itself, reading the compile
             // paths via cmd:toolchain_health — the core no longer touches .vscode.)
-            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+            send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "failed to open project in " + *folder);
         }
@@ -2892,7 +2921,7 @@ static void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::Parsed
         // across every open→emit→close cycle).
         xi::TriggerBus::instance().clear_sink();
         xi::TriggerBus::instance().reset();
-        g_plugin_mgr.close_project();
+        g_eng.plugin_mgr.close_project();
         clear_inst_state();   // instances are gone — drop host-tracked state
         // Reset the script replay shadows on the PROJECT boundary, mirroring
         // unload_script's clear. Closing a project doesn't unload the script
@@ -2900,11 +2929,11 @@ static void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::Parsed
         // to the project just closed — leaving them in place would leak A's
         // values/state into whatever project is opened next (see open_project).
         {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            g_param_cache.clear();
-            g_instance_def_cache.clear();   // sibling replay shadow — same project boundary
-            g_persistent_state_json = "{}";
-            g_persistent_state_schema = 0;
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            g_eng.param_cache.clear();
+            g_eng.instance_def_cache.clear();   // sibling replay shadow — same project boundary
+            g_eng.persistent_state_json = "{}";
+            g_eng.persistent_state_schema = 0;
         }
         send_rsp_ok(srv, id, "{\"closed\":true}");
 }
@@ -2919,14 +2948,14 @@ static void cmd_set_timer_fps_(xi::ws::Server& srv, int64_t id, const xp::Parsed
         // max(1,..) so a high fps (>1000) doesn't round to 0, which the timer
         // loop reads as "off" (the opposite of what was asked). fps<=0 = off.
         int iv = fps > 0 ? std::max(1, 1000 / fps) : 0;
-        g_timer_interval_ms.store(iv);
+        g_eng.timer_interval_ms.store(iv);
         std::string out = "{\"fps\":" + std::to_string(fps) +
                           ",\"interval_ms\":" + std::to_string(iv) + "}";
         send_rsp_ok(srv, id, out);
 }
 
 static void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        if (g_continuous.load()) {
+        if (g_eng.continuous.load()) {
             send_rsp_err(srv, id, "cannot run while continuous mode is active — stop first");
             return;
         }
@@ -2936,11 +2965,11 @@ static void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parse
         // for vars times out with an empty error and drops the WS. open_project
         // does not compile the project's script (that's compile_and_load's job),
         // so this is the common headless gotcha. (Reported bug BUG-3.)
-        if (!g_script.ok()) {
+        if (!g_eng.script.ok()) {
             send_rsp_err(srv, id, "no script loaded — call compile_and_load first");
             return;
         }
-        int64_t run_id = ++g_run_id;
+        int64_t run_id = ++g_eng.run_id;
 
         // Optional `frame_path` arg — plumbed to the script via
         // `xi::current_frame_path()`. Was previously parsed by tests /
@@ -2972,7 +3001,7 @@ static void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parse
 
         // Run inspection on a detached thread so a long inspect doesn't block
         // the WS poll loop (and so the watchdog can observe its deadline slot).
-        // Serialised on g_run_mu so 8 quick `cmd:run` calls produce
+        // Serialised on g_eng.run_mu so 8 quick `cmd:run` calls produce
         // vars entries in run_id order.
         // SEH translator must be installed inside the thread.
         //
@@ -2984,15 +3013,15 @@ static void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parse
         // contract for no real burst gain (bursts arrive via the trigger path).
         crash_set(crash_ctx().last_cmd, sizeof(crash_ctx().last_cmd), "run");
         crash_ctx().last_run_id = (int)run_id;
-        // The detached thread dereferences the main-local srv, so g_inflight owns
+        // The detached thread dereferences the main-local srv, so g_eng.inflight owns
         // the bump/bail/drain; teardown waits it out. A launch racing shutdown (or a
         // spawn failure) just runs nothing — there's no rsp for an async run anyway.
-        g_inflight.launch([&srv, run_id,
+        g_eng.inflight.launch([&srv, run_id,
                      frame_path = std::move(frame_path),
                      meta_json  = std::move(meta_json)]() {
             reserve_fault_stack();   // BUG 2: dump survives a script stack overflow
             xi::install_seh_translator();
-            std::lock_guard<std::mutex> lk(g_run_mu);
+            std::lock_guard<std::mutex> lk(g_eng.run_mu);
 
             // Stage 1b: build a one-shot record (frame image + meta) and expose
             // it as this run's current_trigger — the same path the dispatch
@@ -3035,7 +3064,7 @@ static void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         // that calls inspect() at a configurable interval. The script's
         // own ImageSource (if any) runs its acquisition thread inside
         // the DLL — the backend doesn't manage it.
-        if (g_continuous.load()) {
+        if (g_eng.continuous.load()) {
             send_rsp_ok(srv, id, R"({"already":true})");
             return;
         }
@@ -3048,7 +3077,7 @@ static void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         // see "CONTINUOUS RUN HAS TWO DRIVERS" at the top of this file. fps>0 ticks
         // a source-less script; fps<=0 = trigger-only (sources drive, the normal
         // case). An EXPLICIT fps seeds the live timer rate; if absent, keep whatever
-        // g_timer_interval_ms already holds (project.json runtime.timer_fps, a prior
+        // g_eng.timer_interval_ms already holds (project.json runtime.timer_fps, a prior
         // set_timer_fps, or the default 10fps) — so a project's saved pref isn't
         // clobbered by a bare start.
         int  fps = 10;
@@ -3065,19 +3094,19 @@ static void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         // Stop any existing pool before starting a new one. (A-P1-2: any events
         // that arrived since the last stop are drained + their handles released
         // inside stop_group_pool_, so the new run never fires on stale images.)
-        if (g_timer_thread.joinable()) {
+        if (g_eng.timer_thread.joinable()) {
             stop_dispatch_pool_();
         }
 
-        g_continuous_fps = trigger_only ? 0 : fps;
-        g_continuous = true;
+        g_eng.continuous_fps = trigger_only ? 0 : fps;
+        g_eng.continuous = true;
 
         // Seed the live timer rate (0 = trigger-only). Only when fps was explicit;
-        // otherwise keep the existing g_timer_interval_ms (runtime/prior/default).
-        if (fps_explicit) g_timer_interval_ms.store(trigger_only ? 0 : std::max(1, 1000 / std::max(fps, 1)));
-        int interval_ms = g_timer_interval_ms.load();
+        // otherwise keep the existing g_eng.timer_interval_ms (runtime/prior/default).
+        if (fps_explicit) g_eng.timer_interval_ms.store(trigger_only ? 0 : std::max(1, 1000 / std::max(fps, 1)));
+        int interval_ms = g_eng.timer_interval_ms.load();
 
-        // Bus-driven dispatch: with g_continuous now true the sink enqueues to
+        // Bus-driven dispatch: with g_eng.continuous now true the sink enqueues to
         // the worker pool (single-shot otherwise). Timer thread emits synthetic
         // events on schedule for scripts without trigger sources.
         install_trigger_sink_(&srv);
@@ -3089,7 +3118,7 @@ static void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         // is global (aborts all in-flight frames that round). See
         // run_one_inspection() + docs/guides/write-a-script.md.
 
-        int n_threads = std::max(1, g_plugin_mgr.project().dispatch_threads);
+        int n_threads = std::max(1, g_eng.plugin_mgr.project().dispatch_threads);
         char buf[64];
         std::snprintf(buf, sizeof(buf),
                       R"({"started":true,"dispatch_threads":%d})", n_threads);
@@ -3097,7 +3126,7 @@ static void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
 }
 
 static void cmd_stop_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        g_continuous = false;
+        g_eng.continuous = false;
         xi::TriggerBus::instance().clear_sink();
         stop_dispatch_pool_();   // joins lanes + drains their queues (handles released)
         send_rsp_ok(srv, id, R"({"stopped":true})");
@@ -3139,14 +3168,14 @@ static void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::Pa
                 send_rsp_err(srv, id, std::string("exchange error: ") + e.what());
             }
         } else {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.exchange_instance) {
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            if (g_eng.script.ok() && g_eng.script.exchange_instance) {
                 try {
                     std::vector<char> rsp(256 * 1024);
-                    int n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
+                    int n = g_eng.script.exchange_instance(iname->c_str(), cmd_str.c_str(),
                                                        rsp.data(), (int)rsp.size());
                     if (n < 0) { rsp.resize((size_t)(-(int64_t)n) + 1024);
-                                 n = g_script.exchange_instance(iname->c_str(), cmd_str.c_str(),
+                                 n = g_eng.script.exchange_instance(iname->c_str(), cmd_str.c_str(),
                                                                 rsp.data(), (int)rsp.size()); }
                     if (n >= 0) send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "exchange_instance failed");
@@ -3198,16 +3227,16 @@ static void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::Par
             std::string cmd = "{\"command\":\"prepare\",\"def\":" + def_str;
             if (folder) { cmd += ",\"folder\":"; xp::json_escape_into(cmd, *folder); }
             cmd += "}";
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.exchange_instance) {
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            if (g_eng.script.ok() && g_eng.script.exchange_instance) {
                 // Script-side prepare enters plugin code — guard like the backend
                 // path above (and exchange_instance) so a throw/fault isn't fatal.
                 try {
                     std::vector<char> buf(64 * 1024);
-                    int n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
+                    int n = g_eng.script.exchange_instance(iname->c_str(), cmd.c_str(),
                                                        buf.data(), (int)buf.size());
                     if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                                 n = g_script.exchange_instance(iname->c_str(), cmd.c_str(),
+                                 n = g_eng.script.exchange_instance(iname->c_str(), cmd.c_str(),
                                                                 buf.data(), (int)buf.size()); }
                     if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "prepare failed");
@@ -3266,7 +3295,7 @@ static void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
         auto group_sel  = xp::get_string_field(parsed->args_json, "group");
         auto plugin_sel = xp::get_string_field(parsed->args_json, "plugin");
         if (group_sel || plugin_sel) {
-            for (auto& [iname, ii] : g_plugin_mgr.project().instances) {
+            for (auto& [iname, ii] : g_eng.plugin_mgr.project().instances) {
                 if (group_sel  && ii.group       != *group_sel)  continue;
                 if (plugin_sel && ii.plugin_name != *plugin_sel) continue;
                 add_target(iname);
@@ -3277,7 +3306,7 @@ static void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
             return;
         }
         // DRAIN-BARRIER: after this returns there is provably no process() running
-        // (pool stopped + workers joined + in-flight cmd:run drained via g_run_mu).
+        // (pool stopped + workers joined + in-flight cmd:run drained via g_eng.run_mu).
         auto guard = quiesce_dispatch_for_lifecycle_op_("commit_group", &srv);
         std::string results = "[";
         bool any_fail = false;
@@ -3296,18 +3325,18 @@ static void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
                 }
             } else {
                 // Script-side instances keep the exchange convention.
-                std::lock_guard<std::mutex> lk(g_script_mu);
-                if (g_script.ok() && g_script.exchange_instance) {
+                std::lock_guard<std::mutex> lk(g_eng.script_mu);
+                if (g_eng.script.ok() && g_eng.script.exchange_instance) {
                     // Script-side commit enters plugin code — guard like the backend
                     // inst->commit() path above so a throw/fault isn't fatal (record
                     // it as a per-target failure and keep committing the rest).
                     try {
                         const char* commit_cmd = R"({"command":"commit"})";
                         std::vector<char> buf(64 * 1024);
-                        int n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
+                        int n = g_eng.script.exchange_instance(targets[i].c_str(), commit_cmd,
                                                            buf.data(), (int)buf.size());
                         if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                                     n = g_script.exchange_instance(targets[i].c_str(), commit_cmd,
+                                     n = g_eng.script.exchange_instance(targets[i].c_str(), commit_cmd,
                                                                     buf.data(), (int)buf.size()); }
                         if (n >= 0) { r.assign(buf.data(), (size_t)n); ok = true; }
                     } catch (const seh_exception& e) {
@@ -3401,19 +3430,19 @@ static void cmd_set_watchdog_ms_(xi::ws::Server& srv, int64_t id, const xp::Pars
         int ms = ms_opt ? (int)*ms_opt : 0;
         if (ms < 0) ms = 0;
         if (ms > 600000) ms = 600000;     // 10-minute hard cap
-        g_watchdog_ms = ms;
+        g_eng.watchdog_ms = ms;
         std::string out = "{\"ms\":" + std::to_string(ms);
-        out += ",\"trips\":" + std::to_string(g_watchdog_trips.load()) + "}";
+        out += ",\"trips\":" + std::to_string(g_eng.watchdog_trips.load()) + "}";
         send_rsp_ok(srv, id, out);
 }
 
 static void cmd_watchdog_status_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        std::string out = "{\"ms\":" + std::to_string(g_watchdog_ms.load());
-        out += ",\"trips\":" + std::to_string(g_watchdog_trips.load());
+        std::string out = "{\"ms\":" + std::to_string(g_eng.watchdog_ms.load());
+        out += ",\"trips\":" + std::to_string(g_eng.watchdog_trips.load());
         out += ",\"armed\":";
         // armed == at least one inspect slot is currently in flight.
         bool armed = false;
-        for (int i = 0; i < WD_SLOTS; ++i) if (g_wd_deadlines[i].load() != 0) { armed = true; break; }
+        for (int i = 0; i < WD_SLOTS; ++i) if (g_eng.wd_deadlines[i].load() != 0) { armed = true; break; }
         out += (armed ? "true" : "false");
         out += "}";
         send_rsp_ok(srv, id, out);
@@ -3463,7 +3492,7 @@ static void cmd_get_state_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         InstState st; std::string err; long long crashes = 0;
-        bool known = g_plugin_mgr.get_instance_state(*iname, st, err, &crashes);
+        bool known = g_eng.plugin_mgr.get_instance_state(*iname, st, err, &crashes);
         if (!known) {
             // No tracked transition — report "created" if the instance actually
             // exists, else a clean not-found.
@@ -3488,9 +3517,9 @@ static void cmd_recent_errors_(xi::ws::Server& srv, int64_t id, const xp::Parsed
         int64_t since = since_opt ? (int64_t)*since_opt : 0;
         std::string out = "[";
         {
-            std::lock_guard<std::mutex> lk(g_recent_errors_mu);
+            std::lock_guard<std::mutex> lk(g_eng.recent_errors_mu);
             int n = 0;
-            for (auto& e : g_recent_errors) {
+            for (auto& e : g_eng.recent_errors) {
                 if (e.ts_ms < since) continue;
                 if (n++) out += ",";
                 out += "{\"ts_ms\":" + std::to_string(e.ts_ms);
@@ -3513,9 +3542,9 @@ static void cmd_status_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
         // accelerator between snapshots.
         std::string out = "{";
         {
-            std::lock_guard<std::mutex> lk(g_status_mu);
+            std::lock_guard<std::mutex> lk(g_eng.status_mu);
             int n = 0;
-            for (auto& [who, e] : g_status) {
+            for (auto& [who, e] : g_eng.status) {
                 if (n++) out += ",";
                 xp::json_escape_into(out, who);
                 out += ":{\"text\":"; xp::json_escape_into(out, e.text);
@@ -3540,13 +3569,13 @@ static void cmd_image_pool_stats_(xi::ws::Server& srv, int64_t id, const xp::Par
         std::unordered_map<xi::ImagePoolOwnerId, std::string> labels;
         labels[0] = "<host>";
         {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.owner_id != 0) {
-                labels[g_script.owner_id] =
-                    "script:" + std::filesystem::path(g_script.path).filename().string();
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            if (g_eng.script.owner_id != 0) {
+                labels[g_eng.script.owner_id] =
+                    "script:" + std::filesystem::path(g_eng.script.path).filename().string();
             }
         }
-        for (auto& [iname, ii] : g_plugin_mgr.project().instances) {
+        for (auto& [iname, ii] : g_eng.plugin_mgr.project().instances) {
             if (auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(ii.instance.get())) {
                 labels[a->owner_id()] = "instance:" + ii.name + " (" + ii.plugin_name + ")";
             }
@@ -3612,11 +3641,11 @@ static void cmd_dispatch_stats_(xi::ws::Server& srv, int64_t id, const xp::Parse
         // can answer "how much have we dropped total" / "peak depth ever" across run
         // boundaries (the per-run counters above answer "...since this start").
         std::string data;
-        // Snapshot the lanes under g_lanes_mu so a concurrent stop can't free
+        // Snapshot the lanes under g_eng.lanes_mu so a concurrent stop can't free
         // them mid-read. A no-groups project has one synthesized default lane, so
         // the top-level totals are aggregates across all lanes (unified dispatch).
         std::vector<std::shared_ptr<GroupLane>> lanes;
-        { std::lock_guard<std::mutex> lk(g_lanes_mu); lanes = g_lanes; }
+        { std::lock_guard<std::mutex> lk(g_eng.lanes_mu); lanes = g_eng.lanes; }
         size_t qsz = 0; uint64_t hw = 0, dropped = 0;
         for (auto& lp : lanes) {
             { std::lock_guard<std::mutex> lk(lp->mu); qsz += lp->q.size(); }
@@ -3624,14 +3653,14 @@ static void cmd_dispatch_stats_(xi::ws::Server& srv, int64_t id, const xp::Parse
             dropped += lp->dropped.load();
         }
         data  = "{\"queue_depth_now\":" + std::to_string(qsz);
-        data += ",\"queue_depth_cap\":" + std::to_string(g_plugin_mgr.project().queue_depth);
+        data += ",\"queue_depth_cap\":" + std::to_string(g_eng.plugin_mgr.project().queue_depth);
         data += ",\"queue_depth_high_watermark\":" + std::to_string(hw);
-        data += ",\"overflow\":\"" + g_plugin_mgr.project().overflow + "\"";
-        data += ",\"dispatch_threads\":" + std::to_string(g_plugin_mgr.project().dispatch_threads);
+        data += ",\"overflow\":\"" + g_eng.plugin_mgr.project().overflow + "\"";
+        data += ",\"dispatch_threads\":" + std::to_string(g_eng.plugin_mgr.project().dispatch_threads);
         data += ",\"dropped\":" + std::to_string(dropped);
         // P1-8: process-uptime cumulatives (NOT reset by cmd:start).
-        data += ",\"dropped_lifetime\":" + std::to_string(g_dropped_lifetime.load());
-        data += ",\"queue_depth_high_watermark_lifetime\":" + std::to_string(g_high_watermark_lifetime.load());
+        data += ",\"dropped_lifetime\":" + std::to_string(g_eng.dropped_lifetime.load());
+        data += ",\"queue_depth_high_watermark_lifetime\":" + std::to_string(g_eng.high_watermark_lifetime.load());
         // Source liveness: ms since ANY source last emitted, + per-source ages. The
         // signal for "a camera stalled" — a stalled source otherwise stops the line
         // with zero indication. -1 = nothing has emitted yet. A monitor/FE applies a
@@ -3703,7 +3732,7 @@ static void cmd_open_project_warnings_(xi::ws::Server& srv, int64_t id, const xp
         // individual instances fail (skip-bad-instance), so this is
         // how a UI / agent surfaces those problems instead of having
         // to scrape backend stderr.
-        auto warnings = g_plugin_mgr.open_warnings();
+        auto warnings = g_eng.plugin_mgr.open_warnings();
         std::string data = "{\"warnings\":[";
         bool first = true;
         for (auto& w : warnings) {
@@ -3727,12 +3756,12 @@ static void cmd_list_params_(xi::ws::Server& srv, int64_t id, const xp::ParsedCm
         // see the DLL's params. Otherwise report the backend's own.
         std::string params_json;
         {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.list_params) {
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            if (g_eng.script.ok() && g_eng.script.list_params) {
                 std::vector<char> buf(64 * 1024);
-                int n = g_script.list_params(buf.data(), (int)buf.size());
+                int n = g_eng.script.list_params(buf.data(), (int)buf.size());
                 if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);  // widen: -INT_MIN is UB
-                             n = g_script.list_params(buf.data(), (int)buf.size()); }
+                             n = g_eng.script.list_params(buf.data(), (int)buf.size()); }
                 if (n > 0) params_json.assign(buf.data(), (size_t)n);
             }
         }
@@ -3770,13 +3799,13 @@ static void cmd_set_param_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         // exists but rejected this value (set_from_json failed).
         int rc = 0; bool called = false;
         {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.set_param) {
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            if (g_eng.script.ok() && g_eng.script.set_param) {
                 called = true;
-                rc = g_script.set_param(pname->c_str(), val.c_str());
+                rc = g_eng.script.set_param(pname->c_str(), val.c_str());
                 // Cache an accepted value so compile_and_load replays it into the next
                 // DLL load (else the new DLL's file-scope default silently overwrites it).
-                if (rc == 0) g_param_cache[*pname] = val;
+                if (rc == 0) g_eng.param_cache[*pname] = val;
             }
         }
         if (!called) { send_rsp_err(srv, id, "set_param: no script loaded"); return; }
@@ -3788,23 +3817,23 @@ static void cmd_set_param_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
 static void cmd_list_instances_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         std::string inst_json, params_json;
         {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok()) {
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            if (g_eng.script.ok()) {
                 std::vector<char> buf(64 * 1024);
-                if (g_script.list_instances) {
-                    int n = g_script.list_instances(buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_script.list_instances(buf.data(), (int)buf.size()); }
+                if (g_eng.script.list_instances) {
+                    int n = g_eng.script.list_instances(buf.data(), (int)buf.size());
+                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_eng.script.list_instances(buf.data(), (int)buf.size()); }
                     if (n > 0) inst_json.assign(buf.data(), (size_t)n);
                 }
-                if (g_script.list_params) {
-                    int n = g_script.list_params(buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_script.list_params(buf.data(), (int)buf.size()); }
+                if (g_eng.script.list_params) {
+                    int n = g_eng.script.list_params(buf.data(), (int)buf.size());
+                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_eng.script.list_params(buf.data(), (int)buf.size()); }
                     if (n > 0) params_json.assign(buf.data(), (size_t)n);
                 }
             }
         }
         // Also include backend-managed instances (from PluginManager)
-        auto& proj = g_plugin_mgr.project();
+        auto& proj = g_eng.plugin_mgr.project();
         std::string backend_inst = "[";
         int bi = 0;
         for (auto& [k, v] : proj.instances) {
@@ -3871,13 +3900,13 @@ static void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::Par
                 send_rsp_err(srv, id, em);
             }
         } else {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.set_instance_def) {
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            if (g_eng.script.ok() && g_eng.script.set_instance_def) {
                 try {
-                    int rc = g_script.set_instance_def(iname->c_str(), def_str.c_str());
+                    int rc = g_eng.script.set_instance_def(iname->c_str(), def_str.c_str());
                     // Cache an accepted def so compile_and_load replays it into the next
                     // DLL load (else the new DLL's file-scope ctor silently reverts it).
-                    if (rc == 0) g_instance_def_cache[*iname] = def_str;
+                    if (rc == 0) g_eng.instance_def_cache[*iname] = def_str;
                     if (rc == 0) { set_inst_state(*iname, InstState::Active); send_rsp_ok(srv, id); }
                     else { set_inst_state(*iname, InstState::Faulted, "set_instance_def failed");
                            send_rsp_err(srv, id, "set_instance_def failed"); }
@@ -3922,14 +3951,14 @@ static void cmd_get_instance_def_(xi::ws::Server& srv, int64_t id, const xp::Par
                 send_rsp_err(srv, id, std::string("get_def error: ") + e.what());
             }
         } else {
-            std::lock_guard<std::mutex> lk(g_script_mu);
-            if (g_script.ok() && g_script.get_instance_def) {
+            std::lock_guard<std::mutex> lk(g_eng.script_mu);
+            if (g_eng.script.ok() && g_eng.script.get_instance_def) {
                 try {
                     std::vector<char> buf(256 * 1024);
-                    int n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                    int n = g_eng.script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
                     if (n < 0 && n != -1) {   // -needed → grow + retry (-1 = not found)
                         buf.resize((size_t)(-(int64_t)n) + 1024);
-                        n = g_script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
+                        n = g_eng.script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
                     }
                     if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "instance not found: " + *iname);
@@ -3954,7 +3983,7 @@ static void cmd_create_instance_(xi::ws::Server& srv, int64_t id, const xp::Pars
         // Ensure plugin is loaded — surface WHY if it can't be (missing DLL,
         // missing factory symbol, ABI mismatch, etc.) instead of a generic failure.
         std::string load_err;
-        if (!g_plugin_mgr.load_plugin(*plugin, &load_err)) {
+        if (!g_eng.plugin_mgr.load_plugin(*plugin, &load_err)) {
             send_rsp_err(srv, id, load_err.empty() ? "failed to load plugin" : load_err);
             return;
         }
@@ -3962,11 +3991,11 @@ static void cmd_create_instance_(xi::ws::Server& srv, int64_t id, const xp::Pars
         // the culprit so a factory fault is attributed to this plugin.
         stamp_culprit_(iname->c_str(), *plugin);
         std::string create_err;
-        auto* ii = g_plugin_mgr.create_instance(*iname, *plugin, &create_err);
+        auto* ii = g_eng.plugin_mgr.create_instance(*iname, *plugin, &create_err);
         if (ii) {
             // create_instance records the Created state internally (atomic with the
             // instance add) — no separate set_inst_state needed.
-            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+            send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, create_err.empty() ? "failed to create instance" : create_err);
         }
@@ -3977,10 +4006,10 @@ static void cmd_remove_instance_(xi::ws::Server& srv, int64_t id, const xp::Pars
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         bool delete_folder =
             parsed->args_json.find("\"delete_folder\":true") != std::string::npos;
-        if (g_plugin_mgr.remove_instance(*iname, delete_folder)) {
+        if (g_eng.plugin_mgr.remove_instance(*iname, delete_folder)) {
             // remove_instance drops the lifecycle state internally (atomic with the
             // unregister) — no separate drop_inst_state needed.
-            send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+            send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "instance not found: " + *iname);
         }
@@ -3991,7 +4020,7 @@ static void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::Pars
         auto new_name = xp::get_string_field(parsed->args_json, "new_name");
         if (!old_name || !new_name) { send_rsp_err(srv, id, "missing name or new_name"); return; }
         using RR = xi::PluginManager::RenameResult;
-        RR rr = g_plugin_mgr.rename_instance(*old_name, *new_name);
+        RR rr = g_eng.plugin_mgr.rename_instance(*old_name, *new_name);
         if (rr == RR::Rejected) {
             send_rsp_err(srv, id, "rename failed — name in use or instance missing");
         } else {
@@ -4002,18 +4031,18 @@ static void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::Pars
                 send_rsp_err(srv, id, "renamed in memory but could not persist to disk "
                                       "(disk full / read-only?) — may revert on restart");
             else
-                send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+                send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         }
 }
 
 static void cmd_get_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        send_rsp_ok(srv, id, g_plugin_mgr.to_json());
+        send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
 }
 
 static void cmd_save_instance_config_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        if (g_plugin_mgr.save_instance(*iname)) {
+        if (g_eng.plugin_mgr.save_instance(*iname)) {
             send_rsp_ok(srv, id);
         } else {
             send_rsp_err(srv, id, "instance not found: " + *iname);
@@ -4031,8 +4060,8 @@ static void cmd_get_dashboard_(xi::ws::Server& srv, int64_t id, const xp::Parsed
                 || fname.find('\\') != std::string::npos;
         std::string content;
         bool found = false;
-        if (!bad && !g_project_folder.empty()) {
-            std::ifstream f(std::filesystem::path(g_project_folder) / fname, std::ios::binary);
+        if (!bad && !g_eng.project_folder.empty()) {
+            std::ifstream f(std::filesystem::path(g_eng.project_folder) / fname, std::ios::binary);
             if (f) { std::ostringstream ss; ss << f.rdbuf(); content = ss.str(); found = !content.empty(); }
         }
         std::string out = "{\"found\":" + std::string(found ? "true" : "false") + ",\"name\":";
@@ -4056,7 +4085,7 @@ static void cmd_set_process_priority_(xi::ws::Server& srv, int64_t id, const xp:
 }
 
 static void cmd_list_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        auto plugins = g_plugin_mgr.list_plugins();
+        auto plugins = g_eng.plugin_mgr.list_plugins();
         std::string out = "[";
         auto esc = [](const std::string& s) {
             std::string o; for (char c : s) { if (c=='\\'||c=='"') o.push_back('\\'); o.push_back(c); } return o;
@@ -4073,7 +4102,7 @@ static void cmd_list_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
             out += ",\"prebuilt\":" + std::string(p.prebuilt ? "true" : "false");
             // Same origin field as to_json — the extension's Plugin Browser relies
             // on it to badge project plugins, e2e journey asserts it.
-            bool is_proj = g_plugin_mgr.is_project_plugin(p.name);
+            bool is_proj = g_eng.plugin_mgr.is_project_plugin(p.name);
             out += ",\"origin\":\"" + std::string(is_proj ? "project" : "global") + "\"";
             // Optional `manifest` block from plugin.json (free-form;
             // see docs/reference/c-abi.md). AI agents and doc
@@ -4092,10 +4121,10 @@ static void cmd_rescan_plugins_(xi::ws::Server& srv, int64_t id, const xp::Parse
         // Optional arg: {"dir": "<path>"} scans that one dir (additive).
         // No arg: re-scan the default plugins_dir.
         auto dir_opt = xp::get_string_field(parsed->args_json, "dir");
-        const std::string& dir = dir_opt ? *dir_opt : g_plugins_dir;
+        const std::string& dir = dir_opt ? *dir_opt : g_eng.plugins_dir;
         int n = 0;
         if (!dir.empty() && std::filesystem::exists(dir)) {
-            n = g_plugin_mgr.scan_plugins(dir);
+            n = g_eng.plugin_mgr.scan_plugins(dir);
         }
         std::string out = "{\"scanned\":";
         xp::json_escape_into(out, dir);
@@ -4113,11 +4142,11 @@ static void cmd_unquarantine_plugin_(xi::ws::Server& srv, int64_t id, const xp::
         auto pdir  = xp::get_string_field(parsed->args_json, "dir");
         std::string key = pname ? *pname : (pdir ? *pdir : std::string());
         if (key.empty()) { send_rsp_err(srv, id, "missing name or dir"); return; }
-        bool cleared = g_plugin_mgr.unquarantine_plugin(key);
+        bool cleared = g_eng.plugin_mgr.unquarantine_plugin(key);
         if (!cleared) { send_rsp_err(srv, id, "no quarantine found for: " + key); return; }
         int rearmed = 0;
-        if (!g_plugins_dir.empty() && std::filesystem::exists(g_plugins_dir))
-            rearmed = g_plugin_mgr.scan_plugins(g_plugins_dir);
+        if (!g_eng.plugins_dir.empty() && std::filesystem::exists(g_eng.plugins_dir))
+            rearmed = g_eng.plugin_mgr.scan_plugins(g_eng.plugins_dir);
         std::string out = "{\"unquarantined\":";
         xp::json_escape_into(out, key);
         out += ",\"rearmed\":" + std::to_string(rearmed) + "}";
@@ -4127,7 +4156,7 @@ static void cmd_unquarantine_plugin_(xi::ws::Server& srv, int64_t id, const xp::
 static void cmd_load_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto pname = xp::get_string_field(parsed->args_json, "name");
         if (!pname) { send_rsp_err(srv, id, "missing name"); return; }
-        if (g_plugin_mgr.load_plugin(*pname)) {
+        if (g_eng.plugin_mgr.load_plugin(*pname)) {
             send_rsp_ok(srv, id);
         } else {
             send_rsp_err(srv, id, "failed to load plugin: " + *pname);
@@ -4141,14 +4170,14 @@ static void cmd_export_project_plugin_(xi::ws::Server& srv, int64_t id, const xp
         auto pname = xp::get_string_field(parsed->args_json, "plugin");
         auto dest  = xp::get_string_field(parsed->args_json, "dest");
         if (!pname || !dest) { send_rsp_err(srv, id, "missing plugin or dest"); return; }
-        if (!g_plugin_mgr.is_project_plugin(*pname)) {
+        if (!g_eng.plugin_mgr.is_project_plugin(*pname)) {
             send_rsp_err(srv, id, "not a project plugin: " + *pname);
             return;
         }
         // export_project_plugin recompiles in Release; quiesce so no dispatcher
         // worker is mid-call into the same plugin's instances.
         auto _export_guard = quiesce_dispatch_for_lifecycle_op_("export_project_plugin", &srv);  // resumes at block end
-        auto er = g_plugin_mgr.export_project_plugin(*pname, *dest);
+        auto er = g_eng.plugin_mgr.export_project_plugin(*pname, *dest);
         std::string data = "{\"plugin\":";
         xp::json_escape_into(data, *pname);
         data += ",\"dest\":";
@@ -4180,7 +4209,7 @@ static void cmd_recompile_project_plugin_(xi::ws::Server& srv, int64_t id, const
         // loaded so running inspection isn't disrupted.
         auto pname = xp::get_string_field(parsed->args_json, "plugin");
         if (!pname) { send_rsp_err(srv, id, "missing plugin"); return; }
-        if (!g_plugin_mgr.is_project_plugin(*pname)) {
+        if (!g_eng.plugin_mgr.is_project_plugin(*pname)) {
             send_rsp_err(srv, id, "not a project plugin: " + *pname);
             return;
         }
@@ -4189,7 +4218,7 @@ static void cmd_recompile_project_plugin_(xi::ws::Server& srv, int64_t id, const
         // on those instances from a dispatcher worker would dereference
         // freed code. Drain first.
         auto guard = quiesce_dispatch_for_lifecycle_op_("recompile_project_plugin", &srv);
-        auto rr = g_plugin_mgr.recompile_project_plugin(*pname);
+        auto rr = g_eng.plugin_mgr.recompile_project_plugin(*pname);
         // Build diagnostics JSON — same shape as compile_and_load.
         std::string diag_json = "[";
         for (size_t i = 0; i < rr.diagnostics.size(); ++i) {
@@ -4261,7 +4290,7 @@ static void cmd_rebuild_plugins_(xi::ws::Server& srv, int64_t id, const xp::Pars
             yyjson_doc_free(adoc);
         }
         auto guard = quiesce_dispatch_for_lifecycle_op_("rebuild_plugins", &srv);
-        auto rep = g_plugin_mgr.rebuild_cmake_plugins(
+        auto rep = g_eng.plugin_mgr.rebuild_cmake_plugins(
             cmake_exe ? *cmake_exe : std::string("cmake"),
             config    ? *config    : std::string("Release"),
             only);
@@ -4294,7 +4323,7 @@ static void cmd_get_plugin_ui_(xi::ws::Server& srv, int64_t id, const xp::Parsed
         // load it into a webview.
         auto plugin = xp::get_string_field(parsed->args_json, "plugin");
         if (!plugin) { send_rsp_err(srv, id, "missing plugin"); return; }
-        auto* pi = g_plugin_mgr.find_plugin(*plugin);
+        auto* pi = g_eng.plugin_mgr.find_plugin(*plugin);
         if (pi && pi->has_ui) {
             std::string data = "{\"ui_path\":";
             xp::json_escape_into(data, pi->ui_path);
@@ -4309,7 +4338,7 @@ static void cmd_toolchain_health_(xi::ws::Server& srv, int64_t id, const xp::Par
         // C++ toolchain health check for the open project. Reports each
         // component's resolved path + source (override/env/default/none) +
         // whether it exists, so the config UI can warn on missing/wrong paths.
-        send_rsp_ok(srv, id, xi::toolchain::health_json(g_project_folder, g_include_dir_default));
+        send_rsp_ok(srv, id, xi::toolchain::health_json(g_eng.project_folder, g_eng.include_dir_default));
 }
 
 static void cmd_set_toolchain_override_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
@@ -4330,16 +4359,16 @@ static void cmd_set_toolchain_override_(xi::ws::Server& srv, int64_t id, const x
         else if (*key == "vcvars")    field = "vcvars";
         else { send_rsp_err(srv, id, "unknown toolchain key: " + *key); return; }
         std::string err;
-        if (!xi::toolchain::write_override(g_project_folder, field, path ? *path : std::string(), err)) {
+        if (!xi::toolchain::write_override(g_eng.project_folder, field, path ? *path : std::string(), err)) {
             send_rsp_err(srv, id, "set_toolchain_override failed: " + err);
             return;
         }
         // Re-resolve globals so the next compile reflects the change; the editor's
         // IntelliSense config is the VS Code extension's job (it re-reads the
         // health below). The core no longer writes .vscode.
-        resolve_toolchain_(g_project_folder);
+        resolve_toolchain_(g_eng.project_folder);
         std::string data = "{\"applied\":true,\"recompile_needed\":true,\"health\":";
-        data += xi::toolchain::health_json(g_project_folder, g_include_dir_default);
+        data += xi::toolchain::health_json(g_eng.project_folder, g_eng.include_dir_default);
         data += "}";
         send_rsp_ok(srv, id, data);
 }
@@ -4537,39 +4566,39 @@ int main(int argc, char** argv) {
         std::filesystem::path p = xi::cli::get_exe_dir();
         for (int i = 0; i < 6; ++i) {
             if (std::filesystem::exists(p / "include" / "xi" / "xi.hpp")) {
-                g_include_dir = (p / "include").string();
+                g_eng.include_dir = (p / "include").string();
                 break;
             }
             if (!p.has_parent_path() || p.parent_path() == p) break;
             p = p.parent_path();
         }
-        if (g_include_dir.empty()) {
+        if (g_eng.include_dir.empty()) {
             // Fallback: next to the exe.
-            g_include_dir = (std::filesystem::path(xi::cli::get_exe_dir()) / "include").string();
+            g_eng.include_dir = (std::filesystem::path(xi::cli::get_exe_dir()) / "include").string();
         }
         // Remember the shipped headers as the default a project override falls
         // back to (see resolve_toolchain_).
-        g_include_dir_default = g_include_dir;
+        g_eng.include_dir_default = g_eng.include_dir;
     }
-    g_work_dir = (std::filesystem::temp_directory_path() / "xinsp2").string();
-    std::filesystem::create_directories(g_work_dir);
+    g_eng.work_dir = (std::filesystem::temp_directory_path() / "xinsp2").string();
+    std::filesystem::create_directories(g_eng.work_dir);
 
     // Probe accelerators once. Logged so the user can see what their
     // compiled scripts will inherit.
-    g_opencv_dir     = xi::script::detail::probe_opencv_dir();
-    g_turbojpeg_root = xi::script::detail::probe_turbojpeg_root();
-    g_ipp_root       = xi::script::detail::probe_ipp_root();
+    g_eng.opencv_dir     = xi::script::detail::probe_opencv_dir();
+    g_eng.turbojpeg_root = xi::script::detail::probe_turbojpeg_root();
+    g_eng.ipp_root       = xi::script::detail::probe_ipp_root();
     std::fprintf(stderr, "[xinsp2] script-side accelerators: opencv=%s  turbojpeg=%s  ipp=%s\n",
-                 g_opencv_dir.empty()     ? "no" : g_opencv_dir.c_str(),
-                 g_turbojpeg_root.empty() ? "no" : g_turbojpeg_root.c_str(),
-                 g_ipp_root.empty()       ? "no" : g_ipp_root.c_str());
+                 g_eng.opencv_dir.empty()     ? "no" : g_eng.opencv_dir.c_str(),
+                 g_eng.turbojpeg_root.empty() ? "no" : g_eng.turbojpeg_root.c_str(),
+                 g_eng.ipp_root.empty()       ? "no" : g_eng.ipp_root.c_str());
 
     // Find and scan plugins directory (sibling of backend/)
     {
         std::filesystem::path p = xi::cli::get_exe_dir();
         for (int i = 0; i < 6; ++i) {
             if (std::filesystem::exists(p / "plugins")) {
-                g_plugins_dir = (p / "plugins").string();
+                g_eng.plugins_dir = (p / "plugins").string();
                 break;
             }
             if (!p.has_parent_path() || p.parent_path() == p) break;
@@ -4578,16 +4607,16 @@ int main(int argc, char** argv) {
     }
     // G1.3 — certify each discovered plugin in a throwaway child (this same
     // backend exe, --certify-plugin mode) before arming it during the scan. A DLL
-    // that crashes certification is skipped + surfaced (g_plugin_mgr.certify_
+    // that crashes certification is skipped + surfaced (g_eng.plugin_mgr.certify_
     // warnings()), so discovery can never load a known-bad DLL into the backend.
     {
         char exe[MAX_PATH];
         DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-        if (n) g_plugin_mgr.set_certify_exe(std::string(exe, n));
+        if (n) g_eng.plugin_mgr.set_certify_exe(std::string(exe, n));
     }
-    if (!g_plugins_dir.empty()) {
-        int n = g_plugin_mgr.scan_plugins(g_plugins_dir);
-        std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, g_plugins_dir.c_str());
+    if (!g_eng.plugins_dir.empty()) {
+        int n = g_eng.plugin_mgr.scan_plugins(g_eng.plugins_dir);
+        std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, g_eng.plugins_dir.c_str());
     }
     // Additional plugin folders from --plugins-dir / XINSP2_EXTRA_PLUGIN_DIRS.
     // Lets external SDKs keep their plugin DLLs in place — no copy needed.
@@ -4596,7 +4625,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[xinsp2] extra plugin dir not found: %s\n", dir.c_str());
             continue;
         }
-        int n = g_plugin_mgr.scan_plugins(dir);
+        int n = g_eng.plugin_mgr.scan_plugins(dir);
         std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, dir.c_str());
     }
 
@@ -4604,12 +4633,12 @@ int main(int argc, char** argv) {
     // FE-quarantined) into the recent-errors ring so cmd:recent_errors + the
     // extension toast tell the operator WHICH plugin is disabled and why (not just
     // a silently-missing plugin). The scan already logged each to stderr.
-    for (auto& w : g_plugin_mgr.certify_warnings())
+    for (auto& w : g_eng.plugin_mgr.certify_warnings())
         push_recent_error("plugin", w.reason);
 
-    std::fprintf(stderr, "[xinsp2] include_dir=%s\n", g_include_dir.c_str());
-    std::fprintf(stderr, "[xinsp2] work_dir=%s\n",    g_work_dir.c_str());
-    std::fprintf(stderr, "[xinsp2] plugins_dir=%s\n",  g_plugins_dir.c_str());
+    std::fprintf(stderr, "[xinsp2] include_dir=%s\n", g_eng.include_dir.c_str());
+    std::fprintf(stderr, "[xinsp2] work_dir=%s\n",    g_eng.work_dir.c_str());
+    std::fprintf(stderr, "[xinsp2] plugins_dir=%s\n",  g_eng.plugins_dir.c_str());
 
     // Process isolation + SHM removed 2026-05: all plugins run
     // in-process and share the host ImagePool directly (zero-copy via
@@ -4620,16 +4649,16 @@ int main(int argc, char** argv) {
     // to the plugin manager — project plugins (compiled when a project
     // is opened) need the include dir, vcvars, and accelerator roots.
     xi::CompileEnv env;
-    env.include_dir    = g_include_dir;
-    env.opencv_dir     = g_opencv_dir;
-    env.turbojpeg_root = g_turbojpeg_root;
-    env.ipp_root       = g_ipp_root;
+    env.include_dir    = g_eng.include_dir;
+    env.opencv_dir     = g_eng.opencv_dir;
+    env.turbojpeg_root = g_eng.turbojpeg_root;
+    env.ipp_root       = g_eng.ipp_root;
     // --aot: this is a prebuilt bundle — load existing plugin DLLs instead of
     // compiling (no cl.exe on the target). The autostart script should point at a
     // .dll too (compile_and_load loads a .dll directly).
     env.aot = xi::cli::has_flag(argc, argv, "--aot");
     if (env.aot) std::fprintf(stderr, "[xinsp2] AOT mode: loading prebuilt plugin/script DLLs (no compiler)\n");
-    g_plugin_mgr.set_compile_env(env);
+    g_eng.plugin_mgr.set_compile_env(env);
 
     xi::ws::Server srv;
     srv.on_open  = [&] {
@@ -4643,8 +4672,8 @@ int main(int argc, char** argv) {
         // ring — not visible from the new client's perspective, at best confuses,
         // at worst hides regressions.
         {
-            std::lock_guard<std::mutex> lk(g_recent_errors_mu);
-            g_recent_errors.clear();
+            std::lock_guard<std::mutex> lk(g_eng.recent_errors_mu);
+            g_eng.recent_errors.clear();
         }
         // (E-P1-1: the per-instance-death dedup set was removed with
         // process isolation in 2026-05; no set to clear here.)
@@ -4661,11 +4690,11 @@ int main(int argc, char** argv) {
     srv.set_bind_host(host);
     if (!secret.empty()) srv.set_auth_secret(secret);
 
-    g_watchdog_ms = xi::cli::parse_watchdog_ms(argc, argv);
-    if (g_watchdog_ms.load() > 0) {
-        std::fprintf(stderr, "[xinsp2] watchdog enabled: %d ms per inspect\n", g_watchdog_ms.load());
+    g_eng.watchdog_ms = xi::cli::parse_watchdog_ms(argc, argv);
+    if (g_eng.watchdog_ms.load() > 0) {
+        std::fprintf(stderr, "[xinsp2] watchdog enabled: %d ms per inspect\n", g_eng.watchdog_ms.load());
     }
-    g_srv_for_bp = &srv;   // status_cb + dropped-frame markers emit through it
+    g_eng.srv_for_bp = &srv;   // status_cb + dropped-frame markers emit through it
     // Route plugin host_api->set_status into the status registry. Non-capturing
     // so it converts to the StatusSinkFn function pointer.
     xi::status_sink() = [](const char* who, const char* text) {
@@ -4676,7 +4705,7 @@ int main(int argc, char** argv) {
     // Non-capturing → converts to the BinarySinkFn function pointer. Thread-safe:
     // send_binary may be called from a dispatch worker (any sink's binary push path).
     xi::binary_sink() = [](const void* data, int len) {
-        if (auto* s = g_srv_for_bp.load(std::memory_order_acquire))
+        if (auto* s = g_eng.srv_for_bp.load(std::memory_order_acquire))
             s->send_binary(static_cast<const uint8_t*>(data), static_cast<size_t>(len));
     };
     // ABI v9: a generic JPEG-encode host service — process-global N-rotate cache
@@ -4723,7 +4752,7 @@ int main(int argc, char** argv) {
     // send_text + push_recent_error may be called from any dispatch worker.
     xi::log_sink() = [](int32_t level, const char* msg, int64_t /*ts_ms*/) {
         if (level < 2 || !msg) return;                 // only WARN(2)/ERROR(3) escalate
-        if (auto* s = g_srv_for_bp.load(std::memory_order_acquire)) {
+        if (auto* s = g_eng.srv_for_bp.load(std::memory_order_acquire)) {
             xp::LogMsg lm; lm.level = (level >= 3) ? "error" : "warn"; lm.msg = msg;
             s->send_text(lm.to_json());
         }
@@ -4751,8 +4780,8 @@ int main(int argc, char** argv) {
     //     instance) and risk heap corruption. The process is unrecoverable, so
     //     the backend EXITS; the FE supervisor respawns a clean one (and drives
     //     the line safe). Run without an FE => backend stays down by design.
-    g_watchdog_run = true;
-    g_watchdog_thread = std::thread([&srv]() {
+    g_eng.watchdog_run = true;
+    g_eng.watchdog_thread = std::thread([&srv]() {
         auto now_ms = [] {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -4766,12 +4795,12 @@ int main(int argc, char** argv) {
         // target) is left for the next loop iteration to give its OWN
         // cooperative round, rather than being hard-killed without warning.
         int64_t wd_snap[WD_SLOTS];
-        while (g_watchdog_run.load()) {
+        while (g_eng.watchdog_run.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             int64_t now = now_ms();
             bool any_overran = false;
             for (int i = 0; i < WD_SLOTS; ++i) {
-                int64_t dl = g_wd_deadlines[i].load();
+                int64_t dl = g_eng.wd_deadlines[i].load();
                 if (dl != 0 && now >= dl) { wd_snap[i] = dl; any_overran = true; }
                 else                       { wd_snap[i] = 0; }
             }
@@ -4782,10 +4811,10 @@ int main(int argc, char** argv) {
             // tried the soft cancel first, not jumped straight to the kill).
             std::fprintf(stderr,
                 "[xinsp2] watchdog: inspect overran %dms — requesting cooperative cancel\n",
-                g_watchdog_ms.load());
+                g_eng.watchdog_ms.load());
             {
-                std::lock_guard<std::mutex> lk(g_script_mu);
-                if (g_script.set_global_cancel) g_script.set_global_cancel(1);
+                std::lock_guard<std::mutex> lk(g_eng.script_mu);
+                if (g_eng.script.set_global_cancel) g_eng.script.set_global_cancel(1);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
@@ -4795,34 +4824,34 @@ int main(int argc, char** argv) {
             // slot is not mistaken for the original stuck one.
             bool still_stuck = false;
             for (int i = 0; i < WD_SLOTS; ++i) {
-                if (wd_snap[i] != 0 && g_wd_deadlines[i].load() == wd_snap[i]) {
+                if (wd_snap[i] != 0 && g_eng.wd_deadlines[i].load() == wd_snap[i]) {
                     still_stuck = true; break;
                 }
             }
             if (!still_stuck) {
                 {
-                    std::lock_guard<std::mutex> lk(g_script_mu);
-                    if (g_script.set_global_cancel) g_script.set_global_cancel(0);
+                    std::lock_guard<std::mutex> lk(g_eng.script_mu);
+                    if (g_eng.script.set_global_cancel) g_eng.script.set_global_cancel(0);
                 }
-                int n = ++g_watchdog_trips;
+                int n = ++g_eng.watchdog_trips;
                 std::fprintf(stderr,
                     "[xinsp2] watchdog tripped (#%d) — script honoured cooperative cancel\n", n);
                 emit_error_log(srv,
                     "watchdog tripped — inspect exceeded "
-                    + std::to_string(g_watchdog_ms.load())
+                    + std::to_string(g_eng.watchdog_ms.load())
                     + "ms; cooperative cancel succeeded");
                 continue;
             }
 
             // Phase 2: hard trip — exit for FE respawn (see header above).
-            ++g_watchdog_trips;
+            ++g_eng.watchdog_trips;
             std::fprintf(stderr,
                 "[xinsp2] watchdog HARD trip - inspect exceeded %dms and ignored "
                 "cooperative cancel; exiting for supervisor respawn (rc=0x%04X)\n",
-                g_watchdog_ms.load(), WATCHDOG_EXIT_CODE);
+                g_eng.watchdog_ms.load(), WATCHDOG_EXIT_CODE);
             emit_error_log(srv,
                 "watchdog HARD trip — inspect exceeded "
-                + std::to_string(g_watchdog_ms.load())
+                + std::to_string(g_eng.watchdog_ms.load())
                 + "ms and ignored cooperative cancel; backend exiting for respawn");
             std::fflush(stderr);
             std::fflush(stdout);
@@ -4834,14 +4863,14 @@ int main(int argc, char** argv) {
     // Stop+join the always-on watchdog on ANY exit from here down — the bind-fail
     // `return 1` just below and the debug `--hang-*` `return 0`s all sit AFTER the
     // thread was spawned. A joinable std::thread destroyed at static teardown (the
-    // file-scope g_watchdog_thread) invokes std::terminate, which the still-armed
+    // file-scope g_eng.watchdog_thread) invokes std::terminate, which the still-armed
     // crash filter turns into a spurious minidump + abnormal exit — the FE reads a
     // routine port-in-use as a backend CRASH. The normal epilogue joins too; this
     // then no-ops (joinable()==false).
     struct WatchdogJoiner {
         ~WatchdogJoiner() {
-            g_watchdog_run = false;
-            if (g_watchdog_thread.joinable()) g_watchdog_thread.join();
+            g_eng.watchdog_run = false;
+            if (g_eng.watchdog_thread.joinable()) g_eng.watchdog_thread.join();
         }
     } wd_joiner_;
     if (!srv.start(port)) {
@@ -4901,7 +4930,7 @@ int main(int argc, char** argv) {
                 if (sp.is_relative()) sp = std::filesystem::path(project) / sp;
                 script = sp.string();
             } else {
-                script = g_plugin_mgr.project().script_path;
+                script = g_eng.plugin_mgr.project().script_path;
             }
             if (script.empty() || !std::filesystem::exists(script)) {
                 std::fprintf(stderr,
@@ -4919,7 +4948,7 @@ int main(int argc, char** argv) {
                 // port up (operator can attach + fix) but the line CANNOT inspect,
                 // so mark degraded and withhold "ready" — the FE then treats a
                 // non-inspecting line as unhealthy instead of silently "healthy".
-                if (!g_script.ok()) {
+                if (!g_eng.script.ok()) {
                     degraded = true;
                     std::fprintf(stderr,
                         "[xinsp2] autostart: degraded - script failed to compile/load; "
@@ -4947,7 +4976,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[xinsp2] autostart: --hang-before-ready (debug) — "
                                  "hanging before ready\n");
             std::fflush(stderr);
-            while (!g_should_exit.load()) {
+            while (!g_eng.should_exit.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
             return 0;
@@ -4988,7 +5017,7 @@ int main(int argc, char** argv) {
     if (xi::cli::has_flag(argc, argv, "--hang-after-ready")) {
         std::fprintf(stderr, "[xinsp2] --hang-after-ready (debug) — wedging the serving loop\n");
         std::fflush(stderr);
-        while (!g_should_exit.load()) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        while (!g_eng.should_exit.load()) std::this_thread::sleep_for(std::chrono::milliseconds(200));
         return 0;
     }
 
@@ -5004,19 +5033,19 @@ int main(int argc, char** argv) {
 #endif
 
     int64_t hb_last_ms = 0;
-    while (!g_should_exit.load() && srv.is_running()) {
+    while (!g_eng.should_exit.load() && srv.is_running()) {
         srv.poll(100);
         int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         if (now - hb_last_ms >= 1000) { write_heartbeat(); hb_last_ms = now; }
     }
 
-    g_watchdog_run = false;
-    if (g_watchdog_thread.joinable()) g_watchdog_thread.join();   // join before teardown nulls srv
+    g_eng.watchdog_run = false;
+    if (g_eng.watchdog_thread.joinable()) g_eng.watchdog_thread.join();   // join before teardown nulls srv
     // Controlled teardown before `srv` (a main() local captured by the bus sink +
-    // g_srv_for_bp) leaves scope, and while the ImagePool/TriggerBus singletons
+    // g_eng.srv_for_bp) leaves scope, and while the ImagePool/TriggerBus singletons
     // are still alive — covers exits that didn't go through cmd:shutdown (e.g.
-    // g_should_exit flipped elsewhere). Single source of truth; idempotent with
+    // g_eng.should_exit flipped elsewhere). Single source of truth; idempotent with
     // the shutdown handler. Runs BEFORE srv.stop() so the pool's workers are
     // joined (no emit) before the server goes away.
     controlled_shutdown_teardown_();
