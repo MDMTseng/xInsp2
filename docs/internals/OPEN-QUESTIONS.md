@@ -85,6 +85,18 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
 - **Part III G3.2 (debug illegal-transition asserts)** deferred to backlog (A3 kept the handshake PR focused).
   The contract is documented (G3.1); the asserts that enforce it are the open follow-up.
 
+### Decisions made (user returned, 2026-07-01)
+- **OQ-1 → option (b): install clang-cl.** Wire a clang-cl build config → **in-process libFuzzer** targets
+  (`parse_cmd`/yyjson/ABI/`get_interface`) + **UBSan**. (TSan stays unavailable — clang-cl TSan on Windows is
+  not reliable; real TSan remains a future Linux-lane item, not blocking.)
+- **Phase 4 → GO, full "大破大立" in one shot. Major ABI break authorized.** Stop publishing `xi.legacy`,
+  **remove the dead `shm_*` stubs** from `xi_host_api`, bump `XI_ABI_VERSION`→11, raise `XI_ABI_MIN_COMPAT`,
+  evolve the freeze guard to v11, rebuild all in-tree plugins. Old-layout plugins refused (acceptable — all
+  first-party plugins are rebuildable in-tree).
+- **OQ-2 → push as a BRANCH** (not master). Open for review; do not move `origin/master`.
+- **All other OQs (OQ-3, OQ-5, OQ-6, OQ-7, OQ-8, G3.2) → keep documented, user decides later.**
+- **OQ-4** → already implemented (runner `--certify-plugin` mode); effectively closed.
+
 ### Resolved (recorded for trail)
 - **II-vs-III ordering** → **parallel tracks** after Tier 0 (user: "能平行就平行", 2026-07-01).
 - **Gated pipeline vs single auto-workflow** → **gated, phase-by-phase** with build+test gates (user-approved).
