@@ -3,6 +3,7 @@
 //
 
 #include <xi/xi.hpp>
+#include <xi/xi_instance.hpp>   // xi::Instance<T> / InstanceBase (no longer in the xi.hpp umbrella)
 #include <xi/xi_image.hpp>
 
 // A trivial plugin that holds a multiplier and a name.

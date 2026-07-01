@@ -145,7 +145,9 @@ public:
            .set("close_radius",   close_r)
            .set("min_area",       min_a)
            .set("max_area",       max_a);
-        out.set_raw("centroids", yyjson_mut_val_mut_copy(out.doc(), arr.raw()));
+        // set_value deep-copies arr's node from its own Json doc into out's doc —
+        // exactly the cross-doc copy the manual yyjson_mut_val_mut_copy did.
+        out.set_value("centroids", xi::Record::Value(arr.raw()));
         return out;
     }
 

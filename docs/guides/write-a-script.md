@@ -191,6 +191,15 @@ auto out  = det.process(xi::Record().image("gray", img).set("t", 50));
 `xi::use` works seamlessly across script reloads: the proxy
 re-resolves to the host's current instance after each load.
 
+> **`xi::use("name")` vs `xi::Instance<T>` — two distinct tools, not two ways to
+> do one thing.** `xi::use("name")` reaches a **host-registered** instance (created
+> via the UI / `cmd:create_instance`, owned and persisted by the host) — this is
+> the normal path and comes in through the `xi/xi.hpp` umbrella. `xi::Instance<T>`
+> is a **script-owned** instance you declare and own *inline* in the script — an
+> advanced capability you opt into explicitly with `#include <xi/xi_instance.hpp>`
+> (it is no longer auto-included by the umbrella). Reach for `xi::use` first; use
+> `xi::Instance<T>` only when you deliberately want the script to own the instance.
+
 Image sources are ordinary plugins too — they don't sit behind a pull/`grab`
 API. A source pushes frames by calling `host->emit_record(...)`, and the script
 reads the resulting frame from `xi::current_trigger()` (see *Triggers /
@@ -221,6 +230,25 @@ For richer config (nested objects, arrays), use `xi::state()` instead
 or expose it through a plugin's `set_def`.
 
 ---
+
+## Output channels at a glance — which one do I use?
+
+Historically a script had six-plus ways to emit something (VAR, EMIT, result,
+status, expose, emit_binary). That is now **two blessed surfaces** plus one
+operator-status side-channel. When you ask *"how do I show this value?"* the
+answer is almost always **expose**:
+
+| I want to… | Use | What it is |
+|---|---|---|
+| Ship the run's **pass/fail verdict** (one per run) | `xi::result(code,msg)` / `xi::ok(...)` / `xi::ng(...)` | The single verdict record MES/PLC/HMI consume. Exactly one per run, last-write-wins. |
+| Show **any other value or image** (scores, counts, previews, debug channels) | `xi::use("expose").process(rec)` | The official observational data-out surface. Build a plain `xi::Record`, tag `"$channel"`, push. |
+| Set the operator-facing **"what am I doing right now"** string | `xi::status("...")` | One sticky, human, last-write-wins status line (`xi_status.hpp`). Not a value, not a log. |
+| Write a diagnostic **log line** | `host->log(...)` / plugin `log_*` | Event stream for debugging, not UI values. |
+
+Everything else is legacy: **`VAR(...)` / `EMIT(...)` are removed no-ops** (they
+still compile so old scripts build, but publish nothing — see below), and the old
+per-key `VAR`/`vars`/JPEG-preview wire paths are gone. There is **no** author-facing
+`emit_binary` verb to reach for — image output rides on the `expose` record.
 
 ## Surfacing output — the `expose` plugin
 

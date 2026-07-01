@@ -27,6 +27,17 @@
 // This header stays independent of the existing PluginInstanceBase hierarchy
 // in xInsp — the adapter that bridges the two lives in the service layer.
 //
+// TWO DISTINCT TOOLS (not two ways to do one thing):
+//
+//   xi::use("name")   — reach a HOST-registered instance (created via the UI /
+//                       cmd:create_instance). This is the NORMAL path; the host
+//                       owns the instance and it survives hot-reload. Reached
+//                       through the xi.hpp umbrella (xi_use.hpp).
+//   xi::Instance<T>   — a SCRIPT-OWNED instance you declare + own inline in the
+//                       script. Advanced/opt-in: this header is NOT pulled by the
+//                       xi.hpp umbrella, so a script that wants one includes
+//                       <xi/xi_instance.hpp> explicitly.
+//
 
 #include <memory>
 #include <mutex>

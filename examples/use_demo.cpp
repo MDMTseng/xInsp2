@@ -15,9 +15,14 @@ xi::Param<int> thresh{"threshold", 128, {0, 255}};
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    // Access backend-managed camera — survives hot-reload
-    auto& cam = xi::use("cam0");
-    auto img = cam.grab(500);
+    // PUSH model: the camera SOURCE pushes frames into the trigger bus; the
+    // script reads the CURRENT trigger's image instead of pulling with grab().
+    // xi::use("name") still reaches backend-managed instances for process()/
+    // exchange() (config, detectors), but the frame itself arrives via the
+    // trigger — a one-image trigger resolves under any key, so "cam0" (or the
+    // real source name) returns the pushed frame; empty when no trigger is live.
+    auto t = xi::current_trigger();
+    xi::Image img = t.is_active() ? t.image("cam0") : xi::Image{};
 
     if (img.empty()) {
         // No camera frame — generate a test image

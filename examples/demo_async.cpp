@@ -29,6 +29,7 @@
 #include <thread>
 
 #include <xi/xi.hpp>
+#include <xi/xi_instance.hpp>   // xi::Instance<T> / InstanceBase (no longer in the xi.hpp umbrella)
 
 // --- pretend operators ---
 

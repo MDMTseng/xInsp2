@@ -8,8 +8,14 @@
 //
 //   void inspect(Image frame) { ... }
 //
-// This pulls in the async primitives, tunable params, and the instance
-// registry. It is deliberately OpenCV-free: a routine that does no CV
+// This pulls in the async primitives, tunable params, and cross-frame state.
+// It does NOT pull in xi_instance.hpp: reaching a HOST-registered instance is
+// the normal path and uses xi::use("name") (xi_use.hpp). A SCRIPT-OWNED
+// xi::Instance<T> is a distinct, advanced capability you opt into explicitly:
+//
+//   #include <xi/xi_instance.hpp>
+//
+// It is deliberately OpenCV-free: a routine that does no CV
 // compiles with OpenCV OFF the include path. xInsp2's own op library
 // (xi::ops::*) was removed; scripts and plugins that want cv:: opt in with
 //
@@ -26,5 +32,4 @@
 #include "xi_image.hpp"
 #include "xi_io.hpp"
 #include "xi_param.hpp"
-#include "xi_instance.hpp"
 #include "xi_state.hpp"

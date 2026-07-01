@@ -307,33 +307,18 @@ public:
     }
     Record& set(const std::string& key, const char* v) { return set(key, std::string(v ? v : "")); }
 
-    // Nest a sub-Record as a JSON object (deep copy into this doc).
-    // KNOWN LIMITATION: only the JSON is copied, NOT the sub-Record's images_ —
-    // so nesting a Record that carries images (e.g. xi::Region's mask) silently
-    // drops those pixels. Warn once so an author hits it loudly instead of
-    // chasing an empty mask. (Proper fix = namespacing sub images into the
-    // parent; deferred.)
+    // Nest a sub-Record as a JSON object (deep copy into this doc). The
+    // sub-Record's IMAGES are NOT dropped: they are merged into this Record's
+    // image bag under a namespaced key ("<key>.<imgkey>") so they survive the
+    // nest and stay retrievable via get_image("<key>.<imgkey>"). (Previously the
+    // images were silently dropped with only a warn-once — a data-loss footgun,
+    // e.g. a nested xi::Region's mask would vanish.)
     Record& set(const std::string& key, const Record& sub) {
         cow_();
-        warn_sub_images_dropped_(sub, key.c_str());
         yyjson_mut_val* dup = sub.root_ ? yyjson_mut_val_mut_copy(doc_, sub.root_)
                                         : yyjson_mut_obj(doc_);
         put_(key.c_str(), dup);
-        return *this;
-    }
-
-    // Add a raw yyjson value that ALREADY belongs to this Record's doc (advanced).
-    // NOTE: not valid on a frozen/borrowed view — `item` must come from THIS
-    // Record's (owned) doc, so callers building `item` must already have an owned
-    // doc; cow_() here would orphan an item built against the pre-COW doc.
-    // A frozen Record shares its doc with another copy, so writing here would
-    // corrupt that sibling — assert against it in debug (compiled out in release,
-    // zero hot-path cost). Force ownership first by mutating via a normal setter.
-    Record& set_raw(const std::string& key, yyjson_mut_val* item) {
-        assert(!frozen_.load(std::memory_order_relaxed) &&
-                           "set_raw on a frozen/shared Record corrupts the sibling copy "
-                           "— mutate it through a normal setter first to force copy-on-write");
-        put_(key.c_str(), item);
+        merge_sub_images_(sub, key);
         return *this;
     }
 
@@ -366,10 +351,15 @@ public:
     }
     Record& push(const std::string& key, const Record& sub) {
         cow_();
-        warn_sub_images_dropped_(sub, key.c_str());   // see set(key, Record&)
+        yyjson_mut_val* arr = ensure_arr_(key.c_str());
+        // Namespace merged images by the element's array index so pushing several
+        // image-carrying sub-Records under one key doesn't collide — see
+        // set(key, Record&) for the merge (was a silent image drop).
+        size_t idx = yyjson_mut_arr_size(arr);
         yyjson_mut_val* dup = sub.root_ ? yyjson_mut_val_mut_copy(doc_, sub.root_)
                                         : yyjson_mut_obj(doc_);
-        yyjson_mut_arr_add_val(ensure_arr_(key.c_str()), dup);
+        yyjson_mut_arr_add_val(arr, dup);
+        merge_sub_images_(sub, key + "[" + std::to_string(idx) + "]");
         return *this;
     }
 
@@ -719,18 +709,32 @@ private:
     // box's rc / host_release (acq_rel) already order the doc handoff.
     mutable std::atomic<bool> frozen_{false};
 
-    // One-shot warning when a sub-Record carrying images is nested (its images_
-    // are dropped — see set(key, Record&)). Static flag ⇒ at most one line per
-    // process per TU, never on the hot path for image-less records.
-    static void warn_sub_images_dropped_(const Record& sub, const char* key) {
-        if (sub.images_.empty()) return;
-        static std::atomic<bool> warned{false};
-        if (warned.exchange(true)) return;
-        std::fprintf(stderr,
-            "[xi::Record] WARNING: nesting a sub-Record under '%s' drops its %zu "
-            "image(s) — sub-Record images are not carried into the parent "
-            "(e.g. a Region mask would vanish). Carry the image at the top level.\n",
-            key ? key : "?", sub.images_.size());
+    // Merge a nested sub-Record's images into THIS Record's image bag under a
+    // namespaced key ("<prefix>.<imgkey>") so nesting never silently drops
+    // pixels (see set(key, Record&) / push(key, Record&)). Images are pool-backed
+    // refcounted handles, so this is a cheap addref-per-image, and a no-op (zero
+    // cost) for the common image-less sub-Record. A namespaced key that already
+    // exists is overwritten (last-nest-wins) — matching put_'s replace semantics
+    // for the JSON side.
+    void merge_sub_images_(const Record& sub, const std::string& prefix) {
+        for (const auto& [k, img] : sub.images_)
+            images_[prefix + "." + k] = img;
+    }
+
+    // INTERNAL escape hatch (was the public `set_raw`): store a raw yyjson value
+    // that ALREADY belongs to THIS Record's owned doc, no copy. Frozen-hostile and
+    // easy to misuse (a raw val from another doc, or writing through a shared/frozen
+    // doc, corrupts a sibling copy) — so it is private; author code uses the safe,
+    // copy-semantic `set_value(key, Value)` instead. Kept internal for the SDK's own
+    // same-doc splices. Asserts against a frozen doc in debug (compiled out in
+    // release, zero hot-path cost); cow_() is intentionally NOT called here — it
+    // would orphan an `item` built against the pre-COW doc.
+    Record& set_raw_(const std::string& key, yyjson_mut_val* item) {
+        assert(!frozen_.load(std::memory_order_relaxed) &&
+                           "set_raw_ on a frozen/shared Record corrupts the sibling copy "
+                           "— mutate it through a normal setter first to force copy-on-write");
+        put_(key.c_str(), item);
+        return *this;
     }
 
     void init_() {

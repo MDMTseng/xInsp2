@@ -59,8 +59,8 @@ writeFileSync(scriptPath, `
 #include <xi/xi_use.hpp>
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& cam = xi::use("cam0");
-    auto img = cam.grab(100);
+    // Push model: read the pushed frame from the current trigger (no grab()).
+    auto img = xi::current_trigger().image("cam0");
     VAR(frame_num, frame);
     VAR(captured, !img.empty());
     VAR(pass, frame % 2 == 0);

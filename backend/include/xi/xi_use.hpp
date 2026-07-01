@@ -10,9 +10,9 @@
 // Usage:
 //
 //   void xi_inspect_entry(int frame) {
-//       auto& cam = xi::use("cam0");
 //       auto& det = xi::use("det0");
-//       auto img = cam.grab();
+//       // Frames arrive by PUSH — read the current trigger, don't pull:
+//       auto img = xi::current_trigger().image("cam0");
 //       auto result = det.process(xi::Record().image("gray", img));
 //   }
 //
@@ -620,16 +620,12 @@ public:
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
     }
 
-    Image grab(int timeout_ms = 500) {
-        auto grab_fn = reinterpret_cast<UseGrabFn>(g_use_grab_fn_);
-        auto* host   = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
-        if (!grab_fn || !host) return {};
-        xi_image_handle h = grab_fn(name_.c_str(), timeout_ms);
-        if (h == XI_IMAGE_NULL) return {};
-        Image img = Image::adopt_pool_handle(host, h);
-        host->image_release(h);
-        return img;
-    }
+    // NOTE: the pull-style `grab(timeout_ms)` was removed in a v11 API cleanup.
+    // It contradicted the push-only source model: sources push frames via
+    // emit_record into the trigger bus, and scripts read the CURRENT trigger
+    // (xi::current_trigger().image("src") / the XI_INSPECT_ENTRY view) rather
+    // than pulling a frame from an instance. The host-side grab plumbing
+    // (g_use_grab_fn_) is left in place but no longer reachable from the SDK.
 
     const std::string& name() const { return name_; }
 

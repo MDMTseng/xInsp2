@@ -178,11 +178,13 @@ void xi_inspect_entry(int /*frame*/) {
     }
     crossings_so_far_v += delta_crossings_v;
 
-    // 6) Persist state for the next call. set_raw stores the node we
-    //    pass it, which must already belong to the state Record's doc.
+    // 6) Persist state for the next call. set_value deep-copies the array node
+    //    we build into the state Record's doc (the safe, copy-semantic verb that
+    //    replaced the raw same-doc splice).
     xi::state().set("frame_seq",          frame_seq_v + 1);
     xi::state().set("crossings_so_far",   crossings_so_far_v);
-    xi::state().set_raw("prev_centroids", build_centroid_array(xi::state().doc(), cur));
+    xi::state().set_value("prev_centroids",
+                          xi::Record::Value(build_centroid_array(xi::state().doc(), cur)));
 
     // 7) Emit per-frame VARs the driver can read. VAR(name, expr)
     //    expands to `auto name = expr;` — so we name them differently
