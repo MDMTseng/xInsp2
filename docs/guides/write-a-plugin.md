@@ -6,6 +6,23 @@ A plugin is a C++ DLL that exports a small C ABI (`xi_plugin_create`,
 project-open time and the inspection script reaches it via
 `xi::use("instance_name")`.
 
+> **Why you're writing a plugin — the project's spine.** xInsp2 is built on three
+> non-negotiable principles ([README → Core principles](../../README.md#core-principles--the-spine-do-not-drift),
+> the canonical statement): **speed-first, minimal core, functionality-first as
+> plugins.** The core is a deliberately *dumb hub* — it holds zero domain knowledge;
+> every capability (detectors, cameras, I/O, history, analytics, even orchestration)
+> is a plugin composed over the existing ABI. What this means for you as a plugin
+> author:
+> - **Your plugin owns its domain logic + state** — not the core, not the script.
+>   The script just wires; the core just dispatches. Keep the smarts in here.
+> - **Respect the hot path** — `process()` runs per frame. Zero-copy (images *and*
+>   JSON already move by pointer — don't copy them), no I/O or allocation you can
+>   avoid, measure before trading throughput for convenience.
+> - **A feature that feels like it needs a core change almost never does.** Reach
+>   for plugin composition first; the platform stays minimal precisely so it stays
+>   fast and stable. If you truly hit a wall, ask for the *smallest* host primitive
+>   — never a feature baked into the core.
+
 xInsp2 supports **two authoring paths** with the same C ABI on the
 output side. Pick by audience:
 
