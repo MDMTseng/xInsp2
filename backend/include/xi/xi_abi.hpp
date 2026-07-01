@@ -146,6 +146,11 @@ private:
 
 // --- Plugin base class ---
 
+// Forward-decl of the free emit verb (defined below) so Plugin::emit() — the
+// member convenience that fills host()/name() for a source — can forward to it.
+inline void emit_record(const xi_host_api* host, const char* emitter, Record& r,
+                        xi_trigger_id id, int64_t ts);
+
 class Plugin {
 public:
     Plugin(const xi_host_api* host, const std::string& name)
@@ -175,6 +180,15 @@ public:
     }
     void emit_binary(const std::vector<uint8_t>& frame) const {
         emit_binary(frame.data(), (int)frame.size());
+    }
+
+    // Emit a Record as a trigger event — the member sibling of the free
+    // xi::emit_record(host(), name().c_str(), rec, ...). Fills host_/name_
+    // itself so a source can just `emit(rec)` instead of re-passing the
+    // emitter it already is. Forwards verbatim to the free fn (same staging,
+    // same id/ts defaults: id auto-minted, ts = host now).
+    void emit(Record& r, xi_trigger_id id = XI_TRIGGER_NULL, int64_t ts = 0) {
+        xi::emit_record(host_, name_.c_str(), r, id, ts);
     }
 
     // On-disk folder for THIS instance: project/instances/<name>/
@@ -363,7 +377,9 @@ protected:
         }
         if (host_ && host_->log) host_->log(level, msg.c_str());
     }
+    void log_debug(const std::string& msg) { log_at(0, msg); }
     void log_info(const std::string& msg)  { log_at(1, msg); }
+    void log_warn(const std::string& msg)  { log_at(2, msg); }
     void log_error(const std::string& msg) { log_at(3, msg); }
 
     const xi_host_api* host_;

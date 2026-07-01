@@ -573,6 +573,19 @@ public:
     bool is_na() const { return has(kNaKey); }
     std::string na_reason() const { return get_string(kNaKey); }
 
+    // --- Reserved-key registry ----------------------------------------------
+    // Every `$`-prefixed key the framework reserves on a Record. Named here in
+    // ONE place so an author naming a plain field "src"/"channel"/"seq" can't
+    // silently collide with a framework key. See docs/reference/data-types.md
+    // for the authored-facing table.
+    //   kNaKey      "$na"      not-available marker (see na()/is_na() below)
+    //   kSrcKey     "$src"     producing source/operator id (set_src/src)
+    //   kProvKey    "$prov"    per-field provenance map (set_prov/prov_of)
+    //   kChannelKey "$channel" staged-emit / expose sink lane selector
+    //   kSeqKey     "$seq"     host-stamped arrival/run id for ordering
+    static constexpr const char* kChannelKey = "$channel";
+    static constexpr const char* kSeqKey     = "$seq";
+
     // --- Provenance (src id) ------------------------------------------------
     static constexpr const char* kSrcKey  = "$src";
     static constexpr const char* kProvKey = "$prov";
