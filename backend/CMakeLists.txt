@@ -357,6 +357,24 @@ else()
 endif()
 add_test(NAME parallel_safety COMMAND test_parallel_safety)
 
+# High-stress race nets for the owner-propagation + watchdog epoch-cancel GAPs
+# (§28 Tier-2/3). Same /openmp requirement as parallel_safety so parallel_for
+# hits the real threaded owner-reinstall path. The _heavy variant scales the
+# contention; run under -DXINSP2_SANITIZE=address for the UAF/corruption subset.
+add_executable(test_owner_cancel_stress tests/test_owner_cancel_stress.cpp)
+target_link_libraries(test_owner_cancel_stress PRIVATE xi_core)
+if(MSVC)
+    target_compile_options(test_owner_cancel_stress PRIVATE /openmp)
+else()
+    target_compile_options(test_owner_cancel_stress PRIVATE -fopenmp)
+    target_link_libraries(test_owner_cancel_stress PRIVATE pthread)
+    target_link_options(test_owner_cancel_stress PRIVATE -fopenmp)
+endif()
+add_test(NAME owner_cancel_stress COMMAND test_owner_cancel_stress)
+add_test(NAME owner_cancel_stress_heavy COMMAND test_owner_cancel_stress)
+set_tests_properties(owner_cancel_stress_heavy PROPERTIES
+    LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
+
 add_executable(test_image_pool_stress tests/test_image_pool_stress.cpp)
 target_link_libraries(test_image_pool_stress PRIVATE xi_core)
 if(NOT MSVC)
