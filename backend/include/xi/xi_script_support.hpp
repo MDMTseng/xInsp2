@@ -10,6 +10,12 @@
 //
 
 #include "xi.hpp"
+// This header is FORCE-INCLUDED into every inspection script and uses
+// xi::InstanceRegistry (xi_script_*instance* thunks below), so it must include
+// xi_instance.hpp DIRECTLY — the xi.hpp umbrella no longer pulls it in
+// (script authors reach host instances via xi::use; xi::Instance<T> is opt-in),
+// so relying on a transitive include here would break the script compile.
+#include "xi_instance.hpp"
 #include "xi_image.hpp"
 // The script compile path force-includes OpenCV (opencv2/opencv.hpp PCH) and
 // treats it as mandatory, so scripts keep the cv:: convenience — bring in the
