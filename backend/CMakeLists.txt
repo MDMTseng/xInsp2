@@ -327,6 +327,19 @@ add_dependencies(test_prepare_concurrency stage_probe)
 add_test(NAME prepare_concurrency COMMAND test_prepare_concurrency
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_prepare_concurrency>)
 
+# G3.2 debug lifecycle-contract asserts: a fixture (reentry_probe) whose process()
+# re-enters the real CAbiInstanceAdapter on the host thread, proving the Debug-only
+# guard TRAPS same-thread re-entry into a non-reentrant instance (process→set_def /
+# →commit / →process) while leaving the legal cross-thread + reentrant paths clean.
+add_library(reentry_probe SHARED tests/reentry_probe.cpp)
+target_include_directories(reentry_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_executable(test_lifecycle_asserts tests/test_lifecycle_asserts.cpp)
+target_link_libraries(test_lifecycle_asserts PRIVATE xi_core)
+target_compile_definitions(test_lifecycle_asserts PRIVATE REENTRY_PROBE_DLL="reentry_probe.dll")
+add_dependencies(test_lifecycle_asserts reentry_probe)
+add_test(NAME lifecycle_asserts COMMAND test_lifecycle_asserts
+         WORKING_DIRECTORY $<TARGET_FILE_DIR:test_lifecycle_asserts>)
+
 # SHM / worker-process / script-runner tests removed 2026-05 with the
 # FE/BE in-process split (no more SHM region or worker processes).
 set_tests_properties(protocol PROPERTIES
