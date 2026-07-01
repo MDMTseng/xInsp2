@@ -121,12 +121,12 @@ int main() {
         }
     }
 
-    // ---- (5) xi.legacy@9 still hands back the whole-table view ----------------
+    // ---- (5) xi.legacy@9 is RETIRED (Phase 4) — the door no longer answers it --
+    // The whole-table legacy view was retired in Phase 4 (core_fix_plan.md §12):
+    // capabilities are reached via the carved interfaces above or the struct
+    // fields directly, never the legacy passthrough.
     {
-        const auto* tbl = static_cast<const xi_host_api*>(host.get_interface("xi.legacy", 9));
-        CHECK(tbl != nullptr);
-        CHECK(tbl && tbl->image_create == host.image_create);
-        CHECK(tbl && tbl->log          == host.log);
+        CHECK(host.get_interface("xi.legacy", 9) == nullptr);
     }
 
     // ---- (6) unknown id / wrong version -> null ------------------------------

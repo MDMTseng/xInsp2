@@ -217,14 +217,26 @@ add_test(NAME plugin_teardown COMMAND test_plugin_teardown)
 # (not a committed blob), so it always tracks the live headers.
 add_library(golden_plugin SHARED tests/golden_plugin.cpp)
 target_link_libraries(golden_plugin PRIVATE xi_core)
+
+# Phase 4 stale fixtures: deliberately-stale plugins reporting a PRE-v11 ABI
+# (v9 and v10 — the old shm-bearing layout) from one source (STALE_PLUGIN_ABI).
+# The golden test loads them through the real ABI gate and asserts the raised
+# min-compat floor REFUSES them, proving the authorized break bites.
+add_library(stale_plugin_v9 SHARED tests/stale_plugin.cpp)
+target_compile_definitions(stale_plugin_v9 PRIVATE STALE_PLUGIN_ABI=9)
+add_library(stale_plugin_v10 SHARED tests/stale_plugin.cpp)
+target_compile_definitions(stale_plugin_v10 PRIVATE STALE_PLUGIN_ABI=10)
+
 add_executable(test_golden_plugin tests/test_golden_plugin.cpp)
 target_link_libraries(test_golden_plugin PRIVATE xi_core)
 if(WIN32)
     target_link_libraries(test_golden_plugin PRIVATE Ws2_32)
 endif()
-add_dependencies(test_golden_plugin golden_plugin)
+add_dependencies(test_golden_plugin golden_plugin stale_plugin_v9 stale_plugin_v10)
 target_compile_definitions(test_golden_plugin PRIVATE
-    GOLDEN_PLUGIN_DLL="$<TARGET_FILE:golden_plugin>")
+    GOLDEN_PLUGIN_DLL="$<TARGET_FILE:golden_plugin>"
+    STALE_V9_PLUGIN_DLL="$<TARGET_FILE:stale_plugin_v9>"
+    STALE_V10_PLUGIN_DLL="$<TARGET_FILE:stale_plugin_v10>")
 add_test(NAME golden_plugin COMMAND test_golden_plugin)
 
 # ABI freeze-signature guard: declares xi_host_api@9 frozen and fails the BUILD
@@ -646,4 +658,29 @@ set_tests_properties(qa_quarantine_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 # ============================================================================
 # End Part III G2 block.
+# ============================================================================
+
+# ============================================================================
+# BEGIN fuzz/UBSan (clang-cl) — Cluster-2 / T1.1-T1.2 / OQ-1. Separable,
+# agent-owned. Do not interleave with the blocks above. OFF by default: a plain
+# MSVC configure never enters here, so the default build + ctest are unaffected.
+# This is a SEPARATE build configuration from the MSVC XINSP2_SANITIZE block
+# above (which is address-only on MSVC): it requires clang-cl (LLVM) and adds
+# in-process libFuzzer targets + a real UBSan config MSVC cannot provide.
+# Opt in with the 'fuzz' CMake preset, or -DXINSP2_FUZZ=ON plus a clang-cl
+# compiler. See backend/tests/fuzz/README.md.
+# ============================================================================
+option(XINSP2_FUZZ "Build in-process libFuzzer + UBSan targets (requires clang-cl)" OFF)
+
+if(XINSP2_FUZZ)
+    if(NOT (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
+        message(FATAL_ERROR
+            "XINSP2_FUZZ=ON requires clang-cl. Re-configure with "
+            "-DCMAKE_CXX_COMPILER=\"C:/Program Files/LLVM/bin/clang-cl.exe\" "
+            "(the 'fuzz' preset does this for you).")
+    endif()
+    add_subdirectory(tests/fuzz)
+endif()
+# ============================================================================
+# END fuzz/UBSan (clang-cl)
 # ============================================================================

@@ -1,0 +1,11 @@
+# Generated fuzzing artifacts — seeds/ is the committed corpus; corpus/ is the
+# live working corpus the fuzzer grows.
+corpus/
+crash-*
+crash_*
+oom-*
+timeout-*
+leak-*
+*.exe
+*.pdb
+*.ilk

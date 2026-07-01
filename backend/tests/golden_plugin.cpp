@@ -1,6 +1,6 @@
 //
 // golden_plugin.cpp — the GOLDEN xi C-ABI plugin, pinned to the CURRENT ABI
-// (XI_ABI_VERSION 9 / XI_ABI_MIN_COMPAT 6). It is the single most important ABI
+// (XI_ABI_VERSION 11 / XI_ABI_MIN_COMPAT 11). It is the single most important ABI
 // safety net (see docs/internals/adr-001-host-api-freeze.md): a minimal but REAL
 // plugin that the compat test loads through the genuine plugin-load path
 // (plugin_abi_compatible → CAbiInstanceAdapter) and runs process() on once,
@@ -29,20 +29,22 @@
 #include <xi/xi_abi.h>        // XI_ABI_VERSION, xi_host_api
 #include <xi/xi_record.hpp>   // xi::yyjson_layout_stamp()
 
-// The golden plugin is the v9 contract incarnate — pinned at v9 by a LITERAL,
-// deliberately decoupled from the host's current XI_ABI_VERSION. As the host ABI
-// advances (Phase 1 appended get_interface → v10), this plugin stays a v9 binary
-// so the compat test proves the real thing: an OLD (v9 / min-compat 6) plugin
-// still loads + runs unchanged against the NEWER host. Do NOT bump this to track
-// the header; if a future capability needs exercising, add a SEPARATE golden for
-// that version and keep this one frozen at v9. See ADR-001 / core_fix_plan.md §12.
-static constexpr int kGoldenAbiVersion = 9;
+// The golden plugin is the CURRENT contract incarnate. Phase 4 retired the
+// monolith with an authorized major break (shm_* removed, xi.legacy retired,
+// min-compat raised to 11), which by design invalidated every pre-v11 plugin —
+// so the OLD "v9 plugin loads on a newer host" scenario no longer exists (that
+// break is now PROVEN by test_golden_plugin.cpp's stale-plugin-REFUSED
+// assertion). This golden is therefore re-pinned to v11: it proves a CURRENT
+// plugin still loads + runs. It tracks XI_ABI_MIN_COMPAT so it always sits
+// exactly at the floor — the oldest still-loadable version. See ADR-001 /
+// core_fix_plan.md §12 Phase 4.
+static constexpr int kGoldenAbiVersion = XI_ABI_MIN_COMPAT;   // == 11 at v11
 static_assert(XI_ABI_VERSION >= kGoldenAbiVersion,
-              "host ABI regressed below the golden's pinned v9 — the golden must "
-              "remain loadable (v9 <= host version).");
+              "host ABI regressed below the golden's pinned version — the golden "
+              "must remain loadable (kGoldenAbiVersion <= host version).");
 static_assert(kGoldenAbiVersion >= XI_ABI_MIN_COMPAT,
-              "golden's pinned v9 fell below the host min-compat floor — it would "
-              "no longer load; the freeze contract is broken (ADR-001).");
+              "golden's pinned version fell below the host min-compat floor — it "
+              "would no longer load; the freeze contract is broken (ADR-001).");
 
 namespace {
 
@@ -57,9 +59,8 @@ struct GoldenInstance {
 extern "C" {
 
 __declspec(dllexport) int xi_plugin_abi_version(void) {
-    // Pinned literal — this is a v9 plugin regardless of how new the host headers
-    // are (see kGoldenAbiVersion above). The loader gate accepts it on any host
-    // with XI_ABI_MIN_COMPAT <= 9 <= XI_ABI_VERSION.
+    // A current (v11) plugin. The loader gate accepts it on any host with
+    // XI_ABI_MIN_COMPAT <= kGoldenAbiVersion <= XI_ABI_VERSION.
     return kGoldenAbiVersion;
 }
 

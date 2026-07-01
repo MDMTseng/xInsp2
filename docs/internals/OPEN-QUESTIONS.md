@@ -74,6 +74,25 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
   **skip-with-warning** (not fail) when the measured backend differs from the baseline's; or pin the backend in CI.
 - **Flips if:** user wants the gate hardened now rather than backlogged.
 
+## OQ-9 — Decouple OpenCV from the mandatory plugin surface + JPEG backend strategy (user raised, 2026-07-01)
+- **Source-verified facts:** the **kernel is already OpenCV-free** (`xi_image_pool`/`xi_record`/`xi_doc_registry`/
+  `xi_trigger_bus` = 0 cv refs); `xi_abi.hpp`'s "3 cv refs" are all **comments** (example code); **stb is the
+  zero-dependency unconditional JPEG fallback** (`encode_jpeg` ends `return encode_jpeg_stb(...)`; turbojpeg +
+  OpenCV are optional `#ifdef` fast paths); **`xi_cv.hpp` is already a standalone opt-in convenience header.**
+  The ONLY hard coupling: (1) `xi.hpp` umbrella unconditionally `#include <opencv2/opencv.hpp>`, and (2)
+  `xi_image.hpp`'s `as_cv_mat()`/`from_cv_mat()` need cv types.
+- **Q-B — does core need OpenCV? NO.** OpenCV is a plugin-author convenience force-fed via the umbrella.
+  **Recommended cut (seam already exists):** move `as_cv_mat`/`from_cv_mat` from `xi_image.hpp` → `xi_cv.hpp`
+  (opt-in); drop the opencv include from `xi.hpp`. Then a plugin that does no CV builds with **zero OpenCV**.
+  Breaking-ish (cv-using plugins add `#include <xi/xi_cv.hpp>`) but in-tree plugins are rebuildable.
+- **Q-A — drop turbojpeg, rely on OpenCV? NOT recommended** — that *deepens* the OpenCV coupling Q-B wants to
+  shed, and costs ~6× JPEG encode (2.7 ms→~17 ms here). The dependency-minimal JPEG path is **stb** (already
+  present). Keep turbojpeg as a lean, focused **optional fast path**; make OpenCV **optional as a backend**, not
+  required. i.e. stb default → turbojpeg optional accel → OpenCV optional.
+- **Default:** NOT started — awaiting user go (breaking-ish refactor of the plugin-facing headers). Sequence
+  AFTER Gate F (Phase 4 + OQ-1) lands, since it touches `xi_image.hpp`/`xi.hpp`.
+- **Flips if:** user says go on the OpenCV opt-in cut (recommended), and/or still wants turbojpeg removed anyway.
+
 ---
 
 ### Status snapshot (end of autonomous run, 2026-07-01)
