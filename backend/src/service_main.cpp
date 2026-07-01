@@ -47,6 +47,7 @@
 #include <xi/xi_trigger_bus.hpp>
 #include <xi/xi_inflight_runs.hpp>   // xi::InflightRuns (detached-run lifetime owner)
 #include <xi/xi_emit_gate.hpp>       // xi::EmitGate / xi::EmitTurn (ordered-emit gate)
+#include <xi/xi_metrics.hpp>         // OQ-7a: frame counters + latency histogram (cmd:metrics)
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_ws_server.hpp>
@@ -1381,8 +1382,13 @@ static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
         run_error_what = "\"what\":\"unknown_exception\"";
     }
 
-    auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    auto dt_us = std::chrono::duration_cast<std::chrono::microseconds>(
                      std::chrono::steady_clock::now() - t0).count();
+    auto dt_ms = dt_us / 1000;   // wire/event latency stays integer-ms (unchanged)
+    // OQ-7a observability: record this frame's latency + ok/error into the process
+    // metrics registry (lock-free). Sub-ms precision from dt_us so fast frames don't
+    // all collapse into the 0-bucket. Exported via cmd:metrics (see dispatch below).
+    xi::MetricsRegistry::instance().record_frame((double)dt_us / 1000.0, inspect_ok);
     {
         // Ordered mode: block until it's this frame's turn to emit, then advance the
         // cursor (turn.complete()) right after so the next worker can emit promptly.
@@ -3844,6 +3850,18 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
             data += "]";
         }
         data += "}";
+        send_rsp_ok(srv, id, data);
+    } else if (name == "metrics") {
+        // OQ-7a observability export (core_fix_plan §21 / §27.5 "don't gold-plate").
+        // The minimal, honest metrics surface: monotonic per-frame counters
+        // (total/ok/error) + a fixed-bucket per-frame latency histogram, recorded
+        // in run_one_inspection. Point-query snapshot over THIS existing WS channel
+        // (same shape/role as dispatch_stats / image_pool_stats) — no separate
+        // telemetry server. Counters are process-uptime cumulative (NOT reset by
+        // cmd:start), so a monitor snapshots before/after and derives its own rates
+        // (do not subtract across a restart — same caveat as dispatch_stats).
+        std::string data;
+        xi::MetricsRegistry::instance().snapshot_json(data);
         send_rsp_ok(srv, id, data);
     } else if (name == "open_project_warnings") {
         // Returns the per-instance warnings collected during the most
