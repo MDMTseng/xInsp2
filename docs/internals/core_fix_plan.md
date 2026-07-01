@@ -1,6 +1,8 @@
 # Core Fix Plan — open residue
 
-**Status (2026-07-01):** the Parts I–IV plan is **implemented**. The full plan — the
+**Status (2026-07-01, updated):** the Parts I–IV plan is **implemented**, and the
+2026-07 core top-5 follow-ups (**G3.2, G4/OQ-5, OQ-7a, OQ-7b, A4**) have since **landed on
+`master`** (`d7af0c0`..`f7b3b3a`, plus ws-doc `9df4fe2`). The full plan — the
 evergreen analysis *and* the landed remediation — is archived verbatim at
 [`../archive/core_fix_plan-2026-07.md`](../archive/core_fix_plan-2026-07.md). This file
 tracks only what is **still open**.
@@ -26,6 +28,14 @@ tracks only what is **still open**.
 - **Part IV** — tooling: T0.1 sanitizers (ASan live), T0.2 salvaged fuzz smoke, T0.3 perf
   gates, T1.1/T1.2 clang-cl in-process libFuzzer + UBSan, and the §28 race nets
   (`test_emit_gate`, `test_hot_reload_swap`, `test_owner_cancel_stress`).
+- **2026-07 core top-5** (landed after the archive split):
+  - **G3.2** — debug illegal-transition asserts in `CAbiInstanceAdapter` (`49f63f1`).
+  - **G4 / OQ-5** — opt-in `code_change`-style state-migration hook (`62d8b9a`).
+  - **OQ-7a** — minimal observability export: `cmd:metrics` + latency histogram
+    (`cc7ff1a`, documented in `docs/reference/ws-protocol.md` at `9df4fe2`).
+  - **OQ-7b** — opt-in static cross-plugin Record field contract (`c5fe591`).
+  - **A4** — explicit-trigger entry `xi_inspect_entry_tv` + `XI_INSPECT_ENTRY(t, frame)`
+    (`7e4c48d`; legacy `xi_inspect_entry(int)` still supported).
 
 ---
 
@@ -33,10 +43,9 @@ tracks only what is **still open**.
 
 | Item | From | State | Flips / unblocks when |
 |---|---|---|---|
-| **G3.2 — debug illegal-transition asserts** in `CAbiInstanceAdapter` (e.g. `process` before `commit`, `set_def` during `process` on a non-reentrant instance). | archive §18 G3.2 | Deferred (the contract is documented in G3.1; the asserts that *enforce* it are the follow-up). | Want the lifecycle×thread contract machine-checked, not just written. |
-| **G4 — `code_change`-style state-migration hook** instead of drop-on-mismatch. | archive §18 G4 | Deferred (`OQ-5`). | Cross-version state continuity becomes a stated requirement. |
 | **§28 action 2 — Linux CI lane → real TSan** (also unlocks UBSan/libFuzzer at scale). | archive §28 | **Blocked on `OQ-1`.** Windows has no reliable TSan; the race nets currently lean on ASan + `XINSP2_STRESS_SCALE`. | User stands up a Linux CI lane. |
-| **OQ-7 partial gaps** — observability export (metrics/latency histograms), WS protocol *negotiation*, Record cross-plugin *static* schema contract. | archive §21, §27.5 | Backlogged; "don't gold-plate" (archive Invariant §27.5). | A concrete need appears (e.g. a production-line monitoring requirement, a client-compat break). |
+| **OQ-7 residual — WS protocol *negotiation*.** (The other two OQ-7 gaps — metrics/latency histograms and the Record static schema contract — landed as **OQ-7a**/**OQ-7b** above.) | archive §21, §27.5 | Backlogged; "don't gold-plate" (archive Invariant §27.5). | A concrete need appears (e.g. a client-compat break). |
+| **On-disk deterministic record-replay** — journal tap in `TriggerBus::emit` + a `replay_source` plugin, preserving original trigger ids / arrival timestamps (logical + gate/credit modes). Spec drafted; **not implemented**. | replay design notes (2026-07) | Deferred. The `cache` plugin covers the practical *in-memory* "buffer last N + re-inspect" (incl. `replay_timed` cadence); byte-identical on-disk replay is the separate, larger feature. | Determinism/audit becomes a stated requirement. |
 
 ### Deliberate non-gaps (recorded so they aren't re-chased)
 - **A4 in-repo example migration** — the SDK entry, host wiring, loader, and compat
