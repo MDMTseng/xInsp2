@@ -44,6 +44,7 @@
 #include "xi_config_validate.hpp" // validate_config_against_manifest (opt-in diagnostic, extracted leaf)
 #include "xi_pm_json.hpp"      // pm_json_escape / pm_json_quote (extracted leaf)
 #include <cctype>
+#include <cassert>            // door_matches_fields freeze-guard (default_host_api)
 #include "xi_pm_parse.hpp"     // parse_manifest / extract_string / detail_find_key
 #include "xi_plugin_export.hpp" // export_project_plugin_impl (deploy packaging, extracted leaf)
 #include "xi_cmake_build.hpp"  // xi::cmake_build:: host-side cmake invocation (extracted leaf)
@@ -2524,7 +2525,17 @@ private:
     // Cold path (instance create / recompile / rename), so the single shared
     // static is fine and costs nothing extra.
     static xi_host_api& default_host_api() {
-        static xi_host_api host = []{ auto a = ImagePool::make_host_api(); install_trigger_hook(a); return a; }();
+        static xi_host_api host = []{
+            auto a = ImagePool::make_host_api();
+            install_trigger_hook(a);
+            // DEBUG freeze-guard: this is the FULLY WIRED table plugins receive, so
+            // every carved get_interface entry must track its struct-field twin
+            // (emit_record via the published slot). Catches door/field drift at
+            // startup so the xi.emit@1-null landmine can never silently return.
+            assert(ImagePool::door_matches_fields(a) &&
+                   "carved interface door drifted from its xi_host_api struct fields");
+            return a;
+        }();
         return host;
     }
 

@@ -1802,12 +1802,10 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
             int iv = g_timer_interval_ms.load();
             if (iv <= 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                xi::TriggerBus::instance().evict_stale();
                 continue;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(iv));
             if (!g_continuous.load()) break;
-            xi::TriggerBus::instance().evict_stale();
             if (g_timer_interval_ms.load() <= 0) continue;
             xi::TriggerEvent ev; ev.group = dg;
             (void)enqueue_to_lane_(std::move(ev));

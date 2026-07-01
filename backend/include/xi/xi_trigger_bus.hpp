@@ -141,9 +141,8 @@ public:
         // Liveness stamp (monotonic — NTP/DST safe): a source emitting is alive,
         // even if there's no sink. Lets dispatch_stats expose "ms since the last
         // frame" globally + per source, so a monitor/FE can detect a CAMERA THAT
-        // STALLED — which otherwise stops the line with zero signal (the timer's
-        // evict_stale was a no-op and nothing tracked last-emit). Stamped on every
-        // emit, before the sink check.
+        // STALLED — which otherwise stops the line with zero signal (nothing else
+        // tracked last-emit). Stamped on every emit, before the sink check.
         {
             int64_t mono = steady_now_us();
             last_emit_mono_us_.store(mono, std::memory_order_relaxed);
@@ -210,14 +209,14 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         source_last_emit_mono_us_.clear();
     }
-    // Periodic timer call (cold). Intentionally a no-op: the per-source map is
-    // the camera-stall signal (source_emit_ages_us reports "µs since last emit"),
-    // so age-based eviction here would delete an entry precisely when a source
-    // has stalled the longest — destroying the very signal it exists to surface.
-    // Unbounded growth is bounded instead by reset() at lifecycle boundaries,
-    // where source names actually go out of scope. Kept so the timer caller in
-    // service_main need not change.
-    void evict_stale() {}
+    // (There is deliberately NO periodic age-based eviction of the per-source
+    // liveness map: the map IS the camera-stall signal — source_emit_ages_us
+    // reports "µs since last emit" — so evicting a stale entry would delete it
+    // precisely when a source has stalled the longest, destroying the very signal
+    // it exists to surface. Unbounded growth is bounded instead by reset() at
+    // lifecycle boundaries, where source names actually go out of scope. A no-op
+    // evict_stale() used to live here purely to satisfy a timer caller; both the
+    // method and that call were removed — the timer loop never needed it.)
 
     // Microseconds since ANY source last emitted (monotonic). -1 if nothing has
     // emitted yet. The "is the line getting frames at all" signal.
@@ -272,6 +271,13 @@ inline void install_trigger_hook(xi_host_api& api) {
         TriggerBus::instance().emit(emitter ? emitter : "", id, ts,
                                     rec->images, rec->image_count, meta);
     };
+    // ABI v11: publish the wired emit_record into the process-global slot the
+    // carved xi.emit@1 interface's forwarder reads (xi_image_pool.hpp). This is
+    // the layering bridge: image_pool.hpp cannot include this header, so the door
+    // reaches the live dispatch verb only once we hand it the pointer here — so
+    // the door's emit_record and the struct field host->emit_record hit the SAME
+    // code path (freeze-guard: ImagePool::door_matches_fields).
+    ImagePool::publish_emit_record(api.emit_record);
 }
 
 } // namespace xi

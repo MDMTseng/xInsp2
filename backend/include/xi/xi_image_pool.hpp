@@ -519,11 +519,50 @@ public:
         }();
         return &iface;
     }
+    // xi.emit@1 emit_record wiring bridge (ABI v6/v11 — core_fix_plan.md §12).
+    //
+    // emit_record is the ONE host verb not wired in make_host_api(): it is
+    // installed later by install_trigger_hook (xi_trigger_bus.hpp) onto the
+    // per-load table (default_host_api). image_pool.hpp CANNOT include
+    // trigger_bus.hpp (layering), so the carved xi.emit@1 interface cannot copy
+    // the wired pointer at build time — when emit_v1_iface() is first built the
+    // hook may not have run, and its Meyers singleton is frozen thereafter. The
+    // old code copied h->emit_record from the canonical table (never hooked), so
+    // the door's emit_record was permanently null while the struct field was live
+    // — a dormant landmine for any plugin that trusts the door.
+    //
+    // Bridge: install_trigger_hook publishes the wired emit_record fn-pointer into
+    // this process-global, lock-free slot; the door's emit_record is a tiny stable
+    // forwarder that reads the slot on each call. So the door reaches the EXACT
+    // SAME wired dispatch path as the struct field host->emit_record — a live door
+    // entry, never null. (The freeze-guard asserts slot == wired field.)
+    using EmitRecordFn = void (*)(const char* emitter, xi_trigger_id id,
+                                  const struct xi_record* rec, int64_t ts);
+    static std::atomic<EmitRecordFn>& emit_record_slot() {
+        static std::atomic<EmitRecordFn> slot{nullptr};
+        return slot;
+    }
+    // Published by install_trigger_hook once the bus dispatch lambda exists.
+    static void publish_emit_record(EmitRecordFn fn) {
+        emit_record_slot().store(fn, std::memory_order_release);
+    }
+    // The forwarder the door hands out for xi.emit@1.emit_record: a stable address
+    // (a plugin may cache the interface) that reads the published slot each call.
+    // No-op until the hook publishes — same null-safe contract as the field.
+    static void emit_record_forwarder(const char* emitter, xi_trigger_id id,
+                                      const struct xi_record* rec, int64_t ts) {
+        if (auto fn = emit_record_slot().load(std::memory_order_acquire))
+            fn(emitter, id, rec, ts);
+    }
     static const xi_emit_v1* emit_v1_iface() {
         static const xi_emit_v1 iface = [] {
             const xi_host_api* h = canonical_host_api();
             xi_emit_v1 i{};
-            i.emit_record = h->emit_record;   // may be null until the trigger hook wires it
+            // emit_record: hand out the STABLE forwarder, NOT the raw field (which
+            // is null on the never-hooked canonical table). The forwarder reads the
+            // slot install_trigger_hook publishes, so the door reaches the same
+            // wired dispatch path as host->emit_record.
+            i.emit_record = &emit_record_forwarder;
             i.emit_binary = h->emit_binary;
             return i;
         }();
@@ -574,6 +613,58 @@ public:
         if (std::strcmp(id, "xi.log") == 0 && version == 1)
             return log_v1_iface();
         return nullptr;
+    }
+
+    // Freeze-guard (core_fix_plan.md §12): on a FULLY WIRED table (make_host_api
+    // + install_trigger_hook), assert every carved interface fn-pointer is the
+    // SAME pointer as its xi_host_api struct-field twin, so the door and the field
+    // can never silently drift onto different code paths. emit_record is the one
+    // FUNCTIONAL (not pointer) match: the door hands out a stable forwarder, so we
+    // check the published slot equals the wired field instead. Returns true when
+    // everything tracks. Called at startup on default_host_api (DEBUG assert) and
+    // by test_interface_domains. Pass a table AFTER install_trigger_hook.
+    static bool door_matches_fields(const xi_host_api& api) {
+        if (!api.get_interface) return false;
+        bool ok = true;
+
+        const auto* pv = static_cast<const xi_preview_v1*>(api.get_interface("xi.preview", 1));
+        ok = ok && pv && pv->compress == api.compress_image;
+
+        const auto* iv = static_cast<const xi_imaging_v1*>(api.get_interface("xi.imaging", 1));
+        ok = ok && iv
+             && iv->image_create    == api.image_create
+             && iv->image_addref    == api.image_addref
+             && iv->image_release   == api.image_release
+             && iv->image_data      == api.image_data
+             && iv->image_width     == api.image_width
+             && iv->image_height    == api.image_height
+             && iv->image_channels  == api.image_channels
+             && iv->image_stride    == api.image_stride
+             && iv->read_image_file == api.read_image_file;
+
+        const auto* dv = static_cast<const xi_doc_v1*>(api.get_interface("xi.doc", 1));
+        ok = ok && dv
+             && dv->doc_chunk_alloc   == api.doc_chunk_alloc
+             && dv->doc_chunk_realloc == api.doc_chunk_realloc
+             && dv->doc_chunk_free    == api.doc_chunk_free
+             && dv->doc_retain        == api.doc_retain
+             && dv->doc_release       == api.doc_release
+             && dv->doc_refcount      == api.doc_refcount;
+
+        const auto* ev = static_cast<const xi_emit_v1*>(api.get_interface("xi.emit", 1));
+        ok = ok && ev
+             && ev->emit_binary == api.emit_binary
+             // emit_record: the door is a stable, non-null forwarder whose target
+             // (the published slot) must equal the wired struct field.
+             && ev->emit_record != nullptr
+             && emit_record_slot().load(std::memory_order_acquire) == api.emit_record;
+
+        const auto* lv = static_cast<const xi_log_v1*>(api.get_interface("xi.log", 1));
+        ok = ok && lv
+             && lv->log        == api.log
+             && lv->set_status == api.set_status;
+
+        return ok;
     }
 
     using ReadImageFileFn = xi_image_handle (*)(const char* path);
