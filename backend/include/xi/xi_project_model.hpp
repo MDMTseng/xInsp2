@@ -71,6 +71,14 @@ struct ProjectInfo {
     // + synthetic timer ticks) buffered while workers are busy. Default 100.
     int           queue_depth      = 100;
 
+    // `parallelism.max_inflight`: ceiling on concurrent DETACHED one-shot / cmd:run
+    // inspects (the NON-continuous, trigger-driven path — see InflightRuns). Bounds
+    // the backlog of not-yet-run events (each pinning ImagePool + meta refs) when a
+    // source out-runs the serialized inspect drain; at the cap the newest is dropped
+    // (drop-newest) with an XI_SYS_DROPPED marker. 0/absent = default (64), NOT
+    // unlimited. (Continuous mode uses queue_depth/overflow instead.)
+    int           max_inflight     = 64;
+
     // `parallelism.overflow`: what to do when queue_depth is full and another
     // event arrives. "drop_oldest" (default; live prefers freshest) /
     // "drop_newest" (keep FIFO; archival) / "block" (back-pressure the source).

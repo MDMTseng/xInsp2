@@ -1618,6 +1618,7 @@ public:
         // after the colon (Python's json.dumps default).
         project_.dispatch_threads  = 1;
         project_.queue_depth       = 100;
+        project_.max_inflight      = 64;
         project_.overflow          = "drop_oldest";
         project_.result_order      = "completion";
         project_.groups.clear();
@@ -1687,6 +1688,15 @@ public:
                     if (n < 1)     n = 1;
                     if (n > 10000) n = 10000;
                     project_.queue_depth = n;
+                }
+                // max_inflight: ceiling on concurrent detached one-shot inspects (B1).
+                // <=0/absent keeps the default (64); sanity-capped like queue_depth.
+                if (yyjson_val* k = yyjson_obj_get(par, "max_inflight");
+                    k && yyjson_is_num(k)) {
+                    int n = (int)yyjson_get_num(k);
+                    if (n < 1)     n = 64;      // 0/absent/negative → default, NOT unlimited
+                    if (n > 10000) n = 10000;
+                    project_.max_inflight = n;
                 }
                 if (yyjson_val* k = yyjson_obj_get(par, "overflow");
                     k && yyjson_is_str(k) && yyjson_get_str(k)) {
@@ -2631,6 +2641,7 @@ private:
         out += "  \"parallelism\": {";
         out += "\"dispatch_threads\":" + std::to_string(project_.dispatch_threads);
         out += ",\"queue_depth\":"     + std::to_string(project_.queue_depth);
+        out += ",\"max_inflight\":"    + std::to_string(project_.max_inflight);
         out += ",\"overflow\":";
         pm_json_escape(out, project_.overflow);
         out += ",\"result_order\":";

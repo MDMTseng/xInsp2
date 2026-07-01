@@ -30,15 +30,44 @@ namespace xi {
 
 class InflightRuns {
 public:
+    // Default max concurrent in-flight detached runs (B1). One-shot inspects
+    // serialize on g_run_mu (only one runs at a time), so this bounds the BACKLOG
+    // of not-yet-run events, each pinning ImagePool refs + a meta doc. 64 keeps
+    // that backlog a small fraction of the 65536 ImagePool cap while still
+    // absorbing a reasonable burst — far below the "thread/OOM" runaway a fast
+    // source (200fps in, 50fps drain) would otherwise produce.
+    static constexpr int kDefaultCap = 64;
+
+    // Configure the max-in-flight ceiling (B1, project.json parallelism.max_inflight).
+    // <= 0 means "use the default" (NOT unlimited) — an unbounded launch path is the
+    // very runaway this cap exists to prevent.
+    void set_cap(int c) { cap_.store(c > 0 ? c : kDefaultCap); }
+    int  cap() const { return cap_.load(); }
+
     // Run `fn` on a detached thread, holding the in-flight count until it returns.
-    // Returns false (running nothing) if we're tearing down or the thread couldn't
-    // be created — the caller then does its own bail cleanup. Ordering is a correct
+    // Returns false (running nothing) if we're tearing down, we're at the in-flight
+    // cap (drop-newest — *dropped_over_cap is set so the caller can emit the
+    // XI_SYS_DROPPED marker + bump the dropped counter), or the thread couldn't be
+    // created — the caller then does its own bail cleanup. Ordering is a correct
     // Dekker handshake with the drain: launch() bumps THEN reads the flag, while
     // begin_shutdown() sets the flag THEN drain() reads the count — so a launch
     // racing teardown is either counted by the drain or bails out.
     template <class Fn>
-    bool launch(Fn&& fn) {
-        count_.fetch_add(1);
+    bool launch(Fn&& fn, bool* dropped_over_cap = nullptr) {
+        if (dropped_over_cap) *dropped_over_cap = false;
+        // Atomically claim an in-flight slot, but only while under the cap. A plain
+        // fetch_add-then-check would be a check-then-act race: N launches racing at
+        // count_==cap-1 would each bump past the ceiling before any observed it. The
+        // CAS loop guarantees count_ never exceeds cap_.
+        const int cap = cap_.load();
+        int cur = count_.load();
+        for (;;) {
+            if (cap > 0 && cur >= cap) {          // at the ceiling → drop-newest
+                if (dropped_over_cap) *dropped_over_cap = true;
+                return false;
+            }
+            if (count_.compare_exchange_weak(cur, cur + 1)) break;  // slot claimed (cur reloaded on failure)
+        }
         if (shutting_.load() || paused_.load() > 0) { count_.fetch_sub(1); return false; }
         try {
             std::thread([this, fn = std::forward<Fn>(fn)]() mutable {
@@ -82,6 +111,7 @@ private:
     std::atomic<int>  count_{0};
     std::atomic<bool> shutting_{false};
     std::atomic<int>  paused_{0};      // reversible lifecycle pause (see pause())
+    std::atomic<int>  cap_{kDefaultCap};  // max concurrent in-flight (B1; set_cap)
 };
 
 } // namespace xi
