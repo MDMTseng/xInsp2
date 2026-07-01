@@ -5,6 +5,26 @@
 
 ---
 
+## 0. CURRENT STATE (updated 2026-07-01) — read this first
+
+The body below is the original **2026-06-30 hot-path snapshot**; the core has since advanced. Corrections + current state (full roadmap in `core_fix_plan.md` Parts I–IV; decisions in `OPEN-QUESTIONS.md`):
+
+**Plugin ABI — now v11** (not "v6"). `XI_ABI_VERSION 11`, `XI_ABI_MIN_COMPAT 11`, `sizeof(xi_host_api)==176` (22 fn-ptrs). **8 plugin C exports** (`abi_version`, `create`, `destroy`, `process`, `exchange`, `get_def`, `set_def`, + v7 `prepare`/`commit` for async heavy-asset load).
+
+**Capability segregation (Part II).** Beyond the flat `xi_host_api` struct, the host publishes a CLAP-style **`get_interface(id, version)`** door with frozen per-capability interfaces: `xi.imaging@1`, `xi.doc@1`, `xi.emit@1`, `xi.log@1`, `xi.preview@1`. SDK wrappers query-then-cache with legacy-field fallback. A CI **freeze guard** (`test_abi_freeze.cpp`) pins the v11 layout; changes ship as new frozen versions.
+
+**Removed since the snapshot:** the 5 dead `shm_*` stubs + `xi.legacy@9` door (v11 major break — pre-v11 plugins refused); process isolation (2026-05); VAR (→ `expose` plugin).
+
+**Plugin management hardening (Part III):** subprocess **certify** on scan (`--certify-plugin`, crash-safe load, hash-cached verdict); **per-plugin crash attribution + auto-quarantine** (a crashing plugin is disabled + surfaced, line stays up, instead of latching the whole backend safe); lifecycle × thread contract documented (`write-a-plugin.md`).
+
+**Correctness tooling (Part IV):** MSVC **ASan** + high-iteration race-stress; **perf-regression gate** (`bench_*` → ctest + baselines); salvaged black-box WS fuzz smoke; clang-cl **in-process libFuzzer** (`parse_cmd`/yyjson/record — millions of execs, no findings) + **UBSan**. TSan unavailable on Windows (needs a Linux lane — see OQ-1).
+
+**Dependency surface:** the mandatory plugin umbrella (`xi.hpp`) is now **OpenCV-free** (OQ-9) — cv interop is opt-in via `xi_cv.hpp`; a no-CV plugin builds with OpenCV absent.
+
+**Command surface:** the original report undercounts — the WS protocol has **~50+ commands** (working-copy, instance/plugin lifecycle, observability, runtime control, UI feed, + certify/quarantine/unquarantine). See `core_fix_plan.md` §7 for the full inventory.
+
+---
+
 ## 1. Architecture Summary
 
 The xInsp2 backend (`xinsp-backend.exe`) is a **single-process compute core** handling all inspection workloads: plugin loading, script compilation/execution, dispatch scheduling, and WebSocket I/O. All plugins run **in-process** (no isolation); a plugin crash exits the entire backend, relied upon by the supervisor FE (`xinsp-fe.exe`) to respawn.
@@ -95,7 +115,7 @@ The xInsp2 backend (`xinsp-backend.exe`) is a **single-process compute core** ha
 
 **Lifecycle:**
 - scan_plugins(dir) walks plugins/ folder; each plugin is a folder with plugin.json + dll.
-- LoadLibrary() each plugin DLL → resolve 6 C exports (create, destroy, process, exchange, get_def, set_def).
+- LoadLibrary() each plugin DLL → resolve the C exports (create, destroy, process, exchange, get_def, set_def — plus v7 `prepare`/`commit` and `abi_version`; **8 total**, not 6 — see §0). As of v11 this runs behind a crash-safe subprocess **certify** gate (Part III G1).
 - **ABI version gate + yyjson layout stamp:** plugins must declare compatible ABI + same yyjson layout, else load fails (unless json_fallback: true).
 - **Certification:** plugin.json validated; instances created per-manifest with InstanceRegistry.
 
