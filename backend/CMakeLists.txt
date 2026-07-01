@@ -391,6 +391,24 @@ add_test(NAME emit_gate_heavy COMMAND test_emit_gate)
 set_tests_properties(emit_gate_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
+# Hot-reload g_script swap probe (§28 Tier-2 GAP). A fixture "script" DLL
+# (reload_probe) is hot-reloaded through the REAL loader while reader threads
+# snapshot g_script by value and call inspect() outside the lock — the exact
+# run_one_inspection shape. Drives the module_lifetime deferred-FreeLibrary path;
+# a stale-call UAF aborts via the fixture's magic check (ASan-visible). The writer
+# cycles distinct on-disk copies so FreeLibrary genuinely unmaps.
+add_library(reload_probe SHARED tests/reload_probe.cpp)
+add_executable(test_hot_reload_swap tests/test_hot_reload_swap.cpp)
+target_link_libraries(test_hot_reload_swap PRIVATE xi_core)
+target_compile_definitions(test_hot_reload_swap PRIVATE RELOAD_PROBE_DLL="reload_probe.dll")
+add_dependencies(test_hot_reload_swap reload_probe)
+add_test(NAME hot_reload_swap COMMAND test_hot_reload_swap
+         WORKING_DIRECTORY $<TARGET_FILE_DIR:test_hot_reload_swap>)
+add_test(NAME hot_reload_swap_heavy COMMAND test_hot_reload_swap
+         WORKING_DIRECTORY $<TARGET_FILE_DIR:test_hot_reload_swap>)
+set_tests_properties(hot_reload_swap_heavy PROPERTIES
+    LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
+
 # ---- Perf-regression gate (T0.3) ---------------------------------------
 # Promote the bench_* micro-benchmarks from "run manually" to ctest gates: each
 # runs the bench in --gate mode, parses its integer timing metrics, and FAILS if
