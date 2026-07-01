@@ -518,6 +518,33 @@ fields are cumulative for the whole backend process, so an unattended monitor ca
 answer "how much have we dropped total" across run/restart boundaries (a restart
 no longer reads as a clean line).
 
+### `metrics`
+`args: {}` → `data: { ... }`. Minimal observability snapshot: monotonic
+per-frame counters plus a fixed-bucket latency histogram. Recorded once per
+completed inspection in `run_one_inspection` (covering ok, throw, and crash
+paths). **All values are cumulative over the whole backend process uptime** —
+unlike `dispatch_stats`' per-run counters, they are **NOT** reset on `cmd:start`.
+A monitor derives throughput / windowed latency by diffing two snapshots itself
+(same contract as the `dispatch_stats` `*_lifetime` fields).
+
+```json
+{ "frames_total": 1024, "frames_ok": 1020, "frames_error": 4,
+  "latency_ms": {
+    "count": 1024, "sum_ms": 8123.500, "mean_ms": 7.933,
+    "buckets": [ {"le": 0.5, "count": 12}, {"le": 1.0, "count": 40},
+                 "...", {"le": 5000.0, "count": 3}, {"le": "inf", "count": 1} ]
+  } }
+```
+
+| Field | Meaning |
+|---|---|
+| `frames_total` | inspections recorded since process start (`= frames_ok + frames_error`) |
+| `frames_ok` / `frames_error` | success / failure partition of `frames_total` |
+| `latency_ms.count` | frames in the histogram (equals `frames_total`) |
+| `latency_ms.sum_ms` | Σ per-frame latency, ms (kept in integer µs internally; here in ms) |
+| `latency_ms.mean_ms` | `sum_ms / count`, or `0` when `count == 0` |
+| `latency_ms.buckets` | non-cumulative counts; each entry counts frames with `latency ≤ le`, partitioned by the 13 ms edges (`0.5 … 5000`). The final `{"le":"inf"}` is the overflow bucket. All bucket counts sum to `frames_total`. |
+
 ### `list_instances`
 `args: {}` → triggers an `instances` message.
 
