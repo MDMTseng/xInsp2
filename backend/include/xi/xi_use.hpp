@@ -305,10 +305,8 @@ public:
         return out;
     }
 
-    // Policy leader's source name. For `policy:"leader_followers"` this
-    // is the leader instance; for `policy:"any"` it's the source that
-    // emitted this event; for `policy:"all_required"` it may be empty.
-    // Falls back to the first sources() entry when the host has no
+    // The emitting instance's name — the source that emit_record'd this
+    // event. Falls back to the first sources() entry when the host has no
     // leader callback (older backends) or returns empty.
     std::string primary_source() const {
         if (data_) {

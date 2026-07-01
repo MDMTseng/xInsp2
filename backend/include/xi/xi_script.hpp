@@ -33,21 +33,9 @@
 // (service_main.cpp run_one_inspection) builds the view when _tv is present.
 //
 // The backend invokes the entry during `cmd: run`. Inside it, the user
-// calls the `VAR()` macro and `xi::*` helpers — the global registries
-// (ValueStore, ParamRegistry, InstanceRegistry) are shared between the
-// backend exe and the loaded DLL via the normal static/thread-local
-// linkage inside `xi/xi.hpp`.
-//
-// NOTE on symbol sharing: `xi::ValueStore::current()` and friends are
-// inline functions with a function-local `static` / `thread_local`. Each
-// module that uses them keeps its own instance of the singleton — which
-// is exactly what we want for thread-local state BUT it means the backend
-// and the script DLL have DIFFERENT stores if they both touch them. To
-// bridge, the backend must call into the DLL (via exported thunks) to
-// walk the DLL's ValueStore. See service's `xi_script_entry` discipline
-// below: the script's inspect fn pushes into the DLL's TLS store, and
-// the backend reads back via a second exported function that returns a
-// serialized snapshot.
+// calls the `xi::*` helpers — the global registries (ParamRegistry,
+// InstanceRegistry) are shared between the backend exe and the loaded DLL
+// via the normal static/thread-local linkage inside `xi/xi.hpp`.
 //
 
 #include <cstdint>
@@ -65,13 +53,6 @@
 //
 // Optional hooks:
 //
-//   XI_SCRIPT_EXPORT int  xi_script_snapshot_vars(char* buf, int buflen);
-//       Write a JSON array of {name,kind,value?,gid?,width?,height?,channels?}
-//       to buf, return bytes written (or -1 if buflen too small).
-//   XI_SCRIPT_EXPORT int  xi_script_dump_image(uint32_t gid, uint8_t* out, int cap,
-//                                              int* w, int* h, int* c);
-//       Copy the image payload for gid into `out` (up to `cap` bytes),
-//       write dimensions into w/h/c, return bytes written.
 //   XI_SCRIPT_EXPORT int  xi_script_list_params(char* buf, int buflen);
 //       Write a JSON array of param descriptors.
 //   XI_SCRIPT_EXPORT int  xi_script_set_param(const char* name, const char* value_json);
@@ -79,4 +60,4 @@
 //
 // Scripts don't have to implement the optional hooks by hand — the xInsp2
 // support header `xi_script_support.hpp` provides default implementations
-// that walk the DLL's own xi::ValueStore / ParamRegistry.
+// that walk the DLL's own ParamRegistry.
