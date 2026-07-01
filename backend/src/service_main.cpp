@@ -534,6 +534,30 @@ static void flush_staged_emits_(int64_t run_id) {
     std::vector<StagedEmit> staged = std::move(g_staged);
     g_staged.clear();
     std::vector<xi_record_image> in_imgs;
+    // RAII: xi_record_out_free (+ the consumer-ref releases the plugin handed back)
+    // must run on EVERY exit path. They used to sit at the tail of the try, on the
+    // happy path only — a throw between the process() call and there (e.g. a release
+    // on a corrupt handle, or bad_alloc) jumped to the catch and skipped them, leaking
+    // the out_doc + pool handles. Same cleanup-by-default shape as copy_ref /
+    // TriggerEventReleaser. Dtor swallows: cleanup must not throw during unwinding.
+    struct RecordOutGuard {
+        xi_record_out* out;
+        bool release_refs = false;   // armed once prc>=0: the returned refs are ours to drop
+        ~RecordOutGuard() {
+            try {
+                if (release_refs) {
+                    if (out->out_doc)
+                        xi::DocRegistry::instance().release((yyjson_mut_doc*)out->out_doc);
+                    for (int i = 0; i < out->image_count; ++i)
+                        if (out->images[i].handle)
+                            xi::ImagePool::instance().release(out->images[i].handle);
+                }
+            } catch (...) { /* releases are effectively noexcept; never let one propagate */ }
+            xi_record_out_free(out);
+        }
+        RecordOutGuard(const RecordOutGuard&) = delete;
+        RecordOutGuard& operator=(const RecordOutGuard&) = delete;
+    };
     for (auto& it : staged) {
         // Non-null iff we delivered a PRIVATE COW copy this iteration: released on every
         // exit path below (declared out here so a throw mid-flush can't leak it).
@@ -576,18 +600,16 @@ static void flush_staged_emits_(int64_t run_id) {
             // COW copy via copy_ref) balances the other.
             if (deliver) xi::DocRegistry::instance().retain(deliver);
             xi_record_out output; xi_record_out_init(&output);
+            RecordOutGuard out_guard{&output};   // frees + drops the returned refs on ALL paths
             int prc = use_process_inline_(it.target.c_str(), deliver, nullptr, 0,
                                           in_imgs.data(), (int)in_imgs.size(), &output);
             // prc == -1: target gone before touching the input doc → our reserved ref
             // wasn't consumed; release it. prc == -2 (crash) may have — don't second-
             // guess a torn call (mirrors xi_use.hpp).
             if (deliver && prc == -1) xi::DocRegistry::instance().release(deliver);
-            if (prc >= 0) {
-                if (output.out_doc) xi::DocRegistry::instance().release((yyjson_mut_doc*)output.out_doc);
-                for (int i = 0; i < output.image_count; ++i)
-                    if (output.images[i].handle) xi::ImagePool::instance().release(output.images[i].handle);
-            }
-            xi_record_out_free(&output);
+            // Arm the guard to also drop the out_doc + output image refs (prc>=0 only —
+            // a torn/crashed call's output is untrustworthy; leave its refs alone).
+            if (prc >= 0) out_guard.release_refs = true;
         } catch (const seh_exception& e) {
             std::fprintf(stderr, "[xinsp2] sink '%s' flush crashed: 0x%08X (%s)\n",
                          it.target.c_str(), e.code, e.what());
