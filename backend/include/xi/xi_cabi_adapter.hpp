@@ -279,6 +279,7 @@ public:
                 GetProcAddress(dll_, "xi_plugin_record_schema"))) {
             std::vector<char> buf(4096);
             int n = schema_fn(buf.data(), (int)buf.size());
+            // ABI: callee returns -(exact content size). Alloc n+1: content + room for the trailing NUL a get_def-style export may write.
             if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1); n = schema_fn(buf.data(), (int)buf.size()); }
             if (n > 0) record_schema_ = parse_record_schema_json(buf.data(), (size_t)n);
         }
@@ -330,7 +331,8 @@ public:
         CallScope cs(this);
         std::vector<char> buf(4096);
         int n = get_def_fn_(inst_, buf.data(), (int)buf.size());
-        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = get_def_fn_(inst_, buf.data(), (int)buf.size()); }
+        // ABI: callee returns -(exact content size). Alloc n+1: content + the trailing NUL the export writes.
+        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1); n = get_def_fn_(inst_, buf.data(), (int)buf.size()); }
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
     }
 
@@ -353,7 +355,8 @@ public:
         CallScope cs(this);
         std::vector<char> buf(64 * 1024);
         int n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size());
-        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }
+        // ABI: callee returns -(exact content size). Alloc n+1: content + the trailing NUL the export writes.
+        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
     }
 
