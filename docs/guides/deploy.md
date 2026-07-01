@@ -36,6 +36,16 @@ would gamble the whole line on a browser shell.
 | **BE** | yes | FE catches → crash-history + rate-limited respawn (line-safe is the comms plugin's sidecar) |
 | **HMI / kiosk** | freely | reopen the browser; inspection keeps running |
 
+> **Clean shutdown on abrupt exit.** The BE installs a console-control handler, so
+> closing its console window, `Ctrl+C`/`Ctrl+Break`, logoff, and system shutdown all
+> run the **same controlled teardown** as `cmd:shutdown` (plugin destructors fire —
+> e.g. a comm/PLC plugin's "go-safe on close" — and no spurious crash minidump is
+> written). For the window-close/logoff/shutdown class the OS grants only a short
+> grace window (~5 s): a clean teardown completes within it in the normal case, but
+> if an inspect is wedged the process still hard-exits (the FE respawns) rather than
+> hang. This is orderly-exit best-effort, not a guarantee — the comms sidecar
+> remains the line-safe backstop.
+
 ## Who knows the project folder
 
 The project path is configured **once** (deployment layer) and flows **down** to BE

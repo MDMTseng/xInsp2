@@ -1199,6 +1199,10 @@ static void stamp_culprit_(const char* instance, const std::string& plugin) {
 }
 
 static std::atomic<bool> g_should_exit{false};
+// T2: set at the end of controlled_shutdown_teardown_ so the console-control
+// handler can wait for a clean teardown before the OS force-terminates on a
+// window close / logoff / shutdown (which give only a short grace window).
+static std::atomic<bool> g_teardown_done{false};
 
 // CLI/env arg parsing (get_exe_dir / parse_port / parse_host / parse_watchdog_ms
 // / parse_auth_secret / parse_str_flag / has_flag / parse_autostart_fps /
@@ -1951,7 +1955,47 @@ static void controlled_shutdown_teardown_() {
     // (release_all_for on a destroyed singleton). Idempotent: no-op if already closed.
     g_plugin_mgr.close_project();
     g_srv_for_bp = nullptr;                            // last: every emitter is quiesced now
+    g_teardown_done.store(true);                       // T2: unblock a waiting console handler
 }
+
+// T2 — orderly shutdown on an abrupt console exit (window close, Ctrl+C/Break,
+// logoff, system shutdown), which otherwise bypasses controlled_shutdown_teardown_
+// entirely (the OS default handler ExitProcess'es: no plugin destructors, so a
+// comm/PLC plugin's "go-safe on close" never fires, and the still-armed crash
+// filter can turn the kill into a spurious minidump the FE reads as a crash).
+// The handler just flips g_should_exit — the main serve loop polls it every 100ms
+// and runs the SAME controlled_shutdown_teardown_ path. For the close-class events
+// the OS force-terminates shortly after the handler returns, so we BLOCK (bounded)
+// until teardown signals done, keeping the process alive long enough to tear down
+// cleanly in the common (no-wedge) case. Ctrl+C/Break have no hard deadline.
+// Registered only in main() (the backend exe) — never affects embedded/SDK use.
+#ifdef _WIN32
+static BOOL WINAPI console_ctrl_handler_(DWORD type) {
+    switch (type) {
+        case CTRL_C_EVENT:
+        case CTRL_BREAK_EVENT:
+        case CTRL_CLOSE_EVENT:
+        case CTRL_LOGOFF_EVENT:
+        case CTRL_SHUTDOWN_EVENT: {
+            std::fprintf(stderr, "[xinsp2] console control event %lu — clean shutdown\n",
+                         (unsigned long)type);
+            std::fflush(stderr);
+            g_should_exit.store(true);
+            const bool close_class = (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT);
+            if (close_class) {
+                // ~4.5s budget (< the OS's default ~5s CTRL_CLOSE window) for main()
+                // to run teardown. If teardown hard-exits on a wedged drain (T1), the
+                // process is already gone; this loop just falls through on timeout.
+                for (int i = 0; i < 450 && !g_teardown_done.load(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            return TRUE;   // handled — suppress the default terminate
+        }
+        default:
+            return FALSE;
+    }
+}
+#endif
 
 // Install the bus sink so triggers always dispatch: in continuous mode they feed
 // the worker-pool queue; otherwise each trigger runs a single-shot inspect. This
@@ -4849,6 +4893,17 @@ int main(int argc, char** argv) {
         while (!g_should_exit.load()) std::this_thread::sleep_for(std::chrono::milliseconds(200));
         return 0;
     }
+
+    // T2: catch abrupt console exits (window close / Ctrl+C / logoff / shutdown)
+    // so they run the controlled teardown instead of a bare ExitProcess. Installed
+    // here — after all startup is done and the teardown machinery (srv, pool,
+    // project) is live — so the handler's flip-and-wait always has a real loop to
+    // service it.
+#ifdef _WIN32
+    if (!SetConsoleCtrlHandler(console_ctrl_handler_, TRUE))
+        std::fprintf(stderr, "[xinsp2] warning: SetConsoleCtrlHandler failed (%lu)\n",
+                     (unsigned long)GetLastError());
+#endif
 
     int64_t hb_last_ms = 0;
     while (!g_should_exit.load() && srv.is_running()) {
