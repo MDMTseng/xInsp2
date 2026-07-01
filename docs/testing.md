@@ -57,6 +57,13 @@ All exit with `ALL TESTS PASSED`.
   export/command/macro from shipping while the guides lag. Run standalone:
   `python tools/check_doc_coverage.py`. Skipped only if no Python3 is found.
 - `perf_*` — the perf-regression gates (see *Performance baseline* below).
+- `script_selfcheck` — a compile-only guard that `xi_script_support.hpp` (force-
+  included into every inspection script) stays **self-sufficient**. It compiles a
+  TU that includes *only* that header; if the header ever needs a symbol it doesn't
+  directly `#include` (e.g. relying on a transitive include a refactor later
+  severs — as happened once with `xi::InstanceRegistry`), this goes red. The
+  backend's own TUs don't catch it (they pull the header in from elsewhere), so
+  this is the only automated check of the bare-script compile path.
 
 ---
 

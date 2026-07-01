@@ -830,6 +830,28 @@ else()
     message(STATUS "doc_coverage ctest skipped: no Python3 interpreter found")
 endif()
 
+# ---- Script self-sufficiency compile guard ---------------------------------
+# xi_script_support.hpp is FORCE-INCLUDED (/FI) into every inspection script, so
+# it must be fully self-contained. A regression shipped once: dropping
+# xi_instance.hpp from the xi.hpp umbrella left the header unable to see
+# xi::InstanceRegistry, breaking every script compile — and the backend's own TUs
+# did NOT catch it (they pull the header in from elsewhere). This OBJECT target
+# includes ONLY xi_script_support.hpp (a bare script's view); if the header ever
+# stops being self-sufficient it fails to compile. EXCLUDE_FROM_ALL + a ctest that
+# builds it on demand, so normal builds aren't slowed but `ctest` catches the
+# regression (compile-only — no link, guards header self-sufficiency directly).
+add_library(script_selfcheck OBJECT EXCLUDE_FROM_ALL tests/script_selfcheck.cpp)
+target_link_libraries(script_selfcheck PRIVATE xi_core)   # SDK + vendor + OpenCV include dirs
+if(MSVC)
+    target_compile_options(script_selfcheck PRIVATE /openmp)   # xi_script_support.hpp uses <omp.h>
+else()
+    target_compile_options(script_selfcheck PRIVATE -fopenmp)
+endif()
+add_test(NAME script_selfcheck
+    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
+            --target script_selfcheck --config $<CONFIG>)
+set_tests_properties(script_selfcheck PROPERTIES LABELS "sdk")
+
 # ============================================================================
 # BEGIN fuzz/UBSan (clang-cl) — Cluster-2 / T1.1-T1.2 / OQ-1. Separable,
 # agent-owned. Do not interleave with the blocks above. OFF by default: a plain
