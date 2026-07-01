@@ -24,7 +24,8 @@
 #include "xi_abi.h"
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
-#include "xi_record.hpp"   // γ: yyjson_layout_stamp() for the doc-pointer gate
+#include "xi_record.hpp"          // γ: yyjson_layout_stamp() for the doc-pointer gate
+#include "xi_record_schema.hpp"   // OQ-7: opt-in static Record field contract
 
 #include <condition_variable>
 #include <cstdint>
@@ -228,6 +229,17 @@ public:
         // call it ungated (concurrent with process). Absent → gated set_def / no-op.
         prepare_fn_  = reinterpret_cast<xi_plugin_prepare_fn>(GetProcAddress(dll_, "xi_plugin_prepare"));
         commit_fn_   = reinterpret_cast<xi_plugin_commit_fn>(GetProcAddress(dll_, "xi_plugin_commit"));
+        // OQ-7 (optional): capture the plugin's declared Record field contract at
+        // LOAD time, once, so a composer can validate the wired pipeline up front
+        // (see xi_record_schema.hpp). Absent export → schema stays undeclared and
+        // the plugin keeps its current schemaless behaviour.
+        if (auto schema_fn = reinterpret_cast<xi_plugin_record_schema_fn>(
+                GetProcAddress(dll_, "xi_plugin_record_schema"))) {
+            std::vector<char> buf(4096);
+            int n = schema_fn(buf.data(), (int)buf.size());
+            if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1); n = schema_fn(buf.data(), (int)buf.size()); }
+            if (n > 0) record_schema_ = parse_record_schema_json(buf.data(), (size_t)n);
+        }
         // γ: may we hand this plugin a borrowed yyjson_mut_doc* (in-process zero-
         // serialize input)? Only if it was built against our yyjson layout.
         if (auto abi_fn = reinterpret_cast<uint32_t(*)()>(GetProcAddress(dll_, "xi_yyjson_abi")))
@@ -330,6 +342,12 @@ public:
         commit_fn_(inst_);
     }
 
+    // OQ-7: the plugin's declared cross-plugin Record field contract, captured at
+    // load. .declared == false when the plugin exported no xi_plugin_record_schema
+    // (the opt-in default). Feed a set of these (in pipeline order) to
+    // xi::validate_record_pipeline for wire-time contract checking.
+    const RecordSchema& record_schema() const { return record_schema_; }
+
     void* raw_instance() const { return inst_; }
     xi_plugin_process_fn process_fn() const { return process_fn_; }
     bool reentrant() const { return reentrant_; }
@@ -387,6 +405,7 @@ private:
     xi_plugin_process_fn  process_fn_ = nullptr;
     xi_plugin_prepare_fn  prepare_fn_ = nullptr;   // ABI v7, optional
     xi_plugin_commit_fn   commit_fn_  = nullptr;   // ABI v7, optional
+    RecordSchema          record_schema_;          // OQ-7, optional (declared==false ⇒ none)
     bool                  doc_input_ok_ = false;
     ImagePoolOwnerId      owner_id_ = 0;
 };
