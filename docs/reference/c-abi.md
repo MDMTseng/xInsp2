@@ -67,6 +67,37 @@ swaps the pointer. A plugin that omits these falls back to gated `set_def`
 drives them via `prepare_instance` + `commit_group` → `reference/ws-protocol.md`,
 `roadmap/config-bundles-and-orchestration.md`, and `plugins/config_swap_probe/`.
 
+**Optional — static Record field contract (OQ-7b).** The `Record` is schemaless:
+one plugin writes fields by string key, the next reads them. The only default
+safety net is the per-frame runtime guard `xi::require(in, {"key", …})`. A plugin
+can *additionally* declare, up front, the field keys+types it **produces** and
+**consumes**, so a missing-or-wrong-type cross-plugin field is caught **once, at
+wire/load time**, instead of as a per-frame surprise. Opt in with one more export:
+
+```c
+/* Same buffer convention as get_def: bytes written, or negated required size. */
+int xi_plugin_record_schema(char* buf, int cap);
+```
+
+Return a small JSON contract (bare-string field ≡ `{"key":…,"type":"any"}`):
+
+```json
+{ "produces": [ {"key":"score", "type":"double"} ],
+  "consumes": [ {"key":"gray", "type":"image"}, {"key":"thresh", "type":"int"} ] }
+```
+
+Coarse types only (`int` / `double` / `bool` / `string` / `image` / `record` /
+`array` / `any`); `int`↔`double` are compatible (JSON number widening). The host
+validates a wired producer→consumer pipeline and reports the **first** offending
+stage/field (missing upstream producer, or incompatible type). Semantics are
+**opt-in**: an undeclared plugin (no export) is a wildcard — it may produce or
+consume anything and imposes no constraints, so existing plugins are unaffected.
+Resolved via `GetProcAddress` exactly like `prepare`/`commit` — it does **not**
+touch `xi_host_api`, so the frozen v11 struct and the freeze guard are unchanged.
+Declared types live in `xi/xi_record_schema.hpp` (`xi::FieldType`,
+`validate_record_pipeline`); `backend/tests/schema_fixture_plugin.cpp` is a minimal
+producer/consumer fixture.
+
 ### Lifecycle
 
 ```

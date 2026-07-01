@@ -95,6 +95,55 @@ Plus:
 
 ---
 
+## The entry point — `XI_INSPECT_ENTRY` (preferred) vs the legacy signature
+
+There are **two** ways to declare the entry, and new scripts should use the first:
+
+```cpp
+#include <xi/xi.hpp>
+#include <xi/xi_use.hpp>
+
+// PREFERRED (script-entry ABI v2, "A4"): the host hands you the trigger EXPLICITLY.
+XI_INSPECT_ENTRY(t, frame) {          // `t` is a xi::Trigger, `frame` is int
+    if (!t.is_active()) return;
+    auto img = t.image("frame");
+    // ... inspect ...
+}
+```
+
+```cpp
+// LEGACY (still supported forever): the trigger is ambient thread-local.
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int frame) {
+    auto t = xi::current_trigger();   // reads the ambient thread_local
+    if (!t.is_active()) return;
+    // ... inspect ...
+}
+```
+
+`XI_INSPECT_ENTRY(t, frame)` expands to the exported entry
+`xi_inspect_entry_tv(const xi_trigger_view*, int)` and builds a **self-contained**
+`xi::Trigger t` from a host-filled view — image handles + meta doc + the host API
+to resolve them all travel *in the argument*, with **no ambient `thread_local`
+seam**. Two concrete wins over `xi::current_trigger()`:
+
+- **`t` is valid on ANY thread** and is **safe to capture by value** into
+  `xi::async` / `xi::parallel_for` — it is exactly the `trigger_snapshot()` you
+  otherwise had to make by hand (see [Parallelism safety](#parallelism-safety--three-rules-for-worker-threads),
+  rule 1). No accidental cross-thread read of the ambient trigger.
+- The `t.*` accessor table below is **identical** for both entries — only *how you
+  obtain `t`* differs. Everything else in this guide (`xi::use`, `xi::Param`,
+  `expose`, `xi::result`, `xi::state`) is unchanged.
+
+A script exports **exactly one** of the two — the loader resolves
+`xi_inspect_entry_tv` in preference to `xi_inspect_entry`, and falls back to the
+legacy symbol when the new one is absent, so old scripts run untouched. Everywhere
+below that shows `void xi_inspect_entry(int)` + `xi::current_trigger()` is the
+legacy form; the `XI_INSPECT_ENTRY(t, frame) { … }` form is a drop-in swap where
+`t` replaces the `current_trigger()` call.
+
+---
+
 ## Lifecycle
 
 ```
@@ -460,6 +509,41 @@ Survives:
 
 Use for cross-frame counters, calibration results, "have we seen this
 serial number" caches.
+
+### Schema versioning + migration across a code change
+
+By default a hot-reload that **changes the shape** of `xi::state()` would let the
+old DLL's persisted JSON default-fill the new shape incorrectly. Guard against it
+by declaring a **schema version** at file scope — bump it whenever the state shape
+changes:
+
+```cpp
+#include <xi/xi_state.hpp>
+XI_STATE_SCHEMA(2);          // this script's state is shape-version 2
+```
+
+On reload the host compares the saved version to the new one; on a **mismatch** it
+**drops** the prior state (emits `event:state_dropped`) rather than restore a
+mismatched shape. Version `0` (absent) means "unversioned" — legacy blind-restore.
+
+If you want cross-version **continuity** instead of a drop, register a migrator —
+the same discipline as Erlang's `code_change/3`. It runs in the NEW DLL (which
+alone knows both shapes), gets the old JSON + versions, and returns the re-shaped
+JSON:
+
+```cpp
+#include <xi/xi_state.hpp>
+static int _mig = (xi::set_state_migrate(
+    [](const std::string& old_json, int from, int to) -> std::string {
+        // parse old_json, translate shape `from` -> `to`, return new-shape JSON
+        return migrated_json;    // return "" to DECLINE -> host drops as usual
+    }), 0);
+```
+
+Register it at static-init time (it runs at DLL load, before the host's first
+`set_state`). The migrator must be **pure** w.r.t. the call — it must not read
+live `xi::state()`, which has not been restored yet. Absent registration (or a
+`""` return) leaves the drop-on-mismatch behaviour exactly as before.
 
 ---
 

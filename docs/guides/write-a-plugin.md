@@ -541,6 +541,20 @@ captured values into your own threads.
 > **`prepare` is ungated and concurrent with `process`; `commit` is gated.** That is
 > sound only because `prepare` touches the staging slot alone.
 
+> **Debug builds machine-check this contract (G3.2).** The one transition the gate
+> *cannot* make safe is a **same-thread re-entry** into a non-reentrant instance's
+> own gated export — a plugin's `process()` body calling back into the host to run
+> `set_def()` / `commit()` / `process()` on **its own instance**. `CallScope`
+> (cap = 1) would then wait on a slot this very thread already holds → a silent
+> **deadlock**. In `Debug` (behind `#ifndef NDEBUG`, compiled to nothing in
+> Release) the adapter detects that re-entry and raises a **loud, catchable**
+> lifecycle-contract violation (aborts by default; tests swap in a recorder) instead
+> of hanging. The two named illegal cases are *"`set_def()` during `process()`"* and
+> *"out-of-order lifecycle (`process` before `commit`)"*. A `reentrant: true`
+> instance lifts the gate and owns its locking, so its re-entry is **not** flagged.
+> Don't call the host back into your own non-reentrant instance from inside a gated
+> export; do the work directly or declare the plugin reentrant.
+
 ### Parallelism invariants (for plugin authors)
 
 These hold regardless of plugin type (T0–T3) and mirror the script-side rules in
