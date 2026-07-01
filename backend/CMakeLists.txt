@@ -427,6 +427,28 @@ add_test(NAME hot_reload_swap_heavy COMMAND test_hot_reload_swap
 set_tests_properties(hot_reload_swap_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
+# G4 / OQ-5 — code_change-style state-migration hook. One fixture source
+# (migrate_probe.cpp) is built three ways: a v1 "old" DLL, a v2 DLL that exports
+# the migration hook, and a v2 DLL without it. The test drives the REAL loader +
+# host decision helper (xi::script::migrate_state) to prove state migrates when
+# the hook is present and DROPS (unchanged pre-G4 behaviour) when it is absent.
+add_library(migrate_probe_v1        SHARED tests/migrate_probe.cpp)
+target_compile_definitions(migrate_probe_v1        PRIVATE MIG_SCHEMA=1)
+add_library(migrate_probe_v2        SHARED tests/migrate_probe.cpp)
+target_compile_definitions(migrate_probe_v2        PRIVATE MIG_SCHEMA=2 MIG_HOOK)
+add_library(migrate_probe_v2_nohook SHARED tests/migrate_probe.cpp)
+target_compile_definitions(migrate_probe_v2_nohook PRIVATE MIG_SCHEMA=2)
+add_executable(test_state_migrate tests/test_state_migrate.cpp)
+target_link_libraries(test_state_migrate PRIVATE xi_core)
+target_compile_definitions(test_state_migrate PRIVATE
+    MIGRATE_PROBE_V1_DLL="migrate_probe_v1.dll"
+    MIGRATE_PROBE_V2_DLL="migrate_probe_v2.dll"
+    MIGRATE_PROBE_V2_NOHOOK_DLL="migrate_probe_v2_nohook.dll")
+add_dependencies(test_state_migrate
+    migrate_probe_v1 migrate_probe_v2 migrate_probe_v2_nohook)
+add_test(NAME state_migrate COMMAND test_state_migrate
+         WORKING_DIRECTORY $<TARGET_FILE_DIR:test_state_migrate>)
+
 # ---- Perf-regression gate (T0.3) ---------------------------------------
 # Promote the bench_* micro-benchmarks from "run manually" to ctest gates: each
 # runs the bench in --gate mode, parses its integer timing metrics, and FAILS if
