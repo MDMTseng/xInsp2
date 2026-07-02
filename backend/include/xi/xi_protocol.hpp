@@ -2,8 +2,9 @@
 //
 // xi_protocol.hpp — xInsp2 WebSocket protocol types (C++ side).
 //
-// Canonical schema lives in protocol/messages.md. This header mirrors it
-// as plain C++ structs plus minimal JSON encode/decode helpers.
+// Canonical schema lives in docs/reference/ws-protocol.md (with the JSON shapes
+// in contract/schemas/). This header mirrors it as plain C++ structs plus minimal
+// JSON encode/decode helpers.
 //
 // This file deliberately avoids nlohmann/json (and any other dep) so the
 // xi_core target stays header-only. The parser is small and strict — it

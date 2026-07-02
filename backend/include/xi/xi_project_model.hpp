@@ -69,7 +69,7 @@ struct ProjectInfo {
     // xi_inspect_entry concurrently in continuous mode. Default 1 (single
     // threaded). With no explicit `groups`, this becomes the synthesized default
     // dispatch lane's max_parallel (see spawn_group_pool_). Caveats (xi::state,
-    // plugin process() reentrance, watchdog) — see writing-a-script.md.
+    // plugin process() reentrance, watchdog) — see docs/guides/write-a-script.md.
     int           dispatch_threads = 1;
 
     // `parallelism.queue_depth`: maximum number of trigger events (real bus emits

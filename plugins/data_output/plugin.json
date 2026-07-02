@@ -1,6 +1,6 @@
 {
   "name": "data_output",
-  "description": "Saves inspection results to CSV/JSON files",
+  "description": "Example config surface for a results writer (save is a not-implemented stub; use record_save for real persistence)",
   "dll": "xi-data_output.dll",
   "factory": "xi_plugin_create",
   "has_ui": true,

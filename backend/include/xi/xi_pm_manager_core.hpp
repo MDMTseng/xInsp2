@@ -250,7 +250,7 @@ private:
     // OpenCV/turbojpeg/IPP are deployed) + System32 + AddDllDirectory dirs in
     // the search set; it deliberately drops CWD/PATH (avoids accidental hijack).
     // NOTE: same-named DLLs still collide across plugins — Windows keeps one
-    // module per base name per process (see adding-a-plugin.md).
+    // module per base name per process (see docs/guides/write-a-plugin.md).
     // TODO(linux): dlopen resolves deps via RPATH/$ORIGIN + LD_LIBRARY_PATH;
     // build plugin .so with -Wl,-rpath,$ORIGIN for the same "deps beside me".
     static HMODULE load_plugin_dll_(const std::string& path) {
