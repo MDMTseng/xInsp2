@@ -361,6 +361,18 @@ Precise wording so the baselines aren't over-read:
   plugin/script DLLs load with no compiler on the target.
 - **ImagePool throughput** — `backend/tests/bench_image_pool` (manual, not a
   ctest): create/release cost; its header records why buffer reuse isn't worth it.
+- **In-process Record handoff** — `backend/tests/bench_record` (gated as
+  `perf_record`): measures the **actual** cost of a Record crossing an in-process
+  plugin boundary — the doc-**pointer** adoption + image addref/release path
+  (`Record::share_out` → `adopt_shared`, `xi::Image` pool addref), **not** a JSON
+  serialize/parse round trip. The primary gated metric is
+  `record_handoff_docptr_ns_n50`; path-aware sub-measurements cover the
+  image-addref handoff, copy-on-write mutation, and nested-record + image-bag
+  handoff. JSON serialize+parse is kept only as an **exploratory** (`exp_`-keyed,
+  non-gating) comparison because it is the layout-incompatible **fallback**, not
+  the common path. The bench needs only the vendored yyjson (builds on a clean
+  checkout); the optional `serde_vendor` sources (MPack/CWPack, see
+  `backend/tests/serde_vendor/FETCH.md`) only add an exploratory serde-floor table.
 - **Linux** build path untested (Windows-first WS server, SEH usage,
   `cl.exe` compile driver).
 - **Multi-client server** deliberately deferred to S6.

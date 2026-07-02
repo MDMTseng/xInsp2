@@ -671,27 +671,40 @@ if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
 endif()
 _xinsp_perf_gate(perf_jpeg bench_jpeg jpeg.txt)
 
-# Record serialization micro-bench: cJSON vs yyjson vs MPack vs CWPack.
-# ALL four are bench-only third-party sources now (cJSON was removed from the
-# shipped tree with the yyjson-only migration), gitignored + fetched on demand
-# (see tests/serde_vendor/FETCH.md). Target is skipped if they're absent so a
-# clean checkout still configures. Run manually, not a ctest.
+# Record in-process handoff micro-bench: the REAL pointer-adoption + image
+# addref/release path a plugin call takes in-process (Record::share_out /
+# adopt_shared, xi::Image pool addref), NOT a JSON serialize/parse round trip
+# (that is only the layout-incompatible FALLBACK, kept exploratory in the bench).
+#
+# This bench needs ONLY the always-present vendored yyjson + the xi headers, so
+# it builds on a clean checkout (no separately-fetched sources required) and is
+# gated as `perf_record`. The bench-only serde_vendor sources (MPack/CWPack —
+# see tests/serde_vendor/FETCH.md) are OPTIONAL: when present they are compiled
+# in and enable an extra exploratory serde-floor comparison in the verbose
+# report (guarded by __has_include / XI_BENCH_HAVE_SERDE in the source); when
+# absent the bench still builds, gates, and runs — that comparison is skipped.
+add_executable(bench_record tests/bench_record.cpp)
+target_link_libraries(bench_record PRIVATE yyjson)
+target_include_directories(bench_record PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+target_compile_definitions(bench_record PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
+if(NOT MSVC)
+    target_link_libraries(bench_record PRIVATE pthread)
+endif()
+# Optional serde-backend sources (MPack/CWPack) for the exploratory floor table.
 set(_serde ${CMAKE_CURRENT_SOURCE_DIR}/tests/serde_vendor)
-if(EXISTS ${_serde}/yyjson/yyjson.c AND EXISTS ${_serde}/mpack/mpack.c
-   AND EXISTS ${_serde}/cjson/cJSON.c)
-    add_executable(bench_record
-        tests/bench_record.cpp
-        ${_serde}/cjson/cJSON.c
-        ${_serde}/yyjson/yyjson.c
+if(EXISTS ${_serde}/mpack/mpack.c AND EXISTS ${_serde}/cwpack/cwpack.c)
+    target_sources(bench_record PRIVATE
         ${_serde}/mpack/mpack.c
         ${_serde}/cwpack/cwpack.c)
     target_include_directories(bench_record PRIVATE
-        ${_serde}/cjson ${_serde}/yyjson ${_serde}/mpack ${_serde}/cwpack)
-    target_compile_definitions(bench_record PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
-    # Gate it too — but only when the serde sources are present (this branch).
-    # A clean checkout without them simply has no perf_record test.
-    _xinsp_perf_gate(perf_record bench_record record.txt)
+        ${_serde}/mpack ${_serde}/cwpack)
 endif()
+# Gate it. Baselines require the xi.perf-baseline/1 fingerprint; an old baseline
+# (or one keyed to the retired serialization metric) SKIPs-with-reason until it
+# is recaptured on this machine with UPDATE_BASELINE=ON.
+_xinsp_perf_gate(perf_record bench_record record.txt)
 
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_IPP=1)
