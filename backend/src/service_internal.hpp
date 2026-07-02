@@ -15,7 +15,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -27,6 +29,7 @@
 #include <yyjson.h>
 #include <xi/xi_image.hpp>
 #include <xi/xi_protocol.hpp>
+#include <xi/xi_project.hpp>
 #include <xi/xi_plugin_manager.hpp>
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_inflight_runs.hpp>
@@ -112,6 +115,24 @@ struct Engine {
     std::string station_id;
 };
 extern Engine g_eng;
+
+// ---- Dispatch groups: per-group worker lanes (gated on parallelism.groups) --
+// Full definition here (Engine holds shared_ptr<GroupLane>; cmd:dispatch_stats
+// reads its members). Depends on EmitGate (xi_emit_gate.hpp, included above).
+struct GroupLane {
+    xi::ProjectInfo::DispatchGroup cfg;
+    std::deque<xi::TriggerEvent>   q;
+    std::mutex                     mu;
+    std::condition_variable        cv;
+    std::vector<std::thread>       workers;
+    std::atomic<uint64_t>          running{0};
+    std::atomic<uint64_t>          dropped{0};
+    std::atomic<uint64_t>          high_watermark{0};
+    bool                           ordered{false};
+    std::atomic<int64_t>           seq_next{0};
+    xi::EmitGate                   gate;
+    std::atomic<int64_t>           next_allowed_us{0};
+};
 
 // ---- shared thread_local globals (defined in exactly one TU) ---------------
 // g_staged      — service_sinks section (defined in service_main.cpp)

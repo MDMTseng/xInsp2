@@ -600,6 +600,7 @@ add_executable(xinsp_backend
     src/service_main.cpp
     src/service_cmd_plugin.cpp
     src/service_cmd_project.cpp
+    src/service_cmd_observability.cpp
     src/stb_impl.cpp
     src/xi_image_io.cpp
 )
