@@ -75,7 +75,7 @@ are no external consumers yet (first-party only).
 
 | Package | Purpose / owner | Ships? | Version | Build | Test | Outputs | Compatibility boundary |
 |---|---|---|---|---|---|---|---|
-| `hmi/` | Standalone browser SPA operator dashboard (v1.0 — RUN mode). The single WS client of an FE-supervised backend; subscribes to live `vars` + image preview and renders a `dashboard.json`-described card grid. No build step in v1 — plain ES modules; imports `xi-components` from `lib/`. | Yes | 1.0 (per its README title; no package manifest) | No build step (plain `.mjs`); serve via `serve.mjs` / `serve.py` | unspecified (served + exercised manually / via ui-components suites) | Static SPA (`index.html` + `app.mjs`) | WS client of a 0.2.0 backend; consumes `xi-components` ESM |
+| `hmi/` | Standalone browser SPA operator dashboard (v1.0 — RUN mode). The single WS client of an FE-supervised backend; subscribes to live `vars` + image preview and renders a `dashboard.json`-described card grid. No build step in v1 — plain ES modules; imports `xi-components` from `lib/`. | Yes | 1.0 (per its README title; no package manifest) | No build step (plain `.mjs`); serve via `serve.mjs` | unspecified (served + exercised manually / via ui-components suites) | Static SPA (`index.html` + `app.mjs`) | WS client of a 0.2.0 backend; consumes `xi-components` ESM |
 | `tools/` | Deployment + release tooling: `build_release.mjs` (release zip), `export_bundle.py` / AOT bundle, plus the Python client above. | Yes (dev/release tooling) | unspecified | `node tools/build_release.mjs`, `python tools/export_bundle.py …` | unspecified | `release/xinsp2-<version>-win-x64.zip`; AOT project bundles | n/a |
 
 ### Shared / non-product

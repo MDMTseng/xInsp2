@@ -16,11 +16,12 @@ not the HMI's. No build step — plain ES modules. Design:
 ## Try it (live demo)
 
 ```sh
-python hmi/serve.py
+node hmi/serve.mjs
 ```
 
 This spawns the backend headless on `hmi/demo/` (continuous via `--autostart-fps`),
-serves this folder over HTTP, and opens the URL. You should see the demo
+serves this folder over HTTP with a same-origin `/ws` proxy, and prints the URL to
+open (`http://127.0.0.1:8770/`). You should see the demo
 `dashboard.json` cards updating live: an OK/NG **verdict**, a **yield** %, a
 completed-parts **throughput** rate, and (on the Groups tab) live **dispatch
 groups** — all fed from the backend event stream. (Windows; backend must be built.
@@ -137,7 +138,7 @@ cd ../WebTunnelHub
 - **One same-origin `/ws` proxy beats two tunnels.** Tunnelling page + WS as two
   apps means cross-origin `ws=` juggling; proxying `/ws` on the page's own origin
   is one tunnel, no `?ws=` needed. `app.mjs` defaults to `wss://<host>/ws` and only
-  needs `?ws=` for a direct/local backend (e.g. `serve.py`).
+  needs `?ws=` for a direct/local backend (one you started separately).
 - **`ws` (npm) is borrowed from `vscode-extension/node_modules`** via `createRequire`
   (ESM bare-imports ignore `NODE_PATH`); `hmi/` has no `node_modules`.
 - **Caddy on :1080 serves HTTP/1.1**, so browser WS upgrades work like the CLI's.

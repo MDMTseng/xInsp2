@@ -252,8 +252,8 @@ answer is almost always **expose**:
 | Set the operator-facing **"what am I doing right now"** string | `xi::status("...")` | One sticky, human, last-write-wins status line (`xi_status.hpp`). Not a value, not a log. |
 | Write a diagnostic **log line** | `host->log(...)` / plugin `log_*` | Event stream for debugging, not UI values. |
 
-Everything else is legacy: **`VAR(...)` / `EMIT(...)` are removed no-ops** (they
-still compile so old scripts build, but publish nothing — see below), and the old
+Everything else is legacy: **`VAR(...)` / `EMIT(...)` were removed** (they no longer
+compile — `C3861` — see below), and the old
 per-key `VAR`/`vars`/JPEG-preview wire paths are gone. There is **no** author-facing
 `emit_binary` verb to reach for — image output rides on the `expose` record.
 
