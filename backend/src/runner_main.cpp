@@ -108,8 +108,12 @@ static int use_process_cb(const char* name,
         // γ: borrowed-doc fast path when the plugin shares our yyjson layout;
         // otherwise serialise the doc to JSON here (the caller skipped it).
         std::string in_js;
+        // Q0f: borrowed-doc path leaves the adopter ref UNRELEASED; on a caught crash
+        // (return -2) that ref is deliberately leaked (leak-over-UAF) and must be counted.
+        bool borrowed_doc_ref = false;
         if (input_doc && adapter->doc_input_ok()) {
             in_rec.doc = input_doc;
+            borrowed_doc_ref = true;
         } else if (input_doc) {
             size_t jl = 0;
             char* js = yyjson_mut_write((yyjson_mut_doc*)input_doc, 0, &jl);
@@ -126,7 +130,13 @@ static int use_process_cb(const char* name,
         }
         try {
             adapter->process_fn()(adapter->raw_instance(), &in_rec, output);
-        } catch (...) { return -2; }
+        } catch (...) {
+            // Q0f: caught crash — the borrowed doc's reserved ref is leaked (its owner
+            // state in the torn callee is unknowable). Count it; the runner has no
+            // dispatch_stats channel, but the counter stays process-global and honest.
+            if (borrowed_doc_ref) xi::DocRegistry::instance().note_crash_leak();
+            return -2;
+        }
         return output->image_count;
     }
     return -1;

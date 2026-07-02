@@ -123,8 +123,14 @@ static int use_process_inline_(const char* name,
         // data_json) so a foreign/older plugin still gets valid bytes. Owns the
         // serialized buffer for the duration of the call.
         std::string in_js;
+        // Q0f: true iff we hand the plugin a BORROWED doc with the adopter ref
+        // UNRELEASED. On a caught crash below (rc -2) that reserved ref is
+        // deliberately leaked (leak-over-UAF), so this is exactly the condition
+        // under which the leak counter must tick.
+        bool borrowed_doc_ref = false;
         if (input_doc && adapter->doc_input_ok()) {
             in_rec.doc = input_doc;
+            borrowed_doc_ref = true;
         } else if (input_doc) {
             size_t jl = 0;
             char* js = yyjson_mut_write((yyjson_mut_doc*)input_doc, 0, &jl);
@@ -156,11 +162,17 @@ static int use_process_inline_(const char* name,
             char why[96]; std::snprintf(why, sizeof(why), "process() crashed: 0x%08X", e.code);
             note_instance_crash_(name, why);   // crash-loop count + health degraded
             apply_on_fault_policy_(name, adapter);   // item 14: reuse / reinit / refuse
+            // Q0f: a torn call may or may not have adopted the borrowed doc's reserved
+            // ref; we don't second-guess it (leak-over-UAF), so the ref is leaked. Count
+            // it (dispatch_stats.crash_leaked_docs_lifetime). Every service-side crash of
+            // a doc-carrying process() — synchronous OR staged-sink flush — funnels here.
+            if (borrowed_doc_ref) xi::DocRegistry::instance().note_crash_leak();
             return -2;
         } catch (...) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') threw exception\n", name);
             note_instance_crash_(name, "process() threw an exception");
             apply_on_fault_policy_(name, adapter);   // item 14: reuse / reinit / refuse
+            if (borrowed_doc_ref) xi::DocRegistry::instance().note_crash_leak();   // Q0f: leaked ref
             return -2;
         }
     }
@@ -555,6 +567,8 @@ void flush_staged_emits_(int64_t run_id) {   // decl in header
             // prc == -1 (target gone) / -3 (quarantined, item 14): the input doc was
             // never touched → our reserved ref wasn't consumed; release it. prc == -2
             // (crash) may have — don't second-guess a torn call (mirrors xi_use.hpp).
+            // The leaked ref is COUNTED once, inside use_process_inline_'s crash catch
+            // above (Q0f) — this flush shares that funnel, so we must NOT count again here.
             if (deliver && (prc == -1 || prc == -3)) xi::DocRegistry::instance().release(deliver);
             // Arm the guard to also drop the out_doc + output image refs (prc>=0 only —
             // a torn/crashed call's output is untrustworthy; leave its refs alone).

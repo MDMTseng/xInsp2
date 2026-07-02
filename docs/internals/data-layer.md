@@ -104,6 +104,47 @@ Input and output both go through `share_out`/`adopt_shared`:
   registry keeps it alive until the plugin drops it. (Cost: one retain/release per
   node per dispatch — noise at image-processing ms scale.)
 
+### Caught-crash leak-over-UAF (Q0f)
+
+The input reserve/consume handshake has one deliberately unbalanced edge: **a
+plugin `process()` that crashes mid-call**. The host reserved a ref for the
+adopter and handed over the borrowed doc; the callee then faulted (SEH) or threw
+across the ABI. Whether it had *already* run `adopt_shared` (consuming the reserved
+ref) before faulting is **unknowable** — the crash tears the call at an arbitrary
+point. So the two outcomes the host must choose between are:
+
+- **Release the reserved ref** — correct *if* the plugin never adopted, but a
+  **double-free / use-after-free** if it did (the adopted box will also release).
+- **Leak the reserved ref** — one host-owned doc (and its pooled chunks) stranded,
+  but memory-safe under either callee state.
+
+The host chooses to **leak** (leak-over-UAF): a bounded, memory-safe leak beats an
+unbounded corruption. It happens at the host dispatch funnel every doc-carrying
+`process()` crash passes through — `service_sinks.cpp` `use_process_inline_`
+(synchronous `xi::use()` *and* the staged-sink flush) and `runner_main.cpp`
+`use_process_cb`. The script-side mirror of the decision is `xi_use.hpp`'s `-2`
+branch, which leaves the ref alone; but the *count* is taken host-side (the script
+DLL has its own per-DLL singletons, so only the host can both see the reserved
+`DocRegistry` ref and surface a number over WS).
+
+**What bounds it.** The `on_fault` quarantine (adoption-map item 14): a repeatedly-
+faulting instance escalates to `refuse` and is no longer entered (`rc -3` at the
+fail-fast gate, *before* touching any doc), so a crash **loop** cannot leak without
+end — it converges to a quarantined instance that leaks nothing further.
+
+**Observability.** `DocRegistry::note_crash_leak()` ticks once per such crash;
+`crash_leaked_docs_lifetime` in `dispatch_stats` (process-uptime cumulative) lets an
+operator tell **"one crash ever"** (constant non-zero) from **"leaking every N
+frames"** (climbing). See [`../reference/ws-protocol.md`](../reference/ws-protocol.md)
+"Crash-leak accounting".
+
+**How the class is dissolved.** The v3 all-msgpack frame plane
+([`../new_gen/07-...`](../new_gen)) removes the shared-mutable-doc handshake this
+leak protects: frames cross the ABI as self-contained, canonically-validated
+msgpack with no host-reserved ref to strand, so a torn callee has nothing the host
+must choose to leak-or-free. Until that cutover lands, the counter is the honest
+signal that the residue exists and whether it is accumulating.
+
 ## The load gate (no silent fallback)
 
 Every `XI_PLUGIN_IMPL` plugin exports `xi_yyjson_abi()` = a stamp of
