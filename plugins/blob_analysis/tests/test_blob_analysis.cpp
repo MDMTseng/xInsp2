@@ -145,10 +145,36 @@ XI_TEST(blob_happy_path_via_builder_and_extractor) {
 
     XI_EXPECT(out.ok());
     XI_EXPECT(out.blob_count() == 2);
+    XI_EXPECT(out.blob_count() == out.blobs_size());   // stamped count == array length
     XI_EXPECT(out.threshold_used() == 100);
-    // Each blob has a positive area read through the typed extractor.
-    XI_EXPECT(out.blob(0).area() > 0);
-    XI_EXPECT(out.blob(1).area() > 0);
+    // (The "binary" output image rides the Record's image bag, not its JSON;
+    // this test reconstructs the output from JSON only, so image round-trip is
+    // out of scope here — the contour polygon below, which DOES live in the
+    // JSON, is the field the completed extractor makes newly readable.)
+
+    // Read EVERY per-blob output field through the typed extractor — including
+    // the contour polygon, which the extractor could NOT read before this task
+    // (the io.h exposed only the point count, never the {x,y} data its own .cpp
+    // emitted). This is the flagship "leaky veneer" the completion closes.
+    for (int b = 0; b < out.blob_count(); ++b) {
+        auto blob = out.blob(b);
+        XI_EXPECT(blob.area() > 0);
+        // Centroid falls inside the bounding box.
+        XI_EXPECT(blob.cx() >= blob.min_x() && blob.cx() <= blob.max_x());
+        XI_EXPECT(blob.cy() >= blob.min_y() && blob.cy() <= blob.max_y());
+        XI_EXPECT(blob.min_x() <= blob.max_x());
+        XI_EXPECT(blob.min_y() <= blob.max_y());
+
+        // The stamped point count agrees with the actual emitted polygon length,
+        // and every vertex is now reachable AND lands inside the bounding box.
+        XI_EXPECT(blob.contour_size() > 0);
+        XI_EXPECT(blob.contour_size() == blob.contour_points());
+        for (int i = 0; i < blob.contour_size(); ++i) {
+            auto pt = blob.contour(i);
+            XI_EXPECT(pt.x() >= blob.min_x() && pt.x() <= blob.max_x());
+            XI_EXPECT(pt.y() >= blob.min_y() && pt.y() <= blob.max_y());
+        }
+    }
 }
 
 int main() {
