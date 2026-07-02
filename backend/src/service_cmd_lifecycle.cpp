@@ -108,6 +108,8 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                     "prebuilt DLL must be inside the project folder (out-of-tree path refused)");
                 // P1-4: sticky degraded marker so a status poll sees it after the rsp.
                 set_status_internal("@compile", "degraded: prebuilt DLL refused (out-of-tree)");
+                xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError,
+                                        std::filesystem::path(*src).filename().string());
                 // This return is past stop_dispatch_pool_() — like the compile/load
                 // failure paths it must re-arm continuous mode or the stream stays
                 // dead until the client re-issues cmd:start.
@@ -205,6 +207,8 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             // "@compile" marker so a later status poll (or a reconnecting operator)
             // can tell the line is running the last-good def in a degraded state.
             set_status_internal("@compile", "degraded: compile failed");
+            xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError,
+                                    std::filesystem::path(*src).filename().string());
             resume_continuous_if_needed();   // keep streaming the last-good script
             return;
         }
@@ -225,6 +229,8 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             if (!xi::script::load_script(res.dll_path, next, err)) {
                 send_rsp_err(srv, id, err);
                 set_status_internal("@compile", "degraded: script load failed");  // P1-4
+                xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError,
+                                        std::filesystem::path(*src).filename().string());
                 resume_continuous_if_needed();   // old g_eng.script untouched, keep it streaming
                 return;
             }
@@ -480,6 +486,9 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         // "@compile" entry's seq/ts_ms double as a running-def generation+recency
         // stamp, so a client can tell a fresh good load from a stale "ok".
         set_status_internal("@compile", "ok");
+        // Health contract: the script component is healthy again.
+        xi::health().set_script(xi::CompHealth::Ok, "",
+                                std::filesystem::path(*src).filename().string());
 
         // Return success with dll path + diagnostics (warnings only on
         // success; extension still wants them for squiggle).
@@ -503,6 +512,7 @@ void cmd_unload_script_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
         // is free to start clean.
         g_eng.param_cache.clear();
         g_eng.instance_def_cache.clear();   // sibling replay shadow — same lifetime
+        xi::health().clear_script();   // no script loaded → drop it from the component set
         send_rsp_ok(srv, id);
 }
 
@@ -835,6 +845,12 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             // override (project.json "toolchain" block) so the compiler and the
             // IntelliSense config below both pick up the user's path fixes.
             g_eng.project_folder = *folder;
+            // Health contract: a project is open (boot/prior → project_loaded). Any
+            // prior project's runtime-fault overlay belongs to the project we just
+            // replaced, so drop it. The new project's instances register their
+            // health lazily (derived from InstState at get_health time).
+            xi::health().clear_all_instance_degraded();
+            xi::health().set_state(xi::SysState::ProjectLoaded);
             resolve_toolchain_(*folder);
             // Put the project folder on the DLL search path so a script's
             // statically-linked external dep DLL can live in the project folder.
@@ -854,6 +870,13 @@ void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
         // the in-PluginManager teardown order; this fixes the
         // dispatcher-still-running case the dispatcher pool hit when
         // close_project is sent during continuous mode.)
+        // Health contract: if dispatch was live, the quiesce below drains it →
+        // mark `draining` before the pool teardown, `boot` after.
+        {
+            xi::SysState s = xi::health().state();
+            if (s == xi::SysState::Running || s == xi::SysState::Degraded)
+                xi::health().set_state(xi::SysState::Draining);
+        }
         { auto g = quiesce_dispatch_for_lifecycle_op_("close_project", &srv); g.dismiss(); }  // project closed — nothing to stream
         // Drop the bus's captured sink (it points at `srv`) BEFORE the plugin
         // DLLs are unloaded — otherwise the stale sink can fire into a torn-down
@@ -864,6 +887,11 @@ void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
         xi::TriggerBus::instance().reset();
         g_eng.plugin_mgr.close_project();
         clear_inst_state();   // instances are gone — drop host-tracked state
+        // Health contract: no project → `boot`. The instances (and their runtime-
+        // fault overlay) are gone; the script survives a close (its DLL is not
+        // unloaded here), so its health component is left intact.
+        xi::health().clear_all_instance_degraded();
+        xi::health().set_state(xi::SysState::Boot);
         // Reset the script replay shadows on the PROJECT boundary, mirroring
         // unload_script's clear. Closing a project doesn't unload the script
         // DLL, but the operator-tuned param cache + persisted xi::state() belong

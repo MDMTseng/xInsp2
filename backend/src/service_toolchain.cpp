@@ -138,7 +138,15 @@ void set_project_dll_search_(const std::string& folder) {
 
 // (forward-declared above use_process_cb) record a per-instance process() crash.
 void note_instance_crash_(const char* name, const char* why) {
-    if (name) g_eng.plugin_mgr.note_instance_crash(name, why ? why : "process() crashed");
+    if (name) {
+        g_eng.plugin_mgr.note_instance_crash(name, why ? why : "process() crashed");
+        // Health contract: a caught process()/exchange() crash marks the instance
+        // runtime-degraded (the quarantine seed, adoption-map item 14). This is the
+        // FAULT path — rare, off the per-frame verdict path — so touching the
+        // health mutex here is allowed. If the system is running this flips the
+        // top-level state to `degraded` and emits health_changed.
+        xi::health().mark_instance_degraded(name, xi::kReasonPluginFault);
+    }
 }
 
 // (forward-declared above use_process_inline_) Part III G2.1 culprit stamp.

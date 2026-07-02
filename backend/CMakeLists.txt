@@ -360,6 +360,19 @@ add_test(NAME metrics_heavy COMMAND test_metrics)
 set_tests_properties(metrics_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
+# Health/state contract (adoption-map item 10 / Bucket E): drives the header-only
+# HealthRegistry state machine through its transitions + asserts the wire shape.
+# Header-only like metrics, so it links only yyjson.
+add_executable(test_health tests/test_health.cpp)
+target_link_libraries(test_health PRIVATE yyjson)
+target_include_directories(test_health PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(NOT MSVC)
+    target_link_libraries(test_health PRIVATE pthread)
+endif()
+add_test(NAME health COMMAND test_health)
+
 add_executable(test_protocol tests/test_protocol.cpp)
 target_link_libraries(test_protocol PRIVATE xi_core)
 add_test(NAME protocol COMMAND test_protocol)
@@ -637,6 +650,7 @@ add_executable(xinsp_backend
     src/service_cmd_plugin.cpp
     src/service_cmd_project.cpp
     src/service_cmd_observability.cpp
+    src/service_health.cpp
     src/stb_impl.cpp
     src/xi_image_io.cpp
 )

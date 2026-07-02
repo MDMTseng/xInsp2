@@ -186,6 +186,7 @@ Out-of-band notifications that don't fit the above.
 { "type": "event", "name": "state_dropped", "data": { "old_schema": 1, "new_schema": 2 } }
 { "type": "event", "name": "compile_started", "data": { "path": "..." } }
 { "type": "event", "name": "compile_finished", "data": { "path": "...", "ok": true } }
+{ "type": "event", "name": "health_changed", "data": { "schema": "xi.health/1", "state": "degraded", "since_ms": 1751430000123, "component": { "kind": "instance", "name": "cam0", "health": "degraded", "reason_code": "plugin_fault" }, "ts_ms": 1751430000123 } }
 ```
 
 `run_started` / `run_finished` bracket every `cmd:run` and every
@@ -221,6 +222,16 @@ lines); `compile_finished` fires immediately after with the same
 still tell success from failure. Cold compiles take 4+ s on this
 project and dominate the WS quiet window — without these events the
 connection looks hung.
+
+`health_changed` is the push half of the **health/state contract** (see
+`cmd:get_health` below). It fires on every top-level state transition and on
+every runtime component-health change (a caught plugin fault, a compile
+outcome). `data.state` is the new top-level state; `data.since_ms` is when that
+state was entered; `data.component` (present only when a component changed)
+carries `{kind, name, health, reason_code}`. It is a low-latency **accelerator** —
+`cmd:get_health` is the delivery guarantee (re-pull on connect). Additive:
+existing clients ignore the unknown event. Full model:
+[`new_gen/04-health-contract.md`](../new_gen/04-health-contract.md).
 
 `state_dropped` fires after `cmd:compile_and_load` when the new
 script DLL declares a different `xi_script_state_schema_version()`
@@ -564,6 +575,44 @@ itself (same contract as the `dispatch_stats` `*_lifetime` fields).
 | `inspect_compute_ms.sum_ms` | Σ per-frame inspect **compute** time, ms (kept in integer µs internally; here in ms) |
 | `inspect_compute_ms.mean_ms` | `sum_ms / count`, or `0` when `count == 0` |
 | `inspect_compute_ms.buckets` | non-cumulative counts; each entry counts frames with `compute ≤ le`, partitioned by the 13 ms edges (`0.5 … 5000`). The final `{"le":"inf"}` is the overflow bucket. All bucket counts sum to `frames_total`. |
+
+### `get_health`
+`args: {}` → `data: { ... }`. The **one canonical health read** — the
+core-owned health/state contract (schema `xi.health/1`). It subsumes the ad-hoc
+liveness side channels (`get_state`, the `status` map, `dispatch_stats`'
+`last_emit_age_ms`, `watchdog_status`) under one point-query snapshot, same role
+as `dispatch_stats` / `image_pool_stats` / `metrics`. Clients re-pull it on every
+(re)connect — that is the delivery guarantee; the `health_changed` event (above)
+is the low-latency accelerator between pulls. Full model + rationale:
+[`new_gen/04-health-contract.md`](../new_gen/04-health-contract.md).
+
+```json
+{ "schema": "xi.health/1", "state": "degraded", "since_ms": 1751430000123,
+  "boot_id": "9f3c…", "station_id": "line3-cell2",
+  "components": [
+    { "kind": "script",   "name": "inspect.cpp", "health": "ok",       "reason_code": "",             "since_ms": 1751429990000 },
+    { "kind": "instance", "name": "cam0",        "health": "degraded", "reason_code": "plugin_fault", "since_ms": 1751430000123, "crash_count": 3 },
+    { "kind": "group",    "name": "default",     "health": "ok",       "reason_code": "",             "since_ms": 0, "queue_now": 0, "running": 1, "dropped": 0 },
+    { "kind": "source",   "name": "cam0",        "health": "ok",       "reason_code": "",             "since_ms": 0, "last_emit_age_ms": 41 }
+  ] }
+```
+
+| Field | Meaning |
+|---|---|
+| `state` | top-level machine: `boot` → `project_loaded` → `running` ⇄ `degraded` / `draining` / `fault`. `degraded` = running but a runtime fault is live |
+| `since_ms` | wall-clock ms when the current `state` was entered (age = `now − since_ms`) |
+| `boot_id` / `station_id` | the run-outcome identity slice (same values stamped on every `run_result`) |
+| `components[].kind` | `script` \| `instance` \| `group` \| `source` |
+| `components[].health` | `ok` \| `degraded` (ran then faulted, still in service — the quarantine seed) \| `failed` (could not be brought into service) |
+| `components[].reason_code` | `plugin_fault` (caught crash) \| `prepare_failed` \| `compile_error` \| `""` when `ok` |
+| `components[].since_ms` | when this component health was entered (`0` = not tracked / born state) |
+| instance extras | `crash_count` — process()-crash count (also on `get_state`) |
+| group extras | `queue_now` / `running` / `dropped` — as on `dispatch_stats` |
+| source extras | `last_emit_age_ms` — the existing emit-age signal; sources are always `ok` (core does **not** invent a staleness threshold — alerting is the consumer's call, same as `dispatch_stats`) |
+
+Instance base health is derived from the `get_state` machine at query time (so it
+cannot drift); the caught-crash `degraded` overlay is core-owned. See `get_state`
+for the single-instance point query.
 
 ### `list_instances`
 `args: {}` → triggers an `instances` message.

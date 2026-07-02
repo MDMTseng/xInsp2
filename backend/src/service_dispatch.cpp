@@ -631,6 +631,11 @@ const char* inst_state_str(InstState s) {
 void set_inst_state(const std::string& name, InstState s,
                            const std::string& err) {
     g_eng.plugin_mgr.set_instance_state(name, s, err);
+    // Health contract: re-activating an instance clears any runtime-fault overlay
+    // (an operator re-committing a crash-quarantined instance recovers it). The
+    // base active/faulted health is DERIVED from InstState at get_health time, so
+    // there is nothing else to mirror here. clear is a no-op if it wasn't degraded.
+    if (s == InstState::Active) xi::health().clear_instance_degraded(name);
 }
 void clear_inst_state() {
     g_eng.plugin_mgr.clear_instance_states();

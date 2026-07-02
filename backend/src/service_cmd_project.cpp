@@ -274,7 +274,10 @@ void cmd_remove_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
             parsed->args_json.find("\"delete_folder\":true") != std::string::npos;
         if (g_eng.plugin_mgr.remove_instance(*iname, delete_folder)) {
             // remove_instance drops the lifecycle state internally (atomic with the
-            // unregister) — no separate drop_inst_state needed.
+            // unregister) — no separate drop_inst_state needed. Health contract:
+            // drop any runtime-fault overlay for the removed instance so it no
+            // longer holds the top-level state `degraded`.
+            xi::health().clear_instance_degraded(*iname);
             send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "instance not found: " + *iname);
@@ -293,6 +296,10 @@ void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
             // Ok OR NotPersisted: the runtime + folder were renamed. rename_instance
             // already migrated the host-tracked state inside the same locked op, so
             // there's nothing to sync here — only the disk-save status differs.
+            // Health contract: the runtime-fault overlay is keyed by name; clear the
+            // old key (a renamed crash-quarantined instance recovers — operator
+            // re-runs; the overlay repopulates under the new name on the next fault).
+            xi::health().clear_instance_degraded(*old_name);
             if (rr == RR::NotPersisted)
                 send_rsp_err(srv, id, "renamed in memory but could not persist to disk "
                                       "(disk full / read-only?) — may revert on restart");
