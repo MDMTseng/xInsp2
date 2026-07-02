@@ -46,6 +46,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace xi {
@@ -105,11 +106,22 @@ public:
         else                          { buf_.push_back(tag::UInt64); put_be64(buf_, v); }
     }
 
-    // All floats encode as float64 (0xcb). NaN/Inf ride natively — no sentinel
-    // strings (that was a JSON-edge workaround; msgpack float64 carries them).
+    // All floats encode as float64 (0xcb). NaN is NORMALIZED to the single
+    // canonical quiet-NaN pattern 0x7ff8000000000000 (binding ruling 1,
+    // 2026-07-02): IEEE-754 has ~2^53 NaN encodings, so a byte-deterministic
+    // profile must pick one, and cross-language determinism (TS/Py) wins over
+    // bit-pattern preservation. ANY NaN — any sign, any payload, signalling or
+    // quiet — flattens; +/-Inf and -0.0 are preserved exactly. This same writer
+    // is the canonicalizer's emit path, so foreign NaN is flattened on ingress
+    // too. NaN is detected on the RAW bits (exponent all-ones, mantissa
+    // non-zero) rather than std::isnan, so a signalling NaN is caught without
+    // relying on the FPU not to quiet it in transit.
     void float_(double v) {
         uint64_t bits;
         std::memcpy(&bits, &v, sizeof bits);
+        if ((bits & 0x7ff0000000000000ull) == 0x7ff0000000000000ull &&
+            (bits & 0x000fffffffffffffull) != 0)
+            bits = 0x7ff8000000000000ull;
         buf_.push_back(tag::Float64);
         put_be64(buf_, bits);
     }
@@ -166,6 +178,8 @@ enum class Status {
     LengthOverflow,  // a declared str/bin/ext length exceeds the remaining bytes
     TrailingBytes,   // extra bytes after the top-level value
     UnexpectedExt,   // an ext type not on the accept-list (policy = reject)
+    NonStringKey,    // a map key that is not a str (ruling 2 — string-keyed maps)
+    DuplicateKey,    // a map with a repeated key (ruling 5 — canonicalize only)
 };
 
 inline const char* status_str(Status s) {
@@ -177,6 +191,8 @@ inline const char* status_str(Status s) {
         case Status::LengthOverflow: return "length-overflow";
         case Status::TrailingBytes:  return "trailing-bytes";
         case Status::UnexpectedExt:  return "unexpected-ext";
+        case Status::NonStringKey:   return "non-string-key";
+        case Status::DuplicateKey:   return "duplicate-key";
     }
     return "?";
 }
@@ -292,6 +308,9 @@ public:
 
     // Walk the WHOLE top-level value, enforcing depth and ext policy, and require
     // that nothing follows it. Structural well-formedness of the entire buffer.
+    // Map keys must be strings (ruling 2 -> NonStringKey); duplicate keys are
+    // NOT checked here (that hygiene check lives at the ingress door,
+    // canonicalize(); see below).
     Status validate(int max_depth = kDefaultMaxDepth,
                     const ExtPolicy& policy = ExtPolicy::reject_all()) {
         rewind();
@@ -303,7 +322,11 @@ public:
 
     // Read-any → write-canonical, in one pass. On success `out` holds the
     // canonical re-encoding of the whole buffer. Enforces the same bounds as
-    // validate(); an accept-listed ext passes through (re-emitted as ext32), a
+    // validate() PLUS the two ingress-door checks: NaN is flattened to the
+    // canonical pattern (ruling 1, via the Writer), non-string map keys are
+    // rejected (ruling 2 -> NonStringKey), and DUPLICATE map keys are rejected
+    // (ruling 5 -> DuplicateKey; this is the strict half of the split with
+    // validate()). An accept-listed ext passes through (re-emitted as ext32), a
     // foreign ext is rejected or stripped to bin per policy.
     Status canonicalize(Writer& out, int max_depth = kDefaultMaxDepth,
                         const ExtPolicy& policy = ExtPolicy::reject_all()) {
@@ -443,8 +466,16 @@ private:
             case Kind::Map: {
                 if (depth + 1 > max_depth) return Status::DepthExceeded;
                 for (uint32_t k = 0; k < e.len; ++k) {
-                    s = walk_validate(depth + 1, max_depth, policy);  // key
+                    // Ruling 2: the frame plane is string-keyed. The key must be
+                    // a str scalar (a leaf) — read it directly and reject any
+                    // foreign non-string key. validate() stays PERMISSIVE on
+                    // duplicate keys (ruling 5 puts dup-rejection at the ingress
+                    // door, canonicalize(); cheap dup-detection here is awkward
+                    // and structural validity does not require it).
+                    Element key;
+                    s = next(key);
                     if (s != Status::Ok) return s;
+                    if (key.kind != Kind::Str) return Status::NonStringKey;
                     s = walk_validate(depth + 1, max_depth, policy);  // value
                     if (s != Status::Ok) return s;
                 }
@@ -489,9 +520,21 @@ private:
             case Kind::Map: {
                 if (depth + 1 > max_depth) return Status::DepthExceeded;
                 w.map(e.len);
+                // canonicalize() is the ingress door, so it is STRICT where
+                // validate() is permissive: it both enforces string keys
+                // (ruling 2) and rejects duplicate keys (ruling 5). The seen-set
+                // holds zero-copy views into the input buffer, valid for the
+                // duration of this walk.
+                std::unordered_set<std::string_view> seen;
+                seen.reserve(e.len);
                 for (uint32_t k = 0; k < e.len; ++k) {
-                    s = walk_canon(w, depth + 1, max_depth, policy);  // key
+                    Element key;
+                    s = next(key);
                     if (s != Status::Ok) return s;
+                    if (key.kind != Kind::Str) return Status::NonStringKey;
+                    std::string_view ksv((const char*)key.data, key.len);
+                    if (!seen.insert(ksv).second) return Status::DuplicateKey;
+                    w.str(ksv);
                     s = walk_canon(w, depth + 1, max_depth, policy);  // value
                     if (s != Status::Ok) return s;
                 }

@@ -19,6 +19,7 @@ import pytest
 
 from xinsp2.canonical import (
     Ext,
+    CanonicalError,
     DecodeError,
     DepthLimitError,
     EncodeError,
@@ -292,3 +293,49 @@ def test_shared_encode_vectors(case):
 @pytest.mark.parametrize("case", VECTORS["recanon"], ids=[c["name"] for c in VECTORS["recanon"]])
 def test_shared_recanon_vectors(case):
     assert recanonicalize(bytes.fromhex(case["in_hex"])).hex() == case["out_hex"]
+
+
+# ---- cross-check against the C++ golden fixtures ----------------------------
+# The other half of the three-way validation: the C++ Writer/canonicalizer emits
+# the golden .bin files under protocol/fixtures/canonical/; here the PYTHON codec
+# consumes those same bytes. A canonical golden must decode and recanonicalize to
+# ITSELF (both codecs agree it is already canonical); the compact golden must
+# recanonicalize to its canonical sibling; every hostile golden must be REJECTED
+# by Python too. See backend/tests/test_mp_fixtures.cpp (the generator).
+
+CANON_DIR = REPO / "protocol" / "fixtures" / "canonical"
+_MANIFEST_PATH = CANON_DIR / "manifest.json"
+_MANIFEST = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8")) if _MANIFEST_PATH.exists() else None
+
+pytestmark_goldens = pytest.mark.skipif(_MANIFEST is None, reason="C++ canonical goldens not generated")
+
+
+@pytest.mark.skipif(_MANIFEST is None, reason="C++ canonical goldens not generated")
+@pytest.mark.parametrize("entry", (_MANIFEST or {}).get("canonical", []),
+                         ids=[e["file"] for e in (_MANIFEST or {}).get("canonical", [])])
+def test_cpp_golden_recanonicalizes_to_itself(entry):
+    raw = (CANON_DIR / entry["file"]).read_bytes()
+    # Python decodes the C++-produced canonical bytes without error...
+    decode(raw)
+    # ...and recanonicalizing them reproduces the exact same bytes (byte-agreement
+    # on "what canonical looks like" between the C++ and Python implementations).
+    assert recanonicalize(raw) == raw, entry["file"]
+
+
+@pytest.mark.skipif(_MANIFEST is None, reason="C++ canonical goldens not generated")
+def test_cpp_compact_pair_recanonicalizes_to_canonical():
+    cp = _MANIFEST["compact_pair"]
+    compact = (CANON_DIR / cp["compact_file"]).read_bytes()
+    canonical = (CANON_DIR / cp["canonical_file"]).read_bytes()
+    assert recanonicalize(compact) == canonical
+
+
+@pytest.mark.skipif(_MANIFEST is None, reason="C++ canonical goldens not generated")
+@pytest.mark.parametrize("entry", (_MANIFEST or {}).get("hostile", []),
+                         ids=[e["file"] for e in (_MANIFEST or {}).get("hostile", [])])
+def test_cpp_hostile_golden_rejected_by_python(entry):
+    raw = (CANON_DIR / entry["file"]).read_bytes()
+    # Every adversarial fixture the C++ reader rejects must also be refused by the
+    # Python decoder (some specific subclass of CanonicalError).
+    with pytest.raises(CanonicalError):
+        decode(raw)

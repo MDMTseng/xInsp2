@@ -211,6 +211,21 @@ add_test(NAME mp_fixtures COMMAND test_mp_fixtures)
 set_tests_properties(mp_fixtures PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures")
 
+# canonical_xcheck — the C++ leg of the three-way cross-language validation. It
+# builds every portable vector in contract/canonical-vectors.json with the C++
+# Writer and byte-compares to the expected hex (the SAME vectors the Python and
+# TypeScript suites check), plus the recanon vectors. Byte agreement across the
+# three implementations is the profile's cross-language proof. Labelled
+# "contract" alongside the schema/baseline gates.
+add_executable(test_canonical_xcheck tests/test_canonical_xcheck.cpp)
+target_link_libraries(test_canonical_xcheck PRIVATE yyjson)
+target_include_directories(test_canonical_xcheck PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME canonical_xcheck COMMAND test_canonical_xcheck)
+set_tests_properties(canonical_xcheck PROPERTIES LABELS "contract"
+    ENVIRONMENT "XINSP2_VECTORS=${CMAKE_CURRENT_SOURCE_DIR}/../contract/canonical-vectors.json")
+
 # Plugin-manifest parse layer (xi_pm_parse.hpp): json_flag_true top-level-only (#22).
 add_executable(test_pm_parse tests/test_pm_parse.cpp)
 target_link_libraries(test_pm_parse PRIVATE xi_core)
@@ -509,6 +524,17 @@ if(NOT MSVC)
     target_link_libraries(test_xi_frame PRIVATE pthread)
 endif()
 add_test(NAME xi_frame COMMAND test_xi_frame)
+
+# Ingress canonicalizer (xi_ingress.hpp) — the domain edge (task 1c). The ONLY
+# path from foreign/untrusted msgpack bytes to a Frame entry: structural
+# validation + profile normalization (NaN flatten, dup/non-string-key reject) +
+# the optional semantic seam, and the pool-handle ext rule (never imported).
+add_executable(test_ingress tests/test_ingress.cpp)
+target_link_libraries(test_ingress PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_ingress PRIVATE pthread)
+endif()
+add_test(NAME ingress COMMAND test_ingress)
 
 # Parallel-region safety regression tests (Part I hazards A/B/C — trigger
 # snapshot, OpenMP/SEH containment, worker-thread image-owner propagation).
@@ -1033,6 +1059,16 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../contract/baseline_gate.py)
     set_tests_properties(contract_baseline PROPERTIES LABELS "contract")
+    # canonical_xcheck_py — the PYTHON leg of the three-way cross-validation
+    # (paired with the C++ canonical_xcheck above). Runs the canonical-codec
+    # pytest suite, which checks the shared vectors AND consumes the C++ golden
+    # fixtures (decode + recanonicalize -> byte-compare; hostile goldens must be
+    # rejected). The runner self-skips (exit 0, loud SKIP) when pytest is not
+    # installed for this interpreter, like the doc_coverage / contract_* gates.
+    add_test(NAME canonical_xcheck_py
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/xinsp2_py/run_canonical_xcheck.py)
+    set_tests_properties(canonical_xcheck_py PROPERTIES LABELS "contract")
     # contract_live: the THIRD contract leg (schemas <-> fixtures <-> LIVE bytes).
     # contract_schema proves the fixtures match the schemas; this proves the schemas
     # match what the REAL backend sends. It spawns backend/build/Release/xinsp-backend.exe

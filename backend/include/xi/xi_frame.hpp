@@ -478,6 +478,15 @@ public:
         push(std::move(e), handle);
     }
     // Opaque nested msgpack (already canonical): copied verbatim into the arena.
+    //
+    // GUARD: this is the path for INTERNAL producers whose bytes are canonical
+    // BY CONSTRUCTION (they came out of xi::mp::Writer / a trusted plugin). It
+    // does NOT validate — it trusts. FOREIGN / untrusted bytes (inbound comms
+    // payloads, third-party chunk data, old replay files) must NOT come here:
+    // they go through xi::ingress::canonicalize_entry / canonicalize_into
+    // (xi_ingress.hpp), which validates structure, normalizes to the profile,
+    // and refuses forged pool-handle ext BEFORE producing the canonical bytes
+    // this method then stores. "The safe path is the only path" (doc 07 Ingress).
     void add_mp(std::string_view key, const void* mp, size_t n) {
         Entry& e = begin_inline(key, FrameTag::Mp, n);
         if (n) std::memcpy(const_cast<uint8_t*>(e.inl), mp, n);
