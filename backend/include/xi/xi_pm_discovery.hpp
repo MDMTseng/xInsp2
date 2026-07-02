@@ -162,6 +162,7 @@ inline bool PluginManager::register_plugin_folder_locked_(const std::string& fol
             existing->second.has_ui        = info.has_ui;
             existing->second.reentrant     = info.reentrant;
             existing->second.is_sink       = info.is_sink;
+            existing->second.default_on_fault = info.default_on_fault;
             existing->second.json_fallback = info.json_fallback;
             existing->second.prebuilt      = info.prebuilt;
             existing->second.ui_path       = info.ui_path;

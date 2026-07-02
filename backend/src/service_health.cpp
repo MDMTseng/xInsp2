@@ -74,14 +74,17 @@ void cmd_get_health_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parse
             }
             xi::CompHealth h = xi::CompHealth::Ok;
             std::string reason; int64_t comp_since = 0;
-            std::string ovr_reason; int64_t ovr_since = 0;
+            xi::CompHealth ovr_h; std::string ovr_reason; int64_t ovr_since = 0;
             if (base == InstState::Faulted) {
                 h = xi::CompHealth::Failed;
                 reason = xi::kReasonPrepareFailed;
-            } else if (H.instance_degraded(iname, ovr_reason, ovr_since)) {
-                // A caught runtime crash (InstState stays Active) — the quarantine
-                // seed. Overlay wins over the ok base.
-                h = xi::CompHealth::Degraded;
+            } else if (H.instance_fault(iname, ovr_h, ovr_reason, ovr_since)) {
+                // A runtime-fault overlay (InstState stays Active) — the item-14
+                // quarantine surface. `degraded`/plugin_fault = a caught crash the
+                // policy kept in service (reuse/reinit); `failed`/quarantined =
+                // on_fault=refuse pulled it from service. Overlay wins over the
+                // ok base.
+                h = ovr_h;
                 reason = ovr_reason;
                 comp_since = ovr_since;
             }

@@ -109,6 +109,11 @@ inline InstanceInfo* PluginManager::create_instance(const std::string& instance_
         auto adapter = std::make_shared<CAbiInstanceAdapter>(
             instance_name, plugin_name, pi.handle, raw, pi.reentrant, /*max_concurrency=*/0, pi.is_sink);
         adapter->adopt_owner_id(owner.release());   // adapter owns the sweep now
+        // item 14: a fresh instance takes the plugin's default policy (no
+        // instance.json override yet); arm the in-place reinit for on_fault=reinit.
+        ii.on_fault = pi.default_on_fault;
+        adapter->set_on_fault(ii.on_fault);
+        adapter->arm_reinit(pi.c_factory, &host);
         ii.instance = std::move(adapter);
     }
     InstanceRegistry::instance().add(ii.instance);
@@ -201,6 +206,7 @@ inline PluginManager::RenameResult PluginManager::rename_instance(const std::str
     const std::string plugin_name      = it->second.plugin_name;
     const int         old_max_conc      = it->second.max_concurrency;
     const std::string old_group         = it->second.group;
+    const OnFault     old_on_fault      = it->second.on_fault;   // item 14
     std::string saved_def;
     if (it->second.instance) saved_def = it->second.instance->get_def();
 
@@ -253,9 +259,12 @@ inline PluginManager::RenameResult PluginManager::rename_instance(const std::str
     // rename silently dropped the concurrency cap + dispatch group.
     ii.max_concurrency = old_max_conc;
     ii.group           = old_group;
+    ii.on_fault        = old_on_fault;   // item 14: rename preserves the policy
     auto adapter = std::make_shared<CAbiInstanceAdapter>(
         new_name, plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency, pi.is_sink);
     adapter->adopt_owner_id(owner.release());   // ctor images now belong to the live adapter
+    adapter->set_on_fault(ii.on_fault);
+    adapter->arm_reinit(pi.c_factory, &host);
     ii.instance = std::move(adapter);
     if (!saved_def.empty()) ii.instance->set_def(saved_def);
     InstanceRegistry::instance().add(ii.instance);
@@ -594,6 +603,19 @@ inline bool PluginManager::save_instance_json(const InstanceInfo& ii) {
     // drop it, so the source's triggers silently fell back to default_group).
     if (!ii.group.empty()) {
         out += "  \"group\": "; pm_json_escape(out, ii.group); out += ",\n";
+    }
+    // item 14: round-trip a per-instance on_fault OVERRIDE — only when it differs
+    // from the plugin default (so a save doesn't drop a user's override, nor bake
+    // the plugin default into every instance.json).
+    {
+        OnFault plugin_dflt = OnFault::Reuse;
+        if (auto pit = plugins_.find(ii.plugin_name); pit != plugins_.end())
+            plugin_dflt = pit->second.default_on_fault;
+        if (ii.on_fault != plugin_dflt) {
+            out += "  \"on_fault\": \"";
+            out += on_fault_name(ii.on_fault);
+            out += "\",\n";
+        }
     }
     out += "  \"config\": ";
     out += ii.instance ? ii.instance->get_def() : "{}";

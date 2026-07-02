@@ -10,6 +10,7 @@
 // read/write helpers in namespace xi::project — not the model.)
 //
 #include "xi_instance.hpp"      // InstanceBase (held by InstanceInfo)
+#include "xi_fault_policy.hpp"  // OnFault (per-instance post-fault policy, item 14)
 
 #include <memory>
 #include <string>
@@ -42,6 +43,10 @@ struct InstanceInfo {
     int                  max_concurrency = 0;  // instance.json cap; 0 = unlimited (reentrant)
     std::string          folder_path;  // project/instances/<name>/
     std::string          group;        // instance.json "group" → dispatch group for this source's triggers ("" = default)
+    // Effective post-fault policy (item 14): resolved at load as the instance.json
+    // "on_fault" override if present, else the plugin.json default, else Reuse.
+    // Carried into the CAbiInstanceAdapter at (re)construction, like max_concurrency.
+    OnFault              on_fault = OnFault::Reuse;
     std::shared_ptr<InstanceBase> instance;
 };
 

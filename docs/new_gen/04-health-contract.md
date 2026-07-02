@@ -137,6 +137,7 @@ is source-specific; alerting is the consumer's call, unchanged from
 | `reason_code` | Kind | Meaning |
 |---|---|---|
 | `plugin_fault` | instance | a caught `process()` / `exchange()` crash (SEH or C++ throw); the instance stays in service, `degraded` |
+| `quarantined` | instance | `on_fault=refuse` (or a reinit that escalated) pulled the instance from service → `failed` (item 14) |
 | `prepare_failed` | instance | `prepare` / `commit` / `set_def` failed → `failed` |
 | `compile_error` | script | the last `compile_and_load` failed to build or load → `failed` |
 | `watchdog_trip` | *(state)* | the fatal transition to `fault` |
@@ -212,7 +213,46 @@ reserved for state-machine transitions and runtime faults, keeping it low-noise.
 - **Per-frame telemetry** — that is `metrics`; health never touches the hot path.
 - **Recovery / quarantine policy** — the contract *marks* an instance
   `degraded` on a runtime fault; the reuse/re-init/refuse decision is
-  adoption-map item 14, which builds on this overlay.
+  adoption-map item 14, now landed on top of this overlay (see below).
+
+## Quarantine policy (adoption-map item 14)
+
+The overlay above is the *seed*; item 14 is the *decision* built on it. When a
+plugin instance's `process()`/`exchange()` faults and the SEH boundary catches it
+(`service_sinks.cpp` `use_process_inline_`), a per-instance **`on_fault`** policy
+decides what happens next:
+
+| `on_fault` | Behavior | Health | For |
+|---|---|---|---|
+| `reuse` *(default)* | fault logged; instance stays in service | `degraded` / `plugin_fault` | stateless operators — nothing changes vs. pre-item-14 |
+| `reinit` | instance torn down + re-created + re-prepared from its last committed config before its next use, dropping in-flight state | `degraded` while faulted → clears on a clean rebuild | stateful plugins whose invariants may be corrupted mid-mutation |
+| `refuse` | instance pulled from service; subsequent `process()` calls fail fast (rc `-3`) without entering plugin code | `failed` / `quarantined` | plugins where a wrong-but-not-crashing result is worse than no result |
+
+**Declaration.** `on_fault` is a per-plugin default in `plugin.json`
+(`"on_fault": "reinit"`) with a per-instance `instance.json` override — exactly
+where the other dispatch knobs live (`reentrant`/`sink` in `plugin.json`,
+`max_concurrency`/`group` in `instance.json`). Absent/unknown ⇒ `reuse`, so the
+change is pre-1.0 compatible: nothing changes unless a plugin or instance declares
+otherwise. See the plugin authoring guide and `ws-protocol.md`.
+
+**Enforcement rides the existing lifecycle.** A `reinit` rebuild reuses the same
+create → `set_def` steps as the plugin-reload path (`make_adapter_guarded_`), done
+**in place** on the live adapter and **serialized by the instance's `CallScope`
+gate** (so no `process()` runs concurrently on it and the `shared_ptr` other
+dispatch workers hold stays valid) — it does not invent a second lifecycle. A
+rebuild that fails keeps the old instance live (corrupt-but-runnable) and, after
+`kReinitEscalateAfter` = **3** consecutive failures, escalates to `refuse` so a
+persistently-unrebuildable instance stops thrashing the lifecycle every frame.
+
+**Cost.** The check is off the non-fault path: the refuse fail-fast gate is a
+single already-loaded atomic on the adapter (the natural home — the per-instance
+gate already lives there), and the policy consultation itself happens only in the
+rare caught-fault branch. A per-frame verdict never touches any of this.
+
+**Re-enable** uses the existing operator surface — re-committing an instance's
+config (`set_instance_def` / `commit_group`, which set it `Active`) lifts the
+quarantine and clears the overlay. No new command; a reload/recompile also
+produces a fresh, un-quarantined adapter.
 
 ## What this subsumes
 

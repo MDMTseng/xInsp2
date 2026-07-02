@@ -291,6 +291,21 @@ target_compile_definitions(test_plugin_exception PRIVATE
     THROWING_DLL="$<TARGET_FILE:throwing_plugin>")
 add_test(NAME plugin_exception COMMAND test_plugin_exception)
 
+# Post-fault quarantine policy (adoption-map item 14): a controllable-crash plugin
+# (raw exports, so a fault reaches the host SEH boundary) drives the REAL adapter
+# reinit/refuse mechanics + the health overlay the fault boundary sets.
+add_library(fault_plugin SHARED tests/fault_plugin.cpp)
+target_link_libraries(fault_plugin PRIVATE xi_core)
+add_executable(test_fault_policy tests/test_fault_policy.cpp)
+target_link_libraries(test_fault_policy PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_fault_policy PRIVATE Ws2_32)
+endif()
+add_dependencies(test_fault_policy fault_plugin)
+target_compile_definitions(test_fault_policy PRIVATE
+    FAULT_PLUGIN_DLL="$<TARGET_FILE:fault_plugin>")
+add_test(NAME fault_policy COMMAND test_fault_policy)
+
 # ABI freeze-signature guard: declares xi_host_api@9 frozen and fails the BUILD
 # if its published layout changes (per-field offset + fn-pointer type, in order).
 # Mostly compile-time static_assert; the test target makes it part of the build.

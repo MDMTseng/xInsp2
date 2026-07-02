@@ -221,6 +221,10 @@ private:
         pi.json_fallback = json_flag_true(mc, "json_fallback");
         pi.is_sink       = json_flag_true(mc, "sink") ||
                            (extract_string(mc, "role").value_or("") == "sink");
+        // item 14: per-plugin post-fault policy DEFAULT (an instance.json
+        // "on_fault" overrides it). Unknown/absent → Reuse (today's behavior).
+        pi.default_on_fault = parse_on_fault(extract_string(mc, "on_fault").value_or(""),
+                                             OnFault::Reuse);
         // Refresh the LV2-style capability handshake too, so a rebuilt plugin that
         // newly declares (or drops) a required interface is re-gated on reload.
         pi.required_ifaces = parse_iface_reqs(mc, "requires");
@@ -264,13 +268,15 @@ private:
     struct PendingInstance {
         std::string name, folder, def_json;
         int         max_concurrency = 0;
+        OnFault     on_fault = OnFault::Reuse;   // item 14: preserved across reload
     };
 
     // Owner-guarded factory call shared by every (re)instantiation path on the
     // reload/recompile lanes. (defined in xi_pm_load.hpp)
     std::shared_ptr<CAbiInstanceAdapter> make_adapter_guarded_(
             PluginInfo& pi, const std::string& plugin_name,
-            const std::string& inst_name, int max_concurrency);
+            const std::string& inst_name, int max_concurrency,
+            OnFault on_fault = OnFault::Reuse);
 
     // Phase 1 of a reload: snapshot every instance's def, then destroy them and
     // FreeLibrary the plugin's old DLL. (defined in xi_pm_load.hpp)

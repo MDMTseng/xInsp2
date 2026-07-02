@@ -316,8 +316,8 @@ deciding "unchanged" and running stale code forever.
 > command once and it loads.
 
 > **Manifest flags are re-read on every reload.** `reentrant` (alias `thread_safe`),
-> `sink` / `role`, `json_fallback`, and `factory` are re-parsed from `plugin.json`
-> on **all** load paths — full `open_project`, the `Ctrl+S` cl.exe hot-recompile,
+> `sink` / `role`, `json_fallback`, `on_fault`, and `factory` are re-parsed from
+> `plugin.json` on **all** load paths — full `open_project`, the `Ctrl+S` cl.exe hot-recompile,
 > *and* the cmake **Rebuild** — not just the first open. Toggle `"reentrant": true`
 > → `false` and Save/Rebuild, and the host immediately starts serializing that
 > instance again (the dispatch admission cap follows the live flag); flip a plugin
@@ -406,6 +406,43 @@ live. The canonical lock-free shape: keep the live config in a
 plain (host-serialized) `set_def` — fine for light plugins. The orchestrator drives
 it via `prepare_instance` + `commit_group`; see `plugins/config_swap_probe/` for a
 complete example and [`../reference/c-abi.md`](../reference/c-abi.md) §1.
+
+### After a caught crash — `on_fault` policy (optional)
+
+The host **catches** a `process()`/`exchange()` fault (an access violation, a
+throw) so one bad frame can't take the backend down: the fault is logged, the
+instance is marked `degraded` in the health contract (`get_health`), the frame is
+dropped, and — by default — **the same instance is reused for the next frame**.
+That is exactly right for a **stateless** operator. But if your plugin faults
+*midway through mutating persistent state* (a half-updated model, a container
+resized but not filled), reusing it means the next frame reads inconsistent state
+and can produce a silently-wrong result. `on_fault` lets you choose what happens:
+
+| `on_fault` | After a caught fault | Use it when |
+|---|---|---|
+| `reuse` *(default)* | logged + `degraded`; instance stays in service | your `process()` holds no cross-frame state that a mid-fault could corrupt (stateless operators — most plugins) |
+| `reinit` | the instance is **torn down and re-created + re-prepared from its last committed config** before its next use, dropping in-flight state; after 3 consecutive rebuild failures it escalates to `refuse` | you keep mutable state across frames (accumulators, trackers, a loaded model) whose invariants a mid-fault could break |
+| `refuse` | the instance is **pulled from service**: subsequent `process()` calls fail fast (never entering your code) and it shows `failed`/`quarantined` in `get_health`, until an operator re-enables it | a wrong-but-not-crashing result is worse than no result — better to stop the station than pass a bad part |
+
+Declare it as a **per-plugin default** in `plugin.json`:
+
+```json
+{ "name": "blob_tracker", "reentrant": false, "on_fault": "reinit" }
+```
+
+and override it **per instance** in `instance.json` (`"on_fault": "refuse"`) when
+one deployment of the plugin needs a different posture. Absent/unknown ⇒ `reuse`,
+so existing plugins are unaffected. Like the other dispatch flags it is honoured
+**only as a top-level key** and is re-read on reload.
+
+A `reinit` rebuild rides the same lifecycle as a plugin reload — it re-runs your
+`xi_plugin_create` + restores the last committed config, so **anything your
+constructor/`set_def` rebuilds is restored, and anything only mutated during
+`process()` is dropped** (that's the point). To **re-enable** a `refuse`-d
+instance, re-commit its config (`set_instance_def` / `commit_group`) — the same
+action an operator takes to push a corrected config. See
+[`../new_gen/04-health-contract.md`](../new_gen/04-health-contract.md) and the
+`get_health` reason codes in [`../reference/ws-protocol.md`](../reference/ws-protocol.md).
 
 ### Image ops
 

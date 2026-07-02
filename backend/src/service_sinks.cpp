@@ -32,10 +32,61 @@
 // manager lock is taken only when the active plugin on this thread changes.
 // stamp_culprit_ declared in service_internal.hpp.
 
+// ---- item 14: post-fault quarantine policy (adoption-map item 14) -----------
+// The health-overlay + escalation POLICY lives HERE, at the fault boundary; the
+// CAbiInstanceAdapter carries the mechanical per-instance state (the policy value,
+// the quarantine flag, the in-place rebuild) because its per-instance CallScope
+// gate is the natural serialization point. See xi_fault_policy.hpp +
+// docs/new_gen/04-health-contract.md (§ "Quarantine policy").
+
+// on_fault=refuse: pull the instance out of service. Sets the fail-fast gate,
+// marks it failed/quarantined in the health contract, and surfaces ONE operator-
+// visible error. Idempotent — a per-frame refuse never re-emits (the gate + the
+// health overlay both coalesce), so it can't spam.
+static void quarantine_instance_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+    if (adapter->quarantined()) return;
+    adapter->set_quarantined(true);
+    xi::health().mark_instance_fault(name, xi::CompHealth::Failed, xi::kReasonQuarantined);
+    push_recent_error(name,
+        "instance quarantined (on_fault=refuse) — pulled from service after a caught "
+        "process() fault; re-enable by re-committing its config (set_instance_def / "
+        "commit_group)");
+}
+
+// Consult the caught-fault policy AFTER note_instance_crash_ has already marked the
+// instance runtime-`degraded`. reuse: nothing more (stays in service). reinit:
+// request a rebuild before the instance's next use. refuse: quarantine now.
+static void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+    switch (adapter->on_fault()) {
+        case xi::OnFault::Reuse:  break;
+        case xi::OnFault::Reinit: adapter->request_reinit(); break;
+        case xi::OnFault::Refuse: quarantine_instance_(name, adapter); break;
+    }
+}
+
+// Perform a requested (on_fault=reinit) rebuild before the next process(). A clean
+// rebuild clears the runtime-fault overlay (the instance is healthy again); a
+// failed rebuild keeps the old instance live and escalates to refuse after
+// kReinitEscalateAfter consecutive failures. Runs on the caller thread just before
+// process(); reinit() serializes itself via the instance's CallScope.
+static void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+    if (adapter->reinit()) {
+        adapter->reset_reinit_fails();
+        xi::health().clear_instance_degraded(name);   // recovered → ok / running
+    } else if (adapter->note_reinit_fail() >= xi::kReinitEscalateAfter) {
+        quarantine_instance_(name, adapter);
+    }
+}
+
 // The inline cross-instance process() path: run the target plugin's process() NOW,
 // on this thread. Used directly for a normal xi::use(x).process() (input wiring) and
 // by the staged-sink flush. A sink target is intercepted by use_process_cb (below)
 // and never reaches here inline mid-inspect.
+//
+// Return codes: >=0 output image count; -1 no such instance (input doc untouched);
+// -2 process() faulted mid-call (torn output — do NOT trust it); -3 the instance is
+// quarantined (on_fault=refuse) — plugin NOT entered, input doc untouched (treat the
+// ref accounting like -1). See xi_use.hpp for how the script side maps these.
 static int use_process_inline_(const char* name,
                           const void* input_doc,
                           const uint8_t* input_data, int32_t input_len,
@@ -48,6 +99,17 @@ static int use_process_inline_(const char* name,
     // Check if it's a C ABI adapter with process_fn
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (adapter && adapter->process_fn()) {
+        // item 14: refuse gate — one atomic load on the (rare-fault) hot path. A
+        // quarantined instance fails fast WITHOUT entering plugin code and without
+        // touching the input doc (rc -3 → the caller balances the reserved ref).
+        if (adapter->quarantined()) return -3;
+        // item 14: on_fault=reinit — a prior caught fault requested a rebuild; do
+        // it now, before entering plugin code, so a corrupted invariant can't reach
+        // this frame. The rebuild may escalate to refuse (Nth failure).
+        if (adapter->reinit_pending()) {
+            apply_pending_reinit_(name, adapter);
+            if (adapter->quarantined()) return -3;
+        }
         // G2.1 — stamp the crash culprit before entering plugin code. If this
         // process() faults, the FE's crash report names this plugin (cross-checked
         // against the faulting module) and can quarantine it.
@@ -92,11 +154,13 @@ static int use_process_inline_(const char* name,
             std::fprintf(stderr, "[xinsp2] use_process('%s') crashed: 0x%08X (%s)\n",
                          name, e.code, e.what());
             char why[96]; std::snprintf(why, sizeof(why), "process() crashed: 0x%08X", e.code);
-            note_instance_crash_(name, why);   // visible via get_state (crash-loop alerting)
+            note_instance_crash_(name, why);   // crash-loop count + health degraded
+            apply_on_fault_policy_(name, adapter);   // item 14: reuse / reinit / refuse
             return -2;
         } catch (...) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') threw exception\n", name);
             note_instance_crash_(name, "process() threw an exception");
+            apply_on_fault_policy_(name, adapter);   // item 14: reuse / reinit / refuse
             return -2;
         }
     }
@@ -488,10 +552,10 @@ void flush_staged_emits_(int64_t run_id) {   // decl in header
             RecordOutGuard out_guard{&output};   // frees + drops the returned refs on ALL paths
             int prc = use_process_inline_(it.target.c_str(), deliver, nullptr, 0,
                                           in_imgs.data(), (int)in_imgs.size(), &output);
-            // prc == -1: target gone before touching the input doc → our reserved ref
-            // wasn't consumed; release it. prc == -2 (crash) may have — don't second-
-            // guess a torn call (mirrors xi_use.hpp).
-            if (deliver && prc == -1) xi::DocRegistry::instance().release(deliver);
+            // prc == -1 (target gone) / -3 (quarantined, item 14): the input doc was
+            // never touched → our reserved ref wasn't consumed; release it. prc == -2
+            // (crash) may have — don't second-guess a torn call (mirrors xi_use.hpp).
+            if (deliver && (prc == -1 || prc == -3)) xi::DocRegistry::instance().release(deliver);
             // Arm the guard to also drop the out_doc + output image refs (prc>=0 only —
             // a torn/crashed call's output is untrustworthy; leave its refs alone).
             if (prc >= 0) out_guard.release_refs = true;
