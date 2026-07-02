@@ -411,9 +411,11 @@ XINSP2_FIXTURES=protocol/fixtures ./plugins/build/Release/xex1_fixtures_test --r
 
 ## Commands
 
-The backend implements ~60 commands. The core commands are documented in detail
-below; additional commands are listed at the end of this section. Arguments are
-listed under each entry.
+The backend implements 55 commands (the `doc_coverage` gate extracts the exact
+set from the `g_cmd_table` dispatch table in `service_main.cpp` and fails if any
+is undocumented — see `docs/testing.md`). The core commands are documented in
+detail below; additional commands are listed at the end of this section.
+Arguments are listed under each entry.
 
 ### `ping`
 `args: {}` → `data: { "pong": true, "ts": <unix_seconds> }`
