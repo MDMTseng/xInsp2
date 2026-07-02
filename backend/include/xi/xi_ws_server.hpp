@@ -51,6 +51,7 @@
 #include "xi_sha256.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -293,7 +294,7 @@ public:
     }
 
     bool is_running() const { return running_; }
-    bool has_client() const { return client_ != INVALID_SOCK; }
+    bool has_client() const { return client_.load(std::memory_order_acquire) != INVALID_SOCK; }
 
     // Blocks up to timeout_ms for activity. Accepts a new client, performs
     // the handshake, and reads any pending frames, dispatching callbacks.
@@ -312,9 +313,12 @@ public:
             FD_SET(listen_, &rfds);
             maxfd = std::max(maxfd, listen_);
         }
-        if (client_ != INVALID_SOCK) {
-            FD_SET(client_, &rfds);
-            maxfd = std::max(maxfd, client_);
+        // Poll thread is the sole writer of client_, so this snapshot is stable
+        // for the rest of poll(); workers only read it (under tx_mu_).
+        socket_t cl = client_.load(std::memory_order_acquire);
+        if (cl != INVALID_SOCK) {
+            FD_SET(cl, &rfds);
+            maxfd = std::max(maxfd, cl);
         }
 
         timeval tv;
@@ -329,7 +333,7 @@ public:
             socklen_t peerlen = sizeof(peer);
             socket_t s = ::accept(listen_, reinterpret_cast<sockaddr*>(&peer), &peerlen);
             if (s != INVALID_SOCK) {
-                if (client_ == INVALID_SOCK) {
+                if (cl == INVALID_SOCK) {
                     if (do_handshake(s)) {
                         // Bound the SEND direction too. send_frame does a blocking
                         // ::send on the dispatch WORKER threads; a slow client (laggy
@@ -347,7 +351,13 @@ public:
                         sto.tv_usec = (kSendTimeoutMs % 1000) * 1000;
                         ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &sto, sizeof(sto));
 #endif
-                        client_ = s;
+                        // Publish under tx_mu_ so the store is ordered against
+                        // send_frame's snapshot of client_ (which also holds
+                        // tx_mu_) — symmetric with the close side.
+                        {
+                            std::lock_guard<std::mutex> g(tx_mu_);
+                            client_.store(s, std::memory_order_release);
+                        }
                         if (on_open) on_open();
                     } else {
                         CLOSESOCK(s);
@@ -384,7 +394,8 @@ public:
             }
         }
 
-        if (client_ != INVALID_SOCK && FD_ISSET(client_, &rfds)) {
+        cl = client_.load(std::memory_order_acquire);
+        if (cl != INVALID_SOCK && FD_ISSET(cl, &rfds)) {
             if (!read_pending()) {
                 close_client();
                 if (on_close) on_close();
@@ -411,7 +422,12 @@ private:
     static constexpr size_t kMaxMessage = 16u * 1024u * 1024u;
 
     socket_t    listen_ = INVALID_SOCK;
-    socket_t    client_ = INVALID_SOCK;
+    // client_ is written by the poll thread (accept / close) and read by every
+    // dispatch worker inside send_frame under tx_mu_. It is atomic so those
+    // reads are not a data race, and — crucially — the actual CLOSESOCK is done
+    // under tx_mu_ (see close_client) so a worker can never be mid-::send on an
+    // fd the poll thread is closing (external review 08 finding 2).
+    std::atomic<socket_t> client_{INVALID_SOCK};
     bool        running_ = false;
     std::vector<uint8_t> rx_buf_;
     std::mutex  tx_mu_;
@@ -426,16 +442,31 @@ private:
     std::string          bind_host_;     // empty/127.0.0.1 = loopback
     std::string          auth_secret_;   // empty = no auth required
 
+    // Runs on the poll thread. The actual CLOSESOCK must not happen while a
+    // worker is mid-::send on the fd (an fd-reuse UAF — external review 08
+    // finding 2), yet the poll thread must not block indefinitely on tx_mu_
+    // if a worker is stuck in a slow ::send. Order of operations:
+    //   1. ::shutdown(fd) — unblocks any in-flight ::send (it errors out and
+    //      returns) WITHOUT freeing the fd number, so no reuse can occur yet.
+    //   2. Under tx_mu_: null client_ (no new send will pick up fd), then
+    //      CLOSESOCK(fd). Holding tx_mu_ guarantees no worker is inside ::send
+    //      on fd at the moment we close it — the in-flight one (if any) already
+    //      returned in step 1 and dropped the lock.
     void close_client() {
-        if (client_ != INVALID_SOCK) {
-            CLOSESOCK(client_);
-            client_ = INVALID_SOCK;
-            rx_buf_.clear();
-            msg_buf_.clear();
-            msg_buf_.shrink_to_fit();
-            msg_in_progress_ = false;
-            msg_opcode_      = 0;
+        socket_t fd = client_.load(std::memory_order_acquire);
+        if (fd == INVALID_SOCK) return;
+        ::shutdown(fd, 2 /* SD_BOTH / SHUT_RDWR */);
+        {
+            std::lock_guard<std::mutex> g(tx_mu_);
+            client_.store(INVALID_SOCK, std::memory_order_release);
+            CLOSESOCK(fd);
         }
+        // rx/msg reassembly buffers are touched only by the poll thread.
+        rx_buf_.clear();
+        msg_buf_.clear();
+        msg_buf_.shrink_to_fit();
+        msg_in_progress_ = false;
+        msg_opcode_      = 0;
     }
 
     // Read HTTP request, parse Sec-WebSocket-Key, send 101 switching.
@@ -607,8 +638,12 @@ private:
     }
 
     bool read_pending() {
+        // Poll thread only; it is the sole closer of client_, so the fd is
+        // stable across this call.
+        socket_t fd = client_.load(std::memory_order_acquire);
+        if (fd == INVALID_SOCK) return false;
         uint8_t tmp[16384];
-        int n = ::recv(client_, reinterpret_cast<char*>(tmp), (int)sizeof(tmp), 0);
+        int n = ::recv(fd, reinterpret_cast<char*>(tmp), (int)sizeof(tmp), 0);
         if (n <= 0) return false;
         rx_buf_.insert(rx_buf_.end(), tmp, tmp + n);
         // Guard against unbounded growth: if we've buffered more than a
@@ -716,7 +751,11 @@ private:
 
     bool send_frame(int opcode, const uint8_t* data, size_t n) {
         std::lock_guard<std::mutex> g(tx_mu_);
-        if (client_ == INVALID_SOCK) return false;
+        // Snapshot the fd once under the lock. close_client() also takes tx_mu_
+        // before CLOSESOCK, so fd stays a valid (open) socket for the whole of
+        // this call — the poll thread cannot close it out from under us here.
+        socket_t fd = client_.load(std::memory_order_acquire);
+        if (fd == INVALID_SOCK) return false;
         uint8_t hdr[10];
         size_t  hlen = 0;
         hdr[0] = 0x80 | (uint8_t)opcode;
@@ -742,16 +781,16 @@ private:
         // ::send on the shut-down socket and error out immediately (no block). The
         // poll thread owns the actual close (avoids an fd-reuse race with recv).
         auto drop = [&]() -> bool {
-            if (client_ != INVALID_SOCK) ::shutdown(client_, 2 /* SD_BOTH / SHUT_RDWR */);
+            ::shutdown(fd, 2 /* SD_BOTH / SHUT_RDWR */);
             return false;
         };
-        int s1 = ::send(client_, reinterpret_cast<const char*>(hdr), (int)hlen, 0);
+        int s1 = ::send(fd, reinterpret_cast<const char*>(hdr), (int)hlen, 0);
         if (s1 != (int)hlen) return drop();
         if (n == 0) return true;
         size_t sent = 0;
         while (sent < n) {
             int chunk = (int)std::min<size_t>(n - sent, 1 << 20);
-            int s2 = ::send(client_, reinterpret_cast<const char*>(data + sent), chunk, 0);
+            int s2 = ::send(fd, reinterpret_cast<const char*>(data + sent), chunk, 0);
             if (s2 <= 0) return drop();
             sent += (size_t)s2;
         }

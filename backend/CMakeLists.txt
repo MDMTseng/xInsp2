@@ -473,6 +473,21 @@ add_test(NAME set_def_race_heavy COMMAND test_set_def_race
 set_tests_properties(set_def_race_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
+# WS teardown race (external review 08 finding 2). Sender threads hammer
+# send_text while a client repeatedly connects+disconnects, forcing the poll
+# thread through close_client() concurrent with in-flight sends — the exact
+# close-off-lock / fd-reuse window. Header-only server; Winsock is linked by the
+# header's #pragma comment(lib) on MSVC. Heavy variant scales connect rounds.
+add_executable(test_ws_teardown_race tests/test_ws_teardown_race.cpp)
+target_include_directories(test_ws_teardown_race PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(NOT MSVC)
+    target_link_libraries(test_ws_teardown_race PRIVATE pthread)
+endif()
+add_test(NAME ws_teardown_race COMMAND test_ws_teardown_race)
+add_test(NAME ws_teardown_race_heavy COMMAND test_ws_teardown_race)
+set_tests_properties(ws_teardown_race_heavy PROPERTIES
+    LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
+
 # Ordered-emit gate probe (§28 Tier-1 GAP: dispatch queue + EmitGate). Header-only
 # primitive (xi_emit_gate.hpp) so it links nothing but the test itself; exercises
 # the parallel-compute/ordered-emit invariant, the dtor backstop, and the

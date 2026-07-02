@@ -44,6 +44,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -71,7 +72,12 @@ struct PoolEntry {
     int32_t  channels = 0;
     std::atomic<int32_t> refcount{1};
     uint64_t generation = 0;        // matches handle's generation field
-    ImagePoolOwnerId owner = 0;     // who allocated this; 0 = anonymous
+    // owner: who allocated this; 0 = anonymous. ATOMIC because it is written by
+    // release_all_for() (owner sweep, sets 0 on a spared entry) on one thread
+    // while the diagnostic stats walk reads it on another — a plain field would
+    // be a formal data race (external review 08 finding 1). Relaxed everywhere:
+    // stats only needs a coherent-enough snapshot, not ordering against pixels.
+    std::atomic<ImagePoolOwnerId> owner{0};
 };
 
 class ImagePool {
@@ -134,7 +140,7 @@ public:
         entry->height   = h;
         entry->channels = ch;
         entry->refcount.store(1, std::memory_order_relaxed);
-        entry->owner    = current_owner();
+        entry->owner.store(current_owner(), std::memory_order_relaxed);
 
         uint32_t idx = acquire_slot_();
         if (idx == 0xFFFFFFFFu) {       // pool exhausted
@@ -176,10 +182,15 @@ public:
         if (!e) return;
         if (e->generation != ((h >> SLOT_BITS) & GEN_MAX)) return;
         if (e->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            // Last ref — clear slot, return to free list, delete entry.
-            slots_[idx].entry.store(nullptr, std::memory_order_release);
+            // Last ref — clear slot, return to free list, reclaim entry.
+            // The slot-null store is seq_cst (not merely release) so it is
+            // globally ordered against the active_walkers_ load in
+            // reclaim_entry_(): together they form the StoreLoad handshake that
+            // lets a diagnostic stats walk never dereference a freed entry
+            // (see reclaim_entry_).
+            slots_[idx].entry.store(nullptr, std::memory_order_seq_cst);
             release_slot_(idx);
-            delete e;
+            reclaim_entry_(e);
             live_count_.fetch_sub(1, std::memory_order_relaxed);
         }
     }
@@ -299,23 +310,30 @@ public:
     // spared still-referenced entries are not counted (they were never leaks).
     int release_all_for(ImagePoolOwnerId owner) {
         if (owner == 0) return 0;
+        // This is itself a full-pool slot walk that dereferences entries; a
+        // concurrent stats() walk (or another release_all_for) may be reading
+        // the same entries. Announce ourselves as a walker so any concurrent
+        // release() defers its frees, and route our own frees through
+        // reclaim_entry_ so a concurrent walker never sees a freed entry.
+        WalkGuard wg(*this);
         int swept = 0;
         for (uint32_t i = 0; i < SLOT_COUNT; ++i) {
             PoolEntry* e = slots_[i].entry.load(std::memory_order_acquire);
-            if (!e || e->owner != owner) continue;
+            if (!e || e->owner.load(std::memory_order_relaxed) != owner) continue;
             // Drop P's ownership ref — same accounting as release().
             if (e->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                // Sole holder (leak): clear slot, return to free list, delete.
-                slots_[i].entry.store(nullptr, std::memory_order_release);
+                // Sole holder (leak): clear slot, return to free list, reclaim.
+                // seq_cst store pairs with reclaim_entry_'s walker check.
+                slots_[i].entry.store(nullptr, std::memory_order_seq_cst);
                 release_slot_(i);
-                delete e;
+                reclaim_entry_(e);
                 ++swept;
             } else {
                 // A live external consumer still references this entry. Orphan
                 // it (anonymous owner) so it outlives P and is freed by its last
                 // holder; leave the slot + generation intact so that handle
                 // still resolves.
-                e->owner = 0;
+                e->owner.store(0, std::memory_order_relaxed);
             }
         }
         if (swept > 0) live_count_.fetch_sub(swept, std::memory_order_relaxed);
@@ -340,11 +358,17 @@ public:
         uint64_t total_bytes  = 0;
     };
     OwnerStats stats(ImagePoolOwnerId owner = 0) {
+        // WalkGuard makes this read-only slot walk memory-safe against a
+        // concurrent release(): while any walker is live, a last-ref release
+        // defers its `delete` to the retire list instead of freeing under our
+        // pointer, so `e->pixels.size()` here can never touch a freed entry
+        // (external review 08 finding 1). Zero cost when no walk is in flight.
+        WalkGuard wg(*this);
         OwnerStats s{};
         for (uint32_t i = 0; i < SLOT_COUNT; ++i) {
             PoolEntry* e = slots_[i].entry.load(std::memory_order_acquire);
             if (!e) continue;
-            if (owner != 0 && e->owner != owner) continue;
+            if (owner != 0 && e->owner.load(std::memory_order_relaxed) != owner) continue;
             ++s.handle_count;
             s.total_bytes += e->pixels.size();
         }
@@ -357,12 +381,15 @@ public:
         uint64_t         total_bytes  = 0;
     };
     std::vector<PerOwnerStat> stats_by_owner() {
+        // Same deferred-reclamation guard as stats() — see there.
+        WalkGuard wg(*this);
         std::unordered_map<ImagePoolOwnerId, PerOwnerStat> agg;
         for (uint32_t i = 0; i < SLOT_COUNT; ++i) {
             PoolEntry* e = slots_[i].entry.load(std::memory_order_acquire);
             if (!e) continue;
-            auto& s = agg[e->owner];
-            s.owner = e->owner;
+            ImagePoolOwnerId ow = e->owner.load(std::memory_order_relaxed);
+            auto& s = agg[ow];
+            s.owner = ow;
             ++s.handle_count;
             s.total_bytes += e->pixels.size();
         }
@@ -749,6 +776,74 @@ private:
     std::atomic<uint64_t> total_created_{0};
     std::atomic<int32_t>  live_count_{0};
     std::atomic<int32_t>  high_water_{0};
+
+    // ---- deferred reclamation for the diagnostic slot walks -----------
+    //
+    // The lock-free hot path frees a PoolEntry the instant its last ref drops
+    // (release / release_all_for). A diagnostic walk (stats / stats_by_owner)
+    // cannot hold a ref on every slot it visits, so without coordination it can
+    // dereference an entry a concurrent release just `delete`d — a UAF read
+    // (external review 08 finding 1).
+    //
+    // Fix, entirely on the walk side so the churn path pays nothing: a walk
+    // announces itself by bumping active_walkers_. reclaim_entry_ (the ONLY
+    // place an entry is freed) frees inline when active_walkers_ == 0 — the
+    // steady state, byte-for-byte the old behaviour bar one seq_cst load — and
+    // otherwise defers the entry onto retired_, drained when the walker count
+    // falls back to 0.
+    //
+    // Correctness rests on a StoreLoad handshake: release stores nullptr into
+    // the slot (seq_cst) BEFORE reclaim_entry_ loads active_walkers_ (seq_cst),
+    // and a walker bumps active_walkers_ (seq_cst) BEFORE loading the slot. The
+    // seq_cst total order then guarantees: if a walker observed the entry
+    // (i.e. loaded it before the slot was nulled), the releaser observes
+    // active_walkers_ > 0 and defers — so a walker never frees, and never reads,
+    // under its own feet. A deferred entry is freed only once active_walkers_
+    // hits 0 again, by which point no walker that ever saw it is still running,
+    // and no walker starting afterwards can reach it (its slot is already null).
+    std::atomic<uint32_t> active_walkers_{0};
+    std::mutex            retire_mu_;
+    std::vector<PoolEntry*> retired_;
+
+    // RAII: the scope of one diagnostic slot walk. Constructed by stats(),
+    // stats_by_owner(), and release_all_for().
+    struct WalkGuard {
+        ImagePool& p_;
+        explicit WalkGuard(ImagePool& p) : p_(p) {
+            p_.active_walkers_.fetch_add(1, std::memory_order_seq_cst);
+        }
+        ~WalkGuard() {
+            if (p_.active_walkers_.fetch_sub(1, std::memory_order_seq_cst) == 1)
+                p_.drain_retired_();
+        }
+        WalkGuard(const WalkGuard&) = delete;
+        WalkGuard& operator=(const WalkGuard&) = delete;
+    };
+
+    // Free e now if no diagnostic walk is in flight; otherwise defer it until
+    // the last walker leaves. Called AFTER e's slot has been nulled seq_cst.
+    void reclaim_entry_(PoolEntry* e) {
+        if (active_walkers_.load(std::memory_order_seq_cst) == 0) {
+            delete e;
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(retire_mu_);
+            retired_.push_back(e);
+        }
+        // A walk may have finished between the check and the push; reclaim now
+        // so a lone stats() call can't leave entries pending indefinitely.
+        if (active_walkers_.load(std::memory_order_seq_cst) == 0) drain_retired_();
+    }
+
+    void drain_retired_() {
+        std::vector<PoolEntry*> local;
+        {
+            std::lock_guard<std::mutex> lk(retire_mu_);
+            local.swap(retired_);
+        }
+        for (auto* e : local) delete e;
+    }
 
     uint32_t acquire_slot_() {
         // Try the free list first.
