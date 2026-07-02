@@ -25,6 +25,10 @@ inline constexpr const char* kWidth     = "width";      // int
 inline constexpr const char* kHeight    = "height";     // int
 inline constexpr const char* kFps       = "fps";        // int
 inline constexpr const char* kStreaming = "streaming";  // bool (get_def only, read-only)
+// polaris2 wave-2 (docs/new_gen/08 Wave 2): emit on the v3 Frame plane
+// (xi.frame@1) instead of a Record. DEFAULT OFF — the Record emit path is the
+// unchanged default; only a project that opts in rides the frame door.
+inline constexpr const char* kFrameMode = "frame_mode"; // bool (default false)
 
 // --- Commands (exchange) ---
 inline constexpr const char* kCommand   = "command";    // string (command selector)
@@ -37,6 +41,7 @@ inline constexpr const char* kSetResolution = "set_resolution";
 
 // --- Output frame ---
 inline constexpr const char* kFrame     = "frame";      // image (emitted RGB frame)
+inline constexpr const char* kSeq       = "seq";        // int (frame counter; frame-mode entry)
 
 }  // namespace keys
 }  // namespace xi::mock_camera

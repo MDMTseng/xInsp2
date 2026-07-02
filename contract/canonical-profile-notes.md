@@ -236,3 +236,24 @@ The ingress edge itself (`backend/include/xi/xi_ingress.hpp`,
 boundary and is the ONLY public path from foreign bytes to a Frame entry; a
 pool-handle ext (`kPoolHandleExtType`) is never imported, even under an
 accept-list.
+
+## Frame-shaped fail-loud (polaris2 wave-2, xi.frame@1 door)
+
+When a plugin's frame-in/frame-out door (`xi.frame@1`, `xi_frame_proc_v1`) hits
+a CONTRACT failure — a missing required entry, a wrong-typed one, a schema skew
+— it does NOT return `XI_FRAME_NULL`. `XI_FRAME_NULL` is reserved for a HARD
+internal failure (a caught crash / no frame plane). A contract failure is a
+normal SEALED frame carrying a fail-loud error, so the caller ALWAYS gets a
+frame to route to a verdict — the frame analogue of `xi::Record::na()` +
+`xi::contract`'s `$fault`. The convention (SDK `xi::FrameOut::fault` /
+`xi::FrameIn::is_fault`, keys in `xi::frame_contract`):
+
+- `"$fault"`        — str, the reason code, REUSING the `xi_contract.hpp` codes
+  (`missing_input` / `wrong_type` / `schema_mismatch`).
+- `"$fault_key"`    — str, the offending entry key (optional).
+- `"$fault_detail"` — str, a human message (optional).
+
+A consumer checks `has("$fault")` before reading results. The reason codes are
+identical to the Record path's `$fault.code`, so a script/health mapper treats a
+Record NA and a Frame fault the same way. (Reserved `$`-prefixed keys stay out of
+the plugin's declared schema keyset.)

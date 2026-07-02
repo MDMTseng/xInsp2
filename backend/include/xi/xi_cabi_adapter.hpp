@@ -295,6 +295,17 @@ public:
         // serialize input)? Only if it was built against our yyjson layout.
         if (auto abi_fn = reinterpret_cast<uint32_t(*)()>(GetProcAddress(dll_, "xi_yyjson_abi")))
             doc_input_ok_ = (abi_fn() == xi::yyjson_layout_stamp());
+        // polaris2 wave-2 (synthesis §3 pure-door dry run): the plugin's OWN
+        // capability door — the symmetric mirror of host->get_interface, resolved
+        // via GetProcAddress like prepare/commit (ABI-additive; absent on a
+        // Record-only plugin). Probe it once for the frame process capability. A
+        // plugin that answers xi.frame@1 speaks frame-in/frame-out; NULL = it does
+        // not (a Record-era script keeps driving it through process()).
+        plugin_get_iface_fn_ = reinterpret_cast<xi_plugin_get_interface_fn>(
+            GetProcAddress(dll_, "xi_plugin_get_interface"));
+        if (plugin_get_iface_fn_)
+            frame_proc_ = static_cast<const xi_frame_proc_v1*>(
+                plugin_get_iface_fn_("xi.frame", 1));
     }
 
     ~CAbiInstanceAdapter() override {
@@ -387,6 +398,26 @@ public:
         CallScope cs(this);
         process_fn_(inst_, in, out);
         return out->image_count;
+    }
+
+    // polaris2 wave-2: does this plugin publish the xi.frame@1 frame-in/frame-out
+    // door (resolved once at construction via xi_plugin_get_interface)?
+    bool has_frame_door() const { return frame_proc_ && frame_proc_->process_frame; }
+
+    // Drive the plugin's frame door under the SAME per-instance discipline as
+    // process() (OwnerGuard image-leak tagging + CallScope serialization for a
+    // non-reentrant instance). `in` is a sealed host frame handle (borrowed); the
+    // return is a NEW sealed frame handle the caller owns (host frame registry).
+    // XI_FRAME_NULL when the plugin has no door. Caller owns the SEH boundary,
+    // exactly as with process().
+    xi_frame_handle process_frame_door(xi_frame_handle in) {
+        if (!has_frame_door() || !inst_) return XI_FRAME_NULL;
+#ifndef NDEBUG
+        LcGate lc(this, "process"); if (!lc.ok()) return XI_FRAME_NULL;
+#endif
+        ImagePool::OwnerGuard og(owner_id_);
+        CallScope cs(this);
+        return frame_proc_->process_frame(inst_, in);
     }
 
     // Frame-perfect config swap (ABI v7). prepare loads the new config's heavy
@@ -589,6 +620,8 @@ private:
     xi_plugin_process_fn  process_fn_ = nullptr;
     xi_plugin_prepare_fn  prepare_fn_ = nullptr;   // ABI v7, optional
     xi_plugin_commit_fn   commit_fn_  = nullptr;   // ABI v7, optional
+    xi_plugin_get_interface_fn plugin_get_iface_fn_ = nullptr;  // wave-2, optional
+    const xi_frame_proc_v1*    frame_proc_          = nullptr;  // xi.frame@1 door (null = absent)
     RecordSchema          record_schema_;          // OQ-7, optional (declared==false ⇒ none)
     bool                  doc_input_ok_ = false;
     ImagePoolOwnerId      owner_id_ = 0;

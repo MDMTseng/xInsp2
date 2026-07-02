@@ -446,6 +446,13 @@ static void warn_trigger_off_thread_() {
 void release_trigger_event_(xi::TriggerEvent& ev) {   // decl in header (cross-TU)
     for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
     ev.meta_doc.reset();   // release the event's doc ref + null it (dtor then no-ops)
+    // polaris2 wave-2: drop the event's Frame ref too (no-op for a Record-era
+    // event, whose frame is XI_FRAME_NULL). release_frame_ routes to the installed
+    // FrameRegistry releaser; XI_FRAME_NULL after so a double call can't re-release.
+    if (ev.frame != XI_FRAME_NULL) {
+        xi::TriggerBus::instance().release_frame_(ev.frame);
+        ev.frame = XI_FRAME_NULL;
+    }
 }
 
 // RAII for "this thread's inspect sees `ev` as its trigger". Sets g_current_trigger

@@ -57,6 +57,7 @@
 #include "xi_pm_parse.hpp"       // parse_manifest, extract_string
 #include "xi_sha256.hpp"         // sha256_file (content-hash cache key)
 #include "xi_trigger_bus.hpp"    // install_trigger_hook
+#include "xi_frame_abi.hpp"      // polaris2 wave-2: install_frame_abi (xi.frame@1 door)
 
 #include <cstdio>
 #include <filesystem>
@@ -148,6 +149,7 @@ inline int certify_in_process(const std::string& plugin_dir) {
     // fault inside factory() terminates this child (-> minidump -> crashed).
     xi_host_api host = ImagePool::make_host_api();
     install_trigger_hook(host);
+    install_frame_abi();   // polaris2 wave-2: certify a frame-capable plugin against a live xi.frame@1 door
 
     void* inst = nullptr;
     // Catch ONLY genuine C++ exceptions (a clean refuse — the real factory sites

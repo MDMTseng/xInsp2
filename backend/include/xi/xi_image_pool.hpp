@@ -616,6 +616,21 @@ public:
     static void publish_emit_record(EmitRecordFn fn) {
         emit_record_slot().store(fn, std::memory_order_release);
     }
+
+    // polaris2 wave-2: the carved xi.frame@1 DATA-PLANE interface (const
+    // xi_frame_v1*) is published here by xi::install_frame_abi (xi_frame_abi.hpp).
+    // Same layering bridge as emit_record: image_pool.hpp CANNOT include
+    // xi_frame_abi.hpp (which sits ABOVE it — xi_frame_abi includes xi_frame.hpp,
+    // which includes THIS header), so the door serves a slot-published pointer
+    // instead of building the interface from canonical_host_api(). Null until the
+    // frame ABI is installed (a host with no frame plane returns NULL for the id).
+    static std::atomic<const void*>& frame_iface_slot() {
+        static std::atomic<const void*> slot{nullptr};
+        return slot;
+    }
+    static void publish_frame_iface(const void* iface) {
+        frame_iface_slot().store(iface, std::memory_order_release);
+    }
     // The forwarder the door hands out for xi.emit@1.emit_record: a stable address
     // (a plugin may cache the interface) that reads the published slot each call.
     // No-op until the hook publishes — same null-safe contract as the field.
@@ -684,6 +699,10 @@ public:
             return emit_v1_iface();
         if (std::strcmp(id, "xi.log") == 0 && version == 1)
             return log_v1_iface();
+        // polaris2 wave-2: the Frame data plane, published via publish_frame_iface
+        // (slot-bridged from xi_frame_abi.hpp; null on a host with no frame plane).
+        if (std::strcmp(id, "xi.frame") == 0 && version == 1)
+            return frame_iface_slot().load(std::memory_order_acquire);
         return nullptr;
     }
 

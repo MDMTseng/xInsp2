@@ -390,6 +390,18 @@ endif()
 add_test(NAME interface_domains COMMAND test_interface_domains)
 # <<< host-api-segregation Phase 3 end.
 
+# polaris2 wave-2: the xi.frame@1 carved data-plane door (xi_frame_abi.hpp) +
+# dispatch dual-carry (TriggerEvent frame slot / TriggerBus::emit_frame). Host
+# side only — the opaque-handle build/read accessors, refcount lifecycle with
+# pooled-handle balance, and a Frame riding the same bus as a Record with no
+# crosstalk. The plugin-side door + real end-to-end flow live in the plugin test.
+add_executable(test_frame_door tests/test_frame_door.cpp)
+target_link_libraries(test_frame_door PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_frame_door PRIVATE pthread)
+endif()
+add_test(NAME frame_door COMMAND test_frame_door)
+
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
 target_include_directories(test_yyjson PRIVATE

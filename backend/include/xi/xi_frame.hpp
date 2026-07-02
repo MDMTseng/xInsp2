@@ -458,6 +458,12 @@ public:
         for (const auto& e : entries_) fn(e.key, e.tag);
     }
 
+    // Insertion-ordered index accessors — the O(1) primitives the C-ABI generic
+    // walk (xi_frame_v1.key_at/tag_at) is built on, so a foreign consumer can
+    // enumerate entries without a producer-supplied key list. UB if i >= size().
+    std::string_view key_at(size_t i) const { return entries_[i].key; }
+    FrameTag         tag_at(size_t i) const { return entries_[i].tag; }
+
     // ---- typed borrowed reads ----------------------------------------
     std::optional<int64_t> get_i64(std::string_view key) const {
         const auto* e = find(key);

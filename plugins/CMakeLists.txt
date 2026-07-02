@@ -138,6 +138,25 @@ target_compile_definitions(blob_analysis_test PRIVATE
 add_dependencies(blob_analysis_test blob_analysis)
 add_test(NAME blob_analysis_test COMMAND blob_analysis_test)
 
+# polaris2 wave-2 pilot pair (docs/new_gen/08 Wave 2) — the xi.frame@1 door end
+# to end against the REAL built DLLs: blob_analysis's frame-in/frame-out door
+# (plugin-side capability probe), mock_camera's frame-mode emit through the bus,
+# the chained flow, fail-loud, and pooled-handle balance. Needs both DLLs + a
+# host ImagePool (make_host_api + install_frame_abi).
+add_executable(frame_pilot_test frame_pilot_test.cpp)
+target_include_directories(frame_pilot_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
+    ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera)
+target_compile_definitions(frame_pilot_test PRIVATE
+    BLOB_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis/xi-blob_analysis.dll"
+    MOCK_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera.dll")
+if(WIN32)
+    target_link_libraries(frame_pilot_test PRIVATE Ws2_32)
+endif()
+add_dependencies(frame_pilot_test blob_analysis mock_camera)
+add_test(NAME frame_pilot_test COMMAND frame_pilot_test)
+
 # mock_camera contract test — config/command surface only (source plugin).
 add_executable(mock_camera_test mock_camera/tests/test_mock_camera.cpp)
 target_include_directories(mock_camera_test PRIVATE
