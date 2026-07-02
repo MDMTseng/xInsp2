@@ -1,0 +1,1 @@
+{"type":"rsp","id":3,"ok":false,"error":"project loaded with warnings (partial recipe restore)","data":{"status":"partial","param_warnings":["sigma: no such param"],"instance_warnings":["det: set_def returned false"]}}

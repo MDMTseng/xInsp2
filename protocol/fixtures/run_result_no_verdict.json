@@ -1,0 +1,1 @@
+{"type":"event","name":"run_result","data":{"code":-999005,"msg":"","run_id":19,"ms":5,"source":"@script","group":"main","boot_id":"01234567-89ab-cdef-0123-456789abcdef","inspection_id":"/01234567-89ab-cdef-0123-456789abcdef/19","schema":"xi.run-outcome/1","class":"no_verdict","script_generation":4}}
