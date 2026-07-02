@@ -519,17 +519,25 @@ public:
 
     // Frame-in/frame-out door: override to consume `in` and fill `out`. Publish
     // it to the host with XI_PLUGIN_FRAME_DOOR(YourClass) after XI_PLUGIN_IMPL.
-    virtual void process_frame(FrameIn& in, FrameOut& out) { (void)in; (void)out; }
+    // This is an OVERLOAD of process() — the Record path is process(const Record&)
+    // below; the currency (Record vs Frame) is carried by the argument types, so
+    // an instance that overrides both speaks both. NOTE on C++ overload hiding: a
+    // plugin that overrides ONLY this frame door and relies on the base Record
+    // process() no-op must add `using xi::Plugin::process;` in its class, else the
+    // frame override hides the Record overload in the derived scope and the
+    // XI_PLUGIN_IMPL dispatch (self->process(record)) will not compile. Plugins
+    // that override BOTH (the usual case) need no `using`.
+    virtual void process(FrameIn& in, FrameOut& out) { (void)in; (void)out; }
 
     // SDK plumbing the XI_PLUGIN_FRAME_DOOR trampoline calls: wrap the borrowed
     // input handle, run the virtual, seal the output into a host-owned handle the
     // caller (host) takes ownership of. XI_FRAME_NULL if the host has no frame plane.
-    xi_frame_handle process_frame_abi(xi_frame_handle in) {
+    xi_frame_handle frame_door_abi(xi_frame_handle in) {
         const xi_frame_v1* fi = frame_iface();
         if (!fi) return XI_FRAME_NULL;
         FrameIn  view(fi, in);
         FrameOut out(fi);
-        process_frame(view, out);
+        process(view, out);
         return out.seal();
     }
 
@@ -1090,7 +1098,7 @@ void xi_plugin_commit(void* inst) {                                            \
 }
 
 // Publish the xi.frame@1 frame-in/frame-out door (polaris2 wave-2). Place AFTER
-// XI_PLUGIN_IMPL, ONLY if your plugin OVERRIDES process_frame(FrameIn&,FrameOut&).
+// XI_PLUGIN_IMPL, ONLY if your plugin OVERRIDES process(FrameIn&,FrameOut&).
 // It exports xi_plugin_get_interface — the plugin-side capability door (the
 // synthesis §3 "pure door" dry run) — which the host probes to learn the plugin
 // speaks frames. The Record process() path is untouched; a plugin has BOTH.
@@ -1100,11 +1108,11 @@ void xi_plugin_commit(void* inst) {                                            \
 extern "C" xi_frame_handle xi__frame_proc_##ClassName(void* inst,              \
                                                       xi_frame_handle in) {    \
     auto* self = static_cast<ClassName*>(inst);                                \
-    try { return self->process_frame_abi(in); }                               \
+    try { return self->frame_door_abi(in); }                                  \
     catch (const std::exception& e) {                                          \
-        std::fprintf(stderr, "[xinsp2] plugin process_frame() threw: %s\n", e.what()); \
+        std::fprintf(stderr, "[xinsp2] plugin frame-door process() threw: %s\n", e.what()); \
     } catch (...) {                                                            \
-        std::fprintf(stderr, "[xinsp2] plugin process_frame() threw (non-std)\n"); \
+        std::fprintf(stderr, "[xinsp2] plugin frame-door process() threw (non-std)\n"); \
     }                                                                          \
     return XI_FRAME_NULL; /* hard failure sentinel (a CONTRACT failure is a    \
                              normal sealed frame carrying a $fault entry) */    \

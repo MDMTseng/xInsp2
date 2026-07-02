@@ -86,8 +86,8 @@ public:
     // polaris2 wave-2 (docs/new_gen/08 Wave 2 step 3): the xi.frame@1 frame-in/
     // frame-out door. expose is a SINK — it consumes a sealed frame and its real
     // output is the emit_binary side-effect (exactly as process() above returns a
-    // small ack while emit_binary pushes the real payload). So process_frame walks
-    // the input frame GENERICALLY (count()+key_at()+tag_at()+typed reads — zero
+    // small ack while emit_binary pushes the real payload). So this frame-door
+    // process() walks the input frame GENERICALLY (count()+key_at()+tag_at()+typed reads — zero
     // producer knowledge; the r2 constraint made real) and returns a small ack
     // frame {channel, seen}, mirroring the Record path's ack record.
     //
@@ -97,7 +97,7 @@ public:
     // inlined as raw bin (v2), and nested msgpack rides verbatim (v2). Which wire
     // version is produced is the opt-in `frame_wire_v2` config (DEFAULT v1 — the
     // wire-breaking default stays out per the plan's governance).
-    void process_frame(xi::FrameIn& in, xi::FrameOut& out) override {
+    void process(xi::FrameIn& in, xi::FrameOut& out) override {
         const std::string channel(in.str(xi::Record::kChannelKey).value_or("default"));
         const uint64_t    seq = (uint64_t)in.i64_or(xi::Record::kSeqKey, 0);
 

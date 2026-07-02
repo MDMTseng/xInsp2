@@ -216,7 +216,7 @@ public:
     // xi::contract reason code (FrameOut::fault), which the caller routes to a
     // verdict — never a silent default. The Record process() above is untouched;
     // this instance speaks BOTH currencies.
-    void process_frame(xi::FrameIn& in, xi::FrameOut& out) override {
+    void process(xi::FrameIn& in, xi::FrameOut& out) override {
         auto gray = in.image(keys::kGray);
         if (!gray || !gray->pixels) {
             out.fault(xi::contract::kMissingInput, keys::kGray,

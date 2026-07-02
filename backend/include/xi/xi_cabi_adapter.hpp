@@ -402,7 +402,7 @@ public:
 
     // polaris2 wave-2: does this plugin publish the xi.frame@1 frame-in/frame-out
     // door (resolved once at construction via xi_plugin_get_interface)?
-    bool has_frame_door() const { return frame_proc_ && frame_proc_->process_frame; }
+    bool has_frame_door() const { return frame_proc_ && frame_proc_->process; }
 
     // Drive the plugin's frame door under the SAME per-instance discipline as
     // process() (OwnerGuard image-leak tagging + CallScope serialization for a
@@ -410,14 +410,14 @@ public:
     // return is a NEW sealed frame handle the caller owns (host frame registry).
     // XI_FRAME_NULL when the plugin has no door. Caller owns the SEH boundary,
     // exactly as with process().
-    xi_frame_handle process_frame_door(xi_frame_handle in) {
+    xi_frame_handle run_frame_door(xi_frame_handle in) {
         if (!has_frame_door() || !inst_) return XI_FRAME_NULL;
 #ifndef NDEBUG
         LcGate lc(this, "process"); if (!lc.ok()) return XI_FRAME_NULL;
 #endif
         ImagePool::OwnerGuard og(owner_id_);
         CallScope cs(this);
-        return frame_proc_->process_frame(inst_, in);
+        return frame_proc_->process(inst_, in);
     }
 
     // Frame-perfect config swap (ABI v7). prepare loads the new config's heavy

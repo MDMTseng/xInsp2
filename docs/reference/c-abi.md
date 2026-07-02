@@ -119,7 +119,7 @@ The matching **host** side is `get_interface("xi.frame", 1)` → `const
 xi_frame_v1*`: the Frame value-type ABI (build / read / retain-release / emit a
 Frame, all through an OPAQUE `xi_frame_handle` + accessor functions, never raw
 struct layout). A frame plugin does NOT write these by hand — it overrides
-`process_frame(xi::FrameIn&, xi::FrameOut&)` and publishes the door with
+`process(xi::FrameIn&, xi::FrameOut&)` and publishes the door with
 `XI_PLUGIN_FRAME_DOOR(Class)` after `XI_PLUGIN_IMPL`; its Record `process()` is
 untouched, so the instance speaks **both** currencies. A contract failure
 (missing/wrong entry) is a normal sealed frame stamped with a `$fault` reason

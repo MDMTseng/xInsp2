@@ -21,7 +21,7 @@
   #include <windows.h>
 #endif
 
-#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_frame_door / process_frame_door)
+#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_frame_door / run_frame_door)
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_frame_abi.hpp>      // install_frame_abi + frame_v1_iface + FrameRegistry
 #include <xi/xi_binary_sink.hpp>    // capture emit_binary (the plugin -> WS byte pipe)
@@ -178,7 +178,7 @@ int main() {
     g_emitted.clear();
     {
         xi_frame_handle in = build_input();
-        xi_frame_handle ack = expose->process_frame_door(in);
+        xi_frame_handle ack = expose->run_frame_door(in);
         CHECK(ack != XI_FRAME_NULL);
         if (ack) {
             const char* c = nullptr; int32_t cl = 0;
@@ -212,7 +212,7 @@ int main() {
     g_emitted.clear();
     {
         xi_frame_handle in = build_input();
-        xi_frame_handle ack = expose->process_frame_door(in);
+        xi_frame_handle ack = expose->run_frame_door(in);
         if (ack) fi->release(ack);
         fi->release(in);
         CHECK(g_emitted.size() == 1);
@@ -234,7 +234,7 @@ int main() {
     g_emitted.clear();
     {
         xi_frame_handle in = build_input();
-        xi_frame_handle ack = expose->process_frame_door(in);
+        xi_frame_handle ack = expose->run_frame_door(in);
         if (ack) fi->release(ack);
         fi->release(in);
         CHECK(g_emitted.empty());

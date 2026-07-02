@@ -23,7 +23,7 @@
   #include <windows.h>
 #endif
 
-#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_frame_door / process_frame_door)
+#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_frame_door / run_frame_door)
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_frame_abi.hpp>      // install_frame_abi + frame_v1_iface + FrameRegistry
 #include <xi/xi_trigger_bus.hpp>    // install_trigger_hook + the dispatch sink
@@ -168,7 +168,7 @@ int main() {
         fi->builder_add_i64(b, bkeys::kMinArea, 1);
         xi_frame_handle in = fi->builder_seal(b);
 
-        xi_frame_handle out = blob.adapter->process_frame_door(in);
+        xi_frame_handle out = blob.adapter->run_frame_door(in);
         CHECK(out != XI_FRAME_NULL);
         if (out) {
             int64_t bc = -1, tu = -1;
@@ -197,7 +197,7 @@ int main() {
         xi_frame_builder b = fi->builder_new();
         fi->builder_add_i64(b, bkeys::kThreshold, 100);   // no gray image
         xi_frame_handle in = fi->builder_seal(b);
-        xi_frame_handle out = blob.adapter->process_frame_door(in);
+        xi_frame_handle out = blob.adapter->run_frame_door(in);
         CHECK(out != XI_FRAME_NULL);                      // a contract failure is still a frame
         if (out) {
             const char* code = nullptr; int32_t cl = 0;
@@ -268,7 +268,7 @@ int main() {
             fi->builder_add_i64(b, bkeys::kMinArea, 1);
             xi_frame_handle gframe = fi->builder_seal(b);
 
-            xi_frame_handle out = blob.adapter->process_frame_door(gframe);
+            xi_frame_handle out = blob.adapter->run_frame_door(gframe);
             CHECK(out != XI_FRAME_NULL);
             if (out) {
                 // The chain ran end to end and produced a well-formed, non-fault frame.

@@ -424,7 +424,7 @@ typedef struct xi_frame_v1 {
 } xi_frame_v1;
 
 /* xi.frame@1 (PLUGIN door) — frame-in/frame-out process, published by a
- * plugin through xi_plugin_get_interface (below). process_frame receives a
+ * plugin through xi_plugin_get_interface (below). process receives a
  * sealed input frame (borrowed; the host owns it) and returns a NEW sealed
  * output frame handle the host takes ownership of (and releases). It builds
  * that output via the host's xi_frame_v1 builder. XI_FRAME_NULL signals a
@@ -432,7 +432,7 @@ typedef struct xi_frame_v1 {
  * is instead a normal sealed frame carrying a fail-loud error entry, so the
  * caller always gets a frame to route). Field order frozen; change = v2. */
 typedef struct xi_frame_proc_v1 {
-    xi_frame_handle (*process_frame)(void* inst, xi_frame_handle input);
+    xi_frame_handle (*process)(void* inst, xi_frame_handle input);
 } xi_frame_proc_v1;
 
 /* ------------------------------------------------------------------ */
