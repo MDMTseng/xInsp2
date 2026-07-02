@@ -19,7 +19,7 @@
 // probe are Win32. The crash-event model + crash-log parsing stay portable. TODO(linux) markers below; see docs/roadmap/linux-port.md.
 //
 #include <xi/xi_clock.hpp>            // xi::wall_ms / xi::mono_ms (single clock home)
-#include <xi/xi_safe_state.hpp>
+#include <xi/xi_be_exit.hpp>
 #include <xi/xi_crash_report.hpp>     // xi::enrich_from_crash_report (unit-tested)
 #include <xi/xi_crash_history.hpp>    // xi::CrashHistory (structured BE-death JSONL)
 #include <xi/xi_fe_status.hpp>        // xi::FeStatus (live status snapshot -> JSON file)
@@ -505,7 +505,7 @@ static int run_supervisor(const FeConfig& c) {
             // FOREVER on a blip. Treat it like a death: record + backoff + retry,
             // governed by the SAME consecutive-failure cap so a genuinely broken
             // install still latches "down" instead of spinning.
-            xi::SafeStateEvent ev; ev.reason = xi::SafeStateReason::BackendExit;
+            xi::BeExitEvent ev; ev.reason = xi::BeExitReason::BackendExit;
             ev.ts_ms = now_ms(); ev.backend_rc = -1;
             bool cap_hit = resp.note_death(c.respawn_max);
             history.record(ev, resp.consecutive, cap_hit);
@@ -543,12 +543,12 @@ static int run_supervisor(const FeConfig& c) {
         bool      hb_armed = false;
         int64_t   healthy_since = 0;   // when this instance first went healthy
         DWORD exit_code = 0;
-        xi::SafeStateReason death_reason = xi::SafeStateReason::BackendExit;
+        xi::BeExitReason death_reason = xi::BeExitReason::BackendExit;
         for (;;) {
             DWORD w = WaitForSingleObject(sp.pi.hProcess, (DWORD)c.probe_interval_ms);
             if (w == WAIT_OBJECT_0) {                       // BE exited
                 GetExitCodeProcess(sp.pi.hProcess, &exit_code);
-                death_reason = xi::SafeStateReason::BackendExit;
+                death_reason = xi::BeExitReason::BackendExit;
                 break;
             }
             if (g_stop.load()) break;
@@ -569,7 +569,7 @@ static int run_supervisor(const FeConfig& c) {
                     // wait out the boot timeout; treat it as a failed boot now.
                     std::fprintf(stderr, "[xinsp-fe] backend reported autostart degraded "
                                  "(script did not load); killing for respawn\n");
-                    death_reason = xi::SafeStateReason::BootTimeout;
+                    death_reason = xi::BeExitReason::BootTimeout;
                     TerminateProcess(sp.pi.hProcess, 1);
                     WaitForSingleObject(sp.pi.hProcess, 5000);
                     GetExitCodeProcess(sp.pi.hProcess, &exit_code);
@@ -578,7 +578,7 @@ static int run_supervisor(const FeConfig& c) {
                     std::fprintf(stderr, "[xinsp-fe] backend did not reach 'autostart: ready' "
                                  "within %d ms (boot hang); killing for respawn\n",
                                  c.boot_timeout_ms);
-                    death_reason = xi::SafeStateReason::BootTimeout;
+                    death_reason = xi::BeExitReason::BootTimeout;
                     TerminateProcess(sp.pi.hProcess, 1);
                     WaitForSingleObject(sp.pi.hProcess, 5000);
                     GetExitCodeProcess(sp.pi.hProcess, &exit_code);
@@ -619,7 +619,7 @@ static int run_supervisor(const FeConfig& c) {
                         std::fprintf(stderr, "[xinsp-fe] backend heartbeat stale for >%d ms "
                                      "(serving loop wedged); killing for respawn\n",
                                      c.heartbeat_stale_ms);
-                        death_reason = xi::SafeStateReason::PortUnresponsive;
+                        death_reason = xi::BeExitReason::PortUnresponsive;
                         TerminateProcess(sp.pi.hProcess, 1);
                         WaitForSingleObject(sp.pi.hProcess, 5000);
                         GetExitCodeProcess(sp.pi.hProcess, &exit_code);
@@ -642,7 +642,7 @@ static int run_supervisor(const FeConfig& c) {
             } else if (++probe_fails >= c.probe_fail_max) {
                 std::fprintf(stderr, "[xinsp-fe] backend unresponsive (%d failed probes); "
                              "killing for respawn\n", probe_fails);
-                death_reason = xi::SafeStateReason::PortUnresponsive;
+                death_reason = xi::BeExitReason::PortUnresponsive;
                 TerminateProcess(sp.pi.hProcess, 1);
                 WaitForSingleObject(sp.pi.hProcess, 5000);
                 GetExitCodeProcess(sp.pi.hProcess, &exit_code);
@@ -660,7 +660,7 @@ static int run_supervisor(const FeConfig& c) {
         // ---- BE died unexpectedly: record forensics + respawn ----
         // ("Going safe" on a BE crash is now a comms plugin's own sidecar
         // process, not the FE — the FE just supervises: classify, log, respawn.)
-        xi::SafeStateEvent ev;
+        xi::BeExitEvent ev;
         ev.reason     = death_reason;
         ev.backend_rc = (int)exit_code;
         ev.ts_ms      = now_ms();

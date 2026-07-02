@@ -1,27 +1,30 @@
 #pragma once
 //
-// xi_safe_state.hpp — the FE supervisor's crash-event model.
+// xi_be_exit.hpp — the FE supervisor's backend-exit (crash-event) model.
 //
 // Process isolation was removed (2026-05): a hard plugin crash takes the whole
 // backend (BE) down. The FE (xinsp-fe.exe) supervises: it detects the BE dying,
 // classifies WHY, records it to the crash history, and respawns.
 //
 // The "drive the production line to a safe state on BE crash" action (the PLC
-// SafeStateSink + the host->set_safe_state hook) was REMOVED 2026-06: that
-// belongs to a comms plugin, which spins off its OWN sidecar process that talks
-// to the PLC and — watching the BE's process handle — sends the line-safe message
-// itself when the BE dies. The core/FE no longer owns it.
+// sink + the host->set_safe_state hook) was REMOVED 2026-06: that belongs to a
+// comms plugin, which spins off its OWN sidecar process that talks to the PLC
+// and — watching the BE's process handle — sends the line-safe message itself
+// when the BE dies. The core/FE no longer owns it (see docs/internals/comms-sidecar.md).
 //
-// What remains here is just the crash EVENT (reason + forensic context) the FE
-// records. Deliberately portable: only std headers, no Win32 / no OpenCV (Linux).
+// What remains here is just the BE-exit EVENT (reason + forensic context) the FE
+// records; the old "safe-state" naming was the corpse of that removed PLC action.
+// Deliberately portable: only std headers, no Win32 / no OpenCV (Linux).
 //
 #include <cstdint>
 #include <string>
 
 namespace xi {
 
-// Why the FE observed the backend go down.
-enum class SafeStateReason {
+// Why the FE observed the backend go down. NOTE: the enumerator names double as
+// the WIRE reason strings (to_string below → fe-status.json last_event.reason and
+// crash-history.jsonl); consumers assert on these values, so don't rename them.
+enum class BeExitReason {
     BackendExit,            // BE process exited (crash or unexpected exit)
     PortUnresponsive,       // BE process alive but WS port stopped accepting
     BootTimeout,            // BE alive + port bound but never reached "ready" in time
@@ -30,14 +33,14 @@ enum class SafeStateReason {
     SupervisorShutdown,     // the FE itself is shutting down (intended)
 };
 
-inline const char* to_string(SafeStateReason r) {
+inline const char* to_string(BeExitReason r) {
     switch (r) {
-        case SafeStateReason::BackendExit:          return "BackendExit";
-        case SafeStateReason::PortUnresponsive:     return "PortUnresponsive";
-        case SafeStateReason::BootTimeout:          return "BootTimeout";
-        case SafeStateReason::CommsLost:            return "CommsLost";
-        case SafeStateReason::RespawnLimitExceeded: return "RespawnLimitExceeded";
-        case SafeStateReason::SupervisorShutdown:   return "SupervisorShutdown";
+        case BeExitReason::BackendExit:          return "BackendExit";
+        case BeExitReason::PortUnresponsive:     return "PortUnresponsive";
+        case BeExitReason::BootTimeout:          return "BootTimeout";
+        case BeExitReason::CommsLost:            return "CommsLost";
+        case BeExitReason::RespawnLimitExceeded: return "RespawnLimitExceeded";
+        case BeExitReason::SupervisorShutdown:   return "SupervisorShutdown";
     }
     return "Unknown";
 }
@@ -45,8 +48,8 @@ inline const char* to_string(SafeStateReason r) {
 // Forensic context the FE records when the BE goes down (crash history / status /
 // operator HMI). All fields are best-effort — a clean SupervisorShutdown carries
 // no crash data.
-struct SafeStateEvent {
-    SafeStateReason reason       = SafeStateReason::BackendExit;
+struct BeExitEvent {
+    BeExitReason    reason       = BeExitReason::BackendExit;
     int             backend_rc   = 0;   // BE process exit code (e.g. 0xC0000005)
     std::string     exception_name;     // e.g. "ACCESS_VIOLATION"
     std::string     faulting_module;    // e.g. "plugin_v0.dll"

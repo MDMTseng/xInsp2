@@ -4,10 +4,10 @@
 //
 // The FE supervisor (fe_main.cpp) reads the backend's own log to find the
 // absolute minidump path it printed on death, then reads the sibling .json
-// crash report for forensics (exception name/module, last_phase) that it hands
-// to the SafeStateSink. That logic lived as a FILE-STATIC function inside
-// fe_main.cpp (enrich_from_crash_report) and so could not be unit-tested in
-// isolation.
+// crash report for forensics (exception name/module, last_phase) that it folds
+// into the BeExitEvent (crash history / fe_status). That logic lived as a
+// FILE-STATIC function inside fe_main.cpp (enrich_from_crash_report) and so
+// could not be unit-tested in isolation.
 //
 // This header lifts it out verbatim (same regex, same last-match-wins, same
 // threads[] fallback that prefers the "inspect" breadcrumb) into a portable,
@@ -16,7 +16,7 @@
 //
 // Deliberately portable: only <string>/<fstream>/<sstream>/<regex>/<filesystem>
 // + yyjson (already a backend dep). No Win32, so it compiles unchanged on Linux
-// (see docs/roadmap/linux-port.md). The FE simply forwards its &SafeStateEvent.
+// (see docs/roadmap/linux-port.md). The FE simply forwards its &BeExitEvent.
 //
 #include <cstring>
 #include <filesystem>
@@ -27,7 +27,7 @@
 
 #include <yyjson.h>
 
-#include <xi/xi_safe_state.hpp>
+#include <xi/xi_be_exit.hpp>
 
 namespace xi {
 
@@ -43,7 +43,7 @@ namespace xi {
 //   - sibling .json missing/corrupt   -> report_path set, other fields untouched
 //   - context.last_phase empty        -> falls back to threads[]; prefers "inspect"
 //
-inline void enrich_from_crash_report(const std::string& be_log, SafeStateEvent& ev) {
+inline void enrich_from_crash_report(const std::string& be_log, BeExitEvent& ev) {
     std::ifstream f(be_log);
     if (!f) return;
     std::stringstream ss; ss << f.rdbuf();

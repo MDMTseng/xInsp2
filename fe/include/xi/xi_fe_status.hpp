@@ -26,7 +26,7 @@
 #include <string>
 
 #include <xi/xi_crash_history.hpp>   // xi::json_escape
-#include <xi/xi_safe_state.hpp>
+#include <xi/xi_be_exit.hpp>
 
 namespace xi {
 
@@ -54,7 +54,7 @@ struct FeStatus {
     std::string comms_state;         // always "" now; was "up"|"down"|"gaveup" (disabled)
     // The most recent death's forensics (empty until the first death).
     bool           has_last_event = false;
-    SafeStateEvent last_event;
+    BeExitEvent    last_event;
     std::string crash_history;       // path to the JSONL timeline (for the UI)
     int64_t     ts_ms = 0;           // when this snapshot was written
 
@@ -69,7 +69,7 @@ struct FeStatus {
     int64_t     be_since_ms = 0;     // wall-ms the BE entered be_state
     std::string be_last_reason;      // plugin_fault|compile_error|watchdog_trip|""
 
-    void set_event(const SafeStateEvent& ev) { last_event = ev; has_last_event = true; }
+    void set_event(const BeExitEvent& ev) { last_event = ev; has_last_event = true; }
 
     // Update the mirrored BE health; returns true if anything changed (so the
     // supervisor only re-publishes the status file on a real transition, keeping
@@ -112,7 +112,7 @@ struct FeStatus {
             o += ",\"be_health\":null";
         }
         if (has_last_event) {
-            const SafeStateEvent& e = last_event;
+            const BeExitEvent& e = last_event;
             o += ",\"last_event\":{";
             o += "\"reason\":\"" + std::string(to_string(e.reason)) + "\"";
             o += ",\"rc\":" + std::to_string(e.backend_rc);

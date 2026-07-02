@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-#include <xi/xi_safe_state.hpp>
+#include <xi/xi_be_exit.hpp>
 #include <xi/xi_respawn_policy.hpp>
 
 static int g_failures = 0;
@@ -33,8 +33,8 @@ static int g_failures = 0;
 static bool allowed(xi::RespawnTracker& rt, int cap) { return !rt.note_death(cap); }
 
 int main() {
-    using xi::SafeStateReason;
-    using xi::SafeStateEvent;
+    using xi::BeExitReason;
+    using xi::BeExitEvent;
     const int CAP = 5;
     const int64_t RESET = 30'000;
 

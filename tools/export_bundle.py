@@ -121,7 +121,7 @@ def main() -> int:
 
     # fe.json + run.bat + README.
     json.dump({"project": "./project", "autostart_fps": fps, "be_log": "./be.log",
-               "safe_state": "log", "be_args": ["--aot"]},
+               "be_args": ["--aot"]},
               open(out / "fe.json", "w"), indent=2)
     (out / "run.bat").write_text(
         "@echo off\r\n"

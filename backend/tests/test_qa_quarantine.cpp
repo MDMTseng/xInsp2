@@ -21,7 +21,7 @@
 //        many dispatch threads at once; stressed under ASan (TSan unavailable on
 //        this box — OQ-1) via XINSP2_STRESS_SCALE.
 //
-#include <xi/xi_safe_state.hpp>
+#include <xi/xi_be_exit.hpp>
 #include <xi/xi_crash_history.hpp>
 #include <xi/xi_crash_report.hpp>
 #include <xi/xi_crash_dump.hpp>
@@ -105,14 +105,14 @@ static void write_verdict(const fs::path& dir, const std::string& dll,
 }
 
 int main() {
-    using xi::SafeStateEvent;
+    using xi::BeExitEvent;
     std::printf("[test] G2 per-plugin crash attribution + quarantine\n");
 
     // ===================================================================
     // G2.1 — crash_history_line emits the culprit fields.
     // ===================================================================
     {
-        SafeStateEvent ev;
+        BeExitEvent ev;
         ev.faulting_module  = "flaky.dll+0x12";
         ev.culprit_plugin   = "flaky";
         ev.culprit_instance = "flaky_1";
@@ -120,7 +120,7 @@ int main() {
         CHECK(line.find("\"culprit_plugin\":\"flaky\"") != std::string::npos);
         CHECK(line.find("\"culprit_instance\":\"flaky_1\"") != std::string::npos);
         // Empty culprit (unattributed death) still yields valid empty fields.
-        SafeStateEvent ev2;
+        BeExitEvent ev2;
         std::string line2 = xi::crash_history_line(ev2, 1, false);
         CHECK(line2.find("\"culprit_plugin\":\"\"") != std::string::npos);
     }
@@ -140,7 +140,7 @@ int main() {
                    R"("culprit":{"instance":"flaky_1","plugin":"flaky",)"
                    R"("folder":"C:\\plugins\\flaky","dll":"flaky.dll"}})");
         write_file(d / "be.log", "minidump: " + dmp.string() + "\n");
-        SafeStateEvent ev;
+        BeExitEvent ev;
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "be.log").string(), ev));
         CHECK(ev.culprit_plugin   == "flaky");
         CHECK(ev.culprit_instance == "flaky_1");
@@ -159,7 +159,7 @@ int main() {
                    R"("culprit":{"instance":"flaky_1","plugin":"flaky",)"
                    R"("folder":"C:\\plugins\\flaky","dll":"flaky.dll"}})");
         write_file(d / "be.log", "minidump: " + dmp.string() + "\n");
-        SafeStateEvent ev;
+        BeExitEvent ev;
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "be.log").string(), ev));
         CHECK(ev.culprit_plugin.empty());   // module mismatch -> no attribution
         CHECK(ev.culprit_folder.empty());
