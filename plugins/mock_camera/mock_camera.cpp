@@ -9,7 +9,11 @@
 //      mock_camera.cpp /Fe:mock_camera.dll
 //
 
-#include <xi/xi_abi.hpp>   // xi::Plugin, xi::Record, xi::Image, xi::emit_record
+#include <xi/xi_abi.hpp>       // xi::Plugin, xi::Record, xi::Image, xi::emit_record
+#include <xi/xi_json.hpp>      // parses set_def/exchange (canonical over cmd.find)
+#include <xi/xi_contract.hpp>  // fail-loud command inputs + schema-skew errors
+
+#include "mock_camera_keys.h"
 
 #include <atomic>
 #include <chrono>
@@ -69,6 +73,8 @@ static void draw_number(xi::Image& img, int x, int y, int number) {
     }
 }
 
+namespace keys = xi::mock_camera::keys;
+
 class MockCamera : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
@@ -77,57 +83,69 @@ public:
     ~MockCamera() override { stop_(); }
 
     std::string get_def() const override {
-        char buf[256];
-        std::snprintf(buf, sizeof(buf),
-            R"({"width":%d,"height":%d,"fps":%d,"streaming":%s})",
-            w_, h_, fps_, running_.load() ? "true" : "false");
-        return buf;
+        return xi::Json::object()
+            .set(keys::kWidth, w_.load())
+            .set(keys::kHeight, h_.load())
+            .set(keys::kFps, fps_.load())
+            .set(keys::kStreaming, running_.load())
+            .dump();
     }
 
     bool set_def(const std::string& j) override {
-        auto extract_int = [&](const char* key) -> int {
-            auto k = std::string("\"") + key + "\":";
-            auto pos = j.find(k);
-            if (pos == std::string::npos) return -1;
-            return std::stoi(j.substr(pos + k.size()));
-        };
-        int v;
-        if ((v = extract_int("width"))  > 0) w_ = v;
-        if ((v = extract_int("height")) > 0) h_ = v;
-        if ((v = extract_int("fps"))    > 0) fps_ = v;
+        auto p = xi::Json::parse(j);
+        if (!p.valid()) return false;
+
+        // Guard 3: reject a config built against an incompatible header version
+        // with a precise error naming both versions. Absent stamp (a legacy
+        // persisted instance.json) is tolerated.
+        auto sv = p[xi::contract::kSchemaKey];
+        if (sv.is_number() && sv.as_int() != xi::mock_camera::kSchemaVersion) {
+            log_error("mock_camera: config schema mismatch: built for v" +
+                      std::to_string(sv.as_int()) + ", this plugin serves v" +
+                      std::to_string(xi::mock_camera::kSchemaVersion));
+            return false;
+        }
+
+        if (p[keys::kWidth].as_int(0)  > 0) w_ = p[keys::kWidth].as_int();
+        if (p[keys::kHeight].as_int(0) > 0) h_ = p[keys::kHeight].as_int();
+        if (p[keys::kFps].as_int(0)    > 0) fps_ = clamp_fps_(p[keys::kFps].as_int());
         return true;
     }
 
     std::string exchange(const std::string& cmd_json) override {
-        if (cmd_json.find("\"start\"") != std::string::npos) {
-            start_();
+        auto p = xi::Json::parse(cmd_json);
+        const std::string command = p[keys::kCommand].as_string();
+
+        if (command == keys::kStart)      { start_(); return get_def(); }
+        if (command == keys::kStop)       { stop_();  return get_def(); }
+        if (command == keys::kGetStatus)  { return get_def(); }
+        if (command == keys::kSetFps) {
+            // Guard 2: the payload is required — fail loud, don't silently no-op.
+            auto v = p[keys::kValue];
+            if (!v.valid())     return xi::contract::fault_json(xi::contract::kMissingInput, keys::kValue, "int");
+            if (!v.is_number()) return xi::contract::fault_json(xi::contract::kWrongType,   keys::kValue, "int");
+            fps_ = clamp_fps_(v.as_int());
             return get_def();
         }
-        if (cmd_json.find("\"stop\"") != std::string::npos) {
-            stop_();
+        if (command == keys::kSetResolution) {
+            auto w = p[keys::kWidth], h = p[keys::kHeight];
+            if (!w.valid())     return xi::contract::fault_json(xi::contract::kMissingInput, keys::kWidth,  "int");
+            if (!h.valid())     return xi::contract::fault_json(xi::contract::kMissingInput, keys::kHeight, "int");
+            if (!w.is_number()) return xi::contract::fault_json(xi::contract::kWrongType,    keys::kWidth,  "int");
+            if (!h.is_number()) return xi::contract::fault_json(xi::contract::kWrongType,    keys::kHeight, "int");
+            if (w.as_int() > 0) w_ = w.as_int();
+            if (h.as_int() > 0) h_ = h.as_int();
             return get_def();
         }
-        if (cmd_json.find("\"get_status\"") != std::string::npos) {
-            return get_def();
-        }
-        if (cmd_json.find("\"set_fps\"") != std::string::npos) {
-            auto pos = cmd_json.find("\"value\":");
-            if (pos != std::string::npos) {
-                fps_ = std::stoi(cmd_json.substr(pos + 8));
-                if (fps_ < 1) fps_ = 1;
-                if (fps_ > 60) fps_ = 60;
-            }
-            return get_def();
-        }
-        if (cmd_json.find("\"set_resolution\"") != std::string::npos) {
-            set_def(cmd_json);
-            return get_def();
-        }
-        return R"({"error":"unknown command"})";
+        return exchange_unknown_command(command);
     }
 
 private:
-    int w_ = 640, h_ = 480, fps_ = 10;
+    static int clamp_fps_(int v) { return v < 1 ? 1 : (v > 60 ? 60 : v); }
+
+    // Config touched from the dispatch/UI thread (set_def/exchange) and read from
+    // the capture worker (run_loop) — atomic so those cross-thread reads are sound.
+    std::atomic<int> w_{640}, h_{480}, fps_{10};
     std::atomic<bool> running_{false};
     std::thread thread_;
 
@@ -145,15 +163,18 @@ private:
     void run_loop() {
         int seq = 0;
         while (running_) {
-            xi::Image img(w_, h_, 3);
+            // Snapshot config once per frame (set_def/exchange may retune it live).
+            const int w = w_.load(), h = h_.load(), fps = fps_.load();
+
+            xi::Image img(w, h, 3);
             uint8_t* p = img.data();
 
             // Background: gradient that shifts with frame
-            for (int y = 0; y < h_; ++y) {
-                for (int x = 0; x < w_; ++x) {
-                    int i = (y * w_ + x) * 3;
-                    p[i + 0] = static_cast<uint8_t>((x * 200 / w_ + seq * 2) & 0xFF);
-                    p[i + 1] = static_cast<uint8_t>((y * 180 / h_ + seq * 3) & 0xFF);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    int i = (y * w + x) * 3;
+                    p[i + 0] = static_cast<uint8_t>((x * 200 / w + seq * 2) & 0xFF);
+                    p[i + 1] = static_cast<uint8_t>((y * 180 / h + seq * 3) & 0xFF);
                     p[i + 2] = static_cast<uint8_t>(80 + (seq & 0x3F));
                 }
             }
@@ -162,8 +183,8 @@ private:
             // Black background box
             for (int y = 2; y < 20; ++y) {
                 for (int x = 2; x < 80; ++x) {
-                    if (x < w_ && y < h_) {
-                        int i = (y * w_ + x) * 3;
+                    if (x < w && y < h) {
+                        int i = (y * w + x) * 3;
                         p[i] = p[i+1] = p[i+2] = 0;
                     }
                 }
@@ -171,10 +192,10 @@ private:
             draw_number(img, 4, 4, seq);
 
             xi::emit_record(host_, name().c_str(),
-                            xi::Record().image("frame", img));
+                            xi::Record().image(keys::kFrame, img));
             seq++;
 
-            int sleep_ms = 1000 / std::max(fps_, 1);
+            int sleep_ms = 1000 / std::max(fps, 1);
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
         }
     }
