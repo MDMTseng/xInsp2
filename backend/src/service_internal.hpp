@@ -225,8 +225,9 @@ void*    trigger_meta_cb();
 // ---- toolchain / project helpers -------------------------------------------
 void resolve_toolchain_(const std::string& folder);
 void read_script_deps_(const std::string& folder,
-                       std::vector<std::string>& out_include_dirs,
-                       std::vector<std::string>& out_link_libs);
+                       std::vector<std::string>& include_dirs,
+                       std::vector<std::string>& link_libs,
+                       int& openmp_max_threads);
 void set_project_dll_search_(const std::string& folder);
 bool apply_process_priority_(const std::string& cls);
 
