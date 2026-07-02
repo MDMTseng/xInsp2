@@ -111,12 +111,13 @@ changes. Examples: the crash/graph/toolchain-override commands are vscode-only
 (diagnostics); `get_state` / `prepare_instance` are ui-components-only (the
 instance-editing panel). None are deletion candidates — they have a live caller.
 
-## Part 2 — in-process dead-code sweep (result: NO deletions)
+## Part 2 — in-process findings (clean bill + KEEP-suspicious)
 
 Separate from the command ledger above, the service TUs + `fe_main` + `runner_main`
 were swept for in-process dead code (orphans from the `service_main` split and the
 dispatch-table refactor, duplicated utilities, dead flags/fields, dead branches).
-**Result: nothing dead — the domain is already tight.** Evidence:
+**Result: nothing deletable — the domain is already tight** (this corroborates the
+authoritative per-symbol reference-count sweep done in parallel). Evidence:
 
 - **Header helpers** (45 free functions declared in `service_internal.hpp`): every
   one has ≥1 live call site (min reference count 3 = decl + def + use). No orphan.
@@ -135,11 +136,22 @@ dispatch-table refactor, duplicated utilities, dead flags/fields, dead branches)
   `watchdog_trips` / `script_generation` are emitted to clients (contract — keep).
 - **No dead markers**: no `#if 0`, `[[deprecated]]`, or "unused" TODOs. The `(void)`
   casts in `service_dispatch.cpp` are Linux-stub bodies + intentional-discard, not dead.
-- **One borderline, kept**: `xp::Cmd` (outbound-command envelope in `xi_protocol.hpp`)
-  has no in-tree production caller — the service is server-side and receives via
-  `ParsedCmd`. It is exercised by `test_protocol.cpp` (symmetric to the tested `Rsp`)
-  and is the canonical C++ definition of the inbound-command wire shape, so it is
-  **tested contract surface — not deleted.**
+### KEEP-suspicious (do NOT delete here — coupled removals)
+
+- **`use_grab_cb`** — a retired `grab()` pull-model **no-op stub** that returns
+  `XI_IMAGE_NULL`. Defined twice (`runner_main.cpp:161`, `service_sinks.cpp:286`;
+  declared `service_internal.hpp:267`) and still **wired into the `xi_host_api`
+  grab slot** on both hosts (`runner_main.cpp:442`, `service_cmd_lifecycle.cpp:278`).
+  The legacy pull model (`xi::ImageSource` queue) is gone — sources now PUSH via
+  `emit_record` and scripts read `current_trigger()` — so the callback is dead
+  *semantically* but **live by ABI**: it fills a fixed slot in the host-API function
+  table. Its removal is not a local edit; it is coupled to the **SDK-side twin** (the
+  `grab` slot in the `xi_host_api` layout) and/or **THE CUT** (`docs/new_gen/10`),
+  which owns the coordinated ABI-surface reduction. **Keep until that lands.**
+- **`xp::Cmd`** — outbound-command envelope in `xi_protocol.hpp`; no in-tree
+  production caller (the service is server-side and receives via `ParsedCmd`), but
+  exercised by `test_protocol.cpp` (symmetric to the tested `Rsp`) and the canonical
+  C++ definition of the inbound-command wire shape. **Tested contract surface — keep.**
 
 No source changed by this pass; the `refactor(service)!` deletion commit the brief
 anticipated has an empty changeset (nothing to delete). Baseline (ctest / run_qa /
