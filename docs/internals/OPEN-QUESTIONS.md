@@ -1,5 +1,9 @@
 # Open Questions — deferred decisions (autonomous execution log)
 
+> **Status:** experimental — deferred decisions with recorded working defaults, not
+> ratified design. Each item's default is subject to change on review.
+> **Last verified against:** 2026-07-01 (`core_fix_plan.md` Parts I–IV in progress).
+
 **Context:** User stepped away 2026-07-01 mid-roadmap (Parts I–IV of `core_fix_plan.md`).
 Standing instruction: log deferrable decisions here, proceed on the recorded default, only
 stop and ask if genuinely blocked. Each item records **the default I am proceeding with**,

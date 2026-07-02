@@ -1,5 +1,9 @@
 # Known issues / open bug list
 
+> **Status:** experimental — a living open-bug list, not shipped behavior.
+> **Last verified against:** 2026-06 hardening campaign (fixed items merged in
+> `17384e4`). Items below are what's **still open**; re-verify before relying on any.
+
 Snapshot after the 2026-06 hardening campaign (two structural-review passes; the
 fixed items merged to master in `17384e4`). This lists what's **still open**, ranked
 within each group. Each is tagged with the design theme it belongs to:
