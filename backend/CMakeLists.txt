@@ -980,6 +980,23 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../contract/baseline_gate.py)
     set_tests_properties(contract_baseline PROPERTIES LABELS "contract")
+    # contract_live: the THIRD contract leg (schemas <-> fixtures <-> LIVE bytes).
+    # contract_schema proves the fixtures match the schemas; this proves the schemas
+    # match what the REAL backend sends. It spawns backend/build/Release/xinsp-backend.exe
+    # on an ephemeral port, drives a representative session (hello, dispatch_stats,
+    # get_health, open/compile/run, start/stop -> health_changed, commit_group,
+    # load_project, metrics), and validates every captured message against its schema
+    # (events routed by their schema's type/name consts; rsps by originating command
+    # via contract/live-wire-map.json; every rsp also envelope-checked vs rsp.schema.json).
+    # Messages no schema describes are ratcheted against contract/live-allowlist.json:
+    # an unlisted new message type FAILS. Self-skips (exit 0, loud "SKIP - NOT A PASS")
+    # when the backend exe is not built or a Python dep is missing, like the doc_coverage /
+    # contract_schema gates. LONGER timeout: the session does a cold cl.exe compile.
+    # See contract/live_conformance.py and contract/README.md.
+    add_test(NAME contract_live
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/live_conformance.py)
+    set_tests_properties(contract_live PROPERTIES LABELS "contract" TIMEOUT 600)
 else()
     message(STATUS "doc_coverage ctest skipped: no Python3 interpreter found")
 endif()

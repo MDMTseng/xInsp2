@@ -15,7 +15,10 @@ contract/
   schemas/*.schema.json                 descriptive schemas for the current wire
   examples/*.json                       sample frames for schemas with no protocol/fixtures/ fixture
   fixtures-map.json                     fixture -> schema routing (the discriminator; see below)
+  live-wire-map.json                    rsp command -> schema routing for the live-wire gate
+  live-allowlist.json                   the ratchet: live messages no schema describes (yet)
   validate.py                           the gate: validates BOTH ways (subset + fixtures)
+  live_conformance.py                   the THIRD leg: validates the LIVE backend's bytes
   codegen/gen_types.py                  codegen probe (TS interface + Py TypedDict)
   codegen/generated/                    committed generated artifacts + a tsc type-probe
   codegen/cpp-sketch/                   hand-sketch of the C++ yyjson-view target (not generated)
@@ -88,6 +91,68 @@ The gate is wired as the `contract_schema` ctest (`backend/CMakeLists.txt`), so
 `ctest -C Release -R contract_schema` runs it in CI alongside the other gates. It
 needs the `jsonschema` Python package; like the `doc_coverage` gate it self-skips
 (exit 0) if the interpreter or package is absent, so a minimal box still builds.
+
+## The third leg — live-wire conformance (`live_conformance.py`)
+
+`contract_schema` proves the **fixtures** match the **schemas**. But both are
+hand-authored mirrors of the C++, and nothing checked either against what the
+**live backend actually sends**. So a C++ change that alters the wire and skips
+the schema+fixture update passes every gate green — the two mirrors still agree
+with *each other*; they just no longer describe reality. That is the open loop
+this leg closes:
+
+```
+   schemas  <——contract_schema——>  fixtures        (the two hand-authored mirrors)
+      \                               /
+       \————————contract_live————————/
+                     |
+              the LIVE backend's bytes                (reality)
+```
+
+`live_conformance.py` spawns the real `xinsp-backend.exe` on an ephemeral port,
+drives a representative session (hello, `dispatch_stats`, `get_health`, open /
+compile / run a tiny project, `start`/`stop` to force a `health_changed`
+transition, `commit_group`, `load_project`, `metrics`), captures **every** inbound
+message, and does three things:
+
+1. **Validates** each captured message a schema describes, against that schema
+   with `jsonschema` — the same discriminator logic `fixtures-map.json` encodes,
+   now applied to live bytes. **Events** route by their schema's own `type`/`name`
+   consts (auto-derived — a new event schema is picked up with no edit). **Rsps**
+   carry no `name` on the wire, only an echoed correlation `id`, so they route by
+   their **originating command** via [`live-wire-map.json`](./live-wire-map.json)
+   (`validate: envelope` vs `data` says whether the schema describes the whole rsp
+   or just its `data` payload). Every rsp is *additionally* checked against the
+   generic [`rsp.schema.json`](./schemas/rsp.schema.json) envelope — the only place
+   that schema is exercised against real bytes. A live message that violates its
+   schema **fails** the gate, printing the offender.
+
+2. **Ratchets** every message no schema describes against
+   [`live-allowlist.json`](./live-allowlist.json): a listed key is counted and
+   reported; an **unlisted** one **fails** ("a new unschema'd wire message shipped
+   — add a schema or allowlist it"). A new message type can never reach the wire
+   silently undescribed. The allowlist is seeded with what a real session produces
+   today (the `compile_started` / `run_started` progress notifications, the `log`
+   and `instances` channels, and the rsps whose per-command `data` shape isn't
+   modelled yet), each with a reason.
+
+3. **Coverage**: asserts the session actually observed the load-bearing schema'd
+   messages, so a green means the wire was exercised, not that the session quietly
+   produced nothing (a green with a hole is worse than a red).
+
+**When the live bytes disagree with a schema, the BACKEND is truth.** Fix the
+schema (and refresh the baseline — see below — in the same commit); do **not**
+"fix" the backend to match a stale schema. That divergence surfacing is this gate
+earning its keep.
+
+Wired as the `contract_live` ctest (label `contract`), so it runs in `gate.py`'s
+ctest stage against a freshly built backend. Like the other contract gates it
+self-skips (exit 0, loud `SKIP - NOT A PASS`) when the backend exe is not built or
+a Python dep (`jsonschema`, or the `xinsp2` websocket client) is missing:
+
+```
+python contract/live_conformance.py          # needs a built backend/build/Release/xinsp-backend.exe
+```
 
 ## The protocol-version gate — `baseline/` (`baseline_gate.py`)
 
