@@ -13,6 +13,7 @@ up in [`../docs/new_gen/05-schema-language-spike.md`](../docs/new_gen/05-schema-
 contract/
   meta/xi-contract-subset.schema.json   the constrained-subset meta-schema (enforces the subset)
   schemas/*.schema.json                 descriptive schemas for the current wire
+  plugins/<plugin>.decl.json            per-plugin data-contract declarations (wave-3 codegen input; see codegen/README.md)
   examples/*.json                       sample frames for schemas with no protocol/fixtures/ fixture
   fixtures-map.json                     fixture -> schema routing (the discriminator; see below)
   live-wire-map.json                    rsp command -> schema routing for the live-wire gate
@@ -20,7 +21,11 @@ contract/
   validate.py                           the gate: validates BOTH ways (subset + fixtures)
   live_conformance.py                   the THIRD leg: validates the LIVE backend's bytes
   codegen/gen_types.py                  codegen probe (TS interface + Py TypedDict)
+  codegen/gen_contract.py               plugin-contract generator: decl -> _keys/_schema/_io.gen.h + TS/Py + docs
+  codegen/check_equiv.py                the codegen_equiv gate: generated == hand-written == decl (+ coverage ratchet)
+  codegen/equiv/                        the compiled drop-in proof (codegen_equiv_compile ctest)
   codegen/generated/                    committed generated artifacts + a tsc type-probe
+  codegen/generated/plugins/            committed per-plugin generated headers/types/docs
   codegen/cpp-sketch/                   hand-sketch of the C++ yyjson-view target (not generated)
 ```
 
