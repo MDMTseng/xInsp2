@@ -190,6 +190,27 @@ add_executable(test_record tests/test_record.cpp)
 target_link_libraries(test_record PRIVATE xi_core)
 add_test(NAME record COMMAND test_record)
 
+# Canonical msgpack codec (xi/xi_mp.hpp) — the v3 frame-plane foundation. The
+# header is zero-dependency (no yyjson, no OpenCV), so the unit test links
+# nothing but the include dir. In-memory properties: writer determinism +
+# canonical widths, reader round-trip, and hostile-input rejection.
+add_executable(test_mp tests/test_mp.cpp)
+target_include_directories(test_mp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME mp COMMAND test_mp)
+
+# Canonical msgpack GOLDEN fixtures (protocol/fixtures/canonical) — the
+# cross-implementation lockstep with the sibling TS/Python codecs. Drives the
+# same Writer/canonicalizer and byte-compares against the committed *.bin;
+# --regen rewrites them. Uses xi_json for the manifest, so it links yyjson.
+add_executable(test_mp_fixtures tests/test_mp_fixtures.cpp)
+target_link_libraries(test_mp_fixtures PRIVATE yyjson)
+target_include_directories(test_mp_fixtures PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME mp_fixtures COMMAND test_mp_fixtures)
+set_tests_properties(mp_fixtures PROPERTIES
+    ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures")
+
 # Plugin-manifest parse layer (xi_pm_parse.hpp): json_flag_true top-level-only (#22).
 add_executable(test_pm_parse tests/test_pm_parse.cpp)
 target_link_libraries(test_pm_parse PRIVATE xi_core)

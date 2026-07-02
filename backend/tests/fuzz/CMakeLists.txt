@@ -102,6 +102,10 @@ target_include_directories(fuzz_yyjson PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor/yyjson ${CMAKE_SOURCE_DIR}/include)
 # Record::from_json_bytes — the ABI process() JSON decode (links OpenCV via xi_core).
 xi_fuzz_target(fuzz_record_json fuzz_record_json.cpp xi_core)
+# Canonical msgpack reader (xi/xi_mp.hpp) — header-only, zero deps, so no libs;
+# just the include dir. The ingress edge's validate()/canonicalize() paths.
+xi_fuzz_target(fuzz_mp fuzz_mp.cpp)
+target_include_directories(fuzz_mp PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 # -------- UBSan build of a subset of the unit suite --------------------------
 # A clang-cl -fsanitize=undefined configuration of the pure (socket-free) unit
@@ -143,4 +147,6 @@ if(XINSP2_FUZZ_UBSAN_TESTS)
     xi_ubsan_replay(ubsan_replay_yyjson      fuzz_yyjson.cpp      yyjson)
     target_include_directories(ubsan_replay_yyjson PRIVATE
         ${CMAKE_SOURCE_DIR}/vendor/yyjson ${CMAKE_SOURCE_DIR}/include)
+    xi_ubsan_replay(ubsan_replay_mp          fuzz_mp.cpp)
+    target_include_directories(ubsan_replay_mp PRIVATE ${CMAKE_SOURCE_DIR}/include)
 endif()
