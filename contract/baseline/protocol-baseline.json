@@ -187,7 +187,7 @@
       }
     },
     "rsp-commit-group.schema.json": {
-      "sha256": "36213f467f23c42f1194e764c308b1e01dbbd39bb800d20f98a17e32a87d6be8",
+      "sha256": "b7dec40fec63167a1c5b8f2eeb17e316286f301e00a45c7c10a01ab36214b9df",
       "shape": {
         "$id": "https://xinsp.dev/contract/schemas/rsp-commit-group.schema.json",
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -196,12 +196,30 @@
           "data": {
             "additionalProperties": true,
             "properties": {
-              "canonical": {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              "committed": {
-                "type": "boolean"
+              "results": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "result": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "ok"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               },
               "status": {
                 "enum": [
@@ -209,19 +227,16 @@
                   "partial"
                 ],
                 "type": "string"
-              },
-              "warnings": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
               }
             },
             "required": [
-              "committed",
+              "results",
               "status"
             ],
             "type": "object"
+          },
+          "error": {
+            "type": "string"
           },
           "id": {
             "type": "integer"
@@ -303,7 +318,7 @@
       }
     },
     "rsp-metrics.schema.json": {
-      "sha256": "2096092836898445dcf3f95de67db6655b4651f5ba8ad8e91d39a8c2bac4fe38",
+      "sha256": "33c38d2d133f671ab6dfaf6b934d1567404923bffa12e46327e29835026c3ad8",
       "shape": {
         "$id": "https://xinsp.dev/contract/schemas/rsp-metrics.schema.json",
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -312,42 +327,43 @@
           "data": {
             "additionalProperties": true,
             "properties": {
+              "frames_error": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "frames_ok": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "frames_total": {
+                "minimum": 0,
+                "type": "integer"
+              },
               "inspect_compute_ms": {
                 "additionalProperties": true,
                 "properties": {
                   "buckets": {
-                    "additionalProperties": true,
-                    "properties": {
-                      "gt_50": {
-                        "minimum": 0,
-                        "type": "integer"
+                    "items": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "count": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "le": {
+                          "type": [
+                            "number",
+                            "string"
+                          ]
+                        }
                       },
-                      "le_1": {
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "le_10": {
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "le_2": {
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "le_20": {
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "le_5": {
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "le_50": {
-                        "minimum": 0,
-                        "type": "integer"
-                      }
+                      "required": [
+                        "count",
+                        "le"
+                      ],
+                      "type": "object"
                     },
-                    "type": "object"
+                    "type": "array"
                   },
                   "count": {
                     "minimum": 0,
@@ -372,6 +388,9 @@
               }
             },
             "required": [
+              "frames_error",
+              "frames_ok",
+              "frames_total",
               "inspect_compute_ms"
             ],
             "type": "object"
