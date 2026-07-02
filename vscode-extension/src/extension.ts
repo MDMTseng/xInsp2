@@ -13,6 +13,8 @@ import { renderProjectSettingsHtml } from './projectSettingsHtml';
 import { renderPluginBrowserHtml, PBModel, PBRoot, PBTreeNode, PBPlugin } from './pluginBrowser';
 import { ImageViewerPanel } from './imageViewerPanel';
 import { resolveBackendMode } from './backendMode.mjs';
+import { VerdictTally, parseRunOutcome, parseRunFinished,
+         CLASS_OK, CLASS_NG, CLASS_CRASHED, CLASS_DROPPED } from './runOutcome';
 
 // --- Plugin Browser model building (pure; reads project.json + the filesystem) ---
 function pbExpandRoot(raw: string, projectFolder: string): string {
@@ -530,6 +532,78 @@ export function activate(context: vscode.ExtensionContext) {
     // Retained map; re-synced on every (re)connect so the latest always shows.
     const statusMap: Record<string, string> = {};
     const refreshStatuses = () => treeProvider.setStatuses({ ...statusMap });
+
+    // --- Run-outcome (verdict) status bar --------------------------------
+    // Rolling ok/ng/na/crashed tally fed by `run_result` events (single-shot
+    // cmd:run AND continuous-mode dispatch). Hidden until the first verdict; the
+    // tooltip carries the last verdict's code/msg + full class breakdown, and the
+    // background reddens when the latest verdict is ng/crashed so a failing part
+    // in `start` mode is impossible to miss. Reset on cmd:start (mirrors the
+    // backend resetting its per-run counters) and on disconnect.
+    const verdictTally = new VerdictTally();
+    const verdictStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+    verdictStatus.command = 'xinsp2.resetVerdicts';
+    context.subscriptions.push(verdictStatus);
+    // Throttle OK-class + run_finished output logging so a fast continuous stream
+    // can't flood the channel; ng/crashed/dropped/no_verdict lines are always logged.
+    let lastOkLogMs = 0;
+    let lastFinishLogMs = 0;
+    const updateVerdictStatus = () => {
+        const t = verdictTally;
+        if (t.total === 0) { verdictStatus.hide(); return; }
+        const cr = t.crashed + t.dropped;
+        verdictStatus.text = `$(pulse) ok ${t.ok} · ng ${t.ng} · na ${t.na}`
+            + (cr > 0 ? ` · cr ${cr}` : '');
+        const last = t.last;
+        const lines = [
+            `Last verdict: ${t.lastClass} — code ${last?.code}${last?.msg ? ' “' + last.msg + '”' : ''}`,
+        ];
+        if (last?.source || last?.group)
+            lines.push(`  source: ${last?.source ?? '?'}${last?.group ? '  group: ' + last.group : ''}`);
+        lines.push(`ok ${t.ok} · ng ${t.ng} · na ${t.na} · no_verdict ${t.no_verdict}`
+            + ` · crashed ${t.crashed} · dropped ${t.dropped}`
+            + (t.other ? ` · other ${t.other}` : '') + `  (${t.total} runs)`);
+        lines.push('Click to reset counts.');
+        verdictStatus.tooltip = lines.join('\n');
+        verdictStatus.backgroundColor =
+            t.lastClass === CLASS_CRASHED || t.lastClass === CLASS_DROPPED
+                ? new vscode.ThemeColor('statusBarItem.errorBackground')
+                : t.lastClass === CLASS_NG
+                    ? new vscode.ThemeColor('statusBarItem.warningBackground')
+                    : undefined;
+        verdictStatus.show();
+    };
+    const resetVerdicts = () => { verdictTally.reset(); updateVerdictStatus(); };
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.resetVerdicts', resetVerdicts));
+
+    // --- Compile-lifecycle status bar ------------------------------------
+    // Driven by `compile_started` / `compile_finished` events, which bracket
+    // EVERY compile_and_load — including recompiles the extension didn't initiate
+    // directly (file-watch save, auto-compile on restore), which the local `busy`
+    // flag doesn't cover. Shows a spinner across the 3-5s cold-compile quiet
+    // window so the connection doesn't look hung.
+    const compileStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
+    context.subscriptions.push(compileStatus);
+    let compileClearTimer: ReturnType<typeof setTimeout> | undefined;
+    const showCompiling = (p?: string) => {
+        if (compileClearTimer) { clearTimeout(compileClearTimer); compileClearTimer = undefined; }
+        compileStatus.text = `$(sync~spin) xInsp2: compiling ${p ? path.basename(p) : ''}`.trimEnd();
+        compileStatus.tooltip = `Compiling ${p || 'script'}…`;
+        compileStatus.backgroundColor = undefined;
+        compileStatus.show();
+    };
+    const showCompileDone = (ok: boolean, p?: string) => {
+        if (compileClearTimer) { clearTimeout(compileClearTimer); compileClearTimer = undefined; }
+        const name = p ? path.basename(p) : '';
+        compileStatus.text = ok ? `$(check) xInsp2: compiled ${name}`.trimEnd()
+                                : `$(error) xInsp2: compile failed ${name}`.trimEnd();
+        compileStatus.tooltip = ok ? `Compiled ${p || ''}` : `Compile failed: ${p || ''}`;
+        compileStatus.backgroundColor = ok ? undefined
+            : new vscode.ThemeColor('statusBarItem.errorBackground');
+        compileStatus.show();
+        compileClearTimer = setTimeout(() => compileStatus.hide(), ok ? 3000 : 6000);
+    };
 
     // Plugin data cache (the "Plugins" tree view was removed; the Plugin Browser
     // webview is the management surface now — this just holds the last-known set).
@@ -1087,6 +1161,10 @@ export function activate(context: vscode.ExtensionContext) {
         treeProvider.setProjectOpen(false);
         lastConnected = false;
         setViewBadge(false, 0, 0);
+        // Clear run/compile indicators — stale verdict counts from a dead backend
+        // are misleading, and a spinner would hang forever.
+        resetVerdicts();
+        compileStatus.hide();
         if (attachMode) {
             // The FE owns recovery; make clear the extension isn't going to
             // respawn. Word it from the FE's true state when we have it: a latched
@@ -1108,6 +1186,57 @@ export function activate(context: vscode.ExtensionContext) {
                 statusMap[src] = msg.data?.text ?? '';
                 refreshStatuses();
             }
+        } else if (msg.type === 'event' && msg.name === 'run_result') {
+            // Per-run verdict (schema xi.run-outcome/1). Tally into the status bar
+            // and log the outcome; OK lines are rate-limited so a fast continuous
+            // stream can't flood the output channel.
+            const o = parseRunOutcome(msg);
+            const cls = verdictTally.record(o);
+            updateVerdictStatus();
+            const line = `[run${o.run_id != null ? ' #' + o.run_id : ''}] ${cls}`
+                + ` (code ${o.code})${o.msg ? ' — ' + o.msg : ''}`
+                + (o.source ? `  [${o.source}${o.group ? '/' + o.group : ''}]` : '');
+            if (cls === CLASS_OK) {
+                const now = Date.now();
+                if (now - lastOkLogMs > 1000) { lastOkLogMs = now; output.appendLine(line); }
+            } else {
+                output.appendLine(line);
+            }
+        } else if (msg.type === 'event' && msg.name === 'run_error') {
+            // Inspect threw (C++ exception / SEH) — fires INSTEAD of run_finished.
+            // Surface it distinctly from a normal finish; the crashed verdict is
+            // separately tallied via its run_result, so this is diagnostic detail.
+            const rid = msg.data?.run_id;
+            const what = msg.data?.what ?? 'unknown error';
+            output.appendLine(`[run${rid != null ? ' #' + rid : ''}] ERROR: ${what}`);
+        } else if (msg.type === 'event' && msg.name === 'run_finished') {
+            // Normal bracket close (run_error fires instead of this on a throw).
+            // The verdict already surfaced via run_result, so this only emits an
+            // occasional, rate-limited compute-timing line — inspect COMPUTE time
+            // only, NOT cycle latency — so continuous mode can't flood the channel.
+            const f = parseRunFinished(msg);
+            const now = Date.now();
+            if (f.run_id != null && now - lastFinishLogMs > 1000) {
+                lastFinishLogMs = now;
+                output.appendLine(`[run #${f.run_id}] finished`
+                    + (f.inspect_compute_us != null ? ` (compute ${(f.inspect_compute_us / 1000).toFixed(2)}ms)` : ''));
+            }
+        } else if (msg.type === 'event' && msg.name === 'state_dropped') {
+            // Hot-reload dropped the persisted xi::state() because the new DLL
+            // declares a different state-schema version. The developer MUST see
+            // this — otherwise their state silently resets and they debug a phantom.
+            const oldS = msg.data?.old_schema;
+            const newS = msg.data?.new_schema;
+            const detail = (oldS != null && newS != null)
+                ? ` (state schema v${oldS} → v${newS})` : '';
+            const warn = `xInsp2: persistent script state was DROPPED on reload${detail}`
+                + ' — xi::state() started empty because the schema changed.';
+            output.appendLine('[xinsp2] ' + warn);
+            vscode.window.showWarningMessage(warn);
+        } else if (msg.type === 'event' && msg.name === 'compile_started') {
+            showCompiling(msg.data?.path);
+        } else if (msg.type === 'event' && msg.name === 'compile_finished') {
+            showCompileDone(msg.data?.ok !== false, msg.data?.path);
         } else if (msg.type === 'rsp') {
             // Responses are dispatched via pending map (simple approach).
             const handler = pendingRsp.get(msg.id);
@@ -2763,7 +2892,12 @@ ${exposeBlock}
 
     let g_continuous = false;
     client.on('json', (msg: any) => {
-        if (msg.type === 'rsp' && msg.data?.started) g_continuous = true;
+        if (msg.type === 'rsp' && msg.data?.started) {
+            g_continuous = true;
+            // cmd:start resets the backend's per-run counters — mirror that so the
+            // verdict tally is scoped to the current continuous run, not lifetime.
+            resetVerdicts();
+        }
         if (msg.type === 'rsp' && msg.data?.stopped)  g_continuous = false;
     });
 

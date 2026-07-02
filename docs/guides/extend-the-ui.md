@@ -305,6 +305,30 @@ so it survives reconnects — don't rely on the event alone.
 
 ---
 
+## Run-outcome + compile-lifecycle events
+
+Beyond the `status` channel, the extension consumes the run and compile
+lifecycle events from [`../reference/ws-protocol.md`](../reference/ws-protocol.md)
+(the `event` message type). The dispatch is the `client.on('json', …)` switch in
+`extension.ts`; the outcome parsing/classification is factored into the pure,
+`vscode`-free `src/runOutcome.ts` (mirrors the Python SDK's `RunOutcome`, so both
+clients classify verdicts identically) and unit-tested in
+`test/run_outcome.test.mjs` against the shared `protocol/fixtures/*.json` goldens.
+
+| Event | UX |
+|---|---|
+| `run_result` | Rolling ok/ng/na/crashed tally in a status-bar item (reddens on ng/crashed); verdict lines in the **xInsp2** output channel (OK lines rate-limited to avoid flooding a fast continuous stream). Reset on `cmd:start` and on disconnect; click the item to reset. |
+| `run_error` | Distinct `ERROR` line in the output channel (fires *instead of* `run_finished` when inspect throws). |
+| `run_finished` | Debug line with the inspect **compute** time (not cycle latency). |
+| `state_dropped` | A **warning notification** — the developer must see that hot-reload dropped their persisted `xi::state()` on a state-schema change, with the old→new schema versions. |
+| `compile_started` / `compile_finished` | A spinner status-bar item across the cold-compile quiet window, then a transient ok/failed result. Covers recompiles the extension didn't initiate directly (file-watch save, restore auto-compile), which the local `busy` flag doesn't. |
+
+Unknown event names fall through the switch and are ignored (tolerant reader). To
+add another verdict-driven affordance, feed it from the same `VerdictTally` /
+`updateVerdictStatus()` rather than re-parsing `run_result`.
+
+---
+
 ## Status bar items
 
 Two patterns:
