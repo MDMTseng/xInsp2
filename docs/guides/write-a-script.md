@@ -413,7 +413,11 @@ exception at the await site rather than crashing the backend.
 | Parallelize one operator's inner loop | `cv::parallel_for_(cv::Range(0,h), …)` — uses OpenCV's thread pool | no |
 | A parallel pixel/row loop, **fault-safe** | `xi::parallel_for(n, body)` (below) — SEH-safe, cancellable, owner-attributed | yes (`/openmp`) |
 | Process a list of ROIs/blobs each | `std::for_each(std::execution::par, …)` (`#include <execution>`) | no |
-| Plain `#pragma omp` syntax | **OpenMP** (opt-in, below) | yes |
+
+> **A raw `#pragma omp` in your script is rejected at compile time** — write the
+> loop through `xi::parallel_for` / `xi::async` instead (both are SEH-safe and
+> owner-attributed). See [OpenMP (opt-in)](#openmp-opt-in) for why, and the
+> `allow_raw_omp` escape hatch.
 
 ### OpenMP (opt-in)
 
@@ -427,19 +431,40 @@ of the oversubscription risk below):
 | `N` (>0) | ON, capped to **N** threads (auto `omp_set_num_threads(N)` at load) |
 | `-1` | ON, uncapped (all cores) |
 
+Enabling OpenMP turns on `/openmp` **for `xi::parallel_for` / `xi::async`** — the
+blessed wrappers that carry the crash-isolation translator onto worker threads.
+You write the parallel loop through them, not a hand-rolled pragma:
+
 ```jsonc
 // project.json
 { "openmp_max_threads": 4 }
 ```
 ```cpp
-#include <omp.h>
-#pragma omp parallel for          // honours the cap automatically
-for (int y = 0; y < h; ++y) { /* per-row work */ }
+auto snap = xi::trigger_snapshot();          // on the inspect thread
+xi::parallel_for(h, [&, snap](int y) {       // honours the cap automatically
+    /* per-row work */
+});
 ```
 
-The cap is applied for you at DLL load — you don't call `omp_set_num_threads()`
-(a `num_threads(...)` clause on a specific pragma still overrides it). Links
-`vcomp140.dll` (in System32; `tools/export_bundle.py` bundles it for AOT).
+The cap is applied for you at DLL load — you don't call `omp_set_num_threads()`.
+Links `vcomp140.dll` (in System32; `tools/export_bundle.py` bundles it for AOT).
+
+> **A raw `#pragma omp` written in your script's own source is rejected at
+> compile time** with an error pointing you here (`allow_raw_omp` below overrides
+> it). Why: a hardware fault inside a raw omp region runs on a worker thread that
+> has **no SEH translator**, so it skips crash isolation and **takes down the
+> whole backend**, and any pool image it creates is tagged `owner=0` and leaks
+> past the per-script sweep. `xi::parallel_for` / `xi::async` install the
+> translator **and** the image-pool owner on every worker, so their faults are
+> caught and their images are attributed. (Dropping `/openmp` is not the fix —
+> the wrappers are header-only and need it to parallelize.)
+>
+> **Escape hatch:** if you genuinely need a raw pragma (e.g. a per-loop
+> `num_threads` override for IO-wait work) and accept the three worker-thread
+> rules below, set `"allow_raw_omp": true` in `project.json`. You then own the
+> SEH + owner discipline yourself — the DLL-load warmup installs a translator on
+> the persistent OpenMP team as a best-effort floor, but nested / dynamic / grown
+> teams spawn fresh untranslated threads.
 
 Caveat — **oversubscription**: inspects already run in parallel across dispatch
 threads, and `cv::` ops are internally multi-threaded, so stacking OpenMP on top
@@ -450,16 +475,19 @@ a bool: for **CPU-bound** work set it around `cores ÷ dispatch_threads` and
 
 OpenMP is a **CPU-bound** fork-join model — sizing a thread pool to cores. For
 **IO-wait** operators (PLC / network / disk), don't reach for OpenMP: the threads
-would just block. Either set a higher count on *that* loop only with a per-pragma
-`#pragma omp parallel for num_threads(32)` (overrides the global cap), or better,
-use `xi::async` — one task per concurrent wait, not tied to core count. Keep the
-global `openmp_max_threads` sized for the CPU-bound default.
+would just block. Use **`xi::async`** — one task per concurrent wait, not tied to
+core count, and SEH-safe + owner-attributed like `xi::parallel_for`. (A per-loop
+`num_threads(32)` override that beats the global cap needs a raw pragma, so it
+requires the `allow_raw_omp` opt-out — prefer `xi::async` for IO-wait fan-out.)
+Keep the global `openmp_max_threads` sized for the CPU-bound default.
 
 ### Parallelism safety — three rules for worker threads
 
 Your `inspect` runs on the **inspect thread**. Three pieces of ambient context
 live in *thread-local* state on that thread and **do not cross** into the worker
-threads `xi::async` or `#pragma omp` spawn. Get them wrong and the failure modes
+threads `xi::async` / `xi::parallel_for` (or, under `allow_raw_omp`, a raw
+`#pragma omp` region) spawn. `xi::parallel_for` / `xi::async` handle all three for
+you; a raw region makes them your problem. Get them wrong and the failure modes
 range from silent-wrong-output to a backend crash:
 
 1. **Read the trigger on the inspect thread; parallel regions consume captured
@@ -490,8 +518,8 @@ range from silent-wrong-output to a backend crash:
    isn't reclaimed until process exit and shows as "anonymous" in
    `image_pool_stats`.
 
-**`xi::parallel_for(n, body)` handles all three for you** — prefer it over a
-hand-written `#pragma omp parallel for`:
+**`xi::parallel_for(n, body)` handles all three for you** — and a hand-written
+`#pragma omp parallel for` in your script is rejected at compile time (use this):
 
 ```cpp
 #include <xi/xi.hpp>      // xi::parallel_for comes in via the umbrella
@@ -513,11 +541,14 @@ parallel-created images stay attributed. `xi::async` already does the same
 (`"openmp_max_threads"` set); without it `xi::parallel_for` runs serially with
 identical semantics.
 
-> Raw `#pragma omp` still works and is faster to type, but you own rules 1–3
-> yourself. The script-load **pool warmup** installs a translator on the
-> persistent OpenMP team so common-case raw regions are covered, but nested /
-> dynamic / grown teams spawn fresh untranslated threads — route fault-prone
-> loops through `xi::parallel_for`.
+> Raw `#pragma omp` in a script is **rejected at compile time** — the compiler
+> error routes you to `xi::parallel_for` / `xi::async`. It is not a style
+> preference: a hardware fault in a raw region terminates the whole backend and
+> its pool images leak (`owner=0`). If you deliberately opt out with
+> `"allow_raw_omp": true`, you own rules 1–3: the script-load **pool warmup**
+> installs a translator on the persistent OpenMP team so common-case raw regions
+> are covered, but nested / dynamic / grown teams spawn fresh untranslated
+> threads — route fault-prone loops through `xi::parallel_for`.
 
 ---
 

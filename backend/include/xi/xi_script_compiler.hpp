@@ -69,6 +69,14 @@ struct CompileRequest {
     // One knob = on/off AND the oversubscription ceiling. Links vcomp140.dll
     // (in System32, no extra deploy). See docs/guides/write-a-script.md.
     int openmp_max_threads = 0;
+    // Blessed-concurrency guard (adoption map item 11): a raw OpenMP pragma
+    // written directly in a SCRIPT's own source is rejected at compile time and
+    // the author is steered to xi::parallel_for / xi::async (which install the
+    // SEH translator + image-pool owner on every worker). false = reject (default,
+    // Script mode only); true = an explicit project.json "allow_raw_omp" opt-out
+    // for a power user who accepts the worker-thread safety rules. Ignored for
+    // plugin modes (plugins own their own threads + crash posture).
+    bool allow_raw_omp = false;
     // OpenCV install root — REQUIRED. Plugins/scripts include
     // <opencv2/opencv.hpp> directly via xi.hpp / xi_plugin_support.hpp,
     // so the compile step needs the include + lib paths wired in.
@@ -307,6 +315,60 @@ inline void augment_var_redefinitions(std::vector<Diagnostic>& diags,
     }
 }
 
+// Blessed-concurrency guard (adoption map item 11 / concurrency review finding 4).
+// Return the 1-based line numbers of RAW OpenMP directives (`#pragma omp ...`)
+// found in a script's own source text.
+//
+// Why reject rather than translate: a hardware fault inside a raw `#pragma omp`
+// region runs on a vcomp worker thread that has NO per-thread SEH translator, so
+// it is not converted to a catchable xi::seh_exception — it terminates the whole
+// backend — and pool images the region creates are tagged owner=0 and escape the
+// per-script leak sweep. The blessed xi::parallel_for / xi::async wrappers install
+// the translator + owner on every worker; nothing else guarantees it (the DLL-load
+// warmup in xi_script_support.hpp is a best-effort floor, not airtight for nested /
+// dynamic / grown teams). We can't simply drop /openmp to neutralize the raw form:
+// those same wrappers are header-only and expand `#pragma omp parallel` INTO the
+// script TU, so they REQUIRE /openmp to actually parallelize. The precise boundary
+// is therefore a scan of the AUTHOR's own source (never the xi headers, which carry
+// the blessed pragma) that steers a raw directive to the wrappers.
+//
+// Detection is line-based on preprocessor-directive shape: optional leading
+// whitespace, '#', optional whitespace, "pragma", whitespace, "omp". That is
+// exactly how a real `#pragma omp ...` must appear (directives are line-oriented),
+// so it never matches "omp" inside a string/identifier on a code line. A trailing
+// `//` line comment is stripped first so a commented-out example isn't flagged.
+// (A raw-string literal spanning lines whose content mimics a directive is a known
+// false positive — rare in inspect scripts, and the "allow_raw_omp" opt-out covers
+// the author who genuinely needs it.)
+inline std::vector<int> raw_omp_pragma_lines(const std::string& src) {
+    std::vector<int> hits;
+    size_t pos = 0;
+    int lineno = 0;
+    while (pos <= src.size()) {
+        size_t eol = src.find('\n', pos);
+        std::string line = src.substr(pos, (eol == std::string::npos ? src.size() : eol) - pos);
+        pos = (eol == std::string::npos) ? src.size() + 1 : eol + 1;
+        ++lineno;
+        // Strip a // line comment (naive — fine for directive detection).
+        size_t slashes = line.find("//");
+        if (slashes != std::string::npos) line.resize(slashes);
+        size_t i = 0;
+        auto skip_ws = [&] { while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i; };
+        skip_ws();
+        if (i >= line.size() || line[i] != '#') continue;
+        ++i; skip_ws();
+        if (line.compare(i, 6, "pragma") != 0) continue;
+        i += 6;
+        if (i < line.size() && line[i] != ' ' && line[i] != '\t') continue;  // "pragmaX"
+        skip_ws();
+        if (line.compare(i, 3, "omp") != 0) continue;
+        i += 3;
+        if (i < line.size() && line[i] != ' ' && line[i] != '\t') continue;  // "ompX"
+        hits.push_back(lineno);
+    }
+    return hits;
+}
+
 namespace detail {
 
 // Search a few known VS install roots for vcvars64.bat. Returns empty
@@ -530,6 +592,51 @@ inline CompileResult compile(const CompileRequest& req) {
     if (!check(req.turbojpeg_root, "turbojpeg_root")) return r;
     if (!check(req.ipp_root,       "ipp_root"))       return r;
     if (!check(req.vcvars_path,    "vcvars_path"))    return r;
+
+    // Blessed-concurrency guard (adoption map item 11): reject a raw `#pragma omp`
+    // in a SCRIPT's own source BEFORE cl.exe runs, routing the author to the
+    // SEH-safe xi::parallel_for / xi::async wrappers. Script mode only (plugins own
+    // their own threads); an explicit project.json "allow_raw_omp": true opts out.
+    // The scan reads only the author's source (source_path + extra_sources), never
+    // the xi headers — so xi_parallel.hpp's own blessed `#pragma omp` is untouched.
+    if (req.mode == CompileMode::Script && !req.allow_raw_omp) {
+        std::vector<Diagnostic> omp_diags;
+        auto scan_one = [&](const std::string& path) {
+            std::string text = detail::read_file(path);
+            for (int ln : raw_omp_pragma_lines(text)) {
+                Diagnostic d;
+                d.file     = path;
+                d.line     = ln;
+                d.col      = 0;
+                d.severity = "error";
+                d.code     = "XI9001";
+                d.message  =
+                    "raw OpenMP pragma is not allowed in an inspection script. A hardware "
+                    "fault inside a raw '#pragma omp' region runs on a worker thread with no "
+                    "SEH translator, so it bypasses crash isolation and terminates the whole "
+                    "backend, and pool images it creates leak (owner=0). Use "
+                    "xi::parallel_for(n, [&](int i){ ... }) for a pixel/row loop, or "
+                    "xi::async(...) for independent fan-out -- both install the SEH translator "
+                    "and image-pool owner on every worker. See docs/guides/write-a-script.md "
+                    "(Parallelism safety). To override at your own risk, set "
+                    "\"allow_raw_omp\": true in project.json.";
+                omp_diags.push_back(std::move(d));
+            }
+        };
+        scan_one(req.source_path);
+        for (auto& s : req.extra_sources) scan_one(s);
+        if (!omp_diags.empty()) {
+            std::string log =
+                "xInsp2: raw OpenMP pragma rejected in script -- use xi::parallel_for / "
+                "xi::async (see docs/guides/write-a-script.md):\n";
+            for (auto& d : omp_diags)
+                log += "  " + d.file + "(" + std::to_string(d.line) + ")\n";
+            r.ok          = false;
+            r.build_log   = std::move(log);
+            r.diagnostics = std::move(omp_diags);
+            return r;
+        }
+    }
 
     std::filesystem::create_directories(req.output_dir);
 

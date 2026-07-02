@@ -81,16 +81,41 @@ struct Context {
 // Per-thread crash breadcrumbs. A single global was racy under dispatch_threads
 // > 1 — N concurrent inspects all wrote the same struct, so a crash dump could
 // blame the wrong thread's plugin. Each thread claims a fixed slot (keyed by
-// thread id) on first use; slots are static so they never dangle when a dispatch
-// thread exits (its tid just stays recorded until reused). The crash handler
-// walks all claimed slots and flags the one matching the faulting thread.
+// thread id) on first use and RELEASES it when the owning thread exits, so the
+// table tracks LIVE threads, not lifetime threads. The crash handler walks all
+// claimed slots and flags the one matching the faulting thread.
+//
+// Reclaim matters because the dispatch model produces a steady stream of distinct
+// thread ids: every non-continuous frame runs on a fresh detached thread, and
+// stop/reload joins + respawns the lane workers. Without reclaim the 64 slots
+// filled monotonically and, after 64 lifetime threads, every later inspect fell
+// through to a racy shared slot 0 — collapsing attribution and listing 64 dead
+// threads in the report as if live. The reclaim uses the same thread_local-dtor
+// pattern DocChunkPool::Heads uses to return thread-local pool blocks on exit.
 inline constexpr int kMaxSlots = 64;
 inline Context              g_slots[kMaxSlots];
 inline std::atomic<uint32_t> g_slot_tid[kMaxSlots];
 
+namespace detail {
+// Owns one thread's breadcrumb slot for the thread's lifetime. The destructor
+// (thread exit) clears the breadcrumb and frees the slot for reuse, so a
+// long-running deployment can't exhaust the 64 slots. Clearing the Context BEFORE
+// releasing the tid means a thread that later reclaims this slot never inherits a
+// dead thread's breadcrumb, and the crash-report walk (keyed on a non-zero tid)
+// never lists a reclaimed slot.
+struct SlotGuard {
+    int idx = -1;
+    ~SlotGuard() {
+        if (idx < 0) return;
+        g_slots[idx] = Context{};                                   // clear first
+        g_slot_tid[idx].store(0, std::memory_order_release);        // then release
+    }
+};
+} // namespace detail
+
 inline Context& ctx() {
-    static thread_local int t_idx = -1;
-    if (t_idx >= 0) return g_slots[t_idx];
+    static thread_local detail::SlotGuard guard;
+    if (guard.idx >= 0) return g_slots[guard.idx];
 #ifdef _WIN32
     uint32_t tid = (uint32_t)GetCurrentThreadId();
 #else
@@ -100,13 +125,14 @@ inline Context& ctx() {
         uint32_t expected = 0;
         if (g_slot_tid[i].compare_exchange_strong(
                 expected, tid, std::memory_order_acq_rel)) {
-            t_idx = i;
+            guard.idx = i;
             g_slots[i].thread_id = tid;
             return g_slots[i];
         }
     }
-    // Slots exhausted (>64 live threads ever) — fall back to slot 0.
-    // Racy but never null; bounded to a pathological thread count.
+    // Slots exhausted (>64 CONCURRENTLY-live threads) — fall back to slot 0. Racy
+    // but never null; with per-thread reclaim this needs 64 threads alive AT ONCE,
+    // not merely 64 over the process lifetime.
     return g_slots[0];
 }
 

@@ -76,7 +76,8 @@ void resolve_toolchain_(const std::string& folder) {
 void read_script_deps_(const std::string& folder,
                               std::vector<std::string>& include_dirs,
                               std::vector<std::string>& link_libs,
-                              int& openmp_max_threads) {
+                              int& openmp_max_threads,
+                              bool& allow_raw_omp) {
     if (folder.empty()) return;
     namespace fs = std::filesystem;
     std::ifstream in((fs::path(folder) / "project.json").string());
@@ -108,6 +109,11 @@ void read_script_deps_(const std::string& folder,
     // -1 = on uncapped. Adds /openmp (+ cap macro) in the compiler.
     yyjson_val* omp = yyjson_obj_get(root, "openmp_max_threads");
     if (omp && yyjson_is_num(omp)) openmp_max_threads = yyjson_get_int(omp);
+    // Blessed-concurrency opt-out (adoption map item 11): raw `#pragma omp` in a
+    // script is rejected at compile time by default; an author who accepts the
+    // worker-thread safety rules can set "allow_raw_omp": true to bypass the guard.
+    yyjson_val* raw_omp = yyjson_obj_get(root, "allow_raw_omp");
+    if (raw_omp && yyjson_is_bool(raw_omp)) allow_raw_omp = yyjson_get_bool(raw_omp);
     yyjson_doc_free(doc);
 }
 
