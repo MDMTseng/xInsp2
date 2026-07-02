@@ -15,14 +15,16 @@ its clients (VS Code extension, browser, CLI, test harness).
   old core `subscribe`/`unsubscribe` commands): script output (scalar values +
   images) now goes through the shipped `expose` plugin, not core transport. The
   removed shapes are described below, struck through, for reference only.
-- **Versioning**: every `cmd` and `rsp` carries no explicit version — breaking
-  schema changes bump the server's `version` string (returned by `cmd: version`)
-  and the `hello` event's `abi` field. The protocol evolves **additive-only**
-  (new fields like vars' `src`/`group`, new commands), so old clients ignore
-  unknown fields and new clients tolerate missing ones; unknown commands reply
-  `ok:false`. **There is no enforced version gate today** — a client MAY compare
-  `hello.data.abi` against its expectation and refuse, but the shipped clients
-  only log it. A genuinely breaking bump would need clients to opt into the check.
+- **Versioning**: every `cmd` and `rsp` carries no explicit version. The
+  server's `version` string (returned by `cmd: version` and in the `hello`
+  event) is the intended breaking-change signal; the sibling `abi` field is a
+  hardcoded constant `1` that has never been bumped. The protocol evolves
+  **additive-only** (new fields like vars' `src`/`group`, new commands), so old
+  clients ignore unknown fields and new clients tolerate missing ones; unknown
+  commands reply `ok:false`. **There is no enforced version gate today** — no
+  shipped client reads `hello.data.abi` at all; a client MAY compare it against
+  an expectation and refuse, but a genuinely breaking bump would need clients to
+  opt into that check first.
 
 ---
 
@@ -113,12 +115,12 @@ Per-item fields:
   via `get_double`/`as_double` instead of silently reading as `0.0`. **Consumers
   must restore the sentinel back to a real number**: a top-level `kind: "number"`
   string value, *and* — because a `Record` can hold a non-finite field at any
-  depth — recursively inside a `kind: "record"` `data` object/array. The shipped
-  clients do this (`restoreNonFinite` / `restoreNonFiniteDeep` in
-  `ui-components/src/protocol.mjs` and `vscode-extension/src/protocol.ts`,
-  `_restore_nonfinite_deep` in `tools/xinsp2_py`); a consumer that skips it reads
-  the literal string `"NaN"`, so a threshold compare silently misfires (JS) or
-  raises `TypeError` (Python). **Ambiguity inside record `data`:** the record's
+  depth — recursively inside a `kind: "record"` `data` object/array. The
+  reference implementation is `_restore_nonfinite` in `examples/lib/xex1.py`
+  (recursive; applied when decoding `expose` frames — see below). Any consumer
+  that reads a non-finite field must apply the same restore itself; one that
+  skips it reads the literal string `"NaN"`, so a threshold compare silently
+  misfires (JS) or raises `TypeError` (Python). **Ambiguity inside record `data`:** the record's
   JSON carries no per-field type tag, so a *genuine string field* whose value is
   exactly `"NaN"` / `"Infinity"` / `"-Infinity"` is indistinguishable from a
   non-finite double and will be restored to the number. This is an accepted
@@ -353,9 +355,12 @@ body = {
   non-8-bit / lossless image transport is out of scope (use a purpose-built
   plugin). Image keys in the record correspond to entries in `images[]`.
 - **version gate:** a decoder checks the `XEX1` magic + `v` and rejects anything
-  else (closes the old XPV1-vs-header decoder drift). Stock decoders live in
-  `ui-components/src/protocol.mjs` (`decodeExposeFrame`) and
-  `tools/xinsp2_py/xinsp2/client.py`.
+  else (closes the old XPV1-vs-header decoder drift). The stock decoder is
+  `decode_xex1` in `examples/lib/xex1.py` (checks magic + `v`, raises otherwise;
+  also does the non-finite restore above). The Python client
+  (`tools/xinsp2_py/xinsp2/client.py`) stays **content-agnostic** — it queues raw
+  binary frames on `_inbox_binary` for the caller to decode (e.g. via
+  `xex1.decode_xex1`), rather than decoding `XEX1` itself.
 
 ---
 
@@ -371,8 +376,11 @@ listed under each entry.
 ### `version`
 `args: {}` → `data: { "version": "0.1.0", "abi": 1, "commit": "abc123" }`
 
-`abi` here is the **WS protocol** version (currently 1) — distinct from the C
-plugin-ABI struct version `XI_ABI_VERSION` (9, see `reference/c-abi.md`).
+`abi` here is the **WS protocol** version — distinct from the C plugin-ABI struct
+version `XI_ABI_VERSION` (**11**, see `reference/c-abi.md`). It is a hardcoded
+constant `1` (emitted verbatim by the backend in `service_main.cpp` /
+`service_cmd_lifecycle.cpp`); it has **never been bumped** and **no code reads or
+enforces it** — treat it as an informational stamp, not a live version gate.
 
 ### `shutdown`
 `args: {}` → `ok: true` then the backend closes the socket and exits.

@@ -229,9 +229,14 @@ int    xi_plugin_prepare(void* inst, const char* def_json, const char* folder);
 void   xi_plugin_commit(void* inst);
 ```
 
-#### Host API — `xi_host_api` Function Table (v9)
+#### Host API — `xi_host_api` Function Table (v9 snapshot; ABI is now v11)
 
-26 function pointers, appended-only per version (stable after v6):
+> **Note (post-study):** this table is the **v9** layout as of this study's date.
+> v11 (canonical: [`c-abi.md`](./c-abi.md) §4) **removed the five `shm_*` slots**
+> shown below and added `get_interface`, leaving **22** function pointers
+> (`XI_ABI_EXPECTED_SIZE` = 176). The remaining fields are unchanged.
+
+26 function pointers (v9), appended-only per version (stable after v6):
 
 ```c
 /* Image pool — refcounted uint64_t handles */
@@ -322,10 +327,10 @@ typedef struct {
 
 **Zero-copy:** Input images are views (addref to keep). Output images hand ownership to host. Forwarding unchanged is a bare addref.
 
-**ABI Versioning:**
-- Current: v9 (`emit_binary`, `compress_image`).
-- Min compat: v6 (dispatch model broke layout; v1–v5 plugins rebuild).
-- Version gated at load: plugin asks for X, host provides Y, plugin refused if X > Y.
+**ABI Versioning:** (this study predates the v11 break — canonical current state is [`c-abi.md`](./c-abi.md) §4)
+- Current: **v11** (v9 added `emit_binary`/`compress_image`; v10 added `get_interface`; v11 removed the `shm_*` slots + the `xi.legacy` view).
+- Min compat: **v11** (the v11 layout break refuses every pre-v11 plugin; rebuild required — all first-party plugins are rebuildable in-tree).
+- Version gated at load: plugin asks for X, host provides Y, plugin refused if X > Y (or X below min-compat).
 
 ---
 
@@ -439,7 +444,7 @@ gated). See `docs/internals/core_fix_plan.md`.
 | `json_source/` | `plugins/json_source/` | Emit from JSON (for replay) | `xi::emit_record()` |
 | `synced_stereo/` | `plugins/synced_stereo/` | Multi-camera gathering (correlated images) | One record, N named images |
 | `record_save/` | `plugins/record_save/` | Persist records to disk | File I/O in plugin |
-| `record_load/` | `plugins/record_load/` | Replay from disk | Source plugin, emit replay |
+| `cache/` | `plugins/cache/` (class `BufferReplay`) | In-memory ring buffer + replay | `process()` buffers, `exchange()` re-emits |
 
 ### 4.3 QA / Integration Examples
 
@@ -748,6 +753,6 @@ The xInsp2 SDK is built around **schema-less Records carrying zero-copy image ha
 **Core primitives:**
 - Script: `xi::use()`, `xi::Param<T>`, `xi::Record`, `xi::async()`, `xi::state()`.
 - Plugin: `xi::Plugin::process()` / `exchange()` / `prepare()` / `commit()`.
-- ABI: 6 C exports per plugin, ~26 host functions, yyjson-backed Record, refcounted images.
+- ABI: 6 C exports per plugin, 22 host functions (v11), yyjson-backed Record, refcounted images.
 
 See `docs/guides/write-a-plugin.md` and `docs/guides/write-a-script.md` for task tours; `docs/reference/c-abi.md` for the definitive contract.

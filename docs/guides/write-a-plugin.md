@@ -41,7 +41,7 @@ then export to standalone when you're ready to share.
 
 The repo ships reference plugins to crib from: `plugins/` (source/sink/processor
 basics — `mock_camera`, `blob_analysis`, `data_output`, `json_source`,
-`record_save`, `record_load`, `synced_stereo`, `expose`) and richer worked examples under
+`record_save`, `cache`, `synced_stereo`, `expose`) and richer worked examples under
 `examples/*/plugins/`.
 
 ---
