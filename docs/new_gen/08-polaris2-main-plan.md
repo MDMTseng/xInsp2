@@ -66,6 +66,13 @@ offset-accessor read path (contract-declared key order → precomputed
 offsets; arena chunk reuse) before the pilot's numbers are read. Dev-box
 caveat applies; the perf runner captures the real baseline later.
 
+*Condition MET (same day): the frame-offset-reads branch shipped
+TypedFrame/FrameSchema (compile-time keyset slots, per-thread arena
+recycling, no intern on declared keys). Re-measured micro: TypedFrame 522
+ns/op vs Record 924 (43% win, also beating the raw mp-plane hop at 761);
+the dynamic string-keyed fallback 793 also now beats Record. Keyset drift
+is a compile error. Wave 2 is clear to proceed.*
+
 ## Wave 2 — the carved pilot (sequential-ish; the strangler bite)
 
 1. **`xi.frame@1` carved interface**: a new `get_interface` door exposing
