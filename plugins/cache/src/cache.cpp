@@ -24,6 +24,9 @@
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
 #include <xi/xi_thread.hpp>   // xi::spawn_worker — SEH-safe replay thread
+#include <xi/xi_contract.hpp>   // fail-loud required command payloads + schema skew
+
+#include "cache_keys.h"         // guard 1: command/config/output key names, once
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +36,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+// Guard 1: the plugin's own readers compile from the SAME constants the typed
+// view (cache_io.h) builds from, so a key rename can't drift.
+namespace keys = xi::cache::keys;
 
 class BufferReplay : public xi::Plugin {
 public:
@@ -53,19 +60,35 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         ring_.push_back(Entry{std::move(owned), mono_us_()});
         while ((int)ring_.size() > capacity_) ring_.pop_front();
-        return xi::Record().set("buffered", (int64_t)ring_.size());
+        return xi::Record().set(keys::kBuffered, (int64_t)ring_.size());
     }
 
     std::string exchange(const std::string& cmd) override {
         auto p = xi::Json::parse(cmd);
-        auto c = p["command"].as_string();
+        auto c = p[keys::kCommand].as_string();
 
-        if (c == "replay_timed") {
+        // Guard 2: commands whose payload has NO sensible default fail loud
+        // rather than silently doing nothing. "replay" needs a target index;
+        // "set_capacity" needs a size. (replay_last/replay_all/replay_timed all
+        // have well-defined defaults, so they stay tolerant.) Unknown commands
+        // still fall through to get_def() below — a driver "status" idiom.
+        if (c == keys::kReplay) {
+            auto idx = p[keys::kIndex];
+            if (!idx.valid())     return xi::contract::fault_json(xi::contract::kMissingInput, keys::kIndex, "int");
+            if (!idx.is_number()) return xi::contract::fault_json(xi::contract::kWrongType,   keys::kIndex, "int");
+        }
+        if (c == keys::kSetCapacity) {
+            auto v = p[keys::kValue];
+            if (!v.valid())     return xi::contract::fault_json(xi::contract::kMissingInput, keys::kValue, "int");
+            if (!v.is_number()) return xi::contract::fault_json(xi::contract::kWrongType,   keys::kValue, "int");
+        }
+
+        if (c == keys::kReplayTimed) {
             // Paced replay of the buffered frames on a background thread, so the
             // exchange returns immediately. `speed` scales the recorded gaps
             // (>1 faster, default 1.0). `n` optionally limits to the last n.
-            double speed = p["speed"].as_double(1.0); if (speed <= 0.0) speed = 1.0;
-            int    k     = p["n"].as_int(-1);
+            double speed = p[keys::kSpeed].as_double(1.0); if (speed <= 0.0) speed = 1.0;
+            int    k     = p[keys::kN].as_int(-1);
             std::vector<Entry> snap;
             {
                 std::lock_guard<std::mutex> lk(mu_);
@@ -83,25 +106,25 @@ public:
         {
             std::lock_guard<std::mutex> lk(mu_);
             const int n = (int)ring_.size();
-            if (c == "replay_last") {
-                int k = p["n"].as_int(1); if (k < 1) k = 1; if (k > n) k = n;
+            if (c == keys::kReplayLast) {
+                int k = p[keys::kN].as_int(1); if (k < 1) k = 1; if (k > n) k = n;
                 for (int i = n - k; i < n; ++i) to_emit.push_back(ring_[(size_t)i].rec);
-            } else if (c == "replay_all") {
+            } else if (c == keys::kReplayAll) {
                 for (auto& e : ring_) to_emit.push_back(e.rec);
-            } else if (c == "replay") {
-                int i = p["index"].as_int(-1);
+            } else if (c == keys::kReplay) {
+                int i = p[keys::kIndex].as_int(-1);
                 if (i >= 0 && i < n) to_emit.push_back(ring_[(size_t)i].rec);
-            } else if (c == "stop_replay") {
+            } else if (c == keys::kStopReplay) {
                 // handled below (must not hold the lock while joining)
-            } else if (c == "clear") {
+            } else if (c == keys::kClear) {
                 ring_.clear();
-            } else if (c == "set_capacity") {
-                int v = p["value"].as_int(capacity_); if (v < 1) v = 1;
+            } else if (c == keys::kSetCapacity) {
+                int v = p[keys::kValue].as_int(capacity_); if (v < 1) v = 1;
                 capacity_ = v;
                 while ((int)ring_.size() > capacity_) ring_.pop_front();
             }
         }
-        if (c == "stop_replay" || c == "clear") stop_replay_();
+        if (c == keys::kStopReplay || c == keys::kClear) stop_replay_();
         for (auto& r : to_emit) {
             xi::Record copy = r;                          // keep the buffered one
             xi::emit_record(host_, name().c_str(), copy); // fresh id, ts = now
@@ -112,15 +135,24 @@ public:
     std::string get_def() const override {
         std::lock_guard<std::mutex> lk(mu_);
         return xi::Json::object()
-            .set("capacity", capacity_)
-            .set("count", (int)ring_.size())
-            .set("replaying", replaying_.load())
+            .set(keys::kCapacity, capacity_)
+            .set(keys::kCount, (int)ring_.size())
+            .set(keys::kReplaying, replaying_.load())
             .dump();
     }
     bool set_def(const std::string& json) override {
         auto p = xi::Json::parse(json);
         if (!p.valid()) return false;
-        int v = p["capacity"].as_int(capacity_); if (v < 1) v = 1;
+        // Guard 3: reject a config built against an incompatible header schema
+        // (a matching or absent stamp proceeds — legacy persisted defs have none).
+        auto sv = p[xi::contract::kSchemaKey];
+        if (sv.is_number() && sv.as_int() != xi::cache::kSchemaVersion) {
+            log_error("cache: config schema mismatch: built for v" +
+                      std::to_string(sv.as_int()) + ", this plugin serves v" +
+                      std::to_string(xi::cache::kSchemaVersion));
+            return false;
+        }
+        int v = p[keys::kCapacity].as_int(capacity_); if (v < 1) v = 1;
         std::lock_guard<std::mutex> lk(mu_);
         capacity_ = v;
         while ((int)ring_.size() > capacity_) ring_.pop_front();

@@ -11,11 +11,18 @@
 //
 
 #include <xi/xi_abi.hpp>
+#include <xi/xi_contract.hpp>   // fail-loud required command payload + schema skew
 #include "yyjson.h"   // this plugin does raw yyjson path-building internally
+
+#include "json_source_keys.h"   // guard 1: command/config/patch key names, once
 
 #include <cstdlib>
 #include <cstring>
 #include <string>
+
+// Guard 1: the plugin's own readers compile from the SAME constants the typed
+// view (json_source_io.h) builds from, so a key rename can't drift.
+namespace jkeys = xi::json_source::keys;
 
 namespace {
 
@@ -107,8 +114,8 @@ bool json_set_path(yyjson_mut_doc* doc, yyjson_mut_val* root,
 
 // Apply one {key, value} patch to dst. Returns true if applied.
 bool apply_patch(yyjson_mut_doc* doc, yyjson_mut_val* dst, yyjson_mut_val* patch) {
-    yyjson_mut_val* k = yyjson_mut_obj_get(patch, "key");
-    yyjson_mut_val* v = yyjson_mut_obj_get(patch, "value");
+    yyjson_mut_val* k = yyjson_mut_obj_get(patch, jkeys::kKey);
+    yyjson_mut_val* v = yyjson_mut_obj_get(patch, jkeys::kValue);
     if (!k || !yyjson_mut_is_str(k) || !v) return false;
     return json_set_path(doc, dst, yyjson_mut_get_str(k), v);
 }
@@ -141,11 +148,11 @@ public:
         yyjson_val* in_root = in_rd ? yyjson_doc_get_root(in_rd) : nullptr;
         if (in_root) {
             yyjson_mut_val* in = yyjson_val_mut_copy(doc, in_root);
-            yyjson_mut_val* batch = yyjson_mut_obj_get(in, "patches");
+            yyjson_mut_val* batch = yyjson_mut_obj_get(in, jkeys::kPatches);
             if (batch && yyjson_mut_is_arr(batch)) {
                 size_t _i, _n; yyjson_mut_val* it;
                 yyjson_mut_arr_foreach(batch, _i, _n, it) { apply_patch(doc, base, it); }
-            } else if (yyjson_mut_obj_get(in, "key")) {
+            } else if (yyjson_mut_obj_get(in, jkeys::kKey)) {
                 apply_patch(doc, base, in);
             }
         }
@@ -164,14 +171,20 @@ public:
         yyjson_doc* doc = yyjson_read(cmd.c_str(), cmd.size(), 0);
         yyjson_val* p = doc ? yyjson_doc_get_root(doc) : nullptr;
         if (!p) { yyjson_doc_free(doc); return get_def(); }
-        yyjson_val* c = yyjson_obj_get(p, "command");
-        yyjson_val* v = yyjson_obj_get(p, "value");
+        yyjson_val* c = yyjson_obj_get(p, jkeys::kCommand);
+        yyjson_val* v = yyjson_obj_get(p, jkeys::kValue);
         if (c && yyjson_is_str(c)) {
             std::string command = yyjson_get_str(c);
-            if (command == "set_data" && v) {
+            if (command == jkeys::kSetData) {
+                // Guard 2: the payload is required — fail loud, don't silently
+                // no-op on a set_data that forgot its "value".
+                if (!v) {
+                    yyjson_doc_free(doc);
+                    return xi::contract::fault_json(xi::contract::kMissingInput, jkeys::kValue, "json");
+                }
                 char* s = yyjson_val_write(v, 0, NULL);
                 if (s) { stored_json_.assign(s); free(s); }
-            } else if (command == "reset") {
+            } else if (command == jkeys::kReset) {
                 stored_json_ = "{}";
             }
             // get_status falls through to get_def() below
@@ -191,7 +204,7 @@ public:
         yyjson_val* data_root = data_rd ? yyjson_doc_get_root(data_rd) : nullptr;
         yyjson_mut_val* data = data_root ? yyjson_val_mut_copy(doc, data_root)
                                          : yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_val(doc, root, "data", data);
+        yyjson_mut_obj_add_val(doc, root, jkeys::kData, data);
 
         char* s = yyjson_mut_write(doc, 0, NULL);
         std::string out = s ? s : "{\"data\":{}}";
@@ -205,7 +218,18 @@ public:
         yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
         yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
         if (!root) { yyjson_doc_free(doc); return false; }
-        yyjson_val* data = yyjson_obj_get(root, "data");
+        // Guard 3: reject a config built against an incompatible header schema
+        // (a matching or absent stamp proceeds — legacy persisted defs have none).
+        yyjson_val* sv = yyjson_obj_get(root, xi::contract::kSchemaKey);
+        if (sv && yyjson_is_num(sv) &&
+            (int)yyjson_get_num(sv) != xi::json_source::kSchemaVersion) {
+            log_error(std::string("json_source: config schema mismatch: built for v") +
+                      std::to_string((int)yyjson_get_num(sv)) + ", this plugin serves v" +
+                      std::to_string(xi::json_source::kSchemaVersion));
+            yyjson_doc_free(doc);
+            return false;
+        }
+        yyjson_val* data = yyjson_obj_get(root, jkeys::kData);
         if (data) {
             char* s = yyjson_val_write(data, 0, NULL);
             if (s) { stored_json_.assign(s); free(s); }

@@ -148,6 +148,51 @@ target_compile_definitions(mock_camera_test PRIVATE
 add_dependencies(mock_camera_test mock_camera)
 add_test(NAME mock_camera_test COMMAND mock_camera_test)
 
+# synced_stereo contract test — gathering source. Drives config/command via the
+# C ABI and captures a really-emitted stereo frame through a host emit_record
+# sink (needs the ImagePool host), reading it back through the Frame extractor.
+add_executable(synced_stereo_test synced_stereo/tests/test_synced_stereo.cpp)
+target_include_directories(synced_stereo_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/synced_stereo)
+target_compile_definitions(synced_stereo_test PRIVATE
+    SYNCED_STEREO_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/synced_stereo/xi-synced_stereo.dll")
+add_dependencies(synced_stereo_test synced_stereo)
+add_test(NAME synced_stereo_test COMMAND synced_stereo_test)
+
+# json_source contract test — open output data plane, typed control surface
+# (commands/config/patch). No images, so no pool host needed.
+add_executable(json_source_test json_source/tests/test_json_source.cpp)
+target_include_directories(json_source_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/json_source)
+target_compile_definitions(json_source_test PRIVATE
+    JSON_SOURCE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/json_source/xi-json_source.dll")
+add_dependencies(json_source_test json_source)
+add_test(NAME json_source_test COMMAND json_source_test)
+
+# config_swap_probe contract test — config/command/status + the prepare→commit
+# double-slot (observable only through the Status extractor).
+add_executable(config_swap_probe_test config_swap_probe/tests/test_config_swap_probe.cpp)
+target_include_directories(config_swap_probe_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe)
+target_compile_definitions(config_swap_probe_test PRIVATE
+    CONFIG_SWAP_PROBE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe/xi-config_swap_probe.dll")
+add_dependencies(config_swap_probe_test config_swap_probe)
+add_test(NAME config_swap_probe_test COMMAND config_swap_probe_test)
+
+# cache (BufferReplay) contract test — open buffered payload, typed command
+# surface. Captures + replays through the ImagePool host emit sink.
+add_executable(cache_test cache/tests/test_cache.cpp)
+target_include_directories(cache_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/cache/src)
+target_compile_definitions(cache_test PRIVATE
+    CACHE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/cache/xi-cache.dll")
+add_dependencies(cache_test cache)
+add_test(NAME cache_test COMMAND cache_test)
+
 # XEX1 binary golden fixtures — drives the SAME encoder the expose plugin ships
 # (expose/src/xex1_encode.hpp) and byte-compares its output against the committed
 # protocol/fixtures/binary/*.bin. The JS + Python decoder tests decode those same

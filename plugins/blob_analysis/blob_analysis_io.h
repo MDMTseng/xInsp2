@@ -84,10 +84,35 @@ public:
         int    min_y()  const { return r_.get_int(keys::kMinY); }
         int    max_x()  const { return r_.get_int(keys::kMaxX); }
         int    max_y()  const { return r_.get_int(keys::kMaxY); }
+
+        // The count the plugin STAMPS alongside the polygon. contour_points()
+        // is that scalar; contour_size() is the actual length of the emitted
+        // contour[] array (they agree — the test asserts it).
         int    contour_points() const { return r_.get_int(keys::kContourPoints); }
+
+        // One vertex of the traced boundary polygon.
+        class Point {
+        public:
+            explicit Point(xi::Record r) : r_(std::move(r)) {}
+            int x() const { return r_.get_int(keys::kX); }
+            int y() const { return r_.get_int(keys::kY); }
+        private:
+            xi::Record r_;
+        };
+
+        // The contour polygon itself — the {x,y} array blob_analysis.cpp writes
+        // under keys::kContour. Before this accessor the typed Output could see
+        // only the point COUNT, never the point data its own .cpp emitted; a
+        // script that wanted the boundary had to drop back to raw string keys.
+        int   contour_size() const { return r_.get_array_size(keys::kContour); }
+        Point contour(int i) const { return Point(r_.get_array_item(keys::kContour, i)); }
     private:
         xi::Record r_;
     };
+    // Number of blob objects actually present in the "blobs" array. Agrees with
+    // blob_count() (the stamped scalar); exposed so a reader can iterate the
+    // array without trusting the separately-written count.
+    int  blobs_size() const { return rec_.get_array_size(keys::kBlobs); }
     Blob blob(int i) const { return Blob(rec_.get_array_item(keys::kBlobs, i)); }
 
     const xi::Record& record() const { return rec_; }

@@ -32,15 +32,20 @@
 // Build: part of plugins/CMakeLists.txt (target config_swap_probe).
 //
 
-#include <xi/xi_abi.hpp>   // xi::Plugin, xi::Record, XI_PLUGIN_IMPL
+#include <xi/xi_abi.hpp>       // xi::Plugin, xi::Record, XI_PLUGIN_IMPL
+#include <xi/xi_json.hpp>      // canonical config/command parsing (over cmd.find/atoi)
+#include <xi/xi_contract.hpp>  // schema-version stamp key + skew rejection
+
+#include "config_swap_probe_keys.h"  // guard 1: config/command/status key names, once
 
 #include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include <cstdio>
-#include <cstdlib>
+// Guard 1: the plugin's own readers compile from the SAME constants the typed
+// view (config_swap_probe_io.h) builds from, so a key rename can't drift.
+namespace ckeys = xi::config_swap_probe::keys;
 
 // A stand-in for a heavy loaded asset (model weights, sbm template, calibration).
 // The fill + checksum loop in the constructor simulates a non-trivial load cost,
@@ -56,14 +61,18 @@ struct Resource {
     }
 };
 
-// Minimal field reader — the probe's "def"/commands are tiny flat JSON objects
-// like {"value":42} / {"command":"prepare","value":42}. Mirrors the lightweight
-// string parsing the other example plugins use; no DOM needed.
-static int parse_int_field(const std::string& j, const char* key, int dflt) {
-    std::string k = std::string("\"") + key + "\":";
-    auto pos = j.find(k);
-    if (pos == std::string::npos) return dflt;
-    return std::atoi(j.c_str() + pos + k.size());
+// The probe's "def"/commands are tiny flat JSON objects like {"value":42} /
+// {"command":"get_status"}. Read the resource value through the canonical parser
+// so the key name comes from config_swap_probe_keys.h, not a literal (guard 1).
+static int parse_value(const std::string& j, int dflt) {
+    return xi::Json::parse(j)[ckeys::kValue].as_int(dflt);
+}
+
+// Guard 3: a config/def built against an incompatible header schema is rejected.
+// A matching or absent stamp proceeds (legacy persisted defs carry no stamp).
+static bool schema_ok(const std::string& j) {
+    auto sv = xi::Json::parse(j)[xi::contract::kSchemaKey];
+    return !sv.is_number() || sv.as_int() == xi::config_swap_probe::kSchemaVersion;
 }
 
 class ConfigSwapProbe : public xi::Plugin {
@@ -73,15 +82,18 @@ public:
     // TIER-1 immediate path: load + swap in one step. Host serializes vs process()
     // for a non-reentrant plugin, so no plugin-side lock is needed.
     bool set_def(const std::string& j) override {
-        active_.store(std::make_shared<const Resource>(parse_int_field(j, "value", 0)));
+        if (!schema_ok(j)) {
+            log_error("config_swap_probe: config schema mismatch (built for a "
+                      "different header version than this plugin serves)");
+            return false;
+        }
+        active_.store(std::make_shared<const Resource>(parse_value(j, 0)));
         return true;
     }
 
     std::string get_def() const override {
         auto a = active_.load();
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "{\"value\":%d}", a ? a->value : 0);
-        return buf;
+        return xi::Json::object().set(ckeys::kValue, a ? a->value : 0).dump();
     }
 
     // Lock-free read of the LIVE slot. A swap that happens concurrently (commit on
@@ -99,7 +111,11 @@ public:
     // the (here simulated) heavy load. `folder` would be where a production plugin
     // reads its real assets; this probe loads from an inline value instead.
     bool prepare(const std::string& def, const std::string& /*folder*/) override {
-        staged_.store(std::make_shared<const Resource>(parse_int_field(def, "value", 0)));
+        if (!schema_ok(def)) {
+            log_error("config_swap_probe: prepare schema mismatch");
+            return false;
+        }
+        staged_.store(std::make_shared<const Resource>(parse_value(def, 0)));
         return true;
     }
 
@@ -110,10 +126,9 @@ public:
     }
 
     std::string exchange(const std::string& cmd) override {
-        if (cmd.find("\"get_status\"") != std::string::npos) {
-            return status_json();
-        }
-        return R"({"error":"unknown command"})";
+        const std::string command = xi::Json::parse(cmd)[ckeys::kCommand].as_string();
+        if (command == ckeys::kGetStatus) return status_json();
+        return exchange_unknown_command(command);
     }
 
 private:
@@ -125,15 +140,13 @@ private:
     std::string status_json() const {
         auto a = active_.load();
         auto s = staged_.load();
-        char buf[256];
-        std::snprintf(buf, sizeof(buf),
-            "{\"active\":%d,\"staged\":%s,\"staged_value\":%d,\"last_seen\":%d,\"proc\":%lld}",
-            a ? a->value : 0,
-            s ? "true" : "false",
-            s ? s->value : -1,
-            last_seen_.load(),
-            (long long)proc_calls_.load());
-        return buf;
+        return xi::Json::object()
+            .set(ckeys::kActive,      a ? a->value : 0)
+            .set(ckeys::kStaged,      s ? true : false)
+            .set(ckeys::kStagedValue, s ? s->value : -1)
+            .set(ckeys::kLastSeen,    last_seen_.load())
+            .set(ckeys::kProc,        (long long)proc_calls_.load())
+            .dump();
     }
 };
 
