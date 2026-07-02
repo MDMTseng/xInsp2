@@ -130,14 +130,15 @@ class UnknownCommandError(ProtocolError):
 class PartialStatusError(ProtocolError):
     """A lifecycle cmd reported a non-success `status`.
 
-    BREAKING (already on master): `load_project` returns `ok:false` on a
-    "partial" or "rejected" status (was `ok:true` with warning arrays), and
-    `commit_group` reports `status:"partial"` after a partial commit — after
-    which the backend no longer auto-resumes dispatch. A consumer MUST NOT treat
-    either as success. The backend's `ok:false` already routes partial/rejected
-    `load_project` through `ProtocolError`; this subclass surfaces the `status`
-    (and any `data`) so callers can branch on it, and covers the
-    `commit_group` case where the rsp is `ok:true` but `status != "committed"`.
+    BREAKING (already on master): both `load_project` and `commit_group` return
+    `ok:false` on a non-success status (`load_project`: "partial"/"rejected",
+    was `ok:true` with warning arrays; `commit_group`: "partial", after which the
+    backend no longer auto-resumes dispatch). A consumer MUST NOT treat either as
+    success. The backend's `ok:false` routes both through `ProtocolError`; the
+    helpers re-raise it as this subclass, which surfaces the `status` (and any
+    `data`) so callers can branch on it. (A defensive `ok:true` + non-success
+    `status` path is also honoured, in case an older/other backend reports the
+    status without flipping `ok`.)
     """
     def __init__(self, cmd: str, status: str, *, error: str | None = None, data: Any = None):
         super().__init__(
@@ -537,22 +538,28 @@ class Client:
     def commit_group(self, group: str | None = None, **kwargs) -> dict:
         """Commit a staged config group.
 
-        Status semantics (already on master): the response gained a `status`
-        of "committed" | "partial". After a PARTIAL commit the backend no
-        longer auto-resumes dispatch, so a consumer must not treat "partial" as
-        done — it raises `PartialStatusError` (carrying `.status` and the rsp
-        `data`) so the caller can decide how to recover (e.g. re-stage and
-        re-commit, then explicitly resume). Returns the rsp data on a clean
-        "committed".
+        Status semantics (already on master): the response carries a `status`
+        of "committed" | "partial", and a PARTIAL commit comes back as
+        `ok:false` (the backend no longer auto-resumes dispatch — it latches a
+        config fault). So `Client.call` raises `ProtocolError`, which this helper
+        re-raises as `PartialStatusError` (carrying `.status` and the rsp `data`)
+        so the caller can decide how to recover (e.g. re-stage and re-commit,
+        then explicitly resume). Returns the rsp `data` on a clean "committed".
         """
         args = dict(kwargs)
         if group is not None:
             args["group"] = group
-        data = self.call("commit_group", args)
+        try:
+            data = self.call("commit_group", args)
+        except ProtocolError as e:
+            status = e.data.get("status") if isinstance(e.data, dict) else None
+            raise PartialStatusError(
+                "commit_group", status or "partial", error=e.error, data=e.data
+            ) from e
+        # Defensive: an ok:true rsp that still reports a non-"committed" status
+        # (older/other backend that didn't flip ok) is not a clean success.
         if isinstance(data, dict):
             status = data.get("status")
-            # Older backends returned {"committed":true} without a status; a
-            # `committed:true` (or absent status) is a clean success.
             if status is not None and status != "committed":
                 raise PartialStatusError("commit_group", status, data=data)
         return data

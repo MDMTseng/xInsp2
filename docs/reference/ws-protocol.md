@@ -366,7 +366,10 @@ body = {
 
 ## Commands
 
-The backend implements ~60 commands. The core commands are documented in detail
+The backend implements 54 commands. The authoritative list is the dispatch table
+`g_cmd_table` in `backend/src/service_main.cpp` — that table is the source of
+truth, and `tools/check_doc_coverage.py` (the `doc_coverage` ctest) asserts every
+command in it is documented here. The core commands are documented in detail
 below; additional commands are listed at the end of this section. Arguments are
 listed under each entry.
 
@@ -835,12 +838,14 @@ N project-local plugins compile each plugin under `cl.exe` and can
 take 30–120 s; clients should pass a long timeout for this command.
 
 **Partial-restore reporting.** `load_project` is a *succeeded-with-warnings*
-operation: a clean restore replies `ok: true` with no data, but if any saved
-Param value or instance `def` failed to apply the reply carries
-`data: { "param_warnings": [...], "instance_warnings": [...] }` (arrays of
-`"<name>: <reason>"` strings). A non-empty list means the recipe was only
-partially restored — the client MUST surface it rather than treat the load as a
-clean success. This exists to avoid a *fail-reads-as-pass*: instance defs
+operation. Every reply carries `data: { "status", "param_warnings": [...],
+"instance_warnings": [...] }`; the warning arrays are ALWAYS present (empty on a
+clean load, not omitted). A clean restore replies `ok: true` with
+`status: "ok"` and both arrays empty; if any saved Param value or instance `def`
+failed to apply, the arrays carry `"<name>: <reason>"` strings and `status` is
+`"partial"` (see the status note below). A non-empty list means the recipe was
+only partially restored — the client MUST surface it rather than treat the load
+as a clean success. This exists to avoid a *fail-reads-as-pass*: instance defs
 include script-declared `xi::Instance` objects (resolved via the script DLL's
 own registry), so a dropped def would otherwise let a line run on default
 thresholds/models while the operator believes the saved recipe applied.

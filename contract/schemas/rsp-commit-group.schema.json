@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://xinsp.dev/contract/schemas/rsp-commit-group.schema.json",
   "title": "commit_group rsp",
-  "description": "Response to cmd:commit_group. Schema written to MATCH THE FIXTURES (status/committed/canonical/warnings), which diverge from ws-protocol.md's documented `data.results[]` shape — see the doc/fixture drift finding in the writeup. Descriptive spike: the fixture describes what a test pins, so the schema follows the fixture and the drift is reported, not silently reconciled.",
+  "description": "Response to cmd:commit_group. Describes what cmd_commit_group_ (backend/src/service_cmd_dispatch.cpp) ACTUALLY emits: data carries `status` (\"committed\" = all targets committed / \"partial\" = at least one faulted) plus a `results` array, one entry per target with its name, per-target ok, and the committed def echo (an {\"error\"} object on a per-target fault). The envelope `ok` mirrors `status`: committed => ok:true, partial => ok:false with an `error` string (a partial commit halts dispatch — config-fault latched). The `status==partial => ok==false` pairing cannot be expressed in the constrained subset (no if/then); it is guarded by a consumer test (tools/xinsp2_py/tests/test_run_outcome.py).",
   "type": "object",
   "additionalProperties": true,
   "required": ["type", "id", "ok", "data"],
@@ -10,15 +10,26 @@
     "type": { "type": "string", "const": "rsp" },
     "id": { "type": "integer" },
     "ok": { "type": "boolean" },
+    "error": { "type": "string" },
     "data": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["status", "committed"],
+      "required": ["status", "results"],
       "properties": {
         "status": { "type": "string", "enum": ["committed", "partial"] },
-        "committed": { "type": "boolean" },
-        "canonical": { "type": "object", "additionalProperties": true },
-        "warnings": { "type": "array", "items": { "type": "string" } }
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["name", "ok"],
+            "properties": {
+              "name": { "type": "string" },
+              "ok": { "type": "boolean" },
+              "result": { "type": ["object", "null"] }
+            }
+          }
+        }
       }
     }
   }

@@ -88,9 +88,17 @@ def extract_macros() -> tuple[set[str], list[str]]:
     return surface, stale
 
 def extract_ws_commands() -> set[str]:
-    """The WS command verbs the dispatcher compares against (`name == "..."`)."""
+    """The WS command verbs the dispatcher recognises — read straight from the
+    dispatch table `g_cmd_table` in service_main.cpp, which is the source of
+    truth (a `{"verb", cmd_verb_}` entry per command). This replaced the former
+    if/else-if chain of `name == "..."` comparisons; matching only that old
+    pattern silently found ZERO commands after the refactor, so the whole
+    per-command coverage check was passing vacuously."""
     text = _read(SERVICE_MAIN)
-    return set(re.findall(r'name\s*==\s*"([a-z_]+)"', text))
+    cmds = set(re.findall(r'\{\s*"([a-z_]+)"\s*,\s*cmd_[a-z_]+\}', text))
+    # Belt-and-suspenders: also honour any surviving `name == "..."` arms.
+    cmds |= set(re.findall(r'name\s*==\s*"([a-z_]+)"', text))
+    return cmds
 
 # --- coverage test --------------------------------------------------------
 
