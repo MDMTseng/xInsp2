@@ -8,18 +8,20 @@
 // No WebSocket. No GUI. No plugins beyond what the project uses. The
 // smallest possible binary that turns "saved project" → "execution log".
 //
-// What the report captures TODAY: it is an EXECUTION/CRASH log, not a
-// verdict log. Per frame it records only that the frame ran; the summary
-// carries the requested frame count (frames_run), the crash count
-// (crashed), and total wall time (total_ms). It does NOT capture the
-// per-frame inspection VERDICT (OK / NG / NA) — the result callback is not
-// wired here, and VAR value-tracking was moved out of core to the `expose`
-// plugin. So "pass/fail" is currently an approximation: exit 0 means "every
-// frame dispatched without crashing", NOT "every part passed inspection".
+// What the report captures: both EXECUTION status AND per-frame inspection
+// VERDICT. The result callback (xi::result(code,msg) → xi_script_set_result_callback)
+// is wired below, so each frame records its (code, class, msg): the verdict
+// class is derived from the signed code — code>0 "ok", code in -1..-989999
+// "ng", code==0 "na", a caught crash "crashed", a frame that ran but set no
+// result "no_verdict". The summary carries the requested frame count
+// (frames_run), the crash count (crashed), total wall time (total_ms), AND an
+// additive per-class tally: counts{ok,ng,na,no_verdict,crashed}.
 //
-// PLANNED (not yet implemented): wire the result callback so each frame's
-// verdict is recorded in the report, turning this into a true pass/fail
-// log. Tracked in docs/ext_review/00-triage.md (Bucket B, review 03 #14).
+// IMPORTANT — exit code is still an EXECUTION status, NOT a verdict roll-up.
+// Exit 0 means "every frame dispatched without crashing"; an inspection NG
+// does NOT change the exit code. Infra/compile/load failures and script
+// crashes drive the exit code; grep the report's per-frame "class" / summary
+// "counts" for pass/fail. (VAR value-tracking lives in the `expose` plugin.)
 //
 // Usage:
 //   xinsp-runner.exe <project-folder> [--frames=N] [--output=report.json]
@@ -29,9 +31,9 @@
 //   xinsp-runner.exe C:\factory\project --frames=1000 --output=today.json
 //
 // Exit: 0 if all frames dispatched without crashing; 1 on compile/load
-// failure or any script crash. Note this is an EXECUTION status, not an
-// inspection verdict — the report does not yet carry a per-frame pass/fail
-// field to grep for (see the "PLANNED" note above).
+// failure or any script crash. This is an EXECUTION status, not an
+// inspection-verdict roll-up — grep the per-frame "class" or summary "counts"
+// for pass/fail (see the verdict note above).
 //
 
 #define NOMINMAX
@@ -127,6 +129,49 @@ static int use_exchange_cb(const char* name, const char* cmd,
 // now PUSH via emit_record and scripts read current_trigger().
 static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
     return XI_IMAGE_NULL;
+}
+
+// --- per-frame verdict capture (mirror of service_main's g_run_result) ---
+//
+// The script calls xi::result(code,msg) at most once per inspect; that routes
+// through result_cb below into g_run_result. Reset at the top of each frame so
+// a frame that sets no result is distinguishable (set==false → "no_verdict").
+// thread_local for symmetry with the backend, though the runner is single-lane.
+struct RunResult { int code = 0; std::string msg; bool set = false; };
+static thread_local RunResult g_run_result;
+
+// Framework reserved codes (mirror of service_main / xi_result.hpp). Anything
+// <= kResultSystemBand is the system-fail band; XI_SYS_* are named markers.
+static constexpr int kResultSystemBand = -990000;
+static constexpr int XI_SYS_CRASHED    = -999002;  // caught inspect crash/throw
+static constexpr int XI_SYS_NO_VERDICT = -999005;  // ran, set no result
+
+static void result_cb(int code, const char* msg) {
+    // Host is the trust boundary: a user code in the reserved system band is
+    // not accepted as a real verdict — record it as NA (0), preserving the
+    // offending code in the message (matches service_main::result_cb).
+    if (code <= kResultSystemBand) {
+        g_run_result.code = 0;
+        g_run_result.msg  = "[invalid result code " + std::to_string(code) +
+                            ", reserved band] ";
+        g_run_result.msg += (msg ? msg : "");
+        g_run_result.set  = true;
+        return;
+    }
+    g_run_result.code = code;
+    g_run_result.msg.assign(msg ? msg : "");
+    g_run_result.set  = true;
+}
+
+// Derive the verdict class from the signed code (pure read; mirrors
+// service_main::outcome_class_for_code, minus the "dropped" runner-N/A case).
+static const char* verdict_class_for_code(int code) {
+    if (code == XI_SYS_CRASHED)     return "crashed";
+    if (code == XI_SYS_NO_VERDICT)  return "no_verdict";
+    if (code > 0)                   return "ok";
+    if (code == 0)                  return "na";
+    if (code > kResultSystemBand)   return "ng";   // valid ng band: <0 and > -990000
+    return "na";                                   // other reserved system codes
 }
 
 // --- args ---------------------------------------------------------------
@@ -308,6 +353,13 @@ int main(int argc, char** argv) {
             (void*)use_process_cb, (void*)use_exchange_cb,
             (void*)use_grab_cb, (void*)&host_api);
     }
+    // Wire the result callback so xi::result(code,msg) is captured per frame
+    // (mirrors the backend's install in service_main). Optional symbol: scripts
+    // that don't include xi_result.hpp leave this null → every frame is
+    // "no_verdict", which is the honest outcome for a script that never verdicts.
+    if (script.set_result_callback) {
+        script.set_result_callback((void*)result_cb);
+    }
     std::fprintf(stderr, "[runner] script loaded: %s\n", res.dll_path.c_str());
 
     // Run the frames. We build the JSON as a string then write it once to
@@ -321,27 +373,56 @@ int main(int argc, char** argv) {
     body += ",\"frames\":[";
 
     int crashed = 0;
+    // Additive per-class verdict tally (see verdict_class_for_code).
+    int c_ok = 0, c_ng = 0, c_na = 0, c_no_verdict = 0, c_crashed = 0;
+    // Emit one frame object: {"frame":i,"code":c,"class":"..","msg":".."}.
+    auto emit_frame = [&](int i, int code, const char* cls, const std::string& msg) {
+        if (i > 0) body += ",";
+        body += "{\"frame\":";
+        body += std::to_string(i);
+        body += ",\"code\":";
+        body += std::to_string(code);
+        body += ",\"class\":";
+        xi::proto::json_escape_into(body, cls);
+        body += ",\"msg\":";
+        xi::proto::json_escape_into(body, msg);
+        body += "}";
+    };
     auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < args.frames; ++i) {
         if (script.reset) script.reset();
+        // Reset the per-frame verdict BEFORE inspect so a frame that never calls
+        // xi::result() is recorded as no_verdict, not the previous frame's value.
+        g_run_result = RunResult{};
         try {
             script.inspect(i);
         } catch (const seh_exception& e) {
             std::fprintf(stderr, "[runner] frame %d crashed: 0x%08X\n", i, e.code);
             ++crashed;
+            ++c_crashed;
+            char buf[64];
+            std::snprintf(buf, sizeof buf, "inspect crashed: 0x%08X", e.code);
+            emit_frame(i, XI_SYS_CRASHED, "crashed", buf);
             continue;
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[runner] frame %d threw: %s\n", i, e.what());
             ++crashed;
+            ++c_crashed;
+            emit_frame(i, XI_SYS_CRASHED, "crashed",
+                       std::string("inspect threw: ") + e.what());
             continue;
         }
-        // VAR value-tracking was removed from core (script output is the `expose`
-        // plugin's concern now), so the runner no longer dumps per-frame vars — it
-        // just records that the frame ran. result()/state live on their own paths.
-        if (i > 0) body += ",";
-        body += "{\"frame\":";
-        body += std::to_string(i);
-        body += "}";
+        // Frame ran to completion — derive its verdict from the captured result.
+        // A frame that set no result is "no_verdict" (distinct from na=0). VAR
+        // value-tracking is the `expose` plugin's concern; result()/state live on
+        // their own paths.
+        int code = g_run_result.set ? g_run_result.code : XI_SYS_NO_VERDICT;
+        const char* cls = verdict_class_for_code(code);
+        if      (std::strcmp(cls, "ok") == 0)         ++c_ok;
+        else if (std::strcmp(cls, "ng") == 0)         ++c_ng;
+        else if (std::strcmp(cls, "no_verdict") == 0) ++c_no_verdict;
+        else                                          ++c_na;
+        emit_frame(i, code, cls, g_run_result.msg);
     }
     auto t1 = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -350,6 +431,13 @@ int main(int argc, char** argv) {
     body += "\"frames_run\":" + std::to_string(args.frames);
     body += ",\"crashed\":"   + std::to_string(crashed);
     body += ",\"total_ms\":"  + std::to_string((int)ms);
+    body += ",\"counts\":{";
+    body += "\"ok\":"          + std::to_string(c_ok);
+    body += ",\"ng\":"         + std::to_string(c_ng);
+    body += ",\"na\":"         + std::to_string(c_na);
+    body += ",\"no_verdict\":" + std::to_string(c_no_verdict);
+    body += ",\"crashed\":"    + std::to_string(c_crashed);
+    body += "}";
     body += "}}";
 
     std::ofstream report(args.output);
