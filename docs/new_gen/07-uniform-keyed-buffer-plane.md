@@ -117,6 +117,38 @@ handle and inlines the pixels as `bin`; on import it re-pools them.
 arrays inside an entry. No flattened key conventions, no second container
 format; generic tools recurse.
 
+## Ingress: foreign msgpack must prove itself at the domain edge
+
+The canonical profile's payoffs (O(1) offset reads, one decoder path, sealed
+immutability) are invariants the domain INTERIOR relies on without
+re-checking. Therefore the edge must be total: **nothing enters the frame
+plane unproven.** "Trust inside, prove at the boundary."
+
+- **Canonicalize on ingress.** Foreign msgpack (a comms/MES plugin's inbound
+  payloads, third-party camera chunk data, `json_source`-style feeds, old
+  replay files) is decoded, validated, and re-encoded into the canonical
+  profile in ONE pass by the producer plugin, via the SDK's canonicalizing
+  entry constructor. Three layers: (a) structural well-formedness — bounded
+  nesting depth, declared-vs-actual lengths, no trailing bytes (the review-09
+  robustness class); (b) profile normalization — compact widths widened,
+  canonical field order applied where the schema is known; (c) semantic
+  validation against the contract schema when the entry claims a known type
+  tag. Cost: one KB-scale decode+encode at the edge, paid once, buying the
+  interior's right to never check again.
+- **Constructive enforcement.** The canonicalizing constructor is the ONLY
+  public way to build an entry from external bytes — there is no
+  "insert raw span" path for untrusted data. The safe path is the only path,
+  consistent with the rest of the architecture.
+- **Ext types are rejected at the edge.** Pool handles are msgpack ext values;
+  a forged handle in foreign data would be a fabricated pointer into the pool
+  (use-after-free / type confusion by construction). The canonicalizer
+  refuses (or downgrades to `bin`) any ext from an untrusted source — handles
+  are mintable only by the domain's own allocator.
+- **Replay files are untrusted by default.** Our own record files carry a
+  canonical-profile version stamp, but disk corrupts and files get swapped:
+  the default load path still canonicalizes. A verify-once-then-mmap fast
+  path is a measured-performance option, not the default.
+
 ## Frame lifecycle (the concurrency story in one line each)
 
 1. Producer builds entries into the frame's arena / grabs pool buffers.
