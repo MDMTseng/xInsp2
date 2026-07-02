@@ -22,6 +22,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <random>
 #include <typeinfo>
 #include <sstream>
 #include <string>
@@ -139,6 +140,14 @@ struct Engine {
     std::vector<std::shared_ptr<GroupLane>> lanes;
     std::mutex lanes_mu;
     std::string default_group_snapshot;
+    // ---- Process identity (additive run_result fields; see init_process_identity_) ----
+    // boot_id: a random 128-bit value generated ONCE at backend startup, formatted
+    // as a 32-char lowercase hex string. Stable for the whole process lifetime, so
+    // every run_result from this backend instance shares it. station_id: optional,
+    // sourced from XINSP_STATION_ID (empty if unset) — identifies the physical
+    // station/machine. Both are read-only after init_process_identity_() runs in main().
+    std::string boot_id;
+    std::string station_id;
 };
 static Engine g_eng;
 
@@ -893,18 +902,72 @@ static void result_cb(int code, const char* msg) {
     g_run_result.set = true;
 }
 
+// Stable schema tag for the run_result wire event (bump on a breaking change to
+// the field set). Rides as an additive "schema" field so consumers can version.
+static constexpr const char* kRunResultSchema = "xi.run-outcome/1";
+
+// Format a 128-bit trigger id as a 32-char lowercase hex string ("hi" then "lo",
+// each zero-padded to 16). A null id (0/0) → empty string (omitted on the wire).
+static std::string trigger_id_hex(xi_trigger_id id) {
+    if (id.hi == 0 && id.lo == 0) return {};
+    static const char* d = "0123456789abcdef";
+    std::string s;
+    s.reserve(32);
+    for (int shift = 60; shift >= 0; shift -= 4) s.push_back(d[(id.hi >> shift) & 0xF]);
+    for (int shift = 60; shift >= 0; shift -= 4) s.push_back(d[(id.lo >> shift) & 0xF]);
+    return s;
+}
+
+// Derive the outcome class string from the EXISTING signed code — a pure read,
+// it never changes the numeric code. Bands: >0 → "ok"; ==0 → "na"; the reserved
+// drop marker → "dropped"; a valid ng code (<0 and above the reserved system
+// band) → "ng"; anything else in the system band → "na". The crash path passes
+// its own class explicitly (see emit_run_result cls arg) since a caught inspect
+// error also emits code 0 but must read as "crashed", not "na".
+static const char* outcome_class_for_code(int code) {
+    if (code == XI_SYS_DROPPED)  return "dropped";
+    if (code > 0)                return "ok";
+    if (code == 0)               return "na";
+    if (code > kResultSystemBand) return "ng";   // valid ng band: <0 and > -990000
+    return "na";                                  // other reserved system codes
+}
+
 // Emit a `run_result` wire event. Fields ride directly in the event data (same
 // envelope shape as run_finished). Used by the inspect path (run_id >= 0) and the
 // drop path (run_id < 0 → omitted; code = XI_SYS_DROPPED). ms < 0 omits "ms".
+//
+// Identity (all ADDITIVE, omitted when empty so the wire stays compact and
+// existing consumers are unaffected): trigger_id (128-bit trigger id as hex),
+// boot_id + station_id (process identity), a composite inspection_id
+// "<station_id>/<boot_id>/<run_id>" (only when run_id>=0), a stable schema tag,
+// the derived outcome class, and an optional reason_code. The existing fields
+// (code/msg/run_id/ms/source/group) and their numeric values are UNCHANGED.
+// `cls`: if non-empty, overrides the code-derived class (used by the crash path,
+// which keeps code 0 but is "crashed"). `reason_code`: optional, omitted if empty.
 static void emit_run_result(xi::ws::Server& srv, int code, const std::string& msg,
                             int64_t run_id, int64_t ms,
-                            const std::string& source, const std::string& group) {
+                            const std::string& source, const std::string& group,
+                            const std::string& trigger_id = std::string(),
+                            const char* cls = nullptr,
+                            const char* reason_code = nullptr) {
     std::string data = "{\"code\":" + std::to_string(code) + ",\"msg\":";
     xp::json_escape_into(data, msg);
     if (run_id >= 0) data += ",\"run_id\":" + std::to_string((long long)run_id);
     if (ms >= 0)     data += ",\"ms\":" + std::to_string((long long)ms);
     if (!source.empty()) { data += ",\"source\":"; xp::json_escape_into(data, source); }
     if (!group.empty())  { data += ",\"group\":";  xp::json_escape_into(data, group); }
+    // --- additive identity fields ---
+    if (!trigger_id.empty()) { data += ",\"trigger_id\":"; xp::json_escape_into(data, trigger_id); }
+    if (!g_eng.boot_id.empty()) { data += ",\"boot_id\":"; xp::json_escape_into(data, g_eng.boot_id); }
+    if (!g_eng.station_id.empty()) { data += ",\"station_id\":"; xp::json_escape_into(data, g_eng.station_id); }
+    if (run_id >= 0) {
+        // Composite id: "<station_id>/<boot_id>/<run_id>" (station_id may be empty).
+        std::string insp = g_eng.station_id + "/" + g_eng.boot_id + "/" + std::to_string((long long)run_id);
+        data += ",\"inspection_id\":"; xp::json_escape_into(data, insp);
+    }
+    data += ",\"schema\":"; xp::json_escape_into(data, std::string(kRunResultSchema));
+    data += ",\"class\":"; xp::json_escape_into(data, std::string(cls ? cls : outcome_class_for_code(code)));
+    if (reason_code && *reason_code) { data += ",\"reason_code\":"; xp::json_escape_into(data, std::string(reason_code)); }
     data += "}";
     xp::Event ev;
     ev.name = "run_result";
@@ -1188,6 +1251,7 @@ struct RunOutcome {
     std::string run_error_what;      // run_error payload (empty on success)
     int64_t     dt_us = 0;           // inspect latency, measured once after inspect
     std::string rr_source, rr_group; // Result provenance snapshot (this thread's trigger)
+    std::string rr_trigger_hex;      // this run's 128-bit trigger id as hex (additive; empty if none)
 };
 
 // ---- COMPUTE half: script invocation + SEH boundary + crash breadcrumb + watchdog --
@@ -1229,7 +1293,11 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
     // for the duration of the inspect). The script sets the result via
     // xi::result() → result_cb → g_run_result; emission reads it below in the gate.
     g_run_result = RunResult{};
-    if (g_current_trigger) { out.rr_source = g_current_trigger->leader_source; out.rr_group = g_current_trigger->group; }
+    if (g_current_trigger) {
+        out.rr_source = g_current_trigger->leader_source;
+        out.rr_group  = g_current_trigger->group;
+        out.rr_trigger_hex = trigger_id_hex(g_current_trigger->id);   // additive: this run's trigger id
+    }
 
     emit_run_event_(srv, run_id, "run_started");
 
@@ -1382,7 +1450,8 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
         // called no xi::result), emitted before run_finished so consumers
         // can pair them. Ordered with the rest of the stream by the gate.
         emit_run_result(srv, g_run_result.code, g_run_result.msg,
-                        run_id, dt_ms, out.rr_source, out.rr_group);
+                        run_id, dt_ms, out.rr_source, out.rr_group,
+                        out.rr_trigger_hex);   // class derived from code (ok/ng/na)
         emit_run_event_(srv, run_id, "run_finished",
                         "\"ms\":" + std::to_string((long long)dt_ms));
         // Clear so the next run, if it doesn't carry a frame_path arg,
@@ -1391,7 +1460,11 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
     } else {
         // Inspect failed (crash/throw) — still emit one Result so the stream
         // has no gap. v1: NA (0). v1.1 upgrades this to XI_SYS_CRASHED/TIMEOUT.
-        emit_run_result(srv, 0, "inspect error", run_id, dt_ms, out.rr_source, out.rr_group);
+        // Numeric code stays 0 (unchanged wire contract); the class/reason_code
+        // carry the "crashed" semantics additively. The clean code-fix is a
+        // SEPARATE breaking branch.
+        emit_run_result(srv, 0, "inspect error", run_id, dt_ms, out.rr_source, out.rr_group,
+                        out.rr_trigger_hex, "crashed", "inspect_error");
         emit_run_event_(srv, run_id, "run_error", out.run_error_what);
     }
     turn.complete();   // advance the gate now (dtor would otherwise do it at fn exit)
@@ -1578,7 +1651,8 @@ static void account_dropped_frame_(xi::TriggerEvent& ev, uint64_t warn_count,
     release_trigger_event_(ev);            // the dropped event's image + doc refs
     warn_frame_drop_(warn_count, ev.group, policy);
     if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire))
-        emit_run_result(*srv, XI_SYS_DROPPED, reason, aid, -1, ev.leader_source, ev.group);
+        emit_run_result(*srv, XI_SYS_DROPPED, reason, aid, -1, ev.leader_source, ev.group,
+                        trigger_id_hex(ev.id), "dropped", "queue_full");
 }
 
 // Per-lane enqueue with that lane's queue_depth/overflow policy.
@@ -1618,13 +1692,15 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     auto& front = lane->q.front();   // drop_oldest (the default + fallback)
     int64_t dropped_aid = front.arrival_id;   // the dropped (oldest) frame's slot
     std::string ds = front.leader_source, dg = front.group;   // the dropped (oldest) event
+    std::string dt = trigger_id_hex(front.id);                // its trigger id (additive)
     release_trigger_event_(front);   // the evicted front (a different event, in-queue)
     lane->q.pop_front(); ev.arrival_id = ++g_eng.run_id; lane->q.push_back(std::move(ev)); guard.dismiss();   // ev → queue
     lane->cv.notify_one(); ++lane->dropped; ++g_eng.dropped_lifetime;   // P1-8
     warn_frame_drop_(lane->dropped.load(), dg, "drop_oldest");
     lk.unlock();
     if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire))
-        emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg);
+        emit_run_result(*srv, XI_SYS_DROPPED, "dropped: queue full (drop_oldest)", dropped_aid, -1, ds, dg,
+                        dt, "dropped", "queue_full");
     return true;
 }
 
@@ -4454,6 +4530,24 @@ static void handle_command(xi::ws::Server& srv, std::string_view text) {
 }
 
 
+// Generate the per-process boot_id (random 128-bit → 32-char lowercase hex) and
+// read the optional station_id from XINSP_STATION_ID. Runs ONCE at startup (not
+// per-frame), so std::random_device + a seeded 64-bit engine is fine here. Both
+// land in g_eng and are read-only afterward, so every run_result emission can
+// read them lock-free.
+static void init_process_identity_() {
+    std::random_device rd;
+    std::seed_seq seed{ rd(), rd(), rd(), rd(),
+                        (unsigned)std::chrono::steady_clock::now().time_since_epoch().count() };
+    std::mt19937_64 eng(seed);
+    uint64_t hi = eng(), lo = eng();
+    if (hi == 0 && lo == 0) lo = 1;   // never all-zero (would read as "null")
+    g_eng.boot_id = trigger_id_hex(xi_trigger_id{ hi, lo });
+
+    if (const char* s = std::getenv("XINSP_STATION_ID"); s && *s)
+        g_eng.station_id = s;
+}
+
 int main(int argc, char** argv) {
     // Part III G1.1 — certify mode: load a plugin DLL + call its factory once in
     // THIS throwaway child process, exit with a verdict code (0 ok / 42
@@ -4537,6 +4631,10 @@ int main(int argc, char** argv) {
     }
 
     int port = xi::cli::parse_port(argc, argv);
+
+    // Per-process identity for run_result (boot_id + optional station_id). Once,
+    // early, before any inspection can emit. See init_process_identity_.
+    init_process_identity_();
 
     // ---- thread/process performance knobs --------------------------------------
 #ifdef _WIN32

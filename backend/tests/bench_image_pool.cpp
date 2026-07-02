@@ -22,6 +22,8 @@
 //
 #include <xi/xi_image_pool.hpp>
 
+#include "perf_fingerprint.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -99,7 +101,7 @@ static int gate_main() {
     long long frame = best_ns(320, 240, 3, 20000, 8);
     std::printf("GATE image_pool_ns_per_create_16x16x1 %lld\n", tiny);
     std::printf("GATE image_pool_ns_per_create_320x240x3 %lld\n", frame);
-    std::fflush(stdout);
+    xi_perf::print_fingerprint();
     return 0;
 }
 

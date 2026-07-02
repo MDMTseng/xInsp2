@@ -2163,40 +2163,69 @@ export function activate(context: vscode.ExtensionContext) {
                         p + '0', p);
                 }
             }
+            // The `expose` sink is a plugin like any other and needs an instance
+            // before a script may call xi::use("expose"). Convention: the instance
+            // key IS the string "expose" (that is what the script uses), not "expose0".
+            const hasExpose = plugins.some(x => x.name === 'expose');
+            if (hasExpose) {
+                await vscode.commands.executeCommand('xinsp2.createInstance',
+                    'expose', 'expose');
+            }
             // Seed a working script that uses whichever instances we created.
             const scriptPath = path.join(sampleDir, DEFAULT_SCRIPT_NAME);
             const hasCam = plugins.some(x => x.name === 'mock_camera');
             const hasDet = plugins.some(x => x.name === 'blob_analysis');
             if (hasCam && hasDet) {
+                // Only surface to `expose` if we actually created that instance —
+                // never reference an instance the generator didn't configure.
+                const exposeBlock = hasExpose ? `
+    // Surface the input + result to a UI panel via the shipped \`expose\` sink.
+    // Build a plain Record, tag a "$channel", and push it — no macro, no VAR.
+    xi::use("expose").process(
+        xi::Record()
+            .set("$channel", "inspection")
+            .image("input",  input)
+            .image("binary", out.get_image("binary"))
+            .set("blob_count", blob_count));
+` : `
+    // (No \`expose\` instance in this project — add one to surface previews:
+    //  create an instance named "expose" of the \`expose\` plugin, then push a
+    //  Record via xi::use("expose").process(...).)
+`;
                 fs.writeFileSync(scriptPath, `//
-// xInsp2 sample — mock_camera → blob_analysis pipeline.
+// xInsp2 sample — mock_camera0 -> blob_analysis0 pipeline.
 // Edit, save (compiles automatically), and click Run Inspection.
 //
-#include <xi/xi.hpp>          // pulls in OpenCV
+// Note: <xi/xi.hpp> is the OpenCV-free umbrella. Pull in OpenCV explicitly
+// with <xi/xi_cv.hpp> only if your script calls cv:: functions directly.
+//
+#include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_result.hpp>   // xi::ok / xi::ng / xi::result (per-run verdict)
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int frame) {
-    auto& det = xi::use("blob_analysis0");
+// Explicit-trigger entry: the host hands the trigger in as \`t\` (no ambient
+// state), so \`t\` is self-contained and safe to use on any thread.
+XI_INSPECT_ENTRY(t, frame) {
+    (void)frame;
 
-    // Frames arrive by PUSH — the camera source emits into the trigger bus;
-    // read the current trigger instead of pulling with grab().
-    auto t = xi::current_trigger();
-    auto img = t.is_active() ? t.image("mock_camera0") : xi::Image{};
-    if (img.empty()) {
-        img = xi::Image(320, 240, 1);
-        std::memset(img.data(), 0, 320*240);
-        for (int y = 60; y < 100; ++y)
-            for (int x = 60; x < 100; ++x) img.data()[y*320+x] = 255;
+    // Frames arrive by PUSH — the mock_camera0 source emits into the trigger
+    // bus. Read the correlated frame straight off the trigger view.
+    auto input = t.image("mock_camera0");
+    if (input.empty()) {
+        // Nothing to inspect this run — record NA (code 0), not OK/NG.
+        xi::result(0, "missing frame");
+        return;
     }
-    VAR(input, img);
 
-    // Source is already 1-channel here; if your camera produces RGB,
-    // run cv::cvtColor(img.as_cv_mat(), ..., cv::COLOR_RGB2GRAY).
-    auto out = det.process(xi::Record().image("gray", img));
-    VAR(detection, out);
-    VAR(blob_count, out["blob_count"].as_int());
-    VAR(binary,     out.get_image("binary"));
+    // blob_analysis0 expects its input image under the key "gray" and returns
+    // a "binary" image plus an integer "blob_count".
+    auto out = xi::use("blob_analysis0")
+                   .process(xi::Record().image("gray", input));
+    int blob_count = out["blob_count"].as_int();
+${exposeBlock}
+    // One per-run verdict: OK if we found something, NG otherwise.
+    if (blob_count > 0) xi::ok(1, "blobs found");
+    else                xi::ng(1, "no blobs");
 }
 `);
             }

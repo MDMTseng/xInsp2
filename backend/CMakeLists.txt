@@ -543,12 +543,19 @@ function(_xinsp_perf_gate test_name bench_target baseline_name)
             -DBASELINE=${_perf_baseline_dir}/${baseline_name}
             -DTHRESHOLD_PCT=${XINSP2_PERF_THRESHOLD_PCT}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/perf_gate.cmake)
-    set_tests_properties(${test_name} PROPERTIES LABELS "perf" TIMEOUT 300)
+    # perf_gate.cmake prints "perf_gate: SKIP (...)" and exits 0 when the
+    # committed baseline's environment fingerprint does not match this machine
+    # (different hardware / JPEG backend / build, or a pre-fingerprint baseline)
+    # — surface that as a ctest SKIP, not a silent pass.
+    set_tests_properties(${test_name} PROPERTIES
+        LABELS "perf" TIMEOUT 300
+        SKIP_REGULAR_EXPRESSION "perf_gate: SKIP")
 endfunction()
 
 # Throughput micro-benchmark — also gated as `perf_image_pool` (see below).
 add_executable(bench_image_pool tests/bench_image_pool.cpp)
 target_link_libraries(bench_image_pool PRIVATE xi_core)
+target_compile_definitions(bench_image_pool PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
 if(NOT MSVC)
     target_link_libraries(bench_image_pool PRIVATE pthread)
 endif()
@@ -648,6 +655,7 @@ target_compile_definitions(xinsp_fe PRIVATE
 # Not run as a test (no pass/fail); invoke manually for numbers.
 add_executable(bench_jpeg tests/bench_jpeg.cpp src/stb_impl.cpp)
 target_link_libraries(bench_jpeg PRIVATE xi_core)
+target_compile_definitions(bench_jpeg PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_IPP=1)
     target_include_directories(bench_jpeg PRIVATE ${IPP_INCLUDE_DIR})
@@ -679,6 +687,7 @@ if(EXISTS ${_serde}/yyjson/yyjson.c AND EXISTS ${_serde}/mpack/mpack.c
         ${_serde}/cwpack/cwpack.c)
     target_include_directories(bench_record PRIVATE
         ${_serde}/cjson ${_serde}/yyjson ${_serde}/mpack ${_serde}/cwpack)
+    target_compile_definitions(bench_record PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
     # Gate it too — but only when the serde sources are present (this branch).
     # A clean checkout without them simply has no perf_record test.
     _xinsp_perf_gate(perf_record bench_record record.txt)
