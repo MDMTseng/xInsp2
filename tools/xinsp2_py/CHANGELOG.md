@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.0 — handshake auth + contract-type tie-in
+
+Additive and backward-compatible: `Client(...)` with no `token=` behaves
+exactly as before (unauthenticated), so existing callers are unaffected.
+
+### Added
+- **Handshake auth.** `Client(url, token=..., auth_mode=...)` authenticates
+  against a backend started with `--auth=<secret>` / `XINSP2_AUTH`. Two modes,
+  matching what the backend accepts (the mode is fixed server-side and is NOT
+  negotiated — pick it explicitly):
+  - `auth_mode="bearer"` (default): sends `Authorization: Bearer <token>`;
+    `token` is the shared secret. For a backend started `--auth=<secret>`.
+  - `auth_mode="hmac"`: sends `X-Xi-Timestamp: <unix_seconds>` and
+    `Authorization: Bearer <hex(hmac_sha256(token, <unix_seconds>))>`; `token`
+    is the HMAC key and never crosses the wire, accepted within a ±60 s window.
+    For a backend started `--auth=hmac:<key>`. (There is no server-issued
+    nonce despite the "challenge" framing elsewhere — the client timestamps and
+    signs in a single-shot handshake.)
+  The SDK does NOT auto-fall-back between modes: a bearer attempt against an
+  `hmac:` server would put the raw key on the wire, defeating the mode.
+- `AuthError` (subclass of the builtin `ConnectionError`, alongside
+  `ConnectionLostError`). Raised by `connect()` when the backend rejects the
+  handshake with HTTP 401 — a clean, immediate, catchable refusal rather than a
+  hang. Carries `.mode` and `.status_code`.
+- Contract tie-in: `tests/test_contract_types.py` asserts the SDK's `RunOutcome`
+  dataclass stays field-compatible with the `contract/` generated TypedDict for
+  `xi.run-outcome/1` (wire keys, the `class`->`verdict_class` rename, the
+  `schema`/`class` literals). The SDK keeps its dataclass public API; the test
+  fails if a schema regen drifts from the model.
+- Test suites `tests/test_auth_flow.py` (client-side header/HMAC construction,
+  always runs) and `tests/test_auth_live.py` (spawns the real
+  `xinsp-backend.exe` with `--auth`; bearer + hmac success/refusal, auto-skips
+  if the binary isn't built).
+
 ## 0.2.0 — WS run-outcome contract catch-up
 
 Brings the client up to date with wire changes already on the backend
