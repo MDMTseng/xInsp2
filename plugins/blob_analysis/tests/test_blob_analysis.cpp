@@ -23,7 +23,7 @@
 #include <xi/xi_contract.hpp>
 #include <xi/xi_json.hpp>
 
-#include "blob_analysis_io.h"
+#include "blob_analysis_io.gen.h"
 
 #ifdef _WIN32
   #include <windows.h>

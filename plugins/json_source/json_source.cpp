@@ -14,7 +14,7 @@
 #include <xi/xi_contract.hpp>   // fail-loud required command payload + schema skew
 #include "yyjson.h"   // this plugin does raw yyjson path-building internally
 
-#include "json_source_keys.h"   // guard 1: command/config/patch key names, once
+#include "json_source_keys.gen.h"   // guard 1: command/config/patch key names, once
 
 #include <cstdlib>
 #include <cstring>

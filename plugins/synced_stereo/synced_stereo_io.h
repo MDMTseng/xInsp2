@@ -6,7 +6,8 @@
 // synced_stereo is a gathering source, so — like mock_camera — its builder targets
 // the two string-carried surfaces a driver writes (config via set_def, commands
 // via exchange) and its extractor reads the emitted record. The *_io.h convention
-// is identical to mock_camera_io.h: key names come from synced_stereo_keys.h, the
+// is identical to mock_camera's: key names come from the generated
+// synced_stereo_keys.gen.h (decl: contract/plugins/synced_stereo.decl.json), the
 // Config builder stamps the schema version, and every accessor compiles down to
 // plain Record / JSON operations — nothing new crosses the ABI.
 //
@@ -20,7 +21,7 @@
 //   if (f.has_both()) correlate(f.left(), f.right());
 //
 
-#include "synced_stereo_keys.h"
+#include "synced_stereo_keys.gen.h"
 
 #include <xi/xi_contract.hpp>
 #include <xi/xi_json.hpp>

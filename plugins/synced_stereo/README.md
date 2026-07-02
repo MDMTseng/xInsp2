@@ -16,9 +16,16 @@ the emitted stereo frame.
 
 ## Keys — one source of truth
 
-Every key name is defined **once** in
-[`synced_stereo_keys.h`](./synced_stereo_keys.h); the typed view and (once the
-`spawn_worker` port lands — see below) the plugin's own readers compile from it.
+Every key name is declared **once** in
+[`../../contract/plugins/synced_stereo.decl.json`](../../contract/plugins/synced_stereo.decl.json),
+from which `contract/codegen/gen_contract.py` generates `synced_stereo_keys.gen.h`
+(the `keys::` constants) and `synced_stereo_schema.gen.h` (the left+right frame
+slots). The typed view and (once the `spawn_worker` port lands — see below) the
+plugin's own readers compile from those generated constants. The `_io.h` here
+stays **hand-written** (the decl sets `"handwritten_io": true`): its derived
+`has_both()` and defaulted `fire(int n = 1)` are outside what the generator emits
+verbatim — a documented codegen gap (see `contract/codegen/README.md`, "Coverage &
+the codegen gap").
 
 | Surface | Key | Type | Notes |
 |---------|-----|------|-------|
@@ -37,8 +44,9 @@ Schema version: `xi::synced_stereo::kSchemaVersion` (currently **1**). The
 > **Adoption note.** `synced_stereo.cpp` is *not yet* compiled against these
 > constants: its worker/emit path is being ported to the blessed `spawn_worker`
 > on a parallel branch, and this task deliberately does not touch that code to
-> avoid a conflicting diff. The keys header is the documented source of truth for
-> the typed view now; `tests/test_synced_stereo.cpp` **pins the wire keys** by
+> avoid a conflicting diff. The decl (and its generated keys header) is the
+> documented source of truth for the typed view now;
+> `tests/test_synced_stereo.cpp` **pins the wire keys** by
 > reading a really-emitted frame through the extractor, so any drift between the
 > plugin's literals and this header turns the test red. The `.cpp` adopts the
 > constants when the `spawn_worker` port merges.

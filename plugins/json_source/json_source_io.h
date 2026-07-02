@@ -23,7 +23,7 @@
 // scalars — the one place the typed view stays deliberately string-shaped.
 //
 
-#include "json_source_keys.h"
+#include "json_source_keys.gen.h"
 
 #include <xi/xi_contract.hpp>
 #include <xi/xi_json.hpp>

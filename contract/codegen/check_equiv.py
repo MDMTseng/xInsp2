@@ -11,11 +11,14 @@ Python interpreter is present -- like the contract_baseline gate.
       byte-compare against what is committed in generated/plugins/. A drifted
       commit fails ("regenerate").
   (c) DRIFT (the equivalence core): for each decl, extract the key-constant map
-      {kName -> "value"} + kSchemaVersion from BOTH the generated _keys.gen.h
-      AND the hand-written plugins/<p>/<p>_keys.h, and from the decl itself.
-      All three must agree exactly. A hand-written header that adds/renames/
-      retypes a key without updating its decl (or vice versa) fails here -- the
-      generated header would NOT be a drop-in.
+      {kName -> "value"} + kSchemaVersion from the generated _keys.gen.h and from
+      the decl itself; they must agree exactly (the generator must emit precisely
+      the decl's key set). If a hand-written plugins/<p>/<p>_keys.h is STILL
+      present (a plugin declared but not yet swapped), it is ALSO compared so the
+      pending swap is proven a true drop-in. Post-swap (docs/new_gen/08 Wave 3)
+      that hand-written header is deleted and the plugin includes _keys.gen.h
+      directly, so the decl<->generated leg is the whole proof and an absent
+      hand-written header is the swapped state, not a failure.
   (e) COVERAGE RATCHET (WARN, non-fatal): list every plugin under plugins/ that
       ships a hand-written *_keys.h but has no decl in contract/plugins/. This
       makes the ratchet direction visible without blocking -- the covered-plugin
@@ -100,7 +103,13 @@ def check_drift(decl: dict) -> list[str]:
     if gen_ver != decl["schema_version"]:
         problems.append(f"{plugin}: generated kSchemaVersion {gen_ver} != decl {decl['schema_version']}")
 
-    # decl <-> hand-written (the equivalence claim: drop-in for today's header)
+    # decl <-> hand-written (OPPORTUNISTIC). Post-swap (docs/new_gen/08 Wave 3)
+    # the plugin has DELETED its hand-written plugins/<p>/<p>_keys.h and consumes
+    # the generated _keys.gen.h directly, so the decl is the sole source of truth
+    # and the decl<->generated leg above is the whole drop-in proof. While a plugin
+    # is still pre-swap (a hand-written keys.h present alongside a fresh decl), this
+    # leg keeps guarding that the two agree so the swap will be a true drop-in. An
+    # ABSENT hand-written header therefore means "swapped", not "unproven".
     if hand_h.exists():
         hand_map, hand_ver = parse_keys_header(hand_h.read_text(encoding="utf-8"))
         if set(hand_map.items()) != set(dm.items()):
@@ -109,8 +118,6 @@ def check_drift(decl: dict) -> list[str]:
                             f"decl-only={sorted(set(dm.items()) - set(hand_map.items()))})")
         if hand_ver != decl["schema_version"]:
             problems.append(f"{plugin}: hand-written kSchemaVersion {hand_ver} != decl {decl['schema_version']}")
-    else:
-        problems.append(f"{plugin}: no hand-written {hand_h.relative_to(REPO)} to compare against")
     return problems
 
 
@@ -150,8 +157,8 @@ def main() -> int:
             print(f"    - {p}")
         return 1
 
-    print("codegen_equiv: PASS -- generated headers are a drop-in; decls, generated, "
-          "and hand-written key sets agree.")
+    print("codegen_equiv: PASS -- generated headers are a drop-in; decls and generated "
+          "key sets agree (and any still-present hand-written header agrees too).")
     return 0
 
 

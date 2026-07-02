@@ -605,9 +605,31 @@ def load_decls() -> list[dict]:
 
 
 def render(decl: dict) -> dict[str, str]:
-    """{filename: content} for one decl. Deterministic."""
+    """{filename: content} for one decl. Deterministic.
+
+    Two artifacts are conditional, so the generator never emits a file that would
+    be a lie about what it can express:
+
+      * `_io.gen.h` is SKIPPED when the decl sets `"handwritten_io": true`. Some
+        plugins' control surface is outside the constrained typed-field family the
+        decl governs (json_source's open-schema raw-JSON builders + Patch shape;
+        config_swap_probe's get_status reply extractor; synced_stereo's derived
+        has_both()/defaulted fire()). Their `_io.h` stays hand-written — the
+        generator owns the KEY contract (guard 1, `_keys.gen.h`) for them but not
+        the bespoke I/O veneer. See contract/codegen/README.md (swap-in) and the
+        codegen-gap note in docs/new_gen/08.
+      * `_schema.gen.h` is SKIPPED when the plugin declares no flat frame slots
+        (a source with no `output_frame`): an empty FrameSchema is noise, nothing
+        adopts it, and it would never be compiled.
+    """
     plugin = decl["plugin"]
-    return {plugin + suffix: fn(decl) for suffix, fn in ARTIFACTS.items()}
+    skip: set[str] = set()
+    if decl.get("handwritten_io"):
+        skip.add("_io.gen.h")
+    if not frame_slot_keys(decl):
+        skip.add("_schema.gen.h")
+    return {plugin + suffix: fn(decl)
+            for suffix, fn in ARTIFACTS.items() if suffix not in skip}
 
 
 def generate(out_dir: Path) -> list[Path]:

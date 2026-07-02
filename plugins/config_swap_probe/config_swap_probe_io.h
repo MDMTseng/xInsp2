@@ -18,7 +18,7 @@
 //   assert(s.active() == 42 && s.has_staged() && s.staged_value() == 99);
 //
 
-#include "config_swap_probe_keys.h"
+#include "config_swap_probe_keys.gen.h"
 
 #include <xi/xi_contract.hpp>
 #include <xi/xi_json.hpp>

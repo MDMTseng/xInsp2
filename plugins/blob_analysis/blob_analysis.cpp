@@ -35,7 +35,7 @@
 #include <xi/xi_contract.hpp>   // fail-loud required inputs + schema-skew errors
 #include <xi/xi_mp.hpp>         // wave-2: canonical msgpack for the frame-door contour (doc 07 D3)
 
-#include "blob_analysis_keys.h"
+#include "blob_analysis_keys.gen.h"
 
 #include <algorithm>
 #include <cmath>

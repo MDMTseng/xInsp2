@@ -11,11 +11,14 @@ down to plain `Record` `set`/`get`.
 
 ## Keys — one source of truth
 
-Every Record key this plugin reads or writes is named **once** in
-[`blob_analysis_keys.h`](./blob_analysis_keys.h). The plugin's own reader, the
-input builder, and the output extractor all compile from those constants, so a
-key rename can't drift. Do not hard-code the string names below — include the
-header and use the typed view.
+Every Record key this plugin reads or writes is declared **once** in
+[`../../contract/plugins/blob_analysis.decl.json`](../../contract/plugins/blob_analysis.decl.json),
+from which `contract/codegen/gen_contract.py` generates `blob_analysis_keys.gen.h`
+(the `keys::` constants) and `blob_analysis_io.gen.h` (the typed Input/Output).
+The plugin's own reader, the input builder, and the output extractor all compile
+from those generated constants, so a key rename can't drift. Do not hard-code the
+string names below — include the generated header and use the typed view. (The
+table below is generated from the decl too — see `blob_analysis_keys.md`.)
 
 | Direction | Key | Type | Notes |
 |-----------|-----|------|-------|
@@ -35,13 +38,13 @@ rejected with a precise error naming both versions.
 
 ## Using it from a script
 
-Include [`blob_analysis_io.h`](./blob_analysis_io.h) and never touch a raw
+Include the generated `blob_analysis_io.gen.h` and never touch a raw
 string key — a typo becomes a compile error, and the schema stamp lets the
 plugin report a header/plugin skew precisely:
 
 ```cpp
 #include <xi/xi_result.hpp>   // xi::ok / xi::ng / xi::result
-#include "blob_analysis_io.h"
+#include "blob_analysis_io.gen.h"
 
 XI_INSPECT_ENTRY(t, frame) {
     xi::Image gray = /* ... a single-channel image ... */;
