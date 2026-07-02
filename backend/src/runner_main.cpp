@@ -3,11 +3,23 @@
 //
 // Headless production runner. Takes a project folder, compiles the
 // inspection script if needed, restores all instances, and runs
-// inspect() N times. Writes a JSON report with per-frame variable
-// snapshots.
+// inspect() N times.
 //
 // No WebSocket. No GUI. No plugins beyond what the project uses. The
-// smallest possible binary that turns "saved project" → "pass/fail log".
+// smallest possible binary that turns "saved project" → "execution log".
+//
+// What the report captures TODAY: it is an EXECUTION/CRASH log, not a
+// verdict log. Per frame it records only that the frame ran; the summary
+// carries the requested frame count (frames_run), the crash count
+// (crashed), and total wall time (total_ms). It does NOT capture the
+// per-frame inspection VERDICT (OK / NG / NA) — the result callback is not
+// wired here, and VAR value-tracking was moved out of core to the `expose`
+// plugin. So "pass/fail" is currently an approximation: exit 0 means "every
+// frame dispatched without crashing", NOT "every part passed inspection".
+//
+// PLANNED (not yet implemented): wire the result callback so each frame's
+// verdict is recorded in the report, turning this into a true pass/fail
+// log. Tracked in docs/ext_review/00-triage.md (Bucket B, review 03 #14).
 //
 // Usage:
 //   xinsp-runner.exe <project-folder> [--frames=N] [--output=report.json]
@@ -16,9 +28,10 @@
 // Example:
 //   xinsp-runner.exe C:\factory\project --frames=1000 --output=today.json
 //
-// Exit: 0 if all frames dispatched; 1 on compile/load failure or any
-// script crash. The caller is expected to grep the report for its own
-// pass/fail field.
+// Exit: 0 if all frames dispatched without crashing; 1 on compile/load
+// failure or any script crash. Note this is an EXECUTION status, not an
+// inspection verdict — the report does not yet carry a per-frame pass/fail
+// field to grep for (see the "PLANNED" note above).
 //
 
 #define NOMINMAX
