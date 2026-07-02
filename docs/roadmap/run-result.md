@@ -82,7 +82,9 @@ consumers are unaffected; the numeric `code` is UNCHANGED for every case):**
 - `schema` — result-record version; stable value `"xi.run-outcome/1"`
 - `class` — outcome class string DERIVED from `code` (not a code change):
   `ok` (`code>0`) / `ng` (`-989999…-1`) / `na` (`0`) / `dropped` (`XI_SYS_DROPPED`)
-  / `crashed` (caught inspect error — still `code=0`)
+  / `crashed` (caught inspect error) / `no_verdict` (ran, set no `RESULT`).
+  On master the crashed case still rides `code=0`; see the BREAKING note below for
+  the staged numeric-code semantics.
 - `reason_code` — optional machine tag (e.g. `inspect_error`, `queue_full`);
   omitted for normal verdicts
 
@@ -170,6 +172,36 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
 - `XI_SYS_CRASHED` / `XI_SYS_TIMEOUT` synthesis; `na_reason` text; Pareto card.
 - `part_id` / `recipe` / `defects` traceability fields; MES export; gateway
   consuming `run_result` directly.
+
+## BREAKING (staged, not yet on master) — numeric-code semantics
+
+> **This section documents wire semantics that live on branch
+> `fix/extreview-c2-crash-break` only.** It changes the numeric `code` for two
+> framework-generated cases and is intentionally held off master for a coordinated
+> cutover with the app-dev team. On master these cases still emit `code=0` and are
+> distinguished only by the additive `class`/`reason_code` fields.
+
+Two non-verdict cases stop masquerading as NA (`0`) on the numeric channel; they
+now emit their reserved system codes, so the numeric `code` and the derived
+`class` agree:
+
+| Case | code on master | code on this branch | class | reason_code |
+|---|---|---|---|---|
+| Caught inspect error (inspect threw/crashed) | `0` (NA) | `XI_SYS_CRASHED` = **-999002** | `crashed` | `inspect_error` |
+| Ran to completion but script set no `RESULT` | `0` (NA) | `XI_SYS_NO_VERDICT` = **-999005** | `no_verdict` | *(none)* |
+
+Notes for the cutover:
+- **Actual enum values** (source of truth is `backend/src/service_main.cpp`):
+  `XI_SYS_DROPPED = -999001`, `XI_SYS_CRASHED = -999002`, `XI_SYS_NO_VERDICT =
+  -999005`. (The design sketch above uses illustrative values that predate the
+  implementation; the source enum is authoritative.)
+- A script that **explicitly** sets a verdict — including a legitimate NA (`0`) via
+  `xi::result(0, …)` — is passed through unchanged. Only the *absence* of a verdict
+  after a successful run now yields `XI_SYS_NO_VERDICT`.
+- Both codes are in the reserved system band (`≤ -990000`), so consumers already
+  treating that band as "system fail, not a real reject" need no change to bucket
+  them correctly; only consumers that special-cased `code==0` to mean "crashed" or
+  "no verdict" (which was ambiguous) must switch to the explicit codes / `class`.
 
 ## See also
 - [`production-hmi.md`](./production-hmi.md) — verdict / yield / Pareto cards.

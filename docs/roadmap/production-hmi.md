@@ -87,7 +87,8 @@ flowchart LR
 |---|---|
 | Per-pass values + image refs | `vars` message (`items[]` with values + image `gid`) |
 | Image pixels | binary **preview frames** (gid-keyed) |
-| Cycle time / throughput | `run_finished` event carries `ms` |
+| Inspect compute time | `run_finished` event carries `ms` + `inspect_compute_us` (compute only, NOT cycle/decision latency — external review 05 #7) |
+| Completed-parts throughput | count of terminal `run_result` events over a wall-clock window (external review 05 #20; NOT derived from `run_finished.ms`) |
 | Backfill charts on connect / SPC windows | **client-side ring** — the HMI keeps its own ring of the `vars` frames it receives (the backend keeps no history ring) |
 | Crash / down alarms | FE status channel (`fe-status.json`) — PLC line-safe is the comms plugin's sidecar, not the HMI |
 | Headless run + supervise | `--project --autostart-fps` + `xinsp-fe.exe` |
@@ -136,7 +137,7 @@ customElements.define('xi-spc-card', XiSpcCard);
 | `image` | image var (+ overlay layers) | the output image, fit/zoom, with overlays |
 | `verdict` | bool/string var | big OK (green) / NG (red) tile |
 | `spc` | numeric var | trend + control lines (mean / UCL / LCL), rolling window |
-| `throughput` | (run timing) | parts/min, cycle time, from `run_finished.ms` |
+| `throughput` | (terminal `run_result` events) | **BREAKING (staged):** completed-parts rate (parts/min) over a rolling wall-clock window, NOT `60000/run_finished.ms`; inspect compute shown as a secondary readout (external review 05 #20) |
 | `yield` | verdict var | OK/NG counts + pass-rate % |
 | `value` | any var | single readout (number/string) |
 | `events` | (log/event stream) | scrolling log, safe-state banner |

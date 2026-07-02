@@ -863,7 +863,8 @@ static void status_cb(const char* text) {
 // (<= -990000) the user API (xi::result) refuses to set.
 enum : int {
     XI_SYS_DROPPED    = -999001,  // overflow: event dropped before it could run
-    XI_SYS_NO_VERDICT = -999005,  // ran but script set no RESULT (v1.1 opt-in; unused in v1)
+    XI_SYS_CRASHED    = -999002,  // caught inspect error (throw/crash) — the run did not verdict
+    XI_SYS_NO_VERDICT = -999005,  // ran to completion but script set no RESULT (was v1.1 opt-in)
 };
 
 // The current run's result, written by the script via xi::result(code,msg)
@@ -920,12 +921,14 @@ static std::string trigger_id_hex(xi_trigger_id id) {
 
 // Derive the outcome class string from the EXISTING signed code — a pure read,
 // it never changes the numeric code. Bands: >0 → "ok"; ==0 → "na"; the reserved
-// drop marker → "dropped"; a valid ng code (<0 and above the reserved system
-// band) → "ng"; anything else in the system band → "na". The crash path passes
-// its own class explicitly (see emit_run_result cls arg) since a caught inspect
-// error also emits code 0 but must read as "crashed", not "na".
+// system markers map to their own classes (dropped/crashed/no_verdict); a valid
+// ng code (<0 and above the reserved system band) → "ng"; anything else in the
+// system band → "na". The crash/no-verdict paths now emit their own reserved
+// codes, so class and code agree even when emit_run_result derives the class.
 static const char* outcome_class_for_code(int code) {
-    if (code == XI_SYS_DROPPED)  return "dropped";
+    if (code == XI_SYS_DROPPED)     return "dropped";
+    if (code == XI_SYS_CRASHED)     return "crashed";
+    if (code == XI_SYS_NO_VERDICT)  return "no_verdict";
     if (code > 0)                return "ok";
     if (code == 0)               return "na";
     if (code > kResultSystemBand) return "ng";   // valid ng band: <0 and > -990000
@@ -1446,24 +1449,38 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
         // out of frame order and concurrently to the same sink. The staged guard
         // drops them, matching the crash path ("don't push this frame to the PLC").
         if (my_turn) flush_staged_emits_(run_id);
-        // One Result per run: whatever the script set (default 0 = NA if it
-        // called no xi::result), emitted before run_finished so consumers
-        // can pair them. Ordered with the rest of the stream by the gate.
-        emit_run_result(srv, g_run_result.code, g_run_result.msg,
+        // One Result per run, emitted before run_finished so consumers can pair
+        // them. Ordered with the rest of the stream by the gate. BREAKING: a run
+        // that completed but set no xi::result now emits XI_SYS_NO_VERDICT
+        // (class="no_verdict"), where v1 emitted 0/NA. A script that explicitly
+        // set a verdict — including a legitimate NA (0) — is passed through as-is.
+        int rr_code = g_run_result.set ? g_run_result.code : XI_SYS_NO_VERDICT;
+        std::string rr_msg = g_run_result.set ? g_run_result.msg
+                                              : std::string("no verdict (script set no result)");
+        emit_run_result(srv, rr_code, rr_msg,
                         run_id, dt_ms, out.rr_source, out.rr_group,
-                        out.rr_trigger_hex);   // class derived from code (ok/ng/na)
+                        out.rr_trigger_hex);   // class derived from code (ok/ng/na/no_verdict)
+        // run_finished carries the run's INSPECT COMPUTE time. `ms` is the legacy
+        // integer-ms field (kept, unchanged wire value) — it is inspect compute
+        // ONLY (excludes queue wait, emit-gate wait, staged sink flush, JPEG encode,
+        // WS send), NOT cycle/decision latency. The additive `inspect_compute_us`
+        // field states that meaning explicitly at µs precision (external review 05
+        // #7). BREAKING (staged, not on master): consumers should migrate to
+        // `inspect_compute_us`; `ms` is retained for back-compat.
         emit_run_event_(srv, run_id, "run_finished",
-                        "\"ms\":" + std::to_string((long long)dt_ms));
+                        "\"ms\":" + std::to_string((long long)dt_ms) +
+                        ",\"inspect_compute_us\":" + std::to_string((long long)out.dt_us));
         // Clear so the next run, if it doesn't carry a frame_path arg,
         // sees an empty path instead of the stale previous one.
         if (out.s.set_run_context) out.s.set_run_context("");
     } else {
         // Inspect failed (crash/throw) — still emit one Result so the stream
-        // has no gap. v1: NA (0). v1.1 upgrades this to XI_SYS_CRASHED/TIMEOUT.
-        // Numeric code stays 0 (unchanged wire contract); the class/reason_code
-        // carry the "crashed" semantics additively. The clean code-fix is a
-        // SEPARATE breaking branch.
-        emit_run_result(srv, 0, "inspect error", run_id, dt_ms, out.rr_source, out.rr_group,
+        // has no gap. BREAKING: the numeric code is now XI_SYS_CRASHED (was 0/NA),
+        // so a caught inspect error is no longer indistinguishable from a legit NA
+        // verdict on the numeric channel. class="crashed" derives from the code
+        // (passed explicitly too), reason_code carries the specific cause.
+        emit_run_result(srv, XI_SYS_CRASHED, "inspect error", run_id, dt_ms,
+                        out.rr_source, out.rr_group,
                         out.rr_trigger_hex, "crashed", "inspect_error");
         emit_run_event_(srv, run_id, "run_error", out.run_error_what);
     }

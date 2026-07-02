@@ -179,7 +179,7 @@ Out-of-band notifications that don't fit the above.
 
 ```json
 { "type": "event", "name": "run_started", "data": { "run_id": 17 } }
-{ "type": "event", "name": "run_finished", "data": { "run_id": 17, "ms": 42 } }
+{ "type": "event", "name": "run_finished", "data": { "run_id": 17, "ms": 42, "inspect_compute_us": 42137 } }
 { "type": "event", "name": "run_error", "data": { "run_id": 17, "what": "..." } }
 { "type": "event", "name": "run_result", "data": { "code": -2, "msg": "edge chip", "run_id": 17, "ms": 42, "source": "cam0", "group": "high" } }
 { "type": "event", "name": "script_reloaded", "data": { "path": "..." } }
@@ -190,8 +190,17 @@ Out-of-band notifications that don't fit the above.
 
 `run_started` / `run_finished` bracket every `cmd:run` and every
 inspect dispatched by continuous mode. `run_started.data` carries
-`{run_id}`; `run_finished.data` carries `{run_id, ms}` (the inspect
-wall-clock duration). `run_error.data` is `{run_id, what}` and fires
+`{run_id}`; `run_finished.data` carries `{run_id, ms, inspect_compute_us}`.
+
+> **BREAKING (staged, not on master).** The timing on `run_finished` is script
+> **inspect COMPUTE time only** — it EXCLUDES queue wait, emit-gate wait, staged
+> sink flush, JPEG encode and WS send. It is NOT cycle/decision latency. The
+> legacy `ms` (integer ms) field is retained with its exact old value, but the
+> additive `inspect_compute_us` (microseconds) field states that meaning
+> explicitly. Consumers should migrate to `inspect_compute_us` and must NOT read
+> `ms` as production/cycle rate (external review 05 #7).
+
+`run_error.data` is `{run_id, what}` and fires
 INSTEAD of `run_finished` when the inspect throws (C++ exception or
 SEH). Drivers waiting for run completion should listen for
 `run_finished` OR `run_error` — exactly one fires per run.
@@ -520,16 +529,23 @@ no longer reads as a clean line).
 
 ### `metrics`
 `args: {}` → `data: { ... }`. Minimal observability snapshot: monotonic
-per-frame counters plus a fixed-bucket latency histogram. Recorded once per
-completed inspection in `run_one_inspection` (covering ok, throw, and crash
+per-frame counters plus a fixed-bucket inspect-compute histogram. Recorded once
+per completed inspection in `run_one_inspection` (covering ok, throw, and crash
 paths). **All values are cumulative over the whole backend process uptime** —
 unlike `dispatch_stats`' per-run counters, they are **NOT** reset on `cmd:start`.
-A monitor derives throughput / windowed latency by diffing two snapshots itself
-(same contract as the `dispatch_stats` `*_lifetime` fields).
+A monitor derives throughput / windowed compute stats by diffing two snapshots
+itself (same contract as the `dispatch_stats` `*_lifetime` fields).
+
+> **BREAKING (staged, not on master).** The histogram key was `latency_ms`; it
+> is renamed to `inspect_compute_ms` (and `latency_ms.*` → `inspect_compute_ms.*`)
+> because the recorded value is script inspect **COMPUTE** time only — it excludes
+> queue wait, emit-gate wait, staged sink flush, JPEG encode and WS send, so it is
+> NOT cycle/decision latency (external review 05 #7). The numeric values, bucket
+> edges and shape are unchanged; only the key name changed.
 
 ```json
 { "frames_total": 1024, "frames_ok": 1020, "frames_error": 4,
-  "latency_ms": {
+  "inspect_compute_ms": {
     "count": 1024, "sum_ms": 8123.500, "mean_ms": 7.933,
     "buckets": [ {"le": 0.5, "count": 12}, {"le": 1.0, "count": 40},
                  "...", {"le": 5000.0, "count": 3}, {"le": "inf", "count": 1} ]
@@ -540,10 +556,10 @@ A monitor derives throughput / windowed latency by diffing two snapshots itself
 |---|---|
 | `frames_total` | inspections recorded since process start (`= frames_ok + frames_error`) |
 | `frames_ok` / `frames_error` | success / failure partition of `frames_total` |
-| `latency_ms.count` | frames in the histogram (equals `frames_total`) |
-| `latency_ms.sum_ms` | Σ per-frame latency, ms (kept in integer µs internally; here in ms) |
-| `latency_ms.mean_ms` | `sum_ms / count`, or `0` when `count == 0` |
-| `latency_ms.buckets` | non-cumulative counts; each entry counts frames with `latency ≤ le`, partitioned by the 13 ms edges (`0.5 … 5000`). The final `{"le":"inf"}` is the overflow bucket. All bucket counts sum to `frames_total`. |
+| `inspect_compute_ms.count` | frames in the histogram (equals `frames_total`) |
+| `inspect_compute_ms.sum_ms` | Σ per-frame inspect **compute** time, ms (kept in integer µs internally; here in ms) |
+| `inspect_compute_ms.mean_ms` | `sum_ms / count`, or `0` when `count == 0` |
+| `inspect_compute_ms.buckets` | non-cumulative counts; each entry counts frames with `compute ≤ le`, partitioned by the 13 ms edges (`0.5 … 5000`). The final `{"le":"inf"}` is the overflow bucket. All bucket counts sum to `frames_total`. |
 
 ### `list_instances`
 `args: {}` → triggers an `instances` message.

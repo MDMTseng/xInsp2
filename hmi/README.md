@@ -116,8 +116,15 @@ cd ../WebTunnelHub
 - **Restarts orphan the demo backend.** `Stop-Process -Force` skips `serve.mjs`'s
   SIGTERM handler, so the child backend on **:7872** is left running; kill it
   separately on restart. **Never touch :7823 — that's the dev VS Code backend.**
-- **Throughput card reads inspect *duration*, not trigger rate.** `run_finished.ms`
-  is the inspect wall-clock (sub-ms for the synthetic demo → "150000 /min"), not the
-  inter-frame period. v1.1 should derive true throughput from trigger arrival times.
+- **Throughput card now reports COMPLETED-PARTS rate over a wall-clock window.**
+  **BREAKING (staged, not on master).** It used to derive parts/min from
+  `run_finished.ms` (inspect COMPUTE duration) as `60000 / avg_ms`, so fast compute
+  showed an unrealistic rate even when triggers arrived slowly (external review 05
+  #20). It now counts terminal `run_result` events (one per completed run, run_id
+  deduped) over a rolling wall-clock window (default 60s, `config.windowSec`) and
+  reports the real completed rate; inspect compute is shown only as a secondary,
+  honestly-labelled readout. Note `run_finished.ms` / the new
+  `run_finished.inspect_compute_us` field are inspect **compute** time only, NOT
+  cycle/decision latency — do not derive production rate from them.
 - **The diagnostics panel overlaps the bottom cards.** It's a bring-up aid; make it
   collapsible (or gate behind `?debug=1`) before this is a real operator screen.

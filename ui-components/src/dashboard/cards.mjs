@@ -51,19 +51,53 @@ class VerdictCard extends HTMLElement {
   }
 }
 
-// ---- throughput: parts/min + cycle time (run_ms) ----------------------------
+// ---- throughput: completed-parts rate over a wall-clock window ---------------
+// BREAKING (staged, not on master): this card used to derive parts/min from
+// `run_finished.ms` (inspect COMPUTE duration) as `60000 / avg_ms`. That reports
+// service capacity, not production rate — fast compute showed an unrealistic
+// parts/min even when triggers arrived slowly (external review 05 #20 / P0). It
+// now counts terminal run_result events (one per completed run) over a rolling
+// wall-clock window and reports actual completed rate. The inspect COMPUTE time
+// is shown as a secondary readout, honestly labelled, and no longer drives rate.
 class ThroughputCard extends HTMLElement {
-  connectedCallback() { this.body = shell(this, this.config?.title || "Throughput"); this.buf = []; this.last = -1;
+  connectedCallback() { this.body = shell(this, this.config?.title || "Throughput");
+    // windowSec: rolling wall-clock window for the completed-parts rate.
+    this.windowSec = this.config?.windowSec || 60;
+    this.stamps = [];        // arrival wall-clock times (ms) of terminal results
+    this.lastResult = -1;    // last counted run_result run_id (dedupe)
+    this.lastCompute = null; // most recent inspect compute ms (secondary readout)
     this.body.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px";
     this.big = document.createElement("div"); this.big.style.cssText = "font-size:clamp(18px,6vw,44px);font-weight:700;color:#9ad";
     this.sub = document.createElement("div"); this.sub.style.cssText = "font-size:12px;color:#888";
-    this.body.append(this.big, this.sub); }
+    this.body.append(this.big, this.sub);
+    // Tick so the rate decays toward 0 when parts stop arriving (feed() is only
+    // called on new events, which would otherwise freeze a stale rate).
+    this.timer = setInterval(() => this.render(), 1000);
+  }
+  disconnectedCallback() { if (this.timer) { clearInterval(this.timer); this.timer = 0; } }
   feed(st) {
-    if (st.run_id !== this.last && st.run_ms != null) { this.last = st.run_id;
-      this.buf.push(st.run_ms); if (this.buf.length > 30) this.buf.shift(); }
-    if (this.buf.length) { const avg = this.buf.reduce((a, x) => a + x, 0) / this.buf.length;
-      this.big.textContent = `${(60000 / avg).toFixed(0)} /min`;
-      this.sub.textContent = `cycle ${avg.toFixed(1)} ms`; }
+    // Count each terminal run_result exactly once (run_id-deduped), stamped with
+    // the wall-clock arrival time — NOT the inspect duration. This measures the
+    // rate at which completed parts actually leave the line.
+    const r = st.result;
+    if (r && r.run_id != null && r.run_id !== this.lastResult) {
+      this.lastResult = r.run_id;
+      this.stamps.push(Date.now());
+    }
+    if (st.run_ms != null) this.lastCompute = st.run_ms;  // secondary, non-driving
+    this.render();
+  }
+  render() {
+    const now = Date.now(), cutoff = now - this.windowSec * 1000;
+    while (this.stamps.length && this.stamps[0] < cutoff) this.stamps.shift();
+    // Rate over the actual observed span (bounded by the window), so a short
+    // history doesn't understate the rate by dividing by the full window.
+    const n = this.stamps.length;
+    const spanSec = n ? Math.max((now - this.stamps[0]) / 1000, 1) : this.windowSec;
+    const perMin = n > 1 ? (n / spanSec) * 60 : (n === 1 ? 0 : 0);
+    this.big.textContent = `${perMin.toFixed(0)} /min`;
+    this.sub.textContent = `${n} in ${this.windowSec}s` +
+      (this.lastCompute != null ? ` · compute ${this.lastCompute.toFixed?.(1) ?? this.lastCompute} ms` : "");
   }
 }
 
