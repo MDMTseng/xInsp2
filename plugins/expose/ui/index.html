@@ -130,11 +130,21 @@
   MsgpackReader.prototype.bin = function (n) {
     const v = this.b.subarray(this.o, this.o + n); this.o += n; return v;   // Uint8Array view
   };
+  MsgpackReader.prototype.i8  = function () { const v = this.dv.getInt8(this.o); this.o += 1; return v; };
+  MsgpackReader.prototype.i16 = function () { const v = this.dv.getInt16(this.o, false); this.o += 2; return v; };
+  MsgpackReader.prototype.i32 = function () { const v = this.dv.getInt32(this.o, false); this.o += 4; return v; };
+  MsgpackReader.prototype.i64 = function () {
+    const hi = this.dv.getInt32(this.o, false), lo = this.dv.getUint32(this.o + 4, false);
+    this.o += 8; return hi * 4294967296 + lo;   // exact for our |v| < 2^53 (seq/dims)
+  };
+  MsgpackReader.prototype.f32 = function () { const v = this.dv.getFloat32(this.o, false); this.o += 4; return v; };
+  MsgpackReader.prototype.f64 = function () { const v = this.dv.getFloat64(this.o, false); this.o += 8; return v; };
   MsgpackReader.prototype.arr = function (n) { const a = new Array(n); for (let i = 0; i < n; i++) a[i] = this.read(); return a; };
   MsgpackReader.prototype.map = function (n) { const m = {}; for (let i = 0; i < n; i++) { const k = this.read(); m[k] = this.read(); } return m; };
   MsgpackReader.prototype.read = function () {
     const c = this.u8();
     if (c <= 0x7f) return c;                              // positive fixint
+    if (c >= 0xe0) return c - 0x100;                      // negative fixint
     if (c >= 0x80 && c <= 0x8f) return this.map(c & 0x0f); // fixmap
     if (c >= 0x90 && c <= 0x9f) return this.arr(c & 0x0f); // fixarray
     if (c >= 0xa0 && c <= 0xbf) return this.str(c & 0x1f); // fixstr
@@ -145,10 +155,16 @@
       case 0xc4: return this.bin(this.u8());
       case 0xc5: return this.bin(this.u16());
       case 0xc6: return this.bin(this.u32());
+      case 0xca: return this.f32();
+      case 0xcb: return this.f64();              // canonical float64 (v2 plane)
       case 0xcc: return this.u8();
       case 0xcd: return this.u16();
       case 0xce: return this.u32();
       case 0xcf: return this.u64();
+      case 0xd0: return this.i8();
+      case 0xd1: return this.i16();
+      case 0xd2: return this.i32();
+      case 0xd3: return this.i64();              // canonical int64 (v2 plane)
       case 0xd9: return this.str(this.u8());
       case 0xda: return this.str(this.u16());
       case 0xdb: return this.str(this.u32());
@@ -160,12 +176,35 @@
     }
   };
 
-  // Decode an XEX1 frame -> { v, channel, seq, json, images:[{key, jpeg:Uint8Array}] } or null.
+  // Normalize an XEX1-v2 canonical frame dump { v:2, channel, seq, frame:{...} }
+  // into the same shape the UI renders: scalar/str entries -> values, image
+  // descriptor entries { w,h,c,px } -> images[] with raw pixels (v2 is lossless,
+  // no JPEG). A bin entry surfaces as a Uint8Array value.
+  function normalizeXEX1v2(body) {
+    const frame = (body && body.frame) || {};
+    const values = {}, images = [];
+    for (const k in frame) {
+      const v = frame[k];
+      if (v && typeof v === "object" && !Array.isArray(v) && v.px instanceof Uint8Array) {
+        images.push({ key: k, w: v.w, h: v.h, c: v.c, pixels: v.px });
+      } else {
+        values[k] = v;
+      }
+    }
+    return { v: 2, channel: body.channel, seq: body.seq, values, images, frame };
+  }
+
+  // Decode an XEX1 frame. v1 -> the raw map { v:1, channel, seq, json,
+  // images:[{key,jpeg}] }; v2 -> the normalized canonical dump (values+images).
+  // null on bad magic / unreadable body.
   function decodeXEX1(bytes) {
     if (!bytes || bytes.length < 5) return null;
     if (bytes[0] !== 0x58 || bytes[1] !== 0x45 || bytes[2] !== 0x58 || bytes[3] !== 0x31) return null; // 'XEX1'
-    try { return new MsgpackReader(bytes, 4).read(); }
+    let body;
+    try { body = new MsgpackReader(bytes, 4).read(); }
     catch (e) { console.warn("XEX1 decode failed", e); return null; }
+    if (body && body.v === 2) return normalizeXEX1v2(body);
+    return body;
   }
 
   function b64ToBytes(b64) {

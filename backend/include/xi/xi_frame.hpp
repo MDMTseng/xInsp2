@@ -464,6 +464,19 @@ public:
     std::string_view key_at(size_t i) const { return entries_[i].key; }
     FrameTag         tag_at(size_t i) const { return entries_[i].tag; }
 
+    // Raw stored bytes of the i-th entry's INLINE canonical value — the small-
+    // plane bytes exactly as they live in the arena (I64/F64/Str/inline-Bin/Mp).
+    // This is the memory plane a generic dumper (expose XEX1-v2, record_save)
+    // splices to the wire verbatim, so the wire's small plane EQUALS memory
+    // byte-for-byte (doc 07). Empty for a POOLED entry (Image, or a Bin above
+    // kFrameLargeThreshold) whose payload is a pool buffer — resolve those with
+    // get_image / get_bin. UB if i >= size().
+    std::span<const uint8_t> raw_at(size_t i) const {
+        const auto& e = entries_[i];
+        if (e.pooled) return {};
+        return std::span<const uint8_t>(e.inl, e.inl_len);
+    }
+
     // ---- typed borrowed reads ----------------------------------------
     std::optional<int64_t> get_i64(std::string_view key) const {
         const auto* e = find(key);

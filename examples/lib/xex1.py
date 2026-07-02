@@ -45,10 +45,16 @@ def _mp(data: bytes, p: int) -> tuple[Any, int]:
     if b == 0xC0:  return None, p
     if b == 0xC2:  return False, p
     if b == 0xC3:  return True, p
+    if b == 0xCA:  return struct.unpack_from(">f", data, p)[0], p + 4
+    if b == 0xCB:  return struct.unpack_from(">d", data, p)[0], p + 8  # float64 (v2 plane)
     if b == 0xCC:  return data[p], p + 1
     if b == 0xCD:  return struct.unpack_from(">H", data, p)[0], p + 2
     if b == 0xCE:  return struct.unpack_from(">I", data, p)[0], p + 4
     if b == 0xCF:  return struct.unpack_from(">Q", data, p)[0], p + 8
+    if b == 0xD0:  return struct.unpack_from(">b", data, p)[0], p + 1
+    if b == 0xD1:  return struct.unpack_from(">h", data, p)[0], p + 2
+    if b == 0xD2:  return struct.unpack_from(">i", data, p)[0], p + 4
+    if b == 0xD3:  return struct.unpack_from(">q", data, p)[0], p + 8  # int64 (v2 plane)
     if b == 0xD9:  n = data[p]; p += 1; return data[p:p + n].decode("utf-8", "replace"), p + n
     if b == 0xDA:  n = struct.unpack_from(">H", data, p)[0]; p += 2; return data[p:p + n].decode("utf-8", "replace"), p + n
     if b == 0xDB:  n = struct.unpack_from(">I", data, p)[0]; p += 4; return data[p:p + n].decode("utf-8", "replace"), p + n
@@ -92,14 +98,39 @@ def _restore_nonfinite(v: Any) -> Any:
     return v
 
 
+def _decode_xex1_v2(body: dict) -> dict:
+    """Normalize an XEX1-v2 canonical frame dump {v:2, channel, seq, frame:{...}}
+    into {v, channel, seq, values, images}. Scalar/str/bin entries -> values;
+    image descriptor entries {w,h,c,px} -> images[key] = {w,h,c,pixels}. v2 is
+    lossless (raw pixels as msgpack bin), no JPEG."""
+    frame = body.get("frame") or {}
+    values: dict = {}
+    images: dict = {}
+    for k, v in frame.items():
+        if isinstance(v, dict) and isinstance(v.get("px"), (bytes, bytearray)):
+            images[k] = {"w": v.get("w"), "h": v.get("h"), "c": v.get("c"),
+                         "pixels": bytes(v["px"])}
+        else:
+            values[k] = v
+    return {"v": 2, "channel": body.get("channel"), "seq": body.get("seq"),
+            "values": values, "images": images, "frame": frame}
+
+
 def decode_xex1(data: bytes) -> dict:
-    """Decode an XEX1 frame -> {v, channel, seq, values:dict, images:dict[key]->jpeg bytes}.
-    Raises Xex1Error on a bad magic / unsupported version."""
+    """Decode an XEX1 frame. v1 -> {v, channel, seq, values, images:dict[key]->jpeg
+    bytes}; v2 (the canonical frame dump) -> {v, channel, seq, values,
+    images:dict[key]->{w,h,c,pixels}}. Raises Xex1Error on a bad magic /
+    unsupported version."""
     if len(data) < 5 or data[:4] != MAGIC:
         raise Xex1Error("not an XEX1 frame")
     body, _ = _mp(data, 4)
-    if not isinstance(body, dict) or body.get("v") != 1:
-        raise Xex1Error(f"unsupported XEX1 version {body.get('v') if isinstance(body, dict) else '?'}")
+    if not isinstance(body, dict):
+        raise Xex1Error("XEX1 body is not a msgpack map")
+    v = body.get("v")
+    if v == 2:
+        return _decode_xex1_v2(body)
+    if v != 1:
+        raise Xex1Error(f"unsupported XEX1 version {v}")
     values = {}
     try:
         values = _restore_nonfinite(json.loads(body.get("json") or "{}"))

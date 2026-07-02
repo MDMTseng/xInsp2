@@ -16,13 +16,27 @@
 //   arr  : fixarray / array16 (0xDC) / array32 (0xDD)
 //   map  : fixmap / map16 (0xDE) / map32 (0xDF)
 // Multi-byte integers are big-endian, per msgpack.
+//
+// XEX1-v2 (polaris2 wave-2, docs/new_gen/07 + 08 Wave 2 step 3) — the CANONICAL
+// FRAME DUMP. Where v1 is a Record-shaped display frame (json string + JPEG
+// images), v2 is the frame's own bytes: a canonical max-width msgpack map built
+// by xi::mp::Writer, carrying every entry's stored value VERBATIM (the small
+// plane == the in-memory plane, byte-for-byte) plus images inlined as raw `bin`
+// per doc 07 D1/D2. This is the memory ≈ wire ≈ disk surface. It is OPT-IN; v1
+// stays the default wire and its bytes are untouched (its goldens still pin it).
+// The v2 encoder is xi::mp's Writer — the hand-rolled v1 mp_* helpers above are
+// used ONLY on the v1 path.
 #ifndef XI_XEX1_ENCODE_HPP
 #define XI_XEX1_ENCODE_HPP
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+#include <xi/xi_abi.h>   // XI_FRAME_TAG_* (the entry tag vocabulary v2 dumps by)
+#include <xi/xi_mp.hpp>  // the canonical max-width msgpack Writer (v2 body codec)
 
 namespace xi {
 namespace xex1 {
@@ -104,6 +118,61 @@ inline std::vector<uint8_t> encode_frame(
         mp_str(f, kv.first); mp_uint(f, kv.second);
     }
     return f;
+}
+
+// ---------------------------------------------------------------------------
+// XEX1-v2 — the canonical frame dump.
+// ---------------------------------------------------------------------------
+
+// One entry to dump. For a scalar/str/bin/mp entry, `value` is its ALREADY-
+// CANONICAL msgpack bytes (one complete value) — the small-plane bytes as they
+// live in the frame arena (host side: xi::Frame::raw_at) OR re-encoded from the
+// door's typed accessors (plugin side: a temp xi::mp::Writer). Either way they
+// are byte-identical, because the arena and the Writer speak the same canonical
+// profile. For an image entry (tag == XI_FRAME_TAG_IMAGE) `value` is empty and
+// the pixels are inlined from {w,h,c,px} as a `bin` (doc 07 D2 export rule).
+struct V2Entry {
+    std::string          key;
+    uint8_t              tag = XI_FRAME_TAG_MP;
+    std::vector<uint8_t> value;              // canonical bytes (non-image entries)
+    int32_t              w = 0, h = 0, c = 0;   // image descriptor (IMAGE only)
+    const uint8_t*       px = nullptr;          // image pixels (IMAGE only)
+    size_t               px_len = 0;
+};
+
+// Build one XEX1-v2 frame: magic 'XEX1' + a canonical msgpack map
+//   { "v":2, "channel":<str>, "seq":<int>, "frame":{ <key>:<value>, ... } }.
+// The "frame" sub-map is the GENERIC entry dump — its values are spliced
+// verbatim (scalars/str/bin/mp) or emitted as an image descriptor map
+//   { "w":.., "h":.., "c":.., "px":<bin pixels> }.
+// The whole body is 100% standard msgpack; any stock decoder reads it.
+inline std::vector<uint8_t> encode_frame_v2(
+        std::string_view channel, uint64_t seq,
+        const std::vector<V2Entry>& entries) {
+    xi::mp::Writer w;
+    w.map(4);
+    w.key("v");       w.int_(2);
+    w.key("channel"); w.str(channel);
+    w.key("seq");     w.uint_(seq);
+    w.key("frame");   w.map((uint32_t)entries.size());
+    for (const auto& e : entries) {
+        w.key(e.key);
+        if (e.tag == XI_FRAME_TAG_IMAGE) {
+            w.map(4);
+            w.key("w");  w.int_(e.w);
+            w.key("h");  w.int_(e.h);
+            w.key("c");  w.int_(e.c);
+            w.key("px"); w.bin(e.px, e.px_len);
+        } else {
+            // Splice the entry's canonical value bytes onto the wire unchanged —
+            // the memory ≈ wire identity (doc 07). One complete canonical value.
+            w.raw_canonical(e.value.data(), e.value.size());
+        }
+    }
+    std::vector<uint8_t> out = {'X', 'E', 'X', '1'};
+    const xi::mp::Bytes& body = w.bytes();
+    out.insert(out.end(), body.begin(), body.end());
+    return out;
 }
 
 }  // namespace xex1

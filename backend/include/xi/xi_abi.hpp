@@ -254,6 +254,33 @@ public:
     bool has(const char* k) const { return valid() && fi_->tag_of(h_, k) >= 0; }
     int  tag_of(const char* k) const { return valid() ? fi_->tag_of(h_, k) : -1; }
 
+    // Generic index walk — the count()+key_at()+tag_at() primitives a SINK
+    // (expose, record_save) enumerates a sealed frame with WITHOUT any producer
+    // knowledge (doc 07 §2 self-description). key_at returns a borrowed,
+    // NON-nul-terminated view into the frame arena, valid until the host releases
+    // the handle. tag_at is an XI_FRAME_TAG_* value (-1 if out of range).
+    std::optional<std::string_view> key_at(int i) const {
+        if (!valid()) return std::nullopt;
+        int32_t n = 0;
+        const char* k = fi_->key_at(h_, i, &n);
+        if (!k) return std::nullopt;
+        return std::string_view(k, n > 0 ? (size_t)n : 0);
+    }
+    int tag_at(int i) const { return valid() ? fi_->tag_at(h_, i) : -1; }
+
+    // Walk every entry in insertion order as (key, XI_FRAME_TAG_* tag) — the
+    // generic producer-agnostic path. The key is a borrowed arena view.
+    template <class Fn>
+    void for_each(Fn&& fn) const {
+        int n = count();
+        for (int i = 0; i < n; ++i) {
+            int32_t kl = 0;
+            const char* k = valid() ? fi_->key_at(h_, i, &kl) : nullptr;
+            if (!k) continue;
+            fn(std::string_view(k, kl > 0 ? (size_t)kl : 0), fi_->tag_at(h_, i));
+        }
+    }
+
     std::optional<int64_t> i64(const char* k) const {
         int64_t v; if (valid() && fi_->get_i64(h_, k, &v)) return v; return std::nullopt;
     }
@@ -271,6 +298,14 @@ public:
     std::optional<xi_frame_image> image(const char* k) const {
         xi_frame_image img{};
         if (valid() && fi_->get_image(h_, k, &img)) return img;
+        return std::nullopt;
+    }
+    // Raw binary entry bytes — the host resolves inline-arena vs pool-buffer
+    // storage to one borrowed span (D1 storage duality). Valid for the call.
+    std::optional<std::pair<const uint8_t*, int32_t>> bin(const char* k) const {
+        const void* p; int32_t n;
+        if (valid() && fi_->get_bin(h_, k, &p, &n))
+            return std::make_pair(reinterpret_cast<const uint8_t*>(p), n);
         return std::nullopt;
     }
     // Nested canonical msgpack bytes (decode with xi::mp::Reader).

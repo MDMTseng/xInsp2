@@ -224,3 +224,29 @@ target_include_directories(xex1_fixtures_test PRIVATE
 add_test(NAME xex1_fixtures COMMAND xex1_fixtures_test)
 set_tests_properties(xex1_fixtures PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures")
+
+# polaris2 wave-2 step 3 — the memory ≈ wire ≈ disk HEADLINE (docs/new_gen/07 +
+# 08 Wave 2): build a real xi::Frame, dump it to XEX1-v2, and assert the frame's
+# in-memory canonical small plane equals the wire bytes equals a disk readback,
+# byte-for-byte. Header-only (xi::Frame + xi::mp + the v2 encoder); no DLL load.
+add_executable(xex1_v2_identity_test xex1_v2_identity_test.cpp)
+target_include_directories(xex1_v2_identity_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
+add_test(NAME xex1_v2_identity_test COMMAND xex1_v2_identity_test)
+
+# polaris2 wave-2 step 3 — the GENERIC PROOF: the REAL expose DLL walks a sealed
+# frame with zero producer knowledge and emits XEX1 (v2 opt-in / v1 default),
+# captured off the host binary sink and decoded back. Needs the built expose DLL
+# + a host ImagePool (make_host_api + install_frame_abi).
+add_executable(expose_frame_test expose_frame_test.cpp)
+target_include_directories(expose_frame_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
+target_compile_definitions(expose_frame_test PRIVATE
+    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose.dll")
+if(WIN32)
+    target_link_libraries(expose_frame_test PRIVATE Ws2_32)
+endif()
+add_dependencies(expose_frame_test expose)
+add_test(NAME expose_frame_test COMMAND expose_frame_test)

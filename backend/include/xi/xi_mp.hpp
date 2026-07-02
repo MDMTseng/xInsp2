@@ -156,6 +156,18 @@ public:
         buf_.insert(buf_.end(), data, data + len);
     }
 
+    // Splice an already-canonical, self-contained msgpack value (ONE complete
+    // scalar / str / bin / map / array subtree) into the stream VERBATIM — no
+    // re-encoding. This is the frame-dump primitive: an entry's stored canonical
+    // bytes (the in-memory small plane) land on the wire byte-for-byte, so
+    // memory ≈ wire is an identity, not a conversion (doc 07 "boundaries become
+    // copies, not transformations"). The caller guarantees the bytes are exactly
+    // one canonical value already in the max-width profile (e.g. from a frame
+    // arena or another Writer); this method trusts them, it does not validate.
+    void raw_canonical(const uint8_t* p, size_t n) {
+        if (n) buf_.insert(buf_.end(), p, p + n);
+    }
+
     const Bytes& bytes() const { return buf_; }
     Bytes take()               { return std::move(buf_); }
     void clear()               { buf_.clear(); }
