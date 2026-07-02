@@ -49,10 +49,17 @@ public:
     //
     // Image ops example (replace with your actual logic):
     //
-    //   auto src = in.get_image("src");
-    //   auto dst = pool_image(src.width, src.height, 1);
-    //   cv::GaussianBlur(xi::as_cv_mat(src), xi::as_cv_mat(dst), {0, 0}, 2.0);
-    //   return xi::Record().image("blurred", dst);
+    //   auto src = in.get_image("src");                       // read-only INPUT
+    //   auto dst = pool_image(src.width, src.height, 1);       // writable OUTPUT
+    //   cv::threshold(xi::as_cv_read(src), xi::as_cv_write(dst), 128, 255,
+    //                 cv::THRESH_BINARY);
+    //   return xi::Record().image("binary", dst);
+    //
+    // Read the INPUT via as_cv_read (an input is a zero-copy view shared with
+    // other consumers — read it, never mutate it) and produce a SEPARATE OUTPUT
+    // via pool_image + as_cv_write. NEVER do an in-place cv:: op on an input
+    // (e.g. cv::threshold(as_cv_read(src), as_cv_read(src), ...)) — that corrupts
+    // every other consumer's view of the same pool slot.
     //
     // `pool_image` (inherited from xi::Plugin) allocates a fresh slot in
     // the host's ImagePool — cv:: writes into it land there directly,

@@ -43,6 +43,52 @@ inline cv::Mat as_cv_mat(const Image& img) {
                    static_cast<size_t>(img.stride()));
 }
 
+// --- Read/write access-discipline views (external review 02 I.4) ------------
+// OpenCV has no const cv::Mat (a Mat always carries a mutable data pointer), so
+// the read-only-input / writable-output invariant is encoded in the FUNCTION
+// SURFACE instead: as_cv_read yields a view meant for READING an input, and
+// as_cv_write a view for WRITING an output. Shortest correct plugin body:
+//
+//   const xi::Image src = in.get_image("frame");            // input view
+//   xi::Image       dst = pool_image(src.width, src.height, 1);   // output
+//   cv::threshold(xi::as_cv_read(src), xi::as_cv_write(dst), 128, 255, cv::THRESH_BINARY);
+//   return xi::Record().image("binary", dst);
+
+// READ view over an INPUT (or any) image — a cv::Mat over the pixels reached via
+// Image::read(). By contract callers pass it only as a cv:: SOURCE argument; the
+// const Image& parameter is the signal "I am reading this, not writing it".
+inline cv::Mat as_cv_read(const Image& img) {
+    if (img.empty()) return {};
+    int type = CV_8UC(img.channels);
+    return cv::Mat(img.height, img.width, type,
+                   const_cast<uint8_t*>(img.read()),
+                   static_cast<size_t>(img.stride()));
+}
+
+// WRITE view over a WRITABLE OUTPUT image — a cv::Mat over the pixels reached via
+// Image::write(). Returns an EMPTY Mat if `img` is not writable (an input view):
+// writing into an empty Mat is a loud OpenCV error rather than silent corruption
+// of an aliased input, matching the host's image_write returning null for a
+// shared handle. Use only on an output_image()/pool_image() result.
+inline cv::Mat as_cv_write(Image& img) {
+    uint8_t* p = img.write();
+    if (!p || img.empty()) return {};
+    int type = CV_8UC(img.channels);
+    return cv::Mat(img.height, img.width, type, p,
+                   static_cast<size_t>(img.stride()));
+}
+
+// Ergonomic short aliases used in docs / templates: as_cv(src_read) reads, and
+// as_cv(dst_write) writes. Overload resolution picks the write path only for a
+// non-const (writable) Image lvalue; a const/ input Image binds the read path.
+inline cv::Mat as_cv(const Image& img) { return as_cv_read(img); }
+inline cv::Mat as_cv(Image& img) {
+    // A writable output routes to the write view; an input-origin Image (not
+    // writable) falls back to the read view so as_cv(src) on a non-const local
+    // input still reads correctly.
+    return img.writable() ? as_cv_write(img) : as_cv_read(img);
+}
+
 // Copy a cv::Mat into an OWNING xi::Image — the inverse of xi::as_cv_mat().
 // Use this to record / return an intermediate cv::Mat (e.g. a threshold mask or
 // a background-subtraction response) without worrying about the Mat outliving

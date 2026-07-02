@@ -251,6 +251,37 @@ typedef struct xi_imaging_v1 {
     xi_image_handle (*read_image_file)(const char* path);
 } xi_imaging_v1;
 
+/* xi.imaging_rw@1 — the READ/WRITE access-discipline interface for pool images
+ * (external review 02 I.4). The rest of the imaging surface (xi.imaging@1) hands
+ * out a MUTABLE uint8_t* through image_data for EVERY handle, so nothing in the
+ * type system stops a plugin from writing into a shared INPUT and silently
+ * corrupting another consumer's view of the same pool slot. This interface
+ * encodes the read-only-input / writable-output invariant the framework has only
+ * ever documented ("input is read-only by convention"):
+ *
+ *   image_read(h)  -> const uint8_t*  — the blessed way to read pixels of ANY
+ *       handle (input or output). Never permits mutation. Null on a bad handle.
+ *
+ *   image_write(h) -> uint8_t*  — a writable pointer VALID ONLY for a uniquely-
+ *       owned handle (a freshly-created output, refcount == 1). For a SHARED
+ *       handle (an input aliased across consumers, refcount > 1) it returns NULL
+ *       — the strict, correct behaviour: a plugin that wants to mutate must
+ *       allocate its OWN output (image_create) and write there. There is NO
+ *       silent copy-on-write on the hot path — a null return is the contract, so
+ *       an accidental in-place input write fails loudly instead of corrupting a
+ *       neighbour. Null also on a bad handle.
+ *
+ * Both entries route to the SAME pool bytes image_data returns (image_read just
+ * const-qualifies it; image_write adds the uniqueness gate), so a reader through
+ * this door and one through xi.imaging@1 see byte-for-byte identical pixels.
+ * Field order frozen forever; a change ships as xi_imaging_rw_v2. Null on a host
+ * that predates this interface — a caller then falls back to image_data (the
+ * legacy always-mutable pointer) with the by-convention discipline. */
+typedef struct xi_imaging_rw_v1 {
+    const uint8_t* (*image_read)(xi_image_handle h);
+    uint8_t*       (*image_write)(xi_image_handle h);
+} xi_imaging_rw_v1;
+
 /* xi.doc@1 — the in-process JSON-doc capability domain (ABI v3/v4 γ fields),
  * carved as a frozen interface. The host-owned chunk allocator behind a
  * yyjson_mut_doc (so its free routes back to the host and the doc is safe to
@@ -471,6 +502,9 @@ typedef struct xi_host_api {
     /*       compress_image capability, carved in Phase 2).              */
     /*   get_interface("xi.imaging", 1) -> const xi_imaging_v1*  (image   */
     /*       pool + read_image_file, carved in Phase 3).                  */
+    /*   get_interface("xi.imaging_rw", 1) -> const xi_imaging_rw_v1* (the */
+    /*       read-only-input / writable-output access discipline; ext.     */
+    /*       review 02 I.4).                                               */
     /*   get_interface("xi.doc", 1)     -> const xi_doc_v1*  (the in-proc */
     /*       doc allocator + refcount, Phase 3).                          */
     /*   get_interface("xi.emit", 1)    -> const xi_emit_v1*  (emit_record*/

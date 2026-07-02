@@ -55,11 +55,15 @@ public:
         if (it == imgs.end() || it->second.empty()) return out;
         const xi::Image& src = it->second;
 
-        // Make an output image the same size, single-channel.
+        // Make an output image the same size, single-channel. A fresh Image is
+        // a WRITABLE output: write() is its blessed sink accessor.
         xi::Image bin(src.width, src.height, 1);
 
-        const uint8_t* sp = src.data();
-        uint8_t*       dp = bin.data();
+        // Read the INPUT through read() (const — an input is a shared view, never
+        // mutate it) and WRITE the OUTPUT through write(). This encodes the
+        // read-only-input / writable-output invariant; never write into src.
+        const uint8_t* sp = src.read();
+        uint8_t*       dp = bin.write();
         const int total = src.width * src.height * src.channels;
         long long fg = 0;
         // For multi-channel input, threshold against the first channel

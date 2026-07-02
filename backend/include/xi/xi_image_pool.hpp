@@ -190,6 +190,32 @@ public:
         auto* e = lookup(h);
         return e ? e->pixels.data() : nullptr;
     }
+
+    // Read-only pixel pointer — the blessed accessor for ANY handle (input or
+    // output). Same bytes data() returns, const-qualified so it can never be a
+    // mutation path. Backs xi.imaging_rw@1.image_read. Null on a bad handle.
+    const uint8_t* read_data(xi_image_handle h) {
+        auto* e = lookup(h);
+        return e ? e->pixels.data() : nullptr;
+    }
+
+    // Writable pixel pointer VALID ONLY for a uniquely-owned handle (refcount ==
+    // 1 — a freshly-created output that no other consumer aliases). Returns NULL
+    // for a SHARED handle (an input aliased across consumers, refcount > 1): the
+    // strict, correct behaviour (external review 02 I.4). NO silent copy-on-write
+    // — a plugin that wants to mutate a shared input must allocate its own output
+    // via create() and write there. Backs xi.imaging_rw@1.image_write.
+    //
+    // The refcount is read with acquire ordering; a caller holding its own ref
+    // (the contract for touching any handle) means a concurrent release can only
+    // take the count from N to N-1, never resurrect a freed slot — so a count of
+    // 1 observed here genuinely means "this caller is the sole holder".
+    uint8_t* writable_data(xi_image_handle h) {
+        auto* e = lookup(h);
+        if (!e) return nullptr;
+        if (e->refcount.load(std::memory_order_acquire) != 1) return nullptr;
+        return e->pixels.data();
+    }
     int32_t width(xi_image_handle h) {
         auto* e = lookup(h);  return e ? e->width  : 0;
     }
@@ -488,6 +514,23 @@ public:
     // the field forever). Process-stable address (Meyers singleton), built lazily
     // from canonical_host_api() — no static-init ordering hazard, no recursion
     // (building the table only STORES &get_interface_impl, never calls it).
+    // xi.imaging_rw@1 — the read/write access-discipline interface (external
+    // review 02 I.4). image_read const-qualifies the pool bytes; image_write
+    // gates on unique ownership (refcount == 1) and returns null for a shared
+    // input. Stable free-function trampolines so the interface entries are
+    // process-stable addresses a plugin may cache. Both reach the SAME pool bytes
+    // as image_data.
+    static const uint8_t* image_read_impl(xi_image_handle h) {
+        return ImagePool::instance().read_data(h);
+    }
+    static uint8_t* image_write_impl(xi_image_handle h) {
+        return ImagePool::instance().writable_data(h);
+    }
+    static const xi_imaging_rw_v1* imaging_rw_v1_iface() {
+        static const xi_imaging_rw_v1 iface = { &image_read_impl, &image_write_impl };
+        return &iface;
+    }
+
     static const xi_imaging_v1* imaging_v1_iface() {
         static const xi_imaging_v1 iface = [] {
             const xi_host_api* h = canonical_host_api();
@@ -606,6 +649,8 @@ public:
             return preview_v1_iface();
         if (std::strcmp(id, "xi.imaging") == 0 && version == 1)
             return imaging_v1_iface();
+        if (std::strcmp(id, "xi.imaging_rw") == 0 && version == 1)
+            return imaging_rw_v1_iface();
         if (std::strcmp(id, "xi.doc") == 0 && version == 1)
             return doc_v1_iface();
         if (std::strcmp(id, "xi.emit") == 0 && version == 1)
