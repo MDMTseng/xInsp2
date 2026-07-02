@@ -4221,14 +4221,20 @@ class Ba extends HTMLElement {
 }
 class Xa extends HTMLElement {
   connectedCallback() {
-    var t;
-    this.body = Vn(this, ((t = this.config) == null ? void 0 : t.title) || "Throughput"), this.buf = [], this.last = -1, this.body.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px", this.big = document.createElement("div"), this.big.style.cssText = "font-size:clamp(18px,6vw,44px);font-weight:700;color:#9ad", this.sub = document.createElement("div"), this.sub.style.cssText = "font-size:12px;color:#888", this.body.append(this.big, this.sub);
+    var t, e;
+    this.body = Vn(this, ((t = this.config) == null ? void 0 : t.title) || "Throughput"), this.windowSec = ((e = this.config) == null ? void 0 : e.windowSec) || 60, this.stamps = [], this.lastResult = -1, this.lastCompute = null, this.body.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px", this.big = document.createElement("div"), this.big.style.cssText = "font-size:clamp(18px,6vw,44px);font-weight:700;color:#9ad", this.sub = document.createElement("div"), this.sub.style.cssText = "font-size:12px;color:#888", this.body.append(this.big, this.sub), this.timer = setInterval(() => this.render(), 1e3);
   }
+  disconnectedCallback() { this.timer && (clearInterval(this.timer), this.timer = 0); }
   feed(t) {
-    if (t.run_id !== this.last && t.run_ms != null && (this.last = t.run_id, this.buf.push(t.run_ms), this.buf.length > 30 && this.buf.shift()), this.buf.length) {
-      const n = this.buf.reduce((r, i) => r + i, 0) / this.buf.length;
-      this.big.textContent = `${(6e4 / n).toFixed(0)} /min`, this.sub.textContent = `cycle ${n.toFixed(1)} ms`;
-    }
+    const e = t.result;
+    e && e.run_id != null && e.run_id !== this.lastResult && (this.lastResult = e.run_id, this.stamps.push(Date.now())), t.run_ms != null && (this.lastCompute = t.run_ms), this.render();
+  }
+  render() {
+    var i;
+    const t = Date.now(), e = t - this.windowSec * 1e3;
+    for (; this.stamps.length && this.stamps[0] < e;) this.stamps.shift();
+    const n = this.stamps.length, r = n ? Math.max((t - this.stamps[0]) / 1e3, 1) : this.windowSec, s = n > 1 ? n / r * 60 : 0;
+    this.big.textContent = `${s.toFixed(0)} /min`, this.sub.textContent = `${n} in ${this.windowSec}s` + (this.lastCompute != null ? ` · compute ${((i = this.lastCompute.toFixed) == null ? void 0 : i.call(this.lastCompute, 1)) ?? this.lastCompute} ms` : "");
   }
 }
 class Va extends HTMLElement {

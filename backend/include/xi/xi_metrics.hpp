@@ -5,9 +5,15 @@
 //
 //   * monotonic frame COUNTERS   — total / ok / error (process-uptime cumulative,
 //                                  never reset; a monitor derives throughput itself).
-//   * a fixed-bucket LATENCY     — per-frame inspect latency, lock-free atomics only
-//     HISTOGRAM                    (the codebase favours atomics + solved-lock
-//                                  patterns; there is nothing to lock here).
+//   * a fixed-bucket COMPUTE     — per-frame script inspect COMPUTE time, lock-free
+//     HISTOGRAM                    atomics only (the codebase favours atomics +
+//                                  solved-lock patterns; nothing to lock here).
+//                                  NOTE: this is inspect compute ONLY — it excludes
+//                                  queue wait, emit-gate wait, staged sink flush,
+//                                  JPEG encode and WS send. Exported under the key
+//                                  `inspect_compute_ms` (was `latency_ms`; renamed
+//                                  per external review 05 #7 so consumers can't
+//                                  misread it as cycle/decision latency).
 //
 // Recorded once per inspection in run_one_inspection (service_main.cpp, right
 // where the per-frame `dt_ms` is already computed) and exported as a JSON blob
@@ -70,8 +76,14 @@ public:
     // Serialize a point-in-time snapshot as a JSON object into `out` (appended).
     // Shape (stable, documented in ws-protocol.md):
     //   {"frames_total":N,"frames_ok":N,"frames_error":N,
-    //    "latency_ms":{"count":N,"sum_ms":F,"mean_ms":F,
+    //    "inspect_compute_ms":{"count":N,"sum_ms":F,"mean_ms":F,
     //      "buckets":[{"le":0.5,"count":n},...,{"le":"inf","count":n}]}}
+    //
+    // BREAKING (staged, not on master): the histogram key was `latency_ms`. It was
+    // renamed to `inspect_compute_ms` because the value is script inspect COMPUTE
+    // time only — it excludes queue wait, emit-gate wait, staged sink flush, JPEG
+    // encode and WS send. The old `latency_ms` name misread as cycle/decision time
+    // (external review 05 P0/#7).
     void snapshot_json(std::string& out) const {
         uint64_t total = frames_total_.load(std::memory_order_relaxed);
         uint64_t ok    = frames_ok_.load(std::memory_order_relaxed);
@@ -81,7 +93,7 @@ public:
         out += "{\"frames_total\":" + std::to_string(total);
         out += ",\"frames_ok\":" + std::to_string(ok);
         out += ",\"frames_error\":" + std::to_string(err);
-        out += ",\"latency_ms\":{\"count\":" + std::to_string(total);
+        out += ",\"inspect_compute_ms\":{\"count\":" + std::to_string(total);
         out += ",\"sum_ms\":" + fmt3(sumus / 1000.0);
         out += ",\"mean_ms\":" + fmt3(total ? (double)sumus / 1000.0 / (double)total : 0.0);
         out += ",\"buckets\":[";

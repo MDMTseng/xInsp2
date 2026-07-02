@@ -8,7 +8,7 @@
 //   2. Latency histogram: frames land in the right fixed bucket (incl. the +inf
 //      overflow), and the buckets sum to frames_total.
 //   3. Snapshot serializes: snapshot_json produces a blob that PARSES as JSON and
-//      carries the documented keys/values (frames_*, latency_ms.{count,sum,mean},
+//      carries the documented keys/values (frames_*, inspect_compute_ms.{count,sum,mean},
 //      the bucket array with an "inf" overflow entry).
 //   4. Concurrency smoke: N threads recording concurrently lose no increments
 //      (lock-free counters) — heavy under XINSP2_STRESS_SCALE.
@@ -99,7 +99,7 @@ int main() {
             CHECK(yyjson_get_uint(yyjson_obj_get(root, "frames_ok"))    == 2);
             CHECK(yyjson_get_uint(yyjson_obj_get(root, "frames_error")) == 1);
 
-            yyjson_val* lat = yyjson_obj_get(root, "latency_ms");
+            yyjson_val* lat = yyjson_obj_get(root, "inspect_compute_ms");
             CHECK(yyjson_is_obj(lat));
             CHECK(yyjson_get_uint(yyjson_obj_get(lat, "count")) == 3);
             // mean = (1+4+10)/3 = 5.0 ms; sum = 15.0.
