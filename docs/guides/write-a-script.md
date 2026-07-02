@@ -24,29 +24,28 @@ uses, with pointers into the deeper reference for each piece.
 ## The shape
 
 ```cpp
-#include <xi/xi.hpp>           // xi::Image, xi::Param, VAR, xi::Record, OpenCV
+#include <xi/xi.hpp>           // xi::Image, xi::Param, xi::Record (OpenCV-free umbrella)
+#include <xi/xi_cv.hpp>        // OpenCV interop — needed because we call cv:: below
 #include <xi/xi_use.hpp>
+#include <xi/xi_result.hpp>    // xi::ok / xi::ng — the per-run verdict
 
 // File-scope: parameters tunable from the UI without recompile.
 xi::Param<int>    thresh{ "threshold", 128, {0, 255} };
 xi::Param<double> sigma { "sigma",     2.0, {0.1, 10.0} };
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int frame) {
-    auto& det = xi::use("detector0");
-
-    auto t = xi::current_trigger();     // the record a source emitted
+// Explicit-trigger entry (preferred). The host passes the trigger in as `t`,
+// so it's self-contained — no ambient thread_local state. `frame` is the id.
+XI_INSPECT_ENTRY(t, frame) {
+    (void)frame;
     if (!t.is_active()) return;         // skip synthetic timer ticks
-    auto img = t.image("frame");
+    auto img = t.image("frame");        // the frame a source emitted
     if (img.empty()) return;
 
-    VAR(input, img);                                 // declares `input` (no output — see note below)
-
-    // Image ops: call cv:: directly. xi::Image::as_cv_mat() returns a
-    // non-owning view over the same bytes; for outputs that you want
-    // the next plugin to consume zero-copy, use a fresh
-    // pool-backed Image and write into its as_cv_mat().
-    cv::Mat src = img.as_cv_mat();
+    // Image ops: call cv:: directly. The free `xi::as_cv_mat(img)` (from
+    // <xi/xi_cv.hpp>) returns a non-owning view over the same bytes; for
+    // outputs you want the next plugin to consume zero-copy, use a fresh
+    // pool-backed Image and write into `xi::as_cv_mat()` of it.
+    cv::Mat src = xi::as_cv_mat(img);
     cv::Mat gray_mat;
     cv::cvtColor(src, gray_mat, cv::COLOR_RGB2GRAY);
 
@@ -54,19 +53,27 @@ void xi_inspect_entry(int frame) {
     int k = (int)(sigma * 2 + 1) | 1;        // odd-sized kernel
     cv::GaussianBlur(gray_mat, blur_mat, cv::Size(k, k), (double)sigma);
 
-    // Wrap a cv::Mat back as xi::Image so it crosses the plugin ABI.
-    // For inspection scripts this is a one-shot copy; project plugins
-    // skip it by using xi::Image::create_in_pool(host(), ...) + cv::
-    // writing directly into pool memory (see docs/guides/write-a-plugin.md).
-    xi::Image blur(blur_mat.cols, blur_mat.rows, 1, blur_mat.data);
+    // Copy a cv::Mat back into an OWNING xi::Image so it crosses the plugin
+    // ABI. For inspection scripts this one-shot copy is fine; project plugins
+    // skip it by writing cv:: output straight into pool memory (see
+    // docs/guides/write-a-plugin.md).
+    xi::Image blur = xi::from_cv_mat(blur_mat);
 
-    auto result = det.process(xi::Record()
+    auto result = xi::use("detector0").process(xi::Record()
         .image("gray", blur)
         .set("threshold", (int)thresh));             // slider value, no recompile
 
     int blob_count = result["blob_count"].as_int();
+
+    // Surface per-run values/images to a UI via the `expose` sink (this
+    // replaces the old VAR path). Requires an `expose` instance in project.json.
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "inspection")
+        .image("input", img)
+        .set("blob_count", blob_count));
+
     if (blob_count <= 3) xi::ok(1, "clean");          // the run's verdict
-    else                 xi::ng(1, "too many blobs"); // (VAR no longer outputs)
+    else                 xi::ng(1, "too many blobs");
 }
 ```
 
@@ -77,7 +84,7 @@ That's a full script. Three constructs do the heavy lifting:
 | `xi::use("name")` → `xi::UseProxy&` | Proxy to a backend-managed instance (camera, model, etc.) | Instance lives across hot-reloads, persisted by host |
 | `xi::Param<T>` | Tunable scalar with UI slider | Per script DLL, restored from `project.json` on reload |
 | `xi::use("expose").process(rec)` | Surface per-run values/images to a UI (replaces VAR) — see [below](#surfacing-output--the-expose-plugin) | Per `inspect_entry` invocation |
-| `VAR(name, expr)` | **Legacy no-op.** Expands to `auto name = expr;` and publishes nothing — see [below](#varname-expr--legacy-no-op) | Per `inspect_entry` invocation |
+| `VAR(name, expr)` | **Legacy no-op.** Expands to `auto name = expr;` and publishes nothing — see [appendix](#appendix-legacy-varemit-compatibility) | Per `inspect_entry` invocation |
 
 > **VAR is legacy — surface output through the `expose` plugin.** The core's VAR
 > value-tracking, the `vars` wire message, and the old JPEG image-preview path were
@@ -293,15 +300,9 @@ void xi_inspect_entry(int frame) {
 > with no extra work in your script. Any plugin you want frame-ordered the same way
 > just sets `"sink": true` — see [`../reference/c-abi.md`](../reference/c-abi.md).
 
-### `VAR(name, expr)` — legacy no-op
-
-`VAR` / `EMIT` still **compile** so old scripts keep building, but they publish
-nothing — `VAR(name, expr)` expands to roughly `auto name = expr;` (a plain local
-declaration) and `EMIT(name)` is a bare reference. Because `VAR` *declares*, you
-**cannot** `VAR(count, count)` over an existing value or `VAR(count, …)` twice in
-one scope (cl.exe fires C2374; the backend appends a *"duplicate VAR(count) … use
-EMIT"* hint). None of this surfaces anything to a UI anymore — for that, use the
-`expose` plugin above. New scripts have no reason to use `VAR`/`EMIT` at all.
+> **Legacy `VAR` / `EMIT`?** They no longer surface anything. See
+> [Appendix: legacy `VAR`/`EMIT`](#appendix-legacy-varemit-compatibility) at the
+> end of this guide — new scripts should ignore them and use `expose` above.
 
 ## `xi::result(code, msg)` — the one per-run verdict
 
@@ -976,3 +977,25 @@ the full path and sidesteps search rules entirely.
   …).
 - [`examples/`](../../examples/) — working scripts:
   `defect_detection.cpp`, `use_demo.cpp`, `user_with_instance.cpp`.
+
+---
+
+## Appendix: legacy `VAR`/`EMIT` (compatibility)
+
+> **You do not need this for new scripts.** Prefer `XI_INSPECT_ENTRY` (top of
+> this guide) and surface output through the `expose` plugin. This appendix
+> exists only to explain what old scripts that still contain `VAR`/`EMIT` do.
+
+`VAR` / `EMIT` still **compile** so old scripts keep building, but they publish
+nothing — `VAR(name, expr)` expands to roughly `auto name = expr;` (a plain local
+declaration) and `EMIT(name)` is a bare reference. Because `VAR` *declares*, you
+**cannot** `VAR(count, count)` over an existing value or `VAR(count, …)` twice in
+one scope (cl.exe fires C2374; the backend appends a *"duplicate VAR(count) … use
+EMIT"* hint). None of this surfaces anything to a UI anymore — for that, use the
+`expose` plugin. New scripts have no reason to use `VAR`/`EMIT` at all.
+
+The legacy entry signature `XI_SCRIPT_EXPORT void xi_inspect_entry(int frame)`
+paired with `xi::current_trigger()` also still works (the host falls back to it
+when the `XI_INSPECT_ENTRY`-generated symbol is absent) — see
+[The entry point](#the-entry-point--xi_inspect_entry-preferred-vs-the-legacy-signature)
+above. New scripts should use `XI_INSPECT_ENTRY(t, frame)` instead.

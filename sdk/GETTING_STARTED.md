@@ -2,26 +2,75 @@
 
 Build your first xInsp2 plugin from zero in about 5 minutes.
 
+> **The five-minute path is _in-project_ authoring.** The recommended way
+> to start is to create a plugin **inside a project**: its source lives under
+> `<project>/plugins/<name>/`, and the project declares it explicitly in
+> `project.json`. Project plugins are **trusted** — there is no certification
+> step to clear before your first run. The standalone / external-folder
+> workflow (scaffold a plugin in a sibling folder and load it globally) is a
+> more advanced setup; it lives at the end of this doc under
+> [Advanced: standalone plugins](#advanced-standalone-plugins-external-folder).
+
 ---
 
 ## Prerequisites
 
-- A cloned xInsp2 repo (you're inside it now). Backend must be built:
-  the cert step is what makes loading a plugin "safe by default" and it
-  needs `xinsp-backend.exe`.
+- A cloned xInsp2 repo (you're inside it now) with the backend built —
+  you need `xinsp-backend.exe` to load and run anything.
 - CMake ≥ 3.16
 - A C++ compiler (MSVC 2019+ on Windows, gcc/clang on Linux)
 - Node.js (only needed for the scaffold tool and UI tests)
 - Optional: VS Code with the xInsp2 extension built/loaded
 
-That's it — no npm dependencies for the plugin itself.
+That's it — no npm dependencies for the plugin itself. Project plugins are
+trusted on load: no certification is required for the first-run path.
 
 ---
 
-## 1. Pick a folder for your plugins
+## The project model in one minute
+
+A **project** is a folder with a `project.json`. It declares, explicitly:
+
+- **`instances`** — the configured uses of plugins your script calls by name
+  (e.g. an instance named `expose` of the `expose` plugin).
+- **`plugins`** — the project-local plugins to build, each a `{ "path", "compile" }`
+  entry. Source lives under `<project>/plugins/<path>/`.
+
+```jsonc
+{
+  "name": "my_project",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam0",   "plugin": "my_source" },
+    { "name": "expose", "plugin": "expose" }
+  ],
+  "plugins": {
+    "my_source": { "path": "my_source", "compile": true }
+  }
+}
+```
+
+There is **no folder auto-discovery for project use** — a project plugin is
+used because it is *declared here*, not because it happens to sit in a scanned
+directory. (Shipped plugins like `expose` are always available and just need an
+`instances` entry.) The standalone parent-folder scan described at the end of
+this doc is a separate, global mechanism.
+
+---
+
+## Advanced: standalone plugins (external folder)
+
+> The steps below (1–4) are the **standalone** workflow: a plugin authored in
+> its own folder outside any project and loaded **globally** into the host via a
+> parent-folder scan. This is optional and more advanced than the in-project
+> path above — reach for it when you want one plugin available across many
+> projects. For your first plugin, prefer in-project authoring (declare it in
+> `project.json`); come back here when you outgrow that.
+
+### 1. Pick a folder for your plugins
 
 It can be anywhere — your home dir, a sibling of the xInsp2 checkout,
-inside a different repo. Plugins are *external* by design.
+inside a different repo. A standalone plugin lives outside any single project.
 
 The recommended layout is to keep xInsp2 and your plugins as siblings
 so cmake's auto-detect just works:
@@ -45,7 +94,7 @@ set XINSP2_ROOT=C:\path\to\xInsp2
 
 ---
 
-## 2. Scaffold a new plugin
+### 2. Scaffold a new plugin
 
 The shell wrapper is the shortest path:
 
@@ -81,7 +130,7 @@ protocol diagram, common patterns, pitfalls. Open it.
 
 ---
 
-## 3. Build it
+### 3. Build it
 
 ```bat
 cd my_first_plugin
@@ -97,7 +146,7 @@ walking up the tree). No setup beyond the env var.
 
 ---
 
-## 4. Load it into xInsp2
+### 4. Load it into xInsp2
 
 Pick one — all three accomplish the same thing:
 
@@ -124,7 +173,7 @@ gate. (Write your own tests to gain confidence; see step 7.)
 
 ---
 
-## 5. See it in VS Code
+### 5. See it in VS Code
 
 In the **Instances** view, click the `+` icon. You'll get a QuickPick
 listing all registered plugins — pick `my_first_plugin`. Type an
@@ -136,7 +185,7 @@ click **Apply** — your C++ code runs.
 
 ---
 
-## 6. Edit. Rebuild. Hot reload.
+### 6. Edit. Rebuild. Hot reload.
 
 Change anything in `my_first_plugin.cpp`, then:
 
@@ -150,7 +199,7 @@ restart, no project reopen.
 
 ---
 
-## 7. Test it
+### 7. Test it
 
 ### Native (C++) — fast, headless
 
