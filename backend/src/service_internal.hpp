@@ -143,6 +143,16 @@ struct StagedEmit {
     xi::TriggerEvent rec;      // images map + meta_doc; host owns one ref to each
 };
 extern thread_local std::vector<StagedEmit> g_staged;
+
+// staged-sink drain / flush (definitions in service_main.cpp).
+void drain_staged_emits_();
+void flush_staged_emits_(int64_t run_id);
+// RAII backstop: drains any staged-but-unflushed sink calls on scope exit.
+struct StagedEmitGuard { ~StagedEmitGuard() { drain_staged_emits_(); } };
+
+// Watchdog slot arm/disarm (definitions in service_main.cpp).
+int  wd_arm(int64_t deadline);
+void wd_disarm(int slot);
 extern thread_local const xi::TriggerEvent* g_current_trigger;
 
 struct RunResult { int code = 0; std::string msg; bool set = false; };
