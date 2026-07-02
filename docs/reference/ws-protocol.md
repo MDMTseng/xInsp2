@@ -475,7 +475,10 @@ Serves the project's HMI dashboard: `<project>/dashboard.json` (or
 `dashboard.<name>.json` when `name` is given), embedded verbatim. So the HMI only
 ever needs the BE's WS URL — it asks the BE for its dashboard + all data, with no
 filesystem coupling. `name` is token-guarded (no path traversal); a missing file →
-`found:false` (the HMI then keeps its static fallback).
+`found:false` (the HMI then keeps its static fallback). The read is size-capped
+(8 MiB): a file over the cap replies `found:false, truncated:true` and omits the
+`dashboard` body (a partial slurp would be invalid JSON), so a pathological or
+corrupt dashboard file can never drive an unbounded allocation.
 
 Continuous mode runs `parallelism.dispatch_threads` worker threads inside
 the backend (default 1; see `docs/guides/write-a-script.md` → Parallel
@@ -515,6 +518,7 @@ health since the most recent `cmd:start`:
 | `dropped` | events dropped on overflow since last `cmd:start` (aggregate across lanes) |
 | `dropped_lifetime` | events dropped over the whole **backend process uptime** — does NOT reset on `cmd:start` |
 | `queue_depth_high_watermark_lifetime` | peak single-lane queue depth over the whole **process uptime** — does NOT reset on `cmd:start` |
+| `malformed_cmd_rejected_lifetime` | malformed / unparseable command envelopes rejected by the dispatch shell over the whole **process uptime** — does NOT reset on `cmd:start` (see *Error handling*) |
 | `last_emit_age_ms` | ms since ANY source last emitted a record (monotonic); `-1` if none yet. The "is the line still getting frames" signal — a stalled camera otherwise stops the line silently |
 | `sources` | `[{ source, last_emit_age_ms }]` — per-source emit age, to spot WHICH of N cameras stalled. Scoped to the current project: the per-source list is pruned on a project/script-reload boundary (so source names from a closed project don't linger), then repopulates as the new project's sources emit |
 
@@ -1003,9 +1007,21 @@ are also emitted on the `log` channel as `level: warn` during
 
 ## Error handling
 
-- Malformed JSON: backend sends `{ "type": "log", "level": "error", "msg": "..." }` and keeps the connection open.
+- Malformed / unparseable envelope: if a numeric `id` is still recoverable from
+  the payload (e.g. a valid client that sent one bad field, or the wrong `type`),
+  the backend replies `rsp` with `ok: false, error: "malformed command"` carrying
+  that `id`, so the client is not left blocking to its request timeout. When no
+  `id` can be recovered (none present, or one that overflows int64) there is
+  nothing to correlate to, so the backend falls back to a `{ "type": "log",
+  "level": "error", "msg": "malformed cmd: ..." }` line. Either way the connection
+  stays open and a process-uptime reject counter
+  (`dispatch_stats.malformed_cmd_rejected_lifetime`) is incremented.
 - Unknown command name: `rsp` with `ok: false, error: "unknown command: xyz"`.
 - Exception inside a command handler: `rsp` with `ok: false, error: <what()>`.
+  A single top-level guard around command dispatch converts **any** exception
+  escaping a handler (including `std::bad_alloc`) into this structured reply
+  correlated to the command `id`, rather than letting it unwind out of the serve
+  loop and terminate the backend.
 - Script runtime exception: emitted as an `event` with `name: "run_error"` and `data: { "what": "..." }`. The `rsp` for the `run` command still returns `ok: true` if the run started — failure is reported via the event channel so partial vars can still be delivered.
 
 ---
@@ -1078,7 +1094,7 @@ in full detail above. One-line purpose per entry; args follow the same
 
 | Command | Purpose |
 |---|---|
-| `crash_reports` | Return the JSON crash reports written by previous fatal crashes (from `%TEMP%/xinsp2/crashdumps/*.json`), newest-first. |
+| `crash_reports` | Return the JSON crash reports written by previous fatal crashes (from `%TEMP%/xinsp2/crashdumps/*.json`), newest-first. Each report body is read with an 8 MiB size cap; a file over the cap is listed as `{ "file", "truncated": true }` with no `report` body instead of being slurped unbounded. |
 | `clear_crash_reports` | Delete all crash JSON files from the dump directory. Reply: `{ "removed": N }`. |
 
 #### Watchdog

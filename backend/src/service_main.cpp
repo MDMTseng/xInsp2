@@ -301,25 +301,29 @@ static const std::unordered_map<std::string_view, HandlerFn> g_cmd_table = {
     {"set_toolchain_override", cmd_set_toolchain_override_},
 };
 
+// One dispatch shell (adoption-map item 1 / review 09 findings 1-2). The parse,
+// malformed-envelope handling, handler lookup, and the top-level exception guard
+// all live in xp::dispatch_command_guarded; this is its only production wiring.
+// A handler that throws now becomes `rsp ok:false` correlated to the command id
+// (the documented contract, ws-protocol.md "Error handling") instead of escaping
+// the serve loop into std::terminate. A malformed envelope with a recoverable id
+// gets a correlated error rather than stalling the client to its timeout, and
+// every malformed reject bumps the counter surfaced by dispatch_stats.
 static void handle_command(xi::ws::Server& srv, std::string_view text) {
-    auto parsed = xp::parse_cmd(text);
-    if (!parsed) {
-        xp::LogMsg lm;
-        lm.level = "error";
-        lm.msg   = std::string("malformed cmd: ") + std::string(text.substr(0, 128));
-        srv.send_text(lm.to_json());
-        return;
-    }
-
-    const auto& name = parsed->name;
-    const int64_t id = parsed->id;
-
-    auto it = g_cmd_table.find(name);
-    if (it != g_cmd_table.end()) {
-        it->second(srv, id, &*parsed);
-    } else {
-        send_rsp_err(srv, id, std::string("unknown command: ") + name);
-    }
+    xp::dispatch_command_guarded(
+        text,
+        /*send_err=*/[&](int64_t id, std::string msg) { send_rsp_err(srv, id, std::move(msg)); },
+        /*send_log=*/[&](std::string msg) {
+            xp::LogMsg lm; lm.level = "error"; lm.msg = std::move(msg);
+            srv.send_text(lm.to_json());
+        },
+        /*on_reject=*/[] { g_eng.malformed_cmd_rejected.fetch_add(1, std::memory_order_relaxed); },
+        /*invoke=*/[&](std::string_view name, int64_t id, const xp::ParsedCmd* parsed) -> bool {
+            auto it = g_cmd_table.find(name);
+            if (it == g_cmd_table.end()) return false;
+            it->second(srv, id, parsed);
+            return true;
+        });
 }
 
 

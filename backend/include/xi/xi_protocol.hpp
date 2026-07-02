@@ -15,10 +15,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -337,6 +339,76 @@ inline std::optional<ParsedCmd> parse_cmd(std::string_view json) {
     }
 
     return out;
+}
+
+// Best-effort recovery of a command's numeric `id` from an envelope that
+// parse_cmd() REJECTED (wrong/missing `type`, missing `name`, etc.). Returns the
+// id only when one is present and parseable, so an otherwise-malformed command
+// can still get a CORRELATED error reply instead of stalling the client to its
+// timeout (review 09 finding 2). Returns nullopt when there is genuinely nothing
+// to correlate to (no id, or an id that overflows int64 — e.g. a JS bigint), in
+// which case the caller falls back to a log-only reject.
+inline std::optional<int64_t> recover_cmd_id(std::string_view json) {
+    std::string v;
+    const char* after;
+    if (!detail::find_key(json.data(), json.data() + json.size(), "id", v, after))
+        return std::nullopt;
+    detail::strip_quotes(v);   // tolerate a quoted "id":"7" as well as bare 7
+    try {
+        size_t pos = 0;
+        long long r = std::stoll(v, &pos);
+        return r;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// The single dispatch shell (adoption-map item 1 / review 09 findings 1-2).
+// Runs the whole command lifecycle behind ONE top-level guard so that:
+//   * any std::exception (or unexpected throw) escaping a handler becomes a
+//     structured `rsp` ok:false correlated to the command id — the contract
+//     docs/reference/ws-protocol.md already promises — instead of unwinding out
+//     of the serve loop into std::terminate (whole-backend death);
+//   * a malformed envelope replies with a correlated error when an id is
+//     recoverable, else logs; either way it counts a reject.
+//
+// Parameterised on its side effects (not on ws::Server) so the guard itself is
+// unit-testable with fakes; the production wiring in service_main.cpp is the
+// only real instantiation. Contracts:
+//   send_err(int64_t id, std::string msg)   — emit rsp ok:false with `msg`.
+//   send_log(std::string msg)               — emit a log-only line (no id to
+//                                             correlate to).
+//   on_reject()                             — bump the visible malformed-cmd
+//                                             reject counter.
+//   invoke(name, id, parsed) -> bool        — look up & call a handler; false
+//                                             means "no such command". MUST let
+//                                             a handler throw propagate here.
+template <class SendErr, class SendLog, class OnReject, class Invoke>
+inline void dispatch_command_guarded(std::string_view text,
+                                     SendErr&&  send_err,
+                                     SendLog&&  send_log,
+                                     OnReject&& on_reject,
+                                     Invoke&&   invoke) {
+    auto parsed = parse_cmd(text);
+    if (!parsed) {
+        on_reject();
+        if (auto id = recover_cmd_id(text)) {
+            send_err(*id, std::string("malformed command"));
+        } else {
+            send_log(std::string("malformed cmd: ") +
+                     std::string(text.substr(0, 128)));
+        }
+        return;
+    }
+    const int64_t id = parsed->id;
+    try {
+        if (!invoke(std::string_view(parsed->name), id, &*parsed))
+            send_err(id, std::string("unknown command: ") + parsed->name);
+    } catch (const std::exception& e) {
+        send_err(id, std::string(e.what()));
+    } catch (...) {
+        send_err(id, std::string("unknown error in command handler"));
+    }
 }
 
 // Extract a single string field from a small JSON object. Used by command
