@@ -544,9 +544,10 @@ export function activate(context: vscode.ExtensionContext) {
     const verdictStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
     verdictStatus.command = 'xinsp2.resetVerdicts';
     context.subscriptions.push(verdictStatus);
-    // Throttle OK-class output logging so a fast continuous stream can't flood the
-    // channel; ng/crashed/dropped/no_verdict lines are always logged.
+    // Throttle OK-class + run_finished output logging so a fast continuous stream
+    // can't flood the channel; ng/crashed/dropped/no_verdict lines are always logged.
     let lastOkLogMs = 0;
+    let lastFinishLogMs = 0;
     const updateVerdictStatus = () => {
         const t = verdictTally;
         if (t.total === 0) { verdictStatus.hide(); return; }
@@ -1209,12 +1210,17 @@ export function activate(context: vscode.ExtensionContext) {
             const what = msg.data?.what ?? 'unknown error';
             output.appendLine(`[run${rid != null ? ' #' + rid : ''}] ERROR: ${what}`);
         } else if (msg.type === 'event' && msg.name === 'run_finished') {
-            // Bracket close — inspect COMPUTE time only (NOT cycle latency). Kept
-            // as a debug line; the verdict already surfaced via run_result.
+            // Normal bracket close (run_error fires instead of this on a throw).
+            // The verdict already surfaced via run_result, so this only emits an
+            // occasional, rate-limited compute-timing line — inspect COMPUTE time
+            // only, NOT cycle latency — so continuous mode can't flood the channel.
             const f = parseRunFinished(msg);
-            if (f.run_id != null)
+            const now = Date.now();
+            if (f.run_id != null && now - lastFinishLogMs > 1000) {
+                lastFinishLogMs = now;
                 output.appendLine(`[run #${f.run_id}] finished`
                     + (f.inspect_compute_us != null ? ` (compute ${(f.inspect_compute_us / 1000).toFixed(2)}ms)` : ''));
+            }
         } else if (msg.type === 'event' && msg.name === 'state_dropped') {
             // Hot-reload dropped the persisted xi::state() because the new DLL
             // declares a different state-schema version. The developer MUST see
