@@ -848,6 +848,15 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_doc_coverage.py)
     set_tests_properties(doc_coverage PROPERTIES LABELS "docs")
+    # retired_terms: the mirror of doc_coverage — fails if a RETIRED API token
+    # (VAR(/EMIT( macros, the legacy xi_inspect_entry(int) entry) appears on a
+    # blessed copy-paste surface (docs/guides, docs/reference, overview, README,
+    # the generated-project template in the VS Code extension) outside the
+    # tools/.retired-terms-allow list. Same pure-stdlib Python, same "docs" label.
+    add_test(NAME retired_terms
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_retired_terms.py)
+    set_tests_properties(retired_terms PROPERTIES LABELS "docs")
 else()
     message(STATUS "doc_coverage ctest skipped: no Python3 interpreter found")
 endif()

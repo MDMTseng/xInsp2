@@ -706,18 +706,18 @@ XI_PLUGIN_IMPL(MockCamera)
 
 ```cpp
 #include <xi/xi.hpp>
+#include <xi/xi_cv.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_result.hpp>
 
 xi::Param<int> thresh{"threshold", 128, {0, 255}};
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int frame) {
-    auto t = xi::current_trigger();
-    if (!t.is_active()) return;
-
+XI_INSPECT_ENTRY(t, frame) {
     auto img = t.image("frame");
+    if (img.empty()) { xi::result(0, "missing frame"); return; }
+
     cv::Mat gray;
-    cv::cvtColor(img.as_cv_mat(), gray, cv::COLOR_RGB2GRAY);
+    cv::cvtColor(xi::as_cv_mat(img), gray, cv::COLOR_RGB2GRAY);
 
     int t_val = (int)thresh;  // slider
     cv::Mat bin;

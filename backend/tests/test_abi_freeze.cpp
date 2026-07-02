@@ -146,6 +146,11 @@ XI_FREEZE_IFACE(xi_imaging_v1, image_channels,  48, int32_t         (*)(xi_image
 XI_FREEZE_IFACE(xi_imaging_v1, image_stride,    56, int32_t         (*)(xi_image_handle));
 XI_FREEZE_IFACE(xi_imaging_v1, read_image_file, 64, xi_image_handle (*)(const char*));
 
+// xi.imaging_rw@1 — read/write access discipline (ext review 02 I.4) = 2 entries.
+static_assert(sizeof(xi_imaging_rw_v1) == 2 * sizeof(void*), "xi_imaging_rw_v1 size changed (frozen @1)");
+XI_FREEZE_IFACE(xi_imaging_rw_v1, image_read,  0, const uint8_t* (*)(xi_image_handle));
+XI_FREEZE_IFACE(xi_imaging_rw_v1, image_write, 8, uint8_t*       (*)(xi_image_handle));
+
 // xi.doc@1 — host doc allocator (3) + refcount (3) = 6 entries.
 static_assert(sizeof(xi_doc_v1) == 6 * sizeof(void*), "xi_doc_v1 size changed (frozen @1)");
 XI_FREEZE_IFACE(xi_doc_v1, doc_chunk_alloc,   0,  void*   (*)(size_t));

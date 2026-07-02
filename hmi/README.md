@@ -1,9 +1,17 @@
-# xInsp2 Production HMI (v1.0 — RUN mode)
+# xInsp2 Production HMI (RUN + Compose modes)
 
 A standalone browser SPA operator dashboard. It is the **single WS client** of a
-(FE-supervised) backend: it subscribes to the live `vars` + image preview stream
-and renders a grid of cards described by `dashboard.json`. No build step in v1 —
-plain ES modules. Design: [`../docs/roadmap/production-hmi.md`](../docs/roadmap/production-hmi.md).
+(FE-supervised) backend: it consumes the backend's live **event stream**
+(`run_result` / `run_finished` / `status` events + `dispatch_stats`) and renders a
+grid of cards described by `dashboard.json`. It carries **no** vars/image-preview
+decoding — surfacing per-run values and images is a plugin's own job (the shipped
+`expose` plugin's subscribe-gated XEX1 transport, rendered by that plugin's webUI),
+not the HMI's. No build step — plain ES modules. Design:
+[`../docs/roadmap/production-hmi.md`](../docs/roadmap/production-hmi.md).
+
+> **Version:** there is no version constant in this folder (no `hmi/package.json`).
+> Functionally the HMI today ships **both** RUN mode (render a live dashboard) and
+> **Compose mode** (edit the layout in-page, export the JSON) — see **Scope** below.
 
 ## Try it (live demo)
 
@@ -12,11 +20,12 @@ python hmi/serve.py
 ```
 
 This spawns the backend headless on `hmi/demo/` (continuous via `--autostart-fps`),
-serves this folder over HTTP, and opens the URL. You should see: a moving
-inspection image, an OK/NG verdict, an `fg_pct` SPC trend with control lines,
-yield %, throughput, and a value readout — all updating live. (Windows; backend
-must be built. The HMI is the sole WS client — close any VS Code session on the
-same backend port first.)
+serves this folder over HTTP, and opens the URL. You should see the demo
+`dashboard.json` cards updating live: an OK/NG **verdict**, a **yield** %, a
+completed-parts **throughput** rate, and (on the Groups tab) live **dispatch
+groups** — all fed from the backend event stream. (Windows; backend must be built.
+The HMI is the sole WS client — close any VS Code session on the same backend port
+first.)
 
 Point it at any backend instead:
 
@@ -40,8 +49,12 @@ The cards, layout engine, and `XiClient` now live in the shared
 **Data model:** the HMI is a **generic dashboard host** — it consumes only the
 `run_result` / `run_finished` / `status` events and `dispatch_stats`, and feeds
 the built-in `verdict` / `yield` / `throughput` / `groups` cards. It carries
-**no** preview/vars/gid decoding: a plugin's own webUI renders per-frame
-value/image tiles from the binary frames it decodes itself.
+**no** preview/vars/gid decoding — that path was **removed from the HMI**. Per-run
+values and images are surfaced by the shipped `expose` plugin over its own
+subscribe-gated **XEX1** binary transport (a consumer subscribes by *channel*; the
+plugin JPEG-encodes + pushes only subscribed channels), decoded and rendered by
+**that plugin's own webUI**, not here. See
+[`../docs/roadmap/expose-plugin-and-output-transport.md`](../docs/roadmap/expose-plugin-and-output-transport.md).
 
 **Dashboard source:** on connect the HMI asks the backend for the *project's*
 dashboard (`cmd:get_dashboard` → `<project>/dashboard.json`, or
@@ -56,9 +69,9 @@ test:  cd ui-components && npm test      # cards/layout/client tests live with t
 
 ## Scope
 
-- **v1.0:** RUN mode — render a split-pane `dashboard.json` against a live
+- **Shipped — RUN mode:** render a split-pane `dashboard.json` against a live
   backend; the built-in generic cards (`verdict` / `yield` / `throughput` / `groups`).
-- **v1.1 (this):** Compose mode — toggle **✎ Compose** in the header, then per
+- **Shipped — Compose mode:** toggle **✎ Compose** in the header, then per
   pane: **+⬌ / +⬍** add a pane (an N-pane row/column, each weight set by dragging
   the blue dividers), **⊞** wrap the pane in **tabs/pages** (add `+` / remove `✕` /
   rename by double-click, switch by clicking), pick card type, set its `var` +
@@ -66,7 +79,7 @@ test:  cd ui-components && npm test      # cards/layout/client tests live with t
   `dashboard.json` (`?mode=compose` starts in edit mode). Cards stay live while
   editing. The layout tree has three node kinds: `{card}`, `{dir,children,weights}`,
   `{tabs:[{name,child}],active}` — all nest freely.
-- **Next (v1.2+):** persist via a backend `save_dashboard` (today you Copy/Download
+- **Not yet:** persist via a backend `save_dashboard` (today you Copy/Download
   the JSON and drop it in the project), vector overlay layers, plugin-shipped
   cards/overlays, single-file build + the AOT production package. See the design doc.
 
@@ -84,7 +97,7 @@ cd ../WebTunnelHub
 #   -> https://xinsphmi.db.xception.tech:1080/   (Caddy passes WS through to /ws)
 ```
 
-## Caveats & gotchas (learned during v1.0 bring-up)
+## Caveats & gotchas (learned during bring-up)
 
 - **Single-client backend.** The backend WS accepts **one** client. `serve.mjs`
   opens one backend connection **per browser**, so a second tab / a stale tab
@@ -116,15 +129,15 @@ cd ../WebTunnelHub
 - **Restarts orphan the demo backend.** `Stop-Process -Force` skips `serve.mjs`'s
   SIGTERM handler, so the child backend on **:7872** is left running; kill it
   separately on restart. **Never touch :7823 — that's the dev VS Code backend.**
-- **Throughput card now reports COMPLETED-PARTS rate over a wall-clock window.**
-  **BREAKING (staged, not on master).** It used to derive parts/min from
-  `run_finished.ms` (inspect COMPUTE duration) as `60000 / avg_ms`, so fast compute
-  showed an unrealistic rate even when triggers arrived slowly (external review 05
-  #20). It now counts terminal `run_result` events (one per completed run, run_id
-  deduped) over a rolling wall-clock window (default 60s, `config.windowSec`) and
-  reports the real completed rate; inspect compute is shown only as a secondary,
-  honestly-labelled readout. Note `run_finished.ms` / the new
-  `run_finished.inspect_compute_us` field are inspect **compute** time only, NOT
-  cycle/decision latency — do not derive production rate from them.
+- **Throughput card reports COMPLETED-PARTS rate over a wall-clock window.** It
+  used to derive parts/min from `run_finished.ms` (inspect COMPUTE duration) as
+  `60000 / avg_ms`, so fast compute showed an unrealistic rate even when triggers
+  arrived slowly (external review 05 #20). It now counts terminal `run_result`
+  events (one per completed run, run_id deduped) over a rolling wall-clock window
+  (default 60s, `config.windowSec`) and reports the real completed rate; inspect
+  compute is shown only as a secondary, honestly-labelled readout. Note
+  `run_finished.ms` and the additive `run_finished.inspect_compute_us` field are
+  inspect **compute** time only, NOT cycle/decision latency — do not derive
+  production rate from them.
 - **The diagnostics panel overlaps the bottom cards.** It's a bring-up aid; make it
   collapsible (or gate behind `?debug=1`) before this is a real operator screen.

@@ -43,6 +43,8 @@ struct Image {
     Image() = default;
 
     // Allocate a fresh heap buffer of the given dimensions (zero-initialised).
+    // A freshly-allocated buffer is WRITABLE (this Image is its sole owner), so
+    // write() is the blessed sink accessor on it.
     Image(int w, int h, int c)
         : width(w > 0 ? w : 0), height(h > 0 ? h : 0), channels(c > 0 ? c : 0) {
         if (width > 0 && height > 0 && channels > 0) {
@@ -51,6 +53,7 @@ struct Image {
             // Aliasing ctor: owns `vec`, exposes its first byte.
             pixels_ = std::shared_ptr<uint8_t>(vec, vec->data());
             pixels_size_ = vec->size();
+            writable_ = true;
         }
     }
 
@@ -62,6 +65,7 @@ struct Image {
                 data, data + static_cast<size_t>(width) * height * channels);
             pixels_ = std::shared_ptr<uint8_t>(vec, vec->data());
             pixels_size_ = vec->size();
+            writable_ = true;   // fresh owned copy — this Image is its sole owner
         }
     }
 
@@ -85,7 +89,22 @@ struct Image {
         if (!hndl) return Image{};
         Image img = adopt_pool_handle(host, hndl);
         host->image_release(hndl);
+        // A freshly-created output slot the plugin uniquely owns — the blessed
+        // WRITABLE path (write() returns a mutable pointer). adopt_pool_handle
+        // marks it read-only by default (its common caller is an INPUT view); a
+        // create_in_pool result is the one pool-backed image that IS an output.
+        img.writable_ = true;
         return img;
+    }
+
+    // Allocate a fresh, WRITABLE output slot in the host's ImagePool. Alias of
+    // create_in_pool spelled to make INTENT explicit at the call site: this is an
+    // OUTPUT you will write into (its write() yields a mutable uint8_t*), as
+    // opposed to an INPUT view (adopt_pool_handle), whose blessed accessor is the
+    // const read(). Prefer this + write() over data() when producing an image so
+    // the read-only-input / writable-output invariant is visible in the code.
+    static Image output_image(const xi_host_api* host, int w, int h, int c) {
+        return create_in_pool(host, w, h, c);
     }
 
     // Zero-copy view over a refcounted in-process host pool handle. Bumps
@@ -128,6 +147,32 @@ struct Image {
 
     bool   empty() const { return width == 0 || height == 0 || channels == 0; }
     size_t size()  const { return pixels_size_; }
+
+    // --- Read/write access discipline (external review 02 I.4) --------------
+    // The blessed accessors that encode the read-only-input / writable-output
+    // invariant in the type system, mirroring the host's xi.imaging_rw@1 door.
+
+    // read() — the blessed READ accessor, const on ANY image (input view OR
+    // output). Use this to read pixels of an INPUT: a trigger/input image is a
+    // zero-copy view aliased across consumers, so reading is the only safe verb.
+    const uint8_t* read() const { return pixels_.get(); }
+
+    // write() — the blessed WRITE accessor, VALID ONLY on a writable OUTPUT
+    // (one made via output_image()/create_in_pool()/a fresh heap Image). On an
+    // INPUT-origin image (adopt_pool_handle view / xi::Image::view) it returns
+    // nullptr — the strict, correct behaviour: an input is read-only, and a
+    // plugin that wants to mutate must allocate its OWN output and write there.
+    // NO silent copy-on-write. `writable()` lets a caller test before writing.
+    bool     writable() const { return writable_; }
+    uint8_t* write() { return writable_ ? pixels_.get() : nullptr; }
+
+    // data() — the LEGACY always-mutable accessor. KEPT so existing operator code
+    // stays green, but it is the ESCAPE HATCH: the non-const overload on an
+    // INPUT-origin image (one from adopt_pool_handle / a trigger .image("x")) is
+    // WRONG — writing through it mutates pool memory ALIASED by other consumers
+    // and silently corrupts their input. Prefer read() to read an input and
+    // write()/output_image() to produce an output; reach for data() only when you
+    // knowingly own the buffer and need the raw pointer.
     uint8_t*       data()       { return pixels_.get(); }
     const uint8_t* data() const { return pixels_.get(); }
     int    stride() const { return width * channels; }
@@ -147,6 +192,12 @@ private:
     size_t                   pixels_size_ = 0;
     const xi_host_api*       pool_host_   = nullptr;
     xi_image_handle          pool_handle_ = XI_IMAGE_NULL;
+    // Access discipline (external review 02 I.4): true only for a buffer THIS
+    // Image uniquely owns / produced as an output (fresh heap ctor, owned copy,
+    // output_image/create_in_pool). false for an INPUT view (adopt_pool_handle,
+    // view) — write() then returns nullptr. Defaults false so any path that does
+    // not explicitly opt in (an input view) is read-only.
+    bool                     writable_ = false;
 };
 
 // cv::Mat -> owning xi::Image is the free function `xi::from_cv_mat(mat)`,

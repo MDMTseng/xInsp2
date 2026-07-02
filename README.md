@@ -53,35 +53,37 @@ stop and find the plugin-shaped version.
 ## The model
 
 ```cpp
-#include <xi/xi.hpp>           // xi::Image, xi::Param, VAR, OpenCV (cv::*)
+#include <xi/xi.hpp>           // xi::Image, xi::Param, xi::Record (OpenCV-free umbrella)
+#include <xi/xi_cv.hpp>        // cv:: interop — only if the script calls cv:: directly
 #include <xi/xi_use.hpp>
+#include <xi/xi_result.hpp>    // xi::ok / xi::ng — the per-run verdict
 
 xi::Param<int>    thresh {"threshold", 128, {0, 255}};
 xi::Param<double> sigma  {"sigma",     2.0, {0.1, 10.0}};
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int frame) {
+// Explicit-trigger entry: the host hands the trigger in as `t` (no ambient state).
+XI_INSPECT_ENTRY(t, frame) {
+    (void)frame;
     auto& det = xi::use("detector0");         // survives hot-reload
 
-    auto t = xi::current_trigger();           // frames pushed by the cam0 source
-    if (!t.is_active()) return;
-    auto img = t.image("frame");
-    if (img.empty()) return;
-
-    VAR(input, img);                          // tracked & visible in UI
+    auto img = t.image("frame");              // frames pushed by the cam0 source
+    if (img.empty()) { xi::result(0, "missing frame"); return; }  // NA
 
     cv::Mat gm, bm;
-    cv::cvtColor(img.as_cv_mat(), gm, cv::COLOR_RGB2GRAY);
+    cv::cvtColor(xi::as_cv_mat(img), gm, cv::COLOR_RGB2GRAY);
     int k = (int)(sigma * 2 + 1) | 1;
     cv::GaussianBlur(gm, bm, cv::Size(k, k), (double)sigma);
-    xi::Image blur(bm.cols, bm.rows, 1, bm.data);
+    xi::Image blur = xi::from_cv_mat(bm);
 
     auto result = det.process(xi::Record()
         .image("gray", blur)
         .set("threshold", (int)thresh));      // slider value, no recompile
 
-    VAR(detection, result);
-    VAR(pass, result["blob_count"].as_int() <= 3);
+    // Surface intermediates for the UI through the shipped `expose` plugin.
+    xi::use("expose").process(xi::Record().set("$channel", "detection").image("input", img));
+
+    if (result["blob_count"].as_int() <= 3) xi::ok(1, "pass");
+    else                                    xi::ng(1, "too many blobs");
 }
 ```
 
@@ -91,7 +93,7 @@ Three primitives do all the heavy lifting:
 |------------------|------------------------------------------------------------|
 | `xi::Instance<T>`| Persistent, UI-backed state (cameras, templates, models)   |
 | `xi::Param<T>`   | Tunable value with a slider / picker in VS Code            |
-| `VAR(name, expr)`| Track and publish an intermediate value for inspection     |
+| `xi::use("expose")`| Surface an intermediate value/image for inspection in the UI |
 
 Parallelism is `xi::async(fn, args...)` + `Future<T>` with implicit
 await. Trigger-correlated multi-camera capture is
@@ -236,20 +238,22 @@ buffer style as any C++ file (IntelliSense, save, format).
 ```cpp
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_result.hpp>
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int frame) {
+XI_INSPECT_ENTRY(t, frame) {
+    (void)frame;
     auto& det   = xi::use("det0");
     auto& saver = xi::use("saver0");
 
-    auto t = xi::current_trigger();        // frames pushed by the cam0 source
-    if (!t.is_active()) return;
-    auto img = t.image("frame");
-    if (img.empty()) return;
+    auto img = t.image("frame");           // frames pushed by the cam0 source
+    if (img.empty()) { xi::result(0, "missing frame"); return; }  // NA
 
-    VAR(input, img);
-    VAR(detection, det.process(xi::Record().image("gray", img)));
+    auto detection = det.process(xi::Record().image("gray", img));
     saver.process(xi::Record().image("input", img));
+
+    // Surface the input for the UI via the shipped `expose` plugin.
+    xi::use("expose").process(xi::Record().set("$channel", "input").image("input", img));
+    xi::ok(1, "done");
 }
 ```
 
@@ -263,8 +267,9 @@ Click the gear icon in the editor title bar (visible when on
 ### 8. Run
 
 Click the `▷` icon in the Instances view title bar (or hit **Ctrl+F5**).
-Each `VAR()` lights up in the Variable Window with type-specific
-renderers — numbers, booleans, image thumbnails, Record trees.
+Each channel you push through `xi::use("expose")` lights up in the
+Variable Window with type-specific renderers — numbers, booleans, image
+thumbnails, Record trees.
 
 ![Inspections ran — viewer populated](docs/screenshots/inspections_ran_viewer.png)
 
@@ -383,8 +388,9 @@ This is the same script that produced the file on the Releases page.
 ### Inspection authoring
 
 - **One-file scripts.** Include `<xi/xi.hpp>`; write a plain C++ function.
-- **Variable Window.** Every `VAR(name, expr)` shows up live with a
-  type-specific renderer (number, bool, string, Image preview, Record tree).
+- **Variable Window.** Every channel pushed through `xi::use("expose")`
+  shows up live with a type-specific renderer (number, bool, string,
+  Image preview, Record tree).
 - **Live tuning.** `xi::Param<T>` sliders drive `set_param` directly; no
   recompile. `set_param` → next `run` picks up the new value.
 - **Parallel ops.** `xi::async(fn, args...)` + `Future<T>` with implicit
@@ -400,7 +406,7 @@ This is the same script that produced the file on the Releases page.
   plugin call site. A null deref in user code returns an error message;
   the backend stays up.
 - **CodeLens.** `⚙ Configure` / `🎚 Tune` / `👁 Preview` on every
-  `xi::use(...)` / `xi::Param<...>` / `VAR(...)` site.
+  `xi::use(...)` / `xi::Param<...>` site.
 
 ### Image sources & dispatch
 

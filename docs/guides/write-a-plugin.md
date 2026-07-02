@@ -342,9 +342,9 @@ public:
     using xi::Plugin::Plugin;
 
     xi::Record process(const xi::Record& in) override {
-        auto src = in.get_image("frame");
-        auto dst = pool_image(src.width, src.height, 1);
-        cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0, 0}, 2.0);
+        auto src = in.get_image("frame");                 // read-only INPUT view
+        auto dst = pool_image(src.width, src.height, 1);  // writable OUTPUT
+        cv::GaussianBlur(xi::as_cv_read(src), xi::as_cv_write(dst), {0, 0}, 2.0);
         return xi::Record().image("blurred", dst);
     }
 };
@@ -411,12 +411,26 @@ complete example and [`../reference/c-abi.md`](../reference/c-abi.md) §1.
 
 xInsp2 doesn't ship its own operator library — `xi.hpp` /
 `xi_plugin_support.hpp` pull in `<opencv2/opencv.hpp>` and plugins call
-`cv::*` directly. Two helpers make it zero-copy across the ABI:
+`cv::*` directly. A small set of helpers make it zero-copy across the ABI while
+encoding the **read-only-input / writable-output invariant** in the types:
 
 | Helper | Purpose |
 |---|---|
-| `xi::Image::as_cv_mat()` | Non-owning `cv::Mat` view over the same bytes — no allocation, no copy. The Mat must not outlive the Image. |
-| `Plugin::pool_image(w, h, c)` | Allocate a fresh slot in the host's ImagePool and return a refcounted Image whose `data()` (and `as_cv_mat()`) point straight at pool memory. cv:: writes land in the pool, so returning the Image from `process()` short-circuits to an `addref` — no heap-to-pool memcpy on the way out. |
+| `xi::as_cv_read(img)` | Non-owning `cv::Mat` view for **READING** an image — pass it as a cv:: **source**. Reads through `Image::read()` (the const, blessed input accessor). Use for every INPUT. |
+| `xi::as_cv_write(img)` | Non-owning `cv::Mat` view for **WRITING** a writable OUTPUT — pass it as a cv:: **destination**. Empty Mat (a loud cv:: error, not silent corruption) if `img` is an input view rather than a writable output. |
+| `xi::as_cv_mat(img)` | Legacy always-mutable view (kept for existing code). Prefer `as_cv_read` / `as_cv_write` so read-vs-write intent is visible. |
+| `Plugin::pool_image(w, h, c)` | Allocate a fresh **writable OUTPUT** slot in the host's ImagePool and return a refcounted Image whose `write()` (and `as_cv_write()`) point straight at pool memory. cv:: writes land in the pool, so returning the Image from `process()` short-circuits to an `addref` — no heap-to-pool memcpy on the way out. |
+
+> **Input is read-only — enforced, not just documented.** A trigger/input image
+> (`in.get_image("frame")`) is a zero-copy view over pool memory **aliased across
+> consumers**. Writing into it corrupts every other consumer's input. The type
+> system now backs the rule: an input Image's blessed accessor is the const
+> `read()` (and `as_cv_read`), while `write()` / `as_cv_write` yield a mutable
+> pointer **only** for a freshly-created output (`pool_image` / `output_image`) —
+> on an input they return null / an empty Mat. At the ABI this is the
+> `xi.imaging_rw@1` interface (`image_read` / `image_write`, where `image_write`
+> returns null for a shared handle). **Never** do an in-place cv:: op on an input;
+> always `as_cv_read(src)` → `as_cv_write(dst)` into a separate `pool_image`.
 
 Don't hand-roll Image⇄Mat copies or the RGB↔BGR flip — `<xi/xi_cv.hpp>` ships the
 canonical helpers: `xi::to_cv(img)` (owning copy), `xi::from_cv_mat(mat)` /
@@ -426,9 +440,9 @@ canonical helpers: `xi::to_cv(img)` (owning copy), `xi::from_cv_mat(mat)` /
 Pattern:
 
 ```cpp
-auto src = input.get_image("src");                       // pool-backed view
-auto dst = pool_image(src.width, src.height, 1);         // pool-backed sink
-cv::GaussianBlur(src.as_cv_mat(), dst.as_cv_mat(), {0, 0}, 2.0);
+auto src = input.get_image("src");                       // read-only INPUT view
+auto dst = pool_image(src.width, src.height, 1);         // writable OUTPUT sink
+cv::GaussianBlur(xi::as_cv_read(src), xi::as_cv_write(dst), {0, 0}, 2.0);
 return xi::Record().image("blurred", dst);               // zero-copy across ABI
 ```
 

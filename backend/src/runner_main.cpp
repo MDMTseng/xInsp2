@@ -17,6 +17,17 @@
 // (frames_run), the crash count (crashed), total wall time (total_ms), AND an
 // additive per-class tally: counts{ok,ng,na,no_verdict,crashed}.
 //
+// Identity envelope (ADDITIVE — mirrors the live backend's run_result): the
+// report now carries the SAME traceability identity the service stamps on
+// `run_result`, so a headless run is traceable back to a process + frame.
+// Top-level: schema="xi.run-outcome/1", boot_id (a random 128-bit value
+// generated ONCE at runner startup, formatted as 32-char lowercase hex, stable
+// for the whole run), and station_id (optional, from env XINSP_STATION_ID,
+// omitted when empty). Per frame: run_id (the frame index) and inspection_id =
+// "<station_id>/<boot_id>/<run_id>" (station_id may be empty → leading "/").
+// boot_id/inspection_id are formatted byte-for-byte like service_main.cpp's
+// init_process_identity_ / emit_run_result, so headless and live reports agree.
+//
 // IMPORTANT — exit code is still an EXECUTION status, NOT a verdict roll-up.
 // Exit 0 means "every frame dispatched without crashing"; an inspection NG
 // does NOT change the exit code. Infra/compile/load failures and script
@@ -56,10 +67,12 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -174,6 +187,39 @@ static const char* verdict_class_for_code(int code) {
     return "na";                                   // other reserved system codes
 }
 
+// --- process identity (mirror of service_main's run_result envelope) -----
+//
+// The runner drives script.inspect(i) directly and never goes through the
+// backend's emit_run_result path, so it must GENERATE its own identity the same
+// way the live backend does. schema/boot_id/inspection_id are formatted
+// byte-for-byte like service_main.cpp (init_process_identity_ + emit_run_result)
+// so a headless report and a live run_result agree.
+static constexpr const char* kRunResultSchema = "xi.run-outcome/1";
+
+// Format a 128-bit value as a 32-char lowercase hex string ("hi" then "lo",
+// each zero-padded to 16). Same encoding as service_main::trigger_id_hex.
+static std::string id_hex_128(uint64_t hi, uint64_t lo) {
+    static const char* d = "0123456789abcdef";
+    std::string s;
+    s.reserve(32);
+    for (int shift = 60; shift >= 0; shift -= 4) s.push_back(d[(hi >> shift) & 0xF]);
+    for (int shift = 60; shift >= 0; shift -= 4) s.push_back(d[(lo >> shift) & 0xF]);
+    return s;
+}
+
+// Generate the per-process boot_id ONCE at startup (random 128-bit → 32-char
+// lowercase hex). std::random_device + a seeded 64-bit engine, run once, mirrors
+// service_main::init_process_identity_.
+static std::string make_boot_id() {
+    std::random_device rd;
+    std::seed_seq seed{ rd(), rd(), rd(), rd(),
+                        (unsigned)std::chrono::steady_clock::now().time_since_epoch().count() };
+    std::mt19937_64 eng(seed);
+    uint64_t hi = eng(), lo = eng();
+    if (hi == 0 && lo == 0) lo = 1;   // never all-zero (would read as "null")
+    return id_hex_128(hi, lo);
+}
+
 // --- args ---------------------------------------------------------------
 
 struct Args {
@@ -270,6 +316,14 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[runner] project folder not found: %s\n", args.project_dir.c_str());
         return 2;
     }
+
+    // Per-process identity for the report's run_result envelope (boot_id +
+    // optional station_id). Generated ONCE, early, mirroring the backend's
+    // init_process_identity_. boot_id is stable for the whole run; inspection_id
+    // (formed per frame below) is the only part that varies.
+    const std::string boot_id = make_boot_id();
+    std::string station_id;
+    if (const char* s = std::getenv("XINSP_STATION_ID"); s && *s) station_id = s;
 
     _set_se_translator(seh_translator);
 
@@ -370,16 +424,33 @@ int main(int argc, char** argv) {
     body.reserve(args.frames * 256);
     body += "{\"project\":";
     body += proj_json;
+    // Identity envelope (additive; mirrors the live backend's run_result).
+    body += ",\"schema\":";
+    xi::proto::json_escape_into(body, kRunResultSchema);
+    body += ",\"boot_id\":";
+    xi::proto::json_escape_into(body, boot_id);
+    if (!station_id.empty()) {   // omit when unset, matching the backend wire
+        body += ",\"station_id\":";
+        xi::proto::json_escape_into(body, station_id);
+    }
     body += ",\"frames\":[";
 
     int crashed = 0;
     // Additive per-class verdict tally (see verdict_class_for_code).
     int c_ok = 0, c_ng = 0, c_na = 0, c_no_verdict = 0, c_crashed = 0;
-    // Emit one frame object: {"frame":i,"code":c,"class":"..","msg":".."}.
+    // Emit one frame object:
+    //   {"frame":i,"run_id":i,"inspection_id":"<station>/<boot>/<i>",
+    //    "code":c,"class":"..","msg":".."}.
+    // run_id is the frame index; inspection_id = "<station_id>/<boot_id>/<run_id>"
+    // (station_id may be empty → leading "/"), matching emit_run_result exactly.
     auto emit_frame = [&](int i, int code, const char* cls, const std::string& msg) {
         if (i > 0) body += ",";
         body += "{\"frame\":";
         body += std::to_string(i);
+        body += ",\"run_id\":";
+        body += std::to_string(i);
+        body += ",\"inspection_id\":";
+        xi::proto::json_escape_into(body, station_id + "/" + boot_id + "/" + std::to_string(i));
         body += ",\"code\":";
         body += std::to_string(code);
         body += ",\"class\":";

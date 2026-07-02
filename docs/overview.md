@@ -1,5 +1,9 @@
 # Overview — mental model + architecture in one picture
 
+> **Status:** shipped — describes the current architecture and core nouns.
+> **Last verified against:** master @ 2026-07 (`VAR`/`EMIT` retired from core;
+> per-run output via the `expose` plugin).
+
 The mental model and the core nouns. Read once (~20 min); then the [index](./README.md)
 maps tasks → docs.
 

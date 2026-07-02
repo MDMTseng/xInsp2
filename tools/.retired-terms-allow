@@ -1,0 +1,50 @@
+# retired-terms allow-list — EXPLICIT opt-outs from tools/check_retired_terms.py
+#
+# Each line:  <relpath>[::<substr>]: reason
+#   <relpath>            silences EVERY retired-term hit in that file.
+#   <relpath>::<substr>  silences only hits on lines CONTAINING <substr>.
+# The reason is mandatory and the whole point: it records WHY a retired token is
+# allowed to survive here (a compat appendix that documents the legacy path on
+# purpose, an archived page, or extension runtime logic that parses user VAR(...)
+# tokens for the graph view) instead of leaving a silent gap. If you add a NEW
+# developer-facing example, use the CURRENT API — do not add it here.
+#
+# The checker flags a stale rule (one that matched nothing this run), so prune
+# this file when the underlying legacy content is finally removed.
+
+# --- VS Code extension: the VAR-chip pipeline-graph parser ------------------
+# extension.ts contains a graph view that PARSES `VAR(...)`/`EMIT(...)` tokens out
+# of the USER's script to draw chips. That is runtime logic, not a blessed
+# example — the generated-project TEMPLATE in the same file is already clean.
+# Silence ONLY the two graph-parser comment lines (anchored to phrases unique to
+# that feature) — NOT any bare "VAR" line, so an injected VAR(...) in the
+# generated inspect.cpp TEMPLATE further down the same file is still caught.
+vscode-extension/src/extension.ts::is declared and: extension VAR-chip graph-parser comment — runtime logic that reads user VAR()/EMIT() tokens, not an authored example
+vscode-extension/src/extension.ts::the script surfaces between them: extension VAR-chip graph-parser comment — runtime logic describing how user VAR()/EMIT() tokens become chips, not an authored example
+
+# --- write-a-script.md: the compatibility appendix + legacy-signature section
+# This guide intentionally teaches the CURRENT API first, then documents the
+# legacy VAR/EMIT + `xi_inspect_entry(int)` path as clearly-marked compatibility
+# material (the "## Appendix: legacy VAR/EMIT" section and the "legacy signature"
+# comparison). Kept on purpose so owners of existing scripts can still read it.
+docs/guides/write-a-script.md: legacy VAR/EMIT + legacy-entry material is documented here on purpose (compat appendix + legacy-signature comparison), current API taught first
+
+# --- reference/onboarding prose that DOCUMENTS the retirement on purpose ------
+# These lines mention VAR/EMIT/the legacy entry precisely to TELL the reader the
+# term is retired ("still compiles but no longer publishes", "REMOVED",
+# "Legacy no-op", legacy-signature reference row). Documenting a retired concept
+# is not a copy-paste hazard — the guard's target is examples that TEACH it as
+# current. Anchored to the retirement wording so only the caveat lines are silenced.
+docs/overview.md::still compiles but no longer publishes: overview point 4 documents that VAR is a removed no-op, pointing readers to the expose plugin
+docs/overview.md::declares a local; reusing a name: overview "conventions" note documents the legacy VAR redefinition gotcha as retired
+docs/overview.md::compile but: overview note that VAR/EMIT compile but no longer output — documents the retirement
+docs/reference/data-types.md::no longer emits anything: data-types documents VAR as a removed no-op and redirects to the expose plugin
+docs/reference/ws-protocol.md::still compile but: ws-protocol documents the REMOVED `vars` message and that VAR/EMIT publish nothing
+docs/reference/STUDY-sdk.md::Entry point. Frame count: STUDY signature-reference row for the legacy entry (documents it, does not teach it as current)
+docs/reference/STUDY-sdk.md::Legacy no-op: STUDY primitive-reference rows explicitly labelling VAR/EMIT as legacy no-ops
+docs/reference/STUDY-sdk.md::VAR (legacy): STUDY example-catalog row labels user_script_example.cpp as legacy VAR
+docs/guides/build-and-run.md::still compile but: build-and-run note documents that VAR/EMIT compile but no longer surface, pointing to expose
+
+# --- docs/archive/** --------------------------------------------------------
+# (No archived page is in the scanned blessed set today; if archived pages are
+# ever added under docs/guides or docs/reference, allow-list them here by path.)
