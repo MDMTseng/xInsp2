@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
     if (!def.empty() && syms.set_def) syms.set_def(inst, def.c_str());
 
     if (dump_def) {
-        // Print get_def() JSON and exit (feeds gen_manifest_params). get_def
+        // Print get_def() JSON and exit. get_def
         // returns the byte count, or -needed when the buffer is too small.
         std::vector<char> buf(4096);
         int n = syms.get_def ? syms.get_def(inst, buf.data(), (int)buf.size()) : 0;
