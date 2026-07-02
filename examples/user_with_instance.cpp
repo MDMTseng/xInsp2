@@ -5,6 +5,7 @@
 #include <xi/xi.hpp>
 #include <xi/xi_instance.hpp>   // xi::Instance<T> / InstanceBase (no longer in the xi.hpp umbrella)
 #include <xi/xi_image.hpp>
+#include <xi/xi_use.hpp>
 
 // A trivial plugin that holds a multiplier and a name.
 class Scaler : public xi::InstanceBase {
@@ -43,7 +44,12 @@ static xi::Param<int> base{"base_val", 10, {1, 100}};
 
 extern "C" __declspec(dllexport)
 void xi_inspect_entry(int frame) {
-    VAR(input,  frame * static_cast<int>(base));
-    VAR(scaled, scaler->apply(input));
-    VAR(tag,    std::string("instance_test"));
+    auto input = frame * static_cast<int>(base);
+
+    // Surface the values through the `expose` plugin (channel "instance").
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "instance")
+        .set("input",  input)
+        .set("scaled", scaler->apply(input))
+        .set("tag",    std::string("instance_test")));
 }

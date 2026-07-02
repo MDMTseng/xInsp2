@@ -1,5 +1,16 @@
 //
-// demo_async.cpp — Milestone 0 exit test.
+// demo_async.cpp — Milestone 0 exit test.  [ARCHIVED — does not compile.]
+//
+// Retired from examples/ (2026-07). This M0 demo's whole purpose was to
+// exercise the old per-run VALUE STORE: VAR(name, expr) registering a value,
+// xi::VarKind reflection, and a "vars count" readout. That value-store path was
+// removed from core in v9 (the current data-out surface is the `expose` plugin;
+// see docs/guides/write-a-script.md). Every VAR/VarKind line below therefore no
+// longer compiles, and there is nothing to port to — the feature it demonstrates
+// is gone. Kept here as a historical record of the M0 milestone shape only; do
+// NOT copy it. For a current, compiling async example see
+// examples/parallel_inspect_demo/ and the `xi::async` section of the script
+// guide.
 //
 // Exercises every primitive in xi/xi.hpp using only STL types so it builds
 // with any C++20 compiler, no backend, no OpenCV, no uWebSockets.

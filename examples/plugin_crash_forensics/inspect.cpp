@@ -16,9 +16,12 @@ void xi_inspect_entry(int frame) {
     auto& crasher = xi::use("crasher");
     auto out = crasher.process(xi::Record().set("frame", frame));
 
-    VAR(count, out["count"].as_int(-1));
+    // Surface the running count (and any error) through `expose` on channel "crash".
+    xi::Record rec;
+    rec.set("$channel", "crash").set("count", out["count"].as_int(-1));
     auto err = out["error"].as_string("");
     if (!err.empty()) {
-        VAR(error, err);
+        rec.set("error", err);
     }
+    xi::use("expose").process(rec);
 }

@@ -19,24 +19,9 @@ void xi_inspect_entry(int) {
     // Stage 1 — seed from literals (no upstream source yet).
     auto e = synth_io::extract(syn.process(synth_io::build().seed(7).threshold(0.30).build()));
 
-    // Extractors return nominal types: xi::Number / Point / Pose / Roi / Feature.
-    VAR(count,       e.count().value());
-    VAR(feat_count,  e.feature_count());
-    VAR(centroid_x,  e.centroid().x());
-    VAR(best_x,      e.best_pose().x());
-    VAR(best_score,  e.best_score().value());
-    VAR(roi_w,       e.roi().w());
-    VAR(mean_score,  e.mean_score().value());
-
     // The custom nominal type Feature: pose / score / edge over one array item.
-    synth_io::Feature f0 = e.feature(0);
-    VAR(f0_score,    f0.score());
-    VAR(f0_pose_x,   f0.pose().x());
-    VAR(f0_edge_x2,  f0.edge().x2());
-    VAR(f0_src,      f0.src());            // extractor piped src onto the feature
-
+    synth_io::Feature f0 = e.feature(0);            // extractor piped src onto the feature
     std::vector<synth_io::Feature> feats = e.features();
-    VAR(vec_size,    (int)feats.size());
 
     // Stage 2 — the input is built ENTIRELY from EXTRACTED record-class values.
     // Each typed value carries its src ("syn"), so the constructor records the
@@ -46,19 +31,38 @@ void xi_inspect_entry(int) {
                    .threshold(e.mean_score()) // xi::Number
                    .roi(e.roi())             // xi::Roi
                    .build();
-    VAR(in2_seed_prov, in2.prov_of("seed"));        // "syn"
-    VAR(in2_thr_prov,  in2.prov_of("threshold"));   // "syn"
-    VAR(in2_roi_prov,  in2.prov_of("roi"));         // "syn"
 
     auto e2 = synth_io::extract(syn.process(in2));
-    VAR(out2_count, e2.count().value());
-    VAR(out2_roi_w, e2.roi().w());          // the fed ROI round-trips back (640)
 
     // NA: no seed → require → NA, and the extractors stay total.
     auto na_out = syn.process(xi::Record());
-    VAR(na_is_na,      na_out.is_na());
-    VAR(na_reason,     na_out.na_reason());
     auto ne = synth_io::extract(na_out);
-    VAR(na_count,      ne.count().value()); // 0
-    VAR(na_feature_na, ne.feature(0).is_na());
+
+    // Surface the extracted typed values through the `expose` plugin (channel
+    // "io"). Extractors return nominal types (xi::Number / Point / Pose / Roi /
+    // Feature); their scalar accessors feed .set() directly. Field order below
+    // is the display order.
+    xi::use("expose").process(xi::Record()
+        .set("$channel",      "io")
+        .set("count",         e.count().value())
+        .set("feat_count",    e.feature_count())
+        .set("centroid_x",    e.centroid().x())
+        .set("best_x",        e.best_pose().x())
+        .set("best_score",    e.best_score().value())
+        .set("roi_w",         e.roi().w())
+        .set("mean_score",    e.mean_score().value())
+        .set("f0_score",      f0.score())
+        .set("f0_pose_x",     f0.pose().x())
+        .set("f0_edge_x2",    f0.edge().x2())
+        .set("f0_src",        f0.src())
+        .set("vec_size",      (int)feats.size())
+        .set("in2_seed_prov", in2.prov_of("seed"))       // "syn"
+        .set("in2_thr_prov",  in2.prov_of("threshold"))  // "syn"
+        .set("in2_roi_prov",  in2.prov_of("roi"))        // "syn"
+        .set("out2_count",    e2.count().value())
+        .set("out2_roi_w",    e2.roi().w())              // fed ROI round-trips back (640)
+        .set("na_is_na",      na_out.is_na())
+        .set("na_reason",     na_out.na_reason())
+        .set("na_count",      ne.count().value())        // 0
+        .set("na_feature_na", ne.feature(0).is_na()));
 }

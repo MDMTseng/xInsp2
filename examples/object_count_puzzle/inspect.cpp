@@ -19,11 +19,13 @@
 //   7. connected components with stats -> area + extent (fill ratio) filter
 //   8. centroids of surviving components
 //
-// Emits: VAR(count, int), VAR(centroids, "[[x,y],...]"), VAR(mask) for preview.
+// Surfaces (via the `expose` plugin, channel "objects"): count (int),
+// centroids ("[[x,y],...]") and a mask preview image.
 //
 
 #include <xi/xi.hpp>
 #include <xi/xi_cv.hpp>
+#include <xi/xi_use.hpp>
 
 #include <string>
 #include <vector>
@@ -33,18 +35,21 @@ XI_SCRIPT_EXPORT
 void xi_inspect_entry(int /*frame*/) {
     auto path = xi::current_frame_path();
     if (path.empty()) {
-        VAR(error, std::string("no frame_path supplied to cmd:run"));
-        VAR(count, -1);
+        xi::use("expose").process(xi::Record()
+            .set("$channel", "error")
+            .set("error", std::string("no frame_path supplied to cmd:run"))
+            .set("count", -1));
         return;
     }
 
     auto frame = xi::imread(path);
     if (frame.empty()) {
-        VAR(error, std::string("frame load failed: ") + path);
-        VAR(count, -1);
+        xi::use("expose").process(xi::Record()
+            .set("$channel", "error")
+            .set("error", std::string("frame load failed: ") + path)
+            .set("count", -1));
         return;
     }
-    VAR(frame_path, path);
 
     // --- to single-channel gray ---
     cv::Mat src = xi::as_cv_mat(frame);
@@ -87,8 +92,11 @@ void xi_inspect_entry(int /*frame*/) {
     double mn, mx;
     cv::minMaxLoc(respf, &mn, &mx);
     if (mx < 1e-6) {
-        VAR(count, 0);
-        VAR(centroids, std::string("[]"));
+        xi::use("expose").process(xi::Record()
+            .set("$channel", "objects")
+            .set("frame_path", path)
+            .set("count", 0)
+            .set("centroids", std::string("[]")));
         return;
     }
     respf.convertTo(resp, CV_8U, 255.0 / mx);             // normalize to 0..255
@@ -154,15 +162,21 @@ void xi_inspect_entry(int /*frame*/) {
     }
     out += "]";
 
-    // Build a uint8 mask Image for preview.
+    // Build a uint8 mask Image for preview, then surface everything through the
+    // `expose` plugin (channel "objects").
+    xi::Record rec;
+    rec.set("$channel", "objects");
+    rec.set("frame_path", path);
+
     xi::Image maskImg(mask.cols, mask.rows, 1);
     if (!maskImg.empty()) {
         cv::Mat mv = xi::as_cv_mat(maskImg);
         mask.copyTo(mv);
-        VAR(maskpreview, maskImg);
+        rec.image("maskpreview", maskImg);
     }
 
-    VAR(count, nblob);
-    VAR(centroids, out);
-    VAR(otsu, double(otsu_level));
+    rec.set("count", nblob);
+    rec.set("centroids", out);
+    rec.set("otsu", double(otsu_level));
+    xi::use("expose").process(rec);
 }

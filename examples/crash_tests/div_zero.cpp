@@ -1,7 +1,8 @@
 #include <xi/xi.hpp>
+#include <xi/xi_status.hpp>
 XI_SCRIPT_EXPORT void xi_inspect_entry(int frame) {
-    VAR(before, std::string("about to divide by zero"));
+    xi::status("about to crash: divide by zero");
     int a = 10, b = 0;
     int c = a / b;
-    VAR(never, c);
+    (void)c;
 }

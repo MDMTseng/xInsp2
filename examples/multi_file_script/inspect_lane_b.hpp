@@ -9,6 +9,9 @@
 #include <string>
 
 inline void run_lane_b(int frame) {
-    VAR(lane_b_frame, frame);
-    VAR(lane_b_tag, std::string("beta"));
+    // Surface this lane's values through the `expose` plugin (channel "lane_b").
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "lane_b")
+        .set("lane_b_frame", frame)
+        .set("lane_b_tag", std::string("beta")));
 }

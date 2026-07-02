@@ -11,5 +11,9 @@ XI_SCRIPT_EXPORT
 void xi_inspect_entry(int /*frame*/) {
     auto& det = xi::use("det");
     auto out  = det.process(xi::Record().set("sleep_ms", 50));
-    VAR(count, out["count"].as_int(0));
+
+    // Surface the running count through the `expose` sink on channel "burst".
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "burst")
+        .set("count", out["count"].as_int(0)));
 }

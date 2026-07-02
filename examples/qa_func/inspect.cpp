@@ -3,9 +3,9 @@
 //
 // The "counter" instance (raw_thread_crash, armed:false) just returns a
 // running count and never crashes, so the backend stays healthy under
-// autostart. VAR() was purged from the core, so output is surfaced via the
-// `expose` plugin on channel "qa": a consumer (the driver) reads the values
-// back through expose `get` / the XEX1 push. Two values per frame:
+// autostart. Output is surfaced via the `expose` plugin on channel "qa": a
+// consumer (the driver) reads the values back through expose `get` / the XEX1
+// push. Two values per frame:
 //   count  — the instance's running frame count (advances in continuous mode)
 //   script — a literal tag so AS-I3 can prove WHICH script was compiled
 //            (this default vs the --script override alt_inspect.cpp).

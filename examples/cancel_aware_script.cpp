@@ -17,7 +17,7 @@
 //      xi_script_set_global_cancel(1) thunk (scoped to the in-flight run).
 //   2. xi::cancellation_requested() returns true on every thread running
 //      that inspect (and its xi::async sub-tasks).
-//   3. This script sees it, emits a `cancelled` VAR and exits.
+//   3. This script sees it, surfaces `cancelled` on the expose sink and exits.
 //   4. The cooperative phase succeeded; backend logs
 //      "cooperative cancel succeeded" and skips TerminateThread.
 //
@@ -34,12 +34,15 @@
 //
 
 #include <xi/xi.hpp>
+#include <xi/xi_use.hpp>
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int /*frame*/) {
     auto img = xi::imread(xi::current_frame_path());
     if (img.empty()) {
-        VAR(error, std::string("frame load failed; pass --frame-path"));
+        xi::use("expose").process(xi::Record()
+            .set("$channel", "error")
+            .set("error", std::string("frame load failed; pass --frame-path")));
         return;
     }
 
@@ -53,9 +56,11 @@ void xi_inspect_entry(int /*frame*/) {
         // 200 atomic loads total even on a 20 MP image. Inner loops
         // typically don't need it unless they themselves take seconds.
         if (xi::cancellation_requested()) {
-            VAR(cancelled, true);
-            VAR(passes_done, p);
-            VAR(accum, accum);
+            xi::use("expose").process(xi::Record()
+                .set("$channel", "cancel")
+                .set("cancelled", true)
+                .set("passes_done", p)
+                .set("accum", (double)accum));
             return;
         }
         for (int y = 0; y < img.height; ++y) {
@@ -65,8 +70,10 @@ void xi_inspect_entry(int /*frame*/) {
         }
     }
 
-    VAR(cancelled,    false);
-    VAR(passes_done,  passes);
-    VAR(accum,        accum);
-    VAR(input,        img);
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "cancel")
+        .set("cancelled", false)
+        .set("passes_done", passes)
+        .set("accum", (double)accum)
+        .image("input", img));
 }

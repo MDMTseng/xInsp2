@@ -37,45 +37,58 @@ void xi_inspect_entry(int /*frame*/) {
     // count sentinel — a "this is not a real verdict" signal.)
     auto ref_out = ref.process(xi::Record{});
     bool ref_loaded = ref_out["loaded"].as_bool(false);
-    VAR(reference_loaded, ref_loaded);
     if (!ref_loaded) {
-        VAR(error,            ref_out["error"].as_string("reference not loaded"));
-        VAR(inspection_valid, false);
-        VAR(defect_present,   false);
-        VAR(score,            0.0);
+        // inspection_valid=false marks this as "not a real verdict" — a consumer
+        // MUST gate on it before trusting defect_present. Pushed on the same
+        // `defect` channel so the sentinel rides next to the value it guards.
+        xi::use("expose").process(xi::Record()
+            .set("$channel", "defect")
+            .set("reference_loaded", ref_loaded)
+            .set("error",            ref_out["error"].as_string("reference not loaded"))
+            .set("inspection_valid", false)
+            .set("defect_present",   false)
+            .set("score",            0.0));
         return;
     }
     auto ref_img = ref_out.get_image("reference");
-    VAR(reference, ref_img);
 
     // 2. Load this frame.
     auto src_out = src.process(xi::Record().set("idx", idx));
     if (!src_out["loaded"].as_bool(false)) {
-        VAR(error,            src_out["error"].as_string("frame load failed"));
-        VAR(inspection_valid, false);
-        VAR(defect_present,   false);
-        VAR(score,            0.0);
+        xi::use("expose").process(xi::Record()
+            .set("$channel", "defect")
+            .set("reference_loaded", ref_loaded)
+            .set("error",            src_out["error"].as_string("frame load failed"))
+            .set("inspection_valid", false)
+            .set("defect_present",   false)
+            .set("score",            0.0));
         return;
     }
     auto frame = src_out.get_image("frame");
-    VAR(input,      frame);
-    VAR(frame_path, src_out["path"].as_string(""));
 
     // 3. Compare.
     auto out = finder.process(xi::Record()
         .image("reference", ref_img)
         .image("frame",     frame));
 
-    VAR(inspection_valid, true);   // a real comparison ran — defect_present is trustworthy
-    VAR(diff,           out.get_image("diff"));
-    VAR(mask,           out.get_image("mask"));
-    VAR(defect_present, out["defect_present"].as_bool(false));
-    VAR(score,          out["score"].as_double(0.0));
-    VAR(largest_area,   out["largest_area"].as_int(0));
-    VAR(kept_regions,   out["kept"].as_int(0));
-    VAR(total_regions,  out["total_regions"].as_int(0));
-    VAR(bbox_x0,        out["bbox_x0"].as_int(-1));
-    VAR(bbox_y0,        out["bbox_y0"].as_int(-1));
-    VAR(bbox_x1,        out["bbox_x1"].as_int(-1));
-    VAR(bbox_y1,        out["bbox_y1"].as_int(-1));
+    // Surface the verdict + diagnostic images through the `expose` plugin. A real
+    // comparison ran, so inspection_valid=true — defect_present is now trustworthy.
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "defect")
+        .set("reference_loaded", ref_loaded)
+        .image("reference",      ref_img)
+        .image("input",          frame)
+        .set("frame_path",       src_out["path"].as_string(""))
+        .set("inspection_valid", true)
+        .image("diff",           out.get_image("diff"))
+        .image("mask",           out.get_image("mask"))
+        .set("defect_present",   out["defect_present"].as_bool(false))
+        .set("score",            out["score"].as_double(0.0))
+        .set("largest_area",     out["largest_area"].as_int(0))
+        .set("kept_regions",     out["kept"].as_int(0))
+        .set("total_regions",    out["total_regions"].as_int(0))
+        .set("bbox_x0",          out["bbox_x0"].as_int(-1))
+        .set("bbox_y0",          out["bbox_y0"].as_int(-1))
+        .set("bbox_x1",          out["bbox_x1"].as_int(-1))
+        .set("bbox_y1",          out["bbox_y1"].as_int(-1)));
 }

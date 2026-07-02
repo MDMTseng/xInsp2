@@ -11,5 +11,9 @@ XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
     xi::status("inspected frame " + std::to_string(frame));   // -> "@script"
     xi::use("rep").process(xi::Record());                     // plugin sets "rep" status
-    VAR(frame_no, frame);
+
+    // Surface the frame number through `expose` on channel "status".
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "status")
+        .set("frame_no", frame));
 }

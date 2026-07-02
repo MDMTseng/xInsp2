@@ -13,6 +13,7 @@
 //
 
 #include <xi/xi.hpp>
+#include <xi/xi_use.hpp>
 
 static xi::Param<int>    user_amp {"user_amp",  5,  {1, 100}};
 static xi::Param<double> user_bias{"user_bias", 1.5, {0.0, 10.0}};
@@ -22,13 +23,19 @@ ASYNC_WRAP(user_double)
 
 extern "C" __declspec(dllexport)
 void xi_inspect_entry(int frame) {
-    VAR(raw,     frame);
-    VAR(scaled,  raw * static_cast<int>(user_amp));
+    auto raw    = frame;
+    auto scaled = raw * static_cast<int>(user_amp);
 
-    auto p1 = async_user_double(scaled);
-    VAR(dbl,    int(p1));
+    auto p1  = async_user_double(scaled);
+    int  dbl = int(p1);
 
-    VAR(biased, dbl + static_cast<double>(user_bias));
-    VAR(tag,    std::string("user_script_v1"));
-    VAR(alive,  true);
+    // Surface the pipeline values through the `expose` plugin (channel "user").
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "user")
+        .set("raw",    raw)
+        .set("scaled", scaled)
+        .set("dbl",    dbl)
+        .set("biased", dbl + static_cast<double>(user_bias))
+        .set("tag",    std::string("user_script_v1"))
+        .set("alive",  true));
 }

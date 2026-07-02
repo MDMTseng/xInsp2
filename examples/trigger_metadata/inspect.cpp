@@ -6,14 +6,18 @@
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int /*frame*/) {
-    auto t = xi::current_trigger();
+XI_INSPECT_ENTRY(t, frame) {
+    (void)frame;
     if (!t.is_active()) return;
 
     auto m = t.meta();                                  // borrowed metadata view
-    VAR(meta_command, m["command"].as_string());        // routing key
-    VAR(meta_recipe,  m["recipe"].as_int(-1));
-    VAR(meta_seq,     m["seq"].as_int(-1));
-    VAR(source,       t.primary_source());
+
+    // Surface the read-back routing metadata through the `expose` plugin
+    // (channel "meta"). `t` is handed in explicitly (no ambient thread_local).
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "meta")
+        .set("meta_command", m["command"].as_string())  // routing key
+        .set("meta_recipe",  m["recipe"].as_int(-1))
+        .set("meta_seq",     m["seq"].as_int(-1))
+        .set("source",       t.primary_source()));
 }

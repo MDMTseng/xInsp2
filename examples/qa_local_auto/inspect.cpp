@@ -8,18 +8,22 @@
 #include <xi/xi_result.hpp>
 #include <opencv2/opencv.hpp>
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int /*frame*/) {
-    auto t = xi::current_trigger();
+XI_INSPECT_ENTRY(t, /*frame*/ frame) {
+    (void)frame;
     if (!t.is_active()) return;                 // ignore any non-source tick
 
     xi::Image img = t.image("frame");           // source emits Record().image("frame", img)
     if (img.empty()) { xi::ng(2, "no image"); return; }
-    VAR(frame, img);                            // HMI image card binds var "frame"
 
     cv::Mat m = xi::as_cv_mat(img);
     double brightness = cv::mean(m)[0] / 255.0;
-    EMIT(brightness);   // surface the existing var (VAR(x,x) would redeclare → C2374)
+
+    // Surface the frame image + brightness through `expose` (channel "auto").
+    // The HMI image card binds the "frame" image key.
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "auto")
+        .image("frame", img)
+        .set("brightness", brightness));
 
     if (brightness > 0.15 && brightness < 0.85) xi::ok(1, "brightness ok");
     else                                        xi::ng(1, "brightness out of range");
