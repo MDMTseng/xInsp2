@@ -158,6 +158,10 @@ enum : int {
 };
 static constexpr int          kResultSystemBand = -990000;
 static constexpr size_t       kRecentErrorsCap  = 64;
+static const int              WATCHDOG_EXIT_CODE = 0x5744;  // 'WD' — backend self-exit on a hard trip
+
+// trigger_id → 32-char lowercase hex (used for boot_id + run_result trigger_id).
+std::string trigger_id_hex(xi_trigger_id id);
 
 // ---- host-tracked instance state -------------------------------------------
 using xi::InstState;
@@ -196,6 +200,26 @@ void status_cb(const char* text);
 
 // ---- per-run result --------------------------------------------------------
 void result_cb(int code, const char* msg);
+void emit_run_result(xi::ws::Server& srv, int code, const std::string& msg,
+                     int64_t run_id, int64_t ms,
+                     const std::string& source, const std::string& group,
+                     const std::string& trigger_id = std::string(),
+                     const char* cls = nullptr,
+                     const char* reason_code = nullptr,
+                     int64_t script_generation = 0);
+
+// Release every host resource a finished trigger event owns (image + doc refs).
+void release_trigger_event_(xi::TriggerEvent& ev);
+
+// RAII: release the event on scope exit UNLESS dismiss()ed (handed off to a lane).
+struct TriggerEventReleaser {
+    xi::TriggerEvent* ev_;   // null ⇒ dismissed (handed off)
+    explicit TriggerEventReleaser(xi::TriggerEvent& ev) : ev_(&ev) {}
+    void dismiss() { ev_ = nullptr; }
+    ~TriggerEventReleaser() { if (ev_) release_trigger_event_(*ev_); }
+    TriggerEventReleaser(const TriggerEventReleaser&) = delete;
+    TriggerEventReleaser& operator=(const TriggerEventReleaser&) = delete;
+};
 
 // ---- script host_api + use()/trigger/owner callbacks -----------------------
 // These are cast to void* at their (compile_and_load) use site; the EXACT
@@ -249,6 +273,7 @@ void stop_group_pool_();
 void stop_dispatch_pool_();
 void install_trigger_sink_(xi::ws::Server* srv);
 void controlled_shutdown_teardown_();
+BOOL WINAPI console_ctrl_handler_(DWORD type);
 
 // ---- dispatch quiesce guard (used by lifecycle-op cmd handlers) ------------
 struct DispatchPoolGuard {
