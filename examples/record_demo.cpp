@@ -6,6 +6,7 @@
 #include <xi/xi_cv.hpp>
 #include <xi/xi_image.hpp>
 #include <xi/xi_record.hpp>
+#include <xi/xi_use.hpp>
 
 xi::Param<int> thresh{"threshold", 150, {0, 255}};
 
@@ -29,15 +30,8 @@ void xi_inspect_entry(int frame) {
     cv::cvtColor(xi::as_cv_mat(img), gm, cv::COLOR_RGB2GRAY);
     xi::Image gray(gm.cols, gm.rows, 1, gm.data);
 
-    // Step 1: preprocess — record with images + metadata
-    VAR(preprocess, xi::Record()
-        .image("input", img)
-        .image("gray", gray)
-        .set("width", img.width)
-        .set("height", img.height)
-        .set("frame", frame));
-
-    // Step 2: detection — simulate 4 ROI matches
+    // Step 2: detection — simulate 4 ROI matches. `results` groups the per-ROI
+    // items (each carrying its own images); we publish its scalar summary below.
     xi::Record results;
     results.set("total", 4);
     int pass_count = 0;
@@ -78,9 +72,20 @@ void xi_inspect_entry(int frame) {
 
     results.set("pass_count", pass_count);
     results.set("all_pass", pass_count == 4);
-    VAR(detection, results);
 
-    // Step 3: summary
-    VAR(overall_pass, pass_count == 4);
-    VAR(score_avg, 85.5);
+    // Step 3: surface the previews + grouped scalar summary through the `expose`
+    // plugin (channel "record"). Images render in key order; we publish the
+    // meaningful scalar fields rather than the nested record objects.
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "record")
+        .image("input", img)
+        .image("gray", gray)
+        .set("width", img.width)
+        .set("height", img.height)
+        .set("frame", frame)
+        .set("total", results["total"].as_int())
+        .set("pass_count", pass_count)
+        .set("all_pass", pass_count == 4)
+        .set("overall_pass", pass_count == 4)
+        .set("score_avg", 85.5));
 }

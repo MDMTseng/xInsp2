@@ -12,13 +12,13 @@
 #include <chrono>
 #include <thread>
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int /*frame*/) {
-    auto t = xi::current_trigger();
+XI_INSPECT_ENTRY(t, /*frame*/ frame) {
+    (void)frame;
     if (!t.is_active()) return;   // skip the synthetic timer tick (no source)
 
     const std::string src = t.primary_source();
-    EMIT(src);   // surface the existing var (VAR(src,src) would redeclare it → C2374)
+    // Surface which source fired through `expose` (channel "grp").
+    xi::use("expose").process(xi::Record().set("$channel", "grp").set("src", src));
     // A little work so the lanes actually overlap (fast group has 3 threads).
     std::this_thread::sleep_for(std::chrono::milliseconds(8));
     // Result message = the emitting source; the dispatcher tags run_result.group.

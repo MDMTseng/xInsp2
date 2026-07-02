@@ -10,13 +10,13 @@
 #include <random>
 #include <thread>
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int /*frame*/) {
-    auto t = xi::current_trigger();
+XI_INSPECT_ENTRY(t, /*frame*/ frame) {
+    (void)frame;
     if (!t.is_active()) return;   // skip the synthetic timer tick
 
     const std::string src = t.primary_source();
-    EMIT(src);
+    // Surface which source fired through `expose` (channel "grp").
+    xi::use("expose").process(xi::Record().set("$channel", "grp").set("src", src));
     // Random 50-100ms of work, per-thread RNG so parallel lanes don't contend.
     static thread_local std::mt19937 rng{ std::random_device{}() };
     std::uniform_int_distribution<int> d(50, 100);

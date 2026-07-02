@@ -13,6 +13,10 @@
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int /*frame*/) {
     const int s = ext_add(2, 3);   // <-- call into the external DLL
-    VAR(sum, s);
-    VAR(ok, s == 5);
+
+    // Surface the result through the `expose` plugin (channel "extmath").
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "extmath")
+        .set("sum", s)
+        .set("ok", s == 5));
 }

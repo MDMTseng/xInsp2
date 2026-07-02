@@ -3,8 +3,8 @@
 //
 // A script compiles as ONE translation unit, so the way to split it is to put
 // each lane / logical block in its own HEADER and #include it here. Everything
-// in those headers — VAR(), xi::use(), xi::status(), state() — works exactly as
-// if it were written inline, because it's compiled into this same TU. (You
+// in those headers — xi::use() (incl. the `expose` data-out sink), xi::status(),
+// state() — works exactly as if written inline, it's compiled into this TU. (You
 // CAN'T split into separate .cpp TUs: the script-support thunks + xi::use()
 // callback globals are bound per-TU, so a second .cpp can't see them. Headers
 // sidestep that entirely.)

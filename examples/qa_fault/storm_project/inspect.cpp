@@ -11,5 +11,8 @@ XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
     auto& crasher = xi::use("crasher");
     auto out = crasher.process(xi::Record().set("frame", frame));
-    VAR(count, out["count"].as_int(-1));
+    // Surface the crasher's count through `expose` (channel "qa").
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "qa")
+        .set("count", out["count"].as_int(-1)));
 }

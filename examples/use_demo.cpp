@@ -13,15 +13,14 @@
 
 xi::Param<int> thresh{"threshold", 128, {0, 255}};
 
-XI_SCRIPT_EXPORT
-void xi_inspect_entry(int frame) {
+XI_INSPECT_ENTRY(t, frame) {
     // PUSH model: the camera SOURCE pushes frames into the trigger bus; the
     // script reads the CURRENT trigger's image instead of pulling with grab().
     // xi::use("name") still reaches backend-managed instances for process()/
     // exchange() (config, detectors), but the frame itself arrives via the
     // trigger — a one-image trigger resolves under any key, so "cam0" (or the
     // real source name) returns the pushed frame; empty when no trigger is live.
-    auto t = xi::current_trigger();
+    // `t` is handed in explicitly by the host (no ambient thread_local).
     xi::Image img = t.is_active() ? t.image("cam0") : xi::Image{};
 
     if (img.empty()) {
@@ -37,30 +36,33 @@ void xi_inspect_entry(int frame) {
             }
     }
 
-    VAR(input, img);
     cv::Mat gray_mat;
     cv::cvtColor(xi::as_cv_mat(img), gray_mat, cv::COLOR_RGB2GRAY);
     cv::Mat bin;
     cv::threshold(gray_mat, bin, (int)thresh, 255, cv::THRESH_BINARY);
 
-    // Wrap the cv::Mat results back as xi::Image for VAR previews. The
-    // ctor does a one-shot copy into a heap buffer; for hot-path code
-    // prefer Image::create_in_pool() and write cv:: output directly.
+    // Wrap the cv::Mat results back as xi::Image for the previews. The ctor
+    // does a one-shot copy into a heap buffer; for hot-path code prefer
+    // Image::create_in_pool() and write cv:: output directly.
     xi::Image gray_img(gray_mat.cols, gray_mat.rows, 1, gray_mat.data);
     xi::Image binary_img(bin.cols, bin.rows, 1, bin.data);
-    VAR(gray, gray_img);
-    VAR(binary, binary_img);
 
     cv::Mat labels;
     int n_labels = cv::connectedComponents(bin, labels, 8, CV_32S);
     int blobs = std::max(0, n_labels - 1);
-    VAR(blob_count, blobs);
-    VAR(pass, blobs <= 5);
 
     // Persistent state — survives hot-reload
     int count = xi::state()["run_count"].as_int(0);
     xi::state().set("run_count", count + 1);
     xi::state().set("last_blob_count", blobs);
 
-    VAR(run_count, count + 1);
+    // Surface the previews + values through the `expose` plugin (channel "use").
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "use")
+        .image("input", img)
+        .image("gray", gray_img)
+        .image("binary", binary_img)
+        .set("blob_count", blobs)
+        .set("pass", blobs <= 5)
+        .set("run_count", count + 1));
 }

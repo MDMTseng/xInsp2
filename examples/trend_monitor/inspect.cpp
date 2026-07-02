@@ -89,23 +89,23 @@ void xi_inspect_entry(int /*frame*/) {
     std::string fpath = xi::current_frame_path();
     xi::Image frame = xi::imread(fpath);
     if (frame.empty()) {
-        VAR(error,      std::string("imread failed: ") + fpath);
-        VAR(frame_path, fpath);
+        xi::use("expose").process(xi::Record()
+            .set("$channel", "error")
+            .set("error", std::string("imread failed: ") + fpath)
+            .set("frame_path", fpath));
         return;
     }
-    VAR(input,      frame);
-    VAR(frame_path, fpath);
 
     // 2) Detector → count.
     auto& det = xi::use("det");
     auto det_out = det.process(xi::Record().image("src", frame));
     if (det_out.has("error")) {
-        VAR(error, det_out["error"].as_string("detector error"));
+        xi::use("expose").process(xi::Record()
+            .set("$channel", "error")
+            .set("error", det_out["error"].as_string("detector error")));
         return;
     }
     int count_v = det_out["count"].as_int(0);
-    VAR(mask,    det_out.get_image("mask"));
-    VAR(cleaned, det_out.get_image("cleaned"));
 
     // 3) Pull prior state.
     int frame_seq_v = xi::state()["frame_seq"].as_int(0);
@@ -154,13 +154,19 @@ void xi_inspect_entry(int /*frame*/) {
     xi::state().set_value("window",
                           xi::Record::Value(build_window(xi::state().doc(), window)));
 
-    // 7) Emit per-frame VARs.
-    VAR(count,             count_v);
-    VAR(running_mean,      mean_v);
-    VAR(flagged,           flagged_v ? 1 : 0);
-    VAR(warming,           warming_v ? 1 : 0);
-    VAR(window_len_in,     prev_window_size);
-    VAR(window_len_out,    (int)window.size());
-    VAR(frame_seq,         frame_seq_v);
-    VAR(deviation_pct_used, (int)deviation_pct);
+    // 7) Surface per-frame values + diagnostic images through the `expose` plugin.
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "trend")
+        .image("input",             frame)
+        .set("frame_path",          fpath)
+        .image("mask",              det_out.get_image("mask"))
+        .image("cleaned",           det_out.get_image("cleaned"))
+        .set("count",               count_v)
+        .set("running_mean",        mean_v)
+        .set("flagged",             flagged_v ? 1 : 0)
+        .set("warming",             warming_v ? 1 : 0)
+        .set("window_len_in",       prev_window_size)
+        .set("window_len_out",      (int)window.size())
+        .set("frame_seq",           frame_seq_v)
+        .set("deviation_pct_used",  (int)deviation_pct));
 }

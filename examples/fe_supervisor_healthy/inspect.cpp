@@ -14,5 +14,9 @@ XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
     auto& counter = xi::use("counter");
     auto out = counter.process(xi::Record().set("frame", frame));
-    VAR(count, out["count"].as_int(-1));
+
+    // Surface the running count through the `expose` sink on channel "fe".
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "fe")
+        .set("count", out["count"].as_int(-1)));
 }

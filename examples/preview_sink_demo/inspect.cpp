@@ -1,11 +1,11 @@
-// preview_sink_demo — surfacing script output AFTER VAR was removed from core,
-// into MULTIPLE expose CHANNELS a UI can tab between.
+// preview_sink_demo — surfacing script output AFTER the VAR macro was removed
+// from core, into MULTIPLE expose CHANNELS a UI can tab between.
 //
-// VAR(name, value) still compiles but no longer publishes anything. To view what
-// the script computed, push a Record to the `expose` plugin under a channel id —
-// the generic xi::use("expose").process(rec); no special header. The channel
-// rides in the record under the reserved key "$channel"; the record's own key
-// order IS the display order (no PVAR / layout macro).
+// There is no per-run data macro anymore. To view what the script computed,
+// push a Record to the `expose` plugin under a channel id — the generic
+// xi::use("expose").process(rec); no special header. The channel rides in the
+// record under the reserved key "$channel"; the record's own key order IS the
+// display order (no layout macro).
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
 #include <xi/xi_result.hpp>   // xi::ok / xi::ng (not in the xi.hpp umbrella)
@@ -48,6 +48,6 @@ void xi_inspect_entry(int frame) {
     dark.set("$channel", "dark");
     xi::use("expose").process(dark);
 
-    // The run's verdict still leaves on its own channel (unaffected by VAR removal).
+    // The run's verdict still leaves on its own dedicated path.
     if (score >= 0) xi::ok(1, "ok"); else xi::ng(1, "neg");
 }

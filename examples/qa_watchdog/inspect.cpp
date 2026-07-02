@@ -7,10 +7,13 @@
 // cooperatively, and hard-trip -> the backend exits for the FE to respawn.
 //
 #include <xi/xi.hpp>
+#include <xi/xi_use.hpp>
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    VAR(start, frame);
+    // Mark that we entered (channel "qa") — then wedge forever, so the run never
+    // completes and the per-worker watchdog must hard-trip.
+    xi::use("expose").process(xi::Record().set("$channel", "qa").set("start", frame));
     volatile long long sink = 0;
     while (true) sink = sink + 1;   // never returns, never checks cancel
 }

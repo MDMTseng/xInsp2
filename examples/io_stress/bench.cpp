@@ -28,7 +28,7 @@ void xi_inspect_entry(int) {
     // One representative output (threshold 0 → all ~7 features kept) to extract
     // from repeatedly. process() itself is NOT in the timed loops.
     auto out = syn.process(synth_io::build().seed(7).threshold(0.0).build());
-    VAR(features_in_output, out.get_array_size("features"));
+    auto features_in_output = out.get_array_size("features");
 
     const int N = 100;
     volatile double sink = 0;
@@ -64,10 +64,14 @@ void xi_inspect_entry(int) {
     }
     double raw_us = now_us() - b0;
 
-    VAR(typed_total_us,    typed_us);
-    VAR(typed_per_iter_us, typed_us / N);
-    VAR(raw_total_us,      raw_us);
-    VAR(raw_per_iter_us,   raw_us / N);
-    VAR(overhead_ratio,    raw_us > 0 ? typed_us / raw_us : 0.0);
-    VAR(checksum,          (double)sink);   // keep the loops alive
+    // Publish the timings through the `expose` plugin (channel "bench").
+    xi::use("expose").process(xi::Record()
+        .set("$channel",           "bench")
+        .set("features_in_output", features_in_output)
+        .set("typed_total_us",     typed_us)
+        .set("typed_per_iter_us",  typed_us / N)
+        .set("raw_total_us",       raw_us)
+        .set("raw_per_iter_us",    raw_us / N)
+        .set("overhead_ratio",     raw_us > 0 ? typed_us / raw_us : 0.0)
+        .set("checksum",           (double)sink));   // keep the loops alive
 }

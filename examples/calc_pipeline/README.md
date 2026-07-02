@@ -12,7 +12,8 @@ input ──▶ adder0 ( + addend ) ──▶ multiplier0 ( × factor ) ──�
   a stand-in for a vendor SDK) to do the add.
 - `plugins/multiplier` — `result = value * factor`. Plain **source** plugin: the
   backend compiles it with `cl.exe`, hot-reloaded on save.
-- `inspect.cpp` pushes the frame counter through both and `VAR`s each stage.
+- `inspect.cpp` pushes the frame counter through both and surfaces each stage
+  through the **`expose` plugin** (channel `calc`) — the current data-out surface.
 
 Both move only `xi::Record` JSON — there is **no `xi::Image` anywhere**.
 `addend` / `factor` come from each instance's config
@@ -29,8 +30,8 @@ so you can retune them live in the instance UI without touching the script.
    (or right-click `adder` → **Rebuild Plugins**) — the backend runs its CMake
    (building + linking `vendor/mathx`) and loads it.
 3. Re-open the project (so `adder0` instantiates against the now-built plugin),
-   then Compile → Run. The Variable Window shows `input`, `added`, `product`,
-   `answer` each frame.
+   then Compile → Run. The `expose` panel's `calc` channel shows `input`,
+   `added`, and `answer` each frame.
 
 **Headless:** build the cmake plugin once, then autostart:
 

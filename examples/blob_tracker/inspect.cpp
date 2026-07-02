@@ -118,31 +118,30 @@ void xi_inspect_entry(int /*frame*/) {
     std::string fpath = xi::current_frame_path();
     xi::Image frame = xi::imread(fpath);
     if (frame.empty()) {
-        VAR(error,      std::string("imread failed: ") + fpath);
-        VAR(frame_path, fpath);
+        xi::use("expose").process(xi::Record()
+            .set("$channel", "error")
+            .set("error", std::string("imread failed: ") + fpath)
+            .set("frame_path", fpath));
         return;
     }
-    VAR(input,      frame);
-    VAR(frame_path, fpath);
 
     // 3) Detector → centroid list (+ diagnostic images).
     auto& det = xi::use("det");
     auto det_out = det.process(xi::Record().image("src", frame));
     if (det_out.has("error")) {
-        VAR(error, det_out["error"].as_string("detector error"));
+        xi::use("expose").process(xi::Record()
+            .set("$channel", "error")
+            .set("error", det_out["error"].as_string("detector error")));
         return;
     }
-    VAR(mask,           det_out.get_image("mask"));
-    VAR(cleaned,        det_out.get_image("cleaned"));
-    VAR(n_blobs,        det_out["count"].as_int(0));
-    VAR(rejected_small, det_out["rejected_small"].as_int(0));
-    VAR(rejected_big,   det_out["rejected_big"].as_int(0));
+    int n_blobs        = det_out["count"].as_int(0);
+    int rejected_small = det_out["rejected_small"].as_int(0);
+    int rejected_big   = det_out["rejected_big"].as_int(0);
 
     auto cur = read_centroid_list(det_out["centroids"]);
 
-    // 4) Pull prior state. (Locals shadow the VAR names we'll emit
-    //    later — VAR(name, expr) declares `auto name = expr;` so the
-    //    locals here must use distinct identifiers, hence the `_v` suffix.)
+    // 4) Pull prior state into locals (the `_v` suffix is historical — it
+    //    kept these distinct from the surfaced field names below).
     int  frame_seq_v        = xi::state()["frame_seq"].as_int(0);
     int  crossings_so_far_v = xi::state()["crossings_so_far"].as_int(0);
     auto prev               = read_state_centroids(xi::state()["prev_centroids"]);
@@ -186,13 +185,21 @@ void xi_inspect_entry(int /*frame*/) {
     xi::state().set_value("prev_centroids",
                           xi::Record::Value(build_centroid_array(xi::state().doc(), cur)));
 
-    // 7) Emit per-frame VARs the driver can read. VAR(name, expr)
-    //    expands to `auto name = expr;` — so we name them differently
-    //    from the locals above.
-    VAR(frame_seq,         frame_seq_v);          // frame index this CALL processed
-    VAR(crossings_so_far,  crossings_so_far_v);   // running total after this frame
-    VAR(delta_crossings,   delta_crossings_v);    // crossings detected this frame
-    VAR(matched_blobs,     matched_v);            // blobs matched to prev frame
-    VAR(prev_blob_count,   (int)prev.size());     // size of state we read in
-    VAR(gate_x_used,       GATE);
+    // 7) Surface per-frame values + diagnostic images through the `expose`
+    //    plugin. Display order follows the record's key order.
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "tracker")
+        .image("input",           frame)
+        .set("frame_path",        fpath)
+        .image("mask",            det_out.get_image("mask"))
+        .image("cleaned",         det_out.get_image("cleaned"))
+        .set("n_blobs",           n_blobs)
+        .set("rejected_small",    rejected_small)
+        .set("rejected_big",      rejected_big)
+        .set("frame_seq",         frame_seq_v)          // frame index this CALL processed
+        .set("crossings_so_far",  crossings_so_far_v)   // running total after this frame
+        .set("delta_crossings",   delta_crossings_v)    // crossings detected this frame
+        .set("matched_blobs",     matched_v)            // blobs matched to prev frame
+        .set("prev_blob_count",   (int)prev.size())     // size of state we read in
+        .set("gate_x_used",       GATE));
 }

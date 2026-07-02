@@ -11,6 +11,8 @@
 #include <xi/xi.hpp>
 #include <xi/xi_cv.hpp>
 #include <xi/xi_image.hpp>
+#include <xi/xi_use.hpp>       // xi::use("expose") — the data-out surface
+#include <xi/xi_result.hpp>    // xi::ok / xi::ng — the per-run verdict
 
 #include <vector>
 
@@ -38,8 +40,6 @@ XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
     xi::Image rgb = make_frame(frame);
     if (rgb.empty()) return;
-
-    VAR(input, rgb);
 
     cv::Mat src = xi::as_cv_mat(rgb);
 
@@ -77,16 +77,25 @@ void xi_inspect_entry(int frame) {
 
     cv::Scalar mean_scalar = cv::mean(gray);
 
-    // Wrap cv::Mat results back as xi::Image for VAR previews. Each ctor
-    // does one heap copy; for hot-path code use Image::create_in_pool +
-    // as_cv_mat() to write into pool memory directly (see plugin
-    // examples).
-    VAR(gray_img,    xi::Image(gray.cols,    gray.rows,    1, gray.data));
-    VAR(blurred_img, xi::Image(blurred.cols, blurred.rows, 1, blurred.data));
-    VAR(binary_img,  xi::Image(binary.cols,  binary.rows,  1, binary.data));
-    VAR(cleaned_img, xi::Image(cleaned.cols, cleaned.rows, 1, cleaned.data));
-    VAR(edges_img,   xi::Image(edges.cols,   edges.rows,   1, edges.data));
-    VAR(blob_count_var,    blob_count);
-    VAR(mean_intensity,    mean_scalar[0]);
-    VAR(pass,              blob_count <= 2);
+    // Surface the pipeline stages + values through the `expose` plugin — the
+    // current data-out surface (the old VAR image-preview path was removed).
+    // Wrap each cv::Mat back as an xi::Image; each ctor does one heap copy. For
+    // hot-path code, write cv:: output straight into a pool-backed Image via
+    // Image::create_in_pool + as_cv_mat() instead (see the plugin examples).
+    // Display order follows the record's key order, so the stages render
+    // top-to-bottom as written.
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "defect")
+        .image("input",   rgb)
+        .image("gray",    xi::Image(gray.cols,    gray.rows,    1, gray.data))
+        .image("blurred", xi::Image(blurred.cols, blurred.rows, 1, blurred.data))
+        .image("binary",  xi::Image(binary.cols,  binary.rows,  1, binary.data))
+        .image("cleaned", xi::Image(cleaned.cols, cleaned.rows, 1, cleaned.data))
+        .image("edges",   xi::Image(edges.cols,   edges.rows,   1, edges.data))
+        .set("blob_count",     blob_count)
+        .set("mean_intensity", mean_scalar[0]));
+
+    // The run's pass/fail verdict rides its own dedicated path.
+    if (blob_count <= 2) xi::ok(1, "clean");
+    else                 xi::ng(1, "too many blobs");
 }

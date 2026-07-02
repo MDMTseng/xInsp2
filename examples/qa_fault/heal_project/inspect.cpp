@@ -13,6 +13,9 @@ XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
     auto& healer = xi::use("healer");
     auto out = healer.process(xi::Record().set("frame", frame));
-    VAR(count, out["count"].as_int(-1));
-    VAR(healed, out["healed"].as_bool(false));
+    // Surface the healer's count + healed marker through `expose` (channel "qa").
+    xi::use("expose").process(xi::Record()
+        .set("$channel", "qa")
+        .set("count", out["count"].as_int(-1))
+        .set("healed", out["healed"].as_bool(false)));
 }
