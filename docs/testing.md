@@ -17,6 +17,47 @@ This is the live picture of test surface, organisation, and how to run.
 
 ---
 
+## Enforcement — the gate (`tools/gate.py`)
+
+Every gate below is only worth its green if something runs it. **One command
+runs the enforced surface, in order, and fails on the first failure:**
+
+```
+python tools/gate.py
+```
+
+Stages: **docs** (the derive-from-source freeze guards) → **build** (backend
+Release + shipped plugins) → **ctest** (the full C++ suite — unit, integration,
+perf gates, `script_selfcheck`, and the doc gates again) → **fixtures** (the
+protocol golden-fixture round-trip, `pytest tools/xinsp2_py/tests`) → **qa**
+(the `examples/qa_*` sweep) → **fuzz** (the black-box fuzz smoke,
+`tests/fuzz/run_smoke.py`).
+
+This is the single source of truth for "what must pass," and CI is a thin
+wrapper over it: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+provisions the Windows toolchain (MSVC + OpenCV) and calls `python
+tools/gate.py`, so a local green and a CI green mean the same thing and cannot
+drift. `--only` / `--skip` select stages; `--list` shows them; `--port` sets the
+fuzz WS port (defaults to 7824 so it dodges the VS Code extension on a dev box).
+
+The **qa** stage honors a quarantine
+([`examples/qa_known_failing.txt`](../examples/qa_known_failing.txt)) so the gate
+is usable on a base that still has pre-existing broken examples: a quarantined
+test runs but its failure is a loud, non-fatal `KNOWN-FAIL`, while a quarantined
+test that *passes* is fatal (the list can't rot green). `run_qa.py --strict`
+ignores it. Mechanism and current contents:
+[`docs/ci-gate-known-failures.md`](ci-gate-known-failures.md).
+
+The **fuzz smoke is wired here on purpose and nowhere else.** It was built "to
+be wired into CI as a build-breaking net" (`tests/fuzz/README.md`) — this gate
+is that wiring. It is deliberately *not* a ctest: it spawns a real backend over
+WS and coordinates the single-client port by timing, so it belongs with the
+integration sweep, not the deterministic unit ctests. The Node suites
+(`vscode-extension/test/*.test.mjs`) are likewise **not** in the gate — they
+need `npm install`; run them separately (below).
+
+---
+
 ## Where the tests live
 
 ```
@@ -410,7 +451,9 @@ sequentially, aggregates `VERDICT: PASS|FAIL|SKIP`, and exits non-zero on any
 failure (CI-gate usable). `python tools/run_qa.py group` runs only the
 folder-name matches; `--list` lists without running; `--timeout=N` caps each.
 Tests run one at a time (each spawns its own backend on its own port and some
-share project-plugin DLL paths). Windows-first; drivers SKIP on non-`nt`.
+share project-plugin DLL paths). Windows-first; drivers SKIP on non-`nt`. It is
+the **qa** stage of `tools/gate.py`; run it standalone when iterating on one
+example, run the gate before merging.
 
 ## How to add a new test
 

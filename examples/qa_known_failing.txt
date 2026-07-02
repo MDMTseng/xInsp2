@@ -1,0 +1,43 @@
+# qa_known_failing.txt - quarantine registry for tools/run_qa.py
+#
+# Format:  <qa_dir_name>: <reason>
+# Lines starting with '#' and blank lines are ignored.
+#
+# WHAT THIS IS
+# A quarantine is NOT a mute. A test listed here still RUNS every time; the gate
+# just does not go red because it failed - instead it prints a loud KNOWN-FAIL
+# line with the reason below. Two things keep the list honest:
+#   * if a quarantined test starts PASSING, run_qa reports it as an UNEXPECTED
+#     PASS and FAILS - you must delete its line here (the list cannot rot green);
+#   * `python tools/run_qa.py --strict` ignores this file entirely and treats
+#     every failure as fatal (the raw truth / the eventual clean-suite gate).
+#
+# WHY THESE ARE HERE (see docs/ci-gate-known-failures.md for the full write-up)
+# When the day-1 gate (tools/gate.py) was first stood up, 13 of 25 qa examples
+# were already red on master - the gate did its job and surfaced a pre-existing
+# broken suite. 12 of the 13 are the "dead-API scripts": their inspect.cpp still
+# uses the RETIRED VAR(...) / EMIT(...) macros and the legacy `xi_inspect_entry(
+# int frame)` entry, all removed from the SDK headers, so they no longer compile
+# (C3861 'EMIT'/'VAR' not found, C2065 'frame' undeclared). Rewriting/deleting
+# those scripts is adoption-map item 4 ("fix or delete the 32 dead-API scripts"),
+# a separate branch - NOT the CI-gate branch. They are quarantined so the gate is
+# usable now (it catches NEW breakage) and self-empties as item 4 lands.
+#
+# Retire a line the moment its script is fixed on the examples branch.
+
+# --- dead-API scripts: retired VAR/EMIT/legacy `frame` entry (adoption item 4) ---
+qa_group_parallelism: dead-API script - inspect.cpp uses removed EMIT() (item 4)
+qa_group_stress: dead-API script - inspect.cpp uses removed EMIT() (item 4)
+qa_local_auto: dead-API script - inspect.cpp uses removed VAR()/EMIT()/`frame` (item 4)
+qa_two_group_paths: dead-API script - inspect.cpp uses removed EMIT() (item 4)
+qa_func: dead-API script(s) - uses removed VAR/EMIT; compile fails then driver times out (item 4)
+qa_instance_def_recompile: dead-API script - recompile step hits removed VAR/EMIT (item 4)
+qa_param_state_isolation: dead-API script(s) - uses removed VAR/EMIT (item 4)
+qa_recipe_script_instance: dead-API script - uses removed VAR/EMIT (item 4)
+qa_recover: dead-API script - uses removed VAR/EMIT; FE never reaches recovery (item 4)
+qa_sink_shared_doc: dead-API script - uses removed VAR/EMIT (item 4)
+qa_watchdog: dead-API script - uses removed VAR/EMIT; watchdog path never armed (item 4)
+qa_export_bundle: transitively dead-API - exports+compiles qa_group_parallelism (item 4)
+
+# --- not dead-API: separate pre-existing failure, still on master ---
+qa_lifecycle_teardown: pre-existing on master (base), NOT dead-API - "#7 clean shutdown with project" step fails; owner TBD, tracked in docs/ci-gate-known-failures.md

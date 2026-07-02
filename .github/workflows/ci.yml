@@ -1,0 +1,86 @@
+# xInsp2 CI — runs the SAME authoritative gate a maintainer runs locally.
+#
+# The single source of truth for "what must pass" is tools/gate.py. This
+# workflow only *provisions the toolchain* and then calls that script, so the
+# local gate and CI cannot drift: change a stage in gate.py and both move
+# together.
+#
+# Platform: windows-latest only. xInsp2 is Windows-first by construction — the
+# WS server, the SEH crash layer, and the cl.exe-driven script/plugin compile
+# are all Win32. A Linux job would test nothing that ships (docs/testing.md
+# "What Is Not Tested: Linux").
+#
+# Realism about hosted runners (read before trusting a red/green here):
+#   * The `docs` and `fixtures` gate stages are pure stdlib+pytest Python and
+#     need NO native build — they always run and are a hard gate.
+#   * `build` / `ctest` / `qa` / `fuzz` need OpenCV 4.x and the MSVC toolchain
+#     (incl. cl.exe on PATH at RUNTIME, because the backend JIT-compiles
+#     inspection scripts). Both are provisioned below. OpenCV is fetched with
+#     Chocolatey; if that provisioning ever proves flaky on the hosted image,
+#     the pure-Python subset above still gives signal, and the native half can
+#     be moved to a self-hosted runner without touching gate.py.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python test deps
+        run: python -m pip install --upgrade pip pytest
+
+      # --- Hard gate: the build-free stages. Always run, always block. --------
+      # docs   = check_doc_coverage + check_retired_terms (derive-from-source)
+      # fixtures = protocol golden-fixture round-trip (no live backend)
+      - name: Gate (docs + fixtures — no native build)
+        run: python tools/gate.py --only docs,fixtures
+
+      # --- Provision the native toolchain for the build-dependent stages ------
+      # Put cl.exe / MSVC on PATH for BOTH the CMake build and the backend's
+      # runtime script compile (the qa/fuzz stages spawn a backend that shells
+      # out to cl.exe).
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # OpenCV 4.x is a hard dependency (find_package(OpenCV REQUIRED)). Fetch it
+      # and hand CMake the config dir. If this step fails, the native gate below
+      # cannot run — but the pure-Python gate above has already reported.
+      - name: Install OpenCV
+        run: choco install opencv --version=4.10.0 -y --no-progress
+
+      - name: Locate OpenCVConfig.cmake
+        shell: pwsh
+        run: |
+          # Chocolatey drops OpenCV under C:\tools\opencv; the vc<NN> folder name
+          # varies by package build, so discover it rather than hard-coding.
+          $cfg = Get-ChildItem -Path 'C:\tools\opencv' -Recurse -Filter 'OpenCVConfig.cmake' -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          if (-not $cfg) { throw 'OpenCVConfig.cmake not found under C:\tools\opencv' }
+          $dir = Split-Path $cfg.FullName -Parent
+          Write-Host "OpenCV_DIR=$dir"
+          "OpenCV_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # --- The native gate: build + ctest + qa + fuzz (mirror of local run) ---
+      # Same gate.py, minus the two stages already run above. In CI there is no
+      # VS Code extension racing the WS slot, so the default fuzz port is fine;
+      # we pass 7823 explicitly to document that.
+      - name: Gate (build + ctest + qa + fuzz)
+        run: python tools/gate.py --skip docs,fixtures --port 7823
