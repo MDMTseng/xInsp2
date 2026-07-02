@@ -83,6 +83,46 @@ public:
         return xi::Record().set("channel", channel).set("seen", (int64_t)ch.seen);
     }
 
+    // polaris2 wave-2 (docs/new_gen/08 Wave 2 step 3): the xi.frame@1 frame-in/
+    // frame-out door. expose is a SINK — it consumes a sealed frame and its real
+    // output is the emit_binary side-effect (exactly as process() above returns a
+    // small ack while emit_binary pushes the real payload). So process_frame walks
+    // the input frame GENERICALLY (count()+key_at()+tag_at()+typed reads — zero
+    // producer knowledge; the r2 constraint made real) and returns a small ack
+    // frame {channel, seen}, mirroring the Record path's ack record.
+    //
+    // The framework-internal reserved keys ($channel/$seq) are lifted to the wire
+    // frame's top-level fields; every OTHER entry is dumped by tag: scalars/str
+    // pass through, image entries get the JPEG preview treatment (v1) or are
+    // inlined as raw bin (v2), and nested msgpack rides verbatim (v2). Which wire
+    // version is produced is the opt-in `frame_wire_v2` config (DEFAULT v1 — the
+    // wire-breaking default stays out per the plan's governance).
+    void process_frame(xi::FrameIn& in, xi::FrameOut& out) override {
+        const std::string channel(in.str(xi::Record::kChannelKey).value_or("default"));
+        const uint64_t    seq = (uint64_t)in.i64_or(xi::Record::kSeqKey, 0);
+
+        bool v2;
+        { std::lock_guard<std::mutex> lk(mu_); v2 = wire_v2_; }
+
+        // Walk the borrowed input frame WITHOUT our mutex (it is immutable +
+        // host-owned); take the lock only to publish the result + read state.
+        std::vector<uint8_t> frame = v2 ? build_v2_from_frame_(in, channel, seq)
+                                        : build_v1_from_frame_(in, channel, seq);
+
+        long long seen; bool subscribed;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            Channel& ch = channels_[channel];
+            ch.seq         = seq;
+            ch.frame_bytes = frame;    // keep the latest encoded frame for pull
+            seen = ++ch.seen;
+            subscribed = subscribed_.count(channel) != 0;
+        }
+        if (subscribed) emit_binary(frame);
+
+        out.str("channel", channel).i64("seen", (int64_t)seen);
+    }
+
     std::string exchange(const std::string& cmd) override {
         auto p = xi::Json::parse(cmd);
         const std::string c = p["command"].as_string();
@@ -114,7 +154,11 @@ public:
             auto it = channels_.find(channel);
             if (it == channels_.end())
                 return xi::Json::object().set("found", false).set("channel", channel).dump();
-            std::vector<uint8_t> frame = build_frame_(channel, it->second);
+            // A channel fed through the frame door already holds its encoded XEX1
+            // frame bytes; the Record path rebuilds from the stored record/images.
+            std::vector<uint8_t> frame = !it->second.frame_bytes.empty()
+                ? it->second.frame_bytes
+                : build_frame_(channel, it->second);
             return xi::Json::object().set("found", true).set("channel", channel)
                 .set("seq", (int64_t)it->second.seq)
                 .set("frame_b64", b64(frame.data(), frame.size())).dump();
@@ -128,9 +172,19 @@ public:
         auto names = xi::Json::array();
         for (auto& [name, ch] : channels_) { (void)ch; names.push(name); }
         return xi::Json::object().set("count", (int)channels_.size())
-            .set("channels", names).dump();
+            .set("channels", names)
+            .set("frame_wire_v2", wire_v2_).dump();
     }
-    bool set_def(const std::string&) override { return true; }
+    // Config: opt the frame-in door into the canonical XEX1-v2 wire dump
+    // (default off — v1 stays the default wire per the plan's governance). The
+    // Record path is unaffected; this flag only picks the frame-door encoder.
+    bool set_def(const std::string& json) override {
+        auto p = xi::Json::parse(json);
+        if (!p.valid()) return true;   // tolerant: absent/blank def is a no-op
+        std::lock_guard<std::mutex> lk(mu_);
+        if (p["frame_wire_v2"].valid()) wire_v2_ = p["frame_wire_v2"].as_bool(wire_v2_);
+        return true;
+    }
 
 private:
     struct Channel {
@@ -138,7 +192,106 @@ private:
         uint64_t                          seq  = 0;
         long long                         seen = 0;
         std::map<std::string, xi::Image>  images;
+        std::vector<uint8_t>              frame_bytes;  // latest encoded frame (frame-door path)
     };
+
+    // --- frame-door encoders (the generic walk; docs/new_gen/08 Wave 2) --------
+
+    // XEX1-v2: the canonical frame dump. Walk every entry by index and hand it to
+    // encode_frame_v2 with its VALUE ALREADY CANONICAL — scalars/str/bin are
+    // re-encoded through xi::mp::Writer (byte-identical to the frame arena, same
+    // profile), nested msgpack rides verbatim, images inline their raw pixels.
+    // The $channel/$seq reserved keys are lifted to the wire top level, not dumped.
+    std::vector<uint8_t> build_v2_from_frame_(const xi::FrameIn& in,
+                                              const std::string& channel,
+                                              uint64_t seq) const {
+        std::vector<xi::xex1::V2Entry> entries;
+        const int n = in.count();
+        entries.reserve((size_t)n);
+        for (int i = 0; i < n; ++i) {
+            auto keyv = in.key_at(i);
+            if (!keyv) continue;
+            std::string key(*keyv);
+            if (key == xi::Record::kChannelKey || key == xi::Record::kSeqKey) continue;
+            const int tag = in.tag_at(i);
+            xi::xex1::V2Entry e;
+            e.key = key;
+            e.tag = (uint8_t)tag;
+            switch (tag) {
+                case XI_FRAME_TAG_I64: {
+                    xi::mp::Writer w; w.int_(in.i64_or(key.c_str(), 0)); e.value = w.take();
+                    break;
+                }
+                case XI_FRAME_TAG_F64: {
+                    xi::mp::Writer w; w.float_(in.f64(key.c_str()).value_or(0.0)); e.value = w.take();
+                    break;
+                }
+                case XI_FRAME_TAG_STR: {
+                    xi::mp::Writer w; w.str(in.str(key.c_str()).value_or("")); e.value = w.take();
+                    break;
+                }
+                case XI_FRAME_TAG_BIN: {
+                    auto b = in.bin(key.c_str());
+                    xi::mp::Writer w;
+                    if (b) w.bin(b->first, (size_t)b->second); else w.bin(nullptr, 0);
+                    e.value = w.take();
+                    break;
+                }
+                case XI_FRAME_TAG_MP: {
+                    auto m = in.mp(key.c_str());
+                    if (m) e.value.assign(m->first, m->first + m->second);
+                    break;
+                }
+                case XI_FRAME_TAG_IMAGE: {
+                    auto im = in.image(key.c_str());
+                    if (!im || !im->pixels) continue;
+                    e.w = im->width; e.h = im->height; e.c = im->channels;
+                    e.px = static_cast<const uint8_t*>(im->pixels);
+                    e.px_len = im->length > 0 ? (size_t)im->length : 0;
+                    break;
+                }
+                default: continue;   // unknown tag: skip (opaque forward-compat)
+            }
+            entries.push_back(std::move(e));
+        }
+        return xi::xex1::encode_frame_v2(channel, seq, entries);
+    }
+
+    // XEX1-v1 from a frame: the legacy display shape (same bytes existing clients
+    // decode). Scalar/str entries collect into the json values object; image
+    // entries get the JPEG preview treatment (host cache). bin/mp entries have no
+    // v1 (display) representation and are v2-only — dropped here.
+    std::vector<uint8_t> build_v1_from_frame_(const xi::FrameIn& in,
+                                              const std::string& channel,
+                                              uint64_t seq) const {
+        auto vals = xi::Json::object();
+        std::vector<xi::xex1::EncImage> images;
+        const int n = in.count();
+        for (int i = 0; i < n; ++i) {
+            auto keyv = in.key_at(i);
+            if (!keyv) continue;
+            std::string key(*keyv);
+            if (key == xi::Record::kChannelKey || key == xi::Record::kSeqKey) continue;
+            switch (in.tag_at(i)) {
+                case XI_FRAME_TAG_I64:
+                    vals.set(key.c_str(), (int64_t)in.i64_or(key.c_str(), 0)); break;
+                case XI_FRAME_TAG_F64:
+                    vals.set(key.c_str(), in.f64(key.c_str()).value_or(0.0)); break;
+                case XI_FRAME_TAG_STR:
+                    vals.set(key.c_str(), std::string(in.str(key.c_str()).value_or(""))); break;
+                case XI_FRAME_TAG_IMAGE: {
+                    auto im = in.image(key.c_str());
+                    if (!im || !im->pixels) break;
+                    std::vector<uint8_t> jpeg = compress_px_(
+                        static_cast<const uint8_t*>(im->pixels), im->width, im->height, im->channels);
+                    if (!jpeg.empty()) images.push_back({key, std::move(jpeg)});
+                    break;
+                }
+                default: break;  // bin/mp: no v1 display form
+            }
+        }
+        return xi::xex1::encode_frame(channel, seq, vals.dump(), images);
+    }
 
     // Build the atomic XEX1 frame: magic + msgpack { v, channel, seq, json, images[] }.
     // Framing (msgpack) lives in xex1_encode.hpp; here we JPEG-compress each image
@@ -161,13 +314,17 @@ private:
     // same bytes, same -needed/0 return convention.
     std::vector<uint8_t> compress_(const xi::Image& img) const {
         if (img.empty()) return {};
+        return compress_px_(img.data(), img.width, img.height, img.channels);
+    }
+    // Same JPEG-through-host-cache path, from raw pixel bytes (the frame-door
+    // walk holds a borrowed pool span, not an xi::Image).
+    std::vector<uint8_t> compress_px_(const uint8_t* px, int w, int h, int c) const {
+        if (!px || w <= 0 || h <= 0 || c <= 0) return {};
         std::vector<uint8_t> jpeg(64 * 1024);
-        int n = compress(img.data(), img.width, img.height, img.channels, 85,
-                         jpeg.data(), (int)jpeg.size());
+        int n = compress(px, w, h, c, 85, jpeg.data(), (int)jpeg.size());
         if (n < 0) {  // buffer too small — resize to needed and retry
             jpeg.resize((size_t)(-n));
-            n = compress(img.data(), img.width, img.height, img.channels, 85,
-                         jpeg.data(), (int)jpeg.size());
+            n = compress(px, w, h, c, 85, jpeg.data(), (int)jpeg.size());
         }
         if (n <= 0) return {};
         jpeg.resize((size_t)n);
@@ -177,6 +334,11 @@ private:
     mutable std::mutex              mu_;
     std::map<std::string, Channel>  channels_;
     std::set<std::string>           subscribed_;
+    bool                            wire_v2_ = false;   // frame-door: emit XEX1-v2 (opt-in)
 };
 
 XI_PLUGIN_IMPL(ExposeSink)
+// polaris2 wave-2: publish the xi.frame@1 frame-in/frame-out door so the host
+// learns expose consumes frames (the generic sink — it walks any sealed frame
+// without producer knowledge). The Record process() path is untouched.
+XI_PLUGIN_FRAME_DOOR(ExposeSink)

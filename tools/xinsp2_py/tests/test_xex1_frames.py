@@ -46,6 +46,10 @@ def test_golden_frame_decodes_to_manifest(frame: dict) -> None:
     data = (FIX / frame["file"]).read_bytes()
     assert is_xex1(data)
 
+    if frame.get("v") == 2:
+        _check_v2(frame, data)
+        return
+
     raw = _raw_body(data)
     assert raw["v"] == 1
     assert raw["channel"] == frame["channel"]
@@ -62,6 +66,25 @@ def test_golden_frame_decodes_to_manifest(frame: dict) -> None:
     for im in frame["images"]:
         assert dec["images"][im["key"]] == base64.b64decode(im["b64"])
         assert len(dec["images"][im["key"]]) == im["size"]
+
+
+def _check_v2(frame: dict, data: bytes) -> None:
+    """The canonical frame dump: v:2 with scalar/str/mp entries -> values and
+    image descriptors -> images (raw pixels, lossless)."""
+    dec = decode_xex1(data)
+    assert dec["v"] == 2
+    assert dec["channel"] == frame["channel"]
+    assert dec["seq"] == frame["seq"]
+    for fld in frame["fields"]:
+        key, kind = fld["key"], fld["kind"]
+        if kind == "image":
+            im = dec["images"][key]
+            assert (im["w"], im["h"], im["c"]) == (fld["w"], fld["h"], fld["c"])
+            assert im["pixels"] == base64.b64decode(fld["b64"])
+        elif kind == "bin":
+            assert bytes(dec["values"][key]) == base64.b64decode(fld["b64"])
+        else:
+            assert dec["values"][key] == fld["value"]
 
 
 def test_nonfinite_sentinels_restore() -> None:

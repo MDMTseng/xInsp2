@@ -34,7 +34,35 @@ function loadShippedDecoder() {
 const { decodeXEX1, restoreNonFinite } = loadShippedDecoder();
 const manifest = JSON.parse(readFileSync(path.join(FIX, "manifest.json"), "utf8"));
 
+const b64 = (s) => new Uint8Array(Buffer.from(s, "base64"));
+
 for (const f of manifest.frames) {
+  if (f.v === 2) {
+    test(`XEX1 golden (v2): ${f.file}`, () => {
+      const body = decodeXEX1(new Uint8Array(readFileSync(path.join(FIX, f.file))));
+      assert.ok(body, `decodeXEX1 returned null for ${f.file}`);
+      assert.equal(body.v, 2);
+      assert.equal(body.channel, f.channel);
+      assert.equal(body.seq, f.seq);
+      // The canonical frame dump: scalar/str/mp entries -> values, image
+      // descriptors -> images[] with raw pixels (v2 is lossless, no JPEG).
+      for (const fld of f.fields) {
+        if (fld.kind === "image") {
+          const im = body.images.find((x) => x.key === fld.key);
+          assert.ok(im, `v2 image entry ${fld.key} missing`);
+          assert.equal(im.w, fld.w);
+          assert.equal(im.h, fld.h);
+          assert.equal(im.c, fld.c);
+          assert.deepEqual(new Uint8Array(im.pixels), b64(fld.b64));
+        } else if (fld.kind === "bin") {
+          assert.deepEqual(new Uint8Array(body.values[fld.key]), b64(fld.b64));
+        } else {
+          assert.deepEqual(body.values[fld.key], fld.value);
+        }
+      }
+    });
+    continue;
+  }
   test(`XEX1 golden: ${f.file}`, () => {
     const bytes = new Uint8Array(readFileSync(path.join(FIX, f.file)));
     const body = decodeXEX1(bytes);
@@ -48,7 +76,7 @@ for (const f of manifest.frames) {
     assert.equal(body.images.length, f.images.length);
     for (let i = 0; i < f.images.length; i++) {
       assert.equal(body.images[i].key, f.images[i].key);
-      const want = new Uint8Array(Buffer.from(f.images[i].b64, "base64"));
+      const want = b64(f.images[i].b64);
       assert.equal(body.images[i].jpeg.length, f.images[i].size);
       assert.deepEqual(new Uint8Array(body.images[i].jpeg), want);
     }
