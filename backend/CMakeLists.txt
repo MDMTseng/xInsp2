@@ -327,6 +327,21 @@ target_compile_definitions(test_fault_policy PRIVATE
     FAULT_PLUGIN_DLL="$<TARGET_FILE:fault_plugin>")
 add_test(NAME fault_policy COMMAND test_fault_policy)
 
+# Q0f — the deliberate per-crash doc leak is OBSERVABLE. Drives the real xi_use.hpp
+# UseProxy (share_out reserves a ref; rc -2 leaks it) against the real crashing
+# fault_plugin, and asserts DocRegistry::crash_leaked_lifetime (surfaced in
+# dispatch_stats as crash_leaked_docs_lifetime) ticks once per caught crash while a
+# host-owned doc genuinely stays stranded.
+add_executable(test_crash_leak_counter tests/test_crash_leak_counter.cpp)
+target_link_libraries(test_crash_leak_counter PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_crash_leak_counter PRIVATE Ws2_32)
+endif()
+add_dependencies(test_crash_leak_counter fault_plugin)
+target_compile_definitions(test_crash_leak_counter PRIVATE
+    FAULT_PLUGIN_DLL="$<TARGET_FILE:fault_plugin>")
+add_test(NAME crash_leak_counter COMMAND test_crash_leak_counter)
+
 # ABI freeze-signature guard: declares xi_host_api@9 frozen and fails the BUILD
 # if its published layout changes (per-field offset + fn-pointer type, in order).
 # Mostly compile-time static_assert; the test target makes it part of the build.

@@ -568,7 +568,13 @@ public:
                 // when doc_retain/doc_release were present (else it's a borrowed
                 // input.doc() we must NOT release). The JSON-fallback and adopt paths
                 // already balance their ref; -2 (crash) is left alone (a torn call may
-                // or may not have adopted — don't risk a double-release).
+                // or may not have adopted — don't risk a double-release). That -2 leak
+                // is COUNTED host-side, not here: this proxy runs in the script DLL,
+                // which has its OWN per-DLL singletons (see g_use_host_api_ note above),
+                // so the leaked ref — a HOST DocRegistry ref reserved by share_out — is
+                // tallied where it's abandoned and observable: the host dispatch funnel
+                // (service_sinks.cpp use_process_inline_), surfaced in dispatch_stats as
+                // crash_leaked_docs_lifetime (Q0f; docs/internals/data-layer.md).
                 if (host->doc_retain && host->doc_release && in_doc)
                     host->doc_release(const_cast<void*>(in_doc));
             }

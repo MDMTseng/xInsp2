@@ -341,6 +341,12 @@ void cmd_dispatch_stats_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
         // Review 09 finding 2: malformed/unparseable command envelopes rejected by
         // the dispatch shell (process-uptime cumulative, like the *_lifetime fields).
         data += ",\"malformed_cmd_rejected_lifetime\":" + std::to_string(g_eng.malformed_cmd_rejected.load());
+        // Q0f: host-owned metadata docs deliberately leaked at a caught plugin crash
+        // (rc -2, leak-over-UAF). Process-uptime cumulative (NOT reset by cmd:start,
+        // like the other *_lifetime fields). A steadily-climbing value means a plugin
+        // is crashing repeatedly on doc-carrying calls; a constant non-zero value is a
+        // one-off. Bounded by the on_fault quarantine; dissolved by the v3 frame plane.
+        data += ",\"crash_leaked_docs_lifetime\":" + std::to_string(xi::DocRegistry::instance().crash_leaked_lifetime());
         // Source liveness: ms since ANY source last emitted, + per-source ages. The
         // signal for "a camera stalled" — a stalled source otherwise stops the line
         // with zero indication. -1 = nothing has emitted yet. A monitor/FE applies a

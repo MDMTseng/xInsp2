@@ -35,6 +35,7 @@
         "dropped_lifetime": { "type": "integer", "minimum": 0 },
         "queue_depth_high_watermark_lifetime": { "type": "integer", "minimum": 0 },
         "malformed_cmd_rejected_lifetime": { "type": "integer", "minimum": 0 },
+        "crash_leaked_docs_lifetime": { "type": "integer", "minimum": 0, "description": "Process-uptime count of host-owned metadata docs deliberately leaked at a caught plugin process() crash (leak-over-UAF). Does NOT reset on cmd:start. A climbing value = a plugin crashing repeatedly on doc-carrying calls." },
         "last_emit_age_ms": { "type": "integer" },
         "sources": {
           "type": "array",

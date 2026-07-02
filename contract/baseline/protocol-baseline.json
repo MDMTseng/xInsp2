@@ -38,7 +38,7 @@
       }
     },
     "dispatch-stats.schema.json": {
-      "sha256": "304cdb4071eae4acf4671578714c10d33ceb888ea035c7e4e8c6b49a22e74009",
+      "sha256": "7d1278146cff5b1637063c0a5a030ce1ac186e89ca2b7e8ce023ec06b266f36a",
       "shape": {
         "$defs": {
           "sourceStat": {
@@ -65,6 +65,10 @@
           "data": {
             "additionalProperties": true,
             "properties": {
+              "crash_leaked_docs_lifetime": {
+                "minimum": 0,
+                "type": "integer"
+              },
               "dispatch_threads": {
                 "minimum": 0,
                 "type": "integer"

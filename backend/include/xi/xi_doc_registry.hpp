@@ -21,6 +21,7 @@
 
 #include "yyjson.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -87,6 +88,33 @@ public:
         return n;
     }
 
+    // Q0f — deliberate crash-leak observability. When a plugin's process() is
+    // caught crashing mid-call (rc -2) on a path that had handed the plugin a
+    // BORROWED doc with a reserved adopter ref, the host does NOT release that
+    // ref: the crashed callee's ownership state is unknowable (it may or may not
+    // have already adopted it), so releasing risks a use-after-free / double-free.
+    // We leak the ref (and its host-owned doc + pooled chunks) instead — a bounded,
+    // deliberate leak-over-UAF. `note_crash_leak` is called exactly once per such
+    // caught crash at the host dispatch funnel (service_sinks.cpp use_process_inline_
+    // / runner_main.cpp use_process_cb); `crash_leaked_lifetime` is a process-uptime
+    // cumulative (NOT reset by cmd:start) surfaced in dispatch_stats as
+    // `crash_leaked_docs_lifetime`, so an operator can tell "one crash ever" from
+    // "leaking every N frames". Bounded in practice by the on_fault quarantine (a
+    // repeatedly-faulting instance escalates to refuse); the v3 all-msgpack frame
+    // plane (docs/new_gen/07) dissolves the leak class entirely. relaxed ordering:
+    // an independent counter, no happens-before published through it.
+    void note_crash_leak() noexcept {
+        crash_leaked_.fetch_add(1, std::memory_order_relaxed);
+    }
+    uint64_t crash_leaked_lifetime() const noexcept {
+        return crash_leaked_.load(std::memory_order_relaxed);
+    }
+    // Test-only: zero the crash-leak counter. Process-uptime cumulative by design
+    // (see note above) — only tests reset it.
+    void reset_crash_leaked_for_test() noexcept {
+        crash_leaked_.store(0, std::memory_order_relaxed);
+    }
+
 private:
     static constexpr size_t kShards = 16;   // power of two
 
@@ -95,6 +123,10 @@ private:
         std::unordered_map<yyjson_mut_doc*, int> rc;
     };
     Shard shards_[kShards];
+
+    // Q0f — lifetime count of docs deliberately leaked at a caught plugin crash
+    // (see note_crash_leak above). Not sharded: written on the rare fault path only.
+    std::atomic<uint64_t> crash_leaked_{0};
 
     Shard& shard_for_(yyjson_mut_doc* doc) {
         // Drop the low (alignment) bits, then mask to a shard index.

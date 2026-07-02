@@ -574,6 +574,7 @@ health since the most recent `cmd:start`:
 | `dropped_lifetime` | events dropped over the whole **backend process uptime** — does NOT reset on `cmd:start` |
 | `queue_depth_high_watermark_lifetime` | peak single-lane queue depth over the whole **process uptime** — does NOT reset on `cmd:start` |
 | `malformed_cmd_rejected_lifetime` | malformed / unparseable command envelopes rejected by the dispatch shell over the whole **process uptime** — does NOT reset on `cmd:start` (see *Error handling*) |
+| `crash_leaked_docs_lifetime` | host-owned metadata docs deliberately leaked at a caught plugin `process()` crash (leak-over-UAF — see *Crash-leak accounting*) over the whole **process uptime** — does NOT reset on `cmd:start`. A **constant** non-zero value is a one-off crash; a value that **climbs** frame-over-frame means a plugin is crashing repeatedly on doc-carrying calls (check its `on_fault` policy / quarantine state) |
 | `last_emit_age_ms` | ms since ANY source last emitted a record (monotonic); `-1` if none yet. The "is the line still getting frames" signal — a stalled camera otherwise stops the line silently |
 | `sources` | `[{ source, last_emit_age_ms }]` — per-source emit age, to spot WHICH of N cameras stalled. Scoped to the current project: the per-source list is pruned on a project/script-reload boundary (so source names from a closed project don't linger), then repopulates as the new project's sources emit |
 
@@ -585,6 +586,22 @@ for the end-of-run total, do not subtract a pre-start snapshot. The `*_lifetime`
 fields are cumulative for the whole backend process, so an unattended monitor can
 answer "how much have we dropped total" across run/restart boundaries (a restart
 no longer reads as a clean line).
+
+#### Crash-leak accounting
+
+When a plugin's `process()` is caught crashing mid-call (an SEH fault or a throw
+across the ABI), the backend cannot know whether the crashed callee had already
+adopted the metadata doc it was handed. Releasing the host's reserved reference
+would risk a use-after-free / double-free against a torn callee; so the backend
+**deliberately leaks that one reference** (leak-over-UAF) — a bounded, intentional
+leak of one host-owned doc per caught doc-carrying crash. `crash_leaked_docs_lifetime`
+is how that accumulation becomes visible: it ticks once per such crash. The leak is
+bounded in practice by the `on_fault` quarantine (a repeatedly-faulting instance
+escalates to `refuse` and stops being entered), and the design is documented in
+`docs/internals/data-layer.md`. The class is dissolved entirely by the v3 all-msgpack
+frame plane (`docs/new_gen/07`), which removes the shared-doc handshake this leak
+protects. Until then, the counter is the operator's signal to distinguish "one crash
+ever" from "leaking every N frames".
 
 ### `metrics`
 `args: {}` → `data: { ... }`. Minimal observability snapshot: monotonic
