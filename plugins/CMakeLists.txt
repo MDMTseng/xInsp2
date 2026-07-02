@@ -109,3 +109,32 @@ set_target_properties(blob_analysis PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
 )
+
+# --- Plugin data-contract tests (docs/new_gen/02-plugin-data-contract.md) ----
+# Developer-side test exes: load the built plugin DLL via LoadLibrary and assert
+# the contract behaviour (structured missing-input failures, schema skew, and the
+# builder/extractor happy path). Plugins are trusted, so these are optional — but
+# they keep the two most-copied exemplars honest. yyjson is already link_libraries'd
+# for the whole directory (above), so the Record/Json code links in.
+enable_testing()
+
+# blob_analysis contract test — needs the host ImagePool (make_host_api) to build
+# a real pool-backed gray input, so its process() runs exactly as in the backend.
+add_executable(blob_analysis_test blob_analysis/tests/test_blob_analysis.cpp)
+target_include_directories(blob_analysis_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis)
+target_compile_definitions(blob_analysis_test PRIVATE
+    BLOB_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis/xi-blob_analysis.dll")
+add_dependencies(blob_analysis_test blob_analysis)
+add_test(NAME blob_analysis_test COMMAND blob_analysis_test)
+
+# mock_camera contract test — config/command surface only (source plugin).
+add_executable(mock_camera_test mock_camera/tests/test_mock_camera.cpp)
+target_include_directories(mock_camera_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera)
+target_compile_definitions(mock_camera_test PRIVATE
+    MOCK_CAMERA_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera.dll")
+add_dependencies(mock_camera_test mock_camera)
+add_test(NAME mock_camera_test COMMAND mock_camera_test)
