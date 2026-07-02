@@ -121,7 +121,7 @@ editor.
         │        │ xinsp-runner.exe        │  Headless. No WS. Takes a
         │        │   loads project.json,   │  project folder and writes
         │        │   compiles, runs N      │  an execution/crash JSON
-        │        │   frames, writes report │  report (verdicts: planned).
+        │        │   frames, writes report │  report (per-frame verdicts).
         │        └─────────────────────────┘
         │
    plugin DLLs (C ABI, trusted load)
@@ -428,9 +428,12 @@ This is the same script that produced the file on the Releases page.
   handshake. Constant-time compare.
 - **Headless runner.** `xinsp-runner.exe <project>` — no WS, no UI.
   Loads `project.json`, compiles the script, runs N frames, writes a
-  JSON report. The production face of xInsp2. Today the report is an
-  **execution/crash log** (frame count, crash count, timing); per-frame
-  **verdict** capture (OK / NG / NA) is planned, not yet wired.
+  JSON report. The production face of xInsp2. The report carries both the
+  **execution/crash log** (frame count, crash count, timing) and the
+  per-frame **verdict**: each frame records its `code`, `class`
+  (ok / ng / na / no_verdict / crashed), and `msg`, with a summary
+  `counts` tally. The process **exit code** still reflects infra/crash
+  status only, not the verdict roll-up — grep the report for pass/fail.
 
 ### Plugins
 

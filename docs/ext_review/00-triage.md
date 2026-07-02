@@ -83,10 +83,12 @@ benchmarks. They are scheduled for a coordinated cutover, not slipped in ad hoc.
   complete slice: station id + boot id + inspection id **and** the script
   generation carried in the result. The additive subset lands in Bucket A;
   finishing the slice (and anything that changes shape) is scheduled here.
-- **Runner verdict wiring** (03 #14). Wire the result callback in
-  `xinsp-runner` so the report captures the per-frame verdict (OK / NG / NA),
-  turning today's execution/crash log into a true pass/fail log. (README and the
-  runner's header comment now state this honestly as planned-not-done.)
+- **Runner verdict wiring** (03 #14) — DONE. The result callback is wired in
+  `xinsp-runner`: each frame records `code` / `class`
+  (ok / ng / na / no_verdict / crashed) / `msg`, and the summary carries a
+  `counts` tally. The execution/crash log is now also a pass/fail log. The
+  process exit code still reflects infra/crash status only, not the verdict —
+  README and the runner's header comment describe the implemented behaviour.
 - **Read-only input enforcement** (02 I.4). Enforce that inspection input images
   are read-only, via a newly carved interface splitting `image_read` /
   `image_write`. A carved interface, so ABI-clean — but a real surface, so

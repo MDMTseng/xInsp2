@@ -87,6 +87,17 @@ consumers are unaffected; the numeric `code` is UNCHANGED for every case):**
   the staged numeric-code semantics.
 - `reason_code` — optional machine tag (e.g. `inspect_error`, `queue_full`);
   omitted for normal verdicts
+- `script_generation` — a monotonically increasing integer identifying the
+  **active loaded script version** (which compiled script DLL produced this
+  result). Starts at `0` (no script ever loaded — the field is then omitted) and
+  is bumped **exactly** at the hot-reload swap point where a freshly-compiled DLL
+  becomes the one `inspect` calls. A **failed compile** or a failed load leaves
+  it UNCHANGED — the last-good script stays active at its existing generation, so
+  a consumer can tell that results are still coming from the previous DLL even
+  though the editor may already show newer source. The value is **snapshotted at
+  run start** (under the same lock as the script handle), so an in-flight run
+  that began under generation `N` reports `N` even if a swap to `N+1` lands
+  mid-run. Omitted on the drop path (no run ran) and when `0`/unknown.
 
 **Optional (line / MES / traceability — add later):**
 - `part_id` / `serial` — physical part (barcode)

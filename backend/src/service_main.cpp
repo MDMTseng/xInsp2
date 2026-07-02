@@ -100,6 +100,16 @@ struct Engine {
     std::atomic<int64_t> run_id{0};
     xi::script::LoadedScript script;
     std::mutex script_mu;
+    // Monotonic version of the ACTIVE loaded script DLL. Starts at 0 (no script
+    // ever loaded), incremented EXACTLY at the hot-reload swap point where a
+    // freshly-compiled DLL becomes the one `inspect` calls (see cmd:compile,
+    // g_eng.script = std::move(next)). A FAILED compile or a failed load leaves
+    // it UNCHANGED — the last-good script stays active at its existing
+    // generation. Read (relaxed) and snapshotted at run start into
+    // RunOutcome::rr_script_gen, then surfaced additively as run_result's
+    // `script_generation` so a consumer can tell which loaded DLL produced a
+    // result (the editor may already show newer source that hasn't swapped in).
+    std::atomic<int64_t> script_generation{0};
     std::string persistent_state_json = "{}";
     int persistent_state_schema = 0;
     std::unordered_map<std::string, std::string> param_cache;
@@ -943,7 +953,9 @@ static const char* outcome_class_for_code(int code) {
 // existing consumers are unaffected): trigger_id (128-bit trigger id as hex),
 // boot_id + station_id (process identity), a composite inspection_id
 // "<station_id>/<boot_id>/<run_id>" (only when run_id>=0), a stable schema tag,
-// the derived outcome class, and an optional reason_code. The existing fields
+// the derived outcome class, an optional reason_code, and an optional
+// script_generation (the monotonic version of the active loaded script DLL that
+// produced the result; omitted when 0/unknown). The existing fields
 // (code/msg/run_id/ms/source/group) and their numeric values are UNCHANGED.
 // `cls`: if non-empty, overrides the code-derived class (used by the crash path,
 // which keeps code 0 but is "crashed"). `reason_code`: optional, omitted if empty.
@@ -952,7 +964,8 @@ static void emit_run_result(xi::ws::Server& srv, int code, const std::string& ms
                             const std::string& source, const std::string& group,
                             const std::string& trigger_id = std::string(),
                             const char* cls = nullptr,
-                            const char* reason_code = nullptr) {
+                            const char* reason_code = nullptr,
+                            int64_t script_generation = 0) {
     std::string data = "{\"code\":" + std::to_string(code) + ",\"msg\":";
     xp::json_escape_into(data, msg);
     if (run_id >= 0) data += ",\"run_id\":" + std::to_string((long long)run_id);
@@ -971,6 +984,10 @@ static void emit_run_result(xi::ws::Server& srv, int code, const std::string& ms
     data += ",\"schema\":"; xp::json_escape_into(data, std::string(kRunResultSchema));
     data += ",\"class\":"; xp::json_escape_into(data, std::string(cls ? cls : outcome_class_for_code(code)));
     if (reason_code && *reason_code) { data += ",\"reason_code\":"; xp::json_escape_into(data, std::string(reason_code)); }
+    // script_generation: monotonic version of the active loaded script DLL that
+    // produced this result. Omitted when 0/unknown (no script loaded, or the
+    // drop path where no run ran). Unchanged across a failed compile.
+    if (script_generation > 0) data += ",\"script_generation\":" + std::to_string((long long)script_generation);
     data += "}";
     xp::Event ev;
     ev.name = "run_result";
@@ -1255,6 +1272,7 @@ struct RunOutcome {
     int64_t     dt_us = 0;           // inspect latency, measured once after inspect
     std::string rr_source, rr_group; // Result provenance snapshot (this thread's trigger)
     std::string rr_trigger_hex;      // this run's 128-bit trigger id as hex (additive; empty if none)
+    int64_t     rr_script_gen = 0;   // active-script generation snapshotted at run start (0 = unknown)
 };
 
 // ---- COMPUTE half: script invocation + SEH boundary + crash breadcrumb + watchdog --
@@ -1274,6 +1292,12 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
     {
         std::lock_guard<std::mutex> lk(g_eng.script_mu);
         out.s = g_eng.script;
+        // Snapshot the active-script generation under the SAME lock as the
+        // script handle, so the reported generation is exactly the one that
+        // owns the DLL this run will call. A swap to N+1 that happens mid-run
+        // can't change this run's reported N (we captured it here, not at
+        // emit). 0 stays 0 when no script has ever loaded.
+        out.rr_script_gen = g_eng.script_generation.load(std::memory_order_relaxed);
     }
     xi::script::LoadedScript& s = out.s;
 
@@ -1459,7 +1483,8 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
                                               : std::string("no verdict (script set no result)");
         emit_run_result(srv, rr_code, rr_msg,
                         run_id, dt_ms, out.rr_source, out.rr_group,
-                        out.rr_trigger_hex);   // class derived from code (ok/ng/na/no_verdict)
+                        out.rr_trigger_hex, nullptr, nullptr,
+                        out.rr_script_gen);   // class derived from code (ok/ng/na/no_verdict)
         // run_finished carries the run's INSPECT COMPUTE time. `ms` is the legacy
         // integer-ms field (kept, unchanged wire value) — it is inspect compute
         // ONLY (excludes queue wait, emit-gate wait, staged sink flush, JPEG encode,
@@ -1481,7 +1506,8 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
         // (passed explicitly too), reason_code carries the specific cause.
         emit_run_result(srv, XI_SYS_CRASHED, "inspect error", run_id, dt_ms,
                         out.rr_source, out.rr_group,
-                        out.rr_trigger_hex, "crashed", "inspect_error");
+                        out.rr_trigger_hex, "crashed", "inspect_error",
+                        out.rr_script_gen);
         emit_run_event_(srv, run_id, "run_error", out.run_error_what);
     }
     turn.complete();   // advance the gate now (dtor would otherwise do it at fn exit)
@@ -2437,6 +2463,14 @@ static void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::Par
             // does the owner-sweep + FreeLibrary once any in-flight inspect that
             // snapshotted it returns.
             g_eng.script = std::move(next);
+            // The new DLL is now the active one. Bump the active-script
+            // generation EXACTLY here — this is the only point a compiled DLL
+            // becomes what `inspect` calls. A failed compile (returns above with
+            // "compile failed") or a failed load (returns above) never reaches
+            // this line, so the last-good script keeps its generation. relaxed:
+            // publication happens-before via g_eng.script_mu, which every run
+            // also holds when it snapshots the script + generation.
+            g_eng.script_generation.fetch_add(1, std::memory_order_relaxed);
             // Output-sink subscriptions live entirely in the plugin (e.g. the
             // `expose` plugin tracks subscribed channels) — the core holds no
             // per-viewer subscription state across a recompile swap; binary frames
