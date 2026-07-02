@@ -464,6 +464,16 @@ if(NOT MSVC)
 endif()
 add_test(NAME image_pool COMMAND test_image_pool)
 
+# v3 keyed-buffer Frame container (polaris2 wave-1, xi_frame.hpp): lifecycle,
+# O(1) offset index, seal/immutability, pooled-handle balance vs ImagePool
+# stats, mixed small/large frames, and the drop-on-crash release story.
+add_executable(test_xi_frame tests/test_xi_frame.cpp)
+target_link_libraries(test_xi_frame PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_xi_frame PRIVATE pthread)
+endif()
+add_test(NAME xi_frame COMMAND test_xi_frame)
+
 # Parallel-region safety regression tests (Part I hazards A/B/C — trigger
 # snapshot, OpenMP/SEH containment, worker-thread image-owner propagation).
 # Built WITH /openmp so xi::parallel_for exercises the REAL multi-threaded
