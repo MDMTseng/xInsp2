@@ -280,6 +280,17 @@ public:
             listen_ = INVALID_SOCK;
             return false;
         }
+        // Capture the actual bound port. When the caller passes port 0 the OS
+        // assigns an ephemeral one; getsockname reads it back so callers can
+        // discover where to connect (see local_port()). For a fixed non-zero
+        // port this simply echoes it.
+        sockaddr_in bound{};
+        socklen_t bound_len = sizeof(bound);
+        if (::getsockname(listen_, reinterpret_cast<sockaddr*>(&bound), &bound_len) == 0) {
+            local_port_ = ntohs(bound.sin_port);
+        } else {
+            local_port_ = port;
+        }
         running_ = true;
         return true;
     }
@@ -291,10 +302,18 @@ public:
             CLOSESOCK(listen_);
             listen_ = INVALID_SOCK;
         }
+        local_port_ = 0;
     }
 
     bool is_running() const { return running_; }
     bool has_client() const { return client_.load(std::memory_order_acquire) != INVALID_SOCK; }
+
+    // The TCP port the listen socket is actually bound to. Meaningful after a
+    // successful start(); equals the requested port, or the OS-assigned
+    // ephemeral port when start(0) was used. 0 before start()/after a failed
+    // start(). Lets tests bind an ephemeral port (start(0)) and then connect to
+    // it, so they never collide on a shared fixed port.
+    int local_port() const { return local_port_; }
 
     // Blocks up to timeout_ms for activity. Accepts a new client, performs
     // the handshake, and reads any pending frames, dispatching callbacks.
@@ -422,6 +441,7 @@ private:
     static constexpr size_t kMaxMessage = 16u * 1024u * 1024u;
 
     socket_t    listen_ = INVALID_SOCK;
+    int         local_port_ = 0;   // actual bound port (see local_port())
     // client_ is written by the poll thread (accept / close) and read by every
     // dispatch worker inside send_frame under tx_mu_. It is atomic so those
     // reads are not a data race, and — crucially — the actual CLOSESOCK is done

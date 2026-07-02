@@ -15,6 +15,30 @@
 //
 // Windows-only, matching xi_ws_server.hpp's platform.
 //
+// ---------------------------------------------------------------------------
+// Deflake note (2026-07): this test intermittently exited 0xC0000409
+// (STATUS_STACK_BUFFER_OVERRUN) at ~30-50%. That exit code looks like a GS/
+// stack-cookie corruption in the teardown path, but it is NOT: an ASan build
+// (/fsanitize=address) reported ZERO memory errors, and every failure printed
+// "connected>0 opens=0 sends=<tens of millions>" then tripped the terminal
+// CHECK(opens.load() > 0). std::abort() (what CHECK fires) terminates via
+// __fastfail on modern UCRT, whose exit code IS 0xC0000409 — so the scary code
+// only ever meant "abort() ran," not corruption.
+//
+// Root cause was the *test harness*, not the WS server: the test bound a FIXED
+// port (39187). Two runs of this binary overlap routinely — ctest -j launches
+// ws_teardown_race and ws_teardown_race_heavy together, and parallel worktrees/
+// CI run it at the same time. The server sets SO_REUSEADDR, and on Windows
+// SO_REUSEADDR permits a full DUPLICATE bind: both processes bind 39187 and the
+// kernel hands new connections to whichever listener it likes. The starved
+// server saw opens=0 while its senders spun (hence tens of millions of sends,
+// all short-circuiting on "no client"), and aborted. The production teardown
+// fix in xi_ws_server.hpp (client_ atomic; close_client() ::shutdown()s then
+// CLOSESOCK under tx_mu_; send_frame snapshots the fd under the lock) was never
+// implicated. Fix: bind an ephemeral port via start(0) + local_port() so each
+// process owns a unique port and no rival can steal its connections. The race
+// provocation (4 senders vs. 300x connect/abrupt-close churn) is unchanged.
+// ---------------------------------------------------------------------------
 
 #include <xi/xi_ws_server.hpp>
 
@@ -103,10 +127,22 @@ int main() {
     srv.on_open  = [&] { opens.fetch_add(1, std::memory_order_relaxed); };
     srv.on_close = [&] { closes.fetch_add(1, std::memory_order_relaxed); };
 
-    // Loopback, ephemeral-ish fixed port. If it's busy the bind fails; pick a
-    // high port unlikely to collide with the running backend (7823).
-    const int port = 39187;
-    CHECK(srv.start(port));
+    // Bind an OS-assigned ephemeral port (start(0)), NOT a fixed one. A fixed
+    // port (this test used to hard-code 39187) is shared by every concurrent
+    // run of this binary — ctest -j runs ws_teardown_race and
+    // ws_teardown_race_heavy at once, and multiple dev/CI worktrees run it in
+    // parallel. The server sets SO_REUSEADDR, and on Windows SO_REUSEADDR lets
+    // TWO processes bind the SAME ip:port simultaneously; the kernel then splits
+    // inbound connections between the rival listeners nondeterministically. The
+    // loser's server accepts none of ITS client's connections, so opens stays 0
+    // and the terminal CHECK(opens>0) below std::abort()s — surfacing as exit
+    // 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN), which looks like memory
+    // corruption but is just abort()'s exit code. An ephemeral port is unique to
+    // this process's listen socket for its whole lifetime, so no rival binder
+    // can steal our connections. See the file-header note.
+    CHECK(srv.start(0));
+    const int port = srv.local_port();
+    CHECK(port > 0);
 
     std::atomic<bool> stop{false};
 
