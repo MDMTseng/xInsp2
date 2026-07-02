@@ -893,6 +893,68 @@ add_test(NAME script_selfcheck
             --target script_selfcheck --config $<CONFIG>)
 set_tests_properties(script_selfcheck PROPERTIES LABELS "sdk")
 
+# ---- Examples compile gate -------------------------------------------------
+# "Exemplars are tests" (adoption-map item 4). The examples/ script tree is the
+# first thing a new user runs; once, 32 of its inspect.cpp files carried 181
+# calls to the removed VAR() macro and none compiled on the current backend
+# (review 11, F grade). This gate compiles EVERY example script the same way the
+# backend JIT would — /FI xi/xi_script_support.hpp (the force-included support
+# header), the OpenCV umbrella force-included first, /EHa /MD /std:c++20, /openmp
+# — so a script that uses a removed/renamed API fails the build, not silently a
+# user's first run. Compile-only OBJECT target (no link): it proves every TU
+# COMPILES against the current headers, which is exactly the JIT's front-end.
+#
+# The source list is DERIVED (glob + CONFIGURE_DEPENDS) so a new example is
+# gated automatically — no hand-maintained list to rot. It is every *.cpp under
+# examples/ that is a SCRIPT: we exclude the co-located example PLUGINS
+# (*/plugins/* — those force-include a DIFFERENT support header and are covered
+# elsewhere), vendored third-party sources (*/vendor/*), and the standalone M0
+# executable demo_async (its own add_executable, not a JIT script).
+file(GLOB_RECURSE _examples_scripts CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/../examples/*.cpp)
+list(FILTER _examples_scripts EXCLUDE REGEX "/plugins/")
+list(FILTER _examples_scripts EXCLUDE REGEX "/vendor/")
+list(FILTER _examples_scripts EXCLUDE REGEX "/demo_async\\.cpp$")
+# qa_fault/badscript_project/inspect.cpp is a NEGATIVE fixture — it is
+# deliberately uncompilable (the autostart compile-error / stay-up test). It
+# must fail to compile, so it is intentionally NOT in this gate.
+list(FILTER _examples_scripts EXCLUDE REGEX "/qa_fault/badscript_project/")
+if(_examples_scripts)
+    add_library(examples_gate OBJECT EXCLUDE_FROM_ALL ${_examples_scripts})
+    target_link_libraries(examples_gate PRIVATE xi_core)   # SDK + vendor + OpenCV include dirs
+    # One example (#include <extmath.h>) resolves a header from its own project
+    # folder via project.json "include_dirs"; the JIT adds it as /I. Compile-only,
+    # so only the header (not the .lib) is needed.
+    target_include_directories(examples_gate PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../examples/script_external_dll/include)
+    if(MSVC)
+        # Mirror the JIT's script compile (xi_script_compiler.hpp): force-include
+        # the OpenCV umbrella FIRST (via the PCH below, which CMake injects as a
+        # forced include), then the script-support header, and build with /openmp
+        # (the support header uses <omp.h>).
+        target_compile_options(examples_gate PRIVATE
+            /openmp /FIxi/xi_script_support.hpp)
+        # PCH the OpenCV umbrella once (the dominant per-TU parse cost), shared
+        # across all ~50 script TUs — same header the JIT PCHs. CMake force-injects
+        # it ahead of the /FI above, matching the JIT's include order.
+        target_precompile_headers(examples_gate PRIVATE <opencv2/opencv.hpp>)
+        # Every script TU re-exports the force-included XI_SCRIPT_EXPORT thunks
+        # (in the real JIT each script is its OWN DLL, so no clash). Bundling ~50
+        # into one archive makes lib.exe warn LNK4006 "second definition ignored"
+        # for each thunk — expected and harmless (we gate COMPILATION; a real
+        # compile error still fails the per-TU cl.exe step before archiving).
+        # Silence the noise so a genuine linker issue isn't buried.
+        set_target_properties(examples_gate PROPERTIES STATIC_LIBRARY_OPTIONS "/IGNORE:4006")
+    else()
+        target_compile_options(examples_gate PRIVATE
+            -fopenmp -include opencv2/opencv.hpp -include xi/xi_script_support.hpp)
+    endif()
+    add_test(NAME examples_gate
+        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
+                --target examples_gate --config $<CONFIG>)
+    set_tests_properties(examples_gate PROPERTIES LABELS "sdk")
+endif()
+
 # ============================================================================
 # BEGIN fuzz/UBSan (clang-cl) — Cluster-2 / T1.1-T1.2 / OQ-1. Separable,
 # agent-owned. Do not interleave with the blocks above. OFF by default: a plain

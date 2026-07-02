@@ -1,12 +1,19 @@
+# examples/ — user-authored inspection scripts + their example plugins.
+#
+# These are NOT built as part of the backend: the backend JIT-compiles each
+# inspect.cpp into a DLL at runtime (cl.exe /LD, force-including
+# xi/xi_script_support.hpp — see backend/include/xi/xi_script_compiler.hpp).
+#
+# The COMPILE GATE that keeps every example script building against the current
+# headers — the "exemplars are tests" net — lives in backend/CMakeLists.txt as
+# the `examples_gate` OBJECT target + ctest (it force-includes the same support
+# header the JIT does). Run it with:
+#
+#     ctest --test-dir backend/build -C Release -R examples_gate
+#
+# so there is no separate build step here. (The former M0 `demo_async`
+# executable was archived to docs/archive/examples/ — it demonstrated the
+# removed VAR value-store and no longer compiles.)
+
 cmake_minimum_required(VERSION 3.16)
-project(xinsp2_m0_demo CXX)
-
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-add_executable(demo_async demo_async.cpp)
-target_include_directories(demo_async PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
-
-if(NOT MSVC)
-    target_link_libraries(demo_async PRIVATE pthread)
-endif()
+project(xinsp2_examples NONE)
