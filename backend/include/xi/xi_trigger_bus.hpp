@@ -92,6 +92,10 @@ inline xi_trigger_id make_trigger_id() {
     return t;
 }
 
+// Single-sink dispatch ingress: emit_record funnels in, ONE TriggerEvent per
+// emit funnels out to the lone subscribed worker. No routing, no correlation,
+// no per-tid grouping (removed in the v6 dispatch cleanup) — despite the name,
+// this is a funnel, not a router/bus.
 class TriggerBus {
 public:
     static TriggerBus& instance() {
