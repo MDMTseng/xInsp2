@@ -45,23 +45,38 @@
 - Anything the bilingual batch surfaces as genuinely shape-breaking (none
   known today).
 
-### Record deprecation horizon (proposal)
+### Record removal schedule (maintainer decision 2026-07-03: DELETE, scheduled)
 
-- **Now → bilingual-complete**: Record is the default currency; Frame is the
-  pilot surface. No deprecation language anywhere.
-- **Bilingual-complete + script chaining shipped**: Record path enters
-  **maintenance** (bugfix-only; new capabilities land frame-first). The
-  write-a-script/plugin guides teach Frame as primary.
-- **Hard removal**: NOT on xInsp2. Record deletion is a v3/greenfield event
-  (or a deliberate 1.0 break with the app team) — the dual-carry and
-  bilingual pattern are cheap to keep until then, and honesty beats a forced
-  march.
+Keeping two currencies indefinitely is the hand-synced-two-representations
+disease at the API layer, and Record's survival keeps DocRegistry, COW,
+share_out/adopt, and the counted crash-leak machinery alive forever. Record
+is DELETED from xInsp2, gated on parity milestones — a deliberate pre-1.0
+break in the VAR-hard-delete tradition, not a drift into permanence:
+
+1. **Gate P1 — plugin parity**: all 9 shipped plugins bilingual (the batch
+   above).
+2. **Gate P2 — script parity**: `use()`→door chaining + script-side Pack
+   building + expose-from-script land; the pack path can express every
+   pattern the guides teach (measured against the examples tree: every
+   example expressible pack-only).
+3. **Gate P3 — persistence parity**: record_save/replay v2 = canonical pack
+   dump (memory≈wire≈disk already proves the format); a migration note for
+   existing replay files.
+4. **THE CUT (one event, with the app team)**: ABI v12 — recommended as the
+   synthesis §3 pure-door ABI (delete the monolith struct in the same
+   authorized break), delete `xi_plugin_process(Record)`, delete Record +
+   DocRegistry + COW + share/adopt (+ its crash-leak counter, made obsolete),
+   port the examples tree, app-team scripts port on the same train as the
+   XEX1-v2 default + `abi` bump. One coordinated moment, not three.
+- Until P1–P3 are green, NO deprecation language anywhere (a half-deprecated
+  API teaches worse than either state).
 
 ## Open decisions for the maintainer
 
 - [ ] Approve the bilingual batch (6 plugins) as the next polaris2_main wave.
-- [ ] Approve "maintenance mode" as Record's end state on v2 (vs. scheduling
-      hard removal on a 1.0 cutover).
+- [x] Record end state: DELETE, scheduled behind parity gates P1-P3 with the
+      cut riding the 1.0/abi cutover train (decided 2026-07-03; supersedes
+      the earlier maintenance-mode draft).
 - [ ] XEX1-v2 default flip: joined to the abi-bump train, or its own later
       train? (Recommend: same train — one client-visible moment, not two.)
 - [ ] When to capture perf baselines (which machine is the blessed runner).
