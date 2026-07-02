@@ -56,6 +56,20 @@ All exit with `ALL TESTS PASSED`.
   not listed in `docs/.doc-coverage-allow` with a reason. This is what stops a new
   export/command/macro from shipping while the guides lag. Run standalone:
   `python tools/check_doc_coverage.py`. Skipped only if no Python3 is found.
+- `retired_terms` (`tools/check_retired_terms.py`) — the mirror of `doc_coverage`.
+  Where `doc_coverage` fails if a **live** symbol is undocumented, this fails if a
+  **retired** API token appears on a **blessed copy-paste surface** — the place
+  readers copy from: `docs/guides`, `docs/reference`, `docs/overview.md`,
+  `README.md`, and the generated-project `inspect.cpp` template in the VS Code
+  extension. It enforces the tokens it re-verifies as genuinely gone against
+  `backend/include/xi` each run — `VAR(` / `EMIT(` (macros removed from the SDK
+  headers) and the legacy `xi_inspect_entry(int)` entry (the current entry is the
+  `XI_INSPECT_ENTRY(t, frame)` macro). Intentional legacy mentions (the compat
+  appendix in `write-a-script.md`, prose that documents the retirement, the
+  extension's VAR-chip graph parser) are opted out in `tools/.retired-terms-allow`
+  with a reason. This is what would have caught a generated template still teaching
+  the removed `VAR`/`EMIT` macros. Run standalone: `python
+  tools/check_retired_terms.py`. Skipped only if no Python3 is found.
 - `perf_*` — **best-case micro-throughput regression gates** (see *Performance
   baseline* below). Each metric is a best-of/minimum over repeated batches, so it
   catches a same-machine, same-backend slowdown in a hot inner op; it does **not**
