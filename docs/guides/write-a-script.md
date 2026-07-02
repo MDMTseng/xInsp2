@@ -728,6 +728,76 @@ ticks where there's no trigger event — always check `is_active()`
 first, and treat 0 as "no split available, fall back to end-to-end
 latency."
 
+### Frame pilot — `t.frame()` (EXPERIMENTAL, wave-2)
+
+> **Experimental — subject to change.** This is a polaris2 wave-2 *pilot*
+> surface (docs/new_gen/08 Wave 2), the minimum needed to drive the v3
+> Frame data plane end to end from a script. The final script Frame API is
+> a later decision; treat everything here as unstable and opt-in.
+
+A frame-capable **source** (e.g. `mock_camera` with config `frame_mode:
+true`) emits its output not as a `Record` but as a **v3 Frame** on the
+`xi.frame@1` data plane — one uniform `key → (type, bytes)` table with no
+image/metadata split (docs/new_gen/07). When such a source drives your
+script, read the frame back with `t.frame()`:
+
+```cpp
+#include <xi/xi.hpp>
+#include <xi/xi_use.hpp>
+#include <xi/xi_result.hpp>
+
+XI_INSPECT_ENTRY(t, frame) {
+    if (!t.is_active()) return;
+
+    auto f = t.frame();                      // borrowed, read-only view
+    if (!f) return;                          // no frame on this event → NA (not a crash)
+
+    int64_t seq = f.get_i64("seq").value_or(-1);   // typed reads, std::nullopt on miss
+    if (auto img = f.get_image("frame")) {         // descriptor + zero-copy pixels
+        if (seq >= 0 && img->channels == 3) xi::ok(1);
+        else                                xi::ng(1, "malformed frame");
+    }
+}
+```
+
+`t.frame()` returns an empty view — `bool`-false, every getter
+`std::nullopt` — when the event carried no frame (a normal `Record`-era
+source, the common case), when the host publishes no frame plane, or on
+the legacy `xi_inspect_entry(int)` entry. **The pilot rides the explicit
+`XI_INSPECT_ENTRY(t, frame)` entry** (§ the entry point). Absent-frame is
+fail-loud in your hands, never a fault — mirror `t.image()`'s empty-Image
+behaviour and always check `if (f)`.
+
+Getters (all borrowed, valid for the life of the frame view): `get_i64`,
+`get_f64`, `get_str`, `get_bin`, `get_image`, `get_mp`, plus `count()`,
+`tag_of(key)`, and a generic `for_each([](std::string_view key, int32_t
+tag){ … })` walk. A returned `ScriptFrame` holds its own ref on the
+frame, so it is cheap to copy and **safe to capture by value into
+`xi::async` / `xi::parallel_for`** — same discipline as an `xi::Image` or
+a trigger snapshot.
+
+For a **declared keyset**, `f.typed<Schema>()` gives a compile-time-checked
+view where a bad slot is a *compile error* (the key is fixed at compile
+time; the read is still by key string through the door — the cross-DLL
+reality, docs/new_gen/08):
+
+```cpp
+struct CamFrame {
+    static constexpr std::array<std::string_view, 2> keys = { "seq", "frame" };
+    enum { kSeq, kFrame };
+};
+auto tf  = t.frame().typed<CamFrame>();
+auto seq = tf.get_i64<CamFrame::kSeq>();
+```
+
+**What is *not* here (v0 scope).** A script reads the frame and verdicts on
+its fields. Driving a plugin's *frame door* directly from a script (frame
+in → frame out through `xi::use(...)`) is **not** wired in v0 — that needs
+new use-frame plumbing and is deliberately out of the pilot; that chaining
+stays host-mock-tested in `plugins/frame_pilot_test.cpp`. Runnable end to
+end in `examples/frame_pilot/` (and the `examples/qa_frame_pilot/`
+regression).
+
 ## Parallel dispatch (`parallelism.dispatch_threads`)
 
 By default `cmd:start` runs one dispatcher thread — every inspect call
