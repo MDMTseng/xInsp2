@@ -25,19 +25,9 @@
 #
 # Retire a line the moment its script is fixed on the examples branch.
 
-# --- dead-API scripts: retired VAR/EMIT/legacy `frame` entry (adoption item 4) ---
-qa_group_parallelism: dead-API script - inspect.cpp uses removed EMIT() (item 4)
-qa_group_stress: dead-API script - inspect.cpp uses removed EMIT() (item 4)
-qa_local_auto: dead-API script - inspect.cpp uses removed VAR()/EMIT()/`frame` (item 4)
-qa_two_group_paths: dead-API script - inspect.cpp uses removed EMIT() (item 4)
-qa_func: dead-API script(s) - uses removed VAR/EMIT; compile fails then driver times out (item 4)
-qa_instance_def_recompile: dead-API script - recompile step hits removed VAR/EMIT (item 4)
-qa_param_state_isolation: dead-API script(s) - uses removed VAR/EMIT (item 4)
-qa_recipe_script_instance: dead-API script - uses removed VAR/EMIT (item 4)
-qa_recover: dead-API script - uses removed VAR/EMIT; FE never reaches recovery (item 4)
-qa_sink_shared_doc: dead-API script - uses removed VAR/EMIT (item 4)
-qa_watchdog: dead-API script - uses removed VAR/EMIT; watchdog path never armed (item 4)
-qa_export_bundle: transitively dead-API - exports+compiles qa_group_parallelism (item 4)
-
-# --- not dead-API: separate pre-existing failure, still on master ---
-qa_lifecycle_teardown: pre-existing on master (base), NOT dead-API - "#7 clean shutdown with project" step fails; owner TBD, tracked in docs/ci-gate-known-failures.md
+# --- rebuilt 2026-07-02 on polaris_master (two strict runs; P4's example ports
+# --- cleared the 12 dead-API quarantines - 21/25 now pass strict) ---
+qa_lifecycle_teardown: pre-existing behavioral - "#7 clean shutdown with project" step fails (also failed 2x on master base); owner TBD, tracked in docs/ci-gate-known-failures.md
+qa_local_auto: driver expects VAR-era auto-emitted run_results (got 0); script was ported to the expose API (item 4) but the driver's expectation was not - driver needs porting to current auto-emit semantics
+qa_recipe_script_instance: pre-existing behavioral - after instance reset, factor stays 42 instead of returning to default 5 (failed 2x on master base too)
+qa_reentrancy: flaky on master base (pass->fail across identical runs, review 07 #8 class); deterministic-failing on polaris_master so far - reclassify to strict once it proves stable

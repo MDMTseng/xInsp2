@@ -146,8 +146,14 @@ def stage_ctest(_args) -> None:
 
 
 def stage_fixtures(_args) -> None:
-    """Protocol golden-fixture round-trip (no live backend)."""
-    _run([sys.executable, "-m", "pytest", "-q", REPO / "tools" / "xinsp2_py" / "tests"])
+    """Protocol golden-fixture round-trip (no live backend).
+
+    cwd matters: run from tools/xinsp2_py so THIS tree's `xinsp2` package
+    shadows any pip-editable install pointing at another checkout — from the
+    repo root, `import xinsp2` resolves to that install and this gate would
+    quietly test someone else's working copy."""
+    _run([sys.executable, "-m", "pytest", "-q", "tests"],
+         cwd=REPO / "tools" / "xinsp2_py")
 
 
 def stage_qa(_args) -> None:

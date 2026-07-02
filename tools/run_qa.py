@@ -95,20 +95,28 @@ def main() -> int:
             v = "TIMEOUT"
         dt = time.time() - t0
         quar = name in quarantine
+        # A `flaky` entry (reason starts with "flaky") oscillates pass/fail by
+        # nature, so NEITHER direction is fatal — but both stay loud. This is a
+        # tracked, temporary class: it exists so the deterministic quarantine's
+        # self-healing rule (UNEXPECTED PASS is fatal) isn't defeated by tests
+        # that flip on timing (review 07 #8); it goes away when the flakiness
+        # pass lands and the entry returns to strict.
+        flaky = quar and quarantine[name].lower().startswith("flaky")
         # Reclassify against the quarantine: an expected failure becomes a loud
         # (non-fatal) KNOWN-FAIL; an unexpected pass of a quarantined test is a
         # fatal signal that its line must be removed (the list can't rot green).
         if v in ("FAIL", "TIMEOUT") and quar:
-            outcome = "KNOWN-FAIL"
+            outcome = "KNOWN-FLAKY" if flaky else "KNOWN-FAIL"
         elif v == "PASS" and quar:
-            outcome = "UNEXPECTED-PASS"
+            outcome = "FLAKY-PASS" if flaky else "UNEXPECTED-PASS"
         else:
             outcome = v
         tag = {"PASS": "PASS", "FAIL": "FAIL <<<", "SKIP": "skip",
                "TIMEOUT": "TIMEOUT <<<", "KNOWN-FAIL": "KNOWN-FAIL",
+               "KNOWN-FLAKY": "KNOWN-FLAKY", "FLAKY-PASS": "PASS (flaky)",
                "UNEXPECTED-PASS": "UNEXPECTED PASS <<<"}.get(outcome, outcome)
         print(f"{tag}   ({dt:.0f}s)")
-        if outcome == "KNOWN-FAIL":
+        if outcome in ("KNOWN-FAIL", "KNOWN-FLAKY"):
             print(f"      quarantined: {quarantine[name]}")
         elif outcome == "UNEXPECTED-PASS":
             print(f"      remove '{name}' from examples/qa_known_failing.txt "
@@ -123,9 +131,10 @@ def main() -> int:
     nfail = sum(1 for _, o, _ in results if o in ("FAIL", "TIMEOUT"))
     nskip = sum(1 for _, o, _ in results if o == "SKIP")
     nknown = sum(1 for _, o, _ in results if o == "KNOWN-FAIL")
+    nflaky = sum(1 for _, o, _ in results if o in ("KNOWN-FLAKY", "FLAKY-PASS"))
     nunexp = sum(1 for _, o, _ in results if o == "UNEXPECTED-PASS")
     print(f"\n=== {npass} passed, {nfail} failed, {nskip} skipped, "
-          f"{nknown} known-fail, {nunexp} unexpected-pass "
+          f"{nknown} known-fail, {nflaky} flaky, {nunexp} unexpected-pass "
           f"({len(results)} total, {sum(d for _, _, d in results):.0f}s) ===")
     if nfail:
         print("FAILED: " + ", ".join(n for n, o, _ in results if o in ("FAIL", "TIMEOUT")))
