@@ -453,8 +453,8 @@ gated). See `docs/internals/core_fix_plan.md`.
 | **Parallelism** | `qa_reentrancy`, `qa_dispatch_groups`, `parallel_inspect_demo`, `burst_dispatch` | Concurrency modes (T0–T3), dispatch thread tuning. |
 | **Config Management** | `qa_instance_def_recompile`, `config_validation_demo`, `qa_param_state_isolation` | Persist state, param isolation across hot-reloads. |
 | **Dispatch & Ordering** | `qa_result_order`, `burst_pipeline`, `multi_source_surge` | Queue depth, result order (completion vs arrival), latency splits. |
-| **Multi-Camera** | `stereo_sync`, `stereo_sync2`, `synced_stereo`, `circle_counting` | Gathering plugins, trigger metadata (routing). |
-| **Lifecycle** | `qa_lifecycle_teardown`, `hot_reload_run`, `hot_reload_run2` | Instance teardown, script reload safety. |
+| **Multi-Camera** | `stereo_sync`, `synced_stereo`, `circle_counting` | Gathering plugins, trigger metadata (routing). |
+| **Lifecycle** | `qa_lifecycle_teardown`, `hot_reload_run2` | Instance teardown, script reload safety. |
 | **Error Handling** | `plugin_crash_forensics`, `crash_tests`, `qa_fault` | SEH translation, minidumps, recovery. |
 | **Comm & IO** | `comms_gateway`, `comms_script`, `preview_sink_demo` | Socket, file I/O, output paths. |
 
