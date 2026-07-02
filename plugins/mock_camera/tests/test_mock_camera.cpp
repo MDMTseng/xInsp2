@@ -28,8 +28,11 @@
   #include <windows.h>
 #endif
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <string>
+#include <thread>
 
 #ifndef MOCK_CAMERA_DLL_PATH
 #define MOCK_CAMERA_DLL_PATH "xi-mock_camera.dll"
@@ -120,6 +123,80 @@ XI_TEST(mock_camera_happy_path_via_config_and_command) {
     XI_EXPECT(xi::Json::parse(get_def(inst))[xi::mock_camera::keys::kFps].as_int() == 60);
 
     g_syms.destroy(inst);
+}
+
+// --- Worker-path test ------------------------------------------------------
+//
+// mock_camera's start/stop drives a background source worker (xi::spawn_worker)
+// that paints a pool_image() and hands it over via emit(). This test captures
+// the emitted records (by installing an emit_record on the host table) and
+// checks the port's three promises: the worker actually emits, each record is
+// the frame contract shape, and a clean start/stop/destroy cycle balances every
+// pooled frame's refcount (no leak — the hazard the raw-emit path risked).
+
+struct EmitCapture {
+    std::atomic<int>  frames{0};
+    std::atomic<int>  last_count{0};
+    std::atomic<bool> wrong_shape{false};
+    std::atomic<bool> key_ok{true};
+    std::atomic<int>  w{0}, h{0}, c{0};
+    void reset() {
+        frames = 0; last_count = 0; wrong_shape = false; key_ok = true;
+        w = 0; h = 0; c = 0;
+    }
+};
+static EmitCapture g_cap;
+
+// Runs on the plugin's worker thread — keep it lock-free (atomics + the pool's
+// own lock-free getters).
+static void capture_emit(const char* /*emitter*/, xi_trigger_id /*id*/,
+                         const xi_record* rec, int64_t /*ts*/) {
+    if (!rec) return;
+    g_cap.frames.fetch_add(1);
+    g_cap.last_count.store(rec->image_count);
+    if (rec->image_count != 1) g_cap.wrong_shape.store(true);
+    for (int i = 0; i < rec->image_count; ++i) {
+        const xi_record_image& e = rec->images[i];
+        if (!e.key || std::string(e.key) != std::string(xi::mock_camera::keys::kFrame))
+            g_cap.key_ok.store(false);
+        g_cap.w.store(g_host.image_width(e.handle));
+        g_cap.h.store(g_host.image_height(e.handle));
+        g_cap.c.store(g_host.image_channels(e.handle));
+    }
+}
+
+XI_TEST(mock_camera_worker_emits_frames_and_leaves_no_leak) {
+    load_dll();
+    auto& pool = xi::ImagePool::instance();
+    const int live_before = pool.cumulative().live_now;
+
+    g_cap.reset();
+    g_host.emit_record = &capture_emit;   // field the plugin's emit() forwards to
+
+    void* inst = g_syms.create(&g_host, "cam");
+    // Small frame + high fps so several frames land in a short window.
+    std::string cfg = xi::mock_camera::Config().width(64).height(48).fps(60);
+    XI_EXPECT(g_syms.set_def(inst, cfg.c_str()) == 0);
+
+    send_cmd(inst, R"({"command":"start"})");
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    send_cmd(inst, R"({"command":"stop"})");   // joins the worker
+
+    XI_EXPECT(g_cap.frames.load() > 0);        // the worker actually emitted
+    XI_EXPECT(!g_cap.wrong_shape.load());      // exactly one image per record
+    XI_EXPECT(g_cap.last_count.load() == 1);
+    XI_EXPECT(g_cap.key_ok.load());            // under the kFrame key
+    XI_EXPECT(g_cap.w.load() == 64);
+    XI_EXPECT(g_cap.h.load() == 48);
+    XI_EXPECT(g_cap.c.load() == 3);            // RGB
+
+    g_syms.destroy(inst);
+    g_host.emit_record = nullptr;
+
+    // Clean teardown: every pooled frame emitted through pool_image + emit() is
+    // released, so live occupancy returns to where it started — a leak here would
+    // be exactly the pooled-image leak the raw-thread/raw-emit path risked.
+    XI_EXPECT(pool.cumulative().live_now == live_before);
 }
 
 int main() {

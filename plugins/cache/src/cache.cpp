@@ -3,7 +3,7 @@
 // The host used to own record/replay; in the ABI-v6 dispatch model that's a
 // plugin's job. buffer_replay is the reference for it: process(in) captures the
 // incoming record into a bounded ring; an exchange command re-emits a buffered
-// record via xi::emit_record so the script re-runs on it. That is the
+// record via emit() so the script re-runs on it. That is the
 // HDevelop-style hot-param loop — buffer a frame, tune a Param, "replay_last" to
 // re-inspect the SAME frame with the new value, no camera re-grab.
 //
@@ -23,6 +23,7 @@
 
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
+#include <xi/xi_thread.hpp>   // xi::spawn_worker — SEH-safe replay thread
 
 #include <algorithm>
 #include <atomic>
@@ -147,7 +148,10 @@ private:
         stop_replay_();                       // cancel a prior replay first
         if (snap.empty()) return;
         replaying_.store(true);
-        replay_thread_ = std::thread([this, snap = std::move(snap), speed]() {
+        // Blessed worker: xi::spawn_worker installs the per-thread SEH translator
+        // + top-level catch so a fault mid-replay is contained to this thread
+        // rather than taking down the whole backend (a raw std::thread would not).
+        replay_thread_ = xi::spawn_worker(name() + "-replay", [this, snap = std::move(snap), speed]() {
             for (size_t i = 0; i < snap.size(); ++i) {
                 if (replay_stop_.load()) break;
                 if (i > 0) {
@@ -163,7 +167,7 @@ private:
                     if (replay_stop_.load()) break;
                 }
                 xi::Record copy = snap[i].rec;
-                xi::emit_record(host_, name().c_str(), copy);
+                emit(copy);
             }
             replaying_.store(false);
         });

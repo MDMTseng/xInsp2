@@ -24,7 +24,7 @@ Start with the basics, then the ones that show off a **special host behaviour**.
 | [`counter`](counter/) | Per-instance state across `process()` calls + a UI showing the running total. |
 | [`invert`](invert/) | Image in → image out: read an image by key, allocate, write one back. |
 | [`histogram`](histogram/) | Compute over an image (grayscale histogram + mean/stddev/peak). |
-| [`trigger_source`](trigger_source/) | A **source**: push one frame per tick into the pipeline via `emit_record`. |
+| [`trigger_source`](trigger_source/) | A **source**: push one frame per tick into the pipeline via `emit()` on an SEH-safe `xi::spawn_worker` thread. |
 | [`comm`](comm/) | An **ordered output sink** (`"sink": true`): a comm/PLC forwarder that receives records in **frame order** even under parallel dispatch. See below. |
 
 ## Special behaviour: the ordered sink (`comm`)
