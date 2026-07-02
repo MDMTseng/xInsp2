@@ -317,6 +317,7 @@ clients classify verdicts identically) and unit-tested in
 
 | Event | UX |
 |---|---|
+| `hello` | Extension↔backend **version-skew** check. The `hello` data carries the backend `version` string and the WS `abi` stamp; `src/versionCompat.ts` (pure, `vscode`-free, unit-tested in `test/version_compat.test.mjs`) classifies it against the extension's declared expectations. **Compatible → silence.** Newer backend / unrecognized version → one output-channel line. Older backend or a differing `abi` stamp → a **warning notification** naming both versions + what to do, plus a persistent warning chip in the status bar while connected. It **never blocks** (pre-1.0, first-party — inform, don't lock out). Chip + one-shot warning clear on disconnect. |
 | `run_result` | Rolling ok/ng/na/crashed tally in a status-bar item (reddens on ng/crashed); verdict lines in the **xInsp2** output channel (OK lines rate-limited to avoid flooding a fast continuous stream). Reset on `cmd:start` and on disconnect; click the item to reset. |
 | `run_error` | Distinct `ERROR` line in the output channel (fires *instead of* `run_finished` when inspect throws). |
 | `run_finished` | Debug line with the inspect **compute** time (not cycle latency). |

@@ -400,6 +400,7 @@
     "watch": "node esbuild.mjs --watch",
     "test:protocol": "node --test test/protocol.test.mjs",
     "test:outcome": "node --experimental-strip-types --test test/run_outcome.test.mjs",
+    "test:compat": "node --experimental-strip-types --test test/version_compat.test.mjs",
     "test:integration": "node --test test/ws_basic.test.mjs"
   },
   "devDependencies": {

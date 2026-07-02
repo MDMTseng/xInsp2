@@ -15,6 +15,7 @@ import { ImageViewerPanel } from './imageViewerPanel';
 import { resolveBackendMode } from './backendMode.mjs';
 import { VerdictTally, parseRunOutcome, parseRunFinished,
          CLASS_OK, CLASS_NG, CLASS_CRASHED, CLASS_DROPPED } from './runOutcome';
+import { classifyHello, SkewResult } from './versionCompat';
 
 // --- Plugin Browser model building (pure; reads project.json + the filesystem) ---
 function pbExpandRoot(raw: string, projectFolder: string): string {
@@ -605,6 +606,50 @@ export function activate(context: vscode.ExtensionContext) {
         compileClearTimer = setTimeout(() => compileStatus.hide(), ok ? 3000 : 6000);
     };
 
+    // --- Extension <-> backend version-skew ------------------------------
+    // The backend's `hello` carries its version + WS abi stamp. classifyHello
+    // (pure, in versionCompat.ts) turns that into a compat verdict; the UX here
+    // makes skew VISIBLE without ever blocking (pre-1.0, first-party — inform
+    // loudly, never lock out). Compatible → silence. Notice → one output line.
+    // Incompatible → a warning notification (once per connection) naming BOTH
+    // versions, plus a persistent status chip while connected. Cleared on
+    // disconnect (see the `close` handler's resetSkew()).
+    const extensionVersion: string =
+        (context.extension?.packageJSON?.version as string) || '0.0.0';
+    const skewStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
+    context.subscriptions.push(skewStatus);
+    let skewWarned = false;   // warn notification is shown at most once per connection
+    const applySkew = (r: SkewResult) => {
+        // Always record the verdict in the output channel (the pre-existing
+        // "backend v…" line, now with the classification appended).
+        output.appendLine(`[xinsp2] backend v${r.backendVersion ?? '?'}`
+            + ` (abi ${r.backendAbi ?? '?'}) — ${r.kind}`);
+        if (r.level === 'ok') { skewStatus.hide(); return; }   // silence is the feature
+        if (r.level === 'notice') {
+            // One informational line; no notification, no chip.
+            output.appendLine('[xinsp2] ' + r.summary + (r.advice ? ' ' + r.advice : ''));
+            skewStatus.hide();
+            return;
+        }
+        // warn: persistent chip + a one-shot notification naming both versions.
+        skewStatus.text = '$(warning) xInsp2: version skew';
+        skewStatus.tooltip = r.summary + (r.advice ? '\n' + r.advice : '')
+            + `\nExtension v${r.extensionVersion} · expected backend ${r.expectedBackend} · abi ${r.expectedAbi}`;
+        skewStatus.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+        skewStatus.command = 'xinsp2.showOutput';
+        skewStatus.show();
+        output.appendLine('[xinsp2] VERSION SKEW: ' + r.summary + (r.advice ? ' ' + r.advice : ''));
+        if (!skewWarned) {
+            skewWarned = true;
+            vscode.window.showWarningMessage(r.summary + (r.advice ? '  ' + r.advice : ''));
+        }
+    };
+    const resetSkew = () => { skewWarned = false; skewStatus.hide(); };
+    // Clicking the skew chip reveals the output channel where the full verdict
+    // (both versions + advice) was logged.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.showOutput', () => output.show(true)));
+
     // Plugin data cache (the "Plugins" tree view was removed; the Plugin Browser
     // webview is the management surface now — this just holds the last-known set).
     const pluginRegistry = new PluginRegistry();
@@ -1165,6 +1210,9 @@ export function activate(context: vscode.ExtensionContext) {
         // are misleading, and a spinner would hang forever.
         resetVerdicts();
         compileStatus.hide();
+        // Skew state is per-connection: clear the chip and re-arm the one-shot
+        // warning so a reconnect to a different backend re-evaluates cleanly.
+        resetSkew();
         if (attachMode) {
             // The FE owns recovery; make clear the extension isn't going to
             // respawn. Word it from the FE's true state when we have it: a latched
@@ -1178,7 +1226,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     client.on('json', (msg: any) => {
         if (msg.type === 'event' && msg.name === 'hello') {
-            output.appendLine(`[xinsp2] backend v${msg.data?.version}`);
+            // Classify extension<->backend skew and surface it (versionCompat.ts).
+            // Compatible → silence; notice → one output line; incompatible →
+            // warning notification + persistent status chip. Never blocks.
+            applySkew(classifyHello(msg, extensionVersion));
         } else if (msg.type === 'event' && msg.name === 'status') {
             // Live status delta — accelerator between the connect snapshots.
             const src = msg.data?.source;
