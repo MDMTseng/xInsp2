@@ -842,6 +842,23 @@ if(NOT MSVC)
 endif()
 _xinsp_perf_gate(perf_hotpath bench_hotpath hotpath.txt)
 
+# Frame-vs-Record GO/NO-GO bench (docs/new_gen/08 §1d): the v3 uniform keyed-
+# buffer plane (xi_frame.hpp + xi_mp.hpp) measured against the v2 shared Record
+# doc on the SAME per-frame span as bench_hotpath — arena/contiguous build vs
+# mutable-DOM alloc, memcpy hop vs doc-refcount CAS, O(1) sealed offset reads vs
+# yyjson hash lookups, one-shot free vs registry reconciliation. Links xi_core
+# (header-only) for the real ImagePool/DocRegistry/EmitGate/Frame/mp/Record.
+# Gated as `perf_frame` on the metadata-micro medians + each lane's closed-loop
+# single-worker p50; no baseline shipped, so it SKIPs-with-reason until captured
+# on the gating machine — same pattern as perf_hotpath/perf_record.
+add_executable(bench_frame tests/bench_frame.cpp)
+target_link_libraries(bench_frame PRIVATE xi_core)
+target_compile_definitions(bench_frame PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
+if(NOT MSVC)
+    target_link_libraries(bench_frame PRIVATE pthread)
+endif()
+_xinsp_perf_gate(perf_frame bench_frame frame.txt)
+
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_IPP=1)
     target_include_directories(xinsp_backend PRIVATE ${IPP_INCLUDE_DIR})

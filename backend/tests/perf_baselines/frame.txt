@@ -1,0 +1,18 @@
+# perf baseline for bench_frame.exe
+# NO BASELINE CAPTURED YET — this file intentionally carries no xi.perf-baseline/1
+# fingerprint, so perf_gate.cmake SKIPs-with-reason (never a false regression)
+# until it is recaptured on the gating machine. Same "skipped by default off the
+# capture box" pattern as perf_hotpath / perf_record: a per-machine latency number
+# is meaningless on any other machine (05 review #3, #30).
+#
+# This is the wave-1 GO/NO-GO bench (docs/new_gen/08 §1d): Frame (v3 uniform
+# keyed-buffer plane) vs Record (v2 shared doc) on the per-frame hot path. The
+# gated metrics are:
+#   frame_micro_record_roundtrip_ns          v2 metadata roundtrip (min-of-batches)
+#   frame_micro_framebuilder_ns              v3 FrameBuilder+seal+read+drop
+#   frame_micro_plane_memcpy_hop_ns          v3 mp plane + memcpy-hop + offset-read
+#   frame_hotpath_record_p50_us_320x240x3_p1 v2 closed-loop single-worker p50
+#   frame_hotpath_frame_p50_us_320x240x3_p1  v3 closed-loop single-worker p50
+# All slower-is-worse. Capture on this machine with:
+#   cmake -DBENCH_EXE=<bench_frame.exe> -DBASELINE=<this file> \
+#         -DUPDATE_BASELINE=ON -P backend/tests/perf_gate.cmake
