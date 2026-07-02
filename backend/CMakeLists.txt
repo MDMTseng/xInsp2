@@ -763,6 +763,24 @@ endif()
 # is recaptured on this machine with UPDATE_BASELINE=ON.
 _xinsp_perf_gate(perf_record bench_record record.txt)
 
+# Per-frame hot-path bench: the ACTUAL emit -> trigger bus -> dispatch lane ->
+# tiny inspect -> ordered result span (05 review #6 — bench_record measured a
+# data-layer op, NOT the per-frame pipeline). Links only xi_core (header-only):
+# it drives the REAL TriggerBus/ImagePool/DocRegistry/EmitGate/MetricsRegistry and
+# reproduces GroupLane's queue plumbing as MiniLane (that plumbing is welded into
+# the backend exe behind the private service_internal.hpp). Gated as `perf_hotpath`
+# on a closed-loop best-of MEDIAN latency; the verbose report (no args) also prints
+# p50/p95/p99 + throughput + a burst/overload tail. Baseline requires the
+# xi.perf-baseline/1 fingerprint, so it SKIPs-with-reason until recaptured on the
+# gating machine — same pattern as perf_image_pool / perf_record.
+add_executable(bench_hotpath tests/bench_hotpath.cpp)
+target_link_libraries(bench_hotpath PRIVATE xi_core)
+target_compile_definitions(bench_hotpath PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
+if(NOT MSVC)
+    target_link_libraries(bench_hotpath PRIVATE pthread)
+endif()
+_xinsp_perf_gate(perf_hotpath bench_hotpath hotpath.txt)
+
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_IPP=1)
     target_include_directories(xinsp_backend PRIVATE ${IPP_INCLUDE_DIR})
