@@ -79,3 +79,27 @@ undertaken afterwards, waves 1–3 mean the contract layer, the client fleet,
 the gates, and the plugin data patterns all port unchanged — the greenfield
 build would then be scoped to the core alone (item 15), at a fraction of
 today's cost.
+
+## Status — 2026-07-02, `polaris_master`
+
+Executed as the Polaris line: 25 task branches merged into `polaris_master`
+(never master), all verified green (backend ctest 59/59, plugins 3/3, pytest
+42/42, extension typecheck/build + unit suites, `tools/gate.py` full pass:
+docs / build / ctest / fixtures / qa / fuzz).
+
+- **Done on polaris_master:** items 1–14 of the map (dispatch shell; pool/WS
+  teardown safety; CI gate + qa quarantine registry; examples port + compile
+  gate; plugin data contract stage 1; single template spine; contract/ schemas
+  + validation gate + protocol baseline gate; client-core first steps (HMI on
+  the shared shim, XEX1 goldens, py auth parity, extension events + skew UX);
+  health contract + HMI/extension/FE/runner consumers; post-fault quarantine
+  policy; project-file versioning + full-document save; blessed-concurrency
+  guard; plus: doc-truth batch, doc-coverage extractor rebuild, hot-path bench,
+  release compat manifest.
+- **Item 12–13 note:** the full-document save + `xi.project/1` stamp and the
+  protocol baseline gate are staged HERE (this branch is the staging line);
+  the wire-visible halves (hello `abi` bump) still ride the app-team cutover.
+- **Still open:** item 16 (schema-published `describe()` codegen, stage 2);
+  the qa flaky/behavioral quarantine (4 entries in
+  `examples/qa_known_failing.txt`) and the `ws_teardown_race` stress-test
+  flake — the 07#8 deflake pass owns both.
