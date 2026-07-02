@@ -12,10 +12,12 @@
 #include "xi/xi_frame.hpp"
 #include "xi/xi_image_pool.hpp"
 
+#include <array>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 static int g_fail = 0;
@@ -231,6 +233,175 @@ static void test_crash_drop_no_double_release() {
     }
 }
 
+// ==================================================================
+// TypedFrame<Schema> — the OFFSET-ACCESSOR read path (doc 07 §profile-1). The
+// schema turns the contract key order into compile-time SLOTS; a declared field
+// is read by direct slot index (no hash, no scan) and no key is ever interned.
+// ==================================================================
+namespace blob_schema {
+struct Schema : xi::FrameSchema<Schema> {
+    static constexpr std::array<std::string_view, 6> keys = {
+        "threshold", "blob_count", "mean_area", "label", "mask", "payload"};
+    enum : int { kThreshold, kBlobCount, kMeanArea, kLabel, kMask, kPayload };
+};
+} // namespace blob_schema
+
+using TSchema = blob_schema::Schema;
+using TypedBlob = xi::TypedFrame<TSchema>;
+using TypedBlobBuilder = xi::TypedFrameBuilder<TSchema>;
+
+// COMPILE-TIME slot resolution: the key literal resolves to the same slot as the
+// enumerator, entirely in constant evaluation (these are static_asserts — if the
+// keyset drifted from the enum, this TU would fail to COMPILE, not at runtime).
+static_assert(TSchema::slot_of("threshold") == TSchema::kThreshold, "slot(threshold)");
+static_assert(TSchema::slot_of("mean_area") == TSchema::kMeanArea, "slot(mean_area)");
+static_assert(TSchema::slot_of("label") == TSchema::kLabel, "slot(label)");
+static_assert(TSchema::slot_of("not_declared") == -1, "undeclared key -> -1");
+static_assert(TSchema::slot_count() == 6, "schema slot count");
+
+static void test_typed_compile_time_slots() {
+    TypedBlobBuilder b;
+    b.set_i64<TSchema::kThreshold>(128);
+    b.set_i64<TSchema::kBlobCount>(7);
+    b.set_f64<TSchema::kMeanArea>(42.5);
+    b.set_str<TSchema::kLabel>("pass");
+    CHECK(!b.sealed(), "typed builder not sealed pre-seal");
+
+    TypedBlob f = b.seal();
+    CHECK(b.sealed(), "typed builder sealed after seal");
+    CHECK(f.size() == 4, "typed frame has 4 set fields");
+    CHECK(f.has<TSchema::kThreshold>(), "has<slot> for a set field");
+    CHECK(!f.has<TSchema::kMask>(), "has<slot> false for a declared-but-unset field");
+    CHECK(f.tag_of<TSchema::kMeanArea>() == xi::FrameTag::F64, "tag_of<slot>");
+
+    // Direct slot reads — the offset-accessor path (no hash, no scan).
+    CHECK(f.get_i64<TSchema::kThreshold>().value() == 128, "get_i64<slot>");
+    CHECK(f.get_i64<TSchema::kBlobCount>().value() == 7, "get_i64<slot>");
+    CHECK(f.get_f64<TSchema::kMeanArea>().value() == 42.5, "get_f64<slot>");
+    CHECK(f.get_str<TSchema::kLabel>().value() == "pass", "get_str<slot>");
+
+    // Read by a key LITERAL resolved to a slot at compile time (get<i64>(kKey)).
+    CHECK(f.get_i64<TSchema::slot_of("threshold")>().value() == 128, "read via slot_of(literal)");
+    CHECK((f.get<int64_t, TSchema::kBlobCount>().value() == 7), "get<i64,slot>");
+    CHECK((f.get<double, TSchema::kMeanArea>().value() == 42.5), "get<f64,slot>");
+
+    // Wrong-type / unset reads are nullopt, never a garbage reinterpretation.
+    CHECK(!f.get_str<TSchema::kThreshold>().has_value(), "type-mismatch slot read is nullopt");
+    CHECK(!f.get_i64<TSchema::kMask>().has_value(), "unset slot read is nullopt");
+
+    // Insertion/schema-order walk visits exactly the set declared fields.
+    int seen = 0; bool ordered = true;
+    const std::string_view expect[4] = {"threshold", "blob_count", "mean_area", "label"};
+    f.for_each([&](std::string_view key, xi::FrameTag) {
+        if (seen >= 4 || key != expect[seen]) ordered = false;
+        ++seen;
+    });
+    CHECK(seen == 4 && ordered, "for_each walks set declared fields in schema order");
+}
+
+// Mixed declared + dynamic keys in one typed frame: declared fields read by slot,
+// undeclared keys through the string-keyed side list (the general fallback).
+static void test_typed_mixed_declared_and_dynamic() {
+    TypedBlobBuilder b;
+    b.set_i64<TSchema::kThreshold>(200);
+    b.set_str<TSchema::kLabel>("mixed");
+    b.add_i64("extra_count", 99);          // undeclared -> dynamic side list
+    b.add_str("note", "ad-hoc");
+    TypedBlob f = b.seal();
+
+    CHECK(f.size() == 4, "2 declared + 2 dynamic = 4 fields");
+    CHECK(f.get_i64<TSchema::kThreshold>().value() == 200, "declared slot reads");
+    CHECK(f.get_i64("extra_count").value() == 99, "dynamic key reads by string");
+    CHECK(f.get_str("note").value() == "ad-hoc", "dynamic str reads by string");
+    CHECK(f.has("extra_count") && f.has("threshold"), "has() spans declared + dynamic");
+    CHECK(!f.has("absent"), "absent key not present");
+    // A declared key is also reachable by its runtime string (the fallback path).
+    CHECK(f.get_i64("threshold").value() == 200, "declared key reachable by string too");
+    CHECK(!f.get_i64("note").has_value(), "wrong-type dynamic read is nullopt");
+
+    int seen = 0;
+    f.for_each([&](std::string_view, xi::FrameTag) { ++seen; });
+    CHECK(seen == 4, "for_each visits declared then dynamic");
+}
+
+// Arena recycling correctness: a stream of typed frames reuses the per-thread
+// arena pool across builds. Each frame must read back its OWN values with no
+// stale bleed from a prior (now-recycled) frame's chunk; and frames held alive
+// simultaneously must not alias each other's recycled storage.
+static void test_typed_arena_reuse_no_stale_bleed() {
+    const int base = pool_live();
+
+    // Sequential: build -> read -> drop, thousands of times. Each drop returns the
+    // arena chunk to the pool; the next build reuses it and must overwrite cleanly.
+    bool all = true;
+    for (int i = 0; i < 5000; ++i) {
+        TypedBlobBuilder b;
+        b.set_i64<TSchema::kThreshold>(int64_t(i));
+        b.set_f64<TSchema::kMeanArea>(double(i) * 1.5);
+        b.set_str<TSchema::kLabel>(std::string("lbl") + std::to_string(i));
+        TypedBlob f = b.seal();
+        if (f.get_i64<TSchema::kThreshold>().value() != int64_t(i)) { all = false; break; }
+        if (f.get_f64<TSchema::kMeanArea>().value() != double(i) * 1.5) { all = false; break; }
+        if (f.get_str<TSchema::kLabel>().value() != std::string("lbl") + std::to_string(i)) { all = false; break; }
+    }
+    CHECK(all, "5000 recycled typed frames each read their own scalar+str values");
+
+    // Simultaneously alive: two frames built back-to-back must hold independent
+    // storage (the second cannot borrow the first's still-in-use chunk).
+    {
+        TypedBlobBuilder ba;
+        ba.set_i64<TSchema::kThreshold>(11);
+        ba.set_str<TSchema::kLabel>("first");
+        TypedBlob fa = ba.seal();
+
+        TypedBlobBuilder bb;
+        bb.set_i64<TSchema::kThreshold>(22);
+        bb.set_str<TSchema::kLabel>("second");
+        TypedBlob fb = bb.seal();
+
+        CHECK(fa.get_i64<TSchema::kThreshold>().value() == 11 &&
+              fa.get_str<TSchema::kLabel>().value() == "first",
+              "first live frame keeps its values while a second is built");
+        CHECK(fb.get_i64<TSchema::kThreshold>().value() == 22 &&
+              fb.get_str<TSchema::kLabel>().value() == "second",
+              "second live frame holds independent values");
+    }
+
+    CHECK(pool_live() == base, "no pool handles leaked across the reuse stream");
+}
+
+// Typed pooled-handle balance: image + large bin in declared slots mint pool
+// buffers released exactly once at drop; a move transfers sole ownership.
+static void test_typed_pooled_handle_balance() {
+    const int base = pool_live();
+    std::vector<uint8_t> px(64 * 48 * 3, 0xAB);
+    std::vector<uint8_t> big(8192, 0xCD);   // >= threshold -> pooled bin
+    {
+        TypedBlobBuilder b;
+        b.set_i64<TSchema::kThreshold>(1);
+        b.set_image<TSchema::kMask>(64, 48, 3, px.data());
+        b.set_bin<TSchema::kPayload>(big.data(), big.size());
+        TypedBlob f = b.seal();
+        CHECK(f.handle_count() == 2, "typed frame owns 2 pool handles (image + big bin)");
+        CHECK(pool_live() == base + 2, "pool live rose by 2 while typed frame alive");
+
+        auto iv = f.get_image<TSchema::kMask>();
+        CHECK(iv && iv->width == 64 && iv->height == 48 && iv->channels == 3,
+              "typed image descriptor round-trips");
+        CHECK(iv && iv->pixels.size() == px.size() && iv->pixels[0] == 0xAB,
+              "typed image pixels are a zero-copy view");
+        auto bin = f.get_bin<TSchema::kPayload>();
+        CHECK(bin && bin->size() == big.size() && (*bin)[0] == 0xCD,
+              "typed large bin resolves through the pool");
+
+        // Move transfers ownership; the moved-from frame releases nothing.
+        TypedBlob moved = std::move(f);
+        CHECK(pool_live() == base + 2, "move did not release");
+        CHECK(moved.handle_count() == 2, "handles transferred to the move target");
+    }
+    CHECK(pool_live() == base, "typed frame released both handles once on drop");
+}
+
 int main() {
     std::printf("test_xi_frame\n");
     test_lifecycle_and_contract_layer();
@@ -239,6 +410,10 @@ int main() {
     test_pooled_handle_balance();
     test_mixed_frame();
     test_crash_drop_no_double_release();
+    test_typed_compile_time_slots();
+    test_typed_mixed_declared_and_dynamic();
+    test_typed_arena_reuse_no_stale_bleed();
+    test_typed_pooled_handle_balance();
     if (g_fail == 0) { std::printf("  OK (all checks passed)\n"); return 0; }
     std::printf("  %d check(s) FAILED\n", g_fail);
     return 1;
