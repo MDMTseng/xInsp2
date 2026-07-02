@@ -1,0 +1,1 @@
+{"type":"event","name":"run_result","data":{"code":-999002,"msg":"inspect error","run_id":18,"ms":3,"source":"@script","group":"main","boot_id":"01234567-89ab-cdef-0123-456789abcdef","inspection_id":"/01234567-89ab-cdef-0123-456789abcdef/18","schema":"xi.run-outcome/1","class":"crashed","reason_code":"seh_access_violation","script_generation":4}}

@@ -14,6 +14,59 @@ from typing import Any, Callable
 import websocket  # websocket-client
 
 
+# ---- run-outcome wire contract -----------------------------------------------
+#
+# The backend emits a per-run `run_result` event carrying the outcome of one
+# inspect. Its schema is versioned via the `schema` field. These constants let a
+# consumer distinguish a genuine verdict from a system-generated outcome without
+# hard-coding magic numbers at every call site.
+RUN_RESULT_SCHEMA = "xi.run-outcome/1"
+
+# Reserved system result codes (backend `XI_SYS_*`). These ride on the numeric
+# `code` channel of a `run_result`. BREAKING (already on master): a caught
+# inspect error now emits XI_SYS_CRASHED (was 0), and a run that set no result
+# emits XI_SYS_NO_VERDICT (was 0). An explicit `xi::result(0)` is still 0 ("na").
+XI_SYS_CRASHED = -999002      # caught inspect error (throw/crash); run did not verdict
+XI_SYS_NO_VERDICT = -999005   # inspect ran but never called xi::result()
+XI_SYS_DROPPED = -999001      # run dropped before inspect (e.g. backpressure)
+
+# Derived outcome `class` strings (JSON key `class`; exposed on the Python side
+# as `verdict_class`, since `class` is a reserved keyword).
+CLASS_OK = "ok"
+CLASS_NG = "ng"
+CLASS_NA = "na"
+CLASS_NO_VERDICT = "no_verdict"
+CLASS_CRASHED = "crashed"
+CLASS_DROPPED = "dropped"
+
+# Map a system code to its class string (mirror of the backend's
+# `outcome_class_for_code`, for the reserved codes a consumer cares about).
+_SYS_CODE_CLASS = {
+    XI_SYS_DROPPED: CLASS_DROPPED,
+    XI_SYS_CRASHED: CLASS_CRASHED,
+    XI_SYS_NO_VERDICT: CLASS_NO_VERDICT,
+}
+
+
+def outcome_class_for_code(code: int) -> str:
+    """Best-effort class derivation from a numeric result code.
+
+    Mirrors the backend so a consumer that only has the `code` (e.g. an older
+    event missing the additive `class` field) can still classify it. Prefer the
+    event's own `class` field when present — read `RunOutcome.verdict_class`.
+    """
+    if code in _SYS_CODE_CLASS:
+        return _SYS_CODE_CLASS[code]
+    if code > 0:
+        return CLASS_OK
+    if code == 0:
+        return CLASS_NA
+    # Valid ng band is <0 and above the reserved system band (< -990000).
+    if code > -990000:
+        return CLASS_NG
+    return CLASS_NA
+
+
 class ProtocolError(RuntimeError):
     """Raised when a backend cmd returns ok=false.
 
@@ -74,6 +127,28 @@ class UnknownCommandError(ProtocolError):
         self.command = command
 
 
+class PartialStatusError(ProtocolError):
+    """A lifecycle cmd reported a non-success `status`.
+
+    BREAKING (already on master): `load_project` returns `ok:false` on a
+    "partial" or "rejected" status (was `ok:true` with warning arrays), and
+    `commit_group` reports `status:"partial"` after a partial commit — after
+    which the backend no longer auto-resumes dispatch. A consumer MUST NOT treat
+    either as success. The backend's `ok:false` already routes partial/rejected
+    `load_project` through `ProtocolError`; this subclass surfaces the `status`
+    (and any `data`) so callers can branch on it, and covers the
+    `commit_group` case where the rsp is `ok:true` but `status != "committed"`.
+    """
+    def __init__(self, cmd: str, status: str, *, error: str | None = None, data: Any = None):
+        super().__init__(
+            f"cmd {cmd!r} returned status {status!r} (not a clean success)",
+            error=error or status,
+            data=data,
+        )
+        self.cmd = cmd
+        self.status = status
+
+
 def _enrich_compile_error(orig: ProtocolError, what: str, target: str) -> ProtocolError:
     """Re-raise a compile-failure ProtocolError with the diagnostics
     folded into the message. Bare `compile failed` text is useless on
@@ -105,6 +180,120 @@ def _enrich_compile_error(orig: ProtocolError, what: str, target: str) -> Protoc
 
 
 @dataclass
+class RunOutcome:
+    """Parsed `run_result` event — the per-run verdict/outcome contract.
+
+    Carries the existing fields (`code`, `msg`, `run_id`, `ms`, `source`,
+    `group`) plus the additive identity/outcome fields introduced on master
+    (schema `xi.run-outcome/1`). Every additive field is optional: missing keys
+    parse to None/default so an outcome from an older backend still loads.
+
+    Note the JSON `class` key is exposed as `verdict_class` (`class` is a Python
+    keyword). Use the `CLASS_*` constants to compare, and `is_crashed` /
+    `is_no_verdict` / `is_ng` / `is_ok` for the common checks.
+    """
+    code: int = 0
+    msg: str = ""
+    run_id: int | None = None
+    ms: int | None = None
+    source: str | None = None
+    group: str | None = None
+    # --- additive identity / outcome fields (schema xi.run-outcome/1) ---
+    trigger_id: str | None = None
+    boot_id: str | None = None
+    station_id: str | None = None
+    inspection_id: str | None = None
+    schema: str | None = None
+    verdict_class: str | None = None    # JSON key `class`
+    reason_code: str | None = None
+    script_generation: int | None = None
+    raw: dict = field(default_factory=dict)
+
+    @classmethod
+    def from_event(cls, ev: dict) -> "RunOutcome":
+        """Build from a `run_result` event dict (`{"name","data",...}`) or from a
+        bare data dict. Backward-tolerant: unknown/missing keys are ignored."""
+        data = ev.get("data", ev) if isinstance(ev, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        return cls(
+            code=int(data.get("code", 0)),
+            msg=data.get("msg", "") or "",
+            run_id=data.get("run_id"),
+            ms=data.get("ms"),
+            source=data.get("source"),
+            group=data.get("group"),
+            trigger_id=data.get("trigger_id"),
+            boot_id=data.get("boot_id"),
+            station_id=data.get("station_id"),
+            inspection_id=data.get("inspection_id"),
+            schema=data.get("schema"),
+            # `class` is a Python keyword — map it to `verdict_class`.
+            verdict_class=data.get("class"),
+            reason_code=data.get("reason_code"),
+            script_generation=data.get("script_generation"),
+            raw=data,
+        )
+
+    @property
+    def cls(self) -> str:
+        """The outcome class. Prefers the event's own `class` field; falls back
+        to deriving it from `code` for older events that omit it."""
+        return self.verdict_class or outcome_class_for_code(self.code)
+
+    @property
+    def is_ok(self) -> bool:
+        return self.cls == CLASS_OK
+
+    @property
+    def is_ng(self) -> bool:
+        return self.cls == CLASS_NG
+
+    @property
+    def is_na(self) -> bool:
+        return self.cls == CLASS_NA
+
+    @property
+    def is_crashed(self) -> bool:
+        return self.cls == CLASS_CRASHED or self.code == XI_SYS_CRASHED
+
+    @property
+    def is_no_verdict(self) -> bool:
+        return self.cls == CLASS_NO_VERDICT or self.code == XI_SYS_NO_VERDICT
+
+    @property
+    def is_dropped(self) -> bool:
+        return self.cls == CLASS_DROPPED or self.code == XI_SYS_DROPPED
+
+
+@dataclass
+class RunFinished:
+    """Parsed `run_finished` event — inspect COMPUTE timing for a run.
+
+    Both `ms` (legacy integer-ms) and the additive `inspect_compute_us`
+    (microsecond precision) are inspect COMPUTE time only — they exclude queue
+    wait, emit-gate wait, sink flush, JPEG encode and WS send, and are NOT
+    cycle/decision latency. Prefer `inspect_compute_us` for precision.
+    """
+    run_id: int | None = None
+    ms: int | None = None
+    inspect_compute_us: int | None = None
+    raw: dict = field(default_factory=dict)
+
+    @classmethod
+    def from_event(cls, ev: dict) -> "RunFinished":
+        data = ev.get("data", ev) if isinstance(ev, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        return cls(
+            run_id=data.get("run_id"),
+            ms=data.get("ms"),
+            inspect_compute_us=data.get("inspect_compute_us"),
+            raw=data,
+        )
+
+
+@dataclass
 class RunResult:
     """Outcome of one `inspect()` run.
 
@@ -114,6 +303,9 @@ class RunResult:
     the run. This client does NOT collect or decode VARs or image
     previews — that domain model now lives behind the owning plugin's
     own webUI. Read `data` / `verdict` for the run outcome.
+
+    The per-run `run_result` / `run_finished` events land in `events`; read
+    them typed via the `outcome` and `finished` properties.
     """
     run_id: int
     ms: int
@@ -124,6 +316,33 @@ class RunResult:
     def verdict(self):
         """The script's verdict if it set one, else None."""
         return self.data.get("verdict")
+
+    def _event(self, name: str) -> dict | None:
+        """Last event with the given name that landed during this run."""
+        found = None
+        for ev in self.events:
+            if isinstance(ev, dict) and ev.get("name") == name:
+                found = ev
+        return found
+
+    @property
+    def outcome(self) -> RunOutcome | None:
+        """Parsed `run_result` event for this run, or None if none landed.
+
+        Exposes the additive identity/outcome fields (trigger_id, boot_id,
+        inspection_id, schema, verdict_class, reason_code, script_generation)
+        and lets a consumer distinguish crash/no-verdict/na via the numeric
+        `code` (XI_SYS_*) and the derived `class`.
+        """
+        ev = self._event("run_result")
+        return RunOutcome.from_event(ev) if ev is not None else None
+
+    @property
+    def finished(self) -> RunFinished | None:
+        """Parsed `run_finished` event for this run (inspect compute timing),
+        or None if none landed. Read `.inspect_compute_us` for µs precision."""
+        ev = self._event("run_finished")
+        return RunFinished.from_event(ev) if ev is not None else None
 
 
 class Client:
@@ -291,8 +510,76 @@ class Client:
         from `instances/`. Use `open_project()` for the full flow
         (read + compile plugins + instantiate instances + run instance
         ctors). 90% of the time you want `open_project()`.
+
+        Status semantics (already on master): the response carries a
+        `status` of "ok" | "partial" | "rejected". A "partial" (recipe only
+        partly restored) or "rejected" load now comes back as `ok:false`, so
+        `Client.call` raises `ProtocolError` — this helper re-raises it as a
+        `PartialStatusError` carrying `.status` so a consumer does NOT mistake a
+        partial/rejected load for a clean success. On success returns the rsp
+        data (which still includes `status:"ok"` plus any warning arrays).
         """
-        return self.call("load_project", {"path": path}, timeout=180)
+        try:
+            data = self.call("load_project", {"path": path}, timeout=180)
+        except ProtocolError as e:
+            status = None
+            if isinstance(e.data, dict):
+                status = e.data.get("status")
+            raise PartialStatusError(
+                "load_project", status or "rejected", error=e.error, data=e.data
+            ) from e
+        # Defensive: if a backend ever returns ok:true with a non-ok status,
+        # still refuse to treat it as success.
+        if isinstance(data, dict) and data.get("status") not in (None, "ok"):
+            raise PartialStatusError("load_project", data.get("status"), data=data)
+        return data
+
+    def commit_group(self, group: str | None = None, **kwargs) -> dict:
+        """Commit a staged config group.
+
+        Status semantics (already on master): the response gained a `status`
+        of "committed" | "partial". After a PARTIAL commit the backend no
+        longer auto-resumes dispatch, so a consumer must not treat "partial" as
+        done — it raises `PartialStatusError` (carrying `.status` and the rsp
+        `data`) so the caller can decide how to recover (e.g. re-stage and
+        re-commit, then explicitly resume). Returns the rsp data on a clean
+        "committed".
+        """
+        args = dict(kwargs)
+        if group is not None:
+            args["group"] = group
+        data = self.call("commit_group", args)
+        if isinstance(data, dict):
+            status = data.get("status")
+            # Older backends returned {"committed":true} without a status; a
+            # `committed:true` (or absent status) is a clean success.
+            if status is not None and status != "committed":
+                raise PartialStatusError("commit_group", status, data=data)
+        return data
+
+    def metrics(self) -> dict:
+        """Fetch the backend metrics snapshot (`cmd:metrics`).
+
+        Wire note (already on master): the inspect-timing key was renamed from
+        `latency_ms` to `inspect_compute_ms` (with subkeys
+        `.count/.sum_ms/.mean_ms/.buckets`) because the value is inspect COMPUTE
+        time, not decision latency. This helper returns the raw snapshot; use
+        `metrics_inspect_compute()` for a rename-tolerant accessor.
+        """
+        return self.call("metrics")
+
+    def metrics_inspect_compute(self, snapshot: dict | None = None) -> dict | None:
+        """Return the inspect-compute timing block from a metrics snapshot,
+        tolerating the `latency_ms` -> `inspect_compute_ms` rename.
+
+        Prefers the new `inspect_compute_ms` key; falls back to the legacy
+        `latency_ms` so a snapshot from an older backend still resolves.
+        Returns None if neither key is present.
+        """
+        snap = snapshot if snapshot is not None else self.metrics()
+        if not isinstance(snap, dict):
+            return None
+        return snap.get("inspect_compute_ms", snap.get("latency_ms"))
 
     def open_project(self, path: str, timeout: float = 180) -> dict:
         """Open a project folder end-to-end: scan `instances/`, compile
