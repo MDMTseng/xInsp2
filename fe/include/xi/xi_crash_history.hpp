@@ -29,7 +29,7 @@
 #include <utility>
 #include <vector>
 
-#include <xi/xi_safe_state.hpp>
+#include <xi/xi_be_exit.hpp>
 
 namespace xi {
 
@@ -62,7 +62,7 @@ inline std::string json_escape(const std::string& s) {
 // Build the JSONL record (no trailing newline) for one BE death. Pure + testable.
 //   consecutive: the consecutive-failure count AFTER this death is counted.
 //   cap_hit:     true if this death tripped the respawn cap (line latches safe).
-inline std::string crash_history_line(const SafeStateEvent& ev,
+inline std::string crash_history_line(const BeExitEvent& ev,
                                       int consecutive, bool cap_hit) {
     std::string o = "{";
     o += "\"ts_ms\":" + std::to_string(static_cast<long long>(ev.ts_ms));
@@ -105,7 +105,7 @@ public:
 
     bool enabled() const { return !path_.empty(); }
 
-    void record(const SafeStateEvent& ev, int consecutive, bool cap_hit) {
+    void record(const BeExitEvent& ev, int consecutive, bool cap_hit) {
         if (path_.empty()) return;
         try {
             rotate_if_needed_();

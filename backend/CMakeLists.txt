@@ -114,7 +114,7 @@ target_include_directories(xi_core INTERFACE
 target_link_libraries(xi_core INTERFACE yyjson)
 
 # xi_fe — the FE-supervisor header surface (crash history/report, fe_status,
-# respawn policy, safe-state crash model). Lives in a SEPARATE include root
+# respawn policy, BE-exit crash model). Lives in a SEPARATE include root
 # (fe/include) so it is NOT on xi_core's path: the backend/runner binaries and
 # the runtime script/plugin cl-compiler can't reach FE headers, which makes the
 # core/supervisor split compile-enforced, not just cosmetic. Only the FE binary
@@ -799,9 +799,11 @@ target_compile_definitions(xinsp_runner PRIVATE
     XINSP2_VERSION="${XINSP2_VERSION}"
     XINSP2_COMMIT="${XINSP2_COMMIT}")
 
-# Frontend supervisor. Spawns + monitors xinsp-backend.exe, drives the line to a
-# safe state on backend death, respawns it (rate-limited). Links NEITHER xi_core
-# NOR OpenCV — it only needs the portable xi_safe_state.hpp header + yyjson + the
+# Frontend supervisor. Spawns + monitors xinsp-backend.exe, records crash
+# forensics on backend death, respawns it (rate-limited). (Driving the line to a
+# safe state on BE death is a comms plugin's own sidecar, not the FE.) Links
+# NEITHER xi_core NOR OpenCV — it only needs the portable xi_be_exit.hpp header
+# + yyjson + the
 # Win32 process/socket APIs, so it carries no accelerator-DLL dependency and is
 # excluded from _xinsp_deploy_dlls below.
 add_executable(xinsp_fe src/fe_main.cpp)
