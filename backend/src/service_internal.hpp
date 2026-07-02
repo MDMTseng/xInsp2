@@ -34,11 +34,13 @@
 #include <xi/xi_emit_gate.hpp>
 #include <xi/xi_ws_server.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_seh.hpp>
 #include <xi/xi_crash_dump.hpp>
 
 #include <windows.h>
 
 namespace xp = xi::proto;
+using xi::seh_exception;
 
 // ---- Engine: the host's process-wide mutable state -------------------------
 static constexpr int WD_SLOTS = 64;   // max concurrent in-flight inspects tracked (Engine::wd_deadlines size)
