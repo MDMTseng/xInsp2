@@ -21,6 +21,7 @@
 //              failed/quarantined); re-committing config re-enables it.
 //
 #include <xi/xi_cabi_adapter.hpp>
+#include <xi/xi_crash_dump.hpp>
 #include <xi/xi_fault_policy.hpp>
 #include <xi/xi_health.hpp>
 #include <xi/xi_image_pool.hpp>
@@ -76,6 +77,23 @@ static bool process_caught_fault(xi::CAbiInstanceAdapter& ad) {
     }
     xi_record_out_free(&out);
     return faulted;
+}
+
+// Like process_caught_fault but reports the SEH code (0 = no fault) so a test can
+// assert the fault CLASS, not just that something faulted.
+static unsigned process_seh_code(xi::CAbiInstanceAdapter& ad) {
+    const char* empty = "{}";
+    xi_record in{};
+    in.data = reinterpret_cast<const uint8_t*>(empty); in.len = 2;
+    xi_record_out out; xi_record_out_init(&out);
+    unsigned code = 0;
+    try {
+        ad.process(&in, &out);
+    } catch (const xi::seh_exception& e) {
+        code = e.code;
+    }
+    xi_record_out_free(&out);
+    return code;
 }
 
 int main() {
@@ -216,6 +234,47 @@ int main() {
         CHECK(H.state() == xi::SysState::Running);
         { xi::CompHealth h; std::string r; int64_t s = 0;
           CHECK(!H.instance_fault("refuse0", h, r, s)); }
+        delete ad;
+    }
+
+    // -----------------------------------------------------------------------
+    SECTION("stack overflow: caught + classified, guard page restored (_resetstkoflw), "
+            "worker survives a subsequent deep call, second overflow still faults cleanly");
+    {
+        // Mirror a lane worker: reserve stack headroom so the SE translator can run
+        // after the overflow, exactly as reserve_fault_stack() does at dispatch-thread
+        // entry (service_dispatch.cpp). Without it the translator has no stack.
+        xi::crash::reserve_fault_stack();
+
+        xi::CAbiInstanceAdapter* ad = make_adapter("stk0", xi::OnFault::Reuse);
+
+        // (a) an armed process() overflows the stack; the hardware fault reaches the
+        //     host SEH boundary and is classified as STACK_OVERFLOW (0xC00000FD).
+        ad->exchange("{\"command\":\"arm_stkoflw\"}");
+        unsigned code1 = process_seh_code(*ad);
+        CHECK(code1 == xi::kStackOverflowCode);
+
+        // The worker thread survived the throw, but the overflow consumed its stack
+        // guard page. Restore it — this is exactly what the host's surviving catch
+        // sites now call (xi::recover_seh_stack). Returns true when the page is re-armed.
+        CHECK(xi::recover_seh_stack(code1));
+
+        // (b) a subsequent deep-but-SAFE recursion on the SAME thread completes and
+        //     returns the right checksum — proof the stack is healthy again (kDeepDepth
+        //     is 512 in fault_plugin.cpp; 512*513/2 == 131328).
+        ad->exchange("{\"command\":\"deep\"}");
+        CHECK(process_seh_code(*ad) == 0);                 // no fault
+        std::string st = ad->exchange("{\"command\":\"stats\"}");
+        CHECK(jint(st, "deep_result") == 512 * 513 / 2);
+
+        // (c) a SECOND overflow still faults CLEANLY as STACK_OVERFLOW — proof the guard
+        //     page was genuinely re-armed by (a)'s reset. Without the reset a second
+        //     overflow would not fault cleanly (it would AV / kill the process). Recover
+        //     again so the thread is left healthy for the rest of the test process.
+        ad->exchange("{\"command\":\"arm_stkoflw\"}");
+        CHECK(process_seh_code(*ad) == xi::kStackOverflowCode);
+        CHECK(xi::recover_seh_stack(xi::kStackOverflowCode));
+
         delete ad;
     }
 

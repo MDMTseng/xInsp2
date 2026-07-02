@@ -200,6 +200,19 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         emit_error_log(srv, msg, run_id);
         out.run_error_what = "\"what\":";
         xp::json_escape_into(out.run_error_what, std::string(msg));
+        // STACK_OVERFLOW leaves this lane worker's guard page consumed; restore it
+        // before the worker loops to the next frame, or that frame's first deep call
+        // corrupts memory instead of faulting. If the guard page can't be restored the
+        // worker's stack is unusable — take the watchdog HARD-trip trade (health fault
+        // + hard-exit for FE respawn) rather than run another frame on a holed stack.
+        if (!xi::recover_seh_stack(e.code)) {
+            xi::health().set_state(xi::SysState::Fault);
+            emit_error_log(srv, "STACK_OVERFLOW guard page could not be restored on the "
+                                "inspect worker; backend hard-exiting for respawn", run_id);
+            std::fflush(stderr);
+            std::fflush(stdout);
+            std::_Exit(WATCHDOG_EXIT_CODE);
+        }
     } catch (const std::exception& e) {
         disarm();
         std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());

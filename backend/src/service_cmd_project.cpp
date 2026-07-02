@@ -160,6 +160,7 @@ void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                              iname->c_str(), e.code, e.what());
                 set_inst_state(*iname, InstState::Faulted, msg);
                 send_rsp_err(srv, id, msg);
+                xi::recover_seh_stack_or_die(e.code, "cmd set_instance_def");
             } catch (const std::exception& e) {
                 std::string em = std::string("set_def error: ") + e.what();
                 set_inst_state(*iname, InstState::Faulted, em);
@@ -182,6 +183,7 @@ void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                                  iname->c_str(), e.code, e.what());
                     set_inst_state(*iname, InstState::Faulted, msg);
                     send_rsp_err(srv, id, msg);
+                    xi::recover_seh_stack_or_die(e.code, "cmd script set_instance_def");
                 } catch (const std::exception& e) {
                     std::string em = std::string("script set_instance_def error: ") + e.what();
                     set_inst_state(*iname, InstState::Faulted, em);
@@ -213,6 +215,7 @@ void cmd_get_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 std::snprintf(msg, sizeof(msg), "get_def '%s' crashed: 0x%08X (%s)",
                              iname->c_str(), e.code, e.what());
                 send_rsp_err(srv, id, msg);
+                xi::recover_seh_stack_or_die(e.code, "cmd get_instance_def");
             } catch (const std::exception& e) {
                 send_rsp_err(srv, id, std::string("get_def error: ") + e.what());
             }
@@ -233,6 +236,7 @@ void cmd_get_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                     std::snprintf(msg, sizeof(msg), "script get_instance_def '%s' crashed: 0x%08X (%s)",
                                  iname->c_str(), e.code, e.what());
                     send_rsp_err(srv, id, msg);
+                    xi::recover_seh_stack_or_die(e.code, "cmd script get_instance_def");
                 } catch (const std::exception& e) {
                     send_rsp_err(srv, id, std::string("script get_instance_def error: ") + e.what());
                 }

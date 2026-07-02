@@ -246,6 +246,7 @@ void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd
                 std::snprintf(msg, sizeof(msg), "exchange '%s' crashed: 0x%08X (%s)",
                              iname->c_str(), e.code, e.what());
                 send_rsp_err(srv, id, msg);
+                xi::recover_seh_stack_or_die(e.code, "cmd exchange_instance");
             } catch (const std::exception& e) {
                 send_rsp_err(srv, id, std::string("exchange error: ") + e.what());
             }
@@ -266,6 +267,7 @@ void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd
                     std::snprintf(msg, sizeof(msg), "script exchange '%s' crashed: 0x%08X (%s)",
                                  iname->c_str(), e.code, e.what());
                     send_rsp_err(srv, id, msg);
+                    xi::recover_seh_stack_or_die(e.code, "cmd script exchange_instance");
                 }
             } else {
                 send_rsp_err(srv, id, "instance not found: " + *iname);
@@ -327,6 +329,7 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                     std::snprintf(msg, sizeof(msg), "script prepare '%s' crashed: 0x%08X (%s)",
                                  iname->c_str(), e.code, e.what());
                     send_rsp_err(srv, id, msg);
+                    xi::recover_seh_stack_or_die(e.code, "cmd script prepare_instance");
                 } catch (const std::exception& e) {
                     send_rsp_err(srv, id, std::string("script prepare error: ") + e.what());
                 }
@@ -425,6 +428,7 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
                         char em[256];
                         std::snprintf(em, sizeof(em), "{\"error\":\"commit crashed: 0x%08X\"}", e.code);
                         r = em;
+                        xi::recover_seh_stack_or_die(e.code, "cmd script commit");
                     } catch (const std::exception& e) {
                         r = std::string("{\"error\":\"") + e.what() + "\"}";
                     }

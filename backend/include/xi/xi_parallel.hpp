@@ -87,6 +87,11 @@ void parallel_for(int n, F&& body) {
                 // Translated hardware fault — must be caught INSIDE the region.
                 if (!faulted.exchange(true, std::memory_order_relaxed))
                     seh_code.store(e.code, std::memory_order_relaxed);
+                // The OpenMP runtime KEEPS this worker thread in its pool and reuses it
+                // for the next parallel_for. A STACK_OVERFLOW consumed its guard page;
+                // restore it here (on the faulting worker — the rethrow below lands on a
+                // DIFFERENT thread) or hard-exit if it can't be restored.
+                xi::recover_seh_stack_or_die(e.code, "OpenMP worker");
             } catch (...) {
                 // GAP FIX (beyond the B1 sketch): an ordinary std::exception from
                 // body(i) must not escape the omp region either (Invariant 6.2).
