@@ -1,0 +1,1 @@
+{"type":"vars","run_id":17,"items":[{"name":"gray","kind":"image","gid":100,"raw":false},{"name":"count","kind":"number","value":42},{"name":"label","kind":"string","value":"ok"},{"name":"flag","kind":"boolean","value":true}]}

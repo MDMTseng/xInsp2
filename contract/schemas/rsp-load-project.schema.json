@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://xinsp.dev/contract/schemas/rsp-load-project.schema.json",
   "title": "load_project rsp",
-  "description": "Response to cmd:load_project. `data.status` reports honest partial application (ok/partial/rejected); the warning arrays carry the per-item reasons. Descriptive of the staged breaking shape now present in the fixtures.",
+  "description": "Response to cmd:load_project. Describes what cmd_load_project_ (backend/src/service_cmd_lifecycle.cpp) ACTUALLY emits: data carries a `status` of ok/partial/rejected. A clean load emits status:\"ok\" WITH empty param_warnings/instance_warnings arrays (they are always present, not omitted); a partial load fills those arrays with per-item reasons. The envelope `ok` mirrors `status`: ok => ok:true, partial/rejected => ok:false with an `error` string. The `status!=ok => ok==false` pairing is outside the constrained subset (no if/then) and is guarded by a consumer test (tools/xinsp2_py/tests/test_run_outcome.py).",
   "type": "object",
   "additionalProperties": true,
   "required": ["type", "id", "ok", "data"],
