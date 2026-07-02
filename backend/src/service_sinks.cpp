@@ -156,6 +156,11 @@ static int use_process_inline_(const char* name,
             char why[96]; std::snprintf(why, sizeof(why), "process() crashed: 0x%08X", e.code);
             note_instance_crash_(name, why);   // crash-loop count + health degraded
             apply_on_fault_policy_(name, adapter);   // item 14: reuse / reinit / refuse
+            // This SEH boundary SWALLOWS the fault (returns -2) and the running inspect
+            // continues on THIS lane worker: a STACK_OVERFLOW here would hole the guard
+            // page and the rest of the inspect would run on a compromised stack. Restore
+            // it (or hard-exit for respawn) before returning to the script.
+            xi::recover_seh_stack_or_die(e.code, "plugin process()");
             return -2;
         } catch (...) {
             std::fprintf(stderr, "[xinsp2] use_process('%s') threw exception\n", name);
@@ -254,6 +259,9 @@ int use_exchange_cb(const char* name, const char* cmd,
     } catch (const seh_exception& e) {
         std::fprintf(stderr, "[xinsp2] use_exchange('%s') crashed: 0x%08X (%s)\n",
                      name, e.code, e.what());
+        // Swallowed on a surviving thread (lane worker under a script's use().exchange(),
+        // or the command thread) — restore the stack guard page after an overflow.
+        xi::recover_seh_stack_or_die(e.code, "plugin exchange()");
         return -1;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[xinsp2] use_exchange('%s') threw: %s\n", name, e.what());
@@ -562,6 +570,8 @@ void flush_staged_emits_(int64_t run_id) {   // decl in header
         } catch (const seh_exception& e) {
             std::fprintf(stderr, "[xinsp2] sink '%s' flush crashed: 0x%08X (%s)\n",
                          it.target.c_str(), e.code, e.what());
+            // Loop keeps flushing later staged sinks on this same worker thread.
+            xi::recover_seh_stack_or_die(e.code, "sink flush");
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[xinsp2] sink '%s' flush threw: %s\n", it.target.c_str(), e.what());
         } catch (...) {

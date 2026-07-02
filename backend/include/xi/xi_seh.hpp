@@ -20,10 +20,13 @@
 // MSVC-only — no-op everywhere else.
 //
 
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 
 #ifdef _MSC_VER
 #include <eh.h>
+#include <malloc.h>   // _resetstkoflw
 #endif
 
 namespace xi {
@@ -59,5 +62,59 @@ inline void install_seh_translator() {
 #else
 inline void install_seh_translator() {}
 #endif
+
+// EXCEPTION_STACK_OVERFLOW, spelled here so this header stays free of <windows.h>.
+inline constexpr unsigned int kStackOverflowCode = 0xC00000FD;
+
+// Recover the thread's stack state after a translated seh_exception is CAUGHT on a
+// thread that will KEEP RUNNING (a pooled dispatch/OpenMP/async worker, the WS
+// command thread, the runner's frame loop).
+//
+// Only STACK_OVERFLOW needs anything: the overflow is delivered by writing into the
+// thread's single guard page, and Windows does NOT re-arm that page automatically.
+// Until _resetstkoflw() restores it, the NEXT deep call on this thread does not
+// fault cleanly — it writes past the end of the stack and silently corrupts memory
+// (or dies unrecoverably). Every other SEH code leaves the stack intact, so this is
+// a no-op for them. No-op returning true off MSVC.
+//
+// Returns true when the thread is safe to keep using (not an overflow, or the guard
+// page was restored); false when the guard page could NOT be restored — the caller
+// MUST NOT run more untrusted code on this thread.
+inline bool recover_seh_stack(unsigned int code) {
+#ifdef _MSC_VER
+    if (code == kStackOverflowCode)
+        return _resetstkoflw() != 0;
+#else
+    (void)code;
+#endif
+    return true;
+}
+inline bool recover_seh_stack(const seh_exception& e) { return recover_seh_stack(e.code); }
+
+// Exit code for a self-inflicted hard exit that the FE supervisor respawns. Matches
+// service_internal.hpp's WATCHDOG_EXIT_CODE (0x5744 == 'WD'); duplicated here so the
+// shared xi_parallel / xi_async workers can hard-exit without a service dependency.
+inline constexpr int kStackGuardExitCode = 0x5744;
+
+// recover_seh_stack(), plus the unrecoverable-guard-page policy: if the guard page
+// cannot be restored the thread's stack is compromised and cannot be run again, so
+// we hard-exit crash-safely for the FE supervisor to respawn — the same trade the
+// watchdog HARD trip makes (log + std::_Exit, skipping dtors a wedged thread could
+// deadlock on). Used at every seh_exception catch site whose thread survives to run
+// more untrusted code. On the reset-SUCCESS path it returns and the caller proceeds
+// exactly as before (the fault is already recorded / policy already applied).
+inline void recover_seh_stack_or_die(unsigned int code, const char* where) {
+    if (recover_seh_stack(code)) return;
+    std::fprintf(stderr,
+        "[xinsp2] STACK_OVERFLOW guard page could not be restored on %s — "
+        "hard-exiting for supervisor respawn (rc=0x%04X)\n",
+        where ? where : "worker", (unsigned)kStackGuardExitCode);
+    std::fflush(stderr);
+    std::fflush(stdout);
+    std::_Exit(kStackGuardExitCode);
+}
+inline void recover_seh_stack_or_die(const seh_exception& e, const char* where) {
+    recover_seh_stack_or_die(e.code, where);
+}
 
 } // namespace xi

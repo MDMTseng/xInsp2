@@ -329,7 +329,17 @@ auto async(F&& f, Args&&... args)
             // C2: re-install the parent's image-pool owner for the duration of the
             // user callable so any pool image it creates is attributed correctly.
             detail::OwnerScope owner_scope(parent_owner);
-            return std::apply(std::move(fn), std::move(tup));
+            try {
+                return std::apply(std::move(fn), std::move(tup));
+            } catch (const xi::seh_exception& e) {
+                // std::async(launch::async) runs on a pooled thread (MSVC threadpool)
+                // that is REUSED for later tasks. A STACK_OVERFLOW here holed its guard
+                // page; restore it (or hard-exit) before the fault is stored in the
+                // promise and this thread returns to the pool. Then rethrow so the fault
+                // still surfaces at the awaiting .get() on the spawning thread.
+                xi::recover_seh_stack_or_die(e.code, "xi::async worker");
+                throw;
+            }
         };
 
     return Future<R>{std::async(std::launch::async, std::move(closure)), token};

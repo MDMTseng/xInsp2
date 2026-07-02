@@ -357,6 +357,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                         std::fprintf(stderr,
                             "[xinsp2] replay set_instance_def '%s' crashed: 0x%08X (%s) — skipped\n",
                             iname.c_str(), e.code, e.what());
+                        xi::recover_seh_stack_or_die(e.code, "replay set_instance_def");
                     } catch (const std::exception& e) {
                         std::fprintf(stderr,
                             "[xinsp2] replay set_instance_def '%s' threw: %s — skipped\n",
@@ -408,6 +409,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                             std::fprintf(stderr,
                                 "[xinsp2] replay set_state (migrated) crashed: 0x%08X (%s) — skipped\n",
                                 e.code, e.what());
+                            xi::recover_seh_stack_or_die(e.code, "replay set_state (migrated)");
                         } catch (const std::exception& e) {
                             state_ok = false;
                             std::fprintf(stderr,
@@ -453,6 +455,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                         std::fprintf(stderr,
                             "[xinsp2] replay set_state (restore) crashed: 0x%08X (%s) — skipped\n",
                             e.code, e.what());
+                        xi::recover_seh_stack_or_die(e.code, "replay set_state (restore)");
                     } catch (const std::exception& e) {
                         std::fprintf(stderr,
                             "[xinsp2] replay set_state (restore) threw: %s — skipped\n", e.what());
@@ -706,6 +709,7 @@ void cmd_load_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
                         char msg[128];
                         std::snprintf(msg, sizeof(msg), ": set_def crashed 0x%08X", e.code);
                         instance_warnings.push_back(std::string(iname) + msg);
+                        xi::recover_seh_stack_or_die(e.code, "load set_def");
                     } catch (const std::exception& e) {
                         instance_warnings.push_back(std::string(iname) + ": set_def threw: " + e.what());
                     }

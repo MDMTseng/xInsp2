@@ -511,6 +511,9 @@ int main(int argc, char** argv) {
             char buf[64];
             std::snprintf(buf, sizeof buf, "inspect crashed: 0x%08X", e.code);
             emit_frame(i, XI_SYS_CRASHED, "crashed", buf);
+            // The frame loop continues on THIS thread; after a STACK_OVERFLOW restore
+            // the guard page (or hard-exit) before running the next frame's inspect.
+            xi::recover_seh_stack_or_die(e.code, "runner frame loop");
             continue;
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[runner] frame %d threw: %s\n", i, e.what());
