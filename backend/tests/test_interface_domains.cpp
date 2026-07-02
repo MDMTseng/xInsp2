@@ -84,6 +84,47 @@ int main() {
         }
     }
 
+    // ---- (1b) xi.imaging_rw@1 — read/write access discipline (ext review 02 I.4)
+    {
+        const auto* rw = static_cast<const xi_imaging_rw_v1*>(
+            host.get_interface("xi.imaging_rw", 1));
+        CHECK(rw != nullptr);
+        if (rw) {
+            CHECK(rw->image_read  != nullptr);
+            CHECK(rw->image_write != nullptr);
+            // Bad handle -> null on both.
+            CHECK(rw->image_read(XI_IMAGE_NULL)  == nullptr);
+            CHECK(rw->image_write(XI_IMAGE_NULL) == nullptr);
+
+            // A freshly-created handle is uniquely owned (refcount == 1): both
+            // image_read and image_write hand back the SAME pool bytes as
+            // image_data, and the write pointer is non-null.
+            xi_image_handle h = host.image_create(4, 4, 1);
+            CHECK(h != XI_IMAGE_NULL);
+            const uint8_t* rp = rw->image_read(h);
+            uint8_t*       wp = rw->image_write(h);
+            CHECK(rp != nullptr);
+            CHECK(wp != nullptr);
+            CHECK(rp == host.image_data(h));   // same bytes as the legacy pointer
+            CHECK(wp == host.image_data(h));
+            // Writing through the write pointer is visible via the read pointer.
+            wp[0] = 0x7E;
+            CHECK(rw->image_read(h)[0] == 0x7E);
+
+            // Alias it (a second consumer): refcount now 2 -> image_write must
+            // return NULL (a shared input is NOT writable; no copy-on-write),
+            // while image_read still works.
+            host.image_addref(h);
+            CHECK(rw->image_write(h) == nullptr);
+            CHECK(rw->image_read(h)  != nullptr);
+            CHECK(rw->image_read(h)[0] == 0x7E);
+            // Drop the alias -> uniquely owned again -> writable again.
+            host.image_release(h);
+            CHECK(rw->image_write(h) != nullptr);
+            host.image_release(h);
+        }
+    }
+
     // ---- (2) xi.doc@1 resolves and matches -----------------------------------
     {
         const auto* dv = static_cast<const xi_doc_v1*>(host.get_interface("xi.doc", 1));
@@ -178,6 +219,16 @@ int main() {
         plug.status("running");
         CHECK(g_status_src == "domains_v10");
         CHECK(g_status_txt == "running");
+        // imaging_rw: image_read/image_write via the SDK wrapper honour the
+        // uniqueness gate (write null for a shared handle).
+        xi_image_handle h = host.image_create(2, 2, 1);
+        CHECK(h != XI_IMAGE_NULL);
+        CHECK(plug.image_write(h) != nullptr);          // uniquely owned -> writable
+        CHECK(plug.image_read(h)  == host.image_data(h));
+        host.image_addref(h);
+        CHECK(plug.image_write(h) == nullptr);          // shared -> not writable
+        host.image_release(h);
+        host.image_release(h);
     }
 
     // ---- (8) SDK wrappers: simulated pre-v10 host falls back to fields -------
@@ -198,6 +249,13 @@ int main() {
         plug.status("legacy-path");
         CHECK(g_status_src == "domains_legacy");
         CHECK(g_status_txt == "legacy-path");
+        // imaging_rw: no door -> fall back to the legacy image_data pointer for
+        // BOTH read and write (the by-convention discipline; no uniqueness gate).
+        xi_image_handle h = host.image_create(2, 2, 1);
+        CHECK(h != XI_IMAGE_NULL);
+        CHECK(plug.image_read(h)  == host.image_data(h));
+        CHECK(plug.image_write(h) == host.image_data(h));
+        host.image_release(h);
     }
 
     if (g_failures == 0) {

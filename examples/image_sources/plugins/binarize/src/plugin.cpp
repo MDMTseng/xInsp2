@@ -40,7 +40,7 @@ std::string base64(const std::vector<uint8_t>& d) {
 std::string thumb(const xi::Image& img) {
     if (img.empty()) return "";
     const int TW = 200;
-    cv::Mat src = xi::as_cv_mat(img), small;
+    cv::Mat src = xi::as_cv_read(img), small;   // reading the input -> read view
     if (img.width > TW) {
         int th = std::max(1, img.height * TW / img.width);
         cv::resize(src, small, cv::Size(TW, th), 0, 0, cv::INTER_AREA);
@@ -112,7 +112,7 @@ private:
     // threshold change, so the webui preview reflects the current threshold.
     void recompute_() {
         if (last_input_.empty()) { last_binary_ = {}; last_fg_ = 0.0; return; }
-        cv::Mat src = xi::as_cv_mat(last_input_), gray;
+        cv::Mat src = xi::as_cv_read(last_input_), gray;   // read the cached input
         if (src.channels() == 3)      cv::cvtColor(src, gray, cv::COLOR_RGB2GRAY);
         else if (src.channels() == 4) cv::cvtColor(src, gray, cv::COLOR_RGBA2GRAY);
         else                          gray = src;

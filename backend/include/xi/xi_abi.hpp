@@ -256,6 +256,29 @@ public:
         return XI_IMAGE_NULL;
     }
 
+    // --- xi.imaging_rw@1 read/write access discipline (ext review 02 I.4) ----
+    // The blessed low-level pixel accessors that encode read-only-input /
+    // writable-output at the ABI. image_read const-qualifies ANY handle's bytes;
+    // image_write returns a mutable pointer ONLY for a uniquely-owned output
+    // handle (refcount == 1) and NULL for a shared input — no copy-on-write. Both
+    // resolve xi.imaging_rw@1 once (cached). On a host that predates the interface
+    // they fall back to host->image_data (the legacy always-mutable pointer), so
+    // old hosts keep working under the by-convention discipline.
+    const uint8_t* image_read(xi_image_handle h) const {
+        if (const xi_imaging_rw_v1* rw = imaging_rw_iface()) {
+            if (rw->image_read) return rw->image_read(h);
+        }
+        return host_ ? const_cast<const xi_host_api*>(host_)->image_data(h) : nullptr;
+    }
+    uint8_t* image_write(xi_image_handle h) const {
+        if (const xi_imaging_rw_v1* rw = imaging_rw_iface()) {
+            if (rw->image_write) return rw->image_write(h);
+        }
+        // Pre-interface host: no uniqueness gate available — fall back to the
+        // legacy mutable pointer (by-convention discipline).
+        return host_ ? host_->image_data(h) : nullptr;
+    }
+
     // Host-owned doc chunk allocator (xi.doc@1) — backs a yyjson_mut_doc that is
     // safe to hand across the DLL boundary (its free routes back to the host).
     void*   doc_chunk_alloc(size_t n) const {
@@ -406,6 +429,15 @@ private:
         }
         return imaging_;
     }
+    const xi_imaging_rw_v1* imaging_rw_iface() const {
+        if (!imaging_rw_resolved_) {
+            imaging_rw_resolved_ = true;
+            if (host_ && host_->get_interface)
+                imaging_rw_ = static_cast<const xi_imaging_rw_v1*>(
+                    host_->get_interface("xi.imaging_rw", 1));
+        }
+        return imaging_rw_;
+    }
     const xi_doc_v1* doc_iface() const {
         if (!doc_resolved_) {
             doc_resolved_ = true;
@@ -435,6 +467,8 @@ private:
     }
     mutable bool                 imaging_resolved_ = false;
     mutable const xi_imaging_v1* imaging_          = nullptr;
+    mutable bool                    imaging_rw_resolved_ = false;
+    mutable const xi_imaging_rw_v1* imaging_rw_          = nullptr;
     mutable bool                 doc_resolved_     = false;
     mutable const xi_doc_v1*     doc_              = nullptr;
     mutable bool                 emit_resolved_    = false;
