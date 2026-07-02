@@ -15,6 +15,10 @@ import { ImageViewerPanel } from './imageViewerPanel';
 import { resolveBackendMode } from './backendMode.mjs';
 import { VerdictTally, parseRunOutcome, parseRunFinished,
          CLASS_OK, CLASS_NG, CLASS_CRASHED, CLASS_DROPPED } from './runOutcome';
+import { parseHealth, mergeHealthEvent, enteredProblem, failingComponents,
+         componentSummary, summarizeFailing,
+         STATE_RUNNING, STATE_DEGRADED, STATE_FAULT,
+         type HealthSnapshot } from './healthState';
 
 // --- Plugin Browser model building (pure; reads project.json + the filesystem) ---
 function pbExpandRoot(raw: string, projectFolder: string): string {
@@ -605,6 +609,81 @@ export function activate(context: vscode.ExtensionContext) {
         compileClearTimer = setTimeout(() => compileStatus.hide(), ok ? 3000 : 6000);
     };
 
+    // --- Canonical health/state chip (schema xi.health/1) -----------------
+    // The ONE authoritative read of the backend's state machine + which
+    // component (if any) is unhealthy — pulled once on connect (get_health, the
+    // delivery guarantee) and kept live by the health_changed event
+    // (accelerator). Replaces inferring liveness from side channels. Degrades
+    // gracefully on an older backend that lacks get_health (feature-detected via
+    // the "unknown command" rsp — no version-sniffing): the chip simply stays
+    // hidden and the extension keeps its prior behaviour.
+    const healthChip = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
+    healthChip.command = 'xinsp2.showHealth';
+    context.subscriptions.push(healthChip);
+    // undefined = not yet probed this connection; false = backend has no
+    // get_health (stop touching the chip); a snapshot = live state.
+    let healthSupported: boolean | undefined;
+    let lastHealthState: string | undefined;   // for one-shot enter-problem warning
+    let lastHealthSnap: HealthSnapshot | undefined;
+
+    // Icon + optional warning/error background per top-level state. Unknown
+    // (newer) states fall through to a neutral pulse so they still surface.
+    const HEALTH_ICON: Record<string, string> = {
+        boot: 'debug-start', project_loaded: 'folder-opened', running: 'pulse',
+        degraded: 'warning', draining: 'sync', fault: 'error',
+    };
+    const updateHealthChip = (snap: HealthSnapshot) => {
+        const st = snap.state;
+        healthChip.text = `$(${HEALTH_ICON[st] ?? 'pulse'}) health: ${st}`;
+        const bad = failingComponents(snap);
+        const lines = [`Backend state: ${st}`];
+        if (snap.since_ms) lines.push(`  since ${new Date(snap.since_ms).toLocaleTimeString()}`);
+        if (bad.length) {
+            lines.push('Unhealthy components:');
+            for (const c of bad) lines.push(`  • ${componentSummary(c)}`);
+        } else if (st === STATE_RUNNING) {
+            lines.push('All components healthy.');
+        }
+        lines.push('Click for the full health snapshot.');
+        healthChip.tooltip = lines.join('\n');
+        healthChip.backgroundColor =
+            st === STATE_FAULT ? new vscode.ThemeColor('statusBarItem.errorBackground')
+            : st === STATE_DEGRADED ? new vscode.ThemeColor('statusBarItem.warningBackground')
+            : undefined;
+        healthChip.show();
+    };
+    // Apply a freshly parsed snapshot: refresh the chip and fire a ONE-TIME
+    // warning when the machine ENTERS degraded/fault (not on every subsequent
+    // health_changed while it stays there — see enteredProblem).
+    const applyHealth = (snap: HealthSnapshot) => {
+        healthSupported = true;
+        lastHealthSnap = snap;
+        updateHealthChip(snap);
+        if (enteredProblem(lastHealthState, snap.state)) {
+            const detail = summarizeFailing(snap);
+            const msg = `xInsp2 backend entered "${snap.state}"`
+                + (detail ? ` — ${detail}` : '.');
+            output.appendLine('[xinsp2] ' + msg);
+            if (snap.state === STATE_FAULT) vscode.window.showErrorMessage(msg);
+            else vscode.window.showWarningMessage(msg);
+        }
+        lastHealthState = snap.state;
+    };
+    const resetHealthChip = () => {
+        healthChip.hide();
+        healthChip.backgroundColor = undefined;
+        healthSupported = undefined;
+        lastHealthState = undefined;
+    };
+    // Click → dump the current snapshot to the output channel (a lightweight
+    // "show me everything" without a bespoke panel).
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.showHealth', () => {
+            output.show(true);
+            if (!lastHealthSnap) { output.appendLine('[health] no snapshot yet'); return; }
+            output.appendLine('[health] ' + JSON.stringify(lastHealthSnap.raw));
+        }));
+
     // Plugin data cache (the "Plugins" tree view was removed; the Plugin Browser
     // webview is the management surface now — this just holds the last-known set).
     const pluginRegistry = new PluginRegistry();
@@ -1076,6 +1155,17 @@ export function activate(context: vscode.ExtensionContext) {
             for (const src of Object.keys(data)) statusMap[src] = data[src]?.text ?? '';
             refreshStatuses();
         }).catch(() => {});
+        // Canonical health/state snapshot on (re)connect — the delivery guarantee
+        // behind the health_changed accelerator. Feature-detected: an older backend
+        // answers get_health with an "unknown command" rsp, in which case we mark
+        // the feature unsupported and leave the chip hidden (no version-sniffing).
+        sendCmd('get_health').then((r: any) => {
+            if (r?.ok) { applyHealth(parseHealth(r.data)); return; }
+            if (/unknown command/i.test(r?.error || '')) {
+                healthSupported = false;
+                output.appendLine('[xinsp2] backend has no get_health — health chip disabled (older backend)');
+            }
+        }).catch(() => {});
         // Surface any unread crash reports from previous sessions. The
         // notification names the faulty module so the user knows whether
         // their script, a plugin, or the backend itself was at fault.
@@ -1165,6 +1255,9 @@ export function activate(context: vscode.ExtensionContext) {
         // are misleading, and a spinner would hang forever.
         resetVerdicts();
         compileStatus.hide();
+        // Health is per-connection; drop the chip + re-probe on the next connect
+        // (a stale "running" from a dead backend is misleading).
+        resetHealthChip();
         if (attachMode) {
             // The FE owns recovery; make clear the extension isn't going to
             // respawn. Word it from the FE's true state when we have it: a latched
@@ -1233,6 +1326,12 @@ export function activate(context: vscode.ExtensionContext) {
                 + ' — xi::state() started empty because the schema changed.';
             output.appendLine('[xinsp2] ' + warn);
             vscode.window.showWarningMessage(warn);
+        } else if (msg.type === 'event' && msg.name === 'health_changed') {
+            // Live accelerator for the health/state contract. Ignore it until a
+            // get_health snapshot has confirmed the backend supports the feature
+            // (healthSupported !== false), so a stray event can't un-hide the chip
+            // on a backend we've classified as too old.
+            if (healthSupported !== false) applyHealth(mergeHealthEvent(lastHealthSnap, parseHealth(msg)));
         } else if (msg.type === 'event' && msg.name === 'compile_started') {
             showCompiling(msg.data?.path);
         } else if (msg.type === 'event' && msg.name === 'compile_finished') {

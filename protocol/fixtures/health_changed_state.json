@@ -1,0 +1,10 @@
+{
+  "type": "event",
+  "name": "health_changed",
+  "data": {
+    "schema": "xi.health/1",
+    "state": "running",
+    "since_ms": 1751429990000,
+    "ts_ms": 1751429990000
+  }
+}
