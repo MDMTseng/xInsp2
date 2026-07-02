@@ -169,9 +169,16 @@ typedef uint64_t xi_image_handle;
 
 /* ------------------------------------------------------------------ */
 /* Trigger ID — 128-bit identifier for a single inspection event.     */
-/* Sources tag every emitted frame with one. Frames sharing a tid are */
-/* correlated (e.g., synchronized multi-camera capture). The host's   */
-/* TriggerBus groups them and dispatches the script once per tid.     */
+/* A source stamps each emitted record with one; the id is just that  */
+/* event's identity (its hex is current_trigger().id_string()), not a */
+/* grouping key. As of v6 there is NO correlation: the host dispatches */
+/* the script exactly once per emitted record (one record -> one      */
+/* inspection event). A source that wants several frames inspected     */
+/* together (e.g. synchronized multi-camera capture) puts them in the  */
+/* SAME record — that is now the gathering plugin's job, not a bus     */
+/* policy keyed on the tid. (Pre-v6, frames sharing a tid were         */
+/* correlated by a TriggerBus policy; that policy was removed in the   */
+/* v6 dispatch cleanup — see the XI_ABI_VERSION history above.)        */
 /* ------------------------------------------------------------------ */
 
 typedef struct { uint64_t hi; uint64_t lo; } xi_trigger_id;
