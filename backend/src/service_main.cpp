@@ -62,104 +62,13 @@
 
 namespace xp = xi::proto;
 
-// ---- Engine: the host's process-wide mutable state -------------------------
-// Stage 1 of the Engine refactor (behavior-preserving). The host's mutable
-// file-scope globals are grouped as members of ONE struct with a single
-// file-scope instance `g_eng`, giving the host a NAME and one place that IS its
-// state. This does NOT change construction/destruction TIMING (g_eng is a
-// file-scope static, constructed pre-main exactly as the old globals were, so
-// the --certify-plugin early-return path is unaffected) and does NOT move
-// teardown logic here: controlled_shutdown_teardown_ remains the real,
-// order-sensitive cleanup; g_eng's member dtors are the same idempotent
-// backstop the old static-global dtors were. thread_local globals
-// (g_staged, g_current_trigger, g_run_result), const/constexpr statics
-// (g_cmd_table, WATCHDOG_EXIT_CODE, WD_SLOTS, kResultSystemBand,
-// kRecentErrorsCap), and the Meyers singletons (ImagePool/DocRegistry) are
-// intentionally NOT members — see the classification in the refactor notes.
-static constexpr int WD_SLOTS = 64;   // max concurrent in-flight inspects tracked (Engine::wd_deadlines size)
+#include "service_internal.hpp"
 
-// Latest status per component (see set_status_internal). Defined here so Engine
-// can hold `std::map<std::string, StatusEntry> status;` by value.
-struct StatusEntry { std::string text; int64_t ts_ms = 0; uint64_t seq = 0; };
-
-// Ring of recently-surfaced errors (see push_recent_error). Defined here so
-// Engine can hold `std::deque<RecentError> recent_errors;` by value.
-struct RecentError {
-    int64_t     ts_ms = 0;
-    std::string source;     // "rsp" / "log" / "event"
-    std::string message;
-    int64_t     cmd_id  = 0;   // 0 if unknown
-    int64_t     run_id  = 0;   // 0 if unknown
-};
-
-// GroupLane is fully defined further down (it depends on EmitGate etc.). Engine
-// only holds shared_ptr<GroupLane>, so a forward declaration is sufficient here.
-struct GroupLane;
-
-struct Engine {
-    std::atomic<int64_t> run_id{0};
-    xi::script::LoadedScript script;
-    std::mutex script_mu;
-    // Monotonic version of the ACTIVE loaded script DLL. Starts at 0 (no script
-    // ever loaded), incremented EXACTLY at the hot-reload swap point where a
-    // freshly-compiled DLL becomes the one `inspect` calls (see cmd:compile,
-    // g_eng.script = std::move(next)). A FAILED compile or a failed load leaves
-    // it UNCHANGED — the last-good script stays active at its existing
-    // generation. Read (relaxed) and snapshotted at run start into
-    // RunOutcome::rr_script_gen, then surfaced additively as run_result's
-    // `script_generation` so a consumer can tell which loaded DLL produced a
-    // result (the editor may already show newer source that hasn't swapped in).
-    std::atomic<int64_t> script_generation{0};
-    std::string persistent_state_json = "{}";
-    int persistent_state_schema = 0;
-    std::unordered_map<std::string, std::string> param_cache;
-    std::unordered_map<std::string, std::string> instance_def_cache;
-    std::atomic<bool> continuous{false};
-    std::atomic<int> continuous_fps{10};
-    std::atomic<int> timer_interval_ms{100};
-    std::thread timer_thread;
-    std::mutex run_mu;
-    xi::InflightRuns inflight;
-    std::atomic<int> watchdog_ms{0};
-    std::atomic<int64_t> wd_deadlines[WD_SLOTS];
-    std::atomic<int> watchdog_trips{0};
-    std::thread watchdog_thread;
-    std::atomic<bool> watchdog_run{false};
-    std::atomic<xi::ws::Server*> srv_for_bp{nullptr};
-    std::atomic<unsigned long> inspect_tid{0};
-    std::mutex status_mu;
-    std::map<std::string, StatusEntry> status;
-    std::atomic<uint64_t> status_seq{0};
-    std::string include_dir;
-    std::string work_dir;
-    std::string plugins_dir;
-    std::string opencv_dir;
-    std::string turbojpeg_root;
-    std::string ipp_root;
-    std::string tc_vcvars;
-    std::string project_folder;
-    std::string include_dir_default;
-    DLL_DIRECTORY_COOKIE proj_dll_dir = nullptr;
-    xi::PluginManager plugin_mgr;
-    std::atomic<bool> should_exit{false};
-    std::atomic<bool> teardown_done{false};
-    std::mutex recent_errors_mu;
-    std::deque<RecentError> recent_errors;
-    std::atomic<uint64_t> dropped_lifetime{0};
-    std::atomic<uint64_t> high_watermark_lifetime{0};
-    std::vector<std::shared_ptr<GroupLane>> lanes;
-    std::mutex lanes_mu;
-    std::string default_group_snapshot;
-    // ---- Process identity (additive run_result fields; see init_process_identity_) ----
-    // boot_id: a random 128-bit value generated ONCE at backend startup, formatted
-    // as a 32-char lowercase hex string. Stable for the whole process lifetime, so
-    // every run_result from this backend instance shares it. station_id: optional,
-    // sourced from XINSP_STATION_ID (empty if unset) — identifies the physical
-    // station/machine. Both are read-only after init_process_identity_() runs in main().
-    std::string boot_id;
-    std::string station_id;
-};
-static Engine g_eng;
+// The Engine struct + all shared globals/structs/constants/helpers moved to the
+// PRIVATE header service_internal.hpp (behavior-preserving split). The single
+// DEFINITION of g_eng lives HERE (this TU); every other service_*.cpp sees it via
+// `extern Engine g_eng;` in the header.
+Engine g_eng;
 
 
 // Loaded user script state. When null, cmd:run returns an error.
@@ -209,14 +118,14 @@ using xi::seh_exception;
 
 // Defined after g_eng.plugin_mgr (declared further down); records a per-instance
 // process() crash so a crash loop is visible via get_state.
-static void note_instance_crash_(const char* name, const char* why);
+// note_instance_crash_ declared in service_internal.hpp.
 
 // Part III G2.1 — stamp the process-global crash culprit (xi::crash::g_culprit)
 // with the instance/plugin the host is about to enter, plus that plugin's
 // folder + dll so the FE can quarantine it on a death. Defined after
 // g_eng.plugin_mgr. Cheap on the dispatch hot path: a per-thread cache means the
 // manager lock is taken only when the active plugin on this thread changes.
-static void stamp_culprit_(const char* instance, const std::string& plugin);
+// stamp_culprit_ declared in service_internal.hpp.
 
 // The inline cross-instance process() path: run the target plugin's process() NOW,
 // on this thread. Used directly for a normal xi::use(x).process() (input wiring) and
@@ -299,11 +208,8 @@ static int use_process_inline_(const char* name,
 // so parallel workers stage independently. (use() is script-only — a plugin can't
 // re-enter it — so staging only ever happens inside an inspect, where the guard +
 // flush bracket g_staged.)
-struct StagedEmit {
-    std::string      target;   // destination sink instance name
-    xi::TriggerEvent rec;      // images map + meta_doc; host owns one ref to each
-};
-static thread_local std::vector<StagedEmit> g_staged;
+// StagedEmit struct moved to service_internal.hpp; g_staged DEFINED here.
+thread_local std::vector<StagedEmit> g_staged;
 
 // Stage a sink call: adopt the input's doc + image refs so they outlive use()'s
 // return (the SDK releases its own refs right after we return), then queue it.
@@ -348,7 +254,7 @@ static int stage_sink_emit_(const char* name, const void* input_doc,
 
 // xi::use().process() entry wired into the script DLL. A declared ORDERED SINK target
 // is staged (frame-ordered flush); every other target runs inline as before.
-static int use_process_cb(const char* name,
+int use_process_cb(const char* name,
                           const void* input_doc,
                           const uint8_t* input_data, int32_t input_len,
                           const xi_record_image* input_images, int input_image_count,
@@ -365,7 +271,7 @@ static int use_process_cb(const char* name,
                               input_images, input_image_count, output);
 }
 
-static int use_exchange_cb(const char* name, const char* cmd,
+int use_exchange_cb(const char* name, const char* cmd,
                            char* rsp, int rsplen) {
     try {
         auto inst = xi::InstanceRegistry::instance().find(name);
@@ -388,7 +294,7 @@ static int use_exchange_cb(const char* name, const char* cmd,
 
 // grab() was the legacy pull model (xi::ImageSource queue). Sources now PUSH via
 // emit_record and scripts read current_trigger(), so there's nothing to grab.
-static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
+xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
     return XI_IMAGE_NULL;
 }
 
@@ -429,7 +335,7 @@ static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
 // Reserve stack headroom so the crash filter can dump after a script
 // STACK_OVERFLOW; called at the top of each inspect-running thread. Forwards to
 // the extracted forensics leaf (xi_crash_dump.hpp).
-static void reserve_fault_stack() { xi::crash::reserve_fault_stack(); }
+void reserve_fault_stack() { xi::crash::reserve_fault_stack(); }
 // Synthetic-tick timer thread (`g_eng.timer_thread`): pushes an empty event at the
 // configured fps so scripts without a trigger source still get periodic
 // dispatch. The worker threads themselves are per-lane (see GroupLane).
@@ -459,9 +365,8 @@ using xi::EmitTurn;
 // Crash breadcrumb model + minidump machinery moved to xi_crash_dump.hpp
 // (xi::crash::). These thin forwarders keep the dispatch hot-path call sites
 // (crash_ctx()/crash_set()/crash_set_phase()) terse and unchanged.
-static xi::crash::Context& crash_ctx() { return xi::crash::ctx(); }
-inline void crash_set(char* dst, size_t n, const char* src) { xi::crash::set(dst, n, src); }
-inline void crash_set_phase(const char* phase) { xi::crash::set_phase(phase); }
+xi::crash::Context& crash_ctx() { return xi::crash::ctx(); }
+// crash_set / crash_set_phase are defined inline in service_internal.hpp.
 
 // Watchdog (P2.4). When > 0, inspect() calls have this many ms of wall-
 // clock budget. Default 0 = disabled (back-compat). Set via
@@ -507,7 +412,7 @@ static void wd_disarm(int slot) { if (slot >= 0) g_eng.wd_deadlines[slot].store(
 // script. The script reads via xi::current_trigger() through the three
 // trigger_*_cb functions below. thread_local so multiple parallel
 // dispatch threads can each have their own current trigger.
-static thread_local const xi::TriggerEvent* g_current_trigger = nullptr;
+thread_local const xi::TriggerEvent* g_current_trigger = nullptr;   // DEFINED here (decl in header)
 
 // A1: owning thread id of the in-flight CurrentTriggerScope — NON-thread-local
 // (unlike g_current_trigger above) so any thread can tell "is a trigger active
@@ -563,22 +468,19 @@ static inline void release_trigger_event_(xi::TriggerEvent& ev) {
 // g_current_trigger was left dangling at a popped-stack ev (the next current_trigger
 // callback = UAF) and the event leaked. The dtor makes both impossible and a new
 // dispatch site can't get the sequence wrong.
-struct CurrentTriggerScope {
-    xi::TriggerEvent& ev_;   // non-const: dtor reset()s the event's DocRef
-    explicit CurrentTriggerScope(xi::TriggerEvent& ev) : ev_(ev) {
-        g_current_trigger = &ev;
-        // A1: publish the owning thread id so a trigger thunk fired on another
-        // thread can tell "wrong thread" (loud bug) from "no trigger" (legit).
-        g_eng.inspect_tid.store(GetCurrentThreadId(), std::memory_order_release);
-    }
-    ~CurrentTriggerScope() {
-        g_eng.inspect_tid.store(0, std::memory_order_release);
-        g_current_trigger = nullptr;
-        release_trigger_event_(ev_);
-    }
-    CurrentTriggerScope(const CurrentTriggerScope&) = delete;
-    CurrentTriggerScope& operator=(const CurrentTriggerScope&) = delete;
-};
+// CurrentTriggerScope declared in service_internal.hpp; ctor/dtor defined here
+// (they touch the file-local release_trigger_event_).
+CurrentTriggerScope::CurrentTriggerScope(xi::TriggerEvent& ev) : ev_(ev) {
+    g_current_trigger = &ev;
+    // A1: publish the owning thread id so a trigger thunk fired on another
+    // thread can tell "wrong thread" (loud bug) from "no trigger" (legit).
+    g_eng.inspect_tid.store(GetCurrentThreadId(), std::memory_order_release);
+}
+CurrentTriggerScope::~CurrentTriggerScope() {
+    g_eng.inspect_tid.store(0, std::memory_order_release);
+    g_current_trigger = nullptr;
+    release_trigger_event_(ev_);
+}
 
 // F7: RAII for the enqueue path's "release the event UNLESS it was handed off to a
 // lane queue" discipline. enqueue_to_lane_ has several early-return / drop exits that
@@ -710,15 +612,8 @@ static void flush_staged_emits_(int64_t run_id) {
     }
 }
 
-struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hpp)
-    xi_trigger_id id;
-    int64_t       timestamp_us;
-    int32_t       is_active;
-    int32_t       _pad;             // align dequeued_at_us to 8 bytes
-    int64_t       dequeued_at_us;   // worker-stamped on dequeue from its lane
-};
-
-static void trigger_info_cb(CurrentTriggerInfoC* out) {
+// CurrentTriggerInfoC struct moved to service_internal.hpp.
+void trigger_info_cb(CurrentTriggerInfoC* out) {
     if (!out) return;
     if (!g_current_trigger) { warn_trigger_off_thread_(); *out = {{0,0}, 0, 0, 0, 0}; return; }
     out->id             = g_current_trigger->id;
@@ -728,7 +623,7 @@ static void trigger_info_cb(CurrentTriggerInfoC* out) {
     out->dequeued_at_us = g_current_trigger->dequeued_at_us;
 }
 
-static xi_image_handle trigger_image_cb(const char* source) {
+xi_image_handle trigger_image_cb(const char* source) {
     if (!g_current_trigger) { warn_trigger_off_thread_(); return XI_IMAGE_NULL; }
     if (!source) return XI_IMAGE_NULL;
     auto it = g_current_trigger->images.find(source);
@@ -751,7 +646,7 @@ static xi_image_handle trigger_image_cb(const char* source) {
     return it->second;
 }
 
-static int32_t trigger_sources_cb(char* buf, int32_t buflen) {
+int32_t trigger_sources_cb(char* buf, int32_t buflen) {
     if (!g_current_trigger) { warn_trigger_off_thread_(); return 0; }
     if (!buf) return 0;
     std::string out;
@@ -772,7 +667,7 @@ static int32_t trigger_sources_cb(char* buf, int32_t buflen) {
 // simply the emitting instance's name (the source that emit_record'd this
 // event); scripts consult sources() for the full set. Same -needed_bytes
 // convention as trigger_sources_cb so scripts can resize and retry.
-static int32_t trigger_leader_cb(char* buf, int32_t buflen) {
+int32_t trigger_leader_cb(char* buf, int32_t buflen) {
     if (!g_current_trigger) { warn_trigger_off_thread_(); return 0; }
     if (!buf) return 0;
     const std::string& s = g_current_trigger->leader_source;
@@ -791,7 +686,7 @@ static int32_t trigger_leader_cb(char* buf, int32_t buflen) {
 // xi::Trigger::meta() adopt_shared's it and doc_release's when its Record dies,
 // balancing this reserve; the worker still holds the event's own ref until
 // release_trigger_event_. Returns null when the trigger carries no metadata.
-static void* trigger_meta_cb() {
+void* trigger_meta_cb() {
     if (!g_current_trigger) { warn_trigger_off_thread_(); return nullptr; }
     if (!g_current_trigger->meta_doc) return nullptr;
     xi::DocRegistry::instance().addref(g_current_trigger->meta_doc.get());
@@ -806,10 +701,10 @@ static void* trigger_meta_cb() {
 // raw setter is exactly the primitive it needs. Both run ON the calling thread,
 // so they read/write THAT thread's owner slot — which is the whole point: a
 // worker thread installs the parent's owner before it creates pool images.
-static uint32_t owner_get_cb() {
+uint32_t owner_get_cb() {
     return (uint32_t)xi::ImagePool::current_owner();
 }
-static void owner_set_cb(uint32_t id) {
+void owner_set_cb(uint32_t id) {
     xi::ImagePool::current_owner_ref() = (xi::ImagePoolOwnerId)id;
 }
 
@@ -818,7 +713,7 @@ static void owner_set_cb(uint32_t id) {
 // (wired into the script's g_use_host_api_) AND the A4 explicit-trigger entry
 // (put into the xi_trigger_view so the SDK can resolve the passed image/meta
 // handles). One instance so both paths address the same pool/registry.
-static const xi_host_api* script_host_api_() {
+const xi_host_api* script_host_api_() {
     static xi_host_api use_host = [] {
         auto a = xi::ImagePool::make_host_api();
         xi::install_trigger_hook(a);
@@ -840,7 +735,7 @@ static int64_t status_now_ms() { return xi::wall_ms(); }   // wall: status ts
 // Update the latest status for `who`. Coalesces no-op repeats (same text) so a
 // component setting the same string every frame doesn't spam events. Always
 // mirrors into this thread's crash breadcrumb; pushes a best-effort event.
-static void set_status_internal(const std::string& who, const char* text) {
+void set_status_internal(const std::string& who, const char* text) {
     std::string t = text ? text : "";
     crash_set(crash_ctx().last_status, sizeof(crash_ctx().last_status), t.c_str());
     uint64_t seq;
@@ -863,7 +758,7 @@ static void set_status_internal(const std::string& who, const char* text) {
 
 // Installed into the script DLL (xi_script_set_status_callback) so xi::status()
 // in user scripts publishes under "@script".
-static void status_cb(const char* text) {
+void status_cb(const char* text) {
     set_status_internal("@script", text);
 }
 
@@ -871,28 +766,16 @@ static void status_cb(const char* text) {
 // One Result per trigger: a signed status code + message. See
 // docs/roadmap/run-result.md. Framework system-fail enum lives in a reserved band
 // (<= -990000) the user API (xi::result) refuses to set.
-enum : int {
-    XI_SYS_DROPPED    = -999001,  // overflow: event dropped before it could run
-    XI_SYS_CRASHED    = -999002,  // caught inspect error (throw/crash) — the run did not verdict
-    XI_SYS_NO_VERDICT = -999005,  // ran to completion but script set no RESULT (was v1.1 opt-in)
-};
-
-// The current run's result, written by the script via xi::result(code,msg)
-// through result_cb. thread_local so parallel lanes don't clobber each other
-// (same as g_run_frame_path_). Reset at the top of each inspect.
-struct RunResult { int code = 0; std::string msg; bool set = false; };
-static thread_local RunResult g_run_result;
-
-// Lowest user-usable result code; anything <= this is the framework system-fail
-// band (mirrors xi::kResultSystemBand in xi_result.hpp).
-static constexpr int kResultSystemBand = -990000;
+// XI_SYS_* enum, RunResult struct + kResultSystemBand moved to service_internal.hpp.
+// g_run_result DEFINED here (thread_local; parallel lanes don't clobber each other).
+thread_local RunResult g_run_result;
 
 // Installed into the script DLL (xi_script_set_result_callback) so xi::result()
 // records the one per-run verdict. The host is the trust boundary: a user code in
 // the reserved system band is NOT accepted as-is — it's recorded as NA (0) with a
 // visible warning + the offending code preserved in the message, so the mistake
 // surfaces instead of masquerading as a real verdict.
-static void result_cb(int code, const char* msg) {
+void result_cb(int code, const char* msg) {
     if (code <= kResultSystemBand) {
         if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire)) {
             xp::LogMsg lm;
@@ -1006,13 +889,7 @@ static void emit_run_result(xi::ws::Server& srv, int code, const std::string& ms
 // frame_path (optional) is plumbed to the script via
 // `xi_script_set_run_context`; readable inside the script as
 // `xi::current_frame_path()`. Empty string means none.
-static void run_one_inspection(xi::ws::Server& srv,
-                               int frame_hint = 1,
-                               int64_t run_id = 0,
-                               const std::string& frame_path = "",
-                               int64_t emit_seq = -1,
-                               EmitGate* gate = nullptr);  // null = no ordering gate
-                                                           // (one-shot/cmd:run pass emit_seq=-1)
+// run_one_inspection declared (with default args) in service_internal.hpp.
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
@@ -1059,7 +936,7 @@ static void run_one_inspection(xi::ws::Server& srv,
 // Apply a project's toolchain resolution to the global compiler paths. Called on
 // open_project and after set_toolchain_override so the next compile + the
 // generated IntelliSense config both pick up the override immediately.
-static void resolve_toolchain_(const std::string& folder) {
+void resolve_toolchain_(const std::string& folder) {
     auto r = xi::toolchain::resolve(folder, g_eng.include_dir_default);
     g_eng.include_dir    = r.include_dir;
     g_eng.opencv_dir     = r.opencv_dir;
@@ -1090,7 +967,7 @@ static void resolve_toolchain_(const std::string& folder) {
 // use()/VAR. Multi-file scripts split via headers #included into the one TU —
 // see docs/guides/write-a-script.md. (Plugins, which export a C ABI, use
 // extra_sources; scripts can't follow that model for this reason.)
-static void read_script_deps_(const std::string& folder,
+void read_script_deps_(const std::string& folder,
                               std::vector<std::string>& include_dirs,
                               std::vector<std::string>& link_libs,
                               int& openmp_max_threads) {
@@ -1134,7 +1011,7 @@ static void read_script_deps_(const std::string& folder,
 // which honours dirs added via AddDllDirectory. Re-pointed on each open_project.
 // TODO(linux): equivalent is building the script .so with -Wl,-rpath plus
 // dlopen; AddDllDirectory has no portable analogue.
-static void set_project_dll_search_(const std::string& folder) {
+void set_project_dll_search_(const std::string& folder) {
     if (g_eng.proj_dll_dir) { RemoveDllDirectory(g_eng.proj_dll_dir); g_eng.proj_dll_dir = nullptr; }
     if (folder.empty()) return;
     int wn = MultiByteToWideChar(CP_UTF8, 0, folder.c_str(), -1, nullptr, 0);
@@ -1148,7 +1025,7 @@ static void set_project_dll_search_(const std::string& folder) {
 // Plugin manager (global)
 
 // (forward-declared above use_process_cb) record a per-instance process() crash.
-static void note_instance_crash_(const char* name, const char* why) {
+void note_instance_crash_(const char* name, const char* why) {
     if (name) g_eng.plugin_mgr.note_instance_crash(name, why ? why : "process() crashed");
 }
 
@@ -1157,7 +1034,7 @@ static void note_instance_crash_(const char* name, const char* why) {
 // thread_local cache resolves it ONCE per (plugin, thread) and re-resolves only
 // when the active plugin changes — the per-frame process() hot path then costs
 // just a string compare + the four strncpy inside set_culprit().
-static void stamp_culprit_(const char* instance, const std::string& plugin) {
+void stamp_culprit_(const char* instance, const std::string& plugin) {
     thread_local std::string t_plugin, t_folder, t_dll;
     if (plugin != t_plugin) {
         t_plugin = plugin;
@@ -1178,9 +1055,9 @@ static void stamp_culprit_(const char* instance, const std::string& plugin) {
 // / parse_auth_secret / parse_str_flag / has_flag / parse_autostart_fps /
 // parse_extra_plugin_dirs) moved to xi/xi_cli_args.hpp (namespace xi::cli).
 
-static double now_seconds() { return xi::wall_us() / 1e6; }   // wall: pong ts
+double now_seconds() { return xi::wall_us() / 1e6; }   // wall: pong ts
 
-static void send_rsp_ok(xi::ws::Server& srv, int64_t id, std::string data_json = "") {
+void send_rsp_ok(xi::ws::Server& srv, int64_t id, std::string data_json) {
     xp::Rsp r;
     r.id = id;
     r.ok = true;
@@ -1197,19 +1074,18 @@ static void send_rsp_ok(xi::ws::Server& srv, int64_t id, std::string data_json =
 // run_id on the async two. Until that's fixed protocol-wide, this
 // ring lets the client pull "anything error-shaped that happened
 // in the last minute" with a single query.
-static constexpr size_t               kRecentErrorsCap = 64;
+// kRecentErrorsCap moved to service_internal.hpp.
+int64_t now_ms_() { return xi::wall_ms(); }   // wall: RecentError ts
 
-static int64_t now_ms_() { return xi::wall_ms(); }   // wall: RecentError ts
-
-static void push_recent_error(std::string source, std::string message,
-                              int64_t cmd_id = 0, int64_t run_id = 0) {
+void push_recent_error(std::string source, std::string message,
+                              int64_t cmd_id, int64_t run_id) {
     RecentError e{ now_ms_(), std::move(source), std::move(message), cmd_id, run_id };
     std::lock_guard<std::mutex> lk(g_eng.recent_errors_mu);
     g_eng.recent_errors.push_back(std::move(e));
     while (g_eng.recent_errors.size() > kRecentErrorsCap) g_eng.recent_errors.pop_front();
 }
 
-static void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err) {
+void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err) {
     xp::Rsp r;
     r.id = id;
     r.ok = false;
@@ -1222,14 +1098,14 @@ static void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err) {
 // ring so cmd:recent_errors can surface it. Most error logs go
 // through this; a few legacy sites still build the LogMsg inline —
 // migrating them to this helper is mechanical and ongoing.
-static void emit_error_log(xi::ws::Server& srv, const std::string& msg,
-                           int64_t run_id = 0) {
+void emit_error_log(xi::ws::Server& srv, const std::string& msg,
+                           int64_t run_id) {
     xp::LogMsg lm; lm.level = "error"; lm.msg = msg;
     srv.send_text(lm.to_json());
     push_recent_error("log", msg, /*cmd_id=*/0, run_id);
 }
 
-static void send_hello(xi::ws::Server& srv) {
+void send_hello(xi::ws::Server& srv) {
     xp::Event e;
     e.name = "hello";
     e.data_json = std::string(R"({"version":")") + XINSP2_VERSION
@@ -1515,7 +1391,7 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
 
 // Thin driver: owns the two RAII guards whose lifetimes straddle the compute→emit seam,
 // then calls compute → emission. Deliberately holds no inspect logic of its own.
-static void run_one_inspection(xi::ws::Server& srv, int frame_hint,
+void run_one_inspection(xi::ws::Server& srv, int frame_hint,
                                int64_t run_id, const std::string& frame_path,
                                int64_t emit_seq, EmitGate* gate) {
     if (run_id == 0) run_id = ++g_eng.run_id;
@@ -1620,7 +1496,7 @@ static void set_os_thread_affinity_(const std::vector<int>& cores) {
 
 // Set the backend PROCESS priority class (Win). Returns true if applied. Used at
 // startup (--priority) and live (cmd:set_process_priority). "" = leave unchanged.
-static bool apply_process_priority_(const std::string& cls) {
+bool apply_process_priority_(const std::string& cls) {
     if (cls.empty()) return false;
 #ifdef _WIN32
     DWORD c = 0;
@@ -1747,7 +1623,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     return true;
 }
 
-static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
+void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
     {
         std::lock_guard<std::mutex> lk(g_eng.lanes_mu);
         // F8: callers must stop_dispatch_pool_ before (re)spawning — a non-empty
@@ -1878,7 +1754,7 @@ static void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
     });
 }
 
-static void stop_group_pool_() {
+void stop_group_pool_() {
     // Snapshot the lanes (under the lock) so producers can keep routing into the
     // shared_ptrs while we tear down; new enqueues already bail on !g_eng.continuous.
     std::vector<std::shared_ptr<GroupLane>> lanes;
@@ -1897,7 +1773,7 @@ static void stop_group_pool_() {
 }
 
 // Stop the pool + timer. Safe to call if nothing was spawned.
-static void stop_dispatch_pool_() {
+void stop_dispatch_pool_() {
     g_eng.continuous = false;
     // Wake the lane workers (so they observe g_eng.continuous=false and exit) BEFORE
     // joining, or the join deadlocks. Also wake anyone parked in a per-lane EmitTurn
@@ -1968,7 +1844,7 @@ static void dispatch_one_shot_(xi::ws::Server* srv, xi::TriggerEvent ev) {
 //   4. drop the srv pointer LAST (after every emitter is quiesced).
 // Idempotent: safe to call twice (the shutdown handler runs it, then the epilogue
 // runs it again as the loop unwinds).
-static void controlled_shutdown_teardown_() {
+void controlled_shutdown_teardown_() {
     // Refuse NEW detached runs first, then drop the bus sink so no source emit
     // launches another one-shot. (g_eng.inflight.launch() checks this — a launch
     // racing teardown either bails or is waited out by drain() below.)
@@ -2064,7 +1940,7 @@ static BOOL WINAPI console_ctrl_handler_(DWORD type) {
 // is installed on every compile_and_load so "issue"/"replay" works WITHOUT needing
 // cmd:start — the trigger-driven model (continuous is just an optional free-running
 // timer on top).
-static void install_trigger_sink_(xi::ws::Server* srv) {
+void install_trigger_sink_(xi::ws::Server* srv) {
     // B1: apply the project's one-shot in-flight ceiling. Installed on every
     // compile_and_load, so a project's parallelism.max_inflight takes effect
     // WITHOUT needing cmd:start (one-shot dispatch works pre-start). <=0 → default.
@@ -2109,56 +1985,9 @@ static void install_trigger_sink_(xi::ws::Server* srv) {
 // MOVE-ONLY: quiesce_dispatch_for_lifecycle_op_ returns one by value; a moved-from
 // guard won't resume. CALLERS MUST HOLD IT (`auto g = quiesce_...`) for the op's
 // duration — a discarded temporary would resume immediately, before the op runs.
-struct DispatchPoolGuard {
-    bool            was_continuous = false;
-    int             prior_fps = 10;
-    bool            quiesced = false;
-    xi::ws::Server* srv = nullptr;
-    bool            armed_ = true;   // false once resumed/dismissed/moved-from
-    bool            paused_launches_ = false;  // we g_eng.inflight.pause()'d — dtor MUST unpause
-    bool            restore_sink_    = false;  // we cleared the bus sink — resume re-installs it
-
-    DispatchPoolGuard() = default;
-    DispatchPoolGuard(DispatchPoolGuard&& o) noexcept { *this = std::move(o); }
-    DispatchPoolGuard& operator=(DispatchPoolGuard&& o) noexcept {
-        was_continuous = o.was_continuous; prior_fps = o.prior_fps;
-        quiesced = o.quiesced; srv = o.srv; armed_ = o.armed_;
-        paused_launches_ = o.paused_launches_; restore_sink_ = o.restore_sink_;
-        o.armed_ = false;
-        return *this;
-    }
-    DispatchPoolGuard(const DispatchPoolGuard&) = delete;
-    DispatchPoolGuard& operator=(const DispatchPoolGuard&) = delete;
-    ~DispatchPoolGuard() { resume(); }
-
-    // Op done, stream continues: re-enable detached launches, re-install the one-shot
-    // sink, and respawn continuous mode at the prior fps if we quiesced it. Idempotent.
-    void resume() {
-        if (!armed_) return;
-        armed_ = false;
-        // ALWAYS re-enable launches (even a non-continuous project needs one-shots
-        // for issue/replay) and restore the sink we cleared.
-        if (paused_launches_) { g_eng.inflight.unpause(); paused_launches_ = false; }
-        if (restore_sink_ && srv) { install_trigger_sink_(srv); restore_sink_ = false; }
-        if (was_continuous && quiesced) {
-            bool trig_only = prior_fps <= 0;
-            g_eng.continuous_fps = trig_only ? 0 : prior_fps;
-            g_eng.continuous = true;
-            int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(prior_fps, 1));
-            spawn_group_pool_(srv, interval_ms);
-            std::fprintf(stderr, "[xinsp2] continuous mode resumed\n");
-        }
-    }
-    // The op intentionally leaves dispatch stopped (the stream ended or is replaced:
-    // unload_script / close_project / open_project). Do NOT re-install the sink or
-    // respawn continuous — BUT still re-enable launches (the next project needs them).
-    void dismiss() {
-        armed_ = false;
-        if (paused_launches_) { g_eng.inflight.unpause(); paused_launches_ = false; }
-    }
-};
-
-static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
+// DispatchPoolGuard struct (incl. its inline resume()/dismiss()) moved to
+// service_internal.hpp so lifecycle-op cmd handlers in other TUs can hold it.
+DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
                                                             xi::ws::Server* srv) {
     DispatchPoolGuard g;
     g.srv = srv;
@@ -2214,17 +2043,17 @@ static DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
 // the WS handlers must NOT do it separately.
 using xi::InstState;
 
-static const char* inst_state_str(InstState s) {
+const char* inst_state_str(InstState s) {
     switch (s) { case InstState::Active: return "active";
                  case InstState::Faulted: return "faulted";
                  default: return "created"; }
 }
 
-static void set_inst_state(const std::string& name, InstState s,
-                           const std::string& err = "") {
+void set_inst_state(const std::string& name, InstState s,
+                           const std::string& err) {
     g_eng.plugin_mgr.set_instance_state(name, s, err);
 }
-static void clear_inst_state() {
+void clear_inst_state() {
     g_eng.plugin_mgr.clear_instance_states();
 }
 
