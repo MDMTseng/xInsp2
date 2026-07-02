@@ -15,6 +15,28 @@
 
 #include "service_internal.hpp"
 
+// Read a file with a hard size cap (review 09 finding 4). Peeks the on-disk size
+// first so an oversized file is refused BEFORE the allocation — the whole point
+// is to never slurp an unbounded/pathological file into a std::string (which,
+// past the dispatch shell, would be a bad_alloc → backend death). On over-cap:
+// truncated=true, content left empty (a partial body is invalid JSON, so callers
+// report the truncation rather than embed it).
+bool read_file_capped(const std::filesystem::path& p, size_t cap,
+                      std::string& content, bool& truncated) {
+    truncated = false;
+    content.clear();
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(p, ec);
+    if (ec) return false;   // missing / not a regular file
+    if (sz > cap) { truncated = true; return true; }
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    content.resize((size_t)sz);
+    if (sz) f.read(content.data(), (std::streamsize)sz);
+    content.resize((size_t)f.gcount());
+    return true;
+}
+
 // ---- observability ---------------------------------------------------------
 void cmd_crash_reports_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // List crash JSON reports left by previous fatal crashes.
@@ -36,9 +58,18 @@ void cmd_crash_reports_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
                     return fs::last_write_time(a.path(), ec2) > fs::last_write_time(b.path(), ec2);
                 });
             for (auto& e : entries) {
-                std::ifstream f(e.path(), std::ios::binary);
-                std::stringstream ss; ss << f.rdbuf();
-                std::string body = ss.str();
+                std::string body; bool truncated = false;
+                if (!read_file_capped(e.path(), kMaxInlineFileBytes, body, truncated)) continue;
+                if (truncated) {
+                    // An over-cap crash file: surface its existence + the truncation
+                    // instead of embedding a partial (invalid-JSON) body.
+                    if (!first) out += ",";
+                    first = false;
+                    out += "{\"file\":";
+                    xp::json_escape_into(out, e.path().filename().string());
+                    out += ",\"truncated\":true}";
+                    continue;
+                }
                 while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) body.pop_back();
                 if (body.empty() || body[0] != '{') continue;
                 if (!first) out += ",";
@@ -307,6 +338,9 @@ void cmd_dispatch_stats_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
         // P1-8: process-uptime cumulatives (NOT reset by cmd:start).
         data += ",\"dropped_lifetime\":" + std::to_string(g_eng.dropped_lifetime.load());
         data += ",\"queue_depth_high_watermark_lifetime\":" + std::to_string(g_eng.high_watermark_lifetime.load());
+        // Review 09 finding 2: malformed/unparseable command envelopes rejected by
+        // the dispatch shell (process-uptime cumulative, like the *_lifetime fields).
+        data += ",\"malformed_cmd_rejected_lifetime\":" + std::to_string(g_eng.malformed_cmd_rejected.load());
         // Source liveness: ms since ANY source last emitted, + per-source ages. The
         // signal for "a camera stalled" — a stalled source otherwise stops the line
         // with zero indication. -1 = nothing has emitted yet. A monitor/FE applies a

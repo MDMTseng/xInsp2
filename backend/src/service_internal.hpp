@@ -17,6 +17,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -108,6 +109,9 @@ struct Engine {
     std::deque<RecentError> recent_errors;
     std::atomic<uint64_t> dropped_lifetime{0};
     std::atomic<uint64_t> high_watermark_lifetime{0};
+    // Malformed / unparseable command envelopes rejected by the dispatch shell
+    // (review 09 finding 2). Process-uptime cumulative; surfaced by dispatch_stats.
+    std::atomic<uint64_t> malformed_cmd_rejected{0};
     std::vector<std::shared_ptr<GroupLane>> lanes;
     std::mutex lanes_mu;
     std::string default_group_snapshot;
@@ -169,6 +173,18 @@ enum : int {
 static constexpr int          kResultSystemBand = -990000;
 static constexpr size_t       kRecentErrorsCap  = 64;
 static const int              WATCHDOG_EXIT_CODE = 0x5744;  // 'WD' — backend self-exit on a hard trip
+// Hard ceiling on a whole-file slurp that gets embedded verbatim in a command
+// reply (get_dashboard, crash_reports — review 09 finding 4). Well under the
+// 16 MiB WS message cap, so a pathological/corrupt file can neither drive a
+// bad_alloc (→ whole-backend death via the dispatch shell) nor blow the frame.
+static constexpr size_t       kMaxInlineFileBytes = 8u * 1024u * 1024u;
+
+// Read a file into `content` with a hard size cap. Returns false if it could not
+// be opened. Sets `truncated` = true (and leaves `content` empty) when the file
+// exceeds `cap` — the caller must NOT embed a partial body (it would be invalid
+// JSON); it reports the truncation instead. Defined in service_cmd_observability.cpp.
+bool read_file_capped(const std::filesystem::path& p, size_t cap,
+                      std::string& content, bool& truncated);
 
 // trigger_id → 32-char lowercase hex (used for boot_id + run_result trigger_id).
 std::string trigger_id_hex(xi_trigger_id id);

@@ -326,13 +326,19 @@ void cmd_get_dashboard_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
                 || fname.find('\\') != std::string::npos;
         std::string content;
         bool found = false;
+        bool truncated = false;
         if (!bad && !g_eng.project_folder.empty()) {
-            std::ifstream f(std::filesystem::path(g_eng.project_folder) / fname, std::ios::binary);
-            if (f) { std::ostringstream ss; ss << f.rdbuf(); content = ss.str(); found = !content.empty(); }
+            // Capped read (review 09 finding 4): a pathological/corrupt dashboard
+            // file must not slurp unbounded into memory (bad_alloc → backend death
+            // past the dispatch shell) nor be embedded verbatim once truncated.
+            std::filesystem::path fp = std::filesystem::path(g_eng.project_folder) / fname;
+            if (read_file_capped(fp, kMaxInlineFileBytes, content, truncated) && !truncated)
+                found = !content.empty();
         }
         std::string out = "{\"found\":" + std::string(found ? "true" : "false") + ",\"name\":";
         xp::json_escape_into(out, (nm && !nm->empty()) ? *nm : "");
         if (found) out += ",\"dashboard\":" + content;   // verbatim file (already JSON)
+        if (truncated) out += ",\"truncated\":true";     // over-cap: body omitted (would be invalid JSON)
         out += "}";
         send_rsp_ok(srv, id, out);
 }
