@@ -1,21 +1,27 @@
 //
-// {{NAME}} — "expert" template: stateful synthetic image source.
+// {{NAME}} — "expert" template: stateful synthetic image source (Layer 2).
 //
-// Owns its own worker thread. While running, it pushes a frame into the
-// pipeline every `interval_ms` and counts each emit so a script can
-// read frame count via exchange("count").
+// The SAME xi::Plugin skeleton as easy/medium, with one more layer: a
+// background worker thread that PUSHES frames into the pipeline. While
+// running it paints a frame every `interval_ms` and emits it; a script reads
+// it back as xi::current_trigger().image("frame").
 //
-// Shows:
-//   - Background thread management with xi::spawn_worker (SEH-safe)
-//   - host_api emit_record to push images into the pipeline zero-copy
-//   - Persistent config across reloads (set_def from project.json)
-//   - exchange() as a start/stop/query channel
+// Shows the blessed source patterns — nothing hand-rolled:
+//   - xi::spawn_worker for the SEH-safe worker thread (a stray fault on a
+//     raw std::thread with no translator brings down the whole backend)
+//   - pool_image() for a zero-copy frame + emit() to hand it to the host.
+//     emit() fills host()/name() and runs the RAII marshal/refcount path —
+//     NOT the manual host_->image_create / emit_record / image_release
+//     juggling that leaks on the first early return.
+//   - xi::Json for config + the exchange control channel
+//   - status() for the operator line
 //
 // Open with care: this is the most-touchy template. Read top-to-bottom.
 //
 
-#include <xi/xi_thread.hpp>   // xi::spawn_worker
-#include <yyjson.h>           // backend ships yyjson in vendor/yyjson, also on the force-include path
+#include <xi/xi_json.hpp>     // xi::Json config + command parsing
+#include <xi/xi_thread.hpp>   // xi::spawn_worker (SEH-safe)
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -24,160 +30,110 @@
 #include <string>
 #include <thread>
 
-class {{CLASS}} {
+class {{CLASS}} : public xi::Plugin {
 public:
-    {{CLASS}}(const xi_host_api* host, const char* name)
-        : host_(host), name_(name ? name : "") {}
+    using xi::Plugin::Plugin;
 
-    ~{{CLASS}}() {
-        stop_();
+    ~{{CLASS}}() override { stop_(); }
+
+    std::string get_def() const override {
+        std::lock_guard<std::mutex> lk(mu_);
+        return xi::Json::object()
+            .set("interval_ms", interval_ms_)
+            .set("width",       width_)
+            .set("height",      height_)
+            .set("running",     running_.load())
+            .dump();
     }
 
-    const xi_host_api* host() const { return host_; }
-
-    std::string get_def() const {
+    bool set_def(const std::string& json) override {
+        auto p = xi::Json::parse(json);
+        if (!p.valid()) return false;
         std::lock_guard<std::mutex> lk(mu_);
-        return std::string("{\"interval_ms\":") + std::to_string(interval_ms_)
-             + ",\"width\":" + std::to_string(width_)
-             + ",\"height\":" + std::to_string(height_)
-             + ",\"running\":" + (running_.load() ? "true" : "false") + "}";
-    }
-
-    bool set_def(const std::string& json) {
-        std::lock_guard<std::mutex> lk(mu_);
-        // Pull simple numeric fields out by hand. (Real plugins should
-        // use yyjson; this template avoids it to stay dependency-free.)
-        auto pull_int = [&](const char* key, int& dst, int lo, int hi) {
-            std::string needle = std::string("\"") + key + "\":";
-            auto p = json.find(needle);
-            if (p == std::string::npos) return;
-            try {
-                int v = std::stoi(json.substr(p + needle.size()));
-                if (v < lo) v = lo;
-                if (v > hi) v = hi;
-                dst = v;
-            } catch (...) {}
-        };
-        pull_int("interval_ms", interval_ms_, 1,    10000);
-        pull_int("width",       width_,       1,    8192);
-        pull_int("height",      height_,      1,    8192);
+        interval_ms_ = clamp_(p["interval_ms"].as_int(interval_ms_), 1, 10000);
+        width_       = clamp_(p["width"].as_int(width_),             1, 8192);
+        height_      = clamp_(p["height"].as_int(height_),           1, 8192);
         return true;
     }
 
-    // Sources don't usually emit a per-call result — they push via the
-    // trigger bus instead. We still expose a no-op process() because
-    // XI_PLUGIN_IMPL requires it.
-    xi::Record process(const xi::Record& /*in*/) { return xi::Record{}; }
+    // A source pushes via emit() from its worker, so per-call process() is a
+    // no-op — but the base class already gives us that default, so this tier
+    // doesn't even override it.
 
-    // Control channel. cmd is freeform; we recognise:
-    //   "start"  → spin up the worker
-    //   "stop"   → join the worker
-    //   "count"  → return {"count": N}
-    // The UI talks to us with JSON commands of the form
-    //   { command: "start" | "stop" | "set_interval" | "set_size", value?: ... }
-    // We accept the older bare-string forms ("start", "stop", "count")
-    // for ad-hoc CLI calls too.
-    std::string exchange(const std::string& cmd) {
-        // JSON command path (UI panel)
-        yyjson_doc* doc = yyjson_read(cmd.c_str(), cmd.size(), 0);
-        yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
-        std::string command;
-        if (root) {
-            yyjson_val* c = yyjson_obj_get(root, "command");
-            if (c && yyjson_is_str(c)) command = yyjson_get_str(c);
-            if (command == "set_interval") {
-                yyjson_val* v = yyjson_obj_get(root, "value");
-                if (v && yyjson_is_num(v)) {
-                    std::lock_guard<std::mutex> lk(mu_);
-                    int n = (int)yyjson_get_num(v);
-                    interval_ms_ = n < 1 ? 1 : (n > 10000 ? 10000 : n);
-                }
-            } else if (command == "set_size") {
-                yyjson_val* w = yyjson_obj_get(root, "width");
-                yyjson_val* h = yyjson_obj_get(root, "height");
-                std::lock_guard<std::mutex> lk(mu_);
-                if (w && yyjson_is_num(w)) width_  = (int)yyjson_get_num(w);
-                if (h && yyjson_is_num(h)) height_ = (int)yyjson_get_num(h);
-            }
-        }
-        yyjson_doc_free(doc);
-        if (!command.empty()) {
-            if (command == "start") start_();
-            if (command == "stop")  stop_();
-        } else {
-            // Bare-string fallback for human-typed exchange.
-            if (cmd.find("start") != std::string::npos) start_();
-            if (cmd.find("stop")  != std::string::npos) stop_();
+    // Control channel. The UI posts { command: "start" | "stop" |
+    // "set_interval"(value) | "set_size"(width,height) | "get_status" }.
+    std::string exchange(const std::string& cmd) override {
+        auto p = xi::Json::parse(cmd);
+        auto command = p["command"].as_string();
+        if (command == "start") start_();
+        else if (command == "stop") stop_();
+        else if (command == "set_interval") {
+            std::lock_guard<std::mutex> lk(mu_);
+            interval_ms_ = clamp_(p["value"].as_int(interval_ms_), 1, 10000);
+        } else if (command == "set_size") {
+            std::lock_guard<std::mutex> lk(mu_);
+            width_  = clamp_(p["width"].as_int(width_),   1, 8192);
+            height_ = clamp_(p["height"].as_int(height_), 1, 8192);
+        } else if (command != "get_status" && !command.empty()) {
+            return exchange_unknown_command(command);
         }
         // Report current status — the UI uses these to render counters.
         std::lock_guard<std::mutex> lk(mu_);
-        return std::string("{\"running\":") + (running_.load() ? "true" : "false")
-             + ",\"count\":" + std::to_string(emit_count_.load())
-             + ",\"interval_ms\":" + std::to_string(interval_ms_)
-             + ",\"width\":" + std::to_string(width_)
-             + ",\"height\":" + std::to_string(height_) + "}";
+        return xi::Json::object()
+            .set("running",     running_.load())
+            .set("count",       (int)emit_count_.load())
+            .set("interval_ms", interval_ms_)
+            .set("width",       width_)
+            .set("height",      height_)
+            .dump();
     }
 
 private:
+    static int clamp_(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
     void start_() {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (running_.load()) return;
-        running_ = true;
-        worker_ = xi::spawn_worker(name_ + "-source", [this] { loop_(); });
+        if (running_.exchange(true)) return;
+        status("running");
+        worker_ = xi::spawn_worker(name() + "-source", [this] { loop_(); });
     }
 
     void stop_() {
-        running_ = false;
+        if (!running_.exchange(false)) return;
         if (worker_.joinable()) worker_.join();
+        status("stopped");
     }
 
     void loop_() {
-        // Build a tiny grayscale image once and reuse the buffer.
-        // For a real camera you'd grab from the SDK here.
-        std::vector<uint8_t> buf((size_t)width_ * height_, 0);
         uint64_t seq = 0;
         while (running_.load()) {
-            // Animate the buffer so frames are visibly different.
-            uint8_t v = (uint8_t)(seq & 0xff);
-            std::memset(buf.data(), v, buf.size());
+            int w, h, iv;
+            { std::lock_guard<std::mutex> lk(mu_); w = width_; h = height_; iv = interval_ms_; }
+
+            // Zero-copy: paint straight into a fresh host pool slot. For a real
+            // camera you'd copy the grabbed frame in here.
+            xi::Image frame = pool_image(w, h, 1);
+            std::memset(frame.write(), (uint8_t)(seq & 0xFF), (size_t)w * h);
             ++seq;
 
-            // Allocate a backend pool image and copy into it. The host
-            // API is the only legal way to allocate images that the
-            // backend (and other plugins) can see.
-            xi_image_handle h = host_->image_create(width_, height_, 1);
-            if (h != XI_IMAGE_NULL) {
-                std::memcpy(host_->image_data(h), buf.data(), buf.size());
+            // Hand the frame to the host. emit() fills host()/name(), marshals
+            // the image through the pool refcount path, and mints a fresh
+            // trigger id (ts = host now) — one call, no manual refcount balance.
+            xi::Record rec;
+            rec.image("frame", frame);
+            emit(rec);
+            emit_count_.fetch_add(1);
 
-                // Build a one-image record and push it into the pipeline
-                // under our own source name. id = XI_TRIGGER_NULL → the host
-                // mints a fresh trigger id; ts = 0 → host stamps now(). The
-                // host dispatches the inspection once per emit.
-                xi_record_image rec_img{ "frame", h };
-                xi_record rec{};
-                rec.images      = &rec_img;
-                rec.image_count = 1;
-                if (host_->emit_record) {
-                    host_->emit_record(name_.c_str(), XI_TRIGGER_NULL, &rec, /*ts=*/0);
-                }
-                emit_count_.fetch_add(1);
-                // emit_record addrefs the handle internally; release our ref.
-                host_->image_release(h);
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+            std::this_thread::sleep_for(std::chrono::milliseconds(iv));
         }
     }
 
-    const xi_host_api* host_;
-    std::string        name_;
-    mutable std::mutex mu_;
-    int                interval_ms_ = 100;
-    int                width_       = 640;
-    int                height_      = 480;
-    std::atomic<bool>  running_{false};
+    mutable std::mutex    mu_;
+    int                   interval_ms_ = 100;
+    int                   width_       = 640;
+    int                   height_      = 480;
+    std::atomic<bool>     running_{false};
     std::atomic<uint64_t> emit_count_{0};
-    std::thread        worker_;
+    std::thread           worker_;
 };
 
 XI_PLUGIN_IMPL({{CLASS}})

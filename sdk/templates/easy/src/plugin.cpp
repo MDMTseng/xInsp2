@@ -1,56 +1,47 @@
 //
-// {{NAME}} — minimal "easy" project plugin.
+// {{NAME}} — "easy" template: the base skeleton (Layer 0 — process() only).
 //
-// This file is auto-generated from a template. Read top-to-bottom — the
-// comments walk through every member function in the plugin API.
+// The three project-plugin templates are ONE skeleton with progressively
+// more layers turned on — same base class, same helpers, never a different
+// architecture:
 //
-// You don't need to #include anything: xi_plugin_support.hpp is force-
-// included by the project-plugin compile path, which pulls in xi_abi.hpp
-// (the XI_PLUGIN_IMPL macro + xi::Plugin base), xi_image.hpp (xi::Image
-// + as_cv_mat / create_in_pool helpers), xi_record.hpp, and OpenCV
-// (<opencv2/opencv.hpp>). Image ops: call cv:: directly. The base class
-// gives you `pool_image(w, h, c)` for zero-copy outputs.
+//   easy    Layer 0  process() only                         ← you are here
+//   medium  Layer 1  + config/params (xi::Json) + status()  → an image op
+//   expert  Layer 2  + a source worker (xi::spawn_worker)    → pushes frames
+//                       emitting via the blessed emit() path
 //
-
-#include <string>
+// Every tier is `public xi::Plugin`, so every tier gets pool_image(),
+// status(), compress(), emit(), and the capability wrappers for free. Pick a
+// tier by how much you need, not by a different style.
+//
+// You don't need to #include anything for the basics: xi_plugin_support.hpp
+// is force-included by the project-plugin compile path, which pulls in
+// xi_abi.hpp (the XI_PLUGIN_IMPL macro + xi::Plugin base), xi_image.hpp
+// (xi::Image + xi::Image::create_in_pool), xi_record.hpp, and xi_cv.hpp
+// (OpenCV + the xi::as_cv_read / xi::as_cv_write zero-copy bridges). Image
+// ops: call cv:: directly.
+//
 
 class {{CLASS}} : public xi::Plugin {
 public:
-    // ---- 1. Constructor ----------------------------------------------------
+    // ---- Constructor -------------------------------------------------------
     //
-    // Inherit xi::Plugin's ctor — it wires `host_` (opaque pool handle)
-    // and `name_` (instance name from project.json) automatically. Add
-    // members below the `using` line and initialise them in your own
-    // ctor if you need state.
+    // Inherit xi::Plugin's ctor — it wires `host_` (opaque pool handle) and
+    // `name_` (instance name from project.json) automatically. Add members
+    // below the `using` line and initialise them in your own ctor if you need
+    // state (the medium/expert tiers do exactly that).
     //
     using xi::Plugin::Plugin;
 
-    // ---- 2. get_def / set_def — JSON config -------------------------------
-    //
-    // get_def() returns a JSON object describing this instance's
-    // configuration. The UI panel reads this to render a form, and the
-    // project save serializes it. Keep it stable — instance.json on disk
-    // round-trips through these two functions.
-    //
-    std::string get_def() const override {
-        return "{}";
-    }
-
-    bool set_def(const std::string& /*json*/) override {
-        // Parse 'json' (a JSON object string) and apply to self.
-        // Return true on success, false if the JSON was rejected.
-        return true;
-    }
-
-    // ---- 3. process — the main hook ---------------------------------------
+    // ---- process — the one hook this tier overrides ------------------------
     //
     // Called every time the inspection script does:
-    //     auto out = {{NAME}}.process(in_record);
+    //     auto out = xi::use("{{NAME}}").process(in_record);
     //
     // Image ops example (replace with your actual logic):
     //
-    //   auto src = in.get_image("src");                       // read-only INPUT
-    //   auto dst = pool_image(src.width, src.height, 1);       // writable OUTPUT
+    //   auto src = in.get_image("src");                  // read-only INPUT
+    //   auto dst = pool_image(src.width, src.height, 1);  // writable OUTPUT
     //   cv::threshold(xi::as_cv_read(src), xi::as_cv_write(dst), 128, 255,
     //                 cv::THRESH_BINARY);
     //   return xi::Record().image("binary", dst);
@@ -61,25 +52,19 @@ public:
     // (e.g. cv::threshold(as_cv_read(src), as_cv_read(src), ...)) — that corrupts
     // every other consumer's view of the same pool slot.
     //
-    // `pool_image` (inherited from xi::Plugin) allocates a fresh slot in
-    // the host's ImagePool — cv:: writes into it land there directly,
-    // and returning the Image short-circuits to addref (no memcpy
-    // across the plugin ABI).
+    // `pool_image` (inherited from xi::Plugin) allocates a fresh slot in the
+    // host's ImagePool — cv:: writes into it land there directly, and returning
+    // the Image short-circuits to addref (no memcpy across the plugin ABI).
     //
     xi::Record process(const xi::Record& /*in*/) override {
         return xi::Record{};
     }
 
-    // ---- 4. exchange — RPC channel ----------------------------------------
-    //
-    // Lets the script call:
-    //     auto rsp = xi::use("{{NAME}}").exchange("hello");
-    // We return a JSON string. Use this for "do X right now" actions that
-    // don't fit the per-frame process() flow.
-    //
-    std::string exchange(const std::string& /*cmd*/) override {
-        return "{}";
-    }
+    // get_def()/set_def() (JSON config), exchange() (the script/UI RPC
+    // channel), status(), and the frame-perfect config swap are all inherited
+    // from xi::Plugin with safe defaults — this tier doesn't need them. The
+    // medium template turns on config + exchange + status; the expert template
+    // adds a background source worker on top. Same base, one more layer.
 };
 
 // XI_PLUGIN_IMPL emits the C ABI thunks (xi_plugin_create, _destroy,

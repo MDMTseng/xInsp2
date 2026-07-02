@@ -275,12 +275,14 @@ Scripts read the current event via `xi::current_trigger()`:
 
 ```cpp
 #include <xi/xi_use.hpp>
-void xi_inspect_entry(int frame) {
-    auto t = xi::current_trigger();
+XI_INSPECT_ENTRY(t, frame) {         // t = the trigger, passed in explicitly
+    (void)frame;
     if (!t.is_active()) return;
-    VAR(id,    t.id_string());
-    VAR(frame, t.image("frame"));    // key matches what the source emitted
+    auto id  = t.id_string();
+    auto img = t.image("frame");     // key matches what the source emitted
     auto meta = t.meta();            // the metadata doc, if any
+    // Surface results by pushing a record to the expose sink:
+    xi::use("expose").process(xi::Record().image("frame", img).set("id", id));
 }
 ```
 
@@ -405,9 +407,10 @@ sdk/
 ├── scaffold.mjs        ← CLI: scaffold a new plugin from a template
 ├── scaffold/render.mjs ← shared template renderer (used by extension too)
 ├── templates/          ← single source of truth for both VS Code + CLI
-│   ├── easy/           ← minimal pass-through (constructor / def / process / exchange)
-│   ├── medium/         ← image processor + UI (threshold + inline pan/zoom preview)
-│   ├── expert/         ← stateful source with worker thread + UI (start/stop)
+│   │                     ONE xi::Plugin skeleton, three layers (see below)
+│   ├── easy/           ← Layer 0: process() only — the bare skeleton
+│   ├── medium/         ← Layer 1: + config/params (xi::Json) + status() + image op + UI
+│   ├── expert/         ← Layer 2: + source worker (xi::spawn_worker) emitting via emit() + UI
 │   └── _shared/        ← reusable HTML snippets (image_viewer_widget.html)
 └── examples/
     ├── hello/          ← 1 file, no state, no UI — the "hello world"
@@ -416,6 +419,15 @@ sdk/
     ├── histogram/      ← image analysis with rich JSON output
     └── trigger_source/ ← image source using xi::emit_record (push frames)
 ```
+
+**One spine, three layers.** The `easy` / `medium` / `expert` templates are the
+same `xi::Plugin` skeleton with progressively more turned on — never three
+different architectures. `easy` overrides `process()` only; `medium` adds
+config/params + `status()` + a real image op; `expert` adds a background source
+worker (`xi::spawn_worker`) that pushes frames via `emit()`. Because every tier
+inherits `xi::Plugin`, every tier gets `pool_image()`, `status()`, `compress()`,
+`emit()`, and the capability wrappers for free — the tier you pick decides how
+much is *enabled*, not which base class or style you learn.
 
 Two ways to start a new plugin:
 

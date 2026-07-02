@@ -47,11 +47,29 @@ searched; CWD and PATH are not.)
 | `plugin.json` | Manifest read by the backend's plugin scanner |
 | `CMakeLists.txt` | Standalone build via the SDK's `xinsp2_add_plugin` macro |
 
+## The template spine
+
+All three templates are **one `xi::Plugin` skeleton** with progressively more
+layers turned on — same base class, same helpers, never a different style:
+
+| Tier | Layer | Adds |
+|---|---|---|
+| **easy** | 0 | `process()` only — the bare skeleton |
+| **medium** | 1 | + config/params (`get_def`/`set_def`/`exchange` via `xi::Json`) + `status()` + a real image op |
+| **expert** (this one) | 2 | + a background source worker (`xi::spawn_worker`) pushing frames via `emit()` |
+
+Because every tier is `public xi::Plugin`, every tier gets `pool_image()`,
+`status()`, `compress()`, `emit()`, and the capability wrappers for free. Pick a
+tier by how much you need, not by a different architecture.
+
 ## API surface this template demonstrates
 
-- `Class(host, name)` ctor + `host()` accessor required by `XI_PLUGIN_IMPL`
-- `get_def()` / `set_def()` for JSON config persistence
-- `process(Record)` — the per-frame hook
-- `exchange(string)` — script-side RPC channel
+- `xi::spawn_worker` — the SEH-safe background thread a source runs on
+- `pool_image()` + `emit()` — build a zero-copy frame and push it to the host
+  through the blessed refcount path (no hand-rolled `emit_record` juggling)
+- `get_def()` / `set_def()` / `exchange()` — config + a start/stop/query channel,
+  all via `xi::Json`
+- `status(string)` — the operator status line
 
-For the next step up, see the **medium** template (image processing) or **expert** (background source thread).
+For a simpler starting point, see the **medium** template (image processing) or
+**easy** (the bare skeleton).
