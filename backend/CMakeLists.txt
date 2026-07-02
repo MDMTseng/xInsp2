@@ -942,6 +942,19 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../contract/validate.py)
     set_tests_properties(contract_schema PROPERTIES LABELS "contract")
+    # contract_baseline: the protocol-version gate. Diffs the live schemas under
+    # contract/schemas/ against the committed shape snapshot in
+    # contract/baseline/protocol-baseline.json and classifies the delta:
+    # unchanged -> green; ADDITIVE -> fail, demanding a baseline refresh in the same
+    # commit; BREAKING -> fail, demanding a refresh AND a protocol_version bump. This
+    # is what makes the WS `abi` stamp real: the described wire shape can no longer
+    # drift without the version moving with it. Pure stdlib (no jsonschema), so it
+    # always runs when Python is present. See contract/baseline_gate.py, contract/README.md,
+    # and docs/ext_review/06 finding 2.
+    add_test(NAME contract_baseline
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/baseline_gate.py)
+    set_tests_properties(contract_baseline PROPERTIES LABELS "contract")
 else()
     message(STATUS "doc_coverage ctest skipped: no Python3 interpreter found")
 endif()
