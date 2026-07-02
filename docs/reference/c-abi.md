@@ -191,7 +191,7 @@ struct; null-check tail fields (an older host may leave them `nullptr`).
 | Compress cache (v9) | `compress_image(px, w, h, c, quality, out, cap)` | JPEG-encode an image **through a host-side N-rotate cache** keyed by a content hash: the same frame compressed by several plugins (or repeatedly) is encoded ONCE globally. Lets the `expose` plugin avoid linking opencv/turbojpeg and gives free global dedup. Returns bytes written / `-needed` / 0. Pair with `emit_binary` to push the result. |
 | Doc allocator (v3, γ) | `doc_chunk_alloc` / `doc_chunk_realloc` / `doc_chunk_free` | Host-owned pool behind the in-process yyjson doc → `internals/data-layer.md`. |
 | Doc refcount (v4, γ-4) | `doc_retain` / `doc_release` / `doc_refcount` | The doc analogue of `image_addref/release` → `internals/data-layer.md`. |
-| SHM (removed 2026-05) | `shm_*` (5) | Always `nullptr`; kept for binary compat. Fall back to `image_create`. |
+| ~~SHM~~ | `shm_*` (5) | **Removed in v11** — the five slots were deleted from `xi_host_api` (they were `nullptr` placeholders from v6). Use `image_create` for buffers. |
 
 ### Image pool — the refcount contract
 
@@ -211,32 +211,38 @@ decrements (freed at 0; invalid handles are no-ops). `image_stride(h)` is
 
 ## 4. ABI version + load gate
 
-`XI_ABI_VERSION` is **9**. The struct was append-only through v5; v6 broke that
-to remove the retired dispatch fields, so **all plugins must be rebuilt against
-the current ABI** (no binary compat with v4/v5 kept — this is pre-stable-release).
-v7 added only OPTIONAL *plugin* exports (not `xi_host_api` fields); v8 then v9
-**appended** `emit_binary` and `compress_image` (the current head) at the end of
-`xi_host_api` — additive, so existing older plugins still load on a newer host
-(the gate only refuses a plugin asking for a *newer* ABI than the host). History:
+`XI_ABI_VERSION` is **11** (`backend/include/xi/xi_abi.h`). The struct was
+append-only through v5; v6 broke that to remove the retired dispatch fields; v7
+added only OPTIONAL *plugin* exports (not `xi_host_api` fields); v8 then v9
+**appended** `emit_binary` and `compress_image`; v10 appended `get_interface`
+(the capability-query door). v11 took the authorized "retire the monolith"
+break — it **removed** the five dead `shm_*` slots and stopped publishing the
+whole-table `xi.legacy` view, changing the struct layout. Because v11 is a
+layout break, `XI_ABI_MIN_COMPAT` was raised to **11**, so **every pre-v11
+plugin is refused at load** (rebuild required — all first-party plugins are
+rebuildable in-tree). Within the compatible range the gate only refuses a plugin
+asking for a *newer* ABI than the host. History:
 
 | ver | added |
 |---|---|
-| 1 | image pool, trigger bus, SHM (since removed), `read_image_file` |
+| 1 | image pool, trigger bus, SHM (slots removed entirely in v11), `read_image_file` |
 | 2 | emit/fetch resource hooks + `set_safe_state` (both removed in v6) |
 | 3 | in-process doc allocator `doc_chunk_*` (γ) |
 | 4 | in-process doc refcount `doc_retain`/`doc_release`/`doc_refcount` (γ-4) |
 | 5 | `emit_trigger_record` — trigger metadata doc (superseded by v6) |
-| 6 | dispatch collapsed to ONE verb `emit_record(emitter,id,rec,ts)`; `emit_trigger`, `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` REMOVED (no v4 compat — rebuild all plugins). Multi-cam = gathering plugin; replay = buffer-replay plugin. |
+| 6 | dispatch collapsed to ONE verb `emit_record(emitter,id,rec,ts)`; `emit_trigger`, `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` REMOVED (no v4 compat — rebuild all plugins). Multi-cam = gathering plugin; replay = the `cache` plugin (`plugins/cache`, class `BufferReplay`; demo `examples/buffer_replay_demo`). |
 | 7 | optional plugin exports `xi_plugin_prepare(inst,def,folder)` + `xi_plugin_commit(inst)` for frame-perfect config swap (opt in via `XI_PLUGIN_STAGED`; prepare ungated, commit gated). PLUGIN exports, not host-api fields — no struct shift, older plugins still load. |
 | 8 | `emit_binary(data, len)` appended to `xi_host_api` — plugin→WS binary push (e.g. the `expose` plugin's live `XEX1` frames). Additive (last field); v6/v7 plugins still load on a v8 host. |
 | 9 | `compress_image(px,w,h,c,q,out,cap)` appended — host-side JPEG encode through an N-rotate content-hash cache (global dedup). Additive; older plugins still load on a v9 host. |
+| 10 | `get_interface(id, min)` appended (last field) — the capability-query door for carved per-capability interfaces (`xi.imaging` / `xi.doc` / `xi.emit` / `xi.log` / `xi.preview` @1). Additive; older plugins still load. |
+| 11 | **Layout break** (`docs/internals/adr-001-host-api-freeze.md` Phase 4): the five dead `shm_*` slots removed and the whole-table `xi.legacy` query retired. `XI_ABI_EXPECTED_SIZE` → 176 (22 function pointers); `XI_ABI_MIN_COMPAT` raised 6 → 11, so every pre-v11 plugin is now **refused** (rebuild required). |
 
 **Two load gates** (a plugin failing either is refused at load with a clear
 error, then `FreeLibrary`'d):
 1. **ABI version** — `xi_plugin_abi_version()` is bounded on **both** ends: a
    plugin asking for a version *newer* than the host is refused, and so is one
-   *older* than `XI_ABI_MIN_COMPAT` (currently **6** — the last breaking
-   `xi_host_api` layout change). A pre-v6 (or pre-versioning, treated as v1)
+   *older* than `XI_ABI_MIN_COMPAT` (currently **11** — the v11 layout break that
+   removed the `shm_*` slots). A pre-v11 (or pre-versioning, treated as v1)
    plugin would dereference `xi_host_api` at stale offsets, so it is refused
    rather than loaded with a warning. Bump `XI_ABI_MIN_COMPAT` on every future
    breaking layout change.
