@@ -120,8 +120,8 @@ editor.
         │        ┌────────┴────────────────┐
         │        │ xinsp-runner.exe        │  Headless. No WS. Takes a
         │        │   loads project.json,   │  project folder and writes
-        │        │   compiles, runs N      │  a pass/fail JSON report.
-        │        │   frames, writes report │
+        │        │   compiles, runs N      │  an execution/crash JSON
+        │        │   frames, writes report │  report (verdicts: planned).
         │        └─────────────────────────┘
         │
    plugin DLLs (C ABI, trusted load)
@@ -280,6 +280,16 @@ The runner loads `project.json`, restores all instances, compiles
 the script, runs N frames, and writes a JSON report — no WS, no UI,
 no UI dependencies. Exit `0` if every frame ran clean.
 
+> **What the report captures today:** it is an **execution/crash log**,
+> not a verdict log. The summary records the requested frame count
+> (`frames_run`), the crash count (`crashed`), and total wall time
+> (`total_ms`); each frame entry records only that it ran. It does **not**
+> yet capture the per-frame inspection **verdict** (OK / NG / NA) — so
+> exit `0` means "every frame dispatched without crashing", not "every part
+> passed". Per-frame verdict capture (wiring the result callback) is
+> **planned but not yet implemented** (see
+> [`docs/ext_review/00-triage.md`](docs/ext_review/00-triage.md), Bucket B).
+
 ### 10. Remote backend (LAN deployment)
 
 On the factory PC:
@@ -418,7 +428,9 @@ This is the same script that produced the file on the Releases page.
   handshake. Constant-time compare.
 - **Headless runner.** `xinsp-runner.exe <project>` — no WS, no UI.
   Loads `project.json`, compiles the script, runs N frames, writes a
-  JSON report. The production face of xInsp2.
+  JSON report. The production face of xInsp2. Today the report is an
+  **execution/crash log** (frame count, crash count, timing); per-frame
+  **verdict** capture (OK / NG / NA) is planned, not yet wired.
 
 ### Plugins
 
@@ -503,6 +515,37 @@ xInsp2/
 See [`docs/roadmap/README.md`](docs/roadmap/README.md) for what's shipping and the
 locked-in decision log. Process isolation + SHM were removed 2026-05;
 all plugins run in-process.
+
+---
+
+## Versioning & compatibility
+
+xInsp2 ships as several packages that **version independently** — each moves
+on its own SemVer track, so a bump in one does not force a bump in the others.
+There is no single monolithic product version.
+
+| Package                      | Version | Track                                   |
+|------------------------------|---------|-----------------------------------------|
+| `xinsp-backend` (+ runner)   | 0.2.0   | Native core: WS server, ImagePool, ABI  |
+| VS Code extension            | 0.2.0   | Editor integration (`.vsix`)            |
+| `ui-components`              | 0.1.0   | Shared webview UI kit                   |
+| Python client               | 0.1.0   | WS protocol client library              |
+
+**The one contract that actually gates compatibility is the plugin ABI**
+(`xi_host_api`, currently **frozen at v11** — see
+[`docs/internals/adr-001-host-api-freeze.md`](docs/internals/adr-001-host-api-freeze.md)).
+A plugin compiled against an ABI version keeps loading as long as the backend
+publishes that version; package SemVer numbers do not govern plugin loading.
+
+**Known-compatible set** (what we build and test together today):
+
+| Backend | Extension | ui-components | Python client | ABI |
+|---------|-----------|---------------|---------------|-----|
+| 0.2.0   | 0.2.0     | 0.1.0         | 0.1.0         | v11 |
+
+All packages are **pre-1.0**: minor bumps may still carry breaking changes,
+and there are no external consumers yet (first-party only). Pin to the
+known-compatible row above until we cut 1.0 and adopt a formal support policy.
 
 ---
 
