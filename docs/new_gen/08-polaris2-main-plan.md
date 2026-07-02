@@ -108,6 +108,12 @@ accessors, with cross-door offset reads arriving via codegen handing the
 canonical msgpack plane over as a span the consumer indexes with its own
 schema offsets.
 
+**Wave-2 exit status (2026-07-03): steps 3–4 shipped** — expose walks
+Frames generically, XEX1-v2 opt-in with the memory≈wire≈disk identity test
+passing, `t.frame()` + qa_frame_pilot in the gate, codegen swap-in executed
+(ratchet empty; io gap recorded). Full verify: backend 73/73, plugins 10/10,
+QA 22/0. The written decision: [`10-frame-migration-scope.md`](./10-frame-migration-scope.md) (DRAFT).
+
 **Wave-2 exit gate:** pilot runs under gate.py fully green + a written
 migration-scope decision (which plugins/paths move when; what Record's
 deprecation horizon is; what rides the eventual cutover train).
