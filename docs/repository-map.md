@@ -29,11 +29,10 @@ versions read from the manifests:
 | `xinsp-backend` (+ `xinsp-runner`, `xinsp-fe`) | 0.2.0 | `backend/CMakeLists.txt` (`XINSP2_VERSION`) |
 | VS Code extension | 0.2.0 | `vscode-extension/package.json` |
 | `ui-components` (`xi-components`) | 0.1.0 | `ui-components/package.json` |
-| Python client (`xinsp2`) | 0.1.0 | `tools/xinsp2_py/pyproject.toml` |
+| Python client (`xinsp2`) | 0.2.0 | `tools/xinsp2_py/pyproject.toml` |
 
-> Note: an earlier plan expected the Python client at 0.2.0; the repo currently
-> declares **0.1.0** in `pyproject.toml`. The `xinsp2/__init__.py` module carries
-> no `__version__` constant (unspecified there — the manifest is authoritative).
+> Note: the `xinsp2/__init__.py` module carries no `__version__` constant
+> (unspecified there — the `pyproject.toml` manifest is authoritative).
 
 All packages are **pre-1.0**: minor bumps may carry breaking changes, and there
 are no external consumers yet (first-party only).
@@ -70,7 +69,7 @@ are no external consumers yet (first-party only).
 | Package | Purpose / owner | Ships? | Version | Build | Test | Outputs | Compatibility boundary |
 |---|---|---|---|---|---|---|---|
 | `ui-components/` (`xi-components`) | Svelte-authored UI components that compile to standard **custom elements** (`<xi-*>`), plus a shared WS-client shim and the importable HMI dashboard. The build step is contained to this folder; consumers stay framework-free. | Yes | 0.1.0 | `npm run build` (vite; also copies `dist/xi-components.esm.js` → `hmi/lib/`) | `npm test` (node `--test` DOM suites), `npm run e2e` (Playwright) | `dist/xi-components.esm.js` (ESM custom-element bundle) | Consumed by HMI, plugin UIs, VS Code webviews via `<xi-*>` tags |
-| `tools/xinsp2_py/` (`xinsp2`) | Python client wrapping the backend WS protocol — drives compile/run/inspect cycles, reads VARs + image previews, dumps run snapshots (for AI workflows). | Yes | 0.1.0 | `pip install .` (setuptools; requires Python ≥ 3.10, `websocket-client`) | unspecified (no test config in `pyproject.toml`; fixtures under `tests/`) | Installable `xinsp2` package (`Client`, `RunResult`, `RunSnapshot`, …) | Speaks the WS protocol (see ws-protocol.md) |
+| `tools/xinsp2_py/` (`xinsp2`) | Python client wrapping the backend WS protocol — drives compile/run/inspect cycles, parses `run_result`/`run_finished`/`metrics` events (verdict class, identity fields), dumps run snapshots (for AI workflows). | Yes | 0.2.0 | `pip install .` (setuptools; requires Python ≥ 3.10, `websocket-client`) | `python -m pytest tests` (fixtures under `tests/`) | Installable `xinsp2` package (`Client`, `RunResult`, `RunSnapshot`, …) | Speaks the WS protocol (see ws-protocol.md) |
 
 ### Operation
 
@@ -103,7 +102,7 @@ Pin to this row until 1.0 and a formal support policy.
 - `sdk/`, `hmi/`, `protocol/`, and `tools/` carry **no own version manifest** — their
   versions are "unspecified" (HMI's README title says v1.0; the others inherit
   context, not a declared number).
-- The **Python client** declares **0.1.0** (not 0.2.0 as some plans anticipated);
-  `xinsp2/__init__.py` has no `__version__`. No test runner is declared in its
-  `pyproject.toml`.
+- The **Python client** declares **0.2.0** in `pyproject.toml`;
+  `xinsp2/__init__.py` has no `__version__` constant. Tests run via
+  `python -m pytest tests`.
 - The **HMI** has no automated test entry point of its own.
