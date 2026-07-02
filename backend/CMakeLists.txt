@@ -928,6 +928,25 @@ else()
     message(STATUS "doc_coverage ctest skipped: no Python3 interpreter found")
 endif()
 
+# ---- Release compat-manifest self-check ------------------------------------
+# The release artifact carries a machine-readable compat-manifest.json (built by
+# tools/compat_manifest.mjs from the real version sources). This gate builds +
+# validates that manifest WITHOUT cutting a full release: every field resolves
+# (no nulls), versions are semver, the ABI/WS numbers match the headers read
+# independently, and tools/compat-matrix.json still matches the per-package
+# version sources. Wired here so a version-constant move breaks LOUDLY instead of
+# silently producing a null-field manifest in a shipped zip. Node-guarded; skipped
+# with a notice on a box without node, mirroring the Python gates above.
+find_program(NODE_EXECUTABLE NAMES node node.exe)
+if(NODE_EXECUTABLE)
+    add_test(NAME compat_manifest
+        COMMAND ${NODE_EXECUTABLE} --test
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/compat_manifest.test.mjs)
+    set_tests_properties(compat_manifest PROPERTIES LABELS "release")
+else()
+    message(STATUS "compat_manifest ctest skipped: no node interpreter found")
+endif()
+
 # ---- Script self-sufficiency compile guard ---------------------------------
 # xi_script_support.hpp is FORCE-INCLUDED (/FI) into every inspection script, so
 # it must be fully self-contained. A regression shipped once: dropping
