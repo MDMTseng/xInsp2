@@ -1,0 +1,498 @@
+{
+  "_comment": "Shared cross-language test vectors for the canonical msgpack profile (docs/new_gen/07). ENCODE: build `value` (a portable typed node) into the native value and encode -> must equal `hex`. RECANON: recanonicalize(`in_hex`) -> must equal `out_hex`. Python and TypeScript suites both check these; agreement validates the profile across languages. Regenerate: scratchpad/gen_vectors.py.",
+  "encode": [
+    {
+      "name": "null",
+      "value": {
+        "t": "null"
+      },
+      "hex": "c0"
+    },
+    {
+      "name": "bool_true",
+      "value": {
+        "t": "bool",
+        "v": true
+      },
+      "hex": "c3"
+    },
+    {
+      "name": "bool_false",
+      "value": {
+        "t": "bool",
+        "v": false
+      },
+      "hex": "c2"
+    },
+    {
+      "name": "int_zero",
+      "value": {
+        "t": "int",
+        "v": 0
+      },
+      "hex": "d30000000000000000"
+    },
+    {
+      "name": "int_one",
+      "value": {
+        "t": "int",
+        "v": 1
+      },
+      "hex": "d30000000000000001"
+    },
+    {
+      "name": "int_neg_one",
+      "value": {
+        "t": "int",
+        "v": -1
+      },
+      "hex": "d3ffffffffffffffff"
+    },
+    {
+      "name": "int_127",
+      "value": {
+        "t": "int",
+        "v": 127
+      },
+      "hex": "d3000000000000007f"
+    },
+    {
+      "name": "int_128",
+      "value": {
+        "t": "int",
+        "v": 128
+      },
+      "hex": "d30000000000000080"
+    },
+    {
+      "name": "int_255",
+      "value": {
+        "t": "int",
+        "v": 255
+      },
+      "hex": "d300000000000000ff"
+    },
+    {
+      "name": "int_256",
+      "value": {
+        "t": "int",
+        "v": 256
+      },
+      "hex": "d30000000000000100"
+    },
+    {
+      "name": "int_65535",
+      "value": {
+        "t": "int",
+        "v": 65535
+      },
+      "hex": "d3000000000000ffff"
+    },
+    {
+      "name": "int_65536",
+      "value": {
+        "t": "int",
+        "v": 65536
+      },
+      "hex": "d30000000000010000"
+    },
+    {
+      "name": "int_neg_32",
+      "value": {
+        "t": "int",
+        "v": -32
+      },
+      "hex": "d3ffffffffffffffe0"
+    },
+    {
+      "name": "int_neg_33",
+      "value": {
+        "t": "int",
+        "v": -33
+      },
+      "hex": "d3ffffffffffffffdf"
+    },
+    {
+      "name": "int_int32max",
+      "value": {
+        "t": "int",
+        "v": 2147483647
+      },
+      "hex": "d3000000007fffffff"
+    },
+    {
+      "name": "int_int32max_plus1",
+      "value": {
+        "t": "int",
+        "v": 2147483648
+      },
+      "hex": "d30000000080000000"
+    },
+    {
+      "name": "int_int64max",
+      "value": {
+        "t": "int",
+        "v": "9223372036854775807"
+      },
+      "hex": "d37fffffffffffffff"
+    },
+    {
+      "name": "int_int64min",
+      "value": {
+        "t": "int",
+        "v": "-9223372036854775808"
+      },
+      "hex": "d38000000000000000"
+    },
+    {
+      "name": "uint_int64max_plus1",
+      "value": {
+        "t": "int",
+        "v": "9223372036854775808"
+      },
+      "hex": "cf8000000000000000"
+    },
+    {
+      "name": "uint_max",
+      "value": {
+        "t": "int",
+        "v": "18446744073709551615"
+      },
+      "hex": "cfffffffffffffffff"
+    },
+    {
+      "name": "f64_zero",
+      "value": {
+        "t": "f64",
+        "v": 0.0
+      },
+      "hex": "cb0000000000000000"
+    },
+    {
+      "name": "f64_neg_zero",
+      "value": {
+        "t": "f64",
+        "bits": "8000000000000000"
+      },
+      "hex": "cb8000000000000000"
+    },
+    {
+      "name": "f64_one",
+      "value": {
+        "t": "f64",
+        "v": 1.0
+      },
+      "hex": "cb3ff0000000000000"
+    },
+    {
+      "name": "f64_half",
+      "value": {
+        "t": "f64",
+        "v": 0.5
+      },
+      "hex": "cb3fe0000000000000"
+    },
+    {
+      "name": "f64_pi",
+      "value": {
+        "t": "f64",
+        "v": 3.141592653589793
+      },
+      "hex": "cb400921fb54442d18"
+    },
+    {
+      "name": "f64_neg",
+      "value": {
+        "t": "f64",
+        "v": -2.5
+      },
+      "hex": "cbc004000000000000"
+    },
+    {
+      "name": "f64_nan",
+      "value": {
+        "t": "f64",
+        "bits": "7ff8000000000000"
+      },
+      "hex": "cb7ff8000000000000"
+    },
+    {
+      "name": "f64_nan_alt",
+      "value": {
+        "t": "f64",
+        "bits": "fff8000000000001"
+      },
+      "hex": "cb7ff8000000000000"
+    },
+    {
+      "name": "f64_inf",
+      "value": {
+        "t": "f64",
+        "bits": "7ff0000000000000"
+      },
+      "hex": "cb7ff0000000000000"
+    },
+    {
+      "name": "f64_neg_inf",
+      "value": {
+        "t": "f64",
+        "bits": "fff0000000000000"
+      },
+      "hex": "cbfff0000000000000"
+    },
+    {
+      "name": "str_empty",
+      "value": {
+        "t": "str",
+        "v": ""
+      },
+      "hex": "db00000000"
+    },
+    {
+      "name": "str_ascii",
+      "value": {
+        "t": "str",
+        "v": "hello"
+      },
+      "hex": "db0000000568656c6c6f"
+    },
+    {
+      "name": "str_unicode",
+      "value": {
+        "t": "str",
+        "v": "h\u00e9llo\u00b7\u4e16\u754c"
+      },
+      "hex": "db0000000e68c3a96c6c6fc2b7e4b896e7958c"
+    },
+    {
+      "name": "bin_empty",
+      "value": {
+        "t": "bin",
+        "hex": ""
+      },
+      "hex": "c600000000"
+    },
+    {
+      "name": "bin_bytes",
+      "value": {
+        "t": "bin",
+        "hex": "deadbeef00ff"
+      },
+      "hex": "c600000006deadbeef00ff"
+    },
+    {
+      "name": "array_empty",
+      "value": {
+        "t": "array",
+        "v": []
+      },
+      "hex": "dd00000000"
+    },
+    {
+      "name": "array_ints",
+      "value": {
+        "t": "array",
+        "v": [
+          {
+            "t": "int",
+            "v": 1
+          },
+          {
+            "t": "int",
+            "v": 2
+          },
+          {
+            "t": "int",
+            "v": 3
+          }
+        ]
+      },
+      "hex": "dd00000003d30000000000000001d30000000000000002d30000000000000003"
+    },
+    {
+      "name": "map_empty",
+      "value": {
+        "t": "map",
+        "v": []
+      },
+      "hex": "df00000000"
+    },
+    {
+      "name": "map_simple",
+      "value": {
+        "t": "map",
+        "v": [
+          [
+            "a",
+            {
+              "t": "int",
+              "v": 1
+            }
+          ],
+          [
+            "b",
+            {
+              "t": "str",
+              "v": "x"
+            }
+          ]
+        ]
+      },
+      "hex": "df00000002db0000000161d30000000000000001db0000000162db0000000178"
+    },
+    {
+      "name": "map_order",
+      "value": {
+        "t": "map",
+        "v": [
+          [
+            "z",
+            {
+              "t": "int",
+              "v": 1
+            }
+          ],
+          [
+            "a",
+            {
+              "t": "int",
+              "v": 2
+            }
+          ]
+        ]
+      },
+      "hex": "df00000002db000000017ad30000000000000001db0000000161d30000000000000002"
+    },
+    {
+      "name": "nested",
+      "value": {
+        "t": "map",
+        "v": [
+          [
+            "w",
+            {
+              "t": "int",
+              "v": 640
+            }
+          ],
+          [
+            "h",
+            {
+              "t": "int",
+              "v": 480
+            }
+          ],
+          [
+            "dtype",
+            {
+              "t": "str",
+              "v": "u8"
+            }
+          ],
+          [
+            "roi",
+            {
+              "t": "array",
+              "v": [
+                {
+                  "t": "int",
+                  "v": 10
+                },
+                {
+                  "t": "int",
+                  "v": 20
+                },
+                {
+                  "t": "int",
+                  "v": 30
+                },
+                {
+                  "t": "int",
+                  "v": 40
+                }
+              ]
+            }
+          ],
+          [
+            "scale",
+            {
+              "t": "f64",
+              "v": 1.5
+            }
+          ],
+          [
+            "ok",
+            {
+              "t": "bool",
+              "v": true
+            }
+          ],
+          [
+            "note",
+            {
+              "t": "null"
+            }
+          ]
+        ]
+      },
+      "hex": "df00000007db0000000177d30000000000000280db0000000168d300000000000001e0db000000056474797065db000000027538db00000003726f69dd00000004d3000000000000000ad30000000000000014d3000000000000001ed30000000000000028db000000057363616c65cb3ff8000000000000db000000026f6bc3db000000046e6f7465c0"
+    }
+  ],
+  "recanon": [
+    {
+      "name": "compact_fixint_5",
+      "in_hex": "05",
+      "out_hex": "d30000000000000005"
+    },
+    {
+      "name": "compact_uint8_200",
+      "in_hex": "ccc8",
+      "out_hex": "d300000000000000c8"
+    },
+    {
+      "name": "compact_neg_fixint",
+      "in_hex": "fb",
+      "out_hex": "d3fffffffffffffffb"
+    },
+    {
+      "name": "compact_int16",
+      "in_hex": "d1fb2e",
+      "out_hex": "d3fffffffffffffb2e"
+    },
+    {
+      "name": "compact_float32",
+      "in_hex": "ca3fc00000",
+      "out_hex": "cb3ff8000000000000"
+    },
+    {
+      "name": "compact_fixstr",
+      "in_hex": "a568656c6c6f",
+      "out_hex": "db0000000568656c6c6f"
+    },
+    {
+      "name": "compact_bin8",
+      "in_hex": "c403aabbcc",
+      "out_hex": "c600000003aabbcc"
+    },
+    {
+      "name": "compact_fixarray",
+      "in_hex": "93010203",
+      "out_hex": "dd00000003d30000000000000001d30000000000000002d30000000000000003"
+    },
+    {
+      "name": "compact_fixmap",
+      "in_hex": "82a16101a16202",
+      "out_hex": "df00000002db0000000161d30000000000000001db0000000162d30000000000000002"
+    },
+    {
+      "name": "compact_nested",
+      "in_hex": "92a3666f6f81a16305",
+      "out_hex": "dd00000002db00000003666f6fdf00000001db0000000163d30000000000000005"
+    },
+    {
+      "name": "compact_uint64_big",
+      "in_hex": "cfffffffffffffffff",
+      "out_hex": "cfffffffffffffffff"
+    }
+  ]
+}
