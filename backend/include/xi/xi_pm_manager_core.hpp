@@ -183,6 +183,14 @@ public:
     // (namespace xi) — used unqualified here, resolves to xi::OpenWarning.
     std::vector<OpenWarning> open_warnings();
 
+    // A hard, whole-project open refusal — distinct from the per-instance
+    // skip-bad warnings above (those still open the project). Currently set only
+    // when project.json declares an unrecognized FUTURE schema major (the
+    // project-file analogue of the plugin ABI gate refusing a too-new plugin).
+    // Empty when the last open_project did not hard-refuse; cleared at the start
+    // of every open_project so a stale reason never leaks into a later open.
+    std::string open_error();
+
 private:
     // Part III G1.1/G1.2 — certify a plugin folder, cached by DLL content hash.
     // (defined in xi_pm_discovery.hpp)
@@ -323,6 +331,9 @@ private:
     // by mu_; migrated inline by create/remove/rename so it never drifts.
     std::unordered_map<std::string, InstStateRec> inst_state_;
     std::vector<OpenWarning> last_open_warnings_;
+    // Hard whole-project open refusal reason (see open_error()). Empty unless the
+    // last open_project refused the file outright (unrecognized future schema).
+    std::string last_open_error_;
     // Part III G1 — path to the binary that handles `--certify-plugin <dir>`
     // (self, in practice). Empty disables spawning new certifications; cached
     // verdicts on disk are still honoured. Plugins skipped this scan because

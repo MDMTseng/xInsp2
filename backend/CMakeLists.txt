@@ -195,6 +195,10 @@ add_executable(test_pm_parse tests/test_pm_parse.cpp)
 target_link_libraries(test_pm_parse PRIVATE xi_core)
 add_test(NAME pm_parse COMMAND test_pm_parse)
 
+add_executable(test_project_versioning tests/test_project_versioning.cpp)
+target_link_libraries(test_project_versioning PRIVATE xi_core)
+add_test(NAME project_versioning COMMAND test_project_versioning)
+
 # Plugin load/reload teardown (#13 manifest-renamed, #9 compile:false external).
 # A minimal real xi C-ABI plugin DLL + an in-process PluginManager driver.
 add_library(test_teardown_plugin SHARED tests/test_teardown_plugin.cpp)

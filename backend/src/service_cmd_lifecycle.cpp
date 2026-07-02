@@ -524,7 +524,15 @@ void cmd_save_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
                 }
             }
         }
-        std::string content = xi::project::build_project_json(params_json, inst_json);
+        // Read–modify–write: load the existing document (if any) and overwrite
+        // ONLY the keys this command owns (params/instances) + stamp schema,
+        // preserving every other top-level key verbatim. The prior code rebuilt
+        // project.json from just these two keys and silently dropped the rest
+        // (runtime / parallelism / groups / plugin_dirs / plugins, and the
+        // extension-owned params / auto_respawn / watchdog_ms) — data loss on a
+        // normal save. write_text is atomic (temp + rename).
+        std::string existing = xi::project::read_text(*path);
+        std::string content = xi::project::merge_project_json(existing, params_json, inst_json);
         if (xi::project::write_text(*path, content)) {
             send_rsp_ok(srv, id);
         } else {
@@ -844,7 +852,10 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             // paths via cmd:toolchain_health — the core no longer touches .vscode.)
             send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
-            send_rsp_err(srv, id, "failed to open project in " + *folder);
+            // Prefer a specific hard-refusal reason (e.g. an unrecognized future
+            // project-file schema) over the generic message.
+            std::string oe = g_eng.plugin_mgr.open_error();
+            send_rsp_err(srv, id, !oe.empty() ? oe : ("failed to open project in " + *folder));
         }
 }
 
