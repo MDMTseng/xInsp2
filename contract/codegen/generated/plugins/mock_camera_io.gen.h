@@ -23,6 +23,7 @@ public:
     Config& width(int v) { j_.set(keys::kWidth, v); return *this; }
     Config& height(int v) { j_.set(keys::kHeight, v); return *this; }
     Config& fps(int v) { j_.set(keys::kFps, v); return *this; }
+    Config& frame_mode(bool v) { j_.set(keys::kFrameMode, v); return *this; }
 
     std::string dump() const { return j_.dump(); }
     operator std::string() const { return j_.dump(); }

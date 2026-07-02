@@ -13,8 +13,8 @@
 namespace xi::mock_camera {
 
 struct MockCameraSchema : xi::FrameSchema<MockCameraSchema> {
-    static constexpr std::array<std::string_view, 1> keys = { "frame" };
-    enum : int { kFrame };
+    static constexpr std::array<std::string_view, 2> keys = { "frame", "seq" };
+    enum : int { kFrame, kSeq };
 };
 
 }  // namespace xi::mock_camera

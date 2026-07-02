@@ -9,4 +9,5 @@ MockCameraConfig = TypedDict('MockCameraConfig', {
     "height": NotRequired[int],
     "fps": NotRequired[int],
     "streaming": NotRequired[bool],
+    "frame_mode": NotRequired[bool],
 })

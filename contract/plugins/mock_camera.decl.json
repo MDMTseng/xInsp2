@@ -6,24 +6,85 @@
   "role": "source",
   "title": "mock_camera — synthetic RGB frame source (config + command surface).",
   "config": [
-    { "key": "width",     "type": "int",  "doc": "int" },
-    { "key": "height",    "type": "int",  "doc": "int" },
-    { "key": "fps",       "type": "int",  "doc": "int" },
-    { "key": "streaming", "type": "bool", "readonly": true, "doc": "bool (get_def only, read-only)" }
+    {
+      "key": "width",
+      "type": "int",
+      "doc": "int"
+    },
+    {
+      "key": "height",
+      "type": "int",
+      "doc": "int"
+    },
+    {
+      "key": "fps",
+      "type": "int",
+      "doc": "int"
+    },
+    {
+      "key": "streaming",
+      "type": "bool",
+      "readonly": true,
+      "doc": "bool (get_def only, read-only)"
+    },
+    {
+      "key": "frame_mode",
+      "type": "bool",
+      "doc": "bool (default false) — emit via the xi.frame@1 door instead of Record (wave-2 pilot)"
+    }
   ],
   "commands": {
     "selector_key": "command",
     "value_key": "value",
     "list": [
-      { "name": "start" },
-      { "name": "stop" },
-      { "name": "get_status" },
-      { "name": "set_fps",        "params": [ { "key": "value",  "arg": "v", "type": "int" } ] },
-      { "name": "set_resolution", "params": [ { "key": "width",  "arg": "w", "type": "int" },
-                                              { "key": "height", "arg": "h", "type": "int" } ] }
+      {
+        "name": "start"
+      },
+      {
+        "name": "stop"
+      },
+      {
+        "name": "get_status"
+      },
+      {
+        "name": "set_fps",
+        "params": [
+          {
+            "key": "value",
+            "arg": "v",
+            "type": "int"
+          }
+        ]
+      },
+      {
+        "name": "set_resolution",
+        "params": [
+          {
+            "key": "width",
+            "arg": "w",
+            "type": "int"
+          },
+          {
+            "key": "height",
+            "arg": "h",
+            "type": "int"
+          }
+        ]
+      }
     ]
   },
   "output_frame": [
-    { "key": "frame", "type": "image", "accessor": "image", "has_accessor": "has_frame", "doc": "image (emitted RGB frame)" }
+    {
+      "key": "frame",
+      "type": "image",
+      "accessor": "image",
+      "has_accessor": "has_frame",
+      "doc": "image (emitted RGB frame)"
+    },
+    {
+      "key": "seq",
+      "type": "int",
+      "doc": "int (frame counter; frame-mode entry)"
+    }
   ]
 }
