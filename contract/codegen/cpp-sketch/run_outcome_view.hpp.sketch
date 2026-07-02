@@ -1,0 +1,49 @@
+// HAND-SKETCH — NOT generated, NOT compiled in CI. Target output a C++ generator
+// WOULD emit from schemas/run-outcome.schema.json. Extension `.sketch` so no build
+// picks it up. Purpose: make concrete what "generate readable C++ that respects the
+// zero-copy pools" means for the maintainer's schema-language decision (01, decision
+// checklist). See docs/new_gen/05-schema-language-spike.md §C++.
+//
+// The design point: a run-outcome VIEW over a borrowed yyjson_val* — zero copy, zero
+// allocation. Accessors return const char* / int64 borrowed straight from the parsed
+// doc (same idiom as backend/include/xi/xi_config_validate.hpp). The view owns
+// nothing and outlives nothing; the caller keeps the yyjson_doc alive. This is what a
+// generator must emit to not betray the pools — a struct-with-std::string DTO (the
+// naive TS/Py-style target) would copy every field off the hot path.
+
+#pragma once
+#include <yyjson.h>
+#include <cstdint>
+
+namespace xi::contract {
+
+// xi.run-outcome/1 — generated VIEW. Borrows `root` (the run_result `data` object).
+struct RunOutcomeView {
+    yyjson_val* root;  // borrowed; caller keeps the doc alive.
+
+    static constexpr const char* kSchema = "xi.run-outcome/1";
+
+    // required
+    int64_t     code()   const { return yyjson_get_sint(yyjson_obj_get(root, "code")); }
+    const char* schema() const { return str_or(yyjson_obj_get(root, "schema"), ""); }
+
+    // optional scalars — return a sentinel/empty when absent (the schema's "optional"
+    // maps to has_*/default here; codegen knows which are required from `required`).
+    bool        has_run_id() const { return yyjson_obj_get(root, "run_id") != nullptr; }
+    int64_t     run_id()  const { return yyjson_get_sint(yyjson_obj_get(root, "run_id")); }
+    const char* msg()          const { return str_or(yyjson_obj_get(root, "msg"), ""); }
+    const char* source()       const { return str_or(yyjson_obj_get(root, "source"), ""); }
+    const char* trigger_id()   const { return str_or(yyjson_obj_get(root, "trigger_id"), ""); }   // STRING id (never int64)
+    const char* inspection_id()const { return str_or(yyjson_obj_get(root, "inspection_id"), ""); }
+    // enum `class` (reserved word) -> verdict_class(); the generator maps the JSON key
+    // "class" to a legal C++ identifier, exactly as it renames it in TS/Py.
+    const char* verdict_class() const { return str_or(yyjson_obj_get(root, "class"), ""); }
+    int64_t     script_generation() const { return yyjson_get_sint(yyjson_obj_get(root, "script_generation")); }
+
+private:
+    static const char* str_or(yyjson_val* v, const char* d) {
+        return (v && yyjson_is_str(v)) ? yyjson_get_str(v) : d;
+    }
+};
+
+} // namespace xi::contract

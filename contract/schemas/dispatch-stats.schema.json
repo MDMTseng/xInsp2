@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/dispatch-stats.schema.json",
+  "title": "dispatch_stats rsp",
+  "description": "Response to cmd:dispatch_stats — the dispatch queue health snapshot. The `sources` array (per-source emit age) demonstrates an array-of-objects with an intra-schema $ref to a $defs sub-object, exercising the $defs part of the subset. Exercised by contract/examples/dispatch_stats.json.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "id", "ok", "data"],
+  "$defs": {
+    "sourceStat": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["source", "last_emit_age_ms"],
+      "properties": {
+        "source": { "type": "string" },
+        "last_emit_age_ms": { "type": "integer", "description": "-1 if the source has never emitted." }
+      }
+    }
+  },
+  "properties": {
+    "type": { "type": "string", "const": "rsp" },
+    "id": { "type": "integer" },
+    "ok": { "type": "boolean" },
+    "data": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["queue_depth_now", "queue_depth_cap", "dispatch_threads", "overflow"],
+      "properties": {
+        "queue_depth_now": { "type": "integer", "minimum": 0 },
+        "queue_depth_cap": { "type": "integer", "minimum": 0 },
+        "queue_depth_high_watermark": { "type": "integer", "minimum": 0 },
+        "overflow": { "type": "string", "enum": ["drop_oldest", "drop_newest"] },
+        "dispatch_threads": { "type": "integer", "minimum": 0 },
+        "dropped": { "type": "integer", "minimum": 0 },
+        "dropped_lifetime": { "type": "integer", "minimum": 0 },
+        "queue_depth_high_watermark_lifetime": { "type": "integer", "minimum": 0 },
+        "malformed_cmd_rejected_lifetime": { "type": "integer", "minimum": 0 },
+        "last_emit_age_ms": { "type": "integer" },
+        "sources": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sourceStat" }
+        }
+      }
+    }
+  }
+}

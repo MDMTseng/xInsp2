@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/state-dropped.schema.json",
+  "title": "state_dropped event",
+  "description": "Fires after compile_and_load when the new script DLL declares a different xi::state schema version, so persisted state was dropped. The one correctness signal review 10 flagged the VS Code extension for ignoring. Exercised by contract/examples/state_dropped.json.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "name", "data"],
+  "properties": {
+    "type": { "type": "string", "const": "event" },
+    "name": { "type": "string", "const": "state_dropped" },
+    "data": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["old_schema", "new_schema"],
+      "properties": {
+        "old_schema": { "type": "integer" },
+        "new_schema": { "type": "integer" }
+      }
+    }
+  }
+}

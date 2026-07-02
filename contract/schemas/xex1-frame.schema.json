@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/xex1-frame.schema.json",
+  "title": "XEX1 binary preview frame — DECODED-body descriptor (sketch)",
+  "description": "SKETCH, with a caveat that is itself a headline finding. The real XEX1 frame is NOT JSON: it is the 4-byte magic \"XEX1\" followed by a msgpack body, pushed as a WebSocket BINARY frame via emit_binary. JSON Schema describes JSON documents, so it CANNOT describe: (a) the magic-prefix framing, (b) the msgpack encoding/type tags (fixmap vs map16, bin8/16/32), or (c) the raw JPEG bytes in each image. This schema describes only the msgpack body's LOGICAL structure AFTER decoding to a JSON-shaped object, and models the opaque JPEG payload as a placeholder string. Two real invariants live entirely OUTSIDE this schema and would need a separate binary-IDL/format tool: the fixmap<=15-key cap (expose.cpp emits fixmap only) and the msgpack type coverage the three hand-rolled codecs must agree on. See the binary-frame finding in the writeup: JSON Schema is the wrong tool for XEX1.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["v", "channel", "seq", "json", "images"],
+  "$defs": {
+    "image": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["key", "jpeg"],
+      "properties": {
+        "key": { "type": "string" },
+        "jpeg": {
+          "type": "string",
+          "description": "OPAQUE. On the wire this is msgpack `bin` (raw JPEG bytes), un-representable in JSON; modelled here as a base64/placeholder string ONLY so the decoded-body descriptor is expressible. A binary IDL would type this as bytes with a length; JSON Schema cannot."
+        }
+      }
+    }
+  },
+  "properties": {
+    "v": { "type": "integer", "const": 1, "description": "Decoder version gate." },
+    "channel": { "type": "string" },
+    "seq": {
+      "type": "integer",
+      "description": "= run_id ($seq). int64 on the wire — a JSON-number model would lose precision above 2^53; a real binary format keeps it a fixed-width int. Another reason JSON Schema under-serves the binary path."
+    },
+    "json": { "type": "string", "description": "Record scalars serialized to a JSON STRING (the decoder does one JSON.parse); key order = insertion/display order." },
+    "images": { "type": "array", "items": { "$ref": "#/$defs/image" } }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/vars.schema.json",
+  "title": "vars message (REMOVED / deprecated)",
+  "deprecated": true,
+  "description": "DEPRECATED. Describes the REMOVED `vars` message purely so the orphan fixture protocol/fixtures/vars_mixed.json still maps to a schema and the gate stays strict. The backend no longer emits this; per review 10 finding 9 and adoption-map item 4, vars_mixed.json should be RETIRED. This schema exists to route the orphan, not to bless it. It also illustrates a subset limit: the `items` array is heterogeneous by `kind` (image vs scalar), which without oneOf can only be modelled as a permissive union (name+kind required, everything else optional) — see the heterogeneous-array finding.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "run_id", "items"],
+  "$defs": {
+    "varItem": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "kind"],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "type": "string", "enum": ["image", "number", "boolean", "string", "json", "custom", "record"] },
+        "value": { "description": "Inline value for non-image kinds; type varies by kind, so left unconstrained (any) — a subset consequence of no per-kind discrimination." },
+        "gid": { "type": "integer" },
+        "src": { "type": "integer" },
+        "raw": { "type": "boolean" }
+      }
+    }
+  },
+  "properties": {
+    "type": { "type": "string", "const": "vars" },
+    "run_id": { "type": "integer" },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/varItem" } }
+  }
+}

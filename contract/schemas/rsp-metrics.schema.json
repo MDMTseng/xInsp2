@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/rsp-metrics.schema.json",
+  "title": "metrics rsp",
+  "description": "Response to cmd:metrics. Written to MATCH THE FIXTURE (buckets is a fixed-key OBJECT le_1..gt_50; no frames_total/ok/error keys), which diverges from ws-protocol.md (buckets as an ARRAY of {le,count} over 13 edges, plus frames_total/ok/error). Reported as doc/fixture drift. The fixed-key histogram object also demonstrates a subset point: a closed map is expressible with explicit `properties`; only key-PATTERN maps (patternProperties) are out of subset.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "id", "ok", "data"],
+  "properties": {
+    "type": { "type": "string", "const": "rsp" },
+    "id": { "type": "integer" },
+    "ok": { "type": "boolean" },
+    "data": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["inspect_compute_ms"],
+      "properties": {
+        "inspect_compute_ms": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["count", "sum_ms", "mean_ms", "buckets"],
+          "properties": {
+            "count": { "type": "integer", "minimum": 0 },
+            "sum_ms": { "type": "number", "minimum": 0 },
+            "mean_ms": { "type": "number", "minimum": 0 },
+            "buckets": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "le_1": { "type": "integer", "minimum": 0 },
+                "le_2": { "type": "integer", "minimum": 0 },
+                "le_5": { "type": "integer", "minimum": 0 },
+                "le_10": { "type": "integer", "minimum": 0 },
+                "le_20": { "type": "integer", "minimum": 0 },
+                "le_50": { "type": "integer", "minimum": 0 },
+                "gt_50": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

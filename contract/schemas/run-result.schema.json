@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/run-result.schema.json",
+  "title": "run_result event",
+  "description": "The `event` envelope carrying a run verdict. `data` is the xi.run-outcome/1 payload, referenced by cross-package $ref (this proves the `$ref within the package` subset rule end-to-end through the validator's Registry).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "name", "data"],
+  "properties": {
+    "type": { "type": "string", "const": "event" },
+    "name": { "type": "string", "const": "run_result" },
+    "data": { "$ref": "https://xinsp.dev/contract/schemas/run-outcome.schema.json" }
+  }
+}
