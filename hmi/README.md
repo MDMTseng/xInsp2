@@ -101,9 +101,15 @@ cd ../WebTunnelHub
 
 - **Single-client backend.** The backend WS accepts **one** client. `serve.mjs`
   opens one backend connection **per browser**, so a second tab / a stale tab
-  contends for the slot. For multi-viewer (operator wall + an office screen),
-  v1.1 should make the proxy hold **one** upstream and **fan-out/broadcast** to N
-  browsers. (Until then: one viewer; on a stuck `connecting`, close other tabs.)
+  contends for the slot. When it loses the race the backend replies `503
+  single-client-busy`; `serve.mjs` relays that to the page as a distinct WS close
+  code and the badge shows **"another client is connected"** (not a generic
+  "disconnected") while it keeps retrying — so the operator knows to close the
+  other tab, not to go restart a backend that is running fine (review 10 #6). (A
+  browser connecting **directly** — `?ws=…`, no proxy — can't read the 503 HTTP
+  status, a platform limit, so that path still shows a generic retry.) For
+  multi-viewer (operator wall + an office screen), v1.1 should make the proxy hold
+  **one** upstream and **fan-out/broadcast** to N browsers.
 - **Browser ESM runtime errors are invisible to `node --check`.** A stale
   call-site after a rename (`buildGrid()` → `buildLayout()`) threw a *ReferenceError*
   at module load, so `connect()` never ran and the badge sat on its default

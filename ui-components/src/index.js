@@ -14,7 +14,7 @@ import "./components/xi-image-viewer.svelte";
 import "./components/xi-image-editor.svelte";
 
 // Shared generic WS client (no build needed; handy for `@xinsp2/components` users).
-export { XiClient } from "./ws-client.mjs";
+export { XiClient, BUSY_CLOSE_CODE } from "./ws-client.mjs";
 // Auto-webui renderer: descriptor → sections of wired widgets (task #76).
 export { mountPanel, inferDescriptor, CONTROL_TAGS } from "./auto-panel.mjs";
 

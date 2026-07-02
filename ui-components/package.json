@@ -20,7 +20,7 @@
     "build": "vite build && node -e \"require('fs').copyFileSync('dist/xi-components.esm.js','../hmi/lib/xi-components.esm.js')\"",
     "dev": "vite",
     "e2e": "playwright test",
-    "test": "node --test --test-concurrency=1 test/viewport.mjs test/options.mjs test/xi-slider.dom.mjs test/widgets.dom.mjs test/auto-panel.dom.mjs test/xi-trace.dom.mjs test/tools.mjs test/create-webapp.mjs test/editor.dom.mjs test/layout.test.mjs test/ws-client.smoke.mjs test/xex1-golden.mjs"
+    "test": "node --test --test-concurrency=1 test/viewport.mjs test/options.mjs test/xi-slider.dom.mjs test/widgets.dom.mjs test/auto-panel.dom.mjs test/xi-trace.dom.mjs test/tools.mjs test/create-webapp.mjs test/editor.dom.mjs test/layout.test.mjs test/ws-client.smoke.mjs test/ws-client.busy.mjs test/xex1-golden.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

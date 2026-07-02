@@ -14,6 +14,8 @@ import { readFile, mkdir } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, normalize, extname, sep } from "node:path";
 import { createRequire } from "node:module";
+// Single source of truth for the busy close code (shim <-> proxy contract).
+import { BUSY_CLOSE_CODE } from "../ui-components/src/ws-client.mjs";
 
 const HMI = dirname(fileURLToPath(import.meta.url));
 const REPO = dirname(HMI);
@@ -65,6 +67,16 @@ server.on("upgrade", (req, sock, head) => {
     const up = new WebSocket(BE_URL);          // one backend conn per browser
     const queue = [];
     up.on("open", () => { console.log("[ws] backend open"); for (const [d, b] of queue) up.send(d, { binary: b }); queue.length = 0; });
+    // The backend rejects a 2nd connection with `503 single-client-busy`. A browser
+    // can't read that HTTP status, so relay it as a distinct WS close code the shim
+    // recognises — otherwise the operator sees a generic "disconnected" retry loop
+    // when the real cause is "another client owns the backend" (review 10 #6).
+    up.on("unexpected-response", (_req, res) => {
+      const busy = res.statusCode === 503 && res.headers["x-xi-reason"] === "single-client-busy";
+      console.log(`[ws] backend upgrade rejected status=${res.statusCode} reason=${res.headers["x-xi-reason"] || "-"}`);
+      try { client.close(busy ? BUSY_CLOSE_CODE : 1011, busy ? "single-client-busy" : "backend upgrade failed"); } catch {}
+      try { up.close(); } catch {}
+    });
     client.on("message", (d, isBin) => { up.readyState === 1 ? up.send(d, { binary: isBin }) : queue.push([d, isBin]); });
     up.on("message", (d, isBin) => { if (client.readyState === 1) client.send(d, { binary: isBin }); });
     const bye = (who) => (e) => { console.log(`[ws] close via ${who}${e && e.message ? " " + e.message : ""}`); try { client.close(); } catch {} try { up.close(); } catch {} };
