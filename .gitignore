@@ -35,6 +35,9 @@ examples/*/driver_summary.json
 examples/*/results.json
 examples/*/_results_*.json
 examples/*/driver_log.json
+# Fuzz smoke per-run artifacts (tests/fuzz/run_smoke.py — regenerated each run)
+tests/fuzz/_results_*.json
+tests/fuzz/_run_smoke_summary.json
 # FL agent progress telemetry (per memory: feedback_agent_progress_brief)
 .fl_progress/
 
