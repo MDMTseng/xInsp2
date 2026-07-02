@@ -70,11 +70,26 @@ of seeing silence.
 **Provenance (recommended):**
 - `source` / `group` / `trigger_id` — which source / dispatch group / trigger
 
+**Identity (additive — shipped; all OPTIONAL, omitted when empty so existing
+consumers are unaffected; the numeric `code` is UNCHANGED for every case):**
+- `trigger_id` — the run's 128-bit trigger id as a 32-char lowercase hex string
+- `boot_id` — random 128-bit id (hex) generated ONCE per backend process at
+  startup; stable for the process lifetime, so it groups a run of the same boot
+- `station_id` — optional physical-station id from env `XINSP_STATION_ID`
+  (omitted when unset)
+- `inspection_id` — composite `"<station_id>/<boot_id>/<run_id>"` (present only
+  when `run_id ≥ 0`; `station_id` segment may be empty)
+- `schema` — result-record version; stable value `"xi.run-outcome/1"`
+- `class` — outcome class string DERIVED from `code` (not a code change):
+  `ok` (`code>0`) / `ng` (`-989999…-1`) / `na` (`0`) / `dropped` (`XI_SYS_DROPPED`)
+  / `crashed` (caught inspect error — still `code=0`)
+- `reason_code` — optional machine tag (e.g. `inspect_error`, `queue_full`);
+  omitted for normal verdicts
+
 **Optional (line / MES / traceability — add later):**
 - `part_id` / `serial` — physical part (barcode)
 - `recipe` / `program_version` — which inspection program version judged it
 - `defects: [{ code, where }]` — for NG: failed features + location (feeds overlays)
-- `schema` — result-record version (forward-compat)
 
 ## Script API
 
