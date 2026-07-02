@@ -1460,8 +1460,16 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
         emit_run_result(srv, rr_code, rr_msg,
                         run_id, dt_ms, out.rr_source, out.rr_group,
                         out.rr_trigger_hex);   // class derived from code (ok/ng/na/no_verdict)
+        // run_finished carries the run's INSPECT COMPUTE time. `ms` is the legacy
+        // integer-ms field (kept, unchanged wire value) — it is inspect compute
+        // ONLY (excludes queue wait, emit-gate wait, staged sink flush, JPEG encode,
+        // WS send), NOT cycle/decision latency. The additive `inspect_compute_us`
+        // field states that meaning explicitly at µs precision (external review 05
+        // #7). BREAKING (staged, not on master): consumers should migrate to
+        // `inspect_compute_us`; `ms` is retained for back-compat.
         emit_run_event_(srv, run_id, "run_finished",
-                        "\"ms\":" + std::to_string((long long)dt_ms));
+                        "\"ms\":" + std::to_string((long long)dt_ms) +
+                        ",\"inspect_compute_us\":" + std::to_string((long long)out.dt_us));
         // Clear so the next run, if it doesn't carry a frame_path arg,
         // sees an empty path instead of the stale previous one.
         if (out.s.set_run_context) out.s.set_run_context("");
