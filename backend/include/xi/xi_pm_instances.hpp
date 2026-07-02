@@ -13,6 +13,7 @@
 // to the former in-class definitions.
 //
 #include "xi_pm_manager_core.hpp"
+#include "xi_project.hpp"   // kProjectSchema — the project-file schema identity
 
 #include <cctype>
 #include <cstdio>
@@ -381,6 +382,11 @@ inline std::vector<OpenWarning> PluginManager::open_warnings() {
     return last_open_warnings_;
 }
 
+inline std::string PluginManager::open_error() {
+    std::lock_guard<std::mutex> lk(mu_);
+    return last_open_error_;
+}
+
 // Carry over any top-level project.json keys this writer doesn't manage
 // (e.g. `params`, and fields another tool/the VS Code extension adds like
 // `auto_respawn` / `watchdog_ms`). save_project_locked is a FULL rebuild, so
@@ -414,7 +420,7 @@ inline std::string PluginManager::merge_unknown_top_keys_(const std::string& fre
                 // never persist. Anything NOT in this set is owned by another
                 // writer (params / auto_respawn / watchdog_ms / future) → carry over.
                 static const char* const kOwned[] = {
-                    "name", "script", "parallelism", "runtime",
+                    "schema", "name", "script", "parallelism", "runtime",
                     "instances", "plugin_dirs", "plugins",
                 };
                 size_t idx, mx; yyjson_val *k, *v;
@@ -462,6 +468,10 @@ inline bool PluginManager::save_project_locked() {
         return false;
     }
     std::string out = "{\n";
+    // Schema identity (Finding 2 / adoption item 12): stamp the project-file
+    // format so a future reader can recognize (and, at a breaking bump, refuse)
+    // the format rather than guess. Same family/naming as the run-outcome schema.
+    out += "  \"schema\": \""; out += xi::project::kProjectSchema; out += "\",\n";
     out += "  \"name\": "; pm_json_escape(out, project_.name); out += ",\n";
     out += "  \"script\": ";
     pm_json_escape(out, std::filesystem::path(project_.script_path).filename().string());

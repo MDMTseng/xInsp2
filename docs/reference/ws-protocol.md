@@ -828,6 +828,41 @@ for the full model, [`c-abi.md`](./c-abi.md) §1 for the ABI, and
 ### `save_project` / `load_project` / `open_project`
 `args: { "path": "project.json" }` → `ok: true`
 
+**Project-file schema + full-document save.** `project.json` carries a top-level
+`"schema"` identity — currently `"xi.project/1"` (same family/naming as the
+run-outcome `"xi.run-outcome/1"`) — written on every save. It is a
+`<family>/<major>` string; the major is bumped only on a breaking format change,
+and within a major readers stay forgiving (unknown keys tolerated, missing keys
+defaulted).
+
+`save_project` (and every instance-CRUD save) is a **read–modify–write over the
+whole document**: it loads the existing `project.json`, overwrites ONLY the keys
+the saver owns, and **preserves every other top-level key verbatim** — the
+backend-owned blocks it doesn't itself emit (`runtime`, `parallelism`, `groups`,
+`plugin_dirs`, `plugins`, `toolchain`, `include_dirs`, `link_libs`) AND keys a
+*different* writer owns (the VS Code extension's `params`, `auto_respawn`,
+`watchdog_ms`, and any future key). There is deliberately no code path that
+reconstructs `project.json` from partial knowledge; a prior `save_project` rebuilt
+the file from just `params`+`instances` and silently dropped the rest — data loss
+on a normal save, and the exact failure a cross-version or cross-writer round-trip
+provokes. The write is atomic (temp + rename). Preservation is at **top-level key**
+granularity for keys the saver doesn't own; keys it *does* own (`params`,
+`instances`, and — for the instance-CRUD path — `name`/`script`/`parallelism`/
+`runtime`/`plugin_dirs`/`plugins`) are rewritten wholesale from live state.
+
+**Schema gate on open.** `open_project` reads `schema` with the same discipline as
+the plugin-ABI load gate: a **missing** field is accepted as a legacy (pre-schema)
+file and logged once (the next save stamps the current schema); a **recognized**
+family at this backend's major (or older) loads normally; an **unrecognized family
+or a future major** is **refused** — `open_project` replies `ok:false` with a
+message naming both the file's schema and the backend's (e.g. *"project.json
+declares schema "xi.project/2" but this backend understands "xi.project/1" … Open
+it with a matching backend version."*) — rather than silently mis-reading a newer
+format. (`instance.json` is unaffected: its writer fully round-trips the plugin's
+own `config` subtree via `get_def`/`set_def` and has no second writer of top-level
+keys, so it does not carry the same rebuild-from-partial-knowledge defect and is
+not schema-stamped.)
+
 `load_project` / `open_project` reattach instances and restore Param
 values, but **do NOT recompile the inspection script** — call
 `compile_and_load` separately afterwards. Cold opens of a project with

@@ -13,6 +13,7 @@
 // to the former in-class definitions.
 //
 #include "xi_pm_manager_core.hpp"
+#include "xi_project.hpp"     // kProjectSchema* + parse_project_schema (loader gate)
 
 #include <algorithm>          // std::min/std::max (group clamps)
 #include <cstdio>
@@ -295,6 +296,9 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     // Reset surfaced warnings here (before the project.json parse) so group
     // parse warnings, compile failures, and bad instances all accumulate.
     last_open_warnings_.clear();
+    // Reset any prior hard-refusal reason (unrecognized schema) so it never
+    // leaks into this open's result.
+    last_open_error_.clear();
     // Was the top-level project.json itself well-formed? A malformed file
     // (truncated / garbage) used to load "successfully" with all defaults and
     // no signal to the user — surface it as an open warning below.
@@ -309,6 +313,37 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     yyjson_doc* doc = yyjson_read(content.c_str(), content.size(), 0);
     yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
     if (root) {
+        // Schema-identity gate (Finding 2 / adoption item 12) — same discipline
+        // as the plugin ABI load gate: a MISSING schema is accepted as a legacy
+        // (pre-schema) file and logged once; a RECOGNIZED family whose major is
+        // this backend's (or older) loads normally; an unrecognized family or a
+        // FUTURE major is REFUSED with both versions named, rather than silently
+        // mis-read. A save later stamps the current schema onto a legacy file.
+        if (yyjson_val* sv = yyjson_obj_get(root, "schema");
+            sv && yyjson_is_str(sv) && yyjson_get_str(sv)) {
+            std::string sch = yyjson_get_str(sv);
+            int major = 0;
+            bool recognized = xi::project::parse_project_schema(sch, major);
+            if (!recognized || major > xi::project::kProjectSchemaMajor) {
+                last_open_error_ =
+                    "project.json declares schema \"" + sch + "\" but this backend "
+                    "understands \"" + std::string(xi::project::kProjectSchema) +
+                    "\" (family " + std::string(xi::project::kProjectSchemaFamily) +
+                    ", major " + std::to_string(xi::project::kProjectSchemaMajor) +
+                    ") — refusing to open a project file from a newer/unknown format "
+                    "rather than silently mis-read it. Open it with a matching backend "
+                    "version.";
+                std::fprintf(stderr, "[xinsp2] %s\n", last_open_error_.c_str());
+                yyjson_doc_free(doc);
+                return false;
+            }
+            // recognized current-or-older major → load normally (no log).
+        } else {
+            std::fprintf(stderr,
+                "[xinsp2] project.json has no \"schema\" field — treating as a "
+                "legacy (pre-schema) project; the next save will stamp \"%s\".\n",
+                xi::project::kProjectSchema);
+        }
         if (yyjson_val* pd = yyjson_obj_get(root, "plugin_dirs"); pd && yyjson_is_arr(pd)) {
             size_t _pi, _pn; yyjson_val* it;
             yyjson_arr_foreach(pd, _pi, _pn, it)
