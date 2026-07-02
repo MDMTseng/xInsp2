@@ -19,6 +19,8 @@
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
 
+#include "xex1_encode.hpp"   // the XEX1 msgpack encoder (shared with the fixture test)
+
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -41,43 +43,6 @@ std::string b64(const uint8_t* p, size_t n) {
         o.push_back(i + 2 < n ? T[b & 63] : '=');
     }
     return o;
-}
-
-// ---- minimal msgpack encoder (only the types this fixed frame shape needs) ---
-using Buf = std::vector<uint8_t>;
-void mp_u16(Buf& f, uint16_t v) { f.push_back(v >> 8); f.push_back(v & 0xFF); }   // big-endian
-void mp_u32(Buf& f, uint32_t v) { f.push_back(v >> 24); f.push_back((v >> 16) & 0xFF);
-                                  f.push_back((v >> 8) & 0xFF); f.push_back(v & 0xFF); }
-void mp_u64(Buf& f, uint64_t v) { for (int s = 56; s >= 0; s -= 8) f.push_back((v >> s) & 0xFF); }
-
-void mp_map(Buf& f, uint32_t n) {            // fixmap only (n<=15 — our maps are tiny)
-    f.push_back(0x80 | (uint8_t)(n & 0x0F));
-}
-void mp_arr(Buf& f, uint32_t n) {
-    if (n <= 15) f.push_back(0x90 | (uint8_t)n);
-    else if (n <= 0xFFFF) { f.push_back(0xDC); mp_u16(f, (uint16_t)n); }
-    else { f.push_back(0xDD); mp_u32(f, n); }
-}
-void mp_uint(Buf& f, uint64_t v) {
-    if (v <= 0x7F) f.push_back((uint8_t)v);
-    else if (v <= 0xFF) { f.push_back(0xCC); f.push_back((uint8_t)v); }
-    else if (v <= 0xFFFF) { f.push_back(0xCD); mp_u16(f, (uint16_t)v); }
-    else if (v <= 0xFFFFFFFFull) { f.push_back(0xCE); mp_u32(f, (uint32_t)v); }
-    else { f.push_back(0xCF); mp_u64(f, v); }
-}
-void mp_str(Buf& f, const std::string& s) {
-    size_t n = s.size();
-    if (n <= 31) f.push_back(0xA0 | (uint8_t)n);
-    else if (n <= 0xFF) { f.push_back(0xD9); f.push_back((uint8_t)n); }
-    else if (n <= 0xFFFF) { f.push_back(0xDA); mp_u16(f, (uint16_t)n); }
-    else { f.push_back(0xDB); mp_u32(f, (uint32_t)n); }
-    f.insert(f.end(), s.begin(), s.end());
-}
-void mp_bin(Buf& f, const uint8_t* p, size_t n) {
-    if (n <= 0xFF) { f.push_back(0xC4); f.push_back((uint8_t)n); }
-    else if (n <= 0xFFFF) { f.push_back(0xC5); mp_u16(f, (uint16_t)n); }
-    else { f.push_back(0xC6); mp_u32(f, (uint32_t)n); }
-    f.insert(f.end(), p, p + n);
 }
 
 }  // namespace
@@ -176,29 +141,16 @@ private:
     };
 
     // Build the atomic XEX1 frame: magic + msgpack { v, channel, seq, json, images[] }.
+    // Framing (msgpack) lives in xex1_encode.hpp; here we JPEG-compress each image
+    // (skipping any that fail) and hand the finished entries to the shared encoder.
     std::vector<uint8_t> build_frame_(const std::string& channel, const Channel& ch) const {
-        Buf f;
-        f.push_back('X'); f.push_back('E'); f.push_back('X'); f.push_back('1');
-        mp_map(f, 5);
-        mp_str(f, "v");       mp_uint(f, 1);
-        mp_str(f, "channel"); mp_str(f, channel);
-        mp_str(f, "seq");     mp_uint(f, ch.seq);
-        mp_str(f, "json");    mp_str(f, ch.json);
-        mp_str(f, "images");
-        // Pre-encode so the array length is exact (skip images that fail to encode).
-        std::vector<std::pair<std::string, std::vector<uint8_t>>> encoded;
+        std::vector<xi::xex1::EncImage> encoded;
         encoded.reserve(ch.images.size());
         for (auto& [key, img] : ch.images) {
             std::vector<uint8_t> jpeg = compress_(img);
-            if (!jpeg.empty()) encoded.emplace_back(key, std::move(jpeg));
+            if (!jpeg.empty()) encoded.push_back({key, std::move(jpeg)});
         }
-        mp_arr(f, (uint32_t)encoded.size());
-        for (auto& [key, jpeg] : encoded) {
-            mp_map(f, 2);
-            mp_str(f, "key");  mp_str(f, key);
-            mp_str(f, "jpeg"); mp_bin(f, jpeg.data(), jpeg.size());
-        }
-        return f;
+        return xi::xex1::encode_frame(channel, ch.seq, ch.json, encoded);
     }
 
     // JPEG-encode via the host cache, through the SDK xi::Plugin::compress()
