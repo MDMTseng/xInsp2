@@ -119,7 +119,7 @@ struct PluginInfo {
     // (the default) the host serializes calls per instance with a mutex, so a
     // parallel dispatch pool (parallelism.dispatch_threads > 1) is safe by
     // default — only plugins that opt in get true per-instance parallelism.
-    // See docs/guides/write-a-script.md (parallelism) + plugin-abi.md.
+    // See docs/guides/write-a-script.md (parallelism) + docs/guides/write-a-plugin.md.
     bool        reentrant = false;
     // Opt-in (plugin.json `"json_fallback": true`): allow this plugin to load
     // even when its yyjson layout doesn't match the host's — it then runs the

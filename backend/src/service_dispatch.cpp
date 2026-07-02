@@ -107,7 +107,12 @@ static void warn_oversubscribe_(int total_workers) {
 }
 
 // Resolve a group name to its lane (holding g_eng.lanes_mu). Unknown/typo'd group →
-// the default_group lane, then the first lane — never silently the front (#5).
+// the default_group lane; if that too is absent, the first lane as a last resort.
+// That front() floor is unreachable in today's load-only group model — a synthesized
+// default lane always matches default_group_snapshot (F4 in docs/roadmap/known-issues.md)
+// — so it exists only as a defensive floor for a future runtime "reconfigure groups"
+// path. It is NOT silent: the first time it fires we log loudly (reaching it means
+// routing hit a group the live lane set never knew about).
 // Returns a shared_ptr so the caller keeps the lane alive past a concurrent stop.
 static std::shared_ptr<GroupLane> lane_for_(const std::string& group) {
     std::lock_guard<std::mutex> lk(g_eng.lanes_mu);
@@ -115,6 +120,13 @@ static std::shared_ptr<GroupLane> lane_for_(const std::string& group) {
     for (auto& l : g_eng.lanes) if (l->cfg.name == group) return l;
     const std::string& dg = g_eng.default_group_snapshot;   // F4: spawn-time snapshot, not a live read
     if (!dg.empty()) for (auto& l : g_eng.lanes) if (l->cfg.name == dg) return l;
+    static std::atomic<bool> warned_front{false};
+    if (!warned_front.exchange(true))
+        std::fprintf(stderr,
+            "[xinsp2] WARN lane_for_ fell back to the first lane for group='%s' "
+            "(no group match and no default_group lane) — routing to '%s'\n",
+            group.empty() ? "(default)" : group.c_str(),
+            g_eng.lanes.front()->cfg.name.c_str());
     return g_eng.lanes.front();
 }
 
