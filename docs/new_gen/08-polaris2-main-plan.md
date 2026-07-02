@@ -89,6 +89,25 @@ is a compile error. Wave 2 is clear to proceed.*
 4. **Script surface**: minimal `t.frame()` accessors so an example script
    runs the pilot pair end-to-end; one QA example added to the gate.
 
+**Wave-2 progress (2026-07-02/03):** steps 1–2 SHIPPED (frame-door branch):
+the `xi.frame@1` host door (opaque handle + ~23 C accessors, FrameRegistry,
+fail-closed getters) and its plugin-side `xi_plugin_get_interface` mirror —
+the pure-door dry run worked with zero friction. Pilots are BILINGUAL
+(Record path untouched; frame surface opt-in; no silent conversion in v0).
+Dual-carry rides the same lane/EmitGate machinery. Wave-3 seed also landed:
+decl → generated `_keys/_schema/_io` headers with a byte-level +
+compile-level equivalence gate (codegen_equiv, negative-tested); swap-in
+deferred to wave-2 exit per the codegen README.
+
+**Pure-door finding for the synthesis §3 record:** an opaque-handle door
+necessarily gives up TypedFrame's compile-time offset reads AT THE BOUNDARY
+— cross-DLL consumers read by key string through host accessors; the 522ns
+slot read is a same-DLL property. The greenfield §3 core therefore keeps
+TypedFrame in-process and defines the cross-door contract as opaque handle +
+accessors, with cross-door offset reads arriving via codegen handing the
+canonical msgpack plane over as a span the consumer indexes with its own
+schema offsets.
+
 **Wave-2 exit gate:** pilot runs under gate.py fully green + a written
 migration-scope decision (which plugins/paths move when; what Record's
 deprecation horizon is; what rides the eventual cutover train).
