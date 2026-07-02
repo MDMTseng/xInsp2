@@ -635,7 +635,19 @@ void set_inst_state(const std::string& name, InstState s,
     // (an operator re-committing a crash-quarantined instance recovers it). The
     // base active/faulted health is DERIVED from InstState at get_health time, so
     // there is nothing else to mirror here. clear is a no-op if it wasn't degraded.
-    if (s == InstState::Active) xi::health().clear_instance_degraded(name);
+    if (s == InstState::Active) {
+        xi::health().clear_instance_degraded(name);
+        // item 14: re-committing an instance's config (set_instance_def /
+        // commit_group set it Active) is the EXISTING operator re-enable surface for
+        // an on_fault=refuse quarantine — lift the fail-fast gate + reset the reinit
+        // escalation so the pulled instance is put back in service. No new command.
+        if (auto inst = xi::InstanceRegistry::instance().find(name)) {
+            if (auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get())) {
+                a->set_quarantined(false);
+                a->reset_reinit_fails();
+            }
+        }
+    }
 }
 void clear_inst_state() {
     g_eng.plugin_mgr.clear_instance_states();

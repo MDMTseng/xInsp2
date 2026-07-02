@@ -35,7 +35,7 @@ namespace xi {
 // plugin allocating pool images in its ctor leaked them on every hot-reload.
 inline std::shared_ptr<CAbiInstanceAdapter> PluginManager::make_adapter_guarded_(
         PluginInfo& pi, const std::string& plugin_name,
-        const std::string& inst_name, int max_concurrency) {
+        const std::string& inst_name, int max_concurrency, OnFault on_fault) {
     if (!pi.c_factory) return nullptr;
     xi_host_api& host = default_host_api();
     ImagePoolOwnerScope owner;   // sweeps the ctor's images unless adopted below
@@ -47,6 +47,8 @@ inline std::shared_ptr<CAbiInstanceAdapter> PluginManager::make_adapter_guarded_
     auto inst = std::make_shared<CAbiInstanceAdapter>(
         inst_name, plugin_name, pi.handle, raw, pi.reentrant, max_concurrency, pi.is_sink);
     inst->adopt_owner_id(owner.release());
+    inst->set_on_fault(on_fault);            // item 14: carry the per-instance policy
+    inst->arm_reinit(pi.c_factory, &host);   // enable in-place reinit on this DLL
     return inst;
 }
 
@@ -63,6 +65,7 @@ inline std::vector<PluginManager::PendingInstance> PluginManager::detach_plugin_
         if (ii.plugin_name != plugin_name) continue;
         PendingInstance p; p.name = iname; p.folder = ii.folder_path;
         p.max_concurrency = ii.max_concurrency;
+        p.on_fault = ii.on_fault;   // item 14: preserve policy across the reload
         if (ii.instance) p.def_json = ii.instance->get_def();
         pending.push_back(std::move(p));
     }
@@ -160,7 +163,7 @@ inline bool PluginManager::reattach_plugin_from_dll_locked_(const std::string& p
     }
 
     for (auto& p : pending) {
-        auto inst = make_adapter_guarded_(pi, plugin_name, p.name, p.max_concurrency);
+        auto inst = make_adapter_guarded_(pi, plugin_name, p.name, p.max_concurrency, p.on_fault);
         if (!inst) continue;
         if (!p.def_json.empty()) inst->set_def(p.def_json);
         project_.instances[p.name].instance = inst;
@@ -477,6 +480,7 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
         std::string folder;
         std::string def_json;
         int         max_concurrency = 0;
+        OnFault     on_fault = OnFault::Reuse;   // item 14: preserved across recompile
     };
     std::vector<Pending> pending;
     for (auto& [iname, ii] : project_.instances) {
@@ -485,6 +489,7 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
         p.name   = iname;
         p.folder = ii.folder_path;
         p.max_concurrency = ii.max_concurrency;
+        p.on_fault = ii.on_fault;
         if (ii.instance) p.def_json = ii.instance->get_def();
         pending.push_back(std::move(p));
     }
@@ -506,7 +511,7 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
         auto& pi_old = pi_it->second;
         if (!pi_old.c_factory) return;
         for (auto& p : pending) {
-            auto inst = make_adapter_guarded_(pi_old, plugin_name, p.name, p.max_concurrency);
+            auto inst = make_adapter_guarded_(pi_old, plugin_name, p.name, p.max_concurrency, p.on_fault);
             if (!inst) continue;
             if (!p.def_json.empty()) inst->set_def(p.def_json);
             project_.instances[p.name].instance = inst;
@@ -556,7 +561,7 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
         auto pi_it = plugins_.find(plugin_name);
         if (pi_it != plugins_.end() && pi_it->second.c_factory) {
             for (auto& p : pending) {
-                auto inst = make_adapter_guarded_(pi_it->second, plugin_name, p.name, p.max_concurrency);
+                auto inst = make_adapter_guarded_(pi_it->second, plugin_name, p.name, p.max_concurrency, p.on_fault);
                 if (!inst) continue;
                 if (!p.def_json.empty()) inst->set_def(p.def_json);
                 project_.instances[p.name].instance = inst;
@@ -642,7 +647,7 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
 
     // 4. Re-instantiate every preserved instance using the new factory.
     for (auto& p : pending) {
-        auto inst = make_adapter_guarded_(pi, plugin_name, p.name, p.max_concurrency);
+        auto inst = make_adapter_guarded_(pi, plugin_name, p.name, p.max_concurrency, p.on_fault);
         if (!inst) continue;
         if (!p.def_json.empty()) inst->set_def(p.def_json);
         project_.instances[p.name].instance = inst;

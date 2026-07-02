@@ -22,11 +22,13 @@
 #endif
 
 #include "xi_abi.h"
+#include "xi_fault_policy.hpp"    // OnFault (per-instance post-fault policy, item 14)
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
 #include "xi_record.hpp"          // γ: yyjson_layout_stamp() for the doc-pointer gate
 #include "xi_record_schema.hpp"   // OQ-7: opt-in static Record field contract
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -162,6 +164,12 @@ struct PluginInfo {
     // majority of plugins, which depend only on the always-present legacy surface.
     std::vector<IfaceReq> required_ifaces;
     std::vector<IfaceReq> optional_ifaces;
+
+    // Post-fault policy DEFAULT (plugin.json `"on_fault"`: "reuse" | "reinit" |
+    // "refuse"). item 14 — what happens to an instance whose process() faults and
+    // is caught. `reuse` (the default) keeps today's behavior. A per-instance
+    // instance.json `"on_fault"` overrides this. See xi_fault_policy.hpp.
+    OnFault default_on_fault = OnFault::Reuse;
 
     // New C ABI factory: void* (host_api, name)
     using CFactoryFn = void* (*)(const xi_host_api* host, const char* name);
@@ -343,7 +351,12 @@ public:
 #endif
         ImagePool::OwnerGuard g(owner_id_);
         CallScope cs(this);
-        return set_def_fn_(inst_, j.c_str()) == 0;
+        bool ok = set_def_fn_(inst_, j.c_str()) == 0;
+        // item 14: remember the last accepted config so an on_fault=reinit rebuild
+        // can restore it onto a freshly-created instance (dropping the in-flight
+        // state a fault may have corrupted). Cached under the same gate as the call.
+        if (ok) committed_def_ = j;
+        return ok;
     }
 
     std::string exchange(const std::string& cmd_json) override {
@@ -385,7 +398,11 @@ public:
     bool prepare(const std::string& def, const std::string& folder) override {
         if (!prepare_fn_ || !inst_) return InstanceBase::prepare(def, folder);
         ImagePool::OwnerGuard g(owner_id_);
-        return prepare_fn_(inst_, def.c_str(), folder.c_str()) == 0;
+        bool ok = prepare_fn_(inst_, def.c_str(), folder.c_str()) == 0;
+        // item 14: the staged config is what commit() will make live — cache it
+        // so a later on_fault=reinit rebuild restores this config (see set_def).
+        if (ok) committed_def_ = def;
+        return ok;
     }
 
     // commit swaps staging → live. Gated (CallScope): a lone commit while the
@@ -415,6 +432,73 @@ public:
     // γ: true ⇒ caller may set xi_record.doc (borrowed yyjson doc) instead of
     // serializing to data/len. False ⇒ JSON path (foreign/older plugin).
     bool doc_input_ok() const { return doc_input_ok_; }
+
+    // ---- item 14: post-fault policy + quarantine surface --------------------
+    // The mechanical primitives the service-layer fault boundary (use_process_
+    // inline_) drives; the health-overlay + escalation POLICY lives there, this
+    // adapter just carries the per-instance state and provides the safe in-place
+    // rebuild. Kept here because the per-instance CallScope gate — the natural
+    // serialization point — already lives on the adapter.
+    OnFault on_fault() const { return on_fault_; }
+    void set_on_fault(OnFault p) { on_fault_ = p; }
+
+    // The refuse fail-fast gate: a single relaxed atomic load, cheap enough to
+    // sit on the (non-fault) hot path. True ⇒ the instance is quarantined and
+    // process()/exchange() must fail fast without entering plugin code.
+    bool quarantined() const { return quarantined_.load(std::memory_order_acquire); }
+    void set_quarantined(bool q) { quarantined_.store(q, std::memory_order_release); }
+
+    // on_fault=reinit request bit: set by the fault boundary on a caught fault,
+    // consumed just before the next process() so the rebuild happens off no-frame.
+    bool reinit_pending() const { return reinit_pending_.load(std::memory_order_acquire); }
+    void request_reinit() { reinit_pending_.store(true, std::memory_order_release); }
+
+    // Arm the in-place rebuild with the DLL factory + host so reinit() can
+    // reconstruct this instance's plugin object. Called by the PM at each
+    // (re)construction site (it owns the factory pointer). If never armed, an
+    // on_fault=reinit degrades to reuse (documented) — a safe fallback.
+    void arm_reinit(PluginInfo::CFactoryFn factory, const xi_host_api* host) {
+        reinit_factory_ = factory; reinit_host_ = host;
+    }
+
+    // Consecutive-rebuild-failure accounting (escalation to refuse after
+    // kReinitEscalateAfter). Touched only on the rare fault/reinit path, but from a
+    // dispatch worker (bump) and the control thread (reset via re-enable), so atomic.
+    int  note_reinit_fail() { return reinit_fails_.fetch_add(1, std::memory_order_relaxed) + 1; }
+    void reset_reinit_fails() { reinit_fails_.store(0, std::memory_order_relaxed); }
+
+    // Rebuild this instance from its last committed config, DROPPING the in-flight
+    // persistent state a caught fault may have corrupted. Reuses the same
+    // create → set_def steps as the PM reload path (make_adapter_guarded_), but in
+    // place on THIS adapter so the shared_ptr other workers hold stays valid, and
+    // SERIALIZED by CallScope so no process()/exchange() runs concurrently on this
+    // instance. Returns true on a clean rebuild; false leaves the OLD instance
+    // live (corrupt but runnable), mirroring recompile's restore-against-old.
+    // Clears the reinit-pending bit regardless.
+    bool reinit() {
+        reinit_pending_.store(false, std::memory_order_release);
+        if (!reinit_factory_ || !reinit_host_) return false;   // not armed → reuse
+        CallScope cs(this);                 // serialize vs process/exchange/set_def
+        void* fresh = nullptr;
+        {
+            ImagePool::OwnerGuard og(owner_id_);   // tag the ctor's images to us
+            try { fresh = reinit_factory_(reinit_host_, name_.c_str()); }
+            catch (...) { fresh = nullptr; }       // SEH-translated ctor fault, or throw
+        }
+        if (!fresh) return false;                  // keep the old instance live
+        void* old = inst_;
+        inst_ = fresh;                             // swap BEFORE destroying old
+        if (destroy_fn_ && old) { try { destroy_fn_(old); } catch (...) {} }
+        // Restore the last committed config onto the fresh instance. (We do NOT
+        // sweep the old instance's leaked pool images here — both share owner_id_,
+        // so a sweep would also free the fresh ctor's images; the rare residual is
+        // reclaimed when the adapter is finally destroyed.)
+        if (set_def_fn_ && !committed_def_.empty()) {
+            ImagePool::OwnerGuard og(owner_id_);
+            try { set_def_fn_(inst_, committed_def_.c_str()); } catch (...) {}
+        }
+        return true;
+    }
 
 private:
     // Effective concurrency cap across process/exchange/get_def/set_def:
@@ -508,6 +592,15 @@ private:
     RecordSchema          record_schema_;          // OQ-7, optional (declared==false ⇒ none)
     bool                  doc_input_ok_ = false;
     ImagePoolOwnerId      owner_id_ = 0;
+
+    // ---- item 14: post-fault policy state -----------------------------------
+    OnFault                on_fault_ = OnFault::Reuse;   // effective policy (from PM)
+    std::atomic<bool>      quarantined_{false};          // refuse gate (hot path)
+    std::atomic<bool>      reinit_pending_{false};       // deferred-rebuild request
+    std::atomic<int>       reinit_fails_{0};             // consecutive rebuild failures
+    PluginInfo::CFactoryFn reinit_factory_ = nullptr;    // armed by the PM
+    const xi_host_api*     reinit_host_ = nullptr;       // armed by the PM
+    std::string            committed_def_;               // last accepted config (for reinit)
 };
 
 } // namespace xi

@@ -556,14 +556,14 @@ public:
         // provenance-tagged Record instead of interpreting output. (Previously only
         // -1 was special-cased and the crash path fell through to adopt_shared.)
         if (prc < 0) {
-            if (prc == -1) {
-                warn_use_miss_(host, name_.c_str());
-                // The instance was never found, so use_process_inline_ returned at
-                // its first line WITHOUT touching the shared doc — the ref share_out
-                // RESERVED for the adopting side (xi_record.hpp share_out) is
-                // unconsumed. Release it here or it (and the host-owned doc + its
-                // pooled chunks) leak on EVERY call — a per-frame unbounded leak when
-                // a script use()'s a renamed/typo'd instance under continuous dispatch.
+            if (prc == -1 || prc == -3) {
+                // -1 = no such instance; -3 = instance quarantined (on_fault=refuse,
+                // item 14). Both return BEFORE touching the shared doc — the ref
+                // share_out RESERVED for the adopting side is unconsumed, so release
+                // it here or it (and the host-owned doc + pooled chunks) leak on every
+                // call. -3 skips the "typo'd instance" warning (it's a live instance
+                // that's been pulled from service, not a miss).
+                if (prc == -1) warn_use_miss_(host, name_.c_str());
                 // Scoped to the share_out path: in_doc is the registry pointer only
                 // when doc_retain/doc_release were present (else it's a borrowed
                 // input.doc() we must NOT release). The JSON-fallback and adopt paths

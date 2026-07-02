@@ -150,6 +150,32 @@ int main() {
     CHECK(event_count() == 0);
 
     // ---------------------------------------------------------------------
+    SECTION("item 14: on_fault=refuse marks the overlay failed/quarantined");
+    reset_events();
+    CHECK(H.state() == SysState::Running);
+    // A quarantine is a runtime-fault overlay at CompHealth::Failed (pulled from
+    // service), distinct from the `degraded` (kept in service) crash overlay.
+    H.mark_instance_fault("sink0", CompHealth::Failed, xi::kReasonQuarantined);
+    CHECK(H.state() == SysState::Degraded);                 // any overlay ⇒ degraded top
+    CHECK(event_count() == 1);
+    CHECK(comp_str(last_event(), "kind") == "instance");
+    CHECK(comp_str(last_event(), "name") == "sink0");
+    CHECK(comp_str(last_event(), "health") == "failed");
+    CHECK(comp_str(last_event(), "reason_code") == "quarantined");
+    // instance_fault surfaces the health level for the get_health merge.
+    { xi::CompHealth h; std::string r; int64_t s = 0;
+      CHECK(H.instance_fault("sink0", h, r, s));
+      CHECK(h == CompHealth::Failed);
+      CHECK(r == "quarantined"); }
+    // A quarantine → degraded transition on the SAME instance coalesces cleanly
+    // (health + reason both change) and re-enable clears it back to running.
+    reset_events();
+    H.mark_instance_fault("sink0", CompHealth::Degraded, xi::kReasonPluginFault);
+    CHECK(comp_str(last_event(), "health") == "degraded");
+    CHECK(H.clear_instance_degraded("sink0"));
+    CHECK(H.state() == SysState::Running);
+
+    // ---------------------------------------------------------------------
     SECTION("a failed script also drives running → degraded → running");
     reset_events();
     H.set_script(CompHealth::Failed, xi::kReasonCompileError, "inspect.cpp");

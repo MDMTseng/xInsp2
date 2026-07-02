@@ -647,16 +647,29 @@ is the low-latency accelerator between pulls. Full model + rationale:
 | `since_ms` | wall-clock ms when the current `state` was entered (age = `now − since_ms`) |
 | `boot_id` / `station_id` | the run-outcome identity slice (same values stamped on every `run_result`) |
 | `components[].kind` | `script` \| `instance` \| `group` \| `source` |
-| `components[].health` | `ok` \| `degraded` (ran then faulted, still in service — the quarantine seed) \| `failed` (could not be brought into service) |
-| `components[].reason_code` | `plugin_fault` (caught crash) \| `prepare_failed` \| `compile_error` \| `""` when `ok` |
+| `components[].health` | `ok` \| `degraded` (ran then faulted, still in service — the quarantine seed) \| `failed` (could not be brought into service, or `on_fault=refuse` pulled it out) |
+| `components[].reason_code` | `plugin_fault` (caught crash, kept in service) \| `quarantined` (`on_fault=refuse` pulled it out) \| `prepare_failed` \| `compile_error` \| `""` when `ok` |
 | `components[].since_ms` | when this component health was entered (`0` = not tracked / born state) |
 | instance extras | `crash_count` — process()-crash count (also on `get_state`) |
 | group extras | `queue_now` / `running` / `dropped` — as on `dispatch_stats` |
 | source extras | `last_emit_age_ms` — the existing emit-age signal; sources are always `ok` (core does **not** invent a staleness threshold — alerting is the consumer's call, same as `dispatch_stats`) |
 
 Instance base health is derived from the `get_state` machine at query time (so it
-cannot drift); the caught-crash `degraded` overlay is core-owned. See `get_state`
-for the single-instance point query.
+cannot drift); the caught-crash `degraded` / `quarantined` overlay is core-owned.
+See `get_state` for the single-instance point query.
+
+**Post-fault policy (`on_fault`, item 14).** What happens to an instance whose
+`process()`/`exchange()` faults and is caught is governed by a per-instance
+`on_fault` policy — `reuse` (default; logged + `degraded`, stays in service),
+`reinit` (rebuilt from its last committed config before next use, dropping
+in-flight state; escalates to `refuse` after 3 consecutive rebuild failures), or
+`refuse` (pulled from service → `failed`/`quarantined`; subsequent `process()`
+calls fail fast). It is declared per-plugin in `plugin.json` (`"on_fault"`) with a
+per-instance `instance.json` override, and defaults to `reuse` (nothing changes
+unless declared). A quarantined instance is re-enabled through the existing
+config-commit surface — `set_instance_def` / `commit_group`. See the plugin
+authoring guide (`docs/guides/write-a-plugin.md`) and
+`docs/new_gen/04-health-contract.md`.
 
 ### `list_instances`
 `args: {}` → triggers an `instances` message.

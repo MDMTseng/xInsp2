@@ -60,6 +60,7 @@ inline constexpr const char* kReasonPluginFault   = "plugin_fault";    // caught
 inline constexpr const char* kReasonPrepareFailed = "prepare_failed";  // prepare/commit/set_def failed → failed
 inline constexpr const char* kReasonCompileError  = "compile_error";   // compile_and_load failed → failed (script)
 inline constexpr const char* kReasonWatchdogTrip  = "watchdog_trip";   // fatal → fault
+inline constexpr const char* kReasonQuarantined   = "quarantined";     // on_fault=refuse pulled it from service → failed (item 14)
 
 inline const char* sys_state_name(SysState s) {
     switch (s) {
@@ -193,18 +194,30 @@ public:
 
     // --- per-instance runtime-fault overlay ----------------------------------
 
-    // Mark an instance runtime-degraded (a caught process()/exchange() crash).
-    // This is the ONLY per-instance health the registry stores — the quarantine
-    // seed (adoption-map item 14). Re-derives running/degraded.
-    void mark_instance_degraded(const std::string& name, const std::string& reason) {
+    // Mark an instance's per-instance runtime-fault overlay (a caught
+    // process()/exchange() crash, or an on_fault=refuse quarantine). This is the
+    // ONLY per-instance health the registry stores — the quarantine seed
+    // (adoption-map item 14). `health` is `Degraded` (kept in service — reuse /
+    // reinit) or `Failed` (pulled from service — refuse/quarantine). Re-derives
+    // running/degraded (any overlay entry, degraded OR failed, is a runtime
+    // unhealthy input that keeps the top state `degraded`).
+    void mark_instance_fault(const std::string& name, CompHealth health,
+                             const std::string& reason) {
         std::unique_lock<std::mutex> lk(mu_);
         auto it = degraded_.find(name);
-        if (it != degraded_.end() && it->second.reason == reason) return;  // coalesce
+        if (it != degraded_.end() && it->second.health == health &&
+            it->second.reason == reason)
+            return;  // coalesce
         int64_t now = xi::wall_ms();
-        degraded_[name] = DegradedInst{ reason, now };
+        degraded_[name] = DegradedInst{ health, reason, now };
         recompute_locked_();
-        Comp c{ kKindInstance, name, CompHealth::Degraded, reason, now };
+        Comp c{ kKindInstance, name, health, reason, now };
         emit_(lk, &c);
+    }
+
+    // Back-compat convenience: a runtime crash marks the instance `degraded`.
+    void mark_instance_degraded(const std::string& name, const std::string& reason) {
+        mark_instance_fault(name, CompHealth::Degraded, reason);
     }
 
     // Clear an instance's runtime-fault overlay (re-activated / removed / project
@@ -227,14 +240,23 @@ public:
         emit_(lk, nullptr);
     }
 
-    // Look up an instance's runtime-fault overlay for the get_health merge.
-    bool instance_degraded(const std::string& name, std::string& reason,
-                           int64_t& since_ms) const {
+    // Look up an instance's runtime-fault overlay (health + reason) for the
+    // get_health merge. Returns false when the instance carries no overlay.
+    bool instance_fault(const std::string& name, CompHealth& health,
+                        std::string& reason, int64_t& since_ms) const {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = degraded_.find(name);
         if (it == degraded_.end()) return false;
-        reason = it->second.reason; since_ms = it->second.since_ms;
+        health = it->second.health; reason = it->second.reason;
+        since_ms = it->second.since_ms;
         return true;
+    }
+
+    // Back-compat: is there ANY runtime-fault overlay for `name`? (reason/since
+    // out; health folded away — callers that need it use instance_fault.)
+    bool instance_degraded(const std::string& name, std::string& reason,
+                           int64_t& since_ms) const {
+        CompHealth h; return instance_fault(name, h, reason, since_ms);
     }
 
     // --- snapshot helpers ----------------------------------------------------
@@ -314,7 +336,7 @@ public:
 private:
     HealthRegistry() : state_since_ms_(xi::wall_ms()) {}
 
-    struct DegradedInst { std::string reason; int64_t since_ms; };
+    struct DegradedInst { CompHealth health; std::string reason; int64_t since_ms; };
     struct Comp {
         const char* kind; std::string name; CompHealth health;
         std::string reason; int64_t since_ms;

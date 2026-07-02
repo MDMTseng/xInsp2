@@ -696,6 +696,10 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                     warned_iso_deprecated_ = true;
                 }
 
+                // item 14: resolve the effective post-fault policy — instance.json
+                // "on_fault" override if present, else the plugin default.
+                ii.on_fault = parse_on_fault(extract_string(ic, "on_fault").value_or(""),
+                                             pi.default_on_fault);
                 if (!created && pi.c_factory) {
                     xi_host_api& host = default_host_api();
                     // ImagePoolOwnerScope tags the ctor's images and sweeps them
@@ -711,6 +715,8 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         // Hand the owner id to the adapter so subsequent process /
                         // exchange calls keep tagging into the same bucket.
                         adapter->adopt_owner_id(owner.release());
+                        adapter->set_on_fault(ii.on_fault);             // item 14
+                        adapter->arm_reinit(pi.c_factory, &host);        // enable in-place reinit
                         ii.instance = std::move(adapter);
                         created = true;
                     }
