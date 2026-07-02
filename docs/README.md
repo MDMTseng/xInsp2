@@ -10,6 +10,7 @@ xInsp2 itself?** Jump to [Develop xInsp2](#develop-xinsp2-itself) below.
 | File | Question it answers |
 |---|---|
 | [`overview.md`](./overview.md) | What is this? Mental model, architecture-in-one-picture, the core nouns. |
+| [`repository-map.md`](./repository-map.md) | What's in the repo? The four products, per-package ownership / version / build / test / outputs. |
 
 ## Do (`guides/`)
 | Guide | When to read |
