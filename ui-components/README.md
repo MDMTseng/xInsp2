@@ -18,7 +18,7 @@ src/
     xi-image-viewer.svelte   canvas viewer: wheel-zoom/pan/pixel-probe; tap-out setFrame/fit + pixelpick/viewchange
     xi-image-editor.svelte   teach editor: draw point/rect/polygon (pull model); tap-out setFrame/setTool + commit/cancel
   dashboard/         the HMI dashboard, importable (one source, used by hmi/ + external apps)
-    cards.mjs        xi-card-* dashboard cards (verdict/yield/throughput/groups — run_result/run_ms/dispatch_stats)
+    cards.mjs        xi-card-* dashboard cards (verdict/yield/throughput/groups — run_result/compute_ms/dispatch_stats)
     layout.mjs       N-ary split/tabs layout engine (pure)
     dashboard.mjs    mountDashboard(host,{client,dashboard}) — render cards from a config + feed from WS
   lib/

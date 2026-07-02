@@ -3,10 +3,10 @@
 //
 // Contract (see docs/roadmap/production-hmi.md):
 //   - host sets  el.binding = {...}  and  el.config = {...}
-//   - host calls el.feed({ run_id, run_ms, status, result, groups }) on each update
+//   - host calls el.feed({ run_id, compute_ms, status, result, groups }) on each update
 //   - cards never open their own WS; they only render what they're fed.
 //
-// These are the GENERIC cards — they read the run_result / run_ms / dispatch_stats
+// These are the GENERIC cards — they read the run_result / compute_ms / dispatch_stats
 // streams only. They carry NO preview/vars/gid coupling; a plugin webUI that wants
 // per-VAR value/image/SPC tiles renders those itself from frames it decodes.
 //
@@ -84,7 +84,7 @@ class ThroughputCard extends HTMLElement {
       this.lastResult = r.run_id;
       this.stamps.push(Date.now());
     }
-    if (st.run_ms != null) this.lastCompute = st.run_ms;  // secondary, non-driving
+    if (st.compute_ms != null) this.lastCompute = st.compute_ms;  // secondary, non-driving
     this.render();
   }
   render() {

@@ -8,7 +8,7 @@
 // its own compose-mode editor below. The HMI is a GENERIC dashboard host: it
 // consumes only the run_result / run_finished / status events + dispatch_stats —
 // no preview/vars/gid decoding (a plugin's own webUI owns those frames).
-import { CARDS,
+import { CARDS, XiClient,
          isLeaf, isSplit, isTabs, weightsOf, validate,
          getNode, addSibling, setCard, setWeights, removePane,
          wrapInTabs, addTab, removeTab, renameTab, setActive } from "./lib/xi-components.esm.js";
@@ -21,7 +21,7 @@ const WS_URL = qs.get("ws") ||
   `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 const DASH = qs.get("dashboard") || "./dashboard.json";
 
-const state = { run_id: -1, run_ms: null, status: null, result: null, groups: [] };
+const state = { run_id: -1, compute_ms: null, status: null, result: null, groups: [] };
 let cards = [];
 let raf = 0;
 
@@ -266,54 +266,88 @@ function buildControls() {
 }
 buildControls();
 
+// One transport for the whole HMI: the shared, generic XiClient shim (from the
+// vendored ui-components bundle) owns envelope parsing, request/response
+// correlation, and connection lifecycle — so this page no longer hand-rolls a
+// second envelope parser. The shim doesn't auto-reconnect (by design); the HMI
+// keeps its own 1.5 s reconnect loop and wires the shim's lifecycle events to the
+// on-page diagnostics. Binary frames are ignored (no onBinary subscription): a
+// plugin's own webUI owns preview/vars/gid decode, not this generic host.
+const client = new XiClient(WS_URL);
+let statsTimer = 0, reconnectPending = false;
+
+const stopStatsPoll = () => { if (statsTimer) { clearInterval(statsTimer); statsTimer = 0; } };
+// Poll dispatch_stats so the groups card can show live per-group concurrency.
+// Cheap, so just poll whenever connected (the reply is ignored if no groups card).
+const startStatsPoll = () => {
+  if (statsTimer) return;
+  statsTimer = setInterval(() => {
+    client.cmd("dispatch_stats")
+      .then((d) => { if (d && Array.isArray(d.groups)) { state.groups = d.groups; scheduleRender(); } })
+      .catch(() => { /* reply races a disconnect — next poll or reconnect covers it */ });
+  }, 150);
+};
+// Ask the BE for the PROJECT's dashboard so the HMI only needs the WS URL (no
+// filesystem coupling). If the project has one it overrides the static fetch.
+const requestDashboard = () => {
+  client.cmd("get_dashboard", BOARD ? { name: BOARD } : {})
+    .then((d) => {
+      if (d && d.found && d.dashboard) { dlog("dashboard from BE (project)"); applyDash(d.dashboard); }
+      else dlog("BE has no project dashboard — keeping static");
+    })
+    .catch((e) => dlog(`get_dashboard failed: ${e && e.message ? e.message : e}`));
+};
+
+client.onEvent((m) => {
+  if (m.name === "run_finished" && m.data) {
+    if (typeof m.data.run_id === "number") state.run_id = m.data.run_id;
+    // INSPECT COMPUTE time only — NOT cycle/decision latency (ws-protocol.md
+    // "run_finished"). Prefer the explicitly named `inspect_compute_us` (µs);
+    // fall back to the legacy integer `ms`. The throughput card shows this as a
+    // secondary, honestly labelled "compute … ms" readout; real parts/min comes
+    // from counting run_result events over wall-clock time, not from this.
+    if (typeof m.data.inspect_compute_us === "number") state.compute_ms = m.data.inspect_compute_us / 1000;
+    else if (typeof m.data.ms === "number") state.compute_ms = m.data.ms;
+    scheduleRender();
+  }
+  // The one per-run verdict (see docs/roadmap/run-result.md). Carries its own
+  // run_id (absent on a dropped frame) so cards can count distinct runs.
+  else if (m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
+  else if (m.name === "status") { state.status = m.data; scheduleRender(); }
+});
+
+client.onOpen(() => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); });
+client.onClose((info) => {
+  stopStatsPoll();
+  if (info.busy) {
+    // Single-client reject: the backend is up and healthy but owned by another
+    // client (ws-protocol.md "Single-client enforcement"). Say so instead of a
+    // generic "disconnected" — and keep retrying, since it clears when they leave.
+    dlog(`WS CLOSE — another client owns the backend (single-client-busy; code=${info.code ?? "-"})`);
+    setConn("● another client is connected", "#7a4a1e");
+  } else {
+    dlog(`WS CLOSE code=${info.code ?? "-"} reason=${info.reason || "-"}`);
+    setConn("● disconnected", "#6a1e1e");
+  }
+  scheduleReconnect();
+});
+
+function scheduleReconnect(delay = 1500) {
+  if (reconnectPending) return;   // dedupe, so a repeated close can't stack reconnects
+  reconnectPending = true;
+  setTimeout(() => { reconnectPending = false; connect(); }, delay);
+}
+
 function connect() {
   setConn("connecting…", "#7a6a1e");
   dlog(`WS connect -> ${WS_URL}`);
-  let ws;
-  try { ws = new WebSocket(WS_URL); }
-  catch (e) { dlog(`WS constructor threw: ${e}`); setConn("● bad url", "#6a1e1e"); return; }
-  ws.binaryType = "arraybuffer";
-  // Poll dispatch_stats so the groups card can show live per-group concurrency.
-  // Cheap, so just poll whenever connected (the rsp is ignored if no groups card).
-  let statsTimer = 0, cmdId = 1, dashCmdId = -1;
-  const startStatsPoll = () => {
-    if (statsTimer) return;
-    statsTimer = setInterval(() => {
-      if (ws.readyState === 1) ws.send(JSON.stringify({ type: "cmd", id: ++cmdId, name: "dispatch_stats", args: {} }));
-    }, 150);
-  };
-  // Ask the BE for the PROJECT's dashboard so the HMI only needs the WS URL (no
-  // filesystem coupling). If the project has one it overrides the static fetch.
-  const requestDashboard = () => {
-    dashCmdId = ++cmdId;
-    ws.send(JSON.stringify({ type: "cmd", id: dashCmdId, name: "get_dashboard", args: BOARD ? { name: BOARD } : {} }));
-  };
-  ws.onopen = () => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); };
-  ws.onclose = (e) => { dlog(`WS CLOSE code=${e.code} reason=${e.reason || "-"} clean=${e.wasClean}`); if (statsTimer) { clearInterval(statsTimer); statsTimer = 0; } setConn("● disconnected", "#6a1e1e"); setTimeout(connect, 1500); };
-  ws.onerror = () => { dlog("WS ERROR event"); ws.close(); };
-  ws.onmessage = (ev) => {
-    // Generic dashboard host: only text events/replies are consumed. Binary
-    // frames (a plugin's own previews) are ignored here — the plugin's webUI
-    // owns that decode; this page carries no preview/vars/gid wiring.
-    if (typeof ev.data !== "string") return;
-    let m; try { m = JSON.parse(ev.data); } catch { return; }
-    if (m.type === "event" && m.name === "run_finished" && m.data) {
-      if (typeof m.data.run_id === "number") state.run_id = m.data.run_id;
-      if (typeof m.data.ms === "number") state.run_ms = m.data.ms;
-      scheduleRender();
-    }
-    // The one per-run verdict (see docs/roadmap/run-result.md). Carries its own
-    // run_id (absent on a dropped frame) so cards can count distinct runs.
-    else if (m.type === "event" && m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
-    else if (m.type === "event" && (m.name === "safe_state" || m.name === "status")) { state.status = m.data; scheduleRender(); }
-    // dispatch_stats reply → feed the groups card.
-    else if (m.type === "rsp" && m.data && Array.isArray(m.data.groups)) { state.groups = m.data.groups; scheduleRender(); }
-    // get_dashboard reply → the project's own dashboard wins over the static one.
-    else if (m.type === "rsp" && m.id === dashCmdId) {
-      if (m.data?.found && m.data.dashboard) { dlog("dashboard from BE (project)"); applyDash(m.data.dashboard); }
-      else dlog("BE has no project dashboard — keeping static");
-    }
-  };
+  // The shim rejects on any pre-open failure; onClose (above) already handles the
+  // badge + reconnect for a socket that reached the network, so this catch only
+  // needs to cover the no-close cases (bad URL, version mismatch) and log them.
+  client.connect().catch((e) => {
+    dlog(`WS connect rejected: ${e && e.message ? e.message : e}`);
+    if (!e || !("busy" in e)) { setConn("● bad url", "#6a1e1e"); }  // no socket ever opened/closed
+  });
 }
 
 // Run layout + connect independently so a layout error can't block the WS, and
