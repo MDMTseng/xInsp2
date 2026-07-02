@@ -56,7 +56,13 @@ All exit with `ALL TESTS PASSED`.
   not listed in `docs/.doc-coverage-allow` with a reason. This is what stops a new
   export/command/macro from shipping while the guides lag. Run standalone:
   `python tools/check_doc_coverage.py`. Skipped only if no Python3 is found.
-- `perf_*` — the perf-regression gates (see *Performance baseline* below).
+- `perf_*` — **best-case micro-throughput regression gates** (see *Performance
+  baseline* below). Each metric is a best-of/minimum over repeated batches, so it
+  catches a same-machine, same-backend slowdown in a hot inner op; it does **not**
+  prove p99/tail or end-to-end latency. Each baseline carries an environment
+  fingerprint (`xi.perf-baseline/1`): on a different CPU / JPEG backend / build
+  type — or against a pre-fingerprint baseline — the gate **skips with a reason**
+  rather than reporting a false regression.
 - `script_selfcheck` — a compile-only guard that `xi_script_support.hpp` (force-
   included into every inspection script) stays **self-sufficient**. It compiles a
   TU that includes *only* that header; if the header ever needs a symbol it doesn't
@@ -191,7 +197,19 @@ the SVG connector. The backend half is also covered headless by
 
 ## Performance baseline (1920×1080 RGB)
 
-Numbers from a recent sweep. Drift if you change ops / encoders.
+Numbers from a recent sweep. Drift if you change ops / encoders. These are
+**best-case micro-throughput** figures (best-of/minimum timing) — a floor for a
+hot op on the reference machine, not a p99/tail or end-to-end latency budget.
+
+The committed perf-gate baselines (`backend/tests/perf_baselines/*.txt`) each
+carry an `xi.perf-baseline/1` environment fingerprint (cpu, logical_cores, os,
+build_type, opencv, jpeg_backend, xinsp commit). The JPEG metric key is
+**backend-aware** (`jpeg_<backend>_q85_1920x1080_us`) because turbojpeg / OpenCV /
+IPP / stb differ by 2–5×, so a machine running a different encoder is not a
+regression. A run whose fingerprint doesn't match the baseline (different
+hardware/backend/build, or an old baseline with no fingerprint) is **skipped
+with a reason**, not failed. Re-capture on a machine with
+`-DUPDATE_BASELINE=ON` (see `backend/tests/perf_gate.cmake`).
 
 ### JPEG encode (q=85)
 
@@ -213,6 +231,32 @@ Numbers from a recent sweep. Drift if you change ops / encoders.
 | dilate(r=1) | 24.64 ms | 0.63 ms | **0.54 ms** |
 
 Dispatch order: **IPP → OpenCV → portable C++** (selected at compile).
+
+### What these numbers do and don't claim
+
+Precise wording so the baselines aren't over-read:
+
+- **Dispatch groups give worker-capacity isolation, not full isolation.** A
+  group bounds how many workers a source class can occupy (its lane / `max_parallel`),
+  so one source can't starve another of *dispatch slots*. Groups still **share**
+  CPU cores, memory bandwidth, the allocator + `ImagePool`, the OpenCV/OpenMP
+  thread pools, any shared non-reentrant plugin instance, I/O, and the
+  same-process failure domain (a crash in one takes the process down). Treat a
+  group as a capacity lane, not a sandbox.
+- **Image lifecycle is zero-copy across plugin boundaries, not zero-allocation.**
+  Records and images pass **by pointer / refcounted handle** across in-process
+  plugin boundaries (no serialize, no pixel copy — see `test_record`,
+  `ws_cache_input`), with bounded, refcounted ownership. But `ImagePool::create`
+  currently **allocates** a fresh pixel buffer and memsets it (first-touch page
+  faults), and `release` frees it — so output allocation is **per-image unless a
+  buffer is reused**. The measured cost (`bench_image_pool`) is small enough for
+  target rates (its header explains why buffer reuse isn't worth it) — but this is
+  *bounded, acceptable* allocation, **not** "zero allocation per frame".
+- **The runtime timer / synthetic-source cadence is soft (best-effort), not
+  deadline-accurate.** The timer source and `set_timer_fps` path schedule via
+  **relative sleeps**, so the effective rate drifts under load and is not a hard
+  real-time deadline. Use it as a best-effort cadence source, not a guaranteed
+  frame clock.
 
 ---
 
