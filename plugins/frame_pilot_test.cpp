@@ -29,8 +29,8 @@
 #include <xi/xi_trigger_bus.hpp>    // install_trigger_hook + the dispatch sink
 #include <xi/xi_mp.hpp>             // decode blob_analysis's nested-contour msgpack
 
-#include "blob_analysis_keys.h"     // the frame schema keyset blob reads/writes
-#include "mock_camera_keys.h"
+#include "blob_analysis_keys.gen.h"     // the frame schema keyset blob reads/writes
+#include "mock_camera_keys.gen.h"
 
 #include <chrono>
 #include <condition_variable>

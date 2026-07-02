@@ -1,0 +1,28 @@
+{
+  "$comment": "TRANSCRIBED from plugins/synced_stereo/synced_stereo_keys.h + _io.h. synced_stereo is a GATHERING SOURCE: no process() input Record, its surface is CONFIG (fps settable; running/ticks read-only get_def), COMMANDS (start/stop/set_fps/fire), and a two-image FRAME (left+right under one trigger). The Frame extractor's derived has_both() convenience and the defaulted fire(int n = 1) are outside what the generator emits, so this decl sets \"handwritten_io\": true — the generator owns the KEY contract (_keys.gen.h) and the FrameSchema (_schema.gen.h, slots left+right) but synced_stereo_io.h stays hand-written (codegen-gap note in docs/new_gen/08, contract/codegen/README.md). NOTE: synced_stereo.cpp is not compiled against these constants yet (its worker/emit port is on a parallel branch); the values mirror the literals it emits today and the host-mock test pins that wire contract.",
+  "plugin": "synced_stereo",
+  "namespace": "xi::synced_stereo",
+  "schema_version": 1,
+  "role": "source",
+  "handwritten_io": true,
+  "title": "synced_stereo — correlated left+right frame source (one trigger, two images).",
+  "config": [
+    { "key": "fps",     "type": "int",  "doc": "int (settable)" },
+    { "key": "running", "type": "bool", "readonly": true, "doc": "bool (get_def only, read-only)" },
+    { "key": "ticks",   "type": "int",  "readonly": true, "doc": "int (get_def only, read-only)" }
+  ],
+  "commands": {
+    "selector_key": "command",
+    "value_key": "value",
+    "list": [
+      { "name": "start" },
+      { "name": "stop" },
+      { "name": "set_fps", "params": [ { "key": "value", "arg": "v", "type": "int" } ] },
+      { "name": "fire",    "params": [ { "key": "n",     "arg": "n", "type": "int" } ] }
+    ]
+  },
+  "output_frame": [
+    { "key": "left",  "type": "image", "accessor": "left",  "has_accessor": "has_left",  "doc": "image (vertical stripes)" },
+    { "key": "right", "type": "image", "accessor": "right", "has_accessor": "has_right", "doc": "image (horizontal stripes)" }
+  ]
+}

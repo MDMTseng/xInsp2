@@ -36,7 +36,7 @@
 #include <xi/xi_json.hpp>      // canonical config/command parsing (over cmd.find/atoi)
 #include <xi/xi_contract.hpp>  // schema-version stamp key + skew rejection
 
-#include "config_swap_probe_keys.h"  // guard 1: config/command/status key names, once
+#include "config_swap_probe_keys.gen.h"  // guard 1: config/command/status key names, once
 
 #include <atomic>
 #include <memory>

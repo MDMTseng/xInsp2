@@ -173,8 +173,9 @@ XI_TEST(gen_mock_camera_frame_extractor_accessors_exist) {
 
 namespace {
 using MS = xi::mock_camera::MockCameraSchema;
-static_assert(MS::slot_count() == 1, "generated mock_camera schema slot count");
+static_assert(MS::slot_count() == 2, "generated mock_camera schema slot count (frame + seq)");
 static_assert(MS::slot_of("frame") == MS::kFrame, "slot_of maps the frame key");
+static_assert(MS::slot_of("seq") == MS::kSeq, "slot_of maps the frame-mode seq entry");
 }  // namespace
 
 int main() {

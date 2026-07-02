@@ -14,7 +14,7 @@
 #include <xi/xi_json.hpp>      // parses set_def/exchange (canonical over cmd.find)
 #include <xi/xi_contract.hpp>  // fail-loud command inputs + schema-skew errors
 
-#include "mock_camera_keys.h"
+#include "mock_camera_keys.gen.h"
 
 #include <atomic>
 #include <chrono>

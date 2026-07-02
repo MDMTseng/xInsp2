@@ -18,9 +18,16 @@ names (hand-parsed with raw yyjson before) now follow the plugin data contract:
 
 ## Keys — one source of truth
 
-Every control key is named **once** in
-[`json_source_keys.h`](./json_source_keys.h); the plugin's own readers and the
-typed view ([`json_source_io.h`](./json_source_io.h)) compile from it.
+Every control key is declared **once** in
+[`../../contract/plugins/json_source.decl.json`](../../contract/plugins/json_source.decl.json),
+from which `contract/codegen/gen_contract.py` generates `json_source_keys.gen.h`
+(the `keys::` constants). The plugin's own readers and the typed view
+([`json_source_io.h`](./json_source_io.h)) compile from those generated constants.
+The `_io.h` here stays **hand-written** (the decl sets `"handwritten_io": true`):
+its config/`set_data`/`Patch` builders splice raw user JSON — an OPEN control
+surface by design, outside the typed field family the generator emits — a
+documented codegen gap (see `contract/codegen/README.md`, "Coverage & the codegen
+gap").
 
 | Surface | Key | Type | Notes |
 |---------|-----|------|-------|

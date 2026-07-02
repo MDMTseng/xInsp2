@@ -16,10 +16,15 @@ is observable. It follows the plugin data contract on those surfaces.
 
 ## Keys — one source of truth
 
-Every key name is defined **once** in
-[`config_swap_probe_keys.h`](./config_swap_probe_keys.h); the plugin's own
-readers and the typed view ([`config_swap_probe_io.h`](./config_swap_probe_io.h))
-compile from it.
+Every key name is declared **once** in
+[`../../contract/plugins/config_swap_probe.decl.json`](../../contract/plugins/config_swap_probe.decl.json),
+from which `contract/codegen/gen_contract.py` generates `config_swap_probe_keys.gen.h`
+(the `keys::` constants). The plugin's own readers and the typed view
+([`config_swap_probe_io.h`](./config_swap_probe_io.h)) compile from those generated
+constants. The `_io.h` here stays **hand-written** (the decl sets
+`"handwritten_io": true`): its `get_status` reply extractor is outside the typed
+field family the generator emits — a documented codegen gap (see
+`contract/codegen/README.md`, "Coverage & the codegen gap").
 
 | Surface | Key | Type | Notes |
 |---------|-----|------|-------|

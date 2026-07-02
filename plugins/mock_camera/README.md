@@ -14,9 +14,11 @@ schema-version stamp.
 
 ## Keys — one source of truth
 
-Every key name is defined **once** in
-[`mock_camera_keys.h`](./mock_camera_keys.h); the plugin's readers and the typed
-view both compile from it.
+Every key name is declared **once** in
+[`../../contract/plugins/mock_camera.decl.json`](../../contract/plugins/mock_camera.decl.json),
+from which `contract/codegen/gen_contract.py` generates `mock_camera_keys.gen.h`
+and the typed `mock_camera_io.gen.h`; the plugin's readers and the typed view
+both compile from those generated constants.
 
 | Surface | Key | Type | Notes |
 |---------|-----|------|-------|
@@ -35,10 +37,10 @@ naming both versions. A config with no `_schema` stamp (e.g. a legacy persisted
 
 ## Using it from a driver / script
 
-Include [`mock_camera_io.h`](./mock_camera_io.h):
+Include the generated `mock_camera_io.gen.h`:
 
 ```cpp
-#include "mock_camera_io.h"
+#include "mock_camera_io.gen.h"
 
 // Config via the typed builder (stamps the schema version).
 host.set_def(cam, xi::mock_camera::Config().width(1280).height(720).fps(15));

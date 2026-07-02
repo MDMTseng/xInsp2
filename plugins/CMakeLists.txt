@@ -23,6 +23,17 @@ set(CMAKE_SHARED_LIBRARY_PREFIX "xi-")
 set(XI_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
 set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 
+# Contract-codegen generated headers (contract/codegen/gen_contract.py). The
+# wave-3 swap-in (docs/new_gen/08 Wave 3): every in-tree plugin's #include of its
+# "<p>_keys.gen.h" / "<p>_io.gen.h" resolves here instead of a hand-written copy
+# in the plugin dir, so the ONE committed generated set under version control is
+# the single source of truth and its regenerate-diff shows in git. Directory scope
+# so plugin DLL targets AND their contract-test exes below all see it. The decls
+# live in contract/plugins/*.decl.json; `python contract/codegen/gen_contract.py`
+# refreshes this dir; the codegen_equiv ctest fails a stale commit.
+set(XI_CODEGEN ${CMAKE_CURRENT_SOURCE_DIR}/../contract/codegen/generated/plugins)
+include_directories(${XI_CODEGEN})
+
 # OpenCV — NO LONGER a mandatory dependency (OQ-9). xi_image.hpp / xi_abi.hpp
 # are now OpenCV-free; the cv:: bridge lives in the opt-in <xi/xi_cv.hpp>. None
 # of the in-tree plugins below do any CV, so they build with OpenCV absent.

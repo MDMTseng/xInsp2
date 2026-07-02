@@ -62,10 +62,16 @@ the `blobs` array's item accessor `blob()` and its point class `Point`, not
   `keys` array) for the offset-accessor frame path (`xi_frame.hpp` /
   `docs/new_gen/07`). Flat top-level scalar/image keys only — arrays are not
   slots. `slot_of("k")` is a compile-time constant; keyset drift is a build error.
+  SKIPPED when the plugin declares no flat frame slots (a source with no
+  `output_frame`): an empty schema is noise nothing adopts.
 - **`_io.gen.h`** — the `Input`/`Output` (operator) or `Config`/`Command`/`Frame`
   (source) builder+extractor classes, byte-for-byte the call surface the plugin
   and its tests use. Compiles down to `xi::Record`/`xi::Json` set/get — nothing
-  new crosses the ABI.
+  new crosses the ABI. SKIPPED when the decl sets `"handwritten_io": true` — some
+  plugins' control surface is outside the constrained typed-field family (an
+  open-schema raw-JSON builder, a reply/status extractor, a derived convenience
+  accessor); the generator owns their KEY contract but their `_io.h` stays
+  hand-written. See "Coverage & the codegen gap" below.
 - **`.gen.ts` / `_gen.py`** — typed views over the JSON-carried keys (images are
   omitted: they ride the Record image bag, not the JSON).
 - **`_keys.md`** — a docs keys-table fragment (so review 11's "README shows a
@@ -78,12 +84,15 @@ Two ctests, both label `contract`, wired in `backend/CMakeLists.txt`:
 1. **`codegen_equiv`** (`check_equiv.py`, pure stdlib) — regenerates into a tmp
    dir and (a) byte-compares against the committed `generated/plugins/` (stale =
    fail); (c) extracts the `{kName -> "value"}` + `kSchemaVersion` set from the
-   generated `_keys.gen.h`, the decl, **and** the hand-written
-   `plugins/<p>/<p>_keys.h`, and fails if any of the three disagree — that is the
-   drift guard both directions; (e) **WARNs** (non-fatal) for every plugin that
-   ships a hand-written `*_keys.h` with no decl (the coverage ratchet — the
-   covered set only grows). Today it warns for `config_swap_probe`, `json_source`,
-   `synced_stereo`.
+   generated `_keys.gen.h` and the decl and fails if they disagree — the generator
+   must emit exactly the decl's key set. If a hand-written `plugins/<p>/<p>_keys.h`
+   is **still present** (a plugin declared but not yet swapped) it is ALSO compared,
+   so the pending swap is proven a true drop-in; once swapped, that header is gone
+   and the decl↔generated leg is the whole proof (an absent hand-written header is
+   the swapped state, not a failure). (e) **WARNs** (non-fatal) for every plugin
+   that ships a hand-written `*_keys.h` with no decl (the coverage ratchet — the
+   covered set only grows). All five originally-covered/warned plugins are now
+   swapped, so the WARN list is **empty**; the mechanism stays for future plugins.
 2. **`codegen_equiv_compile`** (`equiv/test_codegen_equiv.cpp`) — a custom command
    regenerates the headers into the build tree, then this TU `#include`s the
    GENERATED headers in place of the hand-written ones and drives the same
@@ -97,32 +106,60 @@ level; `codegen_equiv_compile` proves the generated headers *satisfy the real
 call sites* at compile+run time. That is stage-2's "zero call-site changes"
 promise, mechanised.
 
-## Swap-in plan (for the integration lead — do NOT execute in this branch)
+## Swap-in (EXECUTED — wave-2 exit, docs/new_gen/08 Wave 3)
 
-The hand-written `plugins/<p>/{<p>_keys.h,<p>_io.h}` are **left in place** here on
-purpose: the wave-2 pilot (frame door) is concurrently editing those plugins.
-When the pilot has landed and the accessor convention is stable, the integration
-lead performs the swap per plugin, at wave-2 exit:
+The wave-2 pilot (frame door) has landed and the accessor convention is stable,
+so the swap is done. **Mechanism chosen: include-path add** — `plugins/CMakeLists.txt`
+puts `contract/codegen/generated/plugins/` on the plugin build's include path
+(directory scope, so plugin DLLs and their contract-test exes both see it) and
+each consumer's `#include "<p>_keys.h"` / `"<p>_io.h"` became `"<p>_keys.gen.h"` /
+`"<p>_io.gen.h"`. The ONE committed generated set is the single source of truth,
+and its regenerate-diff shows in git at exactly the path `codegen_equiv` already
+byte-checks. (The alternative — copying the `.gen.h` back into each plugin dir via
+a build-time custom command — was rejected: it either duplicates a committed copy
+per plugin, a second drift surface, or makes the copy build-time-only, hiding the
+regenerate-diff from git. The include-path add has neither problem and reuses the
+existing `../backend/include` cross-tree reference style the plugin build already
+uses.) The `#include` line is a *mechanism* edit, not a *call-site* edit — every
+builder/extractor call site (`Input().threshold(…)`, `keys::kFoo`, `Frame{…}`,
+`out.blob(i).area()`) compiled **unchanged**, which is stage-2's promise, proven.
 
-1. **Regenerate** the artifacts from the decls:
-   `python contract/codegen/gen_contract.py`
-   (and confirm `ctest -R codegen_equiv` is green — generated ≡ hand-written).
-2. **Point the includes at the generated headers.** Either copy the two
-   `generated/plugins/<p>_{keys,io}.gen.h` over the hand-written
-   `plugins/<p>/<p>_{keys,io}.h` (keeping the include *names* the `.cpp`/tests
-   use), or add `generated/plugins/` to the plugin's include path and switch the
-   `#include "<p>_keys.h"` lines to `"<p>_keys.gen.h"`. No call-site edit is
-   needed — the surface is identical (that is exactly what `codegen_equiv` and
-   `codegen_equiv_compile` prove).
-3. **Delete the hand-written headers** once the plugin builds against the
-   generated ones, and add the plugin's `_schema.gen.h` where the frame path is
-   adopted. From then the decl is the single source of truth; `codegen_equiv`
-   keeps it and the (now generated) headers in lockstep, and the config-UI forms,
-   Python typing, and generated docs from the same decl light up (stage-2 tail).
+Per plugin the swap was: regenerate → point includes at the generated headers →
+delete the hand-written headers once every consumer (plugin `.cpp`, tests,
+`frame_pilot_test`, the FrameSchema usage) built against the generated set with
+zero call-site edits. Regeneration is idempotent/deterministic (`--check` guards a
+stale commit), so the decl is now the single source of truth; `codegen_equiv`
+keeps it and the generated headers in lockstep.
 
-Regenerating is idempotent and deterministic, so step 1 can be re-run any time;
-the `codegen_equiv` stale-check guarantees a committed artifact is never behind
-its decl.
+## Coverage & the codegen gap
+
+All in-tree contract plugins now carry a decl and consume the generated
+`_keys.gen.h` (coverage ratchet **empty**). Two levels of swap resulted:
+
+- **Full swap** — `blob_analysis`, `mock_camera`: both `_keys.gen.h` AND
+  `_io.gen.h` replace the hand-written pair; the hand-written headers are deleted.
+  These are the wave-2 pilot pair; the compiled `codegen_equiv_compile` gate drives
+  their generated builder/extractor call sites.
+- **Keys-only swap** — `config_swap_probe`, `json_source`, `synced_stereo`: their
+  `_keys.gen.h` is a true drop-in and replaces the hand-written `_keys.h`, but their
+  `_io.h` stays **hand-written** (their decl sets `"handwritten_io": true`, which
+  suppresses `_io.gen.h`). Their control surface is outside the constrained
+  typed-field family the generator emits, so generating the I/O would require either
+  redesigning the generator past its governance or editing the tests' call sites —
+  the stage-2 rule is to STOP and record the gap, not force it. The specific gaps:
+  - `config_swap_probe` — a `get_status` **reply/status extractor** (`Status` with
+    `valid()`/`active()`/`has_staged()`/`proc()`), a class family the generator has
+    no concept of (it emits `Frame`, not a typed reply reader).
+  - `json_source` — an **open-schema** control surface *by design*: `Config.data()`
+    splices raw user JSON, `set_data` carries arbitrary JSON, and `Patch::single/
+    batch` is open-valued. This is explicitly not typed-field-declarable.
+  - `synced_stereo` — a derived `has_both()` convenience and a defaulted
+    `fire(int n = 1)`; small, but not what the generator emits verbatim.
+
+  Closing these is a future generator extension (a declarative reply-extractor
+  family; a per-command default; a combined has-accessor). Until then the decl owns
+  their keys and the `codegen_equiv` drift gate guards those; the bespoke `_io.h`
+  is a thin veneer over the generated `keys::` constants.
 ```
 python contract/codegen/gen_contract.py            # regenerate all artifacts
 python contract/codegen/gen_contract.py --check    # verify committed == regenerated

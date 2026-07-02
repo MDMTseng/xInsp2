@@ -22,7 +22,7 @@
 #include <xi/xi_json.hpp>
 #include <xi/xi_contract.hpp>
 
-#include "mock_camera_io.h"
+#include "mock_camera_io.gen.h"
 
 #ifdef _WIN32
   #include <windows.h>
