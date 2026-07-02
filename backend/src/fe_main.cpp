@@ -23,6 +23,7 @@
 #include <xi/xi_crash_report.hpp>     // xi::enrich_from_crash_report (unit-tested)
 #include <xi/xi_crash_history.hpp>    // xi::CrashHistory (structured BE-death JSONL)
 #include <xi/xi_fe_status.hpp>        // xi::FeStatus (live status snapshot -> JSON file)
+#include <xi/xi_be_health.hpp>        // xi::BeHealth + parse_be_health (BE health mirror read)
 #include <xi/xi_respawn_policy.hpp>   // xi::RespawnTracker + PluginFaultTracker (unit-tested)
 #include <xi/xi_sha256.hpp>          // xi::sha256::sha256_file (quarantine cache key)
 
@@ -87,6 +88,12 @@ struct FeConfig {
     // one cold compile so a real recompile isn't mistaken for a serving wedge; a
     // genuine wedge is still caught, just ~7 s later.
     int         heartbeat_stale_ms = 15000;
+    // BE health mirror: the backend writes its canonical top-level health
+    // (running/degraded/fault …) to this file on every health_changed, and the FE
+    // reflects it in fe_status WITHOUT holding the single WS client slot the
+    // HMI/extension needs (docs/internals/fe-be.md). Default derived from be_log,
+    // like heartbeat_file; empty disables it.
+    std::string health_file;
     // Per-inspect watchdog budget passed to the backend (--watchdog=N). The
     // serving-loop heartbeat above only catches a wedged SERVING loop; a dispatch
     // WORKER deadlocked inside a plugin's process() keeps the serving loop (and so
@@ -214,6 +221,8 @@ static FeConfig load_config(int argc, char** argv) {
     if (auto v = arg_value(argc, argv, "--be-log");         !v.empty()) c.be_log = v;
     if (auto v = arg_value(argc, argv, "--boot-timeout-ms"); !v.empty()) try { c.boot_timeout_ms = std::stoi(v); } catch (...) {}
     if (auto v = arg_value(argc, argv, "--heartbeat-file");  !v.empty()) c.heartbeat_file = v;
+    if (auto v = arg_value(argc, argv, "--health-file");     !v.empty()) c.health_file = v;
+    if (has_flag(argc, argv, "--no-health-file")) c.health_file = "-";  // explicit off
     if (auto v = arg_value(argc, argv, "--heartbeat-stale-ms"); !v.empty()) try { c.heartbeat_stale_ms = std::stoi(v); } catch (...) {}
     if (auto v = arg_value(argc, argv, "--watchdog-ms"); !v.empty()) try { c.watchdog_ms = std::stoi(v); } catch (...) {}
     if (auto v = arg_value(argc, argv, "--crash-history"); !v.empty()) c.crash_history = v;
@@ -234,6 +243,8 @@ static FeConfig load_config(int argc, char** argv) {
     if (c.backend_exe.empty()) c.backend_exe = discover_backend_exe();
     if (c.be_log.empty())      c.be_log = (fs::temp_directory_path() / "xinsp2-fe-be.log").string();
     if (c.heartbeat_file.empty()) c.heartbeat_file = c.be_log + ".hb";
+    if (c.health_file == "-")        c.health_file.clear();   // explicitly disabled
+    else if (c.health_file.empty())  c.health_file = c.be_log + ".health";
     // Crash history defaults next to be_log; "-" means explicitly disabled.
     if (c.crash_history == "-") {
         c.crash_history.clear();
@@ -275,6 +286,16 @@ static long long read_heartbeat(const std::string& path) {
     long long v = -1;
     f >> v;
     return f ? v : -1;
+}
+
+// Slurp the BE health-mirror file (tiny JSON). Empty on missing/unreadable — the
+// caller then leaves the last-known BE health in place for this poll.
+static std::string read_health_mirror(const std::string& path) {
+    if (path.empty()) return {};
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    std::stringstream ss; ss << f.rdbuf();
+    return ss.str();
 }
 
 // Crash-report parsing (read the BE's log for the minidump path it printed,
@@ -385,6 +406,10 @@ static std::string build_cmdline(const FeConfig& c) {
     for (auto& d : c.plugins_dirs) cl += " --plugins-dir=\"" + d + "\"";
     if (c.heartbeat_stale_ms > 0 && !c.heartbeat_file.empty())
         cl += " --heartbeat-file=\"" + c.heartbeat_file + "\"";
+    // Tell the BE where to mirror its canonical health so the FE can reflect it in
+    // fe_status without opening a WS client (the single client slot stays free).
+    if (!c.health_file.empty())
+        cl += " --health-file=\"" + c.health_file + "\"";
     // Fail-safe for an unattended line: arm the backend's per-inspect watchdog so a
     // worker wedged in a plugin's process() is caught + respawned (the heartbeat
     // can't see it). 0 disables.
@@ -601,6 +626,19 @@ static int run_supervisor(const FeConfig& c) {
                         break;
                     }
                 }
+                // Mirror the BE's canonical health into fe_status. The BE writes
+                // its top-level state to health_file on each health_changed (a
+                // lifecycle-rate write); we read that small file and republish the
+                // status ONLY when it actually changes, so the FE write stays
+                // lifecycle-rate too. This does NOT open a WS client — the single
+                // client slot stays free for the HMI/extension.
+                {
+                    xi::BeHealth bh;
+                    if (xi::parse_be_health(read_health_mirror(c.health_file), bh)) {
+                        if (st.set_be_health(bh.state, bh.since_ms, bh.last_reason))
+                            publish_status(c, st);
+                    }
+                }
             } else if (++probe_fails >= c.probe_fail_max) {
                 std::fprintf(stderr, "[xinsp-fe] backend unresponsive (%d failed probes); "
                              "killing for respawn\n", probe_fails);
@@ -661,6 +699,10 @@ static int run_supervisor(const FeConfig& c) {
         // count and whether this death tripped the cap.
         history.record(ev, resp.consecutive, cap_hit);
         st.state = "down";
+        // The dead BE's last health mirror is now stale — a gone process is not
+        // "running". Drop it; the respawned BE rewrites boot->running and the next
+        // healthy poll re-reads it. (fe_status.state="down" is the live truth here.)
+        st.has_be_health = false; st.be_state.clear(); st.be_last_reason.clear();
         // Preserve the "PluginQuarantined:<id>" reason set above so the status
         // channel tells the operator the line is recovering by disabling a plugin,
         // not just that the BE died.
@@ -716,6 +758,10 @@ static void print_help() {
         "                       reaches 'ready' in N ms (default 60000; 0=off)\n"
         "  --heartbeat-stale-ms=N  serve-time wedge budget: respawn if the backend\n"
         "                       heartbeat stalls N ms while listening (default 15000; 0=off)\n"
+        "  --health-file=PATH   the backend mirrors its canonical health here; the FE\n"
+        "                       surfaces it in fe_status.be_health without a WS client\n"
+        "                       (default: <be-log>.health)\n"
+        "  --no-health-file     disable the BE health mirror\n"
         "  --watchdog-ms=N      per-inspect budget armed in the backend: catch a\n"
         "                       dispatch worker wedged in a plugin (the heartbeat\n"
         "                       can't) and respawn (default 60000; 0=off)\n"

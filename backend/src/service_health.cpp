@@ -15,20 +15,56 @@
 //     lanes; sources → TriggerBus emit ages). Nothing here is a second copy of
 //     that state — it is read at query time so it cannot drift.
 //
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #include "service_internal.hpp"
 #include <xi/xi_health.hpp>
 
-// Route HealthRegistry state changes to WS clients. Non-capturing lambda → the
-// event JSON is already built by the registry; we just push it (best-effort, like
-// the `status` push). Installed once from main().
-void install_health_notifier_() {
+// FE mirror: the top-level health, written to a tiny file the FE supervisor polls
+// (it can't read get_health — that would consume the single WS client slot the
+// HMI/extension needs; see docs/internals/fe-be.md). Set once at boot from
+// install_health_notifier_(); empty = no mirror (a bare/manually-run BE).
+static std::string g_health_mirror_path;
+
+// Write the mirror atomically (tmp + rename) so a mid-write poll never reads a
+// torn file. Lifecycle-rate (only on health_changed), so the I/O is cheap and off
+// the per-frame path. Best-effort — a failed mirror must never affect the BE.
+static void write_health_mirror_() {
+    if (g_health_mirror_path.empty()) return;
+    std::string js  = xi::health().mirror_json();
+    std::string tmp = g_health_mirror_path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        f << js;
+        if (!f) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, g_health_mirror_path, ec);  // replaces on Win/POSIX
+    if (ec) {   // cross-volume or locked: fall back to a direct (non-atomic) write
+        std::ofstream f(g_health_mirror_path, std::ios::binary | std::ios::trunc);
+        if (f) f << js;
+        std::filesystem::remove(tmp, ec);
+    }
+}
+
+// Route HealthRegistry state changes to WS clients AND mirror the top-level state
+// to the FE's status file. The event JSON is already built by the registry; we
+// just push it (best-effort, like the `status` push) and re-write the mirror.
+// Installed once from main(). `health_file` empty disables the mirror.
+void install_health_notifier_(const std::string& health_file) {
+    g_health_mirror_path = health_file;
     xi::health().set_notifier([](const std::string& event_json) {
         if (auto* s = g_eng.srv_for_bp.load(std::memory_order_acquire))
             s->send_text(event_json);
+        write_health_mirror_();
     });
+    // Publish the initial state (boot) immediately so the FE has a value to read
+    // before the first transition, mirroring the FE's own initial status write.
+    write_health_mirror_();
 }
 
 void cmd_get_health_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {

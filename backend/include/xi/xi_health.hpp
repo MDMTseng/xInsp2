@@ -245,6 +245,41 @@ public:
         s = state_; since_ms = state_since_ms_;
     }
 
+    // --- FE mirror --------------------------------------------------------------
+    //
+    // The FE supervisor cannot read `get_health` (it holds no WS client — that
+    // single slot belongs to the HMI/extension; see docs/internals/fe-be.md). So
+    // the BE mirrors just the *top-level* health into a tiny file the FE already
+    // polls (like the heartbeat file), and the FE re-exposes it in fe_status. This
+    // is the whole projection the FE needs: the state, when it was entered, and the
+    // last runtime/fault reason that drove a degraded/fault. It is written ONLY on
+    // health_changed (lifecycle/fault events — never per frame), so it stays a
+    // lifecycle-rate write. `last_reason_` carries the reason of the component that
+    // last drove a non-ok state (plugin_fault / compile_error / watchdog_trip);
+    // it clears when the machine returns to a clean running/loaded/boot state.
+    //
+    // Rendered here (pure, unit-testable) so the service layer only does the I/O.
+    std::string mirror_json() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::string o = "{\"state\":";
+        health_json_str(o, sys_state_name(state_));
+        o += ",\"since_ms\":" + std::to_string(state_since_ms_);
+        o += ",\"last_reason\":"; health_json_str(o, last_reason_);
+        o += ",\"ts_ms\":" + std::to_string(xi::wall_ms());
+        o += "}";
+        return o;
+    }
+
+    // The three mirror fields, atomically (for a consumer that wants them typed
+    // rather than as JSON — and for the unit test).
+    void mirror_snapshot(std::string& state, int64_t& since_ms,
+                         std::string& last_reason) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        state = sys_state_name(state_);
+        since_ms = state_since_ms_;
+        last_reason = last_reason_;
+    }
+
     // Build one component JSON object (shared by get_health and the event). The
     // caller supplies whatever extra derived fields it wants appended (already
     // formatted as `,"k":v` fragments) via `extra`.
@@ -273,6 +308,7 @@ public:
         script_reason_.clear();
         script_name_.clear();
         degraded_.clear();
+        last_reason_.clear();
     }
 
 private:
@@ -302,6 +338,15 @@ private:
     // Build the health_changed event and fire the notifier OUTSIDE the lock (the
     // send must not hold mu_). Takes the held unique_lock, unlocks it, notifies.
     void emit_(std::unique_lock<std::mutex>& lk, const Comp* comp) {
+        // Maintain the FE-mirror's `last_reason_` off the same events. A component
+        // change with a reason (the runtime-fault / compile-fail paths) is what the
+        // FE wants to see; the fatal `fault` state carries watchdog_trip even with
+        // no component; a clean return to running/loaded/boot clears it.
+        if (comp && !comp->reason.empty())              last_reason_ = comp->reason;
+        else if (state_ == SysState::Fault)             last_reason_ = kReasonWatchdogTrip;
+        else if (state_ == SysState::Running ||
+                 state_ == SysState::ProjectLoaded ||
+                 state_ == SysState::Boot)              last_reason_.clear();
         std::string ev = "{\"type\":\"event\",\"name\":\"health_changed\",\"data\":{";
         ev += "\"schema\":";     health_json_str(ev, kHealthSchema);
         ev += ",\"state\":";     health_json_str(ev, sys_state_name(state_));
@@ -331,6 +376,7 @@ private:
     int64_t     script_since_ = 0;
 
     std::map<std::string, DegradedInst> degraded_;   // instance name -> runtime fault
+    std::string last_reason_;   // FE-mirror: reason that drove the last non-ok state
     Notifier notifier_;
 };
 

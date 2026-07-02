@@ -17,6 +17,13 @@
 // (frames_run), the crash count (crashed), total wall time (total_ms), AND an
 // additive per-class tally: counts{ok,ng,na,no_verdict,crashed}.
 //
+// Health (schema xi.health/1): the runner drives the core-owned health registry
+// through its lifecycle (project_loaded -> script ok/failed -> running -> degraded
+// on the first caught inspect crash) and logs each health_changed to the execution
+// log. summary.health carries the FINAL state ({schema,state,since_ms,last_reason}),
+// so a crashed-then-degraded run is visible in the artifact without replaying the
+// per-frame log. See docs/new_gen/04-health-contract.md.
+//
 // Identity envelope (ADDITIVE — mirrors the live backend's run_result): the
 // report now carries the SAME traceability identity the service stamps on
 // `run_result`, so a headless run is traceable back to a process + frame.
@@ -53,6 +60,7 @@
 #include <xi/xi_abi.hpp>
 #include <xi/xi_certify.hpp>     // Part III G1: --certify-plugin child mode + verdict subprocess
 #include <xi/xi_crash_dump.hpp>  // xi::crash::install() — a crashed certify still yields a minidump
+#include <xi/xi_health.hpp>      // xi::health() — canonical health/state contract (schema xi.health/1)
 #include <xi/xi_image.hpp>
 #include <xi/xi_image_pool.hpp>
 #include <xi/xi_instance.hpp>
@@ -325,6 +333,16 @@ int main(int argc, char** argv) {
     std::string station_id;
     if (const char* s = std::getenv("XINSP_STATION_ID"); s && *s) station_id = s;
 
+    // Health/state contract (docs/new_gen/04-health-contract.md). The runner drives
+    // the BE in-process — no service layer, no WS — so it drives the SAME health
+    // registry the live backend does and logs every transition to its execution
+    // log. A crashed-then-degraded run is then visible in BOTH the log (each
+    // health_changed line) and the report summary (the final state), without
+    // replaying frames. Lifecycle-only: the per-frame path never touches health.
+    xi::health().set_notifier([](const std::string& ev) {
+        std::fprintf(stderr, "[runner] health_changed %s\n", ev.c_str());
+    });
+
     _set_se_translator(seh_translator);
 
     // Resolve xInsp2 include dir + built-in plugins by walking up from exe.
@@ -374,6 +392,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::fprintf(stderr, "[runner] project loaded: %s\n", args.project_dir.c_str());
+    xi::health().set_state(xi::SysState::ProjectLoaded);   // boot -> project_loaded
 
     // Compile the inspection script.
     std::string script_path = args.script_override.empty()
@@ -390,9 +409,13 @@ int main(int argc, char** argv) {
     req.opencv_dir     = xi::script::detail::probe_opencv_dir();
     req.turbojpeg_root = xi::script::detail::probe_turbojpeg_root();
     req.ipp_root       = xi::script::detail::probe_ipp_root();
+    const std::string script_name = fs::path(script_path).filename().string();
     auto res = xi::script::compile(req);
     if (!res.ok) {
         std::fprintf(stderr, "[runner] compile failed:\n%s\n", res.build_log.c_str());
+        // The script cannot be brought into service — record it failed so the health
+        // transition (script -> failed / compile_error) is in the log before we bail.
+        xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError, script_name);
         return 1;
     }
 
@@ -400,6 +423,7 @@ int main(int argc, char** argv) {
     std::string err;
     if (!xi::script::load_script(res.dll_path, script, err)) {
         std::fprintf(stderr, "[runner] %s\n", err.c_str());
+        xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError, script_name);
         return 1;
     }
     if (script.set_use_callbacks) {
@@ -415,6 +439,7 @@ int main(int argc, char** argv) {
         script.set_result_callback((void*)result_cb);
     }
     std::fprintf(stderr, "[runner] script loaded: %s\n", res.dll_path.c_str());
+    xi::health().set_script(xi::CompHealth::Ok, "", script_name);   // script in service
 
     // Run the frames. We build the JSON as a string then write it once to
     // avoid partial-file surprises if the process is killed mid-run.
@@ -459,6 +484,17 @@ int main(int argc, char** argv) {
         xi::proto::json_escape_into(body, msg);
         body += "}";
     };
+    // The run is live now. Continuous inspection → running (project_loaded ->
+    // running). A caught inspect crash below flips this to degraded (once), so the
+    // final summary state distinguishes a clean run from a crashed-then-degraded one.
+    xi::health().set_state(xi::SysState::Running);
+    bool health_degraded = false;   // flip running -> degraded on the first crash
+    // A caught inspect crash is a runtime fault of the pipeline: mark the run
+    // degraded (idempotent — later crashes coalesce). The per-frame `crashed`
+    // counter carries the count; this carries the health transition.
+    auto mark_run_degraded = [&] {
+        if (!health_degraded) { xi::health().set_state(xi::SysState::Degraded); health_degraded = true; }
+    };
     auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < args.frames; ++i) {
         if (script.reset) script.reset();
@@ -471,6 +507,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[runner] frame %d crashed: 0x%08X\n", i, e.code);
             ++crashed;
             ++c_crashed;
+            mark_run_degraded();
             char buf[64];
             std::snprintf(buf, sizeof buf, "inspect crashed: 0x%08X", e.code);
             emit_frame(i, XI_SYS_CRASHED, "crashed", buf);
@@ -479,6 +516,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[runner] frame %d threw: %s\n", i, e.what());
             ++crashed;
             ++c_crashed;
+            mark_run_degraded();
             emit_frame(i, XI_SYS_CRASHED, "crashed",
                        std::string("inspect threw: ") + e.what());
             continue;
@@ -509,6 +547,22 @@ int main(int argc, char** argv) {
     body += ",\"no_verdict\":" + std::to_string(c_no_verdict);
     body += ",\"crashed\":"    + std::to_string(c_crashed);
     body += "}";
+    // Final health state (schema xi.health/1 top-level): "running" for a clean run,
+    // "degraded" if any frame crashed, "project_loaded" if 0 frames ran. Lets a
+    // consumer read the run's health verdict from the artifact without scanning the
+    // per-frame log. last_reason is the reason that drove the last non-ok state ("" here).
+    {
+        std::string hstate, hreason; int64_t hsince = 0;
+        xi::health().mirror_snapshot(hstate, hsince, hreason);
+        body += ",\"health\":{\"schema\":";
+        xi::proto::json_escape_into(body, xi::kHealthSchema);
+        body += ",\"state\":";
+        xi::proto::json_escape_into(body, hstate);
+        body += ",\"since_ms\":" + std::to_string(hsince);
+        body += ",\"last_reason\":";
+        xi::proto::json_escape_into(body, hreason);
+        body += "}";
+    }
     body += "}}";
 
     std::ofstream report(args.output);
