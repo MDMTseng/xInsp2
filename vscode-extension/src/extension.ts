@@ -2743,11 +2743,11 @@ ${exposeBlock}
             html = html.replace('</body>', testShim + '</body>');
 
             // Create webview panel. localResourceRoots gates which files the
-            // webview can load — include the extension dir (so @vscode-elements
-            // can be served) and the plugin's own folder (for images/assets
-            // it might reference from the UI).
-            const veLibDir = vscode.Uri.joinPath(context.extensionUri,
-                'node_modules', '@vscode-elements', 'elements', 'dist');
+            // webview can load — include the extension's media dir (so the
+            // in-house @xinsp2/components bundle + VS Code theme adapter can be
+            // served) and the plugin's own folder (for images/assets it might
+            // reference from the UI).
+            const kitDir = vscode.Uri.joinPath(context.extensionUri, 'media');
             const panel = vscode.window.createWebviewPanel(
                 'xinsp2.pluginUI',
                 `${instanceName} (${pluginName})`,
@@ -2755,25 +2755,32 @@ ${exposeBlock}
                 {
                     enableScripts: true,
                     localResourceRoots: [
-                        veLibDir,
+                        kitDir,
                         vscode.Uri.file(uiPath),
                     ],
                 }
             );
 
-            // Inject @vscode-elements (Microsoft's web-components for VS Code
-            // webviews — native-looking buttons, inputs, tabs, badges that
-            // inherit the user's theme). If the plugin doesn't use any of the
-            // <vscode-*> tags this is just ~230KB of dead code in the webview.
-            const veUri = panel.webview.asWebviewUri(
-                vscode.Uri.joinPath(veLibDir, 'bundled.js')
+            // Inject the in-house web-component kit (xi-* custom elements) plus
+            // the theme adapter that maps their --xi-* custom properties onto
+            // the webview's --vscode-* theme tokens, so the kit inherits the
+            // user's active colour theme. The bundle registers the elements;
+            // the stylesheet must precede it so the vars are set before first
+            // paint.
+            const kitScriptUri = panel.webview.asWebviewUri(
+                vscode.Uri.joinPath(kitDir, 'xi-components.esm.js')
             );
-            const veScriptTag = `<script type="module" src="${veUri}"></script>`;
-            // Put it in the <head> if we can find one, else prepend to body.
+            const kitThemeUri = panel.webview.asWebviewUri(
+                vscode.Uri.joinPath(kitDir, 'vscode-theme.css')
+            );
+            const kitTags =
+                `<link rel="stylesheet" href="${kitThemeUri}">\n` +
+                `  <script type="module" src="${kitScriptUri}"></script>`;
+            // Put them in the <head> if we can find one, else prepend to body.
             if (html.includes('</head>')) {
-                html = html.replace('</head>', `  ${veScriptTag}\n</head>`);
+                html = html.replace('</head>', `  ${kitTags}\n</head>`);
             } else {
-                html = html.replace('<body>', `<body>\n${veScriptTag}`);
+                html = html.replace('<body>', `<body>\n${kitTags}`);
             }
             panel.webview.html = html;
             pluginUIPanels.set(instanceName, panel);

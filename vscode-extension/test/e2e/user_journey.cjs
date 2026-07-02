@@ -366,7 +366,7 @@ async function run() {
     await sleep(300);
     shot('blob_params_set');
 
-    api.clickInWebview('det0', 'vscode-button[onclick="onApply()"], button[onclick="onApply()"]');
+    api.clickInWebview('det0', 'xi-button[onclick="onApply()"], button[onclick="onApply()"]');
     await sleep(1000);
     console.log('  ✓ blob analysis configured');
     shot('blob_applied');

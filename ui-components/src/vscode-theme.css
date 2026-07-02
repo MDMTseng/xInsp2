@@ -1,0 +1,30 @@
+/*
+ * VS Code webview theme adapter for @xinsp2/components.
+ *
+ * The kit's custom elements are theme-neutral: each reads its colours from
+ * --xi-* custom properties with light defaults (see the individual .svelte
+ * files). Custom properties pierce the shadow boundary, so defining --xi-* on
+ * the host document re-skins every xi-* element at once. This sheet maps them
+ * onto the webview's --vscode-* theme tokens so the in-house kit inherits the
+ * user's active VS Code colour theme — the job @vscode-elements used to do.
+ *
+ * Loaded by the extension's plugin-UI webview host; harmless anywhere the
+ * --vscode-* vars are absent (every mapping keeps the kit's own fallback).
+ */
+:root {
+  --xi-font: var(--vscode-font-size, 13px) var(--vscode-font-family, system-ui, sans-serif);
+  --xi-fg: var(--vscode-foreground, inherit);
+  --xi-bg: var(--vscode-input-background, #fff);
+  --xi-border: var(--vscode-input-border, var(--vscode-widget-border, #ccc));
+  --xi-accent: var(--vscode-focusBorder, #3b82f6);
+
+  --xi-btn-bg: var(--vscode-button-background, #3b82f6);
+  --xi-btn-fg: var(--vscode-button-foreground, #fff);
+  --xi-btn-hover-bg: var(--vscode-button-hoverBackground, #2f6fe0);
+  --xi-btn-secondary-bg: var(--vscode-button-secondaryBackground, #444);
+  --xi-btn-secondary-fg: var(--vscode-button-secondaryForeground, #fff);
+  --xi-btn-secondary-hover-bg: var(--vscode-button-secondaryHoverBackground, #4f4f4f);
+
+  --xi-badge-bg: var(--vscode-badge-background, #4d4d4d);
+  --xi-badge-fg: var(--vscode-badge-foreground, #fff);
+}

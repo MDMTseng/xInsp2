@@ -9,6 +9,9 @@ import "./components/xi-number.svelte";
 import "./components/xi-toggle.svelte";
 import "./components/xi-radio.svelte";
 import "./components/xi-dropdown.svelte";
+import "./components/xi-text.svelte";
+import "./components/xi-button.svelte";
+import "./components/xi-badge.svelte";
 import "./components/xi-trace.svelte";
 import "./components/xi-image-viewer.svelte";
 import "./components/xi-image-editor.svelte";
@@ -31,5 +34,6 @@ export { mountDashboard } from "./dashboard/dashboard.mjs";
 
 export const XI_COMPONENTS = [
   "xi-slider", "xi-number", "xi-toggle", "xi-radio", "xi-dropdown",
+  "xi-text", "xi-button", "xi-badge",
   "xi-trace", "xi-image-viewer", "xi-image-editor",
 ];

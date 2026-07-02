@@ -417,7 +417,6 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
-    "@vscode-elements/elements": "^2.5.1",
     "ws": "^8.18.0"
   }
 }

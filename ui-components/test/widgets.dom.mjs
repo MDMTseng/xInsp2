@@ -42,3 +42,36 @@ test("xi-radio renders one input per option", async () => {
   const checked = [...radios].find((r) => r.checked);
   assert.equal(checked && checked.value, "2", "selected reflects value");
 });
+
+test("xi-text exposes value and emits input", async () => {
+  const el = await mount(`<xi-text value="hi" placeholder="p"></xi-text>`);
+  assert.ok(w.customElements.get("xi-text"), "defined");
+  assert.equal(el.value, "hi", "value reflects");
+  const input = el.shadowRoot.querySelector("input[type=text]");
+  assert.equal(input.placeholder, "p", "placeholder passthrough");
+  let got = null;
+  el.addEventListener("input", (e) => { got = e.detail.value; });
+  input.value = "world";
+  input.dispatchEvent(new w.window.Event("input", { bubbles: true }));
+  await tick(w);
+  assert.equal(got, "world", "input event carries new value");
+});
+
+test("xi-button renders a button and bubbles a composed click", async () => {
+  const el = await mount(`<xi-button>Go</xi-button>`);
+  assert.ok(w.customElements.get("xi-button"), "defined");
+  const btn = el.shadowRoot.querySelector("button");
+  assert.ok(btn, "renders inner button");
+  let clicked = false;
+  el.addEventListener("click", () => { clicked = true; });
+  btn.dispatchEvent(new w.window.MouseEvent("click", { bubbles: true, composed: true }));
+  assert.equal(clicked, true, "inner click retargets to host");
+});
+
+test("xi-badge projects host text through its slot", async () => {
+  const el = await mount(`<xi-badge variant="counter">3 fields</xi-badge>`);
+  assert.ok(w.customElements.get("xi-badge"), "defined");
+  assert.ok(el.shadowRoot.querySelector("slot"), "has a slot");
+  assert.equal(el.getAttribute("variant"), "counter", "variant reflects");
+  assert.equal(el.textContent.trim(), "3 fields", "text lives in light DOM for the slot");
+});
