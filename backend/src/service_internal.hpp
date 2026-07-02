@@ -406,5 +406,7 @@ void cmd_set_toolchain_override_(xi::ws::Server& srv, int64_t id, const xp::Pars
 void cmd_get_health_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed);
 
 // ---- health/state contract (service_health.cpp) ----------------------------
-// Route HealthRegistry health_changed events to WS clients. Called once at boot.
-void install_health_notifier_();
+// Route HealthRegistry health_changed events to WS clients + mirror the top-level
+// state to the FE's status file (`health_file`; empty disables the mirror).
+// Called once at boot.
+void install_health_notifier_(const std::string& health_file);

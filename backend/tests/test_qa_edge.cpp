@@ -24,6 +24,7 @@
 #include <xi/xi_crash_report.hpp>
 #include <xi/xi_crash_history.hpp>
 #include <xi/xi_fe_status.hpp>
+#include <xi/xi_be_health.hpp>
 #include <xi/xi_safe_state.hpp>
 
 namespace fs = std::filesystem;
@@ -326,6 +327,53 @@ int main() {
         CHECK(j.find("\"last_event\":{") != std::string::npos);
         CHECK(j.find("\"exception\":\"ACCESS_VIOLATION\"") != std::string::npos);
         CHECK(j.find(R"("dump":"C:\\t\\be.dmp")") != std::string::npos);  // path escaped
+    }
+
+    // ---- BE health mirror: parse_be_health + FeStatus.be_health -------------
+    // The FE reads the BE's health-mirror file (it can't call get_health without
+    // stealing the single WS client slot) and re-exposes it in fe_status. These
+    // pin the parser (BH-U*) and the render (FS-U3).
+    {
+        // BH-U1: a well-formed mirror parses into all three fields.
+        xi::BeHealth bh;
+        CHECK(xi::parse_be_health(
+            R"({"state":"degraded","since_ms":1751430000123,"last_reason":"plugin_fault","ts_ms":1751430000200})",
+            bh));
+        CHECK(bh.valid);
+        CHECK(bh.state == "degraded");
+        CHECK(bh.since_ms == 1751430000123LL);
+        CHECK(bh.last_reason == "plugin_fault");
+
+        // BH-U2: a clean running mirror -> empty reason.
+        xi::BeHealth bh2;
+        CHECK(xi::parse_be_health(R"({"state":"running","since_ms":10,"last_reason":"","ts_ms":11})", bh2));
+        CHECK(bh2.state == "running");
+        CHECK(bh2.last_reason.empty());
+
+        // BH-U3: torn / empty / no-"state" reads are rejected (valid=false), so a
+        // mid-write poll just leaves the last-known health in place.
+        xi::BeHealth bad;
+        CHECK(!xi::parse_be_health("", bad));
+        CHECK(!bad.valid);
+        CHECK(!xi::parse_be_health(R"({"state":"degrad)", bad));       // truncated JSON
+        CHECK(!xi::parse_be_health(R"({"since_ms":5})", bad));         // no state key
+        CHECK(!xi::parse_be_health(R"({"state":""})", bad));           // empty state
+    }
+
+    // FS-U3: FeStatus renders be_health as null until set, then as an object; a
+    // real change is reported by set_be_health (drives the FE's publish-on-change).
+    {
+        xi::FeStatus st;
+        st.state = "healthy";
+        CHECK(st.render().find("\"be_health\":null") != std::string::npos);
+        CHECK(st.set_be_health("running", 1751430000000LL, ""));   // first set -> changed
+        CHECK(!st.set_be_health("running", 1751430000000LL, ""));  // identical -> no change
+        CHECK(st.set_be_health("degraded", 1751430009999LL, "plugin_fault"));  // transition
+        std::string j = st.render();
+        CHECK(j.find("\"be_health\":{") != std::string::npos);
+        CHECK(j.find("\"state\":\"degraded\"") != std::string::npos);
+        CHECK(j.find("\"since_ms\":1751430009999") != std::string::npos);
+        CHECK(j.find("\"last_reason\":\"plugin_fault\"") != std::string::npos);
     }
 
     // Cleanup scratch dirs (best-effort).

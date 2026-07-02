@@ -592,8 +592,12 @@ int main(int argc, char** argv) {
     }
     g_eng.srv_for_bp = &srv;   // status_cb + dropped-frame markers emit through it
     // Health/state contract (docs/new_gen/04-health-contract.md): route the
-    // registry's health_changed events to WS clients. State starts at `boot`.
-    install_health_notifier_();
+    // registry's health_changed events to WS clients, and — when --health-file is
+    // given (the FE passes it) — mirror the top-level state to that file so the FE
+    // can surface it in fe_status WITHOUT holding the single WS client slot. State
+    // starts at `boot`.
+    std::string health_file = xi::cli::parse_str_flag(argc, argv, "--health-file");
+    install_health_notifier_(health_file);
     // Route plugin host_api->set_status into the status registry. Non-capturing
     // so it converts to the StatusSinkFn function pointer.
     xi::status_sink() = [](const char* who, const char* text) {

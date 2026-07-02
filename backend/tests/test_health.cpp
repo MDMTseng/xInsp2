@@ -195,6 +195,61 @@ int main() {
     CHECK(data_str(last_event(), "state") == "fault");
 
     // ---------------------------------------------------------------------
+    // The FE mirror: mirror_json()/mirror_snapshot() project the TOP-LEVEL health
+    // (state + since_ms + last_reason) into the tiny file the FE polls — the FE
+    // can't call get_health without stealing the single WS client slot. last_reason
+    // carries the reason that drove the last non-ok state, and clears on a clean
+    // return to running/loaded/boot.
+    SECTION("FE mirror: state + last_reason projection");
+    {
+        H.reset_for_test();
+        // Clean boot: state=boot, no reason.
+        std::string mstate, mreason; int64_t msince = 0;
+        H.mirror_snapshot(mstate, msince, mreason);
+        CHECK(mstate == "boot");
+        CHECK(mreason.empty());
+
+        // Drive to running, then a caught fault -> degraded carries the reason.
+        H.set_state(SysState::ProjectLoaded);
+        H.set_state(SysState::Running);
+        H.mirror_snapshot(mstate, msince, mreason);
+        CHECK(mstate == "running");
+        CHECK(mreason.empty());   // clean running clears any prior reason
+
+        H.mark_instance_degraded("cam0", xi::kReasonPluginFault);
+        H.mirror_snapshot(mstate, msince, mreason);
+        CHECK(mstate == "degraded");
+        CHECK(mreason == "plugin_fault");   // the fault reason is mirrored
+
+        // The JSON form parses and carries the same fields.
+        {
+            std::string mj = H.mirror_json();
+            yyjson_doc* d = yyjson_read(mj.data(), mj.size(), 0);
+            CHECK(d != nullptr);
+            if (d) {
+                yyjson_val* r = yyjson_doc_get_root(d);
+                CHECK(std::string(yyjson_get_str(yyjson_obj_get(r, "state"))) == "degraded");
+                CHECK(std::string(yyjson_get_str(yyjson_obj_get(r, "last_reason"))) == "plugin_fault");
+                CHECK(yyjson_is_int(yyjson_obj_get(r, "since_ms")));
+                CHECK(yyjson_is_int(yyjson_obj_get(r, "ts_ms")));
+                yyjson_doc_free(d);
+            }
+        }
+
+        // Clearing the fault flips back to running AND clears the reason.
+        H.clear_instance_degraded("cam0");
+        H.mirror_snapshot(mstate, msince, mreason);
+        CHECK(mstate == "running");
+        CHECK(mreason.empty());
+
+        // A watchdog hard trip -> fault carries watchdog_trip even with no component.
+        H.set_state(SysState::Fault);
+        H.mirror_snapshot(mstate, msince, mreason);
+        CHECK(mstate == "fault");
+        CHECK(mreason == "watchdog_trip");
+    }
+
+    // ---------------------------------------------------------------------
     SECTION("append_component() wire shape");
     {
         std::string out;
