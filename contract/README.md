@@ -88,3 +88,136 @@ The gate is wired as the `contract_schema` ctest (`backend/CMakeLists.txt`), so
 `ctest -C Release -R contract_schema` runs it in CI alongside the other gates. It
 needs the `jsonschema` Python package; like the `doc_coverage` gate it self-skips
 (exit 0) if the interpreter or package is absent, so a minimal box still builds.
+
+## The protocol-version gate — `baseline/` (`baseline_gate.py`)
+
+`contract_schema` proves each schema is *well-formed* and that fixtures match. It
+does **not** notice when a schema **changes**. That is the second gate's job:
+`baseline_gate.py` makes the WS protocol version **real** without touching the wire.
+
+### The problem it closes
+
+The `hello` event carries an `abi` stamp — the WS-protocol version — hardcoded to
+`1` (`send_hello`, `backend/src/service_cmd_lifecycle.cpp`). That `1` has survived
+genuine wire breaks (the removed `vars` message, partial-status returns) without
+ever moving, and nothing enforced *when* it should (`docs/ext_review/06` finding 2).
+So the **described** shape of the wire could drift silently underneath a stamp that
+never changed. The extension now treats `abi != EXPECTED_WS_ABI` as incompatible
+(`vscode-extension/src/versionCompat.ts`), so the day the backend bumps the stamp,
+clients react — but that only matters if *something decides the stamp must bump*.
+This gate is that decision, mechanised.
+
+### The committed baseline
+
+`baseline/protocol-baseline.json` is a **single, reviewable** generated file holding:
+
+- `protocol_version` — the version this snapshot corresponds to (seeded to the
+  current live `abi`, **1**). Bumped only on a breaking change (see below).
+- `schemas` — for every schema under `schemas/`, its `sha256` **and** its canonical
+  `shape` (the shape-bearing keywords, with documentation annotations stripped —
+  see next paragraph). The `shape` is what makes a change *classifiable*, not just
+  detectable; the `sha256` is the quick unchanged-check and the integrity digest.
+- `open_enums` — **hand-curated** policy: JSON-pointer paths whose enum a consumer
+  tolerates unknown values on (seeded with `run-outcome.schema.json` `/properties/class`,
+  which the schema's own description documents as open). Adding a value to a listed
+  enum is *additive*; to any other enum it is *breaking*. This block is preserved
+  across refreshes — the refresh only regenerates `schemas` and `protocol_version`.
+
+A digest-only manifest was rejected: it can tell you *that* a schema changed but not
+*how*, so it could not distinguish additive from breaking. Full copies of the schema
+tree were rejected as duplication. Storing the **canonical shape** is the middle
+ground — enough structure to classify, small because annotations are stripped, and
+the git diff of this one file shows a reviewer exactly what wire shape moved.
+
+**Canonical shape / what the gate ignores.** Before hashing and diffing, each schema
+is reduced to its shape-bearing keywords; the documentation-only annotations the
+subset marks "not asserted" (`title`, `description`, `$comment`, `examples`,
+`default`, `deprecated`, `format`) are stripped, and order-insensitive lists
+(`required`, `enum`) are sorted. Consequence: **editing a description does not trip
+this gate** (it is not a wire change); changing a type, property, enum, or constraint
+does.
+
+### The additive-vs-breaking ruleset (exact, conservative)
+
+Comparing the baseline shape to the live shape, per schema — when a case is
+ambiguous it is classified **breaking**:
+
+**BREAKING** (a consumer built against the baseline cannot absorb it):
+
+- a property is **removed** (or renamed — a remove + add);
+- a property's **type changes** (including nullability, e.g. `"string"` →
+  `["string","null"]`);
+- a property is **added as `required`**, or an existing property is **made required**;
+- an existing **required property is made optional** (the presence guarantee is gone);
+- an **enum value is removed** (a value producers may still emit becomes invalid);
+- an **enum value is added to a *closed* enum** (one not listed in `open_enums`);
+- a **`const` changes**, any **scalar/array constraint** changes (`minimum`,
+  `maximum`, `minLength`, `pattern`, `minItems`, … — tightening rejects
+  previously-valid values, and even loosening can break a consumer sized to the old
+  bound, so *any* change is breaking), or a **`$ref` target** changes;
+- **`additionalProperties` is tightened** `true` → `false` (unknown fields that used
+  to be tolerated are now rejected);
+- a **new optional property is added to a *closed* object** (`additionalProperties:false`
+  in the baseline — old consumers reject unknown keys);
+- a **schema file is removed** (a message shape retired).
+
+**ADDITIVE** (tolerated by the additive-only wire):
+
+- a **new optional property** on an object that tolerates unknowns
+  (`additionalProperties` `true`/absent in the **baseline**);
+- an **enum value added to an *open* enum** (path listed in `open_enums`);
+- **`additionalProperties` loosened** `false` → `true`;
+- a **new schema file** (a new message type — the discriminator ignores an unknown
+  `type`).
+
+**UNCHANGED** → green. Anything else (e.g. a bare `$id` edit that changes the digest
+but no shape-bearing keyword) is treated as additive: non-breaking, but the baseline
+must still be refreshed so it stays in lockstep.
+
+### Verdicts and the refresh workflow
+
+The gate (`python contract/baseline_gate.py`, read-only) fails on **any** difference —
+the baseline must match the live shape, so a schema cannot change without the
+baseline changing in the same commit:
+
+- **unchanged** → green.
+- **additive** → **fail**, message: refresh the baseline (no version bump) with
+  `python contract/baseline_gate.py --update-baseline`.
+- **breaking** → **fail**, message: refresh the baseline **and** bump the version with
+  `python contract/baseline_gate.py --update-baseline --protocol-version <N>`, plus a
+  pointer to the cutover policy. The refresh command **refuses** to write a breaking
+  change unless given a `--protocol-version` strictly greater than the current one;
+  for an additive change it writes and keeps the version (a supplied bump is ignored
+  with a note). That is what forces a breaking wire change to record a version move.
+
+### Relationship to the `hello` `abi` stamp
+
+`protocol_version` in the baseline and the `abi` integer `send_hello` sends are **the
+same version, split in two halves today**:
+
+- This gate owns the **description** half — it decides *when* the version must move
+  by refusing to let the described shape drift without it.
+- The backend owns the **wire** half — the literal `abi` value. This gate deliberately
+  does **not** read or change it: bumping the live `abi` is a **breaking wire change**,
+  which rides the coordinated cutover train, not master (`docs/ext_review/00-triage.md`
+  "Two branch sets"). The extension already enforces the wire half (`abi != EXPECTED_WS_ABI`
+  ⇒ incompatible, `versionCompat.ts`).
+
+They should be **brought together at the next cutover**: when a breaking change bumps
+`protocol_version` here, the same coordinated step bumps the `abi` literal in
+`send_hello` and `EXPECTED_WS_ABI` in the extension in lockstep, so the number a client
+gates on and the number this gate tracks are one and the same. Until then, this gate is
+the tripwire that guarantees the stamp *can* no longer silently fall behind the wire.
+
+### Running it
+
+```
+python contract/baseline_gate.py                                    # the gate (read-only)
+python contract/baseline_gate.py --update-baseline                  # refresh (additive/unchanged)
+python contract/baseline_gate.py --update-baseline --protocol-version 2   # refresh + bump (breaking)
+```
+
+Wired as the `contract_baseline` ctest (`backend/CMakeLists.txt`):
+`ctest -C Release -R contract_baseline`. Pure stdlib (`json` + `hashlib`, **no**
+`jsonschema`), so unlike `contract_schema` it never skips for a missing package — it
+always runs when a Python interpreter is present.
