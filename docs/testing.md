@@ -54,8 +54,18 @@ All exit with `ALL TESTS PASSED`.
   source of truth and **fails** if any item is undocumented in `docs/guides` or
   `docs/reference` (internal residue + `docs/archive` deliberately don't count) and
   not listed in `docs/.doc-coverage-allow` with a reason. This is what stops a new
-  export/command/macro from shipping while the guides lag. Run standalone:
-  `python tools/check_doc_coverage.py`. Skipped only if no Python3 is found.
+  export/command/macro from shipping while the guides lag. The **WS-command** half
+  parses the exact command set from the `g_cmd_table` dispatch table in
+  `service_main.cpp` (one `{"name", handler}` entry per command) and requires each
+  to appear in `docs/reference/ws-protocol.md` (or a guide) marked as a command —
+  as a heading, a backtick token, or a `cmd:<name>` reference (a bare English word
+  in prose is not enough). The extractor **self-checks**: it aborts loudly if it
+  can't find the `g_cmd_table` block or extracts fewer than 40 commands, because it
+  previously grepped the old `if (name == "...")` god-chain that the dispatch-table
+  refactor deleted — so it silently matched **zero** commands and enforced nothing
+  until this guard was added. Run standalone: `python tools/check_doc_coverage.py`
+  (prints the extracted export/macro/command counts). Skipped only if no Python3 is
+  found.
 - `retired_terms` (`tools/check_retired_terms.py`) — the mirror of `doc_coverage`.
   Where `doc_coverage` fails if a **live** symbol is undocumented, this fails if a
   **retired** API token appears on a **blessed copy-paste surface** — the place

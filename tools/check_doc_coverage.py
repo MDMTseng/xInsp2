@@ -87,10 +87,57 @@ def extract_macros() -> tuple[set[str], list[str]]:
     stale = [m for m in AUTHORING_MACROS if m not in defined]
     return surface, stale
 
+# The command dispatch table lives in service_main.cpp as a single
+# `g_cmd_table` map literal (`{"name", cmd_fn}` entries). This USED to be an
+# `if (name == "...")` god-chain and the extractor grepped `name == "..."`; the
+# TASTE refactor replaced that chain with the table, so the old pattern matched
+# ZERO commands and the gate silently stopped enforcing command documentation.
+# We now parse the table block itself. Fail loudly below if it can't be found or
+# looks implausibly small, so this can't rot the same way twice.
+WS_TABLE_MIN = 40   # sanity floor; the table has ~55 commands as of this writing.
+
+class ExtractorError(RuntimeError):
+    pass
+
 def extract_ws_commands() -> set[str]:
-    """The WS command verbs the dispatcher compares against (`name == "..."`)."""
+    """The WS command verbs the dispatcher routes on — parsed from the
+    `g_cmd_table` map literal in service_main.cpp (`{"name", handler}` entries).
+
+    Anchored on the table's `g_cmd_table = { ... };` span so unrelated string
+    literals elsewhere in the TU can't leak in. Resilient to multi-line layout /
+    trailing commas (it just scans `{"literal",` entries inside the block), but
+    NOT a full C++ parse — if the table is renamed or restructured, the guard
+    below trips rather than silently extracting nothing."""
     text = _read(SERVICE_MAIN)
-    return set(re.findall(r'name\s*==\s*"([a-z_]+)"', text))
+    # Isolate the table body: from `g_cmd_table = {` to the matching `};`.
+    try:
+        where = SERVICE_MAIN.relative_to(ROOT)
+    except ValueError:
+        where = SERVICE_MAIN
+    m = re.search(r'g_cmd_table\s*=\s*\{', text)
+    if not m:
+        raise ExtractorError(
+            "could not find `g_cmd_table = {` in "
+            f"{where} — the WS command dispatch table "
+            "moved or was renamed. The doc-coverage extractor greps that table "
+            "for the command list; update extract_ws_commands() to match. "
+            "(This guard exists because the extractor once silently matched ZERO "
+            "commands after the if/else god-chain became this table.)")
+    body = text[m.end():]
+    end = body.find("};")
+    if end != -1:
+        body = body[:end]
+    # Each entry is `{"command_name", cmd_handler_},` — grab the string key.
+    cmds = set(re.findall(r'\{\s*"([a-z_]+)"\s*,', body))
+    if len(cmds) < WS_TABLE_MIN:
+        raise ExtractorError(
+            f"extracted only {len(cmds)} WS command(s) from g_cmd_table "
+            f"(expected >= {WS_TABLE_MIN}). The table format likely changed and "
+            "the entry regex no longer matches — fix extract_ws_commands() in "
+            "check_doc_coverage.py. Refusing to run with an implausibly small "
+            "command set (a near-empty list would let undocumented commands ship, "
+            "the exact regression this gate was rebuilt to catch).")
+    return cmds
 
 # --- coverage test --------------------------------------------------------
 
@@ -130,7 +177,12 @@ def main() -> int:
     allow = load_allow()
 
     exports = extract_exports()
-    commands = extract_ws_commands()
+    try:
+        commands = extract_ws_commands()
+    except ExtractorError as e:
+        print("[doc-coverage] FAIL: WS-command extractor broke\n")
+        print(e)
+        return 1
     macros, stale_macros = extract_macros()
 
     missing: list[tuple[str, str]] = []      # (kind, name)
