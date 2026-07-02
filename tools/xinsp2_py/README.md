@@ -19,6 +19,31 @@ Backend must be running on `ws://127.0.0.1:7823/`. Two ways to get one:
   doesn't start it for you. If you see `ConnectionRefusedError`, that's
   what's missing.
 
+## Auth
+
+If the backend was started with a shared secret (`--auth=<secret>` or the
+`XINSP2_AUTH` env var), pass a matching credential. The check happens in the
+WebSocket handshake, so a bad/missing one raises `AuthError` (a
+`ConnectionError` subclass) immediately — it does not hang.
+
+```python
+from xinsp2 import Client, AuthError
+
+# backend started: xinsp-backend.exe --auth=my-secret
+with Client(token="my-secret") as c:            # auth_mode="bearer" (default)
+    ...
+
+# backend started: xinsp-backend.exe --auth=hmac:my-key
+with Client(token="my-key", auth_mode="hmac") as c:  # key never sent on the wire
+    ...
+```
+
+The mode is fixed by how the backend was started and is not negotiated — pick
+`auth_mode` to match. The SDK will not silently fall back from `hmac` to
+`bearer` (that would leak the key). `hmac` mode signs the current unix
+timestamp, accepted within ±60 s; post-handshake frames are still plaintext, so
+front a TLS reverse proxy on hostile networks.
+
 ## Quick start
 
 ```python
