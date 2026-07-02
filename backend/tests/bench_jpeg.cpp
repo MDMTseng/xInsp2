@@ -12,6 +12,8 @@
 #include <xi/xi_image.hpp>
 #include <xi/xi_jpeg.hpp>
 
+#include "perf_fingerprint.hpp"
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -63,8 +65,14 @@ static int gate_main() {
         if (us < best_us) best_us = us;
     }
     std::printf("encoder: %s\n", dispatch_label());
-    std::printf("GATE jpeg_us_per_encode_1920x1080 %lld\n", (long long)(best_us + 0.5));
-    std::fflush(stdout);
+    // Backend-aware metric key: turbojpeg/opencv/ipp/stb differ by 2-5x, so a
+    // machine running a different encoder must NOT look like a regression.
+    // The key carries the active backend; perf_gate.cmake also gates on the
+    // baseline fingerprint's jpeg_backend, so cross-backend keys never even
+    // meet (a foreign key is reported "no baseline — skipped").
+    std::printf("GATE jpeg_%s_q85_1920x1080_us %lld\n",
+                xi_perf::jpeg_backend(), (long long)(best_us + 0.5));
+    xi_perf::print_fingerprint();
     return 0;
 }
 

@@ -18,6 +18,8 @@
 //               node DOM; cwpack/tight -> streaming walk, no DOM = its design).
 // All numbers are best-of-R batches (min strips scheduler noise). Run manually.
 //
+#include "perf_fingerprint.hpp"
+
 #include "cJSON.h"
 #include "yyjson.h"
 #include "mpack.h"
@@ -179,7 +181,7 @@ static int gate_main() {
     double rt_us = yy_ser + yy_par;
 
     std::printf("GATE record_yyjson_roundtrip_ns_n50 %lld\n", (long long)(rt_us * 1000.0 + 0.5));
-    std::fflush(stdout);
+    xi_perf::print_fingerprint();
     yyjson_mut_doc_free(yd);
     cJSON_Delete(tree);
     return 0;
