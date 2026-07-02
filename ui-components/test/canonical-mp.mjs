@@ -14,7 +14,7 @@ import path from "node:path";
 import {
   encodeCanonical, decode, recanonicalize,
   f64, Ext,
-  EncodeError, IntRangeError,
+  CanonicalError, EncodeError, IntRangeError,
   DecodeError, TruncatedError, TrailingBytesError,
   DepthLimitError, MapKeyError, ExtNotAllowedError,
 } from "../src/canonical-mp.mjs";
@@ -288,4 +288,41 @@ for (const c of VECTORS.recanon) {
   test(`shared recanon vector: ${c.name}`, () => {
     assert.equal(hex(recanonicalize(bytes(c.in_hex))), c.out_hex);
   });
+}
+
+// ---- cross-check against the C++ golden fixtures ---------------------------
+// The Node leg of the three-way validation: the C++ Writer/canonicalizer emits
+// the golden .bin files under protocol/fixtures/canonical/, and this codec
+// consumes the SAME bytes. A canonical golden must recanonicalize to itself; the
+// compact golden must recanonicalize to its canonical sibling; every hostile
+// golden must be rejected. Mirrors the Python leg in test_canonical.py.
+const CANON_DIR = path.join(REPO, "protocol", "fixtures", "canonical");
+let MANIFEST = null;
+try {
+  MANIFEST = JSON.parse(readFileSync(path.join(CANON_DIR, "manifest.json"), "utf8"));
+} catch {
+  MANIFEST = null;   // goldens not generated on this checkout — skip the leg
+}
+
+if (MANIFEST) {
+  for (const entry of MANIFEST.canonical) {
+    test(`C++ golden recanonicalizes to itself: ${entry.file}`, () => {
+      const raw = new Uint8Array(readFileSync(path.join(CANON_DIR, entry.file)));
+      assert.deepEqual(recanonicalize(raw), raw);
+    });
+  }
+
+  test("C++ compact golden recanonicalizes to its canonical sibling", () => {
+    const cp = MANIFEST.compact_pair;
+    const compact = new Uint8Array(readFileSync(path.join(CANON_DIR, cp.compact_file)));
+    const canonical = new Uint8Array(readFileSync(path.join(CANON_DIR, cp.canonical_file)));
+    assert.deepEqual(recanonicalize(compact), canonical);
+  });
+
+  for (const entry of MANIFEST.hostile) {
+    test(`C++ hostile golden rejected: ${entry.file}`, () => {
+      const raw = new Uint8Array(readFileSync(path.join(CANON_DIR, entry.file)));
+      assert.throws(() => recanonicalize(raw), CanonicalError);
+    });
+  }
 }

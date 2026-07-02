@@ -13,6 +13,7 @@
 //               reserved byte, length overflow).
 //
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,6 +33,20 @@ namespace {
 Bytes bin_of(std::string_view s) {
     return Bytes(reinterpret_cast<const uint8_t*>(s.data()),
                  reinterpret_cast<const uint8_t*>(s.data()) + s.size());
+}
+
+// A double from a raw 64-bit pattern (for building assorted NaN encodings).
+double dbl_from_bits(uint64_t bits) {
+    double d;
+    std::memcpy(&d, &bits, sizeof d);
+    return d;
+}
+
+// The 8 payload bytes of a canonical float64 output (skip the 0xcb tag).
+uint64_t float_payload_bits(const Bytes& b) {
+    uint64_t v = 0;
+    for (int i = 1; i <= 8; ++i) v = (v << 8) | b[i];
+    return v;
 }
 
 }  // namespace
@@ -242,4 +257,83 @@ XI_TEST(reader_huge_count_is_not_a_dos) {
     // not a 4-billion-iteration hang.
     Bytes b = {0xDD, 0xFF, 0xFF, 0xFF, 0xFF};
     XI_EXPECT(xi::mp::validate(b.data(), b.size()) == Status::Truncated);
+}
+
+// ---------------------------------------------- profile alignment (2026-07-02) ---
+// The five BINDING reconciliation rulings in contract/canonical-profile-notes.md.
+
+// Ruling 1: ANY NaN normalizes to 0x7ff8000000000000; +/-Inf and -0.0 preserved.
+XI_TEST(writer_normalizes_nan_to_canonical) {
+    const uint64_t kCanon = 0x7ff8000000000000ull;
+    // Assorted NaN encodings: quiet (payload 0), sign-set quiet, signalling.
+    for (uint64_t bits : {0x7ff8000000000000ull, 0xfff8000000000001ull,
+                          0x7ff0000000000001ull, 0xffffffffffffffffull}) {
+        Writer w; w.float_(dbl_from_bits(bits));
+        XI_EXPECT_EQ(w.bytes().size(), (size_t)9);
+        XI_EXPECT_EQ(w.bytes()[0], tag::Float64);
+        XI_EXPECT_EQ(float_payload_bits(w.bytes()), kCanon);
+    }
+    // Non-NaN specials ride through untouched.
+    { Writer w; w.float_(dbl_from_bits(0x7ff0000000000000ull));  // +Inf
+      XI_EXPECT_EQ(float_payload_bits(w.bytes()), 0x7ff0000000000000ull); }
+    { Writer w; w.float_(dbl_from_bits(0xfff0000000000000ull));  // -Inf
+      XI_EXPECT_EQ(float_payload_bits(w.bytes()), 0xfff0000000000000ull); }
+    { Writer w; w.float_(dbl_from_bits(0x8000000000000000ull));  // -0.0
+      XI_EXPECT_EQ(float_payload_bits(w.bytes()), 0x8000000000000000ull); }
+    { Writer w; w.float_(0.0);                                    // +0.0
+      XI_EXPECT_EQ(float_payload_bits(w.bytes()), 0x0000000000000000ull); }
+}
+
+XI_TEST(canonicalize_normalizes_foreign_nan) {
+    // A foreign float64 carrying a sign-set signalling-ish NaN -> canonical NaN.
+    Bytes weird = {0xCB, 0xFF, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    Writer out;
+    XI_EXPECT(Reader(weird).canonicalize(out) == Status::Ok);
+    XI_EXPECT_EQ(float_payload_bits(out.bytes()), 0x7ff8000000000000ull);
+    // A foreign float32 NaN widens AND normalizes.
+    Bytes f32nan = {0xCA, 0x7F, 0xC0, 0x00, 0x01};
+    Writer out2;
+    XI_EXPECT(Reader(f32nan).canonicalize(out2) == Status::Ok);
+    XI_EXPECT_EQ(float_payload_bits(out2.bytes()), 0x7ff8000000000000ull);
+}
+
+// Ruling 2: map keys MUST be strings — rejected at BOTH validate and canonicalize.
+XI_TEST(reader_rejects_non_string_map_key) {
+    // fixmap(1){ fixint 1 : fixint 2 }  -> 0x81 0x01 0x02  (int key, forbidden)
+    Bytes b = {0x81, 0x01, 0x02};
+    XI_EXPECT(xi::mp::validate(b.data(), b.size()) == Status::NonStringKey);
+    Writer out;
+    XI_EXPECT(Reader(b).canonicalize(out) == Status::NonStringKey);
+}
+
+XI_TEST(reader_rejects_container_map_key) {
+    // fixmap(1){ fixarray(0) : nil }  -> array key is also non-string.
+    Bytes b = {0x81, 0x90, 0xC0};
+    XI_EXPECT(xi::mp::validate(b.data(), b.size()) == Status::NonStringKey);
+}
+
+// Ruling 5: duplicate keys rejected at canonicalize() (the ingress door) but
+// left PERMISSIVE at validate() (structural well-formedness does not need it).
+XI_TEST(canonicalize_rejects_duplicate_map_keys) {
+    // map32(2){ "k": 1, "k": 2 } — a duplicate key.
+    Writer w;
+    w.map(2);
+    w.key("k"); w.int_(1);
+    w.key("k"); w.int_(2);
+    Bytes dup = w.take();
+
+    Writer out;
+    XI_EXPECT(Reader(dup).canonicalize(out) == Status::DuplicateKey);
+
+    // validate() is intentionally permissive on duplicates (the split is
+    // documented in xi_mp.hpp): the buffer is structurally well-formed.
+    XI_EXPECT(xi::mp::validate(dup.data(), dup.size()) == Status::Ok);
+
+    // Distinct keys canonicalize fine (no false positive).
+    Writer w2;
+    w2.map(2); w2.key("a"); w2.int_(1); w2.key("b"); w2.int_(2);
+    Bytes ok = w2.take();
+    Writer out2;
+    XI_EXPECT(Reader(ok).canonicalize(out2) == Status::Ok);
+    XI_EXPECT(out2.bytes() == ok);
 }

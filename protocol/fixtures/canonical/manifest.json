@@ -108,6 +108,14 @@
             "content": "map32(1) with only the key present",
             "expected_status": "truncated",
             "b64": "3wAAAAGhaw=="
+        },
+        {
+            "file": "hostile_nonstring_key.bin",
+            "category": "hostile",
+            "size": 3,
+            "content": "fixmap(1) with an integer key {1: 2}",
+            "expected_status": "non-string-key",
+            "b64": "gQEC"
         }
     ]
 }

@@ -197,3 +197,42 @@ by the ingress-canonicalizer task:
 5. Duplicate map keys: currently unchecked in C++; canonicalize() SHOULD
    reject duplicates at ingress (hygiene) — assigned to the canonicalizer
    task with the rest.
+
+## Alignment landed (2026-07-02, ingress-canonicalizer task 1c)
+
+The five rulings above are now implemented in the C++ codec
+(`backend/include/xi/xi_mp.hpp`). No spec incident surfaced: after alignment
+all three implementations byte-agree on the shared vectors AND on the C++
+golden fixtures. The three-way cross-check now runs on every build —
+`canonical_xcheck` (C++ vs `contract/canonical-vectors.json`, 41 encode + 11
+recanon), `canonical_xcheck_py` (Python decodes+recanonicalizes the C++
+`protocol/fixtures/canonical/*.bin` goldens and the shared vectors), and the
+Node leg in `ui-components/test/canonical-mp.mjs` (same goldens + vectors).
+
+- **Ruling 1 (NaN)** — `Writer::float_` flattens ANY NaN (detected on the raw
+  bits: exponent all-ones, mantissa non-zero, so signalling NaN is caught
+  without FPU-quieting reliance) to `0x7ff8000000000000`; `canonicalize()`
+  inherits it (it is the emit path). ±Inf and −0.0 are preserved. The
+  `scalar_float` golden was UNCHANGED (its `std::nan("")` was already the
+  canonical pattern), so no golden regen was needed for NaN.
+- **Ruling 2 (string keys)** — `validate()` and `canonicalize()` reject a
+  non-string map key (`Status::NonStringKey`, the twin of Python/TS
+  `MapKeyError`). New golden `hostile_nonstring_key.bin`; both siblings reject
+  it too.
+- **Ruling 5 (duplicate keys) — the split.** `canonicalize()` (the ingress
+  door) rejects duplicate keys (`Status::DuplicateKey`); `validate()` stays
+  PERMISSIVE (structural well-formedness does not require uniqueness, and cheap
+  dup-detection there is awkward). This is a C++-only ingress-hygiene check:
+  the Python and TS codecs decode maps into native dict/object/Map, which
+  DEDUPE silently rather than reject. That divergence is acceptable and
+  deliberate — dup detection is a property of C++'s one-pass canonicalizer, not
+  of the wire profile — so no duplicate-key fixture is added to the shared
+  golden set (a Python "must reject" cross-check on such a fixture would fail by
+  construction). Covered by the C++ unit test
+  `canonicalize_rejects_duplicate_map_keys`.
+
+The ingress edge itself (`backend/include/xi/xi_ingress.hpp`,
+`xi::ingress::canonicalize_entry`) composes these into the doc-07 three-layer
+boundary and is the ONLY public path from foreign bytes to a Frame entry; a
+pool-handle ext (`kPoolHandleExtType`) is never imported, even under an
+accept-list.
