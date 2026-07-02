@@ -7,7 +7,7 @@
 //   1. Build two distinct frames (left = vertical stripes, right = horizontal)
 //      stamped with the same `seq` so the script can verify they really come
 //      from the same event.
-//   2. xi::emit_record(host, name, Record().image("left", L).image("right", R))
+//   2. emit(Record().image("left", L).image("right", R))  // the RAII source path
 //
 // The dispatched event carries both images; the script reads them via
 // xi::current_trigger().image("left") and .image("right").
@@ -15,13 +15,13 @@
 
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
+#include <xi/xi_thread.hpp>   // xi::spawn_worker — SEH-safe capture thread
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <thread>
-#include <vector>
 
 class SyncedStereo : public xi::Plugin {
 public:
@@ -73,7 +73,10 @@ private:
     void start_() {
         if (running_.load()) return;
         running_ = true;
-        thread_ = std::thread([this] { run_loop_(); });
+        // Blessed source thread: xi::spawn_worker installs the per-thread SEH
+        // translator + top-level catch so a stray fault in the grab loop is
+        // contained to this worker instead of taking down the whole backend.
+        thread_ = xi::spawn_worker(name() + "-source", [this] { run_loop_(); });
     }
 
     void stop_() {
@@ -87,23 +90,29 @@ private:
         const int W = 320, H = 240;
         int seq = seq_.fetch_add(1);
 
-        // LEFT: vertical stripes. RIGHT: horizontal stripes. Same seq.
-        std::vector<uint8_t> L((size_t)W * H), R((size_t)W * H);
+        // LEFT: vertical stripes. RIGHT: horizontal stripes. Same seq. Paint
+        // straight into fresh host-pool slots so emit() hands them over via the
+        // pool refcount path (no heap-to-pool copy).
+        xi::Image L = pool_image(W, H, 1);
+        xi::Image R = pool_image(W, H, 1);
+        uint8_t* lp = L.data();
+        uint8_t* rp = R.data();
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x) {
-                L[y * W + x] = (uint8_t)(((x + seq) & 31) ? 200 : 32);
-                R[y * W + x] = (uint8_t)(((y + seq) & 31) ? 32 : 200);
+                lp[y * W + x] = (uint8_t)(((x + seq) & 31) ? 200 : 32);
+                rp[y * W + x] = (uint8_t)(((y + seq) & 31) ? 32 : 200);
             }
         // Stamp seq into the top-left 4 bytes of each so the script can verify
         // "these came from the same event".
-        std::memcpy(L.data(), &seq, sizeof(seq));
-        std::memcpy(R.data(), &seq, sizeof(seq));
+        std::memcpy(lp, &seq, sizeof(seq));
+        std::memcpy(rp, &seq, sizeof(seq));
 
         // Both frames in ONE record → one dispatched event, no bus policy.
+        // emit() fills host()/name() and runs the RAII marshal/refcount path.
         xi::Record rec = xi::Record()
-            .image("left",  xi::Image(W, H, 1, L.data()))
-            .image("right", xi::Image(W, H, 1, R.data()));
-        xi::emit_record(host_, name().c_str(), rec, XI_TRIGGER_NULL);
+            .image("left",  L)
+            .image("right", R);
+        emit(rec);
         ticks_++;
     }
 

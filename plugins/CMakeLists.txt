@@ -4,7 +4,16 @@ project(xinsp2_plugins C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(MSVC)
-    add_compile_options(/W3 /utf-8)
+    # /EHa (async exceptions) is REQUIRED, not cosmetic — it matches the SDK's own
+    # plugin build (sdk/cmake/xinsp2_plugin.cmake) and the backend EXE. The host
+    # runs every plugin call under _set_se_translator (xi_seh.hpp), and a source's
+    # xi::spawn_worker installs the same translator on its worker thread; MSVC only
+    # emits the unwind funclets that make that SEH→C++ translation sound AND run
+    # local dtors during unwind under /EHa. Under the default /EHsc the catch still
+    # fires but RAII in the faulting frame is skipped, leaking its pool_image
+    # handles (1 ImagePool slot per absorbed crash) — and _set_se_translator warns
+    # C4535 that it is inoperative.
+    add_compile_options(/W3 /utf-8 /EHa)
 endif()
 
 # All plugin DLLs are namespaced with an "xi-" prefix (xi-<name>.dll). Set once

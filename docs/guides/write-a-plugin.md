@@ -689,6 +689,14 @@ and hand it to the host with the one dispatch verb, `xi::emit_record` (ABI v6),
 from a worker thread. Each record dispatches one inspection. See the Expert
 template for a working synthetic source.
 
+Spawn that worker with **`xi::spawn_worker`** (`<xi/xi_thread.hpp>`), not a raw
+`std::thread`: it installs the per-thread SEH translator + a top-level catch, so a
+stray fault in your grab loop is contained to the worker instead of taking the
+whole backend down. Paint frames into a `pool_image()` slot and emit them with the
+`emit(rec)` member — the same blessed produce-and-hand-over path `process()` uses,
+no manual `host_->image_create` / refcount juggling. (The shipped `mock_camera` /
+`synced_stereo` / `trigger_source` sources all follow this pattern.)
+
 ```cpp
 auto rec = xi::Record()
     .image("frame", img)

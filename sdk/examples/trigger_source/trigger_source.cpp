@@ -1,11 +1,11 @@
 //
-// trigger_source.cpp — minimal image source using emit_record.
+// trigger_source.cpp — minimal image source using the blessed emit() path.
 //
 // A source plugin PUSHES frames into the pipeline: build a record (one or
-// more images + optional metadata) and hand it to the host with
-// xi::emit_record(). The host dispatches the inspection script exactly once
-// per emitted record; the script reads the frames back via
-// xi::current_trigger().image(...).
+// more images + optional metadata) and hand it to the host with emit() — the
+// xi::Plugin member that fills host()/name() and runs the RAII marshal/refcount
+// path. The host dispatches the inspection script exactly once per emitted
+// record; the script reads the frames back via xi::current_trigger().image(...).
 //
 // Each record carries a 128-bit trigger id. Pass XI_TRIGGER_NULL (the default)
 // and the host mints a fresh one — that alone makes every frame individually
@@ -18,8 +18,9 @@
 // See examples/stereo_sync/ for a paired-cameras reference.
 //
 
-#include <xi/xi_abi.hpp>   // xi::Plugin, xi::Record, xi::Image, xi::emit_record
+#include <xi/xi_abi.hpp>    // xi::Plugin, xi::Record, xi::Image, pool_image()/emit()
 #include <xi/xi_json.hpp>
+#include <xi/xi_thread.hpp> // xi::spawn_worker — SEH-safe capture thread
 
 #include <atomic>
 #include <chrono>
@@ -65,7 +66,10 @@ private:
 
     void start_() {
         if (running_.exchange(true)) return;
-        thread_ = std::thread([this] { run_loop_(); });
+        // Blessed source thread: xi::spawn_worker installs the per-thread SEH
+        // translator so a stray fault in run_loop_() is contained here instead
+        // of taking down the whole backend (a raw std::thread would not be).
+        thread_ = xi::spawn_worker(name() + "-source", [this] { run_loop_(); });
     }
 
     void stop_() {
@@ -77,16 +81,18 @@ private:
         const int W = 320, H = 240;
         int seq = 0;
         while (running_.load()) {
-            // 1. Paint one frame.
-            xi::Image img(W, H, 1);
+            // 1. Paint one frame straight into a fresh host-pool slot, so emit()
+            //    hands it over via the pool refcount path (no heap-to-pool copy).
+            xi::Image img = pool_image(W, H, 1);
             uint8_t* px = img.data();
             for (int i = 0; i < W * H; ++i) px[i] = (uint8_t)((i + seq) & 0xFF);
 
             // 2. Emit it. Default id = XI_TRIGGER_NULL → host mints a fresh
             //    trigger id; default ts = 0 → host stamps now(). The script
             //    reads this frame back as current_trigger().image("frame").
-            xi::emit_record(host_, name().c_str(),
-                            xi::Record().image("frame", img));
+            xi::Record rec;
+            rec.image("frame", img);
+            emit(rec);
 
             ++seq;
             ticks_++;

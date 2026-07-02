@@ -9,7 +9,8 @@
 //      mock_camera.cpp /Fe:mock_camera.dll
 //
 
-#include <xi/xi_abi.hpp>       // xi::Plugin, xi::Record, xi::Image, xi::emit_record
+#include <xi/xi_abi.hpp>       // xi::Plugin, xi::Record, xi::Image, pool_image()/emit()
+#include <xi/xi_thread.hpp>    // xi::spawn_worker — SEH-safe capture thread
 #include <xi/xi_json.hpp>      // parses set_def/exchange (canonical over cmd.find)
 #include <xi/xi_contract.hpp>  // fail-loud command inputs + schema-skew errors
 
@@ -152,7 +153,11 @@ private:
     void start_() {
         if (running_.load()) return;
         running_ = true;
-        thread_ = std::thread([this] { run_loop(); });
+        // Blessed source thread: xi::spawn_worker installs the per-thread SEH
+        // translator + a top-level catch, so a stray fault in run_loop() is
+        // contained to this worker instead of killing the whole backend (a raw
+        // std::thread would run OUTSIDE that translator).
+        thread_ = xi::spawn_worker(name() + "-source", [this] { run_loop(); });
     }
 
     void stop_() {
@@ -166,7 +171,9 @@ private:
             // Snapshot config once per frame (set_def/exchange may retune it live).
             const int w = w_.load(), h = h_.load(), fps = fps_.load();
 
-            xi::Image img(w, h, 3);
+            // Paint straight into a fresh host-pool slot: emit() then hands the
+            // frame over via the pool refcount path (zero heap-to-pool copy).
+            xi::Image img = pool_image(w, h, 3);
             uint8_t* p = img.data();
 
             // Background: gradient that shifts with frame
@@ -191,8 +198,12 @@ private:
             }
             draw_number(img, 4, 4, seq);
 
-            xi::emit_record(host_, name().c_str(),
-                            xi::Record().image(keys::kFrame, img));
+            // emit() fills host()/name(), mints a fresh trigger id, and runs the
+            // RAII marshal/refcount path — the member sibling of the free
+            // xi::emit_record, no manual host_-> juggling.
+            xi::Record rec;
+            rec.image(keys::kFrame, img);
+            emit(rec);
             seq++;
 
             int sleep_ms = 1000 / std::max(fps, 1);
