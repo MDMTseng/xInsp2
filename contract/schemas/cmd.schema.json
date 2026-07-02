@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/cmd.schema.json",
+  "title": "cmd envelope (client -> backend)",
+  "description": "The client-to-backend command frame. `args` is command-specific and intentionally left open (an object with additionalProperties:true) — the per-command arg shapes are a separate, larger modelling job the spike does not attempt.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "id", "name"],
+  "properties": {
+    "type": { "type": "string", "const": "cmd" },
+    "id": { "type": "integer", "description": "Correlation id echoed in the matching rsp." },
+    "name": { "type": "string", "description": "Command name." },
+    "args": { "type": "object", "additionalProperties": true, "description": "Command-specific arguments; default {}." }
+  }
+}

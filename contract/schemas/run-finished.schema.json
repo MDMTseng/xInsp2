@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/run-finished.schema.json",
+  "title": "run_finished event",
+  "description": "Fires once per completed run (or run_error fires instead on throw). `ms` is legacy integer-ms; `inspect_compute_us` states the same COMPUTE-time meaning explicitly in microseconds.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "name", "data"],
+  "properties": {
+    "type": { "type": "string", "const": "event" },
+    "name": { "type": "string", "const": "run_finished" },
+    "data": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["run_id"],
+      "properties": {
+        "run_id": { "type": "integer" },
+        "ms": { "type": "integer" },
+        "inspect_compute_us": { "type": "integer" }
+      }
+    }
+  }
+}

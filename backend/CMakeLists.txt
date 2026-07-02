@@ -896,6 +896,16 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_retired_terms.py)
     set_tests_properties(retired_terms PROPERTIES LABELS "docs")
+    # contract_schema: the contract-first spike gate. Validates every schema under
+    # contract/schemas/ against the constrained-subset meta-schema (way A) and
+    # every wire fixture (protocol/fixtures + contract/examples) against its mapped
+    # schema (way B). Needs the `jsonschema` package; validate.py self-skips (exit 0)
+    # if it is absent, so a box without it still passes configure/build like the
+    # doc_coverage gate. See contract/validate.py and docs/new_gen/05-schema-language-spike.md.
+    add_test(NAME contract_schema
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/validate.py)
+    set_tests_properties(contract_schema PROPERTIES LABELS "contract")
 else()
     message(STATUS "doc_coverage ctest skipped: no Python3 interpreter found")
 endif()

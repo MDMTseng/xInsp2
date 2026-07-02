@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/meta/xi-contract-subset.schema.json",
+  "title": "xInsp contract schema subset (meta-schema)",
+  "description": "A schema that every file under contract/schemas/ must itself validate against. It mechanically enforces the CONSTRAINED JSON-Schema subset the xInsp contract package is allowed to use: object/array/scalar types, required, enum, const, additionalProperties, $ref/$defs within the package, and scalar range/length keywords. It BANS the combinators (anyOf/oneOf/allOf/not), conditional keywords (if/then/else, dependentSchemas), and patternProperties/propertyNames/unevaluatedProperties by omitting them from the allowed keyword set under an `additionalProperties:false` node. A schema that uses a banned keyword fails validation against this meta-schema. See contract/README.md for the prose statement of the subset and the rationale for each exclusion.",
+  "$ref": "#/$defs/node",
+  "$defs": {
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "$schema": { "type": "string" },
+        "$id": { "type": "string" },
+        "$ref": {
+          "type": "string",
+          "description": "Local ($defs) or same-package relative reference only. External $ref out of the contract package is not part of the subset."
+        },
+        "$comment": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "deprecated": { "type": "boolean" },
+        "examples": { "type": "array" },
+        "default": true,
+
+        "type": { "$ref": "#/$defs/typeValue" },
+        "enum": { "type": "array", "minItems": 1 },
+        "const": true,
+
+        "properties": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/node" }
+        },
+        "required": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "additionalProperties": {
+          "description": "Boolean or a subschema. The unknown-key POLICY is a per-message decision documented in the README: descriptive schemas of the additive-only wire default to `true` (forward-compatible); closed sub-objects may use `false`.",
+          "oneOf": [
+            { "type": "boolean" },
+            { "$ref": "#/$defs/node" }
+          ]
+        },
+
+        "items": { "$ref": "#/$defs/node" },
+        "minItems": { "type": "integer", "minimum": 0 },
+        "maxItems": { "type": "integer", "minimum": 0 },
+
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" },
+        "exclusiveMinimum": { "type": "number" },
+        "exclusiveMaximum": { "type": "number" },
+        "multipleOf": { "type": "number", "exclusiveMinimum": 0 },
+        "minLength": { "type": "integer", "minimum": 0 },
+        "maxLength": { "type": "integer", "minimum": 0 },
+        "pattern": {
+          "type": "string",
+          "description": "Regex on a scalar STRING value. This is `pattern` (value constraint), NOT `patternProperties` (key matching) — the latter is banned."
+        },
+        "format": {
+          "type": "string",
+          "description": "Annotation only (uuid / hex / date-time). Not asserted for validation; documents intent — e.g. that a string carries a 128-bit id the codegen should keep as a string, never a number."
+        },
+
+        "$defs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/node" }
+        }
+      }
+    },
+    "typeValue": {
+      "description": "A single JSON Schema type name, or an array of them (the only supported way to say `nullable` in the subset — e.g. [\"string\",\"null\"]).",
+      "oneOf": [
+        { "$ref": "#/$defs/typeName" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/typeName" }
+        }
+      ]
+    },
+    "typeName": {
+      "type": "string",
+      "enum": ["object", "array", "string", "integer", "number", "boolean", "null"]
+    }
+  }
+}

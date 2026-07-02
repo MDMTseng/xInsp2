@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/rsp-load-project.schema.json",
+  "title": "load_project rsp",
+  "description": "Response to cmd:load_project. `data.status` reports honest partial application (ok/partial/rejected); the warning arrays carry the per-item reasons. Descriptive of the staged breaking shape now present in the fixtures.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "id", "ok", "data"],
+  "properties": {
+    "type": { "type": "string", "const": "rsp" },
+    "id": { "type": "integer" },
+    "ok": { "type": "boolean" },
+    "error": { "type": "string" },
+    "data": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["status"],
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "partial", "rejected"] },
+        "param_warnings": { "type": "array", "items": { "type": "string" } },
+        "instance_warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

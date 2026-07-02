@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/rsp-commit-group.schema.json",
+  "title": "commit_group rsp",
+  "description": "Response to cmd:commit_group. Schema written to MATCH THE FIXTURES (status/committed/canonical/warnings), which diverge from ws-protocol.md's documented `data.results[]` shape — see the doc/fixture drift finding in the writeup. Descriptive spike: the fixture describes what a test pins, so the schema follows the fixture and the drift is reported, not silently reconciled.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "id", "ok", "data"],
+  "properties": {
+    "type": { "type": "string", "const": "rsp" },
+    "id": { "type": "integer" },
+    "ok": { "type": "boolean" },
+    "data": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["status", "committed"],
+      "properties": {
+        "status": { "type": "string", "enum": ["committed", "partial"] },
+        "committed": { "type": "boolean" },
+        "canonical": { "type": "object", "additionalProperties": true },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/run-outcome.schema.json",
+  "title": "xi.run-outcome/1 payload",
+  "description": "The `data` object of a `run_result` event — the run's single verdict plus the traceability identity slice (schema xi.run-outcome/1). Descriptive of the CURRENT wire. `additionalProperties:true` because the WS protocol evolves additive-only: a newer backend may add identity fields and this schema must still validate old and new frames. Only `code` and `schema` are required — every other field is optional to stay tolerant of the dropped-trigger frame (no run_id/ms) and of older emitters, matching the forward-tolerant Python/TS reference consumers.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["code", "schema"],
+  "properties": {
+    "code": {
+      "type": "integer",
+      "description": "The verdict code. Convention: >0 ok-class, 0 NA, -1..>-990000 ng-class, <=-990000 framework system-fail enum (XI_SYS_*). NOTE: int; see the int64 caveat in the spike writeup — ids that can exceed 2^53 are carried as STRINGS (see inspection_id/trigger_id), never as this or run_id."
+    },
+    "msg": { "type": "string", "description": "Human-readable verdict message; empty string when unset." },
+    "run_id": {
+      "type": "integer",
+      "description": "Monotonic run counter. ABSENT on a dropped-trigger frame (code XI_SYS_DROPPED), hence optional."
+    },
+    "ms": { "type": "integer", "description": "Legacy integer-ms inspect COMPUTE time (not cycle latency). Absent on dropped frames." },
+    "source": { "type": "string", "description": "Emitting source instance name, or \"@script\" for a script-driven run." },
+    "group": { "type": "string", "description": "Dispatch group name." },
+    "trigger_id": {
+      "type": "string",
+      "format": "hex",
+      "description": "128-bit trigger id as a hex string. STRING by design — an int64/int128 id must never round-trip through a JSON number. Absent on synthetic/timer and dropped frames."
+    },
+    "boot_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Backend boot/session id (UUID). Part of the xi.run-outcome/1 identity slice."
+    },
+    "station_id": { "type": "string", "description": "Station identity. May be empty/absent when unconfigured." },
+    "inspection_id": {
+      "type": "string",
+      "description": "Composite identity `<station_id>/<boot_id>/<run_id>` as a STRING — the canonical cross-boundary run key."
+    },
+    "schema": {
+      "type": "string",
+      "const": "xi.run-outcome/1",
+      "description": "Payload schema discriminator. This constant IS how the harness routes a run_result frame to this schema (see the discriminated-union finding in the writeup: the subset has no oneOf, so the discriminator dispatch lives in the validator, not the schema)."
+    },
+    "class": {
+      "type": "string",
+      "enum": ["ok", "ng", "na", "no_verdict", "crashed", "dropped"],
+      "description": "Derived outcome class (wire key `class`; a reserved word in TS/Py — codegen renames it verdict_class). Enum lists the CURRENT classes; a newer backend class would be an additive value, which is why the reference consumers pass an unknown class through as a literal rather than rejecting it. The enum here is descriptive of today's wire."
+    },
+    "reason_code": { "type": "string", "description": "Machine reason for a non-ok class (e.g. seh_access_violation); empty for ok." },
+    "script_generation": { "type": "integer", "description": "Hot-reload generation of the script that produced the verdict." }
+  }
+}
