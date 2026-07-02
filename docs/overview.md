@@ -82,11 +82,10 @@ script** that orchestrates them per frame. The bets:
 4. The **script** `xi_inspect_entry()` runs: reads the record's images, calls
    plugins (`xi::use("det").process(...)` → a `Record`), computes a verdict, emits
    `xi::result(code, msg)` (the one verdict), and may forward to a PLC via a comm
-   plugin. (`VAR(...)` still compiles but no longer publishes per-run values — that
-   path was removed from core; surfacing per-run values/images for viewing is now
-   the shipped `expose` plugin's job — build a `xi::Record` and call
-   `xi::use("expose").process(rec)`, see
-   [`guides/write-a-script.md`](guides/write-a-script.md).)
+   plugin. (`VAR`/`EMIT` were removed — they no longer compile (compiler error
+   C3861); surfacing per-run values/images for viewing is now the shipped `expose`
+   plugin's job — build a `xi::Record` and call `xi::use("expose").process(rec)`,
+   see [`guides/write-a-script.md`](guides/write-a-script.md).)
 5. Emission is ordered per group (so the stream stays in frame order under parallel
    compute).
 6. The **HMI** renders the verdict; the **PLC** gets the verdict. Same
@@ -119,9 +118,9 @@ handling, dispatch pools, script lifecycle, crash filter.
   [`roadmap/linux-port.md`](./roadmap/linux-port.md).
 - **Docs ride with code:** a behavior change updates its matching doc in the same
   commit.
-- **`VAR(name, expr)` declares a local; reusing a name is a redefinition error**
-  (`VAR(x, x)` → C2374). Common first-day gotcha. (Note: `VAR`/`EMIT` compile but
-  no longer output anything — per-run output goes through the `expose` plugin.)
+- **`VAR`/`EMIT` were removed** — they no longer compile (compiler error C3861).
+  Per-run output goes through the `expose` plugin: build a `xi::Record` and call
+  `xi::use("expose").process(rec)`.
 
 ## Glossary
 

@@ -16,7 +16,7 @@ import { CARDS, XiClient,
 const qs = new URLSearchParams(location.search);
 // Default to a same-origin /ws (served by serve.mjs's proxy) so one HTTP tunnel
 // exposes both the page and the WS. Override with ?ws=ws://host:port/ for a
-// direct backend connection (e.g. serve.py's static-only mode).
+// direct backend connection to a separately-started backend).
 const WS_URL = qs.get("ws") ||
   `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 const DASH = qs.get("dashboard") || "./dashboard.json";

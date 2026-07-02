@@ -77,14 +77,13 @@ degrades cleanly. Always check.
   `clone()`d; empty/non-8-bit → empty Image). The supported way to return a
   computed `cv::Mat` lifetime-safely.
 
-**`VAR(name, value)`** declares a local but **no longer emits anything** to the
-client — the per-run value/preview transport was removed from core; surfacing
-values for viewing now goes through the shipped `expose` plugin. There is **no
-header and no macro**: build a plain `xi::Record`, tag it with the reserved key
-`"$channel"` (a string channel id), and call `xi::use("expose").process(rec)`.
-Display order = the record's own key order (insertion order is preserved); the
-host also stamps `"$seq"` for ordering. `VAR` still compiles so existing scripts
-build.
+**`VAR`/`EMIT` were removed** — they **no longer compile** (compiler error C3861);
+the per-run value/preview transport was removed from core. Surfacing values for
+viewing now goes through the shipped `expose` plugin. There is **no header and no
+macro**: build a plain `xi::Record`, tag it with the reserved key `"$channel"` (a
+string channel id), and call `xi::use("expose").process(rec)`. Display order = the
+record's own key order (insertion order is preserved); the host also stamps
+`"$seq"` for ordering.
 
 ## Nominal types — names over Record
 

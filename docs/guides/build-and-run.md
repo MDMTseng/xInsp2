@@ -92,8 +92,8 @@ Override with `TURBOJPEG_ROOT` / `IPP_ROOT`.
   `hmi/index.html?ws=ws://127.0.0.1:7823/`).
 - **First change:** edit a project's `inspect.cpp` and re-run — the backend
   hot-reloads the DLL. Try an `xi::result(...)` (the live per-run verdict) in
-  `examples/qa_run_result/inspect.cpp`. (`VAR(...)`/`EMIT(...)` still compile but
-  no longer surface anything — per-run output goes through the `expose` plugin.)
+  `examples/qa_run_result/inspect.cpp`. (`VAR(...)`/`EMIT(...)` were removed and no
+  longer compile — per-run output goes through the `expose` plugin.)
 - **Tests:** `python tools/run_qa.py` (all `examples/qa_*/driver.py`); `ctest` for
   the C++ unit tests. See `testing.md`.
 

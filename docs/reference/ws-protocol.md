@@ -73,8 +73,8 @@ but discouraged).
 ### ~~`vars` — backend to client~~ (REMOVED)
 
 > **REMOVED.** The backend no longer tracks
-> `VAR()` values or emits a `vars` message — `VAR()`/`EMIT()` still compile but
-> publish nothing. Everything from here to the start of `instances` is retained
+> `VAR()` values or emits a `vars` message — `VAR()`/`EMIT()` were removed and no
+> longer compile. Everything from here to the start of `instances` is retained
 > only to document what the message used to look like; a current client receives
 > none of it. Surfacing values/images for viewing now goes through the shipped
 > **expose** plugin — build a `xi::Record`, tag it with `"$channel"`, and call
