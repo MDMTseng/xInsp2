@@ -23,6 +23,10 @@
         "icon": "$(play)"
       },
       {
+        "command": "xinsp2.showHealth",
+        "title": "xInsp2: Show Backend Health Snapshot"
+      },
+      {
         "command": "xinsp2.openPipelineGraph",
         "title": "xInsp2: Open Pipeline Graph",
         "icon": "$(type-hierarchy)"
@@ -401,6 +405,7 @@
     "test:protocol": "node --test test/protocol.test.mjs",
     "test:outcome": "node --experimental-strip-types --test test/run_outcome.test.mjs",
     "test:compat": "node --experimental-strip-types --test test/version_compat.test.mjs",
+    "test:health": "node --experimental-strip-types --test test/health_state.test.mjs",
     "test:integration": "node --test test/ws_basic.test.mjs"
   },
   "devDependencies": {

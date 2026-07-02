@@ -1,0 +1,14 @@
+{
+  "schema": "xi.health/1",
+  "state": "degraded",
+  "since_ms": 1751430000123,
+  "boot_id": "9f3c1a2b",
+  "station_id": "line3-cell2",
+  "components": [
+    { "kind": "script",   "name": "inspect.cpp", "health": "ok",       "reason_code": "",             "since_ms": 1751429990000 },
+    { "kind": "instance", "name": "cam0",        "health": "degraded", "reason_code": "plugin_fault", "since_ms": 1751430000123, "crash_count": 3 },
+    { "kind": "instance", "name": "sink0",       "health": "ok",       "reason_code": "",             "since_ms": 0 },
+    { "kind": "group",    "name": "default",     "health": "ok",       "reason_code": "",             "since_ms": 0, "queue_now": 0, "running": 1, "dropped": 0 },
+    { "kind": "source",   "name": "cam0",        "health": "ok",       "reason_code": "",             "since_ms": 0, "last_emit_age_ms": 41 }
+  ]
+}

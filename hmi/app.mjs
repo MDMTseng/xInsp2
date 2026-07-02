@@ -54,6 +54,61 @@ dlog(`WS_URL=${WS_URL}  (host=${location.host} proto=${location.protocol})`);
 const badge = () => document.getElementById("conn");
 function setConn(txt, color) { const b = badge(); if (b) { b.textContent = txt; b.style.background = color; } }
 
+// ---- canonical health/state (schema xi.health/1) ----------------------------
+// The ONE authoritative read of the backend's state machine + which component (if
+// any) is unhealthy — pulled once on connect (get_health, the delivery guarantee)
+// and kept live by the health_changed event (accelerator). This replaces the HMI
+// inferring liveness from the event stream; the connection badge stays as-is
+// (transport up/down), and this small text pill next to it carries the canonical
+// state. Degrades gracefully on an older backend that lacks get_health
+// (feature-detected via the "unknown command" rsp): the pill stays hidden.
+let healthPill = null;          // lazily inserted into the header next to #conn
+let healthSupported = true;     // set false once a backend answers "unknown command"
+let lastHealth = null;          // last full snapshot, so an event can overlay onto it
+const STATE_COLORS = {
+  boot: "#4a4a4a", project_loaded: "#3a5a7a", running: "#1e6a3a",
+  degraded: "#7a4a1e", draining: "#5a5a2e", fault: "#6a1e1e",
+};
+function ensureHealthPill() {
+  if (healthPill || !healthSupported) return healthPill;
+  const conn = document.getElementById("conn");
+  if (!conn || !conn.parentNode) return null;
+  healthPill = document.createElement("span");
+  healthPill.id = "health";
+  // Mirror the #conn pill's look so this is information, not a redesign.
+  healthPill.style.cssText = (conn.style.cssText || "") +
+    ";font-size:12px;padding:2px 10px;border-radius:10px;color:#eee;margin-left:8px";
+  healthPill.style.display = "none";
+  conn.parentNode.insertBefore(healthPill, conn.nextSibling);
+  return healthPill;
+}
+// Non-ok components as a short text list (the failing set a degraded/fault points at).
+function failingText(components) {
+  return (components || [])
+    .filter((c) => c && c.health && c.health !== "ok")
+    .map((c) => `${c.kind} "${c.name}": ${c.health}${c.reason_code ? " (" + c.reason_code + ")" : ""}`)
+    .join(", ");
+}
+// Apply a parsed health object ({state, components?, component?}). An event carries
+// only the changed `component`, so overlay it onto the last full snapshot's list.
+function setHealth(h) {
+  if (!h || typeof h !== "object") return;
+  const pill = ensureHealthPill();
+  if (!pill) return;
+  let components = Array.isArray(h.components) ? h.components.slice() : (lastHealth ? lastHealth.components.slice() : []);
+  if (h.component && h.component.name) {
+    const c = h.component, i = components.findIndex((x) => x.kind === c.kind && x.name === c.name);
+    if (i >= 0) components[i] = c; else components.push(c);
+  }
+  lastHealth = { state: h.state || "boot", components };
+  const bad = failingText(components);
+  pill.textContent = `● health: ${lastHealth.state}` + (bad ? ` — ${bad}` : "");
+  pill.style.background = STATE_COLORS[lastHealth.state] || "#4a4a4a";
+  pill.style.display = "";
+  dlog(`health: ${lastHealth.state}${bad ? " — " + bad : ""}`);
+}
+function resetHealth() { lastHealth = null; if (healthPill) healthPill.style.display = "none"; }
+
 function scheduleRender() {
   if (raf) return;
   raf = requestAnimationFrame(() => { raf = 0; for (const el of cards) { try { el.feed(state); } catch (e) { console.error(e); } } });
@@ -287,6 +342,20 @@ const startStatsPoll = () => {
       .catch(() => { /* reply races a disconnect — next poll or reconnect covers it */ });
   }, 150);
 };
+// Pull the canonical health snapshot on connect (delivery guarantee behind the
+// health_changed accelerator). Feature-detected: an older backend rejects with an
+// "unknown command" rsp → mark unsupported so the pill stays hidden and the HMI
+// keeps its prior behaviour (no version-sniffing).
+const requestHealth = () => {
+  client.cmd("get_health")
+    .then((h) => setHealth(h))
+    .catch((e) => {
+      if (e && /unknown command/i.test(e.message || "")) {
+        healthSupported = false;
+        dlog("BE has no get_health — health pill disabled (older backend)");
+      } // any other error: a reply racing a disconnect — the reconnect re-pulls
+    });
+};
 // Ask the BE for the PROJECT's dashboard so the HMI only needs the WS URL (no
 // filesystem coupling). If the project has one it overrides the static fetch.
 const requestDashboard = () => {
@@ -314,11 +383,17 @@ client.onEvent((m) => {
   // run_id (absent on a dropped frame) so cards can count distinct runs.
   else if (m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
   else if (m.name === "status") { state.status = m.data; scheduleRender(); }
+  // Canonical health/state accelerator. Ignore until get_health confirmed support
+  // (a stray event mustn't un-hide the pill on a backend we classified as too old).
+  else if (m.name === "health_changed" && healthSupported) { setHealth(m.data); }
 });
 
-client.onOpen(() => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); });
+client.onOpen(() => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); requestHealth(); });
 client.onClose((info) => {
   stopStatsPoll();
+  // Health is per-connection; drop the pill + re-pull on reconnect (a stale
+  // "running" from a dead backend would mislead).
+  resetHealth();
   if (info.busy) {
     // Single-client reject: the backend is up and healthy but owned by another
     // client (ws-protocol.md "Single-client enforcement"). Say so instead of a

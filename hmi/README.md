@@ -37,7 +37,7 @@ index.html?ws=ws://<host>:<port>/&dashboard=./dashboard.json
 
 | File | Role |
 |---|---|
-| `index.html` | shell: top bar + connection badge + grid container |
+| `index.html` | shell: top bar + connection badge (+ a live health pill next to it) + grid container |
 | `app.mjs` | WS host — connect, consume the generic event stream, lay out the grid, `feed()` cards |
 | `lib/xi-components.esm.js` | vendored ui-components bundle: the `xi-*` elements, cards, and layout engine |
 | `dashboard.json` | the layout: a **split-pane tree** of `{dir:"row"\|"col",weights,children}` nodes with `{card:{type,bind,config}}` leaves |
@@ -55,6 +55,19 @@ subscribe-gated **XEX1** binary transport (a consumer subscribes by *channel*; t
 plugin JPEG-encodes + pushes only subscribed channels), decoded and rendered by
 **that plugin's own webUI**, not here. See
 [`../docs/roadmap/expose-plugin-and-output-transport.md`](../docs/roadmap/expose-plugin-and-output-transport.md).
+
+**Health/state:** on connect the HMI also pulls the canonical health/state
+contract (`cmd:get_health`, schema `xi.health/1`) once and subscribes the
+`health_changed` event — the ONE authoritative read of the backend's state
+machine (`boot`/`project_loaded`/`running`/`degraded`/`draining`/`fault`) and
+which component (if any) is unhealthy, instead of inferring liveness from the
+event stream. It surfaces as a small text **health pill** beside the connection
+badge (`● health: <state>`, colour per state; on `degraded`/`fault` it appends
+the failing component(s) + reason code). The connection badge is unchanged — it
+still means *transport up/down*; the pill is the backend's own report. Degrades
+gracefully on an older backend without `get_health` (feature-detected via the
+*"unknown command"* rsp — no version-sniffing): the pill stays hidden and the HMI
+behaves exactly as before.
 
 **Dashboard source:** on connect the HMI asks the backend for the *project's*
 dashboard (`cmd:get_dashboard` → `<project>/dashboard.json`, or
