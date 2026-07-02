@@ -105,7 +105,13 @@
   //  Self-contained XEX1 decoder (magic gate + minimal msgpack reader).
   //  Implements only the subset the producer emits, per the documented wire
   //  contract. Multi-byte ints are big-endian. No external dependency.
+  //
+  //  The region between the XEX1-DECODER markers below is extracted verbatim
+  //  and cross-tested against the C++ encoder's golden frames by
+  //  ui-components/test/xex1-golden.mjs — keep it self-contained (no DOM refs)
+  //  so that test keeps decoding the exact bytes this webUI does.
   // ======================================================================
+  // <XEX1-DECODER>
   function MsgpackReader(bytes, off) {
     this.b = bytes;
     this.o = off || 0;
@@ -148,6 +154,8 @@
       case 0xdb: return this.str(this.u32());
       case 0xdc: return this.arr(this.u16());
       case 0xdd: return this.arr(this.u32());
+      case 0xde: return this.map(this.u16());   // map16 — a frame with >15 top-level keys
+      case 0xdf: return this.map(this.u32());   // map32
       default: throw new Error("unsupported msgpack byte 0x" + c.toString(16));
     }
   };
@@ -186,6 +194,7 @@
     if (v && typeof v === "object") { const o = {}; for (const k in v) o[k] = restoreNonFinite(v[k]); return o; }
     return v;
   }
+  // </XEX1-DECODER>
 
   // ======================================================================
   //  Frame / channel-list handling (transport-agnostic)

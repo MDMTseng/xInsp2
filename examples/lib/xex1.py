@@ -57,6 +57,8 @@ def _mp(data: bytes, p: int) -> tuple[Any, int]:
     if b == 0xC6:  n = struct.unpack_from(">I", data, p)[0]; p += 4; return data[p:p + n], p + n
     if b == 0xDC:  n = struct.unpack_from(">H", data, p)[0]; p += 2; return _mp_arr(data, p, n)
     if b == 0xDD:  n = struct.unpack_from(">I", data, p)[0]; p += 4; return _mp_arr(data, p, n)
+    if b == 0xDE:  n = struct.unpack_from(">H", data, p)[0]; p += 2; return _mp_map(data, p, n)  # map16 (>15 keys)
+    if b == 0xDF:  n = struct.unpack_from(">I", data, p)[0]; p += 4; return _mp_map(data, p, n)  # map32
     raise Xex1Error(f"unsupported msgpack byte 0x{b:02x}")
 
 

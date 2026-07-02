@@ -355,12 +355,46 @@ body = {
   non-8-bit / lossless image transport is out of scope (use a purpose-built
   plugin). Image keys in the record correspond to entries in `images[]`.
 - **version gate:** a decoder checks the `XEX1` magic + `v` and rejects anything
-  else (closes the old XPV1-vs-header decoder drift). The stock decoder is
-  `decode_xex1` in `examples/lib/xex1.py` (checks magic + `v`, raises otherwise;
-  also does the non-finite restore above). The Python client
-  (`tools/xinsp2_py/xinsp2/client.py`) stays **content-agnostic** — it queues raw
-  binary frames on `_inbox_binary` for the caller to decode (e.g. via
-  `xex1.decode_xex1`), rather than decoding `XEX1` itself.
+  else (closes the old XPV1-vs-header decoder drift).
+
+#### msgpack widths the frame uses
+
+The body is hand-rolled msgpack (fixed shape, no library). Multi-byte integers
+are **big-endian**. The encoder (`plugins/expose/src/xex1_encode.hpp`) can emit,
+and every decoder must handle, exactly this subset:
+
+| Type | Opcodes | Reached by |
+|---|---|---|
+| uint | fixint, `0xCC` u8, `0xCD` u16, `0xCE` u32, `0xCF` u64 | `v`, `seq` |
+| str  | fixstr, `0xD9` str8, `0xDA` str16, `0xDB` str32 | `channel`, `json`, image `key` |
+| bin  | `0xC4` bin8, `0xC5` bin16, `0xC6` bin32 | image `jpeg` |
+| array | fixarray, `0xDC` array16, `0xDD` array32 | `images[]` (array16 once >15 images) |
+| map  | fixmap, `0xDE` map16, `0xDF` map32 | the top-level frame map (map16 once >15 keys) |
+
+The map widths matter: a decoder that handled only `fixmap` corrupted/rejected any
+frame whose top-level map grew past 15 keys. Decoders now widen consistently with
+the encoder. Unknown top-level keys are ignored, so the frame is forward-compatible.
+
+#### Decoders and golden fixtures
+
+The shipped SDK (`tools/xinsp2_py/xinsp2/client.py`) and the browser shim
+(`ui-components/src/ws-client.mjs`) are transport-generic and do **not** decode
+XEX1. The reference decoders are the `expose` plugin's own webUI
+(`plugins/expose/ui/index.html`, `decodeXEX1` + `restoreNonFinite`) and
+`examples/lib/xex1.py` (`decode_xex1` + `_restore_nonfinite`); a consumer that
+decodes expose frames itself owns the non-finite restore.
+
+The C++ encoder and both decoders are pinned against committed golden frames under
+`protocol/fixtures/binary/` (one `.bin` per width boundary + a `manifest.json` of
+their decoded content). The C++ ctest byte-compares the encoder's output against
+the goldens; the JS (`ui-components/test/xex1-golden.mjs`) and Python
+(`tools/xinsp2_py/tests/test_xex1_frames.py`) tests decode the same goldens and
+assert the manifest. Regenerate after an intentional frame change:
+
+```
+cmake --build plugins/build --config Release --target xex1_fixtures_test
+XINSP2_FIXTURES=protocol/fixtures ./plugins/build/Release/xex1_fixtures_test --regen
+```
 
 ---
 
