@@ -95,6 +95,7 @@ borrowed const views across the ABI, one free at frame end; images stay pool
 handles). Zero-copy sharing — with its refcounts, COW, and crash-leak — is
 retired from the small channel and kept only where it pays: pixels.
 This supersedes nothing in xInsp2 today; it is the v3 data-plane target.
+*(Refined and adopted 2026-07-02 as [`../07-uniform-keyed-buffer-plane.md`](../07-uniform-keyed-buffer-plane.md), which erases the remaining image/meta split: one keyed container of typed binary buffers, msgpack as the default metadata encoding.)*
 
 ## 3. The second divergence: kill the monolith struct (B + C)
 
