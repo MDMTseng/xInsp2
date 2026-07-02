@@ -1086,6 +1086,54 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../contract/live_conformance.py)
     set_tests_properties(contract_live PROPERTIES LABELS "contract" TIMEOUT 600)
+
+    # codegen_equiv: the wave-3 contract-codegen equivalence + drift gate
+    # (docs/new_gen/08 Wave 3; docs/new_gen/02 guard 4). Regenerates the
+    # per-plugin artifacts from contract/plugins/*.decl.json into a tmp dir and
+    # (a) byte-compares vs the committed generated/plugins/ (stale = fail);
+    # (c) proves the generated _keys.gen.h, the decl, AND the hand-written
+    # plugins/<p>/<p>_keys.h all carry the identical key-constant set + schema
+    # version (drift either way = fail); (e) WARNs (non-fatal) for any plugin
+    # shipping a hand-written *_keys.h with no decl (the coverage ratchet). Pure
+    # stdlib, so like contract_baseline it runs whenever Python is present.
+    add_test(NAME codegen_equiv
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/codegen/check_equiv.py)
+    set_tests_properties(codegen_equiv PROPERTIES LABELS "contract")
+
+    # codegen_equiv_compile: the COMPILED half of the same proof. A custom
+    # command REGENERATES the _keys/_io/_schema headers from the decls into the
+    # build tree; codegen_equiv_test then #includes those GENERATED headers in
+    # place of the hand-written ones and drives the exact builder/extractor call
+    # sites the plugin tests use -- a renamed constant or changed signature stops
+    # it compiling (drop-in equivalence, proven at compile+run time). The output
+    # Records are rebuilt from JSON exactly as the plugin tests do post-ABI, so no
+    # plugin DLL is needed. See contract/codegen/equiv/test_codegen_equiv.cpp.
+    set(CODEGEN_GEN_DIR ${CMAKE_BINARY_DIR}/codegen_gen)
+    set(CODEGEN_GEN_HEADERS
+        ${CODEGEN_GEN_DIR}/blob_analysis_keys.gen.h
+        ${CODEGEN_GEN_DIR}/blob_analysis_io.gen.h
+        ${CODEGEN_GEN_DIR}/blob_analysis_schema.gen.h
+        ${CODEGEN_GEN_DIR}/mock_camera_keys.gen.h
+        ${CODEGEN_GEN_DIR}/mock_camera_io.gen.h
+        ${CODEGEN_GEN_DIR}/mock_camera_schema.gen.h)
+    add_custom_command(
+        OUTPUT ${CODEGEN_GEN_HEADERS}
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/codegen/gen_contract.py
+                --out ${CODEGEN_GEN_DIR}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../contract/codegen/gen_contract.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/blob_analysis.decl.json
+                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/mock_camera.decl.json
+        COMMENT "codegen: regenerating contract headers into ${CODEGEN_GEN_DIR}")
+    add_custom_target(codegen_gen_headers DEPENDS ${CODEGEN_GEN_HEADERS})
+    add_executable(codegen_equiv_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../contract/codegen/equiv/test_codegen_equiv.cpp)
+    add_dependencies(codegen_equiv_test codegen_gen_headers)
+    target_include_directories(codegen_equiv_test PRIVATE ${CODEGEN_GEN_DIR})
+    target_link_libraries(codegen_equiv_test PRIVATE xi_core)
+    add_test(NAME codegen_equiv_compile COMMAND codegen_equiv_test)
+    set_tests_properties(codegen_equiv_compile PROPERTIES LABELS "contract")
 else()
     message(STATUS "doc_coverage ctest skipped: no Python3 interpreter found")
 endif()

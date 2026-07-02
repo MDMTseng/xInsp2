@@ -1,0 +1,44 @@
+{
+  "$comment": "ONE declaration per plugin — the single source of truth the wave-3 codegen turns into <plugin>_keys.gen.h + _schema.gen.h + _io.gen.h + TS/Py types + a docs keys table. TRANSCRIBED from the hand-written plugins/blob_analysis/blob_analysis_keys.h + _io.h (the headers are today's truth). A decl stays in the constrained field family the repo governs: object with typed fields, required/optional, ranges, nested shapes for arrays — no combinators/conditionals. See contract/codegen/README.md and docs/new_gen/02-plugin-data-contract.md.",
+  "plugin": "blob_analysis",
+  "namespace": "xi::blob",
+  "schema_version": 1,
+  "role": "operator",
+  "title": "blob_analysis — threshold + connected-component blob detector.",
+  "inputs": [
+    { "key": "gray",      "type": "image", "required": true,  "channels": 1, "doc": "image (required, 1-channel)" },
+    { "key": "threshold", "type": "int",   "required": false, "default": 128, "doc": "int (optional, default 128)" },
+    { "key": "min_area",  "type": "int",   "required": false, "default": 10,  "doc": "int (optional, default 10)" },
+    { "key": "max_area",  "type": "int",   "required": false, "default": 999999, "doc": "int (optional, default 999999)" },
+    { "key": "invert",    "type": "bool",  "required": false, "default": false, "doc": "bool (optional, default false)" }
+  ],
+  "outputs": [
+    { "key": "binary",         "type": "image", "doc": "image (thresholded)" },
+    { "key": "blob_count",     "type": "int",   "doc": "int" },
+    { "key": "threshold_used", "type": "int",   "doc": "int" },
+    {
+      "key": "blobs", "type": "array",
+      "item_accessor": "blob", "size_accessor": "blobs_size", "item_class": "Blob",
+      "doc": "array of blob objects",
+      "fields": [
+        { "key": "area",           "type": "int",    "doc": "int" },
+        { "key": "cx",             "type": "double", "doc": "double (centroid x)" },
+        { "key": "cy",             "type": "double", "doc": "double (centroid y)" },
+        { "key": "min_x",          "type": "int",    "doc": "int (bounding box)" },
+        { "key": "min_y",          "type": "int",    "doc": "int" },
+        { "key": "max_x",          "type": "int",    "doc": "int" },
+        { "key": "max_y",          "type": "int",    "doc": "int" },
+        { "key": "contour_points", "type": "int",    "doc": "int (count the plugin stamps alongside the polygon)" },
+        {
+          "key": "contour", "type": "array",
+          "item_accessor": "contour", "size_accessor": "contour_size", "item_class": "Point",
+          "doc": "array of {x,y} — the traced boundary polygon",
+          "fields": [
+            { "key": "x", "type": "int", "doc": "int (contour point)" },
+            { "key": "y", "type": "int", "doc": "int" }
+          ]
+        }
+      ]
+    }
+  ]
+}
