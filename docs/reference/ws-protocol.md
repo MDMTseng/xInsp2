@@ -786,6 +786,16 @@ at the prior fps — a config switch must not stop the stream.
 Overall `ok: false` if any target failed. Resolves backend instances first, then
 script-loaded ones.
 
+> **BREAKING (staged, not on master).** The reply gains a top-level `status`
+> field: `"committed"` (all targets committed) or `"partial"` (any target
+> faulted). On a **partial commit** the drain-barrier is now *dismissed* rather
+> than resumed: continuous production stays **HALTED** on the half-applied group
+> (old behaviour auto-resumed the stream on a mix of new+old config), and a sticky
+> `@commit` config-fault status is latched for operator intervention. `ok: false`
+> on partial is unchanged; the all-or-none commit **semantics** (sequential, no
+> rollback) are unchanged. Delta: `data` gains `"status"`; partial no longer
+> auto-resumes dispatch. Requires an app-team cutover to unhalt after intervention.
+
 **Addressing.** Targets are the deduped union of an explicit `instances[]` (which
 also covers script-side instances) plus selectors that expand against existing
 backend-instance properties — no new schema: `group` (the instance's dispatch
@@ -822,6 +832,18 @@ clean success. This exists to avoid a *fail-reads-as-pass*: instance defs
 include script-declared `xi::Instance` objects (resolved via the script DLL's
 own registry), so a dropped def would otherwise let a line run on default
 thresholds/models while the operator believes the saved recipe applied.
+
+> **BREAKING (staged, not on master).** `load_project` is now honest about
+> partial application via a top-level `status` field: `"ok"` (every param +
+> instance applied — `ok: true`), `"partial"` (some failed, warning arrays
+> non-empty — now **`ok: false`**, was `ok: true`), or `"rejected"` (hard
+> pre-parse failure: missing/unreadable `path`, invalid JSON — `ok: false` with
+> `data: { "status": "rejected" }`). Delta vs old: a partial restore was
+> previously reported as `ok: true` with warnings; generic clients (`if (resp.ok)
+> show "loaded"`) read a half-applied recipe as success. Now partial/rejected set
+> `ok: false`. The `param_warnings`/`instance_warnings` arrays are unchanged
+> (additive). This is BEST-EFFORT / NON-ATOMIC import (no quiesce, no rollback);
+> true atomic-recipe application is deferred.
 
 **Corrupt `project.json` is quarantined, not silently rebuilt.** If
 `project.json` exists but is **non-empty and unparseable** (e.g. a trailing comma
