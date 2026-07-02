@@ -138,3 +138,16 @@ target_compile_definitions(mock_camera_test PRIVATE
     MOCK_CAMERA_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera.dll")
 add_dependencies(mock_camera_test mock_camera)
 add_test(NAME mock_camera_test COMMAND mock_camera_test)
+
+# XEX1 binary golden fixtures — drives the SAME encoder the expose plugin ships
+# (expose/src/xex1_encode.hpp) and byte-compares its output against the committed
+# protocol/fixtures/binary/*.bin. The JS + Python decoder tests decode those same
+# goldens, so the three hand-rolled msgpack codecs are held in lockstep. Run with
+# --regen to (re)write the goldens + manifest after an intentional frame change.
+add_executable(xex1_fixtures_test expose/tests/test_xex1_fixtures.cpp)
+target_include_directories(xex1_fixtures_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
+add_test(NAME xex1_fixtures COMMAND xex1_fixtures_test)
+set_tests_properties(xex1_fixtures PROPERTIES
+    ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures")
