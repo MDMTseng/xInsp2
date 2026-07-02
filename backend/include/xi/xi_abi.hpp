@@ -35,7 +35,9 @@
 #include <cstring>
 #include <exception>
 #include <map>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace xi {
@@ -142,6 +144,152 @@ public:
 private:
     const xi_host_api* host_ = nullptr;
     xi_image_handle    handle_ = XI_IMAGE_NULL;
+};
+
+// --- xi.frame@1 SDK sugar (polaris2 wave-2) --------------------------------
+//
+// Thin C++ wrappers over the host xi_frame_v1 C accessors (xi_abi.h). A frame
+// crosses the ABI as an OPAQUE HANDLE, so — unlike the in-process TypedFrame
+// (xi_frame.hpp) — reads here resolve by key STRING through the host, not by a
+// compile-time offset slot. The FrameSchema/TypedFrame speed is a same-DLL
+// property; across the door a plugin reads/writes with its schema's key
+// CONSTANTS (still no string literals at call sites, still drift-proof), which
+// is what FrameIn/FrameOut give it.
+
+namespace frame_contract {
+// Fail-loud, Frame-shaped: a contract failure is a NORMAL sealed frame carrying
+// these top-level entries (so the caller always gets a frame to route to a
+// verdict), mirroring xi::contract's $fault Record entry. Reuse the SAME reason
+// codes as xi_contract.hpp (missing_input / wrong_type / schema_mismatch). See
+// contract/canonical-profile-notes.md § "Frame-shaped fail-loud".
+inline constexpr const char* kFault       = "$fault";        // str: reason code
+inline constexpr const char* kFaultKey    = "$fault_key";    // str: offending key
+inline constexpr const char* kFaultDetail = "$fault_detail"; // str: human detail
+} // namespace frame_contract
+
+// FrameOut — build an output/emit frame through the host builder. Owns the
+// builder handle until seal()/abandon; move-only (a builder is single-owner).
+class FrameOut {
+public:
+    FrameOut() = default;
+    explicit FrameOut(const xi_frame_v1* fi) : fi_(fi) {
+        if (fi_) b_ = fi_->builder_new();
+    }
+    ~FrameOut() { if (fi_ && b_ && !sealed_) fi_->builder_abandon(b_); }
+    FrameOut(FrameOut&& o) noexcept { move_from(std::move(o)); }
+    FrameOut& operator=(FrameOut&& o) noexcept {
+        if (this != &o) { reset_(); move_from(std::move(o)); }
+        return *this;
+    }
+    FrameOut(const FrameOut&) = delete;
+    FrameOut& operator=(const FrameOut&) = delete;
+
+    bool valid() const { return fi_ && b_ && !sealed_; }
+
+    FrameOut& i64(const char* k, int64_t v) { if (valid()) fi_->builder_add_i64(b_, k, v); return *this; }
+    FrameOut& f64(const char* k, double v)  { if (valid()) fi_->builder_add_f64(b_, k, v); return *this; }
+    FrameOut& str(const char* k, std::string_view v) {
+        if (valid()) fi_->builder_add_str(b_, k, v.data(), (int32_t)v.size());
+        return *this;
+    }
+    FrameOut& boolean(const char* k, bool v) { return i64(k, v ? 1 : 0); }  // no msgpack bool slot; i64 0/1
+    FrameOut& bin(const char* k, const void* d, size_t n) {
+        if (valid()) fi_->builder_add_bin(b_, k, d, (int32_t)n);
+        return *this;
+    }
+    FrameOut& image(const char* k, int32_t w, int32_t h, int32_t c, const void* px) {
+        if (valid()) fi_->builder_add_image(b_, k, w, h, c, px);
+        return *this;
+    }
+    FrameOut& adopt_image(const char* k, int32_t w, int32_t h, int32_t c, xi_image_handle handle) {
+        if (valid()) fi_->builder_adopt_image(b_, k, w, h, c, handle);
+        return *this;
+    }
+    // Nested canonical msgpack (doc 07 D3) — arrays/maps produced by xi::mp::Writer.
+    FrameOut& mp(const char* k, const void* d, size_t n) {
+        if (valid()) fi_->builder_add_mp(b_, k, d, (int32_t)n);
+        return *this;
+    }
+    // Frame-shaped fail-loud: stamp the reason codes and return. The frame is
+    // still a valid, sealed frame the caller routes to a verdict.
+    FrameOut& fault(const char* code, const char* key, std::string_view detail = {}) {
+        str(frame_contract::kFault, code ? code : "");
+        if (key && *key)      str(frame_contract::kFaultKey, key);
+        if (!detail.empty())  str(frame_contract::kFaultDetail, detail);
+        return *this;
+    }
+
+    // Seal into a host-owned frame handle (refcount 1). Empties this FrameOut;
+    // the CALLER now owns the ref (release it, or the host does after emit/door).
+    xi_frame_handle seal() {
+        if (!valid()) return XI_FRAME_NULL;
+        xi_frame_handle h = fi_->builder_seal(b_);
+        sealed_ = true;
+        b_ = XI_FRAME_BUILDER_NULL;
+        return h;
+    }
+
+    const xi_frame_v1* iface() const { return fi_; }
+
+private:
+    void reset_() { if (fi_ && b_ && !sealed_) fi_->builder_abandon(b_); }
+    void move_from(FrameOut&& o) noexcept {
+        fi_ = o.fi_; b_ = o.b_; sealed_ = o.sealed_;
+        o.fi_ = nullptr; o.b_ = XI_FRAME_BUILDER_NULL; o.sealed_ = true;
+    }
+    const xi_frame_v1* fi_ = nullptr;
+    xi_frame_builder   b_  = XI_FRAME_BUILDER_NULL;
+    bool               sealed_ = false;
+};
+
+// FrameIn — read a borrowed input frame handle through the host accessors. Does
+// NOT own the handle (the host does); borrowed spans are valid for the call.
+class FrameIn {
+public:
+    FrameIn(const xi_frame_v1* fi, xi_frame_handle h) : fi_(fi), h_(h) {}
+
+    bool valid() const { return fi_ && h_ != XI_FRAME_NULL; }
+    xi_frame_handle handle() const { return h_; }
+    int  count() const { return valid() ? fi_->count(h_) : 0; }
+    bool has(const char* k) const { return valid() && fi_->tag_of(h_, k) >= 0; }
+    int  tag_of(const char* k) const { return valid() ? fi_->tag_of(h_, k) : -1; }
+
+    std::optional<int64_t> i64(const char* k) const {
+        int64_t v; if (valid() && fi_->get_i64(h_, k, &v)) return v; return std::nullopt;
+    }
+    int64_t i64_or(const char* k, int64_t d) const { auto v = i64(k); return v ? *v : d; }
+    bool    bool_or(const char* k, bool d) const { auto v = i64(k); return v ? (*v != 0) : d; }
+    std::optional<double> f64(const char* k) const {
+        double v; if (valid() && fi_->get_f64(h_, k, &v)) return v; return std::nullopt;
+    }
+    std::optional<std::string_view> str(const char* k) const {
+        const char* p; int32_t n;
+        if (valid() && fi_->get_str(h_, k, &p, &n)) return std::string_view(p, (size_t)n);
+        return std::nullopt;
+    }
+    // Zero-copy image view (dims + pool-buffer pixel span). empty pixels ⇒ absent.
+    std::optional<xi_frame_image> image(const char* k) const {
+        xi_frame_image img{};
+        if (valid() && fi_->get_image(h_, k, &img)) return img;
+        return std::nullopt;
+    }
+    // Nested canonical msgpack bytes (decode with xi::mp::Reader).
+    std::optional<std::pair<const uint8_t*, int32_t>> mp(const char* k) const {
+        const void* p; int32_t n;
+        if (valid() && fi_->get_mp(h_, k, &p, &n))
+            return std::make_pair(reinterpret_cast<const uint8_t*>(p), n);
+        return std::nullopt;
+    }
+
+    // Fail-loud helpers (the FrameOut::fault convention).
+    bool is_fault() const { return has(frame_contract::kFault); }
+    std::optional<std::string_view> fault_code() const { return str(frame_contract::kFault); }
+
+    const xi_frame_v1* iface() const { return fi_; }
+
+private:
+    const xi_frame_v1* fi_;
+    xi_frame_handle    h_;
 };
 
 // --- Plugin base class ---
@@ -305,6 +453,49 @@ public:
     int32_t doc_refcount(void* doc) const {
         if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_refcount) return dv->doc_refcount(doc); }
         return host_ && host_->doc_refcount ? host_->doc_refcount(doc) : 0;
+    }
+
+    // --- xi.frame@1 data plane (polaris2 wave-2) -----------------------------
+    // Resolve the host Frame interface ONCE (cached); null on a host with no
+    // frame plane (then a frame-capable plugin degrades to its Record path).
+    const xi_frame_v1* frame_iface() const {
+        if (!frame_resolved_) {
+            frame_resolved_ = true;
+            if (host_ && host_->get_interface)
+                frame_ = static_cast<const xi_frame_v1*>(
+                    host_->get_interface("xi.frame", 1));
+        }
+        return frame_;
+    }
+    // Start building an output/emit frame (invalid if the host has no frame plane).
+    FrameOut new_frame() const { return FrameOut(frame_iface()); }
+
+    // Source side: seal + emit a frame to host dispatch. Consumes `out`. The host
+    // takes its own ref for the async event, so we drop ours right after. No-op
+    // on a host without the frame plane.
+    void emit_frame(FrameOut&& out, xi_trigger_id id = XI_TRIGGER_NULL, int64_t ts = 0) {
+        const xi_frame_v1* fi = frame_iface();
+        if (!fi) return;
+        xi_frame_handle h = out.seal();
+        if (h == XI_FRAME_NULL) return;
+        fi->emit_frame(name_.c_str(), id, h, ts);
+        fi->release(h);
+    }
+
+    // Frame-in/frame-out door: override to consume `in` and fill `out`. Publish
+    // it to the host with XI_PLUGIN_FRAME_DOOR(YourClass) after XI_PLUGIN_IMPL.
+    virtual void process_frame(FrameIn& in, FrameOut& out) { (void)in; (void)out; }
+
+    // SDK plumbing the XI_PLUGIN_FRAME_DOOR trampoline calls: wrap the borrowed
+    // input handle, run the virtual, seal the output into a host-owned handle the
+    // caller (host) takes ownership of. XI_FRAME_NULL if the host has no frame plane.
+    xi_frame_handle process_frame_abi(xi_frame_handle in) {
+        const xi_frame_v1* fi = frame_iface();
+        if (!fi) return XI_FRAME_NULL;
+        FrameIn  view(fi, in);
+        FrameOut out(fi);
+        process_frame(view, out);
+        return out.seal();
     }
 
     // Override these in your plugin:
@@ -475,6 +666,8 @@ private:
     mutable const xi_emit_v1*    emit_             = nullptr;
     mutable bool                 log_resolved_     = false;
     mutable const xi_log_v1*     log_              = nullptr;
+    mutable bool                 frame_resolved_   = false;
+    mutable const xi_frame_v1*   frame_            = nullptr;   // xi.frame@1 (wave-2)
 };
 
 // --- γ: host doc allocator bridge ---
@@ -859,4 +1052,33 @@ void xi_plugin_commit(void* inst) {                                            \
     } catch (...) {                                                            \
         std::fprintf(stderr, "[xinsp2] plugin commit() threw (non-std)\n");    \
     }                                                                          \
+}
+
+// Publish the xi.frame@1 frame-in/frame-out door (polaris2 wave-2). Place AFTER
+// XI_PLUGIN_IMPL, ONLY if your plugin OVERRIDES process_frame(FrameIn&,FrameOut&).
+// It exports xi_plugin_get_interface — the plugin-side capability door (the
+// synthesis §3 "pure door" dry run) — which the host probes to learn the plugin
+// speaks frames. The Record process() path is untouched; a plugin has BOTH.
+// The trampoline catches C++ exceptions in-plugin (same defense-in-depth as the
+// XI_PLUGIN_IMPL exports): the boundary is noexcept in practice.
+#define XI_PLUGIN_FRAME_DOOR(ClassName)                                        \
+extern "C" xi_frame_handle xi__frame_proc_##ClassName(void* inst,              \
+                                                      xi_frame_handle in) {    \
+    auto* self = static_cast<ClassName*>(inst);                                \
+    try { return self->process_frame_abi(in); }                               \
+    catch (const std::exception& e) {                                          \
+        std::fprintf(stderr, "[xinsp2] plugin process_frame() threw: %s\n", e.what()); \
+    } catch (...) {                                                            \
+        std::fprintf(stderr, "[xinsp2] plugin process_frame() threw (non-std)\n"); \
+    }                                                                          \
+    return XI_FRAME_NULL; /* hard failure sentinel (a CONTRACT failure is a    \
+                             normal sealed frame carrying a $fault entry) */    \
+}                                                                              \
+extern "C" __declspec(dllexport)                                               \
+const void* xi_plugin_get_interface(const char* id, uint32_t version) {        \
+    if (id && version == 1u && std::strcmp(id, "xi.frame") == 0) {             \
+        static const xi_frame_proc_v1 iface = { &xi__frame_proc_##ClassName }; \
+        return &iface;                                                         \
+    }                                                                          \
+    return nullptr;                                                            \
 }

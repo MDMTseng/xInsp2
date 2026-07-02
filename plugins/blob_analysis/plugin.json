@@ -3,5 +3,6 @@
   "description": "Threshold + contour extraction with area, centroid, bounding box per blob",
   "dll": "xi-blob_analysis.dll",
   "factory": "xi_plugin_create",
-  "has_ui": true
+  "has_ui": true,
+  "optional": [ { "iface": "xi.frame", "min": 1 } ]
 }

@@ -98,6 +98,37 @@ Declared types live in `xi/xi_record_schema.hpp` (`xi::FieldType`,
 `validate_record_pipeline`); `backend/tests/schema_fixture_plugin.cpp` is a minimal
 producer/consumer fixture.
 
+**Optional — the plugin capability door `xi_plugin_get_interface` (polaris2
+wave-2).** The **symmetric mirror** of the host's `get_interface`: a plugin
+exports this to publish its OWN capabilities to the host, resolved via
+`GetProcAddress` exactly like `prepare`/`commit`/`record_schema` (ABI-additive —
+the frozen v11 `xi_host_api` is untouched):
+
+```c
+const void* xi_plugin_get_interface(const char* id, uint32_t version);
+```
+
+The host probes `xi_plugin_get_interface("xi.frame", 1)` → `const
+xi_frame_proc_v1*` to learn a plugin does **frame-in/frame-out** on the v3
+keyed-buffer Frame plane; `NULL` means the capability is absent (a Record-only
+plugin exports the symbol not at all, or returns `NULL`). This is the
+[synthesis §3](../new_gen/polaris2/00-synthesis.md) "pure door" dry run — a
+plugin capability reached ONLY through a door rather than a new fixed export.
+
+The matching **host** side is `get_interface("xi.frame", 1)` → `const
+xi_frame_v1*`: the Frame value-type ABI (build / read / retain-release / emit a
+Frame, all through an OPAQUE `xi_frame_handle` + accessor functions, never raw
+struct layout). A frame plugin does NOT write these by hand — it overrides
+`process_frame(xi::FrameIn&, xi::FrameOut&)` and publishes the door with
+`XI_PLUGIN_FRAME_DOOR(Class)` after `XI_PLUGIN_IMPL`; its Record `process()` is
+untouched, so the instance speaks **both** currencies. A contract failure
+(missing/wrong entry) is a normal sealed frame stamped with a `$fault` reason
+code (`contract/canonical-profile-notes.md` § "Frame-shaped fail-loud"), not
+`XI_FRAME_NULL` (which is reserved for a hard internal failure). See
+`docs/new_gen/07-uniform-keyed-buffer-plane.md`, `docs/new_gen/08-polaris2-main-plan.md`
+(Wave 2), and the pilot pair `plugins/mock_camera` (frame-mode emit) +
+`plugins/blob_analysis` (frame door).
+
 ### Lifecycle
 
 ```

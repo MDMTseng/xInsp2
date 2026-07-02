@@ -33,6 +33,7 @@
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>       // parses exchange/def commands (canonical over cmd.find)
 #include <xi/xi_contract.hpp>   // fail-loud required inputs + schema-skew errors
+#include <xi/xi_mp.hpp>         // wave-2: canonical msgpack for the frame-door contour (doc 07 D3)
 
 #include "blob_analysis_keys.h"
 
@@ -204,6 +205,78 @@ public:
         return out;
     }
 
+    // polaris2 wave-2 (docs/new_gen/08 Wave 2): the xi.frame@1 frame-in/frame-out
+    // door. Consumes the SAME contract keyset as the Record process() above (the
+    // blob_analysis_keys.h constants ARE the frame schema — read via FrameIn's
+    // typed accessors, no string literals at the call sites) and produces its
+    // outputs as a frame: the binary image entry, the scalar counts, and the
+    // blobs array (incl. each blob's contour polygon) as ONE nested canonical-
+    // msgpack entry (doc 07 D3 — nesting is msgpack's job). Fail-loud carries
+    // over: a missing/mis-typed 'gray' is a normal sealed frame stamped with the
+    // xi::contract reason code (FrameOut::fault), which the caller routes to a
+    // verdict — never a silent default. The Record process() above is untouched;
+    // this instance speaks BOTH currencies.
+    void process_frame(xi::FrameIn& in, xi::FrameOut& out) override {
+        auto gray = in.image(keys::kGray);
+        if (!gray || !gray->pixels) {
+            out.fault(xi::contract::kMissingInput, keys::kGray,
+                      "blob_analysis(frame): required image 'gray' is missing");
+            return;
+        }
+        if (gray->channels != 1) {
+            out.fault(xi::contract::kWrongType, keys::kGray,
+                      "blob_analysis(frame): 'gray' must be single-channel");
+            return;
+        }
+        const int w = gray->width, h = gray->height;
+        const uint8_t* sp = static_cast<const uint8_t*>(gray->pixels);
+
+        int def_thresh, def_min, def_max; bool def_inv;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            def_thresh = thresh_; def_min = min_area_; def_max = max_area_; def_inv = invert_;
+        }
+        const int  thresh   = (int)in.i64_or(keys::kThreshold, def_thresh);
+        const int  min_area = (int)in.i64_or(keys::kMinArea,   def_min);
+        const int  max_area = (int)in.i64_or(keys::kMaxArea,   def_max);
+        const bool inv      = in.bool_or(keys::kInvert, def_inv);
+
+        std::vector<uint8_t> bin((size_t)w * (size_t)h);
+        for (int i = 0; i < w * h; ++i)
+            bin[i] = inv ? (sp[i] < thresh ? 255 : 0) : (sp[i] > thresh ? 255 : 0);
+
+        auto blobs = find_blobs(bin.data(), w, h, min_area, max_area);
+
+        out.image(keys::kBinary, w, h, 1, bin.data());
+        out.i64(keys::kBlobCount, (int64_t)blobs.size());
+        out.i64(keys::kThresholdUsed, thresh);
+
+        // The blobs array (incl. each contour) as one nested canonical-msgpack
+        // entry — the leaky-veneer contour the _io.h struggled with (synthesis §4)
+        // rides naturally here: msgpack maps/arrays nest without a flattened key
+        // convention.
+        xi::mp::Writer mw;
+        mw.array((uint32_t)blobs.size());
+        for (auto& b : blobs) {
+            mw.map(9);
+            mw.key(keys::kArea);          mw.int_(b.area);
+            mw.key(keys::kCx);            mw.float_(b.cx);
+            mw.key(keys::kCy);            mw.float_(b.cy);
+            mw.key(keys::kMinX);          mw.int_(b.min_x);
+            mw.key(keys::kMinY);          mw.int_(b.min_y);
+            mw.key(keys::kMaxX);          mw.int_(b.max_x);
+            mw.key(keys::kMaxY);          mw.int_(b.max_y);
+            mw.key(keys::kContourPoints); mw.int_((int64_t)b.contour.size());
+            mw.key(keys::kContour);       mw.array((uint32_t)b.contour.size());
+            for (auto& [px, py] : b.contour) {
+                mw.map(2);
+                mw.key(keys::kX); mw.int_(px);
+                mw.key(keys::kY); mw.int_(py);
+            }
+        }
+        out.mp(keys::kBlobs, mw.bytes().data(), mw.bytes().size());
+    }
+
     std::string exchange(const std::string& cmd) override {
         auto p = xi::Json::parse(cmd);
         const std::string command = p["command"].as_string();
@@ -260,3 +333,7 @@ private:
 };
 
 XI_PLUGIN_IMPL(BlobAnalysis)
+// polaris2 wave-2: publish the xi.frame@1 frame-in/frame-out door (the plugin-
+// side capability door — the synthesis §3 pure-door dry run). The host probes
+// xi_plugin_get_interface("xi.frame", 1) to learn blob speaks frames.
+XI_PLUGIN_FRAME_DOOR(BlobAnalysis)
