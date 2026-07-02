@@ -432,14 +432,37 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             results += "}";
         }
         results += "]";
-        // `guard` resumes dispatch at the prior fps when it goes out of scope at
-        // the end of this handler (config switch must not halt streaming).
-        std::string data = "{\"results\":" + results + "}";
+        std::string status = any_fail ? "partial" : "committed";
+        std::string data = "{\"status\":\"" + status + "\",\"results\":" + results + "}";
         if (any_fail) {
+            // PARTIAL COMMIT (review 04 #5, P0). The group did NOT commit as a unit —
+            // some targets took the new def, at least one faulted (already latched to
+            // InstState::Faulted per-target above). The old behaviour let `guard`
+            // resume dispatch at end-of-scope, so production RESUMED on a half-applied
+            // group and the line silently ran a mix of new+old config. That is the
+            // dishonest auto-resume: on a partial commit we must NOT resume.
+            //
+            // dismiss() makes the guard leave dispatch STOPPED (it does not re-install
+            // the trigger sink or respawn continuous mode; it only re-enables one-shot
+            // launches) — so continuous production stays halted and an operator must
+            // intervene. We also latch a sticky config-fault status under "@commit" so a
+            // status poll / the FE sees the degraded state after this rsp returns.
+            // NOTE: this fixes the dishonest resume + result status only; the all-or-none
+            // commit SEMANTICS (targets still commit sequentially, no rollback of the
+            // ones that took) are the deferred atomic-recipe rework and are unchanged.
+            guard.dismiss();
+            set_status_internal("@commit",
+                "config fault: partial commit — dispatch stopped, operator intervention required");
             xp::Rsp r; r.id = id; r.ok = false;
-            r.error = "one or more commits failed"; r.data_json = data;
+            r.error = "one or more commits failed — partial commit, dispatch stopped (config fault latched)";
+            r.data_json = data;
             srv.send_text(r.to_json());
+            push_recent_error("rsp", r.error, id);
         } else {
+            // All committed — clear any prior latched commit fault and let `guard`
+            // resume dispatch at the prior fps at end-of-scope (config switch must not
+            // halt streaming).
+            set_status_internal("@commit", "ok");
             send_rsp_ok(srv, id, data);
         }
 }

@@ -573,15 +573,34 @@ void cmd_discard_working_copy_(xi::ws::Server& srv, int64_t id, const xp::Parsed
 }
 
 void cmd_load_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // BEST-EFFORT / NON-ATOMIC import (review 04 #2/#3, P0-honesty). This handler
+        // applies the recipe's params then its instance defs SEQUENTIALLY and does NOT
+        // quiesce dispatch around the whole operation — it is not a transaction and does
+        // not roll back a partial application. A param/instance that fails to apply is
+        // collected as a warning; the recipe is left half-restored. So the RESULT must be
+        // honest about that: an explicit top-level `status` distinguishes a clean load
+        // ("ok") from a half-applied one ("partial") from a hard failure ("rejected"),
+        // and `ok:false` is set on partial/rejected so generic clients (`if (resp.ok)
+        // show "loaded"`) don't read a partial application as success. Making this
+        // actually atomic is the deferred atomic-recipe rework — NOT done here.
+        // A hard failure BEFORE any param/instance is touched: nothing was applied,
+        // so status is "rejected" (and ok:false). Carry the status field so a generic
+        // client sees the same shape it does on partial.
+        auto send_rejected = [&](const std::string& err) {
+            xp::Rsp r; r.id = id; r.ok = false; r.error = err;
+            r.data_json = "{\"status\":\"rejected\"}";
+            srv.send_text(r.to_json());
+            push_recent_error("rsp", err, id);
+        };
         auto path = xp::get_string_field(parsed->args_json, "path");
-        if (!path) { send_rsp_err(srv, id, "missing path"); return; }
+        if (!path) { send_rejected("missing path"); return; }
         std::string content = xi::project::read_text(*path);
-        if (content.empty()) { send_rsp_err(srv, id, "failed to read " + *path); return; }
+        if (content.empty()) { send_rejected("failed to read " + *path); return; }
 
         // Use yyjson to parse the project file properly
         yyjson_doc* doc = yyjson_read(content.c_str(), content.size(), 0);
         yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
-        if (!root) { send_rsp_err(srv, id, "invalid JSON in project file"); return; }
+        if (!root) { send_rejected("invalid JSON in project file"); return; }
 
         // Restore params. Collect any that DON'T apply (unknown name / rejected
         // value) so a partially-restored recipe isn't reported as a clean success —
@@ -677,23 +696,36 @@ void cmd_load_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         }
 
         yyjson_doc_free(doc);
-        // Succeeded-with-warnings: the project loaded, but surface any params that
-        // didn't apply so the caller can tell the operator the recipe was only
-        // partially restored (instead of a silent clean ok).
-        if (param_warnings.empty() && instance_warnings.empty()) {
-            send_rsp_ok(srv, id);
+        // Honest result (review 04 #2/#3, P0). status distinguishes:
+        //   "ok"      — every param + instance applied (warnings empty)  -> ok:true
+        //   "partial" — some applied, some failed (warnings non-empty)   -> ok:false
+        // A "rejected" (nothing applied) can only come from the pre-parse guards above
+        // via send_rejected(); by the time we get here at least the parse succeeded, so
+        // the two live outcomes are ok / partial. On partial we set ok:false so a generic
+        // client (`if (resp.ok) show "loaded"`) does NOT read a half-applied recipe as a
+        // clean load; the param_warnings/instance_warnings arrays stay (additive) so
+        // detailed clients can still enumerate exactly what didn't apply.
+        bool partial = !param_warnings.empty() || !instance_warnings.empty();
+        std::string data = "{\"status\":";
+        data += partial ? "\"partial\"" : "\"ok\"";
+        data += ",\"param_warnings\":[";
+        for (size_t i = 0; i < param_warnings.size(); ++i) {
+            if (i) data += ",";
+            xp::json_escape_into(data, param_warnings[i]);
+        }
+        data += "],\"instance_warnings\":[";
+        for (size_t i = 0; i < instance_warnings.size(); ++i) {
+            if (i) data += ",";
+            xp::json_escape_into(data, instance_warnings[i]);
+        }
+        data += "]}";
+        if (partial) {
+            xp::Rsp r; r.id = id; r.ok = false;
+            r.error = "project loaded only partially — see param_warnings/instance_warnings";
+            r.data_json = data;
+            srv.send_text(r.to_json());
+            push_recent_error("rsp", r.error, id);
         } else {
-            std::string data = "{\"param_warnings\":[";
-            for (size_t i = 0; i < param_warnings.size(); ++i) {
-                if (i) data += ",";
-                xp::json_escape_into(data, param_warnings[i]);
-            }
-            data += "],\"instance_warnings\":[";
-            for (size_t i = 0; i < instance_warnings.size(); ++i) {
-                if (i) data += ",";
-                xp::json_escape_into(data, instance_warnings[i]);
-            }
-            data += "]}";
             send_rsp_ok(srv, id, data);
         }
 }
