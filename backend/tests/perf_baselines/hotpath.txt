@@ -1,0 +1,14 @@
+# perf baseline for bench_hotpath.exe
+# NO BASELINE CAPTURED YET — this file intentionally carries no xi.perf-baseline/1
+# fingerprint, so perf_gate.cmake SKIPs-with-reason (never a false regression)
+# until it is recaptured on the gating machine. This is the same "skipped by
+# default off the capture box" pattern as the other perf_* gates: a per-machine
+# latency number is meaningless on any other machine (05 review #3, #30).
+#
+# The gated metric is the closed-loop, single-worker, best-of-7 MEDIAN of the
+# per-frame emit->ordered-result latency (a best-case micro-throughput regression
+# gate — NOT a p99/tail claim; see the bench header and 05 guardrail #2). Capture
+# on this machine with:
+#   cmake -DBENCH_EXE=<bench_hotpath.exe> -DBASELINE=<this file> \
+#         -DUPDATE_BASELINE=ON -P backend/tests/perf_gate.cmake
+# (Metric key: hotpath_emit_to_result_p50_us_320x240x3_p1)
