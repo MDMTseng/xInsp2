@@ -893,6 +893,47 @@ add_test(NAME script_selfcheck
             --target script_selfcheck --config $<CONFIG>)
 set_tests_properties(script_selfcheck PROPERTIES LABELS "sdk")
 
+# ---- Scaffold-template compile guard ---------------------------------------
+# The sdk/templates/{easy,medium,expert} plugin sources are the copy-paste
+# surface every new plugin author starts from — and they compile ONLY under the
+# project-plugin force-include (/FIxi/xi_plugin_support.hpp), so the backend's
+# own TUs never exercise them. They drifted before: a scaffold once taught the
+# removed VAR() macro and shipped non-compiling code (ext review 11 P0). This
+# guard renders each template's placeholders and compiles all three the way a
+# scaffolded plugin is compiled; if any template stops compiling against the
+# current SDK, the `template_selfcheck` ctest goes red. Same mechanism as
+# script_selfcheck: OBJECT + EXCLUDE_FROM_ALL (compile-only, no link — three
+# TUs each define the XI_PLUGIN_IMPL C exports, which only clash at link) built
+# on demand by ctest, so normal builds aren't slowed.
+set(_tpl_src_dir ${CMAKE_CURRENT_SOURCE_DIR}/../sdk/templates)
+set(_tpl_out_dir ${CMAKE_BINARY_DIR}/template_selfcheck)
+set(_tpl_rendered "")
+foreach(_tier easy medium expert)
+    set(_in  ${_tpl_src_dir}/${_tier}/src/plugin.cpp)
+    set(_out ${_tpl_out_dir}/${_tier}_plugin.cpp)
+    file(READ ${_in} _tpl_body)
+    # Substitute the same placeholders the scaffold renderer fills (render.mjs).
+    string(REPLACE "{{CLASS}}" "TemplateSelfcheck_${_tier}" _tpl_body "${_tpl_body}")
+    string(REPLACE "{{NAME}}"  "template_selfcheck_${_tier}" _tpl_body "${_tpl_body}")
+    file(WRITE ${_out} "${_tpl_body}")
+    list(APPEND _tpl_rendered ${_out})
+    # Re-render whenever the template source changes (configure-time dependency).
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_in})
+endforeach()
+add_library(template_selfcheck OBJECT EXCLUDE_FROM_ALL ${_tpl_rendered})
+target_link_libraries(template_selfcheck PRIVATE xi_core)   # SDK + yyjson + OpenCV include dirs
+if(MSVC)
+    # Mirror the plugin compile path: /EHa (host runs plugins under SEH
+    # translation) + force-include the plugin support umbrella (xinsp2_plugin.cmake).
+    target_compile_options(template_selfcheck PRIVATE /EHa /FIxi/xi_plugin_support.hpp)
+else()
+    target_compile_options(template_selfcheck PRIVATE -includexi/xi_plugin_support.hpp)
+endif()
+add_test(NAME template_selfcheck
+    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
+            --target template_selfcheck --config $<CONFIG>)
+set_tests_properties(template_selfcheck PROPERTIES LABELS "sdk")
+
 # ============================================================================
 # BEGIN fuzz/UBSan (clang-cl) — Cluster-2 / T1.1-T1.2 / OQ-1. Separable,
 # agent-owned. Do not interleave with the blocks above. OFF by default: a plain
