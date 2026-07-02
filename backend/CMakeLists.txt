@@ -368,6 +368,20 @@ add_executable(test_diagnostics tests/test_diagnostics.cpp)
 target_link_libraries(test_diagnostics PRIVATE xi_core)
 add_test(NAME diagnostics COMMAND test_diagnostics)
 
+# Blessed-concurrency compile guard: a raw `#pragma omp` in a SCRIPT's own source
+# is rejected at the JIT boundary (routed to xi::parallel_for / xi::async); the
+# scan + rejection fire before cl.exe, so this test needs no toolchain.
+add_executable(test_omp_guard tests/test_omp_guard.cpp)
+target_link_libraries(test_omp_guard PRIVATE xi_core)
+add_test(NAME omp_guard COMMAND test_omp_guard)
+
+# Crash-breadcrumb slot recycling: churn >>64 lifetime threads at bounded
+# concurrency and prove per-thread slots are reclaimed on thread exit (attribution
+# never degrades to the shared fallback slot 0).
+add_executable(test_crash_breadcrumb tests/test_crash_breadcrumb.cpp)
+target_link_libraries(test_crash_breadcrumb PRIVATE xi_core)
+add_test(NAME crash_breadcrumb COMMAND test_crash_breadcrumb)
+
 # Config/process race: an unprotected fixture plugin (race_probe) + a harness
 # that hammers set_def against process() through the real CAbiInstanceAdapter,
 # proving the CallScope gate serializes them for a non-reentrant plugin.

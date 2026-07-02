@@ -127,7 +127,8 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         req.ipp_root        = g_eng.ipp_root;
         req.vcvars_path     = g_eng.tc_vcvars;   // empty = compiler auto-finds vcvars64.bat
         // Project-declared external deps (project.json include_dirs / link_libs).
-        read_script_deps_(g_eng.project_folder, req.include_dirs, req.link_libs, req.openmp_max_threads);
+        read_script_deps_(g_eng.project_folder, req.include_dirs, req.link_libs,
+                          req.openmp_max_threads, req.allow_raw_omp);
         // Fast dev compile (/Od) by default — the interactive edit→run loop wants
         // fast COMPILE, not fast runtime. A client benchmarking / the autostart
         // boot path passes "optimize":true to get /O2. (Both spacings, like has_ui.)
