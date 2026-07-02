@@ -9,14 +9,37 @@
 //
 // This header implements the CONTAINER SEMANTICS only:
 //   * Arena     — per-frame bump allocator; owns every small entry's bytes;
-//                 one-shot free at frame end.
+//                 one-shot free at frame end. Its chunks RECYCLE through a
+//                 per-thread freelist (ArenaPool), so a steady stream of frames
+//                 on one lane's thread stops heap-allocating a fresh chunk per
+//                 frame — the ImagePool discipline in miniature (see below).
 //   * Builder   — pre-seal, insertion-ordered entry table; the only way to
 //                 add entries. A frame under construction is never shareable.
-//   * seal()    — flips the frame immutable and builds the O(1) key index;
-//                 only a sealed Frame crosses to consumers.
+//   * seal()    — flips the frame immutable and (for the dynamic, string-keyed
+//                 path) builds the key index; only a sealed Frame crosses to
+//                 consumers.
 //   * Frame     — an immutable, single-owner value: borrowed const views out,
 //                 arena freed + pool handles released on destruction. Drop-on-
 //                 crash is EXACTLY destruction (no reconciliation, no COW).
+//
+// TWO ACCESS PATHS, ONE CONTAINER (doc 07 §profile-1, the wave-1 exit-gate
+// condition — docs/new_gen/08 "Wave-1 exit gate — VERDICT"):
+//
+//   * TypedFrame<Schema> — the OFFSET-ACCESSOR read path. When the field set is
+//     declared up front (the contract's _keys.h key order), the schema resolves
+//     key->slot at COMPILE TIME; each slot holds a direct pointer to its
+//     canonical bytes, filled once at set. get_i64<kSeq>() is [slot]->ptr->load
+//     — no hash, no scan, no string compare (C3). Declared keys are static
+//     constants, so nothing is interned (the per-key intern cost vanishes).
+//     This is the path 07's perf claims are about; it is what a generated
+//     accessor (wave 3) compiles to.
+//
+//   * Frame / FrameBuilder — the DYNAMIC, string-keyed path, for undeclared or
+//     runtime keys (generic walkers, ad-hoc producers, ingress-canonicalized
+//     foreign maps). Its index is HYBRID by measurement: a small frame (the hot
+//     path) is a linear memcmp scan over the contiguous entry table — which
+//     beats a hash map for a handful of keys and allocates NO index nodes — and
+//     only a large frame builds an unordered_map to keep lookups O(1) at scale.
 //
 // The msgpack codec is a SIBLING branch. This file speaks to a deliberately
 // tiny internal reader/writer (`frame_mp_detail`) that emits/reads only the
@@ -33,6 +56,7 @@
 #include "xi_abi.h"
 #include "xi_image_pool.hpp"
 
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -125,36 +149,117 @@ inline std::span<const uint8_t> read_bin(const uint8_t* p) {
 
 } // namespace frame_mp_detail
 
+namespace frame_detail {
+
 // ===================================================================
-// Arena — per-frame bump allocator (chunked growth, one-shot free).
+// ArenaPool — a per-thread freelist of recyclable arena buffers.
 //
-// Owns every small entry's bytes AND the interned key strings. Allocation is
-// a pointer bump within the current chunk; growth adds a chunk. Destruction
-// frees all chunks in one shot (the frame's "arena dies with the frame"
-// discipline). Move-only: moving a frame moves the chunk vector, and because
-// each chunk is a stable heap block, every span/string_view handed out into
-// the arena stays valid across the move.
+// A frame's arena chunks are BORROWED here and RETURNED here when the frame is
+// destroyed, so a steady stream of frames built and dropped on one thread reuses
+// the same handful of buffers instead of hitting the heap allocator per frame
+// (the third cost the wave-1 verdict named: "a fresh heap arena chunk per
+// frame"). It is scoped THREAD-LOCAL — the "per-lane arena cache" the task
+// blesses: a frame is built, sealed, read, and dropped within one lane worker's
+// thread (see doc 07's dispatch), so the recycle needs no lock. A frame that
+// legitimately outlives its producer thread still frees correctly — its buffers
+// simply return to whichever thread's pool drops it, or, if that pool is full,
+// free outright. The retained set is bounded (kMaxFree) so an idle thread does
+// not hoard memory.
+// ===================================================================
+struct ArenaBuf {
+    std::unique_ptr<uint8_t[]> data;
+    size_t cap = 0;
+};
+
+class ArenaPool {
+public:
+    // Hand out a buffer with capacity >= need. Prefer a pooled one (LIFO — the
+    // hottest in cache); otherwise allocate one of at least the default chunk.
+    ArenaBuf acquire(size_t need, size_t default_cap) {
+        for (size_t i = free_.size(); i-- > 0;) {
+            if (free_[i].cap >= need) {
+                ArenaBuf b = std::move(free_[i]);
+                free_[i] = std::move(free_.back());
+                free_.pop_back();
+                return b;
+            }
+        }
+        size_t cap = need > default_cap ? need : default_cap;
+        return ArenaBuf{std::unique_ptr<uint8_t[]>(new uint8_t[cap]), cap};
+    }
+    // Take a buffer back for reuse; drop it (free) if the pool is already full.
+    void release(ArenaBuf&& b) {
+        if (b.data && free_.size() < kMaxFree) free_.push_back(std::move(b));
+    }
+
+private:
+    static constexpr size_t kMaxFree = 32;
+    std::vector<ArenaBuf> free_;
+};
+
+inline ArenaPool& arena_pool() {
+    thread_local ArenaPool p;
+    return p;
+}
+
+} // namespace frame_detail
+
+// ===================================================================
+// Arena — per-frame bump allocator (pool-backed chunks, one-shot free).
+//
+// Owns every small entry's bytes AND the interned key strings (dynamic path).
+// Allocation is a pointer bump within the current chunk; growth borrows another
+// chunk from the per-thread ArenaPool. The COMMON case — a frame that fits in
+// one chunk — keeps its chunk INLINE (head_), so a small frame touches the heap
+// allocator zero times (no chunk alloc, no chunk-vector alloc): its buffer came
+// from the recycle pool. Destruction returns every chunk to the pool in one
+// shot (the frame's "arena dies with the frame" discipline). Move-only: moving a
+// frame moves the chunk(s), and because each chunk is a stable heap block, every
+// span/string_view handed out into the arena stays valid across the move.
 // ===================================================================
 class Arena {
 public:
     Arena() = default;
-    Arena(Arena&&) noexcept = default;
-    Arena& operator=(Arena&&) noexcept = default;
+    Arena(Arena&& o) noexcept { move_from(std::move(o)); }
+    Arena& operator=(Arena&& o) noexcept {
+        if (this != &o) { recycle(); move_from(std::move(o)); }
+        return *this;
+    }
     Arena(const Arena&) = delete;
     Arena& operator=(const Arena&) = delete;
+    ~Arena() { recycle(); }
 
     uint8_t* alloc(size_t n, size_t align = 8) {
         if (n == 0) n = 1;  // keep every entry's ptr distinct + dereferenceable
-        Chunk* c = chunks_.empty() ? nullptr : &chunks_.back();
-        size_t off = c ? align_up(c->used, align) : 0;
-        if (!c || off + n > c->cap) {
-            size_t cap = n > kChunk ? n : kChunk;
-            chunks_.push_back(Chunk{std::unique_ptr<uint8_t[]>(new uint8_t[cap]), cap, 0});
-            c = &chunks_.back();
-            off = 0;
+        if (extra_.empty()) {
+            if (head_.data) {
+                size_t off = align_up(head_used_, align);
+                if (off + n <= head_.cap) {
+                    uint8_t* p = head_.data.get() + off;
+                    head_used_ = off + n;
+                    used_total_ += n;
+                    return p;
+                }
+            } else {
+                head_ = frame_detail::arena_pool().acquire(n, kChunk);
+                head_used_ = n;
+                used_total_ += n;
+                return head_.data.get();
+            }
+        } else {
+            Chunk& c = extra_.back();
+            size_t off = align_up(c.used, align);
+            if (off + n <= c.buf.cap) {
+                uint8_t* p = c.buf.data.get() + off;
+                c.used = off + n;
+                used_total_ += n;
+                return p;
+            }
         }
-        uint8_t* p = c->data.get() + off;
-        c->used = off + n;
+        // Current chunk is full: borrow another from the pool (cap >= n).
+        frame_detail::ArenaBuf b = frame_detail::arena_pool().acquire(n, kChunk);
+        uint8_t* p = b.data.get();
+        extra_.push_back(Chunk{std::move(b), n});
         used_total_ += n;
         return p;
     }
@@ -167,18 +272,37 @@ public:
     }
 
     size_t bytes_used()  const { return used_total_; }
-    size_t chunk_count() const { return chunks_.size(); }
+    size_t chunk_count() const { return (head_.data ? 1 : 0) + extra_.size(); }
 
 private:
     struct Chunk {
-        std::unique_ptr<uint8_t[]> data;
-        size_t cap  = 0;
+        frame_detail::ArenaBuf buf;
         size_t used = 0;
     };
     static constexpr size_t kChunk = 4096;
     static size_t align_up(size_t v, size_t a) { return (v + (a - 1)) & ~(a - 1); }
 
-    std::vector<Chunk> chunks_;
+    void recycle() {
+        auto& pool = frame_detail::arena_pool();
+        if (head_.data) pool.release(std::move(head_));
+        for (auto& c : extra_) pool.release(std::move(c.buf));
+        head_ = {};
+        head_used_ = 0;
+        extra_.clear();
+        used_total_ = 0;
+    }
+    void move_from(Arena&& o) noexcept {
+        head_      = std::move(o.head_);
+        head_used_ = o.head_used_;
+        extra_     = std::move(o.extra_);
+        used_total_ = o.used_total_;
+        o.head_used_  = 0;
+        o.used_total_ = 0;
+    }
+
+    frame_detail::ArenaBuf head_;        // inline first chunk (no vector alloc)
+    size_t head_used_ = 0;
+    std::vector<Chunk> extra_;           // spill chunks (only if head overflows)
     size_t used_total_ = 0;
 };
 
@@ -255,7 +379,8 @@ struct FrameImageView {
 inline constexpr size_t kFrameLargeThreshold = 4096;
 
 namespace frame_detail {
-// One table row. Insertion-ordered; the key is a view into the arena.
+// One table row for the dynamic, string-keyed path. Insertion-ordered; the key
+// is a view into the arena.
 struct Entry {
     std::string_view key;
     FrameTag tag = FrameTag::I64;
@@ -265,18 +390,39 @@ struct Entry {
     xi_image_handle handle = XI_IMAGE_NULL;  // pool buffer (pooled forms)
     int32_t  w = 0, h = 0, c = 0;         // image descriptor dims
 };
+
+// One slot for the TYPED (schema) path. The key is IMPLICIT — it is the slot's
+// compile-time position — so no key string is stored and none is interned. A
+// slot carries the same payload duality as Entry (inline arena bytes OR a pool
+// buffer). `present` distinguishes a set slot from a declared-but-unset one.
+struct Slot {
+    FrameTag tag = FrameTag::I64;
+    bool     present = false;
+    bool     pooled  = false;
+    const uint8_t* inl = nullptr;
+    uint32_t inl_len = 0;
+    xi_image_handle handle = XI_IMAGE_NULL;
+    int32_t  w = 0, h = 0, c = 0;
+};
 } // namespace frame_detail
 
 class FrameBuilder;
 
 // ===================================================================
-// Frame — a sealed, immutable, single-owner keyed buffer.
+// Frame — a sealed, immutable, single-owner keyed buffer (dynamic path).
 //
 // Only produced by FrameBuilder::seal(); there is no public constructor, so a
 // pre-seal (mutable) frame can never be handed out as a Frame. Move-only:
 // exactly one owner at a time, whose destruction is the whole lifecycle end —
 // arena freed in one shot, every pool handle released once. A moved-from Frame
 // owns nothing and releases nothing, so a drop can never double-release.
+//
+// LOOKUP is hybrid (measured honesty, doc 07 §profile-1 "small maps often beat
+// hash with a linear memcmp scan"): a small frame scans the contiguous entry
+// table (no index nodes allocated at all); a large frame builds an
+// unordered_map so lookups stay O(1) at scale. The declared-field hot path does
+// NOT use this container — it uses TypedFrame<Schema> below, whose reads are a
+// direct slot index with no lookup at all.
 // ===================================================================
 class Frame {
 public:
@@ -290,10 +436,15 @@ public:
     Frame& operator=(const Frame&) = delete;
     ~Frame() { destroy(); }
 
+    // Above this entry count seal() builds an unordered_map; at or below it the
+    // frame linear-scans its contiguous table (fewer keys than this, a memcmp
+    // scan is faster than a hash lookup AND allocates no index).
+    static constexpr size_t kLinearMax = 24;
+
     // ---- structure ---------------------------------------------------
     size_t size()  const { return entries_.size(); }
     bool   empty() const { return entries_.empty(); }
-    bool   has(std::string_view key) const { return index_.find(key) != index_.end(); }
+    bool   has(std::string_view key) const { return find(key) != nullptr; }
 
     std::optional<FrameTag> tag_of(std::string_view key) const {
         const auto* e = find(key);
@@ -307,7 +458,7 @@ public:
         for (const auto& e : entries_) fn(e.key, e.tag);
     }
 
-    // ---- typed borrowed reads (O(1) after seal) ----------------------
+    // ---- typed borrowed reads ----------------------------------------
     std::optional<int64_t> get_i64(std::string_view key) const {
         const auto* e = find(key);
         if (!e || e->tag != FrameTag::I64) return std::nullopt;
@@ -359,13 +510,21 @@ private:
           std::vector<xi_image_handle>&& handles)
         : arena_(std::move(arena)), entries_(std::move(entries)),
           handles_(std::move(handles)) {
-        index_.reserve(entries_.size());
-        for (size_t i = 0; i < entries_.size(); ++i)
-            index_.emplace(entries_[i].key, i);
+        // Only a large frame pays for a hash index; small frames scan (below).
+        if (entries_.size() > kLinearMax) {
+            index_.reserve(entries_.size());
+            for (size_t i = 0; i < entries_.size(); ++i)
+                index_.emplace(entries_[i].key, i);
+        }
     }
 
     const Entry* find(std::string_view key) const {
-        auto it = index_.find(key);
+        if (index_.empty()) {                 // small frame -> linear scan
+            for (const auto& e : entries_)
+                if (e.key == key) return &e;
+            return nullptr;
+        }
+        auto it = index_.find(key);           // large frame -> O(1) hash lookup
         return it == index_.end() ? nullptr : &entries_[it->second];
     }
 
@@ -388,18 +547,18 @@ private:
     Arena arena_;
     std::vector<Entry> entries_;                 // insertion order
     std::vector<xi_image_handle> handles_;       // the single owner's handles
-    std::unordered_map<std::string_view, size_t> index_;  // key -> entry idx (O(1))
+    std::unordered_map<std::string_view, size_t> index_;  // large frames only
 };
 
 template <> inline std::optional<int64_t> Frame::get<int64_t>(std::string_view k) const { return get_i64(k); }
 template <> inline std::optional<double>  Frame::get<double>(std::string_view k) const  { return get_f64(k); }
 
 // ===================================================================
-// FrameBuilder — the pre-seal, insertion-ordered entry table.
+// FrameBuilder — the pre-seal, insertion-ordered entry table (dynamic path).
 //
-// The ONLY way to populate a frame. add_* assert the builder is not yet
-// sealed (post-seal writes assert — doc 07 lifecycle step 2). seal() moves
-// the arena, table, and handle ledger into an immutable Frame and empties the
+// The ONLY way to populate a dynamic frame. add_* assert the builder is not yet
+// sealed (post-seal writes assert — doc 07 lifecycle step 2). seal() moves the
+// arena, table, and handle ledger into an immutable Frame and empties the
 // builder, so a builder can neither be sealed twice nor written after seal.
 // ===================================================================
 class FrameBuilder {
@@ -522,6 +681,392 @@ private:
     Arena arena_;
     std::vector<Entry> entries_;
     std::vector<xi_image_handle> handles_;
+    bool sealed_ = false;
+};
+
+// ===================================================================
+// FrameSchema<Derived> — a compile-time declared keyset (the CONTRACT key order,
+// the _keys.h pattern). A schema is the door to the OFFSET-ACCESSOR read path:
+// its keys are known at compile time, so a key resolves to a SLOT (a fixed
+// index) at compile time, and TypedFrame reads that slot directly — no hash,
+// no scan, no string compare, and nothing interned (the keys are the schema's
+// own static constants).
+//
+// A schema is a tiny CRTP struct the plugin (or wave-3 codegen) declares once:
+//
+//   struct BlobSchema : xi::FrameSchema<BlobSchema> {
+//       static constexpr std::array<std::string_view, 4> keys = {
+//           "threshold", "blob_count", "mean_area", "label" };
+//       enum : int { kThreshold, kBlobCount, kMeanArea, kLabel };
+//   };
+//
+// The enum names ARE the compile-time slots; `slot_of("threshold")` gives the
+// same index for a string literal (a constant expression). Field ORDER is the
+// contract's duty (doc 07 §profile-1 / xi_mp.hpp header) — the schema fixes it.
+// ===================================================================
+template <class Derived>
+struct FrameSchema {
+    static constexpr size_t slot_count() { return Derived::keys.size(); }
+    static constexpr std::string_view name_of(size_t slot) { return Derived::keys[slot]; }
+
+    // Compile-time key -> slot; -1 if the key is not declared. consteval so a
+    // call on a literal key is a constant expression usable as a slot index:
+    //   f.get_i64<BlobSchema::slot_of("threshold")>()
+    static consteval int slot_of(std::string_view key) {
+        for (size_t i = 0; i < Derived::keys.size(); ++i)
+            if (Derived::keys[i] == key) return int(i);
+        return -1;
+    }
+    // Runtime key -> slot (the string-keyed fallback into declared fields);
+    // -1 if not declared. Linear memcmp scan over the (small) key table.
+    static int slot_of_runtime(std::string_view key) {
+        for (size_t i = 0; i < Derived::keys.size(); ++i)
+            if (Derived::keys[i] == key) return int(i);
+        return -1;
+    }
+};
+
+template <class Schema> class TypedFrameBuilder;
+
+// ===================================================================
+// TypedFrame<Schema> — a sealed, immutable frame whose declared fields are read
+// by DIRECT SLOT INDEX (the offset-accessor read path). get_i64<kSeq>() is
+// slots_[kSeq] -> ptr -> canonical decode: O(1) with no lookup structure at all,
+// the C3 claim (doc 07 §profile-1) realized in the container.
+//
+// Undeclared / dynamic keys are supported too (mixed frames): they live in a
+// small string-keyed side list scanned linearly — the general fallback. Same
+// single-owner, move-only, one-shot-free lifecycle as Frame; the arena and every
+// pool handle (declared slot OR dynamic entry) release exactly once on drop.
+// ===================================================================
+template <class Schema>
+class TypedFrame {
+public:
+    static constexpr size_t N = Schema::slot_count();
+    using Slot  = frame_detail::Slot;
+    using Entry = frame_detail::Entry;
+
+    TypedFrame() = default;
+    TypedFrame(TypedFrame&& o) noexcept { move_from(std::move(o)); }
+    TypedFrame& operator=(TypedFrame&& o) noexcept {
+        if (this != &o) { destroy(); move_from(std::move(o)); }
+        return *this;
+    }
+    TypedFrame(const TypedFrame&) = delete;
+    TypedFrame& operator=(const TypedFrame&) = delete;
+    ~TypedFrame() { destroy(); }
+
+    // ---- structure ---------------------------------------------------
+    // Count of fields actually SET (declared slots present + dynamic entries).
+    size_t size() const {
+        size_t n = dyn_.size();
+        for (const auto& s : slots_) if (s.present) ++n;
+        return n;
+    }
+    bool empty() const { return size() == 0; }
+
+    template <int SlotIdx>
+    bool has() const {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        return slots_[SlotIdx].present;
+    }
+    bool has(std::string_view key) const {
+        int s = Schema::slot_of_runtime(key);
+        if (s >= 0) return slots_[s].present;
+        return find_dyn(key) != nullptr;
+    }
+
+    template <int SlotIdx>
+    std::optional<FrameTag> tag_of() const {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        const Slot& s = slots_[SlotIdx];
+        return s.present ? std::optional<FrameTag>(s.tag) : std::nullopt;
+    }
+
+    // Walk every set field: declared slots in schema order, then dynamic keys in
+    // insertion order — the generic producer-agnostic path (expose, record_save).
+    template <class Fn>
+    void for_each(Fn&& fn) const {
+        for (size_t i = 0; i < N; ++i)
+            if (slots_[i].present) fn(Schema::name_of(i), slots_[i].tag);
+        for (const auto& e : dyn_) fn(e.key, e.tag);
+    }
+
+    // ---- typed slot reads: [slot] -> ptr -> canonical decode (the fast path) --
+    template <int SlotIdx>
+    std::optional<int64_t> get_i64() const {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        const Slot& s = slots_[SlotIdx];
+        if (!s.present || s.tag != FrameTag::I64) return std::nullopt;
+        return frame_mp_detail::read_i64(s.inl);
+    }
+    template <int SlotIdx>
+    std::optional<double> get_f64() const {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        const Slot& s = slots_[SlotIdx];
+        if (!s.present || s.tag != FrameTag::F64) return std::nullopt;
+        return frame_mp_detail::read_f64(s.inl);
+    }
+    template <int SlotIdx>
+    std::optional<std::string_view> get_str() const {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        const Slot& s = slots_[SlotIdx];
+        if (!s.present || s.tag != FrameTag::Str) return std::nullopt;
+        return frame_mp_detail::read_str(s.inl);
+    }
+    template <int SlotIdx>
+    std::optional<std::span<const uint8_t>> get_bin() const {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        const Slot& s = slots_[SlotIdx];
+        if (!s.present || s.tag != FrameTag::Bin) return std::nullopt;
+        if (s.pooled) return frame_pool::view(s.handle).first(s.inl_len);
+        return frame_mp_detail::read_bin(s.inl);
+    }
+    template <int SlotIdx>
+    std::optional<FrameImageView> get_image() const {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        const Slot& s = slots_[SlotIdx];
+        if (!s.present || s.tag != FrameTag::Image) return std::nullopt;
+        return FrameImageView{s.w, s.h, s.c, frame_pool::view(s.handle)};
+    }
+    template <int SlotIdx>
+    std::optional<std::span<const uint8_t>> get_mp() const {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        const Slot& s = slots_[SlotIdx];
+        if (!s.present || s.tag != FrameTag::Mp) return std::nullopt;
+        return std::span<const uint8_t>(s.inl, s.inl_len);
+    }
+
+    // Doc-flavored get<i64, kSeq>() / get<f64, kScore>() aliases.
+    template <class T, int SlotIdx> std::optional<T> get() const;
+
+    // ---- string-keyed fallback (undeclared/dynamic keys, or runtime keys) ----
+    // A declared key resolves through the slot; an undeclared one scans the
+    // dynamic side list. This is the SLOW path — the fast path is get_i64<Slot>().
+    std::optional<int64_t> get_i64(std::string_view key) const {
+        int s = Schema::slot_of_runtime(key);
+        if (s >= 0) return slot_i64(slots_[s]);
+        const Entry* e = find_dyn(key);
+        if (!e || e->tag != FrameTag::I64) return std::nullopt;
+        return frame_mp_detail::read_i64(e->inl);
+    }
+    std::optional<double> get_f64(std::string_view key) const {
+        int s = Schema::slot_of_runtime(key);
+        if (s >= 0) return slot_f64(slots_[s]);
+        const Entry* e = find_dyn(key);
+        if (!e || e->tag != FrameTag::F64) return std::nullopt;
+        return frame_mp_detail::read_f64(e->inl);
+    }
+    std::optional<std::string_view> get_str(std::string_view key) const {
+        int s = Schema::slot_of_runtime(key);
+        if (s >= 0) return slot_str(slots_[s]);
+        const Entry* e = find_dyn(key);
+        if (!e || e->tag != FrameTag::Str) return std::nullopt;
+        return frame_mp_detail::read_str(e->inl);
+    }
+
+    // ---- diagnostics -------------------------------------------------
+    size_t arena_bytes()  const { return arena_.bytes_used(); }
+    size_t handle_count() const {
+        size_t n = 0;
+        for (const auto& s : slots_) if (s.present && s.handle) ++n;
+        for (const auto& e : dyn_)   if (e.handle) ++n;
+        return n;
+    }
+
+private:
+    friend class TypedFrameBuilder<Schema>;
+
+    TypedFrame(Arena&& arena, const std::array<Slot, N>& slots,
+               std::vector<Entry>&& dyn)
+        : arena_(std::move(arena)), slots_(slots), dyn_(std::move(dyn)) {}
+
+    static std::optional<int64_t> slot_i64(const Slot& s) {
+        if (!s.present || s.tag != FrameTag::I64) return std::nullopt;
+        return frame_mp_detail::read_i64(s.inl);
+    }
+    static std::optional<double> slot_f64(const Slot& s) {
+        if (!s.present || s.tag != FrameTag::F64) return std::nullopt;
+        return frame_mp_detail::read_f64(s.inl);
+    }
+    static std::optional<std::string_view> slot_str(const Slot& s) {
+        if (!s.present || s.tag != FrameTag::Str) return std::nullopt;
+        return frame_mp_detail::read_str(s.inl);
+    }
+    const Entry* find_dyn(std::string_view key) const {
+        for (const auto& e : dyn_) if (e.key == key) return &e;
+        return nullptr;
+    }
+
+    void destroy() {
+        for (Slot& s : slots_)
+            if (s.present && s.handle) { frame_pool::release(s.handle); s.handle = XI_IMAGE_NULL; }
+        for (Entry& e : dyn_)
+            if (e.handle) frame_pool::release(e.handle);
+        dyn_.clear();
+    }
+    void move_from(TypedFrame&& o) noexcept {
+        arena_ = std::move(o.arena_);
+        slots_ = o.slots_;
+        dyn_   = std::move(o.dyn_);
+        o.slots_ = {};        // moved-from owns nothing → never double-releases
+        o.dyn_.clear();
+    }
+
+    Arena arena_;
+    std::array<Slot, N> slots_{};   // declared fields, indexed by compile-time slot
+    std::vector<Entry> dyn_;        // undeclared/dynamic keys (empty for pure schemas)
+};
+
+template <class Schema>
+template <class T, int SlotIdx>
+std::optional<T> TypedFrame<Schema>::get() const {
+    if constexpr (std::is_same_v<T, int64_t>) return get_i64<SlotIdx>();
+    else if constexpr (std::is_same_v<T, double>) return get_f64<SlotIdx>();
+    else { static_assert(sizeof(T) == 0, "TypedFrame::get<T,slot> supports int64_t / double"); }
+}
+
+// ===================================================================
+// TypedFrameBuilder<Schema> — populate a schema frame by SLOT. set_i64<kSeq>(v)
+// writes canonical bytes into the arena and points the slot at them; the KEY IS
+// NEVER STORED OR INTERNED (it is the schema's static constant). Undeclared keys
+// route to add_*(key, ...) into the dynamic side list (interned there, the
+// general fallback). seal() flips immutable into a TypedFrame.
+// ===================================================================
+template <class Schema>
+class TypedFrameBuilder {
+public:
+    static constexpr size_t N = Schema::slot_count();
+    using Slot  = frame_detail::Slot;
+    using Entry = frame_detail::Entry;
+
+    TypedFrameBuilder() = default;
+    TypedFrameBuilder(TypedFrameBuilder&&) = default;
+    TypedFrameBuilder& operator=(TypedFrameBuilder&&) = default;
+    TypedFrameBuilder(const TypedFrameBuilder&) = delete;
+    TypedFrameBuilder& operator=(const TypedFrameBuilder&) = delete;
+    ~TypedFrameBuilder() {
+        // Abandoned without seal(): release handles minted into slots + dyn list.
+        for (Slot& s : slots_) if (s.present && s.handle) frame_pool::release(s.handle);
+        for (Entry& e : dyn_)  if (e.handle) frame_pool::release(e.handle);
+    }
+
+    bool sealed() const { return sealed_; }
+
+    // ---- typed slot setters (no key interned; slot is compile-time) ----------
+    template <int SlotIdx>
+    void set_i64(int64_t v) {
+        Slot& s = begin_slot<SlotIdx>(FrameTag::I64, frame_mp_detail::kI64Size);
+        frame_mp_detail::write_i64(const_cast<uint8_t*>(s.inl), v);
+    }
+    template <int SlotIdx>
+    void set_f64(double v) {
+        Slot& s = begin_slot<SlotIdx>(FrameTag::F64, frame_mp_detail::kF64Size);
+        frame_mp_detail::write_f64(const_cast<uint8_t*>(s.inl), v);
+    }
+    template <int SlotIdx>
+    void set_str(std::string_view v) {
+        Slot& s = begin_slot<SlotIdx>(FrameTag::Str, frame_mp_detail::str_size(v.size()));
+        frame_mp_detail::write_str(const_cast<uint8_t*>(s.inl), v);
+    }
+    template <int SlotIdx>
+    void set_bin(const void* data, size_t n) {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        assert(!sealed_ && "add after seal");
+        Slot& s = slots_[SlotIdx];
+        if (n >= kFrameLargeThreshold) {
+            xi_image_handle h = frame_pool::alloc_bytes(data, n);
+            s.tag = FrameTag::Bin; s.present = true; s.pooled = true;
+            s.handle = h; s.inl_len = uint32_t(n);
+            s.w = int32_t(n); s.h = 1; s.c = 1;
+            return;
+        }
+        s = Slot{};
+        s.tag = FrameTag::Bin; s.present = true;
+        s.inl = arena_.alloc(frame_mp_detail::bin_size(n));
+        s.inl_len = uint32_t(frame_mp_detail::bin_size(n));
+        frame_mp_detail::write_bin(const_cast<uint8_t*>(s.inl), data, n);
+    }
+    template <int SlotIdx>
+    void set_image(int32_t w, int32_t h, int32_t c, const void* pixels) {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        assert(!sealed_ && "add after seal");
+        xi_image_handle handle = frame_pool::alloc_image(w, h, c, pixels);
+        Slot& s = slots_[SlotIdx];
+        s.tag = FrameTag::Image; s.present = true; s.pooled = true;
+        s.handle = handle; s.w = w; s.h = h; s.c = c; s.inl = nullptr; s.inl_len = 0;
+    }
+    template <int SlotIdx>
+    void adopt_image(int32_t w, int32_t h, int32_t c, xi_image_handle handle) {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        assert(!sealed_ && "add after seal");
+        frame_pool::addref(handle);
+        Slot& s = slots_[SlotIdx];
+        s.tag = FrameTag::Image; s.present = true; s.pooled = true;
+        s.handle = handle; s.w = w; s.h = h; s.c = c; s.inl = nullptr; s.inl_len = 0;
+    }
+    // Opaque nested canonical msgpack (trusted-internal; foreign bytes go through
+    // xi::ingress first, exactly as add_mp on the dynamic path — see Frame above).
+    template <int SlotIdx>
+    void set_mp(const void* mp, size_t n) {
+        Slot& s = begin_slot<SlotIdx>(FrameTag::Mp, n);
+        if (n) std::memcpy(const_cast<uint8_t*>(s.inl), mp, n);
+    }
+
+    // ---- dynamic (undeclared) keys — the string-keyed fallback ---------------
+    void add_i64(std::string_view key, int64_t v) {
+        Entry& e = begin_dyn(key, FrameTag::I64, frame_mp_detail::kI64Size);
+        frame_mp_detail::write_i64(const_cast<uint8_t*>(e.inl), v);
+    }
+    void add_f64(std::string_view key, double v) {
+        Entry& e = begin_dyn(key, FrameTag::F64, frame_mp_detail::kF64Size);
+        frame_mp_detail::write_f64(const_cast<uint8_t*>(e.inl), v);
+    }
+    void add_str(std::string_view key, std::string_view v) {
+        Entry& e = begin_dyn(key, FrameTag::Str, frame_mp_detail::str_size(v.size()));
+        frame_mp_detail::write_str(const_cast<uint8_t*>(e.inl), v);
+    }
+    void add_mp(std::string_view key, const void* mp, size_t n) {
+        Entry& e = begin_dyn(key, FrameTag::Mp, n);
+        if (n) std::memcpy(const_cast<uint8_t*>(e.inl), mp, n);
+    }
+
+    TypedFrame<Schema> seal() {
+        assert(!sealed_ && "double seal");
+        sealed_ = true;
+        TypedFrame<Schema> f(std::move(arena_), slots_, std::move(dyn_));
+        slots_ = {};      // ownership moved to the frame; builder releases nothing
+        dyn_.clear();
+        return f;
+    }
+
+private:
+    template <int SlotIdx>
+    Slot& begin_slot(FrameTag tag, size_t n) {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        assert(!sealed_ && "add after seal");
+        Slot& s = slots_[SlotIdx];
+        s = Slot{};
+        s.tag = tag;
+        s.present = true;
+        s.inl = arena_.alloc(n);
+        s.inl_len = uint32_t(n);
+        return s;
+    }
+    Entry& begin_dyn(std::string_view key, FrameTag tag, size_t n) {
+        assert(!sealed_ && "add after seal");
+        Entry e;
+        e.key = arena_.intern(key);
+        e.tag = tag;
+        e.inl = arena_.alloc(n);
+        e.inl_len = uint32_t(n);
+        dyn_.push_back(std::move(e));
+        return dyn_.back();
+    }
+
+    Arena arena_;
+    std::array<Slot, N> slots_{};
+    std::vector<Entry> dyn_;
     bool sealed_ = false;
 };
 

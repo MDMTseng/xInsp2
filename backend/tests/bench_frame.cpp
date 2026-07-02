@@ -117,6 +117,16 @@ static volatile uint64_t g_sink = 0;
 static constexpr int kScalars = 8;   // $src, seq, count, ts_us, score, x, y, pass
 static constexpr int kReads   = 4;   // seq, score, count, $src  (the consumer's M)
 
+// The CONTRACT-declared keyset for this metadata shape (the _keys.h key order).
+// A schema turns the field names into compile-time SLOTS, so the TypedFrame
+// container reads a declared field by direct slot index — the offset-accessor
+// read path (doc 07 §profile-1). Field order here IS the contract order.
+struct BenchSchema : xi::FrameSchema<BenchSchema> {
+    static constexpr std::array<std::string_view, 9> keys = {
+        "$src", "seq", "count", "ts_us", "score", "x", "y", "pass", "region"};
+    enum : int { kSrc, kSeq, kCount, kTsUs, kScore, kX, kY, kPass, kRegion };
+};
+
 // ===========================================================================
 // Host seam — the REAL DocRegistry + the REAL ImagePool behind the ABI host_api,
 // so Record::share_out/adopt_shared CAS the real registry and xi::Image addrefs
@@ -307,6 +317,38 @@ static double micro_frame_builder() {
         s += f.get_str("$src").value_or(std::string_view{}).size();
         g_sink += s;
         // f drops: arena freed in one shot, no handles.
+    });
+}
+
+// (b') FRAME container, TYPED (xi_frame.hpp TypedFrame<BenchSchema>) — the
+//      OFFSET-ACCESSOR read path (doc 07 §profile-1; the wave-1 exit-gate
+//      condition). Same N scalars + nested region, but keys are compile-time
+//      SLOTS: set_i64<kSeq> writes canonical bytes and points the slot at them
+//      with NO key interned; get_i64<kSeq> is slots_[kSeq]->ptr->decode (no hash,
+//      no scan). Arena chunks recycle through the per-thread pool (no per-frame
+//      heap chunk). This is the container path the shipped FrameBuilder (b) lost
+//      with — the three named costs removed.
+static double micro_frame_typed() {
+    return best_us([&] {
+        xi::TypedFrameBuilder<BenchSchema> b;
+        b.set_str<BenchSchema::kSrc>("matcher");
+        b.set_i64<BenchSchema::kSeq>(7);
+        b.set_i64<BenchSchema::kCount>(7 % 17);
+        b.set_i64<BenchSchema::kTsUs>(7000);
+        b.set_f64<BenchSchema::kScore>(0.7 + 7 * 0.01);
+        b.set_f64<BenchSchema::kX>(100.0 + 7 * 0.5);
+        b.set_f64<BenchSchema::kY>(50.0 + 7 * 0.25);
+        b.set_i64<BenchSchema::kPass>(1);
+        xi::mp::Bytes region = region_mp(7);
+        b.set_mp<BenchSchema::kRegion>(region.data(), region.size());
+        xi::TypedFrame<BenchSchema> f = b.seal();
+        uint64_t s = 0;
+        s += (uint64_t)f.get_i64<BenchSchema::kSeq>().value_or(0);
+        s += (uint64_t)(int64_t)f.get_f64<BenchSchema::kScore>().value_or(0);
+        s += (uint64_t)f.get_i64<BenchSchema::kCount>().value_or(0);
+        s += f.get_str<BenchSchema::kSrc>().value_or(std::string_view{}).size();
+        g_sink += s;
+        // f drops: arena chunk returns to the per-thread pool, no handles.
     });
 }
 
@@ -561,9 +603,11 @@ static int gate_main(const xi_host_api& host, const FrameOffsets& off) {
     // micro: min-of-batches (ns), the cleanest per-op metadata cost.
     double rec_ns   = micro_record(host)          * 1000.0;
     double frb_ns   = micro_frame_builder()       * 1000.0;
+    double frt_ns   = micro_frame_typed()         * 1000.0;
     double frp_ns   = micro_frame_plane(off)      * 1000.0;
     std::printf("GATE frame_micro_record_roundtrip_ns %lld\n",   (long long)(rec_ns + 0.5));
     std::printf("GATE frame_micro_framebuilder_ns %lld\n",       (long long)(frb_ns + 0.5));
+    std::printf("GATE frame_micro_typed_ns %lld\n",              (long long)(frt_ns + 0.5));
     std::printf("GATE frame_micro_plane_memcpy_hop_ns %lld\n",   (long long)(frp_ns + 0.5));
 
     int64_t rec_p50 = gate_p50(Lane::Record, host, off);
@@ -618,12 +662,15 @@ int main(int argc, char** argv) {
     std::printf("--- metadata-plane MICRO (no images, no dispatch; min-of-batches, ns/op) ---\n");
     double rec_ns = micro_record(host)     * 1000.0;
     double frb_ns = micro_frame_builder()  * 1000.0;
+    double frt_ns = micro_frame_typed()    * 1000.0;
     double frp_ns = micro_frame_plane(off) * 1000.0;
     std::printf("  %-52s %9.1f ns/op\n", "RECORD build+share_out+adopt+read+release [v2]", rec_ns);
-    std::printf("  %-52s %9.1f ns/op\n", "FRAME  FrameBuilder+seal+read+drop [v3 container]", frb_ns);
+    std::printf("  %-52s %9.1f ns/op\n", "FRAME  FrameBuilder+seal+read+drop [v3 dynamic]", frb_ns);
+    std::printf("  %-52s %9.1f ns/op\n", "FRAME  TypedFrame set+seal+slot-read+drop [v3 typed]", frt_ns);
     std::printf("  %-52s %9.1f ns/op\n", "FRAME  mp plane + memcpy-hop + offset-read [v3 hop]", frp_ns);
-    std::printf("    ^ Record cost = DOM alloc + registry-CAS hop + hash reads + doc free;\n");
-    std::printf("      Frame  cost = arena/contiguous build + one-shot free + O(1) offset reads (+ memcpy hop).\n\n");
+    std::printf("    ^ Record cost  = DOM alloc + registry-CAS hop + hash reads + doc free;\n");
+    std::printf("      Dynamic cost = arena build + hybrid index + interned keys + one-shot free;\n");
+    std::printf("      Typed cost   = arena build (recycled chunk) + slot offset reads, no intern, no lookup.\n\n");
 
     // -------- dispatch side-by-side across parallelism -----------------------
     std::printf("--- closed-loop dispatch (matched load, inflight=parallel) — STEADY-STATE service latency ---\n");
