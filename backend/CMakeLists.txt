@@ -598,6 +598,7 @@ add_test(NAME capability_handshake COMMAND test_capability_handshake)
 
 add_executable(xinsp_backend
     src/service_main.cpp
+    src/service_sinks.cpp
     src/service_inspect.cpp
     src/service_toolchain.cpp
     src/service_result.cpp
