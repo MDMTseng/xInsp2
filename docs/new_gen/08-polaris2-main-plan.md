@@ -46,6 +46,26 @@ makes.
 the hot path, 07 gets re-litigated with data — that is a success of the plan,
 not a failure.
 
+## Wave-1 exit gate — VERDICT (2026-07-02, dev-box numbers, medians of 5+)
+
+**GO on the concept, with one condition.** bench_frame (perf_frame) measured
+the two planes on the identical span and workload:
+
+- The representation doc 07 specifies (canonical fixed-width msgpack +
+  precomputed-offset reads + memcpy hop) **beats Record everywhere**:
+  metadata micro ~752 vs ~923 ns/op (~18%), and at parallel=8 the dispatch
+  p99 tightens from ~33µs to ~22µs (the contended-DocRegistry-CAS claim,
+  confirmed under concurrency).
+- The SHIPPED xi_frame.hpp container currently LOSES the isolated micro
+  (~1145 ns): seal() builds a runtime hash index and get_* does string-hash
+  lookups; fresh heap arena chunk + per-key intern per frame. Implementation,
+  not concept.
+
+**Condition for wave 2:** the pilot's container work realizes the
+offset-accessor read path (contract-declared key order → precomputed
+offsets; arena chunk reuse) before the pilot's numbers are read. Dev-box
+caveat applies; the perf runner captures the real baseline later.
+
 ## Wave 2 — the carved pilot (sequential-ish; the strangler bite)
 
 1. **`xi.frame@1` carved interface**: a new `get_interface` door exposing
