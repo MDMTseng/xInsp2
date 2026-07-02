@@ -299,6 +299,7 @@ static const std::unordered_map<std::string_view, HandlerFn> g_cmd_table = {
     {"get_dashboard", cmd_get_dashboard_},
     {"toolchain_health", cmd_toolchain_health_},
     {"set_toolchain_override", cmd_set_toolchain_override_},
+    {"get_health", cmd_get_health_},
 };
 
 // One dispatch shell (adoption-map item 1 / review 09 findings 1-2). The parse,
@@ -590,6 +591,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[xinsp2] watchdog enabled: %d ms per inspect\n", g_eng.watchdog_ms.load());
     }
     g_eng.srv_for_bp = &srv;   // status_cb + dropped-frame markers emit through it
+    // Health/state contract (docs/new_gen/04-health-contract.md): route the
+    // registry's health_changed events to WS clients. State starts at `boot`.
+    install_health_notifier_();
     // Route plugin host_api->set_status into the status registry. Non-capturing
     // so it converts to the StatusSinkFn function pointer.
     xi::status_sink() = [](const char* who, const char* text) {
@@ -740,6 +744,9 @@ int main(int argc, char** argv) {
 
             // Phase 2: hard trip — exit for FE respawn (see header above).
             ++g_eng.watchdog_trips;
+            // Health contract: an unrecoverable wedge → `fault`. Best-effort push
+            // before the exit (the FE will respawn into a fresh `boot`).
+            xi::health().set_state(xi::SysState::Fault);
             std::fprintf(stderr,
                 "[xinsp2] watchdog HARD trip - inspect exceeded %dms and ignored "
                 "cooperative cancel; exiting for supervisor respawn (rc=0x%04X)\n",

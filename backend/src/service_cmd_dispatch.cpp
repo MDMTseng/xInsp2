@@ -194,6 +194,9 @@ void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // run_one_inspection() + docs/guides/write-a-script.md.
 
         int n_threads = std::max(1, g_eng.plugin_mgr.project().dispatch_threads);
+        // Health contract: dispatch is live → `running` (recompute may immediately
+        // fold it to `degraded` if a component is already unhealthy).
+        xi::health().set_state(xi::SysState::Running);
         char buf[64];
         std::snprintf(buf, sizeof(buf),
                       R"({"started":true,"dispatch_threads":%d})", n_threads);
@@ -201,9 +204,13 @@ void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
 }
 
 void cmd_stop_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Health contract: draining the pool → `draining`, then `project_loaded`
+        // once the lanes are joined and their queues drained.
+        xi::health().set_state(xi::SysState::Draining);
         g_eng.continuous = false;
         xi::TriggerBus::instance().clear_sink();
         stop_dispatch_pool_();   // joins lanes + drains their queues (handles released)
+        xi::health().set_state(xi::SysState::ProjectLoaded);
         send_rsp_ok(srv, id, R"({"stopped":true})");
 }
 

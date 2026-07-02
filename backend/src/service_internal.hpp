@@ -37,6 +37,7 @@
 #include <xi/xi_trigger_bus.hpp>
 #include <xi/xi_emit_gate.hpp>
 #include <xi/xi_ws_server.hpp>
+#include <xi/xi_health.hpp>
 #include <xi/xi_use.hpp>
 #include <xi/xi_seh.hpp>
 #include <xi/xi_crash_dump.hpp>
@@ -402,3 +403,8 @@ void cmd_rebuild_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
 void cmd_get_plugin_ui_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed);
 void cmd_toolchain_health_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed);
 void cmd_set_toolchain_override_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed);
+void cmd_get_health_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed);
+
+// ---- health/state contract (service_health.cpp) ----------------------------
+// Route HealthRegistry health_changed events to WS clients. Called once at boot.
+void install_health_notifier_();
