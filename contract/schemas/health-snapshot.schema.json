@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/health-snapshot.schema.json",
+  "title": "get_health reply payload (xi.health/1)",
+  "description": "The canonical health snapshot returned by `get_health`: the top-level state machine value plus one entry per component, with per-kind extra fields (crash_count on instances, queue stats on groups, last_emit_age_ms on sources). Consumers must tolerate unknown states/health literals (forward-open enums) and unknown fields. Exercised by protocol/fixtures/get_health.json.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema", "state", "since_ms", "components"],
+  "properties": {
+    "schema": { "type": "string", "const": "xi.health/1" },
+    "state": {
+      "type": "string",
+      "description": "Top-level state machine value. Open set: consumers treat unknown values as a neutral/unknown state (forward compatibility), so no closed enum here.",
+      "examples": ["boot", "project_loaded", "running", "degraded", "draining", "fault"]
+    },
+    "since_ms": { "type": "integer" },
+    "boot_id": { "type": "string" },
+    "station_id": { "type": "string" },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["kind", "name", "health"],
+        "properties": {
+          "kind": { "type": "string", "examples": ["script", "instance", "group", "source"] },
+          "name": { "type": "string" },
+          "health": {
+            "type": "string",
+            "description": "Open set (ok / degraded / failed today); unknown values tolerated.",
+            "examples": ["ok", "degraded", "failed"]
+          },
+          "reason_code": { "type": "string" },
+          "since_ms": { "type": "integer" },
+          "crash_count": { "type": "integer" },
+          "queue_now": { "type": "integer" },
+          "running": { "type": "integer" },
+          "dropped": { "type": "integer" },
+          "last_emit_age_ms": { "type": "integer" }
+        }
+      }
+    }
+  }
+}

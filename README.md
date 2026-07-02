@@ -285,15 +285,13 @@ The runner loads `project.json`, restores all instances, compiles
 the script, runs N frames, and writes a JSON report — no WS, no UI,
 no UI dependencies. Exit `0` if every frame ran clean.
 
-> **What the report captures today:** it is an **execution/crash log**,
-> not a verdict log. The summary records the requested frame count
-> (`frames_run`), the crash count (`crashed`), and total wall time
-> (`total_ms`); each frame entry records only that it ran. It does **not**
-> yet capture the per-frame inspection **verdict** (OK / NG / NA) — so
-> exit `0` means "every frame dispatched without crashing", not "every part
-> passed". Per-frame verdict capture (wiring the result callback) is
-> **planned but not yet implemented** (see
-> [`docs/ext_review/00-triage.md`](docs/ext_review/00-triage.md), Bucket B).
+> **What the report captures:** both an **execution/crash log and a verdict
+> log**. Each frame entry records its verdict `code` / `class`
+> (ok / ng / na / no_verdict / crashed) / `msg`, the summary carries a
+> `counts` tally per class plus the final `health` state, and the process
+> **exit code still reflects infra/crash status only** — exit `0` means
+> "every frame dispatched without crashing", not "every part passed"; read
+> `counts` for the parts.
 
 ### 10. Remote backend (LAN deployment)
 

@@ -39,7 +39,7 @@ public:
             for (int i = 0; i < n; ++i) emit_one_();
         }
         else if (command == "set_fps") {
-            int v = p["value"].as_int(fps_);
+            int v = p["value"].as_int(fps_.load());
             if (v < 1) v = 1;
             if (v > 120) v = 120;
             fps_ = v;
@@ -50,7 +50,7 @@ public:
     std::string get_def() const override {
         return xi::Json::object()
             .set("running", running_.load())
-            .set("fps", fps_)
+            .set("fps", fps_.load())
             .set("ticks", (int)ticks_.load())
             .dump();
     }
@@ -58,14 +58,16 @@ public:
     bool set_def(const std::string& json) override {
         auto p = xi::Json::parse(json);
         if (!p.valid()) return false;
-        fps_ = p["fps"].as_int(fps_);
+        fps_ = p["fps"].as_int(fps_.load());
         return true;
     }
 
 private:
     std::atomic<bool> running_{false};
     std::atomic<int>  ticks_{0};
-    int               fps_ = 10;
+    // Written from the control thread (exchange/set_def), read by run_loop_()'s
+    // worker — atomic for the same reason mock_camera's config fields are.
+    std::atomic<int>  fps_{10};
     std::thread       thread_;
 
     void start_() {
@@ -108,7 +110,7 @@ private:
     void run_loop_() {
         while (running_.load()) {
             emit_one_();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000 / std::max(fps_, 1)));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000 / std::max(fps_.load(), 1)));
         }
     }
 };

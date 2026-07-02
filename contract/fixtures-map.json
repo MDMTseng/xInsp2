@@ -1,6 +1,9 @@
 {
   "$comment": "Maps each wire fixture to the contract schema it must satisfy. Paths are relative to the repo root. The validator FAILS if any fixture under the mapped directories is absent from this map (strict: a new fixture cannot land unvalidated) or fails its schema. The discriminated-union dispatch (which schema a message uses) lives HERE, in the harness, not in a schema keyword — the constrained subset has no oneOf, so this map IS the discriminator. See docs/new_gen/05-schema-language-spike.md.",
-  "scan_dirs": ["protocol/fixtures", "contract/examples"],
+  "scan_dirs": [
+    "protocol/fixtures",
+    "contract/examples"
+  ],
   "map": {
     "protocol/fixtures/cmd_run.json": "cmd.schema.json",
     "protocol/fixtures/commit_group_committed.json": "rsp-commit-group.schema.json",
@@ -16,7 +19,11 @@
     "contract/examples/hello.json": "hello.schema.json",
     "contract/examples/state_dropped.json": "state-dropped.schema.json",
     "contract/examples/dispatch_stats.json": "dispatch-stats.schema.json",
-    "contract/examples/xex1_body.json": "xex1-frame.schema.json"
+    "contract/examples/xex1_body.json": "xex1-frame.schema.json",
+    "protocol/fixtures/hello.json": "hello.schema.json",
+    "protocol/fixtures/get_health.json": "health-snapshot.schema.json",
+    "protocol/fixtures/health_changed.json": "health-changed.schema.json",
+    "protocol/fixtures/health_changed_state.json": "health-changed.schema.json"
   },
   "orphans": {
     "protocol/fixtures/vars_mixed.json": "Models the REMOVED `vars` message (review 10 finding 9; adoption-map item 4 flags it for retirement). Mapped to the deprecated vars.schema.json so the gate stays strict; reported as an orphan, not silently deleted."

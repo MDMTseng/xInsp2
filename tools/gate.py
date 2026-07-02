@@ -128,9 +128,18 @@ def _cmake_project(src: Path, build: Path, targets: list[str] | None) -> None:
 # --- stages -----------------------------------------------------------------
 
 def stage_docs(_args) -> None:
-    """The derive-from-source doc freeze guards. Pure stdlib Python, no build."""
+    """The derive-from-source doc freeze guards + the contract gates. Python, no build.
+
+    The contract gates run here with XINSP2_REQUIRE_SCHEMA_GATE=1: inside THIS
+    gate a missing jsonschema is a failure, not a skip — the ctest variant's
+    polite self-skip once let four unmapped fixtures ride a green gate
+    (2026-07-02)."""
     _run([sys.executable, REPO / "tools" / "check_doc_coverage.py"])
     _run([sys.executable, REPO / "tools" / "check_retired_terms.py"])
+    env = os.environ.copy()
+    env["XINSP2_REQUIRE_SCHEMA_GATE"] = "1"
+    _run([sys.executable, REPO / "contract" / "validate.py"], env=env)
+    _run([sys.executable, REPO / "contract" / "baseline_gate.py"], env=env)
 
 
 def stage_build(_args) -> None:

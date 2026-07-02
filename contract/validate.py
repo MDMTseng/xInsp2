@@ -33,7 +33,17 @@ try:
     from referencing import Registry, Resource
     from referencing.jsonschema import DRAFT202012
 except ImportError as e:  # pragma: no cover - environment guard
-    print(f"contract-validate: SKIP - jsonschema/referencing not available ({e})")
+    import os
+    if os.environ.get("XINSP2_REQUIRE_SCHEMA_GATE"):
+        # CI / gate.py set this: a missing dep there means the gate silently
+        # stopped guarding once already (found 2026-07-02: four fixtures landed
+        # unmapped while every "green" was a skip). Fail loudly instead.
+        print(f"contract-validate: FAIL - jsonschema/referencing not installed ({e}); "
+              "XINSP2_REQUIRE_SCHEMA_GATE is set, so skipping is not allowed. "
+              "pip install jsonschema")
+        sys.exit(1)
+    print(f"contract-validate: SKIP (NOT A PASS) - jsonschema/referencing not available ({e}); "
+          "schema + fixture conformance was NOT checked. pip install jsonschema")
     # Skip (not fail) so a Python-without-jsonschema box still configures/builds,
     # mirroring the doc_coverage ctest's no-interpreter skip.
     sys.exit(0)

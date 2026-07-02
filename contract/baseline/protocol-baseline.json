@@ -142,6 +142,155 @@
         "type": "object"
       }
     },
+    "health-changed.schema.json": {
+      "sha256": "14bb23b8523b0ee4a9ce2e9ce6271c754b2fdc682540983ccbb98fdcd34da8d3",
+      "shape": {
+        "$id": "https://xinsp.dev/contract/schemas/health-changed.schema.json",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "properties": {
+          "data": {
+            "additionalProperties": true,
+            "properties": {
+              "component": {
+                "additionalProperties": true,
+                "properties": {
+                  "health": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "reason_code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "health",
+                  "kind",
+                  "name"
+                ],
+                "type": "object"
+              },
+              "schema": {
+                "const": "xi.health/1",
+                "type": "string"
+              },
+              "since_ms": {
+                "type": "integer"
+              },
+              "state": {
+                "type": "string"
+              },
+              "ts_ms": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "schema",
+              "since_ms",
+              "state",
+              "ts_ms"
+            ],
+            "type": "object"
+          },
+          "name": {
+            "const": "health_changed",
+            "type": "string"
+          },
+          "type": {
+            "const": "event",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data",
+          "name",
+          "type"
+        ],
+        "type": "object"
+      }
+    },
+    "health-snapshot.schema.json": {
+      "sha256": "865b729233b44116628c5f4f49cf470f4f37c9c36249640201f187c05669c089",
+      "shape": {
+        "$id": "https://xinsp.dev/contract/schemas/health-snapshot.schema.json",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "properties": {
+          "boot_id": {
+            "type": "string"
+          },
+          "components": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "crash_count": {
+                  "type": "integer"
+                },
+                "dropped": {
+                  "type": "integer"
+                },
+                "health": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "last_emit_age_ms": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "queue_now": {
+                  "type": "integer"
+                },
+                "reason_code": {
+                  "type": "string"
+                },
+                "running": {
+                  "type": "integer"
+                },
+                "since_ms": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "health",
+                "kind",
+                "name"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "schema": {
+            "const": "xi.health/1",
+            "type": "string"
+          },
+          "since_ms": {
+            "type": "integer"
+          },
+          "state": {
+            "type": "string"
+          },
+          "station_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "components",
+          "schema",
+          "since_ms",
+          "state"
+        ],
+        "type": "object"
+      }
+    },
     "hello.schema.json": {
       "sha256": "d4de308eb54da2332bd234b63528af74e90ffaf0f5d36744ce202b43937e65c2",
       "shape": {
