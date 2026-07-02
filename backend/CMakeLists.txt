@@ -606,6 +606,22 @@ add_test(NAME ws_teardown_race_heavy COMMAND test_ws_teardown_race)
 set_tests_properties(ws_teardown_race_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
+# WS exclusive-bind hardening (polaris2/exclusive-bind). Proves the two
+# properties of swapping SO_REUSEADDR → SO_EXCLUSIVEADDRUSE on the Windows listen
+# socket: (a) hijack prevention — a rival SO_REUSEADDR bind on the live
+# listener's port now FAILS; (b) rapid respawn — a start→stop→start cycle on one
+# fixed port still succeeds every time (FE BE-respawn must not regress). Heavy
+# variant scales respawn cycles.
+add_executable(test_ws_exclusive_bind tests/test_ws_exclusive_bind.cpp)
+target_include_directories(test_ws_exclusive_bind PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(NOT MSVC)
+    target_link_libraries(test_ws_exclusive_bind PRIVATE pthread)
+endif()
+add_test(NAME ws_exclusive_bind COMMAND test_ws_exclusive_bind)
+add_test(NAME ws_exclusive_bind_heavy COMMAND test_ws_exclusive_bind)
+set_tests_properties(ws_exclusive_bind_heavy PROPERTIES
+    LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
+
 # Ordered-emit gate probe (§28 Tier-1 GAP: dispatch queue + EmitGate). Header-only
 # primitive (xi_emit_gate.hpp) so it links nothing but the test itself; exercises
 # the parallel-compute/ordered-emit invariant, the dtor backstop, and the

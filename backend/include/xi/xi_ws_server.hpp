@@ -242,8 +242,30 @@ public:
         listen_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_ == INVALID_SOCK) return false;
         int opt = 1;
+#ifdef _WIN32
+        // SO_EXCLUSIVEADDRUSE, NOT SO_REUSEADDR, on the Windows listen socket.
+        // On Windows SO_REUSEADDR does NOT mean what it means on POSIX: it
+        // permits a *full duplicate active bind* — any other local process can
+        // ::bind() our exact ip:port while we are listening, and the kernel then
+        // splits inbound connections between the two rival listeners
+        // nondeterministically (connection hijack; demonstrated live in the
+        // ws_teardown_race deflake — two listeners on port 39187, each getting a
+        // share of connects, the starved one seeing opens=0). SO_EXCLUSIVEADDRUSE
+        // makes our bind exclusive so no rival can steal the port. It does NOT
+        // reintroduce Linux-style TIME_WAIT rebind pain: on Windows a *listen*
+        // socket in the normal close path frees the port immediately for the same
+        // account, so the FE's rapid BE respawn (close listener → new BE binds
+        // same fixed port) still works — covered by the respawn-cycle test.
+        ::setsockopt(listen_, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                     reinterpret_cast<const char*>(&opt), sizeof(opt));
+#else
+        // POSIX SO_REUSEADDR is the safe, needed one: it does NOT allow a second
+        // active bind on the same ip:port while we are listening (that still
+        // fails with EADDRINUSE), it only lets us rebind a port stuck in
+        // TIME_WAIT from a prior socket — exactly the rapid-respawn case. Keep it.
         ::setsockopt(listen_, SOL_SOCKET, SO_REUSEADDR,
                      reinterpret_cast<const char*>(&opt), sizeof(opt));
+#endif
         sockaddr_in addr{};
         addr.sin_family      = AF_INET;
         // Resolve bind host. Empty / "127.0.0.1" → loopback, "0.0.0.0"

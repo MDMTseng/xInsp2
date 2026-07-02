@@ -1345,6 +1345,15 @@ client), and the port stays open so an operator HMI / the extension can attach
 live. This lets `xinsp-fe.exe` run a line at the process level without a C++ WS
 client.
 
+On Windows the listen socket binds **exclusively** (`SO_EXCLUSIVEADDRUSE`): while
+the backend is up, no other local process can bind its `host:port` — so a rival
+listener can never siphon off inbound connections. (Windows `SO_REUSEADDR`, which
+the socket used previously, permits a full duplicate bind and lets the kernel
+split connects between the two listeners; that was never legitimate behaviour.)
+This does not affect the FE's rapid backend respawn: closing the old listener
+frees the port immediately, so the new backend rebinds the same fixed port
+without delay.
+
 ## Remote mode & auth
 
 By default the backend binds to **loopback only** (`127.0.0.1`). To expose it on a
