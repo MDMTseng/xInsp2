@@ -130,7 +130,7 @@ async function run() {
     await sleep(1500);
     shot('5_plugins_with_usage');
 
-    // --- STATE 6: Open a plugin's webview UI to show the vscode-elements polish.
+    // --- STATE 6: Open a plugin's webview UI to show the in-house xi-* kit polish.
     // The polished demo plugin is pre-registered via XINSP2_EXTRA_PLUGIN_DIRS
     // in the launcher so the backend discovers it at startup.
     try {
@@ -154,7 +154,7 @@ async function run() {
     await sleep(1500);
     shot('9_after_close_project');
 
-    // --- STATE 10: mock_camera UI (migrated to @vscode-elements)
+    // --- STATE 10: mock_camera UI (migrated to the in-house xi-* kit)
     const projDir2 = path.join(os.tmpdir(), `xinsp2_ux10_${Date.now()}`);
     await vscode.commands.executeCommand('xinsp2.createProject', projDir2, 'ux_cam');
     await vscode.commands.executeCommand('xinsp2.createInstance', 'cam0', 'mock_camera');

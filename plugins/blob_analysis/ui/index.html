@@ -37,7 +37,7 @@
 <body>
     <div class="header">
         <h2>Blob Analysis</h2>
-        <vscode-badge id="blob-count-pill" variant="counter">no blobs</vscode-badge>
+        <xi-badge id="blob-count-pill" variant="counter">no blobs</xi-badge>
     </div>
     <div class="hint">Threshold + contour extraction. Tweak parameters and click Apply to re-run.</div>
 
@@ -57,10 +57,10 @@
             <input type="number" id="maxArea" value="999999" min="1" max="9999999" onchange="onParamChange()">
         </div>
         <div class="checkbox-row">
-            <vscode-checkbox id="invert" label="Invert threshold"></vscode-checkbox>
+            <xi-toggle id="invert" label="Invert threshold"></xi-toggle>
         </div>
         <div class="row" style="margin-top: 10px">
-            <vscode-button onclick="onApply()">Apply &amp; Run</vscode-button>
+            <xi-button onclick="onApply()">Apply &amp; Run</xi-button>
         </div>
     </div>
 
@@ -104,7 +104,7 @@
         const thresh = parseInt(document.getElementById('threshold').value);
         const minArea = parseInt(document.getElementById('minArea').value);
         const maxArea = parseInt(document.getElementById('maxArea').value);
-        const invert = document.getElementById('invert').checked;
+        const invert = document.getElementById('invert').value;
         sendCmd({ command: 'set_threshold', value: thresh });
         sendCmd({ command: 'set_min_area', value: minArea });
         if (invert) sendCmd({ command: 'set_invert', value: true });
@@ -210,7 +210,7 @@
             }
             if (msg.min_area !== undefined) document.getElementById('minArea').value = msg.min_area;
             if (msg.max_area !== undefined) document.getElementById('maxArea').value = msg.max_area;
-            if (msg.invert !== undefined) document.getElementById('invert').checked = msg.invert;
+            if (msg.invert !== undefined) document.getElementById('invert').value = msg.invert;
         } else if (msg.type === 'preview') {
             // Received a JPEG image — render on canvas
             const img = new Image();

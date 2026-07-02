@@ -27,7 +27,7 @@
 <body>
     <div class="header">
         <h2>Record Save</h2>
-        <vscode-badge id="state-pill" variant="counter">disabled</vscode-badge>
+        <xi-badge id="state-pill" variant="counter">disabled</xi-badge>
     </div>
     <div class="hint">Writes each record as a JSON + one BMP per image, named by the rule below.</div>
 
@@ -35,17 +35,17 @@
         <div class="card-title">Destination</div>
         <div class="field">
             <label for="outputDir">Output folder</label>
-            <vscode-textfield id="outputDir" placeholder="C:\path\to\save\dir"></vscode-textfield>
+            <xi-text id="outputDir" placeholder="C:\path\to\save\dir"></xi-text>
         </div>
         <div class="field">
             <label for="namingRule">Naming rule</label>
-            <vscode-textfield id="namingRule" value="frame_{count}"></vscode-textfield>
+            <xi-text id="namingRule" value="frame_{count}"></xi-text>
         </div>
         <div class="tokens">Tokens: <code>{count}</code> (zero-padded), <code>{timestamp}</code> (YYYYMMDD_HHMMSS)</div>
         <div class="actions">
-            <vscode-button id="btn-apply">Apply Settings</vscode-button>
-            <vscode-button id="btn-toggle">Enable Saving</vscode-button>
-            <vscode-button id="btn-reset" secondary>Reset Counter</vscode-button>
+            <xi-button id="btn-apply">Apply Settings</xi-button>
+            <xi-button id="btn-toggle">Enable Saving</xi-button>
+            <xi-button id="btn-reset" secondary>Reset Counter</xi-button>
         </div>
     </div>
 

@@ -78,7 +78,7 @@ async function run() {
     // Open the webui the same way a tree button / Ctrl-click does.
     console.log(`Opening webui for ${INSTANCE} (${PLUGIN})...`);
     await vscode.commands.executeCommand('xinsp2.openInstanceUI', INSTANCE, PLUGIN);
-    // The panel HTML + @vscode-elements bundle need a beat to render.
+    // The panel HTML + in-house xi-* kit bundle need a beat to render.
     await sleep(3000);
 
     assert.ok(webuiTabOpen(),

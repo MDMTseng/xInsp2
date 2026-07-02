@@ -28,7 +28,7 @@
 <body>
     <div class="header">
         <h2>Mock Camera</h2>
-        <vscode-badge id="stream-pill" variant="counter">stopped</vscode-badge>
+        <xi-badge id="stream-pill" variant="counter">stopped</xi-badge>
     </div>
     <div class="hint">Synthesized frames for pipeline testing. Stream to drive downstream plugins.</div>
 
@@ -36,20 +36,20 @@
         <div class="card-title">Configuration</div>
         <div class="field">
             <label for="width">Width</label>
-            <vscode-textfield id="width" type="number" value="640" min="32" max="4096"></vscode-textfield>
+            <xi-number id="width" value="640" min="32" max="4096"></xi-number>
         </div>
         <div class="field">
             <label for="height">Height</label>
-            <vscode-textfield id="height" type="number" value="480" min="32" max="4096"></vscode-textfield>
+            <xi-number id="height" value="480" min="32" max="4096"></xi-number>
         </div>
         <div class="field">
             <label for="fps">FPS</label>
-            <vscode-textfield id="fps" type="number" value="10" min="1" max="60"></vscode-textfield>
+            <xi-number id="fps" value="10" min="1" max="60"></xi-number>
         </div>
         <div class="actions">
-            <vscode-button id="btn-apply">Apply Settings</vscode-button>
-            <vscode-button id="btn-start" icon="play">Start</vscode-button>
-            <vscode-button id="btn-stop" secondary icon="debug-stop">Stop</vscode-button>
+            <xi-button id="btn-apply">Apply Settings</xi-button>
+            <xi-button id="btn-start" icon="play">Start</xi-button>
+            <xi-button id="btn-stop" secondary icon="debug-stop">Stop</xi-button>
         </div>
     </div>
 
