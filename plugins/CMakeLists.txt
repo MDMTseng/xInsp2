@@ -121,7 +121,7 @@ add_library(record_save SHARED
     ../backend/src/stb_impl.cpp
 )
 # expose/src is on the include path for xex1_pack_dump.hpp + xex1_encode.hpp — the
-# ONE shared pack->XEX1-v2 encoder record_save and expose both dump through (P3).
+# ONE shared pack->XEX1-v3 encoder record_save and expose both dump through (P3).
 target_include_directories(record_save PRIVATE ${XI_INCLUDE} ${XI_VENDOR}
     ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
 set_target_properties(record_save PROPERTIES
@@ -300,9 +300,9 @@ set_tests_properties(xex1_fixtures PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures")
 
 # polaris2 wave-2 step 3 — the memory ≈ wire ≈ disk HEADLINE (docs/new_gen/07 +
-# 08 Wave 2): build a real xi::Pack, dump it to XEX1-v2, and assert the pack's
+# 08 Wave 2): build a real xi::Pack, dump it to XEX1-v3, and assert the pack's
 # in-memory canonical small plane equals the wire bytes equals a disk readback,
-# byte-for-byte. Header-only (xi::Pack + xi::mp + the v2 encoder); no DLL load.
+# byte-for-byte. Header-only (xi::Pack + xi::mp + the v3 encoder); no DLL load.
 add_executable(xex1_v2_identity_test xex1_v2_identity_test.cpp)
 target_include_directories(xex1_v2_identity_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson

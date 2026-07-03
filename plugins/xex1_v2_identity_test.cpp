@@ -3,15 +3,21 @@
 // (docs/new_gen/07-uniform-keyed-buffer-plane.md, "the preview frame, the
 // record/replay file, and the in-memory plane become the same bytes").
 //
+// NAMING NOTE: the file/test name keeps its pilot-era "v2" spelling (doc 10's
+// historical-spelling rule); the frame under test is XEX1-v3 — the FINALIZED
+// canonical dump, i.e. the v2 draft + per-entry tags ([tag, value] entries,
+// gate P3). The identity claims are unchanged: the tag rides BESIDE the value,
+// so every entry's memory-plane bytes still appear verbatim on the wire.
+//
 // This is the doc-07 claim made an EXECUTABLE ASSERTION. It builds a real
-// xi::Pack (the host-side v3 container), seals it, dumps it to an XEX1-v2 frame
+// xi::Pack (the host-side v3 container), seals it, dumps it to an XEX1-v3 frame
 // (the canonical frame dump), and proves three equalities on the small plane:
 //
 //   1. memory  == canonical : each entry's stored arena bytes ARE already
 //      canonical msgpack — re-encoding the same value through xi::mp::Writer
 //      yields byte-identical bytes. The pack does not hold a private layout it
 //      must transcode; it holds the wire encoding.
-//   2. wire     == memory   : the XEX1-v2 dump splices those arena bytes onto the
+//   2. wire     == memory   : the XEX1-v3 dump splices those arena bytes onto the
 //      wire VERBATIM (Writer::raw_canonical), so each entry's memory bytes appear
 //      as a contiguous slice of the emitted pack. Boundaries are copies, not
 //      transformations.
@@ -26,7 +32,7 @@
 #include <xi/xi_image_pool.hpp>  // ImagePool (pooled image pixels) + leak oracle
 #include <xi/xi_mp.hpp>          // xi::mp::Writer/Reader (the canonical codec)
 
-#include "xex1_encode.hpp"       // xi::xex1::V2Entry / encode_frame_v2
+#include "xex1_encode.hpp"       // xi::xex1::V3Entry / encode_frame_v3
 
 #include <algorithm>
 #include <cstdint>
@@ -67,7 +73,7 @@ static std::vector<uint8_t> reencode(const xi::Pack& f, std::string_view key, xi
 }
 
 int main() {
-    std::printf("[test] XEX1-v2 memory == wire == disk identity\n");
+    std::printf("[test] XEX1-v3 memory == wire == disk identity\n");
     const int base_live = xi::ImagePool::instance().cumulative().live_now;
 
     // ---- build a real pack: scalars + str + nested msgpack + a pooled image --
@@ -93,10 +99,10 @@ int main() {
     }
     CHECK(pack.size() == 6);
 
-    // ---- host-side generic dump: read arena bytes VERBATIM into V2Entry --------
+    // ---- host-side generic dump: read arena bytes VERBATIM into V3Entry --------
     // (the same walk expose does across the door, but here in-process we can read
     // the arena bytes directly and prove they flow to the wire unchanged.)
-    std::vector<xi::xex1::V2Entry> entries;
+    std::vector<xi::xex1::V3Entry> entries;
     std::vector<std::vector<uint8_t>> memory_planes;   // per-entry arena bytes (non-image)
     uint64_t seq = 0;
     for (size_t i = 0; i < pack.size(); ++i) {
@@ -104,7 +110,7 @@ int main() {
         xi::PackTag tag = pack.tag_at(i);
         if (key == "$seq") { seq = (uint64_t)*pack.get_i64(key); continue; }  // lift, don't dump
 
-        xi::xex1::V2Entry e;
+        xi::xex1::V3Entry e;
         e.key = std::string(key);
         e.tag = (uint8_t)tag;
         if (tag == xi::PackTag::Image) {
@@ -125,7 +131,7 @@ int main() {
         entries.push_back(std::move(e));
     }
 
-    std::vector<uint8_t> wire = xi::xex1::encode_frame_v2("cam0", seq, entries);
+    std::vector<uint8_t> wire = xi::xex1::encode_frame_v3("cam0", seq, entries);
 
     SECTION("wire is a well-formed XEX1 frame carrying canonical msgpack");
     CHECK(wire.size() > 4);

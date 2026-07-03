@@ -37,19 +37,19 @@ const manifest = JSON.parse(readFileSync(path.join(FIX, "manifest.json"), "utf8"
 const b64 = (s) => new Uint8Array(Buffer.from(s, "base64"));
 
 for (const f of manifest.frames) {
-  if (f.v === 2) {
-    test(`XEX1 golden (v2): ${f.file}`, () => {
+  if (f.v === 3) {
+    test(`XEX1 golden (v3): ${f.file}`, () => {
       const body = decodeXEX1(new Uint8Array(readFileSync(path.join(FIX, f.file))));
       assert.ok(body, `decodeXEX1 returned null for ${f.file}`);
-      assert.equal(body.v, 2);
+      assert.equal(body.v, 3);
       assert.equal(body.channel, f.channel);
       assert.equal(body.seq, f.seq);
       // The canonical frame dump: scalar/str/mp entries -> values, image
-      // descriptors -> images[] with raw pixels (v2 is lossless, no JPEG).
+      // descriptors -> images[] with raw pixels (v3 is lossless, no JPEG; image entries identified by tag, not shape).
       for (const fld of f.fields) {
         if (fld.kind === "image") {
           const im = body.images.find((x) => x.key === fld.key);
-          assert.ok(im, `v2 image entry ${fld.key} missing`);
+          assert.ok(im, `v3 image entry ${fld.key} missing`);
           assert.equal(im.w, fld.w);
           assert.equal(im.h, fld.h);
           assert.equal(im.c, fld.c);
