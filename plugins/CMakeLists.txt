@@ -120,7 +120,10 @@ add_library(record_save SHARED
     record_save/record_save.cpp
     ../backend/src/stb_impl.cpp
 )
-target_include_directories(record_save PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+# expose/src is on the include path for xex1_pack_dump.hpp + xex1_encode.hpp — the
+# ONE shared pack->XEX1-v2 encoder record_save and expose both dump through (P3).
+target_include_directories(record_save PRIVATE ${XI_INCLUDE} ${XI_VENDOR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
 set_target_properties(record_save PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_save
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_save
@@ -261,3 +264,22 @@ if(WIN32)
 endif()
 add_dependencies(expose_pack_test expose)
 add_test(NAME expose_pack_test COMMAND expose_pack_test)
+
+# polaris2 P3 (docs/new_gen/10) — record_save persistence parity. Drives the REAL
+# record_save DLL's pack door to persist a multi-entry pack (scalars + nested mp +
+# image) as a .xex1 file, asserts the file bytes EQUAL the shared encoder's output
+# (golden-style — proving record_save and expose dump byte-identically), then loads
+# it back through the untrusted-disk ingress (xex1_pack_load.hpp) and asserts the
+# rebuilt pack's entries / image pixels are identical and the image pool balances.
+# Needs the built record_save DLL + a host ImagePool (make_host_api + install_pack_abi).
+add_executable(record_save_pack_test record_save_pack_test.cpp)
+target_include_directories(record_save_pack_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
+target_compile_definitions(record_save_pack_test PRIVATE
+    RECORD_SAVE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/record_save/xi-record_save.dll")
+if(WIN32)
+    target_link_libraries(record_save_pack_test PRIVATE Ws2_32)
+endif()
+add_dependencies(record_save_pack_test record_save)
+add_test(NAME record_save_pack_test COMMAND record_save_pack_test)
