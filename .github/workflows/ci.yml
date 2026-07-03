@@ -13,12 +13,17 @@
 # Realism about hosted runners (read before trusting a red/green here):
 #   * The `docs` and `fixtures` gate stages are pure stdlib+pytest Python and
 #     need NO native build — they always run and are a hard gate.
-#   * `build` / `ctest` / `qa` / `fuzz` need OpenCV 4.x and the MSVC toolchain
-#     (incl. cl.exe on PATH at RUNTIME, because the backend JIT-compiles
-#     inspection scripts). Both are provisioned below. OpenCV is fetched with
-#     Chocolatey; if that provisioning ever proves flaky on the hosted image,
-#     the pure-Python subset above still gives signal, and the native half can
-#     be moved to a self-hosted runner without touching gate.py.
+#   * `build` / `sdk` / `ctest` / `live` / `qa` / `fuzz` need OpenCV 4.x and
+#     the MSVC toolchain (incl. cl.exe on PATH at RUNTIME, because the backend
+#     JIT-compiles inspection scripts). Both are provisioned below. The `sdk`
+#     stage additionally needs a bare `node` (preinstalled on windows-latest;
+#     sdk/scaffold.mjs is zero-install, no npm). The `live` stage needs
+#     jsonschema + websocket-client under the gate's python — installed below;
+#     with XINSP2_REQUIRE_SCHEMA_GATE a missing dep FAILS the gate rather than
+#     skipping. OpenCV is fetched with Chocolatey; if that provisioning ever
+#     proves flaky on the hosted image, the pure-Python subset above still
+#     gives signal, and the native half can be moved to a self-hosted runner
+#     without touching gate.py.
 name: ci
 
 on:
@@ -42,8 +47,10 @@ jobs:
         with:
           python-version: "3.11"
 
+      # websocket-client is for the `live` stage (contract/live_conformance.py
+      # drives the in-tree xinsp2 python client against a spawned backend).
       - name: Install Python test deps
-        run: python -m pip install --upgrade pip pytest jsonschema
+        run: python -m pip install --upgrade pip pytest jsonschema websocket-client
 
       # --- Hard gate: the build-free stages. Always run, always block. --------
       # docs   = check_doc_coverage + check_retired_terms (derive-from-source)
@@ -78,9 +85,9 @@ jobs:
           Write-Host "OpenCV_DIR=$dir"
           "OpenCV_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # --- The native gate: build + ctest + qa + fuzz (mirror of local run) ---
-      # Same gate.py, minus the two stages already run above. In CI there is no
-      # VS Code extension racing the WS slot, so the default fuzz port is fine;
-      # we pass 7823 explicitly to document that.
-      - name: Gate (build + ctest + qa + fuzz)
+      # --- The native gate: build + sdk + ctest + live + qa + fuzz -----------
+      # (mirror of local run) Same gate.py, minus the two stages already run
+      # above. In CI there is no VS Code extension racing the WS slot, so the
+      # default fuzz port is fine; we pass 7823 explicitly to document that.
+      - name: Gate (build + sdk + ctest + live + qa + fuzz)
         run: python tools/gate.py --skip docs,fixtures --port 7823

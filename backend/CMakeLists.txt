@@ -1111,6 +1111,10 @@ if(Python3_Interpreter_FOUND)
     # an unlisted new message type FAILS. Self-skips (exit 0, loud "SKIP - NOT A PASS")
     # when the backend exe is not built or a Python dep is missing, like the doc_coverage /
     # contract_schema gates. LONGER timeout: the session does a cold cl.exe compile.
+    # gate.py runs this ONCE, in its `live` stage (the gate's python +
+    # XINSP2_REQUIRE_SCHEMA_GATE=1, so skipping is forbidden there) and excludes
+    # this ctest duplicate (-E contract_live); the registration stays so a bare
+    # `ctest` run remains complete on its own.
     # See contract/live_conformance.py and contract/README.md.
     add_test(NAME contract_live
         COMMAND ${Python3_EXECUTABLE}

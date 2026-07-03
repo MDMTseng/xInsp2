@@ -27,10 +27,17 @@ python tools/gate.py
 ```
 
 Stages: **docs** (the derive-from-source freeze guards) → **build** (backend
-Release + shipped plugins) → **ctest** (the full C++ suite — unit, integration,
-perf gates, `script_selfcheck`, and the doc gates again) → **fixtures** (the
-protocol golden-fixture round-trip, `pytest tools/xinsp2_py/tests`) → **qa**
-(the `examples/qa_*` sweep) → **fuzz** (the black-box fuzz smoke,
+Release + shipped plugins) → **sdk** (compile `sdk/host_mock` + scaffold every
+plugin template — easy/medium/expert, incl. their UI panels — with the real
+`sdk/scaffold.mjs` and compile the result; needs a bare `node`, no npm) →
+**ctest** (the full C++ suite — unit, integration, perf gates,
+`script_selfcheck`, and the doc gates again; `contract_live` excluded, see
+**live**) → **fixtures** (the protocol golden-fixture round-trip, `pytest
+tools/xinsp2_py/tests`) → **live** (`contract/live_conformance.py`, the third
+contract leg — live WS bytes vs schemas + the `contract/live-allowlist.json`
+ratchet — run under the gate's own python with
+`XINSP2_REQUIRE_SCHEMA_GATE=1`, so a missing dep fails instead of skipping) →
+**qa** (the `examples/qa_*` sweep) → **fuzz** (the black-box fuzz smoke,
 `tests/fuzz/run_smoke.py`).
 
 This is the single source of truth for "what must pass," and CI is a thin
