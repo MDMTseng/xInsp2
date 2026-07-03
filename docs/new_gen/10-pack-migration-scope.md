@@ -87,10 +87,13 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    expose-from-script (`xi::use(sink).push(ScriptPack)`, staged + flushed in
    frame order for sink targets). Measured against the examples tree via the
    re-measured parity matrix (doc 12, 2026-07-03): 17 of 29 pattern rows
-   GREEN on live QA evidence, 4 GREEN-composition (both halves proven, one
-   composing example owed: E1/E2/E3 collapse into the graph-level
-   record→replay example below, F1 into a pack-mode config-swap drive), 4+H
-   N/A control-plane. Flagship evidence: **`examples/qa_use_pack_door`** —
+   GREEN on live QA evidence at the verdict, 4 GREEN-composition (both
+   halves proven, one composing example owed), 4+H N/A control-plane. The
+   owed graph-level record→replay example has since LANDED
+   (`examples/qa_pack_record_replay`, QA green 2026-07-03: record →
+   save(.xex1) → replay → verify as ONE live graph, disk == recorded wire ==
+   replayed wire pixel-byte identical), flipping E1/E2/E3 GREEN — now 20
+   GREEN, 1 composition row left (F1: a pack-mode config-swap drive). Flagship evidence: **`examples/qa_use_pack_door`** —
    build → door → push in ONE script, no `xi::Record` anywhere, pixels and
    nested entries byte-checked off the XEX1-v3 wire; `qa_pack_pilot`'s last
    Record leg deleted the same day; `python tools/run_qa.py pack` 4/4.
@@ -127,7 +130,9 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    the cutover train). Remaining P3-adjacent work, tracked outside the
    gate: flipping expose's default wire to v3 rides the cutover train
    (below), and the graph-level "route a recorded run through a full
-   project" example is examples-tree work under gate P2's umbrella.
+   project" example — parked here under gate P2's umbrella — LANDED as
+   `examples/qa_pack_record_replay` (QA green 2026-07-03; doc 12 rows
+   E1/E2/E3 flipped GREEN on it).
 4. **THE CUT (one event, with the app team)**: ABI v12 — recommended as the
    synthesis §3 pure-door ABI (delete the monolith struct in the same
    authorized break), delete `xi_plugin_process(Record)`, delete Record +
