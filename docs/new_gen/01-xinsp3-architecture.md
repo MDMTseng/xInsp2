@@ -279,6 +279,20 @@ bounded `xi::async` executor and moving JPEG/viewer encode off the ordered
 result path — are **design-accommodated** (the dispatch and emit interfaces
 leave room) but not built.
 
+### Known hard limits — explicit non-goals, with named escape hatches
+
+*(added 2026-07-03)* Recorded so each limit reads as a deliberate decision,
+not an oversight. Format per row: the limit, the blessed workaround, and the
+concrete trigger that would reopen the decision.
+
+| Limit (deliberate) | Blessed escape hatch | Revisit when |
+|---|---|---|
+| **No sub-frame feedback loops** — a result cannot steer the *same* frame's capture; dispatch is one-way per event | Frame-level feedback IS supported: the script drives the source's own pack door (`xi::use(source).process(pack)`) so frame N's result steers frame N+1 | A real control loop that measurably cannot tolerate one frame of latency |
+| **No sub-chunk streaming** — a pack is sealed whole; consumers never see partial entries | Split the payload into multiple packs under the chunking convention — doc 18 (in flight); correlate with `$seq`/entry keys | A payload that cannot fit memory, or a latency budget that demands pipelined partial delivery, on a real line |
+| **No cross-instance GPU handoff** — device memory never crosses the ABI; pack entries are host memory | GPU-island: keep the whole GPU pipeline inside one instance; exchange via the resource-handle convention (doc 14 appendix) | Two shipped plugins that must share device buffers AND measurement showing the host round-trip copy dominates |
+| **No preemptive scheduling** — an in-flight inspect runs to completion; no priorities, no cancellation mid-frame | Partition by dispatch groups + bound per-frame work (`xi::parallel_for`/`xi::async`); size the worst case to the takt | A mixed-criticality deployment where group partitioning demonstrably cannot meet a hard takt |
+| **No in-process trust boundary** — plugins are trusted native code; SEH isolation is crash *safety*, not a sandbox | Trusted-load policy (review what you deploy); genuinely untrusted work runs out-of-process behind a proxy plugin you own | An actual third-party/untrusted plugin requirement (note: multi-process isolation was already rejected — it kills zero-copy; that trade stands) |
+
 ## Build order
 
 The order is chosen so every later layer is born inside the discipline, never

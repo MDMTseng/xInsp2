@@ -134,12 +134,25 @@ Key design choices:
 
 - **Stable C ABI for plugins.** No C++ types cross `xi_plugin_*` boundary —
   survives MSVC version drift.
+- **Uniform keyed Pack data plane.** Data moves as sealed **Packs** — keyed,
+  typed entries (images, scalars, nested trees) over one canonical msgpack
+  profile, byte-identical in memory, on the wire (**XEX1-v3**), and on disk
+  (`.xex1`). Every shipped plugin speaks it through a **bilingual door**
+  beside the legacy `xi::Record` path while that path winds down.
+- **Shared heavy work is a lib plugin.** The capability plane: a lib plugin
+  registers named capabilities (e.g. `plugins/imgcodec`'s `xi.jpeg.encode` —
+  one deduplicated encode serves every consumer), and other plugins call it
+  by name through a host-forwarded funnel with the same crash attribution
+  and quarantine as every other boundary.
 - **Sharded refcounted ImagePool.** 16 shards, `shared_mutex`, 64-bit
   internal counter.
 - **SEH → C++ exception translation.** Null deref, div/0, array overrun,
   C++ throw — all recoverable without killing the backend.
-- **Hot-reload with state.** `xi::state()` serialises before DLL unload,
-  restores after. Script edits are a one-file recompile.
+- **Hot-reload with state.** Cross-frame script state lives in `xi::kv()`
+  (a flat typed key-value store, canonical msgpack) — captured before DLL
+  unload, restored after, schema-gated with an opt-in migrate hook; the
+  legacy `xi::state()` JSON channel rides beside it until the cut. Script
+  edits are a one-file recompile.
 - **Dispatch.** Sources `emit_record` (images + metadata under a 128-bit
   trigger id); the host dispatches one inspection per emit. Multi-camera
   correlation is a gathering plugin (e.g. `synced_stereo`), not a policy.
@@ -395,6 +408,10 @@ This is the same script that produced the file on the Releases page.
   await. `ASYNC_WRAP(name)` to pre-wrap an operator.
 - **Record type.** `rec["roi.x"].as_int(0)`, `rec["items[0].score"].as_double()`
   — path expressions, safe defaults, named-image bag, yyjson-backed.
+- **Pack, script-side.** `t.pack()` hands the frame to the script as a sealed
+  Pack (typed reads, zero-copy image spans); `xi::ScriptPackBuilder` builds
+  new ones; `xi::use("det0").process(pack)` chains them through plugin doors;
+  `xi::use("expose").push(pack)` surfaces them to the UI in frame order.
 
 ### Operational
 
@@ -420,10 +437,13 @@ This is the same script that produced the file on the Releases page.
 
 ### Recording & replay
 
-- **Replay is a plugin.** The **buffer_replay** plugin captures emitted
-  records and re-emits them through the same `emit_record` path, so the
-  whole pipeline sees them identically to a live run — for regression
-  tests and off-line tuning. See `examples/buffer_replay_demo/`.
+- **Replay is a plugin.** `record_save` persists runs as **XEX1-v3** `.xex1`
+  files — the same canonical bytes as memory and wire — and the
+  `record_replay` source re-emits them through the standard door: a
+  byte-lossless record → save → replay loop for regression tests and
+  off-line tuning (`examples/qa_pack_record_replay/`). The `cache` plugin
+  is the in-RAM variant — capture live frames, re-inspect on a hot param
+  change. See `examples/buffer_replay_demo/`.
 
 ### Deployment
 
