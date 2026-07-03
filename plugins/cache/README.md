@@ -26,7 +26,8 @@ compile from it.
 | Surface | Key | Type | Notes |
 |---------|-----|------|-------|
 | config  | `capacity`  | int  | ring size (settable) |
-| config  | `count`     | int  | current ring occupancy (read-only) |
+| config  | `count`     | int  | current ring occupancy — records + packs (read-only) |
+| config  | `packs`     | int  | of which are retained sealed packs (read-only) |
 | config  | `replaying` | bool | a timed replay is in flight (read-only) |
 | command | `command`   | string | `replay_last` / `replay_all` / `replay` / `replay_timed` / `stop_replay` / `clear` / `set_capacity` |
 | command | `n`         | int  | `replay_last` count / `replay_timed` limit |
@@ -66,11 +67,62 @@ auto st = xi::cache::Status{ host.get_def(buf) };
 xi::cache::Capture cap{ xi::use("buffer").process(rec) };   // cap.buffered()
 ```
 
+## Pack retention (polaris2 wave-2 — bilingual)
+
+cache speaks **both** currencies through **one ring**. Alongside the Record path
+above it publishes the `xi.pack@1` pack-in/pack-out door
+([`XI_PLUGIN_PACK_DOOR`](./src/cache.cpp)), and a ring `Entry` is a variant: a
+deep-copied **Record**, or a **retained reference to a sealed host Pack**.
+
+- **Capture** (`process(PackIn&, PackOut&)`): the door `retain`s the incoming
+  sealed pack into the ring and acks `{buffered: N}` — the same ack shape the
+  Record path returns. Retaining a sealed pack keeps it **and its pool image
+  handles** alive *beyond the frame that produced it*: this is the whole point
+  of a buffer/replay store on the pack plane.
+- **Replay** re-emits the **same sealed pack handle** through the host emit door
+  (`emit_pack`) with a **fresh trigger id** — **zero pixel copy**. The replay
+  commands are ring-agnostic (they act on whichever entry kind sits at the
+  target slot); `replay_timed` paces **one loop** over the variant entry, so
+  records and packs interleave and replay in capture order.
+- **Eviction / `clear` / `set_capacity` shrink / teardown** all `release` every
+  retained pack — dropping the ring's owning ref, which frees the sealed pack
+  and its pool buffers when no live consumer remains.
+
+**Zero-copy is proven, not asserted** (`tests/test_cache_pack.cpp`): the
+replayed event carries the *identical* handle the ring holds, and
+`ImagePool::cumulative().live_now` is **unchanged** across a replay.
+
+### Retention safety & the one registry finding
+
+A retained pack outliving its producer is safe by construction:
+`ImagePool::release_all_for` (the producer-destroy owner sweep) drops **exactly
+one ref per entry** rather than force-freeing — an image a cache pack still holds
+(refcount > 1) survives, orphaned to the anonymous owner and freed by its last
+holder. That contract was written **naming buffer_replay** as the caching
+consumer it protects, and the static-teardown `g_image_pool_alive` guard means
+even a pack destroyed after the pool is gone releases safely. So there is **no
+ordering hazard** at project close *provided the plugin releases its own refs* —
+which the destructor does.
+
+The one asymmetry worth knowing: the **PackRegistry has no owner-tagged
+leak-sweep** analogue of the ImagePool's `release_all_for`. A pack-retaining
+plugin that forgets to release on destroy leaks the sealed pack in the registry
+until static teardown (safe, but uncounted — no "swept N leaked pack(s)"
+diagnostic like leaked images get). Releasing on teardown is therefore the
+plugin's responsibility; cache discharges it in `~BufferReplay`.
+
 ## Tests
 
 `tests/test_cache.cpp` asserts: `replay` with no `index` and `set_capacity` with
 no `value` → structured faults; an unknown command falls through to `get_def`;
 the `Config`/`Command`/`Capture`/`Status` happy path (capture climbs the buffered
 ack, `replay_last` re-emits through a host emit sink, `clear` empties the ring);
-and a config schema skew → `set_def` rejects it. Run via
-`ctest -C Release -R cache_test` from `plugins/build`.
+and a config schema skew → `set_def` rejects it.
+
+`tests/test_cache_pack.cpp` covers the **pack** side against the real DLL: capture
+N packs → ring stats + the `PackRegistry` / `ImagePool` oracles climb by N;
+eviction and `clear` release; **zero-copy** replay (same sealed handle, fresh id,
+stable pool live-count, identical image bytes); a mixed records+packs ring
+replays in order; and destroy releases everything back to baseline.
+
+Run both via `ctest -C Release -R cache` from `plugins/build`.

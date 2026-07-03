@@ -20,6 +20,18 @@
 // cadence — the "timed" replay mode. It does NOT reproduce byte-identical
 // ordering (that is on-disk deterministic replay, a separate feature); it
 // reproduces load/timing shape.
+//
+// polaris2 wave-2 — BILINGUAL (docs/new_gen/07 + 10 gate P1). buffer_replay now
+// speaks BOTH currencies through ONE ring: a Record entry is a deep-copied
+// Record (below), a Pack entry is a RETAINED reference to a sealed host Pack
+// (xi.pack@1). Retaining a sealed pack keeps it — and its pool image handles —
+// alive BEYOND the frame that produced it; replay re-emits the SAME sealed pack
+// handle with a fresh trigger id (zero pixel copy — proven by a stable pool
+// live-count across replay). Eviction / clear / teardown release every retained
+// pack, exactly as `release()` on the ring's owning ref. The replay commands are
+// ring-agnostic: they work on whichever entry kind lives at the target slot, and
+// replay_timed paces one loop over the variant entry (records + packs interleave
+// and replay in capture order). See README § "Pack retention".
 
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
@@ -44,7 +56,18 @@ namespace keys = xi::cache::keys;
 class BufferReplay : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
-    ~BufferReplay() override { stop_replay_(); }
+    using xi::Plugin::process;   // both process() overloads live in this scope
+    // Teardown honesty: stop the replay worker (it releases its own snapshot
+    // refs on exit), THEN release every pack the ring still owns. Releasing here
+    // is the plugin's job — the host has no pack owner-sweep analogue of the
+    // ImagePool leak-sweep (see README § "Pack retention"), so a missed release
+    // would leak a sealed pack until static teardown. We don't miss it.
+    ~BufferReplay() override {
+        stop_replay_();
+        std::vector<xi_pack_handle> reclaim;
+        { std::lock_guard<std::mutex> lk(mu_); drain_ring_locked_(reclaim); }
+        release_packs_(reclaim);
+    }
 
     // Pass-through + capture. Buffering keeps frames ACROSS calls, but an input
     // image is only valid for THIS call (the host owns its handle for the
@@ -57,10 +80,39 @@ public:
             if (!img.empty())
                 owned.image(k, xi::Image(img.width, img.height, img.channels, img.data()));
 
-        std::lock_guard<std::mutex> lk(mu_);
-        ring_.push_back(Entry{std::move(owned), mono_us_()});
-        while ((int)ring_.size() > capacity_) ring_.pop_front();
-        return xi::Record().set(keys::kBuffered, (int64_t)ring_.size());
+        std::vector<xi_pack_handle> reclaim;
+        int size;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            ring_.push_back(Entry::from_record(std::move(owned), mono_us_()));
+            trim_locked_(reclaim);
+            size = (int)ring_.size();
+        }
+        release_packs_(reclaim);   // evicted pack entries (mixed ring) — outside the lock
+        return xi::Record().set(keys::kBuffered, (int64_t)size);
+    }
+
+    // polaris2 wave-2: the xi.pack@1 capture door. RETAIN the incoming sealed
+    // pack into the SAME ring (same capacity/eviction — evict = release), and ack
+    // with the buffered count exactly as the Record path returns {buffered:N}.
+    // The retained ref keeps the sealed pack + its pool handles alive past this
+    // frame; replay re-emits it (zero copy). Record ring untouched — one ring,
+    // variant entry. A host with no pack plane never calls this door.
+    void process(xi::PackIn& in, xi::PackOut& out) override {
+        const xi_pack_v1* fi = pack_iface();
+        std::vector<xi_pack_handle> reclaim;
+        int size;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (fi && in.valid()) {
+                fi->retain(in.handle());                       // the ring's owning ref
+                ring_.push_back(Entry::from_pack(in.handle(), mono_us_()));
+                trim_locked_(reclaim);
+            }
+            size = (int)ring_.size();
+        }
+        release_packs_(reclaim);                                // evicted entries
+        out.i64(keys::kBuffered, (int64_t)size);                // same ack shape as the Record path
     }
 
     std::string exchange(const std::string& cmd) override {
@@ -84,9 +136,11 @@ public:
         }
 
         if (c == keys::kReplayTimed) {
-            // Paced replay of the buffered frames on a background thread, so the
+            // Paced replay of the buffered entries on a background thread, so the
             // exchange returns immediately. `speed` scales the recorded gaps
-            // (>1 faster, default 1.0). `n` optionally limits to the last n.
+            // (>1 faster, default 1.0). `n` optionally limits to the last n. The
+            // snapshot RETAINS each pack ref (the worker outlives the lock and may
+            // race a clear/evict) — the worker releases them on exit.
             double speed = p[keys::kSpeed].as_double(1.0); if (speed <= 0.0) speed = 1.0;
             int    k     = p[keys::kN].as_int(-1);
             std::vector<Entry> snap;
@@ -94,41 +148,42 @@ public:
                 std::lock_guard<std::mutex> lk(mu_);
                 const int n = (int)ring_.size();
                 int start = (k > 0 && k < n) ? n - k : 0;
-                for (int i = start; i < n; ++i) snap.push_back(ring_[(size_t)i]);
+                for (int i = start; i < n; ++i) snap.push_back(snapshot_locked_(ring_[(size_t)i]));
             }
             start_timed_(std::move(snap), speed);
             return get_def();
         }
 
-        // Snapshot the records to replay UNDER the lock, then emit OUTSIDE it
-        // (emit_record dispatches; the re-run may feed process() back in).
-        std::vector<xi::Record> to_emit;
+        // Snapshot the entries to replay UNDER the lock (retaining pack refs), then
+        // emit OUTSIDE it (emit dispatches; the re-run may feed process() back in).
+        // Pack handles reclaimed by clear/set_capacity are collected and released
+        // after unlocking, same discipline.
+        std::vector<Entry> to_emit;
+        std::vector<xi_pack_handle> reclaim;
         {
             std::lock_guard<std::mutex> lk(mu_);
             const int n = (int)ring_.size();
             if (c == keys::kReplayLast) {
                 int k = p[keys::kN].as_int(1); if (k < 1) k = 1; if (k > n) k = n;
-                for (int i = n - k; i < n; ++i) to_emit.push_back(ring_[(size_t)i].rec);
+                for (int i = n - k; i < n; ++i) to_emit.push_back(snapshot_locked_(ring_[(size_t)i]));
             } else if (c == keys::kReplayAll) {
-                for (auto& e : ring_) to_emit.push_back(e.rec);
+                for (auto& e : ring_) to_emit.push_back(snapshot_locked_(e));
             } else if (c == keys::kReplay) {
                 int i = p[keys::kIndex].as_int(-1);
-                if (i >= 0 && i < n) to_emit.push_back(ring_[(size_t)i].rec);
+                if (i >= 0 && i < n) to_emit.push_back(snapshot_locked_(ring_[(size_t)i]));
             } else if (c == keys::kStopReplay) {
                 // handled below (must not hold the lock while joining)
             } else if (c == keys::kClear) {
-                ring_.clear();
+                drain_ring_locked_(reclaim);   // release every retained pack + empty
             } else if (c == keys::kSetCapacity) {
                 int v = p[keys::kValue].as_int(capacity_); if (v < 1) v = 1;
                 capacity_ = v;
-                while ((int)ring_.size() > capacity_) ring_.pop_front();
+                trim_locked_(reclaim);
             }
         }
         if (c == keys::kStopReplay || c == keys::kClear) stop_replay_();
-        for (auto& r : to_emit) {
-            xi::Record copy = r;                          // keep the buffered one
-            xi::emit_record(host_, name().c_str(), copy); // fresh id, ts = now
-        }
+        emit_snapshot_(to_emit);    // emits each entry then releases its pack refs
+        release_packs_(reclaim);
         return get_def();
     }
 
@@ -137,6 +192,7 @@ public:
         return xi::Json::object()
             .set(keys::kCapacity, capacity_)
             .set(keys::kCount, (int)ring_.size())
+            .set(keys::kPacks, packs_locked_())
             .set(keys::kReplaying, replaying_.load())
             .dump();
     }
@@ -153,18 +209,93 @@ public:
             return false;
         }
         int v = p[keys::kCapacity].as_int(capacity_); if (v < 1) v = 1;
-        std::lock_guard<std::mutex> lk(mu_);
-        capacity_ = v;
-        while ((int)ring_.size() > capacity_) ring_.pop_front();
+        std::vector<xi_pack_handle> reclaim;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            capacity_ = v;
+            trim_locked_(reclaim);   // a shrink may evict retained packs
+        }
+        release_packs_(reclaim);
         return true;
     }
 
 private:
-    struct Entry { xi::Record rec; int64_t t_us; };
+    // One ring, variant entry. Exactly one of {rec, pack} is active per the
+    // is_pack flag; a pack entry OWNS one host Pack ref (retained at capture,
+    // released on evict/clear/teardown). t_us is the monotonic capture time both
+    // kinds carry for replay_timed pacing.
+    struct Entry {
+        xi::Record     rec;
+        xi_pack_handle pack = XI_PACK_NULL;
+        int64_t        t_us = 0;
+        bool is_pack() const { return pack != XI_PACK_NULL; }
+        static Entry from_record(xi::Record r, int64_t t) { Entry e; e.rec = std::move(r); e.t_us = t; return e; }
+        static Entry from_pack(xi_pack_handle h, int64_t t) { Entry e; e.pack = h; e.t_us = t; return e; }
+    };
 
     static int64_t mono_us_() {
         return std::chrono::duration_cast<std::chrono::microseconds>(
                    std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    // --- ring helpers (caller holds mu_) ------------------------------------
+
+    // Copy an entry for a replay snapshot, retaining an INDEPENDENT pack ref so
+    // the snapshot survives a concurrent clear/evict of the ring's own ref. The
+    // caller (emit_snapshot_ / the timed worker) releases it after emitting.
+    Entry snapshot_locked_(const Entry& e) {
+        Entry s = e;
+        if (s.is_pack()) { if (const xi_pack_v1* fi = pack_iface()) fi->retain(s.pack); }
+        return s;
+    }
+
+    // Evict from the front while over capacity, collecting evicted pack refs to
+    // release after the lock (a pack entry's owning ref is dropped on eviction).
+    void trim_locked_(std::vector<xi_pack_handle>& reclaim) {
+        while ((int)ring_.size() > capacity_) {
+            if (ring_.front().is_pack()) reclaim.push_back(ring_.front().pack);
+            ring_.pop_front();
+        }
+    }
+
+    // Empty the ring, collecting every retained pack ref to release after unlock.
+    void drain_ring_locked_(std::vector<xi_pack_handle>& reclaim) {
+        for (auto& e : ring_) if (e.is_pack()) reclaim.push_back(e.pack);
+        ring_.clear();
+    }
+
+    int packs_locked_() const {
+        int n = 0; for (auto& e : ring_) if (e.is_pack()) ++n; return n;
+    }
+
+    // --- emit / release (no lock held) --------------------------------------
+
+    void release_packs_(const std::vector<xi_pack_handle>& hs) {
+        if (hs.empty()) return;
+        const xi_pack_v1* fi = pack_iface();
+        if (fi) for (auto h : hs) fi->release(h);
+    }
+
+    // Re-emit ONE buffered entry with a fresh trigger id. A pack entry re-emits
+    // the SAME sealed handle via the host emit door (emit_pack takes its own event
+    // ref — zero copy, the snapshot/ring refs are untouched); a record entry
+    // re-emits a copy through emit_record.
+    void emit_entry_(const Entry& e) {
+        if (e.is_pack()) {
+            if (const xi_pack_v1* fi = pack_iface())
+                fi->emit_pack(name().c_str(), XI_TRIGGER_NULL, e.pack, 0);  // fresh id, ts = now
+        } else {
+            xi::Record copy = e.rec;
+            xi::emit_record(host_, name().c_str(), copy);
+        }
+    }
+
+    // Emit each snapshot entry, then release the snapshot's retained pack refs.
+    void emit_snapshot_(std::vector<Entry>& snap) {
+        for (auto& e : snap) emit_entry_(e);
+        const xi_pack_v1* fi = pack_iface();
+        if (fi) for (auto& e : snap) if (e.is_pack()) fi->release(e.pack);
+        snap.clear();
     }
 
     // Stop any in-flight timed replay and join its thread. Safe to call from the
@@ -183,7 +314,10 @@ private:
         // Blessed worker: xi::spawn_worker installs the per-thread SEH translator
         // + top-level catch so a fault mid-replay is contained to this thread
         // rather than taking down the whole backend (a raw std::thread would not).
-        replay_thread_ = xi::spawn_worker(name() + "-replay", [this, snap = std::move(snap), speed]() {
+        // ONE loop over the variant entry — records + packs interleave and replay
+        // in capture order; the snapshot's retained pack refs are released on exit
+        // (every path, including an early stop) so nothing leaks.
+        replay_thread_ = xi::spawn_worker(name() + "-replay", [this, snap = std::move(snap), speed]() mutable {
             for (size_t i = 0; i < snap.size(); ++i) {
                 if (replay_stop_.load()) break;
                 if (i > 0) {
@@ -198,9 +332,10 @@ private:
                     }
                     if (replay_stop_.load()) break;
                 }
-                xi::Record copy = snap[i].rec;
-                emit(copy);
+                emit_entry_(snap[i]);
             }
+            const xi_pack_v1* fi = pack_iface();
+            if (fi) for (auto& e : snap) if (e.is_pack()) fi->release(e.pack);
             replaying_.store(false);
         });
     }
@@ -215,3 +350,7 @@ private:
 };
 
 XI_PLUGIN_IMPL(BufferReplay)
+// polaris2 wave-2: publish the xi.pack@1 pack-in/pack-out door — the capture
+// side of the bilingual ring (the host probes xi_plugin_get_interface("xi.pack",
+// 1) to learn cache speaks packs).
+XI_PLUGIN_PACK_DOOR(BufferReplay)
