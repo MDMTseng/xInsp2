@@ -93,54 +93,10 @@ using xi::seh_translator;
 
 // --- xi::use() callbacks (minimal copy of service_main equivalents) -----
 
-static int use_process_cb(const char* name,
-                          const void* input_doc,
-                          const uint8_t* input_data, int32_t input_len,
-                          const xi_record_image* images, int image_count,
-                          xi_record_out* output) {
-    auto inst = xi::InstanceRegistry::instance().find(name);
-    if (!inst) return -1;
-    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
-    if (adapter && adapter->process_fn()) {
-        xi_record in_rec{};
-        in_rec.images = images;
-        in_rec.image_count = image_count;
-        // γ: borrowed-doc fast path when the plugin shares our yyjson layout;
-        // otherwise serialise the doc to JSON here (the caller skipped it).
-        std::string in_js;
-        // Q0f: borrowed-doc path leaves the adopter ref UNRELEASED; on a caught crash
-        // (return -2) that ref is deliberately leaked (leak-over-UAF) and must be counted.
-        bool borrowed_doc_ref = false;
-        if (input_doc && adapter->doc_input_ok()) {
-            in_rec.doc = input_doc;
-            borrowed_doc_ref = true;
-        } else if (input_doc) {
-            size_t jl = 0;
-            char* js = yyjson_mut_write((yyjson_mut_doc*)input_doc, 0, &jl);
-            if (js) { in_js.assign(js, jl); free(js); }
-            in_rec.data = (const uint8_t*)in_js.data();
-            in_rec.len  = (int32_t)in_js.size();
-            // γ-4: balance the ref UseProxy's share_out reserved for an adopter —
-            // this JSON-fallback target serializes instead of adopting. No-op if
-            // the doc wasn't registry-managed.
-            xi::DocRegistry::instance().release((yyjson_mut_doc*)input_doc);
-        } else {
-            in_rec.data = input_data;
-            in_rec.len  = input_len;
-        }
-        try {
-            adapter->process_fn()(adapter->raw_instance(), &in_rec, output);
-        } catch (...) {
-            // Q0f: caught crash — the borrowed doc's reserved ref is leaked (its owner
-            // state in the torn callee is unknowable). Count it; the runner has no
-            // dispatch_stats channel, but the counter stays process-global and honest.
-            if (borrowed_doc_ref) xi::DocRegistry::instance().note_crash_leak();
-            return -2;
-        }
-        return output->image_count;
-    }
-    return -1;
-}
+// THE CUT: the Record process bridge (use_process_cb — built an xi_record, took the
+// borrowed-doc / JSON-serialize path into adapter->process_fn()) is DELETED. The
+// plugin data plane is the xi.pack@1 door only (use_pack_process_cb below); the
+// process_fn ABI slot is fed nullptr in set_use_callbacks.
 
 static int use_exchange_cb(const char* name, const char* cmd,
                            char* rsp, int rsplen) {
@@ -413,11 +369,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[runner] scanned %d extra plugins from %s\n", extra, d.c_str());
     }
 
-    // Install the trigger hook so any image source using emit_trigger still
-    // works even without a live WS server. The bus's primary sink stays
-    // null — trigger events just release their images and move on.
+    // The script host_api over the backend's ImagePool. THE CUT: install_trigger_hook
+    // (the Record emit_record/emit_trigger wiring, deleted from xi_trigger_bus.hpp) is
+    // no longer installed — the data plane is the xi.pack@1 door.
     auto host_api = xi::ImagePool::make_host_api();
-    xi::install_trigger_hook(host_api);
 
     // Restore instances (plugins + configs) from project.json.
     if (!pm.open_project(args.project_dir)) {
@@ -461,8 +416,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (script.set_use_callbacks) {
+        // THE CUT: process_fn slot is nullptr (the Record process bridge is gone);
+        // the pack door is wired via set_use_pack_callback below. grab_fn is the
+        // legacy stub; both params are retained in the ABI signature.
         script.set_use_callbacks(
-            (void*)use_process_cb, (void*)use_exchange_cb,
+            nullptr, (void*)use_exchange_cb,
             (void*)use_grab_cb, (void*)&host_api);
     }
     // polaris2 Gate P2: pack-door chaining (xi::use(name).process(pack)).

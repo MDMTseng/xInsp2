@@ -159,7 +159,7 @@ extern "C" {
 /* Expected sizeof(xi_host_api) for the layout guard below (see the ABI LAYOUT
  * GUARD note after the struct). Bump together with XI_ABI_VERSION on any layout
  * change. 64-bit host (all function pointers). */
-#define XI_ABI_EXPECTED_SIZE 168  /* 64-bit: 21 function pointers * 8 bytes (v11's 22 − read_image_file, evicted to xi.image.decode at THE CUT) */
+#define XI_ABI_EXPECTED_SIZE 112  /* 64-bit: 14 function pointers * 8 bytes. THE CUT (v12) removed from v11's 22: read_image_file (evicted to xi.image.decode), emit_record + doc_chunk_alloc/realloc/free + doc_retain/release/refcount (the Record yyjson-doc dispatch path — sources now emit_pack, plugins use the xi.pack@1 door). */
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -197,20 +197,10 @@ static inline int xi_trigger_id_is_null(xi_trigger_id a) {
     return a.hi == 0 && a.lo == 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Record image entry — defined before xi_host_api so emit_trigger    */
-/* can reference it.                                                  */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    const char*      key;       /* borrowed — valid for duration of the call */
-    xi_image_handle  handle;
-} xi_record_image;
-
-/* Forward declaration so emit_trigger_record (ABI v5) can take a whole
- * record. The full definition (tagged `struct xi_record`) is below, after
- * xi_host_api, since the record carries no host-api types itself. */
-struct xi_record;
+/* [ABI v12 — xi_record_image and struct xi_record were DELETED at THE CUT.
+ * The Record data container (named images + yyjson metadata) is gone; the
+ * data plane is xi.pack@1 (sealed, keyed, typed pack handles). See xi_pack_v1
+ * / xi_pack_proc_v1 above. ] */
 
 /* ------------------------------------------------------------------ */
 /* Segregated capability interfaces (ABI v10+, core_fix_plan.md §11-12).*/
@@ -284,29 +274,15 @@ typedef struct xi_imaging_rw_v1 {
     uint8_t*       (*image_write)(xi_image_handle h);
 } xi_imaging_rw_v1;
 
-/* xi.doc@1 — the in-process JSON-doc capability domain (ABI v3/v4 γ fields),
- * carved as a frozen interface. The host-owned chunk allocator behind a
- * yyjson_mut_doc (so its free routes back to the host and the doc is safe to
- * hand across the DLL boundary) plus the doc refcount (the doc analogue of
- * image_addref/release). Same pointers as the legacy doc_* fields; field order
- * matches the host table (alloc, realloc, free, retain, release, refcount). */
-typedef struct xi_doc_v1 {
-    void*   (*doc_chunk_alloc)(size_t size);
-    void*   (*doc_chunk_realloc)(void* ptr, size_t size);
-    void    (*doc_chunk_free)(void* ptr);
-    void    (*doc_retain)(void* doc);
-    void    (*doc_release)(void* doc);
-    int32_t (*doc_refcount)(void* doc);
-} xi_doc_v1;
+/* [xi.doc@1 — the in-process JSON-doc capability domain — was DELETED at THE
+ * CUT (v12) with the Record yyjson-doc dispatch path. No pack consumer used it;
+ * packs carry typed entries directly (xi.pack@1).] */
 
-/* xi.emit@1 — the dispatch/output capability domain. emit_record (the one
- * plugin-facing dispatch verb: stage + dispatch a whole record) + emit_binary
- * (push an opaque binary frame straight to WS clients). Same pointers as the
- * legacy emit_record/emit_binary fields; either may be null when the host did
- * not wire it (no trigger hook / headless) — always null-check before calling. */
+/* xi.emit@1 — the dispatch/output capability domain. [ABI v12 — emit_record was
+ * DROPPED at THE CUT; a source now emits a sealed pack via xi_pack_v1::emit_pack.]
+ * emit_binary (push an opaque binary frame straight to WS clients) survives. Null
+ * when the host did not wire it (no trigger hook / headless) — always null-check. */
 typedef struct xi_emit_v1 {
-    void (*emit_record)(const char* emitter, xi_trigger_id id,
-                        const struct xi_record* rec, int64_t ts);
     void (*emit_binary)(const void* data, int32_t len);
 } xi_emit_v1;
 
@@ -592,72 +568,16 @@ typedef struct xi_host_api {
      * itself on death — the core no longer brokers it.) */
 
     /* --------------------------------------------------------------- */
-    /* In-process doc allocator (ABI v3, γ). Host-owned heap behind the */
-    /* JSON doc, so a yyjson_mut_doc built through it is host-owned and  */
-    /* its free (via doc->alc) returns to the host — mirrors            */
-    /* image_create/addref/release for pixels, making a doc pointer      */
-    /* safe to hand across the DLL boundary and free from either side.   */
-    /* The plugin wraps these into a yyjson_alc. Null on a pre-v3 host  */
-    /* (the doc path is then simply never taken — see record_to_c).      */
-    /* v1 of this is plain malloc-backed; a pooled free-list is a later  */
-    /* internal swap that needs no ABI change. */
-    void*           (*doc_chunk_alloc)(size_t size);
-    void*           (*doc_chunk_realloc)(void* ptr, size_t size);
-    void            (*doc_chunk_free)(void* ptr);
-
     /* --------------------------------------------------------------- */
-    /* In-process doc refcount (ABI v4, γ-4). Host-side reference count  */
-    /* for a yyjson_mut_doc* handed across the ABI — the doc analogue of */
-    /* image_addref/image_release. A doc shared across the boundary (the */
-    /* host adopting a doc a plugin still caches, or a plugin retaining   */
-    /* its borrowed input) is owned by the host registry; each holding    */
-    /* side keeps one ref. The doc MUST have been built with doc_chunk_*  */
-    /* (host-owned), so its free routes back via doc->alc.                */
-    /*                                                                    */
-    /*   doc_retain:  bump the refcount, creating the entry at 1 if the   */
-    /*                doc is not yet registered. Idempotent per holder.   */
-    /*   doc_release: drop one ref; when it reaches zero the host frees    */
-    /*                the doc (yyjson_mut_doc_free via doc->alc).          */
-    /*                                                                    */
-    /* Null on a pre-v4 host (always null-check): callers then fall back  */
-    /* to the v3 behaviour — deep-copy to retain, serialize to hand off.  */
-    void            (*doc_retain)(void* doc);
-    void            (*doc_release)(void* doc);
-    /* Current host-side refcount for a shared doc (0 if unregistered). Lets the
-     * adopting side learn whether ANOTHER side still holds it: >1 ⇒ shared
-     * (adopt frozen, copy-on-write on mutate); <=1 ⇒ sole side (adopt writable,
-     * no COW). Null on a pre-v4 host ⇒ adopt writable (the v3 transfer behaviour). */
-    int32_t         (*doc_refcount)(void* doc);
-
-    /* --------------------------------------------------------------- */
-    /* emit_record (ABI v6) — the ONE plugin-facing dispatch verb. A    */
-    /* source hands the host a whole record (images + metadata) under an */
-    /* id; the host stages it and dispatches one inspection. The script  */
-    /* reads it back via current_trigger().image()/.meta()/.id_string(). */
-    /*                                                                   */
-    /*   emitter: the staging instance's name (xi::Plugin::name()).      */
-    /*   id:      caller-supplied 128-bit id; XI_TRIGGER_NULL asks the   */
-    /*            host to mint a fresh one. Its hex form is id_string().  */
-    /*   rec->images / rec->image_count: the frame(s); the host addrefs  */
-    /*            each handle, so the caller may release right after.     */
-    /*   rec->doc: a HOST-OWNED yyjson_mut_doc* enrolled via the host    */
-    /*            doc registry — produced by the SDK's xi::emit_record(), */
-    /*            which share_out()s it (reserving one ref for the host   */
-    /*            to consume). Carried across the async dispatch by       */
-    /*            pointer — zero serialize. A plugin-owned bare doc must  */
-    /*            NOT be passed (use the SDK helper, which also guarantees */
-    /*            the doc is built under the host allocator).             */
-    /*   rec->data / rec->len: used only when rec->doc is NULL — parsed   */
-    /*            once into a host-owned doc at emit time.                */
-    /*   ts:     capture timestamp (µs, host clock); 0 = host's now.      */
-    /*                                                                   */
-    /* Multi-camera sync is a gathering plugin (one record, N images),   */
-    /* not a host policy. Null on a pre-v6 host ⇒ use the SDK helper,    */
-    /* which falls back to frames-only on older hosts. */
-    void (*emit_record)(const char* emitter,
-                        xi_trigger_id id,
-                        const struct xi_record* rec,
-                        int64_t ts);
+    /* [ABI v12 — the in-process doc allocator (doc_chunk_alloc/realloc/ */
+    /* free, ABI v3 γ), the doc refcount (doc_retain/doc_release/         */
+    /* doc_refcount, ABI v4 γ-4), and emit_record (ABI v6) were DELETED  */
+    /* at THE CUT. They were the Record yyjson-doc dispatch path: the    */
+    /* host-owned doc heap + refcount backing xi::Record's metadata, and */
+    /* the Record source-emit verb. In v12 a source emits a sealed pack  */
+    /* (xi_pack_v1::emit_pack) and a plugin's data plane is the xi.pack@1 */
+    /* door — there is no cross-ABI yyjson doc anymore. Every field after */
+    /* set_status shifts up by 7 pointers vs v11.]                       */
 
     /* --------------------------------------------------------------- */
     /* emit_binary (ABI v8) — push an opaque binary frame straight to    */
@@ -777,29 +697,14 @@ static_assert(offsetof(xi_host_api, compress_image) == XI_ABI_EXPECTED_SIZE - 2 
 #endif
 
 /* ------------------------------------------------------------------ */
-/* Record — the universal data container crossing the boundary        */
+/* [ABI v12 — struct xi_record (the universal Record data container: named       */
+/* images + yyjson JSON/doc metadata) and xi_record_out (the plugin process       */
+/* OUTPUT record + its xi_record_out_init/add_image/set_data/free helpers) were   */
+/* DELETED at THE CUT along with the whole Record path. The data plane is now      */
+/* xi.pack@1: a source emits a sealed xi_pack_handle (xi_pack_v1::emit_pack) and   */
+/* a plugin's data plane is the xi_pack_proc_v1 door — pack in, sealed pack out,   */
+/* built through the host's xi_pack_v1 builder. No Record, no cross-ABI doc. ]     */
 /* ------------------------------------------------------------------ */
-
-/* A record: named images + JSON metadata. */
-typedef struct xi_record {
-    const xi_record_image* images;
-    int32_t                image_count;
-    const uint8_t*         data;    /* yyjson JSON bytes — used iff doc == NULL */
-    int32_t                len;     /* byte length of `data` */
-    /* ABI v3 (γ): borrowed, READ-ONLY yyjson_mut_doc*. Non-null only for an
-     * in-process call whose plugin's xi_yyjson_abi() matches the host's; the
-     * callee reads it as a view (no parse) and must not mutate it (copy-on-
-     * write into its own doc to change anything). NULL ⇒ use data/len. */
-    const void*            doc;
-} xi_record;
-
-/* [ABI v12 — xi_record_out (the plugin process OUTPUT record) and its
- * xi_record_out_init/add_image/set_data/free helpers were DELETED at THE CUT
- * along with the Record process path. A pack-door plugin returns a NEW sealed
- * xi_pack_handle built through the host's xi_pack_v1 builder (see
- * xi_pack_proc_v1 above); there is no output-record struct anymore. The input
- * xi_record struct + xi_record_image survive ONLY as the emit_pack/emit_record
- * dispatch carrier below. */
 
 /* ------------------------------------------------------------------ */
 /* Plugin entry points — exported by every plugin DLL                 */

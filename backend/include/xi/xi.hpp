@@ -32,5 +32,4 @@
 #include "xi_image.hpp"
 #include "xi_io.hpp"
 #include "xi_param.hpp"
-#include "xi_state.hpp"
-#include "xi_kv.hpp"     // xi::kv() — post-Record cross-frame state (doc 16)
+#include "xi_kv.hpp"     // xi::kv() — cross-frame script state (doc 16)

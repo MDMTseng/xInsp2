@@ -61,15 +61,12 @@ struct LoadedScript {
     using SetInstanceDefFn   = int  (*)(const char* name, const char* def_json);
     using GetInstanceDefFn   = int  (*)(const char* name, char* buf, int buflen);
     using ExchangeInstanceFn = int  (*)(const char* name, const char* cmd_json, char* rsp, int rsplen);
-    using GetStateFn         = int  (*)(char* buf, int buflen);
-    using SetStateFn         = int  (*)(const char* json);
     using SetUseCallbacksFn  = void (*)(void* process_fn, void* exchange_fn,
                                         void* grab_fn, void* host_api);
     using SetTriggerCallbacksFn = void (*)(void* info_fn, void* image_fn,
                                            void* sources_fn);
     using SetRunContextFn         = void (*)(const char* frame_path);
     using SetGlobalCancelFn       = void (*)(int set);
-    using StateSchemaVersionFn    = int  (*)(void);
 
     InspectFn          inspect          = nullptr;
     InspectTvFn        inspect_tv       = nullptr;   // A4 explicit-trigger entry (preferred)
@@ -80,8 +77,6 @@ struct LoadedScript {
     SetInstanceDefFn   set_instance_def = nullptr;
     GetInstanceDefFn   get_instance_def = nullptr;
     ExchangeInstanceFn exchange_instance = nullptr;
-    GetStateFn         get_state         = nullptr;
-    SetStateFn         set_state         = nullptr;
     SetUseCallbacksFn  set_use_callbacks = nullptr;
     SetTriggerCallbacksFn set_trigger_callbacks = nullptr;
     using SetTriggerLeaderCallbackFn = void (*)(void* leader_fn);
@@ -118,14 +113,6 @@ struct LoadedScript {
     // lack it → legacy global-cancel behaviour).
     using InspectBeginFn = void (*)(void);
     InspectBeginFn     inspect_begin    = nullptr;
-    StateSchemaVersionFn state_schema_version = nullptr;
-    // G4 / OQ-5: optional code_change-style state-migration hook. Present when
-    // the (new) script exports xi_script_code_change; the host calls it on a
-    // schema mismatch to carry prior state forward instead of dropping. Null
-    // for older scripts / scripts built without xi_script_support -> host drops.
-    using CodeChangeFn = int (*)(const char* old_json, int old_schema,
-                                 int new_schema, char* buf, int buflen);
-    CodeChangeFn       code_change      = nullptr;
 
     // U2 (docs/new_gen/16) — the kv channel (post-Record state). Canonical-mp
     // BYTES with explicit lengths (never NUL-terminated). All optional
@@ -177,8 +164,6 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_instance_def = reinterpret_cast<LoadedScript::SetInstanceDefFn>(GetProcAddress(h, "xi_script_set_instance_def"));
     out.get_instance_def = reinterpret_cast<LoadedScript::GetInstanceDefFn>(GetProcAddress(h, "xi_script_get_instance_def"));
     out.exchange_instance = reinterpret_cast<LoadedScript::ExchangeInstanceFn>(GetProcAddress(h, "xi_script_exchange_instance"));
-    out.get_state         = reinterpret_cast<LoadedScript::GetStateFn>(GetProcAddress(h, "xi_script_get_state"));
-    out.set_state         = reinterpret_cast<LoadedScript::SetStateFn>(GetProcAddress(h, "xi_script_set_state"));
     out.set_use_callbacks = reinterpret_cast<LoadedScript::SetUseCallbacksFn>(GetProcAddress(h, "xi_script_set_use_callbacks"));
     out.set_use_push_pack_callback = reinterpret_cast<LoadedScript::SetUsePushPackCallbackFn>(GetProcAddress(h, "xi_script_set_use_push_pack_callback"));
     out.set_trigger_callbacks = reinterpret_cast<LoadedScript::SetTriggerCallbacksFn>(GetProcAddress(h, "xi_script_set_trigger_callbacks"));
@@ -192,8 +177,6 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_run_id      = reinterpret_cast<LoadedScript::SetRunIdFn>(GetProcAddress(h, "xi_script_set_run_id"));
     out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
     out.inspect_begin     = reinterpret_cast<LoadedScript::InspectBeginFn>(GetProcAddress(h, "xi_script_inspect_begin"));
-    out.state_schema_version = reinterpret_cast<LoadedScript::StateSchemaVersionFn>(GetProcAddress(h, "xi_script_state_schema_version"));
-    out.code_change          = reinterpret_cast<LoadedScript::CodeChangeFn>(GetProcAddress(h, "xi_script_code_change"));
     out.get_kv               = reinterpret_cast<LoadedScript::GetKvFn>(GetProcAddress(h, "xi_script_kv_get"));
     out.set_kv               = reinterpret_cast<LoadedScript::SetKvFn>(GetProcAddress(h, "xi_script_kv_set"));
     out.kv_schema_version    = reinterpret_cast<LoadedScript::KvSchemaVersionFn>(GetProcAddress(h, "xi_script_kv_schema_version"));
@@ -238,31 +221,9 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     return true;
 }
 
-// G4 / OQ-5 — attempt a code_change-style state migration across a hot-reload.
-// `s` is the already-loaded NEW script; `old_json`/`old_schema` describe the
-// retiring DLL's persisted state. On success returns true and fills `out` with
-// the migrated (new-shape) JSON for the host to set_state. Returns false when
-// the hook is absent OR declines (returns 0) — the caller then DROPS the prior
-// state, preserving the pre-G4 drop-on-mismatch behaviour unchanged. Uses
-// get_state's grow-and-retry buffer convention (negative return = -required).
-inline bool migrate_state(const LoadedScript& s, const std::string& old_json,
-                          int old_schema, int new_schema, std::string& out) {
-    if (!s.code_change) return false;
-    std::vector<char> buf(64 * 1024);
-    int n = s.code_change(old_json.c_str(), old_schema, new_schema,
-                          buf.data(), (int)buf.size());
-    if (n < 0) {
-        buf.resize((size_t)(-(int64_t)n) + 1024);
-        n = s.code_change(old_json.c_str(), old_schema, new_schema,
-                          buf.data(), (int)buf.size());
-    }
-    if (n <= 0) return false;   // absent-shaped / declined -> caller drops
-    out.assign(buf.data(), (size_t)n);
-    return true;
-}
-
-// U2 (docs/new_gen/16) — kv-channel sibling of migrate_state above: attempt a
-// typed code_change migration of the kv store across a hot-reload. `old_bytes`
+// U2 (docs/new_gen/16) — attempt a typed code_change migration of the kv store
+// across a hot-reload (the kv channel's whole migrate path; the Record-channel
+// migrate_state it once sat beside was removed at THE CUT). `old_bytes`
 // is the retiring DLL's serialized kv store (canonical mp; may contain NULs —
 // held in a std::string as a plain byte bag). On success fills `out` with the
 // migrated bytes for the host to set_kv. Returns false when the hook is absent

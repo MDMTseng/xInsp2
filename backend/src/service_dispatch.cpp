@@ -11,8 +11,6 @@
 #include <thread>
 #include <vector>
 
-#include <yyjson.h>
-
 #include "service_internal.hpp"
 
 using xi::EmitGate;
@@ -313,7 +311,10 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                     ev.dequeued_at_us = xi::now_us();
                     lane->running.fetch_add(1);
                     int frame_seq = (int)rid;
-                    if (!ev.images.empty() || ev.id.hi || ev.id.lo) {
+                    // THE CUT: "is this a real trigger?" is now keyed on pack payload
+                    // presence (the Record-era ev.images emptiness check is gone). Use the
+                    // trigger_bus owner's helper TriggerEvent::is_real() (== pack != XI_PACK_NULL).
+                    if (ev.is_real() || ev.id.hi || ev.id.lo) {
                         CurrentTriggerScope trig(ev);   // clears g_current_trigger + releases ev on scope exit
                         run_one_inspection(*srv_ptr, frame_seq, rid, "", eseq, &lane->gate);
                     } else {

@@ -9,18 +9,19 @@
 //
 // Usage:
 //
-//   void xi_inspect_entry(int frame) {
+//   XI_INSPECT_ENTRY(t, frame) {
 //       auto& det = xi::use("det0");
-//       // Frames arrive by PUSH — read the current trigger, don't pull:
-//       auto img = xi::current_trigger().image("cam0");
-//       auto result = det.process(xi::Record().image("gray", img));
+//       // Frames arrive by PUSH — read the current trigger's pack, don't pull:
+//       if (auto f = t.pack()) {
+//           auto result = det.process(f);   // drive det0's xi.pack@1 door
+//           if (auto n = result.get_i64("blob_count")) xi::ok(*n);
+//       }
 //   }
 //
 
 #include "xi_abi.h"
 #include "xi_clock.hpp"
 #include "xi_pack_contract.hpp"  // reserved $-keys + fault/provenance helpers (U1, doc 15)
-#include "xi_record.hpp"   // wire codec is yyjson JSON (Record::from_json_bytes / data_json)
 #include "xi_image.hpp"
 #include "xi_script.hpp"   // XI_SCRIPT_EXPORT (A4 entry export macro)
 
@@ -69,7 +70,10 @@ struct xi_trigger_view {
     int32_t                       image_count;
     int32_t                       _pad1;
     const char*                   leader_source;  // may be null/empty
-    void*                         meta_doc;       // yyjson_mut_doc*, borrowed (host holds a ref)
+    void*                         meta_doc;       // RESERVED — was the Record meta yyjson_mut_doc*;
+                                                  // the Record/doc meta plane was removed at THE CUT
+                                                  // (v12). Kept as an inert slot for struct stability;
+                                                  // metadata now rides the pack ($-keys / entries).
     // polaris2 wave-2 (docs/new_gen/08 Wave 2, step 4): the OPTIONAL v3 Pack this
     // event carries on the dual-carry dispatch path — the SAME xi_pack_handle
     // TriggerEvent::pack holds. XI_PACK_NULL for every Record-era event. Borrowed
@@ -80,7 +84,9 @@ struct xi_trigger_view {
 };
 
 // Defined in xi_script_support.hpp (force-included by the compiler)
-extern void* g_use_process_fn_;
+// THE CUT (v12): g_use_process_fn_ (the Record use()->process bridge) was removed
+// with the xi::Record data plane; xi::use(name).process(ScriptPack) via
+// g_use_pack_process_fn_ is the sole use()->process path.
 extern void* g_use_exchange_fn_;
 // polaris2 Gate P2 (docs/new_gen/10): xi::use(...).process(ScriptPack) — the
 // host callback that drives a plugin's xi.pack@1 pack door. Null on an older
@@ -91,7 +97,6 @@ extern void* g_trigger_info_fn_;
 extern void* g_trigger_image_fn_;
 extern void* g_trigger_sources_fn_;
 extern void* g_trigger_leader_fn_;
-extern void* g_trigger_meta_fn_;
 // polaris2 gate P2 (expose-from-script): host thunk for xi::use(sink).push(pack).
 // Set via the OPTIONAL export xi_script_set_use_push_pack_callback; null on an
 // older host ⇒ push() returns false (degrades like every other optional callback).
@@ -116,16 +121,10 @@ inline int64_t steady_now_us() { return xi::mono_us(); }
 #endif
 
 // Function pointer types for the callbacks
-// γ: `input_doc` carries the caller's borrowed yyjson_mut_doc* for the in-process
-// zero-serialize path. The host callback uses it directly when the target plugin
-// is doc-compatible, else serialises it to JSON itself — so the caller never
-// pays data_json() up front. `input_data`/`input_len` stay in the signature but
-// are null from the doc path (legacy/explicit-JSON callers may still set them).
-using UseProcessFn  = int (*)(const char* name,
-                              const void* input_doc,
-                              const uint8_t* input_data, int32_t input_len,
-                              const xi_record_image* input_images, int input_image_count,
-                              xi_record_out* output);
+// THE CUT (v12): UseProcessFn (the Record use()->process bridge, keyed on
+// xi_record_out/xi_record_image + the borrowed yyjson doc) was removed with the
+// xi::Record data plane. The pack sibling UsePackProcessFn (below) is the sole
+// use()->process callback.
 using UseExchangeFn = int (*)(const char* name, const char* cmd,
                               char* rsp, int rsplen);
 using UseGrabFn     = xi_image_handle (*)(const char* name, int timeout_ms);
@@ -170,11 +169,9 @@ using TriggerSourcesFn = int32_t (*)(char* buf, int32_t buflen);
 // as TriggerSourcesFn: positive return = bytes written, negative return
 // = -needed_bytes (caller resizes and retries), 0 = no leader.
 using TriggerLeaderFn  = int32_t (*)(char* buf, int32_t buflen);
-// ABI v5: returns the event's metadata doc (emit_trigger_record) as a
-// yyjson_mut_doc* with one ref RESERVED for the caller to adopt_shared (==
-// consume) — exactly the share_out/adopt_shared handshake the process()-input
-// doc uses. null when the trigger carries no metadata.
-using TriggerMetaFn    = void* (*)();
+// THE CUT (v12): TriggerMetaFn (the yyjson meta-doc fetch behind t.meta()) was
+// removed with the Record meta plane. Event metadata now rides the pack (t.pack()
+// entries / $-keys), read through the xi.pack@1 door.
 
 // ─── EXPERIMENTAL: the wave-2 Pack pilot surface (t.pack()) ─────────────────
 //
@@ -393,7 +390,6 @@ public:
     // current_trigger() path).
     struct Data {
         std::unordered_map<std::string, Image> images;
-        Record                                 meta;
         CurrentTriggerInfo                     info{};
         std::string                            leader;
         bool                                   active = false;
@@ -430,13 +426,8 @@ public:
             Image img = Image::adopt_pool_handle(v->host, h);   // addref → our own ref
             if (!img.empty()) d->images.emplace(v->images[i].key, std::move(img));
         }
-        if (v->meta_doc && v->host->doc_retain && v->host->doc_release) {
-            // Retain our own ref (host keeps its), then adopt_shared FROZEN — the
-            // Record consumes this reserved ref and doc_release's it when it dies.
-            v->host->doc_retain(v->meta_doc);
-            d->meta = Record::adopt_shared((yyjson_mut_doc*)v->meta_doc,
-                                           v->host->doc_release, /*frozen=*/true);
-        }
+        // THE CUT (v12): the Record meta plane (v->meta_doc retain + adopt_shared)
+        // was removed. Event metadata now rides the pack — see t.pack() below.
         // polaris2 wave-2 Pack pilot: if the event carried a pack, resolve the
         // host's xi.pack@1 vtable and take our OWN ref on the handle (the view's
         // ref is only borrowed for this call). Data's dtor releases it. Mirrors the
@@ -601,34 +592,6 @@ public:
         return srcs.empty() ? std::string{} : srcs.front();
     }
 
-    // ABI v5: the event's routing/context metadata (whatever the source put in
-    // the record it emit_trigger_record'd), as a read-only Record. Zero-copy /
-    // zero-serialize — borrows the host-owned metadata doc by pointer (held by
-    // the DocRegistry refcount for the life of this dispatch), exactly as a
-    // plugin's process(in) borrows in.doc. Read fields off it like any Record:
-    //
-    //   auto t = xi::current_trigger();
-    //   if (t.is_active()) {
-    //       auto m = t.meta();
-    //       std::string cmd = m["command"].as_string();   // routing key
-    //   }
-    //
-    // Returns an empty Record when the trigger carries no metadata (the bare
-    // emit_trigger path) or the host predates this callback. The returned
-    // Record is FROZEN (the host still holds its own ref): reads are free,
-    // a mutation copy-on-writes into the script's own doc.
-    Record meta() const {
-        if (data_) return data_->meta;
-        auto fn   = reinterpret_cast<TriggerMetaFn>(g_trigger_meta_fn_);
-        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
-        if (!fn || !host || !host->doc_release) return Record();
-        void* d = fn();
-        if (!d) return Record();
-        // adopt_shared CONSUMES the ref trigger_meta_cb reserved for us; the
-        // returned Record doc_release's it when it dies, balancing the reserve.
-        return Record::adopt_shared((yyjson_mut_doc*)d, host->doc_release, /*frozen=*/true);
-    }
-
     // EXPERIMENTAL (wave-2 Pack pilot, docs/new_gen/08 Wave 2): the v3 Pack this
     // event carried on the dual-carry dispatch path, as a borrowed read-only view
     // (see ScriptPack above). Empty ScriptPack — bool-false, all getters nullopt
@@ -726,9 +689,8 @@ public:
         return name && images_.find(name) != images_.end();
     }
 
-    // The trigger's metadata Record (frozen, see Trigger::meta()). Held by value
-    // so it stays valid for the life of the snapshot, off any thread.
-    const Record& meta() const { return meta_; }
+    // THE CUT (v12): TriggerSnapshot::meta() was removed with the Record meta
+    // plane. Snapshot the pack instead if you need event metadata off-thread.
 
     xi_trigger_id id() const           { return info_.id; }
     int64_t       timestamp_us() const { return info_.timestamp_us; }
@@ -744,12 +706,11 @@ public:
 private:
     friend TriggerSnapshot trigger_snapshot();
     std::unordered_map<std::string, Image> images_;
-    Record                                 meta_;
     CurrentTriggerInfo                     info_{};
     bool                                   active_ = false;
 };
 
-// Capture the current trigger's images + meta into a by-value snapshot. MUST be
+// Capture the current trigger's images into a by-value snapshot. MUST be
 // called on the inspect thread (where the trigger is ambient); the result is then
 // safe to capture into any worker thread. Returns an inactive snapshot when no
 // trigger is in flight (plain cmd:run / timer tick).
@@ -766,7 +727,6 @@ inline TriggerSnapshot trigger_snapshot() {
         Image img = t.image(src);            // addref'd pool view, held by the snapshot
         if (!img.empty()) s.images_.emplace(src, std::move(img));
     }
-    s.meta_ = t.meta();                      // frozen Record — own ref, survives dispatch
     return s;
 }
 
@@ -803,8 +763,8 @@ inline void warn_use_no_pack_door_(const xi_host_api* host, const char* name) {
         if (!warned.emplace(key, true).second) return;   // warned this name already
     }
     std::string msg = "xi::use(\"" + key + "\").process(pack): instance has no "
-                      "xi.pack@1 door — returns an empty pack (Record-only plugin; "
-                      "use the Record process() overload instead)";
+                      "xi.pack@1 door — returns an empty pack (the target plugin "
+                      "publishes no pack door; it cannot be driven on the data plane)";
     host->log(3, msg.c_str());
 }
 
@@ -835,125 +795,9 @@ class UseProxy {
 public:
     explicit UseProxy(const std::string& name) : name_(name) {}
 
-    Record process(const Record& input) {
-        // NA propagation: a poison input short-circuits — the plugin never runs,
-        // and the NA (with its reason) flows straight through. See
-        // docs/internals/typed-io.md.
-        if (input.is_na()) return Record::na(input.na_reason()).set_src(name_);
-
-        auto process_fn = reinterpret_cast<UseProcessFn>(g_use_process_fn_);
-        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
-        if (!process_fn || !host) return {};
-
-        // Marshal input Record → C ABI. Pool-backed Images forward
-        // their existing handle (just addref); heap-backed Images
-        // allocate a new pool slot and memcpy the bytes in. The
-        // receiving plugin sees the handle either way.
-        // Per-thread scratch, reused across calls to drop two allocations off
-        // the per-frame dispatch path. Safe because use() calls never nest on a
-        // thread: process_fn is a plugin, and a plugin can't call xi::use()
-        // (it's script-side), so it can't re-enter this with the buffers live.
-        static thread_local std::vector<xi_record_image> in_imgs;
-        static thread_local std::vector<xi_image_handle>  in_handles;
-        in_imgs.clear();
-        in_handles.clear();
-        for (auto& [key, img] : input.images()) {
-            if (img.empty()) continue;
-            xi_image_handle h = XI_IMAGE_NULL;
-            if (img.pool_handle() && img.pool_host() == host) {
-                h = img.pool_handle();
-                host->image_addref(h);
-            } else {
-                h = host->image_create(img.width, img.height, img.channels);
-                if (h == XI_IMAGE_NULL) continue;
-                std::memcpy(host->image_data(h), img.data(), img.size());
-            }
-            in_imgs.push_back({key.c_str(), h});
-            in_handles.push_back(h);
-        }
-        xi_record_out output;
-        xi_record_out_init(&output);
-
-        // γ-4: share our input doc into the host registry (enroll this side) and
-        // hand the host the registry-managed pointer, so the plugin can adopt it
-        // and cache it across frames zero-copy — no serialize. For a JSON-fallback
-        // target the host serialises it there; the plugin never adopts, and our
-        // enroll ref is released when this input Record dies.
-        const void* in_doc = (host->doc_retain && host->doc_release)
-            ? (const void*)input.share_out(host->doc_retain, host->doc_release)
-            : (const void*)input.doc();
-        int prc = process_fn(name_.c_str(), in_doc,
-                   nullptr, 0,
-                   in_imgs.data(), (int)in_imgs.size(), &output);
-        // Release input handles from the BACKEND pool — plugin's process()
-        // copied what it needed. Done regardless of outcome.
-        for (auto h : in_handles) host->image_release(h);
-
-        // A failed call's `output` is NOT a trustworthy result: -1 = no such
-        // instance; -2 = the plugin's process() crashed (SEH) or threw — in which
-        // case it may have written a partial/torn out_doc before faulting. Adopting
-        // or parsing it would be a use-after-fault, and treating a crashed call as a
-        // valid (empty) result is a silent false-pass downstream. Bail with an empty
-        // provenance-tagged Record instead of interpreting output. (Previously only
-        // -1 was special-cased and the crash path fell through to adopt_shared.)
-        if (prc < 0) {
-            if (prc == -1 || prc == -3) {
-                // -1 = no such instance; -3 = instance quarantined (on_fault=refuse,
-                // item 14). Both return BEFORE touching the shared doc — the ref
-                // share_out RESERVED for the adopting side is unconsumed, so release
-                // it here or it (and the host-owned doc + pooled chunks) leak on every
-                // call. -3 skips the "typo'd instance" warning (it's a live instance
-                // that's been pulled from service, not a miss).
-                if (prc == -1) warn_use_miss_(host, name_.c_str());
-                // Scoped to the share_out path: in_doc is the registry pointer only
-                // when doc_retain/doc_release were present (else it's a borrowed
-                // input.doc() we must NOT release). The JSON-fallback and adopt paths
-                // already balance their ref; -2 (crash) is left alone (a torn call may
-                // or may not have adopted — don't risk a double-release). That -2 leak
-                // is COUNTED host-side, not here: this proxy runs in the script DLL,
-                // which has its OWN per-DLL singletons (see g_use_host_api_ note above),
-                // so the leaked ref — a HOST DocRegistry ref reserved by share_out — is
-                // tallied where it's abandoned and observable: the host dispatch funnel
-                // (service_sinks.cpp use_process_inline_), surfaced in dispatch_stats as
-                // crash_leaked_docs_lifetime (Q0f; docs/internals/data-layer.md).
-                if (host->doc_retain && host->doc_release && in_doc)
-                    host->doc_release(const_cast<void*>(in_doc));
-            }
-            xi_record_out_free(&output);
-            Record empty;
-            empty.set_src(name_);
-            return empty;
-        }
-
-        // γ: adopt the borrowed-doc output by pointer (zero parse) when the
-        // plugin returned one; otherwise decode the JSON bytes. The adopted doc
-        // is host-pool-backed, so freeing it when `result` dies routes through
-        // the host (doc->alc) — safe across the DLL boundary.
-        Record result = output.out_doc
-            ? Record::adopt_shared((yyjson_mut_doc*)output.out_doc, host->doc_release,
-                                   host->doc_refcount && host->doc_refcount((void*)output.out_doc) > 1)
-            : ((output.data && output.len > 0)
-                   ? Record::from_json_bytes(output.data, (size_t)output.len)
-                   : Record());
-        // Output handles live in the BACKEND pool. Zero-copy: wrap as
-        // a pool-backed view (adopt_pool_handle addrefs internally) and
-        // release our process_fn ref. Net refcount: still 1, held by
-        // the script-side xi::Image via its shared_ptr deleter.
-        for (int i = 0; i < output.image_count; ++i) {
-            xi_image_handle h = output.images[i].handle;
-            if (!h) continue;
-            Image img = Image::adopt_pool_handle(host, h);
-            host->image_release(h);
-            if (!img.empty()) result.image(output.images[i].key, std::move(img));
-        }
-        xi_record_out_free(&output);
-        result.set_src(name_);   // provenance: this output came from this instance
-        return result;
-    }
-
     // polaris2 Gate P2 (docs/new_gen/10): chain a Pack into this instance's
-    // xi.pack@1 pack door. The pack-plane sibling of process(Record) — same
-    // name, same call shape, pack currency in and out:
+    // xi.pack@1 pack door. THE CUT (v12): this is the SOLE use()->process path
+    // (the Record overload was removed); pack currency in and out:
     //
     //   XI_INSPECT_ENTRY(t, frame) {
     //       auto f = t.pack();                              // pack-mode source
@@ -970,7 +814,8 @@ public:
     // (is_fault()) short-circuits HOST-SIDE (use_pack_process_cb, doc 15): the
     // plugin never runs and the result is a NEW fault pack carrying the
     // original reason with this instance appended to the $prov chain — the
-    // pack mirror of the Record overload's NA short-circuit above.
+    // pack-plane fail-loud short-circuit (the pack analogue of the retired
+    // Record NA propagation).
     //
     // OUTPUT: a ScriptPack that OWNS the door's result handle — the keepalive
     // releases it on the last copy, so (like t.pack()) it is safe to hold past
@@ -984,9 +829,6 @@ public:
     // A CONTRACT failure (e.g. missing input key) is NOT empty — the door
     // returns a normal sealed pack carrying "$fault" (fail-loud,
     // xi_pack_proc_v1 contract), so check that.
-    //
-    // The LEGACY Record path above is byte-for-byte untouched — this is a
-    // pure overload on the pack currency.
     ScriptPack process(const ScriptPack& input) {
         auto fn    = reinterpret_cast<UsePackProcessFn>(g_use_pack_process_fn_);
         auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);

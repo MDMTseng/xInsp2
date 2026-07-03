@@ -1,39 +1,34 @@
-// Out-of-line implementation of host_api->read_image_file.
-// Lives in its own TU so xi_image_pool.hpp doesn't need to drag
-// stb_image.h into every consumer; the STB_IMAGE_IMPLEMENTATION
-// macro is defined once in stb_impl.cpp.
+// Out-of-line installer of the backend's internal read_image_file function.
+// A static initialiser installs the function pointer into ImagePool; the
+// backend resolves it via ImagePool::read_image_file_fn() (service_cmd_
+// dispatch.cpp's cmd:run frame injection). Tests that don't link this TU
+// leave the slot null — fine for in-process unit tests.
 //
-// Static initialiser installs the function pointer into ImagePool
-// so make_host_api hands it out. Tests that don't link this TU
-// leave the slot null and read_image_file is unavailable to plugins
-// they spawn — fine for in-process unit tests.
+// polaris2 CORE-CODEC EVICTION, stage 2 of 2 (v12, THE CUT):
+// "jpeg移出core，使用lib plugin處理" — the decode ENGINE has left the core for
+// good. The built-in stb DECODE FALLBACK (read_stb / stbi_load) is DELETED;
+// the "xi.image.decode" capability (the xi.imgcodec lib plugin) is now the
+// ONLY decode engine, reached through the SAME forwarding funnel every
+// capability consumer uses — quarantine fail-fast, per-thread reentrancy
+// refusal, SEH fault attribution to the lib instance (xi_cap_abi.hpp's
+// f_cap_call). On capability absent / funnel refusal / handler fault /
+// contract $fault the read now returns 0 (no in-core fallback) — a host with
+// no imgcodec provider cannot read image files through this path.
 //
-// polaris2 CORE-CODEC EVICTION, stage 1 of 2 (v11-compatible):
-// "jpeg移出core，使用lib plugin處理" — the decode ENGINE leaves the core
-// while the frozen ABI slot stays. The implementation now DELEGATES to the
-// "xi.image.decode" capability (the xi.imgcodec lib plugin) whenever one is
-// registered, through the SAME forwarding funnel every capability consumer
-// uses — quarantine fail-fast, per-thread reentrancy refusal, SEH fault
-// attribution to the lib instance (xi_cap_abi.hpp's f_cap_call). On
-// capability absent / funnel refusal / handler fault / contract $fault it
-// falls back to the built-in stb path, byte-for-byte the pre-eviction
-// behaviour. The slot, its signature, and its fail modes are IDENTICAL
-// either way (0 on null path / unreadable file / undecodable bytes) —
-// callers cannot tell, except the engine-transition log/status line
-// (deployment hygiene: which engine is actually serving?).
+// The plugin-facing host_api.read_image_file ABI SLOT is gone at v12 (the
+// struct field was removed from xi_abi.h and its wiring dropped from
+// xi_image_pool.hpp's make_host_api). This install hook survives ONLY because
+// the backend itself still resolves read_image_file_fn() internally — see
+// service_cmd_dispatch.cpp (frame-injection for cmd:run). It installs a
+// capability-only reader into ImagePool; that is the whole remaining reason
+// this TU exists.
 //
-// Availability is re-checked on EVERY call: read_image_file legally runs
-// inside plugin factories, i.e. possibly BEFORE imgcodec's own factory has
-// registered the capability (absent-then-present), and the capability can
-// vanish again on unload. And the funnel's reentrancy guard (-5) guarantees
-// imgcodec is never served by itself — that refusal lands on the stb
-// fallback like every other miss.
-//
-// At v12 this slot AND the stb fallback are deleted; the capability becomes
-// the only engine (docs/new_gen/14 roster / doc 10 cut contents).
+// Availability is re-checked on EVERY call: the capability can register after
+// a caller starts (absent-then-present) and vanish again on unload. And the
+// funnel's reentrancy guard (-5) guarantees imgcodec is never served by
+// itself — that refusal now yields 0 like every other miss.
 
 #include <xi/xi_image_pool.hpp>
-#include <stb_image.h>
 
 #include <atomic>
 #include <cstdio>
@@ -45,43 +40,25 @@ namespace xi {
 namespace {
 
 // ---- engine observability --------------------------------------------------
-// Logged via stderr + the status registry on every ENGINE TRANSITION (first
-// serving call included), not per call — steady state stays quiet, and the
-// last status line always names the engine currently serving.
-enum : int { kEngineStb = 0, kEngineCap = 1 };
-
-void note_engine(int engine) {
-    static std::atomic<int> last{-1};
-    if (last.exchange(engine, std::memory_order_relaxed) == engine) return;
-    const char* text = (engine == kEngineCap)
-        ? "engine=capability (xi.image.decode, lib plugin)"
-        : "engine=builtin (stb)";
+// One-shot log (stderr + status registry) the first time the capability
+// serves — deployment hygiene: confirms the lib-plugin decode engine is live.
+// With the stb fallback deleted, "capability" is the only engine there is.
+void note_engine_capability() {
+    static std::atomic<bool> announced{false};
+    if (announced.exchange(true, std::memory_order_relaxed)) return;
+    const char* text = "engine=capability (xi.image.decode, lib plugin)";
     std::fprintf(stderr, "[xinsp2] read_image_file: %s\n", text);
     if (auto fn = xi::status_sink()) fn("read_image_file", text);
 }
 
-// ---- the built-in engine (the pre-eviction path, bytes unchanged) -----------
-xi_image_handle read_stb(const char* path) {
-    int w = 0, h = 0, ch = 0;
-    unsigned char* px = stbi_load(path, &w, &h, &ch, 0);
-    if (!px) return 0;
-    auto& pool = ImagePool::instance();
-    xi_image_handle handle = pool.create(w, h, ch);
-    if (!handle) { stbi_image_free(px); return 0; }
-    if (uint8_t* dst = pool.data(handle)) {
-        std::memcpy(dst, px, (size_t)w * h * ch);
-    }
-    stbi_image_free(px);
-    return handle;
-}
-
-// ---- the capability engine ---------------------------------------------------
+// ---- the capability engine (the ONLY engine at v12) --------------------------
 // Try to serve `path` through the registered "xi.image.decode" capability.
 // Returns false when the request was NOT served — capability plane not
 // installed, capability unregistered, file unreadable, funnel refusal
 // (quarantine -3, reentrancy -5: the decoder's own instance is up-stack),
 // handler crash -2 (already charged to the LIB instance by the funnel),
-// contract $fault, or a malformed reply — and the caller falls back to stb.
+// contract $fault, or a malformed reply — and the read then fails with 0
+// (no in-core fallback remains).
 bool read_via_capability(const char* path, xi_image_handle* out_h) {
     *out_h = 0;
     // The plane rides the same published slots get_interface serves — null on
@@ -172,12 +149,10 @@ static xi_image_handle read_image_file_impl(const char* path) {
     if (!path) return 0;
     xi_image_handle h = 0;
     if (read_via_capability(path, &h)) {
-        note_engine(kEngineCap);
+        note_engine_capability();
         return h;
     }
-    h = read_stb(path);
-    if (h) note_engine(kEngineStb);   // an engine is noted only when it SERVED
-    return h;
+    return 0;   // v12: no in-core stb fallback — capability-only decode
 }
 
 namespace {

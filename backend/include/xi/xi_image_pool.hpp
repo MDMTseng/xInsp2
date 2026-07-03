@@ -36,8 +36,8 @@
 #include "xi_binary_sink.hpp"   // ABI v8: backs host_api.emit_binary (plugin -> WS push)
 #include "xi_log_sink.hpp"      // P1-4/P1-3: backs host_api.log (plugin/script -> WS log)
 #include "xi_compress_sink.hpp" // ABI v9: backs host_api.compress_image (host JPEG cache)
-#include "xi_doc_pool.hpp"      // γ: backs host_api.doc_chunk_* (pooled doc allocator)
-#include "xi_doc_registry.hpp"  // γ-4: backs host_api.doc_retain/doc_release
+// [ABI v12 — xi_doc_pool.hpp / xi_doc_registry.hpp includes removed at THE CUT;
+//  the Record yyjson-doc allocator + refcount host slots are gone.]
 
 #include <atomic>
 #include <chrono>
@@ -461,15 +461,12 @@ public:
             buf[n] = 0;
             return n;
         };
-        // ABI v6: wired by install_trigger_hook (xi_trigger_bus.hpp); null here
-        // so a host that never installs the hook leaves it null (the SDK helper
-        // null-checks).
-        api.emit_record = nullptr;
-        // (ABI v11: the five always-null shm_* fields were removed from
-        // xi_host_api in Phase 4 — nothing to null here anymore. SHM was
-        // removed 2026-05; plugins use image_create / the host ImagePool,
-        // zero-copy via pointers within the single backend process.)
-        api.read_image_file = read_image_file_fn();
+        // [ABI v12 — emit_record + read_image_file host slots were DELETED at THE
+        // CUT. Sources emit sealed packs (xi_pack_v1::emit_pack, wired below);
+        // image decode is the xi.image.decode capability. read_image_file_fn()
+        // still exists as an INTERNAL host helper (cmd:run disk frame injection,
+        // service_cmd_dispatch.cpp), now capability-only — it is just no longer
+        // published as a plugin-facing host_api slot.]
         // Routes to the backend's status registry via the installed sink
         // (xi_status_sink.hpp); no-op when no sink is installed (headless).
         api.set_status = [](const char* source, const char* text) {
@@ -485,27 +482,15 @@ public:
         // Routed through compress_image_impl so the legacy field and the carved
         // xi.preview@1 interface (get_interface, below) share the IDENTICAL path.
         api.compress_image = &compress_image_impl;
-        // Host doc allocator (ABI v3, γ) — backs the in-process yyjson doc
-        // pass-by-pointer path. A doc built through these is host-owned, so its
-        // free routes back to the host and is safe to drop from either side of
-        // the DLL boundary. Backed by DocChunkPool (γ-5): a thread-local
-        // size-class free-list ⇒ no per-frame malloc churn on the hot path.
-        api.doc_chunk_alloc   = [](size_t n) -> void* { return xi::DocChunkPool::alloc(n); };
-        api.doc_chunk_realloc = [](void* p, size_t n) -> void* { return xi::DocChunkPool::realloc(p, n); };
-        api.doc_chunk_free    = [](void* p) { xi::DocChunkPool::free(p); };
-        // Host doc refcount (ABI v4, γ-4) — lets a yyjson doc handed across the
-        // ABI be held by more than one side without a deep copy (the doc
-        // analogue of image_addref/image_release).
-        api.doc_retain  = [](void* d) { xi::DocRegistry::instance().addref((yyjson_mut_doc*)d); };
-        api.doc_release = [](void* d) { xi::DocRegistry::instance().release((yyjson_mut_doc*)d); };
-        api.doc_refcount = [](void* d) -> int32_t {
-            return (int32_t)xi::DocRegistry::instance().refcount((yyjson_mut_doc*)d);
-        };
+        // [ABI v12 — the host doc allocator (doc_chunk_*) and doc refcount
+        // (doc_retain/release/refcount) slots were DELETED at THE CUT with the
+        // Record yyjson-doc dispatch path. Packs carry typed entries directly;
+        // there is no cross-ABI yyjson doc. DocChunkPool / DocRegistry are gone.]
         // ABI v10: the capability-query door. A plugin resolves a frozen,
         // segregated interface by id+version through this one pointer
         // (core_fix_plan.md §12 Phase 1). Registrations live in
-        // get_interface_impl: the carved xi.preview/imaging/doc/emit/log@1
-        // interfaces (xi.legacy@9 was retired in Phase 4).
+        // get_interface_impl: the carved xi.preview/imaging/log@1 + xi.pack@1 +
+        // xi.cap interfaces (xi.doc/xi.emit-emit_record retired at THE CUT).
         api.get_interface = &get_interface_impl;
         return api;
     }
@@ -570,52 +555,15 @@ public:
             i.image_height    = h->image_height;
             i.image_channels  = h->image_channels;
             i.image_stride    = h->image_stride;
-            i.read_image_file = h->read_image_file;
+            // [ABI v12 — read_image_file dropped from xi.imaging@1 at THE CUT.]
             return i;
         }();
         return &iface;
     }
-    static const xi_doc_v1* doc_v1_iface() {
-        static const xi_doc_v1 iface = [] {
-            const xi_host_api* h = canonical_host_api();
-            xi_doc_v1 i{};
-            i.doc_chunk_alloc   = h->doc_chunk_alloc;
-            i.doc_chunk_realloc = h->doc_chunk_realloc;
-            i.doc_chunk_free    = h->doc_chunk_free;
-            i.doc_retain        = h->doc_retain;
-            i.doc_release       = h->doc_release;
-            i.doc_refcount      = h->doc_refcount;
-            return i;
-        }();
-        return &iface;
-    }
-    // xi.emit@1 emit_record wiring bridge (ABI v6/v11 — core_fix_plan.md §12).
-    //
-    // emit_record is the ONE host verb not wired in make_host_api(): it is
-    // installed later by install_trigger_hook (xi_trigger_bus.hpp) onto the
-    // per-load table (default_host_api). image_pool.hpp CANNOT include
-    // trigger_bus.hpp (layering), so the carved xi.emit@1 interface cannot copy
-    // the wired pointer at build time — when emit_v1_iface() is first built the
-    // hook may not have run, and its Meyers singleton is frozen thereafter. The
-    // old code copied h->emit_record from the canonical table (never hooked), so
-    // the door's emit_record was permanently null while the struct field was live
-    // — a dormant landmine for any plugin that trusts the door.
-    //
-    // Bridge: install_trigger_hook publishes the wired emit_record fn-pointer into
-    // this process-global, lock-free slot; the door's emit_record is a tiny stable
-    // forwarder that reads the slot on each call. So the door reaches the EXACT
-    // SAME wired dispatch path as the struct field host->emit_record — a live door
-    // entry, never null. (The freeze-guard asserts slot == wired field.)
-    using EmitRecordFn = void (*)(const char* emitter, xi_trigger_id id,
-                                  const struct xi_record* rec, int64_t ts);
-    static std::atomic<EmitRecordFn>& emit_record_slot() {
-        static std::atomic<EmitRecordFn> slot{nullptr};
-        return slot;
-    }
-    // Published by install_trigger_hook once the bus dispatch lambda exists.
-    static void publish_emit_record(EmitRecordFn fn) {
-        emit_record_slot().store(fn, std::memory_order_release);
-    }
+    // [ABI v12 — doc_v1_iface() (xi.doc@1) and the xi.emit@1 emit_record wiring
+    //  bridge (EmitRecordFn / emit_record_slot / publish_emit_record / the
+    //  forwarder) were DELETED at THE CUT. The Record yyjson-doc + Record
+    //  source-emit path is gone; sources emit sealed packs (xi.pack@1 emit_pack).]
 
     // polaris2 wave-2: the carved xi.pack@1 DATA-PLANE interface (const
     // xi_pack_v1*) is published here by xi::install_pack_abi (xi_pack_abi.hpp).
@@ -696,23 +644,13 @@ public:
             return fn(owner);
         return 0;
     }
-    // The forwarder the door hands out for xi.emit@1.emit_record: a stable address
-    // (a plugin may cache the interface) that reads the published slot each call.
-    // No-op until the hook publishes — same null-safe contract as the field.
-    static void emit_record_forwarder(const char* emitter, xi_trigger_id id,
-                                      const struct xi_record* rec, int64_t ts) {
-        if (auto fn = emit_record_slot().load(std::memory_order_acquire))
-            fn(emitter, id, rec, ts);
-    }
+    // [ABI v12 — the xi.emit@1 emit_record forwarder was DELETED at THE CUT.]
+    // xi.emit@1 now carries only emit_binary (the WS binary push); the Record
+    // source-emit verb is replaced by xi.pack@1 emit_pack.
     static const xi_emit_v1* emit_v1_iface() {
         static const xi_emit_v1 iface = [] {
             const xi_host_api* h = canonical_host_api();
             xi_emit_v1 i{};
-            // emit_record: hand out the STABLE forwarder, NOT the raw field (which
-            // is null on the never-hooked canonical table). The forwarder reads the
-            // slot install_trigger_hook publishes, so the door reaches the same
-            // wired dispatch path as host->emit_record.
-            i.emit_record = &emit_record_forwarder;
             i.emit_binary = h->emit_binary;
             return i;
         }();
@@ -758,8 +696,7 @@ public:
             return imaging_v1_iface();
         if (std::strcmp(id, "xi.imaging_rw") == 0 && version == 1)
             return imaging_rw_v1_iface();
-        if (std::strcmp(id, "xi.doc") == 0 && version == 1)
-            return doc_v1_iface();
+        // [xi.doc@1 retired at THE CUT (v12) — Record yyjson-doc plane gone.]
         if (std::strcmp(id, "xi.emit") == 0 && version == 1)
             return emit_v1_iface();
         if (std::strcmp(id, "xi.log") == 0 && version == 1)
@@ -803,25 +740,15 @@ public:
              && iv->image_width     == api.image_width
              && iv->image_height    == api.image_height
              && iv->image_channels  == api.image_channels
-             && iv->image_stride    == api.image_stride
-             && iv->read_image_file == api.read_image_file;
+             && iv->image_stride    == api.image_stride;
+             // [ABI v12 — read_image_file dropped from xi.imaging@1 at THE CUT.]
 
-        const auto* dv = static_cast<const xi_doc_v1*>(api.get_interface("xi.doc", 1));
-        ok = ok && dv
-             && dv->doc_chunk_alloc   == api.doc_chunk_alloc
-             && dv->doc_chunk_realloc == api.doc_chunk_realloc
-             && dv->doc_chunk_free    == api.doc_chunk_free
-             && dv->doc_retain        == api.doc_retain
-             && dv->doc_release       == api.doc_release
-             && dv->doc_refcount      == api.doc_refcount;
+        // [ABI v12 — the xi.doc@1 block was DELETED at THE CUT (doc slots gone).]
 
         const auto* ev = static_cast<const xi_emit_v1*>(api.get_interface("xi.emit", 1));
         ok = ok && ev
-             && ev->emit_binary == api.emit_binary
-             // emit_record: the door is a stable, non-null forwarder whose target
-             // (the published slot) must equal the wired struct field.
-             && ev->emit_record != nullptr
-             && emit_record_slot().load(std::memory_order_acquire) == api.emit_record;
+             && ev->emit_binary == api.emit_binary;
+             // [ABI v12 — emit_record dropped from xi.emit@1 at THE CUT.]
 
         const auto* lv = static_cast<const xi_log_v1*>(api.get_interface("xi.log", 1));
         ok = ok && lv

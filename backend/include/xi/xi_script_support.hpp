@@ -27,7 +27,6 @@
 #include "xi_script.hpp"
 #include "xi_kv.hpp"      // U2: xi::kv() thunk bodies (xi_script_kv_* exports below)
 #include "xi_seh.hpp"     // B2 warmup installs the SEH translator on the omp pool
-#include "xi_state.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -384,68 +383,6 @@ XI_SCRIPT_EXPORT void xi_script_set_global_cancel(int set) {
 // hosts GetProcAddress it and null-check (see xi_script_loader.hpp).
 XI_SCRIPT_EXPORT void xi_script_inspect_begin(void) {
     xi::begin_inspect();
-}
-
-// --- Persistent state thunks ---
-
-XI_SCRIPT_EXPORT int xi_script_get_state(char* buf, int buflen) {
-    std::string json = xi::state().data_json();
-    int needed = (int)json.size();
-    if (buflen < needed + 1) return -needed;
-    std::memcpy(buf, json.data(), json.size());
-    buf[json.size()] = 0;
-    return needed;
-}
-
-XI_SCRIPT_EXPORT int xi_script_set_state(const char* json) {
-    if (!json) return -1;
-    // Replace the state Record by parsing the JSON (yyjson via from_json_bytes).
-    xi::state() = xi::Record::from_json_bytes((const uint8_t*)json, std::strlen(json));
-    return 0;
-}
-
-// State schema version — bump when the shape of xi::state() changes
-// in a way the previous DLL's persisted JSON would default-fill
-// incorrectly. Backend records the version alongside saved state and
-// drops the state on mismatch instead of silently restoring garbage.
-//
-// Default 0 means "unversioned" — backend skips the migration check
-// and restores blindly (legacy back-compat). Register from user code:
-//
-//   XI_STATE_SCHEMA(2);   // file-scope macro
-//
-// or manually:
-//
-//   static int _sv = (xi::set_state_schema_version(2), 0);
-//
-// The export below reads the runtime atomic, so the user's static
-// initialiser (which runs at DLL load, BEFORE the host's first
-// xi_script_set_state) wins.
-XI_SCRIPT_EXPORT int xi_script_state_schema_version(void) {
-    return xi::state_schema_version();
-}
-
-// G4 / OQ-5 — code_change-style state-migration hook. Called by the host on a
-// schema-version mismatch (see xi_script_loader.hpp::migrate_state) BEFORE it
-// would otherwise drop the prior state. `old_json`/`old_schema` are the retiring
-// DLL's persisted state; on success writes the migrated (new-shape) JSON into
-// `buf` and returns its length (get_state's buffer convention: a negative return
-// -N means "buffer too small, need N"). Returns 0 — "decline, drop as usual" —
-// when no migrator was registered via xi::set_state_migrate OR the migrator
-// returned "". This export is always present in a recompiled script; a script
-// with no migrator is indistinguishable (return 0) from one lacking the symbol,
-// so the host's fallback-to-drop path is identical either way.
-XI_SCRIPT_EXPORT int xi_script_code_change(const char* old_json, int old_schema,
-                                           int new_schema, char* buf, int buflen) {
-    auto& fn = xi::state_migrate_fn();
-    if (!fn) return 0;                              // no migrator -> host drops
-    std::string out = fn(old_json ? old_json : "{}", old_schema, new_schema);
-    if (out.empty()) return 0;                      // declined -> host drops
-    int needed = (int)out.size();
-    if (buflen < needed + 1) return -needed;        // grow-and-retry (like get_state)
-    std::memcpy(buf, out.data(), out.size());
-    buf[out.size()] = 0;
-    return needed;
 }
 
 // --- U2 (docs/new_gen/16): xi::kv() persistent-state thunks -----------------

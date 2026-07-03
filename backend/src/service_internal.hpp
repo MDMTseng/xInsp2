@@ -73,8 +73,6 @@ struct Engine {
     xi::script::LoadedScript script;
     std::mutex script_mu;
     std::atomic<int64_t> script_generation{0};
-    std::string persistent_state_json = "{}";
-    int persistent_state_schema = 0;
     // U2 (docs/new_gen/16): the kv channel — canonical-mp BYTES (may contain
     // NULs; std::string used as a plain byte bag), host-opaque like the JSON
     // above. Empty = no captured store (get_kv returned 0). In-memory only,

@@ -234,22 +234,10 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 resume_continuous_if_needed();   // old g_eng.script untouched, keep it streaming
                 return;
             }
-            // Save persistent state from the OLD DLL before swapping it out.
-            // Stamp the OLD DLL's schema version alongside so restore into the
-            // new DLL can detect a shape mismatch.
-            if (g_eng.script.ok() && g_eng.script.get_state) {
-                std::vector<char> buf(256 * 1024);
-                int n = g_eng.script.get_state(buf.data(), (int)buf.size());
-                if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                             n = g_eng.script.get_state(buf.data(), (int)buf.size()); }
-                if (n > 0) g_eng.persistent_state_json.assign(buf.data(), (size_t)n);
-                g_eng.persistent_state_schema = g_eng.script.state_schema_version
-                                          ? g_eng.script.state_schema_version()
-                                          : 0;
-            }
-            // U2 (docs/new_gen/16): capture the kv channel the same way —
-            // canonical-mp bytes, explicit lengths (0 = empty store, nothing
-            // kept). Rides BESIDE the Record channel until THE CUT.
+            // U2 (docs/new_gen/16): capture the kv channel from the OLD DLL
+            // before swapping it out — canonical-mp bytes, explicit lengths
+            // (0 = empty store, nothing kept). Schema stamped alongside so
+            // restore into the new DLL can detect a shape mismatch.
             if (g_eng.script.ok() && g_eng.script.get_kv) {
                 std::vector<uint8_t> kbuf(256 * 1024);
                 int kn = g_eng.script.get_kv(kbuf.data(), (int)kbuf.size());
@@ -399,104 +387,11 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 }
             }
 
-            // Restore persistent state into the new DLL — but drop it
-            // when the schema versions disagree (and both sides
-            // declared one), since set_state's silent default-fill on
-            // a shape change would confuse the new code more than
-            // starting fresh would.
-            if (g_eng.script.set_state && g_eng.persistent_state_json.size() > 2) {
-                int new_schema = g_eng.script.state_schema_version
-                               ? g_eng.script.state_schema_version()
-                               : 0;
-                // Drop whenever the NEW script declares a schema version that
-                // differs from the persisted one — INCLUDING the 0→N case (a
-                // script adopting versioning for the first time): the old
-                // unversioned shape would otherwise default-fill into the new
-                // shape, silently mis-shaping state. new_schema==0 (a script that
-                // doesn't version) keeps the legacy "best-effort restore" path.
-                bool drop = (new_schema != 0 &&
-                             g_eng.persistent_state_schema != new_schema);
-                if (drop) {
-                    // G4 / OQ-5: before dropping, give the NEW DLL a chance to
-                    // migrate the prior state forward via its opt-in code_change
-                    // hook. If it carries state across the schema change, restore
-                    // the migrated shape instead of dropping. Absent hook (or a
-                    // decline) falls through to the unchanged drop path below.
-                    std::string migrated;
-                    if (xi::script::migrate_state(g_eng.script, g_eng.persistent_state_json,
-                                                  g_eng.persistent_state_schema, new_schema,
-                                                  migrated)) {
-                        // set_state enters plugin code under g_eng.run_mu + g_eng.script_mu;
-                        // a throwing/faulting plugin must not terminate the swap. On
-                        // failure, drop the migrated state and continue (no lock touch).
-                        bool state_ok = true;
-                        try {
-                            g_eng.script.set_state(migrated.c_str());
-                        } catch (const seh_exception& e) {
-                            state_ok = false;
-                            std::fprintf(stderr,
-                                "[xinsp2] replay set_state (migrated) crashed: 0x%08X (%s) — skipped\n",
-                                e.code, e.what());
-                            xi::recover_seh_stack_or_die(e.code, "replay set_state (migrated)");
-                        } catch (const std::exception& e) {
-                            state_ok = false;
-                            std::fprintf(stderr,
-                                "[xinsp2] replay set_state (migrated) threw: %s — skipped\n", e.what());
-                        }
-                        if (!state_ok) { g_eng.persistent_state_json = "{}"; }
-                        else {
-                        g_eng.persistent_state_json = migrated;
-                        std::fprintf(stderr,
-                            "[xinsp2] state schema changed (v%d → v%d) — migrated prior state "
-                            "(%zu bytes) via code_change hook\n",
-                            g_eng.persistent_state_schema, new_schema, migrated.size());
-                        std::string ev = "{\"type\":\"event\",\"name\":\"state_migrated\","
-                                         "\"data\":{\"old_schema\":"
-                                       + std::to_string(g_eng.persistent_state_schema)
-                                       + ",\"new_schema\":"
-                                       + std::to_string(new_schema)
-                                       + "}}";
-                        srv.send_text(ev);
-                        g_eng.persistent_state_schema = new_schema;
-                        }
-                    } else {
-                    std::fprintf(stderr,
-                        "[xinsp2] state schema changed (v%d → v%d) — dropping prior state\n",
-                        g_eng.persistent_state_schema, new_schema);
-                    std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
-                                     "\"data\":{\"old_schema\":"
-                                   + std::to_string(g_eng.persistent_state_schema)
-                                   + ",\"new_schema\":"
-                                   + std::to_string(new_schema)
-                                   + "}}";
-                    srv.send_text(ev);
-                    g_eng.persistent_state_json = "{}";
-                    }
-                } else {
-                    // set_state enters plugin code under g_eng.run_mu + g_eng.script_mu; a
-                    // throwing/faulting plugin must not terminate the swap — log + skip.
-                    try {
-                        g_eng.script.set_state(g_eng.persistent_state_json.c_str());
-                        std::fprintf(stderr, "[xinsp2] state restored (%zu bytes, schema v%d)\n",
-                                     g_eng.persistent_state_json.size(), new_schema);
-                    } catch (const seh_exception& e) {
-                        std::fprintf(stderr,
-                            "[xinsp2] replay set_state (restore) crashed: 0x%08X (%s) — skipped\n",
-                            e.code, e.what());
-                        xi::recover_seh_stack_or_die(e.code, "replay set_state (restore)");
-                    } catch (const std::exception& e) {
-                        std::fprintf(stderr,
-                            "[xinsp2] replay set_state (restore) threw: %s — skipped\n", e.what());
-                    }
-                }
-            }
-
-            // U2 (docs/new_gen/16): restore the kv channel — the exact same
-            // choreography as the Record channel above (drop predicate,
-            // code_change-style migrate, SEH guards), on canonical-mp bytes.
-            // Events reuse the state_migrated/state_dropped names with an
-            // added "store":"kv" discriminator; the Record channel's events
-            // stay byte-identical.
+            // U2 (docs/new_gen/16): restore the kv channel into the new DLL —
+            // drop when the schema versions disagree (and the new side declared
+            // one), consult the opt-in kv_change migrate hook first, all under
+            // the same SEH/exception guards. Events use the state_migrated/
+            // state_dropped names with a "store":"kv" discriminator.
             if (g_eng.script.set_kv && !g_eng.persistent_kv_bytes.empty()) {
                 int new_kv_schema = g_eng.script.kv_schema_version
                                   ? g_eng.script.kv_schema_version()
@@ -896,7 +791,7 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         // unload_script's clear. open_project does NOT unload the inspection
         // script DLL (script lifecycle is independent of the project's plugin
         // DLLs), so without this the next project's compile_and_load would
-        // (a) capture the PRIOR project's xi::state() into g_persistent_state_*
+        // (a) capture the PRIOR project's xi::kv() into g_eng.persistent_kv_*
         // from the still-live old g_eng.script, then (b) replay the prior project's
         // g_eng.param_cache values over any same-named Param the new project
         // declares (e.g. "thresh") — running project B's inspections with
@@ -906,8 +801,6 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             g_eng.param_cache.clear();
             g_eng.instance_def_cache.clear();   // sibling replay shadow — same project boundary
-            g_eng.persistent_state_json = "{}";
-            g_eng.persistent_state_schema = 0;
             g_eng.persistent_kv_bytes.clear();  // U2: kv channel — same no-leak boundary
             g_eng.persistent_kv_schema = 0;
         }
@@ -1015,15 +908,13 @@ void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
         xi::health().set_state(xi::SysState::Boot);
         // Reset the script replay shadows on the PROJECT boundary, mirroring
         // unload_script's clear. Closing a project doesn't unload the script
-        // DLL, but the operator-tuned param cache + persisted xi::state() belong
+        // DLL, but the operator-tuned param cache + persisted xi::kv() belong
         // to the project just closed — leaving them in place would leak A's
         // values/state into whatever project is opened next (see open_project).
         {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             g_eng.param_cache.clear();
             g_eng.instance_def_cache.clear();   // sibling replay shadow — same project boundary
-            g_eng.persistent_state_json = "{}";
-            g_eng.persistent_state_schema = 0;
             g_eng.persistent_kv_bytes.clear();  // U2: kv channel — same no-leak boundary
             g_eng.persistent_kv_schema = 0;
         }

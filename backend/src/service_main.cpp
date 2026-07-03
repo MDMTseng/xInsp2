@@ -38,7 +38,8 @@
 //  included below.)
 #include <xi/xi_image.hpp>
 #include <xi/xi_cli_args.hpp>
-#include <xi/xi_jpeg.hpp>
+// [v12 THE CUT — <xi/xi_jpeg.hpp> (in-core encoder) include removed; encode is
+//  now capability-only via xi.jpeg.encode.]
 #include <xi/xi_jpeg_cap.hpp>    // polaris2 ENCODE eviction: compress_sink delegates to xi.jpeg.encode
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_plugin_manager.hpp>
@@ -75,13 +76,9 @@ Engine g_eng;
 
 // Loaded user script state. When null, cmd:run returns an error.
 
-
-// Persistent cross-frame state — survives DLL reloads.
-// Schema version of the DLL that wrote g_eng.persistent_state_json. The
-// next DLL's xi_script_state_schema_version() is compared against
-// this on restore — mismatch (and both non-zero) drops the state
-// rather than letting set_state default-fill into a different shape.
-// 0 means "unversioned" — restore proceeds without the check.
+// [v12 THE CUT — the Record persistent-state channel (persistent_state_json +
+//  xi_script_state_schema_version) was DELETED. Cross-frame script state is now
+//  the kv channel (persistent_kv_bytes + XI_KV_SCHEMA / migrate_kv), doc 16.]
 
 // Cache of every successful `cmd:set_param` value the backend pushed
 // into the live script. compile_and_load replays these into the new
@@ -644,37 +641,14 @@ int main(int argc, char** argv) {
         const uint8_t* p = static_cast<const uint8_t*>(px);
         xi::Image img = xi::Image::view(w, h, c, const_cast<uint8_t*>(p));
         std::vector<uint8_t> jpeg;
-        // polaris2 ENCODE eviction (stage 2, v11-compatible): route through the
-        // "xi.jpeg.encode" capability (the imgcodec lib plugin) whenever it is
-        // registered — imgcodec owns the dedup (its FNV-1a CONTENT cache is
-        // IDENTICAL to the host memo cache below, same key algorithm), so the host
-        // cache is NOT consulted on the capability path: ONE cache per served
-        // path, no double-caching. Per-call availability re-check, self-serve
-        // reentrancy refusal, and SEH fault attribution to the lib instance all
-        // live in encode_via_capability (the funnel). Absent / funnel refusal /
-        // handler fault / contract $fault → the in-core encoder + host memo cache
-        // below, byte-for-byte the pre-eviction path (deleted at v12; the
-        // capability becomes the only engine, turbojpeg living in imgcodec).
-        if (!xi::encode_via_capability(img, q, jpeg) || jpeg.empty()) {
-            const size_t nbytes = (size_t)w * (size_t)h * (size_t)c;
-            uint64_t key = 1469598103934665603ull;          // FNV-1a over the pixels...
-            for (size_t i = 0; i < nbytes; ++i) { key ^= p[i]; key *= 1099511628211ull; }
-            key ^= ((uint64_t)w << 40) ^ ((uint64_t)h << 16) ^ (uint64_t)(c * 1000 + q);  // ...+ dims/quality
-            constexpr size_t kCap = 32;
-            static std::mutex cmu;
-            static std::unordered_map<uint64_t, std::vector<uint8_t>> cache;
-            static std::deque<uint64_t> order;
-            std::lock_guard<std::mutex> lk(cmu);
-            auto it = cache.find(key);
-            if (it != cache.end()) {
-                jpeg = it->second;                       // cache hit → reuse the encode
-            } else {
-                if (!xi::encode_jpeg(img, q, jpeg) || jpeg.empty()) return 0;
-                order.push_back(key);
-                while (order.size() > kCap) { cache.erase(order.front()); order.pop_front(); }
-                cache.emplace(key, jpeg);
-            }
-        }
+        // [v12 THE CUT — capability-only: route through the "xi.jpeg.encode"
+        // capability (the imgcodec lib plugin, which owns the dedup content
+        // cache + the turbojpeg SIMD path). The in-core encoder (xi::encode_jpeg)
+        // and the host memo cache were DELETED — no in-core fallback. Absent /
+        // funnel refusal / handler fault / contract $fault → 0 (no encode). Per-
+        // call availability re-check, reentrancy refusal, and SEH fault
+        // attribution to the lib instance live in encode_via_capability.]
+        if (!xi::encode_via_capability(img, q, jpeg) || jpeg.empty()) return 0;
         if ((int)jpeg.size() > cap) return -(int)jpeg.size();
         std::memcpy(out, jpeg.data(), jpeg.size());
         return (int)jpeg.size();

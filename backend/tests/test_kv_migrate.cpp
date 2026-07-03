@@ -195,21 +195,12 @@ int main() {
         xi::script::unload_script(v2);
     }
 
-    // ---------------------------------------------------------------- SECTION E
-    SECTION("E: JSON-era self-seed (bilingual-window port pattern, doc 16)");
-    {
-        // Host choreography for a script that JUST ported to xi::kv(): the
-        // Record channel restores exactly as it always did; there are no kv
-        // bytes to restore (the old DLL never exported the channel). The
-        // script's FIRST inspect self-seeds kv from the restored state.
-        LoadedScript v1c = load(KV_PROBE_V1_DLL);
-        CHECK(v1c.set_state("{\"count\":41}") == 0);   // Record-channel restore
-        CHECK(read_kv(v1c).empty());                   // kv channel starts empty
-        v1c.inspect(0);                                // seed(41) + increment
-        xi::Kv kv = parse_kv(read_kv(v1c));
-        CHECK(kv.get_i64("count") == 42);              // carried across the port
-        xi::script::unload_script(v1c);
-    }
+    // [v12 THE CUT — SECTION E (JSON-era Record→kv self-seed, the bilingual-
+    //  window port pattern) was REMOVED: the xi::state() Record channel and
+    //  LoadedScript::set_state are deleted, so the self-seed no longer exists
+    //  (doc 16 §4.3 — the seed line dies with the Record channel). Sections
+    //  A–D (kv round-trip + hook-present migrate + hook-absent drop + grow-
+    //  and-retry) remain the migration coverage.]
 
     std::fprintf(stderr, "\nALL TESTS PASSED\n");
     return 0;

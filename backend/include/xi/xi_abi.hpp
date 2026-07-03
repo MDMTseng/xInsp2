@@ -3,8 +3,9 @@
 // xi_abi.hpp — C++ wrapper over the stable C plugin ABI.
 //
 // Plugin authors write a class deriving from xi::Plugin, override
-// process() and exchange(), then put XI_PLUGIN_IMPL(MyClass) at the
-// bottom. The macro generates all 6 C entry points.
+// process(PackIn&, PackOut&) and exchange(), then put XI_PLUGIN_IMPL(MyClass)
+// and XI_PLUGIN_PACK_DOOR(MyClass) at the bottom. The macros generate the C
+// entry points and publish the xi.pack@1 data-plane door.
 //
 // Images are handles managed by the host. The wrapper provides a
 // HostImage class that acts like xi::Image but backed by a host handle.
@@ -16,21 +17,23 @@
 //   public:
 //       using xi::Plugin::Plugin;  // inherit ctor
 //
-//       xi::Record process(const xi::Record& input) override {
-//           auto src  = input.get_image("frame");
-//           auto gray = xi::Image::create_in_pool(host(), src.width, src.height, 1);
-//           cv::cvtColor(xi::as_cv_mat(src), xi::as_cv_mat(gray), cv::COLOR_RGB2GRAY);  // needs <xi/xi_cv.hpp>
-//           return xi::Record().image("gray", gray).set("done", true);
+//       void process(xi::PackIn& in, xi::PackOut& out) override {
+//           auto src = in.image("frame");
+//           if (!src) { out.fault("no_frame", "frame"); return; }
+//           auto gray = pool_image(src->width, src->height, 1);
+//           cv::cvtColor(xi::as_cv_mat(xi::Image(...)), xi::as_cv_mat(gray), cv::COLOR_RGB2GRAY);  // <xi/xi_cv.hpp>
+//           out.image("gray", gray.width, gray.height, gray.channels, gray.data());
+//           out.boolean("done", true);
 //       }
 //   };
 //
 //   XI_PLUGIN_IMPL(MyPlugin)
+//   XI_PLUGIN_PACK_DOOR(MyPlugin)
 //
 
 #include "xi_abi.h"
 #include "xi_image.hpp"
 #include "xi_pack_contract.hpp"  // reserved $-keys + fault/provenance helpers (U1, doc 15)
-#include "xi_record.hpp"   // wire codec is yyjson JSON (Record::from_json_bytes / data_json)
 
 #include <cstdio>
 #include <cstring>
@@ -377,11 +380,6 @@ private:
 
 // --- Plugin base class ---
 
-// Forward-decl of the free emit verb (defined below) so Plugin::emit() — the
-// member convenience that fills host()/name() for a source — can forward to it.
-inline void emit_record(const xi_host_api* host, const char* emitter, Record& r,
-                        xi_trigger_id id, int64_t ts);
-
 class Plugin {
 public:
     Plugin(const xi_host_api* host, const std::string& name)
@@ -411,15 +409,6 @@ public:
     }
     void emit_binary(const std::vector<uint8_t>& frame) const {
         emit_binary(frame.data(), (int)frame.size());
-    }
-
-    // Emit a Record as a trigger event — the member sibling of the free
-    // xi::emit_record(host(), name().c_str(), rec, ...). Fills host_/name_
-    // itself so a source can just `emit(rec)` instead of re-passing the
-    // emitter it already is. Forwards verbatim to the free fn (same staging,
-    // same id/ts defaults: id auto-minted, ts = host now).
-    void emit(Record& r, xi_trigger_id id = XI_TRIGGER_NULL, int64_t ts = 0) {
-        xi::emit_record(host_, name_.c_str(), r, id, ts);
     }
 
     // On-disk folder for THIS instance: project/instances/<name>/
@@ -472,20 +461,10 @@ public:
         return 0;
     }
 
-    // --- Phase 3 capability wrappers: xi.imaging@1 / xi.doc@1 ----------------
-    // Each resolves its frozen interface ONCE via host->get_interface (cached),
-    // and falls back to the legacy xi_host_api field on a pre-v10 host. Both
-    // paths reach the identical host primitive — neither is privileged.
-
-    // Decode an image file (PNG/JPEG/BMP/...) into a fresh pool handle (refcount
-    // 1; caller releases). XI_IMAGE_NULL on failure / no decoder. xi.imaging@1.
-    xi_image_handle read_image_file(const char* path) const {
-        if (const xi_imaging_v1* iv = imaging_iface()) {
-            if (iv->read_image_file) return iv->read_image_file(path);
-        }
-        if (host_ && host_->read_image_file) return host_->read_image_file(path);
-        return XI_IMAGE_NULL;
-    }
+    // --- Phase 3 capability wrappers: xi.imaging_rw@1 ------------------------
+    // Resolves its frozen interface ONCE via host->get_interface (cached), and
+    // falls back to the legacy xi_host_api field on a pre-v10 host. Both paths
+    // reach the identical host primitive — neither is privileged.
 
     // --- xi.imaging_rw@1 read/write access discipline (ext review 02 I.4) ----
     // The blessed low-level pixel accessors that encode read-only-input /
@@ -510,37 +489,9 @@ public:
         return host_ ? host_->image_data(h) : nullptr;
     }
 
-    // Host-owned doc chunk allocator (xi.doc@1) — backs a yyjson_mut_doc that is
-    // safe to hand across the DLL boundary (its free routes back to the host).
-    void*   doc_chunk_alloc(size_t n) const {
-        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_chunk_alloc) return dv->doc_chunk_alloc(n); }
-        return host_ && host_->doc_chunk_alloc ? host_->doc_chunk_alloc(n) : nullptr;
-    }
-    void*   doc_chunk_realloc(void* p, size_t n) const {
-        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_chunk_realloc) return dv->doc_chunk_realloc(p, n); }
-        return host_ && host_->doc_chunk_realloc ? host_->doc_chunk_realloc(p, n) : nullptr;
-    }
-    void    doc_chunk_free(void* p) const {
-        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_chunk_free) { dv->doc_chunk_free(p); return; } }
-        if (host_ && host_->doc_chunk_free) host_->doc_chunk_free(p);
-    }
-    // Host-side doc refcount (xi.doc@1) — the doc analogue of image_addref/release.
-    void    doc_retain(void* doc) const {
-        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_retain) { dv->doc_retain(doc); return; } }
-        if (host_ && host_->doc_retain) host_->doc_retain(doc);
-    }
-    void    doc_release(void* doc) const {
-        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_release) { dv->doc_release(doc); return; } }
-        if (host_ && host_->doc_release) host_->doc_release(doc);
-    }
-    int32_t doc_refcount(void* doc) const {
-        if (const xi_doc_v1* dv = doc_iface()) { if (dv->doc_refcount) return dv->doc_refcount(doc); }
-        return host_ && host_->doc_refcount ? host_->doc_refcount(doc) : 0;
-    }
-
     // --- xi.pack@1 data plane (polaris2 wave-2) -----------------------------
     // Resolve the host Pack interface ONCE (cached); null on a host with no
-    // pack plane (then a pack-capable plugin degrades to its Record path).
+    // pack plane (then the plugin's pack door is inert — new_pack() is invalid).
     const xi_pack_v1* pack_iface() const {
         if (!pack_resolved_) {
             pack_resolved_ = true;
@@ -555,9 +506,8 @@ public:
 
     // Source side: seal + emit a pack to host dispatch. Consumes `out`. The host
     // takes its own ref for the async event, so we drop ours right after. No-op
-    // on a host without the pack plane. Same-verb overload of emit(Record&): the
-    // currency (Record vs Pack) is the argument type. The C-ABI field it forwards
-    // to stays `emit_pack` (a Pack and a Record cross the ABI by distinct paths).
+    // on a host without the pack plane. The C-ABI field it forwards to is
+    // `emit_pack` — the pack data plane is the sole emit door.
     void emit(PackOut&& out, xi_trigger_id id = XI_TRIGGER_NULL, int64_t ts = 0) {
         const xi_pack_v1* fi = pack_iface();
         if (!fi) return;
@@ -575,14 +525,8 @@ public:
 
     // Pack-in/pack-out door: override to consume `in` and fill `out`. Publish
     // it to the host with XI_PLUGIN_PACK_DOOR(YourClass) after XI_PLUGIN_IMPL.
-    // This is an OVERLOAD of process() — the Record path is process(const Record&)
-    // below; the currency (Record vs Pack) is carried by the argument types, so
-    // an instance that overrides both speaks both. NOTE on C++ overload hiding: a
-    // plugin that overrides ONLY this pack door and relies on the base Record
-    // process() no-op must add `using xi::Plugin::process;` in its class, else the
-    // pack override hides the Record overload in the derived scope and the
-    // XI_PLUGIN_IMPL dispatch (self->process(record)) will not compile. Plugins
-    // that override BOTH (the usual case) need no `using`.
+    // This is THE data-plane door — the xi.pack@1 currency is the sole plugin
+    // data path (xi::Record was removed in the v12 ABI cut).
     virtual void process(PackIn& in, PackOut& out) { (void)in; (void)out; }
 
     // SDK plumbing the XI_PLUGIN_PACK_DOOR trampoline calls: wrap the borrowed
@@ -614,7 +558,6 @@ public:
     }
 
     // Override these in your plugin:
-    virtual Record process(const Record& input) { (void)input; return {}; }
     virtual std::string exchange(const std::string& cmd_json) { (void)cmd_json; return "{}"; }
 
     // Helper for the `else` branch of an exchange() if/else-if chain. Returns
@@ -684,7 +627,7 @@ protected:
     //
     //   auto dst = pool_image(src.width, src.height, 1);
     //   cv::GaussianBlur(xi::as_cv_mat(src), xi::as_cv_mat(dst), {0,0}, 2.0);  // <xi/xi_cv.hpp>
-    //   return xi::Record().image("blurred", dst);
+    //   out.image("blurred", dst.width, dst.height, dst.channels, dst.data());
     Image pool_image(int w, int h, int ch) {
         return Image::create_in_pool(host_, w, h, ch);
     }
@@ -744,15 +687,6 @@ private:
         }
         return imaging_rw_;
     }
-    const xi_doc_v1* doc_iface() const {
-        if (!doc_resolved_) {
-            doc_resolved_ = true;
-            if (host_ && host_->get_interface)
-                doc_ = static_cast<const xi_doc_v1*>(
-                    host_->get_interface("xi.doc", 1));
-        }
-        return doc_;
-    }
     const xi_emit_v1* emit_iface() const {
         if (!emit_resolved_) {
             emit_resolved_ = true;
@@ -775,8 +709,6 @@ private:
     mutable const xi_imaging_v1* imaging_          = nullptr;
     mutable bool                    imaging_rw_resolved_ = false;
     mutable const xi_imaging_rw_v1* imaging_rw_          = nullptr;
-    mutable bool                 doc_resolved_     = false;
-    mutable const xi_doc_v1*     doc_              = nullptr;
     mutable bool                 emit_resolved_    = false;
     mutable const xi_emit_v1*    emit_             = nullptr;
     mutable bool                 log_resolved_     = false;
@@ -785,246 +717,6 @@ private:
     mutable const xi_pack_v1*   pack_iface_            = nullptr;   // xi.pack@1 (wave-2)
 };
 
-// --- γ: host doc allocator bridge ---
-//
-// Adapt the host's doc_chunk_* (size)/(ptr,size)/(ptr) functions to yyjson's
-// (ctx, ...) allocator signatures, with ctx = the host_api pointer. A
-// yyjson_mut_doc built through this allocator is backed by the host doc pool, so
-// its chunks free back to the host (doc->alc.free) and the doc is safe to hand
-// across the ABI and free from either side. yyjson copies the alc into the doc,
-// so a transient yyjson_alc is fine.
-namespace detail {
-inline void* doc_alc_malloc(void* ctx, size_t s) {
-    return reinterpret_cast<const xi_host_api*>(ctx)->doc_chunk_alloc(s);
-}
-inline void* doc_alc_realloc(void* ctx, void* p, size_t /*old*/, size_t s) {
-    return reinterpret_cast<const xi_host_api*>(ctx)->doc_chunk_realloc(p, s);
-}
-inline void doc_alc_free(void* ctx, void* p) {
-    reinterpret_cast<const xi_host_api*>(ctx)->doc_chunk_free(p);
-}
-} // namespace detail
-
-inline yyjson_alc make_host_doc_alc(const xi_host_api* host) {
-    yyjson_alc a;
-    a.malloc  = detail::doc_alc_malloc;
-    a.realloc = detail::doc_alc_realloc;
-    a.free    = detail::doc_alc_free;
-    a.ctx     = const_cast<xi_host_api*>(host);
-    return a;
-}
-
-// RAII: install the host doc allocator as the thread-local Record allocator for
-// the duration of an in-process plugin call, so the docs the plugin builds (its
-// output + temporaries) come from the host pool — host-owned, poolable (γ-5),
-// safe to hand back. No-op on a pre-v3 host (doc_chunk_alloc null) → default
-// allocator, JSON output path. Restores the previous alc on scope exit.
-struct HostDocAlcScope {
-    yyjson_alc         alc_;
-    const yyjson_alc*  prev_;
-    explicit HostDocAlcScope(const xi_host_api* host)
-        : alc_(host ? make_host_doc_alc(host) : yyjson_alc{}), prev_(tls_doc_alc()) {
-        if (host && host->doc_chunk_alloc) tls_doc_alc() = &alc_;
-    }
-    ~HostDocAlcScope() { tls_doc_alc() = prev_; }
-    HostDocAlcScope(const HostDocAlcScope&) = delete;
-    HostDocAlcScope& operator=(const HostDocAlcScope&) = delete;
-};
-
-// --- Conversion helpers ---
-
-// Convert a C xi_record to a C++ Record (images become HostImages → copied to xi::Image)
-inline Record record_from_c(const xi_host_api* host, const xi_record* rec) {
-    // γ in-process fast path: when the host handed us a borrowed yyjson doc
-    // (same process + matching yyjson layout, gated host-side), read it as a
-    // view — no JSON parse, no copy. The view is read-only; the plugin's first
-    // mutation copy-on-writes into its own doc, leaving the caller's untouched.
-    // Otherwise decode the JSON bytes exactly as before.
-    // γ-4: input doc is a registry-managed SHARED doc (the host share_out'd it and
-    // enrolled it). We adopt with our own ref so the plugin may cache it across
-    // frames zero-copy; frozen=true since the host still holds its side during the
-    // call, so the plugin's first mutation copy-on-writes. No doc ⇒ JSON / empty.
-    Record r = (rec->doc && host && host->doc_release)
-                 ? Record::adopt_shared((yyjson_mut_doc*)rec->doc,
-                                        host->doc_release, true)
-                 : ((rec->data && rec->len > 0)
-                        ? Record::from_json_bytes(rec->data, (size_t)rec->len)
-                        : Record());
-    for (int i = 0; i < rec->image_count; ++i) {
-        // Zero-copy: wrap the handle as a refcounted view over pool
-        // memory. The xi::Image addrefs the handle on adopt and releases
-        // when its last copy goes away — so the plugin can read pool
-        // bytes directly without a memcpy. (The caller of process_fn
-        // still owns its own ref on each input handle and releases it
-        // independently after the call returns; see UseProxy::process.)
-        auto& entry = rec->images[i];
-        if (!entry.handle) continue;
-        Image img = Image::adopt_pool_handle(host, entry.handle);
-        if (!img.empty()) r.image(entry.key, std::move(img));
-    }
-    return r;
-}
-
-namespace detail {
-// Per-plugin-DLL thread-local storage for the strings populated
-// during process_fn. The backend reads `out->images[i].key` and
-// `out->json` directly; previously these were `_strdup`/`malloc`'d
-// inside the plugin DLL and freed by the backend, which is UB across
-// CRT boundaries. Owning them in thread_local std::string +
-// std::vector inside the plugin DLL means the same allocator that
-// allocated them frees them (when the next process_fn call clears
-// the storage, or when the plugin DLL unloads at process exit). The
-// strings stay valid until the next call to `process_fn` on the same
-// thread — the backend's read happens before that.
-struct PluginOutputStorage {
-    std::vector<std::string>     keys;
-    std::vector<uint8_t>         bytes;   // yyjson JSON bytes (fallback when the doc-pointer fast path isn't taken)
-    std::vector<xi_record_image> images;
-};
-inline PluginOutputStorage& tls_output_storage() {
-    static thread_local PluginOutputStorage s;
-    return s;
-}
-} // namespace detail
-
-// Convert a C++ Record to a C xi_record_out (images → host handles).
-//
-// Strings (image keys + json) live in thread-local storage owned by
-// the plugin DLL — see PluginOutputStorage. The output's
-// `image_capacity` is set to 0 to signal "no malloc'd backing"; the
-// C inline `xi_record_out_free` honours that and skips the free path
-// entirely. This closes the cross-CRT heap-corruption hole that
-// existed when plugin DLLs and the backend EXE used different CRTs.
-inline void record_to_c(const xi_host_api* host, Record& r, xi_record_out* out,
-                        bool want_doc = false) {
-    auto& s = detail::tls_output_storage();
-    s.keys.clear();
-    s.images.clear();
-    // γ symmetric fast path: when the call came in as a borrowed doc (want_doc)
-    // and the host owns a doc allocator, hand the OUTPUT doc back by pointer —
-    // no serialize. The output Record was built under HostDocAlcScope, so its
-    // doc is host-pool-backed; release the ref to the caller, who adopts and
-    // frees it via the host (doc->alc). Otherwise serialize to JSON as before.
-    // γ/γ-4 symmetric fast path: when the call arrived as a borrowed doc and the
-    // host owns a doc registry, hand the OUTPUT doc back by pointer (zero
-    // serialize) as a SHARED, host-refcounted doc — one uniform path, exactly
-    // mirroring image_addref. The caller adopt_shared's it, the plugin keeps any
-    // cached ref, and the doc dies with the last side. share_out returns null
-    // only when there's no owned doc to share (a borrowed input returned as-is);
-    // then, and on a pre-v4 host, we serialize to JSON as before.
-    yyjson_mut_doc* shared = nullptr;
-    if (want_doc && host && host->doc_chunk_alloc &&
-        host->doc_retain && host->doc_release &&
-        (shared = r.share_out(host->doc_retain, host->doc_release)) != nullptr) {
-        out->out_doc = shared;
-        out->data = nullptr;
-        out->len  = 0;
-    } else {
-        std::string js = r.data_json();   // yyjson serialize (borrowed view / pre-v4 host)
-        s.bytes.assign(js.begin(), js.end());
-        out->data = s.bytes.data();
-        out->len  = (int32_t)s.bytes.size();
-        out->out_doc = nullptr;
-    }
-
-    const size_t n = r.images().size();
-    s.keys.reserve(n);
-    s.images.reserve(n);
-    for (auto& [key, img] : r.images()) {
-        if (img.empty()) continue;
-        xi_image_handle h = XI_IMAGE_NULL;
-        if (img.pool_handle() && img.pool_host() == host) {
-            // Zero-copy forward: this Image is already a view over a
-            // pool handle from THIS host. Hand the same handle out (with
-            // a fresh ref) instead of allocating a new slot and memcpy'ing
-            // pixels we already have in the pool.
-            h = img.pool_handle();
-            host->image_addref(h);
-        } else {
-            // Fresh / heap-backed Image — allocate a pool slot and copy
-            // the bytes in. (One copy on the way out per genuinely-new
-            // image is structurally unavoidable.)
-            h = host->image_create(img.width, img.height, img.channels);
-            if (!h) continue;
-            std::memcpy(host->image_data(h), img.data(), img.size());
-        }
-        s.keys.push_back(key);
-        xi_record_image rec{};
-        rec.key    = s.keys.back().c_str();
-        rec.handle = h;
-        s.images.push_back(rec);
-    }
-
-    out->images         = s.images.empty() ? nullptr : s.images.data();
-    out->image_count    = (int32_t)s.images.size();
-    out->image_capacity = 0;   // tls-owned, see xi_record_out_free
-}
-
-// Emit a Record as a trigger event WITH routing/context metadata.
-//
-// The ONE emit verb (added in ABI v6; current XI_ABI_VERSION is higher — see
-// xi_abi.h): a source hands the host a record (images +
-// metadata) under an id; the host stages it and dispatches one inspection. The
-// script reads it back via xi::current_trigger().image()/.meta()/.id_string().
-// The metadata doc is handed over by pointer (zero-serialize) through the same
-// share_out/adopt refcount handshake the process() path uses — no JSON round
-// trip on the live path.
-//
-//   auto rec = xi::Record()
-//       .image("frame", img)
-//       .set("command", "inspect_top")     // ← routing/context metadata
-//       .set("recipe", 7);
-//   xi::emit_record(host(), name().c_str(), rec);   // id auto-minted, ts = now
-//
-// id == XI_TRIGGER_NULL asks the host to mint a fresh id (its hex is
-// id_string()). ts = 0 stamps the host's current time. No-op on a host without
-// emit_record (the slot is null).
-inline void emit_record(const xi_host_api* host, const char* emitter, Record& r,
-                        xi_trigger_id id = XI_TRIGGER_NULL,
-                        int64_t ts = 0) {
-    if (!host) return;
-    // Marshal images → host pool handles (same forward logic as record_to_c).
-    // Locals, not TLS: emit is synchronous — the bus addref's the handles and
-    // consumes the doc ref during the call, so we can release our refs after.
-    std::vector<std::string>     keys;
-    std::vector<xi_record_image> entries;
-    std::vector<xi_image_handle> mine;     // refs we own, released post-emit
-    keys.reserve(r.images().size());       // reserve so key c_str()s don't move
-    entries.reserve(r.images().size());
-    for (auto& [key, img] : r.images()) {
-        if (img.empty()) continue;
-        xi_image_handle h = XI_IMAGE_NULL;
-        if (img.pool_handle() && img.pool_host() == host) {
-            h = img.pool_handle();
-            host->image_addref(h);
-        } else {
-            h = host->image_create(img.width, img.height, img.channels);
-            if (!h) continue;
-            std::memcpy(host->image_data(h), img.data(), img.size());
-        }
-        mine.push_back(h);
-        keys.push_back(key);
-        xi_record_image e{};
-        e.key = keys.back().c_str();
-        e.handle = h;
-        entries.push_back(e);
-    }
-
-    if (host->emit_record) {
-        // Hand the metadata doc over by pointer: share_out reserves a ref the
-        // host consumes. Null when there's no owned doc (nothing to carry).
-        yyjson_mut_doc* shared = (host->doc_retain && host->doc_release)
-            ? r.share_out(host->doc_retain, host->doc_release) : nullptr;
-        xi_record rec{};
-        rec.images      = entries.empty() ? nullptr : entries.data();
-        rec.image_count = (int32_t)entries.size();
-        rec.data        = nullptr;
-        rec.len         = 0;
-        rec.doc         = shared;
-        host->emit_record(emitter, id, &rec, ts);
-    }
-    for (auto h : mine) host->image_release(h);
-}
 
 } // namespace xi
 
@@ -1052,26 +744,9 @@ void xi_plugin_destroy(void* inst) {                                           \
 /* across the DLL boundary is UB. Catching in-plugin makes the boundary noexcept */ \
 /* in practice: the throw is caught in the same runtime that raised it, and the  */ \
 /* host sees a safe sentinel instead of a corrupt unwind. Catch bodies allocate  */ \
-/* nothing (a bad_alloc catch must not re-throw).                                */ \
-extern "C" __declspec(dllexport)                                               \
-void xi_plugin_process(void* inst,                                             \
-                       const xi_record* input,                                 \
-                       xi_record_out* output) {                                \
-    auto* self = static_cast<ClassName*>(inst);                                \
-    try {                                                                      \
-        /* γ: build the input view / output doc under the host doc allocator,  */ \
-        /* return by doc-pointer when the input arrived as one (symmetric).    */ \
-        xi::HostDocAlcScope _xi_alc(self->host());                             \
-        xi::Record in_rec = xi::record_from_c(self->host(), input);            \
-        xi::Record out_rec = self->process(in_rec);                            \
-        xi::record_to_c(self->host(), out_rec, output, input->doc != nullptr); \
-    } catch (const std::exception& e) {                                        \
-        std::fprintf(stderr, "[xinsp2] plugin process() threw: %s\n", e.what()); \
-    } catch (...) {                                                            \
-        std::fprintf(stderr, "[xinsp2] plugin process() threw (non-std)\n");   \
-    } /* on throw: output stays host-initialised (empty) — no crash */         \
-}                                                                              \
-                                                                               \
+/* nothing (a bad_alloc catch must not re-throw). THE CUT (v12): the Record      */ \
+/* xi_plugin_process trampoline is gone — the sole data plane is the xi.pack@1    */ \
+/* door published by XI_PLUGIN_PACK_DOOR (below).                                 */ \
 extern "C" __declspec(dllexport)                                               \
 int xi_plugin_exchange(void* inst, const char* cmd,                            \
                        char* rsp, int rsplen) {                                \
@@ -1127,18 +802,11 @@ int xi_plugin_set_def(void* inst, const char* json) {                          \
 extern "C" __declspec(dllexport)                                               \
 int xi_plugin_abi_version(void) {                                              \
     return XI_ABI_VERSION;                                                     \
-}                                                                              \
-                                                                               \
-/* yyjson layout stamp (ABI v3, γ). The host hands this plugin a raw          */ \
-/* yyjson_mut_doc* (in-process zero-serialize) ONLY if this stamp matches     */ \
-/* the host's own — so a prebuilt plugin carrying a different yyjson version  */ \
-/* /layout transparently falls back to the JSON data/len path instead of      */ \
-/* dereferencing an incompatible struct. Mixes the yyjson version with the    */ \
-/* two struct sizes the doc-pointer path depends on. */                        \
-extern "C" __declspec(dllexport)                                               \
-uint32_t xi_yyjson_abi(void) {                                                 \
-    return xi::yyjson_layout_stamp();                                          \
 }
+/* THE CUT (v12): the xi_yyjson_abi export is gone. It gated the in-process
+   yyjson doc-pointer fast path of the Record process() dispatch — a path that
+   no longer exists (xi::Record deleted; the data plane is the xi.pack@1 door,
+   which crosses the ABI as an opaque handle and needs no layout stamp). */
 
 // Opt into the ABI v7 frame-perfect config swap. Place AFTER XI_PLUGIN_IMPL.
 // ONLY use this if your plugin OVERRIDES prepare()/commit() with a real double-
@@ -1173,7 +841,8 @@ void xi_plugin_commit(void* inst) {                                            \
 // XI_PLUGIN_IMPL, ONLY if your plugin OVERRIDES process(PackIn&,PackOut&).
 // It exports xi_plugin_get_interface — the plugin-side capability door (the
 // synthesis §3 "pure door" dry run) — which the host probes to learn the plugin
-// speaks packs. The Record process() path is untouched; a plugin has BOTH.
+// speaks packs. THE CUT (v12): this is the SOLE data-plane door — the Record
+// process() path was removed, so a data-plane plugin MUST publish this.
 // The trampoline catches C++ exceptions in-plugin (same defense-in-depth as the
 // XI_PLUGIN_IMPL exports): the boundary is noexcept in practice.
 #define XI_PLUGIN_PACK_DOOR(ClassName)                                        \
