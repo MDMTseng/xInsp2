@@ -13,8 +13,8 @@
 namespace xi::synced_stereo {
 
 struct SyncedStereoSchema : xi::PackSchema<SyncedStereoSchema> {
-    static constexpr std::array<std::string_view, 2> keys = { "left", "right" };
-    enum : int { kLeft, kRight };
+    static constexpr std::array<std::string_view, 3> keys = { "left", "right", "seq" };
+    enum : int { kLeft, kRight, kSeq };
 };
 
 }  // namespace xi::synced_stereo

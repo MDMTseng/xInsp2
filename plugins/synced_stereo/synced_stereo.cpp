@@ -1,27 +1,42 @@
 //
 // synced_stereo.cpp — synthetic stereo camera: a GATHERING source that grabs
-// both cameras and emits left+right in ONE record. Multi-camera sync needs no
-// bus policy — the frames are correlated because they ride the same record.
+// both cameras and emits left+right in ONE event. Multi-camera sync needs no
+// bus policy — the frames are correlated because they ride the same container.
 //
 // Per tick:
 //   1. Build two distinct frames (left = vertical stripes, right = horizontal)
 //      stamped with the same `seq` so the script can verify they really come
 //      from the same event.
-//   2. emit(Record().image("left", L).image("right", R))  // the RAII source path
+//   2. emit them together, under ONE trigger, in whichever currency is active:
+//        * DEFAULT — emit(Record().image("left", L).image("right", R))
+//        * pack_mode — one sealed xi.pack@1 Pack carrying left+right images +
+//          the seq entry, adopting the same pool slots (zero-copy addref).
 //
-// The dispatched event carries both images; the script reads them via
-// xi::current_trigger().image("left") and .image("right").
+// polaris2 wave-2 (docs/new_gen/10 Pack migration, gate P1): the plugin is
+// BILINGUAL. The Record path is byte-for-byte the original; pack_mode is an
+// opt-in config (default OFF) that only flips the emit currency — the gathering
+// semantic (both images, one trigger) is IDENTICAL either way, and a single
+// sealed Pack with two image entries is exactly what showcases it. A host
+// without the xi.pack@1 plane degrades safely back to the Record path.
+//
+// The dispatched event carries both images; a script reads them via
+// xi::current_trigger().image("left")/.image("right") (Record) or the pack
+// door / expose walk (Pack).
 //
 
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
 #include <xi/xi_thread.hpp>   // xi::spawn_worker — SEH-safe capture thread
 
+#include "synced_stereo_keys.gen.h"   // the ONE key contract (kLeft/kRight/kSeq/kPackMode)
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <thread>
+
+namespace keys = xi::synced_stereo::keys;
 
 class SyncedStereo : public xi::Plugin {
 public:
@@ -52,6 +67,7 @@ public:
             .set("running", running_.load())
             .set("fps", fps_.load())
             .set("ticks", (int)ticks_.load())
+            .set(keys::kPackMode, pack_mode_.load())
             .dump();
     }
 
@@ -59,6 +75,10 @@ public:
         auto p = xi::Json::parse(json);
         if (!p.valid()) return false;
         fps_ = p["fps"].as_int(fps_.load());
+        // polaris2 wave-2: opt into the sealed-Pack emit currency (default false).
+        // Absent key leaves the current mode (a legacy config keeps emitting the
+        // two-image Record).
+        if (p[keys::kPackMode].valid()) pack_mode_ = p[keys::kPackMode].as_bool(false);
         return true;
     }
 
@@ -68,6 +88,7 @@ private:
     // Written from the control thread (exchange/set_def), read by run_loop_()'s
     // worker — atomic for the same reason mock_camera's config fields are.
     std::atomic<int>  fps_{10};
+    std::atomic<bool> pack_mode_{false};   // polaris2 wave-2 emit currency (default OFF)
     std::thread       thread_;
 
     void start_() {
@@ -107,12 +128,27 @@ private:
         std::memcpy(lp, &seq, sizeof(seq));
         std::memcpy(rp, &seq, sizeof(seq));
 
-        // Both frames in ONE record → one dispatched event, no bus policy.
-        // emit() fills host()/name() and runs the RAII marshal/refcount path.
-        xi::Record rec = xi::Record()
-            .image("left",  L)
-            .image("right", R);
-        emit(rec);
+        // polaris2 wave-2: in pack mode, gather the correlated pair into ONE
+        // sealed Pack — both images plus the seq entry under a single trigger.
+        // adopt_image is a zero-copy pool-handle addref (the same pool slots the
+        // Record path would hand over), so the pixels are identical to the
+        // default path; only the emit currency differs. Taken only when a project
+        // set pack_mode AND the host publishes xi.pack@1 — otherwise the Record
+        // path below (byte-for-byte the original) runs.
+        if (pack_mode_.load() && pack_iface()) {
+            xi::PackOut f = new_pack();
+            f.i64(keys::kSeq, seq);
+            f.adopt_image(keys::kLeft,  W, H, 1, L.pool_handle());
+            f.adopt_image(keys::kRight, W, H, 1, R.pool_handle());
+            emit(std::move(f));
+        } else {
+            // Both frames in ONE record → one dispatched event, no bus policy.
+            // emit() fills host()/name() and runs the RAII marshal/refcount path.
+            xi::Record rec = xi::Record()
+                .image("left",  L)
+                .image("right", R);
+            emit(rec);
+        }
         ticks_++;
     }
 

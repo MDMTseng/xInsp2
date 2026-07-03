@@ -4,6 +4,7 @@
 
 export interface SyncedStereoConfig {
   fps?: number;
+  pack_mode?: boolean;
   running?: boolean;
   ticks?: number;
 }
