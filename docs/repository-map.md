@@ -53,9 +53,10 @@ are no external consumers yet (first-party only).
 
 | Package | Purpose / owner | Ships? | Version | Build | Test | Outputs | Compatibility boundary |
 |---|---|---|---|---|---|---|---|
-| `backend/` | The core: `xi::*` headers, WS server, sharded ImagePool, TriggerBus, SEH crash translation, JIT script/plugin compile. Owns `xinsp-backend.exe` (interactive WS server) + `xinsp-runner.exe` (headless production runner). | Yes | 0.2.0 | `cmake -S backend -B backend/build -A x64 …; cmake --build backend/build --config Release` | `ctest --test-dir backend/build -C Release` | `xinsp-backend.exe`, `xinsp-runner.exe` (+ auto-copied OpenCV/turbojpeg/IPP DLLs) | **Publishes plugin ABI v11**; requires OpenCV 4.x at build+runtime |
+| `backend/` | The core: `xi::*` headers, WS server, sharded ImagePool, TriggerBus, SEH crash translation, JIT script/plugin compile. The polaris2 line added the **pack plane** (`xi_pack.hpp` container, `xi_pack_abi.hpp` host door, `xi_pack_contract.hpp` reserved `$`-keys/fault contract, `xi_mp.hpp` canonical msgpack codec, `xi_ingress.hpp` untrusted-bytes edge), the **capability plane** (`xi_cap_abi.hpp` + `xi_cap_guard.hpp`), and the script-side pack/state surface (`xi_script_pack.hpp`, `xi_kv.hpp`) — see [`internals/pack-plane.md`](./internals/pack-plane.md). Owns `xinsp-backend.exe` (interactive WS server) + `xinsp-runner.exe` (headless production runner). | Yes | 0.2.0 | `cmake -S backend -B backend/build -A x64 …; cmake --build backend/build --config Release` | `ctest --test-dir backend/build -C Release` | `xinsp-backend.exe`, `xinsp-runner.exe` (+ auto-copied OpenCV/turbojpeg/IPP DLLs) | **Publishes plugin ABI v11**; requires OpenCV 4.x at build+runtime |
 | `fe/` (built via `backend/`) | FE-supervisor header surface (`xi_fe_status`, crash history/report, respawn policy, safe-state). Spawns + monitors the backend, drives the line safe on backend death, respawns rate-limited. Header-only here; the `xinsp-fe.exe` target lives in `backend/CMakeLists.txt`. | Yes | 0.2.0 (shares `XINSP2_VERSION`) | Built as target `xinsp_fe` in the backend CMake build | Covered by backend `ctest` (FE status/crash-history unit tests) | `xinsp-fe.exe` (links neither `xi_core` nor OpenCV) | Reads BE heartbeat/status files; no ABI surface of its own |
-| `protocol/` | WS protocol **fixtures** (`fixtures/cmd_run.json`) used to pin the wire format. Reference doc is [`reference/ws-protocol.md`](./reference/ws-protocol.md). | Ships as test/reference data (not a binary) | unspecified (no manifest) | n/a | Consumed by `test_protocol` (C++) and `protocol.test.mjs` (TS) | JSON fixtures | WS wire format (see ws-protocol.md) |
+| `protocol/` | WS protocol **fixtures** (`fixtures/cmd_run.json`) used to pin the wire format, plus the binary goldens: `fixtures/binary/v3_*.bin` (the **XEX1-v3 pack goldens** — minimal / scalars / image / nested / bool) and `fixtures/canonical/*.bin` (canonical-msgpack vectors incl. `hostile_*` adversarial inputs for the ingress edge). Reference doc is [`reference/ws-protocol.md`](./reference/ws-protocol.md). | Ships as test/reference data (not a binary) | unspecified (no manifest) | n/a | Consumed by `test_protocol` (C++), `protocol.test.mjs` (TS), `test_mp_fixtures` / ingress tests (binary goldens) | JSON + binary fixtures | WS wire format (see ws-protocol.md) + the XEX1-v3 / canonical-msgpack byte formats |
+| `contract/` | The three-legged **wire-contract system**: `schemas/` (JSON Schema per WS message + `xex1-frame.schema.json`), `plugins/*.decl.json` + `codegen/` (`gen_contract.py` → per-plugin `_keys.gen.h` / `_io.gen.h` / `_schema.gen.h` / `.gen.ts` / `_gen.py`; `gen_types.py` for shared types; `check_equiv.py` cross-language equivalence), and the gates: `validate.py` + `baseline_gate.py` (static, run in the gate's `docs` stage) and `live_conformance.py` (live WS bytes vs schemas, the gate's `live` stage). | Test/reference + codegen tooling | unspecified (no manifest) | `python contract/codegen/gen_contract.py` (regenerates bindings) | `validate.py`, `baseline_gate.py`, `live_conformance.py` (via `tools/gate.py`) | Generated bindings under `codegen/generated/` | The WS wire format + per-plugin pack key contracts |
 
 ### Authoring
 
@@ -76,7 +77,7 @@ are no external consumers yet (first-party only).
 | Package | Purpose / owner | Ships? | Version | Build | Test | Outputs | Compatibility boundary |
 |---|---|---|---|---|---|---|---|
 | `hmi/` | Standalone browser SPA operator dashboard (v1.0 — RUN mode). The single WS client of an FE-supervised backend; subscribes to live `vars` + image preview and renders a `dashboard.json`-described card grid. No build step in v1 — plain ES modules; imports `xi-components` from `lib/`. | Yes | 1.0 (per its README title; no package manifest) | No build step (plain `.mjs`); serve via `serve.mjs` | unspecified (served + exercised manually / via ui-components suites) | Static SPA (`index.html` + `app.mjs`) | WS client of a 0.2.0 backend; consumes `xi-components` ESM |
-| `tools/` | Deployment + release tooling: `build_release.mjs` (release zip), `export_bundle.py` / AOT bundle, plus the Python client above. | Yes (dev/release tooling) | unspecified | `node tools/build_release.mjs`, `python tools/export_bundle.py …` | unspecified | `release/xinsp2-<version>-win-x64.zip`; AOT project bundles | n/a |
+| `tools/` | Deployment + release tooling: `build_release.mjs` (release zip), `export_bundle.py` / AOT bundle, plus the Python client above. Also **`gate.py` — the one pre-merge gate**: 8 stages run in order (`docs` → `build` → `sdk` → `ctest` → `fixtures` → `live` → `qa` → `fuzz`), covering the doc-freeze + contract static gates, backend/plugin Release build, SDK template compiles, the full ctest suite, Python/protocol fixtures, live WS contract conformance, the `examples/qa_*` regression sweep, and the fuzz smoke. `python tools/gate.py` (stops at the first failing stage unless `--keep-going`). | Yes (dev/release tooling) | unspecified | `node tools/build_release.mjs`, `python tools/export_bundle.py …` | `python tools/gate.py` | `release/xinsp2-<version>-win-x64.zip`; AOT project bundles | n/a |
 
 ### Shared / non-product
 
@@ -85,7 +86,7 @@ are no external consumers yet (first-party only).
 | `docs/` | Architecture, overview, testing, protocol/ABI reference, guides, internals, roadmap, ext_review. | Docs (in-tree) |
 | `examples/` | User-script examples + `crash_tests` + qa drivers (defect_detection, buffer_replay_demo, stereo_sync, …). | In-tree samples |
 | `tests/` | Cross-cutting fuzz harnesses (`fuzz/harness_*.py`, `run_smoke.py`). | Test-only |
-| `plugins/` | Shipped first-party plugins: `blob_analysis`, `cache`, `config_swap_probe`, `data_output`, `expose`, `json_source`, `mock_camera`, `record_save`, `synced_stereo`. Built via `plugins/CMakeLists.txt`. | Yes — plugin DLLs (**ABI v11**) |
+| `plugins/` | Shipped first-party plugins: `blob_analysis`, `cache`, `config_swap_probe`, `data_output`, `expose`, `json_source`, `mock_camera`, `record_save`, `record_replay` (XEX1-v3 replay source — re-emits `.xex1` dumps as sealed packs, byte-lossless round-trip), `synced_stereo`, and `imgcodec` (the first **lib plugin** — a capability provider with no data plane, registering `xi.jpeg.encode` / `xi.image.decode` through the capability plane; see [`reference/c-abi.md`](./reference/c-abi.md)). Built via `plugins/CMakeLists.txt`. | Yes — plugin DLLs (**ABI v11**) |
 
 ## Known-compatible set
 
@@ -93,7 +94,7 @@ What we build and test together today (from the root `README.md`):
 
 | Backend | Extension | ui-components | Python client | ABI |
 |---|---|---|---|---|
-| 0.2.0 | 0.2.0 | 0.1.0 | 0.1.0 | v11 |
+| 0.2.0 | 0.2.0 | 0.1.0 | 0.2.0 | v11 |
 
 Pin to this row until 1.0 and a formal support policy.
 

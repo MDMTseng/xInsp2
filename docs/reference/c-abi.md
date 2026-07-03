@@ -124,10 +124,11 @@ struct layout). A pack plugin does NOT write these by hand — it overrides
 untouched, so the instance speaks **both** currencies. A contract failure
 (missing/wrong entry) is a normal sealed pack stamped with a `$fault` reason
 code (`contract/canonical-profile-notes.md` § "Pack-shaped fail-loud"), not
-`XI_PACK_NULL` (which is reserved for a hard internal failure). See
-`docs/new_gen/07-uniform-keyed-buffer-plane.md`, `docs/new_gen/08-polaris2-main-plan.md`
-(Wave 2), and the pilot pair `plugins/mock_camera` (pack-mode emit) +
-`plugins/blob_analysis` (pack door).
+`XI_PACK_NULL` (which is reserved for a hard internal failure). The exact
+vtables (incl. the capability plane that rides the same door) are in **§6**
+below; see also `docs/new_gen/07-uniform-keyed-buffer-plane.md`,
+`docs/new_gen/08-polaris2-main-plan.md` (Wave 2), and the pilot pair
+`plugins/mock_camera` (pack-mode emit) + `plugins/blob_analysis` (pack door).
 
 ### Lifecycle
 
@@ -316,7 +317,210 @@ typedef struct {
 
 ---
 
-## 6. Plugin manifest — `plugin.json`
+## 6. The `get_interface` planes — pack + capabilities (polaris2)
+
+Everything in this section rides `get_interface` in one direction or the other
+— **zero new `xi_host_api` slots**, so the frozen v11 struct and the freeze
+guard are untouched. Canonical source: `xi_abi.h` (the vtables) +
+`xi_pack_abi.hpp` / `xi_cap_abi.hpp` (the host implementations).
+
+### 6.1 `xi.pack@1` (host door) — the Pack value-type ABI
+
+`host->get_interface("xi.pack", 1)` → `const xi_pack_v1*`. Resolve once (at
+`create`) and cache — the vtable address is process-stable. The pack crosses the
+ABI as an **opaque handle** + accessor functions (spans in / spans out), never
+raw struct layout. Two handle types:
+
+- `xi_pack_handle` — a **sealed, immutable, refcounted** pack
+  (`retain`/`release`, the Pack analogue of `image_addref`/`image_release`).
+  `XI_PACK_NULL` = no pack / hard failure.
+- `xi_pack_builder` — a pre-seal, single-owner builder; `builder_seal`
+  **consumes** it into a pack handle (refcount 1, caller owns);
+  `builder_abandon` drops an unsealed one (releasing any handles it minted).
+
+Entry type tags cross as `XI_PACK_TAG_*` and match `xi::PackTag` 1:1 — values
+frozen: `I64`=0, `F64`=1, `STR`=2, `BIN`=3, `IMAGE`=4, `MP`=5, and `BOOL`=6
+(**appended**, pack-plane hardening — earlier values never move).
+
+```c
+typedef struct xi_pack_v1 {
+    /* builder (produce) */
+    xi_pack_builder (*builder_new)(void);
+    void (*builder_add_i64)(xi_pack_builder b, const char* key, int64_t v);
+    void (*builder_add_f64)(xi_pack_builder b, const char* key, double v);
+    void (*builder_add_str)(xi_pack_builder b, const char* key, const char* s, int32_t len);
+    void (*builder_add_bin)(xi_pack_builder b, const char* key, const void* data, int32_t len);
+    void (*builder_add_image)(xi_pack_builder b, const char* key,
+                              int32_t w, int32_t h, int32_t c, const void* pixels);
+    void (*builder_adopt_image)(xi_pack_builder b, const char* key,
+                                int32_t w, int32_t h, int32_t c, xi_image_handle handle);
+    void (*builder_add_mp)(xi_pack_builder b, const char* key, const void* mp, int32_t len);
+    xi_pack_handle (*builder_seal)(xi_pack_builder b);      /* consumes b */
+    void (*builder_abandon)(xi_pack_builder b);
+
+    /* accessors (consume a sealed pack) */
+    int32_t     (*count)(xi_pack_handle f);
+    const char* (*key_at)(xi_pack_handle f, int32_t i, int32_t* len);
+    int32_t     (*tag_at)(xi_pack_handle f, int32_t i);        /* XI_PACK_TAG_*, -1 OOB */
+    int32_t     (*tag_of)(xi_pack_handle f, const char* key);  /* -1 if absent */
+    int32_t     (*get_i64)(xi_pack_handle f, const char* key, int64_t* out);
+    int32_t     (*get_f64)(xi_pack_handle f, const char* key, double* out);
+    int32_t     (*get_str)(xi_pack_handle f, const char* key, const char** ptr, int32_t* len);
+    int32_t     (*get_bin)(xi_pack_handle f, const char* key, const void** ptr, int32_t* len);
+    int32_t     (*get_image)(xi_pack_handle f, const char* key, xi_pack_image* out);
+    int32_t     (*get_mp)(xi_pack_handle f, const char* key, const void** ptr, int32_t* len);
+
+    /* lifetime */
+    void (*retain)(xi_pack_handle f);
+    void (*release)(xi_pack_handle f);
+
+    /* emit into host dispatch */
+    void (*emit_pack)(const char* emitter, xi_trigger_id id,
+                      xi_pack_handle f, int64_t ts);
+
+    /* ---- ADDITIVE TAIL (pre-cutover): the BOOL entry type ---- */
+    void    (*builder_add_bool)(xi_pack_builder b, const char* key, int32_t v);
+    int32_t (*get_bool)(xi_pack_handle f, const char* key, int32_t* out);
+} xi_pack_v1;
+```
+
+Contract points:
+
+- **Getters are fail-closed.** Every getter returns 1 on success and 0 when the
+  key is absent **or** its stored tag differs from the requested type — no
+  silent coercion (an i64 `0`/`1` entry is *not* a bool). `str`/`bin`/`mp`/
+  `image` payloads are **borrowed** spans into the pack's arena / pool buffer,
+  valid until the caller's last `release` of the handle. `key_at` returns a
+  borrowed, **not NUL-terminated** span (keys live raw in the arena); `count` +
+  `key_at` + `tag_at` are the generic-enumeration primitives a
+  producer-agnostic consumer (`expose`, `record_save`) walks.
+- **`builder_add_mp` trusts.** It is for canonical bytes built by
+  `xi::mp::Writer` / a trusted producer. Foreign/untrusted msgpack must go
+  through the host ingress canonicalizer first
+  ([`../internals/pack-plane.md`](../internals/pack-plane.md) § Ingress).
+- **`emit_pack`** — a source hands a sealed pack to dispatch. The host takes
+  its **own** ref for the async event, so the caller may `release` immediately
+  after. `id == XI_TRIGGER_NULL` mints a fresh id; `ts == 0` stamps host-now.
+  No-op until a dispatch hook is installed. It stamps **nothing** — no
+  `$src`/`$prov` (an emitted pack's entry set is the producer's contract; see
+  §6.2 for the door-hop stamp).
+- **The additive tail + growth doctrine.** `builder_add_bool`/`get_bool` are
+  appended **after** every original field, so no existing offset moves — a
+  consumer built against the shorter v1 sees an identical prefix. This was
+  legal only because `xi.pack@1` had not shipped beyond the tree; **once it
+  has, further growth ships as `xi_pack_v2`** per the freeze doctrine (field
+  order frozen forever within a published version). NULL-check the tail
+  entries when consuming a foreign table. A canonical bool entry is the single
+  msgpack byte `0xc2`/`0xc3` (tag `XI_PACK_TAG_BOOL`); `v` is 0/1 and
+  `get_bool` writes 0/1.
+- **Reserved `$`-keys.** `$fault`/`$fault_key`/`$fault_detail` (fail-loud
+  contract failures), `$src`/`$prov` (provenance), `$seq` (ordering identity),
+  `$channel` (routing) — one home in `xi_pack_contract.hpp`; semantics in
+  [`../internals/pack-plane.md`](../internals/pack-plane.md).
+
+**The plugin-published mirror** (probed by the host, §1): `xi_pack_proc_v1` —
+`xi_pack_handle (*process)(void* inst, xi_pack_handle input)`. Input is
+borrowed (host owns it); the return is a **new** sealed pack the host takes
+ownership of. `XI_PACK_NULL` signals hard internal failure only; a contract
+failure is a normal sealed `$fault` pack. Authored via
+`process(PackIn&, PackOut&)` + `XI_PLUGIN_PACK_DOOR` — see
+[`../guides/write-a-plugin.md`](../guides/write-a-plugin.md).
+
+### 6.2 The capability plane — `xi.cap@1` / `xi.cap.provider@1`
+
+Lib plugins (capability providers with no data plane — nothing routes to them)
+register **named, pack-door-shaped** capabilities; consumers call them by name
+through the host forwarding funnel. Both directions ride `get_interface`:
+
+```c
+/* provider: get_interface("xi.cap.provider", 1) */
+typedef struct xi_cap_provider_v1 {
+    int32_t (*register_capability)(const char* name, xi_cap_handler_fn handler, void* self);
+    int32_t (*unregister_capability)(const char* name, void* self);
+} xi_cap_provider_v1;
+
+/* consumer: get_interface("xi.cap", 1) */
+typedef struct xi_cap_v1 {
+    int32_t (*call)(const char* name, xi_pack_handle in, xi_pack_handle* out);
+    int32_t (*available)(const char* name);   /* cheap 1/0 existence probe */
+} xi_cap_v1;
+
+typedef xi_pack_handle (*xi_cap_handler_fn)(void* self, xi_pack_handle input);
+```
+
+- **Name-only registry, versioning inside the pack.** Names carry no version
+  (`"xi.jpeg.encode"`, not `name@version`). Semantic versioning rides the
+  reserved i64 entry `"$v"` in the *request pack* — the provider dispatches on
+  it internally and answers an unsupported `$v` with a sealed `$fault` pack
+  naming its supported range; an absent `$v` means the documented default. A
+  request whose only entry is bool `"$probe": true` is a version/feature probe
+  (answer: str `"$versions"`, no work done). `get_interface`'s version
+  parameter versions only the transport vtables, frozen like every other
+  published interface.
+- **Registration is a lifecycle act.** It is attributed to the **calling
+  instance** via the thread's owner context (so identity costs no parameter)
+  and is legal only from lifecycle code — `create` / `set_def` / `prepare` /
+  `commit` / `exchange` / `destroy` — never from inside a data-plane door or a
+  capability handler (refused `XI_CAP_REG_ECONTEXT`). Same-owner re-register
+  **overwrites** (the `reinit` rebuild path); a name held by another live
+  instance is refused (`XI_CAP_REG_ETAKEN` — provider identity is
+  configuration, not a race to the slot). The registry is swept per owner on
+  destroy/rebuild, like leaked image handles and pack refs.
+- **Handlers must be thread-safe.** Funnel calls arrive concurrently from
+  multiple dispatch threads with **no** host serialization (no `CallScope`,
+  unlike the gated instance doors) — an ABI-contract requirement. The handler
+  runs under the lib instance's owner guard, so its pool/pack allocations are
+  attributed (and swept) like any other entry point. Pack ownership matches
+  the door: input borrowed, output a new sealed pack; on `XI_CAP_OK` the
+  **caller owns `*out`** (release via `xi_pack_v1.release`); on any error
+  `*out` is `XI_PACK_NULL`.
+- **`call()` result codes** (the funnel verdicts):
+
+  | rc | name | meaning |
+  |---|---|---|
+  | 0 | `XI_CAP_OK` | `*out` is the provider's sealed answer (caller owns) |
+  | −1 | `XI_CAP_EUNKNOWN` | no provider under this name / bad args |
+  | −2 | `XI_CAP_ECRASHED` | handler faulted mid-call — charged to the **lib** instance (its `on_fault` policy has run) |
+  | −3 | `XI_CAP_EQUARANTINED` | providing instance quarantined — handler not entered |
+  | −4 | `XI_CAP_ESHAPE` | provider entry unusable (no adapter / null handler) |
+  | −5 | `XI_CAP_EREENTRY` | refused: the target instance is already being called **on this thread** (per-thread acyclicity — both directions: a plugin calling a capability its own instance provides, and a handler calling back up its own chain). Refused before any lock or plugin code, so the CallScope deadlock dies at the door. |
+
+  Registration codes: `0` OK, `−1` `XI_CAP_REG_EINVAL` (null/empty name or
+  handler), `−2` `XI_CAP_REG_ECONTEXT`, `−3` `XI_CAP_REG_ETAKEN`.
+
+  > **Result-code namespaces are per-vtable.** The integers above belong to
+  > `xi_cap_v1.call` alone. The script use-door's pack `process()` has its own
+  > namespace where **−5 means "target is an ordered sink — use `push()`"**,
+  > not reentrancy (its −1…−4 also differ in wording: no instance / crashed /
+  > quarantined / no pack door). Never compare raw codes across funnels; each
+  > vtable documents its own.
+
+- Cross-thread concurrency is deliberately *not* flagged by the reentrancy
+  stack (providers contract to be thread-safe); only same-thread cycles are.
+- Exemplar: `plugins/imgcodec` — the first lib plugin (`"lib": true`,
+  `reentrant: true`, `on_fault: refuse`), registering `xi.jpeg.encode` +
+  `xi.image.decode` in its constructor and unregistering in its destructor.
+
+### 6.3 Optional script-DLL exports (polaris2)
+
+The script DLL's optional exports grew alongside the pack plane. Like every
+script thunk they are resolved by `GetProcAddress` and **optional** — an older
+script lacks them and the host degrades as noted (canonical list:
+`xi_script_loader.hpp`; the exporting side is generated by
+`xi_script_support.hpp` when the script uses the matching header):
+
+| Export | Purpose | Absent ⇒ |
+|---|---|---|
+| `xi_script_set_use_pack_callback` | Host wires the `xi::use(name).process(ScriptPack)` pack-door callback (gate P2). | `process(ScriptPack)` yields an empty pack |
+| `xi_script_set_use_push_pack_callback` | Host wires the `xi::use(sink).push(pack)` staged-push thunk. | pack push not wired |
+| `xi_script_set_run_id` | Per-run arrival id → the script's `xi::run_id()` (U3, ordering — the value a producer stamps as `"$seq"` before seal). | `xi::run_id()` reads 0 |
+| `xi_script_kv_get` / `xi_script_kv_set` | The kv channel (U2, post-Record script state): the store crosses as **canonical-msgpack bytes with explicit lengths** — never NUL-terminated (msgpack contains NULs). `get` uses the grow-and-retry convention (bytes written, or `-needed`); `0` = the store is empty. | only the Record state channel rides |
+| `xi_script_kv_schema_version` | The kv schema stamp (`XI_KV_SCHEMA(N)`), the kv sibling of `xi_script_state_schema_version`. | schema treated as 0 |
+| `xi_script_kv_change` | Typed migration hook across a hot-reload (old bytes + schemas in, migrated bytes out, same `-needed` convention); declining (≤ 0) drops the prior store, exactly like the Record channel. | prior kv store dropped on schema mismatch |
+
+---
+
+## 7. Plugin manifest — `plugin.json`
 
 ```json
 { "name": "my_plugin", "description": "...", "dll": "my_plugin.dll",

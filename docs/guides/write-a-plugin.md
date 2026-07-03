@@ -528,6 +528,105 @@ an object (its images are merged in under `"<key>.<imgkey>"`, not dropped);
 cross-doc copy verb that replaced the old raw `set_raw` escape hatch). See
 [`reference/data-types.md`](../reference/data-types.md).
 
+### Going bilingual — the pack door (polaris2)
+
+Alongside the Record, the host speaks a second data currency: the **Pack** — a
+sealed, immutable keyed buffer (`key → typed entry`; an image is just an entry)
+that crosses the ABI as an opaque handle
+([`../internals/pack-plane.md`](../internals/pack-plane.md)). Both currencies
+live side by side until THE CUT, and one instance can speak both: your Record
+`process()` is untouched; you *add* the pack door. Three lines of mechanics:
+
+```cpp
+class BlobAnalysis : public xi::Plugin {
+public:
+    using xi::Plugin::Plugin;
+    using xi::Plugin::process;   // REQUIRED: keep the Record overload visible
+                                 // (C++ overload hiding — overriding only the
+                                 // pack door would hide process(const Record&))
+
+    xi::Record process(const xi::Record& in) override { /* unchanged */ }
+
+    // The pack door: sealed pack in (borrowed), entries out.
+    void process(xi::PackIn& in, xi::PackOut& out) override {
+        auto gray = in.image("gray");                    // zero-copy view
+        if (!gray || !gray->pixels) {
+            out.fault(xi::contract::kMissingInput, "gray",
+                      "blob_analysis(pack): required image 'gray' is missing");
+            return;                                      // fault = a NORMAL pack
+        }
+        const int  thresh = (int)in.i64_or("threshold", 128);
+        const bool invert = in.bool_or("invert", false); // reads BOOL, or legacy i64 0/1
+        // ... compute ...
+        out.image("binary", w, h, 1, bin.data());
+        out.i64("blob_count", (int64_t)count);
+        out.boolean("pass", count > 0);                  // a real BOOL entry
+    }
+};
+XI_PLUGIN_IMPL(BlobAnalysis)
+XI_PLUGIN_PACK_DOOR(BlobAnalysis)     // publishes xi_plugin_get_interface("xi.pack", 1)
+```
+
+`XI_PLUGIN_PACK_DOOR` (after `XI_PLUGIN_IMPL`) exports the door the host probes
+to learn you speak packs; a Record-only plugin simply doesn't add it. The
+worked exemplars: `plugins/blob_analysis` (processor door, contract-generated
+keys), `plugins/expose` (a **generic sink** — walks any pack with
+`in.count()` / `in.key_at(i)` / `in.tag_at(i)` without knowing its producer),
+`plugins/mock_camera` (pack-mode emit), `plugins/record_replay` (replay
+source).
+
+**Faults, not nulls.** A *contract* failure (missing input, wrong type) is a
+**normal sealed pack** carrying `$fault` — that's what `out.fault(code, key,
+detail)` writes (reuse the `xi::contract` reason codes) — so the caller always
+gets a pack to route. `XI_PACK_NULL` is reserved for hard internal failure (the
+macro glue returns it if your door throws). A fault input never reaches you at
+all: the host short-circuits it, minting a propagated fault pack with your hop
+appended — so your door body can assume a non-fault input.
+
+**`$src`/`$prov` are stamped for you — at the door.** On every **non-empty**
+door output the glue stamps, *before seal* (sealed packs are immutable):
+`$src` = your instance name, `$prov` = the input's chain + your hop
+(`"cam0/det0"` style, oldest→newest). To override, call `out.src(...)` /
+`out.prov(...)` — those exact methods, not a raw `out.str("$src", ...)`; the
+glue detects only them. An **untouched** `PackOut` seals *empty* and gets no
+stamp — empty is the door's absence sentinel, and stamping identity onto
+nothing would turn absence into presence.
+
+**What `emit()` does NOT stamp.** A pack *source* (`auto p = new_pack(); …
+emit(std::move(p));`) gets **no** automatic `$src`/`$prov` — an emitted pack's
+entry set is the producer's contract (`record_replay` must re-emit disk dumps
+byte-identical; a gatherer's published shape must not grow surprise entries).
+Want attribution on an emitted pack? Call `p.src(name())` yourself. Same for
+ordering: the host can't stamp `"$seq"` into a sealed pack, so a producer that
+wants seq-correlation adds `p.i64("$seq", xi::run_id())` before seal.
+
+**Bool entries.** `out.boolean()` writes a real BOOL-tagged entry (the additive
+v1 tail; on a host without the tail it degrades to i64 0/1). Reads are
+fail-closed per tag — `in.boolean()` won't coerce an i64 — so when you accept
+both eras, read with `in.bool_or(key, def)`, which tries BOOL then legacy
+i64 0/1.
+
+**Structured results** (arrays, nested objects) go in as **one nested
+canonical-msgpack entry**: build with `xi::mp::Writer`, add with `out.mp(key,
+bytes, len)` — see how `blob_analysis` packs its per-blob array (contours
+included) into a single `"blobs"` entry. And prefer contract-generated key
+constants (`contract/plugins/<name>.decl.json` → `<name>_keys.gen.h`) over
+string literals, so producer and consumers can't drift.
+
+**Lib plugins — capability providers (the imgcodec pattern).** A plugin whose
+job is a *service* other plugins call (an encoder, a decoder, a model runner)
+doesn't need a data plane at all: register **named capabilities** instead.
+From lifecycle code (constructor is fine — never from inside a door), resolve
+`host->get_interface("xi.cap.provider", 1)` and register a pack-door-shaped
+handler per capability name (`"xi.jpeg.encode"`); unregister in your
+destructor. Consumers call it by name via `get_interface("xi.cap", 1)` →
+`call(name, in, &out)`. Handlers **must be thread-safe** (the funnel does not
+serialize them), version via the `"$v"` entry *inside* the request pack, and
+answer a bool `"$probe": true` request with a `"$versions"` string doing no
+work. `plugins/imgcodec` (`"lib": true`, `reentrant: true`,
+`on_fault: refuse`) is the reference; the exact vtables + result codes are in
+[`../reference/c-abi.md`](../reference/c-abi.md) §6.
+
 ### Test `process()` headlessly — `xi_run_plugin`
 
 To exercise a plugin's `process()` on an image **without** VS Code / the backend /
