@@ -58,6 +58,7 @@
 #include "xi_sha256.hpp"         // sha256_file (content-hash cache key)
 #include "xi_trigger_bus.hpp"    // install_trigger_hook
 #include "xi_pack_abi.hpp"      // polaris2 wave-2: install_pack_abi (xi.pack@1 door)
+#include "xi_cap_abi.hpp"       // capability plane pilot (doc 14): install_cap_plane
 
 #include <cstdio>
 #include <filesystem>
@@ -150,6 +151,8 @@ inline int certify_in_process(const std::string& plugin_dir) {
     xi_host_api host = ImagePool::make_host_api();
     install_trigger_hook(host);
     install_pack_abi();   // polaris2 wave-2: certify a pack-capable plugin against a live xi.pack@1 door
+    install_cap_plane();  // doc 14 pilot: certify a lib plugin against a live registration door
+                          // (this child process is throwaway — registrations die with it)
 
     void* inst = nullptr;
     // Catch ONLY genuine C++ exceptions (a clean refuse — the real factory sites

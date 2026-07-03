@@ -1,0 +1,346 @@
+#pragma once
+//
+// xi_cap_abi.hpp — the HOST side of the capability plane (docs/new_gen/14,
+// polaris2 pilot): lib plugins register named, pack-door-shaped capabilities;
+// consumers call them by NAME through the host forwarding funnel. The plane
+// costs ZERO xi_host_api slots — both directions ride get_interface:
+//
+//   provider: get_interface("xi.cap.provider", 1) -> xi_cap_provider_v1
+//   consumer: get_interface("xi.cap", 1)          -> xi_cap_v1
+//
+// This header is the sibling of xi_pack_abi.hpp and follows its shape exactly:
+//
+//   * CapRegistry — the NAME-ONLY registry: capability name -> {handler, self,
+//     owning instance}. Names carry no version; semantic versioning rides
+//     INSIDE the request pack as the reserved "$v" i64 entry (the provider
+//     dispatches internally and answers an unsupported "$v" with a sealed
+//     $fault pack), and "$probe": true asks for the supported versions with no
+//     work done. Registration is attributed to the CALLING instance via the
+//     thread's ImagePool owner context (the same context every plugin entry
+//     point already runs under), and is legal ONLY from lifecycle code —
+//     create / set_def / prepare / commit / exchange / destroy — never from a
+//     data-plane door or a capability handler (xi_cap_guard.hpp's depth mark).
+//
+//   * cap_call_funnel — the forwarding funnel, mirroring use_pack_process_cb's
+//     discipline (backend/src/service_sinks.cpp) in NEW code: quarantine
+//     fail-fast (-3), pending-reinit applied before entry, SEH wrap with the
+//     fault CHARGED TO THE LIB INSTANCE (its on_fault policy: reuse / reinit /
+//     refuse->quarantine) (-2), unknown name (-1), unusable entry (-4), and
+//     doc 14's one new invariant: per-thread acyclicity — forwarding into an
+//     instance already being called on THIS thread is refused with -5
+//     (XI_CAP_EREENTRY) before any lock or plugin code is reached, in BOTH
+//     directions (a plugin calling back into itself through a capability, and
+//     a capability handler calling back up its own call chain).
+//
+//   * install_cap_plane() — publishes the two vtables + the owner sweeper into
+//     ImagePool's slots (the same layering bridge as install_pack_abi), so
+//     host->get_interface answers both ids. Idempotent; call next to
+//     install_pack_abi (default_host_api / tests).
+//
+// NO CallScope around the handler: providers CONTRACT to be thread-safe
+// (funnel calls arrive concurrently from multiple dispatch threads) — an
+// ABI-contract requirement, same as the pack vtable. The handler runs under
+// OwnerGuard(provider) so its pool/pack allocations are attributed to the lib
+// instance exactly like every other entry point.
+//
+
+#include "xi_abi.h"           // xi_cap_v1 / xi_cap_provider_v1 / result codes
+#include "xi_cap_guard.hpp"   // reentrancy stack + data-plane depth (leaf)
+#include "xi_cabi_adapter.hpp"// CAbiInstanceAdapter (quarantine/on_fault surface)
+#include "xi_fault_policy.hpp"// OnFault + kReinitEscalateAfter
+#include "xi_health.hpp"      // health overlay marks (quarantine/recovered)
+#include "xi_image_pool.hpp"  // owner context + the publish slots
+#include "xi_instance.hpp"    // InstanceRegistry (owner -> live adapter)
+#include "xi_seh.hpp"         // seh_exception + recover_seh_stack_or_die
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
+namespace xi {
+
+// Mirrors g_pack_registry_alive: readable after the Meyers singleton is gone at
+// process exit, so late teardown sweeps (a static-destruction adapter dtor)
+// skip the registry instead of touching a destroyed object.
+inline std::atomic<bool> g_cap_registry_alive{false};
+
+// ===================================================================
+// CapRegistry — capability name -> providing instance's handler.
+// ===================================================================
+class CapRegistry {
+public:
+    struct Entry {
+        xi_cap_handler_fn handler = nullptr;
+        void*             self    = nullptr;
+        ImagePoolOwnerId  owner   = 0;      // the providing instance's identity
+    };
+
+    static CapRegistry& instance() {
+        static CapRegistry r;
+        g_cap_registry_alive.store(true, std::memory_order_release);
+        return r;
+    }
+    ~CapRegistry() { g_cap_registry_alive.store(false, std::memory_order_release); }
+
+    // Caller has already validated args + lifecycle context (f_cap_register).
+    // Same-owner re-registration OVERWRITES (the reinit path: the fresh factory
+    // re-registers over its predecessor); a name held by ANOTHER live instance
+    // is refused — provider identity is configuration, not a race to the slot.
+    int32_t register_capability(const char* name, xi_cap_handler_fn handler,
+                                void* self, ImagePoolOwnerId owner) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(name);
+        if (it != entries_.end() && it->second.owner != owner)
+            return XI_CAP_REG_ETAKEN;
+        entries_[name] = Entry{handler, self, owner};
+        return XI_CAP_REG_OK;
+    }
+
+    // Unregister by name, gated on the calling instance's identity (only the
+    // owner may drop its registration; `self` is not trusted as identity).
+    int32_t unregister_capability(const char* name, ImagePoolOwnerId owner) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(name);
+        if (it == entries_.end() || it->second.owner != owner)
+            return XI_CAP_REG_EINVAL;
+        entries_.erase(it);
+        return XI_CAP_REG_OK;
+    }
+
+    bool lookup(const char* name, Entry* out) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(name);
+        if (it == entries_.end()) return false;
+        if (out) *out = it->second;
+        return true;
+    }
+
+    // The owner sweep — the registration analogue of PackRegistry::
+    // release_all_for. Drops every capability the dying (or about-to-be-
+    // rebuilt) instance still provides; returns the count for the teardown
+    // diagnostic.
+    int unregister_all_for(ImagePoolOwnerId owner) {
+        if (owner == 0) return 0;
+        std::lock_guard<std::mutex> lk(mu_);
+        int n = 0;
+        for (auto it = entries_.begin(); it != entries_.end();) {
+            if (it->second.owner == owner) { it = entries_.erase(it); ++n; }
+            else ++it;
+        }
+        return n;
+    }
+
+    size_t size() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return entries_.size();
+    }
+
+private:
+    std::mutex mu_;
+    std::unordered_map<std::string, Entry> entries_;
+};
+
+namespace cap_abi_detail {
+
+// ---- optional service enrichment hooks -------------------------------------
+// The funnel's fault mechanics (on_fault policy + health overlay) are complete
+// header-side; the SERVICE additionally keeps crash-loop counts + a recent-
+// errors ring + crash-culprit forensics (note_instance_crash_ / stamp_culprit_,
+// service-layer state this header cannot reach). It installs these hooks at
+// startup; tests and headless hosts run fine without them.
+using CapFaultNoteFn = void (*)(const char* instance, const char* why);
+using CapPrecallFn   = void (*)(const char* instance, const char* plugin);
+inline std::atomic<CapFaultNoteFn>& fault_note_slot() {
+    static std::atomic<CapFaultNoteFn> s{nullptr};
+    return s;
+}
+inline std::atomic<CapPrecallFn>& precall_slot() {
+    static std::atomic<CapPrecallFn> s{nullptr};
+    return s;
+}
+
+// ---- item-14 fault mechanics, capability-funnel edition ---------------------
+// Same POLICY semantics as service_sinks.cpp's quarantine_instance_ /
+// apply_on_fault_policy_ / apply_pending_reinit_, factored as NEW functions
+// (this funnel is a new code path; the service statics stay untouched).
+inline void quarantine_(CAbiInstanceAdapter* a) {
+    if (a->quarantined()) return;
+    a->set_quarantined(true);
+    health().mark_instance_fault(a->name(), CompHealth::Failed, kReasonQuarantined);
+}
+inline void apply_on_fault_(CAbiInstanceAdapter* a) {
+    switch (a->on_fault()) {
+        case OnFault::Reuse:  break;
+        case OnFault::Reinit: a->request_reinit(); break;
+        case OnFault::Refuse: quarantine_(a); break;
+    }
+}
+inline void apply_pending_reinit_(CAbiInstanceAdapter* a) {
+    if (a->reinit()) {
+        a->reset_reinit_fails();
+        health().clear_instance_degraded(a->name());
+    } else if (a->note_reinit_fail() >= kReinitEscalateAfter) {
+        quarantine_(a);
+    }
+}
+
+// Resolve the providing instance by its owner identity. Registration happens
+// in the plugin FACTORY (before the adapter exists in the registry), so a call
+// racing instance creation resolves nothing and fails soft (-4); once the
+// instance is in service the scan finds it. Linear over live instances —
+// bounded small, and the plane is sized for HEAVY calls (doc 14 sizing
+// doctrine), so the scan is noise. The returned shared_ptr pins the instance
+// for the duration of the call.
+inline std::shared_ptr<InstanceBase> resolve_provider_(ImagePoolOwnerId owner,
+                                                       CAbiInstanceAdapter** out) {
+    *out = nullptr;
+    for (auto& p : InstanceRegistry::instance().list()) {
+        auto* a = dynamic_cast<CAbiInstanceAdapter*>(p.get());
+        if (a && a->owner_id() == owner) { *out = a; return p; }
+    }
+    return nullptr;
+}
+
+// ---- the forwarding funnel --------------------------------------------------
+inline int32_t f_cap_call(const char* name, xi_pack_handle in, xi_pack_handle* out) {
+    if (out) *out = XI_PACK_NULL;
+    if (!name || !*name || !out || in == XI_PACK_NULL) return XI_CAP_EUNKNOWN;
+    CapRegistry::Entry e;
+    if (!CapRegistry::instance().lookup(name, &e)) return XI_CAP_EUNKNOWN;
+
+    CAbiInstanceAdapter* adapter = nullptr;
+    auto pin = resolve_provider_(e.owner, &adapter);
+    if (!adapter || !e.handler) return XI_CAP_ESHAPE;
+
+    // item-14 gates, same order as use_pack_process_cb: quarantine fail-fast,
+    // then pending reinit applied off-frame BEFORE entering plugin code.
+    if (adapter->quarantined()) return XI_CAP_EQUARANTINED;
+    if (adapter->reinit_pending()) {
+        apply_pending_reinit_(adapter);
+        if (adapter->quarantined()) return XI_CAP_EQUARANTINED;
+        // The rebuild swept this owner's registrations and the fresh factory
+        // re-registered — re-resolve so the handler/self are the LIVE pair.
+        if (!CapRegistry::instance().lookup(name, &e)) return XI_CAP_EUNKNOWN;
+        if (e.owner != adapter->owner_id() || !e.handler) return XI_CAP_ESHAPE;
+    }
+
+    // Doc 14's reentrancy ruling, BOTH directions: the consumer calling a
+    // capability its own instance provides (target == this thread's current
+    // owner), and a handler calling back up its chain (target already on this
+    // thread's funnel stack). Refused before any lock/plugin code — the
+    // deadlock (a CallScope slot this thread may hold) dies at the door.
+    ImagePoolOwnerId cur = ImagePool::current_owner();
+    if (e.owner == cur || cap_stack_contains(e.owner)) return XI_CAP_EREENTRY;
+
+    if (auto pre = precall_slot().load(std::memory_order_acquire))
+        pre(adapter->name().c_str(), adapter->plugin_name().c_str());
+
+    // Frames: consumer (if any) + provider on the per-thread stack; the
+    // handler is data plane (no registration inside); pool/pack allocations
+    // attributed to the LIB instance.
+    CapStackFrame consumer_frame((uint64_t)cur);
+    CapStackFrame provider_frame((uint64_t)e.owner);
+    DataPlaneMark dp;
+    ImagePool::OwnerGuard og(e.owner);
+    try {
+        *out = e.handler(e.self, in);
+        return XI_CAP_OK;
+    } catch (const seh_exception& ex) {
+        std::fprintf(stderr, "[xinsp2] capability '%s' handler crashed: 0x%08X (%s)\n",
+                     name, ex.code, ex.what());
+        char why[96];
+        std::snprintf(why, sizeof(why), "capability handler crashed: 0x%08X", ex.code);
+        if (auto fn = fault_note_slot().load(std::memory_order_acquire))
+            fn(adapter->name().c_str(), why);
+        apply_on_fault_(adapter);
+        // Same rationale as use_pack_process_cb: this boundary swallows the
+        // fault and the caller continues on this thread — restore the guard
+        // page (or hard-exit for respawn) before returning.
+        recover_seh_stack_or_die(ex.code, "capability handler");
+        *out = XI_PACK_NULL;   // a torn result is never handed out
+        return XI_CAP_ECRASHED;
+    } catch (...) {
+        std::fprintf(stderr, "[xinsp2] capability '%s' handler threw exception\n", name);
+        if (auto fn = fault_note_slot().load(std::memory_order_acquire))
+            fn(adapter->name().c_str(), "capability handler threw an exception");
+        apply_on_fault_(adapter);
+        *out = XI_PACK_NULL;
+        return XI_CAP_ECRASHED;
+    }
+}
+
+inline int32_t f_cap_available(const char* name) {
+    if (!name || !*name) return 0;
+    return CapRegistry::instance().lookup(name, nullptr) ? 1 : 0;
+}
+
+// ---- registration trampolines -----------------------------------------------
+inline int32_t f_cap_register(const char* name, xi_cap_handler_fn handler,
+                              void* self) {
+    if (!name || !*name || !handler) return XI_CAP_REG_EINVAL;
+    // Lifecycle enforcement: the registering thread must carry an owner
+    // context (every plugin entry point does — factory included) and must NOT
+    // be inside a data-plane door or a capability handler.
+    ImagePoolOwnerId owner = ImagePool::current_owner();
+    if (owner == 0 || cap_data_plane_depth() > 0) return XI_CAP_REG_ECONTEXT;
+    return CapRegistry::instance().register_capability(name, handler, self, owner);
+}
+inline int32_t f_cap_unregister(const char* name, void* /*self*/) {
+    if (!name || !*name) return XI_CAP_REG_EINVAL;
+    ImagePoolOwnerId owner = ImagePool::current_owner();
+    if (owner == 0) return XI_CAP_REG_ECONTEXT;
+    return CapRegistry::instance().unregister_capability(name, owner);
+}
+
+// The owner-sweep trampoline published into ImagePool::cap_sweep_slot, so the
+// teardown paths that already sweep leaked image handles + pack refs (adapter
+// dtor) and the reinit rebuild drop this owner's registrations through the
+// same layering bridge. Guarded for static destruction.
+inline int f_cap_sweep_for(ImagePoolOwnerId owner) {
+    if (!g_cap_registry_alive.load(std::memory_order_acquire)) return 0;
+    return CapRegistry::instance().unregister_all_for(owner);
+}
+
+} // namespace cap_abi_detail
+
+// Install a service-side fault-bookkeeping hook (crash-loop count / recent-
+// errors ring — note_instance_crash_'s job) and an optional pre-call culprit
+// stamp. Null = header-side mechanics only (tests, headless hosts).
+inline void set_cap_fault_note(cap_abi_detail::CapFaultNoteFn fn) {
+    cap_abi_detail::fault_note_slot().store(fn, std::memory_order_release);
+}
+inline void set_cap_precall(cap_abi_detail::CapPrecallFn fn) {
+    cap_abi_detail::precall_slot().store(fn, std::memory_order_release);
+}
+
+// The process-stable vtables. Meyers singletons — a plugin caches the pointer
+// once, exactly like pack_v1_iface.
+inline const xi_cap_v1* cap_v1_iface() {
+    static const xi_cap_v1 iface = {
+        &cap_abi_detail::f_cap_call,
+        &cap_abi_detail::f_cap_available,
+    };
+    return &iface;
+}
+inline const xi_cap_provider_v1* cap_provider_v1_iface() {
+    static const xi_cap_provider_v1 iface = {
+        &cap_abi_detail::f_cap_register,
+        &cap_abi_detail::f_cap_unregister,
+    };
+    return &iface;
+}
+
+// Publish the capability plane so host->get_interface answers "xi.cap"@1 and
+// "xi.cap.provider"@1, and wire the owner sweeper into the teardown bridge.
+// Idempotent; call once next to install_pack_abi (default_host_api / tests).
+inline void install_cap_plane() {
+    ImagePool::publish_cap_iface(cap_v1_iface());
+    ImagePool::publish_cap_provider_iface(cap_provider_v1_iface());
+    ImagePool::publish_cap_sweeper(&cap_abi_detail::f_cap_sweep_for);
+}
+
+} // namespace xi

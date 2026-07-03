@@ -38,6 +38,7 @@
 #include "xi_certify.hpp"     // Part III G1: scan/certification isolation (child-process certify + verdict cache)
 #include "xi_image_pool.hpp"
 #include "xi_pack_abi.hpp"   // polaris2 wave-2: install_pack_abi (xi.pack@1 door + dispatch releaser)
+#include "xi_cap_abi.hpp"    // capability plane pilot (doc 14): install_cap_plane (xi.cap@1 + xi.cap.provider@1)
 #include "xi_instance.hpp"
 #include "xi_config_validate.hpp" // validate_config_against_manifest (opt-in diagnostic, extracted leaf)
 #include "xi_pm_json.hpp"      // pm_json_escape (extracted leaf)
@@ -389,6 +390,11 @@ private:
             // dispatch releaser, so a pack-capable plugin resolving the door off
             // this table gets a live interface (and emit_pack reaches the bus).
             install_pack_abi();
+            // Capability plane pilot (docs/new_gen/14): publish xi.cap@1 +
+            // xi.cap.provider@1 and wire the registration owner-sweeper, so a
+            // lib plugin registering in its factory (which runs under this
+            // table) reaches a live registration door.
+            install_cap_plane();
             // DEBUG freeze-guard: this is the FULLY WIRED table plugins receive, so
             // every carved get_interface entry must track its struct-field twin
             // (emit_record via the published slot). Catches door/field drift at

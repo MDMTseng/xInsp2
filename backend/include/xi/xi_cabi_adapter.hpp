@@ -22,6 +22,7 @@
 #endif
 
 #include "xi_abi.h"
+#include "xi_cap_guard.hpp"       // capability plane: data-plane mark (doc 14 pilot)
 #include "xi_fault_policy.hpp"    // OnFault (per-instance post-fault policy, item 14)
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
@@ -318,6 +319,20 @@ public:
             ImagePool::OwnerGuard g(owner_id_);
             destroy_fn_(inst_);
         }
+        // Capability-plane sweep (doc 14 pilot; slot bridge — null until
+        // install_cap_plane): drop any capability registrations this instance
+        // still provides, so a lib plugin that forgot to unregister on destroy
+        // can never leave a dangling handler/self in the registry. Runs AFTER
+        // destroy_fn_ (a well-behaved plugin's own unregister has already
+        // emptied its bucket) and BEFORE the pool-alive early-return below:
+        // the cap registry is pool-independent and self-guards its own static
+        // teardown (g_cap_registry_alive inside the published sweeper).
+        int cswept = ImagePool::sweep_caps_for(owner_id_);
+        if (cswept > 0) {
+            std::fprintf(stderr,
+                "[xinsp2] '%s' destroyed; swept %d leaked capability registration(s)\n",
+                name_.c_str(), cswept);
+        }
         // Sweep any image handles the plugin allocated and forgot to
         // release. Without this, plugin crashes / careless authors leak
         // ImagePool entries forever. GUARD g_image_pool_alive: if this adapter is
@@ -414,6 +429,7 @@ public:
 #endif
         ImagePool::OwnerGuard og(owner_id_);
         CallScope cs(this);
+        DataPlaneMark dp;   // capability plane: no registration from inside a door
         process_fn_(inst_, in, out);
         return out->image_count;
     }
@@ -435,6 +451,7 @@ public:
 #endif
         ImagePool::OwnerGuard og(owner_id_);
         CallScope cs(this);
+        DataPlaneMark dp;   // capability plane: no registration from inside a door
         return frame_proc_->process(inst_, in);
     }
 
@@ -528,6 +545,14 @@ public:
         reinit_pending_.store(false, std::memory_order_release);
         if (!reinit_factory_ || !reinit_host_) return false;   // not armed → reuse
         CallScope cs(this);                 // serialize vs process/exchange/set_def
+        // Capability plane (doc 14 pilot): the registry's handler/self pointers
+        // belong to the CORRUPTED instance this rebuild replaces — sweep them
+        // BEFORE the factory runs so nothing dangles, and so the fresh ctor's
+        // re-registrations (same owner id) land in a clean bucket. If the
+        // factory fails below, the old instance stays live but UNREGISTERED —
+        // honest: a faulted lib whose rebuild failed stops serving (and the
+        // escalation path quarantines it after kReinitEscalateAfter failures).
+        ImagePool::sweep_caps_for(owner_id_);
         void* fresh = nullptr;
         {
             ImagePool::OwnerGuard og(owner_id_);   // tag the ctor's images to us

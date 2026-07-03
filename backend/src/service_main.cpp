@@ -42,6 +42,7 @@
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_plugin_manager.hpp>
 #include <xi/xi_certify.hpp>      // Part III G1: --certify-plugin child mode (scan/certification isolation)
+#include <xi/xi_cap_abi.hpp>      // capability plane pilot (doc 14): service fault-note/culprit hooks
 #include <xi/xi_project.hpp>
 #include <xi/xi_owner_lock.hpp>     // F5: advisory single-writer stamp on the project folder
 #include <cassert>
@@ -645,6 +646,18 @@ int main(int argc, char** argv) {
         std::memcpy(out, jpeg.data(), jpeg.size());
         return (int)jpeg.size();
     };
+
+    // Capability plane pilot (docs/new_gen/14): enrich the header-side funnel
+    // fault mechanics (on_fault policy + health overlay, xi_cap_abi.hpp) with
+    // the service's crash bookkeeping — the same note_instance_crash_ (crash-
+    // loop count + degraded overlay + recent-errors ring) and culprit stamp
+    // the use_pack_process_cb boundary applies. Non-capturing → fn pointers.
+    xi::set_cap_fault_note([](const char* instance, const char* why) {
+        note_instance_crash_(instance, why);
+    });
+    xi::set_cap_precall([](const char* instance, const char* plugin) {
+        stamp_culprit_(instance, std::string(plugin ? plugin : ""));
+    });
 
     // P1-3: forward plugin/script host_api->log to the operator channel. stderr is
     // unwatched on an unattended PC, so a plugin's WARN/ERROR self-diagnostics used
