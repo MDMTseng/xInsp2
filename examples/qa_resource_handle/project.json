@@ -1,0 +1,15 @@
+{
+  "name": "qa_resource_handle",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "lut", "plugin": "lut_owner" },
+    { "name": "u1",  "plugin": "lut_user" },
+    { "name": "u2",  "plugin": "lut_user" }
+  ],
+  "plugins": {
+    "lut_user": {
+      "path": "lut_user",
+      "compile": true
+    }
+  }
+}
