@@ -73,12 +73,53 @@ model inference, expensive lookups).
   mechanism, but you are on your own, and nothing in the core will be bent to
   accommodate it.
 
+## Official lib plugin roster (maintainer ruling 2026-07-03: evict what
+## doesn't need to live in the host)
+
+Surveyed against the three criteria (heavy, cross-instance shared, host-gated):
+
+**First official lib plugin: `xi.imgcodec`** — image encode + decode + dedup
+cache, and it **absorbs `host_api->read_image_file`**. The stb_image reader
+(PNG/JPEG/BMP/TGA/GIF/PSD/HDR/PIC) is the one field in today's host_api that
+is library functionality rather than core infrastructure — under the
+minimal-core philosophy it never belonged there. Moving it out at v12 makes
+the capability-plane ABI bill **net zero**: +1 `register_capability`,
+−1 `read_image_file`. Encode side (turbojpeg is already deployed beside the
+backend) serves expose preview, record_save export, and any comms plugin —
+with the sealed-pack identity as the memo-cache key, one encode serves all
+consumers. `xi.imgcodec` also proves out the whole plane in-tree (register,
+forward, reentrancy guard, quarantine, hot swap) with no external consumer
+needed.
+
+**Named-but-deferred (build when the need arrives):**
+- `xi.infer` — ML model hosting: one load, N detector consumers, quarantine
+  isolates a model crash; owns the RAM/VRAM budget.
+- `xi.compress` — zstd/lz4 for record_save archives / large blob export;
+  shared dictionaries.
+- `xi.calib` — shared calibration/rectification tables (compute-once,
+  many-readers, immutable — same shape as sealed packs). Only once a second
+  consumer beyond synced_stereo exists; until then instance-folder data.
+- `xi.kv` — cross-instance blackboard. RED-FLAGGED: needs semantics decisions
+  (versioning vs last-write-wins) and is a hidden-coupling factory by nature;
+  revisit only against a concrete need.
+
+**Explicit non-candidates** (the sizing doctrine says no): per-pixel/CV
+primitives (plugins statically link OpenCV/IPP — hot path, inline), pack
+building / msgpack encoding (header-only SDK, zero-cost), log/status/health/
+instance-folder (host core proper).
+
+**Eviction principle (general):** the capability plane is also the host's
+slimming exit. Anything in host_api that is a *library* (does work on data)
+rather than *infrastructure* (owns identity, lifetime, routing, or safety)
+is a candidate to move behind a capability at an authorized break.
+
 ## ABI bill
 
 - **Consumer side: zero new slots.** `get_interface("xi.cap", 1)` returns a
   host-owned capability-call vtable (resolve + call by capability name).
 - **Provider side: one new slot** (`register_capability`), rides the v12
   authorized break with the rest of THE CUT.
+- **Net zero at v12** with the `read_image_file` eviction (see roster).
 
 ## Relation to existing planes
 
