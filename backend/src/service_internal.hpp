@@ -268,6 +268,10 @@ int  use_exchange_cb(const char* name, const char* cmd, char* rsp, int rsplen);
 // door. 0 ok (*out = new sealed handle the script owns); -1 no such instance;
 // -2 door crashed/threw; -3 quarantined; -4 no pack door. (service_sinks.cpp)
 int  use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out);
+// polaris2 gate P2 (expose-from-script): xi::use(sink).push(pack) — deliver a
+// script-held sealed pack to a named instance's xi.pack@1 door. Sink targets
+// are staged (frame-ordered flush, like use_process_cb); others run inline.
+int  use_push_pack_cb(const char* name, xi_pack_handle pack);
 xi_image_handle use_grab_cb(const char* name, int timeout_ms);
 uint32_t owner_get_cb();
 void     owner_set_cb(uint32_t id);

@@ -345,6 +345,23 @@ endif()
 add_dependencies(expose_pack_test expose)
 add_test(NAME expose_pack_test COMMAND expose_pack_test)
 
+# polaris2 gate P2 (docs/new_gen/10) — EXPOSE-FROM-SCRIPT: a script-held sealed
+# pack goes through the REAL SDK surface (xi::ScriptPack + xi::use().push(), the
+# TU playing the script DLL) into the REAL expose DLL's pack door, staged +
+# flushed with the service's use_push_pack_cb discipline mirrored, and the
+# pushed XEX1-v2 bytes are asserted BYTE-IDENTICAL to a direct host-side dump
+# of the same pack. Needs the built expose DLL + a host ImagePool.
+add_executable(expose_script_push_test expose_script_push_test.cpp)
+target_include_directories(expose_script_push_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
+target_compile_definitions(expose_script_push_test PRIVATE
+    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose.dll")
+if(WIN32)
+    target_link_libraries(expose_script_push_test PRIVATE Ws2_32)
+endif()
+add_dependencies(expose_script_push_test expose)
+add_test(NAME expose_script_push_test COMMAND expose_script_push_test)
+
 # polaris2 P3 (docs/new_gen/10) — record_save persistence parity. Drives the REAL
 # record_save DLL's pack door to persist a multi-entry pack (scalars + nested mp +
 # image) as a .xex1 file, asserts the file bytes EQUAL the shared encoder's output

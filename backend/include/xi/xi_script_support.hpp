@@ -236,6 +236,11 @@ static void* g_status_fn_           = nullptr;
 // verdict. Signature: void(int code, const char* msg).
 static void* g_result_fn_           = nullptr;
 
+// polaris2 gate P2 (expose-from-script): xi::use(sink).push(pack) host thunk.
+// Signature (cast in xi_use.hpp): int(const char* name, xi_pack_handle pack).
+// Null on an older host ⇒ push() returns false.
+static void* g_use_push_pack_fn_    = nullptr;
+
 // Per-run context. Set by the host before each xi_inspect_entry call,
 // cleared after. Currently just the optional `frame_path` arg from
 // cmd:run; future per-run fields (run_id, request id, etc.) join here.
@@ -314,6 +319,17 @@ XI_SCRIPT_EXPORT void xi_script_set_owner_callbacks(void* get_fn, void* set_fn) 
 // don't include xi_result.hpp leave this null.
 XI_SCRIPT_EXPORT void xi_script_set_result_callback(void* fn) {
     g_result_fn_ = fn;
+}
+
+// polaris2 gate P2 (expose-from-script): install the use-pack push thunk for
+// xi::use(sink).push(pack). Separate symbol (same back-compat reasoning as the
+// leader/meta callbacks): an older host that doesn't know about the pack plane
+// never calls this, the global stays null, and push() degrades to `false`.
+// NOTE: distinct from xi_script_set_use_pack_callback (the use().process(pack)
+// door thunk below) — the two P2 surfaces landed in parallel and each keeps its
+// own optional symbol so either can be absent independently.
+XI_SCRIPT_EXPORT void xi_script_set_use_push_pack_callback(void* push_fn) {
+    g_use_push_pack_fn_ = push_fn;
 }
 
 // Per-run context setter (called by host before each xi_inspect_entry,
