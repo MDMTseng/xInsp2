@@ -20,10 +20,18 @@ STAGES (in order; stop on first failure unless --keep-going)
     docs      check_doc_coverage.py + check_retired_terms.py   (no build)
     build     configure (fresh if the cache is stale) + build backend
               Release + build the shipped plugins Release
+    sdk       compile the SDK surface nothing else exercises: the host_mock
+              CLI (sdk/host_mock) + a scaffold-and-compile of every plugin
+              template (easy/medium/expert incl. their UI panels)
     ctest     the full C++ ctest suite (unit + integration + the perf gates
-              + script_selfcheck; also re-runs doc_coverage/retired_terms)
+              + script_selfcheck; also re-runs doc_coverage/retired_terms).
+              contract_live is excluded here — the `live` stage below runs it
+              under THIS gate's python with skipping forbidden
     fixtures  pytest tools/xinsp2_py/tests — the protocol golden-fixture
               round-trip (no live backend)
+    live      contract/live_conformance.py — the third contract leg (live WS
+              bytes vs schemas + the live-allowlist ratchet); spawns its own
+              backend; a missing dep is a FAILURE here, never a skip
     qa        tools/run_qa.py — the examples/qa_* regression sweep
     fuzz      tests/fuzz/run_smoke.py — the black-box fuzz smoke, build-breaking
 
@@ -31,11 +39,14 @@ The `docs` stage is intentionally also covered by `ctest` (as the
 doc_coverage / retired_terms ctests). Running the standalone scripts first
 gives a ~2s pre-build "docs drifted" signal, and keeping them in ctest means a
 bare `ctest` run is still complete on its own. The overlap is cheap and
-deliberate.
+deliberate. (`contract_live` is the one exception: it is NOT cheap — it cold-
+compiles a script via cl.exe — so the gate runs it exactly once, in `live`.)
 
 Node integration suites (`vscode-extension/test/*.test.mjs`) are NOT in this
 gate: they need `npm install` and a heavier toolchain, and are run separately
-(see docs/testing.md). This gate is the C++/Python enforced core.
+(see docs/testing.md). This gate is the C++/Python enforced core. The `sdk`
+stage does need a bare `node` on PATH (sdk/scaffold.mjs is zero-install, no
+npm) — a missing node FAILS the stage loudly; it never skips.
 
 USAGE
     python tools/gate.py                 # run everything, stop on first failure
@@ -53,7 +64,9 @@ if any selected stage fails, so it is usable directly as a CI gate.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -72,7 +85,7 @@ PLUGINS_BUILD = PLUGINS / "build"
 # is not watching; CI (no extension) can pass --port 7823 or just accept this.
 DEFAULT_FUZZ_PORT = "7824"
 
-STAGE_ORDER = ["docs", "build", "ctest", "fixtures", "qa", "fuzz"]
+STAGE_ORDER = ["docs", "build", "sdk", "ctest", "fixtures", "live", "qa", "fuzz"]
 
 
 class StageFail(Exception):
@@ -83,7 +96,12 @@ def _run(cmd: list[str], *, cwd: Path = REPO, env: dict | None = None) -> None:
     """Run a subprocess streaming its output; raise StageFail on nonzero exit."""
     printable = " ".join(str(c) for c in cmd)
     print(f"    $ {printable}", flush=True)
-    rc = subprocess.call([str(c) for c in cmd], cwd=str(cwd), env=env)
+    try:
+        rc = subprocess.call([str(c) for c in cmd], cwd=str(cwd), env=env)
+    except OSError as e:
+        # A missing tool (node, cmake, ...) must be a stage FAILURE with a
+        # readable message — never a traceback and never a silent skip.
+        raise StageFail(f"`{printable}` could not start: {e}") from e
     if rc != 0:
         raise StageFail(f"`{printable}` exited {rc}")
 
@@ -115,10 +133,11 @@ def _ensure_fresh_cache(build_dir: Path) -> None:
         shutil.rmtree(build_dir, ignore_errors=True)
 
 
-def _cmake_project(src: Path, build: Path, targets: list[str] | None) -> None:
+def _cmake_project(src: Path, build: Path, targets: list[str] | None,
+                   defines: list[str] | None = None) -> None:
     _ensure_fresh_cache(build)
     if not (build / "CMakeCache.txt").exists():
-        _run(["cmake", "-S", src, "-B", build, "-A", "x64"])
+        _run(["cmake", "-S", src, "-B", build, "-A", "x64", *(defines or [])])
     cmd = ["cmake", "--build", build, "--config", "Release"]
     if targets:
         cmd += ["--target", *targets]
@@ -148,10 +167,76 @@ def stage_build(_args) -> None:
     _cmake_project(PLUGINS, PLUGINS_BUILD, targets=None)
 
 
+def stage_sdk(_args) -> None:
+    """Compile the SDK surface no other stage exercises (it rotted silently
+    before this stage existed — nothing built host_mock or a scaffolded
+    template, so an ABI/header change could break every new-plugin flow while
+    the gate stayed green).
+
+    Two legs:
+      1. sdk/host_mock — the standalone xi_run_plugin CLI, built exactly the
+         way its own header documents (own CMakeLists, -DXINSP2_ROOT).
+      2. Every plugin template (easy/medium/expert): render it with the REAL
+         scaffolder (node sdk/scaffold.mjs — the same code path the VS Code
+         command uses), sanity-check the rendered output (plugin.json parses,
+         no unexpanded {{PLACEHOLDER}}, medium/expert emit their ui/index.html
+         panel), then compile the scaffolded plugin against this tree.
+
+    Scaffold output lives under build/gate_sdk/ (gitignored via `build/`).
+    The render overwrites sources every run, so the compiler genuinely
+    re-exercises the templates each gate run; the CMake caches stay warm, so
+    the warm-run cost is a few small rebuilds, not reconfigures.
+    """
+    xinsp2_root_def = f"-DXINSP2_ROOT={REPO}"
+    _cmake_project(REPO / "sdk" / "host_mock",
+                   REPO / "sdk" / "host_mock" / "build",
+                   targets=None, defines=[xinsp2_root_def])
+
+    placeholder = re.compile(r"\{\{[A-Z_]+\}\}")
+    for tid in ("easy", "medium", "expert"):
+        out = REPO / "build" / "gate_sdk" / tid
+        out.mkdir(parents=True, exist_ok=True)
+        _run(["node", REPO / "sdk" / "scaffold.mjs", out,
+              "--name", f"gate_{tid}", "--template", tid, "--force"])
+
+        # The renderer leaves unknown {{KEYS}} in place "to surface bugs" —
+        # surface them HERE, not in a user's first scaffold.
+        rendered = [out / "plugin.json", out / "src" / "plugin.cpp",
+                    out / "CMakeLists.txt"]
+        if tid in ("medium", "expert"):
+            ui = out / "ui" / "index.html"
+            if not ui.exists() or not ui.read_text(encoding="utf-8").strip():
+                raise StageFail(f"template '{tid}' did not render its UI panel "
+                                f"(missing/empty {ui})")
+            rendered.append(ui)
+        for f in rendered:
+            if not f.exists():
+                raise StageFail(f"template '{tid}' did not render {f}")
+            hit = placeholder.search(f.read_text(encoding="utf-8"))
+            if hit:
+                raise StageFail(f"template '{tid}': unexpanded placeholder "
+                                f"{hit.group(0)} left in {f}")
+        try:
+            json.loads((out / "plugin.json").read_text(encoding="utf-8"))
+        except ValueError as e:
+            raise StageFail(f"template '{tid}': rendered plugin.json is not "
+                            f"valid JSON: {e}") from e
+
+        _cmake_project(out, out / "build", targets=None,
+                       defines=[xinsp2_root_def])
+
+
 def stage_ctest(_args) -> None:
-    """Full C++ suite: unit + integration + perf gates + doc gates + selfcheck."""
+    """Full C++ suite: unit + integration + perf gates + doc gates + selfcheck.
+
+    contract_live is excluded (-E): the `live` stage runs the same script once
+    under THIS gate's python with XINSP2_REQUIRE_SCHEMA_GATE=1, which is
+    strictly stronger than the ctest variant (that one runs under the
+    configure-time Python3_EXECUTABLE and may self-skip if that interpreter
+    lacks jsonschema/websocket-client). The session cold-compiles a script via
+    cl.exe, so unlike the doc gates this overlap is NOT cheap — run it once."""
     _run(["ctest", "--test-dir", BACKEND_BUILD, "-C", "Release",
-          "--output-on-failure"])
+          "--output-on-failure", "-E", "^contract_live$"])
 
 
 def stage_fixtures(_args) -> None:
@@ -163,6 +248,25 @@ def stage_fixtures(_args) -> None:
     quietly test someone else's working copy."""
     _run([sys.executable, "-m", "pytest", "-q", "tests"],
          cwd=REPO / "tools" / "xinsp2_py")
+
+
+def stage_live(_args) -> None:
+    """Live-wire conformance — the THIRD contract leg (schemas <-> live bytes).
+
+    contract/live_conformance.py spawns the freshly built backend itself,
+    drives a representative session, validates every captured message against
+    contract/schemas, and ratchets unschema'd messages against
+    contract/live-allowlist.json (an unknown new wire message FAILS; the
+    allowlist only ever shrinks).
+
+    Run under sys.executable — the SAME interpreter as the rest of this gate —
+    with XINSP2_REQUIRE_SCHEMA_GATE=1, so 'jsonschema not installed' or
+    'backend not built' is a hard FAILURE here, never the polite self-skip the
+    ctest variant allows (the class of gap that let four unmapped fixtures
+    ride a green gate on 2026-07-02)."""
+    env = os.environ.copy()
+    env["XINSP2_REQUIRE_SCHEMA_GATE"] = "1"
+    _run([sys.executable, REPO / "contract" / "live_conformance.py"], env=env)
 
 
 def stage_qa(_args) -> None:
@@ -188,8 +292,10 @@ def stage_fuzz(args) -> None:
 STAGES = {
     "docs": stage_docs,
     "build": stage_build,
+    "sdk": stage_sdk,
     "ctest": stage_ctest,
     "fixtures": stage_fixtures,
+    "live": stage_live,
     "qa": stage_qa,
     "fuzz": stage_fuzz,
 }

@@ -40,8 +40,12 @@ in the same commit — that is this test earning its keep.
 
 Self-skips (exit 0, loud 'SKIP - NOT A PASS') when the backend exe is not built or
 a Python dep (jsonschema/referencing, or the xinsp2 websocket client) is missing,
-mirroring contract/validate.py's hardened skip. Wired as the `contract_live` ctest
-(label 'contract'), so gate.py's ctest stage runs it against a freshly built backend.
+mirroring contract/validate.py's hardened skip — UNLESS XINSP2_REQUIRE_SCHEMA_GATE
+is set, which turns any would-be skip into a hard FAIL. gate.py's `live` stage runs
+this script that way, under the gate's own python, against the freshly built
+backend. It is also wired as the `contract_live` ctest (label 'contract') for bare
+`ctest` completeness; gate.py excludes that duplicate (-E) since the session is
+expensive (cold cl.exe compile).
 
     python contract/live_conformance.py
 """
