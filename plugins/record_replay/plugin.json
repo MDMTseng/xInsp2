@@ -1,0 +1,7 @@
+{
+  "name": "record_replay",
+  "description": "Replay recorded .xex1 (XEX1-v3) canonical pack dumps into the graph as sealed Packs",
+  "dll": "xi-record_replay.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false
+}
