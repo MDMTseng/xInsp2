@@ -74,10 +74,37 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
     no `process()` path, so it has no data plane and the Pack door is N/A by
     design (verified 2026-07-03). It carries no parity obligation; see its README
     and `expose` for the generic-sink reference.
-2. **Gate P2 — script parity**: `use()`→door chaining + script-side Pack
-   building + expose-from-script land; the pack path can express every
-   pattern the guides teach (measured against the examples tree: every
-   example expressible pack-only).
+2. **Gate P2 — script parity: ✅ ACHIEVED 2026-07-03, WITH TWO NAMED
+   RESIDUALS (U1, U3).** All three surfaces landed and are QA-gated in the
+   live service: `use()`→door chaining (`xi::use(name).process(ScriptPack)`),
+   script-side Pack building (`xi::ScriptPackBuilder`, whose canonical-gated
+   `add_mp(xi::mp::Writer)` closes the U4 nested-results gap), and
+   expose-from-script (`xi::use(sink).push(ScriptPack)`, staged + flushed in
+   frame order for sink targets). Measured against the examples tree via the
+   re-measured parity matrix (doc 12, 2026-07-03): 17 of 29 pattern rows
+   GREEN on live QA evidence, 4 GREEN-composition (both halves proven, one
+   composing example owed: E1/E2/E3 collapse into the graph-level
+   record→replay example below, F1 into a pack-mode config-swap drive), 4+H
+   N/A control-plane. Flagship evidence: **`examples/qa_use_pack_door`** —
+   build → door → push in ONE script, no `xi::Record` anywhere, pixels and
+   nested entries byte-checked off the XEX1-v3 wire; `qa_pack_pilot`'s last
+   Record leg deleted the same day; `python tools/run_qa.py pack` 4/4.
+   The residuals, named precisely (doc 12 §Unscheduled has the detail):
+   - **U1 — pack-plane NA/provenance/typed-IO script semantics** (no
+     `na()/is_na()/na_reason()`, `$prov`, `src()`, or `_io`-style pack
+     helpers; `$fault` packs are script-readable, the propagate contract is
+     unowned). Gates the ERROR-PATH patterns of fixturing_demo, io_stress,
+     graph_demo — matrix rows B3/B4.
+   - **U3 — ordered-sink semantics** (hosts stamp no `$seq` into sealed
+     packs — script-carried ordering needs blessing or a door-args carry;
+     and `use().process()` on a sink target runs inline, the documented v0
+     gap). Gates qa_result_order's host-stamped pattern — matrix row C3.
+   Neither residual blocks any shipping example pattern beyond those named;
+   both are wave-2 planning inputs. **The CUT (step 4) may not ride until
+   U1/U3 have owners or explicit won't-need decisions** — and U2 below is a
+   separate cut-gate. (U2 — `xi::state()` still returns `xi::Record&` — is
+   NOT a P2 residual: cross-frame state is script-local and orthogonal to
+   the payload currency, but it must be resolved before Record deletion.)
 3. **Gate P3 — persistence parity: ✅ ACHIEVED 2026-07-03.** The canonical
    dump is FINALIZED as **XEX1-v3** (= the v2 draft + per-entry
    `XI_PACK_TAG_*` as `[tag, value]`, closing P1's image-descriptor
