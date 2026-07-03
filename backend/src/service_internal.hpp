@@ -75,6 +75,12 @@ struct Engine {
     std::atomic<int64_t> script_generation{0};
     std::string persistent_state_json = "{}";
     int persistent_state_schema = 0;
+    // U2 (docs/new_gen/16): the kv channel — canonical-mp BYTES (may contain
+    // NULs; std::string used as a plain byte bag), host-opaque like the JSON
+    // above. Empty = no captured store (get_kv returned 0). In-memory only,
+    // exactly like the Record channel: rides hot reloads, not restarts.
+    std::string persistent_kv_bytes;
+    int persistent_kv_schema = 0;
     std::unordered_map<std::string, std::string> param_cache;
     std::unordered_map<std::string, std::string> instance_def_cache;
     std::atomic<bool> continuous{false};

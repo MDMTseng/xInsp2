@@ -25,6 +25,7 @@
 #include "xi_cv.hpp"
 #include "xi_record.hpp"
 #include "xi_script.hpp"
+#include "xi_kv.hpp"      // U2: xi::kv() thunk bodies (xi_script_kv_* exports below)
 #include "xi_seh.hpp"     // B2 warmup installs the SEH translator on the omp pool
 #include "xi_state.hpp"
 
@@ -429,6 +430,38 @@ XI_SCRIPT_EXPORT int xi_script_code_change(const char* old_json, int old_schema,
     std::memcpy(buf, out.data(), out.size());
     buf[out.size()] = 0;
     return needed;
+}
+
+// --- U2 (docs/new_gen/16): xi::kv() persistent-state thunks -----------------
+//
+// The kv channel is the post-Record shape of cross-frame state: canonical
+// max-width msgpack bytes with EXPLICIT LENGTHS (msgpack contains NULs, so the
+// Record channel's NUL-terminated char* convention cannot carry it). The
+// bodies live in xi_kv.hpp (xi::detail::kv_*_thunk) so the loader-level test
+// fixture exports the exact same logic. Bilingual window: these ride BESIDE
+// the Record thunks above; THE CUT deletes the Record set and keeps these.
+
+XI_SCRIPT_EXPORT int xi_script_kv_get(uint8_t* buf, int buflen) {
+    return xi::detail::kv_get_thunk(buf, buflen);
+}
+
+XI_SCRIPT_EXPORT int xi_script_kv_set(const uint8_t* bytes, int len) {
+    return xi::detail::kv_set_thunk(bytes, len);
+}
+
+XI_SCRIPT_EXPORT int xi_script_kv_schema_version(void) {
+    return xi::kv_schema_version();
+}
+
+// Typed code_change for the kv channel (see xi_kv.hpp set_kv_migrate). Always
+// present in a recompiled script; "no migrator registered" returns 0, which is
+// indistinguishable from a missing symbol — the host's drop fallback is
+// identical either way (same contract as xi_script_code_change above).
+XI_SCRIPT_EXPORT int xi_script_kv_change(const uint8_t* old_bytes, int old_len,
+                                         int old_schema, int new_schema,
+                                         uint8_t* buf, int buflen) {
+    return xi::detail::kv_change_thunk(old_bytes, old_len, old_schema,
+                                       new_schema, buf, buflen);
 }
 
 // --- polaris2 Gate P2: xi::use() pack-door callback (docs/new_gen/10) ---

@@ -33,3 +33,4 @@
 #include "xi_io.hpp"
 #include "xi_param.hpp"
 #include "xi_state.hpp"
+#include "xi_kv.hpp"     // xi::kv() — post-Record cross-frame state (doc 16)
