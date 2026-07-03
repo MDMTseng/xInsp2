@@ -39,6 +39,7 @@
 #include "config_swap_probe_keys.gen.h"  // guard 1: config/command/status key names, once
 
 #include <atomic>
+#include <cstring>             // std::strcmp — the pack-door get_interface trampoline
 #include <memory>
 #include <string>
 #include <vector>
@@ -105,6 +106,23 @@ public:
         return {};
     }
 
+    // polaris2 wave-2 (docs/new_gen/10 gate P1): the xi.pack@1 pack-in/pack-out
+    // door. This probe's process() is a no-op OBSERVATION step, so the honest
+    // mirror is an EXACT one: read the live slot into last_seen_, bump the call
+    // counter, and return an EMPTY pack — the same empty result the Record path
+    // returns (`{}` above). The probe emits NO output data in EITHER currency;
+    // its real surface is the config/prepare/commit control plane observed
+    // through get_status (below), which both drive paths reach identically. It
+    // has no input contract, so — like the Record path — there are no required-
+    // input faults and unknown pack entries are ignored. Making the pack path
+    // emit the status/counter keys would make it dishonestly richer than the
+    // Record path it mirrors (and gate P1 keeps that Record path untouched).
+    void process(xi::PackIn& /*in*/, xi::PackOut& /*out*/) override {
+        auto a = active_.load();
+        last_seen_.store(a ? a->value : -1);
+        proc_calls_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     // ABI v7 first-class STAGE: build the heavy resource into the STAGING slot.
     // The host calls this UNGATED (concurrent with process()), so we touch ONLY
     // staged_ — never active_. The live slot keeps serving the old config during
@@ -152,3 +170,7 @@ private:
 
 XI_PLUGIN_IMPL(ConfigSwapProbe)
 XI_PLUGIN_STAGED(ConfigSwapProbe)   // opt into ungated prepare() + commit()
+// polaris2 wave-2: publish the xi.pack@1 pack-in/pack-out door (gate P1). The
+// host probes xi_plugin_get_interface("xi.pack", 1) to learn the probe speaks
+// packs; the Record path above is untouched — this instance speaks BOTH.
+XI_PLUGIN_PACK_DOOR(ConfigSwapProbe)

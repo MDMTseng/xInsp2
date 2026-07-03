@@ -212,6 +212,23 @@ target_compile_definitions(config_swap_probe_test PRIVATE
 add_dependencies(config_swap_probe_test config_swap_probe)
 add_test(NAME config_swap_probe_test COMMAND config_swap_probe_test)
 
+# config_swap_probe bilingual test (polaris2 wave-2, doc 10 gate P1) — the
+# xi.pack@1 door end to end against the REAL built DLL through the host adapter:
+# the capability probe, Record-vs-pack observable-state parity, unknown-entry
+# tolerance, two-phase prepare/commit observability, and pooled/pack-registry
+# balance. Needs a host ImagePool (make_host_api + install_pack_abi).
+add_executable(config_swap_probe_pack_test config_swap_probe/tests/test_config_swap_probe_pack.cpp)
+target_include_directories(config_swap_probe_pack_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe)
+target_compile_definitions(config_swap_probe_pack_test PRIVATE
+    CONFIG_SWAP_PROBE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe/xi-config_swap_probe.dll")
+if(WIN32)
+    target_link_libraries(config_swap_probe_pack_test PRIVATE Ws2_32)
+endif()
+add_dependencies(config_swap_probe_pack_test config_swap_probe)
+add_test(NAME config_swap_probe_pack_test COMMAND config_swap_probe_pack_test)
+
 # cache (BufferReplay) contract test — open buffered payload, typed command
 # surface. Captures + replays through the ImagePool host emit sink.
 add_executable(cache_test cache/tests/test_cache.cpp)
