@@ -1,0 +1,45 @@
+{
+  "name": "lut_owner",
+  "description": "demo.lut — the RESOURCE-HANDLE PATTERN demo lib plugin (docs/new_gen/14, appendix 'Resource-handle convention'). A TYPE-OWNER: heavy custom objects (an immutable sorted i64->i64 lookup table, the minimal honest build-once-query-many structure) never ride packs — this DLL constructs/destructs them and packs carry only the handle entry {type:'demo.lut', id, gen, $v} as a nested canonical-mp map. Ring of N slots with monotonic generation leases (a recycled slot's outstanding handles resolve to $fault stale_handle; generations are never reused, even across reinit); content-keyed build dedup (the zero-rebuild proof); demo.lut.dump is the byte-deterministic MATERIALIZER for persistence (handle entries are runtime-only).",
+  "dll": "xi-lut_owner.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "lib": true,
+  "_lib_doc": "lib plugin marker (informational, doc 14): a capability provider, not a pipeline stage — do not wire it as an input/output of anything; create one instance and let consumers reach it by capability name through the host funnel.",
+  "reentrant": true,
+  "_reentrant_doc": "capability handlers are invoked by the host funnel WITHOUT per-instance serialization (the provider thread-safety contract); ring/dedup are mutex-guarded, resolve pins the object via shared_ptr so a concurrent recycle can never free it under a running query/dump, counters are atomics.",
+  "on_fault": "refuse",
+  "_on_fault_doc": "a type owner whose handler faulted should stop serving (quarantine) rather than answer from possibly-corrupt state; every outstanding handle then fails closed at the funnel (-3), and a re-commit rebuild mints FRESH generations so pre-crash handles can only resolve stale, never alias.",
+  "requires": [
+    { "iface": "xi.pack", "min": 1 },
+    { "iface": "xi.cap.provider", "min": 1 }
+  ],
+  "manifest": {
+    "params": [
+      { "name": "ring_slots", "type": "int", "default": 8, "doc": "number of lease slots in the object ring; under pressure the LRU slot is recycled (its generation bumps and outstanding handles go stale). Shrinking recycles the dropped tail." }
+    ],
+    "inputs": [],
+    "outputs": [],
+    "capabilities": [
+      {
+        "name": "demo.lut.build",
+        "versions": "1",
+        "doc": "Pack in: mp 'keys' (canonical array of i64), mp 'values' (array of i64, same length), i64 '$v' (opt, default 1) | bool '$probe'. Pack out: mp 'handle' {type:'demo.lut', id, gen, $v:1}, i64 'built' (1 = constructed now, 0 = content-dedup hit), i64 'builds' (lifetime — the zero-rebuild proof), i64 'size'. Contract failure -> $fault pack (missing_input/bad_input)."
+      },
+      {
+        "name": "demo.lut.query",
+        "versions": "1",
+        "doc": "Pack in: mp 'handle', mp 'keys' (array of i64), '$v'/'$probe' as above. Pack out: mp 'values' (i64 per found key, nil per missing), i64 'found', i64 'size', i64 'builds' (echo). Handle faults: wrong_type / stale_handle / bad_handle / unsupported_version."
+      },
+      {
+        "name": "demo.lut.dump",
+        "versions": "1",
+        "doc": "Pack in: mp 'handle', '$v'/'$probe' as above. Pack out: bin 'lut' — the byte-deterministic canonical materialization ('XLUT' + u8 ver + be32 count + count*(be64 key, be64 value)), i64 'size', i64 'builds' (echo). Same handle faults as query. This is the persistence materializer: handle entries are runtime-only."
+      }
+    ],
+    "exchange": [
+      { "command": "stats",       "doc": "-> {builds, dedup_hits, queries, dumps, recycles, stale_faults, wrong_type_faults, live, ring_slots, registered} — builds vs dedup_hits is the zero-rebuild proof counter" },
+      { "command": "recycle_all", "doc": "forced recycle of every live slot (generation bump; all outstanding handles go stale) -> {ok:true, recycled:N}" }
+    ]
+  }
+}

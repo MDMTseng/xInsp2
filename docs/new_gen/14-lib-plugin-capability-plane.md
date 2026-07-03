@@ -237,4 +237,96 @@ host-forwarded capability, encode counter pinned at 1 across every run).
 ABI (content-hash keying is correct but pays a per-call hash over pixels);
 per-capability call counts/latency in dispatch_stats (the pilot funnel does
 not meter yet); whether `xi_cap_v1.call` should carry a consumer-declared
-timeout.
+timeout; **custom ext type with registered retain/release/dump hooks** — one
+mechanism upgrading toolbox handles AND device buffers to registry-grade
+lifetime (today the resource-handle convention below fakes lifetime with a
+ring/generation lease entirely inside the owner; a registered ext type would
+let the pack layer itself retain/release owner objects the way it does pool
+images, and `dump` becomes the registered materializer instead of a
+convention). Sits alongside the stable-image-identity item — both are "give
+the pack plane real identity for things it currently only names".
+
+## Appendix: the resource-handle convention (type-owner lib plugins)
+
+Status: **maintainer-settled; demo landed on the polaris2 line** (pre-v12).
+Executable reference: `plugins/lut_owner` (the `demo.lut` type owner), ctest
+`cap_lut_owner_test`, QA `examples/qa_resource_handle` — all green. `demo.lut`
+is exemplar-grade, not a roster member.
+
+Some plugins own **heavy custom data types** — build-once-query-many
+structures (indexes, lookup tables, calibration meshes, model weights) that
+are expensive to construct and nonsensical to serialize per hop. These do
+**not** ride packs. Instead:
+
+> A **type-owner lib plugin** constructs and destructs them; packs carry only
+> the **handle entry**, a nested canonical-mp map:
+> `{ "type": "<ns>", "id": <i64>, "gen": <i64>, "$v": <i64> }`.
+
+The owner registers the type's whole verb set as capabilities (for `demo.lut`:
+`demo.lut.build`, `demo.lut.query`, `demo.lut.dump`). Consumers hop the entry
+through doors like any other pack entry and hand it back to the owner by
+capability name. **Sizing doctrine applies unchanged**: a LIGHT object should
+just be a canonical-mp schema riding the pack — the handle pattern exists for
+objects where one construction amortizes many queries, never as a general
+object-passing mechanism.
+
+### The five rules
+
+1. **All alloc/free inside the owner's DLL.** The object never crosses the
+   ABI; only handle entries and query answers do. (The per-DLL-singleton
+   lesson — a foreign deleter is a layout bomb.)
+2. **Immutable after construction** — the seal-semantics extension. Mutation
+   = build a new object (and get a new handle). This is what makes concurrent
+   consumers, dedup, and byte-deterministic dumps trivially sound.
+3. **Lifetime = ring/generation lease (pre-v12).** The owner keeps a ring of
+   N slots; under pressure it recycles (LRU in the demo) and **bumps the slot
+   generation from a monotonic, never-reused source** — never reused even
+   across instance reinit, so a stale handle can never alias a fresh object.
+   A resolve against a recycled lease answers a normal sealed
+   `$fault "stale_handle"` pack (funnel rc stays 0 — staleness is capability
+   contract, not transport verdict). Owner sweep on crash: the ring dies with
+   the instance (its on_fault policy governs, exactly like any lib plugin;
+   capability registrations are owner-swept as usual), and consumers' held
+   handles fail closed — -3 while quarantined, `stale_handle` after a rebuild.
+4. **Handle entries are RUNTIME-ONLY — never persisted.** The type owner
+   registers a **dump capability as the materializer** (`demo.lut.dump`:
+   handle → byte-deterministic canonical bin). A persist sink either
+   materializes the record on persist or drops the entry (configured
+   sink-side); it never stores the handle itself.
+5. **Wrong-type resolve → `$fault "wrong_type"`.** A handle is only
+   meaningful to its owning namespace; owners must check `type` before `id`.
+
+### What the demo proves (all green)
+
+`cap_lut_owner_test` + `qa_resource_handle`: build → handle entry; content-
+keyed build dedup (two consumers, one sealed content, **build counter pinned
+at 1** — the zero-rebuild headline); the entry riding packs through a real
+door hop to a second consumer; dump byte-determinism across consumers and
+across recycles; ring-pressure recycle and `recycle_all` both → clean
+`stale_handle`; foreign-namespace handle → `wrong_type`; malformed /
+out-of-range handles → `bad_handle`; handle-`$v` gate; generations strictly
+increasing across rebuilds.
+
+### The GPU/VRAM variant (sketch — discussion-grade, NOT scheduled)
+
+The same convention extends to device memory with a **device pool owner** —
+a type-owner lib plugin owning a VRAM arena (e.g. `gpu.buf`): CUDA/D3D12
+allocations never cross the ABI; packs carry
+`{ "type": "gpu.buf", "id", "gen", "$v", "dev": <ordinal>, "event": <i64> }`.
+Two deltas on top of the five rules:
+
+- **`event` field for sync**: the producer records a fence/event id at
+  enqueue; a consumer capability waits on it before touching the buffer —
+  ordering rides in the handle entry, so CPU-side pack hops never
+  synchronize the device.
+- **Materialize-on-persist is a device→host readback** (the dump capability),
+  which is exactly why rule 4 matters: persisting a VRAM id is meaningless
+  across runs, but the materializer makes persistence well-defined at a cost
+  the sink opts into.
+
+Everything else carries over verbatim: immutable-after-construction (compute
+into a new buffer), ring/generation lease over the arena, owner-sweep =
+device pool teardown with the instance, wrong-type refusal. **Not scheduled**:
+no in-tree consumer needs device residency yet; when one arrives, this
+appendix plus the v12 "registered retain/release/dump hooks" item above is
+the design seed, not a commitment.
