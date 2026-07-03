@@ -129,6 +129,22 @@ set_target_properties(record_save PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_save
 )
 
+# imgcodec — the FIRST OFFICIAL LIB PLUGIN (capability plane pilot, docs/
+# new_gen/14). NO data plane: registers xi.jpeg.encode (content-keyed dedup
+# memo cache — one encode serves every consumer) + xi.image.decode (stb_image,
+# host read_image_file's designated v12 eviction target) via get_interface
+# ("xi.cap.provider", 1). stb impls compiled in via backend/src/stb_impl.cpp
+# (the record_save pattern).
+add_library(imgcodec SHARED
+    imgcodec/imgcodec.cpp
+    ../backend/src/stb_impl.cpp
+)
+target_include_directories(imgcodec PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+set_target_properties(imgcodec PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/imgcodec
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/imgcodec
+)
+
 # record_replay — the replay SOURCE, record_save's mirror (doc 10 gate P3): reads
 # canonical .xex1 (XEX1-v3) dumps and emits each as a sealed Pack via the host
 # xi.pack@1 door. expose/src is on the include path for xex1_pack_parse.hpp — the
@@ -411,3 +427,20 @@ if(WIN32)
 endif()
 add_dependencies(record_replay_pack_test record_save record_replay)
 add_test(NAME record_replay_pack_test COMMAND record_replay_pack_test)
+
+# Capability plane pilot (docs/new_gen/14) — xi.imgcodec end to end against
+# the REAL built DLL through the REAL host funnel: register-on-create, calls
+# by name, THE DEDUP PROOF (two consumers + one sealed image = ONE encode,
+# byte-identical JPEG out), decode round trip, $probe/$v convention, $fault
+# contract answers, unregister-on-destroy, pack balance. Needs a host
+# ImagePool (make_host_api + install_pack_abi + install_cap_plane).
+add_executable(cap_imgcodec_test cap_imgcodec_test.cpp)
+target_include_directories(cap_imgcodec_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
+target_compile_definitions(cap_imgcodec_test PRIVATE
+    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec.dll")
+if(WIN32)
+    target_link_libraries(cap_imgcodec_test PRIVATE Ws2_32)
+endif()
+add_dependencies(cap_imgcodec_test imgcodec)
+add_test(NAME cap_imgcodec_test COMMAND cap_imgcodec_test)
