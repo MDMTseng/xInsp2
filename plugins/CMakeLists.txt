@@ -181,12 +181,18 @@ add_test(NAME mock_camera_test COMMAND mock_camera_test)
 # synced_stereo contract test — gathering source. Drives config/command via the
 # C ABI and captures a really-emitted stereo frame through a host emit_record
 # sink (needs the ImagePool host), reading it back through the Frame extractor.
+# polaris2 wave-2: also drives pack_mode ON and captures the sealed xi.pack@1
+# Pack off the TriggerBus (install_pack_abi + install_trigger_hook), so it links
+# Ws2_32 for the pack msgpack codec exactly like pack_pilot_test.
 add_executable(synced_stereo_test synced_stereo/tests/test_synced_stereo.cpp)
 target_include_directories(synced_stereo_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/synced_stereo)
 target_compile_definitions(synced_stereo_test PRIVATE
     SYNCED_STEREO_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/synced_stereo/xi-synced_stereo.dll")
+if(WIN32)
+    target_link_libraries(synced_stereo_test PRIVATE Ws2_32)
+endif()
 add_dependencies(synced_stereo_test synced_stereo)
 add_test(NAME synced_stereo_test COMMAND synced_stereo_test)
 
