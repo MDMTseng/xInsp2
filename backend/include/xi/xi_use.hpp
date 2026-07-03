@@ -92,8 +92,8 @@ extern void* g_trigger_sources_fn_;
 extern void* g_trigger_leader_fn_;
 extern void* g_trigger_meta_fn_;
 // polaris2 gate P2 (expose-from-script): host thunk for xi::use(sink).push(pack).
-// Set via the OPTIONAL export xi_script_set_use_pack_callback; null on an older
-// host ⇒ push() returns false (degrades like every other optional callback).
+// Set via the OPTIONAL export xi_script_set_use_push_pack_callback; null on an
+// older host ⇒ push() returns false (degrades like every other optional callback).
 extern void* g_use_push_pack_fn_;
 
 namespace xi {
