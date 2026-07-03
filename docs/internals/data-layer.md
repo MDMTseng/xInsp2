@@ -3,6 +3,12 @@
 **Shipped design-of-record.** How `xi::Record`'s JSON data crosses between script
 and plugin with zero serialization and zero copy, and how either side caches it.
 
+> **Record-era.** This page describes the Record/doc plane. The polaris2 line
+> added a second data currency — the v3 keyed-buffer **Pack** plane
+> ([`pack-plane.md`](./pack-plane.md)) — and both live side by side (dual carry)
+> until THE CUT. New pack-plane facts go there; this page stays the
+> design-of-record for the Record plane.
+
 `xi::Record` is a yyjson mutable doc + a named-image map. (cJSON was removed; an
 explored MessagePack/CWPack codec was dropped — unknown-count headers + hard
 in-place mutation. The kept rationale lives in `docs/archive/` if you need it.)

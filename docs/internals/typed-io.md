@@ -92,6 +92,15 @@ rec.is_na(); rec.na_reason();
 This extends run-level NA (`xi::result` code 0) down to the Record level so it
 flows *between* stages.
 
+> **Pack-plane mirror.** The v3 Pack plane has the same shape with different
+> vocabulary: a contract failure is a normal sealed pack carrying a `$fault`
+> reason code (never a null handle), and the host funnel short-circuits a fault
+> input by minting a new fault pack with the hop appended — the pack mirror of
+> `use("x").process(na)` returning NA without running the plugin. The contract
+> (reserved `$fault`/`$fault_key`/`$fault_detail`/`$src`/`$prov` keys,
+> `is_fault`, `propagate_fault`) lives in `xi/xi_pack_contract.hpp` — doc 15's
+> implementation — and is described in [`pack-plane.md`](./pack-plane.md).
+
 ## Provenance (`$src` / `$prov`)
 
 A Record can carry **where it came from**, so non-image data flow is
@@ -104,6 +113,9 @@ self-describing without parsing the script:
 Reserved keys (`$src` / `$prov`), like `$na`, harmless to plugins. Complements the
 pipeline-graph image-handle edges: the same dataflow the graph can't trace for
 scalar/JSON, now explicit — a future graph can read `$prov` to draw those edges.
+(The pack plane reuses the same key *names* with its own shapes — `$src` is the
+immediate producer, `$prov` a `/`-joined hop chain, stamped by the door glue
+before seal; see [`pack-plane.md`](./pack-plane.md).)
 
 ## Iconic types — payload on the image channel
 

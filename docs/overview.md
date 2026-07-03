@@ -39,7 +39,7 @@ script** that orchestrates them per frame. The bets:
 | **Script** (`inspect.cpp`) | The per-frame orchestration, compiled to a DLL. Calls plugins, emits results. One per project. |
 | **Plugin** | A DLL implementing the C ABI: a camera/source, detector, op, or I/O bridge. Reusable across projects. |
 | **Instance** | A *configured* plugin (`instances/<name>/instance.json`): which plugin + its config + its dispatch group. |
-| **Record** | The data passed between script and plugin: schema-less JSON + a named-image bag. Zero-copy across the ABI. |
+| **Record** | The data passed between script and plugin: schema-less JSON + a named-image bag. Zero-copy across the ABI. (Transitional: the polaris2 **Pack** — a sealed keyed-buffer — is a second data currency riding the same dispatch; plugins can speak either or both. See [`internals/pack-plane.md`](./internals/pack-plane.md).) |
 | **Trigger bus** | Turns each emitted record into one inspection run; a record carrying several named images (a gathering source) is inspected together. |
 | **Dispatch group** | Worker threads (own `max_parallel` + OS priority + queue) that run inspections; groups are isolated. |
 | **Run-result** | The one verdict per run: a signed status code + message (`>0` ok, `0` NA, `-1…` ng, `≤-990000` framework system-fail). Feeds HMI + PLC. |

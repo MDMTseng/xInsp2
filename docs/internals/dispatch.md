@@ -130,9 +130,41 @@ that re-impose order without throttling compute:
   *Parallel dispatch* section of
   [`../guides/write-a-script.md`](../guides/write-a-script.md).
 
+## 5. The pack plane on dispatch — dual carry + staged pack push
+
+**Status: shipped (polaris2 wave-2 / U3), transitional until THE CUT.** Dispatch
+carries **two data currencies** on one machinery:
+
+- **Dual-carry `TriggerEvent`.** Every event carries the Record payload (image
+  map + refcounted meta doc) *and* an optional sealed-pack handle
+  (`TriggerEvent::pack`, `XI_PACK_NULL` for Record-era events). A pack source
+  emits via `emit_pack(emitter, id, pack, ts)` (the `xi_pack_v1` verb — same
+  funnel discipline as `emit_record`: one emit, one run); the bus stores the
+  sealed handle on the event and extracts no images — the pack *is* the
+  payload. Ordering keys on `id + arrival_id` identically for both currencies.
+  The worker hands the pack to the script through the trigger view; the SDK
+  `Trigger` takes its own retain, so `t.pack()` (a `ScriptPack`) is valid
+  however long the script holds it while `t.image()`/`t.meta()` keep serving
+  the Record side.
+- **Staged pack push / flush.** The §4 ordered-sink discipline applies to packs
+  unchanged: `xi::use(sink).push(pack)` on a `"sink": true` target is staged
+  (the host retains the pack onto the staged emit) and flushed after the
+  inspect inside the same arrival-order gate, so pack deliveries land in frame
+  order under parallel dispatch; a non-sink target is pushed inline. One
+  asymmetry vs the Record path: a sealed pack is **immutable**, so the host
+  cannot stamp `"$seq"` at flush time — the producer stamps it before seal
+  (`b.add_i64("$seq", (int64_t)xi::run_id())`). `use(name).process(pack)` is
+  the request-reply sibling: a `$fault` input short-circuits (the host mints
+  the propagated fault pack without entering the plugin), and a sink target is
+  refused (rc −5) — feed sinks via `push()`.
+
+Container, registry, fault contract and ingress:
+[`pack-plane.md`](./pack-plane.md).
+
 ## See also
 
 - [`../reference/c-abi.md`](../reference/c-abi.md) — the `emit_record` function
   signature.
 - [`../reference/instances.md`](../reference/instances.md) — per-source instances.
+- [`pack-plane.md`](./pack-plane.md) — the v3 pack currency riding this dispatch.
 - `xi_trigger_bus.hpp` — source.
