@@ -40,7 +40,7 @@
 #include "xi_frame_abi.hpp"   // polaris2 wave-2: install_frame_abi (xi.frame@1 door + dispatch releaser)
 #include "xi_instance.hpp"
 #include "xi_config_validate.hpp" // validate_config_against_manifest (opt-in diagnostic, extracted leaf)
-#include "xi_pm_json.hpp"      // pm_json_escape / pm_json_quote (extracted leaf)
+#include "xi_pm_json.hpp"      // pm_json_escape (extracted leaf)
 #include <cctype>
 #include <cassert>            // door_matches_fields freeze-guard (default_host_api)
 #include "xi_pm_parse.hpp"     // parse_manifest / extract_string / detail_find_key
@@ -71,7 +71,7 @@
 
 namespace xi {
 
-// (pm_json_escape / pm_json_quote moved to xi_pm_json.hpp)
+// (pm_json_escape moved to xi_pm_json.hpp)
 // (plugin_abi_compatible / PluginInfo / CAbiInstanceAdapter moved to
 //  xi_cabi_adapter.hpp; InstanceInfo / ProjectInfo / CompileEnv to
 //  xi_project_model.hpp — both included above.)

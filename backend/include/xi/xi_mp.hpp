@@ -70,10 +70,6 @@ constexpr uint8_t Map32   = 0xdf;
 }  // namespace tag
 
 // Big-endian appenders (msgpack multi-byte integers are big-endian).
-inline void put_be16(Bytes& b, uint16_t v) {
-    b.push_back((uint8_t)(v >> 8));
-    b.push_back((uint8_t)v);
-}
 inline void put_be32(Bytes& b, uint32_t v) {
     for (int s = 24; s >= 0; s -= 8) b.push_back((uint8_t)(v >> s));
 }
