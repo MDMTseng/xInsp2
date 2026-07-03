@@ -23,6 +23,25 @@ set(CMAKE_SHARED_LIBRARY_PREFIX "xi-")
 set(XI_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
 set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 
+# libjpeg-turbo — opt-in, MIRRORING backend/CMakeLists.txt. polaris2 ENCODE
+# eviction: turbojpeg's direct SIMD JPEG encoder LEAVES the backend/core and
+# lands in the imgcodec LIB PLUGIN (the xi.jpeg.encode provider). Same switch,
+# same default (OFF; stb fallback), same install root as the backend so a build
+# that opts the backend in opts imgcodec in too — perf parity for the host's
+# compress_sink once it delegates to the capability. At v12 the backend target
+# drops this define; here it stays as imgcodec's fast path.
+option(XINSP2_HAS_TURBOJPEG "Link libjpeg-turbo for direct SIMD JPEG encode in imgcodec" OFF)
+set(TURBOJPEG_ROOT "C:/libjpeg-turbo64" CACHE PATH "libjpeg-turbo install root")
+if(XINSP2_HAS_TURBOJPEG)
+    find_path(TURBOJPEG_INCLUDE_DIR turbojpeg.h
+        HINTS ${TURBOJPEG_ROOT}/include /usr/include /usr/local/include)
+    find_library(TURBOJPEG_LIB NAMES turbojpeg
+        HINTS ${TURBOJPEG_ROOT}/lib /usr/lib /usr/local/lib)
+    if(NOT (TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB))
+        message(WARNING "XINSP2_HAS_TURBOJPEG=ON but libjpeg-turbo not found at ${TURBOJPEG_ROOT}")
+    endif()
+endif()
+
 # Contract-codegen generated headers (contract/codegen/gen_contract.py). The
 # wave-3 swap-in (docs/new_gen/08 Wave 3): every in-tree plugin's #include of its
 # "<p>_keys.gen.h" / "<p>_io.gen.h" resolves here instead of a hand-written copy
@@ -144,6 +163,13 @@ set_target_properties(imgcodec PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/imgcodec
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/imgcodec
 )
+# polaris2 ENCODE eviction: give imgcodec the SIMD JPEG encoder the backend used
+# to own (xi::encode_jpeg's turbo path). Mirrors backend/CMakeLists.txt's wiring.
+if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
+    target_compile_definitions(imgcodec PRIVATE XINSP2_HAS_TURBOJPEG=1)
+    target_include_directories(imgcodec PRIVATE ${TURBOJPEG_INCLUDE_DIR})
+    target_link_libraries(imgcodec PRIVATE ${TURBOJPEG_LIB})
+endif()
 
 # lut_owner — the RESOURCE-HANDLE PATTERN demo lib plugin (doc 14 appendix
 # "Resource-handle convention"): a TYPE-OWNER for demo.lut (immutable sorted
@@ -501,6 +527,33 @@ if(WIN32)
 endif()
 add_dependencies(cap_imgcodec_host_test imgcodec)
 add_test(NAME cap_imgcodec_host_test COMMAND cap_imgcodec_host_test)
+
+# polaris2 CORE-CODEC EVICTION (stage 2) — the HOST's preview JPEG encode
+# (backend compress_sink) delegating to xi.jpeg.encode via encode_via_capability
+# (backend/include/xi/xi_jpeg_cap.hpp), with the in-core xi::encode_jpeg fallback:
+# byte-equivalence across both engines, dedup deferring to imgcodec (no host
+# double-cache), quality plumbing, self-serve reentrancy refusal, encoder-fault
+# (quarantine) clean fallback + attribution, and absent-capability in-core
+# fallback. Compiles the in-core encoder + stb impl into the EXE; the turbojpeg
+# opt-in matches imgcodec's so an opted-in build stays byte-equal engine-for-engine.
+add_executable(cap_jpeg_encode_host_test
+    cap_jpeg_encode_host_test.cpp
+    ../backend/src/stb_impl.cpp
+)
+target_include_directories(cap_jpeg_encode_host_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
+target_compile_definitions(cap_jpeg_encode_host_test PRIVATE
+    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec.dll")
+if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
+    target_compile_definitions(cap_jpeg_encode_host_test PRIVATE XINSP2_HAS_TURBOJPEG=1)
+    target_include_directories(cap_jpeg_encode_host_test PRIVATE ${TURBOJPEG_INCLUDE_DIR})
+    target_link_libraries(cap_jpeg_encode_host_test PRIVATE ${TURBOJPEG_LIB})
+endif()
+if(WIN32)
+    target_link_libraries(cap_jpeg_encode_host_test PRIVATE Ws2_32)
+endif()
+add_dependencies(cap_jpeg_encode_host_test imgcodec)
+add_test(NAME cap_jpeg_encode_host_test COMMAND cap_jpeg_encode_host_test)
 
 # Resource-handle convention (doc 14 appendix) — demo.lut end to end against
 # the REAL built DLL through the REAL host funnel: build -> handle entry

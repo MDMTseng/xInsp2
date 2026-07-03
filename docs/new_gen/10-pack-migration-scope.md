@@ -170,6 +170,11 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    delete the ABI slot AND core's built-in stb decode fallback (the capability
    is then the only decode engine; landed pre-v12 as a byte-equivalent
    delegating slot, doc 14 / `cap_imgcodec_host_test`)**,
+   **evict the preview JPEG encoder to `xi.jpeg.encode` — delete the in-core
+   encoder (`xi_jpeg.hpp` `encode_jpeg`) AND the BACKEND-target
+   `XINSP2_HAS_TURBOJPEG` (the SIMD encoder now lives in the `imgcodec` lib
+   plugin; the capability is then the only encode engine; landed pre-v12 as a
+   byte-equivalent delegating `compress_sink`, doc 14 / `cap_jpeg_encode_host_test`)**,
    port the examples tree, app-team scripts port on the same train as the
    XEX1-v2 default + `abi` bump. One coordinated moment, not three.
 - Until P1–P3 are green, NO deprecation language anywhere (a half-deprecated

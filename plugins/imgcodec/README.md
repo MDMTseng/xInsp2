@@ -40,12 +40,19 @@ host field itself is untouched until the authorized break.
 
 ## Encoder choice
 
-stb_image_write (vendored, compiled in via `backend/src/stb_impl.cpp` — the
-record_save pattern). Deterministic bytes, zero external dependencies.
-libjpeg-turbo is *not* actually deployed beside the backend today
-(`XINSP2_HAS_TURBOJPEG` is an opt-in cmake switch expecting an external
-install); swapping this plugin's encoder later is invisible to consumers —
-that is the point of the capability boundary.
+`xi::encode_jpeg` (`backend/include/xi/xi_jpeg.hpp`): libjpeg-turbo's direct
+SIMD path when built with `-DXINSP2_HAS_TURBOJPEG=ON` (the SAME opt-in the
+backend uses; wired in `plugins/CMakeLists.txt`), else stb_image_write
+(vendored, compiled in via `backend/src/stb_impl.cpp` — the record_save
+pattern; deterministic bytes, zero external dependencies).
+
+polaris2 ENCODE eviction: the SIMD encoder **left core and landed here**. The
+host's preview `compress_sink` delegates to `xi.jpeg.encode`, so consolidating
+turbojpeg into this lib plugin keeps preview-encode perf parity with the old
+in-core path — and at v12 core drops `XINSP2_HAS_TURBOJPEG` entirely, leaving
+`imgcodec` the sole encode engine. Same key/params as the core encoder ⇒
+byte-identical output engine-for-engine; the swap is invisible to consumers —
+the point of the capability boundary.
 
 ## Contracts
 
