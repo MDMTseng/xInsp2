@@ -5,6 +5,7 @@
 #include <xi/xi.hpp>
 #include <xi/xi_cv.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>
 #include <xi/xi_result.hpp>
 #include <opencv2/opencv.hpp>
 
@@ -18,12 +19,16 @@ XI_INSPECT_ENTRY(t, /*frame*/ frame) {
     cv::Mat m = xi::as_cv_mat(img);
     double brightness = cv::mean(m)[0] / 255.0;
 
-    // Surface the frame image + brightness through `expose` (channel "auto").
-    // The HMI image card binds the "frame" image key.
-    xi::use("expose").process(xi::Record()
-        .set("$channel", "auto")
-        .image("frame", img)
-        .set("brightness", brightness));
+    // Surface the frame image + brightness through `expose` (channel "auto"),
+    // pack-only: expose is a sink, so a script-built pack is pushed (the pack
+    // equivalent of the retired process(Record) leg). The HMI image card binds
+    // the "frame" image key. (The source's own carrier is a separate cut-time
+    // concern; the trigger image read t.image("frame") is carrier-agnostic.)
+    xi::ScriptPackBuilder eb;
+    eb.add_str("$channel", "auto");
+    eb.add_image("frame", img);
+    eb.add_f64("brightness", brightness);
+    xi::use("expose").push(eb.seal());
 
     if (brightness > 0.15 && brightness < 0.85) xi::ok(1, "brightness ok");
     else                                        xi::ng(1, "brightness out of range");
