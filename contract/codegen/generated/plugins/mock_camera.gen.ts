@@ -8,4 +8,5 @@ export interface MockCameraConfig {
   fps?: number;
   streaming?: boolean;
   pack_mode?: boolean;
+  gain?: number;
 }

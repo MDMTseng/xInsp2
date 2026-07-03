@@ -219,18 +219,21 @@ add_test(NAME pack_pilot_test COMMAND pack_pilot_test)
 # test_crash_leak_counter) driven through a mirror of the service's
 # use_pack_process_cb into blob_analysis's xi.pack@1 door. Also pins the
 # t.pack() -> use().process chain, the $fault fail-loud contract, fail-closed
-# edges (miss / no door / empty / older host), and pack+pool balance.
+# edges (miss / no door / empty / older host), mock_camera's CONTROL door
+# (ex-feedback, 5c: json_source now seats the -4 door-less edge), and
+# pack+pool balance.
 add_executable(use_pack_door_test use_pack_door_test.cpp)
 target_include_directories(use_pack_door_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis)
 target_compile_definitions(use_pack_door_test PRIVATE
     BLOB_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis/xi-blob_analysis.dll"
-    MOCK_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera.dll")
+    MOCK_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera.dll"
+    JSON_SOURCE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/json_source/xi-json_source.dll")
 if(WIN32)
     target_link_libraries(use_pack_door_test PRIVATE Ws2_32)
 endif()
-add_dependencies(use_pack_door_test blob_analysis mock_camera)
+add_dependencies(use_pack_door_test blob_analysis mock_camera json_source)
 add_test(NAME use_pack_door_test COMMAND use_pack_door_test)
 
 # mock_camera contract test — config/command surface only (source plugin).

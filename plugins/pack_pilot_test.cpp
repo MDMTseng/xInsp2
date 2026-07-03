@@ -6,9 +6,9 @@
 // exercises the xi.pack@1 door both directions:
 //
 //   * PLUGIN-door probe — blob_analysis publishes xi_plugin_get_interface and
-//     answers ("xi.pack", 1); mock_camera (a source, no pack process) does
-//     NOT export the door at all. The host adapter reflects this via
-//     has_pack_door().
+//     answers ("xi.pack", 1); mock_camera answers it too since ex-feedback
+//     (its CONTROL door: the bilingual source emits packs AND accepts
+//     control packs). The host adapter reflects both via has_pack_door().
 //   * CHAINED FLOW — mock_camera in pack mode emits a Pack through the bus;
 //     the test (playing the gray-conversion step a script would own) converts
 //     it to a "gray" pack and drives it through blob_analysis's pack door.
@@ -138,9 +138,11 @@ int main() {
     if (!blob.inst || !mock.inst) { std::fprintf(stderr, "\nSETUP FAILED\n"); return 1; }
 
     // ---------------------------------------------------------------------
-    // (A) Plugin-door probe: blob answers xi.pack@1; mock does not export it.
+    // (A) Plugin-door probe: BOTH answer xi.pack@1 — blob's is the operator
+    //     door; mock's is its CONTROL door (ex-feedback: the bilingual source
+    //     emits packs AND accepts control packs on its own door).
     // ---------------------------------------------------------------------
-    SECTION("plugin door probe: blob has xi.pack@1, mock (source) does not");
+    SECTION("plugin door probe: blob has xi.pack@1; mock (bilingual source) too");
     CHECK(blob.get_iface != nullptr);
     if (blob.get_iface) {
         CHECK(blob.get_iface("xi.pack", 1) != nullptr);
@@ -148,8 +150,13 @@ int main() {
         CHECK(blob.get_iface("xi.other", 1) == nullptr);
     }
     CHECK(blob.adapter->has_pack_door());
-    CHECK(mock.get_iface == nullptr);        // a source exports no capability door
-    CHECK(!mock.adapter->has_pack_door());
+    CHECK(mock.get_iface != nullptr);        // ex-feedback: the control door
+    if (mock.get_iface) {
+        CHECK(mock.get_iface("xi.pack", 1) != nullptr);
+        CHECK(mock.get_iface("xi.pack", 2) == nullptr);   // only @1 published
+        CHECK(mock.get_iface("xi.other", 1) == nullptr);
+    }
+    CHECK(mock.adapter->has_pack_door());
 
     // ---------------------------------------------------------------------
     // (B) Deterministic door: a white square yields one blob whose contour

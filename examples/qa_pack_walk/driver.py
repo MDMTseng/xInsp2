@@ -4,15 +4,16 @@ matrix rows "generic walk", "typed-schema reads", "cross-thread capture";
 docs/new_gen/12-pack-parity-matrix.md).
 
 mock_camera runs in PACK MODE; the inspect script proves, per pack, that
-(1) the generic for_each walk sees exactly {seq:i64, frame:image}, (2) typed-
+(1) the generic for_each walk sees exactly {seq:i64, gain:f64, frame:image}
+(gain is the ex-feedback closed-loop echo), (2) typed-
 schema (ScriptTypedPack) reads equal the string-keyed reads, and (3) a
 ScriptPack captured BY VALUE into a worker thread stays valid (checksums
 agree). The script contains no xi::Record and this driver observes ONLY
 run_result events — pack-only end to end.
 
 Asserts:
-  1. >= 5 ok verdicts, each with a parseable "walk ..." message showing n=2,
-     keys covering seq+frame, tags=1, typed==string seq, xthread=1.
+  1. >= 5 ok verdicts, each with a parseable "walk ..." message showing n=3,
+     keys covering seq+gain+frame, tags=1, typed==string seq AND gain, xthread=1.
   2. NO ng verdicts.
   3. seq strictly increasing in arrival order.
 
@@ -30,7 +31,8 @@ from xinsp2 import Client  # noqa: E402
 BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
 PORT = int(os.environ.get("PORT", "7898"))
 MSG_RE = re.compile(
-    r"walk n=(\d+) keys=(\S+) tags=(\d) seq=(-?\d+) typed=(-?\d+) xthread=(\d)")
+    r"walk n=(\d+) keys=(\S+) tags=(\d) seq=(-?\d+) typed=(-?\d+) "
+    r"gain=([\d.]+) gtyped=([\d.]+) xthread=(\d)")
 
 
 def spawn(port):
@@ -94,7 +96,9 @@ def main() -> int:
                 m = MSG_RE.search(msg)
                 if code > 0 and m:
                     oks.append((int(m.group(1)), m.group(2), int(m.group(3)),
-                                int(m.group(4)), int(m.group(5)), int(m.group(6))))
+                                int(m.group(4)), int(m.group(5)),
+                                float(m.group(6)), float(m.group(7)),
+                                int(m.group(8))))
                 elif code < 0 or (code > 0 and not m):
                     ngs.append(f"code={code} msg={msg!r}")
             if len(oks) >= 12:
@@ -109,9 +113,9 @@ def main() -> int:
         # 1. enough pack-only ok verdicts, each structurally right.
         if len(oks) < 5:
             fails.append(f"too few pack-only ok verdicts (got {len(oks)}, want >=5)")
-        for n, keys, tags, seq, typed, xthread in oks:
+        for n, keys, tags, seq, typed, gain, gtyped, xthread in oks:
             keyset = set(keys.split(","))
-            if n != 2 or keyset != {"seq", "frame"}:
+            if n != 3 or keyset != {"seq", "gain", "frame"}:
                 fails.append(f"generic walk wrong: n={n} keys={keys}")
                 break
             if tags != 1:
@@ -119,6 +123,9 @@ def main() -> int:
                 break
             if seq != typed:
                 fails.append(f"typed-schema read disagrees with string read: {seq} vs {typed}")
+                break
+            if gain != gtyped:
+                fails.append(f"typed-schema f64 read disagrees: {gain} vs {gtyped}")
                 break
             if xthread != 1:
                 fails.append("cross-thread ScriptPack capture broke (checksums differ)")

@@ -26,9 +26,14 @@ both compile from those generated constants.
 | config  | `height` | int | |
 | config  | `fps`    | int | clamped to [1, 60] |
 | config  | `streaming` | bool | read-only (`get_def` only) |
-| command | `command` | string | `start` / `stop` / `get_status` / `set_fps` / `set_resolution` |
-| command | `value`   | int | **required** for `set_fps` |
+| config  | `pack_mode` | bool | default false — emit via the xi.pack@1 plane instead of Record |
+| config  | `gain` | double | default 1.0, clamped to [0.05, 8.0] — **pack-mode** brightness multiplier |
+| command | `command` | string | `start` / `stop` / `get_status` / `set_fps` / `set_resolution` / `set_gain` |
+| command | `value`   | int/double | **required** for `set_fps` (int) and `set_gain` (double) |
 | output  | `frame`   | image | emitted RGB frame |
+| output  | `seq`     | int | frame counter (pack-mode entry) |
+| output  | `gain`    | double | pack-mode entry: the gain THIS frame was painted with |
+| door    | `ack`     | string | door reply: echoes the applied command name |
 
 Schema version: `xi::mock_camera::kSchemaVersion` (currently **1**). A config
 built against a different version is rejected by `set_def` with a precise error
@@ -67,9 +72,40 @@ silently no-op'ing. `set_fps` with no `value` returns:
 reason codes used on the Record path.) Unknown commands return the framework's
 `{"error":"unknown_command", ...}` shape.
 
+## Control door (pack-mode closed loop)
+
+Since polaris2 ex-feedback the source is **bilingual both directions**: besides
+*emitting* pack frames (`pack_mode`), it *accepts* control packs through its
+own `xi.pack@1` door (`XI_PLUGIN_PACK_DOOR`). The door speaks the same command
+vocabulary as `exchange()`, as pack entries:
+
+```
+{ command:"set_gain", value:f64 }   →  ack pack { ack:"set_gain", gain:<clamped>, seq:<frame counter> }
+{ command:"get_status" }            →  ack pack { ack:"get_status", gain, seq, streaming }
+```
+
+A script closes the loop with `xi::use("cam").process(ctrl)` (request-reply;
+the sealed door output IS the ack) or `.push(ctrl)` (fire-and-forget). The
+commanded gain applies to the **next** emitted frame — frame-latency control;
+each pack-mode frame echoes the gain it was painted with (`gain` entry) so the
+loop can regulate against the actual plant state. Faults are the pack-shaped
+fail-loud contract: a value-less `set_gain` acks `$fault=missing_input`, a
+mis-typed value `$fault=wrong_type`, an unknown selector
+`$fault=unknown_command` — never a silent no-op.
+
+This addition is strictly **additive**: the Record emit path is untouched
+(never scaled, byte-for-byte the pre-door behavior), and a host that never
+probes `xi_plugin_get_interface` sees exactly the plugin it always saw. The
+live exemplar is [examples/qa_pack_feedback](../../examples/qa_pack_feedback/README.md)
+(mean-intensity analysis in the script steering `gain` into a target band).
+
 ## Tests
 
 `tests/test_mock_camera.cpp` asserts: `set_fps` with no `value` → structured
 fault; a future config `_schema` → `set_def` rejects it and leaves config
-unchanged; and the `Config`/`Command` builder happy path (including fps
-clamping). Run via `ctest -C Release -R mock_camera_test` from `plugins/build`.
+unchanged; the `Config`/`Command` builder happy path (including fps and gain
+clamping); and the control door (set_gain ack round-trip + clamp + fail-loud
+`$fault` on a command-less pack). The script-surface door chain is covered in
+`plugins/use_pack_door_test.cpp` (5c) and the live loop in
+`examples/qa_pack_feedback`. Run via `ctest -C Release -R mock_camera_test`
+from `plugins/build`.
