@@ -144,6 +144,22 @@ struct PluginInfo {
     // FRAME order even under parallel dispatch. Fire-and-forget: the process()
     // reply is dropped. See run_one_inspection / docs/reference/c-abi.md.
     bool        is_sink = false;
+    // Informational lib-plugin marker (plugin.json `"lib": true`, doc 14): a
+    // capability provider with NO data plane — never wired as a pipeline input/
+    // output. Parsed for documentation + as a sanity signal; the autoload gate
+    // below is the operative flag.
+    bool        is_lib = false;
+    // V3 machine-level autoload (plugin.json `"autoload": true`, doc 14/19 V3).
+    // A `lib` capability provider marked autoload is instantiated ONCE at service
+    // boot under a stable MACHINE owner (PluginManager::machine_instances_), so
+    // its capabilities are registered WITHOUT any project declaring a per-instance
+    // (E1 second cause, doc 06 §6). Machine-scoped: it persists across project
+    // open/close. A project instance of the same plugin still takes precedence —
+    // it evicts the machine provider before its own factory runs (no double-
+    // register), and the machine provider is reinstated when the project provider
+    // goes away. Only meaningful together with `lib` (a data-plane plugin has no
+    // capabilities to autoload).
+    bool        autoload = false;
     std::string folder_path;   // absolute path to plugin folder
     std::string ui_path;       // absolute path to ui/ folder (if has_ui)
     HMODULE     handle = nullptr;

@@ -360,6 +360,21 @@ target_compile_definitions(test_cap_plane PRIVATE
     CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
 add_test(NAME cap_plane_test COMMAND test_cap_plane)
 
+# V3 machine-level lib-plugin autoload (doc 14 / doc 19 V3): the REAL
+# PluginManager scans + autoloads cap_test_plugin (marked lib+autoload) and
+# proves a capability is available with NO project instance, project-instance
+# precedence (evict + reinstate), close_project reinstatement, crash->quarantine
+# ->machine-scoped recovery, and the teardown owner sweep.
+add_executable(test_cap_autoload tests/test_cap_autoload.cpp)
+target_link_libraries(test_cap_autoload PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_cap_autoload PRIVATE Ws2_32)
+endif()
+add_dependencies(test_cap_autoload cap_test_plugin)
+target_compile_definitions(test_cap_autoload PRIVATE
+    CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
+add_test(NAME cap_autoload_test COMMAND test_cap_autoload)
+
 # Q0f — the deliberate per-crash doc leak is OBSERVABLE. Drives the real xi_use.hpp
 # UseProxy (share_out reserves a ref; rc -2 leaks it) against the real crashing
 # fault_plugin, and asserts DocRegistry::crash_leaked_lifetime (surfaced in

@@ -80,6 +80,13 @@ inline InstanceInfo* PluginManager::create_instance(const std::string& instance_
     // call host->instance_folder() from inside its constructor.
     InstanceFolderRegistry::instance().set(instance_name, ii.folder_path);
 
+    // V3 precedence: if this plugin is machine-autoloaded, evict the machine
+    // provider FIRST so this explicit project instance registers its capability
+    // names cleanly (no ETAKEN double-register). The machine provider is
+    // reinstated when the project instance is removed (remove_instance) or the
+    // project closes (close_project).
+    evict_machine_provider_locked_(plugin_name);
+
     ImagePoolOwnerId created_owner = 0;   // for a later sweep if a save fails
     {
         // C ABI — create via host API. ImagePoolOwnerScope tags every image the
@@ -175,6 +182,10 @@ inline bool PluginManager::remove_instance(const std::string& instance_name, boo
             std::filesystem::rename(ij, std::filesystem::path(folder) / "instance.json.removed", ec);
     }
     save_project_locked();
+    // V3: if that was the last project instance of an autoload lib plugin, the
+    // machine provider steps back in (idempotent — no-op for non-autoload plugins
+    // and for plugins still project-provided).
+    autoload_machine_providers_locked_();
     return true;
 }
 

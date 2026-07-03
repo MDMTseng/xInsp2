@@ -97,6 +97,17 @@ public:
         // the case the pool singleton was already torn down before us.
         project_.instances.clear();
         inst_state_.clear();
+        // V3: machine-autoloaded providers are NOT in project_.instances (they
+        // outlive projects), so tear them down here too — BEFORE the FreeLibrary
+        // loop below, for the exact same dangling-destroy_fn reason. Their DLLs
+        // are global (scanned, not project-loaded), so they're in plugins_ and
+        // get freed by the loop after their adapters are gone. Drop the
+        // InstanceRegistry ref FIRST (it holds a shared_ptr too) so clearing the
+        // map actually destroys the adapter here — the same discipline
+        // close_project applies to project instances.
+        for (auto& [pname, inst] : machine_instances_)
+            if (inst) InstanceRegistry::instance().remove(inst->name());
+        machine_instances_.clear();
         // Now release every loaded plugin DLL — no live destroy_fn callers remain.
         for (auto& [name, pi] : plugins_) {
             if (pi.handle) {
@@ -163,6 +174,40 @@ public:
 
     std::string instance_group(const std::string& name);
 
+    // ---- V3 machine-level lib-plugin autoload (doc 14 / doc 19 V3) ----------
+    // Instantiate every discovered plugin marked `"autoload": true` ONCE under a
+    // stable machine owner, so its capabilities register WITHOUT any project
+    // declaring a per-instance (cures E1's second cause, doc 06 §6). Idempotent
+    // + a reconciler: it creates a machine provider only for an autoload plugin
+    // that has NO machine instance yet AND no project instance (a project
+    // instance takes precedence). Called at service boot (after scan_plugins) and
+    // again after project teardown (close_project / remove_instance) to reinstate
+    // providers a closed project had displaced. Returns the count created.
+    // (definition in xi_pm_load.hpp)
+    int autoload_machine_providers();
+    // Deployment opt-in for machine autoload. OFF by default: a stock deployment
+    // is byte-unchanged (no machine providers, so nothing that keys off a
+    // capability's availability — e.g. expose's E2 JPEG preview — flips). The
+    // service sets this from `--autoload-lib` / env XINSP2_AUTOLOAD_LIB BEFORE
+    // the boot autoload pass. While OFF, every autoload path is a no-op, so the
+    // reconcilers wired into open/close/create/remove stay inert too.
+    void set_autoload_enabled(bool on) {
+        std::lock_guard<std::mutex> lk(mu_);
+        autoload_enabled_ = on;
+    }
+    bool autoload_enabled() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return autoload_enabled_;
+    }
+    // Machine-scoped recovery: rebuild a machine provider from a fresh factory
+    // (the analogue of an operator re-committing a project instance's config to
+    // clear a quarantine). Evicts the current machine adapter for `plugin_name`
+    // and re-autoloads it. Returns true if a provider is live afterwards.
+    // (definition in xi_pm_load.hpp)
+    bool reload_machine_provider(const std::string& plugin_name);
+    // Test/inspection: names of the plugins currently machine-provided.
+    std::vector<std::string> machine_provider_plugins();
+
     // ---- host-tracked instance lifecycle state -----------------------------
     // The state map is OWNED here, under the same mu_ as the instance set, so
     // create/remove/rename migrate it atomically (they hold mu_ and call
@@ -223,6 +268,11 @@ private:
         pi.json_fallback = json_flag_true(mc, "json_fallback");
         pi.is_sink       = json_flag_true(mc, "sink") ||
                            (extract_string(mc, "role").value_or("") == "sink");
+        // Keep the doc-14 lib marker + V3 autoload gate refreshed on reload too,
+        // so toggling them in plugin.json + Rebuild takes effect (parse_manifest
+        // is the scan-path twin of this reload-path source of truth).
+        pi.is_lib        = json_flag_true(mc, "lib");
+        pi.autoload      = json_flag_true(mc, "autoload");
         // item 14: per-plugin post-fault policy DEFAULT (an instance.json
         // "on_fault" overrides it). Unknown/absent → Reuse (today's behavior).
         pi.default_on_fault = parse_on_fault(extract_string(mc, "on_fault").value_or(""),
@@ -280,6 +330,19 @@ private:
             const std::string& inst_name, int max_concurrency,
             OnFault on_fault = OnFault::Reuse);
 
+    // V3 autoload internals — mu_ MUST be held (definitions in xi_pm_load.hpp).
+    // load_plugin's body factored so autoload can LoadLibrary while holding mu_.
+    bool load_plugin_locked_(const std::string& name, std::string* err);
+    // The reconciler body (autoload_machine_providers wraps it under the lock).
+    int  autoload_machine_providers_locked_();
+    // Destroy the machine provider for `plugin_name` (adapter dtor owner-sweeps
+    // its capability registrations); no-op if none. Called BEFORE a project
+    // instance of that plugin runs its factory, so the project instance registers
+    // the slot cleanly (project precedence, no double-register).
+    void evict_machine_provider_locked_(const std::string& plugin_name);
+    // True if some project instance currently uses `plugin_name`.
+    bool project_provides_plugin_locked_(const std::string& plugin_name) const;
+
     // Phase 1 of a reload: snapshot every instance's def, then destroy them and
     // FreeLibrary the plugin's old DLL. (defined in xi_pm_load.hpp)
     std::vector<PendingInstance> detach_plugin_instances_locked_(
@@ -334,6 +397,14 @@ private:
 
     std::mutex mu_;
     std::unordered_map<std::string, PluginInfo> plugins_;
+    // V3: machine-autoloaded lib providers, keyed by PLUGIN name (one machine
+    // instance per autoload plugin). Distinct from project_.instances — these are
+    // machine-scoped: created at boot, NOT torn down by close_project, swept in
+    // ~PluginManager. Each holds a CAbiInstanceAdapter also registered in
+    // InstanceRegistry (so the capability funnel's resolve_provider_ finds it).
+    std::unordered_map<std::string, std::shared_ptr<CAbiInstanceAdapter>> machine_instances_;
+    // V3 deployment opt-in (see set_autoload_enabled). OFF = no autoload anywhere.
+    bool autoload_enabled_ = false;
     ProjectInfo project_;
     // Host-tracked instance lifecycle state (see the public set/get above). Guarded
     // by mu_; migrated inline by create/remove/rename so it never drifts.
