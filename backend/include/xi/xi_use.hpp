@@ -531,8 +531,21 @@ public:
     std::vector<std::string> sources() const {
         if (data_) {
             std::vector<std::string> out;
-            out.reserve(data_->images.size());
-            for (auto& [k, v] : data_->images) out.push_back(k);
+            if (!data_->images.empty()) {
+                out.reserve(data_->images.size());
+                for (auto& [k, v] : data_->images) out.push_back(k);
+                return out;
+            }
+            // Pack path (H1): the image map is empty (the frame rides the pack),
+            // so report the pack's source identity — the emitting instance
+            // (leader) and the pack's $src stamp — instead of silently nothing.
+            // Gated on a pack being present ⇒ a bare Record trigger is unchanged.
+            if (auto p = pack()) {
+                if (!data_->leader.empty()) out.push_back(data_->leader);
+                if (auto s = p.src(); s && !s->empty() &&
+                    (out.empty() || out.front() != *s))
+                    out.emplace_back(*s);
+            }
             return out;
         }
         auto fn = reinterpret_cast<TriggerSourcesFn>(g_trigger_sources_fn_);
@@ -632,9 +645,25 @@ public:
     // True if `name` appears in this trigger's source list. Cheap routing
     // affordance for multi-source scripts that switch on source identity
     // without re-implementing string compare or hashing in the hot path.
+    //
+    // Record path: the source is a key in the Record-plane image map.
+    // Pack path (H1): that map is EMPTY (the frame rides the pack), so keying
+    // off it alone always answered false for a pack-plane trigger — forcing
+    // multi-source pack scripts to route via t.primary_source() instead. The
+    // honest source identity of a pack trigger is the emitting instance
+    // (leader_source, what primary_source() returns) plus the pack's own
+    // producer stamp ($src). We consult those ONLY when a pack is actually
+    // carried, so a Record-plane trigger (pack == NULL) is byte-unchanged.
     bool has_source(const char* name) const {
         if (!name) return false;
-        if (data_) return data_->images.find(name) != data_->images.end();
+        if (data_) {
+            if (data_->images.find(name) != data_->images.end()) return true;
+            if (auto p = pack()) {                       // pack path only
+                if (!data_->leader.empty() && data_->leader == name) return true;
+                if (auto s = p.src(); s && *s == name) return true;
+            }
+            return false;
+        }
         for (auto& s : sources()) if (s == name) return true;
         return false;
     }
