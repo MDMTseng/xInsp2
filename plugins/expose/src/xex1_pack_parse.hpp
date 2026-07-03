@@ -156,7 +156,7 @@ inline ParsedFrame parse_frame_v3(const uint8_t* data, size_t size) {
             if (v.kind != mp::Kind::Int || v.i != 3) {
                 // The v2 DRAFT (tagless entries) is refused here by design: its
                 // image-vs-map ambiguity cannot be resolved without guessing.
-                // See docs/new_gen/12-replay-file-migration.md.
+                // See docs/new_gen/13-replay-file-migration.md.
                 out.error = "unsupported frame version (expected v3, the finalized tagged dump)";
                 return out;
             }

@@ -89,7 +89,7 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    entry-for-entry identical incl. restored `$channel`/`$seq`, re-dump ==
    disk == original's dump; `xex1_v2_identity_test` still pins
    memory≈wire≈disk — historical name, v3 bytes). The migration note for
-   pre-v3 artifacts is `12-replay-file-migration.md` (headline: nothing
+   pre-v3 artifacts is `13-replay-file-migration.md` (headline: nothing
    pre-v3 ever had a replay path, so v3 breaks none; the one open item —
    an optional .json/.bmp→.xex1 converter — is parked with the app team on
    the cutover train). Remaining P3-adjacent work, tracked outside the
