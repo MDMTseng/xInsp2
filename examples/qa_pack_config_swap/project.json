@@ -1,0 +1,8 @@
+{
+  "name": "qa_pack_config_swap",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam", "plugin": "mock_camera" },
+    { "name": "probe", "plugin": "config_swap_probe" }
+  ]
+}

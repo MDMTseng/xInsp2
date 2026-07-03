@@ -116,7 +116,7 @@ above.
 
 | # | Pattern | Taught by | Status | Evidence / blocker detail |
 |---|---|---|---|---|
-| F1 | **Config swap** (prepare/commit) under live traffic | config_swap_probe README | **GREEN (composition)** | Record-vs-pack door parity of the probe proven in `plugins/config_swap_probe/tests/test_config_swap_probe_pack.cpp` (re-run green 2026-07-03); the script drive is the live-proven `use().process(pack)` seam. The observation surface (get_status) is control-plane JSON and unaffected. |
+| F1 | **Config swap** (prepare/commit) under live traffic | config_swap_probe README | **GREEN** | Composing example landed: **`examples/qa_pack_config_swap`** (QA green 2026-07-03, `python tools/run_qa.py pack` 5/5) — mock_camera (pack mode) drives the graph, the script chains `t.pack()` into the probe's `xi.pack@1` door while the driver runs `prepare_instance` → `commit_group` mid-run; verdicts on the run_result plane prove the three-phase stream (42/none → 42/staged-99 → 99), `last_seen==active` on every frame (frame-perfect, never torn), and no run lost/duplicated (probe `proc` exactly 1..N, seqs strict; the commit barrier's documented no-process window may skip a source tick — the driver pins any gap to exactly the swap point). Zero `xi::Record` in the script. Halves previously proven: Record-vs-pack door parity in `plugins/config_swap_probe/tests/test_config_swap_probe_pack.cpp` (re-run green 2026-07-03); `use().process(pack)` seam live-proven in `qa_use_pack_door`. |
 | F2 | **Retune-and-rerun** via exchange (hue_tune, golden_defect Param) | hue_tune, golden_defect, buffer_replay_demo | **N/A** (control) | exchange()/Params are control plane. The rerun's DATA leg is B2/E1 and inherits their status (B2 GREEN; E1 GREEN-composition). |
 
 ### G. Verdict / status / state
@@ -167,8 +167,8 @@ Counting the 29 pattern rows (A1–A9, B1–B4, C1–C5, D1–D2, E1–E3, F1–
 
 | Status | Rows | Count |
 |---|---|---|
-| **GREEN (pack-only, live-service QA evidence)** | A1–A9, B1, B2, C1, C2, C4, D1, D2, G1 | **17** |
-| **GREEN (composition — both halves proven, one example owed)** | E1, E2, E3, F1 | **4** |
+| **GREEN (pack-only, live-service QA evidence)** | A1–A9, B1, B2, C1, C2, C4, D1, D2, F1, G1 | **18** |
+| **GREEN (composition — both halves proven, one example owed)** | E1, E2, E3 | **3** |
 | **Open on unscheduled semantics** | B3, B4 (U1), C3 (U3) | **3** |
 | **N/A (control plane / by design)** | C5, F2, G2, G4 + the §H block | **4 rows + H** |
 | **N/A today / U2 at the cut** | G3 | **1** |
@@ -182,9 +182,10 @@ two named semantic residuals — **U1** (pack-plane NA/provenance/typed-IO:
 gates the error paths of fixturing_demo / io_stress / graph_demo, rows B3/B4)
 and **U3** (ordered-sink semantics: script-carried `$seq` needs blessing, and
 process()-on-sink runs inline — gates qa_result_order's pattern, row C3) —
-plus four composition rows owing one example each (E1/E2/E3 collapse into the
-graph-level record→replay example doc 10 already names; F1 into a pack-mode
-config-swap drive). **The Gate P2 verdict rendered on this measurement is in
+plus the composition rows owing one example each (E1/E2/E3 collapse into the
+graph-level record→replay example doc 10 already names; F1's pack-mode
+config-swap drive is DELIVERED — `examples/qa_pack_config_swap`, QA green
+2026-07-03, row F1 now GREEN). **The Gate P2 verdict rendered on this measurement is in
 doc 10: ACHIEVED WITH NAMED RESIDUALS (U1, U3).** U2 (`xi::state()`'s Record
 shape) gates the CUT, not P2.
 

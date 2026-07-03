@@ -1,0 +1,6 @@
+{
+  "plugin": "config_swap_probe",
+  "config": {
+    "value": 42
+  }
+}
