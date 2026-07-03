@@ -25,12 +25,22 @@
 #include <xi/xi_image_pool.hpp>   // ImagePool::make_host_api / cumulative().live_now
 #include <xi/xi_trigger_bus.hpp>  // TriggerBus / install_trigger_hook
 #include <xi/xi_mp.hpp>           // decode the nested-msgpack round-trip
+#include <xi/xi_use.hpp>          // xi::Trigger / xi_trigger_view (H1 has_source)
 
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
+
+// xi_use.hpp's Trigger fallback branches (the ambient thread_local path) name
+// these script-side host thunks, which normally live in xi_script_support.hpp
+// (force-included into a script DLL, not the host). The VIEW-constructed Trigger
+// this test builds never takes those branches, but the linker still needs the
+// symbols. Null host-side definitions satisfy it; the data_ path never reads them.
+void* g_trigger_info_fn_    = nullptr;
+void* g_trigger_sources_fn_ = nullptr;
+void* g_trigger_leader_fn_  = nullptr;
 
 static int g_failures = 0;
 #define CHECK(cond)                                                            \
@@ -349,6 +359,89 @@ static void test_owner_sweep_regression() {
     CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
 }
 
+// ---------------------------------------------------------------------------
+// (6) H1 regression: t.has_source() / t.sources() are honest for a PACK-plane
+//     trigger. The frame rides the pack, so the Record-plane image map is empty
+//     — keying has_source() off it alone always answered false on the pack path
+//     (qa_multi_graph had to route via t.primary_source()). The source identity
+//     of a pack trigger is its leader_source (emitting instance) + the pack's
+//     own $src stamp; both must resolve true, a stranger false. The RECORD path
+//     (pack == NULL) stays byte-unchanged: the leader is NOT a source there.
+// ---------------------------------------------------------------------------
+static void test_has_source_pack_identity() {
+    SECTION("H1: has_source()/sources() honest on the pack path; record path unchanged");
+    xi::install_pack_abi();
+    xi_host_api host = xi::ImagePool::make_host_api();
+    const xi_pack_v1* fi = xi::pack_v1_iface();
+    int base = pool_live();
+
+    // --- PACK path: a sealed pack with a frame + a $src producer stamp. The
+    //     event's leader_source is the emitting instance ("camA"); the pack was
+    //     minted by "detA" ($src). image_count = 0 (the frame rides the pack). ---
+    std::vector<uint8_t> gray(16, 0); gray[0] = 255;
+    xi_pack_builder b = fi->builder_new();
+    fi->builder_add_i64(b, "seq", 7);
+    fi->builder_add_image(b, "frame", 4, 4, 1, gray.data());
+    fi->builder_add_str(b, "$src", "detA", 4);
+    xi_pack_handle f = fi->builder_seal(b);          // rc 1 (ours)
+    CHECK(f != XI_PACK_NULL);
+
+    {
+        xi_trigger_view v{};
+        v.is_active     = 1;
+        v.id            = xi_trigger_id{ 0xABCD, 0x1234 };
+        v.leader_source = "camA";
+        v.images        = nullptr;
+        v.image_count   = 0;                          // pack-plane: no image map
+        v.pack          = f;                          // borrowed; Trigger takes its own ref
+        v.host          = &host;
+
+        xi::Trigger t(&v);
+        CHECK(t.is_active());
+        CHECK((bool)t.pack());                        // the pack came through
+        CHECK(t.primary_source() == "camA");          // leader, as today
+
+        // THE FIX: honest on the pack path (both were false before H1).
+        CHECK(t.has_source("camA"));                  // leader_source
+        CHECK(t.has_source("detA"));                  // pack $src producer stamp
+        CHECK(!t.has_source("camB"));                 // a stranger is still false
+        CHECK(!t.has_source(nullptr));                // null-safe
+
+        // sources() reports the same identity instead of silently empty.
+        auto srcs = t.sources();
+        bool has_camA = false, has_detA = false;
+        for (auto& s : srcs) { has_camA |= (s == "camA"); has_detA |= (s == "detA"); }
+        CHECK(srcs.size() == 2 && has_camA && has_detA);
+    }
+    fi->release(f);                                    // drop our ref (Trigger dropped its own)
+    CHECK(pool_live() == base);                        // pack + pooled image balanced
+
+    // --- RECORD path (pack == NULL): byte-unchanged. The source is the image
+    //     map key; the leader_source is NOT promoted to a source here. ---
+    xi_image_handle rimg = xi::ImagePool::instance().create(4, 4, 1);   // our ref
+    {
+        xi_trigger_view_image imgs[1] = { { "gray", rimg } };
+        xi_trigger_view v{};
+        v.is_active     = 1;
+        v.id            = xi_trigger_id{ 1, 2 };
+        v.leader_source = "cam0";                      // leader != any image key
+        v.images        = imgs;
+        v.image_count   = 1;
+        v.pack          = XI_PACK_NULL;                // Record path
+        v.host          = &host;
+
+        xi::Trigger t(&v);
+        CHECK(!(bool)t.pack());
+        CHECK(t.has_source("gray"));                  // the image-map key
+        CHECK(!t.has_source("cam0"));                 // leader NOT leaked into record path
+        CHECK(!t.has_source("nope"));
+        auto srcs = t.sources();
+        CHECK(srcs.size() == 1 && srcs.front() == "gray");
+    }
+    xi::ImagePool::instance().release(rimg);           // drop our ref (Trigger has its own)
+    CHECK(pool_live() == base);
+}
+
 int main() {
     std::printf("[test] xi.pack@1 carved data-plane door + dispatch dual-carry\n");
     test_door_probe();
@@ -356,6 +449,7 @@ int main() {
     test_refcount_lifecycle();
     test_dispatch_dual_carry();
     test_owner_sweep_regression();
+    test_has_source_pack_identity();
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
         return 0;
