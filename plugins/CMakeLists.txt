@@ -374,6 +374,24 @@ endif()
 add_dependencies(expose_script_push_test expose)
 add_test(NAME expose_script_push_test COMMAND expose_script_push_test)
 
+# U3 (docs/new_gen/17) — frame-order delivery of staged pack pushes under
+# PARALLEL dispatch, asserted at the sink's door: the REAL xi::EmitGate/EmitTurn
+# ordering primitive + the REAL expose DLL door, the service's staged-push
+# flush discipline mirrored per worker. Gated phase -> door-observed wire seq
+# exactly in frame order (and in call order within a frame); ungated control on
+# the same uneven workload -> inversions (proving the gate, not luck, ordered
+# phase A); pack/pool registries balance.
+add_executable(pack_order_gate_test pack_order_gate_test.cpp)
+target_include_directories(pack_order_gate_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
+target_compile_definitions(pack_order_gate_test PRIVATE
+    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose.dll")
+if(WIN32)
+    target_link_libraries(pack_order_gate_test PRIVATE Ws2_32)
+endif()
+add_dependencies(pack_order_gate_test expose)
+add_test(NAME pack_order_gate_test COMMAND pack_order_gate_test)
+
 # polaris2 P3 (docs/new_gen/10) — record_save persistence parity. Drives the REAL
 # record_save DLL's pack door to persist a multi-entry pack (scalars + nested mp +
 # image) as a .xex1 file, asserts the file bytes EQUAL the shared encoder's output

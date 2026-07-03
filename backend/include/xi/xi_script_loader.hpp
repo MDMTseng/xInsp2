@@ -107,6 +107,10 @@ struct LoadedScript {
     using SetUsePushPackCallbackFn = void (*)(void* push_fn);
     SetUsePushPackCallbackFn set_use_push_pack_callback = nullptr;
     SetRunContextFn    set_run_context  = nullptr;
+    // U3 (docs/new_gen/17): per-run arrival/run id → the script's xi::run_id().
+    // Optional symbol — older scripts lack it and read 0.
+    using SetRunIdFn = void (*)(long long run_id);
+    SetRunIdFn         set_run_id       = nullptr;
     SetGlobalCancelFn  set_global_cancel = nullptr;
     // Inspect-start hook: draws this inspect's cancel ticket so the watchdog's
     // cooperative cancel is scoped to inspects in flight at trip time, not
@@ -171,6 +175,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_result_callback = reinterpret_cast<LoadedScript::SetResultCallbackFn>(GetProcAddress(h, "xi_script_set_result_callback"));
     out.set_use_pack_callback = reinterpret_cast<LoadedScript::SetUsePackCallbackFn>(GetProcAddress(h, "xi_script_set_use_pack_callback"));
     out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
+    out.set_run_id      = reinterpret_cast<LoadedScript::SetRunIdFn>(GetProcAddress(h, "xi_script_set_run_id"));
     out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
     out.inspect_begin     = reinterpret_cast<LoadedScript::InspectBeginFn>(GetProcAddress(h, "xi_script_inspect_begin"));
     out.state_schema_version = reinterpret_cast<LoadedScript::StateSchemaVersionFn>(GetProcAddress(h, "xi_script_state_schema_version"));

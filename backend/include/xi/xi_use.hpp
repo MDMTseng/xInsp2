@@ -759,6 +759,29 @@ inline void warn_use_no_pack_door_(const xi_host_api* host, const char* name) {
     host->log(3, msg.c_str());
 }
 
+// U3 (docs/new_gen/17): same once-per-name discipline for a process(pack) call
+// on a DECLARED ORDERED SINK (-5). process() is request-reply; a sink is fed
+// fire-and-forget via push() (staged + flushed in frame order). Rejected
+// fail-loud instead of staged: a staged call's reply cannot exist until the
+// post-inspect flush, so it could only return an empty pack indistinguishable
+// from a door hard failure.
+inline void warn_use_sink_target_(const xi_host_api* host, const char* name) {
+    if (!host || !host->log) return;
+    static std::mutex mu;
+    static std::unordered_map<std::string, bool> warned;
+    std::string key = name ? name : "";
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (!warned.emplace(key, true).second) return;   // warned this name already
+    }
+    std::string msg = "xi::use(\"" + key + "\").process(pack): target is a declared "
+                      "ordered sink — process() is request-reply and is rejected on "
+                      "sinks (returns an empty pack); feed the sink with "
+                      "xi::use(\"" + key + "\").push(pack) instead "
+                      "(staged + flushed in frame order; docs/new_gen/17)";
+    host->log(3, msg.c_str());
+}
+
 class UseProxy {
 public:
     explicit UseProxy(const std::string& name) : name_(name) {}
@@ -902,10 +925,13 @@ public:
     // the dispatch and capture by value into xi::async / xi::parallel_for.
     // EMPTY on: older host (no pack callback wired), no such instance (-1,
     // once-per-name error log), door crashed (-2 — a torn result is never
-    // adopted), instance quarantined (-3), or a Record-only plugin with no
-    // pack door (-4, once-per-name error log). A CONTRACT failure (e.g.
-    // missing input key) is NOT empty — the door returns a normal sealed pack
-    // carrying "$fault" (fail-loud, xi_pack_proc_v1 contract), so check that.
+    // adopted), instance quarantined (-3), a Record-only plugin with no
+    // pack door (-4, once-per-name error log), or a DECLARED ORDERED SINK
+    // target (-5, once-per-name error log — U3, docs/new_gen/17: process()
+    // is request-reply and is rejected on sinks; feed a sink with push()).
+    // A CONTRACT failure (e.g. missing input key) is NOT empty — the door
+    // returns a normal sealed pack carrying "$fault" (fail-loud,
+    // xi_pack_proc_v1 contract), so check that.
     //
     // The LEGACY Record path above is byte-for-byte untouched — this is a
     // pure overload on the pack currency.
@@ -919,6 +945,7 @@ public:
         if (rc < 0) {
             if (rc == -1) warn_use_miss_(host, name_.c_str());
             else if (rc == -4) warn_use_no_pack_door_(host, name_.c_str());
+            else if (rc == -5) warn_use_sink_target_(host, name_.c_str());
             // -2 (crash) / -3 (quarantined) are logged host-side where the
             // fault policy runs; `out` from a torn call is never trusted.
             return {};
@@ -977,6 +1004,11 @@ public:
     // dump of this pack is byte-identical to a direct host-side dump). Routing
     // ($channel) and ordering ($seq) therefore come from the pack's OWN entries;
     // a pack without them lands on expose's "default" channel with seq 0.
+    // U3 contract (docs/new_gen/17): producer-stamped entries are THE in-band
+    // identity mechanism — stamp the host arrival id yourself before seal
+    // (b.add_i64("$seq", (int64_t)xi::run_id())) to get the Record-era
+    // host-stamped semantics; the staged flush guarantees DELIVERY ORDER
+    // (frame order under result_order:"arrival") independently of any entry.
     //
     // FIRE-AND-FORGET, sink-ordered: a declared sink target is staged by the
     // host and flushed after the inspect in frame order (the same staged-emit

@@ -92,6 +92,11 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
     // emission half, success path) so a subsequent run with no frame_path
     // arg sees an empty string, not the previous value.
     if (s.set_run_context) s.set_run_context(frame_path.c_str());
+    // U3 (docs/new_gen/17): publish this run's arrival/run id to the script
+    // (xi::run_id()) — the host truth a pack producer stamps into its `$seq`
+    // ENTRY before seal (the host never stamps a sealed pack). Cleared with
+    // the frame_path on the way out.
+    if (s.set_run_id) s.set_run_id((long long)run_id);
 
     // Per-run Result: reset to NA before the script runs, and snapshot the
     // source/group provenance from this thread's trigger (thread_local, valid
@@ -293,6 +298,8 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
         // Clear so the next run, if it doesn't carry a frame_path arg,
         // sees an empty path instead of the stale previous one.
         if (out.s.set_run_context) out.s.set_run_context("");
+        // U3: clear the per-run id too — xi::run_id() outside an inspect is 0.
+        if (out.s.set_run_id) out.s.set_run_id(0);
     } else {
         // Inspect failed (crash/throw) — still emit one Result so the stream
         // has no gap. BREAKING: the numeric code is now XI_SYS_CRASHED (was 0/NA),

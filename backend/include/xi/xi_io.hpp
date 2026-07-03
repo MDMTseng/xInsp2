@@ -36,12 +36,29 @@
 #include <string>
 
 extern thread_local char  g_run_frame_path_[];   // xi_script_support.hpp
+extern thread_local long long g_run_id_;         // xi_script_support.hpp (U3)
 extern void* g_use_host_api_;       // xi_script_support.hpp (xi_host_api*)
 
 namespace xi {
 
 inline std::string current_frame_path() {
     return std::string(g_run_frame_path_);
+}
+
+// U3 (docs/new_gen/17): the arrival/run id of the inspection this thread is
+// computing — assigned by the host at dequeue (frame-arrival order; monotonic
+// on the wire under parallelism.result_order:"arrival"), set before the
+// inspect runs, cleared after. 0 outside an inspect, and 0 on an older host
+// (the xi_script_set_run_id export is optional). This is the host truth the
+// Record-era ordered sinks got stamped as `$seq` at flush; on the pack plane
+// the PRODUCER stamps it before seal (sealed packs are immutable):
+//
+//   b.add_i64("$seq", (int64_t)xi::run_id());
+//
+// Thread discipline mirrors current_frame_path(): read it ON the inspect
+// thread and capture by value into xi::async / xi::parallel_for bodies.
+inline long long run_id() {
+    return g_run_id_;
 }
 
 // Read a file into an xi::Image. Empty Image on any failure (file

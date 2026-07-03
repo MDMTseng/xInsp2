@@ -258,6 +258,14 @@ static void* g_use_push_pack_fn_    = nullptr;
 // thread.
 static thread_local char g_run_frame_path_[1024] = {0};
 
+// U3 (docs/new_gen/17): the arrival/run id of the inspection THIS THREAD is
+// computing — the host truth the Record path used to stamp into staged sink
+// records as `$seq`. Surfaced to the script (xi::run_id(), xi_io.hpp) so a
+// producer can stamp it into a pack ENTRY before seal (sealed packs are
+// immutable — the host never stamps them). 0 outside an inspect. Same
+// thread_local per-run-context discipline as g_run_frame_path_ above.
+static thread_local long long g_run_id_ = 0;
+
 XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
     void* process_fn, void* exchange_fn, void* grab_fn,
     void* host_api)
@@ -344,6 +352,14 @@ XI_SCRIPT_EXPORT void xi_script_set_run_context(const char* frame_path) {
         ++n;
     }
     g_run_frame_path_[n] = 0;
+}
+
+// U3 (docs/new_gen/17): per-run arrival/run id setter. Called by the host
+// before each xi_inspect_entry (beside xi_script_set_run_context) and cleared
+// (0) after. Separate OPTIONAL symbol per the leader/meta/push-callback
+// back-compat pattern: an older host never calls it and xi::run_id() reads 0.
+XI_SCRIPT_EXPORT void xi_script_set_run_id(long long run_id) {
+    g_run_id_ = run_id;
 }
 
 // Watchdog cooperative-cancel arm/clear — host calls this when an inspect
