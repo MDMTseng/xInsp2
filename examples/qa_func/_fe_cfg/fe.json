@@ -1,7 +1,7 @@
 {
-  "project": "C:\\Users\\TRS001\\Documents\\workspace\\xInsp\\xInsp2\\.claude\\worktrees\\expose\\examples\\qa_func",
+  "project": "C:\\Users\\TRS001\\Documents\\workspace\\xInsp\\xInsp2\\.claude\\worktrees\\xr-01\\examples\\qa_func",
   "script": "inspect.cpp",
   "autostart_fps": 8,
-  "be_log": "C:\\Users\\TRS001\\Documents\\workspace\\xInsp\\xInsp2\\.claude\\worktrees\\expose\\examples\\qa_func\\_fe_cfg\\beA.log",
-  "port": 7855
+  "be_log": "C:\\Users\\TRS001\\Documents\\workspace\\xInsp\\xInsp2\\.claude\\worktrees\\xr-01\\examples\\qa_func\\_fe_cfg\\beA.log",
+  "port": 60458
 }
