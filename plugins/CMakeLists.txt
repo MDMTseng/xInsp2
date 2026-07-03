@@ -145,6 +145,20 @@ set_target_properties(imgcodec PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/imgcodec
 )
 
+# lut_owner — the RESOURCE-HANDLE PATTERN demo lib plugin (doc 14 appendix
+# "Resource-handle convention"): a TYPE-OWNER for demo.lut (immutable sorted
+# i64->i64 lookup table). Heavy objects never ride packs — this DLL owns them
+# in a ring of generation-leased slots; packs carry only the handle entry
+# {type,id,gen,$v} as nested canonical mp. Registers demo.lut.build (content-
+# deduped) / demo.lut.query / demo.lut.dump (the byte-deterministic persistence
+# materializer) via get_interface("xi.cap.provider", 1).
+add_library(lut_owner SHARED lut_owner/lut_owner.cpp)
+target_include_directories(lut_owner PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
+set_target_properties(lut_owner PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/lut_owner
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/lut_owner
+)
+
 # record_replay — the replay SOURCE, record_save's mirror (doc 10 gate P3): reads
 # canonical .xex1 (XEX1-v3) dumps and emits each as a sealed Pack via the host
 # xi.pack@1 door. expose/src is on the include path for xex1_pack_parse.hpp — the
@@ -462,3 +476,21 @@ if(WIN32)
 endif()
 add_dependencies(cap_imgcodec_test imgcodec)
 add_test(NAME cap_imgcodec_test COMMAND cap_imgcodec_test)
+
+# Resource-handle convention (doc 14 appendix) — demo.lut end to end against
+# the REAL built DLL through the REAL host funnel: build -> handle entry
+# {type,id,gen,$v}, content dedup (built=0, builds pinned), the handle HOP
+# (two consumers, zero rebuild), dump byte-determinism, ring-pressure recycle
+# and recycle_all -> stale_handle, wrong type -> wrong_type, malformed/out-of-
+# range handles -> bad_handle, handle $v gate, $probe/$v convention,
+# unregister-on-destroy, pack balance.
+add_executable(cap_lut_owner_test cap_lut_owner_test.cpp)
+target_include_directories(cap_lut_owner_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
+target_compile_definitions(cap_lut_owner_test PRIVATE
+    LUT_OWNER_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/lut_owner/xi-lut_owner.dll")
+if(WIN32)
+    target_link_libraries(cap_lut_owner_test PRIVATE Ws2_32)
+endif()
+add_dependencies(cap_lut_owner_test lut_owner)
+add_test(NAME cap_lut_owner_test COMMAND cap_lut_owner_test)
