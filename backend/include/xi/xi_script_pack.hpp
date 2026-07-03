@@ -147,15 +147,19 @@ public:
         return add_bin(key, v.data(), v.size());
     }
 
-    // Bool — the host PackBuilder has no native bool tag yet.
-    // TODO(pack-hardening): switch to the native builder_add_bool /
-    // XI_PACK_TAG_BOOL once the hardening branch lands it in xi_pack.hpp +
-    // xi_abi.h. Until then a bool rides as an Mp entry holding the canonical
-    // msgpack bool (one byte, 0xc2/0xc3 — trivially canonical by
-    // construction); readers see tag Mp and decode it with xi::mp::Reader
-    // (Element.kind == Kind::Bool).
+    // Bool — a REAL bool entry (tag XI_PACK_TAG_BOOL, canonical 0xc2/0xc3)
+    // through the additive xi_pack_v1 tail (builder_add_bool). On a host whose
+    // pack table predates the bool tail (NULL fn pointer — the tail is
+    // appended, so a shorter table reads as NULL here) the value falls back to
+    // the historical Mp encoding: one canonical msgpack bool byte, tag Mp,
+    // decodable with xi::mp::Reader (Element.kind == Kind::Bool).
     bool add_bool(const char* key, bool v) {
-        if (!valid() || !key || !fi_->builder_add_mp) return false;
+        if (!valid() || !key) return false;
+        if (fi_->builder_add_bool) {
+            fi_->builder_add_bool(b_, key, v ? 1 : 0);
+            return true;
+        }
+        if (!fi_->builder_add_mp) return false;
         const uint8_t byte = v ? 0xc3 : 0xc2;
         fi_->builder_add_mp(b_, key, &byte, 1);
         return true;

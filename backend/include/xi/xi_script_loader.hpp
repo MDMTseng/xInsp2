@@ -200,6 +200,14 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
                         "[xinsp2] script unload: swept %d leaked image handle(s)\n",
                         swept);
                 }
+                // Pack-plane analogue (slot bridge; no-op until install_pack_abi):
+                // reclaim sealed-pack refs the script retained and never released.
+                int fswept = ImagePool::sweep_packs_for(oid);
+                if (fswept > 0) {
+                    std::fprintf(stderr,
+                        "[xinsp2] script unload: swept %d leaked pack ref(s)\n",
+                        fswept);
+                }
             }
             if (m) FreeLibrary(static_cast<HMODULE>(m));
         } catch (...) { /* deleter must not throw */ }

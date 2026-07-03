@@ -146,9 +146,10 @@ std::vector<uint8_t> encode(const Frame& f) {
 
 struct V3Field {
     std::string          key;
-    std::string          kind;   // "i64" | "f64" | "str" | "bin" | "mp" | "image"
+    std::string          kind;   // "i64" | "f64" | "bool" | "str" | "bin" | "mp" | "image"
     int64_t              i = 0;
     double               f = 0;
+    bool                 b = false;   // bool value
     std::string          s;      // str value
     std::vector<uint8_t> bytes;  // bin payload / mp canonical bytes / image pixels
     int32_t              w = 0, h = 0, c = 0;   // image dims
@@ -174,6 +175,8 @@ std::vector<uint8_t> encode_v3(const FrameV3& f) {
             e.tag = XI_PACK_TAG_I64; xi::mp::Writer w; w.int_(fld.i); e.value = w.take();
         } else if (fld.kind == "f64") {
             e.tag = XI_PACK_TAG_F64; xi::mp::Writer w; w.float_(fld.f); e.value = w.take();
+        } else if (fld.kind == "bool") {
+            e.tag = XI_PACK_TAG_BOOL; xi::mp::Writer w; w.boolean(fld.b); e.value = w.take();
         } else if (fld.kind == "str") {
             e.tag = XI_PACK_TAG_STR; xi::mp::Writer w; w.str(fld.s); e.value = w.take();
         } else if (fld.kind == "bin") {
@@ -212,6 +215,16 @@ std::vector<FrameV3> build_frames_v3() {
         img.w = 2; img.h = 2; img.c = 1; img.bytes = {10, 20, 30, 40};   // raw pixels
         f.fields.push_back(std::move(img));
         f.note = "image descriptor {w,h,c,px} with raw pixels inlined as bin (doc 07 D2)";
+        fs.push_back(std::move(f));
+    }
+
+    {
+        // Bool entries (pack-plane hardening — tag XI_PACK_TAG_BOOL): the wire
+        // value is the single canonical msgpack byte 0xc3/0xc2, spliced verbatim.
+        FrameV3 f; f.name = "v3_bool"; f.channel = "c"; f.seq = 9;
+        {V3Field fl; fl.key = "pass"; fl.kind = "bool"; fl.b = true;  f.fields.push_back(fl);}
+        {V3Field fl; fl.key = "fail"; fl.kind = "bool"; fl.b = false; f.fields.push_back(fl);}
+        f.note = "bool entries — canonical msgpack true/false (0xc3/0xc2) verbatim on the wire";
         fs.push_back(std::move(f));
     }
 
@@ -264,6 +277,7 @@ xi::Json manifest_v3(const FrameV3& f) {
         j.set("kind", fld.kind);
         if (fld.kind == "i64")        j.set("value", fld.i);
         else if (fld.kind == "f64")   j.set("value", fld.f);
+        else if (fld.kind == "bool")  j.set("value", fld.b);
         else if (fld.kind == "str")   j.set("value", fld.s);
         else if (fld.kind == "bin") { j.set("b64", b64(fld.bytes)); j.set("size", (int64_t)fld.bytes.size()); }
         else if (fld.kind == "mp")    j.set("value", fld.mp_value);

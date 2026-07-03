@@ -212,6 +212,7 @@ inline ParsedFrame parse_frame_v3(const uint8_t* data, size_t size) {
                     case XI_PACK_TAG_I64:
                         agree = (head.kind == mp::Kind::Int || head.kind == mp::Kind::UInt); break;
                     case XI_PACK_TAG_F64: agree = (head.kind == mp::Kind::Float); break;
+                    case XI_PACK_TAG_BOOL: agree = (head.kind == mp::Kind::Bool); break;
                     case XI_PACK_TAG_STR: agree = (head.kind == mp::Kind::Str);   break;
                     case XI_PACK_TAG_BIN: agree = (head.kind == mp::Kind::Bin);   break;
                     case XI_PACK_TAG_MP:  agree = true; break;   // opaque: any one canonical value

@@ -58,6 +58,11 @@ inline LoadResult build_pack(ParsedFrame&& pf) {
                 b.add_i64(e.key, v.kind == mp::Kind::UInt ? (int64_t)v.u : v.i);
                 break;
             }
+            case XI_PACK_TAG_BOOL: {
+                mp::Reader r(vp, vn); mp::Element v; r.next(v);
+                b.add_bool(e.key, v.b);
+                break;
+            }
             case XI_PACK_TAG_F64: {
                 mp::Reader r(vp, vn); mp::Element v; r.next(v);
                 b.add_f64(e.key, v.d);

@@ -288,6 +288,25 @@
             "note": "image descriptor {w,h,c,px} with raw pixels inlined as bin (doc 07 D2)"
         },
         {
+            "file": "v3_bool.bin",
+            "v": 3,
+            "channel": "c",
+            "seq": 9,
+            "fields": [
+                {
+                    "key": "pass",
+                    "kind": "bool",
+                    "value": true
+                },
+                {
+                    "key": "fail",
+                    "kind": "bool",
+                    "value": false
+                }
+            ],
+            "note": "bool entries — canonical msgpack true/false (0xc3/0xc2) verbatim on the wire"
+        },
+        {
             "file": "v3_nested.bin",
             "v": 3,
             "channel": "c",

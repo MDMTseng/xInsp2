@@ -117,6 +117,11 @@ public:
                     f.f64(e.key.c_str(), v.d);
                     break;
                 }
+                case XI_PACK_TAG_BOOL: {
+                    xi::mp::Reader r(vp, vn); xi::mp::Element v; r.next(v);
+                    f.boolean(e.key.c_str(), v.b);
+                    break;
+                }
                 case XI_PACK_TAG_STR: {
                     xi::mp::Reader r(vp, vn); xi::mp::Element v; r.next(v);
                     f.str(e.key.c_str(), std::string_view((const char*)v.data, v.len));

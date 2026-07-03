@@ -77,9 +77,10 @@ static void expect_entries_identical(const xi::Pack& orig, const xi::Pack& loade
         if (ok != lk || ot != lt) continue;
         std::string key(lk);
         switch (lt) {
-            case xi::PackTag::I64: CHECK(*orig.get_i64(key) == *loaded.get_i64(key)); break;
-            case xi::PackTag::F64: CHECK(*orig.get_f64(key) == *loaded.get_f64(key)); break;
-            case xi::PackTag::Str: CHECK(*orig.get_str(key) == *loaded.get_str(key)); break;
+            case xi::PackTag::I64:  CHECK(*orig.get_i64(key) == *loaded.get_i64(key)); break;
+            case xi::PackTag::F64:  CHECK(*orig.get_f64(key) == *loaded.get_f64(key)); break;
+            case xi::PackTag::Bool: CHECK(*orig.get_bool(key) == *loaded.get_bool(key)); break;
+            case xi::PackTag::Str:  CHECK(*orig.get_str(key) == *loaded.get_str(key)); break;
             case xi::PackTag::Bin: {
                 auto a = *orig.get_bin(key); auto b = *loaded.get_bin(key);
                 CHECK(std::vector<uint8_t>(a.begin(), a.end()) ==
@@ -159,6 +160,7 @@ int main() {
         fi->builder_add_i64(b, "$seq", 7);
         fi->builder_add_i64(b, "count", 42);
         fi->builder_add_f64(b, "score", 1.5);
+        fi->builder_add_bool(b, "pass", 1);   // bool entry: dump + load-back parity
         fi->builder_add_str(b, "label", "ok", 2);
         fi->builder_add_bin(b, "raw", raw.data(), (int32_t)raw.size());
         fi->builder_add_mp(b, "blobs", blobs_mp.data(), (int32_t)blobs_mp.size());
@@ -182,7 +184,8 @@ int main() {
         CHECK(ack != XI_PACK_NULL);
         std::string base_name;
         if (ack) {
-            int64_t saved = 0; CHECK(fi->get_i64(ack, "saved", &saved) == 1 && saved == 1);
+            // "saved" is a REAL bool entry now (PackOut::boolean emits the bool tag).
+            int32_t saved = 0; CHECK(fi->get_bool(ack, "saved", &saved) == 1 && saved == 1);
             const char* bn = nullptr; int32_t bl = 0;
             CHECK(fi->get_str(ack, "base_name", &bn, &bl) == 1);
             if (bn) base_name.assign(bn, bl);

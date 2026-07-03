@@ -228,6 +228,8 @@ private:
                     vals.set(key.c_str(), (int64_t)in.i64_or(key.c_str(), 0)); break;
                 case XI_PACK_TAG_F64:
                     vals.set(key.c_str(), in.f64(key.c_str()).value_or(0.0)); break;
+                case XI_PACK_TAG_BOOL:
+                    vals.set(key.c_str(), in.boolean(key.c_str()).value_or(false)); break;
                 case XI_PACK_TAG_STR:
                     vals.set(key.c_str(), std::string(in.str(key.c_str()).value_or(""))); break;
                 case XI_PACK_TAG_IMAGE: {

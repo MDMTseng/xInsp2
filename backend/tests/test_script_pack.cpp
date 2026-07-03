@@ -145,11 +145,11 @@ static void test_build_read_canonical() {
         CHECK(img && img->pixels.size() == 16 && img->pixels[6] == 210);
         CHECK(sp.tag_of("seq") == XI_PACK_TAG_I64);
         CHECK(sp.tag_of("gray") == XI_PACK_TAG_IMAGE);
-        CHECK(sp.tag_of("pass") == XI_PACK_TAG_MP);   // bool rides as Mp (TODO native)
+        CHECK(sp.tag_of("pass") == XI_PACK_TAG_BOOL);   // native bool entry
 
-        // Bool decodes as a canonical msgpack bool.
-        auto pass = sp.get_mp("pass");
-        CHECK(pass && pass->size() == 1 && (*pass)[0] == 0xc3);
+        // Bool reads back through the typed accessor (native tail).
+        CHECK(sp.get_bool("pass").value_or(false) == true);
+        CHECK(!sp.get_mp("pass"));   // fail-closed: a bool entry is NOT an Mp entry
         // Nested value round-trips structurally.
         auto mp = sp.get_mp("pts");
         CHECK(mp.has_value());
@@ -171,9 +171,9 @@ static void test_build_read_canonical() {
         CHECK(keys[0] == "seq" && keys[1] == "score" && keys[2] == "label" &&
               keys[3] == "raw" && keys[4] == "pass" && keys[5] == "pts" &&
               keys[6] == "gray");
-        CHECK(tags[0] == XI_PACK_TAG_I64 && tags[1] == XI_PACK_TAG_F64 &&
-              tags[2] == XI_PACK_TAG_STR && tags[3] == XI_PACK_TAG_BIN &&
-              tags[4] == XI_PACK_TAG_MP  && tags[5] == XI_PACK_TAG_MP &&
+        CHECK(tags[0] == XI_PACK_TAG_I64  && tags[1] == XI_PACK_TAG_F64 &&
+              tags[2] == XI_PACK_TAG_STR  && tags[3] == XI_PACK_TAG_BIN &&
+              tags[4] == XI_PACK_TAG_BOOL && tags[5] == XI_PACK_TAG_MP &&
               tags[6] == XI_PACK_TAG_IMAGE);
 
         // ---- (3) canonical bytes: stored arena bytes == xi::mp::Writer ----

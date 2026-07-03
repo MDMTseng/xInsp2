@@ -312,8 +312,8 @@ private:
     // Build a sealed Pack from the (patched) document tree `base` and emit it via
     // the host xi.pack@1 door. Mapping rule (documented in the plugin README):
     //   * a `seq` i64 entry (emit counter) leads, mirroring mock_camera;
-    //   * each TOP-LEVEL scalar field becomes a canonical entry (bool → i64 0/1,
-    //     since the pack scalar plane has no bool tag; number → i64/f64;
+    //   * each TOP-LEVEL scalar field becomes a canonical entry (bool → a real
+    //     bool entry, tag XI_PACK_TAG_BOOL / 0xc2-0xc3; number → i64/f64;
     //     string → str; null is skipped);
     //   * each TOP-LEVEL nested value (object/array) becomes ONE `mp` entry whose
     //     bytes are produced by encode_mut and then RE-PROVEN through
