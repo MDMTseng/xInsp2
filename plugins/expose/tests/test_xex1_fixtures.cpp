@@ -135,16 +135,16 @@ std::vector<uint8_t> encode(const Frame& f) {
     return xi::xex1::encode_frame(f.channel, f.seq, f.json, f.images, f.extra);
 }
 
-// --- XEX1-v2 (the canonical frame dump) fixtures ----------------------------
+// --- XEX1-v3 (the canonical frame dump) fixtures ----------------------------
 //
-// A v2 golden is a channel/seq + a generic entry list. Each field carries its
-// value as a decoder-visible expectation AND is encoded into a V2Entry with its
+// A v3 golden is a channel/seq + a generic entry list. Each field carries its
+// value as a decoder-visible expectation AND is encoded into a V3Entry with its
 // canonical msgpack bytes (scalars/str/bin via xi::mp::Writer, nested msgpack
 // verbatim, image pixels inlined as bin) — the exact bytes the expose pack door
 // emits for the same logical frame. The JS + Python decoders decode these same
 // .bin files and assert the field values below.
 
-struct V2Field {
+struct V3Field {
     std::string          key;
     std::string          kind;   // "i64" | "f64" | "str" | "bin" | "mp" | "image"
     int64_t              i = 0;
@@ -155,20 +155,20 @@ struct V2Field {
     xi::Json             mp_value = xi::Json();  // decoded expectation for an mp field
 };
 
-struct FrameV2 {
+struct FrameV3 {
     std::string          name;
     std::string          channel;
     uint64_t             seq = 0;
-    std::vector<V2Field> fields;
+    std::vector<V3Field> fields;
     std::string          note;
 };
 
-// Encode one FrameV2 into wire bytes through the SHARED v2 encoder.
-std::vector<uint8_t> encode_v2(const FrameV2& f) {
-    std::vector<xi::xex1::V2Entry> entries;
+// Encode one FrameV3 into wire bytes through the SHARED v3 encoder.
+std::vector<uint8_t> encode_v3(const FrameV3& f) {
+    std::vector<xi::xex1::V3Entry> entries;
     entries.reserve(f.fields.size());
     for (const auto& fld : f.fields) {
-        xi::xex1::V2Entry e;
+        xi::xex1::V3Entry e;
         e.key = fld.key;
         if (fld.kind == "i64") {
             e.tag = XI_PACK_TAG_I64; xi::mp::Writer w; w.int_(fld.i); e.value = w.take();
@@ -187,28 +187,28 @@ std::vector<uint8_t> encode_v2(const FrameV2& f) {
         }
         entries.push_back(std::move(e));
     }
-    return xi::xex1::encode_frame_v2(f.channel, f.seq, entries);
+    return xi::xex1::encode_frame_v3(f.channel, f.seq, entries);
 }
 
-std::vector<FrameV2> build_frames_v2() {
-    std::vector<FrameV2> fs;
+std::vector<FrameV3> build_frames_v3() {
+    std::vector<FrameV3> fs;
 
-    fs.push_back({"v2_minimal", "c", 0, {}, "empty frame map — smallest v2 dump"});
+    fs.push_back({"v3_minimal", "c", 0, {}, "empty frame map — smallest v3 dump"});
 
     {
-        FrameV2 f; f.name = "v2_scalars"; f.channel = "line1/cam0"; f.seq = 7;
+        FrameV3 f; f.name = "v3_scalars"; f.channel = "line1/cam0"; f.seq = 7;
         f.fields.push_back({"count", "i64", 42});
         f.fields.push_back({"neg", "i64", -5});
         f.fields.push_back({"big", "i64", 4294967296LL});      // 2^32 — still int64 0xd3
-        {V2Field fl; fl.key = "score"; fl.kind = "f64"; fl.f = 1.5; f.fields.push_back(fl);}
-        {V2Field fl; fl.key = "label"; fl.kind = "str"; fl.s = "ok"; f.fields.push_back(fl);}
+        {V3Field fl; fl.key = "score"; fl.kind = "f64"; fl.f = 1.5; f.fields.push_back(fl);}
+        {V3Field fl; fl.key = "label"; fl.kind = "str"; fl.s = "ok"; f.fields.push_back(fl);}
         f.note = "scalar/str entries, canonical int64/float64/str32 verbatim on the wire";
         fs.push_back(std::move(f));
     }
 
     {
-        FrameV2 f; f.name = "v2_image"; f.channel = "c"; f.seq = 3;
-        V2Field img; img.key = "frame"; img.kind = "image";
+        FrameV3 f; f.name = "v3_image"; f.channel = "c"; f.seq = 3;
+        V3Field img; img.key = "frame"; img.kind = "image";
         img.w = 2; img.h = 2; img.c = 1; img.bytes = {10, 20, 30, 40};   // raw pixels
         f.fields.push_back(std::move(img));
         f.note = "image descriptor {w,h,c,px} with raw pixels inlined as bin (doc 07 D2)";
@@ -219,12 +219,12 @@ std::vector<FrameV2> build_frames_v2() {
         // A nested msgpack entry (blob_analysis-shaped): "blobs" = [ {area, cx} ].
         // Built with the SAME xi::mp::Writer a producer uses; the decoders decode
         // it into a native list/array and compare against mp_value.
-        FrameV2 f; f.name = "v2_nested"; f.channel = "c"; f.seq = 1;
+        FrameV3 f; f.name = "v3_nested"; f.channel = "c"; f.seq = 1;
         xi::mp::Writer w;
         w.array(2);
         w.map(2); w.key("area"); w.int_(100); w.key("cx"); w.float_(2.5);
         w.map(2); w.key("area"); w.int_(250); w.key("cx"); w.float_(8.0);
-        V2Field blobs; blobs.key = "blobs"; blobs.kind = "mp"; blobs.bytes = w.take();
+        V3Field blobs; blobs.key = "blobs"; blobs.kind = "mp"; blobs.bytes = w.take();
         auto arr = xi::Json::array();
         auto b0 = xi::Json::object(); b0.set("area", (int64_t)100).set("cx", 2.5); arr.push(b0);
         auto b1 = xi::Json::object(); b1.set("area", (int64_t)250).set("cx", 8.0); arr.push(b1);
@@ -250,11 +250,11 @@ std::string binary_dir() {
     return base + "/binary";
 }
 
-// Manifest entry for one v2 frame: channel/seq + the decoded field expectations.
-xi::Json manifest_v2(const FrameV2& f) {
+// Manifest entry for one v3 frame: channel/seq + the decoded field expectations.
+xi::Json manifest_v3(const FrameV3& f) {
     xi::Json fj = xi::Json::object();
     fj.set("file", f.name + ".bin");
-    fj.set("v", 2);
+    fj.set("v", 3);
     fj.set("channel", f.channel);
     fj.set("seq", (int64_t)f.seq);
     xi::Json fields = xi::Json::array();
@@ -279,12 +279,12 @@ xi::Json manifest_v2(const FrameV2& f) {
 }
 
 int regen(const std::string& dir, const std::vector<Frame>& frames,
-          const std::vector<FrameV2>& frames_v2) {
+          const std::vector<FrameV3>& frames_v3) {
     xi::Json manifest = xi::Json::object();
     manifest.set("note",
         "XEX1 binary golden frames. Generated by plugins/expose/tests/test_xex1_fixtures.cpp "
         "--regen from the production encoder (plugins/expose/src/xex1_encode.hpp). Do not edit "
-        "by hand. Each frame carries a `v` (1 = legacy display frame; 2 = canonical frame "
+        "by hand. Each frame carries a `v` (1 = legacy display frame; 3 = canonical tagged frame "
         "dump). Each *.bin is decoded and checked against this manifest by "
         "ui-components/test/xex1-golden.mjs and tools/xinsp2_py/tests/test_xex1_frames.py.");
     xi::Json arr = xi::Json::array();
@@ -319,14 +319,14 @@ int regen(const std::string& dir, const std::vector<Frame>& frames,
         arr.push(fj);
     }
 
-    for (const auto& f : frames_v2) {
-        std::vector<uint8_t> bytes = encode_v2(f);
+    for (const auto& f : frames_v3) {
+        std::vector<uint8_t> bytes = encode_v3(f);
         std::string path = dir + "/" + f.name + ".bin";
         std::ofstream out(path, std::ios::binary);
         if (!out) { std::fprintf(stderr, "cannot write %s\n", path.c_str()); return 1; }
         out.write(reinterpret_cast<const char*>(bytes.data()), (std::streamsize)bytes.size());
         std::printf("wrote %s (%zu bytes)\n", path.c_str(), bytes.size());
-        arr.push(manifest_v2(f));
+        arr.push(manifest_v3(f));
     }
     manifest.set("frames", arr);
 
@@ -341,7 +341,7 @@ int regen(const std::string& dir, const std::vector<Frame>& frames,
 }
 
 int verify(const std::string& dir, const std::vector<Frame>& frames,
-           const std::vector<FrameV2>& frames_v2) {
+           const std::vector<FrameV3>& frames_v3) {
     int failures = 0;
     for (const auto& f : frames) {
         std::vector<uint8_t> want;
@@ -358,20 +358,20 @@ int verify(const std::string& dir, const std::vector<Frame>& frames,
         }
         std::printf("[xex1] ok %-12s %zu bytes\n", f.name.c_str(), got.size());
     }
-    for (const auto& f : frames_v2) {
+    for (const auto& f : frames_v3) {
         std::vector<uint8_t> want;
         std::string path = dir + "/" + f.name + ".bin";
         if (!read_file(path, want)) {
             std::fprintf(stderr, "FAIL %s: missing golden (run --regen)\n", f.name.c_str());
             ++failures; continue;
         }
-        std::vector<uint8_t> got = encode_v2(f);
+        std::vector<uint8_t> got = encode_v3(f);
         if (got != want) {
-            std::fprintf(stderr, "FAIL %s: v2 encoder output (%zu B) != golden (%zu B)\n",
+            std::fprintf(stderr, "FAIL %s: v3 encoder output (%zu B) != golden (%zu B)\n",
                          f.name.c_str(), got.size(), want.size());
             ++failures; continue;
         }
-        std::printf("[xex1] ok %-12s %zu bytes (v2)\n", f.name.c_str(), got.size());
+        std::printf("[xex1] ok %-12s %zu bytes (v3)\n", f.name.c_str(), got.size());
     }
     return failures;
 }
@@ -382,14 +382,14 @@ int main(int argc, char** argv) {
     const bool do_regen = (argc > 1 && std::string(argv[1]) == "--regen");
     const std::string dir = binary_dir();
     const std::vector<Frame> frames = build_frames();
-    const std::vector<FrameV2> frames_v2 = build_frames_v2();
+    const std::vector<FrameV3> frames_v3 = build_frames_v3();
 
-    if (do_regen) return regen(dir, frames, frames_v2);
+    if (do_regen) return regen(dir, frames, frames_v3);
 
-    int failures = verify(dir, frames, frames_v2);
+    int failures = verify(dir, frames, frames_v3);
     if (failures == 0) {
-        std::printf("\nALL XEX1 FIXTURE GOLDENS MATCH (%zu v1 + %zu v2 frames)\n",
-                    frames.size(), frames_v2.size());
+        std::printf("\nALL XEX1 FIXTURE GOLDENS MATCH (%zu v1 + %zu v3 frames)\n",
+                    frames.size(), frames_v3.size());
         return 0;
     }
     std::fprintf(stderr, "\n%d XEX1 FIXTURE MISMATCH(ES)\n", failures);

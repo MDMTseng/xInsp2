@@ -43,9 +43,11 @@
 
 ### Rides the app-team cutover train (wire-visible; bundle with the `abi` bump)
 
-- **XEX1-v2 becomes the default** preview encoding (v1 retained one release
-  behind a flag, then removed). Clients: expose webUI + xex1.py already
-  bilingual; third-party decoders get the golden fixtures.
+- **XEX1-v3 becomes the default** preview encoding (v1 retained one release
+  behind a flag, then removed). v3 supersedes the tagless v2 draft — finalized
+  with per-entry tags at gate P3, BEFORE any v2 file shipped, so the flip is
+  v1→v3 with no intermediate. Clients: expose webUI + xex1.py already
+  bilingual (v1+v3); third-party decoders get the golden fixtures.
 - `hello.abi` 1 → 2 (the long-planned stamp bump; extension already enforces).
 - Anything the bilingual batch surfaces as genuinely shape-breaking (none
   known today).
@@ -65,7 +67,8 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    zero-copy-replay / persistence-identity proofs. Bonus findings on the
    pack-plane hardening list: PackRegistry owner-sweep asymmetry (cache),
    PackBuilder bool-entry gap (json_source), v2-dump image-descriptor shape
-   ambiguity (record_save).
+   ambiguity (record_save) — the last one CLOSED by the v3 per-entry-tag
+   format at gate P3.
 
 [^data_output]: `data_output` is a config-surface teaching example — it overrides
     no `process()` path, so it has no data plane and the Pack door is N/A by
@@ -75,9 +78,24 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    building + expose-from-script land; the pack path can express every
    pattern the guides teach (measured against the examples tree: every
    example expressible pack-only).
-3. **Gate P3 — persistence parity**: record_save/replay v2 = canonical pack
-   dump (memory≈wire≈disk already proves the format); a migration note for
-   existing replay files.
+3. **Gate P3 — persistence parity: ✅ ACHIEVED 2026-07-03.** The canonical
+   dump is FINALIZED as **XEX1-v3** (= the v2 draft + per-entry
+   `XI_PACK_TAG_*` as `[tag, value]`, closing P1's image-descriptor
+   shape-ambiguity bonus finding before any v2 file shipped; loaders now
+   recover entry types exactly, never by shape, and refuse the tagless
+   draft fail-closed). `record_save` persists it; the new **`record_replay`
+   source** re-emits it through the pack door — record → save → replay is a
+   closed, byte-lossless loop (`record_replay_pack_test`: replayed pack
+   entry-for-entry identical incl. restored `$channel`/`$seq`, re-dump ==
+   disk == original's dump; `xex1_v2_identity_test` still pins
+   memory≈wire≈disk — historical name, v3 bytes). The migration note for
+   pre-v3 artifacts is `12-replay-file-migration.md` (headline: nothing
+   pre-v3 ever had a replay path, so v3 breaks none; the one open item —
+   an optional .json/.bmp→.xex1 converter — is parked with the app team on
+   the cutover train). Remaining P3-adjacent work, tracked outside the
+   gate: flipping expose's default wire to v3 rides the cutover train
+   (below), and the graph-level "route a recorded run through a full
+   project" example is examples-tree work under gate P2's umbrella.
 4. **THE CUT (one event, with the app team)**: ABI v12 — recommended as the
    synthesis §3 pure-door ABI (delete the monolith struct in the same
    authorized break), delete `xi_plugin_process(Record)`, delete Record +

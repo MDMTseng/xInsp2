@@ -46,8 +46,8 @@ def test_golden_frame_decodes_to_manifest(frame: dict) -> None:
     data = (FIX / frame["file"]).read_bytes()
     assert is_xex1(data)
 
-    if frame.get("v") == 2:
-        _check_v2(frame, data)
+    if frame.get("v") == 3:
+        _check_v3(frame, data)
         return
 
     raw = _raw_body(data)
@@ -68,11 +68,11 @@ def test_golden_frame_decodes_to_manifest(frame: dict) -> None:
         assert len(dec["images"][im["key"]]) == im["size"]
 
 
-def _check_v2(frame: dict, data: bytes) -> None:
-    """The canonical frame dump: v:2 with scalar/str/mp entries -> values and
+def _check_v3(frame: dict, data: bytes) -> None:
+    """The canonical frame dump: v:3 with [tag, value] entries -> values and
     image descriptors -> images (raw pixels, lossless)."""
     dec = decode_xex1(data)
-    assert dec["v"] == 2
+    assert dec["v"] == 3
     assert dec["channel"] == frame["channel"]
     assert dec["seq"] == frame["seq"]
     for fld in frame["fields"]:

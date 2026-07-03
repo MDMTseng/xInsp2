@@ -156,7 +156,7 @@
       case 0xc5: return this.bin(this.u16());
       case 0xc6: return this.bin(this.u32());
       case 0xca: return this.f32();
-      case 0xcb: return this.f64();              // canonical float64 (v2 plane)
+      case 0xcb: return this.f64();              // canonical float64 (pack plane)
       case 0xcc: return this.u8();
       case 0xcd: return this.u16();
       case 0xce: return this.u32();
@@ -164,7 +164,7 @@
       case 0xd0: return this.i8();
       case 0xd1: return this.i16();
       case 0xd2: return this.i32();
-      case 0xd3: return this.i64();              // canonical int64 (v2 plane)
+      case 0xd3: return this.i64();              // canonical int64 (pack plane)
       case 0xd9: return this.str(this.u8());
       case 0xda: return this.str(this.u16());
       case 0xdb: return this.str(this.u32());
@@ -176,26 +176,31 @@
     }
   };
 
-  // Normalize an XEX1-v2 canonical frame dump { v:2, channel, seq, frame:{...} }
-  // into the same shape the UI renders: scalar/str entries -> values, image
-  // descriptor entries { w,h,c,px } -> images[] with raw pixels (v2 is lossless,
-  // no JPEG). A bin entry surfaces as a Uint8Array value.
-  function normalizeXEX1v2(body) {
+  // Normalize an XEX1-v3 canonical frame dump { v:3, channel, seq, frame:{...} }
+  // into the same shape the UI renders. v3 (the finalized dump) carries every
+  // entry as a [tag, value] pair — tag is the pack-plane XI_PACK_TAG_* — so an
+  // image descriptor { w,h,c,px } is identified by ITS TAG, never by shape:
+  // tag 4 (image) -> images[] with raw pixels (lossless, no JPEG); every other
+  // tag -> values (a bin entry surfaces as a Uint8Array value).
+  const XEX1_TAG_IMAGE = 4;
+  function normalizeXEX1v3(body) {
     const frame = (body && body.frame) || {};
     const values = {}, images = [];
     for (const k in frame) {
-      const v = frame[k];
-      if (v && typeof v === "object" && !Array.isArray(v) && v.px instanceof Uint8Array) {
+      const e = frame[k];
+      if (!Array.isArray(e) || e.length !== 2) continue;   // not a [tag, value] pair
+      const tag = e[0], v = e[1];
+      if (tag === XEX1_TAG_IMAGE && v && typeof v === "object" && v.px instanceof Uint8Array) {
         images.push({ key: k, w: v.w, h: v.h, c: v.c, pixels: v.px });
       } else {
         values[k] = v;
       }
     }
-    return { v: 2, channel: body.channel, seq: body.seq, values, images, frame };
+    return { v: 3, channel: body.channel, seq: body.seq, values, images, frame };
   }
 
   // Decode an XEX1 frame. v1 -> the raw map { v:1, channel, seq, json,
-  // images:[{key,jpeg}] }; v2 -> the normalized canonical dump (values+images).
+  // images:[{key,jpeg}] }; v3 -> the normalized canonical dump (values+images).
   // null on bad magic / unreadable body.
   function decodeXEX1(bytes) {
     if (!bytes || bytes.length < 5) return null;
@@ -203,7 +208,7 @@
     let body;
     try { body = new MsgpackReader(bytes, 4).read(); }
     catch (e) { console.warn("XEX1 decode failed", e); return null; }
-    if (body && body.v === 2) return normalizeXEX1v2(body);
+    if (body && body.v === 3) return normalizeXEX1v3(body);
     return body;
   }
 

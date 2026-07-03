@@ -8,8 +8,8 @@
 //
 //   * DOOR PROBE — expose (a SINK) now publishes xi_plugin_get_interface and
 //     answers ("xi.pack", 1): it consumes packs.
-//   * v2 opt-in — with frame_wire_v2 set, a subscribed channel's frame is dumped
-//     as the canonical XEX1-v2 frame (scalars/str/mp pass through, image inlined
+//   * v3 opt-in — with frame_wire_v3 set, a subscribed channel's frame is dumped
+//     as the canonical XEX1-v3 frame (scalars/str/mp pass through, image inlined
 //     as raw bin). The emitted bytes are captured off the host binary sink and
 //     decoded back — channel/seq lifted from $channel/$seq, every entry present.
 //   * v1 default — without the opt-in, the same walk produces the legacy XEX1-v1
@@ -69,9 +69,10 @@ static std::string as_str(const xi::mp::Element& e) {
     return std::string(reinterpret_cast<const char*>(e.data), e.len);
 }
 
-// Decoded view of an XEX1-v2 frame (only the fields this test asserts).
-struct V2View {
+// Decoded view of an XEX1-v3 frame (only the fields this test asserts).
+struct V3View {
     bool ok = false;
+    bool tags_ok = true;   // every asserted entry carried its expected XI_PACK_TAG_*
     int64_t v = 0, seq = 0;
     std::string channel;
     bool has_count = false; int64_t count = 0;
@@ -81,8 +82,8 @@ struct V2View {
     std::vector<uint8_t> px;
 };
 
-static V2View decode_v2(const std::vector<uint8_t>& frame) {
-    V2View out;
+static V3View decode_v3(const std::vector<uint8_t>& frame) {
+    V3View out;
     if (frame.size() < 5 || frame[0] != 'X' || frame[1] != 'E' || frame[2] != 'X' || frame[3] != '1')
         return out;
     xi::mp::Reader r(frame.data() + 4, frame.size() - 4);
@@ -104,10 +105,20 @@ static V2View decode_v2(const std::vector<uint8_t>& frame) {
                 xi::mp::Element fk;
                 if (r.next(fk) != xi::mp::Status::Ok || fk.kind != xi::mp::Kind::Str) return out;
                 std::string fkey = as_str(fk);
-                if (fkey == "count")      { xi::mp::Element v; r.next(v); out.has_count = true; out.count = v.i; }
-                else if (fkey == "score") { xi::mp::Element v; r.next(v); out.has_score = true; out.score = v.d; }
-                else if (fkey == "label") { xi::mp::Element v; r.next(v); out.has_label = true; out.label = as_str(v); }
-                else if (fkey == "frame") {  // image descriptor {w,h,c,px}
+                // v3: every entry is a [tag, value] pair.
+                xi::mp::Element arr;
+                if (r.next(arr) != xi::mp::Status::Ok || arr.kind != xi::mp::Kind::Array || arr.len != 2) return out;
+                xi::mp::Element tg;
+                if (r.next(tg) != xi::mp::Status::Ok || tg.kind != xi::mp::Kind::Int) return out;
+                const int64_t tag = tg.i;
+                if (fkey == "count")      { xi::mp::Element v; r.next(v); out.has_count = true; out.count = v.i;
+                                            out.tags_ok = out.tags_ok && tag == XI_PACK_TAG_I64; }
+                else if (fkey == "score") { xi::mp::Element v; r.next(v); out.has_score = true; out.score = v.d;
+                                            out.tags_ok = out.tags_ok && tag == XI_PACK_TAG_F64; }
+                else if (fkey == "label") { xi::mp::Element v; r.next(v); out.has_label = true; out.label = as_str(v);
+                                            out.tags_ok = out.tags_ok && tag == XI_PACK_TAG_STR; }
+                else if (fkey == "frame") {  // image descriptor {w,h,c,px}, tagged IMAGE
+                    out.tags_ok = out.tags_ok && tag == XI_PACK_TAG_IMAGE;
                     xi::mp::Element im;
                     if (r.next(im) != xi::mp::Status::Ok || im.kind != xi::mp::Kind::Map) return out;
                     out.has_image = true;
@@ -119,7 +130,7 @@ static V2View decode_v2(const std::vector<uint8_t>& frame) {
                         else if (ikey == "c") out.ic = iv.i;
                         else if (ikey == "px") out.px.assign(iv.data, iv.data + iv.len);
                     }
-                } else if (!skip_value(r)) return out;   // opaque entry (e.g. mp)
+                } else if (!skip_value(r)) return out;   // opaque entry value (e.g. mp)
             }
         } else if (!skip_value(r)) return out;
     }
@@ -128,7 +139,7 @@ static V2View decode_v2(const std::vector<uint8_t>& frame) {
 }
 
 int main() {
-    std::printf("[test] expose pack door (generic walk -> XEX1-v2)\n");
+    std::printf("[test] expose pack door (generic walk -> XEX1-v3)\n");
 
     xi::install_pack_abi();
     xi_host_api host = xi::ImagePool::make_host_api();
@@ -170,10 +181,10 @@ int main() {
     };
 
     // ---------------------------------------------------------------------
-    // (B) v2 opt-in: subscribed channel -> a decodable XEX1-v2 canonical dump.
+    // (B) v3 opt-in: subscribed channel -> a decodable XEX1-v3 canonical dump.
     // ---------------------------------------------------------------------
-    SECTION("v2 opt-in: generic walk emits the canonical frame dump");
-    CHECK(expose->set_def("{\"frame_wire_v2\":true}"));
+    SECTION("v3 opt-in: generic walk emits the canonical frame dump");
+    CHECK(expose->set_def("{\"frame_wire_v3\":true}"));
     expose->exchange("{\"command\":\"subscribe\",\"channels\":[\"cam0\"]}");
     g_emitted.clear();
     {
@@ -191,9 +202,10 @@ int main() {
 
         CHECK(g_emitted.size() == 1);
         if (g_emitted.size() == 1) {
-            V2View d = decode_v2(g_emitted[0]);
+            V3View d = decode_v3(g_emitted[0]);
             CHECK(d.ok);
-            CHECK(d.v == 2);
+            CHECK(d.v == 3);
+            CHECK(d.tags_ok);                // every entry carried its XI_PACK_TAG_* on the wire
             CHECK(d.channel == "cam0");      // lifted from the $channel entry
             CHECK(d.seq == 7);               // lifted from the $seq entry
             CHECK(d.has_count && d.count == 42);
@@ -208,7 +220,7 @@ int main() {
     // (C) v1 default: without the opt-in, the same walk emits a v1 frame.
     // ---------------------------------------------------------------------
     SECTION("v1 default: opt-out emits the legacy display frame (v:1)");
-    CHECK(expose->set_def("{\"frame_wire_v2\":false}"));
+    CHECK(expose->set_def("{\"frame_wire_v3\":false}"));
     g_emitted.clear();
     {
         xi_pack_handle in = build_input();
@@ -220,8 +232,8 @@ int main() {
             const auto& w = g_emitted[0];
             CHECK(w.size() > 5 && w[0] == 'X' && w[3] == '1');
             // v1 body is a fixmap; its first key is "v" -> 1. Just confirm the
-            // magic + that the canonical decoder does NOT see a v2 marker.
-            V2View d = decode_v2(w);
+            // magic + that the canonical decoder does NOT see a v3 marker.
+            V3View d = decode_v3(w);
             CHECK(d.v == 1);
         }
     }

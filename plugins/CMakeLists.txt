@@ -121,12 +121,24 @@ add_library(record_save SHARED
     ../backend/src/stb_impl.cpp
 )
 # expose/src is on the include path for xex1_pack_dump.hpp + xex1_encode.hpp — the
-# ONE shared pack->XEX1-v2 encoder record_save and expose both dump through (P3).
+# ONE shared pack->XEX1-v3 encoder record_save and expose both dump through (P3).
 target_include_directories(record_save PRIVATE ${XI_INCLUDE} ${XI_VENDOR}
     ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
 set_target_properties(record_save PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_save
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_save
+)
+
+# record_replay — the replay SOURCE, record_save's mirror (doc 10 gate P3): reads
+# canonical .xex1 (XEX1-v3) dumps and emits each as a sealed Pack via the host
+# xi.pack@1 door. expose/src is on the include path for xex1_pack_parse.hpp — the
+# ONE untrusted-disk parse shared with the host-side loader (xex1_pack_load.hpp).
+add_library(record_replay SHARED record_replay/record_replay.cpp)
+target_include_directories(record_replay PRIVATE ${XI_INCLUDE} ${XI_VENDOR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
+set_target_properties(record_replay PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_replay
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/record_replay
 )
 set_target_properties(blob_analysis PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
@@ -320,9 +332,9 @@ set_tests_properties(xex1_fixtures PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures")
 
 # polaris2 wave-2 step 3 — the memory ≈ wire ≈ disk HEADLINE (docs/new_gen/07 +
-# 08 Wave 2): build a real xi::Pack, dump it to XEX1-v2, and assert the pack's
+# 08 Wave 2): build a real xi::Pack, dump it to XEX1-v3, and assert the pack's
 # in-memory canonical small plane equals the wire bytes equals a disk readback,
-# byte-for-byte. Header-only (xi::Pack + xi::mp + the v2 encoder); no DLL load.
+# byte-for-byte. Header-only (xi::Pack + xi::mp + the v3 encoder); no DLL load.
 add_executable(xex1_v2_identity_test xex1_v2_identity_test.cpp)
 target_include_directories(xex1_v2_identity_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
@@ -380,3 +392,22 @@ if(WIN32)
 endif()
 add_dependencies(record_save_pack_test record_save)
 add_test(NAME record_save_pack_test COMMAND record_save_pack_test)
+
+# polaris2 P3 — THE CLOSED LOOP (docs/new_gen/10 "persistence parity"): drives
+# BOTH real DLLs — record_save persists a multi-entry pack as cap_000001.xex1,
+# record_replay re-emits it as a sealed Pack off the TriggerBus — and asserts
+# parity at the pack level (entry-for-entry, incl. restored $channel/$seq) AND
+# the byte level (re-dump == disk == original's dump). Also the fail-loud edge:
+# a corrupt file emits a sealed $fault pack and the cursor advances past it.
+add_executable(record_replay_pack_test record_replay_pack_test.cpp)
+target_include_directories(record_replay_pack_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
+target_compile_definitions(record_replay_pack_test PRIVATE
+    RECORD_SAVE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/record_save/xi-record_save.dll"
+    RECORD_REPLAY_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/record_replay/xi-record_replay.dll")
+if(WIN32)
+    target_link_libraries(record_replay_pack_test PRIVATE Ws2_32)
+endif()
+add_dependencies(record_replay_pack_test record_save record_replay)
+add_test(NAME record_replay_pack_test COMMAND record_replay_pack_test)

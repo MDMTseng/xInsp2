@@ -4,7 +4,7 @@
 //
 //   * DOOR PROBE — record_save (a sink) now publishes xi.pack@1: it consumes packs.
 //   * PERSIST == SHARED ENCODER — the pack door writes ONE <base>.xex1 file whose
-//     bytes EQUAL xi::xex1::encode_pack_v2 over the same pack (the SAME encoder
+//     bytes EQUAL xi::xex1::encode_pack_v3 over the same pack (the SAME encoder
 //     expose pushes on the wire). Byte-for-byte: record_save did not fork a second
 //     dump implementation (memory ≈ wire ≈ disk, doc 07).
 //   * REPLAY LOAD-BACK — the file is read back through xex1_pack_load.hpp (the
@@ -24,8 +24,8 @@
 #include <xi/xi_pack_abi.hpp>       // install_pack_abi + pack_v1_iface + PackRegistry
 #include <xi/xi_mp.hpp>             // xi::mp::Writer (build the nested-mp fixture entry)
 
-#include "xex1_pack_dump.hpp"       // encode_pack_v2 — the shared encoder (the golden oracle)
-#include "xex1_pack_load.hpp"       // load_pack_v2_file — the replay seed under test
+#include "xex1_pack_dump.hpp"       // encode_pack_v3 — the shared encoder (the golden oracle)
+#include "xex1_pack_load.hpp"       // load_pack_v3_file — the replay seed under test
 
 #include <cstdint>
 #include <cstdio>
@@ -169,14 +169,14 @@ int main() {
     // ---------------------------------------------------------------------
     // (B) Persist == the shared encoder's output, byte-for-byte.
     // ---------------------------------------------------------------------
-    SECTION("persist: the .xex1 file bytes equal encode_pack_v2 (shared encoder)");
+    SECTION("persist: the .xex1 file bytes equal encode_pack_v3 (shared encoder)");
     std::string saved_path;
     {
         xi_pack_handle in = build_input();
 
         // The golden oracle: the SAME shared walk+encoder, in-process over the same pack.
         xi::PackIn view(fi, in);
-        std::vector<uint8_t> expected = xi::xex1::encode_pack_v2(view, "cam0", 7);
+        std::vector<uint8_t> expected = xi::xex1::encode_pack_v3(view, "cam0", 7);
 
         xi_pack_handle ack = rec->run_pack_door(in);
         CHECK(ack != XI_PACK_NULL);
@@ -209,7 +209,7 @@ int main() {
         const xi::Pack* orig = xi::PackRegistry::instance().pack(in);
         CHECK(orig != nullptr);
 
-        xi::xex1::LoadResult loaded = xi::xex1::load_pack_v2_file(saved_path);
+        xi::xex1::LoadResult loaded = xi::xex1::load_pack_v3_file(saved_path);
         CHECK(loaded.ok);
         if (!loaded.ok) std::fprintf(stderr, "  load error: %s\n", loaded.error.c_str());
         CHECK(loaded.channel == "cam0");   // lifted from $channel
@@ -227,7 +227,7 @@ int main() {
     {
         std::vector<uint8_t> good = read_file(saved_path);
         std::vector<uint8_t> bad(good.begin(), good.begin() + good.size() / 2);
-        xi::xex1::LoadResult r = xi::xex1::load_pack_v2(bad.data(), bad.size());
+        xi::xex1::LoadResult r = xi::xex1::load_pack_v3(bad.data(), bad.size());
         CHECK(!r.ok);   // bounded ingress catches the truncation
     }
 

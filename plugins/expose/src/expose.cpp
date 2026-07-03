@@ -20,7 +20,7 @@
 #include <xi/xi_json.hpp>
 
 #include "xex1_encode.hpp"    // the XEX1 msgpack encoder (shared with the fixture test)
-#include "xex1_pack_dump.hpp"  // encode_pack_v2 — the generic pack->v2 walk (shared with record_save)
+#include "xex1_pack_dump.hpp"  // encode_pack_v3 — the generic pack->v3 walk (shared with record_save)
 
 #include <cstdint>
 #include <map>
@@ -95,19 +95,19 @@ public:
     // The framework-internal reserved keys ($channel/$seq) are lifted to the wire
     // frame's top-level fields; every OTHER entry is dumped by tag: scalars/str
     // pass through, image entries get the JPEG preview treatment (v1) or are
-    // inlined as raw bin (v2), and nested msgpack rides verbatim (v2). Which wire
-    // version is produced is the opt-in `frame_wire_v2` config (DEFAULT v1 — the
+    // inlined as raw bin (v3), and nested msgpack rides verbatim (v3). Which wire
+    // version is produced is the opt-in `frame_wire_v3` config (DEFAULT v1 — the
     // wire-breaking default stays out per the plan's governance).
     void process(xi::PackIn& in, xi::PackOut& out) override {
         const std::string channel(in.str(xi::Record::kChannelKey).value_or("default"));
         const uint64_t    seq = (uint64_t)in.i64_or(xi::Record::kSeqKey, 0);
 
-        bool v2;
-        { std::lock_guard<std::mutex> lk(mu_); v2 = wire_v2_; }
+        bool v3;
+        { std::lock_guard<std::mutex> lk(mu_); v3 = wire_v3_; }
 
         // Walk the borrowed input pack WITHOUT our mutex (it is immutable +
         // host-owned); take the lock only to publish the result + read state.
-        std::vector<uint8_t> frame = v2 ? build_v2_from_pack_(in, channel, seq)
+        std::vector<uint8_t> frame = v3 ? build_v3_from_pack_(in, channel, seq)
                                         : build_v1_from_pack_(in, channel, seq);
 
         long long seen; bool subscribed;
@@ -174,16 +174,16 @@ public:
         for (auto& [name, ch] : channels_) { (void)ch; names.push(name); }
         return xi::Json::object().set("count", (int)channels_.size())
             .set("channels", names)
-            .set("frame_wire_v2", wire_v2_).dump();
+            .set("frame_wire_v3", wire_v3_).dump();
     }
-    // Config: opt the pack-in door into the canonical XEX1-v2 wire dump
+    // Config: opt the pack-in door into the canonical XEX1-v3 wire dump
     // (default off — v1 stays the default wire per the plan's governance). The
     // Record path is unaffected; this flag only picks the pack-door encoder.
     bool set_def(const std::string& json) override {
         auto p = xi::Json::parse(json);
         if (!p.valid()) return true;   // tolerant: absent/blank def is a no-op
         std::lock_guard<std::mutex> lk(mu_);
-        if (p["frame_wire_v2"].valid()) wire_v2_ = p["frame_wire_v2"].as_bool(wire_v2_);
+        if (p["frame_wire_v3"].valid()) wire_v3_ = p["frame_wire_v3"].as_bool(wire_v3_);
         return true;
     }
 
@@ -198,20 +198,20 @@ private:
 
     // --- pack-door encoders (the generic walk; docs/new_gen/08 Wave 2) --------
 
-    // XEX1-v2: the canonical frame dump. The generic pack walk + the shared v2
+    // XEX1-v3: the canonical frame dump. The generic pack walk + the shared v3
     // encoder now live in xex1_pack_dump.hpp so expose (wire push) and record_save
     // (disk persist) emit BYTE-IDENTICAL bytes for the same pack (doc 10 gate P3);
     // this is the thin call into that ONE implementation.
-    std::vector<uint8_t> build_v2_from_pack_(const xi::PackIn& in,
+    std::vector<uint8_t> build_v3_from_pack_(const xi::PackIn& in,
                                               const std::string& channel,
                                               uint64_t seq) const {
-        return xi::xex1::encode_pack_v2(in, channel, seq);
+        return xi::xex1::encode_pack_v3(in, channel, seq);
     }
 
     // XEX1-v1 from a pack: the legacy display shape (same bytes existing clients
     // decode). Scalar/str entries collect into the json values object; image
     // entries get the JPEG preview treatment (host cache). bin/mp entries have no
-    // v1 (display) representation and are v2-only — dropped here.
+    // v1 (display) representation and are v3-only — dropped here.
     std::vector<uint8_t> build_v1_from_pack_(const xi::PackIn& in,
                                               const std::string& channel,
                                               uint64_t seq) const {
@@ -285,7 +285,7 @@ private:
     mutable std::mutex              mu_;
     std::map<std::string, Channel>  channels_;
     std::set<std::string>           subscribed_;
-    bool                            wire_v2_ = false;   // pack-door: emit XEX1-v2 (opt-in)
+    bool                            wire_v3_ = false;   // pack-door: emit XEX1-v3 (opt-in)
 };
 
 XI_PLUGIN_IMPL(ExposeSink)
