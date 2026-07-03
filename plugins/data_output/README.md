@@ -21,6 +21,13 @@ If you need results actually persisted to disk, use the **`record_save`** plugin
 which is the real writer. `data_output` exists only to demonstrate the config and
 command surface a writer-style plugin exposes.
 
+This plugin has **no data plane by design** — it overrides no `process()` path
+(neither the Record path nor the `xi.pack@1` Pack door), so the bilingual Pack
+door is **N/A** for it: there is nothing to walk and nothing to mirror. For the
+generic-sink reference — a plugin that walks any producer's Pack with zero
+producer knowledge and mirrors its Record path field-for-field — see the
+**`expose`** plugin (`plugins/expose/src/expose.cpp`).
+
 ## Commands (`exchange`)
 
 | command          | behaviour                                             |

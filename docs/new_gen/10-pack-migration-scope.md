@@ -58,8 +58,13 @@ share_out/adopt, and the counted crash-leak machinery alive forever. Record
 is DELETED from xInsp2, gated on parity milestones — a deliberate pre-1.0
 break in the VAR-hard-delete tradition, not a drift into permanence:
 
-1. **Gate P1 — plugin parity**: all 9 shipped plugins bilingual (the batch
-   above).
+1. **Gate P1 — plugin parity**: all shipped plugins with a data plane bilingual
+   (the batch above).[^data_output]
+
+[^data_output]: `data_output` is a config-surface teaching example — it overrides
+    no `process()` path, so it has no data plane and the Pack door is N/A by
+    design (verified 2026-07-03). It carries no parity obligation; see its README
+    and `expose` for the generic-sink reference.
 2. **Gate P2 — script parity**: `use()`→door chaining + script-side Pack
    building + expose-from-script land; the pack path can express every
    pattern the guides teach (measured against the examples tree: every
