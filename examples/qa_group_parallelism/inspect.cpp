@@ -5,6 +5,7 @@
 // (and never exceeds) its max_parallel.
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>
 #include <xi/xi_result.hpp>
 #include <chrono>
 #include <random>
@@ -16,7 +17,10 @@ XI_INSPECT_ENTRY(t, /*frame*/ frame) {
 
     const std::string src = t.primary_source();
     // Surface which source fired through `expose` (channel "grp").
-    xi::use("expose").process(xi::Record().set("$channel", "grp").set("src", src));
+    xi::ScriptPackBuilder b;
+    b.add_str("$channel", "grp");
+    b.add_str("src", src);
+    xi::use("expose").push(b.seal());
     // Random 50-100ms of work, per-thread RNG so parallel lanes don't contend.
     static thread_local std::mt19937 rng{ std::random_device{}() };
     std::uniform_int_distribution<int> d(50, 100);
