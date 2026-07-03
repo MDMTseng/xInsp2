@@ -8,14 +8,17 @@
 //
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& healer = xi::use("healer");
-    auto out = healer.process(xi::Record().set("frame", frame));
+    xi::ScriptPackBuilder cb;
+    cb.add_i64("frame", frame);
+    auto out = xi::use("healer").process(cb.seal());
     // Surface the healer's count + healed marker through `expose` (channel "qa").
-    xi::use("expose").process(xi::Record()
-        .set("$channel", "qa")
-        .set("count", out["count"].as_int(-1))
-        .set("healed", out["healed"].as_bool(false)));
+    xi::ScriptPackBuilder b;
+    b.add_str("$channel", "qa");
+    b.add_i64("count", out.get_i64("count").value_or(-1));
+    b.add_bool("healed", out.get_bool("healed").value_or(false));
+    xi::use("expose").push(b.seal());
 }

@@ -6,13 +6,16 @@
 //
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& crasher = xi::use("crasher");
-    auto out = crasher.process(xi::Record().set("frame", frame));
+    xi::ScriptPackBuilder cb;
+    cb.add_i64("frame", frame);
+    auto out = xi::use("crasher").process(cb.seal());
     // Surface the crasher's count through `expose` (channel "qa").
-    xi::use("expose").process(xi::Record()
-        .set("$channel", "qa")
-        .set("count", out["count"].as_int(-1)));
+    xi::ScriptPackBuilder b;
+    b.add_str("$channel", "qa");
+    b.add_i64("count", out.get_i64("count").value_or(-1));
+    xi::use("expose").push(b.seal());
 }
