@@ -147,18 +147,19 @@ extern "C" {
 /*       The v11 layout is the NEW frozen baseline — the ADR-001 freeze discipline */
 /*       resumes here (test_abi_freeze.cpp is re-snapshot to v11).                 */
 /* ------------------------------------------------------------------ */
-#define XI_ABI_VERSION 11  /* v9: + compress_image; v10: + get_interface; v11: shm_* removed, xi.legacy retired */
+#define XI_ABI_VERSION 12  /* v9: + compress_image; v10: + get_interface; v11: shm_* removed, xi.legacy retired; v12: THE CUT — Record process path deleted (plugin data plane = xi.pack@1 door only), read_image_file slot evicted to xi.image.decode */
 
 /* Oldest plugin ABI the host loads; bump on every breaking xi_host_api layout
- * change. Raised 6 → 11 in Phase 4: removing the shm_* block reshuffles offsets,
- * so a pre-v11 plugin's compiled-in table view no longer matches — it must be
- * refused (authorized break; all first-party plugins rebuild against v11). */
-#define XI_ABI_MIN_COMPAT 11
+ * change. Raised 6 → 11 in Phase 4 (shm_* block removed); raised 11 → 12 at
+ * THE CUT: the Record process path is gone and read_image_file is evicted, so
+ * a pre-v12 plugin's compiled-in table view no longer matches — it must be
+ * refused (authorized break; all first-party plugins rebuild against v12). */
+#define XI_ABI_MIN_COMPAT 12
 
 /* Expected sizeof(xi_host_api) for the layout guard below (see the ABI LAYOUT
  * GUARD note after the struct). Bump together with XI_ABI_VERSION on any layout
  * change. 64-bit host (all function pointers). */
-#define XI_ABI_EXPECTED_SIZE 176  /* 64-bit: 22 function pointers * 8 bytes (v10's 27 − 5 shm_*) */
+#define XI_ABI_EXPECTED_SIZE 168  /* 64-bit: 21 function pointers * 8 bytes (v11's 22 − read_image_file, evicted to xi.image.decode at THE CUT) */
 
 /* ------------------------------------------------------------------ */
 /* Image handle — opaque reference to a refcounted image in the host  */
@@ -238,7 +239,9 @@ typedef struct xi_preview_v1 {
  * holds (the host derives this struct from its own table), so a caller reaching
  * a pixel through xi.imaging@1 and one calling host->image_data hit the byte-for-
  * byte same path. Field order frozen forever; a change ships as xi_imaging_v2.
- *   read_image_file is null when the host installed no decoder — null-check. */
+ *   [ABI v12 — read_image_file was DROPPED from this interface at THE CUT; its
+ *    host slot is evicted to the xi.image.decode capability. The imaging domain
+ *    is now the image pool only.] */
 typedef struct xi_imaging_v1 {
     xi_image_handle (*image_create)(int32_t w, int32_t h, int32_t channels);
     void            (*image_addref)(xi_image_handle h);
@@ -248,7 +251,6 @@ typedef struct xi_imaging_v1 {
     int32_t         (*image_height)(xi_image_handle h);
     int32_t         (*image_channels)(xi_image_handle h);
     int32_t         (*image_stride)(xi_image_handle h);
-    xi_image_handle (*read_image_file)(const char* path);
 } xi_imaging_v1;
 
 /* xi.imaging_rw@1 — the READ/WRITE access-discipline interface for pool images
@@ -567,14 +569,13 @@ typedef struct xi_host_api {
     /* --------------------------------------------------------------- */
 
     /* --------------------------------------------------------------- */
-    /* File I/O (host-provided so plugins / scripts don't have to vendor
-     * stb_image themselves). Reads PNG / JPEG / BMP / TGA / GIF /
-     * PSD / HDR / PIC into a fresh image_create-allocated handle.
-     * Returns 0 on failure (file missing, decode error, OOM).
-     *
-     * The returned handle has refcount 1; the caller is responsible
-     * for image_release when done. */
-    xi_image_handle (*read_image_file)(const char* path);
+    /* [ABI v12 — read_image_file was EVICTED here at THE CUT.] The host's
+     * built-in stb decode slot is gone; image decode is now ONLY the
+     * xi.image.decode capability (provider: imgcodec), reached through the
+     * xi.cap funnel. A project instance or machine-level --autoload-lib must
+     * supply the provider. Every field after instance_folder shifts up by one
+     * pointer (8 bytes) vs v11 — see the ABI LAYOUT GUARD note and
+     * test_abi_freeze.cpp for the fresh v12 baseline. */
 
     /* --------------------------------------------------------------- */
     /* Publish a short sticky status string for this component (ABI-
@@ -767,12 +768,12 @@ static_assert(sizeof(xi_host_api) == XI_ABI_EXPECTED_SIZE,
 static_assert(offsetof(xi_host_api, get_interface) == XI_ABI_EXPECTED_SIZE - sizeof(void*),
               "get_interface is no longer the last field — a field was added/removed "
               "without updating the ABI guard; bump XI_ABI_VERSION.");
-/* v11 baseline: compress_image is the last non-door field at offset 160
- * (176 - 2*ptr); get_interface appends after it at 168. If this fires, a v11
- * field moved — that breaks every v11 plugin. */
+/* v12 baseline: compress_image is the last non-door field at offset 152
+ * (168 - 2*ptr); get_interface appends after it at 160. If this fires, a v12
+ * field moved — that breaks every v12 plugin. */
 static_assert(offsetof(xi_host_api, compress_image) == XI_ABI_EXPECTED_SIZE - 2 * sizeof(void*),
-              "the frozen v9 prefix moved: compress_image must remain the last v9 "
-              "field (v10 = v9 prefix + appended get_interface).");
+              "the frozen prefix moved: compress_image must remain the last "
+              "non-door field (get_interface appends after it).");
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -792,93 +793,13 @@ typedef struct xi_record {
     const void*            doc;
 } xi_record;
 
-/* Output record — plugin fills this during process(). */
-typedef struct {
-    xi_record_image* images;
-    int32_t          image_count;
-    int32_t          image_capacity;
-    const uint8_t*   data;          /* yyjson JSON bytes (tls-owned via record_to_c, or malloc'd) — used iff out_doc == NULL */
-    int32_t          len;
-    /* ABI v3 (γ) + v4 (γ-4): a yyjson_mut_doc* the caller ADOPTS (zero copy /
-     * zero parse), built with the host doc allocator. Handed back as a SHARED,
-     * host-refcounted doc (the caller adopt_shared's it): the plugin may keep a
-     * cached ref, and the doc lives until the LAST side doc_release's it — the
-     * doc analogue of image_addref/release. NULL ⇒ the caller reads data/len.
-     * Never both. */
-    void*            out_doc;
-} xi_record_out;
-
-/* Helpers for building output records */
-
-static inline void xi_record_out_init(xi_record_out* out) {
-    out->images = NULL;
-    out->image_count = 0;
-    out->image_capacity = 0;
-    out->data = NULL;
-    out->len = 0;
-    out->out_doc = NULL;   /* v3/v4: filled only on the in-process doc path (adopt_shared) */
-}
-
-static inline void xi_record_out_add_image(xi_record_out* out,
-                                            const char* key,
-                                            xi_image_handle handle) {
-    if (out->image_count >= out->image_capacity) {
-        int32_t new_cap = out->image_capacity ? out->image_capacity * 2 : 8;
-        xi_record_image* arr = (xi_record_image*)realloc(
-            out->images, (size_t)new_cap * sizeof(xi_record_image));
-        if (!arr) return;
-        out->images = arr;
-        out->image_capacity = new_cap;
-    }
-    xi_record_image* entry = &out->images[out->image_count++];
-    entry->key = _strdup(key);
-    entry->handle = handle;
-}
-
-static inline void xi_record_out_set_data(xi_record_out* out, const uint8_t* data, int32_t len) {
-    free((void*)out->data);
-    uint8_t* copy = (uint8_t*)malloc((size_t)len);
-    if (copy && data) memcpy(copy, data, (size_t)len);
-    out->data = copy;
-    out->len = copy ? len : 0;
-}
-
-/* Free strings the plugin allocated via the inline malloc/strdup
- * helpers above. SAFE TO CALL on outputs populated by `record_to_c`
- * (xi_abi.hpp) — `image_capacity == 0` signals "plugin-owned tls
- * storage; nothing to free", which is the path the C++ macro generates.
- *
- * Background: when these helpers are inlined into a plugin DLL that
- * uses a different CRT than the backend EXE, the plugin's `_strdup` /
- * `realloc` is paired with the backend's `free()` — undefined
- * behaviour. The C++ helpers in `xi_abi.hpp::record_to_c` route output
- * strings through thread-local storage owned by the plugin DLL, so no
- * cross-CRT free happens. Direct-C plugins that call
- * `xi_record_out_add_image` etc still use the malloc path and are
- * safe ONLY if the plugin and backend share a CRT (the CMake default
- * `/MD` does this). */
-static inline void xi_record_out_free(xi_record_out* out) {
-    if (out->image_capacity > 0) {
-        /* Legacy / direct-C path: plugin used the realloc + strdup
-         * helpers. Free with the same allocator the calling EXE was
-         * compiled against (best effort; same-CRT contract). */
-        for (int32_t i = 0; i < out->image_count; ++i) {
-            free((void*)out->images[i].key);
-        }
-        free(out->images);
-        free((void*)out->data);
-    }
-    /* image_capacity == 0: plugin-owned thread-local storage, no free. */
-    /* out_doc is NOT freed here: on the v3 doc path the C++ caller ADOPTS it
-     * (takes the ref) before calling this, so freeing it would be a
-     * use-after-free. Just clear the pointer. */
-    out->images = NULL;
-    out->image_count = 0;
-    out->image_capacity = 0;
-    out->data = NULL;
-    out->len = 0;
-    out->out_doc = NULL;
-}
+/* [ABI v12 — xi_record_out (the plugin process OUTPUT record) and its
+ * xi_record_out_init/add_image/set_data/free helpers were DELETED at THE CUT
+ * along with the Record process path. A pack-door plugin returns a NEW sealed
+ * xi_pack_handle built through the host's xi_pack_v1 builder (see
+ * xi_pack_proc_v1 above); there is no output-record struct anymore. The input
+ * xi_record struct + xi_record_image survive ONLY as the emit_pack/emit_record
+ * dispatch carrier below. */
 
 /* ------------------------------------------------------------------ */
 /* Plugin entry points — exported by every plugin DLL                 */
@@ -909,7 +830,9 @@ static inline void xi_record_out_free(xi_record_out* out) {
 /* Type signatures for GetProcAddress */
 typedef void* (*xi_plugin_create_fn)(const xi_host_api* host, const char* name);
 typedef void  (*xi_plugin_destroy_fn)(void* inst);
-typedef void  (*xi_plugin_process_fn)(void* inst, const xi_record* input, xi_record_out* output);
+/* [ABI v12 — xi_plugin_process_fn (the Record process path) was DELETED at
+ * THE CUT. A plugin's data plane is the xi.pack@1 door (xi_pack_proc_v1),
+ * resolved via xi_plugin_get_interface("xi.pack", 1).] */
 typedef int   (*xi_plugin_exchange_fn)(void* inst, const char* cmd, char* rsp, int rsplen);
 typedef int   (*xi_plugin_get_def_fn)(void* inst, char* buf, int buflen);
 typedef int   (*xi_plugin_set_def_fn)(void* inst, const char* json);
