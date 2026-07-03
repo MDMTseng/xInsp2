@@ -58,8 +58,14 @@ share_out/adopt, and the counted crash-leak machinery alive forever. Record
 is DELETED from xInsp2, gated on parity milestones — a deliberate pre-1.0
 break in the VAR-hard-delete tradition, not a drift into permanence:
 
-1. **Gate P1 — plugin parity**: all shipped plugins with a data plane bilingual
-   (the batch above).[^data_output]
+1. **Gate P1 — plugin parity: ✅ ACHIEVED 2026-07-03.** All shipped plugins
+   with a data plane are bilingual[^data_output]: expose/blob_analysis/
+   mock_camera (pilot) + json_source, synced_stereo, config_swap_probe, cache,
+   record_save (bilingual batch) — each landed with parity / gathering /
+   zero-copy-replay / persistence-identity proofs. Bonus findings on the
+   pack-plane hardening list: PackRegistry owner-sweep asymmetry (cache),
+   PackBuilder bool-entry gap (json_source), v2-dump image-descriptor shape
+   ambiguity (record_save).
 
 [^data_output]: `data_output` is a config-surface teaching example — it overrides
     no `process()` path, so it has no data plane and the Pack door is N/A by
