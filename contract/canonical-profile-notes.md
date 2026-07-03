@@ -29,7 +29,7 @@ where the many-patterns problem forces normalization; zero has exactly two
 patterns and they are meaningful, so we keep them.)
 
 ### D-MapKeys — map keys MUST be strings
-The frame plane is `key(string) -> entry`, so the canonical profile restricts map
+The pack plane is `key(string) -> entry`, so the canonical profile restricts map
 keys to strings. Both encode and decode/recanonicalize REJECT a non-string key
 (`MapKeyError`) rather than coercing it. This also sidesteps JS's object-key
 stringification (which would silently coerce an int key to a string) and keeps
@@ -148,7 +148,7 @@ lives in the doc and the header.
   4-byte length, then the payload, per the msgpack ext32 layout.
 - **The default builder cannot emit ext at all.** Ext is a separate, privileged
   method (`Writer::ext_privileged`). Pool-handle ext values are minted only by
-  the frame layer's allocator.
+  the pack layer's allocator.
 - **Ext is rejected by default on ingress.** The validating reader / canonicalizer
   reject any ext unless its type is on an explicit accept-list (privileged
   callers), or the policy is set to strip unknown ext down to `bin`.
@@ -192,7 +192,7 @@ by the ingress-canonicalizer task:
    non-string keys (TS/Py MapKeyError semantics; C++ to add the check).
 3. Integer boundaries: [−2^63, 2^63) → 0xd3; [2^63, 2^64) → 0xcf — all three
    already agree; int_ and uint_ of the same value are byte-identical.
-4. Ext: canonical width ext32; mintable ONLY by the privileged C++ frame
+4. Ext: canonical width ext32; mintable ONLY by the privileged C++ pack
    layer; TS/Py writers never emit ext; readers reject by default everywhere.
 5. Duplicate map keys: currently unchecked in C++; canonicalize() SHOULD
    reject duplicates at ingress (hygiene) — assigned to the canonicalizer
@@ -233,20 +233,20 @@ Node leg in `ui-components/test/canonical-mp.mjs` (same goldens + vectors).
 
 The ingress edge itself (`backend/include/xi/xi_ingress.hpp`,
 `xi::ingress::canonicalize_entry`) composes these into the doc-07 three-layer
-boundary and is the ONLY public path from foreign bytes to a Frame entry; a
+boundary and is the ONLY public path from foreign bytes to a Pack entry; a
 pool-handle ext (`kPoolHandleExtType`) is never imported, even under an
 accept-list.
 
-## Frame-shaped fail-loud (polaris2 wave-2, xi.frame@1 door)
+## Pack-shaped fail-loud (polaris2 wave-2, xi.pack@1 door)
 
-When a plugin's frame-in/frame-out door (`xi.frame@1`, `xi_frame_proc_v1`) hits
+When a plugin's pack-in/pack-out door (`xi.pack@1`, `xi_pack_proc_v1`) hits
 a CONTRACT failure — a missing required entry, a wrong-typed one, a schema skew
-— it does NOT return `XI_FRAME_NULL`. `XI_FRAME_NULL` is reserved for a HARD
-internal failure (a caught crash / no frame plane). A contract failure is a
-normal SEALED frame carrying a fail-loud error, so the caller ALWAYS gets a
-frame to route to a verdict — the frame analogue of `xi::Record::na()` +
-`xi::contract`'s `$fault`. The convention (SDK `xi::FrameOut::fault` /
-`xi::FrameIn::is_fault`, keys in `xi::frame_contract`):
+— it does NOT return `XI_PACK_NULL`. `XI_PACK_NULL` is reserved for a HARD
+internal failure (a caught crash / no pack plane). A contract failure is a
+normal SEALED pack carrying a fail-loud error, so the caller ALWAYS gets a
+pack to route to a verdict — the pack analogue of `xi::Record::na()` +
+`xi::contract`'s `$fault`. The convention (SDK `xi::PackOut::fault` /
+`xi::PackIn::is_fault`, keys in `xi::pack_contract`):
 
 - `"$fault"`        — str, the reason code, REUSING the `xi_contract.hpp` codes
   (`missing_input` / `wrong_type` / `schema_mismatch`).
@@ -255,5 +255,5 @@ frame to route to a verdict — the frame analogue of `xi::Record::na()` +
 
 A consumer checks `has("$fault")` before reading results. The reason codes are
 identical to the Record path's `$fault.code`, so a script/health mapper treats a
-Record NA and a Frame fault the same way. (Reserved `$`-prefixed keys stay out of
+Record NA and a Pack fault the same way. (Reserved `$`-prefixed keys stay out of
 the plugin's declared schema keyset.)

@@ -1,5 +1,11 @@
 # polaris2_main — Implementation Plan
 
+> **Naming (post-pilot):** the wave-1/2 container this plan calls **Frame**
+> (`xi_frame.hpp`, the `xi.frame@1` door, `t.frame()`) was renamed **Pack**
+> (`xi::Pack`, `xi.pack@1`, `t.pack()`) after the pilots — zero image
+> connotation. The plan/verdict text below is kept verbatim as the historical
+> record; see [`07`](./07-uniform-keyed-buffer-plane.md) for the current names.
+
 | Field | Value |
 |---|---|
 | **Date** | 2026-07-02 |

@@ -17,7 +17,7 @@ inline constexpr const char* kWidth = "width";  // int
 inline constexpr const char* kHeight = "height";  // int
 inline constexpr const char* kFps = "fps";  // int
 inline constexpr const char* kStreaming = "streaming";  // bool (get_def only, read-only)
-inline constexpr const char* kFrameMode = "frame_mode";  // bool (default false) — emit via the xi.frame@1 door instead of Record (wave-2 pilot)
+inline constexpr const char* kPackMode = "pack_mode";  // bool (default false) — emit via the xi.pack@1 door instead of Record (wave-2 pilot)
 inline constexpr const char* kCommand = "command";  // string (command selector)
 inline constexpr const char* kValue = "value";  // int (command payload value)
 inline constexpr const char* kStart = "start";
@@ -26,7 +26,7 @@ inline constexpr const char* kGetStatus = "get_status";
 inline constexpr const char* kSetFps = "set_fps";
 inline constexpr const char* kSetResolution = "set_resolution";
 inline constexpr const char* kFrame = "frame";  // image (emitted RGB frame)
-inline constexpr const char* kSeq = "seq";  // int (frame counter; frame-mode entry)
+inline constexpr const char* kSeq = "seq";  // int (frame counter; pack-mode entry)
 
 }  // namespace keys
 }  // namespace xi::mock_camera

@@ -1,18 +1,18 @@
 //
-// bench_frame.cpp — Frame (v3 uniform keyed-buffer plane) vs Record (v2 shared
-// yyjson doc) on the per-frame hot path. THE wave-1 GO/NO-GO measurement (doc
+// bench_pack.cpp — Pack (v3 uniform keyed-buffer plane) vs Record (v2 shared
+// yyjson doc) on the per-pack hot path. THE wave-1 GO/NO-GO measurement (doc
 // docs/new_gen/08 §1d): does the v3 metadata plane BEAT-OR-MATCH the v2 Record
 // on the thing production pays PER FRAME?
 //
-// This is a MEASUREMENT, not an advocacy. If Frame loses anywhere the number is
-// reported as a loss, with any implementation cause named — a Frame loss is more
+// This is a MEASUREMENT, not an advocacy. If Pack loses anywhere the number is
+// reported as a loss, with any implementation cause named — a Pack loss is more
 // valuable to the decision than a flattered win (see the HONESTY block at the
 // bottom of this header).
 //
 // ---------------------------------------------------------------------------
 // THE CLAIMS UNDER TEST (docs/new_gen/07-uniform-keyed-buffer-plane.md):
 //   C1  arena bump-alloc BUILD beats mutable-DOM node allocation           (§Costs)
-//   C2  one-shot frame FREE beats refcount reconciliation                  (§lifecycle 4)
+//   C2  one-shot pack FREE beats refcount reconciliation                  (§lifecycle 4)
 //   C3  sealed O(1) offset READS (canonical fixed-width + fixed order)     (§profile 1)
 //   C4  memcpy-on-HOP beats contended doc-refcount CAS on the small plane  (§D "small plane")
 // Each lane is built to isolate those four costs at the SAME points so the
@@ -21,7 +21,7 @@
 // ---------------------------------------------------------------------------
 // THE TWO LANES (identical everywhere EXCEPT the metadata plane) ------------
 //
-//   RECORD lane (v2, today):  per frame the producer builds a fresh xi::Record —
+//   RECORD lane (v2, today):  per pack the producer builds a fresh xi::Record —
 //     N scalar fields + a small nested sub-Record (yyjson mutable-DOM node
 //     allocation). The cross-instance HOP is the REAL in-process handshake a
 //     plugin call takes: Record::share_out (freeze + one CAS-guarded registry
@@ -29,7 +29,7 @@
 //     The consumer READS M fields via the typed getters (yyjson hash lookups).
 //     FREE is the doc dropping through the host DocRegistry refcount.
 //
-//   FRAME lane (v3, proposed):  per frame the producer builds the small plane as
+//   PACK lane (v3, proposed):  per pack the producer builds the small plane as
 //     ONE contiguous canonical-profile msgpack buffer via xi::mp::Writer — the
 //     same N scalars + nested map — a single growing arena-style buffer, zero
 //     per-node heap allocation (C1). The HOP is a raw std::memcpy of that sealed
@@ -39,7 +39,7 @@
 //     a precomputed offset (C3). FREE is dropping the plane buffer + one pool
 //     release (C2).
 //
-//   IMAGE traffic is IDENTICAL in both lanes and REAL: a pooled 320x240x3 frame
+//   IMAGE traffic is IDENTICAL in both lanes and REAL: a pooled 320x240x3 pack
 //   (xi::ImagePool) rides the event, addref'd on emit, released on consume, and
 //   touched by the same fixed tiny inspect. It is doc-07-neutral — it is NOT the
 //   thing 07 changes — so keeping it identical isolates the metadata plane, which
@@ -51,31 +51,31 @@
 // GO/NO-GO writeup):
 //   REAL:     ImagePool (pooled frames, addref/release), DocRegistry (the doc
 //             refcount the Record hop CASes on), EmitGate/EmitTurn (arrival-
-//             ordered result emission), xi_frame.hpp FrameBuilder/Frame + xi_mp.hpp
+//             ordered result emission), xi_pack.hpp PackBuilder/Pack + xi_mp.hpp
 //             Writer/Reader (the actual v3 code from tasks 1a/1b), Record
 //             share_out/adopt_shared (the actual v2 in-process handshake).
 //   MODELLED: the dispatch lane's queue plumbing is MiniLane — the same faithful
 //             GroupLane stand-in bench_hotpath uses (deque+mutex+cv, arrival_id,
 //             EmitTurn). The TriggerBus funnel is reproduced as the enqueue sink
 //             (bench_hotpath uses the real bus, but the real bus's emit() signature
-//             only carries a yyjson doc — it cannot carry a Frame plane — so BOTH
+//             only carries a yyjson doc — it cannot carry a Pack plane — so BOTH
 //             lanes enqueue directly here, identical overhead, doc-07-neutral).
 //   NOT in span (on purpose): script/plugin compute (a fixed tiny inspect stands
 //             in), JPEG/expose, WS/PLC — same exclusions as bench_hotpath.
 //
-// The Frame-lane HOP uses the mp::Writer contiguous plane rather than the
-// xi_frame.hpp FrameBuilder arena because 07 §D1's "arena copy" hop must be an
+// The Pack-lane HOP uses the mp::Writer contiguous plane rather than the
+// xi_pack.hpp PackBuilder arena because 07 §D1's "arena copy" hop must be an
 // actual MEMCPY of a position-independent small plane (the claim is memcpy-beats-
-// CAS); the FrameBuilder arena is a scattered chunk set whose pointers can't be
-// memcpy'd verbatim. The FrameBuilder/Frame container (arena bump + seal + O(1)
+// CAS); the PackBuilder arena is a scattered chunk set whose pointers can't be
+// memcpy'd verbatim. The PackBuilder/Pack container (arena bump + seal + O(1)
 // index + one-shot free) IS measured directly in the metadata-only micro below,
 // which is the cleanest read on C1/C2/C3.
 //
 // ---------------------------------------------------------------------------
-// HONESTY: the workload is fixed and identical across lanes. If Frame's naive
+// HONESTY: the workload is fixed and identical across lanes. If Pack's naive
 // path loses, that loss is reported verbatim; the ONLY legitimate substitution is
 // replacing a KNOWN-STUB bottleneck with the real primitive (this branch already
-// has the real xi_mp, so the frame plane is real, not a stub) — tuning the
+// has the real xi_mp, so the pack plane is real, not a stub) — tuning the
 // workload to flatter a lane is not done.
 //
 #include "perf_fingerprint.hpp"
@@ -83,7 +83,7 @@
 #include "xi/xi_clock.hpp"
 #include "xi/xi_doc_registry.hpp"
 #include "xi/xi_emit_gate.hpp"
-#include "xi/xi_frame.hpp"
+#include "xi/xi_pack.hpp"
 #include "xi/xi_image.hpp"
 #include "xi/xi_image_pool.hpp"
 #include "xi/xi_metrics.hpp"
@@ -118,10 +118,10 @@ static constexpr int kScalars = 8;   // $src, seq, count, ts_us, score, x, y, pa
 static constexpr int kReads   = 4;   // seq, score, count, $src  (the consumer's M)
 
 // The CONTRACT-declared keyset for this metadata shape (the _keys.h key order).
-// A schema turns the field names into compile-time SLOTS, so the TypedFrame
+// A schema turns the field names into compile-time SLOTS, so the TypedPack
 // container reads a declared field by direct slot index — the offset-accessor
 // read path (doc 07 §profile-1). Field order here IS the contract order.
-struct BenchSchema : xi::FrameSchema<BenchSchema> {
+struct BenchSchema : xi::PackSchema<BenchSchema> {
     static constexpr std::array<std::string_view, 9> keys = {
         "$src", "seq", "count", "ts_us", "score", "x", "y", "pass", "region"};
     enum : int { kSrc, kSeq, kCount, kTsUs, kScore, kX, kY, kPass, kRegion };
@@ -176,11 +176,11 @@ static inline void read_record(const xi::Record& c) {
 }
 
 // ---------------------------------------------------------------------------
-// FRAME lane metadata — build the small plane as ONE canonical msgpack buffer.
+// PACK lane metadata — build the small plane as ONE canonical msgpack buffer.
 // Same N scalars + nested map. mp::Writer emits the canonical max-width profile
 // (int64 0xd3, float64 0xcb, str32 0xdb, map32) — the v3 small plane verbatim.
 // ---------------------------------------------------------------------------
-static xi::mp::Bytes build_frame_plane(int64_t seq) {
+static xi::mp::Bytes build_pack_plane(int64_t seq) {
     xi::mp::Writer w;
     w.map(kScalars + 1);                                   // 8 scalars + region
     w.key("$src");  w.str("matcher");
@@ -202,10 +202,10 @@ static xi::mp::Bytes build_frame_plane(int64_t seq) {
 // The precomputed offset table — the crux of C3. Because the profile is
 // canonical (fixed-width numbers, widest markers) AND the field order is fixed by
 // the schema, each field's VALUE begins at a byte offset that is IDENTICAL across
-// every frame. A generated accessor caches these once; every read is then a
+// every pack. A generated accessor caches these once; every read is then a
 // fixed-width decode at a known offset (no scan, no hash). We compute the table
 // ONCE from a sample plane by a single structural scan.
-struct FrameOffsets { size_t seq = 0, score = 0, count = 0, src = 0; bool ok = false; };
+struct PackOffsets { size_t seq = 0, score = 0, count = 0, src = 0; bool ok = false; };
 
 static void skip_value_(xi::mp::Reader& r) {
     xi::mp::Element e;
@@ -217,8 +217,8 @@ static void skip_value_(xi::mp::Reader& r) {
     // scalars/str/bin/ext are fully consumed by next()
 }
 
-static FrameOffsets compute_offsets(const xi::mp::Bytes& plane) {
-    FrameOffsets off;
+static PackOffsets compute_offsets(const xi::mp::Bytes& plane) {
+    PackOffsets off;
     xi::mp::Reader r(plane);
     xi::mp::Element top;
     if (r.next(top) != xi::mp::Status::Ok || top.kind != xi::mp::Kind::Map) return off;
@@ -238,14 +238,14 @@ static FrameOffsets compute_offsets(const xi::mp::Bytes& plane) {
 }
 
 // The consumer's M reads by direct offset on the (hopped) plane bytes — reusing
-// xi_frame.hpp's canonical readers (0xd3/0xcb/0xdb), the exact decode a sealed
-// Frame's typed accessor performs.
-static inline void read_frame_plane(const uint8_t* p, const FrameOffsets& off) {
+// xi_pack.hpp's canonical readers (0xd3/0xcb/0xdb), the exact decode a sealed
+// Pack's typed accessor performs.
+static inline void read_pack_plane(const uint8_t* p, const PackOffsets& off) {
     uint64_t s = 0;
-    s += (uint64_t)xi::frame_mp_detail::read_i64(p + off.seq);
-    s += (uint64_t)(int64_t)xi::frame_mp_detail::read_f64(p + off.score);
-    s += (uint64_t)xi::frame_mp_detail::read_i64(p + off.count);
-    s += xi::frame_mp_detail::read_str(p + off.src).size();
+    s += (uint64_t)xi::pack_mp_detail::read_i64(p + off.seq);
+    s += (uint64_t)(int64_t)xi::pack_mp_detail::read_f64(p + off.score);
+    s += (uint64_t)xi::pack_mp_detail::read_i64(p + off.count);
+    s += xi::pack_mp_detail::read_str(p + off.src).size();
     g_sink += s;
 }
 
@@ -269,7 +269,7 @@ static double best_us(F&& op, int L = 2000, int R = 60) {
 }
 
 // A small canonical msgpack map for the nested "region" — built once, added to
-// the FrameBuilder via add_mp (D3: nesting is msgpack's job).
+// the PackBuilder via add_mp (D3: nesting is msgpack's job).
 static xi::mp::Bytes region_mp(int64_t seq) {
     xi::mp::Writer w;
     w.map(4);
@@ -281,7 +281,7 @@ static xi::mp::Bytes region_mp(int64_t seq) {
 }
 
 // (a) RECORD full metadata roundtrip: build (DOM alloc) + share_out + adopt_shared
-//     + read M + release. The v2 per-frame metadata cost end to end.
+//     + read M + release. The v2 per-pack metadata cost end to end.
 static double micro_record(const xi_host_api& host) {
     return best_us([&] {
         xi::Record r = build_record(7);
@@ -293,12 +293,12 @@ static double micro_record(const xi_host_api& host) {
     });
 }
 
-// (b) FRAME container (xi_frame.hpp) — FrameBuilder + seal + read M (O(1) sealed
-//     accessors) + drop. The task's named "FrameBuilder+seal+read+drop": arena
+// (b) PACK container (xi_pack.hpp) — PackBuilder + seal + read M (O(1) sealed
+//     accessors) + drop. The task's named "PackBuilder+seal+read+drop": arena
 //     bump BUILD (C1), sealed O(1) READ (C3), one-shot FREE (C2). No hop.
 static double micro_frame_builder() {
     return best_us([&] {
-        xi::FrameBuilder b;
+        xi::PackBuilder b;
         b.add_str("$src", "matcher");
         b.add_i64("seq", 7);
         b.add_i64("count", 7 % 17);
@@ -309,7 +309,7 @@ static double micro_frame_builder() {
         b.add_i64("pass", 1);
         xi::mp::Bytes region = region_mp(7);
         b.add_mp("region", region.data(), region.size());
-        xi::Frame f = b.seal();
+        xi::Pack f = b.seal();
         uint64_t s = 0;
         s += (uint64_t)f.get_i64("seq").value_or(0);
         s += (uint64_t)(int64_t)f.get_f64("score").value_or(0);
@@ -320,17 +320,17 @@ static double micro_frame_builder() {
     });
 }
 
-// (b') FRAME container, TYPED (xi_frame.hpp TypedFrame<BenchSchema>) — the
+// (b') PACK container, TYPED (xi_pack.hpp TypedPack<BenchSchema>) — the
 //      OFFSET-ACCESSOR read path (doc 07 §profile-1; the wave-1 exit-gate
 //      condition). Same N scalars + nested region, but keys are compile-time
 //      SLOTS: set_i64<kSeq> writes canonical bytes and points the slot at them
 //      with NO key interned; get_i64<kSeq> is slots_[kSeq]->ptr->decode (no hash,
-//      no scan). Arena chunks recycle through the per-thread pool (no per-frame
-//      heap chunk). This is the container path the shipped FrameBuilder (b) lost
+//      no scan). Arena chunks recycle through the per-thread pool (no per-pack
+//      heap chunk). This is the container path the shipped PackBuilder (b) lost
 //      with — the three named costs removed.
 static double micro_frame_typed() {
     return best_us([&] {
-        xi::TypedFrameBuilder<BenchSchema> b;
+        xi::TypedPackBuilder<BenchSchema> b;
         b.set_str<BenchSchema::kSrc>("matcher");
         b.set_i64<BenchSchema::kSeq>(7);
         b.set_i64<BenchSchema::kCount>(7 % 17);
@@ -341,7 +341,7 @@ static double micro_frame_typed() {
         b.set_i64<BenchSchema::kPass>(1);
         xi::mp::Bytes region = region_mp(7);
         b.set_mp<BenchSchema::kRegion>(region.data(), region.size());
-        xi::TypedFrame<BenchSchema> f = b.seal();
+        xi::TypedPack<BenchSchema> f = b.seal();
         uint64_t s = 0;
         s += (uint64_t)f.get_i64<BenchSchema::kSeq>().value_or(0);
         s += (uint64_t)(int64_t)f.get_f64<BenchSchema::kScore>().value_or(0);
@@ -352,34 +352,34 @@ static double micro_frame_typed() {
     });
 }
 
-// (c) FRAME plane + memcpy HOP: mp::Writer plane (BUILD) + memcpy into a reused
+// (c) PACK plane + memcpy HOP: mp::Writer plane (BUILD) + memcpy into a reused
 //     consumer arena (HOP, C4) + read M by offset (C3) + drop (C2). The direct
 //     counterpart to (a)'s share_out/adopt CAS hop — the memcpy-vs-CAS read.
-static double micro_frame_plane(const FrameOffsets& off) {
+static double micro_pack_plane(const PackOffsets& off) {
     static thread_local std::vector<uint8_t> arena;   // consumer arena, reused
     return best_us([&] {
-        xi::mp::Bytes plane = build_frame_plane(7);
+        xi::mp::Bytes plane = build_pack_plane(7);
         arena.resize(plane.size());
         std::memcpy(arena.data(), plane.data(), plane.size());   // the hop
-        read_frame_plane(arena.data(), off);
+        read_pack_plane(arena.data(), off);
     });
 }
 
 // ===========================================================================
 // PART 2 — the DISPATCH side-by-side. emit -> funnel -> lane -> tiny inspect ->
-// ordered result, real pooled image traffic, per frame the metadata plane built
+// ordered result, real pooled image traffic, per pack the metadata plane built
 // by the producer and hopped+read by the consumer. Identical harness for both
 // lanes; ONLY the metadata plane differs.
 // ===========================================================================
-enum class Lane { Record, Frame };
+enum class Lane { Record, Pack };
 
 struct BenchEvent {
     int64_t         timestamp_us   = 0;   // steady t_emit
     int64_t         dequeued_at_us = 0;
     int64_t         arrival_id     = 0;
-    xi_image_handle image          = XI_IMAGE_NULL;   // pooled 320x240x3 frame
+    xi_image_handle image          = XI_IMAGE_NULL;   // pooled 320x240x3 pack
     yyjson_mut_doc* rec_doc        = nullptr;         // RECORD lane: share_out'd doc
-    xi::mp::Bytes   frame_plane;                      // FRAME lane: sealed small plane
+    xi::mp::Bytes   pack_plane;                      // PACK lane: sealed small plane
 };
 
 struct MiniLane {
@@ -422,7 +422,7 @@ static inline void tiny_inspect(const uint8_t* px, size_t nbytes, int work) {
 }
 
 static Result run_scenario(const Config& cfg, const xi_host_api& host,
-                           const FrameOffsets& off) {
+                           const PackOffsets& off) {
     auto& pool = xi::ImagePool::instance();
     const size_t nbytes = (size_t)cfg.width * cfg.height * cfg.channels;
 
@@ -445,7 +445,7 @@ static Result run_scenario(const Config& cfg, const xi_host_api& host,
     // ---- workers: dequeue -> inspect -> metadata HOP+read -> ordered emit ----
     for (int w = 0; w < cfg.parallel; ++w) {
         lane.workers.emplace_back([&] {
-            std::vector<uint8_t> arena;   // this consumer's reused hop arena (Frame lane)
+            std::vector<uint8_t> arena;   // this consumer's reused hop arena (Pack lane)
             while (keep_going.load()) {
                 BenchEvent ev; bool have = false; int64_t rid = 0; int64_t eseq = -1;
                 {
@@ -464,7 +464,7 @@ static Result run_scenario(const Config& cfg, const xi_host_api& host,
                 ev.dequeued_at_us = xi::wall_us();
                 tiny_inspect(pool.data(ev.image), nbytes, cfg.work);
 
-                // --- the metadata plane: the ONLY per-frame difference ---------
+                // --- the metadata plane: the ONLY per-pack difference ---------
                 if (cfg.lane == Lane::Record) {
                     // v2 hop: adopt the share_out'd doc by pointer, read M, release.
                     xi::Record c = xi::Record::adopt_shared(ev.rec_doc, host.doc_release,
@@ -473,9 +473,9 @@ static Result run_scenario(const Config& cfg, const xi_host_api& host,
                     // c drops -> DocRegistry release -> doc freed (producer already gone).
                 } else {
                     // v3 hop: memcpy the sealed small plane into this arena, read M.
-                    arena.resize(ev.frame_plane.size());
-                    std::memcpy(arena.data(), ev.frame_plane.data(), ev.frame_plane.size());
-                    read_frame_plane(arena.data(), off);
+                    arena.resize(ev.pack_plane.size());
+                    std::memcpy(arena.data(), ev.pack_plane.data(), ev.pack_plane.size());
+                    read_pack_plane(arena.data(), off);
                 }
 
                 xi::EmitTurn turn(&lane.gate, eseq, &keep_going);
@@ -527,7 +527,7 @@ static Result run_scenario(const Config& cfg, const xi_host_api& host,
             ev.rec_doc = r.share_out(host.doc_retain, host.doc_release);  // reserved ref -> consumer
             // r drops here: its enroll-side ref releases; doc alive on the reserved ref.
         } else {
-            ev.frame_plane = build_frame_plane(i);
+            ev.pack_plane = build_pack_plane(i);
         }
         enqueue(std::move(ev));
     }
@@ -578,9 +578,9 @@ static void print_dist(const char* label, Result& r) {
     std::fflush(stdout);
 }
 
-// Best-of-R median of the closed-loop, single-worker per-frame latency for one
+// Best-of-R median of the closed-loop, single-worker per-pack latency for one
 // lane — the stable gate signal (matches bench_hotpath's gate discipline).
-static int64_t gate_p50(Lane lane, const xi_host_api& host, const FrameOffsets& off) {
+static int64_t gate_p50(Lane lane, const xi_host_api& host, const PackOffsets& off) {
     Config cfg;
     cfg.parallel = 1; cfg.inflight = 1; cfg.ordered = false;
     cfg.frames = 5000; cfg.lane = lane;
@@ -599,19 +599,19 @@ static int64_t gate_p50(Lane lane, const xi_host_api& host, const FrameOffsets& 
 // Machine-readable GATE lines (integer, slower-is-worse) for perf_gate.cmake:
 // the metadata-micro medians (least noise) + the closed-loop single-worker p50
 // for each lane. No baseline shipped -> SKIPs-with-reason off the capture box.
-static int gate_main(const xi_host_api& host, const FrameOffsets& off) {
+static int gate_main(const xi_host_api& host, const PackOffsets& off) {
     // micro: min-of-batches (ns), the cleanest per-op metadata cost.
     double rec_ns   = micro_record(host)          * 1000.0;
     double frb_ns   = micro_frame_builder()       * 1000.0;
     double frt_ns   = micro_frame_typed()         * 1000.0;
-    double frp_ns   = micro_frame_plane(off)      * 1000.0;
+    double frp_ns   = micro_pack_plane(off)      * 1000.0;
     std::printf("GATE frame_micro_record_roundtrip_ns %lld\n",   (long long)(rec_ns + 0.5));
     std::printf("GATE frame_micro_framebuilder_ns %lld\n",       (long long)(frb_ns + 0.5));
     std::printf("GATE frame_micro_typed_ns %lld\n",              (long long)(frt_ns + 0.5));
     std::printf("GATE frame_micro_plane_memcpy_hop_ns %lld\n",   (long long)(frp_ns + 0.5));
 
     int64_t rec_p50 = gate_p50(Lane::Record, host, off);
-    int64_t frm_p50 = gate_p50(Lane::Frame,  host, off);
+    int64_t frm_p50 = gate_p50(Lane::Pack,  host, off);
     std::printf("GATE frame_hotpath_record_p50_us_320x240x3_p1 %lld\n", (long long)rec_p50);
     std::printf("GATE frame_hotpath_frame_p50_us_320x240x3_p1 %lld\n",  (long long)frm_p50);
 
@@ -621,12 +621,12 @@ static int gate_main(const xi_host_api& host, const FrameOffsets& off) {
 
 int main(int argc, char** argv) {
     xi_host_api host = make_host();
-    FrameOffsets off = compute_offsets(build_frame_plane(7));
-    if (!off.ok) { std::fprintf(stderr, "frame offset table failed to build\n"); return 2; }
+    PackOffsets off = compute_offsets(build_pack_plane(7));
+    if (!off.ok) { std::fprintf(stderr, "pack offset table failed to build\n"); return 2; }
 
     Config cli;
     bool have_cli = false;
-    Lane cli_lane = Lane::Frame;
+    Lane cli_lane = Lane::Pack;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&](int def) { return i + 1 < argc ? std::atoi(argv[++i]) : def; };
@@ -637,23 +637,23 @@ int main(int argc, char** argv) {
         else if (a == "--work")     { cli.work     = next(cli.work);     have_cli = true; }
         else if (a == "--ordered")  { cli.ordered  = true;              have_cli = true; }
         else if (a == "--record")   { cli_lane = Lane::Record;          have_cli = true; }
-        else if (a == "--frame")    { cli_lane = Lane::Frame;           have_cli = true; }
+        else if (a == "--pack")    { cli_lane = Lane::Pack;           have_cli = true; }
     }
 
-    std::printf("Frame (v3 keyed-buffer plane) vs Record (v2 shared doc) — per-frame hot path.\n");
+    std::printf("Pack (v3 keyed-buffer plane) vs Record (v2 shared doc) — per-pack hot path.\n");
     std::printf("Metadata plane: %d scalar fields + a nested region; consumer reads %d fields.\n",
                 kScalars, kReads);
     std::printf("Image: pooled %dx%dx%d, REAL ImagePool, identical both lanes (addref emit / release consume).\n",
                 cli.width, cli.height, cli.channels);
-    std::printf("REAL: ImagePool/DocRegistry/EmitGate + xi_frame.hpp + xi_mp.hpp + Record share_out/adopt.\n");
-    std::printf("MODELLED: MiniLane queue plumbing (== bench_hotpath); funnel = direct enqueue (bus can't carry a Frame).\n\n");
+    std::printf("REAL: ImagePool/DocRegistry/EmitGate + xi_pack.hpp + xi_mp.hpp + Record share_out/adopt.\n");
+    std::printf("MODELLED: MiniLane queue plumbing (== bench_hotpath); funnel = direct enqueue (bus can't carry a Pack).\n\n");
 
     if (have_cli) {
         cli.lane = cli_lane;
         Result r = run_scenario(cli, host, off);
         char lbl[64];
         std::snprintf(lbl, sizeof(lbl), "%s p=%d inflight=%d",
-                      cli_lane == Lane::Record ? "RECORD" : "FRAME", cli.parallel, cli.inflight);
+                      cli_lane == Lane::Record ? "RECORD" : "PACK", cli.parallel, cli.inflight);
         print_dist(lbl, r);
         return 0;
     }
@@ -663,11 +663,11 @@ int main(int argc, char** argv) {
     double rec_ns = micro_record(host)     * 1000.0;
     double frb_ns = micro_frame_builder()  * 1000.0;
     double frt_ns = micro_frame_typed()    * 1000.0;
-    double frp_ns = micro_frame_plane(off) * 1000.0;
+    double frp_ns = micro_pack_plane(off) * 1000.0;
     std::printf("  %-52s %9.1f ns/op\n", "RECORD build+share_out+adopt+read+release [v2]", rec_ns);
-    std::printf("  %-52s %9.1f ns/op\n", "FRAME  FrameBuilder+seal+read+drop [v3 dynamic]", frb_ns);
-    std::printf("  %-52s %9.1f ns/op\n", "FRAME  TypedFrame set+seal+slot-read+drop [v3 typed]", frt_ns);
-    std::printf("  %-52s %9.1f ns/op\n", "FRAME  mp plane + memcpy-hop + offset-read [v3 hop]", frp_ns);
+    std::printf("  %-52s %9.1f ns/op\n", "PACK  PackBuilder+seal+read+drop [v3 dynamic]", frb_ns);
+    std::printf("  %-52s %9.1f ns/op\n", "PACK  TypedPack set+seal+slot-read+drop [v3 typed]", frt_ns);
+    std::printf("  %-52s %9.1f ns/op\n", "PACK  mp plane + memcpy-hop + offset-read [v3 hop]", frp_ns);
     std::printf("    ^ Record cost  = DOM alloc + registry-CAS hop + hash reads + doc free;\n");
     std::printf("      Dynamic cost = arena build + hybrid index + interned keys + one-shot free;\n");
     std::printf("      Typed cost   = arena build (recycled chunk) + slot offset reads, no intern, no lookup.\n\n");
@@ -675,17 +675,17 @@ int main(int argc, char** argv) {
     // -------- dispatch side-by-side across parallelism -----------------------
     std::printf("--- closed-loop dispatch (matched load, inflight=parallel) — STEADY-STATE service latency ---\n");
     for (int p : {1, 2, 4, 8}) {
-        for (Lane ln : {Lane::Record, Lane::Frame}) {
+        for (Lane ln : {Lane::Record, Lane::Pack}) {
             Config c; c.parallel = p; c.inflight = p; c.ordered = (p > 1);
             c.frames = 20000; c.lane = ln;
             Result r = run_scenario(c, host, off);
             char lbl[48];
             std::snprintf(lbl, sizeof(lbl), "%-6s inflight=parallel=%d%s",
-                          ln == Lane::Record ? "RECORD" : "FRAME", p, p > 1 ? " ordered" : "");
+                          ln == Lane::Record ? "RECORD" : "PACK", p, p > 1 ? " ordered" : "");
             print_dist(lbl, r);
         }
     }
-    std::printf("\nThe closed-loop p50 is the per-frame SERVICE cost; the metadata plane is the only\n"
+    std::printf("\nThe closed-loop p50 is the per-pack SERVICE cost; the metadata plane is the only\n"
                 "difference between the two lanes. Read the micro for the isolated build/read/hop/free split.\n");
     return 0;
 }

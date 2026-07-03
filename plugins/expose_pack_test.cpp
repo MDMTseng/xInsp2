@@ -1,13 +1,13 @@
 //
 // expose_frame_test.cpp — the polaris2 wave-2 GENERIC PROOF (docs/new_gen/08
-// Wave 2 step 3): the REAL expose DLL walks a sealed frame with ZERO producer
+// Wave 2 step 3): the REAL expose DLL walks a sealed pack with ZERO producer
 // knowledge and emits it as an XEX1 wire frame.
 //
 // Loads the shipped expose plugin through the genuine C-ABI load path and drives
-// the xi.frame@1 frame-in door:
+// the xi.pack@1 pack-in door:
 //
 //   * DOOR PROBE — expose (a SINK) now publishes xi_plugin_get_interface and
-//     answers ("xi.frame", 1): it consumes frames.
+//     answers ("xi.pack", 1): it consumes packs.
 //   * v2 opt-in — with frame_wire_v2 set, a subscribed channel's frame is dumped
 //     as the canonical XEX1-v2 frame (scalars/str/mp pass through, image inlined
 //     as raw bin). The emitted bytes are captured off the host binary sink and
@@ -21,9 +21,9 @@
   #include <windows.h>
 #endif
 
-#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_frame_door / run_frame_door)
+#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_pack_door / run_pack_door)
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
-#include <xi/xi_frame_abi.hpp>      // install_frame_abi + frame_v1_iface + FrameRegistry
+#include <xi/xi_pack_abi.hpp>      // install_pack_abi + pack_v1_iface + PackRegistry
 #include <xi/xi_binary_sink.hpp>    // capture emit_binary (the plugin -> WS byte pipe)
 #include <xi/xi_mp.hpp>             // decode the emitted XEX1 body
 
@@ -128,11 +128,11 @@ static V2View decode_v2(const std::vector<uint8_t>& frame) {
 }
 
 int main() {
-    std::printf("[test] expose frame door (generic walk -> XEX1-v2)\n");
+    std::printf("[test] expose pack door (generic walk -> XEX1-v2)\n");
 
-    xi::install_frame_abi();
+    xi::install_pack_abi();
     xi_host_api host = xi::ImagePool::make_host_api();
-    const xi_frame_v1* fi = xi::frame_v1_iface();
+    const xi_pack_v1* fi = xi::pack_v1_iface();
     xi::binary_sink() = &capture_binary;
 
     const int base_live = xi::ImagePool::instance().cumulative().live_now;
@@ -150,16 +150,16 @@ int main() {
     auto expose = std::make_unique<xi::CAbiInstanceAdapter>("sink0", "sink0", dll, inst);
 
     // ---------------------------------------------------------------------
-    // (A) Door probe: expose (a sink) publishes xi.frame@1.
+    // (A) Door probe: expose (a sink) publishes xi.pack@1.
     // ---------------------------------------------------------------------
-    SECTION("door probe: expose answers xi.frame@1 (it consumes frames)");
-    CHECK(get_iface && get_iface("xi.frame", 1) != nullptr);
-    CHECK(expose->has_frame_door());
+    SECTION("door probe: expose answers xi.pack@1 (it consumes packs)");
+    CHECK(get_iface && get_iface("xi.pack", 1) != nullptr);
+    CHECK(expose->has_pack_door());
 
-    // Build one input frame: reserved $channel/$seq + a generic entry mix.
+    // Build one input pack: reserved $channel/$seq + a generic entry mix.
     std::vector<uint8_t> pixels = {10, 20, 30, 40};   // 2x2x1 gray
-    auto build_input = [&]() -> xi_frame_handle {
-        xi_frame_builder b = fi->builder_new();
+    auto build_input = [&]() -> xi_pack_handle {
+        xi_pack_builder b = fi->builder_new();
         fi->builder_add_str(b, "$channel", "cam0", 4);
         fi->builder_add_i64(b, "$seq", 7);
         fi->builder_add_i64(b, "count", 42);
@@ -177,9 +177,9 @@ int main() {
     expose->exchange("{\"command\":\"subscribe\",\"channels\":[\"cam0\"]}");
     g_emitted.clear();
     {
-        xi_frame_handle in = build_input();
-        xi_frame_handle ack = expose->run_frame_door(in);
-        CHECK(ack != XI_FRAME_NULL);
+        xi_pack_handle in = build_input();
+        xi_pack_handle ack = expose->run_pack_door(in);
+        CHECK(ack != XI_PACK_NULL);
         if (ack) {
             const char* c = nullptr; int32_t cl = 0;
             CHECK(fi->get_str(ack, "channel", &c, &cl) == 1 && std::string(c, cl) == "cam0");
@@ -211,8 +211,8 @@ int main() {
     CHECK(expose->set_def("{\"frame_wire_v2\":false}"));
     g_emitted.clear();
     {
-        xi_frame_handle in = build_input();
-        xi_frame_handle ack = expose->run_frame_door(in);
+        xi_pack_handle in = build_input();
+        xi_pack_handle ack = expose->run_pack_door(in);
         if (ack) fi->release(ack);
         fi->release(in);
         CHECK(g_emitted.size() == 1);
@@ -233,8 +233,8 @@ int main() {
     expose->exchange("{\"command\":\"unsubscribe\",\"channels\":[\"cam0\"]}");
     g_emitted.clear();
     {
-        xi_frame_handle in = build_input();
-        xi_frame_handle ack = expose->run_frame_door(in);
+        xi_pack_handle in = build_input();
+        xi_pack_handle ack = expose->run_pack_door(in);
         if (ack) fi->release(ack);
         fi->release(in);
         CHECK(g_emitted.empty());
@@ -246,7 +246,7 @@ int main() {
     FreeLibrary(dll);
 
     CHECK(xi::ImagePool::instance().cumulative().live_now == base_live);
-    CHECK(xi::FrameRegistry::instance().live_frames() == 0);
+    CHECK(xi::PackRegistry::instance().live_frames() == 0);
 
     if (g_failures == 0) { std::printf("\nALL TESTS PASSED\n"); return 0; }
     std::fprintf(stderr, "\n%d FAILURES\n", g_failures);

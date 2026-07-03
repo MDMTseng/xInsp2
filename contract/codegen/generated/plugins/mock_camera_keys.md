@@ -7,7 +7,7 @@
 | `height` | `kHeight` | int | int |
 | `fps` | `kFps` | int | int |
 | `streaming` | `kStreaming` | bool | bool (get_def only, read-only) |
-| `frame_mode` | `kFrameMode` | bool | bool (default false) — emit via the xi.frame@1 door instead of Record (wave-2 pilot) |
+| `pack_mode` | `kPackMode` | bool | bool (default false) — emit via the xi.pack@1 door instead of Record (wave-2 pilot) |
 | `command` | `kCommand` | string | string (command selector) |
 | `value` | `kValue` | int | int (command payload value) |
 | `start` | `kStart` | string (command name) |  |
@@ -16,4 +16,4 @@
 | `set_fps` | `kSetFps` | string (command name) |  |
 | `set_resolution` | `kSetResolution` | string (command name) |  |
 | `frame` | `kFrame` | image | image (emitted RGB frame) |
-| `seq` | `kSeq` | int | int (frame counter; frame-mode entry) |
+| `seq` | `kSeq` | int | int (frame counter; pack-mode entry) |

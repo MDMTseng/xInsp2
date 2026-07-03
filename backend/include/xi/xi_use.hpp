@@ -69,12 +69,12 @@ struct xi_trigger_view {
     int32_t                       _pad1;
     const char*                   leader_source;  // may be null/empty
     void*                         meta_doc;       // yyjson_mut_doc*, borrowed (host holds a ref)
-    // polaris2 wave-2 (docs/new_gen/08 Wave 2, step 4): the OPTIONAL v3 Frame this
-    // event carries on the dual-carry dispatch path — the SAME xi_frame_handle
-    // TriggerEvent::frame holds. XI_FRAME_NULL for every Record-era event. Borrowed
+    // polaris2 wave-2 (docs/new_gen/08 Wave 2, step 4): the OPTIONAL v3 Pack this
+    // event carries on the dual-carry dispatch path — the SAME xi_pack_handle
+    // TriggerEvent::pack holds. XI_PACK_NULL for every Record-era event. Borrowed
     // for the call (the dispatch's ref keeps it alive); the SDK Trigger takes its
-    // OWN ref (get_interface("xi.frame",1)->retain) so t.frame() stays valid after.
-    xi_frame_handle               frame;          // XI_FRAME_NULL ⇒ no frame on this event
+    // OWN ref (get_interface("xi.pack",1)->retain) so t.pack() stays valid after.
+    xi_pack_handle               pack;          // XI_PACK_NULL ⇒ no pack on this event
     const xi_host_api*            host;           // pool + doc access; null ⇒ inactive
 };
 
@@ -147,61 +147,61 @@ using TriggerLeaderFn  = int32_t (*)(char* buf, int32_t buflen);
 // doc uses. null when the trigger carries no metadata.
 using TriggerMetaFn    = void* (*)();
 
-// ─── EXPERIMENTAL: the wave-2 Frame pilot surface (t.frame()) ───────────────
+// ─── EXPERIMENTAL: the wave-2 Pack pilot surface (t.pack()) ─────────────────
 //
-// A SCRIPT-SIDE, borrowed, read-only view of the v3 Frame (xi_frame.hpp) that a
-// frame-mode source emitted on the xi.frame@1 data plane. This is a WAVE-2 PILOT
+// A SCRIPT-SIDE, borrowed, read-only view of the v3 Pack (xi_pack.hpp) that a
+// pack-mode source emitted on the xi.pack@1 data plane. This is a WAVE-2 PILOT
 // surface — minimal, opaque-handle-backed, and SUBJECT TO CHANGE: the final
-// script Frame API is a wave-3+ decision (docs/new_gen/08 Wave 2, step 4).
+// script Pack API is a wave-3+ decision (docs/new_gen/08 Wave 2, step 4).
 //
-// WHY OPAQUE, NOT the TypedFrame<Schema> container directly: a script is a
-// separate JIT-compiled DLL. The Frame container (xi_frame.hpp) owns an arena +
-// pool handles minted host-side, and every inline singleton (FrameRegistry) is
+// WHY OPAQUE, NOT the TypedPack<Schema> container directly: a script is a
+// separate JIT-compiled DLL. The Pack container (xi_pack.hpp) owns an arena +
+// pool handles minted host-side, and every inline singleton (PackRegistry) is
 // PER-DLL — so the script cannot touch the container's C++ layout. It reads the
-// frame through the process-stable xi_frame_v1 vtable it resolves from the host
-// (get_interface("xi.frame", 1)): spans in / spans out, keyed by string. The
+// pack through the process-stable xi_pack_v1 vtable it resolves from the host
+// (get_interface("xi.pack", 1)): spans in / spans out, keyed by string. The
 // 522ns compile-time-offset slot read is a SAME-DLL property (the pure-door
 // finding, docs/new_gen/08); across the door a consumer reads by key string.
 //
 //   XI_INSPECT_ENTRY(t, frame) {
-//       auto f = t.frame();                      // borrowed; empty if no frame
+//       auto f = t.pack();                       // borrowed; empty if no pack
 //       if (f) {
 //           int64_t seq = f.get_i64("seq").value_or(-1);
 //           if (auto img = f.get_image("frame")) xi::ok(1);   // verdict on it
 //       }
 //   }
 //
-// LIFETIME: the returned ScriptFrame holds its OWN ref on the frame handle (the
+// LIFETIME: the returned ScriptPack holds its OWN ref on the pack handle (the
 // Trigger took it via retain() when it was built from the view). Copies are cheap
-// (a shared_ptr bump) and keep the frame + its pool buffers alive — safe to hold
+// (a shared_ptr bump) and keep the pack + its pool buffers alive — safe to hold
 // past the dispatch and to capture BY VALUE into xi::async / xi::parallel_for,
-// exactly like an xi::Image or a TriggerSnapshot. ABSENT frame (a Record-era
-// event, or no frame plane on the host) ⇒ an empty ScriptFrame: bool-false, all
+// exactly like an xi::Image or a TriggerSnapshot. ABSENT pack (a Record-era
+// event, or no pack plane on the host) ⇒ an empty ScriptPack: bool-false, all
 // getters std::nullopt — fail-loud in the script's hands, never a crash.
 
-// A borrowed image entry read out of a frame: descriptor + a zero-copy view over
-// the pool buffer's pixels. Valid for the life of the owning ScriptFrame.
-struct ScriptFrameImage {
+// A borrowed image entry read out of a pack: descriptor + a zero-copy view over
+// the pool buffer's pixels. Valid for the life of the owning ScriptPack.
+struct ScriptPackImage {
     int32_t width    = 0;
     int32_t height   = 0;
     int32_t channels = 0;
     std::span<const uint8_t> pixels;
 };
 
-template <class Schema> class ScriptTypedFrame;
+template <class Schema> class ScriptTypedPack;
 
-class ScriptFrame {
+class ScriptPack {
 public:
-    ScriptFrame() = default;
-    ScriptFrame(xi_frame_handle h, const xi_frame_v1* fi,
+    ScriptPack() = default;
+    ScriptPack(xi_pack_handle h, const xi_pack_v1* fi,
                 std::shared_ptr<const void> keepalive)
         : h_(h), fi_(fi), keep_(std::move(keepalive)) {}
 
-    // A frame is present iff we hold a live handle AND the host's frame vtable.
-    bool valid() const { return fi_ && h_ != XI_FRAME_NULL; }
+    // A pack is present iff we hold a live handle AND the host's pack vtable.
+    bool valid() const { return fi_ && h_ != XI_PACK_NULL; }
     explicit operator bool() const { return valid(); }
 
-    // Number of keyed entries (0 on an empty frame).
+    // Number of keyed entries (0 on an empty pack).
     int32_t count() const { return (valid() && fi_->count) ? fi_->count(h_) : 0; }
 
     // ---- typed borrowed reads (std::nullopt on absent key / type mismatch) ----
@@ -228,11 +228,11 @@ public:
                          std::span<const uint8_t>(static_cast<const uint8_t*>(p), n > 0 ? (size_t)n : 0))
                    : std::nullopt;
     }
-    std::optional<ScriptFrameImage> get_image(const char* key) const {
+    std::optional<ScriptPackImage> get_image(const char* key) const {
         if (!valid() || !fi_->get_image) return std::nullopt;
-        xi_frame_image im{};
+        xi_pack_image im{};
         if (fi_->get_image(h_, key, &im) != 1) return std::nullopt;
-        return ScriptFrameImage{ im.width, im.height, im.channels,
+        return ScriptPackImage{ im.width, im.height, im.channels,
             std::span<const uint8_t>(static_cast<const uint8_t*>(im.pixels),
                                      im.length > 0 ? (size_t)im.length : 0) };
     }
@@ -245,15 +245,15 @@ public:
                    : std::nullopt;
     }
 
-    // XI_FRAME_TAG_* of a key, or -1 if absent (the raw ABI tag — the script
-    // consumes the opaque door, so it speaks int tags, not the C++ FrameTag enum).
+    // XI_PACK_TAG_* of a key, or -1 if absent (the raw ABI tag — the script
+    // consumes the opaque door, so it speaks int tags, not the C++ PackTag enum).
     int32_t tag_of(const char* key) const {
         return (valid() && fi_->tag_of) ? fi_->tag_of(h_, key) : -1;
     }
 
     // Generic producer-agnostic walk: fn(std::string_view key, int32_t tag) for
     // every entry in insertion order — the same enumeration `expose`/record_save
-    // do host-side, exposed to a script that wants to dump an unknown frame.
+    // do host-side, exposed to a script that wants to dump an unknown pack.
     template <class Fn>
     void for_each(Fn&& fn) const {
         if (!valid() || !fi_->count || !fi_->key_at || !fi_->tag_at) return;
@@ -268,33 +268,33 @@ public:
     // The declared-keyset TYPED view: get_i64<Schema::kSeq>() resolves the slot to
     // its key string at COMPILE TIME (Schema::keys[slot]) and reads it by string
     // through the door. Schema is any struct with a constexpr `keys` array (an
-    // xi::FrameSchema-derived type, or the wave-3 generated _keys, works as-is).
+    // xi::PackSchema-derived type, or the wave-3 generated _keys, works as-is).
     template <class Schema>
-    ScriptTypedFrame<Schema> typed() const { return ScriptTypedFrame<Schema>(*this); }
+    ScriptTypedPack<Schema> typed() const { return ScriptTypedPack<Schema>(*this); }
 
     // Escape hatch for callers that want the raw door (e.g. to forward the handle).
-    xi_frame_handle    handle() const { return h_; }
-    const xi_frame_v1* iface()  const { return fi_; }
+    xi_pack_handle    handle() const { return h_; }
+    const xi_pack_v1* iface()  const { return fi_; }
 
 private:
-    xi_frame_handle             h_    = XI_FRAME_NULL;
-    const xi_frame_v1*          fi_   = nullptr;
-    std::shared_ptr<const void> keep_;   // holds the Trigger's frame ref alive
+    xi_pack_handle             h_    = XI_PACK_NULL;
+    const xi_pack_v1*          fi_   = nullptr;
+    std::shared_ptr<const void> keep_;   // holds the Trigger's pack ref alive
 };
 
-// ScriptTypedFrame<Schema> — a schema-keyed convenience over ScriptFrame. Reads
+// ScriptTypedPack<Schema> — a schema-keyed convenience over ScriptPack. Reads
 // are STILL by key string through the door (the cross-DLL reality); the schema
 // only fixes key spelling at compile time and turns a bad slot into a compile
 // error. `keys` may hold const char* or std::string_view; both convert to the
 // std::string we pass as a NUL-terminated key (a pilot surface — not the hot
 // path, so correctness over the micro-cost of the copy).
 template <class Schema>
-class ScriptTypedFrame {
+class ScriptTypedPack {
 public:
-    explicit ScriptTypedFrame(ScriptFrame f) : f_(std::move(f)) {}
+    explicit ScriptTypedPack(ScriptPack f) : f_(std::move(f)) {}
     bool valid() const { return f_.valid(); }
     explicit operator bool() const { return f_.valid(); }
-    const ScriptFrame& frame() const { return f_; }
+    const ScriptPack& pack() const { return f_; }
 
     template <int Slot> std::optional<int64_t> get_i64() const {
         static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
@@ -308,13 +308,13 @@ public:
         static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
         return f_.get_str(std::string(Schema::keys[Slot]).c_str());
     }
-    template <int Slot> std::optional<ScriptFrameImage> get_image() const {
+    template <int Slot> std::optional<ScriptPackImage> get_image() const {
         static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
         return f_.get_image(std::string(Schema::keys[Slot]).c_str());
     }
 
 private:
-    ScriptFrame f_;
+    ScriptPack f_;
 };
 
 // xi::Trigger — read-only view of the current inspection event.
@@ -342,15 +342,15 @@ public:
         CurrentTriggerInfo                     info{};
         std::string                            leader;
         bool                                   active = false;
-        // polaris2 wave-2 Frame pilot: an OWNED ref on the event's frame handle
+        // polaris2 wave-2 Pack pilot: an OWNED ref on the event's pack handle
         // (retained from the view). Released here on the LAST Data ref, so every
-        // ScriptFrame the script kept — even one captured into a worker — stays
-        // valid until it (and this Data) drop. XI_FRAME_NULL ⇒ no frame carried.
-        xi_frame_handle    frame       = XI_FRAME_NULL;
-        const xi_frame_v1* frame_iface = nullptr;
+        // ScriptPack the script kept — even one captured into a worker — stays
+        // valid until it (and this Data) drop. XI_PACK_NULL ⇒ no pack carried.
+        xi_pack_handle    pack       = XI_PACK_NULL;
+        const xi_pack_v1* pack_iface = nullptr;
         ~Data() {
-            if (frame != XI_FRAME_NULL && frame_iface && frame_iface->release)
-                frame_iface->release(frame);
+            if (pack != XI_PACK_NULL && pack_iface && pack_iface->release)
+                pack_iface->release(pack);
         }
     };
 
@@ -382,17 +382,17 @@ public:
             d->meta = Record::adopt_shared((yyjson_mut_doc*)v->meta_doc,
                                            v->host->doc_release, /*frozen=*/true);
         }
-        // polaris2 wave-2 Frame pilot: if the event carried a frame, resolve the
-        // host's xi.frame@1 vtable and take our OWN ref on the handle (the view's
+        // polaris2 wave-2 Pack pilot: if the event carried a pack, resolve the
+        // host's xi.pack@1 vtable and take our OWN ref on the handle (the view's
         // ref is only borrowed for this call). Data's dtor releases it. Mirrors the
-        // image/meta addref-our-own discipline so t.frame() survives the dispatch.
-        if (v->frame != XI_FRAME_NULL && v->host->get_interface) {
-            const auto* fi = static_cast<const xi_frame_v1*>(
-                v->host->get_interface("xi.frame", 1));
+        // image/meta addref-our-own discipline so t.pack() survives the dispatch.
+        if (v->pack != XI_PACK_NULL && v->host->get_interface) {
+            const auto* fi = static_cast<const xi_pack_v1*>(
+                v->host->get_interface("xi.pack", 1));
             if (fi && fi->retain && fi->release) {
-                fi->retain(v->frame);
-                d->frame       = v->frame;
-                d->frame_iface = fi;
+                fi->retain(v->pack);
+                d->pack        = v->pack;
+                d->pack_iface = fi;
             }
         }
         data_ = std::move(d);
@@ -561,16 +561,16 @@ public:
         return Record::adopt_shared((yyjson_mut_doc*)d, host->doc_release, /*frozen=*/true);
     }
 
-    // EXPERIMENTAL (wave-2 Frame pilot, docs/new_gen/08 Wave 2): the v3 Frame this
+    // EXPERIMENTAL (wave-2 Pack pilot, docs/new_gen/08 Wave 2): the v3 Pack this
     // event carried on the dual-carry dispatch path, as a borrowed read-only view
-    // (see ScriptFrame above). Empty ScriptFrame — bool-false, all getters nullopt
-    // — when the event carried no frame (a Record-era event, the common case), when
-    // the host publishes no xi.frame@1 plane, or on the legacy ambient (non-view)
+    // (see ScriptPack above). Empty ScriptPack — bool-false, all getters nullopt
+    // — when the event carried no pack (a Record-era event, the common case), when
+    // the host publishes no xi.pack@1 plane, or on the legacy ambient (non-view)
     // entry: the pilot rides the explicit XI_INSPECT_ENTRY(t, frame) path. Never a
-    // crash — the absent-frame contract mirrors t.image()'s empty-Image behaviour.
-    ScriptFrame frame() const {
-        if (data_ && data_->frame != XI_FRAME_NULL && data_->frame_iface)
-            return ScriptFrame(data_->frame, data_->frame_iface, data_);
+    // crash — the absent-pack contract mirrors t.image()'s empty-Image behaviour.
+    ScriptPack pack() const {
+        if (data_ && data_->pack != XI_PACK_NULL && data_->pack_iface)
+            return ScriptPack(data_->pack, data_->pack_iface, data_);
         return {};
     }
 

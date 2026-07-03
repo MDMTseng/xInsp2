@@ -1,15 +1,15 @@
-// test_xi_frame.cpp — unit tests for the v3 keyed-buffer Frame container
-// (xi_frame.hpp). Covers the frame lifecycle (produce -> seal -> borrow ->
+// test_xi_pack.cpp — unit tests for the v3 keyed-buffer Pack container
+// (xi_pack.hpp). Covers the pack lifecycle (produce -> seal -> borrow ->
 // drop), O(1) offset-index correctness at scale, immutability/seal semantics,
 // pooled-handle balance verified against ImagePool's own stats, mixed
-// small/large frames, and the drop-on-crash story (destruction == the release
+// small/large packs, and the drop-on-crash story (destruction == the release
 // path, with no double-release across a move).
 //
 // It also exercises the _keys.h-style typed accessor layer from doc 02 against
-// Frame, proving the contract layer carries over to the v3 representation
+// Pack, proving the contract layer carries over to the v3 representation
 // unchanged.
 
-#include "xi/xi_frame.hpp"
+#include "xi/xi_pack.hpp"
 #include "xi/xi_image_pool.hpp"
 
 #include <array>
@@ -24,19 +24,19 @@ static int g_fail = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { \
     std::printf("  FAIL: %s (%s:%d)\n", msg, __FILE__, __LINE__); ++g_fail; } } while (0)
 
-using xi::Frame;
-using xi::FrameBuilder;
-using xi::FrameTag;
+using xi::Pack;
+using xi::PackBuilder;
+using xi::PackTag;
 
 // Live pool-handle count — the balance oracle. cumulative().live_now mirrors
 // stats().handle_count via a cheap atomic; we use it to assert every pooled
-// buffer a frame mints is released exactly once when the frame drops.
+// buffer a pack mints is released exactly once when the pack drops.
 static int pool_live() { return xi::ImagePool::instance().cumulative().live_now; }
 
 // ------------------------------------------------------------------
-// The _keys.h-style contract layer (doc 02), applied to Frame. Key names are
+// The _keys.h-style contract layer (doc 02), applied to Pack. Key names are
 // defined ONCE; a builder and an extractor compile from them. This is the same
-// discipline v2 uses over the Record — proving it carries over to the v3 frame
+// discipline v2 uses over the Record — proving it carries over to the v3 pack
 // representation with only the underlying accessor calls changing.
 // ------------------------------------------------------------------
 namespace blob_keys {
@@ -54,15 +54,15 @@ struct BlobResult {
     std::string label;
 };
 
-// builder: BlobResult -> frame entries (compiles down to Frame add_*).
-static void build_blob(FrameBuilder& b, const BlobResult& r) {
+// builder: BlobResult -> pack entries (compiles down to Pack add_*).
+static void build_blob(PackBuilder& b, const BlobResult& r) {
     b.add_i64(blob_keys::kThreshold, r.threshold);
     b.add_i64(blob_keys::kBlobCount, r.blob_count);
     b.add_f64(blob_keys::kMeanArea,  r.mean_area);
     b.add_str(blob_keys::kLabel,     r.label);
 }
-// extractor: frame -> BlobResult (fails loud on a missing required key).
-static bool extract_blob(const Frame& f, BlobResult& out) {
+// extractor: pack -> BlobResult (fails loud on a missing required key).
+static bool extract_blob(const Pack& f, BlobResult& out) {
     auto th = f.get_i64(blob_keys::kThreshold);
     auto bc = f.get_i64(blob_keys::kBlobCount);
     auto ma = f.get_f64(blob_keys::kMeanArea);
@@ -76,16 +76,16 @@ static bool extract_blob(const Frame& f, BlobResult& out) {
 // ------------------------------------------------------------------
 static void test_lifecycle_and_contract_layer() {
     BlobResult in{128, 7, 42.5, "pass"};
-    FrameBuilder b;
+    PackBuilder b;
     build_blob(b, in);
     CHECK(!b.sealed(), "builder not sealed pre-seal");
 
-    Frame f = b.seal();
+    Pack f = b.seal();
     CHECK(b.sealed(), "builder sealed after seal");
-    CHECK(f.size() == 4, "frame has 4 entries");
+    CHECK(f.size() == 4, "pack has 4 entries");
     CHECK(f.has(blob_keys::kThreshold), "has threshold");
     CHECK(!f.has("nonexistent"), "missing key absent");
-    CHECK(f.tag_of(blob_keys::kMeanArea) == FrameTag::F64, "mean_area is f64");
+    CHECK(f.tag_of(blob_keys::kMeanArea) == PackTag::F64, "mean_area is f64");
 
     BlobResult out;
     CHECK(extract_blob(f, out), "extract succeeds");
@@ -106,10 +106,10 @@ static void test_lifecycle_and_contract_layer() {
 // Insertion-ordered walk + O(1) index correctness at scale.
 static void test_offset_index_at_scale() {
     const int N = 2000;
-    FrameBuilder b;
+    PackBuilder b;
     for (int i = 0; i < N; ++i)
         b.add_i64("k" + std::to_string(i), int64_t(i) * 3 + 1);
-    Frame f = b.seal();
+    Pack f = b.seal();
     CHECK(f.size() == size_t(N), "all N entries present");
 
     // Random-ish access: every key resolves to its exact value in O(1).
@@ -122,7 +122,7 @@ static void test_offset_index_at_scale() {
 
     // Insertion order preserved by the walk.
     int seen = 0; bool ordered = true;
-    f.for_each([&](std::string_view key, FrameTag) {
+    f.for_each([&](std::string_view key, PackTag) {
         if (key != std::string("k" + std::to_string(seen))) ordered = false;
         ++seen;
     });
@@ -132,30 +132,30 @@ static void test_offset_index_at_scale() {
 // Seal / immutability semantics observable in a release build (asserts are
 // compiled out under NDEBUG, so we test the enforceable state, not the assert).
 static void test_seal_semantics() {
-    FrameBuilder b;
+    PackBuilder b;
     b.add_i64("x", 1);
     CHECK(!b.sealed(), "not sealed before seal()");
-    Frame f = b.seal();
+    Pack f = b.seal();
     CHECK(b.sealed(), "sealed flag set — further add_* would assert");
-    // Frame exposes only const reads: there is no compile-time path to mutate a
-    // sealed frame (enforced by the type — no non-const accessors exist).
-    CHECK(f.get_i64("x").value() == 1, "sealed frame still reads");
+    // Pack exposes only const reads: there is no compile-time path to mutate a
+    // sealed pack (enforced by the type — no non-const accessors exist).
+    CHECK(f.get_i64("x").value() == 1, "sealed pack still reads");
 }
 
 // Pooled-handle balance: images/large bins mint pool buffers that must be
-// released exactly once at frame drop. Verified against ImagePool's live count.
+// released exactly once at pack drop. Verified against ImagePool's live count.
 static void test_pooled_handle_balance() {
     const int base = pool_live();
     std::vector<uint8_t> px(64 * 48 * 3, 0xAB);
     std::vector<uint8_t> big(8192, 0xCD);   // >= threshold -> pooled bin
     {
-        FrameBuilder b;
+        PackBuilder b;
         b.add_i64("n", 1);
         b.add_image("mask", 64, 48, 3, px.data());
         b.add_bin("payload", big.data(), big.size());
-        Frame f = b.seal();
-        CHECK(f.handle_count() == 2, "frame owns 2 pool handles (image + big bin)");
-        CHECK(pool_live() == base + 2, "pool live count rose by 2 while frame alive");
+        Pack f = b.seal();
+        CHECK(f.handle_count() == 2, "pack owns 2 pool handles (image + big bin)");
+        CHECK(pool_live() == base + 2, "pool live count rose by 2 while pack alive");
 
         auto iv = f.get_image("mask");
         CHECK(iv && iv->width == 64 && iv->height == 48 && iv->channels == 3,
@@ -166,55 +166,55 @@ static void test_pooled_handle_balance() {
         CHECK(bin && bin->size() == big.size() && (*bin)[0] == 0xCD,
               "large bin resolves through the pool");
     }
-    CHECK(pool_live() == base, "all pooled handles released when frame dropped");
+    CHECK(pool_live() == base, "all pooled handles released when pack dropped");
 }
 
-// Mixed small/large frame: every storage class in one frame, all readable,
+// Mixed small/large pack: every storage class in one pack, all readable,
 // handles balanced.
 static void test_mixed_frame() {
     const int base = pool_live();
     std::vector<uint8_t> px(16 * 16, 7);
     uint8_t small_bin[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     {
-        FrameBuilder b;
+        PackBuilder b;
         b.add_i64("i", -99);
         b.add_f64("f", 3.14159);
-        b.add_str("s", "hello frame");
+        b.add_str("s", "hello pack");
         b.add_bin("tiny", small_bin, sizeof small_bin);   // inline, no handle
         b.add_image("img", 16, 16, 1, px.data());         // pooled
-        Frame f = b.seal();
+        Pack f = b.seal();
 
         CHECK(f.handle_count() == 1, "only the image is pooled; tiny bin is inline");
         CHECK(pool_live() == base + 1, "one pool handle live");
         CHECK(f.get_i64("i").value() == -99, "negative i64 round-trips");
         CHECK(f.get_f64("f").value() == 3.14159, "f64 round-trips");
-        CHECK(f.get_str("s").value() == "hello frame", "str round-trips");
+        CHECK(f.get_str("s").value() == "hello pack", "str round-trips");
         auto tb = f.get_bin("tiny");
         CHECK(tb && tb->size() == 8 && (*tb)[7] == 8, "inline tiny bin round-trips");
-        CHECK(f.tag_of("tiny") == FrameTag::Bin, "tiny bin tagged Bin regardless of storage");
+        CHECK(f.tag_of("tiny") == PackTag::Bin, "tiny bin tagged Bin regardless of storage");
         auto iv = f.get_image("img");
         CHECK(iv && iv->pixels.size() == 256 && iv->pixels[0] == 7, "image reads");
     }
-    CHECK(pool_live() == base, "mixed frame balances the pool on drop");
+    CHECK(pool_live() == base, "mixed pack balances the pool on drop");
 }
 
 // Drop-on-crash story: destruction IS the release path. A move transfers sole
-// ownership; the moved-from frame releases nothing (no double-release), and
+// ownership; the moved-from pack releases nothing (no double-release), and
 // exactly one release happens when the live owner dies.
 static void test_crash_drop_no_double_release() {
     const int base = pool_live();
     std::vector<uint8_t> px(32 * 32 * 3, 0x11);
     {
-        Frame moved_to;   // empty
+        Pack moved_to;   // empty
         {
-            FrameBuilder b;
+            PackBuilder b;
             b.add_image("mask", 32, 32, 3, px.data());
-            Frame f = b.seal();
+            Pack f = b.seal();
             CHECK(pool_live() == base + 1, "one handle live after seal");
             moved_to = std::move(f);
             // f is now moved-from: its scope exit must NOT release the handle.
         }
-        CHECK(pool_live() == base + 1, "moved-from frame drop released nothing");
+        CHECK(pool_live() == base + 1, "moved-from pack drop released nothing");
         CHECK(moved_to.handle_count() == 1, "ownership transferred to the move target");
     }
     CHECK(pool_live() == base, "the single live owner released exactly once");
@@ -224,7 +224,7 @@ static void test_crash_drop_no_double_release() {
     {
         const int b2 = pool_live();
         {
-            FrameBuilder b;
+            PackBuilder b;
             b.add_image("x", 8, 8, 3, nullptr);
             CHECK(pool_live() == b2 + 1, "unsealed builder minted a handle");
             // no seal() — builder destructs here
@@ -234,12 +234,12 @@ static void test_crash_drop_no_double_release() {
 }
 
 // ==================================================================
-// TypedFrame<Schema> — the OFFSET-ACCESSOR read path (doc 07 §profile-1). The
+// TypedPack<Schema> — the OFFSET-ACCESSOR read path (doc 07 §profile-1). The
 // schema turns the contract key order into compile-time SLOTS; a declared field
 // is read by direct slot index (no hash, no scan) and no key is ever interned.
 // ==================================================================
 namespace blob_schema {
-struct Schema : xi::FrameSchema<Schema> {
+struct Schema : xi::PackSchema<Schema> {
     static constexpr std::array<std::string_view, 6> keys = {
         "threshold", "blob_count", "mean_area", "label", "mask", "payload"};
     enum : int { kThreshold, kBlobCount, kMeanArea, kLabel, kMask, kPayload };
@@ -247,8 +247,8 @@ struct Schema : xi::FrameSchema<Schema> {
 } // namespace blob_schema
 
 using TSchema = blob_schema::Schema;
-using TypedBlob = xi::TypedFrame<TSchema>;
-using TypedBlobBuilder = xi::TypedFrameBuilder<TSchema>;
+using TypedBlob = xi::TypedPack<TSchema>;
+using TypedBlobBuilder = xi::TypedPackBuilder<TSchema>;
 
 // COMPILE-TIME slot resolution: the key literal resolves to the same slot as the
 // enumerator, entirely in constant evaluation (these are static_asserts — if the
@@ -269,10 +269,10 @@ static void test_typed_compile_time_slots() {
 
     TypedBlob f = b.seal();
     CHECK(b.sealed(), "typed builder sealed after seal");
-    CHECK(f.size() == 4, "typed frame has 4 set fields");
+    CHECK(f.size() == 4, "typed pack has 4 set fields");
     CHECK(f.has<TSchema::kThreshold>(), "has<slot> for a set field");
     CHECK(!f.has<TSchema::kMask>(), "has<slot> false for a declared-but-unset field");
-    CHECK(f.tag_of<TSchema::kMeanArea>() == xi::FrameTag::F64, "tag_of<slot>");
+    CHECK(f.tag_of<TSchema::kMeanArea>() == xi::PackTag::F64, "tag_of<slot>");
 
     // Direct slot reads — the offset-accessor path (no hash, no scan).
     CHECK(f.get_i64<TSchema::kThreshold>().value() == 128, "get_i64<slot>");
@@ -292,14 +292,14 @@ static void test_typed_compile_time_slots() {
     // Insertion/schema-order walk visits exactly the set declared fields.
     int seen = 0; bool ordered = true;
     const std::string_view expect[4] = {"threshold", "blob_count", "mean_area", "label"};
-    f.for_each([&](std::string_view key, xi::FrameTag) {
+    f.for_each([&](std::string_view key, xi::PackTag) {
         if (seen >= 4 || key != expect[seen]) ordered = false;
         ++seen;
     });
     CHECK(seen == 4 && ordered, "for_each walks set declared fields in schema order");
 }
 
-// Mixed declared + dynamic keys in one typed frame: declared fields read by slot,
+// Mixed declared + dynamic keys in one typed pack: declared fields read by slot,
 // undeclared keys through the string-keyed side list (the general fallback).
 static void test_typed_mixed_declared_and_dynamic() {
     TypedBlobBuilder b;
@@ -320,13 +320,13 @@ static void test_typed_mixed_declared_and_dynamic() {
     CHECK(!f.get_i64("note").has_value(), "wrong-type dynamic read is nullopt");
 
     int seen = 0;
-    f.for_each([&](std::string_view, xi::FrameTag) { ++seen; });
+    f.for_each([&](std::string_view, xi::PackTag) { ++seen; });
     CHECK(seen == 4, "for_each visits declared then dynamic");
 }
 
-// Arena recycling correctness: a stream of typed frames reuses the per-thread
-// arena pool across builds. Each frame must read back its OWN values with no
-// stale bleed from a prior (now-recycled) frame's chunk; and frames held alive
+// Arena recycling correctness: a stream of typed packs reuses the per-thread
+// arena pool across builds. Each pack must read back its OWN values with no
+// stale bleed from a prior (now-recycled) pack's chunk; and packs held alive
 // simultaneously must not alias each other's recycled storage.
 static void test_typed_arena_reuse_no_stale_bleed() {
     const int base = pool_live();
@@ -344,9 +344,9 @@ static void test_typed_arena_reuse_no_stale_bleed() {
         if (f.get_f64<TSchema::kMeanArea>().value() != double(i) * 1.5) { all = false; break; }
         if (f.get_str<TSchema::kLabel>().value() != std::string("lbl") + std::to_string(i)) { all = false; break; }
     }
-    CHECK(all, "5000 recycled typed frames each read their own scalar+str values");
+    CHECK(all, "5000 recycled typed packs each read their own scalar+str values");
 
-    // Simultaneously alive: two frames built back-to-back must hold independent
+    // Simultaneously alive: two packs built back-to-back must hold independent
     // storage (the second cannot borrow the first's still-in-use chunk).
     {
         TypedBlobBuilder ba;
@@ -361,10 +361,10 @@ static void test_typed_arena_reuse_no_stale_bleed() {
 
         CHECK(fa.get_i64<TSchema::kThreshold>().value() == 11 &&
               fa.get_str<TSchema::kLabel>().value() == "first",
-              "first live frame keeps its values while a second is built");
+              "first live pack keeps its values while a second is built");
         CHECK(fb.get_i64<TSchema::kThreshold>().value() == 22 &&
               fb.get_str<TSchema::kLabel>().value() == "second",
-              "second live frame holds independent values");
+              "second live pack holds independent values");
     }
 
     CHECK(pool_live() == base, "no pool handles leaked across the reuse stream");
@@ -382,8 +382,8 @@ static void test_typed_pooled_handle_balance() {
         b.set_image<TSchema::kMask>(64, 48, 3, px.data());
         b.set_bin<TSchema::kPayload>(big.data(), big.size());
         TypedBlob f = b.seal();
-        CHECK(f.handle_count() == 2, "typed frame owns 2 pool handles (image + big bin)");
-        CHECK(pool_live() == base + 2, "pool live rose by 2 while typed frame alive");
+        CHECK(f.handle_count() == 2, "typed pack owns 2 pool handles (image + big bin)");
+        CHECK(pool_live() == base + 2, "pool live rose by 2 while typed pack alive");
 
         auto iv = f.get_image<TSchema::kMask>();
         CHECK(iv && iv->width == 64 && iv->height == 48 && iv->channels == 3,
@@ -394,16 +394,16 @@ static void test_typed_pooled_handle_balance() {
         CHECK(bin && bin->size() == big.size() && (*bin)[0] == 0xCD,
               "typed large bin resolves through the pool");
 
-        // Move transfers ownership; the moved-from frame releases nothing.
+        // Move transfers ownership; the moved-from pack releases nothing.
         TypedBlob moved = std::move(f);
         CHECK(pool_live() == base + 2, "move did not release");
         CHECK(moved.handle_count() == 2, "handles transferred to the move target");
     }
-    CHECK(pool_live() == base, "typed frame released both handles once on drop");
+    CHECK(pool_live() == base, "typed pack released both handles once on drop");
 }
 
 int main() {
-    std::printf("test_xi_frame\n");
+    std::printf("test_xi_pack\n");
     test_lifecycle_and_contract_layer();
     test_offset_index_at_scale();
     test_seal_semantics();

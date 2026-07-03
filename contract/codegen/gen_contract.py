@@ -8,7 +8,7 @@ itself TRANSCRIBED from today's hand-written headers) into
     <plugin>_keys.gen.h    the key-constants contract (guard 1) — same namespace,
                            constant NAMES + VALUES + kSchemaVersion as the
                            hand-written <plugin>_keys.h (formatting may differ).
-    <plugin>_schema.gen.h  the FrameSchema<Derived> CRTP keyset (enum slots +
+    <plugin>_schema.gen.h  the PackSchema<Derived> CRTP keyset (enum slots +
                            keys array) for the offset-accessor frame path.
     <plugin>_io.gen.h      the Input/Output (operator) or Config/Command/Frame
                            (source) builder+extractor classes — byte-for-byte the
@@ -185,10 +185,10 @@ def gen_keys(decl: dict) -> str:
     return "\n".join(L)
 
 
-# ---- <plugin>_schema.gen.h (FrameSchema CRTP keyset) ------------------------
+# ---- <plugin>_schema.gen.h (PackSchema CRTP keyset) ------------------------
 
 def frame_slot_keys(decl: dict) -> list[str]:
-    """The flat, top-level keys that become FrameSchema slots (the offset-accessor
+    """The flat, top-level keys that become PackSchema slots (the offset-accessor
     frame path). Arrays are NOT slots (they ride as dynamic/Mp entries), so they
     are skipped. operator: inputs + non-array outputs; source: the output frame."""
     keys: list[str] = []
@@ -220,19 +220,19 @@ def gen_schema(decl: dict) -> str:
     L = [
         "#pragma once",
         banner(decl["plugin"]),
-        f"// FrameSchema keyset for {decl['plugin']} — the compile-time declared key",
+        f"// PackSchema keyset for {decl['plugin']} — the compile-time declared key",
         "// order the offset-accessor read path resolves to slots (docs/new_gen/07).",
-        "// enum names ARE the slots; TypedFrame<Schema> reads slots_[kX] directly —",
+        "// enum names ARE the slots; TypedPack<Schema> reads slots_[kX] directly —",
         "// no hash, no scan. Arrays are omitted (they are not flat slots).",
         "",
-        "#include <xi/xi_frame.hpp>",
+        "#include <xi/xi_pack.hpp>",
         "",
         "#include <array>",
         "#include <string_view>",
         "",
         f"namespace {ns} {{",
         "",
-        f"struct {cls} : xi::FrameSchema<{cls}> {{",
+        f"struct {cls} : xi::PackSchema<{cls}> {{",
         f"    static constexpr std::array<std::string_view, {n}> keys = {{ {keys_lit} }};",
         f"    enum : int {{ {enum_lit} }};",
         "};",
@@ -619,7 +619,7 @@ def render(decl: dict) -> dict[str, str]:
         the bespoke I/O veneer. See contract/codegen/README.md (swap-in) and the
         codegen-gap note in docs/new_gen/08.
       * `_schema.gen.h` is SKIPPED when the plugin declares no flat frame slots
-        (a source with no `output_frame`): an empty FrameSchema is noise, nothing
+        (a source with no `output_frame`): an empty PackSchema is noise, nothing
         adopts it, and it would never be compiled.
     """
     plugin = decl["plugin"]

@@ -108,26 +108,26 @@ the frozen v11 `xi_host_api` is untouched):
 const void* xi_plugin_get_interface(const char* id, uint32_t version);
 ```
 
-The host probes `xi_plugin_get_interface("xi.frame", 1)` → `const
-xi_frame_proc_v1*` to learn a plugin does **frame-in/frame-out** on the v3
-keyed-buffer Frame plane; `NULL` means the capability is absent (a Record-only
+The host probes `xi_plugin_get_interface("xi.pack", 1)` → `const
+xi_pack_proc_v1*` to learn a plugin does **pack-in/pack-out** on the v3
+keyed-buffer Pack plane; `NULL` means the capability is absent (a Record-only
 plugin exports the symbol not at all, or returns `NULL`). This is the
 [synthesis §3](../new_gen/polaris2/00-synthesis.md) "pure door" dry run — a
 plugin capability reached ONLY through a door rather than a new fixed export.
 
-The matching **host** side is `get_interface("xi.frame", 1)` → `const
-xi_frame_v1*`: the Frame value-type ABI (build / read / retain-release / emit a
-Frame, all through an OPAQUE `xi_frame_handle` + accessor functions, never raw
-struct layout). A frame plugin does NOT write these by hand — it overrides
-`process(xi::FrameIn&, xi::FrameOut&)` and publishes the door with
-`XI_PLUGIN_FRAME_DOOR(Class)` after `XI_PLUGIN_IMPL`; its Record `process()` is
+The matching **host** side is `get_interface("xi.pack", 1)` → `const
+xi_pack_v1*`: the Pack value-type ABI (build / read / retain-release / emit a
+Pack, all through an OPAQUE `xi_pack_handle` + accessor functions, never raw
+struct layout). A pack plugin does NOT write these by hand — it overrides
+`process(xi::PackIn&, xi::PackOut&)` and publishes the door with
+`XI_PLUGIN_PACK_DOOR(Class)` after `XI_PLUGIN_IMPL`; its Record `process()` is
 untouched, so the instance speaks **both** currencies. A contract failure
-(missing/wrong entry) is a normal sealed frame stamped with a `$fault` reason
-code (`contract/canonical-profile-notes.md` § "Frame-shaped fail-loud"), not
-`XI_FRAME_NULL` (which is reserved for a hard internal failure). See
+(missing/wrong entry) is a normal sealed pack stamped with a `$fault` reason
+code (`contract/canonical-profile-notes.md` § "Pack-shaped fail-loud"), not
+`XI_PACK_NULL` (which is reserved for a hard internal failure). See
 `docs/new_gen/07-uniform-keyed-buffer-plane.md`, `docs/new_gen/08-polaris2-main-plan.md`
-(Wave 2), and the pilot pair `plugins/mock_camera` (frame-mode emit) +
-`plugins/blob_analysis` (frame door).
+(Wave 2), and the pilot pair `plugins/mock_camera` (pack-mode emit) +
+`plugins/blob_analysis` (pack door).
 
 ### Lifecycle
 

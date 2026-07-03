@@ -69,15 +69,15 @@ struct TriggerEvent {
     // (releasing the images alongside); the destructor is the backstop. The script
     // reads it as a borrowed read-only view via current_trigger().meta().
     DocRef meta_doc;
-    // polaris2 wave-2: OPTIONAL Frame carry (transitional dual-carry, docs/new_gen/
-    // 07 + 08 Wave 2). When set, this event rides the v3 keyed-buffer Frame plane
-    // (a sealed, immutable, refcounted host frame handle) instead of / alongside
+    // polaris2 wave-2: OPTIONAL Pack carry (transitional dual-carry, docs/new_gen/
+    // 07 + 08 Wave 2). When set, this event rides the v3 keyed-buffer Pack plane
+    // (a sealed, immutable, refcounted host pack handle) instead of / alongside
     // the Record's images+meta_doc — the ordering/EmitGate machinery keys on id +
-    // arrival_id, so it carries a frame identically. The bus took ONE ref on
-    // emit_frame; release_trigger_event_() drops it at the drop/consume site via
-    // TriggerBus::release_frame_(). XI_FRAME_NULL for every Record-era event, so
+    // arrival_id, so it carries a pack identically. The bus took ONE ref on
+    // emit_pack; release_trigger_event_() drops it at the drop/consume site via
+    // TriggerBus::release_pack_(). XI_PACK_NULL for every Record-era event, so
     // the Record path stays byte-for-byte unchanged.
-    xi_frame_handle frame = XI_FRAME_NULL;
+    xi_pack_handle pack = XI_PACK_NULL;
 };
 
 #ifndef XI_NOW_US_DEFINED
@@ -213,25 +213,25 @@ public:
         }
     }
 
-    // polaris2 wave-2: the Frame sibling of emit(). A frame-capable source hands
-    // a SEALED frame handle to dispatch. OWNERSHIP IS TRANSFERRED — the caller
-    // gives us one ref (the host xi_frame_v1.emit_frame forwarder retained the
-    // frame before calling here) and the bus consumes it: it stores the handle on
-    // the dispatched event, or releases it via the installed frame releaser when
+    // polaris2 wave-2: the Pack sibling of emit(). A pack-capable source hands
+    // a SEALED pack handle to dispatch. OWNERSHIP IS TRANSFERRED — the caller
+    // gives us one ref (the host xi_pack_v1.emit_pack forwarder retained the
+    // pack before calling here) and the bus consumes it: it stores the handle on
+    // the dispatched event, or releases it via the installed pack releaser when
     // there is no sink. Same funnel discipline as emit(); the Record path is
-    // untouched. Images are NOT extracted onto the event — the frame IS the
-    // payload (a frame's image entries are read through the Frame accessors, not
+    // untouched. Images are NOT extracted onto the event — the pack IS the
+    // payload (a pack's image entries are read through the Pack accessors, not
     // the event's image map).
-    void emit_frame(const std::string& source,
+    void emit_pack(const std::string& source,
                     xi_trigger_id id_in,
                     int64_t ts_us,
-                    xi_frame_handle frame)
+                    xi_pack_handle pack)
     {
-        if (frame == XI_FRAME_NULL) return;
+        if (pack == XI_PACK_NULL) return;
         if (ts_us == 0) ts_us = now_us();
         xi_trigger_id id = xi_trigger_id_is_null(id_in) ? make_trigger_id() : id_in;
 
-        // Liveness stamp — identical to emit(): a source emitting frames is alive.
+        // Liveness stamp — identical to emit(): a source emitting packs is alive.
         {
             int64_t mono = steady_now_us();
             last_emit_mono_us_.store(mono, std::memory_order_relaxed);
@@ -243,7 +243,7 @@ public:
         ev.id            = id;
         ev.timestamp_us  = ts_us;
         ev.leader_source = source;
-        ev.frame         = frame;   // consume the caller's ref
+        ev.pack          = pack;    // consume the caller's ref
 
         Sink to_fire;
         { std::lock_guard<std::mutex> lk(mu_); to_fire = sink_; }
@@ -251,25 +251,25 @@ public:
         if (to_fire) {
             to_fire(std::move(ev));
         } else {
-            release_frame_(frame);   // no consumer — drop the ref we were handed
+            release_pack_(pack);   // no consumer — drop the ref we were handed
         }
     }
 
-    // Install the frame-handle releaser (xi::install_frame_abi wires it to the
-    // host FrameRegistry). Kept as a bare fn-pointer so this header stays free of
-    // any dependency on xi_frame_abi.hpp / the Frame container (it speaks only the
-    // opaque xi_frame_handle from xi_abi.h). Null until installed — a bus with no
-    // frame plane simply never sees a frame event.
-    using FrameReleaseFn = void (*)(xi_frame_handle);
-    void set_frame_releaser(FrameReleaseFn fn) {
-        frame_releaser_.store(fn, std::memory_order_release);
+    // Install the pack-handle releaser (xi::install_pack_abi wires it to the
+    // host PackRegistry). Kept as a bare fn-pointer so this header stays free of
+    // any dependency on xi_pack_abi.hpp / the Pack container (it speaks only the
+    // opaque xi_pack_handle from xi_abi.h). Null until installed — a bus with no
+    // pack plane simply never sees a pack event.
+    using PackReleaseFn = void (*)(xi_pack_handle);
+    void set_pack_releaser(PackReleaseFn fn) {
+        pack_releaser_.store(fn, std::memory_order_release);
     }
-    // Release one ref on a frame handle via the installed releaser (no-op if the
-    // frame plane was never installed, or the handle is null). Used by the
+    // Release one ref on a pack handle via the installed releaser (no-op if the
+    // pack plane was never installed, or the handle is null). Used by the
     // no-sink drop path here and by the dispatcher's release_trigger_event_.
-    void release_frame_(xi_frame_handle h) {
-        if (h == XI_FRAME_NULL) return;
-        if (auto fn = frame_releaser_.load(std::memory_order_acquire)) fn(h);
+    void release_pack_(xi_pack_handle h) {
+        if (h == XI_PACK_NULL) return;
+        if (auto fn = pack_releaser_.load(std::memory_order_acquire)) fn(h);
     }
 
     // Lifecycle reset (script reload / project close). There is no correlation
@@ -314,7 +314,7 @@ private:
     std::atomic<int64_t> last_emit_mono_us_{0};
     std::unordered_map<std::string, int64_t> source_last_emit_mono_us_;  // guarded by mu_
     Sink       sink_;
-    std::atomic<FrameReleaseFn> frame_releaser_{nullptr};   // polaris2 wave-2
+    std::atomic<PackReleaseFn> pack_releaser_{nullptr};   // polaris2 wave-2
 };
 
 // Wire emit_record on a host_api struct produced by ImagePool::make_host_api().

@@ -1,18 +1,18 @@
 // test_ingress.cpp — the domain-edge ingress canonicalizer (xi/xi_ingress.hpp).
 //
 // canonicalize_entry / canonicalize_into are the ONLY public path from foreign,
-// untrusted msgpack bytes to a Frame entry (doc 07 "Ingress"). These tests cover
+// untrusted msgpack bytes to a Pack entry (doc 07 "Ingress"). These tests cover
 // the three layers and the pool-handle rule:
 //   * happy path — compact foreign bytes are validated + widened to canonical
-//     and land in a sealed Frame, readable through get_mp.
+//     and land in a sealed Pack, readable through get_mp.
 //   * structural rejection — trailing bytes, non-string keys, duplicate keys,
-//     depth bombs are refused (no partial entry reaches the frame).
+//     depth bombs are refused (no partial entry reaches the pack).
 //   * ext / pool-handle rule — a forged pool-handle ext is refused even when the
 //     caller's accept-list names it; a non-handle ext strips to bin under policy.
 //   * semantic seam — the optional layer-(c) hook can accept or reject.
 
 #include "xi/xi_ingress.hpp"
-#include "xi/xi_frame.hpp"
+#include "xi/xi_pack.hpp"
 #include "xi/xi_mp.hpp"
 
 #include <cstdint>
@@ -24,9 +24,9 @@ static int g_fail = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { \
     std::printf("  FAIL: %s (%s:%d)\n", msg, __FILE__, __LINE__); ++g_fail; } } while (0)
 
-using xi::Frame;
-using xi::FrameBuilder;
-using xi::FrameTag;
+using xi::Pack;
+using xi::PackBuilder;
+using xi::PackTag;
 using xi::mp::Bytes;
 using xi::mp::Status;
 using xi::mp::Writer;
@@ -37,7 +37,7 @@ static std::span<const uint8_t> as_span(const Bytes& b) {
 }
 
 // ------------------------------------------------------------------
-// Happy path: foreign COMPACT map -> canonical bytes -> a sealed Frame entry.
+// Happy path: foreign COMPACT map -> canonical bytes -> a sealed Pack entry.
 static void test_ingress_happy_path() {
     // Foreign compact: fixmap(1){ fixstr"n": fixint 5 }.
     Bytes foreign = {0x81, 0xA1, 'n', 0x05};
@@ -50,20 +50,20 @@ static void test_ingress_happy_path() {
     want.map(1); want.key("n"); want.int_(5);
     CHECK(r.canonical == want.bytes(), "canonical output widened to max-width profile");
 
-    // The composed edge lands it in a sealed frame as an opaque Mp entry.
-    FrameBuilder b;
+    // The composed edge lands it in a sealed pack as an opaque Mp entry.
+    PackBuilder b;
     ingress::Result r2 = ingress::canonicalize_into(b, "payload", as_span(foreign), "mp");
     CHECK(r2.ok(), "canonicalize_into succeeds");
-    Frame f = b.seal();
-    CHECK(f.tag_of("payload") == FrameTag::Mp, "foreign entry stored as Mp");
+    Pack f = b.seal();
+    CHECK(f.tag_of("payload") == PackTag::Mp, "foreign entry stored as Mp");
     auto got = f.get_mp("payload");
     CHECK(got.has_value(), "Mp entry present");
     CHECK(got && Bytes(got->begin(), got->end()) == want.bytes(),
-          "frame stores the canonical bytes verbatim");
+          "pack stores the canonical bytes verbatim");
 }
 
 // ------------------------------------------------------------------
-// Structural / profile rejection: nothing malformed reaches a frame.
+// Structural / profile rejection: nothing malformed reaches a pack.
 static void test_ingress_rejects_malformed() {
     // Trailing bytes after a complete value.
     { Bytes b = {0xC0, 0xC0};

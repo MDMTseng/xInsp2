@@ -35,7 +35,7 @@
 #include <utility>
 #include <vector>
 
-#include <xi/xi_abi.h>   // XI_FRAME_TAG_* (the entry tag vocabulary v2 dumps by)
+#include <xi/xi_abi.h>   // XI_PACK_TAG_* (the entry tag vocabulary v2 dumps by)
 #include <xi/xi_mp.hpp>  // the canonical max-width msgpack Writer (v2 body codec)
 
 namespace xi {
@@ -126,14 +126,14 @@ inline std::vector<uint8_t> encode_frame(
 
 // One entry to dump. For a scalar/str/bin/mp entry, `value` is its ALREADY-
 // CANONICAL msgpack bytes (one complete value) — the small-plane bytes as they
-// live in the frame arena (host side: xi::Frame::raw_at) OR re-encoded from the
+// live in the pack arena (host side: xi::Pack::raw_at) OR re-encoded from the
 // door's typed accessors (plugin side: a temp xi::mp::Writer). Either way they
 // are byte-identical, because the arena and the Writer speak the same canonical
-// profile. For an image entry (tag == XI_FRAME_TAG_IMAGE) `value` is empty and
+// profile. For an image entry (tag == XI_PACK_TAG_IMAGE) `value` is empty and
 // the pixels are inlined from {w,h,c,px} as a `bin` (doc 07 D2 export rule).
 struct V2Entry {
     std::string          key;
-    uint8_t              tag = XI_FRAME_TAG_MP;
+    uint8_t              tag = XI_PACK_TAG_MP;
     std::vector<uint8_t> value;              // canonical bytes (non-image entries)
     int32_t              w = 0, h = 0, c = 0;   // image descriptor (IMAGE only)
     const uint8_t*       px = nullptr;          // image pixels (IMAGE only)
@@ -157,7 +157,7 @@ inline std::vector<uint8_t> encode_frame_v2(
     w.key("frame");   w.map((uint32_t)entries.size());
     for (const auto& e : entries) {
         w.key(e.key);
-        if (e.tag == XI_FRAME_TAG_IMAGE) {
+        if (e.tag == XI_PACK_TAG_IMAGE) {
             w.map(4);
             w.key("w");  w.int_(e.w);
             w.key("h");  w.int_(e.h);

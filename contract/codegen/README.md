@@ -58,8 +58,8 @@ the `blobs` array's item accessor `blob()` and its point class `Point`, not
   constant NAMES + VALUES match the hand-written `_keys.h` exactly (`min_area`
   → `kMinArea`), so the plugin `.cpp`, the builder, and the extractor all keep
   compiling against it.
-- **`_schema.gen.h`** — the `xi::FrameSchema<Derived>` CRTP keyset (enum slots +
-  `keys` array) for the offset-accessor frame path (`xi_frame.hpp` /
+- **`_schema.gen.h`** — the `xi::PackSchema<Derived>` CRTP keyset (enum slots +
+  `keys` array) for the offset-accessor pack path (`xi_pack.hpp` /
   `docs/new_gen/07`). Flat top-level scalar/image keys only — arrays are not
   slots. `slot_of("k")` is a compile-time constant; keyset drift is a build error.
   SKIPPED when the plugin declares no flat frame slots (a source with no
@@ -108,7 +108,7 @@ promise, mechanised.
 
 ## Swap-in (EXECUTED — wave-2 exit, docs/new_gen/08 Wave 3)
 
-The wave-2 pilot (frame door) has landed and the accessor convention is stable,
+The wave-2 pilot (pack door) has landed and the accessor convention is stable,
 so the swap is done. **Mechanism chosen: include-path add** — `plugins/CMakeLists.txt`
 puts `contract/codegen/generated/plugins/` on the plugin build's include path
 (directory scope, so plugin DLLs and their contract-test exes both see it) and
@@ -126,7 +126,7 @@ builder/extractor call site (`Input().threshold(…)`, `keys::kFoo`, `Frame{…}
 
 Per plugin the swap was: regenerate → point includes at the generated headers →
 delete the hand-written headers once every consumer (plugin `.cpp`, tests,
-`frame_pilot_test`, the FrameSchema usage) built against the generated set with
+`pack_pilot_test`, the PackSchema usage) built against the generated set with
 zero call-site edits. Regeneration is idempotent/deterministic (`--check` guards a
 stale commit), so the decl is now the single source of truth; `codegen_equiv`
 keeps it and the generated headers in lockstep.

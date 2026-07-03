@@ -1,12 +1,12 @@
-// qa_frame_pilot — e2e regression for the wave-2 t.frame() script surface.
+// qa_pack_pilot — e2e regression for the wave-2 t.pack() script surface.
 //
-// mock_camera runs in FRAME MODE, so it emits a v3 Frame on the xi.frame@1 plane;
-// the frame rides the dual-carry dispatch to this script, which reads it via
-// t.frame() (the borrowed opaque-handle view) and:
-//   * verdicts the frame with xi::ok / xi::ng (run_result), and
+// mock_camera runs in PACK MODE, so it emits a v3 Pack on the xi.pack@1 plane;
+// the pack rides the dual-carry dispatch to this script, which reads it via
+// t.pack() (the borrowed opaque-handle view) and:
+//   * verdicts the pack with xi::ok / xi::ng (run_result), and
 //   * surfaces seq + image dims on the `expose` channel "qa".
-// The driver asserts the sequence advances (t.frame() delivered the "seq" entry)
-// and the dims match config — proof the frame reached script hands intact.
+// The driver asserts the sequence advances (t.pack() delivered the "seq" entry)
+// and the dims match config — proof the pack reached script hands intact.
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
 #include <xi/xi_result.hpp>
@@ -15,8 +15,8 @@ XI_INSPECT_ENTRY(t, frame) {
     (void)frame;
     if (!t.is_active()) return;
 
-    auto f = t.frame();
-    if (!f) return;                                  // no frame on this tick → NA
+    auto f = t.pack();
+    if (!f) return;                                  // no pack on this tick → NA
 
     int64_t seq = f.get_i64("seq").value_or(-1);
     auto    img = f.get_image("frame");

@@ -180,10 +180,10 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
                 leader            = g_current_trigger->leader_source;
                 view.leader_source = leader.c_str();
                 view.meta_doc     = (void*)g_current_trigger->meta_doc.get();
-                // polaris2 wave-2 Frame pilot: carry the event's optional v3 frame
+                // polaris2 wave-2 Pack pilot: carry the event's optional v3 pack
                 // handle into the view. Borrowed — the dispatch's CurrentTriggerScope
                 // holds the event's ref for this call; the SDK Trigger takes its own.
-                view.frame        = g_current_trigger->frame;
+                view.pack        = g_current_trigger->pack;
             }
             view.host = script_host_api_();
             s.inspect_tv(&view, frame_hint);

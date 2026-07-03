@@ -1,7 +1,7 @@
 // fuzz_mp.cpp — coverage-guided fuzz target for the canonical msgpack reader.
 //
 // Boundary under test: xi::mp::Reader in xi/xi_mp.hpp — the BOUNDED, VALIDATING
-// decoder that is the sole ingress path for the v3 frame plane. This is the code
+// decoder that is the sole ingress path for the v3 pack plane. This is the code
 // a malicious/broken foreign producer's bytes hit head-on: arbitrary input goes
 // straight into validate() and canonicalize(), the exact adversary the edge must
 // survive. The reader walks the full standard msgpack width families with its

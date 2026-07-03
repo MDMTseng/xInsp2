@@ -146,119 +146,119 @@ private:
     xi_image_handle    handle_ = XI_IMAGE_NULL;
 };
 
-// --- xi.frame@1 SDK sugar (polaris2 wave-2) --------------------------------
+// --- xi.pack@1 SDK sugar (polaris2 wave-2) --------------------------------
 //
-// Thin C++ wrappers over the host xi_frame_v1 C accessors (xi_abi.h). A frame
-// crosses the ABI as an OPAQUE HANDLE, so — unlike the in-process TypedFrame
-// (xi_frame.hpp) — reads here resolve by key STRING through the host, not by a
-// compile-time offset slot. The FrameSchema/TypedFrame speed is a same-DLL
+// Thin C++ wrappers over the host xi_pack_v1 C accessors (xi_abi.h). A pack
+// crosses the ABI as an OPAQUE HANDLE, so — unlike the in-process TypedPack
+// (xi_pack.hpp) — reads here resolve by key STRING through the host, not by a
+// compile-time offset slot. The PackSchema/TypedPack speed is a same-DLL
 // property; across the door a plugin reads/writes with its schema's key
 // CONSTANTS (still no string literals at call sites, still drift-proof), which
-// is what FrameIn/FrameOut give it.
+// is what PackIn/PackOut give it.
 
-namespace frame_contract {
-// Fail-loud, Frame-shaped: a contract failure is a NORMAL sealed frame carrying
-// these top-level entries (so the caller always gets a frame to route to a
+namespace pack_contract {
+// Fail-loud, Pack-shaped: a contract failure is a NORMAL sealed pack carrying
+// these top-level entries (so the caller always gets a pack to route to a
 // verdict), mirroring xi::contract's $fault Record entry. Reuse the SAME reason
 // codes as xi_contract.hpp (missing_input / wrong_type / schema_mismatch). See
-// contract/canonical-profile-notes.md § "Frame-shaped fail-loud".
+// contract/canonical-profile-notes.md § "Pack-shaped fail-loud".
 inline constexpr const char* kFault       = "$fault";        // str: reason code
 inline constexpr const char* kFaultKey    = "$fault_key";    // str: offending key
 inline constexpr const char* kFaultDetail = "$fault_detail"; // str: human detail
-} // namespace frame_contract
+} // namespace pack_contract
 
-// FrameOut — build an output/emit frame through the host builder. Owns the
+// PackOut — build an output/emit pack through the host builder. Owns the
 // builder handle until seal()/abandon; move-only (a builder is single-owner).
-class FrameOut {
+class PackOut {
 public:
-    FrameOut() = default;
-    explicit FrameOut(const xi_frame_v1* fi) : fi_(fi) {
+    PackOut() = default;
+    explicit PackOut(const xi_pack_v1* fi) : fi_(fi) {
         if (fi_) b_ = fi_->builder_new();
     }
-    ~FrameOut() { if (fi_ && b_ && !sealed_) fi_->builder_abandon(b_); }
-    FrameOut(FrameOut&& o) noexcept { move_from(std::move(o)); }
-    FrameOut& operator=(FrameOut&& o) noexcept {
+    ~PackOut() { if (fi_ && b_ && !sealed_) fi_->builder_abandon(b_); }
+    PackOut(PackOut&& o) noexcept { move_from(std::move(o)); }
+    PackOut& operator=(PackOut&& o) noexcept {
         if (this != &o) { reset_(); move_from(std::move(o)); }
         return *this;
     }
-    FrameOut(const FrameOut&) = delete;
-    FrameOut& operator=(const FrameOut&) = delete;
+    PackOut(const PackOut&) = delete;
+    PackOut& operator=(const PackOut&) = delete;
 
     bool valid() const { return fi_ && b_ && !sealed_; }
 
-    FrameOut& i64(const char* k, int64_t v) { if (valid()) fi_->builder_add_i64(b_, k, v); return *this; }
-    FrameOut& f64(const char* k, double v)  { if (valid()) fi_->builder_add_f64(b_, k, v); return *this; }
-    FrameOut& str(const char* k, std::string_view v) {
+    PackOut& i64(const char* k, int64_t v) { if (valid()) fi_->builder_add_i64(b_, k, v); return *this; }
+    PackOut& f64(const char* k, double v)  { if (valid()) fi_->builder_add_f64(b_, k, v); return *this; }
+    PackOut& str(const char* k, std::string_view v) {
         if (valid()) fi_->builder_add_str(b_, k, v.data(), (int32_t)v.size());
         return *this;
     }
-    FrameOut& boolean(const char* k, bool v) { return i64(k, v ? 1 : 0); }  // no msgpack bool slot; i64 0/1
-    FrameOut& bin(const char* k, const void* d, size_t n) {
+    PackOut& boolean(const char* k, bool v) { return i64(k, v ? 1 : 0); }  // no msgpack bool slot; i64 0/1
+    PackOut& bin(const char* k, const void* d, size_t n) {
         if (valid()) fi_->builder_add_bin(b_, k, d, (int32_t)n);
         return *this;
     }
-    FrameOut& image(const char* k, int32_t w, int32_t h, int32_t c, const void* px) {
+    PackOut& image(const char* k, int32_t w, int32_t h, int32_t c, const void* px) {
         if (valid()) fi_->builder_add_image(b_, k, w, h, c, px);
         return *this;
     }
-    FrameOut& adopt_image(const char* k, int32_t w, int32_t h, int32_t c, xi_image_handle handle) {
+    PackOut& adopt_image(const char* k, int32_t w, int32_t h, int32_t c, xi_image_handle handle) {
         if (valid()) fi_->builder_adopt_image(b_, k, w, h, c, handle);
         return *this;
     }
     // Nested canonical msgpack (doc 07 D3) — arrays/maps produced by xi::mp::Writer.
-    FrameOut& mp(const char* k, const void* d, size_t n) {
+    PackOut& mp(const char* k, const void* d, size_t n) {
         if (valid()) fi_->builder_add_mp(b_, k, d, (int32_t)n);
         return *this;
     }
-    // Frame-shaped fail-loud: stamp the reason codes and return. The frame is
-    // still a valid, sealed frame the caller routes to a verdict.
-    FrameOut& fault(const char* code, const char* key, std::string_view detail = {}) {
-        str(frame_contract::kFault, code ? code : "");
-        if (key && *key)      str(frame_contract::kFaultKey, key);
-        if (!detail.empty())  str(frame_contract::kFaultDetail, detail);
+    // Pack-shaped fail-loud: stamp the reason codes and return. The pack is
+    // still a valid, sealed pack the caller routes to a verdict.
+    PackOut& fault(const char* code, const char* key, std::string_view detail = {}) {
+        str(pack_contract::kFault, code ? code : "");
+        if (key && *key)      str(pack_contract::kFaultKey, key);
+        if (!detail.empty())  str(pack_contract::kFaultDetail, detail);
         return *this;
     }
 
-    // Seal into a host-owned frame handle (refcount 1). Empties this FrameOut;
+    // Seal into a host-owned pack handle (refcount 1). Empties this PackOut;
     // the CALLER now owns the ref (release it, or the host does after emit/door).
-    xi_frame_handle seal() {
-        if (!valid()) return XI_FRAME_NULL;
-        xi_frame_handle h = fi_->builder_seal(b_);
+    xi_pack_handle seal() {
+        if (!valid()) return XI_PACK_NULL;
+        xi_pack_handle h = fi_->builder_seal(b_);
         sealed_ = true;
-        b_ = XI_FRAME_BUILDER_NULL;
+        b_ = XI_PACK_BUILDER_NULL;
         return h;
     }
 
-    const xi_frame_v1* iface() const { return fi_; }
+    const xi_pack_v1* iface() const { return fi_; }
 
 private:
     void reset_() { if (fi_ && b_ && !sealed_) fi_->builder_abandon(b_); }
-    void move_from(FrameOut&& o) noexcept {
+    void move_from(PackOut&& o) noexcept {
         fi_ = o.fi_; b_ = o.b_; sealed_ = o.sealed_;
-        o.fi_ = nullptr; o.b_ = XI_FRAME_BUILDER_NULL; o.sealed_ = true;
+        o.fi_ = nullptr; o.b_ = XI_PACK_BUILDER_NULL; o.sealed_ = true;
     }
-    const xi_frame_v1* fi_ = nullptr;
-    xi_frame_builder   b_  = XI_FRAME_BUILDER_NULL;
+    const xi_pack_v1* fi_ = nullptr;
+    xi_pack_builder   b_  = XI_PACK_BUILDER_NULL;
     bool               sealed_ = false;
 };
 
-// FrameIn — read a borrowed input frame handle through the host accessors. Does
+// PackIn — read a borrowed input pack handle through the host accessors. Does
 // NOT own the handle (the host does); borrowed spans are valid for the call.
-class FrameIn {
+class PackIn {
 public:
-    FrameIn(const xi_frame_v1* fi, xi_frame_handle h) : fi_(fi), h_(h) {}
+    PackIn(const xi_pack_v1* fi, xi_pack_handle h) : fi_(fi), h_(h) {}
 
-    bool valid() const { return fi_ && h_ != XI_FRAME_NULL; }
-    xi_frame_handle handle() const { return h_; }
+    bool valid() const { return fi_ && h_ != XI_PACK_NULL; }
+    xi_pack_handle handle() const { return h_; }
     int  count() const { return valid() ? fi_->count(h_) : 0; }
     bool has(const char* k) const { return valid() && fi_->tag_of(h_, k) >= 0; }
     int  tag_of(const char* k) const { return valid() ? fi_->tag_of(h_, k) : -1; }
 
     // Generic index walk — the count()+key_at()+tag_at() primitives a SINK
-    // (expose, record_save) enumerates a sealed frame with WITHOUT any producer
+    // (expose, record_save) enumerates a sealed pack with WITHOUT any producer
     // knowledge (doc 07 §2 self-description). key_at returns a borrowed,
-    // NON-nul-terminated view into the frame arena, valid until the host releases
-    // the handle. tag_at is an XI_FRAME_TAG_* value (-1 if out of range).
+    // NON-nul-terminated view into the pack arena, valid until the host releases
+    // the handle. tag_at is an XI_PACK_TAG_* value (-1 if out of range).
     std::optional<std::string_view> key_at(int i) const {
         if (!valid()) return std::nullopt;
         int32_t n = 0;
@@ -268,7 +268,7 @@ public:
     }
     int tag_at(int i) const { return valid() ? fi_->tag_at(h_, i) : -1; }
 
-    // Walk every entry in insertion order as (key, XI_FRAME_TAG_* tag) — the
+    // Walk every entry in insertion order as (key, XI_PACK_TAG_* tag) — the
     // generic producer-agnostic path. The key is a borrowed arena view.
     template <class Fn>
     void for_each(Fn&& fn) const {
@@ -295,8 +295,8 @@ public:
         return std::nullopt;
     }
     // Zero-copy image view (dims + pool-buffer pixel span). empty pixels ⇒ absent.
-    std::optional<xi_frame_image> image(const char* k) const {
-        xi_frame_image img{};
+    std::optional<xi_pack_image> image(const char* k) const {
+        xi_pack_image img{};
         if (valid() && fi_->get_image(h_, k, &img)) return img;
         return std::nullopt;
     }
@@ -316,15 +316,15 @@ public:
         return std::nullopt;
     }
 
-    // Fail-loud helpers (the FrameOut::fault convention).
-    bool is_fault() const { return has(frame_contract::kFault); }
-    std::optional<std::string_view> fault_code() const { return str(frame_contract::kFault); }
+    // Fail-loud helpers (the PackOut::fault convention).
+    bool is_fault() const { return has(pack_contract::kFault); }
+    std::optional<std::string_view> fault_code() const { return str(pack_contract::kFault); }
 
-    const xi_frame_v1* iface() const { return fi_; }
+    const xi_pack_v1* iface() const { return fi_; }
 
 private:
-    const xi_frame_v1* fi_;
-    xi_frame_handle    h_;
+    const xi_pack_v1* fi_;
+    xi_pack_handle    h_;
 };
 
 // --- Plugin base class ---
@@ -490,53 +490,55 @@ public:
         return host_ && host_->doc_refcount ? host_->doc_refcount(doc) : 0;
     }
 
-    // --- xi.frame@1 data plane (polaris2 wave-2) -----------------------------
-    // Resolve the host Frame interface ONCE (cached); null on a host with no
-    // frame plane (then a frame-capable plugin degrades to its Record path).
-    const xi_frame_v1* frame_iface() const {
-        if (!frame_resolved_) {
-            frame_resolved_ = true;
+    // --- xi.pack@1 data plane (polaris2 wave-2) -----------------------------
+    // Resolve the host Pack interface ONCE (cached); null on a host with no
+    // pack plane (then a pack-capable plugin degrades to its Record path).
+    const xi_pack_v1* pack_iface() const {
+        if (!pack_resolved_) {
+            pack_resolved_ = true;
             if (host_ && host_->get_interface)
-                frame_ = static_cast<const xi_frame_v1*>(
-                    host_->get_interface("xi.frame", 1));
+                pack_iface_ = static_cast<const xi_pack_v1*>(
+                    host_->get_interface("xi.pack", 1));
         }
-        return frame_;
+        return pack_iface_;
     }
-    // Start building an output/emit frame (invalid if the host has no frame plane).
-    FrameOut new_frame() const { return FrameOut(frame_iface()); }
+    // Start building an output/emit pack (invalid if the host has no pack plane).
+    PackOut new_pack() const { return PackOut(pack_iface()); }
 
-    // Source side: seal + emit a frame to host dispatch. Consumes `out`. The host
+    // Source side: seal + emit a pack to host dispatch. Consumes `out`. The host
     // takes its own ref for the async event, so we drop ours right after. No-op
-    // on a host without the frame plane.
-    void emit_frame(FrameOut&& out, xi_trigger_id id = XI_TRIGGER_NULL, int64_t ts = 0) {
-        const xi_frame_v1* fi = frame_iface();
+    // on a host without the pack plane. Same-verb overload of emit(Record&): the
+    // currency (Record vs Pack) is the argument type. The C-ABI field it forwards
+    // to stays `emit_pack` (a Pack and a Record cross the ABI by distinct paths).
+    void emit(PackOut&& out, xi_trigger_id id = XI_TRIGGER_NULL, int64_t ts = 0) {
+        const xi_pack_v1* fi = pack_iface();
         if (!fi) return;
-        xi_frame_handle h = out.seal();
-        if (h == XI_FRAME_NULL) return;
-        fi->emit_frame(name_.c_str(), id, h, ts);
+        xi_pack_handle h = out.seal();
+        if (h == XI_PACK_NULL) return;
+        fi->emit_pack(name_.c_str(), id, h, ts);
         fi->release(h);
     }
 
-    // Frame-in/frame-out door: override to consume `in` and fill `out`. Publish
-    // it to the host with XI_PLUGIN_FRAME_DOOR(YourClass) after XI_PLUGIN_IMPL.
+    // Pack-in/pack-out door: override to consume `in` and fill `out`. Publish
+    // it to the host with XI_PLUGIN_PACK_DOOR(YourClass) after XI_PLUGIN_IMPL.
     // This is an OVERLOAD of process() — the Record path is process(const Record&)
-    // below; the currency (Record vs Frame) is carried by the argument types, so
+    // below; the currency (Record vs Pack) is carried by the argument types, so
     // an instance that overrides both speaks both. NOTE on C++ overload hiding: a
-    // plugin that overrides ONLY this frame door and relies on the base Record
+    // plugin that overrides ONLY this pack door and relies on the base Record
     // process() no-op must add `using xi::Plugin::process;` in its class, else the
-    // frame override hides the Record overload in the derived scope and the
+    // pack override hides the Record overload in the derived scope and the
     // XI_PLUGIN_IMPL dispatch (self->process(record)) will not compile. Plugins
     // that override BOTH (the usual case) need no `using`.
-    virtual void process(FrameIn& in, FrameOut& out) { (void)in; (void)out; }
+    virtual void process(PackIn& in, PackOut& out) { (void)in; (void)out; }
 
-    // SDK plumbing the XI_PLUGIN_FRAME_DOOR trampoline calls: wrap the borrowed
+    // SDK plumbing the XI_PLUGIN_PACK_DOOR trampoline calls: wrap the borrowed
     // input handle, run the virtual, seal the output into a host-owned handle the
-    // caller (host) takes ownership of. XI_FRAME_NULL if the host has no frame plane.
-    xi_frame_handle frame_door_abi(xi_frame_handle in) {
-        const xi_frame_v1* fi = frame_iface();
-        if (!fi) return XI_FRAME_NULL;
-        FrameIn  view(fi, in);
-        FrameOut out(fi);
+    // caller (host) takes ownership of. XI_PACK_NULL if the host has no pack plane.
+    xi_pack_handle pack_door_abi(xi_pack_handle in) {
+        const xi_pack_v1* fi = pack_iface();
+        if (!fi) return XI_PACK_NULL;
+        PackIn  view(fi, in);
+        PackOut out(fi);
         process(view, out);
         return out.seal();
     }
@@ -709,8 +711,8 @@ private:
     mutable const xi_emit_v1*    emit_             = nullptr;
     mutable bool                 log_resolved_     = false;
     mutable const xi_log_v1*     log_              = nullptr;
-    mutable bool                 frame_resolved_   = false;
-    mutable const xi_frame_v1*   frame_            = nullptr;   // xi.frame@1 (wave-2)
+    mutable bool                 pack_resolved_   = false;
+    mutable const xi_pack_v1*   pack_iface_            = nullptr;   // xi.pack@1 (wave-2)
 };
 
 // --- γ: host doc allocator bridge ---
@@ -1097,30 +1099,30 @@ void xi_plugin_commit(void* inst) {                                            \
     }                                                                          \
 }
 
-// Publish the xi.frame@1 frame-in/frame-out door (polaris2 wave-2). Place AFTER
-// XI_PLUGIN_IMPL, ONLY if your plugin OVERRIDES process(FrameIn&,FrameOut&).
+// Publish the xi.pack@1 pack-in/pack-out door (polaris2 wave-2). Place AFTER
+// XI_PLUGIN_IMPL, ONLY if your plugin OVERRIDES process(PackIn&,PackOut&).
 // It exports xi_plugin_get_interface — the plugin-side capability door (the
 // synthesis §3 "pure door" dry run) — which the host probes to learn the plugin
-// speaks frames. The Record process() path is untouched; a plugin has BOTH.
+// speaks packs. The Record process() path is untouched; a plugin has BOTH.
 // The trampoline catches C++ exceptions in-plugin (same defense-in-depth as the
 // XI_PLUGIN_IMPL exports): the boundary is noexcept in practice.
-#define XI_PLUGIN_FRAME_DOOR(ClassName)                                        \
-extern "C" xi_frame_handle xi__frame_proc_##ClassName(void* inst,              \
-                                                      xi_frame_handle in) {    \
+#define XI_PLUGIN_PACK_DOOR(ClassName)                                        \
+extern "C" xi_pack_handle xi__frame_proc_##ClassName(void* inst,              \
+                                                      xi_pack_handle in) {    \
     auto* self = static_cast<ClassName*>(inst);                                \
-    try { return self->frame_door_abi(in); }                                  \
+    try { return self->pack_door_abi(in); }                                  \
     catch (const std::exception& e) {                                          \
-        std::fprintf(stderr, "[xinsp2] plugin frame-door process() threw: %s\n", e.what()); \
+        std::fprintf(stderr, "[xinsp2] plugin pack-door process() threw: %s\n", e.what()); \
     } catch (...) {                                                            \
-        std::fprintf(stderr, "[xinsp2] plugin frame-door process() threw (non-std)\n"); \
+        std::fprintf(stderr, "[xinsp2] plugin pack-door process() threw (non-std)\n"); \
     }                                                                          \
-    return XI_FRAME_NULL; /* hard failure sentinel (a CONTRACT failure is a    \
-                             normal sealed frame carrying a $fault entry) */    \
+    return XI_PACK_NULL; /* hard failure sentinel (a CONTRACT failure is a    \
+                             normal sealed pack carrying a $fault entry) */    \
 }                                                                              \
 extern "C" __declspec(dllexport)                                               \
 const void* xi_plugin_get_interface(const char* id, uint32_t version) {        \
-    if (id && version == 1u && std::strcmp(id, "xi.frame") == 0) {             \
-        static const xi_frame_proc_v1 iface = { &xi__frame_proc_##ClassName }; \
+    if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {             \
+        static const xi_pack_proc_v1 iface = { &xi__frame_proc_##ClassName }; \
         return &iface;                                                         \
     }                                                                          \
     return nullptr;                                                            \

@@ -89,7 +89,7 @@ public:
             .set(keys::kHeight, h_.load())
             .set(keys::kFps, fps_.load())
             .set(keys::kStreaming, running_.load())
-            .set(keys::kFrameMode, frame_mode_.load())
+            .set(keys::kPackMode, pack_mode_.load())
             .dump();
     }
 
@@ -111,9 +111,9 @@ public:
         if (p[keys::kWidth].as_int(0)  > 0) w_ = p[keys::kWidth].as_int();
         if (p[keys::kHeight].as_int(0) > 0) h_ = p[keys::kHeight].as_int();
         if (p[keys::kFps].as_int(0)    > 0) fps_ = clamp_fps_(p[keys::kFps].as_int());
-        // polaris2 wave-2: opt into frame-plane emit (default false). Absent key
+        // polaris2 wave-2: opt into pack-plane emit (default false). Absent key
         // leaves the current mode (a legacy config keeps emitting Records).
-        if (p[keys::kFrameMode].valid()) frame_mode_ = p[keys::kFrameMode].as_bool(false);
+        if (p[keys::kPackMode].valid()) pack_mode_ = p[keys::kPackMode].as_bool(false);
         return true;
     }
 
@@ -152,7 +152,7 @@ private:
     // the capture worker (run_loop) — atomic so those cross-thread reads are sound.
     std::atomic<int> w_{640}, h_{480}, fps_{10};
     std::atomic<bool> running_{false};
-    std::atomic<bool> frame_mode_{false};   // polaris2 wave-2 (default OFF)
+    std::atomic<bool> pack_mode_{false};   // polaris2 wave-2 (default OFF)
     std::thread thread_;
 
     void start_() {
@@ -203,16 +203,16 @@ private:
             }
             draw_number(img, 4, 4, seq);
 
-            // polaris2 wave-2: in frame mode, emit on the v3 Frame plane instead
-            // of a Record — the frame carries the same pixels (adopt_image is a
+            // polaris2 wave-2: in pack mode, emit on the v3 Pack plane instead
+            // of a Record — the pack carries the same pixels (adopt_image is a
             // zero-copy pool-handle addref, not a memcpy) plus a "seq" entry. The
             // Record path below is the unchanged default; only a project that set
-            // frame_mode (and a host that publishes xi.frame@1) takes this branch.
-            if (frame_mode_.load() && frame_iface()) {
-                xi::FrameOut f = new_frame();
+            // pack_mode (and a host that publishes xi.pack@1) takes this branch.
+            if (pack_mode_.load() && pack_iface()) {
+                xi::PackOut f = new_pack();
                 f.i64(keys::kSeq, seq);
                 f.adopt_image(keys::kFrame, w, h, 3, img.pool_handle());
-                emit_frame(std::move(f));
+                emit(std::move(f));
             } else {
                 // emit() fills host()/name(), mints a fresh trigger id, and runs the
                 // RAII marshal/refcount path — the member sibling of the free

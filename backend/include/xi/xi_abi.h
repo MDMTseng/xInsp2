@@ -318,122 +318,122 @@ typedef struct xi_log_v1 {
 } xi_log_v1;
 
 /* ------------------------------------------------------------------ */
-/* xi.frame@1 — the v3 uniform keyed-buffer data plane, carried across  */
+/* xi.pack@1 — the v3 uniform keyed-buffer data plane, carried across  */
 /* the ABI (polaris2 wave-2, docs/new_gen/07-uniform-keyed-buffer-      */
-/* plane.md). Two doors, both id "xi.frame" v1, disambiguated by        */
+/* plane.md). Two doors, both id "xi.pack" v1, disambiguated by        */
 /* DIRECTION (which get_interface answers):                             */
 /*                                                                      */
-/*   • HOST-published  xi_frame_v1     (host_api.get_interface):        */
-/*       the Frame value-type ABI — build / read / retain-release /     */
-/*       emit a Frame. A frame-capable plugin resolves it at create.    */
-/*   • PLUGIN-published xi_frame_proc_v1 (xi_plugin_get_interface):     */
-/*       frame-in/frame-out process. The host probes it to learn a      */
-/*       plugin speaks frames (absent = it does not).                   */
+/*   • HOST-published  xi_pack_v1     (host_api.get_interface):        */
+/*       the Pack value-type ABI — build / read / retain-release /     */
+/*       emit a Pack. A pack-capable plugin resolves it at create.    */
+/*   • PLUGIN-published xi_pack_proc_v1 (xi_plugin_get_interface):     */
+/*       pack-in/pack-out process. The host probes it to learn a      */
+/*       plugin speaks packs (absent = it does not).                   */
 /*                                                                      */
-/* The Frame crosses as an OPAQUE HANDLE + accessor C functions (spans  */
+/* The Pack crosses as an OPAQUE HANDLE + accessor C functions (spans  */
 /* in/out) — NEVER as raw struct layout (doc 02 r1: raw C++ layout +    */
-/* hot-reload skew = silent corruption). The C++ TypedFrame/FrameSchema */
-/* sugar (xi_frame.hpp) is SDK-side over these C accessors. Handles are  */
-/* minted only by the host's Frame allocator (doc 07 ingress rule).     */
+/* hot-reload skew = silent corruption). The C++ TypedPack/PackSchema */
+/* sugar (xi_pack.hpp) is SDK-side over these C accessors. Handles are  */
+/* minted only by the host's Pack allocator (doc 07 ingress rule).     */
 /* ------------------------------------------------------------------ */
 
-/* Opaque, host-minted references. A frame handle is a sealed, immutable,
- * refcounted Frame (retain/release, the Frame analogue of image_addref/
- * release). A builder handle is a pre-seal, single-owner FrameBuilder that
- * builder_seal consumes into a frame handle. */
-typedef uint64_t xi_frame_handle;
-#define XI_FRAME_NULL 0
-typedef uint64_t xi_frame_builder;
-#define XI_FRAME_BUILDER_NULL 0
+/* Opaque, host-minted references. A pack handle is a sealed, immutable,
+ * refcounted Pack (retain/release, the Pack analogue of image_addref/
+ * release). A builder handle is a pre-seal, single-owner PackBuilder that
+ * builder_seal consumes into a pack handle. */
+typedef uint64_t xi_pack_handle;
+#define XI_PACK_NULL 0
+typedef uint64_t xi_pack_builder;
+#define XI_PACK_BUILDER_NULL 0
 
-/* Entry type tags carried across the ABI. Values MATCH xi::FrameTag
- * (xi_frame.hpp) so the SDK maps 1:1 with no translation table. */
+/* Entry type tags carried across the ABI. Values MATCH xi::PackTag
+ * (xi_pack.hpp) so the SDK maps 1:1 with no translation table. */
 enum {
-    XI_FRAME_TAG_I64   = 0,
-    XI_FRAME_TAG_F64   = 1,
-    XI_FRAME_TAG_STR   = 2,
-    XI_FRAME_TAG_BIN   = 3,
-    XI_FRAME_TAG_IMAGE = 4,
-    XI_FRAME_TAG_MP    = 5
+    XI_PACK_TAG_I64   = 0,
+    XI_PACK_TAG_F64   = 1,
+    XI_PACK_TAG_STR   = 2,
+    XI_PACK_TAG_BIN   = 3,
+    XI_PACK_TAG_IMAGE = 4,
+    XI_PACK_TAG_MP    = 5
 };
 
-/* A borrowed image view returned by xi_frame_v1.get_image — dimensions +
+/* A borrowed image view returned by xi_pack_v1.get_image — dimensions +
  * a zero-copy span over the pool buffer's pixels. Valid for the lifetime of
- * the frame handle (i.e. until the caller's last release). */
-typedef struct xi_frame_image {
+ * the pack handle (i.e. until the caller's last release). */
+typedef struct xi_pack_image {
     int32_t     width;
     int32_t     height;
     int32_t     channels;
     const void* pixels;    /* zero-copy pool buffer; NULL if unavailable */
     int32_t     length;    /* pixel byte length (width*height*channels) */
-} xi_frame_image;
+} xi_pack_image;
 
-/* xi.frame@1 (HOST door) — the Frame value-type ABI. Build a frame, read a
+/* xi.pack@1 (HOST door) — the Pack value-type ABI. Build a pack, read a
  * sealed one, manage its refcount, and emit it into host dispatch. Every
  * getter returns 1 on success and 0 when the key is absent OR its stored tag
  * differs from the requested type (fail-closed — no silent coercion). str/bin/
- * mp/image payloads are borrowed spans into the frame's arena / pool buffer,
+ * mp/image payloads are borrowed spans into the pack's arena / pool buffer,
  * valid until the caller releases the handle. Field order frozen forever; a
- * change ships as xi_frame_v2. */
-typedef struct xi_frame_v1 {
-    /* ---- builder (produce) — a frame under construction is never shareable */
-    xi_frame_builder (*builder_new)(void);
-    void (*builder_add_i64)(xi_frame_builder b, const char* key, int64_t v);
-    void (*builder_add_f64)(xi_frame_builder b, const char* key, double v);
-    void (*builder_add_str)(xi_frame_builder b, const char* key, const char* s, int32_t len);
-    void (*builder_add_bin)(xi_frame_builder b, const char* key, const void* data, int32_t len);
-    void (*builder_add_image)(xi_frame_builder b, const char* key,
+ * change ships as xi_pack_v2. */
+typedef struct xi_pack_v1 {
+    /* ---- builder (produce) — a pack under construction is never shareable */
+    xi_pack_builder (*builder_new)(void);
+    void (*builder_add_i64)(xi_pack_builder b, const char* key, int64_t v);
+    void (*builder_add_f64)(xi_pack_builder b, const char* key, double v);
+    void (*builder_add_str)(xi_pack_builder b, const char* key, const char* s, int32_t len);
+    void (*builder_add_bin)(xi_pack_builder b, const char* key, const void* data, int32_t len);
+    void (*builder_add_image)(xi_pack_builder b, const char* key,
                               int32_t w, int32_t h, int32_t c, const void* pixels);
-    void (*builder_adopt_image)(xi_frame_builder b, const char* key,
+    void (*builder_adopt_image)(xi_pack_builder b, const char* key,
                                 int32_t w, int32_t h, int32_t c, xi_image_handle handle);
     /* Trusted canonical msgpack (already in the max-width profile) — nested
      * arrays/maps (doc 07 D3). Foreign/untrusted bytes must go through the
      * host ingress canonicalizer first (not this call). */
-    void (*builder_add_mp)(xi_frame_builder b, const char* key, const void* mp, int32_t len);
-    /* Seal + CONSUME the builder → a sealed frame handle (refcount 1). The
-     * builder id is dead after this. XI_FRAME_NULL on a bad/dead builder. */
-    xi_frame_handle (*builder_seal)(xi_frame_builder b);
+    void (*builder_add_mp)(xi_pack_builder b, const char* key, const void* mp, int32_t len);
+    /* Seal + CONSUME the builder → a sealed pack handle (refcount 1). The
+     * builder id is dead after this. XI_PACK_NULL on a bad/dead builder. */
+    xi_pack_handle (*builder_seal)(xi_pack_builder b);
     /* Drop an unsealed builder (releasing any handles it minted). */
-    void (*builder_abandon)(xi_frame_builder b);
+    void (*builder_abandon)(xi_pack_builder b);
 
-    /* ---- accessors (consume a sealed frame) ---- */
-    int32_t     (*count)(xi_frame_handle f);
+    /* ---- accessors (consume a sealed pack) ---- */
+    int32_t     (*count)(xi_pack_handle f);
     /* i-th key in insertion order — a BORROWED span (ptr+len via *len), NOT
-     * NUL-terminated (frame keys live raw in the arena). NULL / *len=0 if OOB.
+     * NUL-terminated (pack keys live raw in the arena). NULL / *len=0 if OOB.
      * The generic-enumeration primitive (expose/record_save walk count()+key_at). */
-    const char* (*key_at)(xi_frame_handle f, int32_t i, int32_t* len);
-    int32_t     (*tag_at)(xi_frame_handle f, int32_t i);   /* XI_FRAME_TAG_*, -1 if OOB */
-    int32_t     (*tag_of)(xi_frame_handle f, const char* key);  /* -1 if the key is absent */
-    int32_t     (*get_i64)(xi_frame_handle f, const char* key, int64_t* out);
-    int32_t     (*get_f64)(xi_frame_handle f, const char* key, double* out);
-    int32_t     (*get_str)(xi_frame_handle f, const char* key, const char** ptr, int32_t* len);
-    int32_t     (*get_bin)(xi_frame_handle f, const char* key, const void** ptr, int32_t* len);
-    int32_t     (*get_image)(xi_frame_handle f, const char* key, xi_frame_image* out);
-    int32_t     (*get_mp)(xi_frame_handle f, const char* key, const void** ptr, int32_t* len);
+    const char* (*key_at)(xi_pack_handle f, int32_t i, int32_t* len);
+    int32_t     (*tag_at)(xi_pack_handle f, int32_t i);   /* XI_PACK_TAG_*, -1 if OOB */
+    int32_t     (*tag_of)(xi_pack_handle f, const char* key);  /* -1 if the key is absent */
+    int32_t     (*get_i64)(xi_pack_handle f, const char* key, int64_t* out);
+    int32_t     (*get_f64)(xi_pack_handle f, const char* key, double* out);
+    int32_t     (*get_str)(xi_pack_handle f, const char* key, const char** ptr, int32_t* len);
+    int32_t     (*get_bin)(xi_pack_handle f, const char* key, const void** ptr, int32_t* len);
+    int32_t     (*get_image)(xi_pack_handle f, const char* key, xi_pack_image* out);
+    int32_t     (*get_mp)(xi_pack_handle f, const char* key, const void** ptr, int32_t* len);
 
-    /* ---- lifetime (the Frame analogue of image_addref/image_release) ---- */
-    void (*retain)(xi_frame_handle f);
-    void (*release)(xi_frame_handle f);
+    /* ---- lifetime (the Pack analogue of image_addref/image_release) ---- */
+    void (*retain)(xi_pack_handle f);
+    void (*release)(xi_pack_handle f);
 
-    /* ---- emit: a source hands a sealed frame to host dispatch. The host
+    /* ---- emit: a source hands a sealed pack to host dispatch. The host
      * takes its own ref (retain) for the async event, so the caller may
      * release right after. id == XI_TRIGGER_NULL mints a fresh id; ts == 0
      * stamps host now. No-op until a dispatch hook is installed. ---- */
-    void (*emit_frame)(const char* emitter, xi_trigger_id id,
-                       xi_frame_handle f, int64_t ts);
-} xi_frame_v1;
+    void (*emit_pack)(const char* emitter, xi_trigger_id id,
+                       xi_pack_handle f, int64_t ts);
+} xi_pack_v1;
 
-/* xi.frame@1 (PLUGIN door) — frame-in/frame-out process, published by a
+/* xi.pack@1 (PLUGIN door) — pack-in/pack-out process, published by a
  * plugin through xi_plugin_get_interface (below). process receives a
- * sealed input frame (borrowed; the host owns it) and returns a NEW sealed
- * output frame handle the host takes ownership of (and releases). It builds
- * that output via the host's xi_frame_v1 builder. XI_FRAME_NULL signals a
+ * sealed input pack (borrowed; the host owns it) and returns a NEW sealed
+ * output pack handle the host takes ownership of (and releases). It builds
+ * that output via the host's xi_pack_v1 builder. XI_PACK_NULL signals a
  * hard internal failure (a CONTRACT failure — missing input, wrong type —
- * is instead a normal sealed frame carrying a fail-loud error entry, so the
- * caller always gets a frame to route). Field order frozen; change = v2. */
-typedef struct xi_frame_proc_v1 {
-    xi_frame_handle (*process)(void* inst, xi_frame_handle input);
-} xi_frame_proc_v1;
+ * is instead a normal sealed pack carrying a fail-loud error entry, so the
+ * caller always gets a pack to route). Field order frozen; change = v2. */
+typedef struct xi_pack_proc_v1 {
+    xi_pack_handle (*process)(void* inst, xi_pack_handle input);
+} xi_pack_proc_v1;
 
 /* ------------------------------------------------------------------ */
 /* Host API — function table provided by the backend to every plugin  */
@@ -853,13 +853,13 @@ typedef int   (*xi_plugin_record_schema_fn)(char* buf, int buflen);
  * publish its OWN capabilities to the host, resolved via GetProcAddress
  * exactly like prepare/commit/record_schema (so it is ABI-ADDITIVE — the
  * frozen xi_host_api layout is untouched). The host probes
- * xi_plugin_get_interface("xi.frame", 1) -> const xi_frame_proc_v1* to learn a
- * plugin does frame-in/frame-out; NULL means the capability is absent.
+ * xi_plugin_get_interface("xi.pack", 1) -> const xi_pack_proc_v1* to learn a
+ * plugin does pack-in/pack-out; NULL means the capability is absent.
  *
  * This is the polaris2 synthesis §3 "pure door" dry run: a plugin capability
  * reached ONLY through a door, not a new fixed export. In the greenfield core
  * the whole plugin surface (process/exchange/get_def/...) would move behind
- * this one entry point; the pilot routes ONLY the new frame capability through
+ * this one entry point; the pilot routes ONLY the new pack capability through
  * it, leaving the v11 Record exports exactly as they are. */
 typedef const void* (*xi_plugin_get_interface_fn)(const char* id, uint32_t version);
 

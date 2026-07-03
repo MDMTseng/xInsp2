@@ -33,7 +33,7 @@
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>       // parses exchange/def commands (canonical over cmd.find)
 #include <xi/xi_contract.hpp>   // fail-loud required inputs + schema-skew errors
-#include <xi/xi_mp.hpp>         // wave-2: canonical msgpack for the frame-door contour (doc 07 D3)
+#include <xi/xi_mp.hpp>         // wave-2: canonical msgpack for the pack-door contour (doc 07 D3)
 
 #include "blob_analysis_keys.gen.h"
 
@@ -205,27 +205,27 @@ public:
         return out;
     }
 
-    // polaris2 wave-2 (docs/new_gen/08 Wave 2): the xi.frame@1 frame-in/frame-out
+    // polaris2 wave-2 (docs/new_gen/08 Wave 2): the xi.pack@1 pack-in/pack-out
     // door. Consumes the SAME contract keyset as the Record process() above (the
-    // blob_analysis_keys.h constants ARE the frame schema — read via FrameIn's
+    // blob_analysis_keys.h constants ARE the pack schema — read via PackIn's
     // typed accessors, no string literals at the call sites) and produces its
-    // outputs as a frame: the binary image entry, the scalar counts, and the
+    // outputs as a pack: the binary image entry, the scalar counts, and the
     // blobs array (incl. each blob's contour polygon) as ONE nested canonical-
     // msgpack entry (doc 07 D3 — nesting is msgpack's job). Fail-loud carries
-    // over: a missing/mis-typed 'gray' is a normal sealed frame stamped with the
-    // xi::contract reason code (FrameOut::fault), which the caller routes to a
+    // over: a missing/mis-typed 'gray' is a normal sealed pack stamped with the
+    // xi::contract reason code (PackOut::fault), which the caller routes to a
     // verdict — never a silent default. The Record process() above is untouched;
     // this instance speaks BOTH currencies.
-    void process(xi::FrameIn& in, xi::FrameOut& out) override {
+    void process(xi::PackIn& in, xi::PackOut& out) override {
         auto gray = in.image(keys::kGray);
         if (!gray || !gray->pixels) {
             out.fault(xi::contract::kMissingInput, keys::kGray,
-                      "blob_analysis(frame): required image 'gray' is missing");
+                      "blob_analysis(pack): required image 'gray' is missing");
             return;
         }
         if (gray->channels != 1) {
             out.fault(xi::contract::kWrongType, keys::kGray,
-                      "blob_analysis(frame): 'gray' must be single-channel");
+                      "blob_analysis(pack): 'gray' must be single-channel");
             return;
         }
         const int w = gray->width, h = gray->height;
@@ -333,7 +333,7 @@ private:
 };
 
 XI_PLUGIN_IMPL(BlobAnalysis)
-// polaris2 wave-2: publish the xi.frame@1 frame-in/frame-out door (the plugin-
+// polaris2 wave-2: publish the xi.pack@1 pack-in/pack-out door (the plugin-
 // side capability door — the synthesis §3 pure-door dry run). The host probes
-// xi_plugin_get_interface("xi.frame", 1) to learn blob speaks frames.
-XI_PLUGIN_FRAME_DOOR(BlobAnalysis)
+// xi_plugin_get_interface("xi.pack", 1) to learn blob speaks packs.
+XI_PLUGIN_PACK_DOOR(BlobAnalysis)

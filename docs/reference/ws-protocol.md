@@ -599,7 +599,7 @@ is how that accumulation becomes visible: it ticks once per such crash. The leak
 bounded in practice by the `on_fault` quarantine (a repeatedly-faulting instance
 escalates to `refuse` and stops being entered), and the design is documented in
 `docs/internals/data-layer.md`. The class is dissolved entirely by the v3 all-msgpack
-frame plane (`docs/new_gen/07`), which removes the shared-doc handshake this leak
+pack plane (`docs/new_gen/07`), which removes the shared-doc handshake this leak
 protects. Until then, the counter is the operator's signal to distinguish "one crash
 ever" from "leaking every N frames".
 

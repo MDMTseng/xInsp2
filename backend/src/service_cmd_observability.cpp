@@ -345,7 +345,7 @@ void cmd_dispatch_stats_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
         // (rc -2, leak-over-UAF). Process-uptime cumulative (NOT reset by cmd:start,
         // like the other *_lifetime fields). A steadily-climbing value means a plugin
         // is crashing repeatedly on doc-carrying calls; a constant non-zero value is a
-        // one-off. Bounded by the on_fault quarantine; dissolved by the v3 frame plane.
+        // one-off. Bounded by the on_fault quarantine; dissolved by the v3 pack plane.
         data += ",\"crash_leaked_docs_lifetime\":" + std::to_string(xi::DocRegistry::instance().crash_leaked_lifetime());
         // Source liveness: ms since ANY source last emitted, + per-source ages. The
         // signal for "a camera stalled" — a stalled source otherwise stops the line

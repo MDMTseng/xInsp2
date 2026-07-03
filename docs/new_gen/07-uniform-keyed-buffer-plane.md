@@ -1,20 +1,25 @@
 # xInsp3 Data Plane — Uniform Keyed Binary Buffers, msgpack by Default
 
+> **Naming:** the container is **Pack** (`xi::Pack`, the `xi.pack@1` door). It
+> was called **Frame** in the wave-2 pilots; the type/door/SDK surface was
+> renamed Frame → Pack (zero image connotation) — the `"frame"` *image key* and
+> the preview-frame wire wording are unrelated and unchanged.
+
 | Field | Value |
 |---|---|
 | **Date** | 2026-07-02 |
 | **Status** | Adopted direction for the v3 data plane (maintainer decision). Supersedes the two-plane amendment in [`polaris2/00-synthesis.md`](./polaris2/00-synthesis.md) §2 by unifying it. Not a v2 retrofit |
-| **Decision** | One frame container: `key → (type tag, binary buffer)`. No image/meta split — an image is an entry whose type happens to be an image format. **Everything structured encodes as msgpack — including image descriptors — under a canonical max-width profile** (all numbers fixed-width int64/float64; wide container markers). Pixels live raw in pool buffers referenced by a handle ext type. Zero-copy sharing (pool handles + refcounts) is retired to large buffers only; the small plane is immutable arena data freed with the frame |
+| **Decision** | One pack container: `key → (type tag, binary buffer)`. No image/meta split — an image is an entry whose type happens to be an image format. **Everything structured encodes as msgpack — including image descriptors — under a canonical max-width profile** (all numbers fixed-width int64/float64; wide container markers). Pixels live raw in pool buffers referenced by a handle ext type. Zero-copy sharing (pool handles + refcounts) is retired to large buffers only; the small plane is immutable arena data freed with the pack |
 
 ## The proposal
 
 The polaris2 visions converged on killing the shared-mutable JSON Record but
 all four kept a two-plane design (pooled images + a typed metadata value).
 This decision goes one step further: **there is only one kind of thing in a
-frame** —
+pack** —
 
 ```
-Frame = { key: string  →  entry }
+Pack = { key: string  →  entry }
 entry = { type: string,  bytes: const span }
 ```
 
@@ -33,8 +38,8 @@ principle taken to its limit — the core's last piece of domain knowledge
 1. **One ownership discipline.** Today's two refcount registries (ImagePool +
    DocRegistry) exist because images and metadata are different citizens.
    Unified, there is ONE pool (large buffers), ONE arena (small entries), one
-   walk, one crash story: a caught fault drops the frame — arena freed in one
-   shot, handles released by the frame's single owner. The
+   walk, one crash story: a caught fault drops the pack — arena freed in one
+   shot, handles released by the pack's single owner. The
    leak-per-crash class (vision B/D's `xi_use.hpp:558` finding) cannot be
    expressed.
 2. **Self-description survives** (the 02 constraint that made schemaless
@@ -57,7 +62,7 @@ principle taken to its limit — the core's last piece of domain knowledge
   `expose` stops re-encoding, replay stops re-parsing.
 - **Self-describing + typed + compact**, native int64/bin/nested maps — the
   JSON warts the schema spike hit (int64-as-string, binary-as-category-error)
-  don't exist on the frame plane. JSON remains at the human edges only:
+  don't exist on the pack plane. JSON remains at the human edges only:
   project/config files and the WS text envelope.
 - **Implementations everywhere** (C/C++/TS/Py), and this repo already
   maintains golden fixtures + a width-discipline table for its msgpack subset
@@ -65,7 +70,7 @@ principle taken to its limit — the core's last piece of domain knowledge
   already governed here, and the canonical max-width profile (below) shrinks
   that discipline to a single width per type.
 - **Write-once fits it.** msgpack's weakness is mutation/random access; the
-  frame plane is write-once-read-many per frame (seal-then-share), so the
+  pack plane is write-once-read-many per pack (seal-then-share), so the
   weakness never engages. Readers scan KB-scale data; accessors cache offsets.
 
 ## The canonical encoding profile (max-width by default)
@@ -83,14 +88,14 @@ our encoders simply never compact. What this buys:
    accessors can index `key → byte offset` once at seal time and then do
    direct offset reads — struct-grade random access without leaving msgpack.
 2. **Size stability.** A value crossing 127/255/65535 no longer changes its
-   encoded length: frame sizes are stable, in-place pre-seal patches are
+   encoded length: pack sizes are stable, in-place pre-seal patches are
    possible, replay files diff cleanly.
 3. **One decoder path.** The width-boundary bug family (the fixmap→map16
    incident, review 10) loses most of its surface: encoders emit exactly one
    width per type, and the golden fixtures pin it.
 
-Cost: a few hundred bytes per frame on a kilobyte-scale plane riding next to
-megapixel buffers — noise. The profile applies to the frame plane everywhere
+Cost: a few hundred bytes per pack on a kilobyte-scale plane riding next to
+megapixel buffers — noise. The profile applies to the pack plane everywhere
 (memory, wire, disk — sameness is the point); the compact forms remain legal
 to READ (stock msgpack), so foreign producers interop.
 
@@ -99,8 +104,8 @@ to READ (stock msgpack), so foreign producers interop.
 **D1 — storage duality, API unity.** An entry's storage is either
 arena-inline (small, the msgpack plane) or a pool handle (large, above a
 threshold); both surface as a `const span`. Refcounts exist only for the
-pool; the arena dies with the frame. In msgpack terms a handle is an **ext
-type** ("pool ref") the walker resolves — so even the mixed frame serializes
+pool; the arena dies with the pack. In msgpack terms a handle is an **ext
+type** ("pool ref") the walker resolves — so even the mixed pack serializes
 naturally (inline the bytes on export, re-pool on import).
 
 **D2 — dimensioned types are msgpack descriptors over raw pool buffers.**
@@ -121,7 +126,7 @@ format; generic tools recurse.
 
 The canonical profile's payoffs (O(1) offset reads, one decoder path, sealed
 immutability) are invariants the domain INTERIOR relies on without
-re-checking. Therefore the edge must be total: **nothing enters the frame
+re-checking. Therefore the edge must be total: **nothing enters the pack
 plane unproven.** "Trust inside, prove at the boundary."
 
 - **Canonicalize on ingress.** Foreign msgpack (a comms/MES plugin's inbound
@@ -149,14 +154,14 @@ plane unproven.** "Trust inside, prove at the boundary."
   the default load path still canonicalizes. A verify-once-then-mmap fast
   path is a measured-performance option, not the default.
 
-## Frame lifecycle (the concurrency story in one line each)
+## Pack lifecycle (the concurrency story in one line each)
 
-1. Producer builds entries into the frame's arena / grabs pool buffers.
-2. **Seal** — the frame becomes immutable; only then does it cross the ABI.
+1. Producer builds entries into the pack's arena / grabs pool buffers.
+2. **Seal** — the pack becomes immutable; only then does it cross the ABI.
 3. Consumers (script, plugins, sinks) hold borrowed const views; outputs go
-   into a NEW frame/arena (their own), never mutate the input.
-4. Frame end: arena freed in one shot; pool handles released by the one
-   owner. A caught plugin crash = drop the output frame; the input stays
+   into a NEW pack/arena (their own), never mutate the input.
+4. Pack end: arena freed in one shot; pool handles released by the one
+   owner. A caught plugin crash = drop the output pack; the input stays
    valid for the pipeline's error path. No reconciliation, no reserved-ref
    dance, no COW.
 
@@ -168,7 +173,7 @@ plane unproven.** "Trust inside, prove at the boundary."
   mutable-DOM node allocation).
 - Type-tag governance: a naming convention + registry in `contract/`
   (unknown = opaque). The contract tooling already exists.
-- yyjson leaves the frame path entirely (stays for config/JSON edges); the
+- yyjson leaves the pack path entirely (stays for config/JSON edges); the
   ad-hoc `p["key"].as_int` style is replaced by the accessor layer — which is
   the direction 02 already adopted.
 - This is the **v3 target representation**. v2 keeps the Record; the contract
@@ -182,5 +187,5 @@ plane unproven.** "Trust inside, prove at the boundary."
 - **polaris2 synthesis §2**: this refines the "immutable tagged arena value"
   amendment by erasing the remaining image/meta plane split.
 - **Vision B/C's "kill the monolith" ABI amendment**: orthogonal, compatible —
-  a `get_interface`-only ABI would expose exactly one frame interface:
+  a `get_interface`-only ABI would expose exactly one pack interface:
   entries in, entries out.

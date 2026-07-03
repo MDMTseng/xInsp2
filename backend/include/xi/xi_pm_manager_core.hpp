@@ -37,7 +37,7 @@
 #include "xi_cabi_adapter.hpp" // plugin_abi_compatible / PluginInfo / CAbiInstanceAdapter
 #include "xi_certify.hpp"     // Part III G1: scan/certification isolation (child-process certify + verdict cache)
 #include "xi_image_pool.hpp"
-#include "xi_frame_abi.hpp"   // polaris2 wave-2: install_frame_abi (xi.frame@1 door + dispatch releaser)
+#include "xi_pack_abi.hpp"   // polaris2 wave-2: install_pack_abi (xi.pack@1 door + dispatch releaser)
 #include "xi_instance.hpp"
 #include "xi_config_validate.hpp" // validate_config_against_manifest (opt-in diagnostic, extracted leaf)
 #include "xi_pm_json.hpp"      // pm_json_escape / pm_json_quote (extracted leaf)
@@ -385,10 +385,10 @@ private:
         static xi_host_api host = []{
             auto a = ImagePool::make_host_api();
             install_trigger_hook(a);
-            // polaris2 wave-2: publish the xi.frame@1 data plane + wire the frame
-            // dispatch releaser, so a frame-capable plugin resolving the door off
-            // this table gets a live interface (and emit_frame reaches the bus).
-            install_frame_abi();
+            // polaris2 wave-2: publish the xi.pack@1 data plane + wire the pack
+            // dispatch releaser, so a pack-capable plugin resolving the door off
+            // this table gets a live interface (and emit_pack reaches the bus).
+            install_pack_abi();
             // DEBUG freeze-guard: this is the FULLY WIRED table plugins receive, so
             // every carved get_interface entry must track its struct-field twin
             // (emit_record via the published slot). Catches door/field drift at
