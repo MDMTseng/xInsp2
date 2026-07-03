@@ -162,6 +162,27 @@ static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
     return XI_IMAGE_NULL;
 }
 
+// polaris2 Gate P2 — minimal runner copy of the service's use_pack_process_cb:
+// drive the target's xi.pack@1 pack door for xi::use(...).process(ScriptPack).
+// Same return codes (0 ok / -1 miss / -2 crash / -4 no door); the runner has no
+// item-14 quarantine machinery, so -3 never occurs here.
+static int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out) {
+    if (out) *out = XI_PACK_NULL;
+    if (!name || !out) return -1;
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    if (!adapter || !adapter->has_pack_door()) return -4;
+    try {
+        *out = adapter->run_pack_door(in);
+        return 0;
+    } catch (...) {
+        std::fprintf(stderr, "[runner] use_pack_process('%s') crashed/threw\n", name);
+        *out = XI_PACK_NULL;
+        return -2;
+    }
+}
+
 // --- per-frame verdict capture (mirror of service_main's g_run_result) ---
 //
 // The script calls xi::result(code,msg) at most once per inspect; that routes
@@ -440,6 +461,11 @@ int main(int argc, char** argv) {
         script.set_use_callbacks(
             (void*)use_process_cb, (void*)use_exchange_cb,
             (void*)use_grab_cb, (void*)&host_api);
+    }
+    // polaris2 Gate P2: pack-door chaining (xi::use(name).process(pack)).
+    // Optional symbol — older scripts don't export it.
+    if (script.set_use_pack_callback) {
+        script.set_use_pack_callback((void*)use_pack_process_cb);
     }
     // Wire the result callback so xi::result(code,msg) is captured per frame
     // (mirrors the backend's install in service_main). Optional symbol: scripts

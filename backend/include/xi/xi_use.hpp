@@ -81,6 +81,10 @@ struct xi_trigger_view {
 // Defined in xi_script_support.hpp (force-included by the compiler)
 extern void* g_use_process_fn_;
 extern void* g_use_exchange_fn_;
+// polaris2 Gate P2 (docs/new_gen/10): xi::use(...).process(ScriptPack) — the
+// host callback that drives a plugin's xi.pack@1 pack door. Null on an older
+// host (no pack chaining): the ScriptPack overload then returns an empty pack.
+extern void* g_use_pack_process_fn_;
 extern void* g_use_host_api_;   // xi_host_api* into BACKEND's ImagePool
 extern void* g_trigger_info_fn_;
 extern void* g_trigger_image_fn_;
@@ -120,6 +124,17 @@ using UseProcessFn  = int (*)(const char* name,
 using UseExchangeFn = int (*)(const char* name, const char* cmd,
                               char* rsp, int rsplen);
 using UseGrabFn     = xi_image_handle (*)(const char* name, int timeout_ms);
+// polaris2 Gate P2: drive the named instance's xi.pack@1 pack door with a
+// sealed input pack. `in` is BORROWED for the call (the script keeps its ref);
+// on success (return 0) `*out` is a NEW sealed pack handle the CALLER OWNS
+// (host pack registry — release through xi_pack_v1) or XI_PACK_NULL if the
+// plugin's door returned nothing (a hard internal failure; a mere CONTRACT
+// failure is a normal sealed pack carrying "$fault", see xi_pack_proc_v1).
+// Negative returns mirror UseProcessFn: -1 no such instance; -2 the door
+// crashed (SEH) or threw; -3 instance quarantined (on_fault=refuse);
+// -4 the plugin publishes no xi.pack@1 door (a Record-only plugin).
+using UsePackProcessFn = int (*)(const char* name, xi_pack_handle in,
+                                 xi_pack_handle* out);
 
 // Trigger callbacks (host-side wires these in via xi_script_set_trigger_callbacks)
 struct CurrentTriggerInfo {
@@ -704,6 +719,25 @@ inline void warn_use_miss_(const xi_host_api* host, const char* name) {
     host->log(3, msg.c_str());
 }
 
+// polaris2 Gate P2: same once-per-name discipline for a pack-door miss — the
+// instance EXISTS but publishes no xi.pack@1 door (a Record-only plugin), so
+// use(name).process(ScriptPack) can only return an empty pack. Without this
+// log the silent empty looks identical to a real empty result.
+inline void warn_use_no_pack_door_(const xi_host_api* host, const char* name) {
+    if (!host || !host->log) return;
+    static std::mutex mu;
+    static std::unordered_map<std::string, bool> warned;
+    std::string key = name ? name : "";
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (!warned.emplace(key, true).second) return;   // warned this name already
+    }
+    std::string msg = "xi::use(\"" + key + "\").process(pack): instance has no "
+                      "xi.pack@1 door — returns an empty pack (Record-only plugin; "
+                      "use the Record process() overload instead)";
+    host->log(3, msg.c_str());
+}
+
 class UseProxy {
 public:
     explicit UseProxy(const std::string& name) : name_(name) {}
@@ -822,6 +856,64 @@ public:
         xi_record_out_free(&output);
         result.set_src(name_);   // provenance: this output came from this instance
         return result;
+    }
+
+    // polaris2 Gate P2 (docs/new_gen/10): chain a Pack into this instance's
+    // xi.pack@1 pack door. The pack-plane sibling of process(Record) — same
+    // name, same call shape, pack currency in and out:
+    //
+    //   XI_INSPECT_ENTRY(t, frame) {
+    //       auto f = t.pack();                              // pack-mode source
+    //       if (!f) return;
+    //       auto r = xi::use("det0").process(f);            // drive the door
+    //       int64_t blobs = r.get_i64("blob_count").value_or(-1);
+    //       if (auto fault = r.get_str("$fault")) xi::ng(1, "det0 fault");
+    //   }
+    //
+    // INPUT: any live ScriptPack — the trigger's own pack (t.pack(), the
+    // chaining case above) or a script-built one. Borrowed for the call; the
+    // caller's ref is untouched. An EMPTY input returns an empty pack without
+    // entering the plugin (mirrors the Record overload's NA short-circuit:
+    // absence propagates, never crashes).
+    //
+    // OUTPUT: a ScriptPack that OWNS the door's result handle — the keepalive
+    // releases it on the last copy, so (like t.pack()) it is safe to hold past
+    // the dispatch and capture by value into xi::async / xi::parallel_for.
+    // EMPTY on: older host (no pack callback wired), no such instance (-1,
+    // once-per-name error log), door crashed (-2 — a torn result is never
+    // adopted), instance quarantined (-3), or a Record-only plugin with no
+    // pack door (-4, once-per-name error log). A CONTRACT failure (e.g.
+    // missing input key) is NOT empty — the door returns a normal sealed pack
+    // carrying "$fault" (fail-loud, xi_pack_proc_v1 contract), so check that.
+    //
+    // The LEGACY Record path above is byte-for-byte untouched — this is a
+    // pure overload on the pack currency.
+    ScriptPack process(const ScriptPack& input) {
+        auto fn    = reinterpret_cast<UsePackProcessFn>(g_use_pack_process_fn_);
+        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
+        if (!fn || !host) return {};              // older host: no pack chaining
+        if (!input.valid()) return {};            // absence propagates
+        xi_pack_handle out = XI_PACK_NULL;
+        int rc = fn(name_.c_str(), input.handle(), &out);
+        if (rc < 0) {
+            if (rc == -1) warn_use_miss_(host, name_.c_str());
+            else if (rc == -4) warn_use_no_pack_door_(host, name_.c_str());
+            // -2 (crash) / -3 (quarantined) are logged host-side where the
+            // fault policy runs; `out` from a torn call is never trusted.
+            return {};
+        }
+        if (out == XI_PACK_NULL) return {};       // door's hard internal failure
+        // Wrap the result in an OWNING ScriptPack. Prefer the input's cached
+        // vtable (same process-stable host singleton); fall back to resolving
+        // the door — it must exist, since the host just minted `out` on it.
+        const xi_pack_v1* fi = input.iface();
+        if (!fi && host->get_interface)
+            fi = static_cast<const xi_pack_v1*>(host->get_interface("xi.pack", 1));
+        if (!fi || !fi->release) return {};       // unreachable on a sane host
+        std::shared_ptr<const void> keep(
+            static_cast<const void*>(fi),         // any non-null tag; deleter is the point
+            [fi, out](const void*) { fi->release(out); });
+        return ScriptPack(out, fi, std::move(keep));
     }
 
     std::string exchange(const std::string& cmd) {

@@ -36,7 +36,7 @@
 | What | When | Cost basis |
 |---|---|---|
 | Remaining plugins go BILINGUAL (json_source, synced_stereo, config_swap_probe, cache, record_save, data_output — sinks get the generic walk, sources the emit mode) | next batch; ~½–1 day each (measured: blob +77 lines, mock +29) | pilots' diffs |
-| `xi::use()` → pack-door plumbing for scripts (w2c's honest v0 gap: scripts can read t.frame() but not yet drive an operator's door) | one focused task; unblocks script-side chaining | frame_pilot_test shows the host-side call pattern |
+| ~~`xi::use()` → pack-door plumbing for scripts~~ **DONE** (polaris2/p2-use-door): `xi::use(name).process(ScriptPack)` chains a pack (t.pack() or a built one) into a plugin's xi.pack@1 door via the new optional `xi_script_set_use_pack_callback` export + host `use_pack_process_cb` (service + runner); Record path byte-untouched; pinned by `use_pack_door_test`. v0 gap: pack calls on ordered-SINK targets run inline (no frame-ordered staging) — revisit when a pack-consuming sink exists | one focused task; unblocks script-side chaining | frame_pilot_test shows the host-side call pattern |
 | Codegen gap #2 (reply-extractor family, param defaults, has-accessors) → the 3 keys-only plugins get generated `_io` too | one generator task | w2d's gap report |
 | Record→Pack conversion shims (explicit, opt-in helpers — never silent) | decide AFTER the bilingual batch; may prove unnecessary | — |
 | Perf-runner baseline capture for perf_frame + perf_hotpath | before any master-merge conversation | benches ship SKIP-until-fingerprinted |

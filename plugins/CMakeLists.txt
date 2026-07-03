@@ -171,6 +171,26 @@ endif()
 add_dependencies(pack_pilot_test blob_analysis mock_camera)
 add_test(NAME pack_pilot_test COMMAND pack_pilot_test)
 
+# polaris2 Gate P2 (docs/new_gen/10) — script-side use()->pack-door CHAINING:
+# the REAL xi_use.hpp UseProxy::process(ScriptPack) overload (this TU plays the
+# script-DLL role and owns the extern callback globals, like the backend's
+# test_crash_leak_counter) driven through a mirror of the service's
+# use_pack_process_cb into blob_analysis's xi.pack@1 door. Also pins the
+# t.pack() -> use().process chain, the $fault fail-loud contract, fail-closed
+# edges (miss / no door / empty / older host), and pack+pool balance.
+add_executable(use_pack_door_test use_pack_door_test.cpp)
+target_include_directories(use_pack_door_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis)
+target_compile_definitions(use_pack_door_test PRIVATE
+    BLOB_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis/xi-blob_analysis.dll"
+    MOCK_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera.dll")
+if(WIN32)
+    target_link_libraries(use_pack_door_test PRIVATE Ws2_32)
+endif()
+add_dependencies(use_pack_door_test blob_analysis mock_camera)
+add_test(NAME use_pack_door_test COMMAND use_pack_door_test)
+
 # mock_camera contract test — config/command surface only (source plugin).
 add_executable(mock_camera_test mock_camera/tests/test_mock_camera.cpp)
 target_include_directories(mock_camera_test PRIVATE
