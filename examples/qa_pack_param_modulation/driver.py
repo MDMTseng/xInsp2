@@ -41,10 +41,11 @@ REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
 sys.path.insert(0, str(ROOT.parents[0] / "lib"))
 from xinsp2 import Client  # noqa: E402
+from ports import free_port  # noqa: E402
 from xex1 import collect_frames, subscribe  # noqa: E402
 
 BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
-PORT = int(os.environ.get("PORT", "7923"))
+PORT = int(os.environ.get("PORT", "0")) or free_port()
 STAIRCASE = {40: 4, 90: 3, 140: 2, 190: 1, 240: 0}
 DEF_THR, DEF_COUNT = 200, 1
 MSG_RE = re.compile(

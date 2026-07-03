@@ -20,10 +20,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
+sys.path.insert(0, str(REPO / "examples" / "lib"))
 from xinsp2 import Client  # noqa: E402
+from ports import free_port  # noqa: E402
 
 BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
-PORT = int(os.environ.get("PORT", "7894"))
+PORT = int(os.environ.get("PORT", "0")) or free_port()
 
 
 def spawn(port, iso_name):
@@ -104,9 +106,10 @@ def main() -> int:
     # --- legacy: no groups -> dispatch_stats has no "groups" key ---
     legacy = REPO / "examples" / "image_sources"
     if legacy.is_dir():
-        proc2 = spawn(PORT + 1, "xi_dg_legacy_tmp")
+        p_legacy = free_port()
+        proc2 = spawn(p_legacy, "xi_dg_legacy_tmp")
         try:
-            c2 = connect(PORT + 1)
+            c2 = connect(p_legacy)
             if c2:
                 c2.call("open_project", {"path": str(legacy)})
                 st2 = c2.call("dispatch_stats")
@@ -136,9 +139,10 @@ def main() -> int:
     # --- Test B: max_parallel is clamped to 32 (#4) ---
     pB = make_proj("xi_dg_clampB", {"default_group": "main",
                                     "groups": [{"name": "main", "max_parallel": 1000000}]})
-    proc3 = spawn(PORT + 2, "xi_dg_clamp_iso")
+    p_clamp = free_port()
+    proc3 = spawn(p_clamp, "xi_dg_clamp_iso")
     try:
-        c3 = connect(PORT + 2)
+        c3 = connect(p_clamp)
         if c3:
             c3.call("open_project", {"path": str(pB)})
             c3.compile_and_load(str(pB / "inspect.cpp"), timeout=300)
@@ -160,9 +164,10 @@ def main() -> int:
         {"name": "dup", "max_parallel": 4},
         {"name": "weird", "thread_priority": "bogus", "overflow": "nope"},
     ]})
-    proc4 = spawn(PORT + 3, "xi_dg_warn_iso")
+    p_warn = free_port()
+    proc4 = spawn(p_warn, "xi_dg_warn_iso")
     try:
-        c4 = connect(PORT + 3)
+        c4 = connect(p_warn)
         if c4:
             c4.call("open_project", {"path": str(pD)})
             warns = (c4.call("open_project_warnings").get("warnings") or [])
@@ -226,8 +231,8 @@ def main() -> int:
         inv = sum(1 for i in range(len(ids) - 1) if ids[i] > ids[i + 1])
         return len(ids), inv
 
-    n_arr, inv_arr = order_run("xi_dg_orderE", "arrival", PORT + 4)
-    n_cmp, inv_cmp = order_run("xi_dg_orderC", "completion", PORT + 5)
+    n_arr, inv_arr = order_run("xi_dg_orderE", "arrival", free_port())
+    n_cmp, inv_cmp = order_run("xi_dg_orderC", "completion", free_port())
     print(f"Test E arrival: {n_arr} run_results, {inv_arr} inversions; "
           f"completion control: {n_cmp} run_results, {inv_cmp} inversions")
     if n_arr < 20:

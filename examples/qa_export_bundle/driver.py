@@ -17,10 +17,13 @@ ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 SRC_PROJECT = REPO / "examples" / "qa_group_parallelism"   # plugin + script, source-driven
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
+sys.path.insert(0, str(REPO / "examples" / "lib"))
 from xinsp2 import Client  # noqa: E402
+from ports import free_port  # noqa: E402
 
 BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
-PORT = int(os.environ.get("PORT", "7909"))
+PORT = int(os.environ.get("PORT", "0")) or free_port()          # bundle run port
+EXPORT_PORT = free_port()                                       # baked into the bundle
 
 
 def main() -> int:
@@ -34,7 +37,7 @@ def main() -> int:
     try:
         # 1. Export (dev box has the toolchain). --fps=-1: source-driven, trigger-only.
         r = subprocess.run([sys.executable, str(REPO / "tools" / "export_bundle.py"),
-                            str(SRC_PROJECT), str(bundle), "--fps=-1", "--port=7922"],
+                            str(SRC_PROJECT), str(bundle), "--fps=-1", f"--port={EXPORT_PORT}"],
                            cwd=str(REPO), capture_output=True, text=True, timeout=400)
         if r.returncode != 0:
             print(r.stdout[-1500:]); fails.append(f"export failed rc={r.returncode}")

@@ -23,10 +23,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
+sys.path.insert(0, str(REPO / "examples" / "lib"))
 from xinsp2 import Client  # noqa: E402
+from ports import free_port  # noqa: E402
 
 BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
-PORT = int(os.environ.get("PORT", "7917"))
+PORT = int(os.environ.get("PORT", "0")) or free_port()
 MSG_RE = re.compile(
     r"capqa seq=(-?\d+) built=(\d) fault=(\d) rc1=(-?\d+) rc2=(-?\d+) "
     r"magic=(\d) same=(\d) hit2=(-?\d+) enc=(-?\d+) dec1=(-?\d+) dec2=(-?\d+)")

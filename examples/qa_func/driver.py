@@ -41,6 +41,7 @@ sys.path.insert(0, str(SDK))
 # xi::use("expose").process(rec) and a consumer pulls them back here.
 sys.path.insert(0, str(ROOT.parents[0] / "lib"))
 from xex1 import pull_latest, subscribe  # noqa: E402
+from ports import free_port  # noqa: E402
 
 
 def _pull_value(c, channel, key, retries=20, delay=0.1):
@@ -163,7 +164,7 @@ def case_AS_I1() -> list[str]:
     'autostart: open_project' then 'compile_and_load', opens the project, and
     its WS port accepts."""
     f: list[str] = []
-    port = 7850
+    port = free_port()
     log = ROOT / "be_as_i1.log"
     if port_open(port):
         return [f"AS-I1: :{port} already in use"]
@@ -198,7 +199,7 @@ def case_AS_I2() -> list[str]:
     is turning."""
     from xinsp2 import Client  # noqa: E402
     f: list[str] = []
-    port = 7851
+    port = free_port()
     log = ROOT / "be_as_i2.log"
     if port_open(port):
         return [f"AS-I2: :{port} already in use"]
@@ -242,7 +243,7 @@ def case_AS_I3() -> list[str]:
     stamps 1 (the script reads it back through xi::use("expose"))."""
     from xinsp2 import Client  # noqa: E402
     f: list[str] = []
-    port = 7852
+    port = free_port()
     log = ROOT / "be_as_i3.log"
     if port_open(port):
         return [f"AS-I3: :{port} already in use"]
@@ -273,7 +274,7 @@ def case_AS_I4() -> list[str]:
     accepting so an operator can attach and drive it later."""
     from xinsp2 import Client  # noqa: E402
     f: list[str] = []
-    port = 7853
+    port = free_port()
     log = ROOT / "be_as_i4.log"
     if port_open(port):
         return [f"AS-I4: :{port} already in use"]
@@ -305,7 +306,7 @@ def case_AS_I7() -> list[str]:
     a client connecting AFTER the autostart sequence can still version/ping/run."""
     from xinsp2 import Client  # noqa: E402
     f: list[str] = []
-    port = 7854
+    port = free_port()
     log = ROOT / "be_as_i7.log"
     if port_open(port):
         return [f"AS-I7: :{port} already in use"]
@@ -368,7 +369,7 @@ def case_FE_E9() -> list[str]:
     scratch.mkdir(exist_ok=True)
 
     # ----- Phase A: fe.json honoured -----------------------------------
-    portA = 7855
+    portA = free_port()
     if port_open(portA):
         return [f"FE-E9: :{portA} already in use"]
     be_logA = scratch / "beA.log"
@@ -399,7 +400,7 @@ def case_FE_E9() -> list[str]:
         wait_port(portA, up=False, budget=10)
 
     # ----- Phase B: CLI overrides fe.json ------------------------------
-    portB = 7856
+    portB = free_port()
     if port_open(portB):
         f.append(f"FE-E9/B: :{portB} already in use")
         return f

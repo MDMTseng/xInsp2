@@ -49,14 +49,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
+sys.path.insert(0, str(REPO_ROOT / "examples" / "lib"))
+from ports import free_port  # noqa: E402
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 FE_EXE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-fe{EXE_SUFFIX}"
 
-# PRIVATE ports reserved for QA Agent EDGE: 7910-7929.
-PORT_ORPHAN = 7910
-PORT_BACKOFF = 7911
-PORT_QUOTE = 7912
-PORT_INJECT = 7913
+# Ephemeral, probed-free ports (were the reserved 7910-7913): a stale/foreign
+# backend on a fixed port would make these edge tests false-fail.
+PORT_ORPHAN = free_port()
+PORT_BACKOFF = free_port()
+PORT_QUOTE = free_port()
+PORT_INJECT = free_port()
 
 
 def port_open(port: int, timeout: float = 0.25) -> bool:
@@ -229,7 +232,7 @@ def main() -> int:
     # A healthy supervisor closes each backend's process/thread/log handles per
     # spawn (fe_main.cpp CloseHandle trio), so the count should be roughly flat.
     print("[QE-L1] handle-leak check across respawns (documented; soft on no tooling)")
-    proc5, log5 = launch_fe(PORT_BACKOFF + 5, str(ROOT), 5, ROOT / "qe_l1.fe.log")
+    proc5, log5 = launch_fe(free_port(), str(ROOT), 5, ROOT / "qe_l1.fe.log")
     try:
         time.sleep(2.0)
         h_early = fe_handle_count(proc5.pid)

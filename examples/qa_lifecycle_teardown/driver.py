@@ -38,7 +38,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "xinsp2_py"))
+sys.path.insert(0, str(REPO_ROOT / "examples" / "lib"))
 from xinsp2 import Client  # noqa: E402
+from ports import free_port  # noqa: E402
 
 SUF = ".exe" if os.name == "nt" else ""
 BE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{SUF}"
@@ -69,15 +71,18 @@ def wait_port(p, proc, secs=20):
 
 
 def test_bind_fail():
-    port = 7891
     d0 = dump_count()
     # SO_EXCLUSIVEADDRUSE: the WS server sets SO_REUSEADDR, so on Windows a plain second
     # backend would hijack-bind the same port and just run. Exclusive-hold forces the
     # bind to genuinely fail so we exercise the early `return 1` path.
+    # NB: let the EXCLUSIVE holder pick the ephemeral port itself (bind :0) — routing
+    # through ports.free_port() would taint the port with SO_REUSEADDR first, and a
+    # subsequent SO_EXCLUSIVEADDRUSE bind on that port fails with WSAEADDRINUSE.
     holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     if os.name == "nt":
         holder.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-    holder.bind(("127.0.0.1", port)); holder.listen(1)
+    holder.bind(("127.0.0.1", 0)); holder.listen(1)
+    port = holder.getsockname()[1]
     try:
         b = subprocess.Popen([str(BE), f"--port={port}"], cwd=str(BE.parent),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -99,7 +104,7 @@ def test_bind_fail():
 
 
 def test_clean_shutdown_with_project():
-    port = 7892
+    port = free_port()
     d0 = dump_count()
     blog = open(ROOT / "be.log", "wb")
     be = subprocess.Popen([str(BE), f"--port={port}"], cwd=str(BE.parent),
@@ -132,7 +137,7 @@ def test_clean_shutdown_with_project():
 
 
 def test_open_close_cycle():
-    port = 7893
+    port = free_port()
     cycles = 8
     d0 = dump_count()
     blog = open(ROOT / "be_cycle.log", "wb")
