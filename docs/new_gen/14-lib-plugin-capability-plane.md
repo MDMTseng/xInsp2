@@ -206,6 +206,12 @@ sibling) + `xi_cap_guard.hpp` (leaf thread-local state):
   chain) BEFORE any lock, so the CallScope deadlock dies at the door. The
   handler runs under `OwnerGuard(provider)` (allocations attributed to the
   lib) with NO CallScope — providers contract to be thread-safe.
+  > **rc-namespace note (cross-ref doc 17):** host-funnel return codes are
+  > PER-VTABLE namespaces, not one global enum. `-5` means **reentrancy** on
+  > `xi.cap.call` (this table) and **sink-target rejection** on the use-door
+  > funnel (`use_pack_process_cb`, doc 17). The two tables are independent
+  > and each is frozen in its own doc — never cross-read a code from one
+  > funnel against the other's table.
 - Published by `install_cap_plane()` next to `install_pack_abi()`
   (default_host_api, certify, tests) through ImagePool slot bridges.
 

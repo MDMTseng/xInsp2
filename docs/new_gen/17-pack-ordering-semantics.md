@@ -137,6 +137,13 @@ entered, no health/quarantine state is touched. The runner's mirror
 (`runner_main.cpp`) carries the same branch for contract symmetry — inert
 there, the runner never marks adapters as sinks.)
 
+> **rc-namespace note (cross-ref doc 14):** host-funnel return codes are
+> PER-VTABLE namespaces, not one global enum. `-5` means **sink-target
+> rejection** on this use-door funnel and **reentrancy** on `xi.cap.call`
+> (the capability funnel, doc 14). The two tables are independent and each
+> is frozen in its own doc — never cross-read a code from one funnel
+> against the other's table.
+
 `push()` on a **non-sink** pack-door target stays inline ("deliver now") —
 the ordering guarantee attaches to the declared sink role, not to the verb.
 
