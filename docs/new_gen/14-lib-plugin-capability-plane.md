@@ -96,9 +96,19 @@ expose preview, record_save export, and any comms plugin — with the image's
 content identity as the memo-cache key, one encode serves all consumers.
 (Encoder reality check, corrected by the pilot survey: turbojpeg is NOT
 actually deployed beside the backend — `XINSP2_HAS_TURBOJPEG` is an opt-in
-cmake switch expecting an external install; the pilot ships the vendored
+cmake switch expecting an external install; the pilot shipped the vendored
 stb_image_write path, and swapping the encoder later is invisible behind the
-capability.) `xi.imgcodec` also proves out the whole plane in-tree (register,
+capability.) **The encoder swap has now LANDED (polaris2/v12-encoder-eviction):
+`xi.imgcodec` encodes through `xi::encode_jpeg` behind the SAME
+`XINSP2_HAS_TURBOJPEG` opt-in the backend used, so the SIMD (turbojpeg) path —
+and its external dep — MOVE OUT of core and into this lib plugin. The host's
+`compress_sink` delegates preview encode to `xi.jpeg.encode` (per-call re-check,
+reentrancy/quarantine/$fault → in-core fallback, dedup deferred to imgcodec's
+content cache — no host double-cache), byte-identical engine-for-engine (proven:
+`cap_jpeg_encode_host_test`). At v12 core's in-core encoder + BACKEND
+`XINSP2_HAS_TURBOJPEG` are deleted and `xi.imgcodec` OWNS the SIMD encoder as the
+sole encode engine (doc 06 §1 row 9 / doc 10 cut-list).**
+`xi.imgcodec` also proves out the whole plane in-tree (register,
 forward, reentrancy guard, quarantine, owner-swept lifecycle) with no external
 consumer needed.
 

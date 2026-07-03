@@ -45,20 +45,25 @@
 // (pack_contract convention) — the funnel's rc stays 0; consumers route the
 // $fault. Hard internal failures return XI_PACK_NULL.
 //
-// ENCODER CHOICE (pilot): stb_image_write, vendored in backend/vendor and
-// compiled into this DLL via backend/src/stb_impl.cpp (the record_save
-// pattern). Deterministic bytes, zero external deps. libjpeg-turbo is NOT
-// actually deployed beside the backend today (XINSP2_HAS_TURBOJPEG is an
-// opt-in cmake switch expecting an external install), so the doc-14 "turbo is
-// already there" assumption does not hold in-tree; swapping this plugin's
-// encoder to turbojpeg later is invisible to every consumer — that is the
-// point of the capability boundary.
+// ENCODER: xi::encode_jpeg (xi/xi_jpeg.hpp) — libjpeg-turbo's direct SIMD path
+// when XINSP2_HAS_TURBOJPEG is ON (the SAME opt-in the backend links), else
+// stb_image_write (vendored in backend/vendor, compiled into this DLL via
+// backend/src/stb_impl.cpp — the record_save pattern; deterministic bytes, zero
+// external deps). polaris2 ENCODE eviction: turbojpeg LEAVES the backend/core and
+// lands HERE, in the lib plugin, so the SIMD encoder + its deps consolidate
+// behind the capability boundary — the host's compress_sink delegates to
+// "xi.jpeg.encode" for perf parity with the pre-eviction in-core turbo path, and
+// at v12 core loses XINSP2_HAS_TURBOJPEG entirely. Same key/params as the core
+// encoder ⇒ byte-identical output engine-for-engine (turbo↔turbo, stb↔stb), so
+// the eviction is invisible to every consumer — the point of the boundary.
 //
 // THREAD SAFETY: handlers arrive concurrently from multiple dispatch threads
 // (the funnel does NOT serialize — the provider contract). The memo cache is
 // mutex-guarded; counters are atomics; config is read through the same mutex.
 //
 #include <xi/xi_abi.hpp>
+#include <xi/xi_image.hpp>
+#include <xi/xi_jpeg.hpp>   // xi::encode_jpeg — turbojpeg (opt-in) → stb fallback
 #include <xi/xi_json.hpp>
 
 #include <atomic>
@@ -72,9 +77,8 @@
 #include <vector>
 
 // stb prototypes (implementation compiled in via backend/src/stb_impl.cpp).
-extern "C" int stbi_write_jpg_to_func(
-    void (*func)(void* context, void* data, int size), void* context,
-    int x, int y, int comp, const void* data, int quality);
+// The JPEG WRITER is reached through xi::encode_jpeg (xi_jpeg.hpp declares its
+// own stbi_write_jpg_to_func extern); only the DECODE side is called directly.
 extern "C" unsigned char* stbi_load_from_memory(
     const unsigned char* buffer, int len, int* x, int* y,
     int* channels_in_file, int desired_channels);
@@ -231,18 +235,16 @@ private:
             hits_.fetch_add(1, std::memory_order_relaxed);
         } else {
             auto fresh = std::make_shared<std::vector<uint8_t>>();
-            auto writer = [](void* ctx, void* data, int size) {
-                auto* v = static_cast<std::vector<uint8_t>*>(ctx);
-                auto* p = static_cast<uint8_t*>(data);
-                v->insert(v->end(), p, p + size);
-            };
-            // xi_pack_image pixels are contiguous (w*h*c) — stb's layout.
-            if (!stbi_write_jpg_to_func(writer, fresh.get(),
-                                        img.width, img.height, img.channels,
-                                        img.pixels, q) ||
-                fresh->empty()) {
+            // xi_pack_image pixels are contiguous (w*h*c) — the encoder's native
+            // interleaved layout; wrap without copy. xi::encode_jpeg dispatches
+            // turbojpeg (XINSP2_HAS_TURBOJPEG) → stb, matching the core encoder
+            // byte-for-byte engine-for-engine (perf parity is the point).
+            xi::Image view = xi::Image::view(
+                img.width, img.height, img.channels,
+                static_cast<const uint8_t*>(img.pixels));
+            if (!xi::encode_jpeg(view, q, *fresh) || fresh->empty()) {
                 return fault_("encode_failed", "image",
-                              "xi.jpeg.encode: stb encoder failed");
+                              "xi.jpeg.encode: encoder failed");
             }
             encodes_.fetch_add(1, std::memory_order_relaxed);
             std::lock_guard<std::mutex> lk(mu_);
