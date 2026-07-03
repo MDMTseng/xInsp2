@@ -1,0 +1,7 @@
+{
+  "name": "qa_pack_stereo",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "stereo", "plugin": "synced_stereo" }
+  ]
+}

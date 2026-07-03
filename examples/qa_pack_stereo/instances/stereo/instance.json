@@ -1,0 +1,7 @@
+{
+  "plugin": "synced_stereo",
+  "config": {
+    "pack_mode": true,
+    "fps": 10
+  }
+}

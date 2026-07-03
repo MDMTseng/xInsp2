@@ -1,0 +1,7 @@
+{
+  "name": "qa_pack_walk",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam", "plugin": "mock_camera" }
+  ]
+}
