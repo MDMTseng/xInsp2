@@ -1,0 +1,36 @@
+{
+  "name": "qa_multi_graph",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "parallelism": {
+    "default_group": "line_a",
+    "groups": [
+      {
+        "name": "line_a",
+        "max_parallel": 1,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest"
+      },
+      {
+        "name": "line_b",
+        "max_parallel": 1,
+        "thread_priority": "normal",
+        "queue_depth": 200,
+        "overflow": "drop_oldest"
+      }
+    ]
+  },
+  "instances": [
+    { "name": "camA", "plugin": "mock_camera" },
+    { "name": "camB", "plugin": "mock_camera" },
+    { "name": "detA", "plugin": "blob_analysis" },
+    { "name": "detB", "plugin": "blob_analysis" },
+    { "name": "expose", "plugin": "expose" }
+  ]
+}
