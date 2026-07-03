@@ -1,0 +1,10 @@
+{
+  "name": "poly_door",
+  "description": "Teaching plugin for the POLYMORPHIC DOOR pattern: ONE xi.pack@1 door dispatches different behaviors on the pack's producer-domain 'type' entry (bare key, NOT $type — the $ namespace is framework-reserved). type=measure returns stats over the image; type=annotate returns a derived overlay entry; an unknown type answers a sealed $fault (unsupported_type) naming the supported set in 'types' — the producer-domain mirror of the capability plane's $v/$versions idiom.",
+  "dll": "poly_door.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "requires": [
+    { "iface": "xi.pack", "min": 1 }
+  ]
+}
