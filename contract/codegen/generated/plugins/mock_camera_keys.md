@@ -3,17 +3,20 @@
 
 | key | constant | type | notes |
 |---|---|---|---|
+| `ack` | `kAck` | string | string (pack-door ack: echoes the applied command name, e.g. "set_gain") |
 | `width` | `kWidth` | int | int |
 | `height` | `kHeight` | int | int |
 | `fps` | `kFps` | int | int |
 | `streaming` | `kStreaming` | bool | bool (get_def only, read-only) |
 | `pack_mode` | `kPackMode` | bool | bool (default false) — emit via the xi.pack@1 door instead of Record (wave-2 pilot) |
+| `gain` | `kGain` | double | double (default 1.0; clamped [0.05, 8.0]) — PACK-MODE brightness multiplier applied to emitted pixels (saturating at 255); the Record path is never scaled |
 | `command` | `kCommand` | string | string (command selector) |
-| `value` | `kValue` | int | int (command payload value) |
+| `value` | `kValue` | double | int (command payload value) |
 | `start` | `kStart` | string (command name) |  |
 | `stop` | `kStop` | string (command name) |  |
 | `get_status` | `kGetStatus` | string (command name) |  |
 | `set_fps` | `kSetFps` | string (command name) |  |
 | `set_resolution` | `kSetResolution` | string (command name) |  |
+| `set_gain` | `kSetGain` | string (command name) |  |
 | `frame` | `kFrame` | image | image (emitted RGB frame) |
 | `seq` | `kSeq` | int | int (frame counter; pack-mode entry) |

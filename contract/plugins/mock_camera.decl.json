@@ -31,6 +31,11 @@
       "key": "pack_mode",
       "type": "bool",
       "doc": "bool (default false) — emit via the xi.pack@1 door instead of Record (wave-2 pilot)"
+    },
+    {
+      "key": "gain",
+      "type": "double",
+      "doc": "double (default 1.0; clamped [0.05, 8.0]) — PACK-MODE brightness multiplier applied to emitted pixels (saturating at 255); the Record path is never scaled"
     }
   ],
   "commands": {
@@ -70,9 +75,26 @@
             "type": "int"
           }
         ]
+      },
+      {
+        "name": "set_gain",
+        "params": [
+          {
+            "key": "value",
+            "arg": "v",
+            "type": "double"
+          }
+        ]
       }
     ]
   },
+  "outputs": [
+    {
+      "key": "ack",
+      "type": "string",
+      "doc": "string (pack-door ack: echoes the applied command name, e.g. \"set_gain\")"
+    }
+  ],
   "output_frame": [
     {
       "key": "frame",
@@ -85,6 +107,11 @@
       "key": "seq",
       "type": "int",
       "doc": "int (frame counter; pack-mode entry)"
+    },
+    {
+      "key": "gain",
+      "type": "double",
+      "doc": "double (pack-mode entry: the brightness gain in effect for THIS frame — the closed-loop echo)"
     }
   ]
 }

@@ -2,13 +2,15 @@
 // gets, exercised PACK-ONLY in the live service (Gate P2 rows "generic
 // producer-agnostic walk", "typed-schema reads", "cross-thread pack capture").
 //
-// mock_camera runs in PACK MODE (entries: seq:i64, frame:image 64x48x3). This
+// mock_camera runs in PACK MODE (entries: seq:i64, gain:f64, frame:image
+// 64x48x3 — gain is the ex-feedback closed-loop echo, see the decl). This
 // script never names xi::Record; observability is the run_result verdict plane
 // alone (pack-only end to end). Per pack it proves:
 //
-//   1. GENERIC WALK — for_each visits exactly the two entries with the right
-//      ABI tags (XI_PACK_TAG_I64 / XI_PACK_TAG_IMAGE), the same producer-
-//      agnostic enumeration expose/record_save do host-side, in script hands.
+//   1. GENERIC WALK — for_each visits exactly the three entries with the right
+//      ABI tags (XI_PACK_TAG_I64 / XI_PACK_TAG_F64 / XI_PACK_TAG_IMAGE), the
+//      same producer-agnostic enumeration expose/record_save do host-side, in
+//      script hands.
 //   2. TYPED-SCHEMA READS — ScriptTypedPack over a declared keyset returns the
 //      same values as the string-keyed reads (the _keys.h consumption pattern,
 //      previously shown only in the manual examples/pack_pilot).
@@ -28,8 +30,8 @@
 // The declared keyset of mock_camera's pack contract (contract/plugins/
 // mock_camera.decl.json): slot order fixes key spelling at compile time.
 struct CamPack {
-    static constexpr std::array<std::string_view, 2> keys = { "seq", "frame" };
-    enum : int { kSeq, kFrame };
+    static constexpr std::array<std::string_view, 3> keys = { "seq", "gain", "frame" };
+    enum : int { kSeq, kGain, kFrame };
 };
 
 static long long checksum(const xi::ScriptPackImage& img) {
@@ -54,6 +56,7 @@ XI_INSPECT_ENTRY(t, frame) {
         if (!keys.empty()) keys += ',';
         keys.append(k);
         if (k == "seq"   && tag != XI_PACK_TAG_I64)   tags_ok = false;
+        if (k == "gain"  && tag != XI_PACK_TAG_F64)   tags_ok = false;
         if (k == "frame" && tag != XI_PACK_TAG_IMAGE) tags_ok = false;
     });
 
@@ -61,6 +64,8 @@ XI_INSPECT_ENTRY(t, frame) {
     auto typed = f.typed<CamPack>();
     int64_t seq_str   = f.get_i64("seq").value_or(-1);
     int64_t seq_typed = typed.get_i64<CamPack::kSeq>().value_or(-2);
+    double  gain_str   = f.get_f64("gain").value_or(-1.0);
+    double  gain_typed = typed.get_f64<CamPack::kGain>().value_or(-2.0);
     auto    img_typed = typed.get_image<CamPack::kFrame>();
 
     // 3. cross-thread capture: ScriptPack by value into a worker thread.
@@ -73,14 +78,17 @@ XI_INSPECT_ENTRY(t, frame) {
     if (auto img = f.get_image("frame")) local_sum = checksum(*img);
 
     bool xthread_ok = worker_sum >= 0 && worker_sum == local_sum;
-    bool pass = n == 2 && tags_ok && seq_str >= 0 && seq_str == seq_typed &&
+    bool pass = n == 3 && tags_ok && seq_str >= 0 && seq_str == seq_typed &&
+                gain_str > 0.0 && gain_str == gain_typed &&
                 img_typed && img_typed->channels == 3 && xthread_ok;
 
     char msg[192];
     std::snprintf(msg, sizeof msg,
-                  "walk n=%d keys=%s tags=%d seq=%lld typed=%lld xthread=%d",
+                  "walk n=%d keys=%s tags=%d seq=%lld typed=%lld gain=%.3f "
+                  "gtyped=%.3f xthread=%d",
                   n, keys.c_str(), tags_ok ? 1 : 0,
-                  (long long)seq_str, (long long)seq_typed, xthread_ok ? 1 : 0);
+                  (long long)seq_str, (long long)seq_typed,
+                  gain_str, gain_typed, xthread_ok ? 1 : 0);
     if (pass) xi::ok(1, msg);
     else      xi::ng(1, msg);
 }

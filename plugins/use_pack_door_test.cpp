@@ -23,8 +23,13 @@
 //   4. FAIL-LOUD CONTRACT — input missing "gray" returns a NORMAL sealed pack
 //      stamped "$fault"=missing_input (not an empty pack).
 //   5. FAIL-CLOSED EDGES — unknown instance (-1), Record-only plugin with no
-//      door (-4, mock_camera), empty input pack, and an older host (callback
+//      door (-4, json_source), empty input pack, and an older host (callback
 //      null) all yield an empty bool-false ScriptPack, never a crash.
+//  5c. (ex-feedback) A SOURCE'S OWN DOOR — mock_camera is bilingual BOTH ways
+//      now: a control pack {command:"set_gain", value} through
+//      use("cam0").process() acks (gain clamped + echoed), and a command-less
+//      pack faults loud (missing_input) — the closed-loop actuation seam
+//      examples/qa_pack_feedback drives live.
 //  5b. (U3, doc 17) SINK REJECTION — process(pack) on a DECLARED ORDERED SINK
 //      is rejected at the funnel (-5, empty ScriptPack); the door never runs.
 //   7. (U1, doc 15) FAULT ROUND-TRIP — ScriptPackBuilder::fault()/src() seal a
@@ -70,6 +75,9 @@
 #ifndef MOCK_DLL_PATH
 #define MOCK_DLL_PATH "xi-mock_camera.dll"
 #endif
+#ifndef JSON_SOURCE_DLL_PATH
+#define JSON_SOURCE_DLL_PATH "xi-json_source.dll"
+#endif
 
 static int g_failures = 0;
 #define CHECK(cond)                                                            \
@@ -82,6 +90,9 @@ static int g_failures = 0;
 #define SECTION(name) std::printf("[test] %s\n", name)
 
 namespace bkeys = xi::blob::keys;
+
+#include "mock_camera_keys.gen.h"   // 5c: the control-door vocabulary
+namespace mkeys = xi::mock_camera::keys;
 
 static int pool_live() { return xi::ImagePool::instance().cumulative().live_now; }
 
@@ -166,26 +177,31 @@ int main() {
     // adapters where use()'s host callback looks them up.
     HMODULE blob_dll = LoadLibraryA(BLOB_DLL_PATH);
     HMODULE mock_dll = LoadLibraryA(MOCK_DLL_PATH);
-    if (!blob_dll || !mock_dll) {
-        std::fprintf(stderr, "FAIL: LoadLibrary err %lu (blob=%p mock=%p)\n",
-                     GetLastError(), (void*)blob_dll, (void*)mock_dll);
+    HMODULE json_dll = LoadLibraryA(JSON_SOURCE_DLL_PATH);   // 5: the Record-only (-4) subject
+    if (!blob_dll || !mock_dll || !json_dll) {
+        std::fprintf(stderr, "FAIL: LoadLibrary err %lu (blob=%p mock=%p json=%p)\n",
+                     GetLastError(), (void*)blob_dll, (void*)mock_dll, (void*)json_dll);
         return 1;
     }
     auto bfac = reinterpret_cast<xi::PluginInfo::CFactoryFn>(GetProcAddress(blob_dll, "xi_plugin_create"));
     auto mfac = reinterpret_cast<xi::PluginInfo::CFactoryFn>(GetProcAddress(mock_dll, "xi_plugin_create"));
-    CHECK(bfac && mfac);
-    if (!bfac || !mfac) return 1;
+    auto jfac = reinterpret_cast<xi::PluginInfo::CFactoryFn>(GetProcAddress(json_dll, "xi_plugin_create"));
+    CHECK(bfac && mfac && jfac);
+    if (!bfac || !mfac || !jfac) return 1;
     void* binst = bfac(&host, "det0");
     void* binst1 = bfac(&host, "det1");   // U1: second door hop for the provenance chain
     void* minst = mfac(&host, "cam0");
-    CHECK(binst && binst1 && minst);
-    if (!binst || !binst1 || !minst) return 1;
+    void* jinst = jfac(&host, "rec0");    // never started: only its (absent) door matters
+    CHECK(binst && binst1 && minst && jinst);
+    if (!binst || !binst1 || !minst || !jinst) return 1;
     xi::InstanceRegistry::instance().add(
         std::make_shared<xi::CAbiInstanceAdapter>("det0", "blob_analysis", blob_dll, binst));
     xi::InstanceRegistry::instance().add(
         std::make_shared<xi::CAbiInstanceAdapter>("det1", "blob_analysis", blob_dll, binst1));
     xi::InstanceRegistry::instance().add(
         std::make_shared<xi::CAbiInstanceAdapter>("cam0", "mock_camera", mock_dll, minst));
+    xi::InstanceRegistry::instance().add(
+        std::make_shared<xi::CAbiInstanceAdapter>("rec0", "json_source", json_dll, jinst));
 
     // Wire the script-side use() seam exactly as the host does per DLL load.
     g_use_host_api_        = (void*)&host;
@@ -271,7 +287,10 @@ int main() {
         auto in = own_pack(build_square_pack(fi), fi);
 
         CHECK(!xi::use("no_such_instance").process(in).valid()); // -1: unknown name
-        CHECK(!xi::use("cam0").process(in).valid());             // -4: source, no pack door
+        // -4: a Record-only plugin (json_source exports no xi.pack@1 door).
+        // mock_camera used to be this edge's subject — it grew a control door
+        // (ex-feedback), so the door-less seat is json_source's now.
+        CHECK(!xi::use("rec0").process(in).valid());
 
         xi::ScriptPack empty;                                    // absence propagates
         CHECK(!xi::use("det0").process(empty).valid());
@@ -307,6 +326,44 @@ int main() {
             // Doctrine sanity: the same target via the non-sink twin still works.
             CHECK(xi::use("det0").process(in).valid());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    SECTION("(5c) ex-feedback: the SOURCE'S OWN door — control pack in, ack out");
+    {
+        // set_gain round-trips: the value is clamped into [0.05, 8.0], applied,
+        // and echoed on the ack (the sealed door output IS the reply).
+        xi::ScriptPackBuilder cb;
+        CHECK(cb.add_str(mkeys::kCommand, mkeys::kSetGain));
+        CHECK(cb.add_f64(mkeys::kValue, 0.5));
+        auto ack = xi::use("cam0").process(cb.seal());
+        CHECK(ack.valid() && !ack.is_fault());
+        CHECK(ack.get_str(mkeys::kAck) && *ack.get_str(mkeys::kAck) == mkeys::kSetGain);
+        CHECK(ack.get_f64(mkeys::kGain).value_or(-1) == 0.5);
+        CHECK(ack.src() && *ack.src() == "cam0");            // glue-stamped producer
+
+        // Out-of-range value: clamped, not rejected (a knob, not a contract).
+        xi::ScriptPackBuilder cb2;
+        cb2.add_str(mkeys::kCommand, mkeys::kSetGain);
+        cb2.add_f64(mkeys::kValue, 99.0);
+        auto ack2 = xi::use("cam0").process(cb2.seal());
+        CHECK(ack2.valid() && ack2.get_f64(mkeys::kGain).value_or(-1) == 8.0);
+
+        // Fail-loud: no command selector -> $fault missing_input, never a no-op.
+        xi::ScriptPackBuilder nb;
+        nb.add_i64(mkeys::kValue, 1);
+        auto f = xi::use("cam0").process(nb.seal());
+        CHECK(f.valid() && f.is_fault());
+        CHECK(f.fault_reason() && *f.fault_reason() == "missing_input");
+        CHECK(f.fault_key() && *f.fault_key() == mkeys::kCommand);
+
+        // get_status reads back the applied knob (and the clamp stuck).
+        xi::ScriptPackBuilder sb;
+        sb.add_str(mkeys::kCommand, mkeys::kGetStatus);
+        auto st = xi::use("cam0").process(sb.seal());
+        CHECK(st.valid() && !st.is_fault());
+        CHECK(st.get_str(mkeys::kAck) && *st.get_str(mkeys::kAck) == mkeys::kGetStatus);
+        CHECK(st.get_f64(mkeys::kGain).value_or(-1) == 8.0);
     }
 
     // -----------------------------------------------------------------------
@@ -420,6 +477,7 @@ int main() {
     xi::InstanceRegistry::instance().clear();
     FreeLibrary(blob_dll);
     FreeLibrary(mock_dll);
+    FreeLibrary(json_dll);
 
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");

@@ -1,0 +1,10 @@
+{
+  "plugin": "mock_camera",
+  "config": {
+    "pack_mode": true,
+    "width": 64,
+    "height": 48,
+    "fps": 20,
+    "gain": 0.2
+  }
+}

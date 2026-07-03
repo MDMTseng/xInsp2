@@ -24,6 +24,7 @@ public:
     Config& height(int v) { j_.set(keys::kHeight, v); return *this; }
     Config& fps(int v) { j_.set(keys::kFps, v); return *this; }
     Config& pack_mode(bool v) { j_.set(keys::kPackMode, v); return *this; }
+    Config& gain(double v) { j_.set(keys::kGain, v); return *this; }
 
     std::string dump() const { return j_.dump(); }
     operator std::string() const { return j_.dump(); }
@@ -43,6 +44,9 @@ public:
     }
     static std::string set_resolution(int w, int h) {
         return xi::Json::object().set(keys::kCommand, keys::kSetResolution).set(keys::kWidth, w).set(keys::kHeight, h).dump();
+    }
+    static std::string set_gain(double v) {
+        return xi::Json::object().set(keys::kCommand, keys::kSetGain).set(keys::kValue, v).dump();
     }
 
 private:

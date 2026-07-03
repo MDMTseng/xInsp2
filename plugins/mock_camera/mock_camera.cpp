@@ -90,6 +90,7 @@ public:
             .set(keys::kFps, fps_.load())
             .set(keys::kStreaming, running_.load())
             .set(keys::kPackMode, pack_mode_.load())
+            .set(keys::kGain, gain_.load())
             .dump();
     }
 
@@ -114,6 +115,9 @@ public:
         // polaris2 wave-2: opt into pack-plane emit (default false). Absent key
         // leaves the current mode (a legacy config keeps emitting Records).
         if (p[keys::kPackMode].valid()) pack_mode_ = p[keys::kPackMode].as_bool(false);
+        // polaris2 ex-feedback: pack-mode brightness multiplier (default 1.0).
+        // Only the pack emit branch scales pixels; the Record path never does.
+        if (p[keys::kGain].is_number()) gain_ = clamp_gain_(p[keys::kGain].as_double());
         return true;
     }
 
@@ -142,17 +146,78 @@ public:
             if (h.as_int() > 0) h_ = h.as_int();
             return get_def();
         }
+        if (command == keys::kSetGain) {
+            // Same fail-loud contract as set_fps: the payload is required.
+            auto v = p[keys::kValue];
+            if (!v.valid())     return xi::contract::fault_json(xi::contract::kMissingInput, keys::kValue, "double");
+            if (!v.is_number()) return xi::contract::fault_json(xi::contract::kWrongType,   keys::kValue, "double");
+            gain_ = clamp_gain_(v.as_double());
+            return get_def();
+        }
         return exchange_unknown_command(command);
+    }
+
+    // ---- pack-door CONSUMER (polaris2 ex-feedback) --------------------------
+    //
+    // The other half of the bilingual source: mock_camera EMITS pack frames
+    // (run_loop below) and now also ACCEPTS control packs through its own
+    // xi.pack@1 door — the closed-loop pattern (analysis in the script,
+    // actuation back into the source, effective on the NEXT emitted frame:
+    // frame-latency control, examples/qa_pack_feedback). The door speaks the
+    // same command vocabulary as exchange(): {command:"set_gain", value:f64}.
+    // Strictly ADDITIVE — the Record emit path is byte-for-byte untouched and
+    // a Record-mode project never routes anything here.
+    using xi::Plugin::process;   // keep the Record process() overload visible
+    void process(xi::PackIn& in, xi::PackOut& out) override {
+        auto cmd = in.str(keys::kCommand);
+        if (!cmd) {
+            out.fault(xi::contract::kMissingInput, keys::kCommand,
+                      "str (door command selector: set_gain | get_status)");
+            return;
+        }
+        if (*cmd == keys::kSetGain) {
+            if (!in.has(keys::kValue)) {
+                out.fault(xi::contract::kMissingInput, keys::kValue, "f64 (brightness gain)");
+                return;
+            }
+            auto v = in.f64(keys::kValue);
+            if (!v) { if (auto iv = in.i64(keys::kValue)) v = (double)*iv; }
+            if (!v) {
+                out.fault(xi::contract::kWrongType, keys::kValue, "f64 (brightness gain)");
+                return;
+            }
+            const double g = clamp_gain_(*v);
+            gain_.store(g);
+            // The ack: the sealed door output IS the reply. `seq` is the frame
+            // counter at ack time — the new gain is in effect for every frame
+            // painted after this store (i.e. no later than seq+1).
+            out.str(keys::kAck, keys::kSetGain);
+            out.f64(keys::kGain, g);
+            out.i64(keys::kSeq, seq_.load());
+            return;
+        }
+        if (*cmd == keys::kGetStatus) {
+            out.str(keys::kAck, keys::kGetStatus);
+            out.f64(keys::kGain, gain_.load());
+            out.i64(keys::kSeq, seq_.load());
+            out.boolean(keys::kStreaming, running_.load());
+            return;
+        }
+        out.fault("unknown_command", keys::kCommand, *cmd);
     }
 
 private:
     static int clamp_fps_(int v) { return v < 1 ? 1 : (v > 60 ? 60 : v); }
+    static double clamp_gain_(double v) { return v < 0.05 ? 0.05 : (v > 8.0 ? 8.0 : v); }
 
     // Config touched from the dispatch/UI thread (set_def/exchange) and read from
     // the capture worker (run_loop) — atomic so those cross-thread reads are sound.
+    // gain_ is additionally written by the pack DOOR (host-driven, another thread).
     std::atomic<int> w_{640}, h_{480}, fps_{10};
     std::atomic<bool> running_{false};
     std::atomic<bool> pack_mode_{false};   // polaris2 wave-2 (default OFF)
+    std::atomic<double> gain_{1.0};        // polaris2 ex-feedback (pack-mode only)
+    std::atomic<int> seq_{0};              // frame counter (door acks read it)
     std::thread thread_;
 
     void start_() {
@@ -171,8 +236,9 @@ private:
     }
 
     void run_loop() {
-        int seq = 0;
+        seq_.store(0);
         while (running_) {
+            const int seq = seq_.load();
             // Snapshot config once per frame (set_def/exchange may retune it live).
             const int w = w_.load(), h = h_.load(), fps = fps_.load();
 
@@ -209,8 +275,22 @@ private:
             // Record path below is the unchanged default; only a project that set
             // pack_mode (and a host that publishes xi.pack@1) takes this branch.
             if (pack_mode_.load() && pack_iface()) {
+                // ex-feedback: apply the door-controlled brightness gain to THIS
+                // frame (saturating multiply; 1.0 is the identity). Pack-mode
+                // only — the Record branch below never scales a pixel. The pack
+                // ECHOES the gain it was painted with, so a closed-loop script
+                // controls against the actual per-frame plant state.
+                const double g = gain_.load();
+                if (g != 1.0) {
+                    const size_t n = (size_t)w * (size_t)h * 3;
+                    for (size_t i = 0; i < n; ++i) {
+                        const double v = p[i] * g;
+                        p[i] = v >= 255.0 ? (uint8_t)255 : (uint8_t)(v + 0.5);
+                    }
+                }
                 xi::PackOut f = new_pack();
                 f.i64(keys::kSeq, seq);
+                f.f64(keys::kGain, g);
                 f.adopt_image(keys::kFrame, w, h, 3, img.pool_handle());
                 emit(std::move(f));
             } else {
@@ -221,7 +301,7 @@ private:
                 rec.image(keys::kFrame, img);
                 emit(rec);
             }
-            seq++;
+            seq_.fetch_add(1);
 
             int sleep_ms = 1000 / std::max(fps, 1);
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
@@ -230,3 +310,9 @@ private:
 };
 
 XI_PLUGIN_IMPL(MockCamera)
+
+// polaris2 ex-feedback: publish the control door (xi.pack@1 consumer). This is
+// what lets a script close the loop on the camera itself:
+// xi::use("cam").process(ctrl) / .push(ctrl). Additive — a host that never
+// probes xi_plugin_get_interface sees exactly the plugin it always saw.
+XI_PLUGIN_PACK_DOOR(MockCamera)
