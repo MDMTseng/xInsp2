@@ -1,4 +1,4 @@
-// xi_mp.hpp — the canonical msgpack codec for the xInsp3 (v3) frame plane.
+// xi_mp.hpp — the canonical msgpack codec for the xInsp3 (v3) pack plane.
 //
 // This is the foundation of the "uniform keyed binary buffer" data plane
 // (docs/new_gen/07-uniform-keyed-buffer-plane.md). It is HEADER-ONLY and has
@@ -13,7 +13,7 @@
 //      (map32/array32/str32/bin32). The output is 100% standard msgpack — any
 //      stock decoder reads it — the writer simply never compacts. The default
 //      builder CANNOT emit ext; ext is a separate, clearly-privileged method
-//      (Writer::ext_privileged) reserved for the frame layer's pool-handle mint.
+//      (Writer::ext_privileged) reserved for the pack layer's pool-handle mint.
 //
 //   2. Reader — a BOUNDED, VALIDATING pull decoder over the FULL standard
 //      msgpack width families (so it reads both our canonical output AND foreign
@@ -142,7 +142,7 @@ public:
     void key(std::string_view k) { str(k); }
 
     // PRIVILEGED. The default builder above cannot emit ext; this is the SOLE
-    // ext path. It exists for (a) the frame layer minting a pool-handle ext and
+    // ext path. It exists for (a) the pack layer minting a pool-handle ext and
     // (b) the canonicalizer passing an accept-listed ext through. Untrusted
     // producers never reach it. Canonical ext width is ext32 (0xc9) always.
     void ext_privileged(int8_t ext_type, const uint8_t* data, size_t len) {
@@ -474,7 +474,7 @@ private:
             case Kind::Map: {
                 if (depth + 1 > max_depth) return Status::DepthExceeded;
                 for (uint32_t k = 0; k < e.len; ++k) {
-                    // Ruling 2: the frame plane is string-keyed. The key must be
+                    // Ruling 2: the pack plane is string-keyed. The key must be
                     // a str scalar (a leaf) — read it directly and reject any
                     // foreign non-string key. validate() stays PERMISSIVE on
                     // duplicate keys (ruling 5 puts dup-rejection at the ingress

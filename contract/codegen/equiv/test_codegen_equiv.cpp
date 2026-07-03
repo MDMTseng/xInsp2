@@ -117,9 +117,9 @@ XI_TEST(gen_blob_output_extractor_reads_every_field) {
     }
 }
 
-// The generated FrameSchema keyset (offset-accessor frame path). slot_of is a
+// The generated PackSchema keyset (offset-accessor frame path). slot_of is a
 // compile-time constant, so these are static_asserts -- a renamed slot is a
-// build error, exactly the keyset-drift guard xi_frame.hpp promises.
+// build error, exactly the keyset-drift guard xi_pack.hpp promises.
 namespace {
 using BS = xi::blob::BlobAnalysisSchema;
 static_assert(BS::slot_count() == 8, "generated blob schema slot count");
@@ -129,10 +129,10 @@ static_assert(BS::slot_of("not_a_key") == -1, "slot_of rejects undeclared key");
 }  // namespace
 
 XI_TEST(gen_blob_typed_frame_round_trips) {
-    xi::TypedFrameBuilder<BS> b;
+    xi::TypedPackBuilder<BS> b;
     b.set_i64<BS::kBlobCount>(2);
     b.set_i64<BS::kThresholdUsed>(100);
-    xi::TypedFrame<BS> f = b.seal();
+    xi::TypedPack<BS> f = b.seal();
     XI_EXPECT(f.get_i64<BS::kBlobCount>().value() == 2);
     XI_EXPECT(f.get_i64<BS::kThresholdUsed>().value() == 100);
     XI_EXPECT(!f.has<BS::kThreshold>());   // declared but unset
@@ -175,7 +175,7 @@ namespace {
 using MS = xi::mock_camera::MockCameraSchema;
 static_assert(MS::slot_count() == 2, "generated mock_camera schema slot count (frame + seq)");
 static_assert(MS::slot_of("frame") == MS::kFrame, "slot_of maps the frame key");
-static_assert(MS::slot_of("seq") == MS::kSeq, "slot_of maps the frame-mode seq entry");
+static_assert(MS::slot_of("seq") == MS::kSeq, "slot_of maps the pack-mode seq entry");
 }  // namespace
 
 int main() {

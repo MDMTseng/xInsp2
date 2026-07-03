@@ -298,14 +298,14 @@ public:
         // polaris2 wave-2 (synthesis §3 pure-door dry run): the plugin's OWN
         // capability door — the symmetric mirror of host->get_interface, resolved
         // via GetProcAddress like prepare/commit (ABI-additive; absent on a
-        // Record-only plugin). Probe it once for the frame process capability. A
-        // plugin that answers xi.frame@1 speaks frame-in/frame-out; NULL = it does
+        // Record-only plugin). Probe it once for the pack process capability. A
+        // plugin that answers xi.pack@1 speaks pack-in/pack-out; NULL = it does
         // not (a Record-era script keeps driving it through process()).
         plugin_get_iface_fn_ = reinterpret_cast<xi_plugin_get_interface_fn>(
             GetProcAddress(dll_, "xi_plugin_get_interface"));
         if (plugin_get_iface_fn_)
-            frame_proc_ = static_cast<const xi_frame_proc_v1*>(
-                plugin_get_iface_fn_("xi.frame", 1));
+            frame_proc_ = static_cast<const xi_pack_proc_v1*>(
+                plugin_get_iface_fn_("xi.pack", 1));
     }
 
     ~CAbiInstanceAdapter() override {
@@ -400,24 +400,24 @@ public:
         return out->image_count;
     }
 
-    // polaris2 wave-2: does this plugin publish the xi.frame@1 frame-in/frame-out
+    // polaris2 wave-2: does this plugin publish the xi.pack@1 pack-in/pack-out
     // door (resolved once at construction via xi_plugin_get_interface)?
-    bool has_frame_door() const { return frame_proc_ && frame_proc_->process_frame; }
+    bool has_pack_door() const { return frame_proc_ && frame_proc_->process; }
 
-    // Drive the plugin's frame door under the SAME per-instance discipline as
+    // Drive the plugin's pack door under the SAME per-instance discipline as
     // process() (OwnerGuard image-leak tagging + CallScope serialization for a
-    // non-reentrant instance). `in` is a sealed host frame handle (borrowed); the
-    // return is a NEW sealed frame handle the caller owns (host frame registry).
-    // XI_FRAME_NULL when the plugin has no door. Caller owns the SEH boundary,
+    // non-reentrant instance). `in` is a sealed host pack handle (borrowed); the
+    // return is a NEW sealed pack handle the caller owns (host pack registry).
+    // XI_PACK_NULL when the plugin has no door. Caller owns the SEH boundary,
     // exactly as with process().
-    xi_frame_handle process_frame_door(xi_frame_handle in) {
-        if (!has_frame_door() || !inst_) return XI_FRAME_NULL;
+    xi_pack_handle run_pack_door(xi_pack_handle in) {
+        if (!has_pack_door() || !inst_) return XI_PACK_NULL;
 #ifndef NDEBUG
-        LcGate lc(this, "process"); if (!lc.ok()) return XI_FRAME_NULL;
+        LcGate lc(this, "process"); if (!lc.ok()) return XI_PACK_NULL;
 #endif
         ImagePool::OwnerGuard og(owner_id_);
         CallScope cs(this);
-        return frame_proc_->process_frame(inst_, in);
+        return frame_proc_->process(inst_, in);
     }
 
     // Frame-perfect config swap (ABI v7). prepare loads the new config's heavy
@@ -621,7 +621,7 @@ private:
     xi_plugin_prepare_fn  prepare_fn_ = nullptr;   // ABI v7, optional
     xi_plugin_commit_fn   commit_fn_  = nullptr;   // ABI v7, optional
     xi_plugin_get_interface_fn plugin_get_iface_fn_ = nullptr;  // wave-2, optional
-    const xi_frame_proc_v1*    frame_proc_          = nullptr;  // xi.frame@1 door (null = absent)
+    const xi_pack_proc_v1*    frame_proc_          = nullptr;  // xi.pack@1 door (null = absent)
     RecordSchema          record_schema_;          // OQ-7, optional (declared==false ⇒ none)
     bool                  doc_input_ok_ = false;
     ImagePoolOwnerId      owner_id_ = 0;

@@ -145,7 +145,7 @@ Bytes bin_boundaries() {
 }
 
 Bytes nested_frame() {
-    // A realistic v3 frame plane: a map of typed entries, one of which is an
+    // A realistic v3 pack plane: a map of typed entries, one of which is an
     // image descriptor (nested map), one a list of blobs (array of maps).
     Writer w;
     w.map(3);
@@ -250,7 +250,7 @@ std::vector<Hostile> hostile_fixtures() {
                   {0xD4, 0x07, 0xAA}, Status::UnexpectedExt});
     hs.push_back({"map_missing_value", "map32(1) with only the key present",
                   {0xDF, 0, 0, 0, 1, 0xA1, 'k'}, Status::Truncated});
-    // Ruling 2 (2026-07-02): the frame plane is string-keyed. A foreign map with
+    // Ruling 2 (2026-07-02): the pack plane is string-keyed. A foreign map with
     // a non-string key is rejected at the boundary (Python's MapKeyError twin).
     hs.push_back({"nonstring_key", "fixmap(1) with an integer key {1: 2}",
                   {0x81, 0x01, 0x02}, Status::NonStringKey});

@@ -190,7 +190,7 @@ add_executable(test_record tests/test_record.cpp)
 target_link_libraries(test_record PRIVATE xi_core)
 add_test(NAME record COMMAND test_record)
 
-# Canonical msgpack codec (xi/xi_mp.hpp) — the v3 frame-plane foundation. The
+# Canonical msgpack codec (xi/xi_mp.hpp) — the v3 pack-plane foundation. The
 # header is zero-dependency (no yyjson, no OpenCV), so the unit test links
 # nothing but the include dir. In-memory properties: writer determinism +
 # canonical widths, reader round-trip, and hostile-input rejection.
@@ -390,17 +390,17 @@ endif()
 add_test(NAME interface_domains COMMAND test_interface_domains)
 # <<< host-api-segregation Phase 3 end.
 
-# polaris2 wave-2: the xi.frame@1 carved data-plane door (xi_frame_abi.hpp) +
-# dispatch dual-carry (TriggerEvent frame slot / TriggerBus::emit_frame). Host
+# polaris2 wave-2: the xi.pack@1 carved data-plane door (xi_pack_abi.hpp) +
+# dispatch dual-carry (TriggerEvent pack slot / TriggerBus::emit_pack). Host
 # side only — the opaque-handle build/read accessors, refcount lifecycle with
-# pooled-handle balance, and a Frame riding the same bus as a Record with no
+# pooled-handle balance, and a Pack riding the same bus as a Record with no
 # crosstalk. The plugin-side door + real end-to-end flow live in the plugin test.
-add_executable(test_frame_door tests/test_frame_door.cpp)
-target_link_libraries(test_frame_door PRIVATE xi_core)
+add_executable(test_pack_door tests/test_pack_door.cpp)
+target_link_libraries(test_pack_door PRIVATE xi_core)
 if(NOT MSVC)
-    target_link_libraries(test_frame_door PRIVATE pthread)
+    target_link_libraries(test_pack_door PRIVATE pthread)
 endif()
-add_test(NAME frame_door COMMAND test_frame_door)
+add_test(NAME pack_door COMMAND test_pack_door)
 
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
@@ -527,18 +527,18 @@ if(NOT MSVC)
 endif()
 add_test(NAME image_pool COMMAND test_image_pool)
 
-# v3 keyed-buffer Frame container (polaris2 wave-1, xi_frame.hpp): lifecycle,
+# v3 keyed-buffer Pack container (polaris2 wave-1, xi_pack.hpp): lifecycle,
 # O(1) offset index, seal/immutability, pooled-handle balance vs ImagePool
 # stats, mixed small/large frames, and the drop-on-crash release story.
-add_executable(test_xi_frame tests/test_xi_frame.cpp)
-target_link_libraries(test_xi_frame PRIVATE xi_core)
+add_executable(test_xi_pack tests/test_xi_pack.cpp)
+target_link_libraries(test_xi_pack PRIVATE xi_core)
 if(NOT MSVC)
-    target_link_libraries(test_xi_frame PRIVATE pthread)
+    target_link_libraries(test_xi_pack PRIVATE pthread)
 endif()
-add_test(NAME xi_frame COMMAND test_xi_frame)
+add_test(NAME xi_pack COMMAND test_xi_pack)
 
 # Ingress canonicalizer (xi_ingress.hpp) — the domain edge (task 1c). The ONLY
-# path from foreign/untrusted msgpack bytes to a Frame entry: structural
+# path from foreign/untrusted msgpack bytes to a Pack entry: structural
 # validation + profile normalization (NaN flatten, dup/non-string-key reject) +
 # the optional semantic seam, and the pool-handle ext rule (never imported).
 add_executable(test_ingress tests/test_ingress.cpp)
@@ -898,22 +898,22 @@ if(NOT MSVC)
 endif()
 _xinsp_perf_gate(perf_hotpath bench_hotpath hotpath.txt)
 
-# Frame-vs-Record GO/NO-GO bench (docs/new_gen/08 §1d): the v3 uniform keyed-
-# buffer plane (xi_frame.hpp + xi_mp.hpp) measured against the v2 shared Record
+# Pack-vs-Record GO/NO-GO bench (docs/new_gen/08 §1d): the v3 uniform keyed-
+# buffer plane (xi_pack.hpp + xi_mp.hpp) measured against the v2 shared Record
 # doc on the SAME per-frame span as bench_hotpath — arena/contiguous build vs
 # mutable-DOM alloc, memcpy hop vs doc-refcount CAS, O(1) sealed offset reads vs
 # yyjson hash lookups, one-shot free vs registry reconciliation. Links xi_core
-# (header-only) for the real ImagePool/DocRegistry/EmitGate/Frame/mp/Record.
-# Gated as `perf_frame` on the metadata-micro medians + each lane's closed-loop
+# (header-only) for the real ImagePool/DocRegistry/EmitGate/Pack/mp/Record.
+# Gated as `perf_pack` on the metadata-micro medians + each lane's closed-loop
 # single-worker p50; no baseline shipped, so it SKIPs-with-reason until captured
 # on the gating machine — same pattern as perf_hotpath/perf_record.
-add_executable(bench_frame tests/bench_frame.cpp)
-target_link_libraries(bench_frame PRIVATE xi_core)
-target_compile_definitions(bench_frame PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
+add_executable(bench_pack tests/bench_pack.cpp)
+target_link_libraries(bench_pack PRIVATE xi_core)
+target_compile_definitions(bench_pack PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
 if(NOT MSVC)
-    target_link_libraries(bench_frame PRIVATE pthread)
+    target_link_libraries(bench_pack PRIVATE pthread)
 endif()
-_xinsp_perf_gate(perf_frame bench_frame frame.txt)
+_xinsp_perf_gate(perf_pack bench_pack pack.txt)
 
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_IPP=1)

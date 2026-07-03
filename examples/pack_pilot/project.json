@@ -1,5 +1,5 @@
 {
-  "name": "frame_pilot",
+  "name": "pack_pilot",
   "script": "inspect.cpp",
   "instances": [
     { "name": "cam", "plugin": "mock_camera" },

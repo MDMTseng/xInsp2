@@ -28,9 +28,9 @@
       "doc": "bool (get_def only, read-only)"
     },
     {
-      "key": "frame_mode",
+      "key": "pack_mode",
       "type": "bool",
-      "doc": "bool (default false) — emit via the xi.frame@1 door instead of Record (wave-2 pilot)"
+      "doc": "bool (default false) — emit via the xi.pack@1 door instead of Record (wave-2 pilot)"
     }
   ],
   "commands": {
@@ -84,7 +84,7 @@
     {
       "key": "seq",
       "type": "int",
-      "doc": "int (frame counter; frame-mode entry)"
+      "doc": "int (frame counter; pack-mode entry)"
     }
   ]
 }

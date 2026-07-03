@@ -140,7 +140,7 @@ std::vector<uint8_t> encode(const Frame& f) {
 // A v2 golden is a channel/seq + a generic entry list. Each field carries its
 // value as a decoder-visible expectation AND is encoded into a V2Entry with its
 // canonical msgpack bytes (scalars/str/bin via xi::mp::Writer, nested msgpack
-// verbatim, image pixels inlined as bin) — the exact bytes the expose frame door
+// verbatim, image pixels inlined as bin) — the exact bytes the expose pack door
 // emits for the same logical frame. The JS + Python decoders decode these same
 // .bin files and assert the field values below.
 
@@ -171,18 +171,18 @@ std::vector<uint8_t> encode_v2(const FrameV2& f) {
         xi::xex1::V2Entry e;
         e.key = fld.key;
         if (fld.kind == "i64") {
-            e.tag = XI_FRAME_TAG_I64; xi::mp::Writer w; w.int_(fld.i); e.value = w.take();
+            e.tag = XI_PACK_TAG_I64; xi::mp::Writer w; w.int_(fld.i); e.value = w.take();
         } else if (fld.kind == "f64") {
-            e.tag = XI_FRAME_TAG_F64; xi::mp::Writer w; w.float_(fld.f); e.value = w.take();
+            e.tag = XI_PACK_TAG_F64; xi::mp::Writer w; w.float_(fld.f); e.value = w.take();
         } else if (fld.kind == "str") {
-            e.tag = XI_FRAME_TAG_STR; xi::mp::Writer w; w.str(fld.s); e.value = w.take();
+            e.tag = XI_PACK_TAG_STR; xi::mp::Writer w; w.str(fld.s); e.value = w.take();
         } else if (fld.kind == "bin") {
-            e.tag = XI_FRAME_TAG_BIN; xi::mp::Writer w; w.bin(fld.bytes.data(), fld.bytes.size());
+            e.tag = XI_PACK_TAG_BIN; xi::mp::Writer w; w.bin(fld.bytes.data(), fld.bytes.size());
             e.value = w.take();
         } else if (fld.kind == "mp") {
-            e.tag = XI_FRAME_TAG_MP; e.value = fld.bytes;   // already-canonical nested bytes
+            e.tag = XI_PACK_TAG_MP; e.value = fld.bytes;   // already-canonical nested bytes
         } else if (fld.kind == "image") {
-            e.tag = XI_FRAME_TAG_IMAGE; e.w = fld.w; e.h = fld.h; e.c = fld.c;
+            e.tag = XI_PACK_TAG_IMAGE; e.w = fld.w; e.h = fld.h; e.c = fld.c;
             e.px = fld.bytes.data(); e.px_len = fld.bytes.size();
         }
         entries.push_back(std::move(e));

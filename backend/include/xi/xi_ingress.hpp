@@ -7,10 +7,10 @@
 // domain INTERIOR relies on WITHOUT re-checking. This header is the total edge
 // that earns that right: it is the ONLY public path from foreign / untrusted
 // msgpack bytes (a comms/MES plugin's inbound payloads, third-party camera
-// chunk data, json_source-style feeds, old replay files) to a Frame entry. See
+// chunk data, json_source-style feeds, old replay files) to a Pack entry. See
 // docs/new_gen/07-uniform-keyed-buffer-plane.md ("Ingress").
 //
-// It sits ABOVE both siblings — xi_mp.hpp (the codec) and xi_frame.hpp (the
+// It sits ABOVE both siblings — xi_mp.hpp (the codec) and xi_pack.hpp (the
 // container) — and composes them into the three-layer ingress of doc 07:
 //
 //   (a) STRUCTURAL well-formedness — bounded nesting depth, declared-vs-actual
@@ -27,13 +27,13 @@
 // EXT / POOL-HANDLE RULE. A pool handle is an msgpack ext value; a forged
 // handle in foreign data would be a fabricated pointer into the pool
 // (use-after-free / type confusion by construction). Handles are mintable ONLY
-// by the frame layer's own allocator (xi_frame's frame_pool). Therefore ingress
+// by the pack layer's own allocator (xi_pack's pack_pool). Therefore ingress
 // NEVER imports a pool-handle ext — not even when a caller's accept-list names
 // it. That is asserted (and, belt-and-braces, stripped from the effective
 // accept-list so the guarantee holds under NDEBUG too). Non-handle foreign ext
 // is rejected by default or downgraded to bin per policy.
 
-#include "xi_frame.hpp"
+#include "xi_pack.hpp"
 #include "xi_mp.hpp"
 
 #include <algorithm>
@@ -47,7 +47,7 @@ namespace xi {
 namespace ingress {
 
 // The reserved msgpack ext type code for a pool handle ("pool ref"). Minted
-// ONLY by the frame layer's allocator; NEVER imported from foreign bytes. The
+// ONLY by the pack layer's allocator; NEVER imported from foreign bytes. The
 // value is a domain reservation (application-specific ext range, 0..127).
 constexpr int8_t kPoolHandleExtType = 0x70;
 
@@ -66,8 +66,8 @@ struct Options {
 
 // The outcome of ingress. `canonical` is meaningful ONLY when ok(): the caller
 // must discard it on any failure. This is a DISTINCT type from a raw byte span:
-// it is the only token that FrameBuilder's foreign-entry path accepts, so
-// untrusted bytes cannot reach a frame except through canonicalize_entry.
+// it is the only token that PackBuilder's foreign-entry path accepts, so
+// untrusted bytes cannot reach a pack except through canonicalize_entry.
 struct Result {
     mp::Status codec_status = mp::Status::Ok;  // layers (a)+(b): the codec verdict
     bool       semantic_ok  = true;            // layer (c): the schema-hook verdict
@@ -77,7 +77,7 @@ struct Result {
     explicit operator bool() const { return ok(); }
 };
 
-// Canonicalize foreign msgpack bytes into a Frame-insertable Result. `type_tag`
+// Canonicalize foreign msgpack bytes into a Pack-insertable Result. `type_tag`
 // is the entry's claimed type (fed to the optional semantic hook; storage is
 // opaque canonical msgpack either way). On any failure the Result is not ok()
 // and its bytes are empty.
@@ -89,7 +89,7 @@ inline Result canonicalize_entry(std::span<const uint8_t> foreign,
     // even where the assert is compiled out (NDEBUG / Release).
     for (int8_t a : opts.ext_policy.accept)
         assert(a != kPoolHandleExtType &&
-               "pool-handle ext is minted by the frame layer, never imported at ingress");
+               "pool-handle ext is minted by the pack layer, never imported at ingress");
     mp::ExtPolicy policy = opts.ext_policy;
     policy.accept.erase(std::remove(policy.accept.begin(), policy.accept.end(),
                                     kPoolHandleExtType),
@@ -117,8 +117,8 @@ inline Result canonicalize_entry(std::span<const uint8_t> foreign,
 // Convenience: canonicalize foreign bytes and, on success, add them to `b` as
 // an opaque canonical-msgpack (Mp) entry under `key`. Returns the ingress
 // Result so the caller can inspect the failure reason. This is the composed
-// "foreign bytes -> sealed frame entry" edge in one call.
-inline Result canonicalize_into(FrameBuilder& b, std::string_view key,
+// "foreign bytes -> sealed pack entry" edge in one call.
+inline Result canonicalize_into(PackBuilder& b, std::string_view key,
                                 std::span<const uint8_t> foreign,
                                 std::string_view type_tag,
                                 const Options& opts = {}) {

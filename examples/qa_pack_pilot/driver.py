@@ -1,25 +1,25 @@
 """
-qa_frame_pilot — e2e for the wave-2 t.frame() script surface (docs/new_gen/08
+qa_pack_pilot — e2e for the wave-2 t.pack() script surface (docs/new_gen/08
 Wave 2, step 4).
 
-mock_camera runs in FRAME MODE: it emits a v3 Frame on the xi.frame@1 plane
-instead of a Record. The frame rides the dual-carry dispatch path to the inspect
-script, which reads it via t.frame() and (a) verdicts it with xi::ok/xi::ng and
+mock_camera runs in PACK MODE: it emits a v3 Pack on the xi.pack@1 plane
+instead of a Record. The pack rides the dual-carry dispatch path to the inspect
+script, which reads it via t.pack() and (a) verdicts it with xi::ok/xi::ng and
 (b) surfaces seq + image dims on the `expose` channel "qa".
 
 Asserts:
-  1. FRAME REACHED THE SCRIPT: >=5 XEX1 frames arrive on channel "qa", each
-     carrying a seq value read out of t.frame() (before the surface existed the
-     script had no way to see a frame-plane emit at all).
+  1. PACK REACHED THE SCRIPT: >=5 XEX1 frames arrive on channel "qa", each
+     carrying a seq value read out of t.pack() (before the surface existed the
+     script had no way to see a pack-plane emit at all).
   2. SEQ MONOTONICITY: the seq values are strictly increasing in arrival order
-     (mock_camera stamps a monotonic frame counter; t.frame().get_i64("seq")
+     (mock_camera stamps a monotonic frame counter; t.pack().get_i64("seq")
      round-trips it, and the ordered dispatch preserves it).
-  3. DIMS: every frame reports w==64, h==48, c==3 — the descriptor read back
+  3. DIMS: every image reports w==64, h==48, c==3 — the descriptor read back
      through the door matches the mock_camera config.
-  4. VERDICT: at least one ok (code>0) run_result arrived — the per-frame verdict
-     the script published while holding the frame.
+  4. VERDICT: at least one ok (code>0) run_result arrived — the per-pack verdict
+     the script published while holding the pack.
 
-Run:  python examples/qa_frame_pilot/driver.py   (Windows; backend built)
+Run:  python examples/qa_pack_pilot/driver.py   (Windows; backend built)
 """
 from __future__ import annotations
 import os, queue, subprocess, sys, time
@@ -37,7 +37,7 @@ PORT = int(os.environ.get("PORT", "7893"))
 
 
 def spawn(port):
-    iso = Path(os.environ["LOCALAPPDATA"]) / "Temp" / "xi_frame_pilot_iso"
+    iso = Path(os.environ["LOCALAPPDATA"]) / "Temp" / "xi_pack_pilot_iso"
     iso.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ); env["TEMP"] = env["TMP"] = str(iso)
     log = open(ROOT / f"backend_{port}.log", "w", encoding="utf-8")
@@ -88,7 +88,7 @@ def main() -> int:
         c.drain_binary()                  # zero the binary baseline
         drain_ok_verdicts(c)              # zero the event baseline
 
-        # Kick mock_camera's capture thread — it emits Frames on the xi.frame@1 plane.
+        # Kick mock_camera's capture thread — it emits Packs on the xi.pack@1 plane.
         c.exchange_instance("cam", {"command": "start"})
 
         seqs: list[int] = []
@@ -113,11 +113,11 @@ def main() -> int:
         c.call("stop")
         ok_verdicts += drain_ok_verdicts(c)
 
-        print(f"frames={len(seqs)} seqs={seqs[:20]} dims0={dims[0] if dims else None} ok_verdicts={ok_verdicts}")
+        print(f"packs={len(seqs)} seqs={seqs[:20]} dims0={dims[0] if dims else None} ok_verdicts={ok_verdicts}")
 
-        # 1. the frame reached the script at all.
+        # 1. the pack reached the script at all.
         if len(seqs) < 5:
-            fails.append(f"too few frame-plane frames reached the script (got {len(seqs)}, want >=5)")
+            fails.append(f"too few pack-plane packs reached the script (got {len(seqs)}, want >=5)")
 
         # 2. seq monotonicity (strictly increasing in arrival order).
         for i in range(1, len(seqs)):
@@ -130,9 +130,9 @@ def main() -> int:
         if bad:
             fails.append(f"frame dims mismatch (want (64,48,3)); saw {bad[:5]}")
 
-        # 4. the per-frame verdict surfaced.
+        # 4. the per-pack verdict surfaced.
         if ok_verdicts < 1:
-            fails.append("no ok run_result verdict arrived while the script held the frame")
+            fails.append("no ok run_result verdict arrived while the script held the pack")
 
     except Exception as e:
         fails.append(f"exception: {e!r}")
@@ -145,9 +145,9 @@ def main() -> int:
     if fails:
         for f in fails:
             print("  -", f)
-        print("VERDICT: FAIL: t.frame() pilot e2e")
+        print("VERDICT: FAIL: t.pack() pilot e2e")
         return 1
-    print("VERDICT: PASS: t.frame() delivered frame-plane frames to the script (seq monotonic, dims ok, verdict surfaced)")
+    print("VERDICT: PASS: t.pack() delivered pack-plane packs to the script (seq monotonic, dims ok, verdict surfaced)")
     return 0
 
 

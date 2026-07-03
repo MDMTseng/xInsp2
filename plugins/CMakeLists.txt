@@ -149,24 +149,24 @@ target_compile_definitions(blob_analysis_test PRIVATE
 add_dependencies(blob_analysis_test blob_analysis)
 add_test(NAME blob_analysis_test COMMAND blob_analysis_test)
 
-# polaris2 wave-2 pilot pair (docs/new_gen/08 Wave 2) — the xi.frame@1 door end
-# to end against the REAL built DLLs: blob_analysis's frame-in/frame-out door
-# (plugin-side capability probe), mock_camera's frame-mode emit through the bus,
+# polaris2 wave-2 pilot pair (docs/new_gen/08 Wave 2) — the xi.pack@1 door end
+# to end against the REAL built DLLs: blob_analysis's pack-in/pack-out door
+# (plugin-side capability probe), mock_camera's pack-mode emit through the bus,
 # the chained flow, fail-loud, and pooled-handle balance. Needs both DLLs + a
-# host ImagePool (make_host_api + install_frame_abi).
-add_executable(frame_pilot_test frame_pilot_test.cpp)
-target_include_directories(frame_pilot_test PRIVATE
+# host ImagePool (make_host_api + install_pack_abi).
+add_executable(pack_pilot_test pack_pilot_test.cpp)
+target_include_directories(pack_pilot_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
     ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera)
-target_compile_definitions(frame_pilot_test PRIVATE
+target_compile_definitions(pack_pilot_test PRIVATE
     BLOB_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis/xi-blob_analysis.dll"
     MOCK_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera.dll")
 if(WIN32)
-    target_link_libraries(frame_pilot_test PRIVATE Ws2_32)
+    target_link_libraries(pack_pilot_test PRIVATE Ws2_32)
 endif()
-add_dependencies(frame_pilot_test blob_analysis mock_camera)
-add_test(NAME frame_pilot_test COMMAND frame_pilot_test)
+add_dependencies(pack_pilot_test blob_analysis mock_camera)
+add_test(NAME pack_pilot_test COMMAND pack_pilot_test)
 
 # mock_camera contract test — config/command surface only (source plugin).
 add_executable(mock_camera_test mock_camera/tests/test_mock_camera.cpp)
@@ -237,9 +237,9 @@ set_tests_properties(xex1_fixtures PROPERTIES
     ENVIRONMENT "XINSP2_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures")
 
 # polaris2 wave-2 step 3 — the memory ≈ wire ≈ disk HEADLINE (docs/new_gen/07 +
-# 08 Wave 2): build a real xi::Frame, dump it to XEX1-v2, and assert the frame's
+# 08 Wave 2): build a real xi::Pack, dump it to XEX1-v2, and assert the pack's
 # in-memory canonical small plane equals the wire bytes equals a disk readback,
-# byte-for-byte. Header-only (xi::Frame + xi::mp + the v2 encoder); no DLL load.
+# byte-for-byte. Header-only (xi::Pack + xi::mp + the v2 encoder); no DLL load.
 add_executable(xex1_v2_identity_test xex1_v2_identity_test.cpp)
 target_include_directories(xex1_v2_identity_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
@@ -247,17 +247,17 @@ target_include_directories(xex1_v2_identity_test PRIVATE
 add_test(NAME xex1_v2_identity_test COMMAND xex1_v2_identity_test)
 
 # polaris2 wave-2 step 3 — the GENERIC PROOF: the REAL expose DLL walks a sealed
-# frame with zero producer knowledge and emits XEX1 (v2 opt-in / v1 default),
+# pack with zero producer knowledge and emits XEX1 (v2 opt-in / v1 default),
 # captured off the host binary sink and decoded back. Needs the built expose DLL
-# + a host ImagePool (make_host_api + install_frame_abi).
-add_executable(expose_frame_test expose_frame_test.cpp)
-target_include_directories(expose_frame_test PRIVATE
+# + a host ImagePool (make_host_api + install_pack_abi).
+add_executable(expose_pack_test expose_pack_test.cpp)
+target_include_directories(expose_pack_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
-target_compile_definitions(expose_frame_test PRIVATE
+target_compile_definitions(expose_pack_test PRIVATE
     EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose.dll")
 if(WIN32)
-    target_link_libraries(expose_frame_test PRIVATE Ws2_32)
+    target_link_libraries(expose_pack_test PRIVATE Ws2_32)
 endif()
-add_dependencies(expose_frame_test expose)
-add_test(NAME expose_frame_test COMMAND expose_frame_test)
+add_dependencies(expose_pack_test expose)
+add_test(NAME expose_pack_test COMMAND expose_pack_test)

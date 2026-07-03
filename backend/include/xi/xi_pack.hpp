@@ -1,31 +1,31 @@
 #pragma once
 //
-// xi_frame.hpp — the v3 uniform keyed-buffer frame container (polaris2 wave-1).
+// xi_pack.hpp — the v3 uniform keyed-buffer pack container (polaris2 wave-1).
 //
-// A frame is ONE thing:  key(string) -> entry, where an entry is
+// A pack is ONE thing:  key(string) -> entry, where an entry is
 // (type tag, const-span bytes). There is no image/metadata split — an image
 // is simply an entry whose tag says "image" and whose pixels live in a pool
 // buffer. See docs/new_gen/07-uniform-keyed-buffer-plane.md for the decision.
 //
 // This header implements the CONTAINER SEMANTICS only:
-//   * Arena     — per-frame bump allocator; owns every small entry's bytes;
-//                 one-shot free at frame end. Its chunks RECYCLE through a
-//                 per-thread freelist (ArenaPool), so a steady stream of frames
+//   * Arena     — per-pack bump allocator; owns every small entry's bytes;
+//                 one-shot free at pack end. Its chunks RECYCLE through a
+//                 per-thread freelist (ArenaPool), so a steady stream of packs
 //                 on one lane's thread stops heap-allocating a fresh chunk per
-//                 frame — the ImagePool discipline in miniature (see below).
+//                 pack — the ImagePool discipline in miniature (see below).
 //   * Builder   — pre-seal, insertion-ordered entry table; the only way to
-//                 add entries. A frame under construction is never shareable.
-//   * seal()    — flips the frame immutable and (for the dynamic, string-keyed
-//                 path) builds the key index; only a sealed Frame crosses to
+//                 add entries. A pack under construction is never shareable.
+//   * seal()    — flips the pack immutable and (for the dynamic, string-keyed
+//                 path) builds the key index; only a sealed Pack crosses to
 //                 consumers.
-//   * Frame     — an immutable, single-owner value: borrowed const views out,
+//   * Pack     — an immutable, single-owner value: borrowed const views out,
 //                 arena freed + pool handles released on destruction. Drop-on-
 //                 crash is EXACTLY destruction (no reconciliation, no COW).
 //
 // TWO ACCESS PATHS, ONE CONTAINER (doc 07 §profile-1, the wave-1 exit-gate
 // condition — docs/new_gen/08 "Wave-1 exit gate — VERDICT"):
 //
-//   * TypedFrame<Schema> — the OFFSET-ACCESSOR read path. When the field set is
+//   * TypedPack<Schema> — the OFFSET-ACCESSOR read path. When the field set is
 //     declared up front (the contract's _keys.h key order), the schema resolves
 //     key->slot at COMPILE TIME; each slot holds a direct pointer to its
 //     canonical bytes, filled once at set. get_i64<kSeq>() is [slot]->ptr->load
@@ -34,23 +34,23 @@
 //     This is the path 07's perf claims are about; it is what a generated
 //     accessor (wave 3) compiles to.
 //
-//   * Frame / FrameBuilder — the DYNAMIC, string-keyed path, for undeclared or
+//   * Pack / PackBuilder — the DYNAMIC, string-keyed path, for undeclared or
 //     runtime keys (generic walkers, ad-hoc producers, ingress-canonicalized
-//     foreign maps). Its index is HYBRID by measurement: a small frame (the hot
+//     foreign maps). Its index is HYBRID by measurement: a small pack (the hot
 //     path) is a linear memcmp scan over the contiguous entry table — which
 //     beats a hash map for a handful of keys and allocates NO index nodes — and
-//     only a large frame builds an unordered_map to keep lookups O(1) at scale.
+//     only a large pack builds an unordered_map to keep lookups O(1) at scale.
 //
 // The msgpack codec is a SIBLING branch. This file speaks to a deliberately
-// tiny internal reader/writer (`frame_mp_detail`) that emits/reads only the
+// tiny internal reader/writer (`pack_mp_detail`) that emits/reads only the
 // canonical max-width scalar/str/bin forms the tests need. At integration it
-// is replaced wholesale by xi_mp.hpp — the Frame API above it does not change.
+// is replaced wholesale by xi_mp.hpp — the Pack API above it does not change.
 //
 // Large payloads (images, big binaries) do NOT live in the arena: they are
 // raw pool buffers referenced by a handle. The handle mechanics are the
 // EXISTING lock-free refcounted ImagePool (xi_image_pool.hpp), reached here
-// through a thin TYPELESS facade (`frame_pool`, task 1e). Handles are minted
-// ONLY by this frame layer — the privileged ext path of doc 07's ingress rule.
+// through a thin TYPELESS facade (`pack_pool`, task 1e). Handles are minted
+// ONLY by this pack layer — the privileged ext path of doc 07's ingress rule.
 //
 
 #include "xi_abi.h"
@@ -70,7 +70,7 @@
 namespace xi {
 
 // ===================================================================
-// frame_mp_detail — minimal canonical-profile msgpack reader/writer.
+// pack_mp_detail — minimal canonical-profile msgpack reader/writer.
 //
 //   SWAP TARGET: replace this whole namespace with xi_mp.hpp at codec
 //   integration. Fixed-width forms only (int64 0xd3, float64 0xcb,
@@ -78,7 +78,7 @@ namespace xi {
 //   just enough to store scalars/strings/small binaries and read them back.
 //   Everything is 100% standard msgpack; a stock decoder reads it.
 // ===================================================================
-namespace frame_mp_detail {
+namespace pack_mp_detail {
 
 inline void put_u64_be(uint8_t* p, uint64_t v) {
     for (int i = 7; i >= 0; --i) { p[i] = uint8_t(v & 0xFF); v >>= 8; }
@@ -125,11 +125,11 @@ inline void write_bin(uint8_t* out, const void* data, size_t n) {
 }
 
 inline int64_t read_i64(const uint8_t* p) {
-    assert(p[0] == 0xd3 && "frame entry is not a canonical int64");
+    assert(p[0] == 0xd3 && "pack entry is not a canonical int64");
     return int64_t(get_u64_be(p + 1));
 }
 inline double read_f64(const uint8_t* p) {
-    assert(p[0] == 0xcb && "frame entry is not a canonical float64");
+    assert(p[0] == 0xcb && "pack entry is not a canonical float64");
     uint64_t bits = get_u64_be(p + 1);
     double v;
     std::memcpy(&v, &bits, sizeof v);
@@ -137,30 +137,30 @@ inline double read_f64(const uint8_t* p) {
 }
 // str/bin readers return a view straight into the arena payload region.
 inline std::string_view read_str(const uint8_t* p) {
-    assert(p[0] == 0xdb && "frame entry is not a canonical str32");
+    assert(p[0] == 0xdb && "pack entry is not a canonical str32");
     uint32_t n = get_u32_be(p + 1);
     return std::string_view(reinterpret_cast<const char*>(p + 5), n);
 }
 inline std::span<const uint8_t> read_bin(const uint8_t* p) {
-    assert(p[0] == 0xc6 && "frame entry is not a canonical bin32");
+    assert(p[0] == 0xc6 && "pack entry is not a canonical bin32");
     uint32_t n = get_u32_be(p + 1);
     return std::span<const uint8_t>(p + 5, n);
 }
 
-} // namespace frame_mp_detail
+} // namespace pack_mp_detail
 
-namespace frame_detail {
+namespace pack_detail {
 
 // ===================================================================
 // ArenaPool — a per-thread freelist of recyclable arena buffers.
 //
-// A frame's arena chunks are BORROWED here and RETURNED here when the frame is
-// destroyed, so a steady stream of frames built and dropped on one thread reuses
-// the same handful of buffers instead of hitting the heap allocator per frame
+// A pack's arena chunks are BORROWED here and RETURNED here when the pack is
+// destroyed, so a steady stream of packs built and dropped on one thread reuses
+// the same handful of buffers instead of hitting the heap allocator per pack
 // (the third cost the wave-1 verdict named: "a fresh heap arena chunk per
-// frame"). It is scoped THREAD-LOCAL — the "per-lane arena cache" the task
-// blesses: a frame is built, sealed, read, and dropped within one lane worker's
-// thread (see doc 07's dispatch), so the recycle needs no lock. A frame that
+// pack"). It is scoped THREAD-LOCAL — the "per-lane arena cache" the task
+// blesses: a pack is built, sealed, read, and dropped within one lane worker's
+// thread (see doc 07's dispatch), so the recycle needs no lock. A pack that
 // legitimately outlives its producer thread still frees correctly — its buffers
 // simply return to whichever thread's pool drops it, or, if that pool is full,
 // free outright. The retained set is bounded (kMaxFree) so an idle thread does
@@ -202,19 +202,19 @@ inline ArenaPool& arena_pool() {
     return p;
 }
 
-} // namespace frame_detail
+} // namespace pack_detail
 
 // ===================================================================
-// Arena — per-frame bump allocator (pool-backed chunks, one-shot free).
+// Arena — per-pack bump allocator (pool-backed chunks, one-shot free).
 //
 // Owns every small entry's bytes AND the interned key strings (dynamic path).
 // Allocation is a pointer bump within the current chunk; growth borrows another
-// chunk from the per-thread ArenaPool. The COMMON case — a frame that fits in
-// one chunk — keeps its chunk INLINE (head_), so a small frame touches the heap
+// chunk from the per-thread ArenaPool. The COMMON case — a pack that fits in
+// one chunk — keeps its chunk INLINE (head_), so a small pack touches the heap
 // allocator zero times (no chunk alloc, no chunk-vector alloc): its buffer came
 // from the recycle pool. Destruction returns every chunk to the pool in one
-// shot (the frame's "arena dies with the frame" discipline). Move-only: moving a
-// frame moves the chunk(s), and because each chunk is a stable heap block, every
+// shot (the pack's "arena dies with the pack" discipline). Move-only: moving a
+// pack moves the chunk(s), and because each chunk is a stable heap block, every
 // span/string_view handed out into the arena stays valid across the move.
 // ===================================================================
 class Arena {
@@ -241,7 +241,7 @@ public:
                     return p;
                 }
             } else {
-                head_ = frame_detail::arena_pool().acquire(n, kChunk);
+                head_ = pack_detail::arena_pool().acquire(n, kChunk);
                 head_used_ = n;
                 used_total_ += n;
                 return head_.data.get();
@@ -257,7 +257,7 @@ public:
             }
         }
         // Current chunk is full: borrow another from the pool (cap >= n).
-        frame_detail::ArenaBuf b = frame_detail::arena_pool().acquire(n, kChunk);
+        pack_detail::ArenaBuf b = pack_detail::arena_pool().acquire(n, kChunk);
         uint8_t* p = b.data.get();
         extra_.push_back(Chunk{std::move(b), n});
         used_total_ += n;
@@ -276,14 +276,14 @@ public:
 
 private:
     struct Chunk {
-        frame_detail::ArenaBuf buf;
+        pack_detail::ArenaBuf buf;
         size_t used = 0;
     };
     static constexpr size_t kChunk = 4096;
     static size_t align_up(size_t v, size_t a) { return (v + (a - 1)) & ~(a - 1); }
 
     void recycle() {
-        auto& pool = frame_detail::arena_pool();
+        auto& pool = pack_detail::arena_pool();
         if (head_.data) pool.release(std::move(head_));
         for (auto& c : extra_) pool.release(std::move(c.buf));
         head_ = {};
@@ -300,23 +300,23 @@ private:
         o.used_total_ = 0;
     }
 
-    frame_detail::ArenaBuf head_;        // inline first chunk (no vector alloc)
+    pack_detail::ArenaBuf head_;        // inline first chunk (no vector alloc)
     size_t head_used_ = 0;
     std::vector<Chunk> extra_;           // spill chunks (only if head overflows)
     size_t used_total_ = 0;
 };
 
 // ===================================================================
-// frame_pool — thin TYPELESS facade over ImagePool (task 1e).
+// pack_pool — thin TYPELESS facade over ImagePool (task 1e).
 //
 // The pool is image-shaped (create(w,h,ch)); a typeless large buffer of N
 // bytes is just a (N,1,1) entry whose pixels ARE the bytes, and an image is a
 // native (w,h,c) entry. Either way the handle is minted here, released here,
-// and resolved to a raw const span. This is the ONLY mint path in the frame
+// and resolved to a raw const span. This is the ONLY mint path in the pack
 // layer, satisfying doc 07's "handles are mintable only by the domain's own
 // allocator". See docs/new_gen/09-bufferpool-audit.md for the reuse verdict.
 // ===================================================================
-namespace frame_pool {
+namespace pack_pool {
 
 // Mint a typeless buffer of n bytes and copy src into it. 0 on failure
 // (n==0, over the pool's 1 GiB per-buffer cap, or pool exhausted).
@@ -340,7 +340,7 @@ inline void addref(xi_image_handle h) {
         ImagePool::instance().addref(h);
 }
 inline void release(xi_image_handle h) {
-    // Guarded so a frame destroyed during static teardown (after the pool
+    // Guarded so a pack destroyed during static teardown (after the pool
     // singleton is gone) never touches a destroyed Meyers singleton.
     if (h && g_image_pool_alive.load(std::memory_order_acquire))
         ImagePool::instance().release(h);
@@ -354,7 +354,7 @@ inline std::span<const uint8_t> view(xi_image_handle h) {
     return std::span<const uint8_t>(p, n);
 }
 
-} // namespace frame_pool
+} // namespace pack_pool
 
 // ===================================================================
 // Entry type tags. The tag is the entry's stored type; the bytes are its
@@ -362,11 +362,11 @@ inline std::span<const uint8_t> view(xi_image_handle h) {
 // pool-buffer reference (Bin above threshold, Image). Unknown/opaque nested
 // msgpack rides as Mp — forward compatibility by construction (doc 07 §2).
 // ===================================================================
-enum class FrameTag : uint8_t { I64, F64, Str, Bin, Image, Mp };
+enum class PackTag : uint8_t { I64, F64, Str, Bin, Image, Mp };
 
 // A borrowed const view of an image entry: dimensions + a zero-copy span over
-// the pool buffer's pixels. Valid for the lifetime of the owning Frame.
-struct FrameImageView {
+// the pool buffer's pixels. Valid for the lifetime of the owning Pack.
+struct PackImageView {
     int32_t width    = 0;
     int32_t height   = 0;
     int32_t channels = 0;
@@ -376,14 +376,14 @@ struct FrameImageView {
 // Bytes at/above this size go to a pool buffer instead of the arena (D1
 // storage duality). Small enough that scalars/short strings stay inline;
 // large enough that kilobyte metadata does not churn the pool.
-inline constexpr size_t kFrameLargeThreshold = 4096;
+inline constexpr size_t kPackLargeThreshold = 4096;
 
-namespace frame_detail {
+namespace pack_detail {
 // One table row for the dynamic, string-keyed path. Insertion-ordered; the key
 // is a view into the arena.
 struct Entry {
     std::string_view key;
-    FrameTag tag = FrameTag::I64;
+    PackTag tag = PackTag::I64;
     bool     pooled = false;              // storage lives in a pool buffer
     const uint8_t* inl = nullptr;         // arena payload (inline forms)
     uint32_t inl_len = 0;                 // arena payload byte length
@@ -396,7 +396,7 @@ struct Entry {
 // slot carries the same payload duality as Entry (inline arena bytes OR a pool
 // buffer). `present` distinguishes a set slot from a declared-but-unset one.
 struct Slot {
-    FrameTag tag = FrameTag::I64;
+    PackTag tag = PackTag::I64;
     bool     present = false;
     bool     pooled  = false;
     const uint8_t* inl = nullptr;
@@ -404,40 +404,40 @@ struct Slot {
     xi_image_handle handle = XI_IMAGE_NULL;
     int32_t  w = 0, h = 0, c = 0;
 };
-} // namespace frame_detail
+} // namespace pack_detail
 
-class FrameBuilder;
+class PackBuilder;
 
 // ===================================================================
-// Frame — a sealed, immutable, single-owner keyed buffer (dynamic path).
+// Pack — a sealed, immutable, single-owner keyed buffer (dynamic path).
 //
-// Only produced by FrameBuilder::seal(); there is no public constructor, so a
-// pre-seal (mutable) frame can never be handed out as a Frame. Move-only:
+// Only produced by PackBuilder::seal(); there is no public constructor, so a
+// pre-seal (mutable) pack can never be handed out as a Pack. Move-only:
 // exactly one owner at a time, whose destruction is the whole lifecycle end —
-// arena freed in one shot, every pool handle released once. A moved-from Frame
+// arena freed in one shot, every pool handle released once. A moved-from Pack
 // owns nothing and releases nothing, so a drop can never double-release.
 //
 // LOOKUP is hybrid (measured honesty, doc 07 §profile-1 "small maps often beat
-// hash with a linear memcmp scan"): a small frame scans the contiguous entry
-// table (no index nodes allocated at all); a large frame builds an
+// hash with a linear memcmp scan"): a small pack scans the contiguous entry
+// table (no index nodes allocated at all); a large pack builds an
 // unordered_map so lookups stay O(1) at scale. The declared-field hot path does
-// NOT use this container — it uses TypedFrame<Schema> below, whose reads are a
+// NOT use this container — it uses TypedPack<Schema> below, whose reads are a
 // direct slot index with no lookup at all.
 // ===================================================================
-class Frame {
+class Pack {
 public:
-    Frame() = default;   // empty/null frame (default-constructed, owns nothing)
-    Frame(Frame&& o) noexcept { move_from(std::move(o)); }
-    Frame& operator=(Frame&& o) noexcept {
+    Pack() = default;   // empty/null pack (default-constructed, owns nothing)
+    Pack(Pack&& o) noexcept { move_from(std::move(o)); }
+    Pack& operator=(Pack&& o) noexcept {
         if (this != &o) { destroy(); move_from(std::move(o)); }
         return *this;
     }
-    Frame(const Frame&) = delete;
-    Frame& operator=(const Frame&) = delete;
-    ~Frame() { destroy(); }
+    Pack(const Pack&) = delete;
+    Pack& operator=(const Pack&) = delete;
+    ~Pack() { destroy(); }
 
     // Above this entry count seal() builds an unordered_map; at or below it the
-    // frame linear-scans its contiguous table (fewer keys than this, a memcmp
+    // pack linear-scans its contiguous table (fewer keys than this, a memcmp
     // scan is faster than a hash lookup AND allocates no index).
     static constexpr size_t kLinearMax = 24;
 
@@ -446,9 +446,9 @@ public:
     bool   empty() const { return entries_.empty(); }
     bool   has(std::string_view key) const { return find(key) != nullptr; }
 
-    std::optional<FrameTag> tag_of(std::string_view key) const {
+    std::optional<PackTag> tag_of(std::string_view key) const {
         const auto* e = find(key);
-        return e ? std::optional<FrameTag>(e->tag) : std::nullopt;
+        return e ? std::optional<PackTag>(e->tag) : std::nullopt;
     }
 
     // Insertion-ordered key walk — the generic-plugin path (record_save,
@@ -459,17 +459,17 @@ public:
     }
 
     // Insertion-ordered index accessors — the O(1) primitives the C-ABI generic
-    // walk (xi_frame_v1.key_at/tag_at) is built on, so a foreign consumer can
+    // walk (xi_pack_v1.key_at/tag_at) is built on, so a foreign consumer can
     // enumerate entries without a producer-supplied key list. UB if i >= size().
     std::string_view key_at(size_t i) const { return entries_[i].key; }
-    FrameTag         tag_at(size_t i) const { return entries_[i].tag; }
+    PackTag         tag_at(size_t i) const { return entries_[i].tag; }
 
     // Raw stored bytes of the i-th entry's INLINE canonical value — the small-
     // plane bytes exactly as they live in the arena (I64/F64/Str/inline-Bin/Mp).
     // This is the memory plane a generic dumper (expose XEX1-v2, record_save)
     // splices to the wire verbatim, so the wire's small plane EQUALS memory
     // byte-for-byte (doc 07). Empty for a POOLED entry (Image, or a Bin above
-    // kFrameLargeThreshold) whose payload is a pool buffer — resolve those with
+    // kPackLargeThreshold) whose payload is a pool buffer — resolve those with
     // get_image / get_bin. UB if i >= size().
     std::span<const uint8_t> raw_at(size_t i) const {
         const auto& e = entries_[i];
@@ -480,37 +480,37 @@ public:
     // ---- typed borrowed reads ----------------------------------------
     std::optional<int64_t> get_i64(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != FrameTag::I64) return std::nullopt;
-        return frame_mp_detail::read_i64(e->inl);
+        if (!e || e->tag != PackTag::I64) return std::nullopt;
+        return pack_mp_detail::read_i64(e->inl);
     }
     std::optional<double> get_f64(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != FrameTag::F64) return std::nullopt;
-        return frame_mp_detail::read_f64(e->inl);
+        if (!e || e->tag != PackTag::F64) return std::nullopt;
+        return pack_mp_detail::read_f64(e->inl);
     }
     std::optional<std::string_view> get_str(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != FrameTag::Str) return std::nullopt;
-        return frame_mp_detail::read_str(e->inl);
+        if (!e || e->tag != PackTag::Str) return std::nullopt;
+        return pack_mp_detail::read_str(e->inl);
     }
     // Binary: resolves storage duality — inline arena bytes OR a pool buffer,
     // both surfaced as one const span (D1 "storage duality, API unity").
     std::optional<std::span<const uint8_t>> get_bin(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != FrameTag::Bin) return std::nullopt;
-        if (e->pooled) return frame_pool::view(e->handle).first(e->inl_len);
-        return frame_mp_detail::read_bin(e->inl);
+        if (!e || e->tag != PackTag::Bin) return std::nullopt;
+        if (e->pooled) return pack_pool::view(e->handle).first(e->inl_len);
+        return pack_mp_detail::read_bin(e->inl);
     }
     // Image descriptor + zero-copy pixel span over the pool buffer.
-    std::optional<FrameImageView> get_image(std::string_view key) const {
+    std::optional<PackImageView> get_image(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != FrameTag::Image) return std::nullopt;
-        return FrameImageView{e->w, e->h, e->c, frame_pool::view(e->handle)};
+        if (!e || e->tag != PackTag::Image) return std::nullopt;
+        return PackImageView{e->w, e->h, e->c, pack_pool::view(e->handle)};
     }
     // Opaque nested msgpack pass-through (unknown type tags, arrays, maps).
     std::optional<std::span<const uint8_t>> get_mp(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != FrameTag::Mp) return std::nullopt;
+        if (!e || e->tag != PackTag::Mp) return std::nullopt;
         return std::span<const uint8_t>(e->inl, e->inl_len);
     }
 
@@ -522,14 +522,14 @@ public:
     size_t handle_count()  const { return handles_.size(); }
 
 private:
-    friend class FrameBuilder;
-    using Entry = frame_detail::Entry;
+    friend class PackBuilder;
+    using Entry = pack_detail::Entry;
 
-    Frame(Arena&& arena, std::vector<Entry>&& entries,
+    Pack(Arena&& arena, std::vector<Entry>&& entries,
           std::vector<xi_image_handle>&& handles)
         : arena_(std::move(arena)), entries_(std::move(entries)),
           handles_(std::move(handles)) {
-        // Only a large frame pays for a hash index; small frames scan (below).
+        // Only a large pack pays for a hash index; small packs scan (below).
         if (entries_.size() > kLinearMax) {
             index_.reserve(entries_.size());
             for (size_t i = 0; i < entries_.size(); ++i)
@@ -538,22 +538,22 @@ private:
     }
 
     const Entry* find(std::string_view key) const {
-        if (index_.empty()) {                 // small frame -> linear scan
+        if (index_.empty()) {                 // small pack -> linear scan
             for (const auto& e : entries_)
                 if (e.key == key) return &e;
             return nullptr;
         }
-        auto it = index_.find(key);           // large frame -> O(1) hash lookup
+        auto it = index_.find(key);           // large pack -> O(1) hash lookup
         return it == index_.end() ? nullptr : &entries_[it->second];
     }
 
     void destroy() {
         // Drop-on-crash == this exact path: release each pool handle exactly
         // once (single owner), then the arena frees in one shot as members die.
-        for (xi_image_handle h : handles_) frame_pool::release(h);
+        for (xi_image_handle h : handles_) pack_pool::release(h);
         handles_.clear();
     }
-    void move_from(Frame&& o) noexcept {
+    void move_from(Pack&& o) noexcept {
         arena_   = std::move(o.arena_);
         entries_ = std::move(o.entries_);
         handles_ = std::move(o.handles_);
@@ -566,56 +566,56 @@ private:
     Arena arena_;
     std::vector<Entry> entries_;                 // insertion order
     std::vector<xi_image_handle> handles_;       // the single owner's handles
-    std::unordered_map<std::string_view, size_t> index_;  // large frames only
+    std::unordered_map<std::string_view, size_t> index_;  // large packs only
 };
 
-template <> inline std::optional<int64_t> Frame::get<int64_t>(std::string_view k) const { return get_i64(k); }
-template <> inline std::optional<double>  Frame::get<double>(std::string_view k) const  { return get_f64(k); }
+template <> inline std::optional<int64_t> Pack::get<int64_t>(std::string_view k) const { return get_i64(k); }
+template <> inline std::optional<double>  Pack::get<double>(std::string_view k) const  { return get_f64(k); }
 
 // ===================================================================
-// FrameBuilder — the pre-seal, insertion-ordered entry table (dynamic path).
+// PackBuilder — the pre-seal, insertion-ordered entry table (dynamic path).
 //
-// The ONLY way to populate a dynamic frame. add_* assert the builder is not yet
+// The ONLY way to populate a dynamic pack. add_* assert the builder is not yet
 // sealed (post-seal writes assert — doc 07 lifecycle step 2). seal() moves the
-// arena, table, and handle ledger into an immutable Frame and empties the
+// arena, table, and handle ledger into an immutable Pack and empties the
 // builder, so a builder can neither be sealed twice nor written after seal.
 // ===================================================================
-class FrameBuilder {
+class PackBuilder {
 public:
-    FrameBuilder() = default;
-    FrameBuilder(FrameBuilder&&) = default;
-    FrameBuilder& operator=(FrameBuilder&&) = default;
-    FrameBuilder(const FrameBuilder&) = delete;
-    FrameBuilder& operator=(const FrameBuilder&) = delete;
-    ~FrameBuilder() {
+    PackBuilder() = default;
+    PackBuilder(PackBuilder&&) = default;
+    PackBuilder& operator=(PackBuilder&&) = default;
+    PackBuilder(const PackBuilder&) = delete;
+    PackBuilder& operator=(const PackBuilder&) = delete;
+    ~PackBuilder() {
         // A builder abandoned without seal() still owns any handles it minted
         // (e.g. a producer that faults mid-build) — release them, no leak.
-        for (xi_image_handle h : handles_) frame_pool::release(h);
+        for (xi_image_handle h : handles_) pack_pool::release(h);
     }
 
     bool sealed() const { return sealed_; }
 
     void add_i64(std::string_view key, int64_t v) {
-        Entry& e = begin_inline(key, FrameTag::I64, frame_mp_detail::kI64Size);
-        frame_mp_detail::write_i64(const_cast<uint8_t*>(e.inl), v);
+        Entry& e = begin_inline(key, PackTag::I64, pack_mp_detail::kI64Size);
+        pack_mp_detail::write_i64(const_cast<uint8_t*>(e.inl), v);
     }
     void add_f64(std::string_view key, double v) {
-        Entry& e = begin_inline(key, FrameTag::F64, frame_mp_detail::kF64Size);
-        frame_mp_detail::write_f64(const_cast<uint8_t*>(e.inl), v);
+        Entry& e = begin_inline(key, PackTag::F64, pack_mp_detail::kF64Size);
+        pack_mp_detail::write_f64(const_cast<uint8_t*>(e.inl), v);
     }
     void add_str(std::string_view key, std::string_view v) {
-        Entry& e = begin_inline(key, FrameTag::Str, frame_mp_detail::str_size(v.size()));
-        frame_mp_detail::write_str(const_cast<uint8_t*>(e.inl), v);
+        Entry& e = begin_inline(key, PackTag::Str, pack_mp_detail::str_size(v.size()));
+        pack_mp_detail::write_str(const_cast<uint8_t*>(e.inl), v);
     }
     // Binary: small stays inline (canonical bin32 in the arena); large is
     // minted into a pool buffer (D1). Either way get_bin returns one span.
     void add_bin(std::string_view key, const void* data, size_t n) {
         assert(!sealed_ && "add after seal");
-        if (n >= kFrameLargeThreshold) {
-            xi_image_handle h = frame_pool::alloc_bytes(data, n);
+        if (n >= kPackLargeThreshold) {
+            xi_image_handle h = pack_pool::alloc_bytes(data, n);
             Entry e;
             e.key = arena_.intern(key);
-            e.tag = FrameTag::Bin;
+            e.tag = PackTag::Bin;
             e.pooled = true;
             e.handle = h;
             e.inl_len = uint32_t(n);   // logical byte length within the buffer
@@ -623,33 +623,33 @@ public:
             push(std::move(e), h);
             return;
         }
-        Entry& e = begin_inline(key, FrameTag::Bin, frame_mp_detail::bin_size(n));
-        frame_mp_detail::write_bin(const_cast<uint8_t*>(e.inl), data, n);
+        Entry& e = begin_inline(key, PackTag::Bin, pack_mp_detail::bin_size(n));
+        pack_mp_detail::write_bin(const_cast<uint8_t*>(e.inl), data, n);
     }
     // Image: pixels always pooled (aligned raw buffer); descriptor is the
     // dims carried on the entry. Copies the caller's pixels into a fresh
-    // frame-owned buffer.
+    // pack-owned buffer.
     void add_image(std::string_view key, int32_t w, int32_t h, int32_t c,
                    const void* pixels) {
         assert(!sealed_ && "add after seal");
-        xi_image_handle handle = frame_pool::alloc_image(w, h, c, pixels);
+        xi_image_handle handle = pack_pool::alloc_image(w, h, c, pixels);
         Entry e;
         e.key = arena_.intern(key);
-        e.tag = FrameTag::Image;
+        e.tag = PackTag::Image;
         e.pooled = true;
         e.handle = handle;
         e.w = w; e.h = h; e.c = c;
         push(std::move(e), handle);
     }
     // Adopt an ALREADY-pooled handle (zero-copy) as an image entry — addref so
-    // the frame becomes a co-owner and releases its ref on drop.
+    // the pack becomes a co-owner and releases its ref on drop.
     void adopt_image(std::string_view key, int32_t w, int32_t h, int32_t c,
                      xi_image_handle handle) {
         assert(!sealed_ && "add after seal");
-        frame_pool::addref(handle);
+        pack_pool::addref(handle);
         Entry e;
         e.key = arena_.intern(key);
-        e.tag = FrameTag::Image;
+        e.tag = PackTag::Image;
         e.pooled = true;
         e.handle = handle;
         e.w = w; e.h = h; e.c = c;
@@ -666,23 +666,23 @@ public:
     // and refuses forged pool-handle ext BEFORE producing the canonical bytes
     // this method then stores. "The safe path is the only path" (doc 07 Ingress).
     void add_mp(std::string_view key, const void* mp, size_t n) {
-        Entry& e = begin_inline(key, FrameTag::Mp, n);
+        Entry& e = begin_inline(key, PackTag::Mp, n);
         if (n) std::memcpy(const_cast<uint8_t*>(e.inl), mp, n);
     }
 
-    // Flip immutable: hand arena/table/handles to a Frame, empty the builder.
-    Frame seal() {
+    // Flip immutable: hand arena/table/handles to a Pack, empty the builder.
+    Pack seal() {
         assert(!sealed_ && "double seal");
         sealed_ = true;
-        return Frame(std::move(arena_), std::move(entries_), std::move(handles_));
+        return Pack(std::move(arena_), std::move(entries_), std::move(handles_));
     }
 
 private:
-    using Entry = frame_detail::Entry;
+    using Entry = pack_detail::Entry;
 
     // Reserve `n` arena bytes for an inline entry, register it, return the row
     // (its `inl` points at the reserved bytes for the caller to fill).
-    Entry& begin_inline(std::string_view key, FrameTag tag, size_t n) {
+    Entry& begin_inline(std::string_view key, PackTag tag, size_t n) {
         assert(!sealed_ && "add after seal");
         Entry e;
         e.key = arena_.intern(key);
@@ -704,16 +704,16 @@ private:
 };
 
 // ===================================================================
-// FrameSchema<Derived> — a compile-time declared keyset (the CONTRACT key order,
+// PackSchema<Derived> — a compile-time declared keyset (the CONTRACT key order,
 // the _keys.h pattern). A schema is the door to the OFFSET-ACCESSOR read path:
 // its keys are known at compile time, so a key resolves to a SLOT (a fixed
-// index) at compile time, and TypedFrame reads that slot directly — no hash,
+// index) at compile time, and TypedPack reads that slot directly — no hash,
 // no scan, no string compare, and nothing interned (the keys are the schema's
 // own static constants).
 //
 // A schema is a tiny CRTP struct the plugin (or wave-3 codegen) declares once:
 //
-//   struct BlobSchema : xi::FrameSchema<BlobSchema> {
+//   struct BlobSchema : xi::PackSchema<BlobSchema> {
 //       static constexpr std::array<std::string_view, 4> keys = {
 //           "threshold", "blob_count", "mean_area", "label" };
 //       enum : int { kThreshold, kBlobCount, kMeanArea, kLabel };
@@ -724,7 +724,7 @@ private:
 // contract's duty (doc 07 §profile-1 / xi_mp.hpp header) — the schema fixes it.
 // ===================================================================
 template <class Derived>
-struct FrameSchema {
+struct PackSchema {
     static constexpr size_t slot_count() { return Derived::keys.size(); }
     static constexpr std::string_view name_of(size_t slot) { return Derived::keys[slot]; }
 
@@ -745,35 +745,35 @@ struct FrameSchema {
     }
 };
 
-template <class Schema> class TypedFrameBuilder;
+template <class Schema> class TypedPackBuilder;
 
 // ===================================================================
-// TypedFrame<Schema> — a sealed, immutable frame whose declared fields are read
+// TypedPack<Schema> — a sealed, immutable pack whose declared fields are read
 // by DIRECT SLOT INDEX (the offset-accessor read path). get_i64<kSeq>() is
 // slots_[kSeq] -> ptr -> canonical decode: O(1) with no lookup structure at all,
 // the C3 claim (doc 07 §profile-1) realized in the container.
 //
-// Undeclared / dynamic keys are supported too (mixed frames): they live in a
+// Undeclared / dynamic keys are supported too (mixed packs): they live in a
 // small string-keyed side list scanned linearly — the general fallback. Same
-// single-owner, move-only, one-shot-free lifecycle as Frame; the arena and every
+// single-owner, move-only, one-shot-free lifecycle as Pack; the arena and every
 // pool handle (declared slot OR dynamic entry) release exactly once on drop.
 // ===================================================================
 template <class Schema>
-class TypedFrame {
+class TypedPack {
 public:
     static constexpr size_t N = Schema::slot_count();
-    using Slot  = frame_detail::Slot;
-    using Entry = frame_detail::Entry;
+    using Slot  = pack_detail::Slot;
+    using Entry = pack_detail::Entry;
 
-    TypedFrame() = default;
-    TypedFrame(TypedFrame&& o) noexcept { move_from(std::move(o)); }
-    TypedFrame& operator=(TypedFrame&& o) noexcept {
+    TypedPack() = default;
+    TypedPack(TypedPack&& o) noexcept { move_from(std::move(o)); }
+    TypedPack& operator=(TypedPack&& o) noexcept {
         if (this != &o) { destroy(); move_from(std::move(o)); }
         return *this;
     }
-    TypedFrame(const TypedFrame&) = delete;
-    TypedFrame& operator=(const TypedFrame&) = delete;
-    ~TypedFrame() { destroy(); }
+    TypedPack(const TypedPack&) = delete;
+    TypedPack& operator=(const TypedPack&) = delete;
+    ~TypedPack() { destroy(); }
 
     // ---- structure ---------------------------------------------------
     // Count of fields actually SET (declared slots present + dynamic entries).
@@ -796,10 +796,10 @@ public:
     }
 
     template <int SlotIdx>
-    std::optional<FrameTag> tag_of() const {
+    std::optional<PackTag> tag_of() const {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         const Slot& s = slots_[SlotIdx];
-        return s.present ? std::optional<FrameTag>(s.tag) : std::nullopt;
+        return s.present ? std::optional<PackTag>(s.tag) : std::nullopt;
     }
 
     // Walk every set field: declared slots in schema order, then dynamic keys in
@@ -816,43 +816,43 @@ public:
     std::optional<int64_t> get_i64() const {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         const Slot& s = slots_[SlotIdx];
-        if (!s.present || s.tag != FrameTag::I64) return std::nullopt;
-        return frame_mp_detail::read_i64(s.inl);
+        if (!s.present || s.tag != PackTag::I64) return std::nullopt;
+        return pack_mp_detail::read_i64(s.inl);
     }
     template <int SlotIdx>
     std::optional<double> get_f64() const {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         const Slot& s = slots_[SlotIdx];
-        if (!s.present || s.tag != FrameTag::F64) return std::nullopt;
-        return frame_mp_detail::read_f64(s.inl);
+        if (!s.present || s.tag != PackTag::F64) return std::nullopt;
+        return pack_mp_detail::read_f64(s.inl);
     }
     template <int SlotIdx>
     std::optional<std::string_view> get_str() const {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         const Slot& s = slots_[SlotIdx];
-        if (!s.present || s.tag != FrameTag::Str) return std::nullopt;
-        return frame_mp_detail::read_str(s.inl);
+        if (!s.present || s.tag != PackTag::Str) return std::nullopt;
+        return pack_mp_detail::read_str(s.inl);
     }
     template <int SlotIdx>
     std::optional<std::span<const uint8_t>> get_bin() const {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         const Slot& s = slots_[SlotIdx];
-        if (!s.present || s.tag != FrameTag::Bin) return std::nullopt;
-        if (s.pooled) return frame_pool::view(s.handle).first(s.inl_len);
-        return frame_mp_detail::read_bin(s.inl);
+        if (!s.present || s.tag != PackTag::Bin) return std::nullopt;
+        if (s.pooled) return pack_pool::view(s.handle).first(s.inl_len);
+        return pack_mp_detail::read_bin(s.inl);
     }
     template <int SlotIdx>
-    std::optional<FrameImageView> get_image() const {
+    std::optional<PackImageView> get_image() const {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         const Slot& s = slots_[SlotIdx];
-        if (!s.present || s.tag != FrameTag::Image) return std::nullopt;
-        return FrameImageView{s.w, s.h, s.c, frame_pool::view(s.handle)};
+        if (!s.present || s.tag != PackTag::Image) return std::nullopt;
+        return PackImageView{s.w, s.h, s.c, pack_pool::view(s.handle)};
     }
     template <int SlotIdx>
     std::optional<std::span<const uint8_t>> get_mp() const {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         const Slot& s = slots_[SlotIdx];
-        if (!s.present || s.tag != FrameTag::Mp) return std::nullopt;
+        if (!s.present || s.tag != PackTag::Mp) return std::nullopt;
         return std::span<const uint8_t>(s.inl, s.inl_len);
     }
 
@@ -866,22 +866,22 @@ public:
         int s = Schema::slot_of_runtime(key);
         if (s >= 0) return slot_i64(slots_[s]);
         const Entry* e = find_dyn(key);
-        if (!e || e->tag != FrameTag::I64) return std::nullopt;
-        return frame_mp_detail::read_i64(e->inl);
+        if (!e || e->tag != PackTag::I64) return std::nullopt;
+        return pack_mp_detail::read_i64(e->inl);
     }
     std::optional<double> get_f64(std::string_view key) const {
         int s = Schema::slot_of_runtime(key);
         if (s >= 0) return slot_f64(slots_[s]);
         const Entry* e = find_dyn(key);
-        if (!e || e->tag != FrameTag::F64) return std::nullopt;
-        return frame_mp_detail::read_f64(e->inl);
+        if (!e || e->tag != PackTag::F64) return std::nullopt;
+        return pack_mp_detail::read_f64(e->inl);
     }
     std::optional<std::string_view> get_str(std::string_view key) const {
         int s = Schema::slot_of_runtime(key);
         if (s >= 0) return slot_str(slots_[s]);
         const Entry* e = find_dyn(key);
-        if (!e || e->tag != FrameTag::Str) return std::nullopt;
-        return frame_mp_detail::read_str(e->inl);
+        if (!e || e->tag != PackTag::Str) return std::nullopt;
+        return pack_mp_detail::read_str(e->inl);
     }
 
     // ---- diagnostics -------------------------------------------------
@@ -894,23 +894,23 @@ public:
     }
 
 private:
-    friend class TypedFrameBuilder<Schema>;
+    friend class TypedPackBuilder<Schema>;
 
-    TypedFrame(Arena&& arena, const std::array<Slot, N>& slots,
+    TypedPack(Arena&& arena, const std::array<Slot, N>& slots,
                std::vector<Entry>&& dyn)
         : arena_(std::move(arena)), slots_(slots), dyn_(std::move(dyn)) {}
 
     static std::optional<int64_t> slot_i64(const Slot& s) {
-        if (!s.present || s.tag != FrameTag::I64) return std::nullopt;
-        return frame_mp_detail::read_i64(s.inl);
+        if (!s.present || s.tag != PackTag::I64) return std::nullopt;
+        return pack_mp_detail::read_i64(s.inl);
     }
     static std::optional<double> slot_f64(const Slot& s) {
-        if (!s.present || s.tag != FrameTag::F64) return std::nullopt;
-        return frame_mp_detail::read_f64(s.inl);
+        if (!s.present || s.tag != PackTag::F64) return std::nullopt;
+        return pack_mp_detail::read_f64(s.inl);
     }
     static std::optional<std::string_view> slot_str(const Slot& s) {
-        if (!s.present || s.tag != FrameTag::Str) return std::nullopt;
-        return frame_mp_detail::read_str(s.inl);
+        if (!s.present || s.tag != PackTag::Str) return std::nullopt;
+        return pack_mp_detail::read_str(s.inl);
     }
     const Entry* find_dyn(std::string_view key) const {
         for (const auto& e : dyn_) if (e.key == key) return &e;
@@ -919,12 +919,12 @@ private:
 
     void destroy() {
         for (Slot& s : slots_)
-            if (s.present && s.handle) { frame_pool::release(s.handle); s.handle = XI_IMAGE_NULL; }
+            if (s.present && s.handle) { pack_pool::release(s.handle); s.handle = XI_IMAGE_NULL; }
         for (Entry& e : dyn_)
-            if (e.handle) frame_pool::release(e.handle);
+            if (e.handle) pack_pool::release(e.handle);
         dyn_.clear();
     }
-    void move_from(TypedFrame&& o) noexcept {
+    void move_from(TypedPack&& o) noexcept {
         arena_ = std::move(o.arena_);
         slots_ = o.slots_;
         dyn_   = std::move(o.dyn_);
@@ -939,35 +939,35 @@ private:
 
 template <class Schema>
 template <class T, int SlotIdx>
-std::optional<T> TypedFrame<Schema>::get() const {
+std::optional<T> TypedPack<Schema>::get() const {
     if constexpr (std::is_same_v<T, int64_t>) return get_i64<SlotIdx>();
     else if constexpr (std::is_same_v<T, double>) return get_f64<SlotIdx>();
-    else { static_assert(sizeof(T) == 0, "TypedFrame::get<T,slot> supports int64_t / double"); }
+    else { static_assert(sizeof(T) == 0, "TypedPack::get<T,slot> supports int64_t / double"); }
 }
 
 // ===================================================================
-// TypedFrameBuilder<Schema> — populate a schema frame by SLOT. set_i64<kSeq>(v)
+// TypedPackBuilder<Schema> — populate a schema pack by SLOT. set_i64<kSeq>(v)
 // writes canonical bytes into the arena and points the slot at them; the KEY IS
 // NEVER STORED OR INTERNED (it is the schema's static constant). Undeclared keys
 // route to add_*(key, ...) into the dynamic side list (interned there, the
-// general fallback). seal() flips immutable into a TypedFrame.
+// general fallback). seal() flips immutable into a TypedPack.
 // ===================================================================
 template <class Schema>
-class TypedFrameBuilder {
+class TypedPackBuilder {
 public:
     static constexpr size_t N = Schema::slot_count();
-    using Slot  = frame_detail::Slot;
-    using Entry = frame_detail::Entry;
+    using Slot  = pack_detail::Slot;
+    using Entry = pack_detail::Entry;
 
-    TypedFrameBuilder() = default;
-    TypedFrameBuilder(TypedFrameBuilder&&) = default;
-    TypedFrameBuilder& operator=(TypedFrameBuilder&&) = default;
-    TypedFrameBuilder(const TypedFrameBuilder&) = delete;
-    TypedFrameBuilder& operator=(const TypedFrameBuilder&) = delete;
-    ~TypedFrameBuilder() {
+    TypedPackBuilder() = default;
+    TypedPackBuilder(TypedPackBuilder&&) = default;
+    TypedPackBuilder& operator=(TypedPackBuilder&&) = default;
+    TypedPackBuilder(const TypedPackBuilder&) = delete;
+    TypedPackBuilder& operator=(const TypedPackBuilder&) = delete;
+    ~TypedPackBuilder() {
         // Abandoned without seal(): release handles minted into slots + dyn list.
-        for (Slot& s : slots_) if (s.present && s.handle) frame_pool::release(s.handle);
-        for (Entry& e : dyn_)  if (e.handle) frame_pool::release(e.handle);
+        for (Slot& s : slots_) if (s.present && s.handle) pack_pool::release(s.handle);
+        for (Entry& e : dyn_)  if (e.handle) pack_pool::release(e.handle);
     }
 
     bool sealed() const { return sealed_; }
@@ -975,93 +975,93 @@ public:
     // ---- typed slot setters (no key interned; slot is compile-time) ----------
     template <int SlotIdx>
     void set_i64(int64_t v) {
-        Slot& s = begin_slot<SlotIdx>(FrameTag::I64, frame_mp_detail::kI64Size);
-        frame_mp_detail::write_i64(const_cast<uint8_t*>(s.inl), v);
+        Slot& s = begin_slot<SlotIdx>(PackTag::I64, pack_mp_detail::kI64Size);
+        pack_mp_detail::write_i64(const_cast<uint8_t*>(s.inl), v);
     }
     template <int SlotIdx>
     void set_f64(double v) {
-        Slot& s = begin_slot<SlotIdx>(FrameTag::F64, frame_mp_detail::kF64Size);
-        frame_mp_detail::write_f64(const_cast<uint8_t*>(s.inl), v);
+        Slot& s = begin_slot<SlotIdx>(PackTag::F64, pack_mp_detail::kF64Size);
+        pack_mp_detail::write_f64(const_cast<uint8_t*>(s.inl), v);
     }
     template <int SlotIdx>
     void set_str(std::string_view v) {
-        Slot& s = begin_slot<SlotIdx>(FrameTag::Str, frame_mp_detail::str_size(v.size()));
-        frame_mp_detail::write_str(const_cast<uint8_t*>(s.inl), v);
+        Slot& s = begin_slot<SlotIdx>(PackTag::Str, pack_mp_detail::str_size(v.size()));
+        pack_mp_detail::write_str(const_cast<uint8_t*>(s.inl), v);
     }
     template <int SlotIdx>
     void set_bin(const void* data, size_t n) {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         assert(!sealed_ && "add after seal");
         Slot& s = slots_[SlotIdx];
-        if (n >= kFrameLargeThreshold) {
-            xi_image_handle h = frame_pool::alloc_bytes(data, n);
-            s.tag = FrameTag::Bin; s.present = true; s.pooled = true;
+        if (n >= kPackLargeThreshold) {
+            xi_image_handle h = pack_pool::alloc_bytes(data, n);
+            s.tag = PackTag::Bin; s.present = true; s.pooled = true;
             s.handle = h; s.inl_len = uint32_t(n);
             s.w = int32_t(n); s.h = 1; s.c = 1;
             return;
         }
         s = Slot{};
-        s.tag = FrameTag::Bin; s.present = true;
-        s.inl = arena_.alloc(frame_mp_detail::bin_size(n));
-        s.inl_len = uint32_t(frame_mp_detail::bin_size(n));
-        frame_mp_detail::write_bin(const_cast<uint8_t*>(s.inl), data, n);
+        s.tag = PackTag::Bin; s.present = true;
+        s.inl = arena_.alloc(pack_mp_detail::bin_size(n));
+        s.inl_len = uint32_t(pack_mp_detail::bin_size(n));
+        pack_mp_detail::write_bin(const_cast<uint8_t*>(s.inl), data, n);
     }
     template <int SlotIdx>
     void set_image(int32_t w, int32_t h, int32_t c, const void* pixels) {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         assert(!sealed_ && "add after seal");
-        xi_image_handle handle = frame_pool::alloc_image(w, h, c, pixels);
+        xi_image_handle handle = pack_pool::alloc_image(w, h, c, pixels);
         Slot& s = slots_[SlotIdx];
-        s.tag = FrameTag::Image; s.present = true; s.pooled = true;
+        s.tag = PackTag::Image; s.present = true; s.pooled = true;
         s.handle = handle; s.w = w; s.h = h; s.c = c; s.inl = nullptr; s.inl_len = 0;
     }
     template <int SlotIdx>
     void adopt_image(int32_t w, int32_t h, int32_t c, xi_image_handle handle) {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         assert(!sealed_ && "add after seal");
-        frame_pool::addref(handle);
+        pack_pool::addref(handle);
         Slot& s = slots_[SlotIdx];
-        s.tag = FrameTag::Image; s.present = true; s.pooled = true;
+        s.tag = PackTag::Image; s.present = true; s.pooled = true;
         s.handle = handle; s.w = w; s.h = h; s.c = c; s.inl = nullptr; s.inl_len = 0;
     }
     // Opaque nested canonical msgpack (trusted-internal; foreign bytes go through
-    // xi::ingress first, exactly as add_mp on the dynamic path — see Frame above).
+    // xi::ingress first, exactly as add_mp on the dynamic path — see Pack above).
     template <int SlotIdx>
     void set_mp(const void* mp, size_t n) {
-        Slot& s = begin_slot<SlotIdx>(FrameTag::Mp, n);
+        Slot& s = begin_slot<SlotIdx>(PackTag::Mp, n);
         if (n) std::memcpy(const_cast<uint8_t*>(s.inl), mp, n);
     }
 
     // ---- dynamic (undeclared) keys — the string-keyed fallback ---------------
     void add_i64(std::string_view key, int64_t v) {
-        Entry& e = begin_dyn(key, FrameTag::I64, frame_mp_detail::kI64Size);
-        frame_mp_detail::write_i64(const_cast<uint8_t*>(e.inl), v);
+        Entry& e = begin_dyn(key, PackTag::I64, pack_mp_detail::kI64Size);
+        pack_mp_detail::write_i64(const_cast<uint8_t*>(e.inl), v);
     }
     void add_f64(std::string_view key, double v) {
-        Entry& e = begin_dyn(key, FrameTag::F64, frame_mp_detail::kF64Size);
-        frame_mp_detail::write_f64(const_cast<uint8_t*>(e.inl), v);
+        Entry& e = begin_dyn(key, PackTag::F64, pack_mp_detail::kF64Size);
+        pack_mp_detail::write_f64(const_cast<uint8_t*>(e.inl), v);
     }
     void add_str(std::string_view key, std::string_view v) {
-        Entry& e = begin_dyn(key, FrameTag::Str, frame_mp_detail::str_size(v.size()));
-        frame_mp_detail::write_str(const_cast<uint8_t*>(e.inl), v);
+        Entry& e = begin_dyn(key, PackTag::Str, pack_mp_detail::str_size(v.size()));
+        pack_mp_detail::write_str(const_cast<uint8_t*>(e.inl), v);
     }
     void add_mp(std::string_view key, const void* mp, size_t n) {
-        Entry& e = begin_dyn(key, FrameTag::Mp, n);
+        Entry& e = begin_dyn(key, PackTag::Mp, n);
         if (n) std::memcpy(const_cast<uint8_t*>(e.inl), mp, n);
     }
 
-    TypedFrame<Schema> seal() {
+    TypedPack<Schema> seal() {
         assert(!sealed_ && "double seal");
         sealed_ = true;
-        TypedFrame<Schema> f(std::move(arena_), slots_, std::move(dyn_));
-        slots_ = {};      // ownership moved to the frame; builder releases nothing
+        TypedPack<Schema> f(std::move(arena_), slots_, std::move(dyn_));
+        slots_ = {};      // ownership moved to the pack; builder releases nothing
         dyn_.clear();
         return f;
     }
 
 private:
     template <int SlotIdx>
-    Slot& begin_slot(FrameTag tag, size_t n) {
+    Slot& begin_slot(PackTag tag, size_t n) {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         assert(!sealed_ && "add after seal");
         Slot& s = slots_[SlotIdx];
@@ -1072,7 +1072,7 @@ private:
         s.inl_len = uint32_t(n);
         return s;
     }
-    Entry& begin_dyn(std::string_view key, FrameTag tag, size_t n) {
+    Entry& begin_dyn(std::string_view key, PackTag tag, size_t n) {
         assert(!sealed_ && "add after seal");
         Entry e;
         e.key = arena_.intern(key);
