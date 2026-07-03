@@ -22,7 +22,7 @@
 #include <xi/xi_json.hpp>
 #include <xi/xi_contract.hpp>
 
-#include "config_swap_probe_io.h"
+#include "config_swap_probe_io.gen.h"
 
 #ifdef _WIN32
   #include <windows.h>

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -63,6 +64,32 @@ GETTER = {"int": "get_int", "double": "get_double", "bool": "get_bool",
           "string": "get_string"}
 TS_SCALAR = {"int": "number", "double": "number", "bool": "boolean", "string": "string"}
 PY_SCALAR = {"int": "int", "double": "float", "bool": "bool", "string": "str"}
+
+# Reply extractors read a JSON *reply string* (an exchange() result), not a
+# Record, so they go through xi::Json's as_* accessors.
+REPLY_GETTER = {"int": ("int", "as_int"), "double": ("double", "as_double"),
+                "bool": ("bool", "as_bool"), "string": ("std::string", "as_string")}
+# A reply field may declare ONE whitelisted C++ cast over its as_* read (the
+# constrained escape hatch for config_swap_probe's double-carried counter read
+# back as `long long`). Growing this set is a deliberate generator change, not
+# open templating.
+REPLY_CASTS = {"long long"}
+
+
+def _cpp_value(v, typ: str) -> str:
+    """A decl JSON scalar -> its C++ literal (for param/config defaults)."""
+    if typ == "bool":
+        return "true" if v else "false"
+    if typ == "string":
+        return json.dumps(v)  # JSON string escaping == C++ string escaping here
+    return str(v)
+
+
+def _section(title: str) -> str:
+    """The `// ---- Title ----…` section banner, dash-padded to 78 columns
+    (matches the hand-written and previously-literal generated banners)."""
+    line = f"// ---- {title} "
+    return line + "-" * max(3, 78 - len(line))
 
 
 def banner(decl_name: str, comment: str = "//") -> str:
@@ -107,6 +134,9 @@ def collect_keys(decl: dict) -> list[tuple[str, str]]:
             _walk_fields(out.get("fields", []), tmp)
             for k, d in tmp:
                 add(k, d)
+    for rep in decl.get("replies", []):
+        for f in rep.get("fields", []):
+            add(f["key"], f.get("doc", ""))
     for cfg in decl.get("config", []):
         add(cfg["key"], cfg.get("doc", ""))
     cmds = decl.get("commands")
@@ -140,6 +170,9 @@ def key_type_map(decl: dict) -> dict[str, str]:
         t[out["key"]] = out.get("type", "")
         if out.get("type") == "array":
             _walk_field_types(out.get("fields", []), t)
+    for rep in decl.get("replies", []):
+        for f in rep.get("fields", []):
+            t.setdefault(f["key"], f.get("type", ""))
     for cfg in decl.get("config", []):
         t[cfg["key"]] = cfg.get("type", "")
     cmds = decl.get("commands")
@@ -366,6 +399,19 @@ def gen_io_operator(decl: dict) -> str:
 
 def gen_io_source(decl: dict) -> str:
     ns = decl["namespace"]
+    cfgs = [c for c in decl.get("config", []) if not c.get("readonly")]
+    raw_cfgs = [c for c in cfgs if c.get("raw_json")]
+    pb = decl.get("patch_builder")
+    frame = decl.get("output_frame", [])
+    images = [fr for fr in frame if fr["type"] == "image"]
+
+    std_includes = {"string"}
+    if pb:
+        std_includes |= {"initializer_list", "utility"}
+    xi_includes = ["#include <xi/xi_contract.hpp>", "#include <xi/xi_json.hpp>"]
+    if images:  # only the Frame extractor touches xi::Record
+        xi_includes.append("#include <xi/xi_record.hpp>")
+
     L = [
         "#pragma once",
         banner(decl["plugin"]),
@@ -376,52 +422,102 @@ def gen_io_source(decl: dict) -> str:
         "",
         f'#include "{decl["plugin"]}_keys.gen.h"',
         "",
-        "#include <xi/xi_contract.hpp>",
-        "#include <xi/xi_json.hpp>",
-        "#include <xi/xi_record.hpp>",
+        *xi_includes,
         "",
-        "#include <string>",
+        *(f"#include <{h}>" for h in sorted(std_includes)),
         "",
         f"namespace {ns} {{",
         "",
-        "// ---- Config builder (produces the set_def JSON) ---------------------------",
-        "class Config {",
-        "public:",
-        "    Config() { j_ = xi::Json::object().set(xi::contract::kSchemaKey, kSchemaVersion); }",
-        "",
     ]
-    for cfg in decl.get("config", []):
-        if cfg.get("readonly"):
-            continue
-        arg = CPP_SCALAR[cfg["type"]]
-        L.append(f"    Config& {cfg['key']}({arg} v) "
-                 f"{{ j_.set(keys::{k_name(cfg['key'])}, v); return *this; }}")
-    L += [
-        "",
-        "    std::string dump() const { return j_.dump(); }",
-        "    operator std::string() const { return j_.dump(); }",
-        "",
-        "private:",
-        "    xi::Json j_;",
-        "};",
-        "",
-    ]
+
+    # ---- Config -------------------------------------------------------------
+    L.append(_section("Config builder (produces the set_def JSON)"))
+    if raw_cfgs:
+        # Raw-JSON config fields are spliced VERBATIM (open payload by design),
+        # so dump() concatenates the document instead of routing through typed
+        # setters; typed config keys ride the same raw JSON (see the decl).
+        L += [
+            "// Raw-JSON config fields are spliced VERBATIM (open payload by design), so",
+            "// dump() concatenates the document instead of routing through typed setters;",
+            "// typed config keys ride the same raw JSON (see the decl).",
+            "class Config {",
+            "public:",
+        ]
+        for c in raw_cfgs:
+            L.append(f"    Config& {c['key']}(const std::string& raw_json) "
+                     f"{{ {c['key']}_ = raw_json; return *this; }}")
+        splice = "               std::to_string(kSchemaVersion)"
+        for c in raw_cfgs:
+            splice += f' + ",\\"" + keys::{k_name(c["key"])} + "\\":" + {c["key"]}_'
+        L += [
+            "",
+            "    std::string dump() const {",
+            '        return std::string("{\\"") + xi::contract::kSchemaKey + "\\":" +',
+            splice + ' + "}";',
+            "    }",
+            "    operator std::string() const { return dump(); }",
+            "",
+            "private:",
+        ]
+        for c in raw_cfgs:
+            L.append(f"    std::string {c['key']}_ = {_cpp_value(c.get('default', '{}'), 'string')};")
+        L += ["};", ""]
+    else:
+        L += [
+            "class Config {",
+            "public:",
+            "    Config() { j_ = xi::Json::object().set(xi::contract::kSchemaKey, kSchemaVersion); }",
+            "",
+        ]
+        for cfg in cfgs:
+            arg = CPP_SCALAR[cfg["type"]]
+            L.append(f"    Config& {cfg['key']}({arg} v) "
+                     f"{{ j_.set(keys::{k_name(cfg['key'])}, v); return *this; }}")
+        L += [
+            "",
+            "    std::string dump() const { return j_.dump(); }",
+            "    operator std::string() const { return j_.dump(); }",
+            "",
+            "private:",
+            "    xi::Json j_;",
+            "};",
+            "",
+        ]
+
+    # ---- Command ------------------------------------------------------------
     cmds = decl.get("commands")
     if cmds:
         sel = k_name(cmds["selector_key"])
         L += [
-            "// ---- Command builder (produces the exchange JSON) -------------------------",
+            _section("Command builder (produces the exchange JSON)"),
             "class Command {",
             "public:",
         ]
         for c in cmds["list"]:
             name = c["name"]
             params = c.get("params", [])
+            if c.get("doc"):
+                L.append(f"    // {c['doc']}")
             if not params:
                 L.append(f"    static std::string {name}() "
                          f"{{ return cmd_(keys::{k_name(name)}); }}")
+            elif any(p.get("raw_json") for p in params):
+                # validated: a raw-JSON command has exactly ONE param, spliced
+                # verbatim (the payload is arbitrary JSON text by design).
+                p = params[0]
+                L.append(f"    static std::string {name}(const std::string& {p['arg']}) {{")
+                L.append(f'        return std::string("{{\\"") + keys::{sel} + "\\":\\"" '
+                         f"+ keys::{k_name(name)} +")
+                L.append(f'               "\\",\\"" + keys::{k_name(p["key"])} + "\\":" '
+                         f'+ {p["arg"]} + "}}";')
+                L.append("    }")
             else:
-                sig = ", ".join(f"{CPP_SCALAR[p['type']]} {p['arg']}" for p in params)
+                def _sig(p: dict) -> str:
+                    s = f"{CPP_SCALAR[p['type']]} {p['arg']}"
+                    if "default" in p:
+                        s += f" = {_cpp_value(p['default'], p['type'])}"
+                    return s
+                sig = ", ".join(_sig(p) for p in params)
                 body = f"xi::Json::object().set(keys::{sel}, keys::{k_name(name)})"
                 for p in params:
                     body += f".set(keys::{k_name(p['key'])}, {p['arg']})"
@@ -437,23 +533,98 @@ def gen_io_source(decl: dict) -> str:
             "};",
             "",
         ]
-    frame = decl.get("output_frame", [])
-    if frame:
+
+    # ---- Patch builder (raw-JSON per-emit patch shape) -----------------------
+    if pb:
+        cls = pb["class"]
+        pk, vk, lk = pb["path_key"], pb["value_key"], pb["list_key"]
+        single = pb.get("single_accessor", "single")
+        batch = pb.get("batch_accessor", "batch")
+        L.append(_section(f"{cls} builder (produces the process() input JSON)"))
+        if pb.get("doc"):
+            L.append(f"// {pb['doc']}")
         L += [
-            "// ---- Frame extractor (reads an emitted output Record) ---------------------",
+            f"class {cls} {{",
+            "public:",
+            f'    // {{ "{pk}": <path>, "{vk}": <raw json> }}',
+            f"    static std::string {single}(const std::string& path, const std::string& raw_value) {{",
+            f'        return std::string("{{\\"") + keys::{k_name(pk)} + "\\":\\"" + path + "\\",\\"" +',
+            f'               keys::{k_name(vk)} + "\\":" + raw_value + "}}";',
+            "    }",
+            f'    // {{ "{lk}": [ {{{pk},{vk}}}, ... ] }}',
+            f"    static std::string {batch}(std::initializer_list<std::pair<std::string, std::string>> patches) {{",
+            f'        std::string out = std::string("{{\\"") + keys::{k_name(lk)} + "\\":[";',
+            "        bool first = true;",
+            "        for (auto& [path, raw_value] : patches) {",
+            '            if (!first) out += ",";',
+            f"            out += {single}(path, raw_value);",
+            "            first = false;",
+            "        }",
+            '        out += "]}";',
+            "        return out;",
+            "    }",
+            "};",
+            "",
+        ]
+
+    # ---- Reply extractors (typed readers over an exchange() reply string) ----
+    for rep in decl.get("replies", []):
+        cls = rep["class"]
+        title = (f"{cls} extractor (reads the {rep['of_command']} reply)"
+                 if rep.get("of_command") else f"{cls} extractor (reads a reply)")
+        L.append(_section(title))
+        if rep.get("doc"):
+            L.append(f"// {rep['doc']}")
+        L += [
+            f"class {cls} {{",
+            "public:",
+            f"    explicit {cls}(const std::string& json) : j_(xi::Json::parse(json)) {{}}",
+            "",
+            "    bool valid() const { return j_.valid(); }",
+            "",
+        ]
+        for f in rep["fields"]:
+            ret, getter = REPLY_GETTER[f["type"]]
+            acc = f.get("accessor", f["key"])
+            expr = f"j_[keys::{k_name(f['key'])}].{getter}()"
+            if f.get("cast"):
+                ret = f["cast"]
+                expr = f"({f['cast']}){expr}"
+            L.append(f"    {ret} {acc}() const {{ return {expr}; }}")
+        L += [
+            "",
+            "private:",
+            "    xi::Json j_;",
+            "};",
+            "",
+        ]
+
+    # ---- Frame (emitted only when there is an image to extract) --------------
+    if images:
+        composites = decl.get("frame_composites", [])
+        L += [
+            _section("Frame extractor (reads an emitted output Record)"),
             "class Frame {",
             "public:",
             "    explicit Frame(xi::Record rec) : rec_(std::move(rec)) {}",
             "",
         ]
-        for fr in frame:
-            if fr["type"] == "image":
-                has = fr.get("has_accessor", "has_" + fr["key"])
-                acc = fr.get("accessor", fr["key"])
-                L.append(f"    bool {has}() const "
-                         f"{{ return rec_.has_image(keys::{k_name(fr['key'])}); }}")
-                L.append(f"    const xi::Image& {acc}() const "
-                         f"{{ return rec_.get_image(keys::{k_name(fr['key'])}); }}")
+        has_names = {}
+        for fr in images:
+            has = fr.get("has_accessor", "has_" + fr["key"])
+            has_names[fr["key"]] = has
+            L.append(f"    bool {has}() const "
+                     f"{{ return rec_.has_image(keys::{k_name(fr['key'])}); }}")
+        for comp in composites:
+            expr = " && ".join(f"{has_names[k]}()" for k in comp["all_of"])
+            doc = f"  // {comp['doc']}" if comp.get("doc") else ""
+            L.append(f"    bool {comp['accessor']}() const {{ return {expr}; }}{doc}")
+        if len(images) > 1 or composites:
+            L.append("")
+        for fr in images:
+            acc = fr.get("accessor", fr["key"])
+            L.append(f"    const xi::Image& {acc}() const "
+                     f"{{ return rec_.get_image(keys::{k_name(fr['key'])}); }}")
         L += [
             "",
             "    const xi::Record& record() const { return rec_; }",
@@ -597,10 +768,174 @@ ARTIFACTS = {
 }
 
 
+_IDENT = re.compile(r"^[A-Za-z_]\w*$")
+
+
+def _validate_decl(decl: dict) -> None:
+    """The decl-subset validator: a decl may only say what the generator can
+    faithfully emit (the constrained-subset philosophy — no open templating).
+    Unknown sections/attributes are ERRORS, and the bespoke escape hatches
+    (raw_json splicing, reply casts, patch_builder) are fixed whitelisted
+    shapes. Runs on every load, so gen_contract.py AND check_equiv.py both
+    refuse a decl the generator would mis-render."""
+    plugin = decl.get("plugin", "?")
+
+    def fail(msg: str):
+        raise ValueError(f"decl {plugin}: {msg}")
+
+    def check_attrs(obj: dict, allowed: set, what: str):
+        extra = set(obj) - allowed
+        if extra:
+            fail(f"{what} has unsupported attribute(s) {sorted(extra)} "
+                 f"(constrained subset: {sorted(allowed)})")
+
+    def check_ident(name, what: str):
+        if not isinstance(name, str) or not _IDENT.match(name):
+            fail(f"{what} {name!r} is not a C++ identifier")
+
+    check_attrs(decl, {"$comment", "plugin", "namespace", "schema_version", "role",
+                       "title", "handwritten_io", "inputs", "outputs", "config",
+                       "commands", "output_frame", "replies", "patch_builder",
+                       "frame_composites"}, "decl")
+    for req in ("plugin", "namespace", "schema_version", "role"):
+        if req not in decl:
+            fail(f"missing required attribute {req!r}")
+    if decl["role"] not in ("operator", "source"):
+        fail(f"role {decl['role']!r} must be operator|source")
+
+    def check_field_list(fields, what: str, scalar_ok: set, arrays_ok: bool):
+        for f in fields:
+            check_attrs(f, {"key", "type", "doc", "required", "channels", "default",
+                            "item_accessor", "size_accessor", "item_class", "fields"},
+                        f"{what} field {f.get('key', '?')!r}")
+            if f.get("type") == "array":
+                if not arrays_ok:
+                    fail(f"{what} field {f['key']!r}: arrays not allowed here")
+                for a in ("item_accessor", "size_accessor", "item_class"):
+                    check_ident(f.get(a), f"{what} {f['key']}.{a}")
+                check_field_list(f.get("fields", []), f"{what}.{f['key']}",
+                                 scalar_ok, arrays_ok)
+            elif f.get("type") not in scalar_ok:
+                fail(f"{what} field {f.get('key', '?')!r}: type {f.get('type')!r} "
+                     f"not in {sorted(scalar_ok)}")
+
+    scalar_or_image = set(CPP_SCALAR) | {"image"}
+    check_field_list(decl.get("inputs", []), "inputs", scalar_or_image, True)
+    check_field_list(decl.get("outputs", []), "outputs", scalar_or_image, True)
+    for fr in decl.get("output_frame", []):
+        check_attrs(fr, {"key", "type", "doc", "accessor", "has_accessor"},
+                    f"output_frame field {fr.get('key', '?')!r}")
+        if fr.get("type") not in scalar_or_image:
+            fail(f"output_frame field {fr.get('key', '?')!r}: "
+                 f"type {fr.get('type')!r} not in {sorted(scalar_or_image)}")
+        for a in ("accessor", "has_accessor"):
+            if a in fr:
+                check_ident(fr[a], f"output_frame {fr['key']}.{a}")
+
+    for cfg in decl.get("config", []):
+        check_attrs(cfg, {"key", "type", "doc", "readonly", "raw_json", "default"},
+                    f"config field {cfg.get('key', '?')!r}")
+        if cfg.get("type") not in CPP_SCALAR:
+            fail(f"config field {cfg.get('key', '?')!r}: type {cfg.get('type')!r}")
+        if cfg.get("raw_json") and cfg["type"] != "string":
+            fail(f"config field {cfg['key']!r}: raw_json requires type string")
+        if "default" in cfg and not cfg.get("raw_json"):
+            fail(f"config field {cfg['key']!r}: default is only emitted for "
+                 f"raw_json fields (typed setters have no backing member)")
+
+    cmds = decl.get("commands")
+    cmd_names = set()
+    if cmds:
+        check_attrs(cmds, {"selector_key", "value_key", "list"}, "commands")
+        for c in cmds.get("list", []):
+            check_attrs(c, {"name", "doc", "params"}, f"command {c.get('name', '?')!r}")
+            check_ident(c.get("name"), "command name")
+            cmd_names.add(c["name"])
+            params = c.get("params", [])
+            for p in params:
+                check_attrs(p, {"key", "arg", "type", "default", "raw_json"},
+                            f"command {c['name']} param {p.get('key', '?')!r}")
+                check_ident(p.get("arg"), f"command {c['name']} param arg")
+                if p.get("type") not in CPP_SCALAR:
+                    fail(f"command {c['name']} param {p.get('key', '?')!r}: "
+                         f"type {p.get('type')!r}")
+                if p.get("raw_json"):
+                    if p["type"] != "string":
+                        fail(f"command {c['name']}: raw_json param requires type string")
+                    if len(params) != 1:
+                        fail(f"command {c['name']}: a raw_json param must be the "
+                             f"ONLY param (fixed splice shape)")
+                    if "default" in p:
+                        fail(f"command {c['name']}: raw_json param cannot default")
+                elif "default" in p:
+                    want = {"int": int, "double": (int, float), "bool": bool,
+                            "string": str}[p["type"]]
+                    if isinstance(p["default"], bool) and p["type"] != "bool":
+                        fail(f"command {c['name']} param {p['key']!r}: bool default "
+                             f"on a {p['type']} param")
+                    if not isinstance(p["default"], want):
+                        fail(f"command {c['name']} param {p['key']!r}: default "
+                             f"{p['default']!r} does not match type {p['type']}")
+
+    if decl.get("replies") and decl["role"] != "source":
+        fail("replies are a source-role family (exchange() replies)")
+    for rep in decl.get("replies", []):
+        check_attrs(rep, {"class", "of_command", "doc", "fields"},
+                    f"reply {rep.get('class', '?')!r}")
+        check_ident(rep.get("class"), "reply class")
+        if rep.get("of_command") and rep["of_command"] not in cmd_names:
+            fail(f"reply {rep['class']}: of_command {rep['of_command']!r} is not "
+                 f"a declared command")
+        for f in rep.get("fields", []):
+            check_attrs(f, {"key", "type", "doc", "accessor", "cast"},
+                        f"reply {rep['class']} field {f.get('key', '?')!r}")
+            if f.get("type") not in REPLY_GETTER:
+                fail(f"reply {rep['class']} field {f.get('key', '?')!r}: "
+                     f"type {f.get('type')!r} not in {sorted(REPLY_GETTER)}")
+            if "accessor" in f:
+                check_ident(f["accessor"], f"reply {rep['class']} accessor")
+            if "cast" in f:
+                if f["cast"] not in REPLY_CASTS:
+                    fail(f"reply {rep['class']} field {f['key']!r}: cast "
+                         f"{f['cast']!r} not whitelisted ({sorted(REPLY_CASTS)})")
+                if f["type"] != "double":
+                    fail(f"reply {rep['class']} field {f['key']!r}: cast is only "
+                         f"defined over the double (number) read")
+
+    minted = {k for k, _ in collect_keys(decl)}
+    pb = decl.get("patch_builder")
+    if pb:
+        if decl["role"] != "source":
+            fail("patch_builder is a source-role family (process() input)")
+        check_attrs(pb, {"class", "doc", "path_key", "value_key", "list_key",
+                         "single_accessor", "batch_accessor"}, "patch_builder")
+        check_ident(pb.get("class"), "patch_builder class")
+        for a in ("path_key", "value_key", "list_key"):
+            if pb.get(a) not in minted:
+                fail(f"patch_builder.{a} {pb.get(a)!r} is not a declared key "
+                     f"(mint it under inputs/commands so _keys.gen.h carries it)")
+
+    if decl.get("frame_composites"):
+        image_has = {fr["key"] for fr in decl.get("output_frame", [])
+                     if fr.get("type") == "image"}
+        for comp in decl["frame_composites"]:
+            check_attrs(comp, {"accessor", "all_of", "doc"},
+                        f"frame_composite {comp.get('accessor', '?')!r}")
+            check_ident(comp.get("accessor"), "frame_composite accessor")
+            if not comp.get("all_of"):
+                fail(f"frame_composite {comp['accessor']}: all_of must be non-empty")
+            for k in comp["all_of"]:
+                if k not in image_has:
+                    fail(f"frame_composite {comp['accessor']}: {k!r} is not a "
+                         f"declared output_frame image key")
+
+
 def load_decls() -> list[dict]:
     decls = []
     for p in sorted(DECLS.glob("*.decl.json")):
-        decls.append(json.loads(p.read_text(encoding="utf-8")))
+        decl = json.loads(p.read_text(encoding="utf-8"))
+        _validate_decl(decl)
+        decls.append(decl)
     return decls
 
 
@@ -610,14 +945,13 @@ def render(decl: dict) -> dict[str, str]:
     Two artifacts are conditional, so the generator never emits a file that would
     be a lie about what it can express:
 
-      * `_io.gen.h` is SKIPPED when the decl sets `"handwritten_io": true`. Some
-        plugins' control surface is outside the constrained typed-field family the
-        decl governs (json_source's open-schema raw-JSON builders + Patch shape;
-        config_swap_probe's get_status reply extractor; synced_stereo's derived
-        has_both()/defaulted fire()). Their `_io.h` stays hand-written — the
-        generator owns the KEY contract (guard 1, `_keys.gen.h`) for them but not
-        the bespoke I/O veneer. See contract/codegen/README.md (swap-in) and the
-        codegen-gap note in docs/new_gen/08.
+      * `_io.gen.h` is SKIPPED when the decl sets `"handwritten_io": true` — the
+        escape hatch for a control surface the constrained decl subset cannot
+        express. Since the polaris2 codegen-gap-#2 extension (reply extractors,
+        param defaults, raw-JSON splicing, patch_builder, frame composites) NO
+        in-tree decl needs it any more (json_source / config_swap_probe /
+        synced_stereo are fully generated); it stays supported for future
+        plugins. See contract/codegen/README.md.
       * `_schema.gen.h` is SKIPPED when the plugin declares no flat frame slots
         (a source with no `output_frame`): an empty PackSchema is noise, nothing
         adopts it, and it would never be compiled.

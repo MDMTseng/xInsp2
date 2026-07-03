@@ -1159,7 +1159,14 @@ if(Python3_Interpreter_FOUND)
         ${CODEGEN_GEN_DIR}/blob_analysis_schema.gen.h
         ${CODEGEN_GEN_DIR}/mock_camera_keys.gen.h
         ${CODEGEN_GEN_DIR}/mock_camera_io.gen.h
-        ${CODEGEN_GEN_DIR}/mock_camera_schema.gen.h)
+        ${CODEGEN_GEN_DIR}/mock_camera_schema.gen.h
+        ${CODEGEN_GEN_DIR}/config_swap_probe_keys.gen.h
+        ${CODEGEN_GEN_DIR}/config_swap_probe_io.gen.h
+        ${CODEGEN_GEN_DIR}/json_source_keys.gen.h
+        ${CODEGEN_GEN_DIR}/json_source_io.gen.h
+        ${CODEGEN_GEN_DIR}/synced_stereo_keys.gen.h
+        ${CODEGEN_GEN_DIR}/synced_stereo_io.gen.h
+        ${CODEGEN_GEN_DIR}/synced_stereo_schema.gen.h)
     add_custom_command(
         OUTPUT ${CODEGEN_GEN_HEADERS}
         COMMAND ${Python3_EXECUTABLE}
@@ -1168,6 +1175,9 @@ if(Python3_Interpreter_FOUND)
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../contract/codegen/gen_contract.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/blob_analysis.decl.json
                 ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/mock_camera.decl.json
+                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/config_swap_probe.decl.json
+                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/json_source.decl.json
+                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/synced_stereo.decl.json
         COMMENT "codegen: regenerating contract headers into ${CODEGEN_GEN_DIR}")
     add_custom_target(codegen_gen_headers DEPENDS ${CODEGEN_GEN_HEADERS})
     add_executable(codegen_equiv_test

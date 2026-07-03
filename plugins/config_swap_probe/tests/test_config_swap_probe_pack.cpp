@@ -39,7 +39,7 @@
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_pack_abi.hpp>       // install_pack_abi + pack_v1_iface + PackRegistry
 
-#include "config_swap_probe_io.h"   // Config / Command / Status typed views
+#include "config_swap_probe_io.gen.h"   // Config / Command / Status typed views
 
 #include <cstdint>
 #include <cstdio>

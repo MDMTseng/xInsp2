@@ -27,12 +27,12 @@ Every key name is declared **once** in
 [`../../contract/plugins/synced_stereo.decl.json`](../../contract/plugins/synced_stereo.decl.json),
 from which `contract/codegen/gen_contract.py` generates `synced_stereo_keys.gen.h`
 (the `keys::` constants) and `synced_stereo_schema.gen.h` (the left+right+seq
-frame slots). The typed view and the plugin's own pack path compile from those
-generated constants. The `_io.h` here
-stays **hand-written** (the decl sets `"handwritten_io": true`): its derived
-`has_both()` and defaulted `fire(int n = 1)` are outside what the generator emits
-verbatim — a documented codegen gap (see `contract/codegen/README.md`, "Coverage &
-the codegen gap").
+frame slots) and `synced_stereo_io.gen.h` (the typed `Config`/`Command`/`Frame`
+view). The derived `has_both()` is the decl's `"frame_composites"` family and
+`fire(int n = 1)` its param `"default"` (the polaris2 codegen-gap-#2 extension),
+so this plugin is now a **full swap**: the hand-written `_io.h` is deleted and
+every consumer includes the generated header (see `contract/codegen/README.md`,
+"Coverage").
 
 | Surface | Key | Type | Notes |
 |---------|-----|------|-------|
@@ -60,10 +60,10 @@ Schema version: `xi::synced_stereo::kSchemaVersion` (currently **1**). The
 
 ## Using it from a driver / script
 
-Include [`synced_stereo_io.h`](./synced_stereo_io.h):
+Include the generated `synced_stereo_io.gen.h`:
 
 ```cpp
-#include "synced_stereo_io.h"
+#include "synced_stereo_io.gen.h"
 
 host.set_def(cam, xi::synced_stereo::Config().fps(30));
 host.exchange(cam, xi::synced_stereo::Command::start());

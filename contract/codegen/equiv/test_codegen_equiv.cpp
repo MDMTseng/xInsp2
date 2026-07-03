@@ -33,6 +33,12 @@
 #include "blob_analysis_schema.gen.h"
 #include "mock_camera_io.gen.h"
 #include "mock_camera_schema.gen.h"
+// The codegen-gap-#2 trio (reply extractors / param defaults / raw-JSON
+// splicing / patch builder / frame composites), generated for the first time:
+#include "config_swap_probe_io.gen.h"
+#include "json_source_io.gen.h"
+#include "synced_stereo_io.gen.h"
+#include "synced_stereo_schema.gen.h"
 
 #include <string>
 #include <utility>
@@ -176,6 +182,128 @@ using MS = xi::mock_camera::MockCameraSchema;
 static_assert(MS::slot_count() == 2, "generated mock_camera schema slot count (frame + seq)");
 static_assert(MS::slot_of("frame") == MS::kFrame, "slot_of maps the frame key");
 static_assert(MS::slot_of("seq") == MS::kSeq, "slot_of maps the pack-mode seq entry");
+}  // namespace
+
+// ===========================================================================
+// config_swap_probe (source) -- Config / Command / Status REPLY extractor.
+// The reply-extractor family (codegen gap #2): a typed reader over the
+// exchange() reply STRING, exactly the call sites test_config_swap_probe.cpp
+// drives (Status{ send_cmd(inst, Command::get_status()) }).
+// ===========================================================================
+
+XI_TEST(gen_csp_config_and_command_match_call_sites) {
+    std::string cfg = xi::config_swap_probe::Config().value(42);
+    auto j = xi::Json::parse(cfg);
+    XI_EXPECT(j[xi::config_swap_probe::keys::kValue].as_int() == 42);
+    XI_EXPECT(j[xi::contract::kSchemaKey].as_int() == xi::config_swap_probe::kSchemaVersion);
+
+    auto cmd = xi::Json::parse(xi::config_swap_probe::Command::get_status());
+    XI_EXPECT(cmd[xi::config_swap_probe::keys::kCommand].as_string()
+              == std::string(xi::config_swap_probe::keys::kGetStatus));
+}
+
+XI_TEST(gen_csp_status_reply_extractor_reads_every_field) {
+    // The exact reply shape the plugin's get_status emits (see the plugin test's
+    // staged/committed assertions: s.active(), s.has_staged(), s.staged_value()).
+    xi::config_swap_probe::Status s{
+        R"({"active":42,"staged":true,"staged_value":99,"last_seen":7,"proc":3})" };
+    XI_EXPECT(s.valid());
+    XI_EXPECT(s.active() == 42);
+    XI_EXPECT(s.has_staged());
+    XI_EXPECT(s.staged_value() == 99);
+    XI_EXPECT(s.last_seen() == 7);
+    XI_EXPECT(s.proc() == 3);  // the whitelisted (long long) over as_double()
+    long long p = s.proc();    // compile proof: the cast changed the return type
+    XI_EXPECT(p == 3);
+
+    xi::config_swap_probe::Status none{ R"({"active":1,"staged":false})" };
+    XI_EXPECT(!none.has_staged());
+    XI_EXPECT(xi::config_swap_probe::Status{ "not json" }.valid() == false);
+}
+
+// ===========================================================================
+// json_source (source) -- raw-JSON Config splice, raw command param, Patch.
+// The open-value family: builders CONCATENATE pre-serialized JSON text (that
+// openness is the plugin's whole point), byte-for-byte what the hand-written
+// json_source_io.h produced and test_json_source.cpp sends.
+// ===========================================================================
+
+XI_TEST(gen_json_source_config_splices_raw_json) {
+    // Same call site as json_source_config_wrapper_and_reset: the data payload
+    // rides UNQUOTED (raw), the schema stamp leads.
+    std::string cfg = xi::json_source::Config().data(R"({"tag":"keep"})");
+    XI_EXPECT(cfg == R"({"_schema":1,"data":{"tag":"keep"}})");
+    // Default document is {} (the defaulted raw member).
+    XI_EXPECT(xi::json_source::Config().dump() == R"({"_schema":1,"data":{}})");
+}
+
+XI_TEST(gen_json_source_commands_match_call_sites) {
+    // set_data carries arbitrary JSON text spliced raw under "value".
+    XI_EXPECT(xi::json_source::Command::set_data(R"({"n":5})")
+              == R"({"command":"set_data","value":{"n":5}})");
+    auto reset = xi::Json::parse(xi::json_source::Command::reset());
+    XI_EXPECT(reset[xi::json_source::keys::kCommand].as_string()
+              == std::string(xi::json_source::keys::kReset));
+    auto status = xi::Json::parse(xi::json_source::Command::get_status());
+    XI_EXPECT(status[xi::json_source::keys::kCommand].as_string()
+              == std::string(xi::json_source::keys::kGetStatus));
+}
+
+XI_TEST(gen_json_source_patch_builder_single_and_batch) {
+    // Same call site as json_source_process_patch: Patch::single(".n", "7").
+    XI_EXPECT(xi::json_source::Patch::single(".n", "7")
+              == R"({"key":".n","value":7})");
+    XI_EXPECT(xi::json_source::Patch::batch({ {".n", "7"}, {".tag", "\"hi\""} })
+              == R"({"patches":[{"key":".n","value":7},{"key":".tag","value":"hi"}]})");
+}
+
+// ===========================================================================
+// synced_stereo (source) -- defaulted fire(), composite has_both().
+// ===========================================================================
+
+XI_TEST(gen_synced_stereo_config_and_command_match_call_sites) {
+    std::string cfg = xi::synced_stereo::Config().fps(30);
+    auto j = xi::Json::parse(cfg);
+    XI_EXPECT(j[xi::synced_stereo::keys::kFps].as_int() == 30);
+    XI_EXPECT(j[xi::contract::kSchemaKey].as_int() == xi::synced_stereo::kSchemaVersion);
+
+    auto fps = xi::Json::parse(xi::synced_stereo::Command::set_fps(25));
+    XI_EXPECT(fps[xi::synced_stereo::keys::kCommand].as_string()
+              == std::string(xi::synced_stereo::keys::kSetFps));
+    XI_EXPECT(fps[xi::synced_stereo::keys::kValue].as_int() == 25);
+
+    // fire(int n = 1): the DEFAULTED param (codegen gap #2). fire() == fire(1)
+    // is the hand-written contract, proven on the produced bytes.
+    XI_EXPECT(xi::synced_stereo::Command::fire() == xi::synced_stereo::Command::fire(1));
+    auto fire4 = xi::Json::parse(xi::synced_stereo::Command::fire(4));
+    XI_EXPECT(fire4[xi::synced_stereo::keys::kCommand].as_string()
+              == std::string(xi::synced_stereo::keys::kFire));
+    XI_EXPECT(fire4[xi::synced_stereo::keys::kN].as_int() == 4);
+
+    auto start = xi::Json::parse(xi::synced_stereo::Command::start());
+    XI_EXPECT(start[xi::synced_stereo::keys::kCommand].as_string()
+              == std::string(xi::synced_stereo::keys::kStart));
+    auto stop = xi::Json::parse(xi::synced_stereo::Command::stop());
+    XI_EXPECT(stop[xi::synced_stereo::keys::kCommand].as_string()
+              == std::string(xi::synced_stereo::keys::kStop));
+}
+
+// The composite has_both() (frame_composites family) and the per-image
+// accessors exist and behave; an image round-trip needs a live pool, so the
+// empty-frame verdict is the API proof, exactly like mock_camera's.
+XI_TEST(gen_synced_stereo_frame_extractor_composite_has_both) {
+    xi::synced_stereo::Frame f{ xi::Record() };
+    XI_EXPECT(!f.has_left());
+    XI_EXPECT(!f.has_right());
+    XI_EXPECT(!f.has_both());
+}
+
+namespace {
+using SS = xi::synced_stereo::SyncedStereoSchema;
+static_assert(SS::slot_count() == 3, "generated synced_stereo schema slot count (left+right+seq)");
+static_assert(SS::slot_of("left") == SS::kLeft, "slot_of maps the left image key");
+static_assert(SS::slot_of("right") == SS::kRight, "slot_of maps the right image key");
+static_assert(SS::slot_of("seq") == SS::kSeq, "slot_of maps the pack-mode seq entry");
 }  // namespace
 
 int main() {

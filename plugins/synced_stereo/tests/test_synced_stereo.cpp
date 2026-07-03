@@ -34,7 +34,7 @@
 #include <xi/xi_test.hpp>
 #include <xi/xi_json.hpp>
 
-#include "synced_stereo_io.h"
+#include "synced_stereo_io.gen.h"
 
 #ifdef _WIN32
   #include <windows.h>
