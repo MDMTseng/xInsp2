@@ -89,7 +89,11 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    re-measured parity matrix (doc 12, 2026-07-03): 17 of 29 pattern rows
    GREEN on live QA evidence, 4 GREEN-composition (both halves proven, one
    composing example owed: E1/E2/E3 collapse into the graph-level
-   record→replay example below, F1 into a pack-mode config-swap drive), 4+H
+   record→replay example below, F1 into a pack-mode config-swap drive —
+   F1's is DELIVERED 2026-07-03: **`examples/qa_pack_config_swap`** drives
+   the probe's pack door under live mock_camera traffic while the driver
+   runs `prepare_instance` → `commit_group` mid-run, verdicts on the
+   run_result plane, zero `xi::Record`; row F1 flipped GREEN in doc 12), 4+H
    N/A control-plane. Flagship evidence: **`examples/qa_use_pack_door`** —
    build → door → push in ONE script, no `xi::Record` anywhere, pixels and
    nested entries byte-checked off the XEX1-v3 wire; `qa_pack_pilot`'s last
