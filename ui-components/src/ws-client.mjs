@@ -46,9 +46,12 @@ export class XiClient {
     this._id = 0;
     this._pending = new Map();          // id -> {resolve, reject}
     this._listeners = {                 // type -> Set<cb>
-      instances: new Set(), log: new Set(), event: new Set(), hello: new Set(),
+      instances: new Set(), log: new Set(), event: new Set(),
       binary: new Set(), open: new Set(), close: new Set(),
     };
+    // NOTE: no `hello` slot — the backend's hello frame arrives as
+    // {type:"event", name:"hello"} and is delivered through the `event` set
+    // (dispatch keys off msg.type); a type-level hello listener could never fire.
   }
 
   // Open the socket; resolves once it's open. If opts.checkVersion is set, also
