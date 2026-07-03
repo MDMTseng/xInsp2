@@ -87,6 +87,10 @@ extern void* g_trigger_image_fn_;
 extern void* g_trigger_sources_fn_;
 extern void* g_trigger_leader_fn_;
 extern void* g_trigger_meta_fn_;
+// polaris2 gate P2 (expose-from-script): host thunk for xi::use(sink).push(pack).
+// Set via the OPTIONAL export xi_script_set_use_pack_callback; null on an older
+// host ⇒ push() returns false (degrades like every other optional callback).
+extern void* g_use_push_pack_fn_;
 
 namespace xi {
 
@@ -120,6 +124,14 @@ using UseProcessFn  = int (*)(const char* name,
 using UseExchangeFn = int (*)(const char* name, const char* cmd,
                               char* rsp, int rsplen);
 using UseGrabFn     = xi_image_handle (*)(const char* name, int timeout_ms);
+// polaris2 gate P2 (expose-from-script): push a SEALED pack to a named
+// instance's xi.pack@1 door, fire-and-forget (the ack pack is dropped host-
+// side, mirroring how a staged sink's reply Record is dropped). The handle is
+// BORROWED for the call — the host retains its own ref before returning, so
+// the script's ScriptPack ref (t.pack()'s keepalive) is the only one the SDK
+// side manages. Returns: 0 staged/delivered; -1 no such instance; -2 the door
+// crashed; -3 instance quarantined; -4 instance has no xi.pack@1 door.
+using UsePushPackFn = int (*)(const char* name, xi_pack_handle pack);
 
 // Trigger callbacks (host-side wires these in via xi_script_set_trigger_callbacks)
 struct CurrentTriggerInfo {
@@ -848,6 +860,46 @@ public:
     // (g_use_grab_fn_) is now gone too; the host still passes its use_grab_cb
     // stub into the retained grab_fn ABI slot (xi_script_set_use_callbacks),
     // where it is simply discarded until that slot is formally cut.
+
+    // ─── polaris2 gate P2: expose-from-script (push a sealed Pack to a sink) ──
+    //
+    // Push a pack the script holds (t.pack(), or any ScriptPack) to this
+    // instance's xi.pack@1 pack door WITHOUT an intervening plugin:
+    //
+    //   XI_INSPECT_ENTRY(t, frame) {
+    //       if (auto f = t.pack()) xi::use("expose").push(f);
+    //   }
+    //
+    // ZERO-COPY + AS-IS: the sealed pack handle crosses the seam untouched — no
+    // re-encode, no re-key, no host stamping ($seq is NOT injected: a sealed
+    // pack is immutable, and the whole design point is that expose's XEX1-v2
+    // dump of this pack is byte-identical to a direct host-side dump). Routing
+    // ($channel) and ordering ($seq) therefore come from the pack's OWN entries;
+    // a pack without them lands on expose's "default" channel with seq 0.
+    //
+    // FIRE-AND-FORGET, sink-ordered: a declared sink target is staged by the
+    // host and flushed after the inspect in frame order (the same staged-emit
+    // discipline as use(sink).process(rec)); the ack pack is dropped host-side.
+    // A non-sink pack-door target is driven inline. Pack-out chaining (reading
+    // the door's reply) is NOT this API — that is the use()->door chaining
+    // surface, deliberately separate.
+    //
+    // LIFETIME: `p` is borrowed for the call. The host retains its own ref on
+    // the handle before returning (kept until the staged flush releases it), so
+    // the script may drop its ScriptPack immediately after push() returns.
+    //
+    // Returns true iff the push was accepted (staged, or delivered inline);
+    // false on an older host (no callback), an empty pack, a missing instance /
+    // missing pack door, a quarantined instance, or a crashed inline door.
+    bool push(const ScriptPack& p) {
+        auto push_fn = reinterpret_cast<UsePushPackFn>(g_use_push_pack_fn_);
+        if (!push_fn || !p.valid()) return false;
+        int rc = push_fn(name_.c_str(), p.handle());
+        if (rc == -1)   // -4 (live instance, no pack door) is NOT a name miss
+            warn_use_miss_(reinterpret_cast<const xi_host_api*>(g_use_host_api_),
+                           name_.c_str());
+        return rc >= 0;
+    }
 
     const std::string& name() const { return name_; }
 

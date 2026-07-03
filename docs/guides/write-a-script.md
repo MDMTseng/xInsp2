@@ -790,13 +790,30 @@ auto tf  = t.pack().typed<CamPack>();
 auto seq = tf.get_i64<CamPack::kSeq>();
 ```
 
-**What is *not* here (v0 scope).** A script reads the pack and verdicts on
-its fields. Driving a plugin's *pack door* directly from a script (pack
-in → pack out through `xi::use(...)`) is **not** wired in v0 — that needs
-new use-pack plumbing and is deliberately out of the pilot; that chaining
-stays host-mock-tested in `plugins/pack_pilot_test.cpp`. Runnable end to
-end in `examples/pack_pilot/` (and the `examples/qa_pack_pilot/`
-regression).
+**Pushing the pack onward (gate P2: expose-from-script).** A script can
+push a pack it holds to a pack-door **sink** — no intervening plugin:
+
+```cpp
+XI_INSPECT_ENTRY(t, frame) {
+    if (auto f = t.pack()) xi::use("expose").push(f);   // zero-copy, as-is
+}
+```
+
+`push()` is fire-and-forget: a sink target is staged and flushed after the
+inspect in frame order (the same ordered-emit discipline as
+`use(sink).process(rec)`); the ack is dropped. The sealed pack crosses the
+seam **untouched** — no re-encode, no `$seq` stamping — so expose's XEX1-v2
+dump of a pushed pack is byte-identical to a host-side dump of the same
+pack (`plugins/expose_script_push_test.cpp` asserts this). Routing comes
+from the pack's own `$channel`/`$seq` entries; without them it lands on
+channel `"default"` with seq 0. Returns `false` on an older host, an empty
+pack, a missing instance/door, or a quarantined instance.
+
+**What is *not* here.** *Chaining* through a plugin's pack door (pack in →
+pack **out** through `xi::use(...)`, reading the reply) is still not wired
+— that chaining stays host-mock-tested in `plugins/pack_pilot_test.cpp`.
+Runnable end to end in `examples/pack_pilot/` (and the
+`examples/qa_pack_pilot/` regression).
 
 ## Parallel dispatch (`parallelism.dispatch_threads`)
 

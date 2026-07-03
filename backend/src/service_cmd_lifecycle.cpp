@@ -278,6 +278,12 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                     (void*)use_grab_cb,
                     (void*)script_host_api_());
             }
+            // polaris2 gate P2 (expose-from-script): use-pack push thunk for
+            // xi::use(sink).push(pack). Optional symbol — older scripts don't
+            // export it and never see the pack push.
+            if (g_eng.script.set_use_pack_callback) {
+                g_eng.script.set_use_pack_callback((void*)use_push_pack_cb);
+            }
             // Phase 3: trigger access callbacks. Older scripts that don't
             // import xi_script_set_trigger_callbacks just stay null and
             // xi::current_trigger().is_active() returns false.

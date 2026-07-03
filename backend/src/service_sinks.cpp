@@ -13,6 +13,7 @@
 
 #include <yyjson.h>
 #include <xi/xi_graph_capture.hpp>
+#include <xi/xi_pack_abi.hpp>   // PackRegistry retain/release (use_push_pack_cb)
 
 #include "service_internal.hpp"
 
@@ -255,6 +256,77 @@ int use_process_cb(const char* name,
     }
     return use_process_inline_(name, input_doc, input_data, input_len,
                               input_images, input_image_count, output);
+}
+
+// ---- polaris2 gate P2: expose-from-script (use(sink).push(pack)) ----------------
+// Deliver a SEALED pack to `name`'s xi.pack@1 door NOW, on this thread. The pack
+// handle is BORROWED (caller keeps its ref; run_pack_door borrows too) and crosses
+// AS-IS — no re-encode, no $seq stamping (a sealed pack is immutable, and identity
+// with a direct host-side dump is the contract; $channel/$seq ride as pack entries).
+// The ack pack the door returns is dropped (fire-and-forget, mirroring how the
+// staged Record flush drops the sink's reply). Same fault discipline as
+// use_process_inline_: quarantine gate, pending reinit, culprit stamp, SEH boundary
+// (a crashed door -> -2, on_fault policy applied; the borrowed input handle is
+// still ours, so nothing leaks). Return codes: 0 delivered; -1 no such instance;
+// -2 door crashed; -3 quarantined; -4 no xi.pack@1 door.
+static int use_push_pack_inline_(const char* name, xi_pack_handle pack) {
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    if (!adapter || !adapter->has_pack_door()) return -4;
+    if (adapter->quarantined()) return -3;
+    if (adapter->reinit_pending()) {
+        apply_pending_reinit_(name, adapter);
+        if (adapter->quarantined()) return -3;
+    }
+    stamp_culprit_(name, inst->plugin_name());
+    try {
+        xi_pack_handle ack = adapter->run_pack_door(pack);
+        if (ack != XI_PACK_NULL) xi::PackRegistry::instance().release(ack);
+        return 0;
+    } catch (const seh_exception& e) {
+        std::fprintf(stderr, "[xinsp2] use(\"%s\").push(pack) crashed: 0x%08X (%s)\n",
+                     name, e.code, e.what());
+        char why[96]; std::snprintf(why, sizeof(why), "pack door crashed: 0x%08X", e.code);
+        note_instance_crash_(name, why);
+        apply_on_fault_policy_(name, adapter);
+        xi::recover_seh_stack_or_die(e.code, "plugin pack door");
+        return -2;
+    } catch (...) {
+        std::fprintf(stderr, "[xinsp2] use(\"%s\").push(pack) threw exception\n", name);
+        note_instance_crash_(name, "pack door threw an exception");
+        apply_on_fault_policy_(name, adapter);
+        return -2;
+    }
+}
+
+// xi::use().push(pack) entry wired into the script DLL (optional symbol —
+// xi_script_set_use_pack_callback). A declared ORDERED SINK target is staged and
+// flushed after the inspect in frame order, exactly like use_process_cb's Record
+// staging: StagedEmit.rec is a TriggerEvent, whose `pack` slot carries our
+// RETAINED ref (release_trigger_event_ / drain_staged_emits_ already release it
+// on every flush/drop path — the dual-carry discipline, reused). A non-sink
+// pack-door target runs inline. Fail-fast at call time (missing instance / no
+// door) so the script's push() gets an honest false instead of a silent
+// flush-time drop.
+int use_push_pack_cb(const char* name, xi_pack_handle pack) {
+    if (!name || pack == XI_PACK_NULL) return -1;
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    if (!a || !a->has_pack_door()) return -4;
+    if (a->is_sink()) {
+        // Our staged ref: the script's own ScriptPack ref may die right after
+        // push() returns, so retain BEFORE returning. Balanced by
+        // release_trigger_event_ at flush/drain.
+        xi::PackRegistry::instance().retain(pack);
+        StagedEmit item;
+        item.target   = name;
+        item.rec.pack = pack;
+        g_staged.push_back(std::move(item));
+        return 0;
+    }
+    return use_push_pack_inline_(name, pack);
 }
 
 int use_exchange_cb(const char* name, const char* cmd,
@@ -535,6 +607,18 @@ void flush_staged_emits_(int64_t run_id) {   // decl in header
         RecordOutGuard& operator=(const RecordOutGuard&) = delete;
     };
     for (auto& it : staged) {
+        // polaris2 gate P2: a staged PACK push (use(sink).push(pack)). The sealed
+        // pack is delivered AS-IS — no $seq stamping (immutable; and byte-identity
+        // between this push and a direct host-side dump of the same pack is the
+        // contract — the pack's own $channel/$seq entries carry routing/ordering).
+        // use_push_pack_inline_ owns the SEH boundary + fault policy; -1/-3/-4
+        // need no ref rebalance here because the door BORROWS the handle either
+        // way. release_trigger_event_ drops our staged ref on every path.
+        if (it.rec.pack != XI_PACK_NULL) {
+            use_push_pack_inline_(it.target.c_str(), it.rec.pack);
+            release_trigger_event_(it.rec);
+            continue;
+        }
         // Non-null iff we delivered a PRIVATE COW copy this iteration: released on every
         // exit path below (declared out here so a throw mid-flush can't leak it).
         yyjson_mut_doc* copy_ref = nullptr;

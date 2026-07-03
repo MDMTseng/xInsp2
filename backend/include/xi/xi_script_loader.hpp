@@ -97,6 +97,11 @@ struct LoadedScript {
     SetOwnerCallbacksFn set_owner_callbacks = nullptr;
     using SetResultCallbackFn = void (*)(void* fn);
     SetResultCallbackFn set_result_callback = nullptr;
+    // polaris2 gate P2 (expose-from-script): use-pack push thunk for
+    // xi::use(sink).push(pack). Optional symbol — an older script lacks it
+    // and the host simply doesn't wire the pack push.
+    using SetUsePackCallbackFn = void (*)(void* push_fn);
+    SetUsePackCallbackFn set_use_pack_callback = nullptr;
     SetRunContextFn    set_run_context  = nullptr;
     SetGlobalCancelFn  set_global_cancel = nullptr;
     // Inspect-start hook: draws this inspect's cancel ticket so the watchdog's
@@ -159,6 +164,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_status_callback = reinterpret_cast<LoadedScript::SetStatusCallbackFn>(GetProcAddress(h, "xi_script_set_status_callback"));
     out.set_owner_callbacks = reinterpret_cast<LoadedScript::SetOwnerCallbacksFn>(GetProcAddress(h, "xi_script_set_owner_callbacks"));
     out.set_result_callback = reinterpret_cast<LoadedScript::SetResultCallbackFn>(GetProcAddress(h, "xi_script_set_result_callback"));
+    out.set_use_pack_callback = reinterpret_cast<LoadedScript::SetUsePackCallbackFn>(GetProcAddress(h, "xi_script_set_use_pack_callback"));
     out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
     out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
     out.inspect_begin     = reinterpret_cast<LoadedScript::InspectBeginFn>(GetProcAddress(h, "xi_script_inspect_begin"));
