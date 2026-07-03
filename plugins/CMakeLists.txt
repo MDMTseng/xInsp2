@@ -480,6 +480,28 @@ endif()
 add_dependencies(cap_imgcodec_test imgcodec)
 add_test(NAME cap_imgcodec_test COMMAND cap_imgcodec_test)
 
+# polaris2 CORE-CODEC EVICTION (stage 1) — the HOST's read_image_file
+# (backend/src/xi_image_io.cpp, linked in so its static installer runs)
+# delegating decode to xi.image.decode with an stb fallback: byte-equivalence
+# across both engines (3-channel + native 2-channel gray+alpha), absent-
+# capability / factory-timing fallback, self-serve reentrancy refusal, decoder-
+# fault (quarantine) clean fallback + attribution, and identical fail modes on
+# corrupt/null. Compiles the real host TU + stb impl into the EXE.
+add_executable(cap_imgcodec_host_test
+    cap_imgcodec_host_test.cpp
+    ../backend/src/xi_image_io.cpp
+    ../backend/src/stb_impl.cpp
+)
+target_include_directories(cap_imgcodec_host_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
+target_compile_definitions(cap_imgcodec_host_test PRIVATE
+    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec.dll")
+if(WIN32)
+    target_link_libraries(cap_imgcodec_host_test PRIVATE Ws2_32)
+endif()
+add_dependencies(cap_imgcodec_host_test imgcodec)
+add_test(NAME cap_imgcodec_host_test COMMAND cap_imgcodec_host_test)
+
 # Resource-handle convention (doc 14 appendix) — demo.lut end to end against
 # the REAL built DLL through the REAL host funnel: build -> handle entry
 # {type,id,gen,$v}, content dedup (built=0, builds pinned), the handle HOP

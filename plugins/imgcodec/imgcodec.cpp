@@ -30,9 +30,16 @@
 //                                 read_image_file's format set: this
 //                                 capability is that field's designated
 //                                 eviction target at v12; the host field
-//                                 stays untouched until then), optional "$v" /
-//                                 "$probe" as above.
-//                       Pack out: image "image" + i64 w/h/c.
+//                                 stays untouched until then), optional i64
+//                                 "raw" (1 = preserve the file's NATIVE channel
+//                                 count, incl. 2-ch gray+alpha — the host sets
+//                                 this so the eviction is byte-for-byte), and
+//                                 optional "$v" / "$probe" as above.
+//                       Pack out: image "image" + i64 w/h/c for 1/3/4-channel;
+//                                 for a raw 2-channel result the pixels ride bin
+//                                 "pixels" + i64 w/h/c (the pack image type
+//                                 cannot tag 2 channels). Without "raw",
+//                                 gray+alpha is re-decoded to RGB (legacy shape).
 //
 // Contract failures are NORMAL sealed packs carrying the $fault entries
 // (pack_contract convention) — the funnel's rc stays 0; consumers route the
@@ -261,6 +268,15 @@ private:
     }
 
     // -- xi.image.decode --------------------------------------------------------
+    // Decodes to the file's NATIVE channel count (stb, desired=0), mirroring the
+    // host's read_image_file (stbi_load(...,0)) EXACTLY so the eviction is byte-
+    // for-byte. Two reply shapes:
+    //   * comp in {1,3,4}: image "image" + i64 w/h/c (the taggable pack image).
+    //   * comp == 2 (gray+alpha): the pack image type cannot tag 2 channels, so
+    //     the pixels come back as bin "pixels" + i64 w/h/c — but ONLY when the
+    //     caller opts in with i64 "raw"=1 (the host does, to preserve stb's true
+    //     channel count). Legacy callers (no "raw") keep the historical behaviour:
+    //     gray+alpha is re-decoded to RGB so they always get an "image" entry.
     xi_pack_handle decode_(xi_pack_handle in) {
         if (xi_pack_handle early = version_gate_(in)) return early;
 
@@ -269,18 +285,23 @@ private:
             return fault_("missing_input", "data",
                           "xi.image.decode: required bin entry 'data' is missing");
 
+        int64_t raw = 0;
+        pk_->get_i64(in, "raw", &raw);
+
         int w = 0, h = 0, comp = 0;
         unsigned char* px = stbi_load_from_memory(
             static_cast<const unsigned char*>(ptr), len, &w, &h, &comp, 0);
-        if (px && comp == 2) {
-            // gray+alpha has no pack image tag — re-decode as RGB.
+        if (px && comp == 2 && !raw) {
+            // Legacy: gray+alpha has no pack image tag — re-decode as RGB.
             stbi_image_free(px);
             px = stbi_load_from_memory(static_cast<const unsigned char*>(ptr),
                                        len, &w, &h, &comp, 3);
             comp = 3;
         }
-        if (!px || w <= 0 || h <= 0 ||
-            (comp != 1 && comp != 3 && comp != 4)) {
+        // "raw" additionally admits the native 2-channel result (returned as bin).
+        const bool comp_ok = raw ? (comp >= 1 && comp <= 4)
+                                  : (comp == 1 || comp == 3 || comp == 4);
+        if (!px || w <= 0 || h <= 0 || !comp_ok) {
             if (px) stbi_image_free(px);
             return fault_("decode_failed", "data",
                           "xi.image.decode: unsupported or corrupt image bytes");
@@ -288,7 +309,12 @@ private:
         decodes_.fetch_add(1, std::memory_order_relaxed);
 
         xi_pack_builder b = pk_->builder_new();
-        pk_->builder_add_image(b, "image", w, h, comp, px);
+        if (comp == 2) {
+            // raw gray+alpha — the pixels ride bin "pixels" (contiguous w*h*2).
+            pk_->builder_add_bin(b, "pixels", px, (int32_t)((size_t)w * h * 2));
+        } else {
+            pk_->builder_add_image(b, "image", w, h, comp, px);
+        }
         pk_->builder_add_i64(b, "w", w);
         pk_->builder_add_i64(b, "h", h);
         pk_->builder_add_i64(b, "c", comp);
