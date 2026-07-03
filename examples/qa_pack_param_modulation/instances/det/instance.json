@@ -1,0 +1,4 @@
+{
+  "plugin": "blob_analysis",
+  "config": { "threshold": 200 }
+}
