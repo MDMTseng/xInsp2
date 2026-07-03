@@ -104,11 +104,48 @@ def _restore_nonfinite(v: Any) -> Any:
 TAG_IMAGE = 4
 
 
+def jpeg_dims(data: bytes) -> tuple[int, int] | None:
+    """Read (width, height) from a JPEG's first SOF marker — a dependency-free
+    way to prove a `preview` entry is FULL resolution (its decoded dims match the
+    source), without pulling in Pillow. Returns None if not a parseable JPEG."""
+    if len(data) < 2 or data[0] != 0xFF or data[1] != 0xD8:  # SOI
+        return None
+    i = 2
+    n = len(data)
+    while i + 3 < n:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        i += 2
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:  # standalone markers
+            continue
+        if i + 1 >= n:
+            break
+        seg_len = (data[i] << 8) | data[i + 1]
+        # SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15 carry the frame dims.
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                      0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            if i + 4 < n:
+                h = (data[i + 3] << 8) | data[i + 4]
+                w = (data[i + 5] << 8) | data[i + 6]
+                return (w, h)
+            return None
+        i += seg_len
+    return None
+
+
 def _decode_xex1_v3(body: dict) -> dict:
     """Normalize an XEX1-v3 canonical frame dump {v:3, channel, seq,
     frame:{key: [tag, value], ...}} into {v, channel, seq, values, images}.
     tag 4 (image descriptor {w,h,c,px}) -> images[key] = {w,h,c,pixels}; every
-    other tag -> values. v3 is lossless (raw pixels as msgpack bin), no JPEG."""
+    other tag -> values. v3 is lossless (raw pixels as msgpack bin), no JPEG.
+
+    E2: an image descriptor MAY additionally carry a nested `preview` map
+    { w,h,c, enc:"jpeg", q, data:<jpeg bytes> } — expose's WS-SEND-only
+    full-resolution compressed substitution (the raw `px` is then empty on the
+    wire). When present it surfaces as images[key]["preview"]; the raw-pixel
+    fields stay for decoders that ignore it (record_save/disk always ship raw)."""
     frame = body.get("frame") or {}
     values: dict = {}
     images: dict = {}
@@ -117,8 +154,16 @@ def _decode_xex1_v3(body: dict) -> dict:
             continue   # not a [tag, value] pair
         tag, v = e
         if tag == TAG_IMAGE and isinstance(v, dict):
-            images[k] = {"w": v.get("w"), "h": v.get("h"), "c": v.get("c"),
-                         "pixels": bytes(v.get("px") or b"")}
+            entry = {"w": v.get("w"), "h": v.get("h"), "c": v.get("c"),
+                     "pixels": bytes(v.get("px") or b"")}
+            pv = v.get("preview")
+            if isinstance(pv, dict) and pv.get("data") is not None:
+                entry["preview"] = {
+                    "w": pv.get("w"), "h": pv.get("h"), "c": pv.get("c"),
+                    "enc": pv.get("enc"), "q": pv.get("q"),
+                    "data": bytes(pv.get("data") or b""),
+                }
+            images[k] = entry
         else:
             values[k] = v
     return {"v": 3, "channel": body.get("channel"), "seq": body.get("seq"),

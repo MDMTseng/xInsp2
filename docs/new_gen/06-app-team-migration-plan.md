@@ -223,11 +223,24 @@ folder_camera) fully pack-ported; wire running frame_wire v3.
   Machine-level autoload for lib plugins (no per-project instance) is a
   named v12 candidate (doc 14).
 - **E2 — full-resolution preview without raw-pixel WS load**: they downsample
-  to ~384px today. Planned answer: expose consumes `xi.jpeg.encode` when the
-  capability is present and ships a compressed preview entry (nested-mp
-  `{w,h,c,enc,data}` beside — not replacing — the frozen v3 raw image tag;
-  disk dumps stay raw for identity). Scheduled as the next expose×imgcodec
-  work item.
+  to ~384px today. **DELIVERED** (`polaris2/e2-jpeg-preview`): expose resolves
+  `xi.jpeg.encode` via `get_interface("xi.cap",1)` (per-instance, cached,
+  re-resolve tolerant) and, on its v3 **WS-SEND** path only, each IMAGE entry
+  carries a nested-mp `preview` map `{w,h,c,enc:"jpeg",q,data:<bin>}` beside the
+  frozen v3 image tag (the tag is untouched; raw px leaves the wire). Gated by
+  the `preview_compress` def knob (default ON) and the capability's presence —
+  **fail-OPEN to raw**, never to nothing: absent provider / `preview_compress`
+  off / a per-image contract `$fault` → that image ships raw; a codec-wide
+  funnel failure (`on_fault:"refuse"` quarantine → rc<0) flips a **persistent
+  degraded** raw mode (one status line + one log per transition, throttled
+  re-probe — no per-frame fault storm). Dims come from the SOURCE image (the
+  encoder reply carries none). `record_save`/disk dumps stay RAW via the SHARED
+  `xex1_pack_dump.hpp::encode_pack_v3` (the substitution lives in expose's own
+  `xex1_wire_preview.hpp`), so record→replay byte-identity is intact
+  (`record_replay_pack_test` green). Proof: `examples/qa_jpeg_preview`
+  (full-res dims via JPEG SOF, size≪raw, dedup `encodes==1` across two channels,
+  raw fallback + degraded-mode legs). Client decoders updated: the expose webUI
+  (`ui/index.html`) and `examples/lib/xex1.py`.
 - **Deployment hygiene incident (noted)**: the main-checkout deployed
   `xi-expose.dll` was a stale record-only build (source had the door, DLL
   predated it); they hot-swapped our integration build to unblock validation
