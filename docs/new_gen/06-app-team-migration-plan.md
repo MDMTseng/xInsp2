@@ -206,11 +206,19 @@ folder_camera) fully pack-ported; wire running frame_wire v3.
 
 **Enablement asks from them (our side, tracked)**:
 - **E1 — capability plane not live in their deployment**: `xi.image.decode`
-  factory-time resolve returns null (their deployed backend exe predates
-  `xi.cap.provider@1`), so folder_camera falls back to `read_image_file`.
-  Fix = redeploy backend + plugin DLLs from the gate-green tip, and create
-  an `imgcodec` instance in the project (registration happens in the lib
-  plugin's factory — see `examples/qa_cap_imgcodec/instances/codec/`).
+  is unavailable, so folder_camera falls back to `read_image_file`.
+  **Unavailability has TWO causes and the fix must address both**: (a) the
+  deployed backend exe predates `xi.cap.provider@1` so the plane was never
+  installed (`get_interface("xi.cap.provider",1)` returns null) — cured by
+  redeploying backend from the gate-green tip; (b) the plane IS installed but
+  **no `imgcodec` instance exists in the project**, so `available("xi.image
+  .decode")==0` and `call()` returns `-1` (EUNKNOWN) — cured by creating an
+  `imgcodec` instance (registration happens in the lib plugin's factory — see
+  `examples/qa_cap_imgcodec/instances/codec/`). A current exe WITHOUT the
+  instance still falls back, so both steps are required. (The `runner`/minimal
+  hosts also don't install the plane — not the app team's service deployment,
+  but the exhaustive root cause is "the host that built the plugin didn't call
+  `install_cap_plane`", which for a shipped service reduces to old-exe.)
   Machine-level autoload for lib plugins (no per-project instance) is a
   named v12 candidate (doc 14).
 - **E2 — full-resolution preview without raw-pixel WS load**: they downsample
