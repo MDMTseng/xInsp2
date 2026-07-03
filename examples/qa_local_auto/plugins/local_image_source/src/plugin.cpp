@@ -176,9 +176,13 @@ private:
         xi::Image img = xi::Image::adopt_pool_handle(host(), rh);
         host()->image_release(rh);
         if (img.empty()) return false;
-        // Emit the loaded image as a fresh-id trigger (burst_source pattern).
-        xi::Record rec = xi::Record().image("frame", img);
-        xi::emit_record(host(), name().c_str(), rec, XI_TRIGGER_NULL);
+        // Emit the loaded image as a fresh-id trigger, PACK-plane (polaris2 THE
+        // CUT): build a pack carrying the frame under key "frame" and emit it —
+        // the script reads it back via t.pack().get_image("frame").
+        xi::PackOut out = new_pack();
+        if (!out.valid()) return false;            // host has no pack plane
+        out.image("frame", img.width, img.height, img.channels, img.read());
+        emit(std::move(out), XI_TRIGGER_NULL);
         return true;
     }
 

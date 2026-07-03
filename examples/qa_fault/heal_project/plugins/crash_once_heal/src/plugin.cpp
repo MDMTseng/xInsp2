@@ -60,6 +60,23 @@ public:
                            .set("healed", true);
     }
 
+    // Pack door (polaris2 THE CUT): pack-in/pack-out mirror of the Record door —
+    // same crash-once-then-heal behaviour, same {count, healed} output.
+    void process(xi::PackIn& /*in*/, xi::PackOut& out) override {
+        fs::path marker = marker_path();
+        std::error_code ec;
+        bool armed = !marker.empty() && !fs::exists(marker, ec);
+        if (armed) {
+            if (!marker.empty()) {
+                fs::create_directories(marker.parent_path(), ec);
+                std::ofstream(marker.string(), std::ios::trunc) << "crashed-once\n";
+            }
+            std::thread t([] { *(volatile int*)nullptr = 0xDEAD; });
+            t.join();
+        }
+        out.i64("count", ++frames_processed_).boolean("healed", true);
+    }
+
     std::string get_def() const override {
         return xi::Json::object()
             .set("frames_processed", frames_processed_)
@@ -82,3 +99,4 @@ private:
 };
 
 XI_PLUGIN_IMPL(CrashOnceHeal)
+XI_PLUGIN_PACK_DOOR(CrashOnceHeal)

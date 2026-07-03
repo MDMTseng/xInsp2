@@ -13,22 +13,23 @@ XI_INSPECT_ENTRY(t, /*frame*/ frame) {
     (void)frame;
     if (!t.is_active()) return;                 // ignore any non-source tick
 
-    xi::Image img = t.image("frame");           // source emits Record().image("frame", img)
-    if (img.empty()) { xi::ng(2, "no image"); return; }
+    auto p = t.pack();                          // source emits a pack keyed "frame"
+    if (!p) { xi::ng(2, "no pack"); return; }
+    auto pv = p.get_image("frame");
+    if (!pv) { xi::ng(2, "no image"); return; }
 
-    cv::Mat m = xi::as_cv_mat(img);
+    cv::Mat m((int)pv->height, (int)pv->width, CV_8UC((int)pv->channels),
+              (void*)pv->pixels.data());
     double brightness = cv::mean(m)[0] / 255.0;
 
-    // Surface the frame image + brightness through `expose` (channel "auto"),
-    // pack-only: expose is a sink, so a script-built pack is pushed (the pack
-    // equivalent of the retired process(Record) leg). The HMI image card binds
-    // the "frame" image key. (The source's own carrier is a separate cut-time
-    // concern; the trigger image read t.image("frame") is carrier-agnostic.)
-    xi::ScriptPackBuilder eb;
-    eb.add_str("$channel", "auto");
-    eb.add_image("frame", img);
-    eb.add_f64("brightness", brightness);
-    xi::use("expose").push(eb.seal());
+    // Surface the frame image + brightness through `expose` (channel "auto").
+    // The HMI image card binds the "frame" image key.
+    xi::ScriptPackBuilder b;
+    b.add_str("$channel", "auto");
+    b.add_image("frame", (int)pv->width, (int)pv->height, (int)pv->channels,
+                pv->pixels.data());
+    b.add_f64("brightness", brightness);
+    xi::use("expose").push(b.seal());
 
     if (brightness > 0.15 && brightness < 0.85) xi::ok(1, "brightness ok");
     else                                        xi::ng(1, "brightness out of range");

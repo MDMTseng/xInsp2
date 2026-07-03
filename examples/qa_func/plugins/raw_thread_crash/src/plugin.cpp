@@ -36,6 +36,17 @@ public:
         return xi::Record().set("count", ++frames_processed_);
     }
 
+    // Pack door (polaris2 THE CUT): pack-in/pack-out mirror of the Record door
+    // above — same crash-if-armed behaviour, same {count} output. Bilingual:
+    // the Record path is untouched; scripts drive this via use("counter").process(pack).
+    void process(xi::PackIn& /*in*/, xi::PackOut& out) override {
+        if (armed_) {
+            std::thread t([] { *(volatile int*)nullptr = 0xDEAD; });
+            t.join();
+        }
+        out.i64("count", ++frames_processed_);
+    }
+
     std::string exchange(const std::string& cmd) override {
         auto p = xi::Json::parse(cmd);
         auto command = p["command"].as_string();
@@ -64,3 +75,4 @@ private:
 };
 
 XI_PLUGIN_IMPL(RawThreadCrash)
+XI_PLUGIN_PACK_DOOR(RawThreadCrash)

@@ -12,15 +12,21 @@
 //
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& counter = xi::use("counter");
-    auto out = counter.process(xi::Record().set("frame", frame));
-    xi::Record rec;
-    rec.set("count", out["count"].as_int(-1))
-       .set("script", 1)      // default script marker (alt_inspect.cpp emits 2)
-       .set("frame", frame);
-    rec.set("$channel", "qa");
-    xi::use("expose").process(rec);
+    // Drive the counter instance through its pack door (pack in, pack out).
+    xi::ScriptPackBuilder cb;
+    cb.add_i64("frame", frame);
+    auto out = xi::use("counter").process(cb.seal());
+    const long long count = out.get_i64("count").value_or(-1);
+
+    // Surface count + the script marker through `expose` (channel "qa").
+    xi::ScriptPackBuilder b;
+    b.add_i64("count", count);
+    b.add_i64("script", 1);      // default script marker (alt_inspect.cpp emits 2)
+    b.add_i64("frame", frame);
+    b.add_str("$channel", "qa");
+    xi::use("expose").push(b.seal());
 }
