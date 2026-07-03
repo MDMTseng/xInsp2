@@ -40,11 +40,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "xinsp2_py"))
-from xinsp2 import Client  # noqa: E402
+sys.path.insert(0, str(REPO_ROOT / "examples" / "lib"))
+from xinsp2 import Client, PartialStatusError  # noqa: E402
+from ports import free_port  # noqa: E402
 
 SUF = ".exe" if os.name == "nt" else ""
 BE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{SUF}"
-PORT = 7871
+PORT = free_port()  # ephemeral (was 7871); no squatter cross-talk
 RECIPE = ROOT / "recipe.json"
 
 
@@ -114,10 +116,17 @@ def main() -> int:
             if not scaler_entry or scaler_entry.get("def", {}).get("factor") != 42:
                 failures.append(f"list_instances did not capture tuned scaler def: {scaler_entry}")
 
-            # Reset: reload the script DLL so the script instance reverts to default.
+            # Reset the instance back to its default. NOTE: a second compile_and_load
+            # is a HOT RECOMPILE, which DELIBERATELY replays the cached tuned instance
+            # defs into the reloaded DLL (g_eng.instance_def_cache) so a recompile never
+            # silently wipes operator tuning — factor would stay 42. A genuine reset that
+            # clears tuning is close_project (it drops the per-session def cache); the
+            # subsequent open + compile brings the script instance up at its default.
+            c.call("close_project")
+            c.open_project(str(ROOT), timeout=300)
             c.compile_and_load(str(ROOT / "inspect.cpp"), timeout=180)
             reset_factor = get_factor(c)
-            print(f"[step] after reset, factor = {reset_factor}")
+            print(f"[step] after reset (close+reopen), factor = {reset_factor}")
             if reset_factor != 5:
                 failures.append(f"reset did not restore default factor 5, got {reset_factor}")
 
@@ -133,9 +142,21 @@ def main() -> int:
             }
             RECIPE.write_text(json.dumps(recipe, indent=2), encoding="utf-8")
 
-            # Restore the recipe.
-            rsp = c.load_project(str(RECIPE))
-            print(f"[step] load_project rsp = {json.dumps(rsp)}")
+            # Restore the recipe. The recipe deliberately includes a MISSING "ghost"
+            # instance, so the load is EXPECTED to come back "partial": the client's
+            # load_project() raises PartialStatusError on a non-clean status, carrying
+            # the rsp `data` (with the warning arrays). A CLEAN ok here would be the
+            # bug — it would mean the missing instance was silently swallowed.
+            try:
+                rsp = c.load_project(str(RECIPE))
+                failures.append(
+                    "load_project reported a CLEAN ok for a recipe with a missing "
+                    "instance — partial restore not surfaced (fail-reads-as-pass)")
+            except PartialStatusError as e:
+                if e.status != "partial":
+                    failures.append(f"load_project status {e.status!r} != 'partial'")
+                rsp = e.data if isinstance(e.data, dict) else {}
+            print(f"[step] load_project (partial) rsp = {json.dumps(rsp)}")
 
             # The tuned def must be re-applied to the script instance.
             applied = get_factor(c)
