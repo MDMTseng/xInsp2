@@ -6,7 +6,10 @@ maintainer-settled 2026-07-03). The plane is live code: host registry + funnel
 lib plugin `plugins/imgcodec`, ctest `cap_plane_test` + `cap_imgcodec_test`,
 and QA `examples/qa_cap_imgcodec` — all green. Zero ABI slots were spent (see
 the ABI bill below); v12 may still formalize the surface, the pilot proves the
-shape. See "The pilot implementation" at the end.
+shape. See "The pilot implementation" at the end. **V3 (machine-level autoload —
+a provider available with NO per-project instance) also LANDED pre-v12** as a
+default-OFF deployment opt-in (`--autoload-lib`); see "V3: machine-level
+autoload" below.
 
 ## Problem
 
@@ -250,6 +253,56 @@ itself — funnel −5 → stb; its decode counter does not move), decoder-fault
 instance, and identical fail modes on corrupt/null; QA
 `examples/qa_cap_imgcodec` (live service: script → consumer pack door →
 host-forwarded capability, encode counter pinned at 1 across every run).
+
+### V3: machine-level autoload (LANDED pre-v12)
+
+The pilot registered a capability only once a PROJECT created a provider
+instance (the factory is what calls `register_capability`), so E1's second cause
+(doc 06 §6): a deployment with the plane installed but no `imgcodec` instance
+still `available("xi.image.decode")==0` → falls back. **V3 removes the
+per-project instance requirement.** A provider plugin marks itself
+`"autoload": true` in plugin.json (imgcodec does — informational alongside
+`"lib"`), and the host instantiates every eligible provider ONCE at service boot
+under a stable **machine owner** (`PluginManager::machine_instances_`, keyed by
+plugin name, synthetic instance `@auto:<plugin>`, in `InstanceRegistry` but NOT
+`project_.instances`). Its capabilities register with no project open; the
+provider persists across project open/close and is swept at shutdown.
+
+- **Deployment opt-in, default OFF.** Gated on `--autoload-lib` / env
+  `XINSP2_AUTOLOAD_LIB`. This is deliberate: autoloading imgcodec makes BOTH
+  `xi.image.decode` AND `xi.jpeg.encode` available, and expose's E2 preview keys
+  off `xi.jpeg.encode` availability — so an *implicit* machine-wide autoload
+  would silently flip every deployment's WS wire to JPEG previews. The flag
+  keeps a stock deployment byte-identical; a deployment that wants the E1 cure
+  (and the E2 previews it implies) opts in once. The `"autoload"` marker is
+  *eligibility*; the flag is *activation*.
+- **Project precedence.** An explicit project instance of an autoload plugin
+  wins: before its factory runs (`create_instance` / open_project), the machine
+  provider is evicted (adapter dtor owner-sweeps its registrations) so the
+  project instance claims the capability names cleanly — no ETAKEN
+  double-register. On teardown (`remove_instance` / `close_project`) the machine
+  provider is reinstated (its global DLL is never project-unloaded). So E1 step
+  (b-i) — a per-project instance — stays a valid alternative to (b-ii) autoload.
+- **Machine-scoped recovery.** A project instance re-enables after a quarantine
+  by re-committing its config (`set_inst_state → Active`); a machine provider has
+  no project commit surface, so `PluginManager::reload_machine_provider(plugin)`
+  rebuilds it from a fresh factory (the machine analogue of the re-commit). The
+  autoload instance keeps the plugin's declared `on_fault` (imgcodec: `refuse` →
+  quarantine on a handler crash), so an unattended deployment that prefers
+  self-healing can set the eligible provider's default to `reinit` instead.
+- **Proof (all green):** backend ctest `cap_autoload_test` (available with no
+  project, project-instance precedence evict+reinstate, close_project
+  reinstatement, crash→quarantine→`reload_machine_provider` recovery, teardown
+  owner sweep, all via the real `PluginManager` + real lib DLL); QA
+  `qa_cap_imgcodec_autoload` (live service, `--autoload-lib`, NO codec instance
+  declared — the consumer's door is still served, `enc==1`) alongside the
+  unchanged `qa_cap_imgcodec` (WITH a codec instance — precedence: the project
+  instance is the provider, `registered==true`).
+- **v12 formalization:** promote `--autoload-lib` into declared config (a
+  deployment/backend config list) and decide whether autoload should be the
+  default once `read_image_file`'s built-in stb fallback is deleted at the cut
+  (below) — at that point a deployment with no decode provider has no safety net,
+  so autoload-on may become the sane default.
 
 **v12 must revisit**: promote/retire the two interfaces formally; **pay the
 `read_image_file` eviction — delete the host ABI slot AND core's built-in stb

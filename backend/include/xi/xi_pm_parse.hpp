@@ -186,6 +186,13 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
     // gates use(<instance>).process() so the sink's side effect lands in frame order.
     pi.is_sink = json_flag_true(content, "sink") ||
                  (extract_string(content, "role").value_or("") == "sink");
+    // doc 14 lib-plugin marker (informational) + V3 machine-autoload gate
+    // (doc 19 V3): `"lib": true` flags a capability provider with no data plane;
+    // `"autoload": true` makes the host instantiate it once at boot under a
+    // machine owner so its capabilities are available without a per-project
+    // instance (PluginManager::autoload_machine_providers). See PluginInfo.
+    pi.is_lib   = json_flag_true(content, "lib");
+    pi.autoload = json_flag_true(content, "autoload");
     // item 14: per-plugin post-fault policy DEFAULT ("on_fault"). An instance.json
     // "on_fault" overrides it per instance. Absent/unknown → Reuse (unchanged).
     pi.default_on_fault = parse_on_fault(extract_string(content, "on_fault").value_or(""),

@@ -213,16 +213,24 @@ folder_camera) fully pack-ported; wire running frame_wire v3.
   deployed backend exe predates `xi.cap.provider@1` so the plane was never
   installed (`get_interface("xi.cap.provider",1)` returns null) — cured by
   redeploying backend from the gate-green tip; (b) the plane IS installed but
-  **no `imgcodec` instance exists in the project**, so `available("xi.image
-  .decode")==0` and `call()` returns `-1` (EUNKNOWN) — cured by creating an
-  `imgcodec` instance (registration happens in the lib plugin's factory — see
-  `examples/qa_cap_imgcodec/instances/codec/`). A current exe WITHOUT the
-  instance still falls back, so both steps are required. (The `runner`/minimal
-  hosts also don't install the plane — not the app team's service deployment,
-  but the exhaustive root cause is "the host that built the plugin didn't call
-  `install_cap_plane`", which for a shipped service reduces to old-exe.)
-  Machine-level autoload for lib plugins (no per-project instance) is a
-  named v12 candidate (doc 14).
+  **no `imgcodec` provider is registered**, so `available("xi.image.decode")==0`
+  and `call()` returns `-1` (EUNKNOWN). Two ways to register a provider, either
+  suffices: (b-i) create an `imgcodec` instance in the project (registration
+  happens in the lib plugin's factory — see
+  `examples/qa_cap_imgcodec/instances/codec/`); OR (b-ii) **enable machine-level
+  autoload** — launch the backend with `--autoload-lib` (or env
+  `XINSP2_AUTOLOAD_LIB=1`) and the host instantiates the `"autoload"`-marked
+  `imgcodec` provider ONCE at boot under a machine owner, so the capability is
+  available deployment-wide with NO per-project instance (V3, LANDED pre-v12 —
+  doc 14 / doc 19). The per-project step (b-i) is now OPTIONAL when autoload is
+  on; a project that still declares its own `imgcodec` instance takes precedence
+  (it displaces the machine provider for that project — no double-register).
+  Recommended for the app deployment: redeploy the gate-green exe (cures (a))
+  AND set `--autoload-lib` (cures (b) machine-wide). Autoload is default-OFF so a
+  stock deployment stays byte-unchanged. (The `runner`/minimal hosts also don't
+  install the plane — not the app team's service deployment, but the exhaustive
+  root cause is "the host that built the plugin didn't call `install_cap_plane`",
+  which for a shipped service reduces to old-exe.)
 - **E2 — full-resolution preview without raw-pixel WS load**: they downsample
   to ~384px today. **DELIVERED** (`polaris2/e2-jpeg-preview`): expose resolves
   `xi.jpeg.encode` via `get_interface("xi.cap",1)` (per-instance, cached,

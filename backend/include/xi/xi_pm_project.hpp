@@ -99,6 +99,13 @@ inline void PluginManager::close_project() {
     project_loaded_plugins_.clear();
     project_plugin_origin_.clear();
     project_ = ProjectInfo{};
+    // V3: machine-autoloaded lib providers are machine-scoped — they survive the
+    // project teardown above (never in project_.instances / project_loaded_
+    // plugins_). Reinstate any that THIS project had displaced with its own
+    // instance (their global DLL is still mapped in plugins_), so a capability
+    // that was project-provided stays available after close. No-op at boot / when
+    // nothing was displaced.
+    autoload_machine_providers_locked_();
 }
 
 // ---- working copy (transactional edits at <project>/.xinsp_work) --------
@@ -694,6 +701,11 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                 bool created = false;
                 // Same registration as create_instance — needed for project-load too.
                 InstanceFolderRegistry::instance().set(ii.name, ii.folder_path);
+                // V3 precedence: an explicit project instance of an autoload lib
+                // plugin displaces the boot machine provider so this instance
+                // registers its capabilities cleanly (no ETAKEN). Reinstated on
+                // close_project. (No-op unless *plugin is machine-provided.)
+                evict_machine_provider_locked_(*plugin);
 
                 // Every instance runs in-process: plugins are loaded
                 // into the backend and called directly (zero-copy via

@@ -538,6 +538,32 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[xinsp2] work_dir=%s\n",    g_eng.work_dir.c_str());
     std::fprintf(stderr, "[xinsp2] plugins_dir=%s\n",  g_eng.plugins_dir.c_str());
 
+    // V3 machine-level lib-plugin autoload (docs/new_gen/14, doc 19 V3): bring up
+    // every discovered plugin marked `"autoload": true` (a `lib` capability
+    // provider, e.g. imgcodec) ONCE now, under a stable machine owner, so its
+    // capabilities (xi.image.decode / xi.jpeg.encode) are available WITHOUT any
+    // project declaring a per-instance — clearing E1's second cause (doc 06 §6).
+    // Machine-scoped: these persist across project open/close; an explicit
+    // project instance of the same plugin still takes precedence (it displaces
+    // the machine provider for the life of the project). DEPLOYMENT OPT-IN:
+    // gated on `--autoload-lib` (or env XINSP2_AUTOLOAD_LIB) so a stock
+    // deployment is byte-unchanged — nothing that keys off capability
+    // availability (e.g. expose's E2 JPEG preview, which activates when
+    // xi.jpeg.encode is present) flips implicitly. The app team enables this once
+    // per deployment (E1). Runs after the plugin scan; the first factory call
+    // publishes the cap plane via default_host_api().
+    {
+        const char* env = std::getenv("XINSP2_AUTOLOAD_LIB");
+        bool autoload_lib = xi::cli::has_flag(argc, argv, "--autoload-lib") ||
+                            (env && *env && std::strcmp(env, "0") != 0);
+        g_eng.plugin_mgr.set_autoload_enabled(autoload_lib);
+        if (autoload_lib) {
+            int nlib = g_eng.plugin_mgr.autoload_machine_providers();
+            std::fprintf(stderr, "[xinsp2] lib autoload ENABLED — %d machine "
+                                 "provider(s) up\n", nlib);
+        }
+    }
+
     // Process isolation + SHM removed 2026-05: all plugins run
     // in-process and share the host ImagePool directly (zero-copy via
     // pointers, no cross-process marshalling). No worker process, no

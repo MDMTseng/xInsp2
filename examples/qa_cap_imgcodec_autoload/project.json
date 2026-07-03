@@ -1,0 +1,13 @@
+{
+  "name": "qa_cap_imgcodec_autoload",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "enc", "plugin": "cap_consumer" }
+  ],
+  "plugins": {
+    "cap_consumer": {
+      "path": "cap_consumer",
+      "compile": true
+    }
+  }
+}

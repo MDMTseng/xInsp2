@@ -52,6 +52,83 @@ inline std::shared_ptr<CAbiInstanceAdapter> PluginManager::make_adapter_guarded_
     return inst;
 }
 
+// ---- V3 machine-level lib-plugin autoload (doc 14 / doc 19 V3) --------------
+inline bool PluginManager::project_provides_plugin_locked_(const std::string& plugin_name) const {
+    for (auto& [iname, ii] : project_.instances)
+        if (ii.plugin_name == plugin_name) return true;
+    return false;
+}
+
+inline void PluginManager::evict_machine_provider_locked_(const std::string& plugin_name) {
+    auto it = machine_instances_.find(plugin_name);
+    if (it == machine_instances_.end()) return;
+    // Drop it from the live-instance registry FIRST (so the funnel's
+    // resolve_provider_ can't hand it out mid-teardown), then release our ref.
+    // The adapter dtor runs the plugin destroy_fn AND owner-sweeps its capability
+    // registrations (CAbiInstanceAdapter::~ -> sweep_caps_for), freeing the names
+    // for the incoming project instance to claim.
+    InstanceRegistry::instance().remove(it->second->name());
+    machine_instances_.erase(it);   // shared_ptr drop -> ~CAbiInstanceAdapter
+}
+
+inline int PluginManager::autoload_machine_providers_locked_() {
+    if (!autoload_enabled_) return 0;   // deployment opt-in gate (V3)
+    int created = 0;
+    for (auto& [name, pi] : plugins_) {
+        if (!pi.autoload) continue;                 // not an autoload lib plugin
+        if (machine_instances_.count(name)) continue;   // already machine-provided
+        if (project_provides_plugin_locked_(name)) continue;  // project wins
+        std::string err;
+        if (!load_plugin_locked_(name, &err)) {     // no-op if already loaded
+            std::fprintf(stderr, "[xinsp2] autoload: cannot load lib plugin '%s': %s\n",
+                         name.c_str(), err.c_str());
+            continue;
+        }
+        auto pit = plugins_.find(name);
+        if (pit == plugins_.end() || !pit->second.c_factory) continue;
+        // Machine-owned instance: synthetic name (not a valid user instance name,
+        // so it never collides with a project instance), fresh owner id, the
+        // plugin's declared on_fault policy. NOT added to project_.instances.
+        const std::string inst_name = "@auto:" + name;
+        auto inst = make_adapter_guarded_(pit->second, name, inst_name,
+                                          /*max_concurrency=*/0, pit->second.default_on_fault);
+        if (!inst) {
+            std::fprintf(stderr, "[xinsp2] autoload: factory failed for lib plugin '%s' "
+                         "(it registered no capabilities)\n", name.c_str());
+            continue;
+        }
+        InstanceRegistry::instance().add(inst);
+        machine_instances_[name] = inst;
+        ++created;
+        std::fprintf(stderr, "[xinsp2] autoload: machine lib provider '%s' up (owner=%llu)\n",
+                     name.c_str(), (unsigned long long)inst->owner_id());
+    }
+    return created;
+}
+
+inline int PluginManager::autoload_machine_providers() {
+    std::lock_guard<std::mutex> lk(mu_);
+    return autoload_machine_providers_locked_();
+}
+
+inline bool PluginManager::reload_machine_provider(const std::string& plugin_name) {
+    std::lock_guard<std::mutex> lk(mu_);
+    // Only meaningful for an autoload plugin with no project instance holding the
+    // slot; if a project instance provides it, that one is authoritative.
+    if (project_provides_plugin_locked_(plugin_name)) return false;
+    evict_machine_provider_locked_(plugin_name);   // drop the quarantined/stale one
+    autoload_machine_providers_locked_();           // fresh factory re-registers
+    return machine_instances_.count(plugin_name) > 0;
+}
+
+inline std::vector<std::string> PluginManager::machine_provider_plugins() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<std::string> out;
+    out.reserve(machine_instances_.size());
+    for (auto& [name, inst] : machine_instances_) out.push_back(name);
+    return out;
+}
+
 // Phase 1 of a reload: snapshot every instance's def, then destroy them and
 // FreeLibrary the plugin's old DLL. The instance dtor runs xi_plugin_destroy
 // (joins worker threads / frees a CUDA context) BEFORE we unload, and freeing
@@ -828,8 +905,15 @@ inline bool PluginManager::is_project_plugin(const std::string& name) {
 // err (optional): on failure, filled with a human-readable reason so callers
 // (the create_instance handler) can surface WHY instead of a generic message.
 inline bool PluginManager::load_plugin(const std::string& name, std::string* err) {
-    auto fail = [&](std::string msg) { if (err) *err = std::move(msg); return false; };
     std::lock_guard<std::mutex> lk(mu_);
+    return load_plugin_locked_(name, err);
+}
+
+// Body of load_plugin with mu_ ALREADY held — so autoload (which holds mu_ for
+// the whole reconcile) can bring a scanned-but-unloaded lib DLL into memory
+// without re-entering the non-recursive mu_.
+inline bool PluginManager::load_plugin_locked_(const std::string& name, std::string* err) {
+    auto fail = [&](std::string msg) { if (err) *err = std::move(msg); return false; };
     auto it = plugins_.find(name);
     if (it == plugins_.end())
         return fail("plugin '" + name + "' not found (not in any plugins dir or the open project)");

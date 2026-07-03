@@ -6,6 +6,8 @@
   "has_ui": false,
   "lib": true,
   "_lib_doc": "lib plugin marker (informational, doc 14 pilot): a capability provider, not a pipeline stage — do not wire it as an input/output of anything; create one instance and let consumers reach it by capability name through the host funnel.",
+  "autoload": true,
+  "_autoload_doc": "V3 machine-level autoload ELIGIBILITY (doc 14 / doc 19 V3): marks this lib provider as safe to instantiate once at service boot under a machine owner, so xi.image.decode / xi.jpeg.encode are available WITHOUT any project declaring a per-instance (clears E1's second cause, doc 06 §6). ELIGIBILITY ONLY — the host autoloads eligible providers only when the DEPLOYMENT opts in (backend flag `--autoload-lib` / env XINSP2_AUTOLOAD_LIB), so the default (unset) deployment is byte-unchanged and this never silently alters the WS wire (e.g. expose's E2 preview, which keys off xi.jpeg.encode availability). A project that DOES declare an imgcodec instance takes precedence: it displaces the machine provider for the life of that project (no double-registration), reinstated on project close.",
   "reentrant": true,
   "_reentrant_doc": "capability handlers are invoked by the host funnel WITHOUT per-instance serialization (the provider thread-safety contract); the control surface (exchange/set_def) may also run concurrently — everything inside is mutex/atomic-guarded.",
   "on_fault": "refuse",
