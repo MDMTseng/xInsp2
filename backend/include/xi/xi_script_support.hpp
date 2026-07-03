@@ -194,7 +194,6 @@ XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* c
 // reads happen inside the script's address space only.
 static void* g_use_process_fn_   = nullptr;
 static void* g_use_exchange_fn_  = nullptr;
-static void* g_use_grab_fn_      = nullptr;
 // Pointer to backend's xi_host_api — image_create / image_data /
 // image_release etc. all operate on the BACKEND's ImagePool, which is the
 // only pool plugins see via their own host_api. Without this, the script's
@@ -260,7 +259,12 @@ XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
 {
     g_use_process_fn_   = process_fn;
     g_use_exchange_fn_  = exchange_fn;
-    g_use_grab_fn_      = grab_fn;
+    // grab_fn: the host still feeds this slot with its use_grab_cb stub, but the
+    // SDK-side landing pad (g_use_grab_fn_) is gone — the pull-style xi::grab()
+    // that read it was removed in the v11 push-only cleanup (see xi_use.hpp), so
+    // nothing consumes it. The ABI parameter is retained (dropping it is a
+    // coordinated host<->script signature change) but no longer stored.
+    (void)grab_fn;
     g_use_host_api_     = host_api;
 }
 

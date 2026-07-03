@@ -81,7 +81,6 @@ struct xi_trigger_view {
 // Defined in xi_script_support.hpp (force-included by the compiler)
 extern void* g_use_process_fn_;
 extern void* g_use_exchange_fn_;
-extern void* g_use_grab_fn_;
 extern void* g_use_host_api_;   // xi_host_api* into BACKEND's ImagePool
 extern void* g_trigger_info_fn_;
 extern void* g_trigger_image_fn_;
@@ -845,8 +844,10 @@ public:
     // It contradicted the push-only source model: sources push frames via
     // emit_record into the trigger bus, and scripts read the CURRENT trigger
     // (xi::current_trigger().image("src") / the XI_INSPECT_ENTRY view) rather
-    // than pulling a frame from an instance. The host-side grab plumbing
-    // (g_use_grab_fn_) is left in place but no longer reachable from the SDK.
+    // than pulling a frame from an instance. The SDK-side landing pad
+    // (g_use_grab_fn_) is now gone too; the host still passes its use_grab_cb
+    // stub into the retained grab_fn ABI slot (xi_script_set_use_callbacks),
+    // where it is simply discarded until that slot is formally cut.
 
     const std::string& name() const { return name_; }
 
