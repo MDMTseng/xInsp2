@@ -56,6 +56,16 @@ inline constexpr const char* kProv = "$prov";  // str: hop chain, '/'-joined, ol
 // expose routing). Named here because propagate_fault copies it forward so a
 // propagated fault stays correlatable with its frame.
 inline constexpr const char* kSeq = "$seq";
+// Streaming via chunking (docs/new_gen/18-stream-chunking-convention.md): a
+// logical payload too large / too long-lived for one sealed pack travels as a
+// SEQUENCE of ordinary sealed packs on one lane — same "$stream" id, dense
+// 0-based "$part", "$eof" present-and-true on the LAST chunk only. Pure
+// CONVENTION: the host never buffers, reassembles or stamps these; the
+// consumer owns the (bounded) reassembly window. A "$fault" pack carrying the
+// stream's "$stream" id poisons the WHOLE stream (doc 15's one poison marker).
+inline constexpr const char* kStream = "$stream"; // i64: producer-chosen stream id
+inline constexpr const char* kPart   = "$part";   // i64: 0-based dense chunk index
+inline constexpr const char* kEof    = "$eof";    // bool: true on the LAST chunk only
 inline constexpr char kProvSep = '/';
 
 // --- vtable-level reads (host / plugin / script alike) -----------------------

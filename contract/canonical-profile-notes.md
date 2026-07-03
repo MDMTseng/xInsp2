@@ -314,3 +314,22 @@ for that discriminator is a BARE `type` str entry, NOT `$type`:
 Reference example: `examples/qa_pack_poly_door` (the bundled `poly_door`
 plugin: `type="measure"` → image stats, `type="annotate"` → derived overlay
 entry, anything else → `unsupported_type` + `types`).
+### Doc-18 addendum: streaming via chunking (docs/new_gen/18)
+
+The reserved-key set gained three STREAMING keys (constants:
+`xi::pack_contract::kStream/kPart/kEof`). Pure convention — no host mechanism,
+no new pack kind: a logical payload too large / too long-lived for one sealed
+pack travels as a SEQUENCE of ordinary sealed packs on one lane.
+
+- `"$stream"` — i64, producer-chosen stream id; all chunks of one logical
+  payload carry the same value (unique among streams in flight on the lane).
+- `"$part"`   — i64, 0-based DENSE chunk index (+1 per chunk; a gap is a
+  protocol fault, never a reorder to tolerate — doc 17 lane order is
+  authoritative).
+- `"$eof"`    — bool, present-and-true on the LAST chunk only; the stream's
+  only completion signal (missing `$eof` → consumer-owned timeout fault).
+
+The CONSUMER owns the (bounded) reassembly window; the host never buffers or
+stamps. A `$fault` pack carrying the stream's `$stream` id poisons the WHOLE
+stream (the doc-15 one-poison-marker rule: abort, discard partials, drop
+stragglers). Worked example: `examples/qa_pack_stream/`.

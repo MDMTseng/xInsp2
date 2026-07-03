@@ -62,6 +62,9 @@ poison marker — there is deliberately no pack `$na`.
 | `$src` | `pack_contract::kSrc` | str, immediate producer — auto-stamped at seal by the door glue on NON-EMPTY door outputs (`emit()` never stamps; sources/scripts attribute explicitly via `src()`). |
 | `$prov` | `pack_contract::kProv` | str, hop chain (`/`-joined, oldest→newest) — door hops append; the use-funnel appends on fault short-circuit too. |
 | `$channel` / `$seq` | — | Same routing/ordering roles as on Records; on packs they are the pack's OWN entries (never host-stamped — sealed packs are immutable). `propagate_fault` copies `$seq` forward. |
+| `$stream` | `pack_contract::kStream` | i64, producer-chosen stream id — streaming-via-chunking convention (`docs/new_gen/18-stream-chunking-convention.md`): one logical payload as a sequence of sealed packs on one lane, all carrying the same id. |
+| `$part` | `pack_contract::kPart` | i64, 0-based DENSE chunk index within a `$stream` (+1 per chunk; a gap is a protocol fault — no reorder tolerance on one lane). |
+| `$eof` | `pack_contract::kEof` | bool, present-and-true on the LAST chunk only — the stream's only completion signal; missing `$eof` ends in a consumer-owned timeout fault. A mid-stream `$fault` pack poisons the whole stream. |
 
 ## `xi::Image`
 
