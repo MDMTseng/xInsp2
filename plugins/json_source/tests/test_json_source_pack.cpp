@@ -11,7 +11,7 @@
 //   * OFF (default) — pack_mode false: process() returns the Record byte-for-byte
 //     as before and NOTHING reaches the pack bus (the Record path is unchanged).
 //   * ON — the document's top-level scalars land as canonical pack entries
-//     (bool → i64 0/1, number → i64/f64, string → str), a nested object/array
+//     (bool → bool tag, number → i64/f64, string → str), a nested object/array
 //     lands as ONE ingress-canonicalized `mp` entry that decodes back, and a
 //     leading `seq` counter mirrors mock_camera.
 //   * HOSTILE — a depth-bomb document is rejected LOUDLY: a sealed $fault pack
@@ -188,7 +188,11 @@ int main() {
             double ratio = 0; CHECK(fi->get_f64(pk, "ratio", &ratio) == 1 && ratio == 1.5);
             const char* s = nullptr; int32_t sl = 0;
             CHECK(fi->get_str(pk, "name", &s, &sl) == 1 && std::string(s, (size_t)sl) == "widget");
-            int64_t ok = -1; CHECK(fi->get_i64(pk, "ok", &ok) == 1 && ok == 1);   // bool → i64 0/1
+            // bool → a REAL bool entry (tag XI_PACK_TAG_BOOL) — the old i64 0/1
+            // workaround is gone: the i64 read now fail-closes on the bool tag.
+            CHECK(fi->tag_of(pk, "ok") == XI_PACK_TAG_BOOL);
+            int32_t okb = 0; CHECK(fi->get_bool(pk, "ok", &okb) == 1 && okb == 1);
+            int64_t ok = -1; CHECK(fi->get_i64(pk, "ok", &ok) == 0);
             // not a fault pack.
             const char* fc = nullptr; int32_t fl = 0;
             CHECK(fi->get_str(pk, "$fault", &fc, &fl) == 0);

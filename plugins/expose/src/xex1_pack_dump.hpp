@@ -61,6 +61,10 @@ inline std::vector<uint8_t> encode_pack_v3(const xi::PackIn& in,
                 xi::mp::Writer w; w.float_(in.f64(key.c_str()).value_or(0.0)); e.value = w.take();
                 break;
             }
+            case XI_PACK_TAG_BOOL: {
+                xi::mp::Writer w; w.boolean(in.boolean(key.c_str()).value_or(false)); e.value = w.take();
+                break;
+            }
             case XI_PACK_TAG_STR: {
                 xi::mp::Writer w; w.str(in.str(key.c_str()).value_or("")); e.value = w.take();
                 break;

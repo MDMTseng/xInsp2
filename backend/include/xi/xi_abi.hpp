@@ -192,7 +192,15 @@ public:
         if (valid()) fi_->builder_add_str(b_, k, v.data(), (int32_t)v.size());
         return *this;
     }
-    PackOut& boolean(const char* k, bool v) { return i64(k, v ? 1 : 0); }  // no msgpack bool slot; i64 0/1
+    // Real bool entry (tag XI_PACK_TAG_BOOL, canonical 0xc2/0xc3). Falls back to
+    // the historical i64 0/1 encoding on a host whose xi_pack_v1 predates the
+    // additive bool tail (NULL fn pointer) — readers cover both via bool_or.
+    PackOut& boolean(const char* k, bool v) {
+        if (!valid()) return *this;
+        if (fi_->builder_add_bool) fi_->builder_add_bool(b_, k, v ? 1 : 0);
+        else fi_->builder_add_i64(b_, k, v ? 1 : 0);
+        return *this;
+    }
     PackOut& bin(const char* k, const void* d, size_t n) {
         if (valid()) fi_->builder_add_bin(b_, k, d, (int32_t)n);
         return *this;
@@ -285,7 +293,19 @@ public:
         int64_t v; if (valid() && fi_->get_i64(h_, k, &v)) return v; return std::nullopt;
     }
     int64_t i64_or(const char* k, int64_t d) const { auto v = i64(k); return v ? *v : d; }
-    bool    bool_or(const char* k, bool d) const { auto v = i64(k); return v ? (*v != 0) : d; }
+    // True bool entry (tag XI_PACK_TAG_BOOL). nullopt if absent, not a bool, or
+    // the host predates the bool tail.
+    std::optional<bool> boolean(const char* k) const {
+        int32_t v;
+        if (valid() && fi_->get_bool && fi_->get_bool(h_, k, &v)) return v != 0;
+        return std::nullopt;
+    }
+    // Tolerant read: a real bool entry first, then the historical i64 0/1
+    // encoding (producers from before the bool tag), else the default.
+    bool bool_or(const char* k, bool d) const {
+        if (auto b = boolean(k)) return *b;
+        auto v = i64(k); return v ? (*v != 0) : d;
+    }
     std::optional<double> f64(const char* k) const {
         double v; if (valid() && fi_->get_f64(h_, k, &v)) return v; return std::nullopt;
     }

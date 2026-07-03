@@ -98,8 +98,9 @@ inline uint32_t get_u32_be(const uint8_t* p) {
 }
 
 // Encoded-size constants for the canonical forms.
-inline constexpr size_t kI64Size = 9;   // 0xd3 + 8
-inline constexpr size_t kF64Size = 9;   // 0xcb + 8
+inline constexpr size_t kI64Size  = 9;   // 0xd3 + 8
+inline constexpr size_t kF64Size  = 9;   // 0xcb + 8
+inline constexpr size_t kBoolSize = 1;   // 0xc2 / 0xc3 — the canonical bool IS its tag byte
 inline size_t str_size(size_t n) { return 5 + n; }  // 0xdb + 4 len + bytes
 inline size_t bin_size(size_t n) { return 5 + n; }  // 0xc6 + 4 len + bytes
 
@@ -112,6 +113,9 @@ inline void write_f64(uint8_t* out, double v) {
     std::memcpy(&bits, &v, sizeof bits);
     out[0] = 0xcb;
     put_u64_be(out + 1, bits);
+}
+inline void write_bool(uint8_t* out, bool v) {
+    out[0] = v ? 0xc3 : 0xc2;   // msgpack true / false (already canonical)
 }
 inline void write_str(uint8_t* out, std::string_view s) {
     out[0] = 0xdb;
@@ -134,6 +138,10 @@ inline double read_f64(const uint8_t* p) {
     double v;
     std::memcpy(&v, &bits, sizeof v);
     return v;
+}
+inline bool read_bool(const uint8_t* p) {
+    assert((p[0] == 0xc2 || p[0] == 0xc3) && "pack entry is not a canonical bool");
+    return p[0] == 0xc3;
 }
 // str/bin readers return a view straight into the arena payload region.
 inline std::string_view read_str(const uint8_t* p) {
@@ -362,7 +370,9 @@ inline std::span<const uint8_t> view(xi_image_handle h) {
 // pool-buffer reference (Bin above threshold, Image). Unknown/opaque nested
 // msgpack rides as Mp — forward compatibility by construction (doc 07 §2).
 // ===================================================================
-enum class PackTag : uint8_t { I64, F64, Str, Bin, Image, Mp };
+// Bool is APPENDED (=6) so every pre-existing tag keeps its ABI value
+// (XI_PACK_TAG_* in xi_abi.h matches 1:1 — the json_source bool-entry gap fix).
+enum class PackTag : uint8_t { I64, F64, Str, Bin, Image, Mp, Bool };
 
 // A borrowed const view of an image entry: dimensions + a zero-copy span over
 // the pool buffer's pixels. Valid for the lifetime of the owning Pack.
@@ -488,6 +498,11 @@ public:
         if (!e || e->tag != PackTag::F64) return std::nullopt;
         return pack_mp_detail::read_f64(e->inl);
     }
+    std::optional<bool> get_bool(std::string_view key) const {
+        const auto* e = find(key);
+        if (!e || e->tag != PackTag::Bool) return std::nullopt;
+        return pack_mp_detail::read_bool(e->inl);
+    }
     std::optional<std::string_view> get_str(std::string_view key) const {
         const auto* e = find(key);
         if (!e || e->tag != PackTag::Str) return std::nullopt;
@@ -571,6 +586,7 @@ private:
 
 template <> inline std::optional<int64_t> Pack::get<int64_t>(std::string_view k) const { return get_i64(k); }
 template <> inline std::optional<double>  Pack::get<double>(std::string_view k) const  { return get_f64(k); }
+template <> inline std::optional<bool>    Pack::get<bool>(std::string_view k) const    { return get_bool(k); }
 
 // ===================================================================
 // PackBuilder — the pre-seal, insertion-ordered entry table (dynamic path).
@@ -602,6 +618,10 @@ public:
     void add_f64(std::string_view key, double v) {
         Entry& e = begin_inline(key, PackTag::F64, pack_mp_detail::kF64Size);
         pack_mp_detail::write_f64(const_cast<uint8_t*>(e.inl), v);
+    }
+    void add_bool(std::string_view key, bool v) {
+        Entry& e = begin_inline(key, PackTag::Bool, pack_mp_detail::kBoolSize);
+        pack_mp_detail::write_bool(const_cast<uint8_t*>(e.inl), v);
     }
     void add_str(std::string_view key, std::string_view v) {
         Entry& e = begin_inline(key, PackTag::Str, pack_mp_detail::str_size(v.size()));
@@ -827,6 +847,13 @@ public:
         return pack_mp_detail::read_f64(s.inl);
     }
     template <int SlotIdx>
+    std::optional<bool> get_bool() const {
+        static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
+        const Slot& s = slots_[SlotIdx];
+        if (!s.present || s.tag != PackTag::Bool) return std::nullopt;
+        return pack_mp_detail::read_bool(s.inl);
+    }
+    template <int SlotIdx>
     std::optional<std::string_view> get_str() const {
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         const Slot& s = slots_[SlotIdx];
@@ -876,6 +903,13 @@ public:
         if (!e || e->tag != PackTag::F64) return std::nullopt;
         return pack_mp_detail::read_f64(e->inl);
     }
+    std::optional<bool> get_bool(std::string_view key) const {
+        int s = Schema::slot_of_runtime(key);
+        if (s >= 0) return slot_bool(slots_[s]);
+        const Entry* e = find_dyn(key);
+        if (!e || e->tag != PackTag::Bool) return std::nullopt;
+        return pack_mp_detail::read_bool(e->inl);
+    }
     std::optional<std::string_view> get_str(std::string_view key) const {
         int s = Schema::slot_of_runtime(key);
         if (s >= 0) return slot_str(slots_[s]);
@@ -907,6 +941,10 @@ private:
     static std::optional<double> slot_f64(const Slot& s) {
         if (!s.present || s.tag != PackTag::F64) return std::nullopt;
         return pack_mp_detail::read_f64(s.inl);
+    }
+    static std::optional<bool> slot_bool(const Slot& s) {
+        if (!s.present || s.tag != PackTag::Bool) return std::nullopt;
+        return pack_mp_detail::read_bool(s.inl);
     }
     static std::optional<std::string_view> slot_str(const Slot& s) {
         if (!s.present || s.tag != PackTag::Str) return std::nullopt;
@@ -942,7 +980,8 @@ template <class T, int SlotIdx>
 std::optional<T> TypedPack<Schema>::get() const {
     if constexpr (std::is_same_v<T, int64_t>) return get_i64<SlotIdx>();
     else if constexpr (std::is_same_v<T, double>) return get_f64<SlotIdx>();
-    else { static_assert(sizeof(T) == 0, "TypedPack::get<T,slot> supports int64_t / double"); }
+    else if constexpr (std::is_same_v<T, bool>) return get_bool<SlotIdx>();
+    else { static_assert(sizeof(T) == 0, "TypedPack::get<T,slot> supports int64_t / double / bool"); }
 }
 
 // ===================================================================
@@ -982,6 +1021,11 @@ public:
     void set_f64(double v) {
         Slot& s = begin_slot<SlotIdx>(PackTag::F64, pack_mp_detail::kF64Size);
         pack_mp_detail::write_f64(const_cast<uint8_t*>(s.inl), v);
+    }
+    template <int SlotIdx>
+    void set_bool(bool v) {
+        Slot& s = begin_slot<SlotIdx>(PackTag::Bool, pack_mp_detail::kBoolSize);
+        pack_mp_detail::write_bool(const_cast<uint8_t*>(s.inl), v);
     }
     template <int SlotIdx>
     void set_str(std::string_view v) {
@@ -1040,6 +1084,10 @@ public:
     void add_f64(std::string_view key, double v) {
         Entry& e = begin_dyn(key, PackTag::F64, pack_mp_detail::kF64Size);
         pack_mp_detail::write_f64(const_cast<uint8_t*>(e.inl), v);
+    }
+    void add_bool(std::string_view key, bool v) {
+        Entry& e = begin_dyn(key, PackTag::Bool, pack_mp_detail::kBoolSize);
+        pack_mp_detail::write_bool(const_cast<uint8_t*>(e.inl), v);
     }
     void add_str(std::string_view key, std::string_view v) {
         Entry& e = begin_dyn(key, PackTag::Str, pack_mp_detail::str_size(v.size()));

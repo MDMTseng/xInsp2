@@ -241,6 +241,11 @@ public:
         return (valid() && fi_->get_f64 && fi_->get_f64(h_, key, &v) == 1)
                    ? std::optional<double>(v) : std::nullopt;
     }
+    std::optional<bool> get_bool(const char* key) const {
+        int32_t v = 0;
+        return (valid() && fi_->get_bool && fi_->get_bool(h_, key, &v) == 1)
+                   ? std::optional<bool>(v != 0) : std::nullopt;
+    }
     std::optional<std::string_view> get_str(const char* key) const {
         const char* p = nullptr; int32_t n = 0;
         return (valid() && fi_->get_str && fi_->get_str(h_, key, &p, &n) == 1)
@@ -329,6 +334,10 @@ public:
     template <int Slot> std::optional<double> get_f64() const {
         static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
         return f_.get_f64(std::string(Schema::keys[Slot]).c_str());
+    }
+    template <int Slot> std::optional<bool> get_bool() const {
+        static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
+        return f_.get_bool(std::string(Schema::keys[Slot]).c_str());
     }
     template <int Slot> std::optional<std::string_view> get_str() const {
         static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");

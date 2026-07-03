@@ -39,6 +39,12 @@
 
 namespace xi {
 
+// Mirrors g_image_pool_alive (xi_image_pool.hpp): readable after the registry
+// Meyers singleton is destroyed at process exit, so late teardown paths (the
+// owner sweep a static-destruction adapter dtor triggers) skip registry access
+// instead of touching a destroyed singleton (UB).
+inline std::atomic<bool> g_pack_registry_alive{false};
+
 // ===================================================================
 // PackRegistry — the opaque-handle table behind xi.pack@1.
 //
@@ -49,13 +55,31 @@ namespace xi {
 // std::unordered_map are pointer-stable, so a Pack* handed to an accessor stays
 // valid across concurrent insert/erase of OTHER handles — the caller holds a ref
 // on its own handle, so that entry cannot vanish under it.
+//
+// OWNER-TAGGED REFS (pack-plane hardening — the cache plugin's registry
+// finding). The ImagePool sweeps leaked image handles per owner on instance
+// destroy (release_all_for); the registry used to have NO such analogue, so a
+// pack-retaining plugin that forgot to release on destroy leaked its sealed
+// packs silently until static teardown. Now every ref acquired under an
+// ImagePool owner context (seal / retain inside the adapter's OwnerGuard) is
+// tagged in a small per-slot ledger, and release_all_for(owner) drops exactly
+// that owner's outstanding refs — precisely as if the plugin had called
+// release() itself — returning the count so the teardown path can print the
+// "swept N leaked pack ref(s)" diagnostic. Refs acquired with no owner context
+// (dispatch-event refs via retain_untagged, test code outside a guard) are
+// untagged and never swept. A release under the wrong/no owner context is
+// reconciled against the untagged headroom first, then against any ledger
+// bucket, so the ledger can never claim more refs than the slot holds and a
+// sweep can never over-release.
 // ===================================================================
 class PackRegistry {
 public:
     static PackRegistry& instance() {
         static PackRegistry r;
+        g_pack_registry_alive.store(true, std::memory_order_release);
         return r;
     }
+    ~PackRegistry() { g_pack_registry_alive.store(false, std::memory_order_release); }
 
     // ---- builder side (produce) --------------------------------------------
     xi_pack_builder new_builder() {
@@ -81,8 +105,16 @@ public:
             builders_.erase(it);
         }
         uint64_t id = next_.fetch_add(1, std::memory_order_relaxed);
+        Slot s;
+        s.pack = fb->seal();
+        s.rc   = 1;
+        // The creator's initial ref is owner-tagged (seal runs inside the
+        // producing plugin's OwnerGuard), so a source that seals and forgets
+        // to release is swept on destroy exactly like a leaked image handle.
+        if (ImagePoolOwnerId ow = ImagePool::current_owner())
+            s.owners.push_back(OwnerRef{ow, 1});
         std::lock_guard<std::mutex> lk(mu_);
-        frames_.emplace(id, Slot{fb->seal(), 1});
+        frames_.emplace(id, std::move(s));
         return id;
     }
     void abandon(xi_pack_builder b) {
@@ -96,30 +128,132 @@ public:
         auto it = frames_.find(f);
         return it == frames_.end() ? nullptr : &it->second.pack;
     }
-    void retain(xi_pack_handle f) {
+    // Owner-tagged retain: the ref is charged to the calling thread's ImagePool
+    // owner context (the adapter's OwnerGuard around every plugin entry point),
+    // so release_all_for(owner) knows it is outstanding if the plugin forgets.
+    void retain(xi_pack_handle f) { retain_as(f, ImagePool::current_owner()); }
+    // Untagged retain — for framework-internal transient refs (the dispatch
+    // event's ref in f_emit_pack) that are released from OTHER threads with no
+    // owner context and must never be charged to (or swept with) the plugin.
+    void retain_untagged(xi_pack_handle f) { retain_as(f, 0); }
+    void retain_as(xi_pack_handle f, ImagePoolOwnerId owner) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = frames_.find(f);
-        if (it != frames_.end()) ++it->second.rc;
+        if (it == frames_.end()) return;
+        ++it->second.rc;
+        if (owner) ledger_bump(it->second, owner);
     }
-    void release(xi_pack_handle f) {
+    void release(xi_pack_handle f) { release_as(f, ImagePool::current_owner()); }
+    void release_as(xi_pack_handle f, ImagePoolOwnerId owner) {
         Pack dropped;   // destroy OUTSIDE the lock (releases pool handles)
         {
             std::lock_guard<std::mutex> lk(mu_);
             auto it = frames_.find(f);
             if (it == frames_.end()) return;
+            ledger_release(it->second, owner);
             if (--it->second.rc > 0) return;
             dropped = std::move(it->second.pack);
             frames_.erase(it);
         }
     }
 
+    // The owner sweep — the release_all_for analogue for sealed packs. Drops
+    // every ref still charged to `owner` in the ledger (exactly as if the dying
+    // plugin had called release() per outstanding ref), destroying any pack
+    // whose count reaches zero. Returns the number of leaked refs dropped so
+    // the caller (adapter dtor / script unload) can print the diagnostic.
+    // A ref another consumer holds is untouched — the ledger sum never exceeds
+    // the slot's refcount (see ledger_release), so the sweep cannot free a pack
+    // out from under a live co-owner.
+    int release_all_for(ImagePoolOwnerId owner) {
+        if (owner == 0) return 0;
+        std::vector<Pack> dropped;   // destroyed OUTSIDE the lock
+        int swept = 0;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            for (auto it = frames_.begin(); it != frames_.end();) {
+                Slot& s = it->second;
+                int k = ledger_take(s, owner);
+                if (k > 0) {
+                    swept += k;
+                    s.rc -= k;
+                    if (s.rc <= 0) {
+                        dropped.push_back(std::move(s.pack));
+                        it = frames_.erase(it);
+                        continue;
+                    }
+                }
+                ++it;
+            }
+        }
+        return swept;
+    }
+
     // Test/diagnostic: how many live packs + builders the table holds. Used by
     // the pack-door tests as a leak oracle alongside ImagePool::cumulative().
     size_t live_frames()   { std::lock_guard<std::mutex> lk(mu_); return frames_.size(); }
     size_t live_builders() { std::lock_guard<std::mutex> lk(mu_); return builders_.size(); }
+    // Diagnostic: refs currently charged to `owner` across all live packs (the
+    // amount a sweep would reclaim right now).
+    int owner_refs(ImagePoolOwnerId owner) {
+        std::lock_guard<std::mutex> lk(mu_);
+        int n = 0;
+        for (auto& [id, s] : frames_)
+            for (const OwnerRef& r : s.owners)
+                if (r.owner == owner) n += r.n;
+        return n;
+    }
 
 private:
-    struct Slot { Pack pack; int rc = 0; };
+    struct OwnerRef { ImagePoolOwnerId owner; int n; };
+    struct Slot {
+        Pack pack;
+        int rc = 0;
+        std::vector<OwnerRef> owners;   // per-owner outstanding-ref ledger
+    };
+
+    static void ledger_bump(Slot& s, ImagePoolOwnerId owner) {
+        for (OwnerRef& r : s.owners)
+            if (r.owner == owner) { ++r.n; return; }
+        s.owners.push_back(OwnerRef{owner, 1});
+    }
+    // Reconcile one release against the ledger BEFORE rc is decremented.
+    // Preference order keeps the invariant sum(ledger) <= rc:
+    //   1. the caller's own bucket (the well-behaved case);
+    //   2. untagged headroom (rc - ledger sum) absorbs it — nothing to adjust;
+    //   3. any bucket (a tagged ref released from a guard-less thread, e.g. a
+    //      plugin worker) — mis-attributed but never over-counted.
+    static void ledger_release(Slot& s, ImagePoolOwnerId owner) {
+        if (owner) {
+            for (size_t i = 0; i < s.owners.size(); ++i) {
+                if (s.owners[i].owner == owner) {
+                    if (--s.owners[i].n == 0) {
+                        s.owners[i] = s.owners.back();
+                        s.owners.pop_back();
+                    }
+                    return;
+                }
+            }
+        }
+        int sum = 0;
+        for (const OwnerRef& r : s.owners) sum += r.n;
+        if (sum < s.rc) return;          // an untagged ref absorbs this release
+        if (!s.owners.empty()) {
+            if (--s.owners.back().n == 0) s.owners.pop_back();
+        }
+    }
+    // Remove and return owner's whole bucket (the sweep primitive).
+    static int ledger_take(Slot& s, ImagePoolOwnerId owner) {
+        for (size_t i = 0; i < s.owners.size(); ++i) {
+            if (s.owners[i].owner == owner) {
+                int n = s.owners[i].n;
+                s.owners[i] = s.owners.back();
+                s.owners.pop_back();
+                return n;
+            }
+        }
+        return 0;
+    }
     std::mutex mu_;
     std::unordered_map<uint64_t, std::unique_ptr<PackBuilder>> builders_;
     std::unordered_map<uint64_t, Slot> frames_;
@@ -137,6 +271,9 @@ inline void f_add_i64(xi_pack_builder b, const char* key, int64_t v) {
 }
 inline void f_add_f64(xi_pack_builder b, const char* key, double v) {
     if (auto* fb = PackRegistry::instance().builder(b)) fb->add_f64(key ? key : "", v);
+}
+inline void f_add_bool(xi_pack_builder b, const char* key, int32_t v) {
+    if (auto* fb = PackRegistry::instance().builder(b)) fb->add_bool(key ? key : "", v != 0);
 }
 inline void f_add_str(xi_pack_builder b, const char* key, const char* s, int32_t len) {
     if (auto* fb = PackRegistry::instance().builder(b))
@@ -201,6 +338,14 @@ inline int32_t f_get_f64(xi_pack_handle f, const char* key, double* out) {
     if (out) *out = *v;
     return 1;
 }
+inline int32_t f_get_bool(xi_pack_handle f, const char* key, int32_t* out) {
+    Pack* fr = PackRegistry::instance().pack(f);
+    if (!fr || !key) return 0;
+    auto v = fr->get_bool(key);
+    if (!v) return 0;
+    if (out) *out = *v ? 1 : 0;
+    return 1;
+}
 inline int32_t f_get_str(xi_pack_handle f, const char* key, const char** ptr, int32_t* len) {
     Pack* fr = PackRegistry::instance().pack(f);
     if (!fr || !key) return 0;
@@ -253,12 +398,25 @@ inline void f_release(xi_pack_handle f) { PackRegistry::instance().release(f); }
 inline void f_emit_pack(const char* emitter, xi_trigger_id id,
                          xi_pack_handle f, int64_t ts) {
     if (f == XI_PACK_NULL) return;
-    PackRegistry::instance().retain(f);               // the event's ref
+    // UNTAGGED: the event's ref is framework-transient — released by the
+    // dispatcher on another thread with no owner context. Tagging it to the
+    // emitting plugin would leave a phantom ledger entry the owner sweep
+    // could later double-release.
+    PackRegistry::instance().retain_untagged(f);       // the event's ref
     TriggerBus::instance().emit_pack(emitter ? emitter : "", id, ts, f);
 }
 
 // The releaser the bus/dispatcher calls to drop an event's pack ref.
 inline void f_release_for_bus(xi_pack_handle f) { PackRegistry::instance().release(f); }
+
+// The owner-sweep trampoline published into ImagePool::pack_sweep_slot, so the
+// teardown paths that already sweep leaked image handles (adapter dtor, script
+// unload) reclaim leaked pack refs through the same layering bridge. Guarded:
+// during static destruction the registry singleton may already be gone.
+inline int f_sweep_packs_for(ImagePoolOwnerId owner) {
+    if (!g_pack_registry_alive.load(std::memory_order_acquire)) return 0;
+    return PackRegistry::instance().release_all_for(owner);
+}
 
 } // namespace pack_abi_detail
 
@@ -290,6 +448,9 @@ inline const xi_pack_v1* pack_v1_iface() {
         &pack_abi_detail::f_retain,
         &pack_abi_detail::f_release,
         &pack_abi_detail::f_emit_pack,
+        // additive v1 tail (bool entry) — positions match the struct tail.
+        &pack_abi_detail::f_add_bool,
+        &pack_abi_detail::f_get_bool,
     };
     return &iface;
 }
@@ -300,6 +461,7 @@ inline const xi_pack_v1* pack_v1_iface() {
 // and in any test that builds a host_api it drives packs through.
 inline void install_pack_abi() {
     ImagePool::publish_pack_iface(pack_v1_iface());
+    ImagePool::publish_pack_sweeper(&pack_abi_detail::f_sweep_packs_for);
     TriggerBus::instance().set_pack_releaser(&pack_abi_detail::f_release_for_bus);
 }
 

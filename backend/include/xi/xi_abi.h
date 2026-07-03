@@ -354,7 +354,8 @@ enum {
     XI_PACK_TAG_STR   = 2,
     XI_PACK_TAG_BIN   = 3,
     XI_PACK_TAG_IMAGE = 4,
-    XI_PACK_TAG_MP    = 5
+    XI_PACK_TAG_MP    = 5,
+    XI_PACK_TAG_BOOL  = 6   /* appended (pack-plane hardening) — earlier values frozen */
 };
 
 /* A borrowed image view returned by xi_pack_v1.get_image — dimensions +
@@ -421,6 +422,17 @@ typedef struct xi_pack_v1 {
      * stamps host now. No-op until a dispatch hook is installed. ---- */
     void (*emit_pack)(const char* emitter, xi_trigger_id id,
                        xi_pack_handle f, int64_t ts);
+
+    /* ---- additive tail (pre-cutover, polaris2 line): the BOOL entry type.
+     * Appended AFTER every original field so no existing offset moves — an
+     * in-tree consumer built against the shorter v1 sees an identical prefix.
+     * (xi.pack@1 has not shipped beyond this line; once it does, further
+     * growth ships as xi_pack_v2 per the freeze doctrine above.) A canonical
+     * bool entry is the single msgpack byte 0xc2/0xc3, tag XI_PACK_TAG_BOOL.
+     * v is 0/1; get_bool writes 0/1 and stays fail-closed on tag mismatch
+     * (an i64 0/1 entry is NOT a bool). NULL-check these on a foreign table. */
+    void    (*builder_add_bool)(xi_pack_builder b, const char* key, int32_t v);
+    int32_t (*get_bool)(xi_pack_handle f, const char* key, int32_t* out);
 } xi_pack_v1;
 
 /* xi.pack@1 (PLUGIN door) — pack-in/pack-out process, published by a

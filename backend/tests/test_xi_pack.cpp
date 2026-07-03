@@ -103,6 +103,56 @@ static void test_lifecycle_and_contract_layer() {
     CHECK(!f.get_i64("missing").has_value(), "missing-key read is nullopt");
 }
 
+// ------------------------------------------------------------------
+// Bool entry (pack-plane hardening — the json_source bool-entry gap): builder ->
+// canonical 0xc2/0xc3 arena byte -> tagged walk -> typed reads, on BOTH access
+// paths, fail-closed against i64 in both directions (an i64 0/1 is NOT a bool).
+// ------------------------------------------------------------------
+namespace bool_schema {
+struct Schema : xi::PackSchema<Schema> {
+    static constexpr std::array<std::string_view, 2> keys = {"pass", "count"};
+    enum : int { kPass, kCount };
+};
+} // namespace bool_schema
+
+static void test_bool_entry() {
+    // Dynamic (string-keyed) path.
+    PackBuilder b;
+    b.add_bool("pass", true);
+    b.add_bool("fail", false);
+    b.add_i64("one", 1);
+    Pack f = b.seal();
+    CHECK(f.tag_of("pass") == PackTag::Bool, "bool entry stores the Bool tag");
+    CHECK(f.get_bool("pass").value() == true,  "get_bool true round-trips");
+    CHECK(f.get_bool("fail").value() == false, "get_bool false round-trips");
+    CHECK(f.get<bool>("pass").value() == true, "get<bool> alias");
+    // Fail-closed BOTH directions: no silent bool<->i64 coercion.
+    CHECK(!f.get_i64("pass").has_value(), "bool entry refuses an i64 read");
+    CHECK(!f.get_bool("one").has_value(), "i64 entry refuses a bool read");
+    // The stored small-plane bytes ARE the canonical msgpack bool — the single
+    // 0xc2/0xc3 byte a generic dumper splices to the wire verbatim (memory==wire).
+    CHECK(f.raw_at(0).size() == 1 && f.raw_at(0)[0] == 0xc3, "canonical true byte 0xc3");
+    CHECK(f.raw_at(1).size() == 1 && f.raw_at(1)[0] == 0xc2, "canonical false byte 0xc2");
+    int bools = 0;
+    f.for_each([&](std::string_view, PackTag t) { if (t == PackTag::Bool) ++bools; });
+    CHECK(bools == 2, "generic walk reports the Bool tag");
+
+    // Typed (schema-slot) path + the dynamic side list.
+    using BS = bool_schema::Schema;
+    xi::TypedPackBuilder<BS> tb;
+    tb.set_bool<BS::kPass>(true);
+    tb.set_i64<BS::kCount>(3);
+    tb.add_bool("extra", false);            // undeclared -> dynamic side list
+    xi::TypedPack<BS> tf = tb.seal();
+    CHECK(tf.tag_of<BS::kPass>() == PackTag::Bool, "typed tag_of<slot> is Bool");
+    CHECK(tf.get_bool<BS::kPass>().value() == true, "get_bool<slot>");
+    CHECK((tf.get<bool, BS::kPass>().value() == true), "get<bool,slot> alias");
+    CHECK(tf.get_bool("pass").value() == true,   "declared bool readable by string");
+    CHECK(tf.get_bool("extra").value() == false, "dynamic bool readable by string");
+    CHECK(!tf.get_i64<BS::kPass>().has_value(),  "typed bool slot refuses i64");
+    CHECK(!tf.get_bool<BS::kCount>().has_value(), "typed i64 slot refuses bool");
+}
+
 // Insertion-ordered walk + O(1) index correctness at scale.
 static void test_offset_index_at_scale() {
     const int N = 2000;
@@ -405,6 +455,7 @@ static void test_typed_pooled_handle_balance() {
 int main() {
     std::printf("test_xi_pack\n");
     test_lifecycle_and_contract_layer();
+    test_bool_entry();
     test_offset_index_at_scale();
     test_seal_semantics();
     test_pooled_handle_balance();

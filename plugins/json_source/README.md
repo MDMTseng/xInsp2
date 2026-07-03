@@ -66,7 +66,7 @@ a JSON **object** at its root; each top-level field becomes one pack entry:
 | number (integer) | canonical `i64` |
 | number (real) | canonical `f64` |
 | string | canonical `str` |
-| boolean | `i64` `0`/`1` (the pack scalar plane has no bool tag) |
+| boolean | canonical `bool` (tag `XI_PACK_TAG_BOOL`, the 0xc2/0xc3 byte; was `i64` `0`/`1` before the pack plane grew a bool tag) |
 | `null` | **skipped** |
 | object / array (**nested**) | **one** `mp` entry — the value encoded to canonical msgpack and re-proven through the ingress edge (see below) |
 

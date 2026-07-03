@@ -631,6 +631,28 @@ public:
     static void publish_pack_iface(const void* iface) {
         pack_iface_slot().store(iface, std::memory_order_release);
     }
+
+    // Pack-plane hardening: the PackRegistry OWNER-SWEEP bridge — the pack
+    // analogue of release_all_for's leak sweep. Published by install_pack_abi
+    // (same layering bridge as pack_iface_slot: this header cannot include
+    // xi_pack_abi.hpp). The teardown paths that sweep leaked image handles
+    // (CAbiInstanceAdapter dtor, script unload) call sweep_packs_for so a
+    // pack-retaining plugin that forgets to release on destroy is counted and
+    // reclaimed instead of silently leaking sealed packs in the registry.
+    // Returns the number of leaked pack refs dropped; 0 until published.
+    using PackSweepFn = int (*)(ImagePoolOwnerId owner);
+    static std::atomic<PackSweepFn>& pack_sweep_slot() {
+        static std::atomic<PackSweepFn> slot{nullptr};
+        return slot;
+    }
+    static void publish_pack_sweeper(PackSweepFn fn) {
+        pack_sweep_slot().store(fn, std::memory_order_release);
+    }
+    static int sweep_packs_for(ImagePoolOwnerId owner) {
+        if (auto fn = pack_sweep_slot().load(std::memory_order_acquire))
+            return fn(owner);
+        return 0;
+    }
     // The forwarder the door hands out for xi.emit@1.emit_record: a stable address
     // (a plugin may cache the interface) that reads the published slot each call.
     // No-op until the hook publishes — same null-safe contract as the field.

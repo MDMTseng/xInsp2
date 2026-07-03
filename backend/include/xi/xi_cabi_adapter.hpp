@@ -309,7 +309,15 @@ public:
     }
 
     ~CAbiInstanceAdapter() override {
-        if (destroy_fn_ && inst_) destroy_fn_(inst_);
+        if (destroy_fn_ && inst_) {
+            // OwnerGuard so the plugin dtor's own releases (image handles AND
+            // pack refs — cache-style retaining plugins release their ring
+            // here) are attributed to this instance, exactly like every other
+            // entry point. The sweeps below then reclaim only what the plugin
+            // genuinely forgot.
+            ImagePool::OwnerGuard g(owner_id_);
+            destroy_fn_(inst_);
+        }
         // Sweep any image handles the plugin allocated and forgot to
         // release. Without this, plugin crashes / careless authors leak
         // ImagePool entries forever. GUARD g_image_pool_alive: if this adapter is
@@ -324,6 +332,16 @@ public:
             std::fprintf(stderr,
                 "[xinsp2] '%s' destroyed; swept %d leaked image handle(s)\n",
                 name_.c_str(), swept);
+        }
+        // Pack-plane analogue (via the slot bridge — null until the pack ABI is
+        // installed): reclaim sealed-pack refs this instance retained and forgot
+        // to release, so a careless pack-retaining plugin can't silently leak
+        // packs in the registry until static teardown.
+        int fswept = ImagePool::sweep_packs_for(owner_id_);
+        if (fswept > 0) {
+            std::fprintf(stderr,
+                "[xinsp2] '%s' destroyed; swept %d leaked pack ref(s)\n",
+                name_.c_str(), fswept);
         }
     }
 
