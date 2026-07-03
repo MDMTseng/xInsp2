@@ -215,7 +215,7 @@ void send_hello(xi::ws::Server& srv) {
     e.name = "hello";
     e.data_json = std::string(R"({"version":")") + XINSP2_VERSION
                 + R"(","commit":")" + XINSP2_COMMIT
-                + R"(","abi":1})";
+                + R"(","abi":2})";
     srv.send_text(e.to_json());
 }
 
@@ -254,12 +254,10 @@ static const std::unordered_map<std::string_view, HandlerFn> g_cmd_table = {
     {"set_watchdog_ms", cmd_set_watchdog_ms_},
     {"set_process_priority", cmd_set_process_priority_},
     {"set_timer_fps", cmd_set_timer_fps_},
-    {"watchdog_status", cmd_watchdog_status_},
     {"graph_capture", cmd_graph_capture_},
     {"graph_snapshot", cmd_graph_snapshot_},
     {"shutdown", cmd_shutdown_},
     {"compile_and_load", cmd_compile_and_load_},
-    {"unload_script", cmd_unload_script_},
     {"run", cmd_run_},
     {"start", cmd_start_},
     {"stop", cmd_stop_},
@@ -281,8 +279,6 @@ static const std::unordered_map<std::string_view, HandlerFn> g_cmd_table = {
     {"status", cmd_status_},
     {"image_pool_stats", cmd_image_pool_stats_},
     {"rescan_plugins", cmd_rescan_plugins_},
-    {"unquarantine_plugin", cmd_unquarantine_plugin_},
-    {"load_plugin", cmd_load_plugin_},
     {"create_project", cmd_create_project_},
     {"open_project", cmd_open_project_},
     {"close_project", cmd_close_project_},
@@ -295,7 +291,6 @@ static const std::unordered_map<std::string_view, HandlerFn> g_cmd_table = {
     {"create_instance", cmd_create_instance_},
     {"remove_instance", cmd_remove_instance_},
     {"rename_instance", cmd_rename_instance_},
-    {"get_project", cmd_get_project_},
     {"save_instance_config", cmd_save_instance_config_},
     {"get_plugin_ui", cmd_get_plugin_ui_},
     {"get_dashboard", cmd_get_dashboard_},

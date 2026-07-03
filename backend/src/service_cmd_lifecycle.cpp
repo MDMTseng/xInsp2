@@ -28,7 +28,7 @@ void cmd_ping_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
 void cmd_version_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         std::string vd = std::string(R"({"version":")") + XINSP2_VERSION
                        + R"(","commit":")" + XINSP2_COMMIT
-                       + R"(","abi":1})";
+                       + R"(","abi":2})";
         send_rsp_ok(srv, id, vd);
 }
 
@@ -618,21 +618,10 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         send_rsp_ok(srv, id, data);
 }
 
-void cmd_unload_script_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        // P0-AB-1: dispatcher workers snapshot g_eng.script under
-        // g_eng.script_mu and may be mid-inspect when unload_script
-        // FreeLibrary's the DLL. Drain the pool first.
-        { auto g = quiesce_dispatch_for_lifecycle_op_("unload_script", &srv); g.dismiss(); }  // script gone — don't resume
-        std::lock_guard<std::mutex> lk(g_eng.script_mu);
-        xi::script::unload_script(g_eng.script);
-        // Drop the param replay cache — there's no live script to
-        // replay into, and a future load_project / compile_and_load
-        // is free to start clean.
-        g_eng.param_cache.clear();
-        g_eng.instance_def_cache.clear();   // sibling replay shadow — same lifetime
-        xi::health().clear_script();   // no script loaded → drop it from the component set
-        send_rsp_ok(srv, id);
-}
+/* [cmd_unload_script_ RETIRED at THE CUT (v12) — app-team confirmed, doc 11.
+ * Zero in-tree callers; close_project / a fresh compile_and_load clear the
+ * live script. The xi::script::unload_script loader primitive stays; only the
+ * WS command surface is retired.] */
 
 void cmd_save_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto path = xp::get_string_field(parsed->args_json, "path");

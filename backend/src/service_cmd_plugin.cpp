@@ -76,36 +76,11 @@ void cmd_rescan_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
         send_rsp_ok(srv, id, out);
 }
 
-void cmd_unquarantine_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        // Part III G2.3 — operator un-quarantine. Clears the G1 .xi_certify.json
-        // verdict (crashed/quarantined) for a plugin so the next scan re-certifies
-        // it from scratch. Accepts {"name": "<plugin>"} (resolved to its folder via
-        // the last scan) or {"dir": "<folder>"}. Re-scans the default plugins dir
-        // afterwards so a now-clean plugin is re-armed without a restart.
-        auto pname = xp::get_string_field(parsed->args_json, "name");
-        auto pdir  = xp::get_string_field(parsed->args_json, "dir");
-        std::string key = pname ? *pname : (pdir ? *pdir : std::string());
-        if (key.empty()) { send_rsp_err(srv, id, "missing name or dir"); return; }
-        bool cleared = g_eng.plugin_mgr.unquarantine_plugin(key);
-        if (!cleared) { send_rsp_err(srv, id, "no quarantine found for: " + key); return; }
-        int rearmed = 0;
-        if (!g_eng.plugins_dir.empty() && std::filesystem::exists(g_eng.plugins_dir))
-            rearmed = g_eng.plugin_mgr.scan_plugins(g_eng.plugins_dir);
-        std::string out = "{\"unquarantined\":";
-        xp::json_escape_into(out, key);
-        out += ",\"rearmed\":" + std::to_string(rearmed) + "}";
-        send_rsp_ok(srv, id, out);
-}
-
-void cmd_load_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        auto pname = xp::get_string_field(parsed->args_json, "name");
-        if (!pname) { send_rsp_err(srv, id, "missing name"); return; }
-        if (g_eng.plugin_mgr.load_plugin(*pname)) {
-            send_rsp_ok(srv, id);
-        } else {
-            send_rsp_err(srv, id, "failed to load plugin: " + *pname);
-        }
-}
+/* [cmd_unquarantine_plugin_ and cmd_load_plugin_ RETIRED at THE CUT (v12) —
+ * app-team confirmed, doc 11. Zero in-tree callers; rescan_plugins re-arms a
+ * cleaned plugin, and instances load their plugins on project open. The
+ * PluginManager::unquarantine_plugin/load_plugin methods remain for internal
+ * use; only the WS command surface is retired.] */
 
 void cmd_export_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Package a project plugin as a deployable folder. Compiles Release;

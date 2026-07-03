@@ -113,17 +113,8 @@ void cmd_set_watchdog_ms_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         send_rsp_ok(srv, id, out);
 }
 
-void cmd_watchdog_status_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        std::string out = "{\"ms\":" + std::to_string(g_eng.watchdog_ms.load());
-        out += ",\"trips\":" + std::to_string(g_eng.watchdog_trips.load());
-        out += ",\"armed\":";
-        // armed == at least one inspect slot is currently in flight.
-        bool armed = false;
-        for (int i = 0; i < WD_SLOTS; ++i) if (g_eng.wd_deadlines[i].load() != 0) { armed = true; break; }
-        out += (armed ? "true" : "false");
-        out += "}";
-        send_rsp_ok(srv, id, out);
-}
+/* [cmd_watchdog_status_ RETIRED at THE CUT (v12) — app-team confirmed, doc 11.
+ * set_watchdog_ms still returns the same {ms,trips} snapshot on set.] */
 
 void cmd_graph_capture_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Toggle pipeline-graph dataflow capture (stage 2). Default off → no

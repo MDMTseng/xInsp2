@@ -312,9 +312,8 @@ void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         }
 }
 
-void cmd_get_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
-}
+/* [cmd_get_project_ RETIRED at THE CUT (v12) — app-team confirmed, doc 11.
+ * Zero in-tree callers; list_plugins / list_instances cover the surface.] */
 
 void cmd_save_instance_config_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
