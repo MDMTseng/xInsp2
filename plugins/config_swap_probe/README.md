@@ -44,6 +44,21 @@ A def with no `_schema` stamp is tolerated (legacy persisted `instance.json`).
 There are **no required process inputs** to fail loud on; the schema-skew
 rejection above is this plugin's structured-error surface.
 
+## Bilingual — the `xi.pack@1` door (polaris2 wave-2, doc 10 gate P1)
+
+The plugin is **bilingual**: alongside the Record `process()` it publishes the
+`xi.pack@1` pack-in/pack-out door (`XI_PLUGIN_PACK_DOOR`), so the host can drive
+it with either currency. Because this probe's `process()` is a **no-op
+observation** step (read the live slot into `last_seen`, bump the call counter,
+return empty), the pack door is an **exact mirror**: it performs the identical
+observation and returns an **empty pack** — the pack analogue of the Record
+path's empty `{}`. The probe emits no output data in *either* currency; its real
+surface stays the config/prepare/commit control plane observed through
+`get_status`, which both drive paths reach identically. It has no input
+contract, so — like the Record path — there are **no required-input faults** and
+unknown pack entries are ignored. (Emitting the status/counter keys on the pack
+path would make it dishonestly richer than the untouched Record path it mirrors.)
+
 ## Using it from a driver
 
 ```cpp
@@ -65,3 +80,10 @@ happy path including the full `prepare`→`commit` double-slot (staged value
 visible while the live slot is unchanged, then swapped on commit); and a config
 schema skew → `set_def` rejects it, leaving the live value unchanged. Run via
 `ctest -C Release -R config_swap_probe_test` from `plugins/build`.
+
+`tests/test_config_swap_probe_pack.cpp` proves the bilingual door end to end
+against the real built DLL through the host adapter: the capability probe
+(`xi.pack@1` published), **Record-vs-pack parity** (drive each path an equal
+number of times, `get_status` identical field-for-field), unknown-entry
+tolerance, and that the two-phase `prepare`/`commit` observability is unchanged
+by the door. Run via `ctest -C Release -R config_swap_probe_pack_test`.
