@@ -5,7 +5,7 @@
 | **Date** | 2026-07-03 |
 | **Audience** | The app-dev team consuming the xInsp2 backend: your inspection scripts, your plugins, your WS clients/tooling, your recorded artifacts |
 | **Scope** | ONE coordinated break ("THE CUT"): plugin ABI v11 → v12 pure pack door, Record deleted, XEX1-v3 default wire, `hello.abi` 1 → 2, plus the retirements listed in §1 — and the bilingual window you can use TODAY to make the cut a non-event |
-| **Status** | All engineering gates on our side are ACHIEVED (doc 10: P1/P2/P3 green, cut-gates U1/U2/U3 resolved, parity matrix doc 12 fully green). The ONLY remaining precondition is coordination with you — the decisions in §6 |
+| **Status** | All engineering gates ACHIEVED on our side, and **§6 is ANSWERED (2026-07-04)** — all five decisions closed, app-side porting done + soaked (see §6's resolution block). THE CUT is GO pending only a train date on our release rhythm; two enablement items (E1 deployment refresh, E2 jpeg preview) tracked in §6 |
 | **Supersedes** | The previous version of this document (the `polaris_master` merge brief). That migration completed; the `hello.abi` bump it deferred as "Phase 3" now rides this train |
 
 ## TL;DR
@@ -183,6 +183,48 @@ port is one counter reset at its porting reload, not data loss.
    after.
 5. **A named contact + a rig window** for the joint validation pass — same
    ask as the previous train.
+
+### §6 — ANSWERED (app team, 2026-07-04). All five closed:
+
+1. **Train date**: app side is ported + soaked and ready NOW; the date is
+   ours to pick by release rhythm — no constraint from them.
+2. **XEX1-v1 window**: proposal ACCEPTED (flag for one release, then delete).
+   Their decoder is already v1+v3 bilingual.
+3. **Command retirements**: ALL FIVE CONFIRMED (`watchdog_status`,
+   `unload_script`, `unquarantine_plugin`, `load_plugin`, `get_project` —
+   zero usage, grep-verified on their side). Retirement rides the train.
+4. **Converter**: NOT NEEDED — no legacy capture replay dependency (they use
+   `.xex1` synth/test data). The converter is never built (doc 13 ruling
+   stands as re-record).
+5. **Contact**: ct@xception.tech (app-team lead); rig window with the train.
+
+**Their window work, already done (FYI)**: 4 app-owned measurement plugins
+(shape_based_matching / lens_calib / pose_register / dim_measure) are
+bilingual with pack==Record parity tests green (their branch
+`feat/pack-door-v12`); inspect scripts + their sources (cmd_panel /
+folder_camera) fully pack-ported; wire running frame_wire v3.
+
+**Enablement asks from them (our side, tracked)**:
+- **E1 — capability plane not live in their deployment**: `xi.image.decode`
+  factory-time resolve returns null (their deployed backend exe predates
+  `xi.cap.provider@1`), so folder_camera falls back to `read_image_file`.
+  Fix = redeploy backend + plugin DLLs from the gate-green tip, and create
+  an `imgcodec` instance in the project (registration happens in the lib
+  plugin's factory — see `examples/qa_cap_imgcodec/instances/codec/`).
+  Machine-level autoload for lib plugins (no per-project instance) is a
+  named v12 candidate (doc 14).
+- **E2 — full-resolution preview without raw-pixel WS load**: they downsample
+  to ~384px today. Planned answer: expose consumes `xi.jpeg.encode` when the
+  capability is present and ships a compressed preview entry (nested-mp
+  `{w,h,c,enc,data}` beside — not replacing — the frozen v3 raw image tag;
+  disk dumps stay raw for identity). Scheduled as the next expose×imgcodec
+  work item.
+- **Deployment hygiene incident (noted)**: the main-checkout deployed
+  `xi-expose.dll` was a stale record-only build (source had the door, DLL
+  predated it); they hot-swapped our integration build to unblock validation
+  (backup `.record-only.bak-20260703`). Official redeploy from the gate-green
+  tip owed — and binaries-lag-source is exactly the class the sdk/live gate
+  stages were built to catch in-repo; deployment needs the same discipline.
 
 ## §7 Reference
 
