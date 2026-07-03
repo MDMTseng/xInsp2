@@ -101,7 +101,11 @@ needed.
   consumer beyond synced_stereo exists; until then instance-folder data.
 - `xi.kv` — cross-instance blackboard. RED-FLAGGED: needs semantics decisions
   (versioning vs last-write-wins) and is a hidden-coupling factory by nature;
-  revisit only against a concrete need.
+  revisit only against a concrete need. NAMING NOTE (2026-07-03): the `kv`
+  name is since taken by the SCRIPT-LOCAL state store `xi::kv()` (U2, doc 16)
+  — an unrelated plane (script SDK, never crosses the ABI). If this
+  blackboard is ever revived, pick a different door name (e.g.
+  `xi.blackboard`) to avoid teaching two `kv`s.
 
 **Explicit non-candidates** (the sizing doctrine says no): per-pixel/CV
 primitives (plugins statically link OpenCV/IPP — hot path, inline), pack

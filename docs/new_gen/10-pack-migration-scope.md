@@ -106,10 +106,16 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
      gap). Gates qa_result_order's host-stamped pattern — matrix row C3.
    Neither residual blocks any shipping example pattern beyond those named;
    both are wave-2 planning inputs. **The CUT (step 4) may not ride until
-   U1/U3 have owners or explicit won't-need decisions** — and U2 below is a
-   separate cut-gate. (U2 — `xi::state()` still returns `xi::Record&` — is
-   NOT a P2 residual: cross-frame state is script-local and orthogonal to
-   the payload currency, but it must be resolved before Record deletion.)
+   U1/U3 have owners or explicit won't-need decisions.** (U2 — the separate
+   `xi::state()` cut-gate — is **RESOLVED 2026-07-03**: the post-Record
+   state shape is DECIDED and LANDED BILINGUAL as **`xi::kv()`** — a flat
+   typed KV store, canonical-mp boundary bytes over the new length-carrying
+   `xi_script_kv_*` exports, typed `xi::set_kv_migrate` code_change hook;
+   decision record `16-script-state-shape.md`, which also lists the exact
+   Record-channel edits the cut makes. Evidence: `test_kv` +
+   `test_kv_migrate` ctests, live QA `examples/qa_kv_reload`. Record
+   deletion is no longer blocked on a state decision — at the cut, execute
+   doc 16 §What THE CUT deletes.)
 3. **Gate P3 — persistence parity: ✅ ACHIEVED 2026-07-03.** The canonical
    dump is FINALIZED as **XEX1-v3** (= the v2 draft + per-entry
    `XI_PACK_TAG_*` as `[tag, value]`, closing P1's image-descriptor

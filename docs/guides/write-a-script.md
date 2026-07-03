@@ -174,6 +174,8 @@ legacy form; the `XI_INSPECT_ENTRY(t, frame) { … }` form is a drop-in swap whe
 State that survives the reload:
 - `xi::state()` JSON (persisted by `xi_script_get_state` /
   `xi_script_set_state`).
+- `xi::kv()` canonical-mp bytes (persisted by `xi_script_kv_get` /
+  `xi_script_kv_set` — the post-Record channel, see *`xi::kv()`* below).
 - `xi::Param<T>` values (replayed by `xi_script_set_param`).
 
 State that does NOT survive:
@@ -563,12 +565,21 @@ s.set("counter", count + 1);
 ```
 
 Survives:
-- Hot-reload (DLL unload + reload).
-- Backend restart (host writes to disk on shutdown).
-- Project re-open.
+- Hot-reload (DLL unload + reload) — the host captures the state from the old
+  DLL and restores it into the new one, in memory.
+
+Does NOT survive (deliberately — verified against the host, 2026-07-03; the
+project boundary reset is pinned by `qa_param_state_isolation`):
+- Backend restart (state is never written to disk).
+- Project open/close (a fresh project starts from its own defaults).
 
 Use for cross-frame counters, calibration results, "have we seen this
 serial number" caches.
+
+> **Heads-up — `xi::state()` is scheduled for deletion at the Record cut**
+> (docs/new_gen/16-script-state-shape.md). Its successor `xi::kv()` (next
+> section) is live NOW; new scripts should prefer it, and existing scripts
+> can port at leisure during the bilingual window.
 
 ### Schema versioning + migration across a code change
 
@@ -604,6 +615,84 @@ Register it at static-init time (it runs at DLL load, before the host's first
 `set_state`). The migrator must be **pure** w.r.t. the call — it must not read
 live `xi::state()`, which has not been restored yet. Absent registration (or a
 `""` return) leaves the drop-on-mismatch behaviour exactly as before.
+
+---
+
+## `xi::kv()` — persistent typed key-value state (the post-Record shape)
+
+The successor of `xi::state()` (decision record:
+`docs/new_gen/16-script-state-shape.md`). A **flat, typed, mutable key-value
+store**: scalar slots (`i64 / f64 / bool / str / bin`) plus an `mp` slot
+holding one nested **canonical msgpack** value for rebuilt-each-frame
+structures. It crosses the host boundary as canonical msgpack bytes — one
+codec, byte-deterministic (sorted keys), no JSON anywhere on the path.
+
+```cpp
+#include <xi/xi.hpp>          // umbrella includes xi_kv.hpp
+
+XI_INSPECT_ENTRY(t, frame) {
+    std::lock_guard<std::mutex> lk(xi::kv_mutex());  // needed only with xi::async
+    long long n = xi::kv().get_i64("count", 0) + 1;
+    xi::kv().set_i64("count", n);
+    xi::kv().set_str("last_serial", "A-1042");
+
+    xi::mp::Writer pts;                    // nested structure, rebuilt per frame
+    pts.array(1); pts.map(2);
+    pts.key("x"); pts.int_(3); pts.key("y"); pts.int_(4);
+    xi::kv().set_mp("prev_centroids", pts);
+}
+```
+
+Typed getters return the default on absent/wrong-type (`get_i64(key, def)`,
+…); `has()` / `type_of()` are the strict path; `get_mp()` hands back the
+canonical bytes for `xi::mp::Reader`. `set_mp` refuses malformed /
+ext-bearing / duplicate-keyed bytes (same canonical gate as
+`ScriptPackBuilder::add_mp`).
+
+Same survival rules as `xi::state()`: rides hot reloads in memory (host
+exports `xi_script_kv_get` / `xi_script_kv_set` — byte-length convention,
+never NUL-terminated), does NOT survive backend restarts or project switches.
+
+### Schema versioning + migration (kv flavour)
+
+```cpp
+XI_KV_SCHEMA(2);              // this script's kv shape is version 2
+                              // (read back by xi_script_kv_schema_version)
+```
+
+On a version mismatch at reload the host **drops** the store
+(`event:state_dropped` with `"store":"kv"`) unless the new DLL registered a
+**typed** migrator — no JSON string-wrangling, you get the old store already
+parsed (the host calls the script's `xi_script_kv_change` export):
+
+```cpp
+namespace { static int _mig = [] {
+    xi::set_kv_migrate([](const xi::Kv& old, int from, int to)
+                           -> std::optional<xi::Kv> {
+        xi::Kv out;
+        out.set_i64("frames", old.get_i64("count", 0));   // rename, carry value
+        out.set_i64("migrated_from", from);
+        return out;               // std::nullopt to DECLINE -> host drops
+    });
+    return 0;
+}(); }
+```
+
+On success the host restores the migrated store and emits
+`event:state_migrated` with `"store":"kv"`. Live proof: `examples/qa_kv_reload`.
+
+### Porting from `xi::state()` (the bilingual window)
+
+Both stores are live in the same DLL until the cut, so a porting script
+self-seeds once — no host conversion exists, by design:
+
+```cpp
+if (xi::kv().empty() && xi::state().has("count"))
+    xi::kv().set_i64("count", xi::state()["count"].as_int(0));
+```
+
+After one reload the kv channel carries and the `xi::state()` usage can be
+deleted.
 
 ---
 
