@@ -84,8 +84,8 @@ above.
 |---|---|---|---|---|
 | B1 | `use().process()` with **values**, read result fields | calc_pipeline, burst_dispatch, qa_func, qa_reentrancy | **GREEN** | `qa_use_pack_door` (new): a script-built pack through `xi::use("det").process(pack)` in the live service — blob_count/threshold_used read off the returned ScriptPack, `$fault` absent asserted. Full seam contract (result ownership, trigger chaining, $fault pack, fail-closed edges -1/-4/empty/older-host, refcount balance) in `plugins/use_pack_door_test.cpp` against the real DLLs. |
 | B2 | `use().process()` with **images**, chain outputs zero-copy | circle_counting, circle_size_buckets, hue_tune, golden_defect, graph_demo, multi_source_surge | **GREEN** | `qa_use_pack_door`: image in (script-built gray), image back (the door's `binary`, byte-checked after a further push). Chaining a door RESULT onward is the same sealed handle passed as-is (`process` accepts any live ScriptPack — zero-copy across doors); note `ScriptPackBuilder::add_image` COPIES pixels by design (pool-identity across the script seam is deliberately not offered yet, xi_script_pack.hpp). |
-| B3 | **Typed-IO contracts** (io.hpp build/extract) + **NA propagation** + **provenance** ($prov, out.src()) | fixturing_demo, io_stress, graph_demo (provenance) | **UNSCHEDULED U1** | The [USE-DOOR] half landed: the door is script-reachable and `$fault` packs are script-READABLE (`qa_use_pack_door` asserts fault=0 on the happy path; `use_pack_door_test` §4 reads a `$fault` pack). Still missing script-side: pack equivalents of `Record::na()/is_na()/na_reason()`, `$prov`/`prov_of()`, `set_src()/src()`, and `_io`-style typed pack build/extract helpers (doc 10 codegen gap #2 shipped `_io` only for the 3 keys-only plugins, Record-shaped). |
-| B4 | **NA short-circuit** through a chain (poison input skips the plugin) | fixturing_demo, typed-io docs | **UNSCHEDULED U1** | The Record UseProxy short-circuits `is_na()` input before the door; the pack door has no NA notion to short-circuit on. Unchanged by the write-half landing — this is U1's propagation half. |
+| B3 | **Typed-IO contracts** (io.hpp build/extract) + **NA propagation** + **provenance** ($prov, out.src()) | fixturing_demo, io_stress, graph_demo (provenance) | **GREEN (error path + provenance, doc 15; typed-IO helpers narrowed out)** | U1's error-path + provenance thirds LANDED (doc 15): the pack poison marker is `$fault` (one marker, no pack `$na` — deliberate), read script-side via `ScriptPack::is_fault()/fault_reason()/fault_key()/fault_detail()`; provenance rides as `$src` (immediate producer) + `$prov` ('/'-joined hop chain), auto-stamped at seal by the door glue (`pack_door_abi`) and by `emit(PackOut&&)`, with `PackOut::src()/prov()` / `ScriptPackBuilder::fault()/src()` for explicit stamping. Evidence: `use_pack_door_test` §7–§10 (round-trip, chain "det0/det1" across two real doors), `qa_pack_fault_path` live-service. The `_io`-style TYPED pack build/extract helpers remain OPEN — narrowed out of U1 (doc 10 codegen gap #2 shipped `_io` Record-shaped only); error path no longer waits on them. |
+| B4 | **NA short-circuit** through a chain (poison input skips the plugin) | fixturing_demo, typed-io docs | **GREEN (doc 15)** | The host funnel (`use_pack_process_cb`) short-circuits a fault input BEFORE the instance lookup — the plugin NEVER runs; the result is a NEW sealed fault pack carrying the original reason (+`$seq`) with the hop appended to `$prov` — the pack mirror of the Record `is_na()` short-circuit. Evidence: `use_pack_door_test` §8/§9 (a door-call counter proves zero plugin entries; two-hop chain "det/det2" accumulates without running either door), `qa_pack_fault_path` (live service: poisoned frame → NG verdict carrying reason + chain; happy control unaffected). |
 
 ### C. Script → sink (observability + custom sinks)
 
@@ -125,7 +125,7 @@ above.
 |---|---|---|---|---|
 | G1 | **Per-run verdicts** incl. ok/ng/na/crash classes | qa_run_result, defect_detection.cpp | **GREEN** (orthogonal) | The verdict plane is not a data currency; all four pack QA examples verdict while holding a pack. `qa_pack_stereo`/`qa_pack_walk` use it as the ONLY observability channel — proof it suffices pack-only. |
 | G2 | **Sticky status** breadcrumbs (`xi::status`) | status_demo, crash_tests | **N/A** (control) | |
-| G3 | **Cross-frame script state** (`xi::state()`) | blob_tracker, trend_monitor, hot_reload_run2 | **N/A today / UNSCHEDULED U2 at the cut** | Orthogonal to the payload currency (script-local), BUT `xi::state()` returns `xi::Record&` — it is a named casualty of Record deletion with no scheduled replacement. |
+| G3 | **Cross-frame script state** (`xi::state()` → `xi::kv()`) | blob_tracker, trend_monitor, hot_reload_run2; **reference port: qa_kv_reload** | **GREEN (successor landed bilingual; U2 RESOLVED 2026-07-03)** | Orthogonal to the payload currency (script-local). The post-Record shape is DECIDED and LIVE: `xi::kv()` (flat typed KV, canonical-mp boundary bytes, `XI_KV_SCHEMA` + typed `set_kv_migrate`; doc 16). Live QA `qa_kv_reload` carries a counter across a hot reload + schema 1→2 migration pack-only; ctests `kv`/`kv_migrate` pin the boundary + the JSON-era self-seed port pattern. Record-era teachers port at the cut per doc 16 §cut edits. |
 | G4 | **Params / recipes / instance defs** | qa_param_state_isolation, qa_recipe_script_instance, user_with_instance.cpp | **N/A** (control) | JSON config plane; explicitly untouched by the migration. |
 
 ### H. Pure control-plane examples (no per-frame data payload — N/A rows)
@@ -167,12 +167,15 @@ Counting the 29 pattern rows (A1–A9, B1–B4, C1–C5, D1–D2, E1–E3, F1–
 
 | Status | Rows | Count |
 |---|---|---|
-| **GREEN (pack-only, live-service QA evidence)** | A1–A9, B1, B2, C1, C2, C3, C4, D1, D2, E1, E2, E3, F1, G1 | **22** |
-| **Open on unscheduled semantics** | B3, B4 (U1) | **2** |
+| **GREEN (pack-only, live-service QA evidence)** | A1–A9, B1–B4, C1, C2, C3, C4, D1, D2, E1, E2, E3, F1, G1, G3 | **25** |
 | **N/A (control plane / by design)** | C5, F2, G2, G4 + the §H block | **4 rows + H** |
-| **N/A today / U2 at the cut** | G3 | **1** |
 
-(C3 flipped 2026-07-03 by U3's resolution — docs/new_gen/17 + `qa_pack_order`.)
+(C3 flipped 2026-07-03 by U3's resolution — docs/new_gen/17 + `qa_pack_order`.
+B3/B4 flipped 2026-07-03 by U1's resolution — docs/new_gen/15 +
+`qa_pack_fault_path` + `use_pack_door_test` §7–§10. G3 flipped 2026-07-03 by
+U2's resolution — docs/new_gen/16 + `xi::kv()` landed bilingual with
+`test_kv`/`test_kv_migrate` + `qa_kv_reload`. No open pattern rows remain:
+every non-N/A row is GREEN.)
 
 Bottom line for Gate P2: **both halves of script parity are now landed and
 QA-gated** — read (t.pack(), walk, typed, cross-thread) AND write
@@ -186,29 +189,48 @@ bridge, process()-on-sink rejected fail-loud; row C3 flipped by
 `examples/qa_pack_record_replay` (record → save(.xex1) → replay → verify as
 one live graph, disk == recorded wire == replayed wire pixel-byte identical —
 rows E1/E2/E3 GREEN) and `examples/qa_pack_config_swap` (row F1 GREEN). No
-composition rows remain. What remains is exactly one named semantic residual —
-**U1** (pack-plane NA/provenance/typed-IO: gates the error paths of
-fixturing_demo / io_stress / graph_demo, rows B3/B4). **The Gate P2 verdict
-rendered on this measurement is in doc 10: ACHIEVED WITH NAMED RESIDUALS
-(U1 open; U3 since resolved).** U2 (`xi::state()`'s Record shape) gates the
-CUT, not P2.
+composition rows remain, and **U1 is now RESOLVED too** (error path +
+provenance, doc 15; typed-IO helpers narrowed out as a non-gate) — rows B3/B4
+flipped with live evidence, so NO pattern row remains open on unscheduled
+semantics. **The Gate P2 verdict rendered on this measurement is in doc 10:
+ACHIEVED WITH NAMED RESIDUALS (both since resolved — U1 by doc 15, U3 by doc
+17).** U2 (`xi::state()`'s Record shape) gated the CUT, not P2 — and is
+**RESOLVED 2026-07-03** too (doc 16, `xi::kv()`; see §Unscheduled and row G3).
 
 ## Unscheduled blockers (the wave-2 planning input; re-measured 2026-07-03)
 
-- **U1 — Pack-plane NA / provenance / typed-IO script semantics. STILL OPEN.**
-  No pack equivalent of `Record::na()/is_na()/na_reason()` (NA propagation
-  through chains), `$prov`/`prov_of()`, `set_src()/src()` (provenance), and no
-  `_io`-style typed build/extract helpers for packs beyond doc 10's codegen
-  gap #2 (keys-only plugins, Record-shaped). What the landing DID give:
-  plugin-side `$fault` packs are now script-READABLE (`use_pack_door_test` §4)
-  — the fail-loud seed exists; the propagate/short-circuit contract is
-  unowned. Affects: fixturing_demo, io_stress, graph_demo, and the error path
-  of every chained example. **This is Gate P2 residual #1 (doc 10).**
-- **U2 — `xi::state()` post-Record shape. STILL OPEN (verified 2026-07-03:
-  xi_state.hpp still returns `xi::Record&`).** DocRegistry/COW die at the cut.
-  Keep-as-JSON vs move-to-pack is nobody's decision yet. Affects:
-  blob_tracker, trend_monitor, hot_reload_run2 (+ `t.meta()`'s Record return,
-  same family). Gates the CUT, not P2.
+- **U1 — Pack-plane NA / provenance / typed-IO script semantics. RESOLVED
+  (error path + provenance, doc 15) / NARROWED (typed-IO helpers).** The
+  propagate/short-circuit contract is OWNED AND LANDED
+  (`polaris2/u1-pack-fault-semantics`, docs/new_gen/15): `$fault` is the one
+  pack poison marker (no pack `$na` — decided, not deferred);
+  `ScriptPack::is_fault()/fault_reason()/…/src()/prov()` +
+  `ScriptPackBuilder::fault()/src()` + `PackIn`/`PackOut` siblings are the
+  read/write surface; `$src`/`$prov` are stamped at seal producer-side
+  (door glue + emit); the host funnel short-circuits fault inputs (plugin
+  never runs, reason + `$seq` carried, hop appended). Rows B3/B4 flipped with
+  evidence (`use_pack_door_test` §7–§10, `qa_pack_fault_path`). What remains
+  of the original bundle — narrowed OUT of U1, no longer gating any error
+  path: `_io`-style TYPED pack build/extract helpers (doc 10 codegen gap #2
+  is still Record-shaped). **Gate P2 residual #1 is thereby closed; see doc
+  10.**
+- **U2 — `xi::state()` post-Record shape. ✅ RESOLVED 2026-07-03** (decision
+  record: `16-script-state-shape.md`; landed bilingual on the
+  `polaris2/u2-state-shape` branch). Decided: neither keep-as-JSON nor
+  move-to-pack — **`xi::kv()`**, a flat typed KV store (pure SDK-side,
+  mutable — packs are sealed and were the wrong shape), canonical-mp
+  boundary bytes over NEW length-carrying `xi_script_kv_*` exports (the old
+  `const char*` thunks cannot carry NUL-bearing msgpack — the finding that
+  forced a decided shape), `XI_KV_SCHEMA` + typed `xi::set_kv_migrate`
+  mirroring the Record channel's choreography, host legs beside (not
+  touching) the Record legs. JSON-era state: host converts NOTHING; scripts
+  self-seed kv from the restored `xi::state()` during the bilingual window
+  (pinned by `test_kv_migrate` §E). Evidence: ctests `kv` + `kv_migrate`,
+  live QA `qa_kv_reload` (carry + schema 1→2 migration + wire event).
+  The cut executes doc 16 §What THE CUT deletes. NOTE: `t.meta()`'s Record
+  return is NOT covered — it is a payload-plane read surface (pack
+  migration's read side), named in doc 16 so the cut planner doesn't assume
+  U2 closed it.
 - **U3 — Ordered-sink semantics on the pack plane. ✅ RESOLVED 2026-07-03**
   (docs/new_gen/17 — the owned decision the narrowing asked for). (a)
   Producer-stamped `$seq` is BLESSED as the one in-band mechanism — the host

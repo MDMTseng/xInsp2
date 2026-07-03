@@ -80,8 +80,9 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
     design (verified 2026-07-03). It carries no parity obligation; see its README
     and `expose` for the generic-sink reference.
 2. **Gate P2 — script parity: ✅ ACHIEVED 2026-07-03, WITH TWO NAMED
-   RESIDUALS (U1, U3 — U3 since ✅ RESOLVED the same day, docs/new_gen/17;
-   U1 remains the open one).** All three surfaces landed and are QA-gated in the
+   RESIDUALS (U1, U3 — BOTH since ✅ RESOLVED the same day: U3 by
+   docs/new_gen/17, U1 by docs/new_gen/15 with its typed-IO leftover
+   narrowed out).** All three surfaces landed and are QA-gated in the
    live service: `use()`→door chaining (`xi::use(name).process(ScriptPack)`),
    script-side Pack building (`xi::ScriptPackBuilder`, whose canonical-gated
    `add_mp(xi::mp::Writer)` closes the U4 nested-results gap), and
@@ -96,16 +97,25 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    mock_camera traffic while the driver runs `prepare_instance` →
    `commit_group` mid-run, verdicts on the run_result plane, zero
    `xi::Record`; F1 GREEN) — no composition rows remain (doc 12 scorecard:
-   22 GREEN), 4+H N/A control-plane. Flagship evidence: **`examples/qa_use_pack_door`** —
+   24 GREEN with U1's B3/B4 and U3's C3 since flipped), 4+H N/A
+   control-plane. Flagship evidence: **`examples/qa_use_pack_door`** —
    build → door → push in ONE script, no `xi::Record` anywhere, pixels and
    nested entries byte-checked off the XEX1-v3 wire; `qa_pack_pilot`'s last
    Record leg deleted the same day; `python tools/run_qa.py pack` 4/4.
    The residuals, named precisely (doc 12 §Unscheduled has the detail):
-   - **U1 — pack-plane NA/provenance/typed-IO script semantics** (no
-     `na()/is_na()/na_reason()`, `$prov`, `src()`, or `_io`-style pack
-     helpers; `$fault` packs are script-readable, the propagate contract is
-     unowned). Gates the ERROR-PATH patterns of fixturing_demo, io_stress,
-     graph_demo — matrix rows B3/B4.
+   - **U1 — pack-plane NA/provenance/typed-IO script semantics: ✅ RESOLVED
+     for the error path + provenance (owned + landed,
+     `polaris2/u1-pack-fault-semantics`, doc 15); NARROWED for typed-IO.**
+     `$fault` is the one pack poison marker (no pack `$na` — a decision, doc
+     15 D1); `ScriptPack::is_fault()/fault_reason()/src()/prov()` (+ builder
+     and PackIn/PackOut siblings) are the surface; `$src`/`$prov` stamp at
+     seal producer-side; the host funnel short-circuits fault inputs (plugin
+     never runs; reason + `$seq` carried; hop appended to the chain). The
+     ERROR-PATH patterns of fixturing_demo/io_stress/graph_demo are no
+     longer gated — matrix rows B3/B4 GREEN (`use_pack_door_test` §7–§10,
+     `examples/qa_pack_fault_path`). Still open, narrowed OUT of U1 and
+     gating nothing above: `_io`-style TYPED pack build/extract helpers
+     (codegen gap #2 remains Record-shaped).
    - **U3 — ordered-sink semantics. ✅ RESOLVED 2026-07-03**
      (docs/new_gen/17 — the ordering contract, owned + landed): delivery
      ORDER is envelope-carried (staged push flushed inside the emit gate;
@@ -118,12 +128,20 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
      closing the documented v0 inline gap by doctrine. qa_result_order's
      pattern ported: `examples/qa_pack_order` (live, arrival zero-inversion /
      completion reorders) — matrix row C3 flipped GREEN.
-   U1 blocks no shipping example pattern beyond those named; it is a wave-2
-   planning input. **The CUT (step 4) may not ride until U1 has an owner or
-   an explicit won't-need decision** (U3's is done) — and U2 below is a
-   separate cut-gate. (U2 — `xi::state()` still returns `xi::Record&` — is
-   NOT a P2 residual: cross-frame state is script-local and orthogonal to
-   the payload currency, but it must be resolved before Record deletion.)
+   Both P2 residuals are RESOLVED; neither's leftover (U1's typed-IO
+   narrowing) gates any shipping example pattern — wave-2 planning inputs
+   only. **The CUT (step 4)'s owner precondition is MET on every named
+   gate — U1 (doc 15), U3 (doc 17), and U2 alike.** (U2 — the separate
+   `xi::state()` cut-gate — is **RESOLVED 2026-07-03**: the post-Record
+   state shape is DECIDED and LANDED BILINGUAL as **`xi::kv()`** — a flat
+   typed KV store, canonical-mp boundary bytes over the new length-carrying
+   `xi_script_kv_*` exports, typed `xi::set_kv_migrate` code_change hook;
+   decision record `16-script-state-shape.md`, which also lists the exact
+   Record-channel edits the cut makes. Evidence: `test_kv` +
+   `test_kv_migrate` ctests, live QA `examples/qa_kv_reload`. Record
+   deletion is no longer blocked on any named semantic decision — THE CUT's
+   remaining precondition is app-team cutover-train coordination only; at
+   the cut, execute doc 16 §What THE CUT deletes.)
 3. **Gate P3 — persistence parity: ✅ ACHIEVED 2026-07-03.** The canonical
    dump is FINALIZED as **XEX1-v3** (= the v2 draft + per-entry
    `XI_PACK_TAG_*` as `[tag, value]`, closing P1's image-descriptor

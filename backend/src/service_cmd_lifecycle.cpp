@@ -247,6 +247,20 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                                           ? g_eng.script.state_schema_version()
                                           : 0;
             }
+            // U2 (docs/new_gen/16): capture the kv channel the same way —
+            // canonical-mp bytes, explicit lengths (0 = empty store, nothing
+            // kept). Rides BESIDE the Record channel until THE CUT.
+            if (g_eng.script.ok() && g_eng.script.get_kv) {
+                std::vector<uint8_t> kbuf(256 * 1024);
+                int kn = g_eng.script.get_kv(kbuf.data(), (int)kbuf.size());
+                if (kn < 0) { kbuf.resize((size_t)(-(int64_t)kn) + 1024);
+                              kn = g_eng.script.get_kv(kbuf.data(), (int)kbuf.size()); }
+                if (kn > 0) g_eng.persistent_kv_bytes.assign((const char*)kbuf.data(), (size_t)kn);
+                else        g_eng.persistent_kv_bytes.clear();
+                g_eng.persistent_kv_schema = g_eng.script.kv_schema_version
+                                           ? g_eng.script.kv_schema_version()
+                                           : 0;
+            }
             // Swap: move-assign drops the old module's last ref — its deleter
             // does the owner-sweep + FreeLibrary once any in-flight inspect that
             // snapshotted it returns.
@@ -473,6 +487,93 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                     } catch (const std::exception& e) {
                         std::fprintf(stderr,
                             "[xinsp2] replay set_state (restore) threw: %s — skipped\n", e.what());
+                    }
+                }
+            }
+
+            // U2 (docs/new_gen/16): restore the kv channel — the exact same
+            // choreography as the Record channel above (drop predicate,
+            // code_change-style migrate, SEH guards), on canonical-mp bytes.
+            // Events reuse the state_migrated/state_dropped names with an
+            // added "store":"kv" discriminator; the Record channel's events
+            // stay byte-identical.
+            if (g_eng.script.set_kv && !g_eng.persistent_kv_bytes.empty()) {
+                int new_kv_schema = g_eng.script.kv_schema_version
+                                  ? g_eng.script.kv_schema_version()
+                                  : 0;
+                bool kv_drop = (new_kv_schema != 0 &&
+                                g_eng.persistent_kv_schema != new_kv_schema);
+                if (kv_drop) {
+                    std::string kv_migrated;
+                    if (xi::script::migrate_kv(g_eng.script, g_eng.persistent_kv_bytes,
+                                               g_eng.persistent_kv_schema, new_kv_schema,
+                                               kv_migrated)) {
+                        bool kv_ok = true;
+                        try {
+                            if (g_eng.script.set_kv((const uint8_t*)kv_migrated.data(),
+                                                    (int)kv_migrated.size()) != 0) {
+                                kv_ok = false;
+                                std::fprintf(stderr,
+                                    "[xinsp2] replay kv_set (migrated) refused the bytes — skipped\n");
+                            }
+                        } catch (const seh_exception& e) {
+                            kv_ok = false;
+                            std::fprintf(stderr,
+                                "[xinsp2] replay kv_set (migrated) crashed: 0x%08X (%s) — skipped\n",
+                                e.code, e.what());
+                            xi::recover_seh_stack_or_die(e.code, "replay kv_set (migrated)");
+                        } catch (const std::exception& e) {
+                            kv_ok = false;
+                            std::fprintf(stderr,
+                                "[xinsp2] replay kv_set (migrated) threw: %s — skipped\n", e.what());
+                        }
+                        if (!kv_ok) { g_eng.persistent_kv_bytes.clear(); }
+                        else {
+                        g_eng.persistent_kv_bytes = kv_migrated;
+                        std::fprintf(stderr,
+                            "[xinsp2] kv schema changed (v%d → v%d) — migrated prior store "
+                            "(%zu bytes) via kv_change hook\n",
+                            g_eng.persistent_kv_schema, new_kv_schema, kv_migrated.size());
+                        std::string ev = "{\"type\":\"event\",\"name\":\"state_migrated\","
+                                         "\"data\":{\"store\":\"kv\",\"old_schema\":"
+                                       + std::to_string(g_eng.persistent_kv_schema)
+                                       + ",\"new_schema\":"
+                                       + std::to_string(new_kv_schema)
+                                       + "}}";
+                        srv.send_text(ev);
+                        g_eng.persistent_kv_schema = new_kv_schema;
+                        }
+                    } else {
+                    std::fprintf(stderr,
+                        "[xinsp2] kv schema changed (v%d → v%d) — dropping prior store\n",
+                        g_eng.persistent_kv_schema, new_kv_schema);
+                    std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
+                                     "\"data\":{\"store\":\"kv\",\"old_schema\":"
+                                   + std::to_string(g_eng.persistent_kv_schema)
+                                   + ",\"new_schema\":"
+                                   + std::to_string(new_kv_schema)
+                                   + "}}";
+                    srv.send_text(ev);
+                    g_eng.persistent_kv_bytes.clear();
+                    }
+                } else {
+                    try {
+                        if (g_eng.script.set_kv((const uint8_t*)g_eng.persistent_kv_bytes.data(),
+                                                (int)g_eng.persistent_kv_bytes.size()) == 0) {
+                            std::fprintf(stderr, "[xinsp2] kv restored (%zu bytes, schema v%d)\n",
+                                         g_eng.persistent_kv_bytes.size(), new_kv_schema);
+                        } else {
+                            std::fprintf(stderr,
+                                "[xinsp2] replay kv_set (restore) refused the bytes — skipped\n");
+                        }
+                    } catch (const seh_exception& e) {
+                        std::fprintf(stderr,
+                            "[xinsp2] replay kv_set (restore) crashed: 0x%08X (%s) — skipped\n",
+                            e.code, e.what());
+                        xi::recover_seh_stack_or_die(e.code, "replay kv_set (restore)");
+                    } catch (const std::exception& e) {
+                        std::fprintf(stderr,
+                            "[xinsp2] replay kv_set (restore) threw: %s — skipped\n", e.what());
                     }
                 }
             }
@@ -818,6 +919,8 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             g_eng.instance_def_cache.clear();   // sibling replay shadow — same project boundary
             g_eng.persistent_state_json = "{}";
             g_eng.persistent_state_schema = 0;
+            g_eng.persistent_kv_bytes.clear();  // U2: kv channel — same no-leak boundary
+            g_eng.persistent_kv_schema = 0;
         }
         if (g_eng.plugin_mgr.open_project(*folder, working_copy)) {
             // F5: advisory single-writer stamp. If another LIVE backend already
@@ -932,6 +1035,8 @@ void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
             g_eng.instance_def_cache.clear();   // sibling replay shadow — same project boundary
             g_eng.persistent_state_json = "{}";
             g_eng.persistent_state_schema = 0;
+            g_eng.persistent_kv_bytes.clear();  // U2: kv channel — same no-leak boundary
+            g_eng.persistent_kv_schema = 0;
         }
         send_rsp_ok(srv, id, "{\"closed\":true}");
 }

@@ -208,6 +208,23 @@ public:
         return add_mp(key, v.data(), v.size());
     }
 
+    // ---- U1 pack-plane error path + provenance (docs/new_gen/15) -----------
+    // Script-side siblings of PackOut::fault()/src(): mark the pack under
+    // construction as a FAULT (reason code + optional offending key + human
+    // detail — the xi::contract codes for contract-shaped failures, free-form
+    // producer codes otherwise), or stamp an explicit producer identity. A
+    // script-built pack carries NO automatic $src (a script is not an
+    // instance); downstream door hops still append to $prov when the pack
+    // propagates (use_pack_process_cb / pack_door_abi).
+    bool fault(const char* code, const char* key = nullptr,
+               std::string_view detail = {}) {
+        bool ok = add_str(pack_contract::kFault, code ? code : "");
+        if (key && *key)     ok = add_str(pack_contract::kFaultKey, key) && ok;
+        if (!detail.empty()) ok = add_str(pack_contract::kFaultDetail, detail) && ok;
+        return ok;
+    }
+    bool src(std::string_view id) { return add_str(pack_contract::kSrc, id); }
+
     // ---- seal ---------------------------------------------------------------
     // Flip immutable: consume the host builder into a sealed pack and wrap it
     // as a first-class ScriptPack — the SAME type t.pack() yields, so a

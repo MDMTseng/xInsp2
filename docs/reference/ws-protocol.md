@@ -253,6 +253,22 @@ the user TU is parsed, so the user's `#define` arrived too late.
 `XI_STATE_SCHEMA(N)` declares a runtime static initialiser, which
 runs at DLL load and wins.)
 
+The same two events also report the **kv channel** (`xi::kv()`, the
+post-Record state store — `docs/new_gen/16-script-state-shape.md`), with an
+additive `"store": "kv"` discriminator in `data` (and `XI_KV_SCHEMA(N)` as
+the version macro). An event WITHOUT `store` is the `xi::state()` channel —
+existing clients keep working unchanged:
+
+```json
+{ "type": "event", "name": "state_dropped",  "data": { "store": "kv", "old_schema": 1, "new_schema": 2 } }
+{ "type": "event", "name": "state_migrated", "data": { "store": "kv", "old_schema": 1, "new_schema": 2 } }
+```
+
+`state_migrated` (either channel) fires INSTEAD of `state_dropped` when the
+new DLL registered a migration hook (`xi::set_state_migrate` /
+`xi::set_kv_migrate`) and it carried the prior state across the schema
+change.
+
 ---
 
 ## ~~Binary frame layout — image preview~~ (REMOVED)
@@ -457,7 +473,8 @@ shell metacharacters or a double-quote (command-injection guard).
 
 Hot-reload semantics: across the call, the backend (a) saves and restores
 `xi::state()` JSON (drops it on schema mismatch via `state_dropped`
-event), (b) replays every `cmd:set_param` value the user pushed into
+event) and, on the same choreography, the `xi::kv()` canonical-mp store
+(events carry `"store":"kv"`), (b) replays every `cmd:set_param` value the user pushed into
 the previous DLL into the new one, (c) if `cmd:start` was active,
 captures the fps + auto-resumes a fresh worker after the new DLL is
 ready (rsp gets `"resumed_continuous": true`). The cl.exe rebuild gap

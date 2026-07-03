@@ -653,6 +653,49 @@ public:
             return fn(owner);
         return 0;
     }
+
+    // Capability plane (docs/new_gen/14 pilot): the two host-owned vtables —
+    // xi.cap@1 (consumer call funnel) and xi.cap.provider@1 (registration) —
+    // are published here by xi::install_cap_plane (xi_cap_abi.hpp). Same
+    // layering bridge as pack_iface_slot: this header cannot include
+    // xi_cap_abi.hpp (which sits above it). Null until the plane is installed
+    // (a host with no capability plane answers NULL for both ids).
+    static std::atomic<const void*>& cap_iface_slot() {
+        static std::atomic<const void*> slot{nullptr};
+        return slot;
+    }
+    static void publish_cap_iface(const void* iface) {
+        cap_iface_slot().store(iface, std::memory_order_release);
+    }
+    static std::atomic<const void*>& cap_provider_iface_slot() {
+        static std::atomic<const void*> slot{nullptr};
+        return slot;
+    }
+    static void publish_cap_provider_iface(const void* iface) {
+        cap_provider_iface_slot().store(iface, std::memory_order_release);
+    }
+    // Capability-registry OWNER SWEEP — the registration analogue of
+    // release_all_for / sweep_packs_for. Published by install_cap_plane; the
+    // teardown paths that sweep leaked image handles + pack refs (the
+    // CAbiInstanceAdapter dtor) also drop this owner's registrations, so a lib
+    // plugin that forgets to unregister on destroy can never leave a dangling
+    // handler in the registry. The adapter's reinit() calls it too, BEFORE the
+    // rebuild factory runs: the registered `self` pointers belong to the
+    // corrupted instance about to be destroyed (the fresh factory re-registers).
+    // Returns the number of registrations dropped; 0 until published.
+    using CapSweepFn = int (*)(ImagePoolOwnerId owner);
+    static std::atomic<CapSweepFn>& cap_sweep_slot() {
+        static std::atomic<CapSweepFn> slot{nullptr};
+        return slot;
+    }
+    static void publish_cap_sweeper(CapSweepFn fn) {
+        cap_sweep_slot().store(fn, std::memory_order_release);
+    }
+    static int sweep_caps_for(ImagePoolOwnerId owner) {
+        if (auto fn = cap_sweep_slot().load(std::memory_order_acquire))
+            return fn(owner);
+        return 0;
+    }
     // The forwarder the door hands out for xi.emit@1.emit_record: a stable address
     // (a plugin may cache the interface) that reads the published slot each call.
     // No-op until the hook publishes — same null-safe contract as the field.
@@ -725,6 +768,14 @@ public:
         // (slot-bridged from xi_pack_abi.hpp; null on a host with no pack plane).
         if (std::strcmp(id, "xi.pack") == 0 && version == 1)
             return pack_iface_slot().load(std::memory_order_acquire);
+        // Capability plane (docs/new_gen/14 pilot), published via
+        // install_cap_plane (slot-bridged from xi_cap_abi.hpp; null on a host
+        // with no capability plane). ZERO xi_host_api slots — both directions
+        // ride this door pre-v12.
+        if (std::strcmp(id, "xi.cap") == 0 && version == 1)
+            return cap_iface_slot().load(std::memory_order_acquire);
+        if (std::strcmp(id, "xi.cap.provider") == 0 && version == 1)
+            return cap_provider_iface_slot().load(std::memory_order_acquire);
         return nullptr;
     }
 
@@ -945,7 +996,15 @@ private:
 class ImagePoolOwnerScope {
 public:
     ImagePoolOwnerScope() : id_(ImagePool::alloc_owner_id()) {}
-    ~ImagePoolOwnerScope() { if (!released_) ImagePool::instance().release_all_for(id_); }
+    ~ImagePoolOwnerScope() {
+        if (released_) return;
+        ImagePool::instance().release_all_for(id_);
+        // Capability plane (doc 14 pilot): a factory that REGISTERED and then
+        // failed construction must not leave dangling handler/self pointers in
+        // the registry — sweep its registrations with its images (slot bridge;
+        // no-op until install_cap_plane).
+        ImagePool::sweep_caps_for(id_);
+    }
     ImagePoolOwnerScope(const ImagePoolOwnerScope&) = delete;
     ImagePoolOwnerScope& operator=(const ImagePoolOwnerScope&) = delete;
 

@@ -342,6 +342,24 @@ target_compile_definitions(test_fault_policy PRIVATE
     FAULT_PLUGIN_DLL="$<TARGET_FILE:fault_plugin>")
 add_test(NAME fault_policy COMMAND test_fault_policy)
 
+# Capability plane pilot (docs/new_gen/14): host registry + forwarding funnel +
+# reentrancy guard, driven against a REAL lib plugin (raw exports so a handler
+# crash reaches the funnel's SEH boundary genuinely). Covers register/resolve/
+# call round-trip, the name-only registry's $v/$probe convention, unknown -1,
+# crash -2 + quarantine charged to the lib instance, reentrancy -5 in both
+# directions, lifecycle-only registration, and the unregister-on-destroy sweep.
+add_library(cap_test_plugin SHARED tests/cap_test_plugin.cpp)
+target_link_libraries(cap_test_plugin PRIVATE xi_core)
+add_executable(test_cap_plane tests/test_cap_plane.cpp)
+target_link_libraries(test_cap_plane PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_cap_plane PRIVATE Ws2_32)
+endif()
+add_dependencies(test_cap_plane cap_test_plugin)
+target_compile_definitions(test_cap_plane PRIVATE
+    CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
+add_test(NAME cap_plane_test COMMAND test_cap_plane)
+
 # Q0f — the deliberate per-crash doc leak is OBSERVABLE. Drives the real xi_use.hpp
 # UseProxy (share_out reserves a ref; rc -2 leaks it) against the real crashing
 # fault_plugin, and asserts DocRegistry::crash_leaked_lifetime (surfaced in
@@ -700,6 +718,37 @@ add_dependencies(test_state_migrate
     migrate_probe_v1 migrate_probe_v2 migrate_probe_v2_nohook)
 add_test(NAME state_migrate COMMAND test_state_migrate
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_state_migrate>)
+
+# U2 (docs/new_gen/16) — xi::Kv container unit test. Header-only under test
+# (xi_kv.hpp = std + xi_mp.hpp), so like test_mp it links nothing.
+add_executable(test_kv tests/test_kv.cpp)
+target_include_directories(test_kv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME kv COMMAND test_kv)
+
+# U2 — kv-channel hot-reload carry. The kv sibling of state_migrate above:
+# one fixture source (kv_probe.cpp, exporting the REAL xi::detail::kv_*_thunk
+# bodies over the real xi::kv() store) built three ways, driven through the
+# REAL loader + xi::script::migrate_kv. SECTION E pins the doc-16 JSON-era
+# self-seed pattern (Record channel restored -> script seeds kv -> kv carries).
+add_library(kv_probe_v1        SHARED tests/kv_probe.cpp)
+target_compile_definitions(kv_probe_v1        PRIVATE KVP_SCHEMA=1)
+target_include_directories(kv_probe_v1        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_library(kv_probe_v2        SHARED tests/kv_probe.cpp)
+target_compile_definitions(kv_probe_v2        PRIVATE KVP_SCHEMA=2 KVP_HOOK)
+target_include_directories(kv_probe_v2        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_library(kv_probe_v2_nohook SHARED tests/kv_probe.cpp)
+target_compile_definitions(kv_probe_v2_nohook PRIVATE KVP_SCHEMA=2)
+target_include_directories(kv_probe_v2_nohook PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_executable(test_kv_migrate tests/test_kv_migrate.cpp)
+target_link_libraries(test_kv_migrate PRIVATE xi_core)
+target_compile_definitions(test_kv_migrate PRIVATE
+    KV_PROBE_V1_DLL="kv_probe_v1.dll"
+    KV_PROBE_V2_DLL="kv_probe_v2.dll"
+    KV_PROBE_V2_NOHOOK_DLL="kv_probe_v2_nohook.dll")
+add_dependencies(test_kv_migrate
+    kv_probe_v1 kv_probe_v2 kv_probe_v2_nohook)
+add_test(NAME kv_migrate COMMAND test_kv_migrate
+         WORKING_DIRECTORY $<TARGET_FILE_DIR:test_kv_migrate>)
 
 # ---- Perf-regression gate (T0.3) ---------------------------------------
 # Promote the bench_* micro-benchmarks from "run manually" to ctest gates: each

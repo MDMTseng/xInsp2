@@ -127,6 +127,20 @@ struct LoadedScript {
                                  int new_schema, char* buf, int buflen);
     CodeChangeFn       code_change      = nullptr;
 
+    // U2 (docs/new_gen/16) — the kv channel (post-Record state). Canonical-mp
+    // BYTES with explicit lengths (never NUL-terminated). All optional
+    // symbols: an older script lacks them and only the Record channel rides.
+    using GetKvFn          = int (*)(uint8_t* buf, int buflen);
+    using SetKvFn          = int (*)(const uint8_t* bytes, int len);
+    using KvSchemaVersionFn = int (*)(void);
+    using KvChangeFn       = int (*)(const uint8_t* old_bytes, int old_len,
+                                     int old_schema, int new_schema,
+                                     uint8_t* buf, int buflen);
+    GetKvFn            get_kv            = nullptr;
+    SetKvFn            set_kv            = nullptr;
+    KvSchemaVersionFn  kv_schema_version = nullptr;
+    KvChangeFn         kv_change         = nullptr;
+
     bool ok() const { return handle && (inspect || inspect_tv); }
 };
 
@@ -180,6 +194,10 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.inspect_begin     = reinterpret_cast<LoadedScript::InspectBeginFn>(GetProcAddress(h, "xi_script_inspect_begin"));
     out.state_schema_version = reinterpret_cast<LoadedScript::StateSchemaVersionFn>(GetProcAddress(h, "xi_script_state_schema_version"));
     out.code_change          = reinterpret_cast<LoadedScript::CodeChangeFn>(GetProcAddress(h, "xi_script_code_change"));
+    out.get_kv               = reinterpret_cast<LoadedScript::GetKvFn>(GetProcAddress(h, "xi_script_kv_get"));
+    out.set_kv               = reinterpret_cast<LoadedScript::SetKvFn>(GetProcAddress(h, "xi_script_kv_set"));
+    out.kv_schema_version    = reinterpret_cast<LoadedScript::KvSchemaVersionFn>(GetProcAddress(h, "xi_script_kv_schema_version"));
+    out.kv_change            = reinterpret_cast<LoadedScript::KvChangeFn>(GetProcAddress(h, "xi_script_kv_change"));
     if (!out.inspect && !out.inspect_tv) {
         err = "script missing xi_inspect_entry / xi_inspect_entry_tv export";
         FreeLibrary(h);
@@ -240,6 +258,28 @@ inline bool migrate_state(const LoadedScript& s, const std::string& old_json,
     }
     if (n <= 0) return false;   // absent-shaped / declined -> caller drops
     out.assign(buf.data(), (size_t)n);
+    return true;
+}
+
+// U2 (docs/new_gen/16) — kv-channel sibling of migrate_state above: attempt a
+// typed code_change migration of the kv store across a hot-reload. `old_bytes`
+// is the retiring DLL's serialized kv store (canonical mp; may contain NULs —
+// held in a std::string as a plain byte bag). On success fills `out` with the
+// migrated bytes for the host to set_kv. Returns false when the hook is absent
+// OR declines (0) — the caller then DROPS, exactly like the Record channel.
+inline bool migrate_kv(const LoadedScript& s, const std::string& old_bytes,
+                       int old_schema, int new_schema, std::string& out) {
+    if (!s.kv_change) return false;
+    std::vector<uint8_t> buf(64 * 1024);
+    int n = s.kv_change((const uint8_t*)old_bytes.data(), (int)old_bytes.size(),
+                        old_schema, new_schema, buf.data(), (int)buf.size());
+    if (n < 0) {
+        buf.resize((size_t)(-(int64_t)n) + 1024);
+        n = s.kv_change((const uint8_t*)old_bytes.data(), (int)old_bytes.size(),
+                        old_schema, new_schema, buf.data(), (int)buf.size());
+    }
+    if (n <= 0) return false;   // absent-shaped / declined -> caller drops
+    out.assign((const char*)buf.data(), (size_t)n);
     return true;
 }
 

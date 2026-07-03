@@ -47,6 +47,22 @@ first-party code.
 | `$channel` | `Record::kChannelKey` | Staged-emit / `expose` sink lane selector (which channel a record surfaces on). |
 | `$seq` | `Record::kSeqKey` | Host-stamped arrival/run id, used to order sink deliveries. |
 
+### Reserved Pack keys (the xi.pack@1 plane)
+
+The pack plane reserves the same `$` namespace; constants + helpers live in
+`xi::pack_contract` (`xi_pack_contract.hpp`; full contract:
+`docs/new_gen/15-pack-fault-semantics.md`). `$fault` is the pack plane's ONE
+poison marker — there is deliberately no pack `$na`.
+
+| Key | Constant | Meaning |
+|---|---|---|
+| `$fault` | `pack_contract::kFault` | str reason code — the pack is POISONED; check `is_fault()` before reading results. `xi::contract` codes for contract failures, free-form producer codes otherwise. |
+| `$fault_key` | `pack_contract::kFaultKey` | str, offending entry key (optional). |
+| `$fault_detail` | `pack_contract::kFaultDetail` | str, human message (optional). |
+| `$src` | `pack_contract::kSrc` | str, immediate producer — auto-stamped at seal by the door glue on NON-EMPTY door outputs (`emit()` never stamps; sources/scripts attribute explicitly via `src()`). |
+| `$prov` | `pack_contract::kProv` | str, hop chain (`/`-joined, oldest→newest) — door hops append; the use-funnel appends on fault short-circuit too. |
+| `$channel` / `$seq` | — | Same routing/ordering roles as on Records; on packs they are the pack's OWN entries (never host-stamped — sealed packs are immutable). `propagate_fault` copies `$seq` forward. |
+
 ## `xi::Image`
 
 An owning, refcounted 8-bit image buffer (`xi_image.hpp`).
