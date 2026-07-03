@@ -55,11 +55,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "xinsp2_py"))
+sys.path.insert(0, str(REPO_ROOT / "examples" / "lib"))
 from xinsp2 import Client  # noqa: E402
+from ports import free_port  # noqa: E402
 
 SUF = ".exe" if os.name == "nt" else ""
 BE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{SUF}"
-PORT = 7874  # spare port — NOT the dev backend (7823) or web-terminal-hub (9091)
+PORT = free_port()  # ephemeral (was 7874); no squatter cross-talk  # spare port — NOT the dev backend (7823) or web-terminal-hub (9091)
 
 # A non-empty project.json with the three extension-owned top-level keys the
 # backend does NOT emit, plus a deliberate trailing comma (invalid JSON).

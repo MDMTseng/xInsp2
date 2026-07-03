@@ -27,6 +27,5 @@
 
 # --- rebuilt 2026-07-02 on polaris_master (two strict runs; P4's example ports
 # --- cleared the 12 dead-API quarantines - 21/25 now pass strict) ---
-qa_local_auto: driver expects VAR-era auto-emitted run_results (got 0); script was ported to the expose API (item 4) but the driver's expectation was not - driver needs porting to current auto-emit semantics
-qa_recipe_script_instance: pre-existing behavioral - after instance reset, factor stays 42 instead of returning to default 5 (failed 2x on master base too)
 qa_reentrancy: flaky on master base (pass->fail across identical runs, review 07 #8 class); deterministic-failing on polaris_master so far - reclassify to strict once it proves stable
+qa_cpu_affinity: flaky - the multi-core-SPREAD assertion (bound group must touch >1 of its 4 masked cores {2,3,4,5}) is OS-scheduler-timing dependent. The affinity-correctness invariants (mask reported as [[2,3,4,5]], every bound run stays WITHIN the mask, per-group isolation vs the free group) ALL pass; only the spread check flakes when a light/serialized bound workload happens to stay on one core. Passes standalone, fails under full-suite load; pre-existing (fails on the pre-rebuild backend too); NOT a port issue (port-only sweep diff, backend binds cleanly, zero bind warnings). Proper fix = relax/rework assertion #3 (driver.py:99) or lengthen/overlap the bound workload so the scheduler exercises the mask.

@@ -30,10 +30,11 @@ REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
 sys.path.insert(0, str(ROOT.parents[0] / "lib"))
 from xinsp2 import Client  # noqa: E402
+from ports import free_port  # noqa: E402
 from xex1 import collect_frames, pull_latest, subscribe  # noqa: E402
 
 BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
-PORT = int(os.environ.get("PORT", "7877"))
+PORT = int(os.environ.get("PORT", "0")) or free_port()
 FRAME = REPO / "examples" / "blob_tracker" / "frames" / "frame_00.png"
 
 

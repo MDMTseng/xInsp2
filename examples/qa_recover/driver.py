@@ -45,9 +45,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
+sys.path.insert(0, str(REPO_ROOT / "examples" / "lib"))
+from ports import free_port  # noqa: E402
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 FE_EXE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-fe{EXE_SUFFIX}"
-PORT = 7861
+PORT = free_port()  # ephemeral (was 7861); no squatter cross-talk
 CRASH_COUNT = 2                       # must match instances/healer/instance.json
 FE_LOG = ROOT / "fe.log"
 BE_LOG = ROOT / "be.log"

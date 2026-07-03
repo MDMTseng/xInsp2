@@ -31,11 +31,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "xinsp2_py"))
+sys.path.insert(0, str(REPO_ROOT / "examples" / "lib"))
 from xinsp2 import Client  # noqa: E402
+from ports import free_port  # noqa: E402
 
 SUF = ".exe" if os.name == "nt" else ""
 BE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{SUF}"
-PORT = 7887
+PORT = free_port()  # ephemeral (was 7887); no squatter cross-talk
 
 
 def port_open(p, timeout=0.3):
