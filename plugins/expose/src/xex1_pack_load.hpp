@@ -167,6 +167,7 @@ inline LoadResult load_pack_v2(const uint8_t* data, size_t size) {
                     case mp::Kind::Int:   b.add_i64(entry_key, head.i); break;
                     case mp::Kind::UInt:  b.add_i64(entry_key, (int64_t)head.u); break;
                     case mp::Kind::Float: b.add_f64(entry_key, head.d); break;
+                    case mp::Kind::Bool:  b.add_bool(entry_key, head.b); break;
                     case mp::Kind::Str:   b.add_str(entry_key, std::string_view((const char*)head.data, head.len)); break;
                     case mp::Kind::Bin:   b.add_bin(entry_key, head.data, head.len); break;
                     case mp::Kind::Map: {
@@ -177,7 +178,7 @@ inline LoadResult load_pack_v2(const uint8_t* data, size_t size) {
                             b.add_mp(entry_key, vp, vn);   // nested msgpack (already through ingress)
                         break;
                     }
-                    // Array / nil / bool: keep lossless as opaque canonical msgpack.
+                    // Array / nil: keep lossless as opaque canonical msgpack.
                     default: b.add_mp(entry_key, vp, vn); break;
                 }
             }

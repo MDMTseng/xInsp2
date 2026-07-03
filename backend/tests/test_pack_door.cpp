@@ -87,6 +87,8 @@ static void test_build_read_roundtrip() {
     CHECK(b != XI_PACK_BUILDER_NULL);
     fi->builder_add_i64(b, "threshold", 128);
     fi->builder_add_f64(b, "mean_area", 42.5);
+    CHECK(fi->builder_add_bool && fi->get_bool);   // additive v1 tail present
+    fi->builder_add_bool(b, "pass", 1);
     fi->builder_add_str(b, "label", "part-A", 6);
     const uint8_t blob[3] = {1, 2, 3};
     fi->builder_add_bin(b, "raw", blob, 3);
@@ -101,6 +103,10 @@ static void test_build_read_roundtrip() {
     // Scalars.
     int64_t i = 0; CHECK(fi->get_i64(f, "threshold", &i) == 1 && i == 128);
     double  d = 0; CHECK(fi->get_f64(f, "mean_area", &d) == 1 && d == 42.5);
+    int32_t bv = 0; CHECK(fi->get_bool(f, "pass", &bv) == 1 && bv == 1);
+    CHECK(fi->tag_of(f, "pass") == XI_PACK_TAG_BOOL);
+    CHECK(fi->get_i64(f, "pass", &i) == 0);      // fail-closed: bool is not i64
+    CHECK(fi->get_bool(f, "threshold", &bv) == 0); // fail-closed: i64 is not bool
     const char* sp = nullptr; int32_t sl = 0;
     CHECK(fi->get_str(f, "label", &sp, &sl) == 1 && sl == 6 &&
           std::string(sp, (size_t)sl) == "part-A");
@@ -133,12 +139,13 @@ static void test_build_read_roundtrip() {
     CHECK(fi->tag_of(f, "gray") == XI_PACK_TAG_IMAGE);
 
     // Generic enumeration (the expose/record_save walk): count + key_at/tag_at.
-    CHECK(fi->count(f) == 6);
+    CHECK(fi->count(f) == 7);
     int32_t klen = 0;
     const char* k0 = fi->key_at(f, 0, &klen);
     CHECK(k0 && klen == 9 && std::string(k0, (size_t)klen) == "threshold");
     CHECK(fi->tag_at(f, 0) == XI_PACK_TAG_I64);
-    CHECK(fi->tag_at(f, 4) == XI_PACK_TAG_IMAGE);
+    CHECK(fi->tag_at(f, 2) == XI_PACK_TAG_BOOL);   // "pass" (insertion order)
+    CHECK(fi->tag_at(f, 5) == XI_PACK_TAG_IMAGE);
     CHECK(fi->key_at(f, 99, &klen) == nullptr && klen == 0);   // OOB
     CHECK(fi->tag_at(f, 99) == -1);
 

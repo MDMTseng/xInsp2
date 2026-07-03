@@ -104,12 +104,16 @@ even a pack destroyed after the pool is gone releases safely. So there is **no
 ordering hazard** at project close *provided the plugin releases its own refs* —
 which the destructor does.
 
-The one asymmetry worth knowing: the **PackRegistry has no owner-tagged
-leak-sweep** analogue of the ImagePool's `release_all_for`. A pack-retaining
-plugin that forgets to release on destroy leaks the sealed pack in the registry
-until static teardown (safe, but uncounted — no "swept N leaked pack(s)"
-diagnostic like leaked images get). Releasing on teardown is therefore the
-plugin's responsibility; cache discharges it in `~BufferReplay`.
+The asymmetry this finding flagged is now **closed** (pack-plane hardening):
+the PackRegistry keeps an owner-tagged ref ledger and
+`PackRegistry::release_all_for` is the exact analogue of the ImagePool's
+sweep. A pack-retaining plugin that forgets to release on destroy has its
+outstanding refs reclaimed by the adapter dtor / script unload, with a
+"swept N leaked pack ref(s)" diagnostic — mirroring leaked images. Releasing
+on teardown is still good manners (a swept ref is a reported bug, not a
+feature); cache discharges it in `~BufferReplay`, so its sweep count is 0.
+The regression test for the original scenario lives in
+`backend/tests/test_pack_door.cpp` (owner-sweep section).
 
 ## Tests
 

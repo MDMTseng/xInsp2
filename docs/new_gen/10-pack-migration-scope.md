@@ -63,9 +63,15 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    mock_camera (pilot) + json_source, synced_stereo, config_swap_probe, cache,
    record_save (bilingual batch) — each landed with parity / gathering /
    zero-copy-replay / persistence-identity proofs. Bonus findings on the
-   pack-plane hardening list: PackRegistry owner-sweep asymmetry (cache),
-   PackBuilder bool-entry gap (json_source), v2-dump image-descriptor shape
-   ambiguity (record_save).
+   pack-plane hardening list: PackRegistry owner-sweep asymmetry (cache) —
+   **FIXED** (owner-tagged ref ledger + `release_all_for` + "swept N leaked
+   pack ref(s)" diagnostic at adapter dtor / script unload; regression test in
+   `test_pack_door`); PackBuilder bool-entry gap (json_source) — **FIXED**
+   (PackTag::Bool end-to-end: builder → canonical 0xc2/0xc3 → walk/dump/load →
+   typed accessors → additive `xi_pack_v1` tail; json_source/record_save now
+   emit real bools; `v2_bool` golden fixture cross-checked by the JS + Python
+   decoders); v2-dump image-descriptor shape ambiguity (record_save) — still
+   open.
 
 [^data_output]: `data_output` is a config-surface teaching example — it overrides
     no `process()` path, so it has no data plane and the Pack door is N/A by

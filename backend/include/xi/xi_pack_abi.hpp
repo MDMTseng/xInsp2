@@ -272,6 +272,9 @@ inline void f_add_i64(xi_pack_builder b, const char* key, int64_t v) {
 inline void f_add_f64(xi_pack_builder b, const char* key, double v) {
     if (auto* fb = PackRegistry::instance().builder(b)) fb->add_f64(key ? key : "", v);
 }
+inline void f_add_bool(xi_pack_builder b, const char* key, int32_t v) {
+    if (auto* fb = PackRegistry::instance().builder(b)) fb->add_bool(key ? key : "", v != 0);
+}
 inline void f_add_str(xi_pack_builder b, const char* key, const char* s, int32_t len) {
     if (auto* fb = PackRegistry::instance().builder(b))
         fb->add_str(key ? key : "", std::string_view(s ? s : "", len > 0 ? (size_t)len : 0));
@@ -333,6 +336,14 @@ inline int32_t f_get_f64(xi_pack_handle f, const char* key, double* out) {
     auto v = fr->get_f64(key);
     if (!v) return 0;
     if (out) *out = *v;
+    return 1;
+}
+inline int32_t f_get_bool(xi_pack_handle f, const char* key, int32_t* out) {
+    Pack* fr = PackRegistry::instance().pack(f);
+    if (!fr || !key) return 0;
+    auto v = fr->get_bool(key);
+    if (!v) return 0;
+    if (out) *out = *v ? 1 : 0;
     return 1;
 }
 inline int32_t f_get_str(xi_pack_handle f, const char* key, const char** ptr, int32_t* len) {
@@ -437,6 +448,9 @@ inline const xi_pack_v1* pack_v1_iface() {
         &pack_abi_detail::f_retain,
         &pack_abi_detail::f_release,
         &pack_abi_detail::f_emit_pack,
+        // additive v1 tail (bool entry) — positions match the struct tail.
+        &pack_abi_detail::f_add_bool,
+        &pack_abi_detail::f_get_bool,
     };
     return &iface;
 }
