@@ -150,6 +150,21 @@ struct V3Entry {
     int32_t              w = 0, h = 0, c = 0;   // image descriptor (IMAGE only)
     const uint8_t*       px = nullptr;          // image pixels (IMAGE only)
     size_t               px_len = 0;
+
+    // --- WS-wire preview substitution (E2) — expose's SEND path ONLY ----------
+    // When `preview` is set on an IMAGE entry, the descriptor keeps its frozen
+    // {w,h,c,px} shape and IMAGE tag, but the raw pixels leave the wire (px is
+    // emitted as an EMPTY bin) and a nested `preview` map
+    //   { "w","h","c", "enc":"jpeg", "q":<int>, "data":<jpeg bin> }
+    // rides BESIDE px carrying the full-resolution compressed image. record_save
+    // NEVER sets this (its walk is xex1_pack_dump.hpp::encode_pack_v3, which
+    // leaves `preview` default-false), so its disk bytes stay byte-identical and
+    // the memory ≈ disk identity is preserved. The preview dims come from the
+    // SOURCE image (w/h/c) — the encoder reply carries none (contract fact 1).
+    bool                 preview = false;
+    int32_t              pv_q = 0;              // JPEG quality used
+    const uint8_t*       pv_jpeg = nullptr;     // compressed bytes (must outlive encode)
+    size_t               pv_len = 0;
 };
 
 // Build one XEX1-v3 frame: magic 'XEX1' + a canonical msgpack map
@@ -176,11 +191,31 @@ inline std::vector<uint8_t> encode_frame_v3(
         w.array(2);
         w.uint_(e.tag);   // the entry's XI_PACK_TAG_* (canonical int64, like every scalar)
         if (e.tag == XI_PACK_TAG_IMAGE) {
-            w.map(4);
-            w.key("w");  w.int_(e.w);
-            w.key("h");  w.int_(e.h);
-            w.key("c");  w.int_(e.c);
-            w.key("px"); w.bin(e.px, e.px_len);
+            if (e.preview) {
+                // E2 WS-wire preview: the IMAGE tag + descriptor shape are
+                // UNTOUCHED, but the raw pixels leave the wire (px -> empty bin)
+                // and a nested `preview` map carries the full-resolution JPEG
+                // BESIDE them. record_save never reaches this branch.
+                w.map(5);
+                w.key("w");  w.int_(e.w);
+                w.key("h");  w.int_(e.h);
+                w.key("c");  w.int_(e.c);
+                w.key("px"); w.bin(nullptr, 0);   // raw pixels dropped from the wire
+                w.key("preview");
+                w.map(6);
+                w.key("w");    w.int_(e.w);
+                w.key("h");    w.int_(e.h);
+                w.key("c");    w.int_(e.c);
+                w.key("enc");  w.str("jpeg");
+                w.key("q");    w.int_(e.pv_q);
+                w.key("data"); w.bin(e.pv_jpeg, e.pv_len);
+            } else {
+                w.map(4);
+                w.key("w");  w.int_(e.w);
+                w.key("h");  w.int_(e.h);
+                w.key("c");  w.int_(e.c);
+                w.key("px"); w.bin(e.px, e.px_len);
+            }
         } else {
             // Splice the entry's canonical value bytes onto the wire unchanged —
             // the memory ≈ wire identity (doc 07). One complete canonical value.

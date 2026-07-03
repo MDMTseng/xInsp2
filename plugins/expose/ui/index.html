@@ -182,6 +182,11 @@
   // image descriptor { w,h,c,px } is identified by ITS TAG, never by shape:
   // tag 4 (image) -> images[] with raw pixels (lossless, no JPEG); every other
   // tag -> values (a bin entry surfaces as a Uint8Array value).
+  //
+  // E2: an image descriptor MAY carry a nested `preview` map
+  // { w,h,c, enc:"jpeg", q, data:<jpeg bin> } beside its (then-empty) raw px —
+  // expose's WS-SEND-only full-resolution compressed substitution. Surface it so
+  // the UI can decode the JPEG directly; raw-pixel fields stay for lossless frames.
   const XEX1_TAG_IMAGE = 4;
   function normalizeXEX1v3(body) {
     const frame = (body && body.frame) || {};
@@ -191,7 +196,11 @@
       if (!Array.isArray(e) || e.length !== 2) continue;   // not a [tag, value] pair
       const tag = e[0], v = e[1];
       if (tag === XEX1_TAG_IMAGE && v && typeof v === "object" && v.px instanceof Uint8Array) {
-        images.push({ key: k, w: v.w, h: v.h, c: v.c, pixels: v.px });
+        const im = { key: k, w: v.w, h: v.h, c: v.c, pixels: v.px };
+        if (v.preview && typeof v.preview === "object" && v.preview.data instanceof Uint8Array)
+          im.preview = { w: v.preview.w, h: v.preview.h, c: v.preview.c,
+                         enc: v.preview.enc, q: v.preview.q, data: v.preview.data };
+        images.push(im);
       } else {
         values[k] = v;
       }
@@ -249,17 +258,51 @@
     return channels[name];
   }
 
+  // Raw v3 pixels (gray/RGB/RGBA) -> a data URL, painted through a canvas. The
+  // lossless v3 wire carries raw planes; when no compressed preview rides along
+  // we rasterize them here so the same UI renders both wire shapes.
+  function rawPixelsToDataUrl(w, h, c, px) {
+    if (!w || !h || !c || !(px instanceof Uint8Array) || px.length < w * h * c) return null;
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext("2d");
+    const img = ctx.createImageData(w, h);
+    const d = img.data;
+    for (let i = 0, n = w * h; i < n; i++) {
+      const s = i * c, o = i * 4;
+      if (c === 1) { d[o] = d[o + 1] = d[o + 2] = px[s]; d[o + 3] = 255; }
+      else if (c === 3) { d[o] = px[s]; d[o + 1] = px[s + 1]; d[o + 2] = px[s + 2]; d[o + 3] = 255; }
+      else { d[o] = px[s]; d[o + 1] = px[s + 1]; d[o + 2] = px[s + 2]; d[o + 3] = px[s + 3]; }
+    }
+    ctx.putImageData(img, 0, 0);
+    return cv.toDataURL("image/png");
+  }
+
   function onFrame(frame) {
     if (!frame || typeof frame.channel !== "string") return;
     const st = ensureChannel(frame.channel);
     st.seq = frame.seq;
+    const isV3 = frame.v === 3;
+    // v3 carries values as a decoded object; v1 carries a JSON string.
     let values = {};
-    try { values = restoreNonFinite(JSON.parse(frame.json || "{}")); } catch (e) { values = {}; }
+    if (isV3 && frame.values && typeof frame.values === "object") {
+      values = restoreNonFinite(frame.values);
+    } else {
+      try { values = restoreNonFinite(JSON.parse(frame.json || "{}")); } catch (e) { values = {}; }
+    }
     st.values = values;
     st.images = {};
     for (const im of (frame.images || [])) {
-      if (im && typeof im.key === "string" && im.jpeg)
+      if (!im || typeof im.key !== "string") continue;
+      if (im.jpeg) {                                   // v1: JPEG display frame
         st.images[im.key] = "data:image/jpeg;base64," + bytesToB64(im.jpeg);
+      } else if (im.preview && im.preview.data && (im.preview.enc || "jpeg") === "jpeg") {
+        // E2: full-resolution compressed preview — decode the JPEG bin directly.
+        st.images[im.key] = "data:image/jpeg;base64," + bytesToB64(im.preview.data);
+      } else if (im.pixels && im.pixels.length) {      // v3 lossless: rasterize raw planes
+        const url = rawPixelsToDataUrl(im.w, im.h, im.c, im.pixels);
+        if (url) st.images[im.key] = url;
+      }
     }
     st.image_count = Object.keys(st.images).length;
     frameCount++;

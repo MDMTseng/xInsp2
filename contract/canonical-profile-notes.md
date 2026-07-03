@@ -333,3 +333,31 @@ The CONSUMER owns the (bounded) reassembly window; the host never buffers or
 stamps. A `$fault` pack carrying the stream's `$stream` id poisons the WHOLE
 stream (the doc-15 one-poison-marker rule: abort, discard partials, drop
 stragglers). Worked example: `examples/qa_pack_stream/`.
+
+### E2 addendum: the XEX1-v3 `preview` image sub-entry (expose WS-SEND only)
+
+The expose plugin's live WS wire (XEX1-v3, magic `'XEX1'` + a canonical map
+`{v:3, channel, seq, frame:{key:[tag, value]}}`) gained an OPTIONAL compressed
+substitution for image entries. It is a WIRE convention on expose's SEND path
+ONLY — never on disk. `record_save` and every replay file keep the raw image
+descriptor via the SHARED `plugins/expose/src/xex1_pack_dump.hpp::encode_pack_v3`,
+so the memory ≈ disk identity and record→replay byte-equality are unchanged.
+
+- The v3 image tag is UNTOUCHED. An image entry is still
+  `<key>: [XI_PACK_TAG_IMAGE (4), <descriptor map>]`.
+- In preview mode the descriptor is
+  `{ "w","h","c", "px":<EMPTY bin>, "preview":{ "w","h","c",
+     "enc":"jpeg", "q":<int>, "data":<jpeg bin> } }`:
+  the raw pixels LEAVE the wire (`px` is a zero-length bin) and a nested-mp
+  `preview` map rides BESIDE them carrying a FULL-RESOLUTION JPEG. The dims are
+  the SOURCE image's (the `xi.jpeg.encode` reply carries none).
+- It is producer convention, not a host mechanism: expose emits it when the
+  `xi.jpeg.encode` capability is live and the `preview_compress` def knob (default
+  ON) is set; it FAILS OPEN to the raw descriptor (px full, no `preview`) per
+  image when the codec is absent/faults. A decoder that does not understand
+  `preview` still sees a valid tag-4 image entry (empty px).
+- The DISK/replay v3 image descriptor stays the frozen 4-key `{w,h,c,px}`;
+  `xex1_pack_parse.hpp` refuses any other image-descriptor shape (a `preview`
+  key on a replay file is a corrupt/foreign artifact). Worked example +
+  cross-decoder deltas: `examples/qa_jpeg_preview/`, `examples/lib/xex1.py`,
+  `plugins/expose/ui/index.html`.
