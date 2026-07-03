@@ -287,3 +287,30 @@ hop and the hop appended to `$prov` — mirroring the Record path's
 nothing, ever (the byte-identical-dump guarantee stands). Script surface:
 `ScriptPack::is_fault()/fault_reason()/fault_key()/fault_detail()/src()/prov()`,
 `ScriptPackBuilder::fault()/src()`.
+
+### Producer-domain type dispatch: bare `type`, not `$type` (polymorphic door)
+
+One pack door MAY dispatch different behaviors on a kind entry in the request
+pack — the same idiom the capability plane uses for `$v` (dispatch is
+provider-internal; no funnel reads the discriminator). The blessed convention
+for that discriminator is a BARE `type` str entry, NOT `$type`:
+
+- The `$` prefix marks keys the FRAMEWORK owns — keys a host funnel or the
+  door glue reads/stamps (`$fault` family, `$src`/`$prov`, `$seq`) or a
+  plane-level contract defines (`$v`/`$probe`/`$versions` on the capability
+  plane). A which-of-MY-behaviors switch is PRODUCER schema: each door names
+  its own supported set, no host component interprets it, and it belongs in
+  the plugin's declared keyset like any other input — which the rule above
+  ("reserved `$`-prefixed keys stay out of the plugin's declared schema
+  keyset") would forbid for a `$type`. Spelling it `$type` would claim
+  framework semantics it doesn't have.
+- Unknown `type` → the door answers a normal sealed fault pack:
+  `$fault: "unsupported_type"`, `$fault_key: "type"`, plus an un-prefixed
+  `types` str entry naming the supported set (comma-joined) — the
+  producer-domain mirror of the capability plane's unsupported-`$v` reply
+  (`$fault: "unsupported_version"` + `$versions`). A missing `type` on a door
+  that requires one is the ordinary `missing_input`.
+
+Reference example: `examples/qa_pack_poly_door` (the bundled `poly_door`
+plugin: `type="measure"` → image stats, `type="annotate"` → derived overlay
+entry, anything else → `unsupported_type` + `types`).
