@@ -1,0 +1,8 @@
+{
+  "plugin": "record_replay",
+  "config": {
+    "enabled": false,
+    "loop": false,
+    "dir": "examples/qa_pack_record_replay/instances/rec/captures"
+  }
+}

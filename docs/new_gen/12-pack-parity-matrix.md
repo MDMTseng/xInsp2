@@ -108,9 +108,9 @@ above.
 
 | # | Pattern | Taught by | Status | Evidence / blocker detail |
 |---|---|---|---|---|
-| E1 | **In-memory capture ring + hot-param replay** | buffer_replay_demo (cache), cache README, image_sources (cached_image_source) | **GREEN (composition)** | The missing script→cache capture call is now `use("cache").process(pack)` — the seam live-proven in `qa_use_pack_door` (against blob_analysis); cache's capture door + ZERO-COPY replay re-emit (same handle, fresh trigger id) + eviction/teardown release proven against the real DLL in `plugins/cache/tests/test_cache_pack.cpp` (re-run green 2026-07-03). The replayed pack reaches the script via `t.pack()` like any emit (A1). Owed: a pack-mode `buffer_replay` QA example composing them. |
-| E2 | **Persist results to disk** | record_save README, data-out guides | **GREEN (composition)** | The feed leg is `push()` — staged sink discipline live-proven in `qa_use_pack_door` (against expose, the same `use_push_pack_cb` path); record_save's pack door writes canonical XEX1-v3, byte-identical to expose's wire dump (memory≈wire≈disk), proven in `plugins/record_save_pack_test.cpp` (re-run green 2026-07-03). Owed: the graph-level record example (doc 10 parks it under P2's umbrella). |
-| E3 | **Replay FROM disk** (load a dump back into the pipeline) | record_save README (xex1_pack_load) | **GREEN (composition)** | Gate P3 ✅ (doc 10): the `record_replay` SOURCE re-emits a disk dump through the pack door — record → save → replay is a closed byte-lossless loop, entry-for-entry identical incl. restored `$channel`/`$seq`, proven against the real DLL in `plugins/record_replay_pack_test.cpp` (re-run green 2026-07-03); source-emit → `t.pack()` is the live-proven A1 path. Owed: the same graph-level example as E2 (route a recorded run through a full project). |
+| E1 | **In-memory capture ring + hot-param replay** | buffer_replay_demo (cache), cache README, image_sources (cached_image_source) | **GREEN** | The owed composition landed as `examples/qa_pack_record_replay` (QA green 2026-07-03): both replay seams live-proven in one graph — script→door capture routing (`use(door).process(pack)` per trigger) and replayed-source-emit → `t.pack()` verification (the doc-10-named example E1/E2/E3 collapse into; scorecard note below). Cache's own ring specifics — capture door + ZERO-COPY replay re-emit (same handle, fresh trigger id) + eviction/teardown release — stay proven against the real DLL in `plugins/cache/tests/test_cache_pack.cpp` (re-run green 2026-07-03). |
+| E2 | **Persist results to disk** | record_save README, data-out guides | **GREEN** | `examples/qa_pack_record_replay` phase 1 (QA green 2026-07-03): a live project routes camera packs into record_save's xi.pack@1 door from the script (`use("rec").process(cap)`, ack asserted) — one canonical XEX1-v3 file per trigger lands in the instance's captures folder, and the driver decodes the DISK files and proves disk == pushed wire, entry-for-entry and pixel-byte identical (memory≈wire≈disk, live). Byte-level oracle: `plugins/record_save_pack_test.cpp` (re-run green 2026-07-03). |
+| E3 | **Replay FROM disk** (load a dump back into the pipeline) | record_save README (xex1_pack_load) | **GREEN** | `examples/qa_pack_record_replay` phase 2 (QA green 2026-07-03): a `record_replay` instance replays the phase-1 files into the SAME live graph (script pumps `use("replay").process(Record{})`, one file per synthetic tick); each file re-enters as a sealed-pack trigger (`t.primary_source()=="replay"`, the A1 path), the script verifies restored `$channel`/`$seq` + checksum + nested mp, and the driver proves replayed wire == disk == recorded wire with the cursor at position==total. Byte-level oracle: `plugins/record_replay_pack_test.cpp` (re-run green 2026-07-03). |
 
 ### F. Config-plane patterns over data-plane plugins
 
@@ -167,8 +167,7 @@ Counting the 29 pattern rows (A1–A9, B1–B4, C1–C5, D1–D2, E1–E3, F1–
 
 | Status | Rows | Count |
 |---|---|---|
-| **GREEN (pack-only, live-service QA evidence)** | A1–A9, B1, B2, C1, C2, C3, C4, D1, D2, F1, G1 | **19** |
-| **GREEN (composition — both halves proven, one example owed)** | E1, E2, E3 | **3** |
+| **GREEN (pack-only, live-service QA evidence)** | A1–A9, B1, B2, C1, C2, C3, C4, D1, D2, E1, E2, E3, F1, G1 | **22** |
 | **Open on unscheduled semantics** | B3, B4 (U1) | **2** |
 | **N/A (control plane / by design)** | C5, F2, G2, G4 + the §H block | **4 rows + H** |
 | **N/A today / U2 at the cut** | G3 | **1** |
@@ -179,19 +178,20 @@ Bottom line for Gate P2: **both halves of script parity are now landed and
 QA-gated** — read (t.pack(), walk, typed, cross-thread) AND write
 (ScriptPackBuilder incl. canonical nested-mp, use()→door chaining,
 expose-from-script with staged sink ordering), the full loop proven in one
-live script (`qa_use_pack_door`). U4 is SATISFIED, and **U3 is now RESOLVED**
+live script (`qa_use_pack_door`). U4 is SATISFIED, **U3 is RESOLVED**
 (ordered-sink semantics — the doc-17 contract: envelope-carried delivery
 order, producer-stamped `$seq` blessed with `xi::run_id()` as the host-truth
 bridge, process()-on-sink rejected fail-loud; row C3 flipped by
-`qa_pack_order`). What remains is exactly one named semantic residual —
+`qa_pack_order`), and BOTH owed composing examples LANDED 2026-07-03:
+`examples/qa_pack_record_replay` (record → save(.xex1) → replay → verify as
+one live graph, disk == recorded wire == replayed wire pixel-byte identical —
+rows E1/E2/E3 GREEN) and `examples/qa_pack_config_swap` (row F1 GREEN). No
+composition rows remain. What remains is exactly one named semantic residual —
 **U1** (pack-plane NA/provenance/typed-IO: gates the error paths of
-fixturing_demo / io_stress / graph_demo, rows B3/B4) — plus the three
-composition rows owing one example (E1/E2/E3 collapse into the graph-level
-record→replay example doc 10 already names; F1's pack-mode config-swap
-drive is DELIVERED — `examples/qa_pack_config_swap`, QA green 2026-07-03,
-row F1 now GREEN). **The Gate P2 verdict rendered on this measurement is in
-doc 10: ACHIEVED WITH NAMED RESIDUALS (U1 open; U3 since resolved).** U2
-(`xi::state()`'s Record shape) gates the CUT, not P2.
+fixturing_demo / io_stress / graph_demo, rows B3/B4). **The Gate P2 verdict
+rendered on this measurement is in doc 10: ACHIEVED WITH NAMED RESIDUALS
+(U1 open; U3 since resolved).** U2 (`xi::state()`'s Record shape) gates the
+CUT, not P2.
 
 ## Unscheduled blockers (the wave-2 planning input; re-measured 2026-07-03)
 

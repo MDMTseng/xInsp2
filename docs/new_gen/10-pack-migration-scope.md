@@ -88,14 +88,15 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    expose-from-script (`xi::use(sink).push(ScriptPack)`, staged + flushed in
    frame order for sink targets). Measured against the examples tree via the
    re-measured parity matrix (doc 12, 2026-07-03): 17 of 29 pattern rows
-   GREEN on live QA evidence, 4 GREEN-composition (both halves proven, one
-   composing example owed: E1/E2/E3 collapse into the graph-level
-   record→replay example below, F1 into a pack-mode config-swap drive —
-   F1's is DELIVERED 2026-07-03: **`examples/qa_pack_config_swap`** drives
-   the probe's pack door under live mock_camera traffic while the driver
-   runs `prepare_instance` → `commit_group` mid-run, verdicts on the
-   run_result plane, zero `xi::Record`; row F1 flipped GREEN in doc 12), 4+H
-   N/A control-plane. Flagship evidence: **`examples/qa_use_pack_door`** —
+   GREEN on live QA evidence, 4 GREEN-composition at verdict time — ALL FOUR
+   since delivered 2026-07-03: **`examples/qa_pack_record_replay`** (record →
+   save(.xex1) → replay → verify as ONE live graph, disk == recorded wire ==
+   replayed wire pixel-byte identical; E1/E2/E3 GREEN) and
+   **`examples/qa_pack_config_swap`** (drives the probe's pack door under live
+   mock_camera traffic while the driver runs `prepare_instance` →
+   `commit_group` mid-run, verdicts on the run_result plane, zero
+   `xi::Record`; F1 GREEN) — no composition rows remain (doc 12 scorecard:
+   22 GREEN), 4+H N/A control-plane. Flagship evidence: **`examples/qa_use_pack_door`** —
    build → door → push in ONE script, no `xi::Record` anywhere, pixels and
    nested entries byte-checked off the XEX1-v3 wire; `qa_pack_pilot`'s last
    Record leg deleted the same day; `python tools/run_qa.py pack` 4/4.
@@ -140,7 +141,9 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    the cutover train). Remaining P3-adjacent work, tracked outside the
    gate: flipping expose's default wire to v3 rides the cutover train
    (below), and the graph-level "route a recorded run through a full
-   project" example is examples-tree work under gate P2's umbrella.
+   project" example — parked here under gate P2's umbrella — LANDED as
+   `examples/qa_pack_record_replay` (QA green 2026-07-03; doc 12 rows
+   E1/E2/E3 flipped GREEN on it).
 4. **THE CUT (one event, with the app team)**: ABI v12 — recommended as the
    synthesis §3 pure-door ABI (delete the monolith struct in the same
    authorized break), delete `xi_plugin_process(Record)`, delete Record +

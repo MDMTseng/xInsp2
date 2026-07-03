@@ -1,0 +1,10 @@
+{
+  "name": "qa_pack_record_replay",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam", "plugin": "mock_camera" },
+    { "name": "rec", "plugin": "record_save" },
+    { "name": "replay", "plugin": "record_replay" },
+    { "name": "expose", "plugin": "expose" }
+  ]
+}
