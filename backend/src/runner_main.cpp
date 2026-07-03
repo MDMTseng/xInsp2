@@ -164,8 +164,10 @@ static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
 
 // polaris2 Gate P2 — minimal runner copy of the service's use_pack_process_cb:
 // drive the target's xi.pack@1 pack door for xi::use(...).process(ScriptPack).
-// Same return codes (0 ok / -1 miss / -2 crash / -4 no door); the runner has no
-// item-14 quarantine machinery, so -3 never occurs here.
+// Same return codes (0 ok / -1 miss / -2 crash / -4 no door / -5 sink target,
+// U3 docs/new_gen/17); the runner has no item-14 quarantine machinery, so -3
+// never occurs here, and it never marks adapters as sinks, so -5 is carried
+// for contract symmetry only.
 static int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out) {
     if (out) *out = XI_PACK_NULL;
     if (!name || !out) return -1;
@@ -173,6 +175,7 @@ static int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_hand
     if (!inst) return -1;
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (!adapter || !adapter->has_pack_door()) return -4;
+    if (adapter->is_sink()) return -5;   // U3: sink feed is push(), fail-loud
     try {
         *out = adapter->run_pack_door(in);
         return 0;

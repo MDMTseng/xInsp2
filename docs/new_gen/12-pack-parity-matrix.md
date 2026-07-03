@@ -93,7 +93,7 @@ above.
 |---|---|---|---|---|
 | C1 | Surface **values/images** on a channel (expose `$channel`) | virtually every example; qa_get_dashboard, qa_local_auto | **GREEN** | `qa_use_pack_door`: result pack pushed via `xi::use("expose").push()`, decoded off the XEX1-v3 wire (values + byte-checked image). `qa_pack_pilot`'s expose leg flipped to pack-only as promised (Record leg deleted 2026-07-03, still green). Host-side seam contract in `plugins/expose_script_push_test.cpp`. |
 | C2 | **Multi-channel** preview (UI tabs) | preview_sink_demo | **GREEN** | `qa_use_pack_door`: a SECOND script-built pack (`$channel:"qa2"`, synthetic gray built with ScriptPackBuilder) pushed per frame; the driver subscribes both channels and byte-checks the qa2 image. Both landings arrived: `$channel` routing (door) + script-side building. |
-| C3 | **Ordered sink** emission (`result_order`, wire `$seq`) | qa_result_order | **UNSCHEDULED U3** (narrowed) | RE-MEASURED: the ordered-STAGING analogue now EXISTS for `push()` — a declared sink target is staged and flushed after the inspect in frame order (`use_push_pack_cb`, service_sinks.cpp; `qa_use_pack_door` asserts wire seq strictly increasing per channel). What remains of U3: (a) the host does NOT stamp `$seq` into a sealed pack — ordering identity is script-carried by design (the pack's own `$seq` entry; expose defaults to 0 without it), so qa_result_order's host-stamped-arrival-id semantics need an owned decision (bless script-carried, or stamp at the door args/event); (b) `use().process()` on a sink target runs INLINE — the documented v0 gap (service_sinks.cpp) — so a pack-consuming ordered sink driven via process() would see completion order under parallel dispatch. Neither is exercised by any example today; both must be decided before qa_result_order's pattern ports. |
+| C3 | **Ordered sink** emission (`result_order`, wire `$seq`) | qa_result_order | **GREEN** (U3 RESOLVED, doc 17) | `qa_pack_order` (new): qa_result_order's pattern pack-only in the live service — uneven workload, `dispatch_threads=4`, script-built packs pushed to expose; arrival mode → wire seq zero inversions (255 frames), completion → 51 inversions on the same workload. The ordering contract is docs/new_gen/17: (a) DELIVERY order is envelope-carried (staged push flushed inside the EmitTurn gate — `pack_order_gate_test` proves frame order + within-frame call order at the real expose door under a 4-worker pool); in-band IDENTITY is producer-stamped before seal, blessed as the ONE mechanism (the host never stamps a sealed pack; push ≡ dump ≡ disk byte-identity holds) — the host arrival id is script-reachable as `xi::run_id()` (new optional export `xi_script_set_run_id`), so `$seq = xi::run_id()` reproduces the Record host-stamp value exactly; (b) `use(sink).process(pack)` is REJECTED fail-loud (rc −5 + once-per-name log naming `push()`) — the v0 inline gap closed by doctrine (`use_pack_door_test` §5b; rejection live-asserted every frame in `qa_pack_order`). |
 | C4 | **Custom sink instances** fed per-frame from the script | qa_sink_shared_doc (count_sink) | **GREEN** (pattern) | The feed leg landed: `qa_use_pack_door` feeds a sink instance (expose) per-frame via `push()` — the same xi.pack@1 door any custom sink implements (write one door, get the staged script feed for free). count_sink itself is Record-era and vehicle-ports at the cut; its `$seq` COW double-stamp regression RETIRES: sealed single-owner packs make the shared-doc double-stamp class unrepresentable (doc 10 §safety). |
 | C5 | data_output config-surface sink | data_output README, image_sources | **N/A by design** | No process() override, no data plane (doc 10 footnote, verified 2026-07-03). |
 
@@ -167,27 +167,31 @@ Counting the 29 pattern rows (A1–A9, B1–B4, C1–C5, D1–D2, E1–E3, F1–
 
 | Status | Rows | Count |
 |---|---|---|
-| **GREEN (pack-only, live-service QA evidence)** | A1–A9, B1, B2, C1, C2, C4, D1, D2, F1, G1 | **18** |
+| **GREEN (pack-only, live-service QA evidence)** | A1–A9, B1, B2, C1, C2, C3, C4, D1, D2, F1, G1 | **19** |
 | **GREEN (composition — both halves proven, one example owed)** | E1, E2, E3 | **3** |
-| **Open on unscheduled semantics** | B3, B4 (U1), C3 (U3) | **3** |
+| **Open on unscheduled semantics** | B3, B4 (U1) | **2** |
 | **N/A (control plane / by design)** | C5, F2, G2, G4 + the §H block | **4 rows + H** |
 | **N/A today / U2 at the cut** | G3 | **1** |
+
+(C3 flipped 2026-07-03 by U3's resolution — docs/new_gen/17 + `qa_pack_order`.)
 
 Bottom line for Gate P2: **both halves of script parity are now landed and
 QA-gated** — read (t.pack(), walk, typed, cross-thread) AND write
 (ScriptPackBuilder incl. canonical nested-mp, use()→door chaining,
 expose-from-script with staged sink ordering), the full loop proven in one
-live script (`qa_use_pack_door`). U4 is SATISFIED. What remains is exactly
-two named semantic residuals — **U1** (pack-plane NA/provenance/typed-IO:
-gates the error paths of fixturing_demo / io_stress / graph_demo, rows B3/B4)
-and **U3** (ordered-sink semantics: script-carried `$seq` needs blessing, and
-process()-on-sink runs inline — gates qa_result_order's pattern, row C3) —
-plus the composition rows owing one example each (E1/E2/E3 collapse into the
-graph-level record→replay example doc 10 already names; F1's pack-mode
-config-swap drive is DELIVERED — `examples/qa_pack_config_swap`, QA green
-2026-07-03, row F1 now GREEN). **The Gate P2 verdict rendered on this measurement is in
-doc 10: ACHIEVED WITH NAMED RESIDUALS (U1, U3).** U2 (`xi::state()`'s Record
-shape) gates the CUT, not P2.
+live script (`qa_use_pack_door`). U4 is SATISFIED, and **U3 is now RESOLVED**
+(ordered-sink semantics — the doc-17 contract: envelope-carried delivery
+order, producer-stamped `$seq` blessed with `xi::run_id()` as the host-truth
+bridge, process()-on-sink rejected fail-loud; row C3 flipped by
+`qa_pack_order`). What remains is exactly one named semantic residual —
+**U1** (pack-plane NA/provenance/typed-IO: gates the error paths of
+fixturing_demo / io_stress / graph_demo, rows B3/B4) — plus the three
+composition rows owing one example (E1/E2/E3 collapse into the graph-level
+record→replay example doc 10 already names; F1's pack-mode config-swap
+drive is DELIVERED — `examples/qa_pack_config_swap`, QA green 2026-07-03,
+row F1 now GREEN). **The Gate P2 verdict rendered on this measurement is in
+doc 10: ACHIEVED WITH NAMED RESIDUALS (U1 open; U3 since resolved).** U2
+(`xi::state()`'s Record shape) gates the CUT, not P2.
 
 ## Unscheduled blockers (the wave-2 planning input; re-measured 2026-07-03)
 
@@ -205,16 +209,20 @@ shape) gates the CUT, not P2.
   Keep-as-JSON vs move-to-pack is nobody's decision yet. Affects:
   blob_tracker, trend_monitor, hot_reload_run2 (+ `t.meta()`'s Record return,
   same family). Gates the CUT, not P2.
-- **U3 — Ordered-sink semantics on the pack plane. NARROWED, still open.**
-  The staging analogue landed for `push()` (sink targets staged + flushed in
-  frame order — live-evidenced by strictly-increasing wire seq in
-  `qa_use_pack_door`). Remaining: (a) hosts do not stamp `$seq` into sealed
-  packs — ordering identity is script-carried by design; bless that (and
-  give qa_result_order's host-stamped semantics an explicit successor) or
-  specify a door-args/event carry; (b) `use().process()` on a sink target
-  runs INLINE (documented v0 gap, service_sinks.cpp) — completion-order side
-  effects under parallel dispatch. Affects: qa_result_order's pattern.
-  **This is Gate P2 residual #2 (doc 10).**
+- **U3 — Ordered-sink semantics on the pack plane. ✅ RESOLVED 2026-07-03**
+  (docs/new_gen/17 — the owned decision the narrowing asked for). (a)
+  Producer-stamped `$seq` is BLESSED as the one in-band mechanism — the host
+  never stamps sealed packs (byte-identity preserved); qa_result_order's
+  host-stamped semantics got their explicit successor via `xi::run_id()`
+  (the arrival id, script-reachable per-run; new optional export
+  `xi_script_set_run_id`) — no door-args carry (rejected: dual-mechanism
+  precedence forever, new ABI for a value available before seal). Delivery
+  ORDER itself is envelope-guaranteed by the staged flush inside the emit
+  gate and needs no entry. (b) `use().process()` on a sink target no longer
+  runs inline — it is REJECTED fail-loud (rc −5; script maps to empty pack +
+  once-per-name log naming `push()`). Evidence: `pack_order_gate_test`,
+  `use_pack_door_test` §5b, `qa_pack_order` (row C3 flipped). **Gate P2
+  residual #2 (doc 10) is closed.**
 - **U4 — Script-reachable canonical-mp writer for nested entries.
   ✅ SATISFIED 2026-07-03** by `ScriptPackBuilder::add_mp(xi::mp::Writer)`
   (xi_script_pack.hpp): nested bytes pass the `xi::mp::canonicalize`

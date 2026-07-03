@@ -370,11 +370,15 @@ xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
 // needed: pack lifetime is pure handle refcount (PackRegistry), nothing is
 // reserved for an adopter up front.
 //
-// v0 GAP (deliberate): ordered-SINK staging does not apply here — a pack call
-// on a sink target still runs inline, so under parallel dispatch its side
-// effect lands in completion order, not frame order. Today no sink consumes
-// packs via use() (record_save/expose read the bus), so nothing observes this;
-// revisit when a pack-consuming ordered sink exists (docs/new_gen/10).
+// U3 (docs/new_gen/17): the v0 "sink target runs inline" gap is CLOSED by
+// doctrine, not by staging — a process() call on a declared ORDERED SINK is
+// rejected at call time (-5, fail-loud). process() is the request-reply
+// surface; a staged call's reply cannot exist until the post-inspect flush,
+// so staging here would force an empty return indistinguishable from the
+// documented "door hard failure" empty — a silent semantic fork on the
+// target's declared role. The sink feed is use(sink).push(pack) (staged +
+// flushed in frame order, use_push_pack_cb above). The script side maps -5 to
+// an empty pack + a once-per-name error log naming push().
 int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out) {
     if (out) *out = XI_PACK_NULL;
     if (!name || !out) return -1;
@@ -382,6 +386,9 @@ int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out
     if (!inst) return -1;
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (!adapter) return -4;                       // non-C-ABI instance: no door
+    // U3: static misuse — checked BEFORE the fault gates (the plugin is never
+    // entered, no health/quarantine state is touched).
+    if (adapter->is_sink()) return -5;
     if (adapter->quarantined()) return -3;
     if (adapter->reinit_pending()) {
         apply_pending_reinit_(name, adapter);
@@ -665,6 +672,11 @@ void flush_staged_emits_(int64_t run_id) {   // decl in header
         // pack is delivered AS-IS — no $seq stamping (immutable; and byte-identity
         // between this push and a direct host-side dump of the same pack is the
         // contract — the pack's own $channel/$seq entries carry routing/ordering).
+        // U3 contract (docs/new_gen/17): delivery ORDER here — inside the EmitTurn
+        // gate, in staging order — is the envelope's authoritative guarantee to
+        // the sink; in-band IDENTITY is producer-stamped before seal ($seq =
+        // xi::run_id() for the host arrival id). The envelope never backfills
+        // entries.
         // use_push_pack_inline_ owns the SEH boundary + fault policy; -1/-3/-4
         // need no ref rebalance here because the door BORROWS the handle either
         // way. release_trigger_event_ drops our staged ref on every path.

@@ -80,7 +80,8 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
     design (verified 2026-07-03). It carries no parity obligation; see its README
     and `expose` for the generic-sink reference.
 2. **Gate P2 — script parity: ✅ ACHIEVED 2026-07-03, WITH TWO NAMED
-   RESIDUALS (U1, U3).** All three surfaces landed and are QA-gated in the
+   RESIDUALS (U1, U3 — U3 since ✅ RESOLVED the same day, docs/new_gen/17;
+   U1 remains the open one).** All three surfaces landed and are QA-gated in the
    live service: `use()`→door chaining (`xi::use(name).process(ScriptPack)`),
    script-side Pack building (`xi::ScriptPackBuilder`, whose canonical-gated
    `add_mp(xi::mp::Writer)` closes the U4 nested-results gap), and
@@ -104,13 +105,21 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
      helpers; `$fault` packs are script-readable, the propagate contract is
      unowned). Gates the ERROR-PATH patterns of fixturing_demo, io_stress,
      graph_demo — matrix rows B3/B4.
-   - **U3 — ordered-sink semantics** (hosts stamp no `$seq` into sealed
-     packs — script-carried ordering needs blessing or a door-args carry;
-     and `use().process()` on a sink target runs inline, the documented v0
-     gap). Gates qa_result_order's host-stamped pattern — matrix row C3.
-   Neither residual blocks any shipping example pattern beyond those named;
-   both are wave-2 planning inputs. **The CUT (step 4) may not ride until
-   U1/U3 have owners or explicit won't-need decisions** — and U2 below is a
+   - **U3 — ordered-sink semantics. ✅ RESOLVED 2026-07-03**
+     (docs/new_gen/17 — the ordering contract, owned + landed): delivery
+     ORDER is envelope-carried (staged push flushed inside the emit gate;
+     `pack_order_gate_test`); in-band IDENTITY is producer-stamped `$seq`,
+     blessed as the ONE mechanism — the host never stamps sealed packs, and
+     the host arrival id is script-reachable as `xi::run_id()` (optional
+     export `xi_script_set_run_id`), so `$seq = xi::run_id()` reproduces the
+     Record host-stamp; `use().process()` on a sink target is REJECTED
+     fail-loud (rc −5 → empty pack + once-per-name log naming `push()`),
+     closing the documented v0 inline gap by doctrine. qa_result_order's
+     pattern ported: `examples/qa_pack_order` (live, arrival zero-inversion /
+     completion reorders) — matrix row C3 flipped GREEN.
+   U1 blocks no shipping example pattern beyond those named; it is a wave-2
+   planning input. **The CUT (step 4) may not ride until U1 has an owner or
+   an explicit won't-need decision** (U3's is done) — and U2 below is a
    separate cut-gate. (U2 — `xi::state()` still returns `xi::Record&` — is
    NOT a P2 residual: cross-frame state is script-local and orthogonal to
    the payload currency, but it must be resolved before Record deletion.)

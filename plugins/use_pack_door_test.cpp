@@ -92,6 +92,10 @@ static int use_pack_process(const char* name, xi_pack_handle in, xi_pack_handle*
     if (!inst) return -1;
     auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (!a || !a->has_pack_door()) return -4;
+    // U3 (docs/new_gen/17): a declared ordered sink rejects process(pack) —
+    // request-reply is not the sink feed (that's push()). The plugin is never
+    // entered; the script maps -5 to an empty pack + a once-per-name log.
+    if (a->is_sink()) return -5;
     try {
         *out = a->run_pack_door(in);
         return 0;
@@ -247,6 +251,30 @@ int main() {
 
         // The happy path still works after all the failure probes.
         CHECK(xi::use("det0").process(in).valid());
+    }
+
+    // -----------------------------------------------------------------------
+    SECTION("(5b) U3 doctrine: process(pack) on a DECLARED SINK -> rejected (-5, empty)");
+    {
+        // A second blob instance registered AS A SINK (plugin.json "sink": true
+        // == ctor is_sink) — same DLL, same door, only the declared role differs.
+        void* sinst = bfac(&host, "sinkish");
+        CHECK(sinst != nullptr);
+        if (sinst) {
+            xi::InstanceRegistry::instance().add(std::make_shared<xi::CAbiInstanceAdapter>(
+                "sinkish", "blob_analysis", blob_dll, sinst,
+                /*reentrant=*/false, /*max_concurrency=*/0, /*is_sink=*/true));
+
+            auto in = own_pack(build_square_pack(fi), fi);
+            // The identical input that returns a VALID result pack through the
+            // non-sink instance ("det0", section 1) comes back EMPTY here: -5 is
+            // mapped like the other fail-closed edges (plus the once-per-name
+            // log pointing at push()). The door was never entered — an inline
+            // run on this input would have produced the blob_count pack.
+            CHECK(!xi::use("sinkish").process(in).valid());
+            // Doctrine sanity: the same target via the non-sink twin still works.
+            CHECK(xi::use("det0").process(in).valid());
+        }
     }
 
     // -----------------------------------------------------------------------
