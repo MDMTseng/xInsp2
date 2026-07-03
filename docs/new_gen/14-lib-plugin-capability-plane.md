@@ -228,12 +228,25 @@ stb_image format set — `read_image_file`'s designated v12 eviction target).
 -1, crash → -2 + quarantine, -3 fail-fast, -5 both directions, lifecycle-only
 registration, ETAKEN, targeted unregister, dtor sweep, pack balance); plugins
 ctest `cap_imgcodec_test` (two consumers + one sealed image = ONE encode,
-byte-identical JPEG, decode round trip, $fault contract); QA
+byte-identical JPEG, decode round trip, $fault contract); plugins ctest
+`cap_imgcodec_host_test` — the **core-codec eviction landed pre-v12**: the
+host's `read_image_file` now delegates decode to `xi.image.decode` (per-call
+availability re-probe, never caching absence) with a silent built-in-stb
+fallback, proven byte-equivalent across both engines (3-channel + native
+2-channel gray+alpha via the `raw` reply), factory-timing / absent-capability
+fallback, self-serve reentrancy refusal (the decoder is never served by
+itself — funnel −5 → stb; its decode counter does not move), decoder-fault
+(quarantine −3) clean fallback with the fault still attributed to the lib
+instance, and identical fail modes on corrupt/null; QA
 `examples/qa_cap_imgcodec` (live service: script → consumer pack door →
 host-forwarded capability, encode counter pinned at 1 across every run).
 
-**v12 must revisit**: promote/retire the two interfaces formally; pay the
-`read_image_file` eviction; expose a stable sealed-image identity across the
+**v12 must revisit**: promote/retire the two interfaces formally; **pay the
+`read_image_file` eviction — delete the host ABI slot AND core's built-in stb
+fallback, leaving the `xi.image.decode` capability as the only decode engine**
+(the pre-v12 slot keeps the stb fallback only so a project with no `imgcodec`
+instance still decodes; at the cut that safety net goes with the slot); expose
+a stable sealed-image identity across the
 ABI (content-hash keying is correct but pays a per-call hash over pixels);
 per-capability call counts/latency in dispatch_stats (the pilot funnel does
 not meter yet); whether `xi_cap_v1.call` should carry a consumer-declared

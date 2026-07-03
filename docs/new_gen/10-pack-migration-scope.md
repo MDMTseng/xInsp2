@@ -166,6 +166,10 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    synthesis §3 pure-door ABI (delete the monolith struct in the same
    authorized break), delete `xi_plugin_process(Record)`, delete Record +
    DocRegistry + COW + share/adopt (+ its crash-leak counter, made obsolete),
+   **evict `host_api->read_image_file` to the `xi.image.decode` capability —
+   delete the ABI slot AND core's built-in stb decode fallback (the capability
+   is then the only decode engine; landed pre-v12 as a byte-equivalent
+   delegating slot, doc 14 / `cap_imgcodec_host_test`)**,
    port the examples tree, app-team scripts port on the same train as the
    XEX1-v2 default + `abi` bump. One coordinated moment, not three.
 - Until P1–P3 are green, NO deprecation language anywhere (a half-deprecated
