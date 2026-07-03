@@ -448,6 +448,82 @@ typedef struct xi_pack_proc_v1 {
 } xi_pack_proc_v1;
 
 /* ------------------------------------------------------------------ */
+/* The CAPABILITY PLANE (docs/new_gen/14, polaris2 pilot) — lib        */
+/* plugins register named, host-forwarded capabilities; consumers      */
+/* call them by NAME through the host forwarding funnel. ZERO new      */
+/* xi_host_api slots: BOTH sides ride get_interface —                  */
+/*                                                                     */
+/*   provider: get_interface("xi.cap.provider", 1) -> xi_cap_provider_v1 */
+/*   consumer: get_interface("xi.cap", 1)          -> xi_cap_v1        */
+/*                                                                     */
+/* The registry is NAME-ONLY ("xi.jpeg.encode", not name@version).     */
+/* Semantic versioning rides INSIDE the request pack as the reserved   */
+/* i64 entry "$v": the provider dispatches on it internally, answers   */
+/* an unsupported "$v" with a normal sealed $fault pack naming its     */
+/* supported range, and treats an ABSENT "$v" as its documented        */
+/* default. A request whose only entry is bool "$probe": true is a     */
+/* version/feature probe — the provider answers (str "$versions",      */
+/* e.g. "1") and does NO work. get_interface's version parameter        */
+/* versions only the TRANSPORT vtables below, which are frozen like    */
+/* every other published interface (a change ships as v2).             */
+/*                                                                     */
+/* A capability handler is pack-door-shaped (xi_pack_proc_v1's shape): */
+/* sealed pack in (borrowed), NEW sealed pack out (the host funnel     */
+/* takes ownership and hands it to the consumer, who releases it).     */
+/* XI_PACK_NULL out = hard internal failure; CONTRACT failures are a   */
+/* normal sealed pack carrying the $fault entries. Handlers MUST be    */
+/* thread-safe: funnel calls arrive concurrently from multiple         */
+/* dispatch threads with NO host serialization (unlike the CallScope-  */
+/* gated instance doors).                                              */
+/* ------------------------------------------------------------------ */
+
+/* xi_cap_v1.call() result codes — the consumer-visible funnel verdicts,
+ * matching the established use_pack_process_cb semantics. */
+#define XI_CAP_OK            0   /* *out is the provider's sealed answer (caller owns) */
+#define XI_CAP_EUNKNOWN     -1   /* no provider registered under this name / bad args  */
+#define XI_CAP_ECRASHED     -2   /* handler faulted mid-call (charged to the LIB
+                                    instance; its on_fault policy has run) — *out NULL */
+#define XI_CAP_EQUARANTINED -3   /* providing instance is quarantined — handler NOT entered */
+#define XI_CAP_ESHAPE       -4   /* provider entry unusable (no adapter / null handler)  */
+#define XI_CAP_EREENTRY     -5   /* refused: the target instance is already being called
+                                    on THIS thread (acyclicity ruling, doc 14) */
+
+/* xi_cap_provider_v1.register/unregister result codes. */
+#define XI_CAP_REG_OK        0
+#define XI_CAP_REG_EINVAL   -1   /* null/empty name or null handler */
+#define XI_CAP_REG_ECONTEXT -2   /* not inside a plugin lifecycle context (registration
+                                    is legal only during create/set_def/prepare/commit/
+                                    exchange/destroy — never inside a data-plane door
+                                    or a capability handler) */
+#define XI_CAP_REG_ETAKEN   -3   /* name already provided by ANOTHER live instance
+                                    (same-owner re-register overwrites: the reinit path) */
+
+/* The pack-door-shaped capability handler a lib plugin registers. */
+typedef xi_pack_handle (*xi_cap_handler_fn)(void* self, xi_pack_handle input);
+
+/* xi.cap.provider@1 — the PROVIDER side (host-owned registration vtable).
+ * The host attributes the registration to the CALLING instance via the
+ * thread's owner context (every plugin entry point runs under it), so the
+ * fault-charging / unregister-on-destroy identity costs no extra parameter.
+ * Field order frozen forever; a change ships as xi_cap_provider_v2. */
+typedef struct xi_cap_provider_v1 {
+    int32_t (*register_capability)(const char* name, xi_cap_handler_fn handler,
+                                   void* self);
+    int32_t (*unregister_capability)(const char* name, void* self);
+} xi_cap_provider_v1;
+
+/* xi.cap@1 — the CONSUMER side (host-owned call vtable). call() enters the
+ * host forwarding funnel: SEH-wrapped, fault charged to the LIB instance,
+ * reentrancy refused with XI_CAP_EREENTRY. On XI_CAP_OK the caller OWNS
+ * *out (release via xi_pack_v1.release); on any error *out is XI_PACK_NULL.
+ * available() is the cheap existence probe (1/0) for init-time checks.
+ * Field order frozen forever; a change ships as xi_cap_v2. */
+typedef struct xi_cap_v1 {
+    int32_t (*call)(const char* name, xi_pack_handle in, xi_pack_handle* out);
+    int32_t (*available)(const char* name);
+} xi_cap_v1;
+
+/* ------------------------------------------------------------------ */
 /* Host API — function table provided by the backend to every plugin  */
 /* ------------------------------------------------------------------ */
 

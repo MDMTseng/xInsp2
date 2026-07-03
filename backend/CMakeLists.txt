@@ -342,6 +342,24 @@ target_compile_definitions(test_fault_policy PRIVATE
     FAULT_PLUGIN_DLL="$<TARGET_FILE:fault_plugin>")
 add_test(NAME fault_policy COMMAND test_fault_policy)
 
+# Capability plane pilot (docs/new_gen/14): host registry + forwarding funnel +
+# reentrancy guard, driven against a REAL lib plugin (raw exports so a handler
+# crash reaches the funnel's SEH boundary genuinely). Covers register/resolve/
+# call round-trip, the name-only registry's $v/$probe convention, unknown -1,
+# crash -2 + quarantine charged to the lib instance, reentrancy -5 in both
+# directions, lifecycle-only registration, and the unregister-on-destroy sweep.
+add_library(cap_test_plugin SHARED tests/cap_test_plugin.cpp)
+target_link_libraries(cap_test_plugin PRIVATE xi_core)
+add_executable(test_cap_plane tests/test_cap_plane.cpp)
+target_link_libraries(test_cap_plane PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_cap_plane PRIVATE Ws2_32)
+endif()
+add_dependencies(test_cap_plane cap_test_plugin)
+target_compile_definitions(test_cap_plane PRIVATE
+    CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
+add_test(NAME cap_plane_test COMMAND test_cap_plane)
+
 # Q0f — the deliberate per-crash doc leak is OBSERVABLE. Drives the real xi_use.hpp
 # UseProxy (share_out reserves a ref; rc -2 leaks it) against the real crashing
 # fault_plugin, and asserts DocRegistry::crash_leaked_lifetime (surfaced in
