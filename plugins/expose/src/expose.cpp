@@ -19,7 +19,8 @@
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
 
-#include "xex1_encode.hpp"   // the XEX1 msgpack encoder (shared with the fixture test)
+#include "xex1_encode.hpp"    // the XEX1 msgpack encoder (shared with the fixture test)
+#include "xex1_pack_dump.hpp"  // encode_pack_v2 — the generic pack->v2 walk (shared with record_save)
 
 #include <cstdint>
 #include <map>
@@ -197,64 +198,14 @@ private:
 
     // --- pack-door encoders (the generic walk; docs/new_gen/08 Wave 2) --------
 
-    // XEX1-v2: the canonical frame dump. Walk every entry by index and hand it to
-    // encode_frame_v2 with its VALUE ALREADY CANONICAL — scalars/str/bin are
-    // re-encoded through xi::mp::Writer (byte-identical to the pack arena, same
-    // profile), nested msgpack rides verbatim, images inline their raw pixels.
-    // The $channel/$seq reserved keys are lifted to the wire top level, not dumped.
+    // XEX1-v2: the canonical frame dump. The generic pack walk + the shared v2
+    // encoder now live in xex1_pack_dump.hpp so expose (wire push) and record_save
+    // (disk persist) emit BYTE-IDENTICAL bytes for the same pack (doc 10 gate P3);
+    // this is the thin call into that ONE implementation.
     std::vector<uint8_t> build_v2_from_pack_(const xi::PackIn& in,
                                               const std::string& channel,
                                               uint64_t seq) const {
-        std::vector<xi::xex1::V2Entry> entries;
-        const int n = in.count();
-        entries.reserve((size_t)n);
-        for (int i = 0; i < n; ++i) {
-            auto keyv = in.key_at(i);
-            if (!keyv) continue;
-            std::string key(*keyv);
-            if (key == xi::Record::kChannelKey || key == xi::Record::kSeqKey) continue;
-            const int tag = in.tag_at(i);
-            xi::xex1::V2Entry e;
-            e.key = key;
-            e.tag = (uint8_t)tag;
-            switch (tag) {
-                case XI_PACK_TAG_I64: {
-                    xi::mp::Writer w; w.int_(in.i64_or(key.c_str(), 0)); e.value = w.take();
-                    break;
-                }
-                case XI_PACK_TAG_F64: {
-                    xi::mp::Writer w; w.float_(in.f64(key.c_str()).value_or(0.0)); e.value = w.take();
-                    break;
-                }
-                case XI_PACK_TAG_STR: {
-                    xi::mp::Writer w; w.str(in.str(key.c_str()).value_or("")); e.value = w.take();
-                    break;
-                }
-                case XI_PACK_TAG_BIN: {
-                    auto b = in.bin(key.c_str());
-                    xi::mp::Writer w;
-                    if (b) w.bin(b->first, (size_t)b->second); else w.bin(nullptr, 0);
-                    e.value = w.take();
-                    break;
-                }
-                case XI_PACK_TAG_MP: {
-                    auto m = in.mp(key.c_str());
-                    if (m) e.value.assign(m->first, m->first + m->second);
-                    break;
-                }
-                case XI_PACK_TAG_IMAGE: {
-                    auto im = in.image(key.c_str());
-                    if (!im || !im->pixels) continue;
-                    e.w = im->width; e.h = im->height; e.c = im->channels;
-                    e.px = static_cast<const uint8_t*>(im->pixels);
-                    e.px_len = im->length > 0 ? (size_t)im->length : 0;
-                    break;
-                }
-                default: continue;   // unknown tag: skip (opaque forward-compat)
-            }
-            entries.push_back(std::move(e));
-        }
-        return xi::xex1::encode_frame_v2(channel, seq, entries);
+        return xi::xex1::encode_pack_v2(in, channel, seq);
     }
 
     // XEX1-v1 from a pack: the legacy display shape (same bytes existing clients
