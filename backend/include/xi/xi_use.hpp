@@ -19,6 +19,7 @@
 
 #include "xi_abi.h"
 #include "xi_clock.hpp"
+#include "xi_pack_contract.hpp"  // reserved $-keys + fault/provenance helpers (U1, doc 15)
 #include "xi_record.hpp"   // wire codec is yyjson JSON (Record::from_json_bytes / data_json)
 #include "xi_image.hpp"
 #include "xi_script.hpp"   // XI_SCRIPT_EXPORT (A4 entry export macro)
@@ -281,6 +282,23 @@ public:
     int32_t tag_of(const char* key) const {
         return (valid() && fi_->tag_of) ? fi_->tag_of(h_, key) : -1;
     }
+
+    // ---- U1 pack-plane error path + provenance (docs/new_gen/15) ------------
+    // The pack mirror of Record::is_na()/na_reason() + src(): a fault is a
+    // NORMAL sealed pack carrying "$fault" (reason code) — check it before
+    // reading results, exactly as the Record path checks is_na(). $src is the
+    // immediate producer (the door instance / the funnel hop that minted this
+    // pack); $prov is the '/'-joined hop chain, oldest→newest.
+    //
+    //   auto r = xi::use("det0").process(f);
+    //   if (r.is_fault())
+    //       xi::ng(1, std::string(*r.fault_reason()).c_str());   // poison, no results
+    bool is_fault() const { return pack_contract::is_fault(fi_, valid() ? h_ : XI_PACK_NULL); }
+    std::optional<std::string_view> fault_reason() const { return get_str(pack_contract::kFault); }
+    std::optional<std::string_view> fault_key()    const { return get_str(pack_contract::kFaultKey); }
+    std::optional<std::string_view> fault_detail() const { return get_str(pack_contract::kFaultDetail); }
+    std::optional<std::string_view> src()  const { return get_str(pack_contract::kSrc); }
+    std::optional<std::string_view> prov() const { return get_str(pack_contract::kProv); }
 
     // Generic producer-agnostic walk: fn(std::string_view key, int32_t tag) for
     // every entry in insertion order — the same enumeration `expose`/record_save
@@ -894,8 +912,11 @@ public:
     // INPUT: any live ScriptPack — the trigger's own pack (t.pack(), the
     // chaining case above) or a script-built one. Borrowed for the call; the
     // caller's ref is untouched. An EMPTY input returns an empty pack without
-    // entering the plugin (mirrors the Record overload's NA short-circuit:
-    // absence propagates, never crashes).
+    // entering the plugin (absence propagates, never crashes). A FAULT input
+    // (is_fault()) short-circuits HOST-SIDE (use_pack_process_cb, doc 15): the
+    // plugin never runs and the result is a NEW fault pack carrying the
+    // original reason with this instance appended to the $prov chain — the
+    // pack mirror of the Record overload's NA short-circuit above.
     //
     // OUTPUT: a ScriptPack that OWNS the door's result handle — the keepalive
     // releases it on the last copy, so (like t.pack()) it is safe to hold past

@@ -14,6 +14,7 @@
 #include <yyjson.h>
 #include <xi/xi_graph_capture.hpp>
 #include <xi/xi_pack_abi.hpp>   // PackRegistry retain/release (use_push_pack_cb)
+#include <xi/xi_pack_contract.hpp> // U1 fault short-circuit (use_pack_process_cb, doc 15)
 
 #include "service_internal.hpp"
 
@@ -378,6 +379,20 @@ xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
 int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out) {
     if (out) *out = XI_PACK_NULL;
     if (!name || !out) return -1;
+    // U1 fault SHORT-CIRCUIT (docs/new_gen/15): a poison input never enters
+    // plugin code. The funnel mints a NEW sealed fault pack — the original
+    // "$fault"/"$fault_key"/"$fault_detail" (+ "$seq") with this hop stamped
+    // as "$src" and appended to the "$prov" chain — and returns it as the
+    // call's result (rc 0). This is the pack mirror of the Record path's
+    // `if (input.is_na()) return Record::na(reason).set_src(name)`
+    // (UseProxy::process, xi_use.hpp), and like it, it runs BEFORE the
+    // instance lookup: poison propagates even through a typo'd, quarantined
+    // or door-less name — the frame's failure is already explained by the
+    // carried reason, and the plugin must not run either way.
+    if (xi::pack_contract::is_fault(xi::pack_v1_iface(), in)) {
+        *out = xi::pack_contract::propagate_fault(xi::pack_v1_iface(), in, name);
+        return 0;
+    }
     auto inst = xi::InstanceRegistry::instance().find(name);
     if (!inst) return -1;
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());

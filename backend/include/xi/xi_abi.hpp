@@ -29,6 +29,7 @@
 
 #include "xi_abi.h"
 #include "xi_image.hpp"
+#include "xi_pack_contract.hpp"  // reserved $-keys + fault/provenance helpers (U1, doc 15)
 #include "xi_record.hpp"   // wire codec is yyjson JSON (Record::from_json_bytes / data_json)
 
 #include <cstdio>
@@ -156,16 +157,10 @@ private:
 // CONSTANTS (still no string literals at call sites, still drift-proof), which
 // is what PackIn/PackOut give it.
 
-namespace pack_contract {
-// Fail-loud, Pack-shaped: a contract failure is a NORMAL sealed pack carrying
-// these top-level entries (so the caller always gets a pack to route to a
-// verdict), mirroring xi::contract's $fault Record entry. Reuse the SAME reason
-// codes as xi_contract.hpp (missing_input / wrong_type / schema_mismatch). See
-// contract/canonical-profile-notes.md § "Pack-shaped fail-loud".
-inline constexpr const char* kFault       = "$fault";        // str: reason code
-inline constexpr const char* kFaultKey    = "$fault_key";    // str: offending key
-inline constexpr const char* kFaultDetail = "$fault_detail"; // str: human detail
-} // namespace pack_contract
+// The reserved pack keys ($fault/$fault_key/$fault_detail/$src/$prov) and the
+// shared fault/provenance helpers now live in xi_pack_contract.hpp (U1,
+// docs/new_gen/15) — one home for the SDK, the script surface and the host
+// funnel. `xi::pack_contract` keeps its historical name and spellings.
 
 // PackOut — build an output/emit pack through the host builder. Owns the
 // builder handle until seal()/abandon; move-only (a builder is single-owner).
@@ -186,10 +181,10 @@ public:
 
     bool valid() const { return fi_ && b_ && !sealed_; }
 
-    PackOut& i64(const char* k, int64_t v) { if (valid()) fi_->builder_add_i64(b_, k, v); return *this; }
-    PackOut& f64(const char* k, double v)  { if (valid()) fi_->builder_add_f64(b_, k, v); return *this; }
+    PackOut& i64(const char* k, int64_t v) { if (valid()) { touched_ = true; fi_->builder_add_i64(b_, k, v); } return *this; }
+    PackOut& f64(const char* k, double v)  { if (valid()) { touched_ = true; fi_->builder_add_f64(b_, k, v); } return *this; }
     PackOut& str(const char* k, std::string_view v) {
-        if (valid()) fi_->builder_add_str(b_, k, v.data(), (int32_t)v.size());
+        if (valid()) { touched_ = true; fi_->builder_add_str(b_, k, v.data(), (int32_t)v.size()); }
         return *this;
     }
     // Real bool entry (tag XI_PACK_TAG_BOOL, canonical 0xc2/0xc3). Falls back to
@@ -197,25 +192,26 @@ public:
     // additive bool tail (NULL fn pointer) — readers cover both via bool_or.
     PackOut& boolean(const char* k, bool v) {
         if (!valid()) return *this;
+        touched_ = true;
         if (fi_->builder_add_bool) fi_->builder_add_bool(b_, k, v ? 1 : 0);
         else fi_->builder_add_i64(b_, k, v ? 1 : 0);
         return *this;
     }
     PackOut& bin(const char* k, const void* d, size_t n) {
-        if (valid()) fi_->builder_add_bin(b_, k, d, (int32_t)n);
+        if (valid()) { touched_ = true; fi_->builder_add_bin(b_, k, d, (int32_t)n); }
         return *this;
     }
     PackOut& image(const char* k, int32_t w, int32_t h, int32_t c, const void* px) {
-        if (valid()) fi_->builder_add_image(b_, k, w, h, c, px);
+        if (valid()) { touched_ = true; fi_->builder_add_image(b_, k, w, h, c, px); }
         return *this;
     }
     PackOut& adopt_image(const char* k, int32_t w, int32_t h, int32_t c, xi_image_handle handle) {
-        if (valid()) fi_->builder_adopt_image(b_, k, w, h, c, handle);
+        if (valid()) { touched_ = true; fi_->builder_adopt_image(b_, k, w, h, c, handle); }
         return *this;
     }
     // Nested canonical msgpack (doc 07 D3) — arrays/maps produced by xi::mp::Writer.
     PackOut& mp(const char* k, const void* d, size_t n) {
-        if (valid()) fi_->builder_add_mp(b_, k, d, (int32_t)n);
+        if (valid()) { touched_ = true; fi_->builder_add_mp(b_, k, d, (int32_t)n); }
         return *this;
     }
     // Pack-shaped fail-loud: stamp the reason codes and return. The pack is
@@ -226,6 +222,28 @@ public:
         if (!detail.empty())  str(pack_contract::kFaultDetail, detail);
         return *this;
     }
+    // U1 provenance (doc 15): EXPLICIT producer identity / hop chain. The
+    // pack-door glue (pack_door_abi) stamps $src/$prov automatically on every
+    // NON-EMPTY door output when the plugin hasn't — call these only to
+    // OVERRIDE the automatic stamp (e.g. a router forwarding another
+    // producer's payload verbatim), or from a SOURCE that wants origin
+    // attribution on an emitted pack (emit() never stamps: replay
+    // byte-identity + published pack shapes are producer contracts). Use
+    // these setters, not raw str("$src", ...): the glue detects only them.
+    PackOut& src(std::string_view id) {
+        src_stamped_ = true;
+        return str(pack_contract::kSrc, id);
+    }
+    PackOut& prov(std::string_view chain) {
+        prov_stamped_ = true;
+        return str(pack_contract::kProv, chain);
+    }
+    bool src_stamped()  const { return src_stamped_; }
+    bool prov_stamped() const { return prov_stamped_; }
+    // True iff any adder ran — i.e. the plugin actually produced entries. The
+    // door glue stamps provenance only then: an untouched PackOut seals EMPTY
+    // (the door's absence sentinel, mirroring the Record path's empty `{}`).
+    bool touched() const { return touched_; }
 
     // Seal into a host-owned pack handle (refcount 1). Empties this PackOut;
     // the CALLER now owns the ref (release it, or the host does after emit/door).
@@ -243,11 +261,16 @@ private:
     void reset_() { if (fi_ && b_ && !sealed_) fi_->builder_abandon(b_); }
     void move_from(PackOut&& o) noexcept {
         fi_ = o.fi_; b_ = o.b_; sealed_ = o.sealed_;
+        src_stamped_ = o.src_stamped_; prov_stamped_ = o.prov_stamped_;
+        touched_ = o.touched_;
         o.fi_ = nullptr; o.b_ = XI_PACK_BUILDER_NULL; o.sealed_ = true;
     }
     const xi_pack_v1* fi_ = nullptr;
     xi_pack_builder   b_  = XI_PACK_BUILDER_NULL;
     bool               sealed_ = false;
+    bool               src_stamped_  = false;   // plugin called src() explicitly
+    bool               prov_stamped_ = false;   // plugin called prov() explicitly
+    bool               touched_      = false;   // any adder ran (see touched())
 };
 
 // PackIn — read a borrowed input pack handle through the host accessors. Does
@@ -336,9 +359,14 @@ public:
         return std::nullopt;
     }
 
-    // Fail-loud helpers (the PackOut::fault convention).
+    // Fail-loud helpers (the PackOut::fault convention, doc 15).
     bool is_fault() const { return has(pack_contract::kFault); }
     std::optional<std::string_view> fault_code() const { return str(pack_contract::kFault); }
+    std::optional<std::string_view> fault_key() const { return str(pack_contract::kFaultKey); }
+    std::optional<std::string_view> fault_detail() const { return str(pack_contract::kFaultDetail); }
+    // U1 provenance (doc 15): the immediate producer / the hop chain.
+    std::optional<std::string_view> src() const { return str(pack_contract::kSrc); }
+    std::optional<std::string_view> prov() const { return str(pack_contract::kProv); }
 
     const xi_pack_v1* iface() const { return fi_; }
 
@@ -533,6 +561,12 @@ public:
     void emit(PackOut&& out, xi_trigger_id id = XI_TRIGGER_NULL, int64_t ts = 0) {
         const xi_pack_v1* fi = pack_iface();
         if (!fi) return;
+        // U1 provenance (doc 15): emit() deliberately stamps NOTHING. An
+        // emitted pack's entry set is the producer's contract — record_replay
+        // re-emits disk dumps BYTE-IDENTICAL (the E3 lossless loop), and a
+        // gatherer's published pack shape ({left,right,seq}) must not grow
+        // surprise entries. A source that wants origin attribution calls
+        // out.src(name()) itself; chains materialise at the first door hop.
         xi_pack_handle h = out.seal();
         if (h == XI_PACK_NULL) return;
         fi->emit_pack(name_.c_str(), id, h, ts);
@@ -560,6 +594,22 @@ public:
         PackIn  view(fi, in);
         PackOut out(fi);
         process(view, out);
+        // U1 provenance (doc 15): every NON-EMPTY door output — result or
+        // plugin-minted $fault pack alike — carries producer identity ($src =
+        // this instance) and the hop chain ($prov = the input's chain + this
+        // hop), stamped BEFORE seal because sealed packs are immutable. Zero
+        // plugin-author effort; an explicit PackOut::src()/prov() call wins
+        // (a forwarding router can preserve the original attribution). An
+        // UNTOUCHED PackOut seals EMPTY on purpose: the empty pack is the
+        // door's absence sentinel (the pack mirror of the Record path's `{}`)
+        // — provenance rides data; stamping identity onto nothing would turn
+        // absence into presence.
+        if (out.valid() && out.touched()) {
+            if (!out.src_stamped()) out.src(name_);
+            if (!out.prov_stamped())
+                out.prov(pack_contract::prov_append(
+                    pack_contract::prov_parent(fi, in), name_));
+        }
         return out.seal();
     }
 

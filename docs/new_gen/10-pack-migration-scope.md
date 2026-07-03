@@ -95,19 +95,28 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    nested entries byte-checked off the XEX1-v3 wire; `qa_pack_pilot`'s last
    Record leg deleted the same day; `python tools/run_qa.py pack` 4/4.
    The residuals, named precisely (doc 12 §Unscheduled has the detail):
-   - **U1 — pack-plane NA/provenance/typed-IO script semantics** (no
-     `na()/is_na()/na_reason()`, `$prov`, `src()`, or `_io`-style pack
-     helpers; `$fault` packs are script-readable, the propagate contract is
-     unowned). Gates the ERROR-PATH patterns of fixturing_demo, io_stress,
-     graph_demo — matrix rows B3/B4.
+   - **U1 — pack-plane NA/provenance/typed-IO script semantics: ✅ RESOLVED
+     for the error path + provenance (owned + landed,
+     `polaris2/u1-pack-fault-semantics`, doc 15); NARROWED for typed-IO.**
+     `$fault` is the one pack poison marker (no pack `$na` — a decision, doc
+     15 D1); `ScriptPack::is_fault()/fault_reason()/src()/prov()` (+ builder
+     and PackIn/PackOut siblings) are the surface; `$src`/`$prov` stamp at
+     seal producer-side; the host funnel short-circuits fault inputs (plugin
+     never runs; reason + `$seq` carried; hop appended to the chain). The
+     ERROR-PATH patterns of fixturing_demo/io_stress/graph_demo are no
+     longer gated — matrix rows B3/B4 GREEN (`use_pack_door_test` §7–§10,
+     `examples/qa_pack_fault_path`). Still open, narrowed OUT of U1 and
+     gating nothing above: `_io`-style TYPED pack build/extract helpers
+     (codegen gap #2 remains Record-shaped).
    - **U3 — ordered-sink semantics** (hosts stamp no `$seq` into sealed
      packs — script-carried ordering needs blessing or a door-args carry;
      and `use().process()` on a sink target runs inline, the documented v0
      gap). Gates qa_result_order's host-stamped pattern — matrix row C3.
    Neither residual blocks any shipping example pattern beyond those named;
    both are wave-2 planning inputs. **The CUT (step 4) may not ride until
-   U1/U3 have owners or explicit won't-need decisions** — and U2 below is a
-   separate cut-gate. (U2 — `xi::state()` still returns `xi::Record&` — is
+   U1/U3 have owners or explicit won't-need decisions** — U1's owner
+   condition is now MET (resolved above; its typed-IO leftover is a
+   narrowed non-gate), leaving U3 — and U2 below is a separate cut-gate. (U2 — `xi::state()` still returns `xi::Record&` — is
    NOT a P2 residual: cross-frame state is script-local and orthogonal to
    the payload currency, but it must be resolved before Record deletion.)
 3. **Gate P3 — persistence parity: ✅ ACHIEVED 2026-07-03.** The canonical

@@ -1,4 +1,4 @@
-# Canonical msgpack profile — implementation decision log
+﻿# Canonical msgpack profile — implementation decision log
 
 Where `docs/new_gen/07-uniform-keyed-buffer-plane.md` is silent or ambiguous,
 the codec implementations record the minimal reasonable choice here. Each
@@ -257,3 +257,33 @@ A consumer checks `has("$fault")` before reading results. The reason codes are
 identical to the Record path's `$fault.code`, so a script/health mapper treats a
 Record NA and a Pack fault the same way. (Reserved `$`-prefixed keys stay out of
 the plugin's declared schema keyset.)
+
+### U1 addendum: provenance + the propagate contract (docs/new_gen/15)
+
+The reserved-key set gained two provenance entries, and the fault convention
+gained a PROPAGATION rule (constants + shared helpers:
+`backend/include/xi/xi_pack_contract.hpp`, `xi::pack_contract` — the former
+`xi_abi.hpp` constants moved there, spellings unchanged):
+
+- `"$src"`  — str, the immediate producer: the instance whose seal minted the
+  pack. Auto-stamped before seal by the door glue (`pack_door_abi`) on every
+  NON-EMPTY door output (an untouched PackOut seals empty — the absence
+  sentinel stays unstamped); explicit `PackOut::src()` /
+  `ScriptPackBuilder::src()` for producer-chosen attribution.
+  `Plugin::emit(PackOut&&)` stamps NOTHING — replay byte-identity
+  (record_replay, doc 13 E3) and published emit shapes are producer
+  contracts.
+- `"$prov"` — str, the hop chain: instance names joined by `/`,
+  oldest→newest (`cam0/det0/det1`). Door outputs append their hop to the
+  input's chain (a lone `$src` seeds the chain).
+
+PROPAGATE: `$fault` is the pack plane's ONE poison marker (there is
+deliberately no pack `"$na"`). The host use-funnel (`use_pack_process_cb`)
+short-circuits a fault input BEFORE the instance lookup — the plugin never
+runs; the result is a NEW sealed pack (sealed packs are immutable) carrying
+the original `$fault`/`$fault_key`/`$fault_detail` + `$seq`, with `$src` = the
+hop and the hop appended to `$prov` — mirroring the Record path's
+`Record::na(reason).set_src(name)` short-circuit. The push path stamps
+nothing, ever (the byte-identical-dump guarantee stands). Script surface:
+`ScriptPack::is_fault()/fault_reason()/fault_key()/fault_detail()/src()/prov()`,
+`ScriptPackBuilder::fault()/src()`.

@@ -25,8 +25,20 @@
 //   5. FAIL-CLOSED EDGES — unknown instance (-1), Record-only plugin with no
 //      door (-4, mock_camera), empty input pack, and an older host (callback
 //      null) all yield an empty bool-false ScriptPack, never a crash.
-//   6. BALANCE — PackRegistry live_frames + ImagePool live handles return to
-//      baseline once every ScriptPack is dropped.
+//   7. (U1, doc 15) FAULT ROUND-TRIP — ScriptPackBuilder::fault()/src() seal a
+//      readable fault pack (is_fault/fault_reason/fault_key/fault_detail/src).
+//   8. (U1) SHORT-CIRCUIT — a fault input with an otherwise-processable
+//      payload never enters the door (call count unchanged), and the result
+//      is a NEW fault pack: original reason + $seq carried, $src = the hop,
+//      $prov appended.
+//   9. (U1) PROVENANCE CHAIN across two chained doors — happy-path chain
+//      det0→det1 accumulates $prov "det0/det1" (det1's plugin-minted contract
+//      fault inherits det0's chain); a fault input short-circuited through
+//      both hops accumulates the same chain without running either door.
+//  10. (U1) NON-FAULT PACKS UNAFFECTED — the happy path still carries its
+//      results, no $fault appears, and the door output is $src/$prov-stamped.
+//  11. BALANCE (runs last) — PackRegistry live_frames + ImagePool live handles
+//      return to baseline once every ScriptPack is dropped.
 //
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
@@ -37,6 +49,8 @@
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_instance.hpp>       // InstanceRegistry (the use() lookup table)
 #include <xi/xi_pack_abi.hpp>       // install_pack_abi + pack_v1_iface + PackRegistry
+#include <xi/xi_pack_contract.hpp>  // U1: is_fault/propagate_fault (the funnel short-circuit)
+#include <xi/xi_script_pack.hpp>    // U1: ScriptPackBuilder (fault()/src() ergonomics)
 #include <xi/xi_trigger_bus.hpp>    // install_trigger_hook
 #include <xi/xi_use.hpp>            // the REAL script surface: use()/UseProxy/ScriptPack/Trigger
 
@@ -83,16 +97,25 @@ void* g_trigger_meta_fn_     = nullptr;
 void* g_use_pack_process_fn_ = nullptr;   // Gate P2: the seam under test
 
 // Mirror of service_sinks.cpp use_pack_process_cb, minus the item-14 fault
-// machinery (no quarantine state in this harness): registry lookup → adapter →
-// door probe → run_pack_door. Same return-code contract the script maps.
+// machinery (no quarantine state in this harness): U1 fault short-circuit
+// (the SAME xi::pack_contract::propagate_fault the service calls, doc 15) →
+// registry lookup → adapter → door probe → run_pack_door. Same return-code
+// contract the script maps. g_door_calls counts actual door entries so the
+// short-circuit sections can PROVE the plugin never ran.
+static int g_door_calls = 0;
 static int use_pack_process(const char* name, xi_pack_handle in, xi_pack_handle* out) {
     if (out) *out = XI_PACK_NULL;
     if (!name || !out) return -1;
+    if (xi::pack_contract::is_fault(xi::pack_v1_iface(), in)) {
+        *out = xi::pack_contract::propagate_fault(xi::pack_v1_iface(), in, name);
+        return 0;
+    }
     auto inst = xi::InstanceRegistry::instance().find(name);
     if (!inst) return -1;
     auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (!a || !a->has_pack_door()) return -4;
     try {
+        ++g_door_calls;
         *out = a->run_pack_door(in);
         return 0;
     } catch (...) {
@@ -143,11 +166,14 @@ int main() {
     CHECK(bfac && mfac);
     if (!bfac || !mfac) return 1;
     void* binst = bfac(&host, "det0");
+    void* binst1 = bfac(&host, "det1");   // U1: second door hop for the provenance chain
     void* minst = mfac(&host, "cam0");
-    CHECK(binst && minst);
-    if (!binst || !minst) return 1;
+    CHECK(binst && binst1 && minst);
+    if (!binst || !binst1 || !minst) return 1;
     xi::InstanceRegistry::instance().add(
         std::make_shared<xi::CAbiInstanceAdapter>("det0", "blob_analysis", blob_dll, binst));
+    xi::InstanceRegistry::instance().add(
+        std::make_shared<xi::CAbiInstanceAdapter>("det1", "blob_analysis", blob_dll, binst1));
     xi::InstanceRegistry::instance().add(
         std::make_shared<xi::CAbiInstanceAdapter>("cam0", "mock_camera", mock_dll, minst));
 
@@ -250,7 +276,109 @@ int main() {
     }
 
     // -----------------------------------------------------------------------
-    SECTION("(6) balance: every pack + pooled image accounted for");
+    SECTION("(7) U1 fault round-trip: ScriptPackBuilder::fault()/src() -> readable fault pack");
+    {
+        xi::ScriptPackBuilder b;
+        CHECK(b.valid());
+        CHECK(b.fault("frame_timeout", "gray", "sensor dropped the frame"));
+        CHECK(b.src("qa_src"));
+        CHECK(b.add_i64("$seq", 41));
+        auto f = b.seal();
+        CHECK(f.valid());
+        CHECK(f.is_fault());
+        CHECK(f.fault_reason() && *f.fault_reason() == "frame_timeout");
+        CHECK(f.fault_key() && *f.fault_key() == "gray");
+        CHECK(f.fault_detail() && *f.fault_detail() == "sensor dropped the frame");
+        CHECK(f.src() && *f.src() == "qa_src");
+        CHECK(!f.prov());                                    // origin: no chain yet
+    }
+
+    // -----------------------------------------------------------------------
+    SECTION("(8) U1 short-circuit: fault input never enters the door; reason + $seq carried, hop appended");
+    {
+        // An OTHERWISE-PROCESSABLE payload (the happy-path square + threshold)
+        // poisoned with $fault: if the door ran, blob_count would appear.
+        std::vector<uint8_t> gray(16 * 16, 0);
+        for (int y = 5; y < 10; ++y)
+            for (int x = 5; x < 10; ++x) gray[(size_t)y * 16 + x] = 255;
+        xi_pack_builder b = fi->builder_new();
+        fi->builder_add_image(b, bkeys::kGray, 16, 16, 1, gray.data());
+        fi->builder_add_i64(b, bkeys::kThreshold, 128);
+        fi->builder_add_i64(b, bkeys::kMinArea, 1);
+        fi->builder_add_str(b, "$fault", "upstream_timeout", 16);
+        fi->builder_add_i64(b, "$seq", 7);
+        auto in = own_pack(fi->builder_seal(b), fi);
+
+        int calls_before = g_door_calls;
+        auto out = xi::use("det0").process(in);
+        CHECK(g_door_calls == calls_before);                 // the plugin NEVER ran
+        CHECK(out.valid());                                  // poison flows, never empties
+        CHECK(out.is_fault());
+        CHECK(out.fault_reason() && *out.fault_reason() == "upstream_timeout");
+        CHECK(!out.get_i64(bkeys::kBlobCount));              // no results were computed
+        CHECK(!out.get_image(bkeys::kGray));                 // the poisoned payload is NOT carried
+        CHECK(out.get_i64("$seq").value_or(-1) == 7);        // frame identity rides along
+        CHECK(out.src() && *out.src() == "det0");            // the skipped hop owns the result
+        CHECK(out.prov() && *out.prov() == "det0");
+
+        // Poison propagates even through a NAME MISS (mirrors the Record NA
+        // short-circuit running before instance resolution).
+        auto miss = xi::use("no_such_instance").process(in);
+        CHECK(miss.valid() && miss.is_fault());
+        CHECK(miss.prov() && *miss.prov() == "no_such_instance");
+    }
+
+    // -----------------------------------------------------------------------
+    SECTION("(9) U1 provenance chain across two chained doors");
+    {
+        // Happy-path chain: det0's result (a REAL door run) feeds det1. det1's
+        // door runs and faults on contract (no 'gray' in det0's output) — a
+        // PLUGIN-MINTED fault, auto-stamped by the door glue: $src = det1,
+        // $prov = det0's chain + det1.
+        auto in   = own_pack(build_square_pack(fi), fi);
+        int calls_before = g_door_calls;
+        auto out0 = xi::use("det0").process(in);
+        CHECK(out0.valid() && !out0.is_fault());
+        CHECK(out0.src() && *out0.src() == "det0");          // glue-stamped producer id
+        CHECK(out0.prov() && *out0.prov() == "det0");        // unattributed input -> chain starts here
+        auto out1 = xi::use("det1").process(out0);
+        CHECK(g_door_calls == calls_before + 2);             // BOTH doors genuinely ran
+        CHECK(out1.valid() && out1.is_fault());              // contract fault: no 'gray' entry
+        CHECK(out1.fault_reason() && *out1.fault_reason() == "missing_input");
+        CHECK(out1.src() && *out1.src() == "det1");
+        CHECK(out1.prov() && *out1.prov() == "det0/det1");   // the chain accumulated
+
+        // Fault chain: the same poison short-circuited through BOTH hops —
+        // neither door runs, the chain still accumulates hop by hop.
+        xi_pack_builder fb = fi->builder_new();
+        fi->builder_add_str(fb, "$fault", "upstream_timeout", 16);
+        auto poison = own_pack(fi->builder_seal(fb), fi);
+        calls_before = g_door_calls;
+        auto hop1 = xi::use("det0").process(poison);
+        auto hop2 = xi::use("det1").process(hop1);
+        CHECK(g_door_calls == calls_before);                 // zero door entries
+        CHECK(hop2.valid() && hop2.is_fault());
+        CHECK(hop2.fault_reason() && *hop2.fault_reason() == "upstream_timeout");
+        CHECK(hop2.src() && *hop2.src() == "det1");
+        CHECK(hop2.prov() && *hop2.prov() == "det0/det1");
+    }
+
+    // -----------------------------------------------------------------------
+    SECTION("(10) U1 non-fault packs unaffected: results intact, no $fault, provenance stamped");
+    {
+        auto in  = own_pack(build_square_pack(fi), fi);
+        auto out = xi::use("det0").process(in);
+        CHECK(out.valid());
+        CHECK(!out.is_fault());
+        CHECK(!out.fault_reason());
+        CHECK(out.get_i64(bkeys::kBlobCount).value_or(-1) == 1);   // the section-1 result, still
+        CHECK(out.get_i64(bkeys::kThresholdUsed).value_or(-1) == 128);
+        CHECK(out.src() && *out.src() == "det0");
+        CHECK(out.prov() && *out.prov() == "det0");
+    }
+
+    // -----------------------------------------------------------------------
+    SECTION("(11) balance: every pack + pooled image accounted for");
     CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
     CHECK(pool_live() == base_pool);
 
