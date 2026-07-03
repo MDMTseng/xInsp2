@@ -6,8 +6,10 @@
 | `patches` | `kPatches` | string | array of {key,value} — per-emit patches (open value; hand-written builder) |
 | `key` | `kKey` | string | string — patch target path |
 | `data` | `kData` | string | string — the user's JSON document, spliced raw under "data" |
+| `pack_mode` | `kPackMode` | bool | bool (default false) — emit each document as a sealed xi.pack@1 pack (top-level scalars → canonical entries, nested → one ingress-canonicalized mp entry, plus seq) instead of a Record (wave-2 bilingual) |
 | `command` | `kCommand` | string | string (command selector) |
 | `value` | `kValue` | int | int (command payload value) |
 | `set_data` | `kSetData` | string (command name) |  |
 | `reset` | `kReset` | string (command name) |  |
 | `get_status` | `kGetStatus` | string (command name) |  |
+| `seq` | `kSeq` | int | int (emit counter; pack-mode entry, mirrors mock_camera). The user document's own fields ride as open, dynamically-keyed pack entries — not declared slots (open output by design). |

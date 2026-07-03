@@ -7,7 +7,8 @@
   "handwritten_io": true,
   "title": "json_source — user-authored JSON injector (open output; typed control surface).",
   "config": [
-    { "key": "data", "type": "string", "doc": "string — the user's JSON document, spliced raw under \"data\"" }
+    { "key": "data", "type": "string", "doc": "string — the user's JSON document, spliced raw under \"data\"" },
+    { "key": "pack_mode", "type": "bool", "doc": "bool (default false) — emit each document as a sealed xi.pack@1 pack (top-level scalars → canonical entries, nested → one ingress-canonicalized mp entry, plus seq) instead of a Record (wave-2 bilingual)" }
   ],
   "commands": {
     "selector_key": "command",
@@ -21,5 +22,8 @@
   "inputs": [
     { "key": "patches", "type": "string", "doc": "array of {key,value} — per-emit patches (open value; hand-written builder)" },
     { "key": "key",     "type": "string", "doc": "string — patch target path" }
+  ],
+  "output_frame": [
+    { "key": "seq", "type": "int", "doc": "int (emit counter; pack-mode entry, mirrors mock_camera). The user document's own fields ride as open, dynamically-keyed pack entries — not declared slots (open output by design)." }
   ]
 }
