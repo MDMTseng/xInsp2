@@ -223,6 +223,24 @@ target_compile_definitions(cache_test PRIVATE
 add_dependencies(cache_test cache)
 add_test(NAME cache_test COMMAND cache_test)
 
+# cache (BufferReplay) pack-door test (polaris2 wave-2, docs/new_gen/10 gate P1)
+# — the xi.pack@1 side end to end against the REAL built DLL: pack retention
+# across frames, eviction/clear/teardown release, zero-copy replay (same sealed
+# handle, fresh id, stable pool live-count), and a mixed records+packs ring
+# replayed in order. Needs the built cache DLL + a host ImagePool
+# (make_host_api + install_pack_abi + install_trigger_hook) and the pack ABI.
+add_executable(cache_pack_test cache/tests/test_cache_pack.cpp)
+target_include_directories(cache_pack_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/cache/src)
+target_compile_definitions(cache_pack_test PRIVATE
+    CACHE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/cache/xi-cache.dll")
+if(WIN32)
+    target_link_libraries(cache_pack_test PRIVATE Ws2_32)
+endif()
+add_dependencies(cache_pack_test cache)
+add_test(NAME cache_pack_test COMMAND cache_pack_test)
+
 # XEX1 binary golden fixtures — drives the SAME encoder the expose plugin ships
 # (expose/src/xex1_encode.hpp) and byte-compares its output against the committed
 # protocol/fixtures/binary/*.bin. The JS + Python decoder tests decode those same

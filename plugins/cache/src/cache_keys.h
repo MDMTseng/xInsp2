@@ -24,7 +24,8 @@ namespace keys {
 
 // --- Config (get_def / set_def) ---
 inline constexpr const char* kCapacity  = "capacity";   // int (settable)
-inline constexpr const char* kCount     = "count";      // int  (get_def only, read-only)
+inline constexpr const char* kCount     = "count";      // int  (get_def only, read-only) — TOTAL ring occupancy
+inline constexpr const char* kPacks     = "packs";      // int  (get_def only, read-only) — of which are retained packs
 inline constexpr const char* kReplaying = "replaying";  // bool (get_def only, read-only)
 
 // --- Commands (exchange) ---

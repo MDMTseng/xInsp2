@@ -93,7 +93,8 @@ public:
     explicit Status(const std::string& json) : j_(xi::Json::parse(json)) {}
     bool valid() const { return j_.valid(); }
     int  capacity()  const { return j_[keys::kCapacity].as_int(); }
-    int  count()     const { return j_[keys::kCount].as_int(); }
+    int  count()     const { return j_[keys::kCount].as_int(); }   // TOTAL ring occupancy (records + packs)
+    int  packs()     const { return j_[keys::kPacks].as_int(); }   // of which are retained sealed packs
     bool replaying() const { return j_[keys::kReplaying].as_bool(); }
 private:
     xi::Json j_;
