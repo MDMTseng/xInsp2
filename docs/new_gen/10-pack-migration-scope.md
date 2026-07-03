@@ -1,4 +1,9 @@
-# Frame Plane — Migration Scope Decision (Wave-2 Exit)
+# Pack Plane — Migration Scope Decision (Wave-2 Exit)
+
+> **Naming note:** the container was renamed **Frame → Pack** after this
+> document was first drafted (zero image connotation; see doc 07). Container
+> tokens below are updated; quoted test/bench names from the pilot era keep
+> their historical spellings.
 
 | Field | Value |
 |---|---|
@@ -8,20 +13,20 @@
 
 ## What the pilot proved (evidence, not claims)
 
-1. **Performance**: TypedFrame 522 ns/op vs Record 924 on the identical
+1. **Performance**: TypedPack 522 ns/op vs Record 924 on the identical
    metadata workload (43%); dispatch p99 at parallel=8 tightens ~33µs → ~22µs
    (bench_frame, dev-box medians; perf-runner baseline still to capture).
 2. **Identity**: the in-memory small plane IS the wire IS the disk —
    `xex1_v2_identity_test` asserts the three byte-equalities.
-3. **Genericity** (02's r2 constraint): `expose` walks any producer's Frame
+3. **Genericity** (02's r2 constraint): `expose` walks any producer's Pack
    with zero producer knowledge; the contour rides as nested canonical mp.
-4. **End-to-end**: mock_camera(frame_mode) → dual-carry dispatch →
-   `t.frame()` script → verdict, as a QA-gated example (`qa_frame_pilot`).
+4. **End-to-end**: mock_camera(pack_mode) → dual-carry dispatch →
+   `t.pack()` script → verdict, as a QA-gated example (`qa_pack_pilot`).
 5. **Contract discipline held under fire**: the codegen drift gate caught a
    real cross-branch drift (frame_mode/seq) the day it landed; generated
    headers replaced hand-written ones with zero call-site edits.
-6. **Safety story simplified**: sealed frames = drop-on-crash; the
-   leak-per-crash class is unrepresentable on the frame path (the Record
+6. **Safety story simplified**: sealed packs = drop-on-crash; the
+   leak-per-crash class is unrepresentable on the pack path (the Record
    path's leak is now counted: `crash_leaked_docs_lifetime`).
 
 ## Proposed migration scope
@@ -31,9 +36,9 @@
 | What | When | Cost basis |
 |---|---|---|
 | Remaining plugins go BILINGUAL (json_source, synced_stereo, config_swap_probe, cache, record_save, data_output — sinks get the generic walk, sources the emit mode) | next batch; ~½–1 day each (measured: blob +77 lines, mock +29) | pilots' diffs |
-| `xi::use()` → frame-door plumbing for scripts (w2c's honest v0 gap: scripts can read t.frame() but not yet drive an operator's door) | one focused task; unblocks script-side chaining | frame_pilot_test shows the host-side call pattern |
+| `xi::use()` → pack-door plumbing for scripts (w2c's honest v0 gap: scripts can read t.frame() but not yet drive an operator's door) | one focused task; unblocks script-side chaining | frame_pilot_test shows the host-side call pattern |
 | Codegen gap #2 (reply-extractor family, param defaults, has-accessors) → the 3 keys-only plugins get generated `_io` too | one generator task | w2d's gap report |
-| Record→Frame conversion shims (explicit, opt-in helpers — never silent) | decide AFTER the bilingual batch; may prove unnecessary | — |
+| Record→Pack conversion shims (explicit, opt-in helpers — never silent) | decide AFTER the bilingual batch; may prove unnecessary | — |
 | Perf-runner baseline capture for perf_frame + perf_hotpath | before any master-merge conversation | benches ship SKIP-until-fingerprinted |
 
 ### Rides the app-team cutover train (wire-visible; bundle with the `abi` bump)
