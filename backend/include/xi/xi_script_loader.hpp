@@ -97,6 +97,10 @@ struct LoadedScript {
     SetOwnerCallbacksFn set_owner_callbacks = nullptr;
     using SetResultCallbackFn = void (*)(void* fn);
     SetResultCallbackFn set_result_callback = nullptr;
+    // polaris2 Gate P2: xi::use() pack-door process callback. Optional symbol —
+    // older scripts lack it and use(...).process(ScriptPack) yields an empty pack.
+    using SetUsePackCallbackFn = void (*)(void* fn);
+    SetUsePackCallbackFn set_use_pack_callback = nullptr;
     SetRunContextFn    set_run_context  = nullptr;
     SetGlobalCancelFn  set_global_cancel = nullptr;
     // Inspect-start hook: draws this inspect's cancel ticket so the watchdog's
@@ -153,6 +157,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.get_state         = reinterpret_cast<LoadedScript::GetStateFn>(GetProcAddress(h, "xi_script_get_state"));
     out.set_state         = reinterpret_cast<LoadedScript::SetStateFn>(GetProcAddress(h, "xi_script_set_state"));
     out.set_use_callbacks = reinterpret_cast<LoadedScript::SetUseCallbacksFn>(GetProcAddress(h, "xi_script_set_use_callbacks"));
+    out.set_use_pack_callback = reinterpret_cast<LoadedScript::SetUsePackCallbackFn>(GetProcAddress(h, "xi_script_set_use_pack_callback"));
     out.set_trigger_callbacks = reinterpret_cast<LoadedScript::SetTriggerCallbacksFn>(GetProcAddress(h, "xi_script_set_trigger_callbacks"));
     out.set_trigger_leader_callback = reinterpret_cast<LoadedScript::SetTriggerLeaderCallbackFn>(GetProcAddress(h, "xi_script_set_trigger_leader_callback"));
     out.set_trigger_meta_callback = reinterpret_cast<LoadedScript::SetTriggerMetaCallbackFn>(GetProcAddress(h, "xi_script_set_trigger_meta_callback"));

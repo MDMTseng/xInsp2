@@ -287,6 +287,60 @@ xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
     return XI_IMAGE_NULL;
 }
 
+// polaris2 Gate P2 — xi::use(...).process(ScriptPack) wired into the script DLL:
+// drive the target plugin's xi.pack@1 pack door with a sealed host pack. Runs
+// INLINE on this thread under the same item-14 fault gates as the Record path
+// (use_process_inline_): refuse → -3 without entering plugin code, pending
+// reinit applied first, culprit stamped, SEH/throw caught → -2 with the same
+// crash bookkeeping + on-fault policy. `in` is borrowed (script keeps its ref);
+// on 0 `*out` is a NEW sealed handle the SCRIPT owns (or XI_PACK_NULL if the
+// door hard-failed). No pack analogue of the DocRegistry ref accounting is
+// needed: pack lifetime is pure handle refcount (PackRegistry), nothing is
+// reserved for an adopter up front.
+//
+// v0 GAP (deliberate): ordered-SINK staging does not apply here — a pack call
+// on a sink target still runs inline, so under parallel dispatch its side
+// effect lands in completion order, not frame order. Today no sink consumes
+// packs via use() (record_save/expose read the bus), so nothing observes this;
+// revisit when a pack-consuming ordered sink exists (docs/new_gen/10).
+int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out) {
+    if (out) *out = XI_PACK_NULL;
+    if (!name || !out) return -1;
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    if (!adapter) return -4;                       // non-C-ABI instance: no door
+    if (adapter->quarantined()) return -3;
+    if (adapter->reinit_pending()) {
+        apply_pending_reinit_(name, adapter);
+        if (adapter->quarantined()) return -3;
+    }
+    if (!adapter->has_pack_door()) return -4;      // Record-only plugin
+    stamp_culprit_(name, inst->plugin_name());
+    try {
+        *out = adapter->run_pack_door(in);         // OwnerGuard + CallScope inside
+        return 0;
+    } catch (const seh_exception& e) {
+        std::fprintf(stderr, "[xinsp2] use_pack_process('%s') crashed: 0x%08X (%s)\n",
+                     name, e.code, e.what());
+        char why[96]; std::snprintf(why, sizeof(why), "pack door crashed: 0x%08X", e.code);
+        note_instance_crash_(name, why);
+        apply_on_fault_policy_(name, adapter);
+        // Same rationale as use_process_inline_: this boundary swallows the fault
+        // and the inspect continues on this worker — restore the guard page (or
+        // hard-exit for respawn) before returning to the script.
+        xi::recover_seh_stack_or_die(e.code, "plugin pack door");
+        *out = XI_PACK_NULL;                       // a torn result is never handed out
+        return -2;
+    } catch (...) {
+        std::fprintf(stderr, "[xinsp2] use_pack_process('%s') threw exception\n", name);
+        note_instance_crash_(name, "pack door threw an exception");
+        apply_on_fault_policy_(name, adapter);
+        *out = XI_PACK_NULL;
+        return -2;
+    }
+}
+
 // ---- Trigger loop state ----
 //
 // CONTINUOUS RUN HAS TWO DRIVERS — don't confuse them:

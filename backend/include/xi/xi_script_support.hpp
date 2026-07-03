@@ -415,4 +415,20 @@ XI_SCRIPT_EXPORT int xi_script_code_change(const char* old_json, int old_schema,
     return needed;
 }
 
+// --- polaris2 Gate P2: xi::use() pack-door callback (docs/new_gen/10) ---
+//
+// Storage for the pack-door process callback xi_use.hpp declares extern (same
+// lifetime invariant as g_use_process_fn_ above: lives in the script DLL,
+// written by the host once per load, never retained past FreeLibrary).
+// Signature (cast in xi_use.hpp, xi::UsePackProcessFn):
+//   int(const char* name, xi_pack_handle in, xi_pack_handle* out)
+static void* g_use_pack_process_fn_ = nullptr;
+
+// Separate optional symbol (same back-compat reasoning as the leader/meta
+// callbacks): an older host never looks it up and leaves the pointer null, in
+// which case xi::use(...).process(ScriptPack) returns an empty pack.
+XI_SCRIPT_EXPORT void xi_script_set_use_pack_callback(void* fn) {
+    g_use_pack_process_fn_ = fn;
+}
+
 #endif // XI_SCRIPT_NO_DEFAULT_THUNKS
