@@ -6,4 +6,5 @@ from typing import TypedDict, NotRequired, List
 
 JsonSourceConfig = TypedDict('JsonSourceConfig', {
     "data": NotRequired[str],
+    "pack_mode": NotRequired[bool],
 })

@@ -12,13 +12,17 @@
 
 #include <xi/xi_abi.hpp>
 #include <xi/xi_contract.hpp>   // fail-loud required command payload + schema skew
+#include <xi/xi_mp.hpp>         // canonical-profile msgpack Writer (nested JSON → mp)
+#include <xi/xi_ingress.hpp>    // the foreign-bytes domain edge (doc 07 Ingress)
 #include "yyjson.h"   // this plugin does raw yyjson path-building internally
 
 #include "json_source_keys.gen.h"   // guard 1: command/config/patch key names, once
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 
 // Guard 1: the plugin's own readers compile from the SAME constants the typed
 // view (json_source_io.h) builds from, so a key rename can't drift.
@@ -120,6 +124,53 @@ bool apply_patch(yyjson_mut_doc* doc, yyjson_mut_val* dst, yyjson_mut_val* patch
     return json_set_path(doc, dst, yyjson_mut_get_str(k), v);
 }
 
+// --- pack-mode (polaris2 wave-2) nested-value encoder -----------------------
+// Depth cap for the JSON→msgpack walk. Matches the ingress limit so the pack
+// interior never sees a value the edge would reject; also bounds THIS recursion
+// so a depth-bomb document can't overflow the plugin's stack before the ingress
+// canonicalizer ever runs (yyjson's reader is iterative, but this tree walk is
+// not). The re-validation in xi::ingress uses the same bound.
+inline constexpr int kPackMaxDepth = xi::mp::kDefaultMaxDepth;   // 64
+
+// Encode one yyjson value into `w` in the canonical max-width profile. Returns
+// false (aborting the whole emit) only on a depth-bomb — everything else is a
+// well-formed canonical value. This is the "foreign JSON → msgpack" half; the
+// bytes it produces are then re-proven by xi::ingress::canonicalize_entry.
+bool encode_mut(xi::mp::Writer& w, yyjson_mut_val* v, int depth) {
+    if (depth > kPackMaxDepth) return false;
+    switch (yyjson_mut_get_type(v)) {
+        case YYJSON_TYPE_NULL: w.nil();                       return true;
+        case YYJSON_TYPE_BOOL: w.boolean(yyjson_mut_get_bool(v)); return true;
+        case YYJSON_TYPE_NUM:
+            switch (yyjson_mut_get_subtype(v)) {
+                case YYJSON_SUBTYPE_UINT: w.uint_(yyjson_mut_get_uint(v)); break;
+                case YYJSON_SUBTYPE_SINT: w.int_(yyjson_mut_get_sint(v));  break;
+                default:                  w.float_(yyjson_mut_get_real(v)); break;
+            }
+            return true;
+        case YYJSON_TYPE_STR:
+            w.str(std::string_view(yyjson_mut_get_str(v), yyjson_mut_get_len(v)));
+            return true;
+        case YYJSON_TYPE_ARR: {
+            w.array((uint32_t)yyjson_mut_arr_size(v));
+            size_t i, n; yyjson_mut_val* e;
+            yyjson_mut_arr_foreach(v, i, n, e)
+                if (!encode_mut(w, e, depth + 1)) return false;
+            return true;
+        }
+        case YYJSON_TYPE_OBJ: {
+            w.map((uint32_t)yyjson_mut_obj_size(v));
+            size_t i, n; yyjson_mut_val *k, *val;
+            yyjson_mut_obj_foreach(v, i, n, k, val) {
+                w.key(std::string_view(yyjson_mut_get_str(k), yyjson_mut_get_len(k)));
+                if (!encode_mut(w, val, depth + 1)) return false;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 class JsonSource : public xi::Plugin {
@@ -157,6 +208,18 @@ public:
             }
         }
         if (in_rd) yyjson_doc_free(in_rd);
+
+        // polaris2 wave-2 (bilingual): when pack_mode is set AND the host
+        // publishes xi.pack@1, emit the (patched) document as a sealed Pack
+        // through the host door instead of returning a Record — the same emit
+        // path mock_camera takes. The Record output plane is left empty; the
+        // payload rides the pack. Default OFF, so the Record path below is
+        // byte-for-byte unchanged for every existing project.
+        if (pack_mode_.load() && pack_iface()) {
+            emit_pack_(base);
+            if (doc) yyjson_mut_doc_free(doc);
+            return xi::Record();
+        }
 
         // Hand the built tree to a yyjson Record via a JSON round-trip.
         char* s = doc ? yyjson_mut_write(doc, 0, NULL) : nullptr;
@@ -205,6 +268,9 @@ public:
         yyjson_mut_val* data = data_root ? yyjson_val_mut_copy(doc, data_root)
                                          : yyjson_mut_obj(doc);
         yyjson_mut_obj_add_val(doc, root, jkeys::kData, data);
+        // Reflect the pack-mode flag so a UI/driver can read (and round-trip
+        // via set_def) the emit mode — mirrors mock_camera's get_def.
+        yyjson_mut_obj_add_bool(doc, root, jkeys::kPackMode, pack_mode_.load());
 
         char* s = yyjson_mut_write(doc, 0, NULL);
         std::string out = s ? s : "{\"data\":{}}";
@@ -234,12 +300,126 @@ public:
             char* s = yyjson_val_write(data, 0, NULL);
             if (s) { stored_json_.assign(s); free(s); }
         }
+        // polaris2 wave-2: opt into pack-plane emit (default false). An absent
+        // key leaves the current mode (a legacy config keeps emitting Records).
+        yyjson_val* pm = yyjson_obj_get(root, jkeys::kPackMode);
+        if (pm && yyjson_is_bool(pm)) pack_mode_ = yyjson_get_bool(pm);
         yyjson_doc_free(doc);
         return true;
     }
 
 private:
+    // Build a sealed Pack from the (patched) document tree `base` and emit it via
+    // the host xi.pack@1 door. Mapping rule (documented in the plugin README):
+    //   * a `seq` i64 entry (emit counter) leads, mirroring mock_camera;
+    //   * each TOP-LEVEL scalar field becomes a canonical entry (bool → i64 0/1,
+    //     since the pack scalar plane has no bool tag; number → i64/f64;
+    //     string → str; null is skipped);
+    //   * each TOP-LEVEL nested value (object/array) becomes ONE `mp` entry whose
+    //     bytes are produced by encode_mut and then RE-PROVEN through
+    //     xi::ingress::canonicalize_entry — the user JSON is FOREIGN input, so it
+    //     crosses into the pack plane only through the domain edge (doc 07).
+    // A user field literally named "seq" is reserved (shadowed by the counter).
+    // Any rejected input (depth bomb, oversized, non-object root) emits a sealed
+    // $fault pack (fail loud) rather than a partial or silent result.
+    void emit_pack_(yyjson_mut_val* base) {
+        xi::PackOut f = new_pack();
+        if (!f.valid()) return;   // no pack plane (should not happen: caller checked)
+
+        const int64_t seq = seq_.fetch_add(1);
+        f.i64(jkeys::kSeq, seq);
+
+        const char* err_code = nullptr;
+        const char* err_key  = nullptr;
+        std::string err_detail;
+
+        if (!yyjson_mut_is_obj(base)) {
+            err_code = xi::contract::kWrongType;
+            err_key  = jkeys::kData;
+            err_detail = "pack_mode requires a JSON object at the document root";
+        } else {
+            size_t i, n; yyjson_mut_val *k, *v;
+            yyjson_mut_obj_foreach(base, i, n, k, v) {
+                const char* key = yyjson_mut_get_str(k);
+                if (!key) continue;
+                if (std::strcmp(key, jkeys::kSeq) == 0) continue;  // reserved
+                if (!add_field_(f, key, v, err_code, err_key, err_detail)) break;
+            }
+        }
+
+        if (err_code) { emit_fault_(seq, err_code, err_key, err_detail); return; }
+        emit(std::move(f));   // seals + hands to host dispatch (drops our ref)
+    }
+
+    // Add one top-level field to the pack. Returns false (and fills err_*) when
+    // a nested value fails the ingress edge, so the caller can fail loud.
+    bool add_field_(xi::PackOut& f, const char* key, yyjson_mut_val* v,
+                    const char*& ec, const char*& ek, std::string& ed) {
+        switch (yyjson_mut_get_type(v)) {
+            case YYJSON_TYPE_NULL: return true;   // documented: null is skipped
+            case YYJSON_TYPE_BOOL: f.boolean(key, yyjson_mut_get_bool(v)); return true;
+            case YYJSON_TYPE_NUM:
+                switch (yyjson_mut_get_subtype(v)) {
+                    case YYJSON_SUBTYPE_UINT: f.i64(key, (int64_t)yyjson_mut_get_uint(v)); break;
+                    case YYJSON_SUBTYPE_SINT: f.i64(key, yyjson_mut_get_sint(v)); break;
+                    default:                  f.f64(key, yyjson_mut_get_real(v)); break;
+                }
+                return true;
+            case YYJSON_TYPE_STR:
+                f.str(key, std::string_view(yyjson_mut_get_str(v), yyjson_mut_get_len(v)));
+                return true;
+            case YYJSON_TYPE_ARR:
+            case YYJSON_TYPE_OBJ: {
+                xi::mp::Writer w;
+                if (!encode_mut(w, v, 1)) {   // depth bomb aborted the walk
+                    ec = xi::mp::status_str(xi::mp::Status::DepthExceeded);
+                    ek = key; ed = "nested JSON exceeds the ingress depth limit";
+                    return false;
+                }
+                xi::mp::Bytes raw = w.take();
+                if (raw.size() > kPackMaxEntryBytes) {
+                    ec = "oversized"; ek = key;
+                    ed = "nested entry exceeds the ingress size cap";
+                    return false;
+                }
+                // The foreign edge: prove structure + normalize to the profile in
+                // one pass. (Idempotent here since encode_mut already emitted the
+                // canonical forms, but this is the ONLY sanctioned foreign→pack
+                // path and it re-checks depth/dup-keys/trailing bytes.)
+                xi::ingress::Options opts;
+                opts.max_depth = kPackMaxDepth;
+                xi::ingress::Result r = xi::ingress::canonicalize_entry(raw, "mp", opts);
+                if (!r.ok()) {
+                    ec = xi::mp::status_str(r.codec_status);
+                    ek = key;
+                    ed = "nested payload rejected at the pack ingress edge";
+                    return false;
+                }
+                f.mp(key, r.canonical.data(), r.canonical.size());
+                return true;
+            }
+        }
+        ec = xi::contract::kWrongType; ek = key; ed = "unsupported JSON value type";
+        return false;
+    }
+
+    // A contract failure is a NORMAL sealed pack carrying seq + the $fault stamp
+    // (pilot convention) so the consumer always gets a pack to route to a verdict.
+    void emit_fault_(int64_t seq, const char* code, const char* key,
+                     const std::string& detail) {
+        xi::PackOut f = new_pack();
+        if (!f.valid()) return;
+        f.i64(jkeys::kSeq, seq);
+        f.fault(code, key, detail);
+        emit(std::move(f));
+    }
+
+    // A nested entry above this many encoded bytes is rejected as oversized.
+    static constexpr size_t kPackMaxEntryBytes = 8u * 1024u * 1024u;
+
     std::string stored_json_ = "{}";
+    std::atomic<bool>    pack_mode_{false};   // polaris2 wave-2 (default OFF)
+    std::atomic<int64_t> seq_{0};             // per-emit counter (pack mode)
 };
 
 XI_PLUGIN_IMPL(JsonSource)

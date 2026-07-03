@@ -204,6 +204,25 @@ target_compile_definitions(json_source_test PRIVATE
 add_dependencies(json_source_test json_source)
 add_test(NAME json_source_test COMMAND json_source_test)
 
+# json_source BILINGUAL pack-mode test (polaris2 wave-2, docs/new_gen/10 Gate P1)
+# — drives the REAL DLL through the xi.pack@1 door: pack_mode OFF leaves the
+# Record path untouched (zero packs on the bus), ON emits sealed packs (scalars →
+# canonical entries, nested → one ingress-canonicalized mp entry, + seq), and a
+# depth-bomb document is rejected loudly with a $fault pack. Needs the host
+# ImagePool + pack ABI + trigger bus (make_host_api + install_pack_abi), like
+# pack_pilot_test.
+add_executable(json_source_pack_test json_source/tests/test_json_source_pack.cpp)
+target_include_directories(json_source_pack_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/json_source)
+target_compile_definitions(json_source_pack_test PRIVATE
+    JSON_SOURCE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/json_source/xi-json_source.dll")
+if(WIN32)
+    target_link_libraries(json_source_pack_test PRIVATE Ws2_32)
+endif()
+add_dependencies(json_source_pack_test json_source)
+add_test(NAME json_source_pack_test COMMAND json_source_pack_test)
+
 # config_swap_probe contract test — config/command/status + the prepare→commit
 # double-slot (observable only through the Status extractor).
 add_executable(config_swap_probe_test config_swap_probe/tests/test_config_swap_probe.cpp)
