@@ -39,12 +39,39 @@ required/optional, ranges, nested shapes for arrays — no combinators/condition
                  "item_class", "fields": [ ...nested, arrays may recurse... ] } ],
 
   // source: config (get_def/set_def) + commands (exchange) + emitted frame
-  "config": [ { "key", "type", "readonly"? }, ... ],
+  "config": [ { "key", "type", "readonly"?,
+                "raw_json"?, "default"? }, ... ],   // raw_json: the value is
+                                       // pre-serialized JSON TEXT spliced
+                                       // verbatim (json_source's open "data");
+                                       // default = the member's initial text.
+                                       // A Config with raw fields emits setters
+                                       // ONLY for those (concat dump()).
   "commands": { "selector_key", "value_key",
-                "list": [ { "name" }, { "name", "params": [ {"key","arg","type"} ] } ] },
-  "output_frame": [ { "key", "type": "image", "accessor", "has_accessor" } ]
+                "list": [ { "name", "doc"? },
+                          { "name", "params": [ {"key","arg","type",
+                                                 "default"?,        // C++ default arg (fire(int n = 1))
+                                                 "raw_json"?} ] } ] }, // spliced JSON text; must be the ONLY param
+  "output_frame": [ { "key", "type": "image", "accessor", "has_accessor" } ],
+
+  // source extras (the codegen-gap-#2 families, all fixed shapes):
+  "replies": [ { "class": "Status", "of_command": "get_status",   // typed reader over an
+                 "fields": [ { "key", "type": int|double|bool|string,  // exchange() REPLY string
+                               "accessor"?,          // has_staged() over the "staged" key
+                               "cast"?, "doc"? } ] } ],  // whitelisted C++ cast (e.g. "long long"
+                                                         // over the double read) — REPLY_CASTS
+  "patch_builder": { "class": "Patch", "path_key", "value_key", "list_key",
+                     "single_accessor"?, "batch_accessor"?, "doc"? },
+                                       // the fixed {key,value} single / {patches:[...]}
+                                       // batch raw-JSON process()-input shape
+  "frame_composites": [ { "accessor": "has_both", "all_of": ["left","right"], "doc"? } ]
+                                       // derived AND of the per-image has_* checks
 }
 ```
+
+Every decl is checked by the **subset validator** (`_validate_decl`, run on
+every load by `gen_contract.py` AND `check_equiv.py`): unknown sections or
+attributes are errors, `raw_json`/`cast`/`patch_builder` are fixed whitelisted
+shapes — the decl language stays a constrained subset, not a template engine.
 
 `item_accessor` / `size_accessor` / `item_class` are carried explicitly because
 they are **not** mechanically derivable (the hand-written blob extractor names
@@ -64,14 +91,16 @@ the `blobs` array's item accessor `blob()` and its point class `Point`, not
   slots. `slot_of("k")` is a compile-time constant; keyset drift is a build error.
   SKIPPED when the plugin declares no flat frame slots (a source with no
   `output_frame`): an empty schema is noise nothing adopts.
-- **`_io.gen.h`** — the `Input`/`Output` (operator) or `Config`/`Command`/`Frame`
-  (source) builder+extractor classes, byte-for-byte the call surface the plugin
-  and its tests use. Compiles down to `xi::Record`/`xi::Json` set/get — nothing
-  new crosses the ABI. SKIPPED when the decl sets `"handwritten_io": true` — some
-  plugins' control surface is outside the constrained typed-field family (an
-  open-schema raw-JSON builder, a reply/status extractor, a derived convenience
-  accessor); the generator owns their KEY contract but their `_io.h` stays
-  hand-written. See "Coverage & the codegen gap" below.
+- **`_io.gen.h`** — the `Input`/`Output` (operator) or `Config`/`Command`/
+  `Patch`/reply-extractor/`Frame` (source) builder+extractor classes,
+  byte-for-byte the call surface the plugin and its tests use. Compiles down to
+  `xi::Record`/`xi::Json` set/get (raw-JSON shapes concatenate pre-serialized
+  text, exactly like the hand-written originals) — nothing new crosses the ABI.
+  The `Frame` class is emitted only when the frame carries at least one image
+  (an accessor-less Frame is noise). SKIPPED when the decl sets
+  `"handwritten_io": true` — the escape hatch for a surface the subset cannot
+  express; since the codegen-gap-#2 families landed NO in-tree decl uses it.
+  See "Coverage" below.
 - **`.gen.ts` / `_gen.py`** — typed views over the JSON-carried keys (images are
   omitted: they ride the Record image bag, not the JSON).
 - **`_keys.md`** — a docs keys-table fragment (so review 11's "README shows a
@@ -131,35 +160,43 @@ zero call-site edits. Regeneration is idempotent/deterministic (`--check` guards
 stale commit), so the decl is now the single source of truth; `codegen_equiv`
 keeps it and the generated headers in lockstep.
 
-## Coverage & the codegen gap
+## Coverage
 
-All in-tree contract plugins now carry a decl and consume the generated
-`_keys.gen.h` (coverage ratchet **empty**). Two levels of swap resulted:
+All in-tree contract plugins carry a decl and are now **full swaps** (coverage
+ratchet **empty**): `_keys.gen.h` AND `_io.gen.h` replaced the hand-written pair
+and the hand-written headers are deleted. The compiled `codegen_equiv_compile`
+gate drives every plugin's generated builder/extractor call sites.
 
-- **Full swap** — `blob_analysis`, `mock_camera`: both `_keys.gen.h` AND
-  `_io.gen.h` replace the hand-written pair; the hand-written headers are deleted.
-  These are the wave-2 pilot pair; the compiled `codegen_equiv_compile` gate drives
-  their generated builder/extractor call sites.
-- **Keys-only swap** — `config_swap_probe`, `json_source`, `synced_stereo`: their
-  `_keys.gen.h` is a true drop-in and replaces the hand-written `_keys.h`, but their
-  `_io.h` stays **hand-written** (their decl sets `"handwritten_io": true`, which
-  suppresses `_io.gen.h`). Their control surface is outside the constrained
-  typed-field family the generator emits, so generating the I/O would require either
-  redesigning the generator past its governance or editing the tests' call sites —
-  the stage-2 rule is to STOP and record the gap, not force it. The specific gaps:
-  - `config_swap_probe` — a `get_status` **reply/status extractor** (`Status` with
-    `valid()`/`active()`/`has_staged()`/`proc()`), a class family the generator has
-    no concept of (it emits `Frame`, not a typed reply reader).
-  - `json_source` — an **open-schema** control surface *by design*: `Config.data()`
-    splices raw user JSON, `set_data` carries arbitrary JSON, and `Patch::single/
-    batch` is open-valued. This is explicitly not typed-field-declarable.
-  - `synced_stereo` — a derived `has_both()` convenience and a defaulted
-    `fire(int n = 1)`; small, but not what the generator emits verbatim.
+The wave-2 "codegen gap" (the keys-only trio) was closed by the polaris2
+**codegen-gap-#2 extension** — four new decl families, each a fixed shape the
+generator emits verbatim (validated by the subset validator, no open templating):
 
-  Closing these is a future generator extension (a declarative reply-extractor
-  family; a per-command default; a combined has-accessor). Until then the decl owns
-  their keys and the `codegen_equiv` drift gate guards those; the bespoke `_io.h`
-  is a thin veneer over the generated `keys::` constants.
+- **`replies`** — a typed reader class over an exchange() reply *string*
+  (`xi::Json::parse` + `valid()` + `as_*` getters, per-field `accessor` renames
+  for `has_*` semantics, and a whitelisted `cast` for bespoke reads). Closed
+  `config_swap_probe` (`Status` with `active()`/`has_staged()`/
+  `proc() -> long long`).
+- **raw-JSON splicing** — `"raw_json": true` on a config field (with a
+  `default` initial text) or on a command's single param: the value is
+  pre-serialized JSON TEXT concatenated verbatim, the one deliberately
+  string-shaped corner. Closed `json_source`'s open `Config.data()` +
+  `set_data`.
+- **`patch_builder`** — the fixed `{key,value}` single / `{patches:[...]}`
+  batch process()-input shape. Closed `json_source`'s `Patch`.
+- **param `default` + `frame_composites`** — C++ default args on command
+  factories and derived AND-composites over per-image `has_*` checks. Closed
+  `synced_stereo`'s `fire(int n = 1)` + `has_both()`.
+
+Idiom notes from the swap (compile+behavior equivalence proven by
+`codegen_equiv_compile`; the emitted JSON bytes are identical): generated
+no-param commands always route through the private `cmd_` helper, `.set` chains
+are single-line, hand-written column alignment is not reproduced, commands
+follow decl order, and a decl'd settable config key always gets a setter
+(synced_stereo's typed `Config.pack_mode(bool)` is generated although the
+hand-written view omitted it — additive, no call-site impact).
+
+`"handwritten_io": true` remains supported as the escape hatch for a future
+plugin whose surface genuinely exceeds the subset; nothing in-tree uses it.
 ```
 python contract/codegen/gen_contract.py            # regenerate all artifacts
 python contract/codegen/gen_contract.py --check    # verify committed == regenerated

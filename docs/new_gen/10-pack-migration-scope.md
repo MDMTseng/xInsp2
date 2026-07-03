@@ -37,7 +37,7 @@
 |---|---|---|
 | Remaining plugins go BILINGUAL (json_source, synced_stereo, config_swap_probe, cache, record_save, data_output — sinks get the generic walk, sources the emit mode) | next batch; ~½–1 day each (measured: blob +77 lines, mock +29) | pilots' diffs |
 | `xi::use()` → pack-door plumbing for scripts (w2c's honest v0 gap: scripts can read t.frame() but not yet drive an operator's door) | one focused task; unblocks script-side chaining | frame_pilot_test shows the host-side call pattern |
-| Codegen gap #2 (reply-extractor family, param defaults, has-accessors) → the 3 keys-only plugins get generated `_io` too | one generator task | w2d's gap report |
+| **DONE (2026-07-03)** Codegen gap #2 (reply-extractor family, param defaults, has-accessors + raw-JSON/patch_builder shapes) → the 3 keys-only plugins are full swaps (generated `_io`, hand-written `_io.h` deleted; see `contract/codegen/README.md` "Coverage") | one generator task | w2d's gap report |
 | Record→Pack conversion shims (explicit, opt-in helpers — never silent) | decide AFTER the bilingual batch; may prove unnecessary | — |
 | Perf-runner baseline capture for perf_frame + perf_hotpath | before any master-merge conversation | benches ship SKIP-until-fingerprinted |
 

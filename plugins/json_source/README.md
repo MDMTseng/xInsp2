@@ -21,13 +21,13 @@ names (hand-parsed with raw yyjson before) now follow the plugin data contract:
 Every control key is declared **once** in
 [`../../contract/plugins/json_source.decl.json`](../../contract/plugins/json_source.decl.json),
 from which `contract/codegen/gen_contract.py` generates `json_source_keys.gen.h`
-(the `keys::` constants). The plugin's own readers and the typed view
-([`json_source_io.h`](./json_source_io.h)) compile from those generated constants.
-The `_io.h` here stays **hand-written** (the decl sets `"handwritten_io": true`):
-its config/`set_data`/`Patch` builders splice raw user JSON — an OPEN control
-surface by design, outside the typed field family the generator emits — a
-documented codegen gap (see `contract/codegen/README.md`, "Coverage & the codegen
-gap").
+(the `keys::` constants) **and** `json_source_io.gen.h` (the typed
+`Config`/`Command`/`Patch` view). The config/`set_data`/`Patch` builders splice
+raw user JSON — an OPEN control surface by design — declared through the decl's
+constrained raw-JSON shapes (`"raw_json"` fields/params + the `"patch_builder"`
+family, the polaris2 codegen-gap-#2 extension), so this plugin is now a **full
+swap**: the hand-written `_io.h` is deleted and every consumer includes the
+generated header (see `contract/codegen/README.md`, "Coverage").
 
 | Surface | Key | Type | Notes |
 |---------|-----|------|-------|
@@ -101,7 +101,7 @@ carrying `seq` + the reason code:
 ## Using it from a driver / script
 
 ```cpp
-#include "json_source_io.h"
+#include "json_source_io.gen.h"
 
 host.set_def(src, xi::json_source::Config().data(R"({"roi":[0,0,64,64]})"));
 host.exchange(src, xi::json_source::Command::set_data(R"({"n":3})"));

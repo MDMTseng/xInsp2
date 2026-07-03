@@ -7,7 +7,7 @@
 | `staged` | `kStaged` | bool | bool — is a resource staged? |
 | `staged_value` | `kStagedValue` | int | int — value in the STAGING slot (-1 if none) |
 | `last_seen` | `kLastSeen` | int | int — value the last process() observed |
-| `proc` | `kProc` | int | int — process() call count |
+| `proc` | `kProc` | double | int — process() call count (number-carried; read back as long long) |
 | `value` | `kValue` | int | int — the loaded resource value |
 | `command` | `kCommand` | string | string (command selector) |
 | `get_status` | `kGetStatus` | string (command name) |  |

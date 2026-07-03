@@ -24,7 +24,7 @@
 #include <xi/xi_contract.hpp>
 #include <xi/xi_json.hpp>
 
-#include "json_source_io.h"
+#include "json_source_io.gen.h"
 
 #ifdef _WIN32
   #include <windows.h>

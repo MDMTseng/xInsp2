@@ -19,12 +19,12 @@ is observable. It follows the plugin data contract on those surfaces.
 Every key name is declared **once** in
 [`../../contract/plugins/config_swap_probe.decl.json`](../../contract/plugins/config_swap_probe.decl.json),
 from which `contract/codegen/gen_contract.py` generates `config_swap_probe_keys.gen.h`
-(the `keys::` constants). The plugin's own readers and the typed view
-([`config_swap_probe_io.h`](./config_swap_probe_io.h)) compile from those generated
-constants. The `_io.h` here stays **hand-written** (the decl sets
-`"handwritten_io": true`): its `get_status` reply extractor is outside the typed
-field family the generator emits — a documented codegen gap (see
-`contract/codegen/README.md`, "Coverage & the codegen gap").
+(the `keys::` constants) **and** `config_swap_probe_io.gen.h` (the typed
+`Config`/`Command`/`Status` view). The `Status` reply reader is the decl's
+`"replies"` family (a typed extractor over the `get_status` exchange() reply —
+the polaris2 codegen-gap-#2 extension), so this plugin is now a **full swap**:
+the hand-written `_io.h` is deleted and every consumer includes the generated
+header (see `contract/codegen/README.md`, "Coverage").
 
 | Surface | Key | Type | Notes |
 |---------|-----|------|-------|
@@ -62,7 +62,7 @@ path would make it dishonestly richer than the untouched Record path it mirrors.
 ## Using it from a driver
 
 ```cpp
-#include "config_swap_probe_io.h"
+#include "config_swap_probe_io.gen.h"
 
 host.set_def(p, xi::config_swap_probe::Config().value(42));            // tier-1 immediate
 host.prepare(p, xi::config_swap_probe::Config().value(99), folder);   // stage in background

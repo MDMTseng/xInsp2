@@ -1,10 +1,9 @@
 {
-  "$comment": "TRANSCRIBED from plugins/config_swap_probe/config_swap_probe_keys.h + _io.h. config_swap_probe is a reference SOURCE for the orchestrator config-swap design: its process() has no data contract, so its surface is its CONFIG ({value}), one exchange COMMAND (get_status), and the STATUS object that command returns. The status-reply object is a bespoke extractor OUTSIDE the constrained typed-field family the generator emits, so this decl sets \"handwritten_io\": true — the generator owns the KEY contract (_keys.gen.h) but config_swap_probe_io.h stays hand-written (see the codegen-gap note in docs/new_gen/08 and contract/codegen/README.md). The status field key names are listed under \"outputs\" ONLY so collect_keys mints their k-constants; a source's outputs never become schema slots or TS/Py types.",
+  "$comment": "TRANSCRIBED from plugins/config_swap_probe/config_swap_probe_keys.h + _io.h. config_swap_probe is a reference SOURCE for the orchestrator config-swap design: its process() has no data contract, so its surface is its CONFIG ({value}), one exchange COMMAND (get_status), and the STATUS object that command returns. That status object is declared under \"replies\" — the reply-extractor family (polaris2 codegen gap #2): each reply class is a typed reader over an exchange() reply string (xi::Json::parse + as_* getters + valid()). The proc counter is number-carried on the wire and read back as long long via the whitelisted \"cast\" (the one bespoke read). Reply field keys are minted into _keys.gen.h exactly like the old \"outputs\" listing was; a source's replies never become schema slots or TS/Py types.",
   "plugin": "config_swap_probe",
   "namespace": "xi::config_swap_probe",
   "schema_version": 1,
   "role": "source",
-  "handwritten_io": true,
   "title": "config_swap_probe — orchestrator config-swap reference (config + get_status).",
   "config": [
     { "key": "value", "type": "int", "doc": "int — the loaded resource value" }
@@ -16,11 +15,17 @@
       { "name": "get_status" }
     ]
   },
-  "outputs": [
-    { "key": "active",       "type": "int",  "doc": "int — value in the LIVE slot" },
-    { "key": "staged",       "type": "bool", "doc": "bool — is a resource staged?" },
-    { "key": "staged_value", "type": "int",  "doc": "int — value in the STAGING slot (-1 if none)" },
-    { "key": "last_seen",    "type": "int",  "doc": "int — value the last process() observed" },
-    { "key": "proc",         "type": "int",  "doc": "int — process() call count" }
+  "replies": [
+    {
+      "class": "Status",
+      "of_command": "get_status",
+      "fields": [
+        { "key": "active",       "type": "int",    "doc": "int — value in the LIVE slot" },
+        { "key": "staged",       "type": "bool",   "accessor": "has_staged", "doc": "bool — is a resource staged?" },
+        { "key": "staged_value", "type": "int",    "doc": "int — value in the STAGING slot (-1 if none)" },
+        { "key": "last_seen",    "type": "int",    "doc": "int — value the last process() observed" },
+        { "key": "proc",         "type": "double", "cast": "long long", "doc": "int — process() call count (number-carried; read back as long long)" }
+      ]
+    }
   ]
 }

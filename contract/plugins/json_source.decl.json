@@ -1,28 +1,34 @@
 {
-  "$comment": "TRANSCRIBED from plugins/json_source/json_source_keys.h + _io.h. json_source is a generic injector whose EMITTED data plane is an OPEN schema by design (docs/new_gen/02), and whose control surface is deliberately string-shaped: the Config splices RAW user JSON under \"data\", set_data carries arbitrary JSON, and the per-emit Patch shape ({key,value} single or {patches:[...]} batch) is open-valued. None of that is in the constrained typed-field family the generator emits, so this decl sets \"handwritten_io\": true — the generator owns the KEY contract (_keys.gen.h) but json_source_io.h stays hand-written (codegen-gap note in docs/new_gen/08, contract/codegen/README.md). The patch key names ride \"inputs\" ONLY so collect_keys mints their k-constants (a source's inputs never become schema slots or TS/Py types).",
+  "$comment": "TRANSCRIBED from plugins/json_source/json_source_keys.h + _io.h. json_source is a generic injector whose EMITTED data plane is an OPEN schema by design (docs/new_gen/02), and whose control surface is deliberately string-shaped: the Config splices RAW user JSON under \"data\" (\"raw_json\": true + \"default\"), set_data carries arbitrary JSON (a raw_json command param), and the per-emit Patch shape ({key,value} single or {patches:[...]} batch) is the fixed \"patch_builder\" family — all constrained whitelisted shapes the generator emits verbatim since the polaris2 codegen gap #2 extension (no more \"handwritten_io\"). The typed pack_mode config key rides the same raw config document (a raw-JSON Config emits setters only for its raw fields). The patch key names ride \"inputs\" ONLY so collect_keys mints their k-constants (a source's inputs never become schema slots or TS/Py types).",
   "plugin": "json_source",
   "namespace": "xi::json_source",
   "schema_version": 1,
   "role": "source",
-  "handwritten_io": true,
   "title": "json_source — user-authored JSON injector (open output; typed control surface).",
   "config": [
-    { "key": "data", "type": "string", "doc": "string — the user's JSON document, spliced raw under \"data\"" },
+    { "key": "data", "type": "string", "raw_json": true, "default": "{}", "doc": "string — the user's JSON document, spliced raw under \"data\"" },
     { "key": "pack_mode", "type": "bool", "doc": "bool (default false) — emit each document as a sealed xi.pack@1 pack (top-level scalars → canonical entries, nested → one ingress-canonicalized mp entry, plus seq) instead of a Record (wave-2 bilingual)" }
   ],
   "commands": {
     "selector_key": "command",
     "value_key": "value",
     "list": [
-      { "name": "set_data" },
+      { "name": "set_data", "doc": "Replace the stored JSON. Payload is arbitrary JSON text.", "params": [ { "key": "value", "arg": "raw_json", "type": "string", "raw_json": true } ] },
       { "name": "reset" },
       { "name": "get_status" }
     ]
   },
   "inputs": [
-    { "key": "patches", "type": "string", "doc": "array of {key,value} — per-emit patches (open value; hand-written builder)" },
+    { "key": "patches", "type": "string", "doc": "array of {key,value} — per-emit patches (open value; generated Patch builder)" },
     { "key": "key",     "type": "string", "doc": "string — patch target path" }
   ],
+  "patch_builder": {
+    "class": "Patch",
+    "path_key": "key",
+    "value_key": "value",
+    "list_key": "patches",
+    "doc": "The process input mutates the stored JSON for THIS emit only. Values are open JSON text."
+  },
   "output_frame": [
     { "key": "seq", "type": "int", "doc": "int (emit counter; pack-mode entry, mirrors mock_camera). The user document's own fields ride as open, dynamically-keyed pack entries — not declared slots (open output by design)." }
   ]

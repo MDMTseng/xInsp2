@@ -1,10 +1,9 @@
 {
-  "$comment": "TRANSCRIBED from plugins/synced_stereo/synced_stereo_keys.h + _io.h. synced_stereo is a GATHERING SOURCE: no process() input Record, its surface is CONFIG (fps settable; pack_mode opt-in; running/ticks read-only get_def), COMMANDS (start/stop/set_fps/fire), and a two-image FRAME (left+right under one trigger). The Frame extractor's derived has_both() convenience and the defaulted fire(int n = 1) are outside what the generator emits, so this decl sets \"handwritten_io\": true — the generator owns the KEY contract (_keys.gen.h) and the PackSchema (_schema.gen.h, slots left+right+seq) but synced_stereo_io.h stays hand-written (codegen-gap note in docs/new_gen/08, contract/codegen/README.md). polaris2 wave-2 (docs/new_gen/10 Pack migration, gate P1): the plugin is now BILINGUAL — its default Record path still emits the two-image record literally (the host-mock test pins those wire literals), and an opt-in pack_mode gathers left+right+seq into ONE sealed xi.pack@1 Pack per trigger, compiled against kPackMode/kSeq/kLeft/kRight here.",
+  "$comment": "TRANSCRIBED from plugins/synced_stereo/synced_stereo_keys.h + _io.h. synced_stereo is a GATHERING SOURCE: no process() input Record, its surface is CONFIG (fps settable; pack_mode opt-in; running/ticks read-only get_def), COMMANDS (start/stop/set_fps/fire — fire's n defaults to 1 via the param \"default\"), and a two-image FRAME (left+right under one trigger) whose derived has_both() convenience is the \"frame_composites\" family (polaris2 codegen gap #2 — fully generated, no more \"handwritten_io\"). polaris2 wave-2 (docs/new_gen/10 Pack migration, gate P1): the plugin is BILINGUAL — its default Record path still emits the two-image record literally (the host-mock test pins those wire literals), and an opt-in pack_mode gathers left+right+seq into ONE sealed xi.pack@1 Pack per trigger, compiled against kPackMode/kSeq/kLeft/kRight here.",
   "plugin": "synced_stereo",
   "namespace": "xi::synced_stereo",
   "schema_version": 1,
   "role": "source",
-  "handwritten_io": true,
   "title": "synced_stereo — correlated left+right frame source (one trigger, two images).",
   "config": [
     { "key": "fps",       "type": "int",  "doc": "int (settable)" },
@@ -19,12 +18,15 @@
       { "name": "start" },
       { "name": "stop" },
       { "name": "set_fps", "params": [ { "key": "value", "arg": "v", "type": "int" } ] },
-      { "name": "fire",    "params": [ { "key": "n",     "arg": "n", "type": "int" } ] }
+      { "name": "fire",    "doc": "Deterministic headless drive: emit `n` frames synchronously.", "params": [ { "key": "n", "arg": "n", "type": "int", "default": 1 } ] }
     ]
   },
   "output_frame": [
     { "key": "left",  "type": "image", "accessor": "left",  "has_accessor": "has_left",  "doc": "image (vertical stripes)" },
     { "key": "right", "type": "image", "accessor": "right", "has_accessor": "has_right", "doc": "image (horizontal stripes)" },
     { "key": "seq",   "type": "int",   "doc": "int (correlation counter; both images carry it, pack-mode canonical entry)" }
+  ],
+  "frame_composites": [
+    { "accessor": "has_both", "all_of": ["left", "right"] }
   ]
 }
