@@ -1,170 +1,196 @@
-# Migrating to `polaris_master` — Plan for the App Team
+# THE CUT — Cutover-Train Brief for the App Team
 
 | Field | Value |
 |---|---|
-| **Date** | 2026-07-02 |
-| **Audience** | The app-dev team consuming the xInsp2 backend, WS protocol, project files, and shipped clients |
-| **Scope** | Everything on `polaris_master` that is not on `master` (25 merged task branches), plus the ONE wire change still pending after it |
-| **Status** | Proposal — phases 1–3 need your sign-off; phase 0 you can start today |
+| **Date** | 2026-07-03 |
+| **Audience** | The app-dev team consuming the xInsp2 backend: your inspection scripts, your plugins, your WS clients/tooling, your recorded artifacts |
+| **Scope** | ONE coordinated break ("THE CUT"): plugin ABI v11 → v12 pure pack door, Record deleted, XEX1-v3 default wire, `hello.abi` 1 → 2, plus the retirements listed in §1 — and the bilingual window you can use TODAY to make the cut a non-event |
+| **Status** | All engineering gates on our side are ACHIEVED (doc 10: P1/P2/P3 green, cut-gates U1/U2/U3 resolved, parity matrix doc 12 fully green). The ONLY remaining precondition is coordination with you — the decisions in §6 |
+| **Supersedes** | The previous version of this document (the `polaris_master` merge brief). That migration completed; the `hello.abi` bump it deferred as "Phase 3" now rides this train |
 
 ## TL;DR
 
-`polaris_master` was engineered to be **wire-compatible**: no message was
-renamed, no field changed type, no reply shape moved. Your clients should run
-unchanged against it. What you must actually check is four narrow things —
-scripts using raw OpenMP pragmas, external tools that write `project.json`,
-any third-party XEX1 decoder you own, and scripts that feed plugins malformed
-input and relied on silence. Everything else is additive surface you can adopt
-at your own pace, plus a large amount of hardening you get for free.
+xInsp2's data plane has been rebuilt around **Pack**: one sealed, keyed, typed
+container (canonical msgpack) that is byte-identical in memory, on the WS wire
+(XEX1-v3), and on disk (`.xex1`). Every shipped plugin and every script surface
+is already **bilingual** — the old `xi::Record` world and the new Pack world run
+side by side in today's builds, proven by live QA. At THE CUT, the Record half
+is deleted in one coordinated event shared with you.
 
-The previously staged breaking set (`integration/extreview-breaking` — wire
-renames, `XI_SYS_CRASHED`, HMI throughput semantics, partial-status returns)
-is **already merged to master** (merge `86e0a53`) — if your app runs against
-current master, you have absorbed it. The only wire change still pending
-anywhere is the `hello.abi` bump (Phase 3, coordinated).
+What that means for you, compressed:
 
-## What Polaris is (one paragraph)
+- **Nothing forces you to wait.** Every Pack surface (§3) works against the
+  current backend. Port your scripts and plugins during the bilingual window,
+  soak them under your own regression, and THE CUT becomes a recompile.
+- **The porting is mechanical.** §4 is a line-for-line idioms table; typical
+  script ports are minutes-to-an-hour each.
+- **Nothing durable is at risk.** Recorded `.xex1` files are the format that
+  survives; state is in-memory by design; project files don't change.
+- **We need five decisions from you** (§6) — most importantly the train date
+  and your confirmation on five candidate command retirements.
 
-Eleven external reviews (docs/ext_review/01–11) were distilled into a
-north-star architecture (docs/new_gen/01–02) and an adoption map
-(docs/new_gen/03). `polaris_master` executes adoption items 1–14: every
-boundary is now either **generated from one source** (contract/ schemas →
-validation gates) or **guarded by a gate** (tools/gate.py: docs → build →
-ctest → fixtures → qa → fuzz, all green at HEAD). Full status:
-docs/new_gen/03-adoption-map.md § Status.
+## §1 What changes at THE CUT — item by item
 
-## Impact on you, classified
+Effort classes: **S** = under an hour per affected unit · **M** = hours to ~a
+day per unit · **L** = multiple days. "Zero" = no action if the "who is
+affected" column doesn't describe you.
 
-### A. Action required (check BEFORE merging — the only 4 candidates)
+| # | Change | What breaks | What you do | Effort |
+|---|---|---|---|---|
+| 1 | **Plugin ABI v11 → v12: pure pack door.** `xi_plugin_process(Record)` and the Record-based monolith struct are deleted; a plugin's data plane is the `xi.pack@1` door only. The capability-plane interfaces (`xi.cap` / `xi.cap.provider`, doc 14) are formalized as documented ABI in the same break, and `host_api->read_image_file` is evicted into the `xi.image.decode` capability (net ABI bill: −1 slot; the pilot's `get_interface` route needs zero new slots, so no `register_capability` slot is required) | Any plugin DLL **you** own that only implements the Record `process()` stops loading at v12; any plugin of yours calling `read_image_file` stops compiling | Add the pack door NOW (bilingual — it coexists with your Record door today); swap `read_image_file` calls for the `xi.image.decode` capability (§3.7). Recompile against v12 at the cut | **M** per plugin for the door (measured on shipped plugins: blob_analysis +77 lines, mock_camera +29); **S** for the read_image_file swap |
+| 2 | **`xi::Record` deleted from the script SDK** (and with it DocRegistry, COW, share/adopt internally — invisible to you except as the API deletion) | Every script idiom in §4.1's left column fails loud at compile: `t.image()`, `t.meta()`, `xi::Record()`, `use().process(Record)` | Port per the idioms table (§4.1). All target surfaces exist today | **S–M** per script (mechanical; ~15–60 min each in our ports of the examples tree) |
+| 3 | **`xi::state()` deleted; cross-frame script state is `xi::kv()`** (doc 16) | Scripts using `xi::state()` fail loud at compile; an unported script's state resets once at its porting reload | Port with the self-seed pattern (§4.3) during the window so the carry is seamless | **S** per script |
+| 4 | **XEX1-v3 becomes the default preview wire.** v1 is retained one release behind a flag, then deleted (window length = your call, §6.2) | Only a third-party XEX1-**v1** decoder you wrote yourself. In-tree decoders (expose webUI, `examples/lib/xex1.py`) are already bilingual v1+v3 | Port your decoder to v3 — it is plain tagged msgpack (`{v:3, channel, seq, frame:{key:[tag,value],…}}`), readable by any stock msgpack library; golden fixtures under `protocol/fixtures/binary/` | **M** if you own a decoder (a day incl. tests); zero otherwise |
+| 5 | **`hello.abi` 1 → 2** — the long-planned protocol stamp bump, in lockstep with the clients | Nothing today (no client of yours checks the field — which is the problem this fixes) | If you own a WS client: read `hello.data.abi`, compare, warn loudly on mismatch. One comparison | **S** |
+| 6 | **`record_save`'s legacy `.json`+`.bmp` export door is deleted** (it goes with Record) | New runs no longer produce `.json`+`.bmp` exports. Existing files stay on disk, stay human-readable — and stay what they always were: exports, never replayable (doc 13 §2) | Switch capture workflows to `.xex1` now (§3.9). If you have OLD captures you genuinely need to REPLAY, raise it — §6.4 | Zero, unless §6.4 applies |
+| 7 | **Five WS commands retire — pending YOUR confirmation** (doc 11): `watchdog_status`, `unload_script`, `unquarantine_plugin`, `load_plugin`, `get_project`. Zero in-tree callers; all five are plausible external-operator surface, so none retires without your sign-off | Any external script/tooling of yours calling one of the five | Grep your tooling for the five literals; confirm or veto per command (§6.3) | **S** (an afternoon of grepping) |
 
-| # | Change | Who is affected | What to do |
-|---|---|---|---|
-| A1 | **Raw OpenMP pragmas in scripts are rejected at compile** (XI9001, with a message routing to `xi::parallel_for` / `xi::async`) | Any `inspect.cpp` using `#pragma omp` directly (not via the xi wrappers). A faulting raw-omp thread kills the whole backend untranslated — that's why | Grep your project scripts for `#pragma omp`. Port to `xi::parallel_for`/`xi::async` (usually mechanical), or set `"allow_raw_omp": true` in project.json if you accept the worker-thread rules |
-| A2 | **`project.json` gains `"schema": "xi.project/1"`, written on every save** | Any external tool of yours that parses project.json and rejects unknown top-level keys, or rewrites the file from partial knowledge (the backend no longer does — yours shouldn't either) | Confirm your tooling tolerates the new key. Files without the stamp load fine (legacy, logged once); a future-major stamp is refused with a precise error |
-| A3 | **XEX1 frames can emit msgpack `map16`/`map32`** once the top-level map exceeds 15 keys (today's real frames are byte-identical — still fixmap) | Only a third-party XEX1 decoder you wrote yourself. The in-tree decoders (expose webUI, `examples/lib/xex1.py`) are updated and pinned by golden fixtures under `protocol/fixtures/binary/` | Test your decoder against the goldens (they include a 17-key `map16.bin`); add the two opcodes if missing |
-| A4 | **Plugins fail loud on bad input** (`mock_camera`, `blob_analysis`): a missing/mis-typed required key now returns a structured NA (reason code + key + expected type) instead of a silent default; unknown keys warn once | Scripts that feed these plugins incomplete Records and relied on silent tolerance | The structured NA maps to your existing verdict handling; fix the call site (the error names the exact key). Happy-path callers see zero change |
+### What does NOT change (so you don't re-audit it)
 
-### B. Observable behavior fixes (no action expected — but be aware)
+The verdict plane (`xi::ok/ng/result`, run_result shape), the control plane
+(create/def/prepare/commit/exchange, project open/save), `project.json`
+(`xi.project/1`, unchanged), the health contract (`xi.health/1`), params and
+instance UIs, the trigger model and gathering sources, the WS envelope shape,
+auth. THE CUT is a data-currency swap, not a protocol redesign.
 
-- **A handler exception now becomes `rsp ok:false`** correlated to your command
-  id, instead of killing the backend process. (The documented contract is now
-  true.)
-- **A malformed command envelope with a recoverable `id` gets a correlated
-  error reply** instead of a log-only silent drop — your client no longer
-  blocks to its timeout on a typo'd field. Rejects are counted in
-  `dispatch_stats.malformed_cmd_rejected_lifetime` (new field).
-- `get_dashboard` / `crash_reports` cap file reads at 8 MiB
-  (`truncated:true` beyond that) instead of attempting unbounded allocation.
-- `save_project` **preserves every top-level key it doesn't own** (previously
-  it silently rebuilt the file from two keys — if you ever lost `runtime` /
-  `parallelism` / `groups` after a save, that's fixed).
-- A second WS client is still refused; through the HMI proxy the refusal is
-  now an explicit close code (4003) so the HMI shows "another client is
-  connected" instead of generic retry.
+## §2 Why one train, not three
 
-### C. Additive surfaces you can adopt when useful (ignore = zero cost)
+The pieces are coupled: the pure-door ABI needs plugins ported; deleting Record
+needs scripts ported; the v3 wire default and the `abi` stamp are each
+one-client-visible-moment events. Bundling them means you re-validate your app
+ONCE. Everything that could be decoupled already was — it shipped bilingual and
+is behind you.
 
-| Surface | What it gives you |
+## §3 The bilingual window — what you can adopt TODAY
+
+Everything below runs against the current backend, coexists with your existing
+Record code, and is exactly the code that survives the cut. Recommended order:
+
+1. **Read the frame as a pack** — `auto f = t.pack()` beside your existing
+   `t.image()`. Typed reads return `std::optional` (absence is explicit):
+   `f.get_i64("seq")`, `f.get_image("frame")` (zero-copy span + dims — wrap it
+   in a `cv::Mat` directly). *(S per script)*
+2. **Build packs script-side** — `xi::ScriptPackBuilder` (`add_i64/f64/str/
+   bool/bin`, `add_image`, `add_mp(xi::mp::Writer)` for one nested subtree,
+   then `seal()`). *(S)*
+3. **Chain into plugins** — `xi::use("det0").process(pack)` drives a plugin's
+   pack door, request-reply, same host funnel and crash gates as always. *(S)*
+4. **Expose from script** — `xi::use("expose").push(pack)` (with a
+   `$channel` entry for UI routing): fire-and-forget, staged and flushed in
+   frame order for sink targets (doc 17). *(S)*
+5. **Ordering identity** — where you relied on the host stamping `$seq` on
+   ordered sinks, stamp it yourself before seal: `b.add_i64("$seq",
+   xi::run_id())` — the same value the host used to inject (doc 17). *(S)*
+6. **Fault discipline** — check `r.is_fault()` / `fault_reason()` before
+   reading results; one poison marker, `$src`/`$prov` provenance rides along,
+   and the host short-circuits fault inputs so your plugin never sees poison
+   (doc 15). *(S)*
+7. **Capability calls from your plugins** — `get_interface("xi.cap", 1)` →
+   `call("xi.jpeg.encode", …)` / `"xi.image.decode"`; dedup'd, host-forwarded,
+   crash-attributed (doc 14). Probe with `$probe:true`; version in-band with
+   `$v`. *(S per call site)*
+8. **`xi::kv()` state** — port with the self-seed pattern (§4.3). *(S)*
+9. **Record `.xex1` captures now** — `record_save`'s pack door writes
+   XEX1-v3; `record_replay` re-emits it byte-lossless. Every capture you make
+   during the window is already in the surviving format. *(S — config)*
+10. **Take your plugins bilingual** — add the `xi.pack@1` door beside your
+    Record `process()`; ship both until the cut. *(M per plugin)*
+
+Live QA references you can crib from: `examples/qa_use_pack_door` (build →
+chain → push in one script, zero Record), `qa_pack_record_replay` (record →
+save → replay, byte-lossless), `qa_pack_order` ($seq + ordering),
+`qa_pack_fault_path` (fault propagation), `qa_kv_reload` (kv + hot-reload
+migration), `qa_cap_imgcodec` (capability plane).
+
+## §4 The port checklist
+
+### 4.1 Scripts — Record → Pack idioms
+
+| Today (Record) | After (Pack) |
 |---|---|
-| `get_health` cmd + `health_changed` event (schema `xi.health/1`) | The canonical backend state machine (boot → project_loaded → running ⇄ degraded / draining / fault) + per-component health with reason codes — stop inferring liveness from side channels. Feature-detect via "unknown command" on old backends |
-| `fe-status.json → be_health` | The supervisor now mirrors the BE's canonical state (file-based, doesn't consume the single WS client slot) — your line-side watchdogs can read it |
-| `on_fault` policy (plugin.json / instance.json): `reuse` (default) / `reinit` / `refuse` | Explicit post-crash reuse policy per plugin; escalation to quarantine after 3 failed re-inits; re-enable by re-committing config |
-| Python SDK 0.3.0 (`tools/xinsp2_py`) | `--auth` support (bearer + timestamp-HMAC), `AuthError`, contract-typed run outcomes. Note: no auto mode-fallback by design (a bearer-first fallback would leak an HMAC key) |
-| Extension (dev client) | Run-verdict status bar, `state_dropped` warnings, compile lifecycle, version-skew warnings, health chip |
-| `compat-manifest.json` in every release artifact | Machine-readable identity: backend version, plugin ABI (v11), WS command count, schema list, tested-together client versions. A target machine answers "what am I running" from the artifact alone |
-| `contract/` schemas + fixtures | The wire, machine-readable. If you build a consumer, generate/validate against these instead of reading prose |
-| Builder/extractor headers (`<plugin>_io.h`, `<plugin>_keys.h`) | Typed, compile-checked plugin I/O for scripts — key typos become compile errors |
+| `auto img = t.image("frame");` | `auto f = t.pack(); auto img = f.get_image("frame");` — zero-copy pixels + dims; `cv::Mat` wraps the span directly |
+| `t.meta()["seq"].as_int(0)` | `f.get_i64("seq").value_or(0)` — metadata rides as ordinary pack entries |
+| `det.process(xi::Record().image("gray", g).set("thresh", v))` | `xi::ScriptPackBuilder b; b.add_image("gray", g); b.add_i64("thresh", v); auto r = xi::use("det0").process(b.seal());` |
+| `result["blob_count"].as_int(0)` | `r.get_i64("blob_count").value_or(0)` — typed, optional-returning |
+| Nested trees: `rec["items[0].score"]` | One `add_mp(key, xi::mp::Writer)` subtree at build; read via `r.get_mp(key)` + `xi::mp::Reader`, or enumerate unknown packs with `r.for_each(...)` |
+| `rec.is_na()` / `na_reason()` | `r.is_fault()` / `fault_reason()` — check BEFORE reading results; `src()`/`prov()` name the producer and the hop chain (doc 15) |
+| `xi::use("expose").process(xi::Record().set("$channel","x").image(...))` | Build a pack with `b.add_str("$channel","x")` + entries; `xi::use("expose").push(pack)` |
+| `use(sink).process(rec)` (host staged it) | `use(sink).push(pack)`. Note: `process()` on a declared ordered sink is now REJECTED fail-loud (empty pack + a log naming the fix) — push is the sink feed, process is the reply chain (doc 17) |
+| Host-stamped `$seq` on ordered sinks | Producer stamps: `b.add_i64("$seq", xi::run_id())` before seal — same value, honest ownership |
+| `xi::state()["count"]` | `xi::kv().get_i64("count")` — see §4.3 |
 
-### D. Free hardening (invisible unless you were being bitten)
+Declared-keyset reads (compile-checked keys) exist on the pack side too —
+`ScriptTypedPack` with a schema of key slots (see `examples/qa_pack_walk`).
 
-Pool-stats UAF fix (a UI polling stats can no longer fault the backend), WS
-teardown race fix, crash-breadcrumb slots recycle (long-run one-shot dispatch
-no longer degrades crash attribution), post-fault health overlay, hot-path
-benchmark with honest labels.
+### 4.2 Replay files — the doc 13 rulings, compressed
 
-## Migration phases
+| You have | Ruling | Your move |
+|---|---|---|
+| `.xex1` recorded during the window (v3) | The durable format; replays before and after the cut | Nothing — this is the target |
+| Tagless "v2 draft" `.xex1` (dev-line only, pre-2026-07-03) | Refused permanently — a converter would have to guess types by shape, the exact defect v3 removes | Re-record. (These never left our dev line; you almost certainly have none) |
+| Record-era `.json`+`.bmp` captures | Never replayable (no reader ever existed); remain human-readable exports forever | Nothing — unless you need to REPLAY specific old captures: then §6.4 |
+| XEX1-v1 frames saved off the wire | A lossy *display* format, never a record of the data plane | Nothing; v1 decoders keep decoding them for as long as v1 decoders exist |
 
-### Phase 0 — inventory + test rig (you, now; no repo changes)
+### 4.3 State — the JSON → kv self-seed (doc 16)
 
-Answer the four A-items against your codebase:
+Both channels are live in one DLL during the window; the host converts
+nothing. A porting script seeds once, then the kv channel carries:
 
-- [ ] `grep -r "#pragma omp" <your projects>/… ` — list scripts to port (A1)
-- [ ] List every tool of yours that READS or WRITES `project.json` (A2)
-- [ ] Do you own any XEX1 decoder outside this repo? (A3)
-- [ ] Any script that knowingly under-feeds `mock_camera`/`blob_analysis`? (A4)
-- [ ] Confirm your WS client ignores unknown `event` names and unknown fields
-      (it should already — the protocol has been additive-evolving all along)
+```cpp
+// first inspect after the porting reload:
+if (xi::kv().empty() && xi::state().has("count"))
+    xi::kv().set_i64("count", xi::state()["count"].as_int(0));
+```
 
-Then point one line/test rig at a `polaris_master` build and run your app's
-own regression pass. We can hand you a zipped artifact (with its
-`compat-manifest.json`) on request.
+From then on, use `xi::kv()` everywhere (typed get/set, `XI_KV_SCHEMA(N)` +
+`xi::set_kv_migrate` replacing the old code_change hook). At the cut the
+Record channel disappears; the seed line dies with it (delete it after the
+port soaks). State is in-memory only — worst case for a script you never
+port is one counter reset at its porting reload, not data loss.
 
-### Phase 1 — the merge (us + you, one step)
+## §5 Rollback stance
 
-`polaris_master` → `master` as ONE merge (25 branches, already integrated and
-gate-green; no cherry-picks — the branches interlock). Prerequisites:
+- **The train is one event on our side**: one merge, one revert point.
+  Pre-cut `master` stays tagged; artifacts are zip-swappable and
+  self-identifying (`compat-manifest.json` names backend version, ABI, and
+  the tested-together client set).
+- **The wire has a flag**: XEX1-v1 remains selectable for one release after
+  the flip — the display-wire rollback is a config change, not a redeploy.
+- **The real safety net is the window, and it is honest to say so**: code you
+  port during the window runs on BOTH pre-cut and post-cut backends, so
+  rolling the backend back does not roll your porting work back. After the
+  cut, the only expensive rollback is un-porting — which is precisely why the
+  porting and the soak happen BEFORE the train, and the train itself is a
+  recompile + revalidation, not a leap.
+- **Nothing durable needs a rollback story**: `.xex1` files are valid on both
+  sides of the cut; state is in-memory; `project.json` is untouched.
 
-- [ ] Phase 0 checklist clean or remediated
-- [ ] Your app's regression pass green on the rig
-- [ ] `tools/gate.py` green at the merge commit (we run it; you can too — it
-      is the same command CI runs)
+## §6 Open coordination decisions — what we need from you
 
-Rollback story: pre-merge `master` stays tagged; artifacts are zip-swappable
-and self-identifying via the manifest. The merge itself is trivially
-revertible in git (one merge commit).
+1. **The train date.** Our gates are green; pick the window that matches your
+   release rhythm. Every pre-train release is one more deployed client to
+   re-touch, so sooner is cheaper — but there is no forcing function.
+2. **XEX1-v1 support window.** Proposal: default flips at the cut, v1 behind
+   a flag for ONE release, then deleted. Veto with a reason if you need
+   longer.
+3. **The five command retirements** (§1.7). Confirm or veto EACH of:
+   `watchdog_status`, `unload_script`, `unquarantine_plugin`, `load_plugin`,
+   `get_project`. "No answer" keeps a command alive — we retire nothing
+   unconfirmed.
+4. **The `.json`+`.bmp` → `.xex1` converter** (doc 13 §2). Built ONLY if you
+   name concrete pre-cut captures you must replay; otherwise the answer is
+   re-record and the converter is never built. Decide on the train, not
+   after.
+5. **A named contact + a rig window** for the joint validation pass — same
+   ask as the previous train.
 
-### Phase 2 — adopt at your pace (you, whenever)
+## §7 Reference
 
-The C-table above, in whatever order pays for itself. Recommended first:
-`be_health` in your line-side monitoring (cheap, file-read), then `get_health`
-in whatever operator surface you own.
-
-### Phase 3 — the `abi` bump cutover (us + you, coordinated, LAST)
-
-The one remaining wire change anywhere: `hello.abi` goes 1 → 2, in lockstep
-with `EXPECTED_WS_ABI` in the extension. This is deliberately NOT in
-`polaris_master`. Mechanics are already in place on both sides:
-
-- the **baseline gate** (`contract/baseline_gate.py`, a ctest) now refuses any
-  breaking schema change without a version bump — so "did the wire move" is
-  machine-checked, not remembered;
-- the extension already **enforces** the stamp (treats `abi != 1` as
-  incompatible with a visible warning).
-
-At the cutover we bump the stamp, refresh the baseline, and your clients that
-check `abi` (if any — today none of yours do, which is exactly the problem
-this fixes) start getting a real signal. If you own a WS client, add the
-check then: read `hello.data.abi`, compare to the value you were built
-against, warn loudly on mismatch. One comparison.
-
-## Known issues shipped (honesty section)
-
-- 4 QA examples are quarantined as pre-existing failures
-  (`examples/qa_known_failing.txt`, each with its reason):
-  `qa_lifecycle_teardown`, `qa_local_auto` (driver expects retired VAR-era
-  auto-emit), `qa_recipe_script_instance`, `qa_reentrancy` (flaky on master
-  base). They fail on master too — quarantine makes them loud instead of
-  gate-blocking. A deflake/behavioral pass owns them.
-- `ws_teardown_race` (a stress test, not product code) flakes rarely under
-  load; same owner.
-- The GitHub Actions workflow is authored but has never run on a hosted
-  runner (no remote CI yet); `tools/gate.py` locally is the enforced truth.
-
-## What we need from you
-
-1. Phase 0 checklist results (especially the A1 script inventory).
-2. A named contact + a rig/window for Phase 1.
-3. Your preference on Phase 3 timing: piggyback on your next planned client
-   update, or schedule standalone. There is no urgency — the gate prevents
-   drift while it waits — but every release that ships before it is one more
-   deployed client that ignores the version field.
-
-## Reference
-
-- Full change inventory: `git log master..polaris_master --first-parent`
-  (25 merges, each message summarizes its branch)
-- Reviews that motivated each change: docs/ext_review/06–11
-- Architecture rationale: docs/new_gen/01 (north star), 03 (adoption map +
-  status), 04 (health contract), 05 (schema language)
-- Wire truth: contract/schemas + protocol/fixtures (text),
-  protocol/fixtures/binary (XEX1 goldens)
+- Scope + gates + the cut's exact contents: `docs/new_gen/10-pack-migration-scope.md`
+- Parity evidence (what "everything works pack-only" is measured against): `docs/new_gen/12-pack-parity-matrix.md`
+- Replay-file rulings in full: `docs/new_gen/13-replay-file-migration.md`
+- Capability plane: `docs/new_gen/14-lib-plugin-capability-plane.md`
+- Fault/provenance semantics: `docs/new_gen/15-pack-fault-semantics.md`
+- State (`xi::kv()`) decision + the cut's exact state edits: `docs/new_gen/16-script-state-shape.md`
+- Ordering + `xi::run_id()`: `docs/new_gen/17-pack-ordering-semantics.md`
+- Wire truth: `contract/` schemas + `protocol/fixtures/` (incl. the XEX1-v3 binary goldens)

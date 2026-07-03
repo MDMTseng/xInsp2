@@ -8,7 +8,7 @@
 | Field | Value |
 |---|---|
 | **Date** | 2026-07-03 |
-| **Status** | DRAFT for maintainer decision — the wave-2 exit-gate deliverable (docs/new_gen/08) |
+| **Status** | ADOPTED — IN EXECUTION (updated 2026-07-03; originally the wave-2 exit-gate DRAFT, docs/new_gen/08). Gates P1/P2/P3 all ACHIEVED; cut-gates U1/U2/U3 all RESOLVED (docs 15/16/17); the maintainer decisions below are adopted. THE CUT's sole remaining precondition is app-team cutover coordination — the brief is docs/new_gen/06 |
 | **Basis** | Everything below is merged and gate-green on `polaris2_main` |
 
 ## What the pilot proved (evidence, not claims)
