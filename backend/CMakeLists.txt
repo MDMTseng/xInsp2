@@ -402,6 +402,19 @@ if(NOT MSVC)
 endif()
 add_test(NAME pack_door COMMAND test_pack_door)
 
+# polaris2 gate P2: SCRIPT-SIDE Pack building (xi_script_pack.hpp). Host-role
+# TU (the test_parallel_safety idiom: it owns the xi_use.hpp extern globals and
+# injects the real host_api) driving xi::ScriptPackBuilder -> seal() ->
+# ScriptPack: reads through the t.pack() surface, byte-level canonical-profile
+# checks against xi::mp::Writer, the add_mp canonicalize gate (re-encode
+# non-canonical, refuse malformed/ext), and builder/pack refcount balance.
+add_executable(test_script_pack tests/test_script_pack.cpp)
+target_link_libraries(test_script_pack PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_script_pack PRIVATE pthread)
+endif()
+add_test(NAME script_pack COMMAND test_script_pack)
+
 add_executable(test_yyjson tests/test_yyjson.cpp)
 target_link_libraries(test_yyjson PRIVATE yyjson)
 target_include_directories(test_yyjson PRIVATE
