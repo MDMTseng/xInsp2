@@ -269,12 +269,59 @@ static void test_loader_gate() {
     }
 }
 
+// H2: a project.json `instances` array is otherwise INERT — instances only
+// materialize from instances/<name>/instance.json. A declared entry with NO
+// backing dir used to vanish with no signal (qa_multi_graph: a project.json-only
+// `expose` silently didn't exist). The loader now warns loudly, naming each
+// phantom, while a declared entry that DOES have a backing dir is not falsely
+// flagged as inert.
+static void test_phantom_instance_warns() {
+    SECTION("H2: project.json instance with no backing dir emits a loud warning");
+    fs::path root = scratch("phantom_inst");
+
+    // project.json declares two instances: `backed` (has a dir) and `phantom`
+    // (no dir at all — the inert case). `plugin` names are irrelevant to the
+    // phantom check (it fires purely on the missing backing file).
+    write_project_json(root, R"({
+      "schema":"xi.project/1",
+      "name":"phantom_inst",
+      "instances":[
+        {"name":"backed",  "plugin":"mock_camera"},
+        {"name":"phantom", "plugin":"expose"}
+      ]
+    })");
+    // Give `backed` a real instances/backed/instance.json so it is NOT a phantom
+    // (it may still fail to load for lack of the plugin, but that's a different,
+    // non-phantom warning keyed off the present backing file).
+    fs::create_directories(root / "instances" / "backed");
+    { std::ofstream f((root / "instances" / "backed" / "instance.json").string(), std::ios::binary);
+      f << R"({"plugin":"mock_camera"})"; }
+
+    xi::PluginManager pm;
+    CHECK(pm.open_project(root.string(), /*working_copy=*/false));   // load succeeds (warnings, not errors)
+    auto ws = pm.open_warnings();
+
+    bool phantom_warned = false;
+    bool backed_flagged_inert = false;
+    for (auto& w : ws) {
+        const bool inert = w.reason.find("INERT") != std::string::npos ||
+                           w.reason.find("project.json 'instances'") != std::string::npos;
+        if (w.instance == "phantom" && inert) phantom_warned = true;
+        if (w.instance == "backed"  && inert) backed_flagged_inert = true;
+    }
+    CHECK(phantom_warned);          // the phantom is named and flagged inert
+    CHECK(!backed_flagged_inert);   // a backed entry is never mis-flagged as inert
+
+    std::error_code ec; fs::remove_all(root, ec);
+}
+
 int main() {
     test_parse_schema();
     test_merge_preserves_unknown_stamps_schema();
     test_merge_absent_corrupt_and_schema_replace();
     test_create_project_stamps_schema();
     test_loader_gate();
+    test_phantom_instance_warns();
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
         return 0;

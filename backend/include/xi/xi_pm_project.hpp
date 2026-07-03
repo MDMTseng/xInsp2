@@ -307,6 +307,11 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     // plugin_dirs = ordered search roots; plugins = { label: { path } } refs.
     std::vector<std::string> proj_plugin_dirs;
     std::vector<ProjectInfo::PluginRef> proj_plugin_refs;
+    // H2: {name, plugin} entries declared in project.json's top-level `instances`
+    // array. Instances only materialize from instances/<name>/instance.json
+    // (scanned below); a project.json-only entry is inert. Collected here so the
+    // post-scan cross-check can warn loudly about any phantom (no backing dir).
+    std::vector<std::pair<std::string, std::string>> proj_declared_instances;
     // Project-level DEFAULT for a `plugins` entry that omits its own `compile`
     // flag; per-entry `compile` (parsed below) overrides it. Default off.
     bool proj_plugin_dirs_compile = json_flag_true(content, "plugin_dirs_compile");
@@ -361,6 +366,21 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         compile = yyjson_get_bool(cv);          // per-plugin override
                     proj_plugin_refs.push_back({label, yyjson_get_str(pathv), compile});
                 }
+            }
+        }
+        // H2: collect the top-level `instances` array (shape: [{name, plugin}]).
+        // We DON'T materialize from it — that stays the instances/<name>/
+        // instance.json job below — but we remember the declared names so a
+        // phantom entry (declared here, no backing dir) gets a loud warning
+        // instead of silently doing nothing (found by qa_multi_graph).
+        if (yyjson_val* insts = yyjson_obj_get(root, "instances"); insts && yyjson_is_arr(insts)) {
+            size_t _ii, _in; yyjson_val* it;
+            yyjson_arr_foreach(insts, _ii, _in, it) {
+                if (!yyjson_is_obj(it)) continue;
+                const char* nm = nullptr; const char* pl = nullptr;
+                if (yyjson_val* nv = yyjson_obj_get(it, "name");   nv && yyjson_is_str(nv)) nm = yyjson_get_str(nv);
+                if (yyjson_val* pv = yyjson_obj_get(it, "plugin"); pv && yyjson_is_str(pv)) pl = yyjson_get_str(pv);
+                if (nm && *nm) proj_declared_instances.emplace_back(nm, pl ? pl : "");
             }
         }
         // (trigger_policy removed in the ABI-v6 dispatch cleanup — multi-cam
@@ -790,6 +810,31 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                     inst_name.c_str());
             }
         }
+    }
+
+    // H2: cross-check the project.json `instances` array against what actually
+    // materialized on disk. An instance ONLY exists via instances/<name>/
+    // instance.json (scanned above); a project.json entry with no backing dir
+    // is inert and used to vanish with NO signal — a project.json-only source
+    // (e.g. an `expose` sink) that silently didn't exist (qa_multi_graph). Warn
+    // loudly, naming each phantom, so the misconfig surfaces via
+    // cmd:open_project_warnings instead of manifesting as a mystery-missing
+    // instance far downstream. (A declared entry WHOSE dir exists but failed to
+    // load was already warned by the scan loop; we key off the missing backing
+    // file so we don't double-report it.)
+    for (auto& [nm, pl] : proj_declared_instances) {
+        auto backing = std::filesystem::path(folder) / "instances" / nm / "instance.json";
+        if (std::filesystem::exists(backing)) continue;          // real dir handled above
+        std::string msg =
+            "declared in project.json 'instances' but has no instances/" + nm +
+            "/instance.json — this entry is INERT (instances materialize only "
+            "from their instance.json). Create the folder or remove the "
+            "project.json entry.";
+        last_open_warnings_.push_back({nm, pl, msg});
+        std::fprintf(stderr,
+            "[xinsp2] project.json declares instance '%s' (plugin '%s') with no "
+            "backing instances/%s/instance.json — INERT, not created.\n",
+            nm.c_str(), pl.c_str(), nm.c_str());
     }
     return true;
 }
