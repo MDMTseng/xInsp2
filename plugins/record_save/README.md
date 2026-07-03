@@ -42,7 +42,7 @@ image as a descriptor map `{ "w":.., "h":.., "c":.., "px":<bin pixels> }`
 > v3 puts the tag on the wire (+14 bytes/entry in the max-width profile), so the
 > entry type is recovered exactly. The version bump makes stale readers fail
 > closed; the v2 draft never shipped beyond the polaris2 line and is refused by
-> the loader (see docs/new_gen/11-replay-file-migration.md).
+> the loader (see docs/new_gen/12-replay-file-migration.md).
 
 **This is not a private record format.** The bytes are produced by the *same*
 encoder the `expose` plugin pushes on the wire — `plugins/expose/src/xex1_encode.hpp`
@@ -86,7 +86,7 @@ exactly — the v2 draft's guess-by-shape (and its one ambiguous case) is gone.
 The replay **source** is `plugins/record_replay` — it closes the
 record → save → replay loop (`record_replay_pack_test` proves the replayed packs
 byte-identical to the originals). Migration for pre-v3 files:
-docs/new_gen/11-replay-file-migration.md.
+docs/new_gen/12-replay-file-migration.md.
 
 ## Tests
 

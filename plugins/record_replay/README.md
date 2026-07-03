@@ -43,7 +43,7 @@ A parse failure (truncated/forged/tagless-v2-draft file) emits a sealed
 `$fault` pack (fail loud, the pilot convention: code `bad_replay_file`, detail
 = the parser's reason) and the ack carries the error; the cursor still
 advances, so one bad file cannot wedge a replay loop. Pre-v3 files are refused
-by design — see `docs/new_gen/11-replay-file-migration.md`.
+by design — see `docs/new_gen/12-replay-file-migration.md`.
 
 ## Config
 
