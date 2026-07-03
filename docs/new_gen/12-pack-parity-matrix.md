@@ -2,10 +2,30 @@
 
 | Field | Value |
 |---|---|
-| **Date** | 2026-07-03 |
+| **Date** | 2026-07-03 (re-measured after the three P2 write-half branches merged — see §The write half landed) |
 | **Status** | LIVING INSTRUMENT — this document IS the Gate P2 gate (doc 10: "the pack path can express every pattern the guides teach, measured against the examples tree: every example expressible pack-only") |
 | **Basis** | Everything marked GREEN is demonstrated on `polaris2_main` + this branch, in the RUNNING backend service (not host-mock), by a QA-gated example under `examples/qa_*` unless the evidence column says otherwise |
-| **Method** | Every distinct pattern the examples tree (60 example dirs + 7 top-level scripts) and the plugin READMEs teach was enumerated (one row per pattern, examples mapped onto rows); each row was then tested against what the pack plane offers TODAY: `xi::Pack`/`PackBuilder` (xi_pack.hpp), the xi.pack@1 door (xi_pack_abi.hpp), source `emit_pack`, dual-carry dispatch, and the script `t.pack()` read surface (xi_use.hpp) |
+| **Method** | Every distinct pattern the examples tree (60 example dirs + 7 top-level scripts) and the plugin READMEs teach was enumerated (one row per pattern, examples mapped onto rows); each row was then tested against what the pack plane offers TODAY: `xi::Pack`/`PackBuilder` (xi_pack.hpp), the xi.pack@1 door (xi_pack_abi.hpp), source `emit_pack`, dual-carry dispatch, the script `t.pack()` read surface + `use().process(ScriptPack)` + `use(sink).push(ScriptPack)` (xi_use.hpp), and script-side building via `xi::ScriptPackBuilder` (xi_script_pack.hpp) |
+
+## The write half landed (re-measure, 2026-07-03)
+
+The three formerly IN-FLIGHT sibling branches are all merged on `polaris2_main`:
+
+- **[USE-DOOR]** ✅ — `xi::use(name).process(ScriptPack)` (xi_use.hpp; service
+  callback `use_pack_process_cb`, export `xi_script_set_use_pack_callback`).
+- **[SCRIPT-BUILD]** ✅ — `xi::ScriptPackBuilder` → `seal()` → first-class
+  `ScriptPack` (xi_script_pack.hpp), canonical-gated `add_mp` included (U4).
+- **[EXPOSE-SCRIPT]** ✅ — `xi::use(sink).push(ScriptPack)` (xi_use.hpp; service
+  callback `use_push_pack_cb`, export `xi_script_set_use_push_pack_callback`);
+  declared sink targets are STAGED and flushed after the inspect in frame order.
+
+The blocker tags below are retained in row history where useful but no longer
+gate anything; rows were flipped ONLY where the evidence bar was met. A new
+evidence class is used for rows whose two halves are proven separately:
+**GREEN (composition)** = the script seam is live-QA-proven (qa_use_pack_door)
+AND the target plugin's door is proven against the real built DLL, but no
+single QA example composes them yet. Composition rows are named follow-ups,
+not hidden debt.
 
 ## What "pack-only" means here (the honesty rules)
 
@@ -20,34 +40,36 @@
 - GREEN requires **evidence in the live service**, not aspiration: a QA-gated
   example (preferred) or, where explicitly noted, a shipped host-side test
   against the real DLL.
-- A row blocked on one of the three IN-FLIGHT sibling branches names it, so
-  the matrix mechanically flips as each lands:
-  - **[USE-DOOR]** — `xi::use()` → pack-door chaining for scripts
-  - **[SCRIPT-BUILD]** — script-side Pack building
-  - **[EXPOSE-SCRIPT]** — expose-from-script on the pack plane
+- The three sibling-branch blockers ([USE-DOOR] / [SCRIPT-BUILD] /
+  [EXPOSE-SCRIPT]) have ALL LANDED (§The write half landed) — they appear
+  below only as history inside flipped rows.
 - A row blocked on work **nobody has scheduled** says so with a precise name
   (the §Unscheduled list — this is the wave-2 planning input).
-- **[P3]** — blocked on Gate P3 persistence parity (scheduled in doc 10,
-  not started).
+- **[P3]** — Gate P3 persistence parity: ✅ ACHIEVED 2026-07-03 (doc 10);
+  the tag survives only in E3's history.
 
 ## The reference pack-only examples (QA-gated, all green)
 
 | Example | What it proves pack-only in the live service |
 |---|---|
-| `qa_pack_pilot` | mock_camera pack_mode → dual-carry dispatch → `t.pack()` reads seq + image dims → verdict. (Its observability leg still re-surfaces values through a Record on expose — the [EXPOSE-SCRIPT] gap, marked below.) |
-| `qa_pack_stereo` **(new)** | synced_stereo pack_mode gathers left+right+seq into ONE sealed pack per trigger; script verifies both images' pixel-stamped seq equals the pack's `seq` entry (same-event correlation) — pack-only end to end, observed via the verdict plane alone (no Record anywhere). |
-| `qa_pack_walk` **(new)** | the script read surfaces beyond string gets: generic `for_each` walk with ABI tags, typed-schema (`ScriptTypedPack`) reads equal string-keyed reads, and a ScriptPack captured BY VALUE into a worker thread stays valid — pack-only, verdict-plane observed. |
+| `qa_pack_pilot` | mock_camera pack_mode → dual-carry dispatch → `t.pack()` reads seq + image dims → verdict. **Now pack-only end to end**: the expose leg (formerly the marked [EXPOSE-SCRIPT] Record gap) is a ScriptPackBuilder result pack pushed via `use("expose").push()` (ported 2026-07-03, still green). |
+| `qa_pack_stereo` | synced_stereo pack_mode gathers left+right+seq into ONE sealed pack per trigger; script verifies both images' pixel-stamped seq equals the pack's `seq` entry (same-event correlation) — pack-only end to end, observed via the verdict plane alone (no Record anywhere). |
+| `qa_pack_walk` | the script read surfaces beyond string gets: generic `for_each` walk with ABI tags, typed-schema (`ScriptTypedPack`) reads equal string-keyed reads, and a ScriptPack captured BY VALUE into a worker thread stays valid — pack-only, verdict-plane observed. |
+| `qa_use_pack_door` **(new — the write-half flagship)** | the FULL P2 loop in one script: `xi::ScriptPackBuilder` assembles a white-square gray pack (image + scalars + a nested `xi::mp::Writer` entry round-tripped byte-identical — U4), chains it into blob_analysis's xi.pack@1 door via `xi::use("det").process(pack)` (blob_count/threshold_used/binary asserted off the returned ScriptPack), then builds a RESULT pack (derived binary image + nested mp + `$channel`/`$seq`) and `xi::use("expose").push()`es it, plus a second script-built pack on channel "qa2" (multi-channel). The driver decodes the XEX1-v3 wire and byte-checks the pushed pixels on both channels and the decoded nested entry; wire seq strictly increasing per channel (sink-staged flush). No `xi::Record` anywhere. |
 
 ## The matrix
 
-Legend: **GREEN** = expressible pack-only today. Blockers as defined above.
+Legend: **GREEN** = expressible pack-only today, live-service QA evidence.
+**GREEN (composition)** = both halves proven separately (see §The write half
+landed) — a named follow-up example is owed. Remaining blockers as defined
+above.
 
 ### A. Source → dispatch → script (ingestion + reads)
 
 | # | Pattern | Taught by | Status | Evidence / blocker detail |
 |---|---|---|---|---|
 | A1 | Single-source per-frame **image** delivered to the script | burst_pipeline, image_sources, use_demo.cpp, qa_local_auto, qa_emit_frame_key | **GREEN** | `qa_pack_pilot` (dims through the door), `qa_pack_walk` (pixel reads). Source side: mock_camera `pack_mode` emits from its capture thread. |
-| A2 | **Scalar/string metadata** payload delivered to the script | trigger_metadata (meta_source), json_source README | **GREEN** | `qa_pack_pilot`/`qa_pack_stereo`/`qa_pack_walk` (`seq` i64 entries). json_source's full JSON→pack mapping (scalars, bools, nested→mp, `$fault` on hostile input) is proven against the real DLL in `plugins/json_source/tests/test_json_source_pack.cpp`; its in-service emit fires inside `process()`, so driving it from a script is Record-carried until [USE-DOOR] lands (flips fully then). |
+| A2 | **Scalar/string metadata** payload delivered to the script | trigger_metadata (meta_source), json_source README | **GREEN** | `qa_pack_pilot`/`qa_pack_stereo`/`qa_pack_walk` (`seq` i64 entries). json_source's full JSON→pack mapping (scalars, bools, nested→mp, `$fault` on hostile input) is proven against the real DLL in `plugins/json_source/tests/test_json_source_pack.cpp`; the [USE-DOOR] that was blocking a script-side drive of its `process()` has landed (`use(name).process(ScriptPack)` live-proven in `qa_use_pack_door`), so the script-drive leg is now GREEN (composition). |
 | A3 | **Gathered multi-image trigger** (stereo pair, one event) | stereo_sync (synced_cam), synced_stereo README | **GREEN** | `qa_pack_stereo` (new): one sealed pack carries `left`+`right`+`seq`; same-event correlation asserted in script hands. Note: gathering is the PLUGIN's job (one emitter, one pack) — the bus carries exactly one pack per event and has no bus-level multi-emitter pack merge; no example needs one (see §Explicit non-needs). |
 | A4 | Trigger **identity / timing / ordered arrival** with data in flight | burst_pipeline (latency), qa_result_order (order) | **GREEN** | seq strict monotonicity through the ordered dispatch: `qa_pack_pilot` assert 2, `qa_pack_stereo` assert 3. `t.id()/timestamp_us()/dequeued_at_us()` are event fields, currency-independent. |
 | A5 | **Generic producer-agnostic walk** (dump an unknown pack) | expose/record_save internals; the "generic sink" pattern of doc 02 r2 | **GREEN** | `qa_pack_walk` (new): script `for_each` + ABI tag checks — the same enumeration expose/record_save do host-side, now in script hands in-service. |
@@ -60,48 +82,48 @@ Legend: **GREEN** = expressible pack-only today. Blockers as defined above.
 
 | # | Pattern | Taught by | Status | Evidence / blocker detail |
 |---|---|---|---|---|
-| B1 | `use().process()` with **values**, read result fields | calc_pipeline, burst_dispatch, qa_func, qa_reentrancy | **[USE-DOOR]** | Operator door is ready: blob_analysis `process(PackIn&,PackOut&)` + the chained flow (source pack → door) proven host-side in `plugins/pack_pilot_test.cpp`. Scripts cannot reach any instance door — `UseProxy::process` is Record-only. |
-| B2 | `use().process()` with **images**, chain outputs zero-copy | circle_counting, circle_size_buckets, hue_tune, golden_defect, graph_demo, multi_source_surge | **[USE-DOOR]** | Same as B1; `adopt_image` in the builder ABI gives the zero-copy leg. |
-| B3 | **Typed-IO contracts** (io.hpp build/extract) + **NA propagation** + **provenance** ($prov, out.src()) | fixturing_demo, io_stress, graph_demo (provenance) | **[USE-DOOR]** + **UNSCHEDULED U1** | Plugin-side fail-loud exists ($fault packs: blob_analysis, json_source). Script-side there is NO pack equivalent of `Record::na()/is_na()/na_reason()`, `$prov`/`prov_of()`, `set_src()/src()`, and no `_io`-style typed pack build/extract helpers (doc 10 codegen gap #2 schedules `_io` only for the 3 keys-only plugins). |
-| B4 | **NA short-circuit** through a chain (poison input skips the plugin) | fixturing_demo, typed-io docs | **[USE-DOOR]** + **UNSCHEDULED U1** | The Record UseProxy short-circuits `is_na()` input before the door; the pack door has no NA notion to short-circuit on. |
+| B1 | `use().process()` with **values**, read result fields | calc_pipeline, burst_dispatch, qa_func, qa_reentrancy | **GREEN** | `qa_use_pack_door` (new): a script-built pack through `xi::use("det").process(pack)` in the live service — blob_count/threshold_used read off the returned ScriptPack, `$fault` absent asserted. Full seam contract (result ownership, trigger chaining, $fault pack, fail-closed edges -1/-4/empty/older-host, refcount balance) in `plugins/use_pack_door_test.cpp` against the real DLLs. |
+| B2 | `use().process()` with **images**, chain outputs zero-copy | circle_counting, circle_size_buckets, hue_tune, golden_defect, graph_demo, multi_source_surge | **GREEN** | `qa_use_pack_door`: image in (script-built gray), image back (the door's `binary`, byte-checked after a further push). Chaining a door RESULT onward is the same sealed handle passed as-is (`process` accepts any live ScriptPack — zero-copy across doors); note `ScriptPackBuilder::add_image` COPIES pixels by design (pool-identity across the script seam is deliberately not offered yet, xi_script_pack.hpp). |
+| B3 | **Typed-IO contracts** (io.hpp build/extract) + **NA propagation** + **provenance** ($prov, out.src()) | fixturing_demo, io_stress, graph_demo (provenance) | **UNSCHEDULED U1** | The [USE-DOOR] half landed: the door is script-reachable and `$fault` packs are script-READABLE (`qa_use_pack_door` asserts fault=0 on the happy path; `use_pack_door_test` §4 reads a `$fault` pack). Still missing script-side: pack equivalents of `Record::na()/is_na()/na_reason()`, `$prov`/`prov_of()`, `set_src()/src()`, and `_io`-style typed pack build/extract helpers (doc 10 codegen gap #2 shipped `_io` only for the 3 keys-only plugins, Record-shaped). |
+| B4 | **NA short-circuit** through a chain (poison input skips the plugin) | fixturing_demo, typed-io docs | **UNSCHEDULED U1** | The Record UseProxy short-circuits `is_na()` input before the door; the pack door has no NA notion to short-circuit on. Unchanged by the write-half landing — this is U1's propagation half. |
 
 ### C. Script → sink (observability + custom sinks)
 
 | # | Pattern | Taught by | Status | Evidence / blocker detail |
 |---|---|---|---|---|
-| C1 | Surface **values/images** on a channel (expose `$channel`) | virtually every example; qa_get_dashboard, qa_local_auto | **[EXPOSE-SCRIPT]** | expose's pack door + generic walk + XEX1-v1/v2 encode are ready (`plugins/expose_pack_test.cpp`); what's missing is the script→expose pack leg. `qa_pack_pilot`'s expose leg flips to pack-only when this lands. |
-| C2 | **Multi-channel** preview (UI tabs) | preview_sink_demo | **[EXPOSE-SCRIPT]** + **[SCRIPT-BUILD]** | Channels are the pack door's `$channel` entry (already handled by the door); the synthetic preview images must first be BUILT script-side. |
-| C3 | **Ordered sink** emission (`result_order`, wire `$seq`) | qa_result_order | **[EXPOSE-SCRIPT]** + **UNSCHEDULED U3** | The Record path's dispatch stamps `$seq` INTO the staged record (COW-when-shared). A sealed pack is immutable — ordering metadata must ride the door args/event instead. The expose pack door already carries its own `seq`; the ordered-STAGING analogue is unowned and must be specified in (or alongside) the [EXPOSE-SCRIPT] design. |
-| C4 | **Custom sink instances** fed per-frame from the script | qa_sink_shared_doc (count_sink) | **[USE-DOOR]** (feed leg) | The `$seq` COW double-stamp regression itself is Record-machinery under test — it RETIRES at the cut: sealed single-owner packs make the shared-doc double-stamp class unrepresentable (doc 10 §safety). |
+| C1 | Surface **values/images** on a channel (expose `$channel`) | virtually every example; qa_get_dashboard, qa_local_auto | **GREEN** | `qa_use_pack_door`: result pack pushed via `xi::use("expose").push()`, decoded off the XEX1-v3 wire (values + byte-checked image). `qa_pack_pilot`'s expose leg flipped to pack-only as promised (Record leg deleted 2026-07-03, still green). Host-side seam contract in `plugins/expose_script_push_test.cpp`. |
+| C2 | **Multi-channel** preview (UI tabs) | preview_sink_demo | **GREEN** | `qa_use_pack_door`: a SECOND script-built pack (`$channel:"qa2"`, synthetic gray built with ScriptPackBuilder) pushed per frame; the driver subscribes both channels and byte-checks the qa2 image. Both landings arrived: `$channel` routing (door) + script-side building. |
+| C3 | **Ordered sink** emission (`result_order`, wire `$seq`) | qa_result_order | **UNSCHEDULED U3** (narrowed) | RE-MEASURED: the ordered-STAGING analogue now EXISTS for `push()` — a declared sink target is staged and flushed after the inspect in frame order (`use_push_pack_cb`, service_sinks.cpp; `qa_use_pack_door` asserts wire seq strictly increasing per channel). What remains of U3: (a) the host does NOT stamp `$seq` into a sealed pack — ordering identity is script-carried by design (the pack's own `$seq` entry; expose defaults to 0 without it), so qa_result_order's host-stamped-arrival-id semantics need an owned decision (bless script-carried, or stamp at the door args/event); (b) `use().process()` on a sink target runs INLINE — the documented v0 gap (service_sinks.cpp) — so a pack-consuming ordered sink driven via process() would see completion order under parallel dispatch. Neither is exercised by any example today; both must be decided before qa_result_order's pattern ports. |
+| C4 | **Custom sink instances** fed per-frame from the script | qa_sink_shared_doc (count_sink) | **GREEN** (pattern) | The feed leg landed: `qa_use_pack_door` feeds a sink instance (expose) per-frame via `push()` — the same xi.pack@1 door any custom sink implements (write one door, get the staged script feed for free). count_sink itself is Record-era and vehicle-ports at the cut; its `$seq` COW double-stamp regression RETIRES: sealed single-owner packs make the shared-doc double-stamp class unrepresentable (doc 10 §safety). |
 | C5 | data_output config-surface sink | data_output README, image_sources | **N/A by design** | No process() override, no data plane (doc 10 footnote, verified 2026-07-03). |
 
 ### D. Script-BUILT payloads
 
 | # | Pattern | Taught by | Status | Evidence / blocker detail |
 |---|---|---|---|---|
-| D1 | Script constructs **derived images/values** and pushes them | object_count_puzzle (mask), defect_detection.cpp (6 previews), preview_sink_demo | **[SCRIPT-BUILD]** (+ C1 to surface) | The host builder ABI is complete (xi_pack_v1 builder_new/add_*/seal/emit); scripts have no blessed surface to reach it (ScriptPack is read-only; `iface()` escape hatch requires an arrived pack and is not a taught pattern). |
-| D2 | **Nested / grouped results** (per-ROI record arrays) | record_demo.cpp (`push("items", …)`), io_stress (nested typed) | **[SCRIPT-BUILD]** + **UNSCHEDULED U4** | Nested data rides as ONE canonical-mp entry (`add_mp`) — building it script-side needs a script-reachable canonical msgpack writer (xi_mp Writer or generated builders). Flagged so the [SCRIPT-BUILD] sibling scopes it explicitly; if in their scope, U4 collapses into that branch. |
+| D1 | Script constructs **derived images/values** and pushes them | object_count_puzzle (mask), defect_detection.cpp (6 previews), preview_sink_demo | **GREEN** | `qa_use_pack_door`: the blessed surface is `xi::ScriptPackBuilder` (xi_script_pack.hpp — host-side builder behind the xi.pack@1 door, canonical profile enforced, fail-closed on older hosts). Both derived-payload shapes live: a door-derived image re-packed + pushed (binary, byte-checked on the wire) and a fully synthetic script image (qa2). Backend seam unit: `test_script_pack`. |
+| D2 | **Nested / grouped results** (per-ROI record arrays) | record_demo.cpp (`push("items", …)`), io_stress (nested typed) | **GREEN** (U4 SATISFIED) | `ScriptPackBuilder::add_mp(xi::mp::Writer)` IS the script-reachable canonical-mp writer U4 asked for — untrusted bytes go through `xi::mp::canonicalize` (reject-all ext policy), so a script cannot mint non-canonical pack bytes. Live evidence in `qa_use_pack_door`: a nested Writer map round-trips byte-identical through seal(), rides through the blob door input, and a copy on the RESULT pack decodes correctly off the XEX1-v3 wire ({origin, trigger_seq} checked by the driver). |
 
 ### E. Buffering / replay / persistence
 
 | # | Pattern | Taught by | Status | Evidence / blocker detail |
 |---|---|---|---|---|
-| E1 | **In-memory capture ring + hot-param replay** | buffer_replay_demo (cache), cache README, image_sources (cached_image_source) | **[USE-DOOR]** (capture leg) | cache's pack capture door + ZERO-COPY replay re-emit (same handle, fresh trigger id) + eviction/teardown release are proven against the real DLL in `plugins/cache/tests/test_cache_pack.cpp`. The replayed pack reaches the script via `t.pack()` like any emit. Only the script→cache capture call is missing. |
-| E2 | **Persist results to disk** | record_save README, data-out guides | **[USE-DOOR]** (feed leg) | record_save's pack door writes canonical XEX1-v2, byte-identical to expose's wire dump (memory≈wire≈disk), proven in `plugins/record_save_pack_test.cpp`. |
-| E3 | **Replay FROM disk** (load a dump back into the pipeline) | record_save README (xex1_pack_load) | **[P3]** | Untrusted-disk load-back through ingress already rebuilds an identical pack in `record_save_pack_test.cpp`; the replay-SOURCE path + migration note for old replay files is Gate P3 (doc 10), scheduled, not started. |
+| E1 | **In-memory capture ring + hot-param replay** | buffer_replay_demo (cache), cache README, image_sources (cached_image_source) | **GREEN (composition)** | The missing script→cache capture call is now `use("cache").process(pack)` — the seam live-proven in `qa_use_pack_door` (against blob_analysis); cache's capture door + ZERO-COPY replay re-emit (same handle, fresh trigger id) + eviction/teardown release proven against the real DLL in `plugins/cache/tests/test_cache_pack.cpp` (re-run green 2026-07-03). The replayed pack reaches the script via `t.pack()` like any emit (A1). Owed: a pack-mode `buffer_replay` QA example composing them. |
+| E2 | **Persist results to disk** | record_save README, data-out guides | **GREEN (composition)** | The feed leg is `push()` — staged sink discipline live-proven in `qa_use_pack_door` (against expose, the same `use_push_pack_cb` path); record_save's pack door writes canonical XEX1-v3, byte-identical to expose's wire dump (memory≈wire≈disk), proven in `plugins/record_save_pack_test.cpp` (re-run green 2026-07-03). Owed: the graph-level record example (doc 10 parks it under P2's umbrella). |
+| E3 | **Replay FROM disk** (load a dump back into the pipeline) | record_save README (xex1_pack_load) | **GREEN (composition)** | Gate P3 ✅ (doc 10): the `record_replay` SOURCE re-emits a disk dump through the pack door — record → save → replay is a closed byte-lossless loop, entry-for-entry identical incl. restored `$channel`/`$seq`, proven against the real DLL in `plugins/record_replay_pack_test.cpp` (re-run green 2026-07-03); source-emit → `t.pack()` is the live-proven A1 path. Owed: the same graph-level example as E2 (route a recorded run through a full project). |
 
 ### F. Config-plane patterns over data-plane plugins
 
 | # | Pattern | Taught by | Status | Evidence / blocker detail |
 |---|---|---|---|---|
-| F1 | **Config swap** (prepare/commit) under live traffic | config_swap_probe README | **[USE-DOOR]** | Record-vs-pack door parity of the probe proven in `plugins/config_swap_probe/tests/test_config_swap_probe_pack.cpp`; the observation surface (get_status) is control-plane JSON and unaffected. |
-| F2 | **Retune-and-rerun** via exchange (hue_tune, golden_defect Param) | hue_tune, golden_defect, buffer_replay_demo | **N/A** (control) | exchange()/Params are control plane. The rerun's DATA leg is B2/E1 and inherits their blockers. |
+| F1 | **Config swap** (prepare/commit) under live traffic | config_swap_probe README | **GREEN (composition)** | Record-vs-pack door parity of the probe proven in `plugins/config_swap_probe/tests/test_config_swap_probe_pack.cpp` (re-run green 2026-07-03); the script drive is the live-proven `use().process(pack)` seam. The observation surface (get_status) is control-plane JSON and unaffected. |
+| F2 | **Retune-and-rerun** via exchange (hue_tune, golden_defect Param) | hue_tune, golden_defect, buffer_replay_demo | **N/A** (control) | exchange()/Params are control plane. The rerun's DATA leg is B2/E1 and inherits their status (B2 GREEN; E1 GREEN-composition). |
 
 ### G. Verdict / status / state
 
 | # | Pattern | Taught by | Status | Evidence / blocker detail |
 |---|---|---|---|---|
-| G1 | **Per-run verdicts** incl. ok/ng/na/crash classes | qa_run_result, defect_detection.cpp | **GREEN** (orthogonal) | The verdict plane is not a data currency; all three pack QA examples verdict while holding a pack. `qa_pack_stereo`/`qa_pack_walk` use it as the ONLY observability channel — proof it suffices pack-only. |
+| G1 | **Per-run verdicts** incl. ok/ng/na/crash classes | qa_run_result, defect_detection.cpp | **GREEN** (orthogonal) | The verdict plane is not a data currency; all four pack QA examples verdict while holding a pack. `qa_pack_stereo`/`qa_pack_walk` use it as the ONLY observability channel — proof it suffices pack-only. |
 | G2 | **Sticky status** breadcrumbs (`xi::status`) | status_demo, crash_tests | **N/A** (control) | |
 | G3 | **Cross-frame script state** (`xi::state()`) | blob_tracker, trend_monitor, hot_reload_run2 | **N/A today / UNSCHEDULED U2 at the cut** | Orthogonal to the payload currency (script-local), BUT `xi::state()` returns `xi::Record&` — it is a named casualty of Record deletion with no scheduled replacement. |
 | G4 | **Params / recipes / instance defs** | qa_param_state_isolation, qa_recipe_script_instance, user_with_instance.cpp | **N/A** (control) | JSON config plane; explicitly untouched by the migration. |
@@ -138,50 +160,66 @@ Where a Record appears it is a control vehicle, noted per family:
   Record leg to the pack equivalents (C1/B1) on the cut train — doc 10 step 4
   "port the examples tree".
 
-## Scorecard
+## Scorecard (re-measured 2026-07-03, post-landing)
 
-Counting the 30 pattern rows (A1–A9, B1–B4, C1–C5, D1–D2, E1–E3, F1–F2, G1–G4;
-§H is the N/A block):
+Counting the 29 pattern rows (A1–A9, B1–B4, C1–C5, D1–D2, E1–E3, F1–F2, G1–G4;
+§H is the N/A block — the pre-landing scorecard said "30", a miscount):
 
 | Status | Rows | Count |
 |---|---|---|
-| **GREEN today (pack-only, evidenced)** | A1–A9, G1 | **10** |
-| **Flips on [USE-DOOR]** | B1, B2, C4, E1, E2, F1 (+ B3, B4 partially) | **6 (+2 partial)** |
-| **Flips on [EXPOSE-SCRIPT]** | C1, C2 (also D-gated), C3 (needs U3 answered) | **3** |
-| **Flips on [SCRIPT-BUILD]** | D1, D2 (needs U4 answered), C2 (shared) | **2** |
-| **Gate P3 (scheduled)** | E3 | **1** |
-| **Unscheduled blocker involved** | B3, B4 (U1), C3 (U3), D2 (U4), G3 (U2) | **5** |
+| **GREEN (pack-only, live-service QA evidence)** | A1–A9, B1, B2, C1, C2, C4, D1, D2, G1 | **17** |
+| **GREEN (composition — both halves proven, one example owed)** | E1, E2, E3, F1 | **4** |
+| **Open on unscheduled semantics** | B3, B4 (U1), C3 (U3) | **3** |
 | **N/A (control plane / by design)** | C5, F2, G2, G4 + the §H block | **4 rows + H** |
+| **N/A today / U2 at the cut** | G3 | **1** |
 
-Bottom line for Gate P2: **the read half of script parity is done and
-QA-gated** (everything a script needs to CONSUME packs works in the live
-service today). The write half is exactly the three sibling branches — plus
-four named semantic gaps (U1–U4) that no branch owns. **P2 cannot be declared
-green until B/C/D rows flip AND U1/U3/U4 have owners or explicit
-won't-need decisions.**
+Bottom line for Gate P2: **both halves of script parity are now landed and
+QA-gated** — read (t.pack(), walk, typed, cross-thread) AND write
+(ScriptPackBuilder incl. canonical nested-mp, use()→door chaining,
+expose-from-script with staged sink ordering), the full loop proven in one
+live script (`qa_use_pack_door`). U4 is SATISFIED. What remains is exactly
+two named semantic residuals — **U1** (pack-plane NA/provenance/typed-IO:
+gates the error paths of fixturing_demo / io_stress / graph_demo, rows B3/B4)
+and **U3** (ordered-sink semantics: script-carried `$seq` needs blessing, and
+process()-on-sink runs inline — gates qa_result_order's pattern, row C3) —
+plus four composition rows owing one example each (E1/E2/E3 collapse into the
+graph-level record→replay example doc 10 already names; F1 into a pack-mode
+config-swap drive). **The Gate P2 verdict rendered on this measurement is in
+doc 10: ACHIEVED WITH NAMED RESIDUALS (U1, U3).** U2 (`xi::state()`'s Record
+shape) gates the CUT, not P2.
 
-## Unscheduled blockers (the wave-2 planning input)
+## Unscheduled blockers (the wave-2 planning input; re-measured 2026-07-03)
 
-- **U1 — Pack-plane NA / provenance / typed-IO script semantics.** No pack
-  equivalent of `Record::na()/is_na()/na_reason()` (NA propagation through
-  chains), `$prov`/`prov_of()`, `set_src()/src()` (provenance), and no
+- **U1 — Pack-plane NA / provenance / typed-IO script semantics. STILL OPEN.**
+  No pack equivalent of `Record::na()/is_na()/na_reason()` (NA propagation
+  through chains), `$prov`/`prov_of()`, `set_src()/src()` (provenance), and no
   `_io`-style typed build/extract helpers for packs beyond doc 10's codegen
-  gap #2 (keys-only plugins). Plugin-side `$fault` packs exist and are a good
-  seed; the script-side read/propagate contract is unowned. Affects:
-  fixturing_demo, io_stress, graph_demo, and the error path of every chained
-  example.
-- **U2 — `xi::state()` post-Record shape.** Returns `xi::Record&`
-  (xi_state.hpp); DocRegistry/COW die at the cut. Keep-as-JSON vs move-to-pack
-  is nobody's decision yet. Affects: blob_tracker, trend_monitor,
-  hot_reload_run2 (+ `t.meta()`'s Record return, same family).
-- **U3 — Ordered-sink semantics on the pack plane.** Dispatch stamps `$seq`
-  into staged Records; sealed packs are immutable, so ordering metadata must
-  ride the door args/event. Must be specified in or alongside the
-  [EXPOSE-SCRIPT] design; today unowned. Affects: qa_result_order's pattern.
-- **U4 — Script-reachable canonical-mp writer for nested entries.** Nested/
-  grouped results are one `Mp` entry; building one script-side needs an
-  xi::mp-writer surface (or generated builders). Belongs in [SCRIPT-BUILD]'s
-  scope — flagged so that branch either includes it or this becomes a task.
+  gap #2 (keys-only plugins, Record-shaped). What the landing DID give:
+  plugin-side `$fault` packs are now script-READABLE (`use_pack_door_test` §4)
+  — the fail-loud seed exists; the propagate/short-circuit contract is
+  unowned. Affects: fixturing_demo, io_stress, graph_demo, and the error path
+  of every chained example. **This is Gate P2 residual #1 (doc 10).**
+- **U2 — `xi::state()` post-Record shape. STILL OPEN (verified 2026-07-03:
+  xi_state.hpp still returns `xi::Record&`).** DocRegistry/COW die at the cut.
+  Keep-as-JSON vs move-to-pack is nobody's decision yet. Affects:
+  blob_tracker, trend_monitor, hot_reload_run2 (+ `t.meta()`'s Record return,
+  same family). Gates the CUT, not P2.
+- **U3 — Ordered-sink semantics on the pack plane. NARROWED, still open.**
+  The staging analogue landed for `push()` (sink targets staged + flushed in
+  frame order — live-evidenced by strictly-increasing wire seq in
+  `qa_use_pack_door`). Remaining: (a) hosts do not stamp `$seq` into sealed
+  packs — ordering identity is script-carried by design; bless that (and
+  give qa_result_order's host-stamped semantics an explicit successor) or
+  specify a door-args/event carry; (b) `use().process()` on a sink target
+  runs INLINE (documented v0 gap, service_sinks.cpp) — completion-order side
+  effects under parallel dispatch. Affects: qa_result_order's pattern.
+  **This is Gate P2 residual #2 (doc 10).**
+- **U4 — Script-reachable canonical-mp writer for nested entries.
+  ✅ SATISFIED 2026-07-03** by `ScriptPackBuilder::add_mp(xi::mp::Writer)`
+  (xi_script_pack.hpp): nested bytes pass the `xi::mp::canonicalize`
+  reject-all-ext gate, canonical input rides byte-identical. Live evidence:
+  `qa_use_pack_door` (round-trip in script + decode off the v3 wire); unit:
+  `test_script_pack`. [SCRIPT-BUILD] scoped it in, exactly as flagged.
 
 ## Explicit non-needs (checked, deliberately NOT scheduled)
 
