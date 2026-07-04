@@ -429,6 +429,33 @@ int main() {
     }
 
     // -----------------------------------------------------------------------
+    SECTION("(8b) F1 stream identity: a propagated mid-stream fault keeps $stream/$part/$eof");
+    {
+        // A fault sealed mid-stream carries the doc-18 stream identity keys. When
+        // it flows through a funnel hop (use().process() short-circuit), the
+        // propagated fault must KEEP $stream/$part/$eof — else the consumer can no
+        // longer match the poison to its stream and the stream is never poisoned.
+        xi_pack_builder b = fi->builder_new();
+        fi->builder_add_str(b, "$fault", "sensor_drop", 11);
+        fi->builder_add_i64(b, "$seq", 5);
+        fi->builder_add_i64(b, "$stream", 1002);
+        fi->builder_add_i64(b, "$part", 2);
+        fi->builder_add_bool(b, "$eof", 1);
+        auto in = own_pack(fi->builder_seal(b), fi);
+
+        int calls_before = g_door_calls;
+        auto out = xi::use("det0").process(in);
+        CHECK(g_door_calls == calls_before);                 // short-circuited, door never ran
+        CHECK(out.valid() && out.is_fault());
+        CHECK(out.fault_reason() && *out.fault_reason() == "sensor_drop");
+        CHECK(out.get_i64("$seq").value_or(-1) == 5);
+        CHECK(out.get_i64("$stream").value_or(-1) == 1002);  // F1: stream id SURVIVES the hop
+        CHECK(out.get_i64("$part").value_or(-1) == 2);       // ... and the chunk index
+        CHECK(out.get_bool("$eof").value_or(false) == true); // ... and the eof marker
+        CHECK(out.src() && *out.src() == "det0");
+    }
+
+    // -----------------------------------------------------------------------
     SECTION("(9) U1 provenance chain across two chained doors");
     {
         // Happy-path chain: det0's result (a REAL door run) feeds det1. det1's

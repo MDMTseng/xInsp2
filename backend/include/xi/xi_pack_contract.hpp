@@ -114,7 +114,9 @@ inline std::string prov_append(std::string parent, std::string_view hop) {
 //
 // Mint the NEW sealed pack a fault input flows through a door as, WITHOUT
 // running the plugin: the original "$fault"/"$fault_key"/"$fault_detail"
-// (and "$seq", so the fault stays correlatable with its frame) are copied,
+// (and "$seq", so the fault stays correlatable with its frame; and the stream
+// identity "$stream"/"$part"/"$eof" when present, so a mid-stream fault keeps
+// poisoning its stream after a hop — F1/doc 18) are copied,
 // "$src" becomes this hop, and the hop is appended to "$prov". Precondition:
 // is_fault(fi, in) — but a torn/mistyped "$fault" entry still yields a fault
 // pack (reason "fault") rather than silently laundering the poison.
@@ -140,6 +142,20 @@ inline xi_pack_handle propagate_fault(const xi_pack_v1* fi, xi_pack_handle in,
     if (fi->get_i64 && fi->builder_add_i64) {
         int64_t seq = 0;
         if (fi->get_i64(in, kSeq, &seq) == 1) fi->builder_add_i64(b, kSeq, seq);
+        // F1 (doc 18/15): a mid-stream fault must keep its STREAM IDENTITY, else
+        // a propagated fault loses the "$stream" id the consumer keys its poison
+        // marker on — the poison silently stops poisoning that stream. Carry
+        // "$stream"/"$part" (i64) and "$eof" (bool) forward when present, exactly
+        // as "$seq" is carried, so a fault that flows through a funnel hop still
+        // names the stream it belongs to (doc 15's one poison marker).
+        int64_t stream = 0;
+        if (fi->get_i64(in, kStream, &stream) == 1) fi->builder_add_i64(b, kStream, stream);
+        int64_t part = 0;
+        if (fi->get_i64(in, kPart, &part) == 1) fi->builder_add_i64(b, kPart, part);
+    }
+    if (fi->get_bool && fi->builder_add_bool) {
+        int32_t eof = 0;
+        if (fi->get_bool(in, kEof, &eof) == 1) fi->builder_add_bool(b, kEof, eof);
     }
     std::string chain = prov_append(prov_parent(fi, in), hop_sv);
     fi->builder_add_str(b, kSrc, hop_sv.data(), (int32_t)hop_sv.size());
