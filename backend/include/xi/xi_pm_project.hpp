@@ -472,6 +472,15 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                     "requires overflow:block — clamping depth to 1\n");
                 project_.queue_depth = 1;
             }
+            // Advisory (not clamped): rendezvous is strict 1-in-flight lock-step, so
+            // extra worker threads sit idle. Almost always a misconfig — flag it but
+            // honour it (see doc 24 "max_parallel").
+            if (project_.queue_depth == 0 && project_.dispatch_threads > 1) {
+                std::fprintf(stderr,
+                    "[xinsp2] project.json parallelism.queue_depth:0 (rendezvous) "
+                    "serializes to one in-flight event — dispatch_threads>1 (%d) will "
+                    "sit idle\n", project_.dispatch_threads);
+            }
             // parallelism.groups + default_group (optional; empty = legacy pool)
             if (yyjson_val* arr = yyjson_obj_get(par, "groups"); arr && yyjson_is_arr(arr)) {
                 auto warn = [&](const std::string& who, const std::string& msg) {
@@ -548,6 +557,10 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         warn(grp.name, "queue_depth:0 (rendezvous) requires overflow:block — clamping depth to 1");
                         grp.queue_depth = 1;
                     }
+                    // Advisory (honoured, not clamped): rendezvous is strict 1-in-flight,
+                    // so max_parallel>1 leaves the extra workers idle (see doc 24).
+                    if (grp.queue_depth == 0 && grp.max_parallel > 1)
+                        warn(grp.name, "queue_depth:0 (rendezvous) serializes to one in-flight event — max_parallel>1 will sit idle");
                     project_.groups.push_back(std::move(grp));
                 }
                 if (yyjson_val* k = yyjson_obj_get(par, "default_group"); k && yyjson_is_str(k) && yyjson_get_str(k))
