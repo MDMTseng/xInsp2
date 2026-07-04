@@ -18,6 +18,25 @@ doc 10 / doc 14.
 | ~~H5~~ | ~~**`qa_local_auto`** — driver expects VAR-era auto-emitted run_results.~~ **DONE / diagnosis was wrong** (polaris2/h-qa-infra). The driver was already on the current run_result contract (identical to green qa_run_result / qa_emit_frame_key). The real defect: `instances/cam/instance.json` pointed `dir` at `examples/object_count_solve/frames`, an example that was deleted — 0 images → 0 auto-emits → 0 run_results. Repointed to `examples/blob_tracker/frames` (as the sibling qa_emit_frame_key does); driver now PASSes (10 run_results, ok=10). Quarantine entry removed. | `examples/qa_local_auto/instances/cam/instance.json` | Low — dead config path | S |
 
 
+### A.1 — red-team load/concurrency pass (2026-07, doc 21)
+
+An adversarial load/concurrency review of the v12 core (threat model:
+well-behaved clients under heavy load) surfaced the rows below. All are LANDED on
+`polaris2/redteam-hardening` with a reproducing regression each; full severity /
+repro / fix / test mapping is in [`21-redteam-load-findings.md`](./21-redteam-load-findings.md).
+The two concurrency rows (RT6/RT7) are core changes flagged for human review.
+
+| ID | Item | Where | Sev | Fix + regression |
+|---|---|---|---|---|
+| ~~RT1 (F1)~~ | ~~**`propagate_fault` drops stream identity.**~~ **DONE.** It copied `$fault*/$seq/$src/$prov` but not `$stream/$part/$eof`, so a propagated mid-stream fault lost the id its consumer keys its poison on. Now carries them when present. | `xi_pack_contract.hpp` | Med | Copy `kStream/kPart/kEof`; `use_pack_door_test` §8b. |
+| ~~RT2 (F3)~~ | ~~**Stream consumer poisoned by a FOREIGN fault.**~~ **DONE.** The qa consumer aborted on any `$fault` before checking its `$stream`; a fault for another stream (or stream-less) cleared it. Now poisons only when the fault names THIS stream. | `examples/qa_pack_stream/inspect.cpp` | Med | `$stream`-match gate; qa driver `s4_foreign_fault_ignored`. |
+| ~~RT3 (F5)~~ | ~~**`record_replay` injects `$channel/$seq` unconditionally.**~~ **DONE.** A replayed pack gained a spurious `""/0` pair even when the recording lacked them. v3 header fields are now OPTIONAL; parser signals presence; replay injects only when carried. | `record_replay.cpp`, `xex1_*` | Med | presence flags; `record_replay_pack_test` §G. |
+| ~~RT4 (B1)~~ | ~~**2nd provider instance → capability permanently lost.**~~ **DONE.** A 2nd project instance got `ETAKEN` silently; removing the 1st swept the name, leaving a live provider unregistered. CapRegistry now ref-counts (shadow-stack): the loser is remembered and PROMOTED when the holder leaves. | `xi_cap_abi.hpp` | High | shadow-stack; `test_cap_provider_refcount`. |
+| ~~RT5~~ | ~~**`cmd_remove_instance_` had NO quiesce guard.**~~ **DONE.** The only DLL-affecting lifecycle op that didn't quiesce the dispatch pool — closes R1's ledger-mis-attribution UAF window on remove. Now wrapped like every sibling. | `service_cmd_project.cpp` | High | quiesce guard; `examples/qa_remove_under_load`. |
+| RT6 (A1/A2) | **Cap funnel reinit-UAF** — the funnel runs the handler under no CallScope, so `reinit()` can destroy `inst_` under a concurrent cap handler. Fixed with a per-adapter reader/writer reinit gate (**core concurrency change — human review**; options in doc 21). | `xi_cap_abi.hpp`, `xi_cabi_adapter.hpp` | High | shared/exclusive gate; `test_cap_reinit_race`. |
+| RT7 (P1) | **`cmd:stop` verdict/actuation divergence** — a stop-woken success reported its verdict to the wire while its staged sink push (PLC actuation) was drain-dropped. Fixed by coupling both through one predicate (verdict suppressed with the actuation). (**human review** — option choice in doc 21.) | `service_inspect.cpp`, `xi_emit_gate.hpp` | High | `emit_success_outputs`; `test_emit_gate` §P1. |
+| RT8 (P2) | **Slow consumer stalls the whole ordered lane** — `send_frame` holds `tx_mu_` + blocks in `::send` inside the EmitTurn window. NOT fixed (larger restructure: decouple send from the emit gate / per-consumer queue). Documented in doc 21 §P2. | `service` send path | Med | design note only (doc 21). |
+
 ## B. v12 cutover-train items (deferred, coordinated — see doc 06 §1 / 10 / 14)
 
 | ID | Item | Rationale for deferral |
@@ -32,7 +51,7 @@ doc 10 / doc 14.
 
 | ID | Item | Note |
 |---|---|---|
-| R1 | **PackRegistry owner-ledger mis-attribution** — a tagged ref released from a guard-less thread while multiple owners hold buckets can be mis-attributed in the ledger. | NEVER memory-unsafe, NEVER over-released (handles fail closed); documented in `xi_pack_abi.hpp`. Tighten if a real leak is observed. |
+| R1 | **PackRegistry owner-ledger mis-attribution** — a tagged ref released from a guard-less thread while multiple owners hold buckets can be mis-attributed in the ledger. | NEVER memory-unsafe, NEVER over-released (handles fail closed); documented in `xi_pack_abi.hpp`. The `remove_instance` window that made this reachable as a UAF is now closed by RT5's quiesce guard (doc 21). Tighten further if a real leak is observed. |
 | R2 | **Capability funnel not metered into `dispatch_stats`** — doc 14 promised call-count/latency observability "for free"; the pilot didn't wire it. | Cheap add when the plane grows; needed before the plane carries production load. |
 | R3 | **Codegen `.gen.ts` / `_gen.py` emitters have no consumer** — `gen_contract.py` emits a per-plugin TS/Py pair nobody imports yet; deleting them fails the codegen-equiv drift gate. | Report-not-delete (verified orphan-but-load-bearing-to-the-gate). If never adopted, remove the emitters from `ARTIFACTS` for all plugins at once — a generator decision, not a file delete. |
 

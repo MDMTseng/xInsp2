@@ -2,9 +2,11 @@
 
 > **Status: the out-of-process `xinsp-comms` gateway + the in-process `xi::comms`
 > client + script API were REMOVED.** PLC / external I/O is now a plugin concern,
-> and the "tell the PLC on a backend crash" guarantee is served by the FE's
-> safe-state sink + `host->set_safe_state`. This supersedes the old gateway
-> design (Increments 1–3), which shipped but is no longer in the tree.
+> and the "tell the PLC on a backend crash" guarantee is served by a comms
+> plugin's own crash-watching sidecar process (see ../internals/comms-sidecar.md).
+> This supersedes the old gateway design (Increments 1–3), and also the
+> intermediate `set_safe_state` ABI verb + FE `--safe-state` sink, both of which
+> shipped and were themselves removed 2026-06 — do not use them.
 
 ## Why the change
 
