@@ -24,6 +24,9 @@ Asserts (per summary frame, all frames):
      partials discarded, stragglers dropped.
   5. TIMEOUT: s3_timeout==1 — a stream whose $eof never arrives aborts
      stream_timeout at the end-of-lane sweep.
+  5b. FOREIGN FAULT IGNORED (F3): s4_foreign_fault_ignored==1 — a fault tagged
+     for ANOTHER stream (and a stream-less fault) delivered mid-flight does NOT
+     poison this consumer; the stream still completes with both features found.
   6. VERDICT: >=1 ok run_result arrived and ZERO ng run_results (every run's
      in-script assertion bundle passed).
 
@@ -133,7 +136,8 @@ def main() -> int:
             fails.append(f"too few stream summaries reached the wire (got {len(summaries)}, want >=5)")
 
         want = {"feat_a": 1, "feat_b": 1, "feat_other": 0, "s1_complete": 1,
-                "win": 1, "overlap_needed": 1, "s2_fault_abort": 1, "s3_timeout": 1}
+                "win": 1, "overlap_needed": 1, "s2_fault_abort": 1, "s3_timeout": 1,
+                "s4_foreign_fault_ignored": 1}
         for i, s in enumerate(summaries):
             bad = {k: s.get(k) for k, v in want.items() if int(s.get(k, -1)) != v}
             if bad:

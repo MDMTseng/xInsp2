@@ -129,7 +129,15 @@ struct StreamConsumer {
         if (aborted) return;                         // poisoned stream: stragglers dropped
         if (!p.valid()) { abort("bad_chunk"); return; }
         if (p.is_fault()) {                          // doc 15: $fault poisons the stream
-            abort(std::string(p.fault_reason().value_or("fault")));
+            // F3: doc 15's poison marker is the fault carrying THIS stream's
+            // "$stream" id — a fault MUST name the stream it poisons. A fault
+            // tagged for ANOTHER stream, or a stream-less fault, is NOT this
+            // consumer's poison: ignore it, don't clear the in-progress
+            // reassembly (a shared lane carries faults for every stream on it).
+            const long long fsid = p.get_i64("$stream").value_or(-1);
+            if (id < 0 && fsid >= 0) id = fsid;      // first thing seen binds the stream
+            if (fsid >= 0 && fsid == id)
+                abort(std::string(p.fault_reason().value_or("fault")));
             return;
         }
         const long long sid  = p.get_i64("$stream").value_or(-1);
@@ -223,14 +231,48 @@ XI_INSPECT_ENTRY(t, frame) {
     s3.finish();                                     // the lane's deadline expires
     const bool s3_ok = s3.aborted && !s3.complete && s3.reason == "stream_timeout";
 
-    const bool pass = seq >= 0 && sealed_ok && s1_ok && overlap_needed && s2_ok && s3_ok;
-    char msg[224];
+    // ---- stream 1004: a FOREIGN fault must NOT poison this stream (F3) -------
+    // A shared lane carries faults for every stream on it. A fault tagged for
+    // ANOTHER stream (1002), and a stream-less fault, are delivered mid-flight to
+    // consumer 1004: neither may clear its reassembly. The stream still completes
+    // on its own $eof with both features found exactly once.
+    StreamConsumer s4;
+    s4.feed(make_chunk(1004, 0, strip, seq));        // binds id = 1004
+    s4.feed(make_chunk(1004, 1, strip, seq));
+    {
+        xi::ScriptPackBuilder foreign;               // a fault for a DIFFERENT stream
+        foreign.fault("sensor_drop", "strip", "qa: fault for stream 1002");
+        foreign.add_i64("$stream", 1002);
+        foreign.add_i64("$part", 2);
+        foreign.add_i64("$seq", seq);
+        s4.feed(foreign.seal());
+        xi::ScriptPackBuilder streamless;            // a fault with NO stream id
+        streamless.fault("global_glitch", "strip", "qa: stream-less fault");
+        streamless.add_i64("$seq", seq);
+        s4.feed(streamless.seal());
+    }
+    s4.feed(make_chunk(1004, 2, strip, seq));        // reassembly must be intact
+    s4.feed(make_chunk(1004, 3, strip, seq));        // carries $eof
+    s4.finish();
+    int s4a = 0, s4b = 0, s4other = 0;
+    for (const auto& f : s4.features) {
+        if (f.first == kAy && f.second == kAx)      ++s4a;
+        else if (f.first == kBy && f.second == kBx) ++s4b;
+        else                                        ++s4other;
+    }
+    const bool s4_ok = s4.complete && !s4.aborted &&     // the foreign faults were ignored
+                       s4a == 1 && s4b == 1 && s4other == 0;
+
+    const bool pass = seq >= 0 && sealed_ok && s1_ok && overlap_needed &&
+                      s2_ok && s3_ok && s4_ok;
+    char msg[256];
     std::snprintf(msg, sizeof msg,
                   "pstream seq=%lld sealed=%d s1(complete=%d a=%d b=%d other=%d win=%d) "
-                  "overlap_needed=%d s2(%d:%s) s3(%d:%s)",
+                  "overlap_needed=%d s2(%d:%s) s3(%d:%s) s4(%d:a=%d b=%d)",
                   seq, sealed_ok ? 1 : 0, s1.complete ? 1 : 0, na, nb, nother,
                   s1.max_buffered, overlap_needed ? 1 : 0, s2_ok ? 1 : 0,
-                  s2.reason.c_str(), s3_ok ? 1 : 0, s3.reason.c_str());
+                  s2.reason.c_str(), s3_ok ? 1 : 0, s3.reason.c_str(),
+                  s4_ok ? 1 : 0, s4a, s4b);
     if (pass) xi::ok(1, msg);                        // the verdict rides run_result
     else      xi::ng(1, msg);
 
@@ -247,5 +289,6 @@ XI_INSPECT_ENTRY(t, frame) {
     rb.add_i64("overlap_needed", overlap_needed ? 1 : 0);
     rb.add_i64("s2_fault_abort", s2_ok ? 1 : 0);
     rb.add_i64("s3_timeout", s3_ok ? 1 : 0);
+    rb.add_i64("s4_foreign_fault_ignored", s4_ok ? 1 : 0);
     if (auto out = rb.seal()) xi::use("expose").push(out);
 }
