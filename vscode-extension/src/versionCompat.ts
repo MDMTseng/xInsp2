@@ -3,7 +3,7 @@
 // The backend announces itself once per connection in the `hello` event, whose
 // data carries exactly three identity fields today (backend/src/service_main.cpp
 // send_hello): `version` (the backend's SemVer string, e.g. "0.2.0"), `commit`
-// (git sha), and `abi` (the WS *protocol* stamp — a hardcoded `1`, distinct from
+// (git sha), and `abi` (the WS *protocol* stamp — a hardcoded `2`, distinct from
 // the C plugin-ABI struct version; see docs/reference/ws-protocol.md §version:
 // "an informational stamp, not a live version gate"). This module turns that
 // payload into an explicit compatibility verdict instead of a silent log line
@@ -17,7 +17,7 @@
 //
 // Compat model — anchored to README §"Versioning & compatibility":
 //   * Packages version independently on their own SemVer tracks; the
-//     known-compatible row pairs backend 0.2.x with extension 0.2.x at WS abi 1.
+//     known-compatible row pairs backend 0.2.x with extension 0.2.x at WS abi 2.
 //   * Pre-1.0, "minor bumps may still carry breaking changes" (README), so the
 //     compatibility unit is the backend MAJOR.MINOR, not just the major.
 //   * The protocol "evolves additive-only" (ws-protocol.md), which makes skew
@@ -33,10 +33,11 @@
 export const EXPECTED_BACKEND_MAJOR = 0;
 export const EXPECTED_BACKEND_MINOR = 2;
 
-// The WS-protocol `abi` stamp this extension was built to speak. Constant `1`
-// today; a genuinely breaking wire bump would raise this in lockstep with the
-// backend so a mismatch becomes a real, catchable incompatibility.
-export const EXPECTED_WS_ABI = 1;
+// The WS-protocol `abi` stamp this extension was built to speak. Raised to `2`
+// at the ABI v11->v12 cut (the Record data plane was deleted, pack-door only),
+// in lockstep with the backend's send_hello, so a mismatch becomes a real,
+// catchable incompatibility.
+export const EXPECTED_WS_ABI = 2;
 
 export type SkewKind =
     | 'compatible'   // backend MAJOR.MINOR == expected, abi matches

@@ -9,11 +9,15 @@ This is the live picture of test surface, organisation, and how to run.
 > `subscribe`/`unsubscribe` commands have been removed from the backend. Script
 > data-out now goes through the shipped `expose` plugin (per-channel subscription
 > over `exchange` + one atomic `XEX1` frame per record). Suites that
-> exercised the old core paths (e.g. `ws_run_vars`, `ws_preview`, `runSubscribe`, the
+> exercised the old core paths (e.g. `ws_run_vars`, `ws_preview`, the
 > JPEG-preview assertions in `ws_comprehensive`, the preview-header rows in
 > `test_protocol`, the *JPEG encode* note below) cover **removed** behavior and
 > are legacy — to be retired or rewritten. They are listed below
 > as they stand today; treat the old preview/vars/subscribe coverage as legacy.
+> (`runSubscribe`, a standalone launcher that exercised ONLY the removed
+> `vars`/binary-preview/`subscribe`/`unsubscribe` core paths, has been deleted
+> at THE CUT — v12 has no such core commands; per-channel preview now lives in
+> the `expose` plugin, covered by `ws_expose_sink`.)
 
 ---
 
@@ -197,7 +201,6 @@ cd vscode-extension && node test/runUserJourney.mjs
 | Runner | What it proves |
 |---|---|
 | `runMulticam` | `synced_stereo` gathering plugin emits one record carrying left+right (same `seq`) |
-| `runSubscribe` | *(legacy — removed behavior)* preview subscription gates binary frames by name |
 | `runWatchdog` | watchdog kills runaway inspect; backend stays alive |
 | `runRemoteAuth` | `--auth` bearer gate, 401 on bad/missing, constant-time compare |
 | `runHeadlessRunner` | `xinsp-runner.exe` produces JSON report from a project |

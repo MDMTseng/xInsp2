@@ -27,10 +27,10 @@ const EXT = '0.2.0';
 const OK = `${EXPECTED_BACKEND_MAJOR}.${EXPECTED_BACKEND_MINOR}.0`;
 const hello = (data) => ({ type: 'event', name: 'hello', data });
 
-test('sanity: the module expectations match README known-compatible row (0.2.x @ abi 1)', () => {
+test('sanity: the module expectations match README known-compatible row (0.2.x @ abi 2)', () => {
     assert.equal(EXPECTED_BACKEND_MAJOR, 0);
     assert.equal(EXPECTED_BACKEND_MINOR, 2);
-    assert.equal(EXPECTED_WS_ABI, 1);
+    assert.equal(EXPECTED_WS_ABI, 2);
 });
 
 test('hello.json fixture classifies compatible and stays silent', () => {
@@ -38,24 +38,24 @@ test('hello.json fixture classifies compatible and stays silent', () => {
     assert.equal(r.kind, 'compatible');
     assert.equal(r.level, 'ok');
     assert.equal(r.backendVersion, '0.2.0');
-    assert.equal(r.backendAbi, 1);
+    assert.equal(r.backendAbi, 2);
     assert.equal(r.advice, undefined);   // silence is the feature
     assert.match(r.summary, /compatible/i);
 });
 
 test('patch difference inside the expected minor is still compatible', () => {
-    const r = classifyHello(hello({ version: '0.2.9', abi: 1 }), EXT);
+    const r = classifyHello(hello({ version: '0.2.9', abi: 2 }), EXT);
     assert.equal(r.kind, 'compatible');
     assert.equal(r.level, 'ok');
 });
 
 test('accepts a bare data dict (not wrapped in an event envelope)', () => {
-    const r = classifyHello({ version: OK, abi: 1 }, EXT);
+    const r = classifyHello({ version: OK, abi: 2 }, EXT);
     assert.equal(r.kind, 'compatible');
 });
 
 test('newer backend minor -> notice, proceed (names both versions)', () => {
-    const r = classifyHello(hello({ version: '0.3.0', abi: 1 }), EXT);
+    const r = classifyHello(hello({ version: '0.3.0', abi: 2 }), EXT);
     assert.equal(r.kind, 'newer');
     assert.equal(r.level, 'notice');
     assert.match(r.summary, /0\.3\.0/);
@@ -64,13 +64,13 @@ test('newer backend minor -> notice, proceed (names both versions)', () => {
 });
 
 test('newer backend major -> notice', () => {
-    const r = classifyHello(hello({ version: '1.0.0', abi: 1 }), EXT);
+    const r = classifyHello(hello({ version: '1.0.0', abi: 2 }), EXT);
     assert.equal(r.kind, 'newer');
     assert.equal(r.level, 'notice');
 });
 
 test('older backend minor -> warn (asymmetric bad case)', () => {
-    const r = classifyHello(hello({ version: '0.1.0', abi: 1 }), EXT);
+    const r = classifyHello(hello({ version: '0.1.0', abi: 2 }), EXT);
     assert.equal(r.kind, 'older');
     assert.equal(r.level, 'warn');
     assert.match(r.summary, /0\.1\.0/);
@@ -78,12 +78,15 @@ test('older backend minor -> warn (asymmetric bad case)', () => {
 });
 
 test('abi stamp mismatch -> warn regardless of a compatible version string', () => {
-    const r = classifyHello(hello({ version: OK, abi: 2 }), EXT);
+    // A pre-cut (abi 1) backend against this v12 extension (abi 2): the wire
+    // contract itself differs, so it warns even though the version string sits
+    // on the compatible row.
+    const r = classifyHello(hello({ version: OK, abi: 1 }), EXT);
     assert.equal(r.kind, 'abi');
     assert.equal(r.level, 'warn');
-    assert.equal(r.backendAbi, 2);
-    assert.match(r.summary, /abi 2/);
+    assert.equal(r.backendAbi, 1);
     assert.match(r.summary, /abi 1/);
+    assert.match(r.summary, /abi 2/);
 });
 
 test('missing version -> unknown, notice, never blocks', () => {
@@ -94,7 +97,7 @@ test('missing version -> unknown, notice, never blocks', () => {
 });
 
 test('garbage version string -> unknown, notice', () => {
-    const r = classifyHello(hello({ version: 'not-a-version', abi: 1 }), EXT);
+    const r = classifyHello(hello({ version: 'not-a-version', abi: 2 }), EXT);
     assert.equal(r.kind, 'unknown');
     assert.equal(r.level, 'notice');
 });
