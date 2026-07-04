@@ -1,0 +1,12 @@
+{
+  "name": "qa_slow_consumer",
+  "script": "inspect.cpp",
+  "parallelism": {
+    "dispatch_threads": 4,
+    "queue_depth": 256,
+    "overflow": "drop_oldest"
+  },
+  "instances": [
+    { "name": "expose", "plugin": "expose" }
+  ]
+}

@@ -1,0 +1,2 @@
+{ "plugin": "expose", "isolation": "in_process",
+  "config": { "frame_wire_v3": true, "preview_compress": false } }
