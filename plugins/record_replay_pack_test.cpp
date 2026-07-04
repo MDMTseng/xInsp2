@@ -318,6 +318,57 @@ int main() {
         drain();
     }
 
+    // -----------------------------------------------------------------------
+    // (G) F5: a pack with NO $channel/$seq replays WITHOUT gaining them. The
+    // reserved header fields are OPTIONAL — a pack that never carried them must
+    // round-trip entry-for-entry, not pick up a spurious ""/0 pair on replay.
+    // -----------------------------------------------------------------------
+    SECTION("F5: channel/seq-less pack round-trips WITHOUT gaining $channel/$seq");
+    {
+        std::filesystem::path outdir2 =
+            std::filesystem::temp_directory_path() / "xinsp2_record_replay_f5_test";
+        std::filesystem::remove_all(outdir2, ec);
+
+        auto build_plain = [&]() -> xi_pack_handle {
+            xi_pack_builder b = fi->builder_new();
+            fi->builder_add_i64(b, "count", 99);
+            fi->builder_add_str(b, "label", "plain", 5);
+            fi->builder_add_f64(b, "score", 3.5);
+            return fi->builder_seal(b);   // NO $channel / NO $seq
+        };
+
+        CHECK(saver.ad->set_def(
+            std::string("{\"enabled\":true,\"naming_rule\":\"plain_{count}\",\"output_dir\":\"")
+            + outdir2.generic_string() + "\"}"));
+        xi_pack_handle porig = build_plain();
+        const xi::Pack* ppo = xi::PackRegistry::instance().pack(porig);
+        CHECK(ppo != nullptr);
+        const size_t orig_count = ppo ? ppo->size() : 0;
+        CHECK(orig_count == 3);
+        xi_pack_handle ack = saver.ad->run_pack_door(porig);
+        if (ack != XI_PACK_NULL) fi->release(ack);
+        fi->release(porig);
+
+        CHECK(replayer.ad->set_def(std::string("{\"dir\":\"") + outdir2.generic_string() + "\"}"));
+        drive_process(fi, *replayer.ad);
+        xi_pack_handle rp = XI_PACK_NULL;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            CHECK(got.size() == 1);
+            if (got.size() == 1) rp = got[0].pack;
+        }
+        if (rp != XI_PACK_NULL) {
+            const char* s = nullptr; int32_t sl = 0; int64_t iv = 0;
+            CHECK(fi->get_str(rp, xi::pack_contract::kChannel, &s, &sl) != 1);  // NOT injected
+            CHECK(fi->get_i64(rp, xi::pack_contract::kSeq, &iv) != 1);          // NOT injected
+            const xi::Pack* prp = xi::PackRegistry::instance().pack(rp);
+            CHECK(prp && prp->size() == orig_count);          // entry-for-entry, no ""/0 gain
+            CHECK(fi->get_i64(rp, "count", &iv) == 1 && iv == 99);
+        }
+        drain();
+        std::filesystem::remove_all(outdir2, ec);
+    }
+
     // ---- teardown + balance ----
     xi::TriggerBus::instance().clear_sink();
     replayer.unload();

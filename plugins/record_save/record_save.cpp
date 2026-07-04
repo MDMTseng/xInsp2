@@ -44,10 +44,18 @@ public:
         if (output_dir_.empty()) { out.boolean("saved", false).str("reason", "no output_dir set"); return; }
 
         // Reserved fields ride the frame header (lifted, not dumped as entries).
-        const std::string channel(in.str(xi::pack_contract::kChannel).value_or("default"));
+        // F5: only lift them when the pack ACTUALLY carried them — else a pack
+        // that never had $channel/$seq would be persisted with a spurious
+        // "default"/0 header and gain those two entries on replay (count drift).
+        // Presence is reflected into the header so replay re-injects them iff
+        // they were there.
+        const bool has_channel = in.has(xi::pack_contract::kChannel);
+        const bool has_seq     = in.has(xi::pack_contract::kSeq);
+        const std::string channel(in.str(xi::pack_contract::kChannel).value_or(""));
         const uint64_t    seq = (uint64_t)in.i64_or(xi::pack_contract::kSeq, 0);
 
-        std::vector<uint8_t> frame = xi::xex1::encode_pack_v3(in, channel, seq);
+        std::vector<uint8_t> frame =
+            xi::xex1::encode_pack_v3(in, channel, seq, has_channel, has_seq);
 
         std::filesystem::create_directories(output_dir_);
         std::string base = render_filename(naming_rule_, ++save_count_);

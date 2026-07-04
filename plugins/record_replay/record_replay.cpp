@@ -87,9 +87,12 @@ public:
         if (!f.valid()) return;
 
         // Restore the reserved entries the sink LIFTED into the frame header,
-        // first — so a pack that carried them round-trips entry-for-entry.
-        f.str(xi::pack_contract::kChannel, pf.channel);
-        f.i64(xi::pack_contract::kSeq, (int64_t)pf.seq);
+        // first — so a pack that carried them round-trips entry-for-entry. F5:
+        // inject ONLY when the file actually carried them (pf.has_*); a pack that
+        // never had $channel/$seq must replay WITHOUT them, not gain a spurious
+        // ""/0 pair that inflates its entry count.
+        if (pf.has_channel) f.str(xi::pack_contract::kChannel, pf.channel);
+        if (pf.has_seq)     f.i64(xi::pack_contract::kSeq, (int64_t)pf.seq);
 
         // Rebuild every frame entry in wire order, typed by its on-wire tag.
         for (const xi::xex1::ParsedEntry& e : pf.entries) {

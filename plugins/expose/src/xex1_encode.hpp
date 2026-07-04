@@ -177,14 +177,22 @@ struct V3Entry {
 // lets a loader rebuild every entry's type EXACTLY (no shape-guessing — the v2
 // draft's image-vs-map ambiguity is unrepresentable here).
 // The whole body is 100% standard msgpack; any stock decoder reads it.
+// `has_channel`/`has_seq` (default true) control whether the reserved
+// "channel"/"seq" top-level fields are emitted. They default true so every
+// existing caller (expose's wire, the fixtures) is byte-identical. record_save
+// passes the pack's ACTUAL presence so a pack that never carried $channel/$seq
+// round-trips WITHOUT them (F5) instead of gaining a spurious ""/0 on replay.
+// A frame with both present is still the map(4) {v,channel,seq,frame} shape —
+// unchanged bytes; only the never-present case shrinks the map.
 inline std::vector<uint8_t> encode_frame_v3(
         std::string_view channel, uint64_t seq,
-        const std::vector<V3Entry>& entries) {
+        const std::vector<V3Entry>& entries,
+        bool has_channel = true, bool has_seq = true) {
     xi::mp::Writer w;
-    w.map(4);
+    w.map(2 + (has_channel ? 1u : 0u) + (has_seq ? 1u : 0u));
     w.key("v");       w.int_(3);
-    w.key("channel"); w.str(channel);
-    w.key("seq");     w.uint_(seq);
+    if (has_channel) { w.key("channel"); w.str(channel); }
+    if (has_seq)     { w.key("seq");     w.uint_(seq); }
     w.key("frame");   w.map((uint32_t)entries.size());
     for (const auto& e : entries) {
         w.key(e.key);

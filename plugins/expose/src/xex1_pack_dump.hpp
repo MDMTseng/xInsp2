@@ -38,9 +38,15 @@ namespace xex1 {
 // inline their raw pool pixels as `bin` (doc 07 D2 export rule). The reserved
 // $channel/$seq keys are LIFTED to the frame's top-level fields, not dumped as
 // entries — the caller passes them in (already read from the pack).
+// `has_channel`/`has_seq` (default true) forward to encode_frame_v3: they let a
+// caller (record_save) reflect whether the pack ACTUALLY carried $channel/$seq
+// so the never-present case does not gain a spurious ""/0 header on round-trip
+// (F5). Default true keeps every existing caller (expose) byte-identical.
 inline std::vector<uint8_t> encode_pack_v3(const xi::PackIn& in,
                                            std::string_view channel,
-                                           uint64_t seq) {
+                                           uint64_t seq,
+                                           bool has_channel = true,
+                                           bool has_seq = true) {
     std::vector<xi::xex1::V3Entry> entries;
     const int n = in.count();
     entries.reserve((size_t)(n > 0 ? n : 0));
@@ -94,7 +100,7 @@ inline std::vector<uint8_t> encode_pack_v3(const xi::PackIn& in,
         }
         entries.push_back(std::move(e));
     }
-    return xi::xex1::encode_frame_v3(channel, seq, entries);
+    return xi::xex1::encode_frame_v3(channel, seq, entries, has_channel, has_seq);
 }
 
 }  // namespace xex1

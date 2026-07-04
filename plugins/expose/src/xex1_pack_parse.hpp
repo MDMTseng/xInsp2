@@ -63,6 +63,13 @@ struct ParsedFrame {
     std::string error;        // human reason when !ok
     std::string channel;      // lifted frame-header fields
     uint64_t    seq = 0;
+    // F5: presence, not just value — the v3 header's channel/seq are OPTIONAL.
+    // A consumer (record_replay) must inject $channel/$seq back onto the rebuilt
+    // pack ONLY when the file carried them, else a pack that never had them gains
+    // a spurious ""/0 pair on replay. Distinguishes "absent" from "present but
+    // empty/zero" (which channel==""/seq==0 alone cannot).
+    bool        has_channel = false;
+    bool        has_seq = false;
     mp::Bytes   body;         // POST-ingress canonical frame body
     std::vector<ParsedEntry> entries;
 
@@ -165,12 +172,14 @@ inline ParsedFrame parse_frame_v3(const uint8_t* data, size_t size) {
             mp::Element v;
             if (r.next(v) != mp::Status::Ok || v.kind != mp::Kind::Str) { out.error = "bad channel field"; return out; }
             out.channel.assign((const char*)v.data, v.len);
+            out.has_channel = true;
         } else if (key == "seq") {
             mp::Element v;
             if (r.next(v) != mp::Status::Ok) { out.error = "bad seq field"; return out; }
             if (v.kind == mp::Kind::Int && v.i >= 0) out.seq = (uint64_t)v.i;
             else if (v.kind == mp::Kind::UInt)       out.seq = v.u;
             else { out.error = "bad seq type"; return out; }
+            out.has_seq = true;
         } else if (key == "frame") {
             mp::Element fm;
             if (r.next(fm) != mp::Status::Ok || fm.kind != mp::Kind::Map) { out.error = "frame field is not a map"; return out; }
