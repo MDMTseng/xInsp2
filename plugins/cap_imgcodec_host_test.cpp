@@ -191,51 +191,44 @@ int main() {
 
     // ---- 3. self-serve reentrancy refusal ---------------------------------
     SECTION("self-serve refusal: decode while imgcodec is the current owner -> "
-            "funnel -5 -> stb fallback; imgcodec never serves itself");
+            "funnel -5 -> FAIL (v12: no in-core fallback); imgcodec never serves itself");
     int d2 = codec_decodes(codec.get());
-    Img self_rgb;
     {
         xi::ImagePool::OwnerGuard og(codec_owner);   // as if imgcodec called us
-        self_rgb = materialize(read_image_file(png3));
+        // [v12 THE CUT: the stb fallback is deleted — a refused funnel call
+        //  fails LOUD (0 handle), it does not silently decode in-core.]
+        CHECK(read_image_file(png3) == 0);
     }
-    CHECK(self_rgb.ok);
     CHECK(codec_decodes(codec.get()) == d2);              // decoder did NOT serve
-    CHECK(same_pixels(self_rgb, cap_rgb));                // stb == capability bytes
 
     // ---- 4. decoder fault -> clean fallback + attribution -----------------
-    SECTION("quarantined decoder (a handler-fault outcome) -> funnel -3 -> stb "
-            "fallback; fault stays attributed to the lib instance");
+    SECTION("quarantined decoder (a handler-fault outcome) -> funnel -3 -> FAIL "
+            "(v12: no in-core fallback); fault stays attributed to the lib instance");
     codec->set_quarantined(true);
     int d3 = codec_decodes(codec.get());
-    Img q_rgb = materialize(read_image_file(png3));
-    CHECK(q_rgb.ok);
+    // [v12 THE CUT: quarantined provider = decode unavailable = 0, fail loud.]
+    CHECK(read_image_file(png3) == 0);
     CHECK(codec_decodes(codec.get()) == d3);              // quarantined: not served
-    CHECK(same_pixels(q_rgb, cap_rgb));
     CHECK(codec->quarantined());                          // attribution intact
     codec->set_quarantined(false);
 
     // ---- 5. contract $fault -> fallback -> stb also fails -> 0 ------------
-    SECTION("corrupt bytes: $fault -> stb fallback -> stb also fails -> 0 "
-            "(fail modes identical to pre-eviction)");
+    SECTION("corrupt bytes: $fault -> 0 (v12: capability is the only engine)");
     CHECK(read_image_file(junkfile) == 0);
     CHECK(read_image_file(nullptr) == 0);                 // null path unchanged
 
     // ---- 2. absent capability: remove the instance, stb serves ------------
-    SECTION("remove the imgcodec instance -> capability absent -> stb engine, "
-            "byte-identical to the capability engine's output");
+    SECTION("remove the imgcodec instance -> capability absent -> decode FAILS "
+            "(v12: no stb engine; an imgcodec provider is a hard requirement)");
     xi::InstanceRegistry::instance().remove("codec");
     codec.reset();
     CHECK(cap->available("xi.image.decode") == 0);
 
-    Img stb_rgb = materialize(read_image_file(png3));
-    CHECK(stb_rgb.ok);
-    CHECK(same_pixels(stb_rgb, cap_rgb));                 // BYTE-EQUIVALENCE (3ch)
-
-    Img stb_ga = materialize(read_image_file(png2));
-    CHECK(stb_ga.ok && stb_ga.c == 2);
-    CHECK(same_pixels(stb_ga, cap_ga));                   // BYTE-EQUIVALENCE (2ch)
-
-    // still 0 on corrupt/null with no capability at all
+    // [v12 THE CUT: with the provider gone there is NO decode engine — every
+    //  decode fails loud (0). Deployments supply imgcodec via a project
+    //  instance or machine autoload (--autoload-lib / XINSP2_AUTOLOAD_LIB=1).]
+    CHECK(read_image_file(png3) == 0);
+    CHECK(read_image_file(png2) == 0);
     CHECK(read_image_file(junkfile) == 0);
 
     std::remove(png3); std::remove(png2); std::remove(junkfile);

@@ -287,10 +287,19 @@ int main() {
         auto in = own_pack(build_square_pack(fi), fi);
 
         CHECK(!xi::use("no_such_instance").process(in).valid()); // -1: unknown name
-        // -4: a Record-only plugin (json_source exports no xi.pack@1 door).
-        // mock_camera used to be this edge's subject — it grew a control door
-        // (ex-feedback), so the door-less seat is json_source's now.
-        CHECK(!xi::use("rec0").process(in).valid());
+        // [v12 THE CUT — the "-4: no xi.pack@1 door" edge lost its integration
+        //  subject: json_source (the last Record-only plugin) converted its
+        //  process-tick to a pack door, so EVERY loaded subject now has a door.
+        //  Its door is a SOURCE TICK: input ignored, payload rides emit_pack,
+        //  and the reply is the door's ack — a valid, EMPTY, fault-free pack
+        //  (the untouched-PackOut absence sentinel). Assert that shape here;
+        //  the -4 code path itself stays unit-covered at the adapter level.]
+        {
+            auto ack = xi::use("rec0").process(in);
+            CHECK(ack.valid());                                  // door exists: tick acked
+            CHECK(!ack.get_str("$fault"));                       // not a fault pack
+            CHECK(!ack.get_str("$src"));                         // untouched ack: no stamps
+        }
 
         xi::ScriptPack empty;                                    // absence propagates
         CHECK(!xi::use("det0").process(empty).valid());
