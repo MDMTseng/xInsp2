@@ -444,10 +444,16 @@ public:
                         ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &sto, sizeof(sto));
 #endif
                         // Publish under tx_mu_ so the store is ordered against
-                        // send_frame's snapshot of client_ (which also holds
-                        // tx_mu_) — symmetric with the close side.
+                        // the writer's snapshot of client_ (which also holds
+                        // tx_mu_) — symmetric with the close side. Bump the
+                        // connection epoch in the SAME lock section: this new
+                        // connection gets a tag distinct from any prior one, so a
+                        // frame still in flight for the previous client (even one
+                        // the writer already popped) fails the writer's epoch check
+                        // and is dropped rather than sent to this client.
                         {
                             std::lock_guard<std::mutex> g(tx_mu_);
+                            conn_epoch_.fetch_add(1, std::memory_order_release);
                             client_.store(s, std::memory_order_release);
                         }
                         if (on_open) on_open();
@@ -544,13 +550,45 @@ private:
     // emit_run_outcome_, between wait_turn() and complete()), enqueue order ==
     // gate order == wire order. The writer is a strict single drainer, so FIFO ==
     // exact enqueue order: never reorder or coalesce.
-    std::deque<std::vector<uint8_t>> out_q_;
-    size_t                    out_bytes_ = 0;   // sum of out_q_ element sizes (guarded by out_mu_)
+    //
+    // Each queued frame carries the connection epoch it was built for (see
+    // conn_epoch_) so a frame that outlives its connection — including one the
+    // writer has already POPPED into its local variable when the swap happens — is
+    // dropped instead of being sent to a newly-accepted client.
+    struct OutFrame {
+        uint64_t             epoch;
+        std::vector<uint8_t> bytes;
+    };
+    std::deque<OutFrame>      out_q_;
+    size_t                    out_bytes_ = 0;   // sum of out_q_ element byte sizes (guarded by out_mu_)
     std::mutex                out_mu_;
     std::condition_variable   out_cv_;
     std::thread               writer_thread_;
     bool                      writer_stop_ = false;  // guarded by out_mu_
 
+    // Connection epoch. Incremented (under tx_mu_) each time a new client is
+    // published on a successful accept, so every distinct connection has a unique
+    // tag. send_frame stamps the CURRENT epoch onto each queued frame; the writer,
+    // under tx_mu_ (the authoritative check, same lock accept/close use), sends a
+    // frame ONLY if its epoch still equals conn_epoch_. This is what actually
+    // enforces "no frame crosses connections" for a frame the writer already
+    // popped before a close+reaccept: tx_mu_ serializes each op atomically but does
+    // NOT bind a popped frame to the fd that was live at pop time — the epoch does.
+    // Atomic because send_frame reads it under out_mu_ (a DIFFERENT lock than the
+    // tx_mu_ writers), so this cross-lock read must be defined/non-torn; the
+    // tx_mu_-guarded store↔writer-read pair is additionally ordered by tx_mu_.
+    std::atomic<uint64_t>     conn_epoch_{0};
+
+public:
+    // Test-only seam (null in production; a single null-check per frame). Invoked
+    // by the writer AFTER it pops a frame and releases out_mu_, but BEFORE it
+    // acquires tx_mu_ to send — i.e. inside the exact pop→send window that the
+    // connection-epoch tag guards. A test sets it to force a client swap in that
+    // window and prove the popped frame is dropped (epoch mismatch) instead of
+    // crossing onto the new connection. Never set outside tests.
+    std::function<void()> on_writer_after_pop_;
+
+private:
     // Proactive-drop signal. The send side (send_frame's byte-cap, or the writer's
     // failed ::send) can only ::shutdown the socket — it must NOT call close_client
     // itself (close_client owns the poll-thread-only rx/msg buffers). On Windows a
@@ -598,11 +636,15 @@ private:
         //       then removed by the clear, or
         //   (b) acquires out_mu_ after this clear → it re-reads client_ == INVALID
         //       (nulled above) and enqueues nothing.
-        // Either way no stale frame survives. A frame the writer already popped is
-        // guarded separately: it sends under tx_mu_, which also serializes accept
-        // (client_ publish) and this close, so the in-hand frame sees the OLD fd or
-        // INVALID — never a newly-accepted client's fd. Wake the writer in case it
-        // is parked on an empty queue (it will re-check the now-nulled client_).
+        // Either way no QUEUED frame survives. A frame the writer has already
+        // POPPED (in its local var, no longer in out_q_) is NOT covered by this
+        // clear and is NOT bound to this fd by tx_mu_ (the writer fresh-loads
+        // client_ after the handoff and could see a newly-accepted client). That
+        // case is handled by the connection-epoch tag: the popped frame carries
+        // this connection's epoch, the next accept bumps conn_epoch_, and the
+        // writer's under-tx_mu_ epoch check drops the superseded frame. Wake the
+        // writer in case it is parked on an empty queue (it will re-check the
+        // now-nulled client_).
         {
             std::lock_guard<std::mutex> g(out_mu_);
             out_q_.clear();
@@ -634,22 +676,33 @@ private:
     // reached without ever stalling a worker.
     void writer_loop_() {
         for (;;) {
-            std::vector<uint8_t> frame;
+            OutFrame frame;
             {
                 std::unique_lock<std::mutex> lk(out_mu_);
                 out_cv_.wait(lk, [&] { return writer_stop_ || !out_q_.empty(); });
                 if (writer_stop_) return;            // stop: abandon any backlog (client is going away)
                 frame = std::move(out_q_.front());
                 out_q_.pop_front();
-                out_bytes_ -= frame.size();
+                out_bytes_ -= frame.bytes.size();
             }
+            // Test seam: the pop→send window the epoch tag guards (see member).
+            if (on_writer_after_pop_) on_writer_after_pop_();
             std::lock_guard<std::mutex> g(tx_mu_);
             socket_t fd = client_.load(std::memory_order_acquire);
-            if (fd == INVALID_SOCK) continue;        // connection gone — drop the frame
+            // Authoritative cross-connection guard: send ONLY if the socket is live
+            // AND this frame's epoch still matches the current connection. The
+            // epoch catches the case tx_mu_ alone cannot — a frame popped for
+            // client A while A is then closed and B accepted: fd would be B's
+            // (valid), but frame.epoch (A's) != conn_epoch_ (B's), so we drop it.
+            if (fd == INVALID_SOCK ||
+                frame.epoch != conn_epoch_.load(std::memory_order_acquire)) {
+                continue;                            // connection gone or superseded — drop
+            }
+            const std::vector<uint8_t>& bytes = frame.bytes;
             size_t sent = 0;
-            while (sent < frame.size()) {
-                int chunk = (int)std::min<size_t>(frame.size() - sent, 1 << 20);
-                int s = ::send(fd, reinterpret_cast<const char*>(frame.data() + sent), chunk, 0);
+            while (sent < bytes.size()) {
+                int chunk = (int)std::min<size_t>(bytes.size() - sent, 1 << 20);
+                int s = ::send(fd, reinterpret_cast<const char*>(bytes.data() + sent), chunk, 0);
                 if (s <= 0) {
                     // Desynced/dead/wedged: half a frame went out (or SO_SNDTIMEO
                     // fired). Shut the socket AND request a proactive drop; the poll
@@ -1004,8 +1057,11 @@ private:
             out_bytes_ = 0;
             return false;
         }
+        // Stamp the frame with the CURRENT connection epoch (read here under
+        // out_mu_; the authoritative match happens in the writer under tx_mu_).
+        uint64_t ep = conn_epoch_.load(std::memory_order_acquire);
         out_bytes_ += frame.size();
-        out_q_.push_back(std::move(frame));
+        out_q_.push_back(OutFrame{ ep, std::move(frame) });
         out_cv_.notify_one();
         return true;
     }

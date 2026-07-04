@@ -80,12 +80,36 @@ can never fire on a subsequently-accepted client.
   bounded — a writer mid-`::send` is released by its own `SO_SNDTIMEO` (≤1.5 s) at
   worst, then observes the stop flag and exits.
 - `close_client()`: after nulling `client_` (under `tx_mu_`) it clears the queue +
-  resets the byte counter (under `out_mu_`) so no frame crosses connections. The
-  null-before-clear ordering is load-bearing (see the code comment): a racing
-  `send_frame` either has its frame cleared, or re-reads `client_==INVALID` and
-  enqueues nothing. A frame the writer already popped is guarded by `tx_mu_`, which
-  also serializes accept (client_ publish) and close — so the in-hand frame sees the
-  OLD fd or INVALID, never a newly-accepted client's fd.
+  resets the byte counter (under `out_mu_`). The null-before-clear ordering is
+  load-bearing (see the code comment): a racing `send_frame` either has its QUEUED
+  frame cleared, or re-reads `client_==INVALID` and enqueues nothing.
+
+## Connection-epoch guard — the popped-in-hand crossing
+
+Clearing the queue is NOT sufficient for a frame the writer has already **popped**
+into its local variable (no longer in `out_q_`) when a close+reaccept interleaves.
+`tx_mu_` serializes each op atomically but does NOT bind that popped frame to the
+fd that was live at pop time — the writer fresh-loads `client_` *after* the handoff
+and can observe a newly-accepted client B, sending A's frame onto B's fresh stream
+(diff-review finding; not memory-unsafe, but violates "no frame crosses
+connections"). The fix is a **connection epoch**:
+
+- `conn_epoch_` (`std::atomic<uint64_t>`) is incremented under `tx_mu_` in the SAME
+  lock section that publishes `client_` on a successful accept — so every distinct
+  connection has a unique tag. It is NOT bumped on close (a closed connection is
+  already caught by the writer's `client_==INVALID` check; bumping on accept is what
+  makes B's tag differ from A's).
+- Each queued frame is an `OutFrame{ epoch, bytes }`; `send_frame` stamps the
+  current epoch at enqueue.
+- The writer, under `tx_mu_` (the authoritative check), sends a frame ONLY if
+  `fd != INVALID_SOCK && frame.epoch == conn_epoch_`. A frame popped for A (epoch e)
+  after B is accepted (epoch e+1) has `fd`=B (valid) but `e != e+1` → dropped.
+- **Memory ordering:** `conn_epoch_` is written under `tx_mu_` (accept) and read
+  authoritatively under `tx_mu_` (writer) — those are additionally ordered by the
+  mutex. `send_frame` reads it under `out_mu_` (a *different* lock), so the atomic
+  makes that cross-lock read defined/non-torn; it is release-on-store,
+  acquire-on-load. The `send_frame` read is only advisory (it stamps the tag); the
+  `tx_mu_`-guarded comparison in the writer is what enforces correctness.
 
 ## Semantic change (documented in code)
 
@@ -104,7 +128,12 @@ memcpy-scale price versus a 1.5 s lane stall.
   ~5 ms, bound < 200 ms), never the ~1.5 s of a blocking send; (B) LIVENESS —
   tens of thousands of calls complete in a 1 s window (pre-fix: ~1–3); (C)
   BACKPRESSURE + CLEAN DROP — the wedged client is dropped within one poll tick;
-  (D) ORDER — a draining client receives 300 frames in strict FIFO seq.
+  (D) ORDER — a draining client receives 300 frames in strict FIFO seq; (E)
+  CONNECTION-EPOCH GUARD — using a test-only `on_writer_after_pop_` seam to force a
+  client swap deterministically in the pop→send window, a frame popped for client A
+  is dropped (not sent) when B is accepted mid-window, while a legitimate B-frame
+  is still delivered. Disabling the epoch check (`-DXINSP2_WS_NO_EPOCH_GUARD_DEMO`)
+  makes case E fail (`saw_F(crossed)=1`), confirming the test has teeth.
   **Pre-fix demonstration:** compiling this test with `-DXINSP2_WS_SYNC_SEND_DEMO`
   (a temporary sync-send path, not in the tree) yields `max_call_ms=1505.92`,
   `calls_in_1s=3` — the assertions A/B fail, capturing the exact RT8 stall.
@@ -126,5 +155,9 @@ memcpy-scale price versus a 1.5 s lane stall.
   unachievable on Windows (self-shutdown does not wake the server's own `select`).
   It is small, poll-thread-owned, and closes a pre-existing latent gap. Flagged for
   review.
+- **Connection-epoch guard** (`conn_epoch_` + per-frame tag) was added in review to
+  close a popped-in-hand cross-connection window the original `tx_mu_`-only argument
+  missed (see the section above). A single `on_writer_after_pop_` test seam (null in
+  production) makes that window deterministically testable.
 - Everything else (64 MiB cap value, FIFO single-drainer, send-return-on-enqueue
   semantic, `tx_mu_` reuse) follows the brief as written.

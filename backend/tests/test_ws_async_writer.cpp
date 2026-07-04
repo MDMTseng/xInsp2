@@ -259,6 +259,97 @@ int main() {
     CHECK(received.load() == kN);
     CLOSESOCK(fastc);
 
+    // ------------------------------------------------------------------
+    // Phase 3: CONNECTION-EPOCH GUARD. A frame the writer has already POPPED
+    // (for client A) must NOT be sent to a newly-accepted client B if A is
+    // closed and B accepted in the pop→send window. tx_mu_ alone does not bind
+    // the popped frame to A's fd (the writer fresh-loads client_ after the
+    // handoff); the connection-epoch tag is what drops it. We force exactly that
+    // interleave deterministically via the on_writer_after_pop_ test seam.
+    // ------------------------------------------------------------------
+    {
+        // Wait for the phase-2 client's close to settle.
+        auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        while (srv.has_client() && std::chrono::steady_clock::now() < dl)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+        std::atomic<bool> in_pop_window{false};
+        std::atomic<bool> resume_writer{false};
+        std::atomic<int>  hook_calls{0};
+        srv.on_writer_after_pop_ = [&] {
+            if (hook_calls.fetch_add(1) != 0) return;   // one-shot: only the F frame
+            in_pop_window.store(true, std::memory_order_release);
+            while (!resume_writer.load(std::memory_order_acquire))
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        };
+
+        // Client A.
+        opened.store(false);
+        socket_t A = connect_and_handshake(port);
+        CHECK(A != INVALID_SOCK);
+        wait_until(opened, 4000);
+        CHECK(opened.load());
+
+        // Enqueue frame F for A (marker byte 0xF1). The writer pops it, then parks
+        // in the hook inside the pop→send window.
+        std::vector<uint8_t> F(2048, 0xF1);
+        CHECK(srv.send_binary(F.data(), F.size()));
+        {
+            auto d2 = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000);
+            while (!in_pop_window.load() && std::chrono::steady_clock::now() < d2)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        CHECK(in_pop_window.load());   // writer holds F, parked before tx_mu_
+
+        // Swap A -> B while the writer is parked. Close A (poll runs close_client,
+        // client_ -> INVALID), then accept B (poll bumps conn_epoch_, publishes B).
+        CLOSESOCK(A);
+        {
+            auto d3 = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000);
+            while (srv.has_client() && std::chrono::steady_clock::now() < d3)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        CHECK(!srv.has_client());
+        opened.store(false);
+        socket_t B = connect_and_handshake(port);
+        CHECK(B != INVALID_SOCK);
+        wait_until(opened, 4000);
+        CHECK(opened.load());
+        // Bound B's reader so it can't block forever on the (correct) absence of F.
+        DWORD rto = 800;
+        ::setsockopt(B, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rto, sizeof(rto));
+
+        // B's reader: record the marker of every frame it receives.
+        std::atomic<bool> saw_F{false};
+        std::atomic<bool> saw_G{false};
+        std::thread b_reader([&] {
+            std::vector<uint8_t> pl;
+            while (read_ws_frame(B, pl)) {
+                if (!pl.empty() && pl[0] == 0xF1) saw_F.store(true);
+                if (!pl.empty() && pl[0] == 0x60) { saw_G.store(true); break; }
+            }
+        });
+
+        // Release the writer: it now sees client_ == B (valid fd) but F.epoch !=
+        // conn_epoch_ (B's), so it MUST drop F rather than send it to B.
+        resume_writer.store(true, std::memory_order_release);
+
+        // Then enqueue a fresh frame G (marker 0x60) for B — its epoch matches, so
+        // B must receive it. This confirms the guard drops only the superseded
+        // frame, not a legitimate same-connection one.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::vector<uint8_t> G(2048, 0x60);
+        CHECK(srv.send_binary(G.data(), G.size()));
+        b_reader.join();
+
+        srv.on_writer_after_pop_ = nullptr;
+        std::fprintf(stderr, "  phase3(epoch): saw_F(crossed)=%d saw_G(same-conn)=%d\n",
+            (int)saw_F.load(), (int)saw_G.load());
+        CHECK(!saw_F.load());   // the popped A-frame did NOT cross onto B
+        CHECK(saw_G.load());    // a legitimate B-frame is still delivered
+        CLOSESOCK(B);
+    }
+
     stop_poll.store(true);
     poll_thread.join();
     srv.stop();
