@@ -72,10 +72,10 @@ void xi_inspect_entry(int /*frame*/) {
 
     auto f = t.pack();
     auto img = f.get_image("img");
-    if (!img || !img->pixels) return;
+    if (!img || img->pixels.size() < 16) return;
 
     uint64_t seq_u64 = 0, src_tag = 0;
-    const uint8_t* d = static_cast<const uint8_t*>(img->pixels);
+    const uint8_t* d = img->pixels.data();
     std::memcpy(&seq_u64, d,     sizeof(seq_u64));
     std::memcpy(&src_tag, d + 8, sizeof(src_tag));
 
@@ -86,7 +86,7 @@ void xi_inspect_entry(int /*frame*/) {
     // input pack from the borrowed frame (a sealed pack is immutable).
     auto build_det_input = [&]() {
         xi::ScriptPackBuilder b;
-        b.add_image("img", img->width, img->height, img->channels, img->pixels);
+        b.add_image("img", img->width, img->height, img->channels, img->pixels.data());
         return b.seal();
     };
     if (route_fast) (void)xi::use("detector_fast").process(build_det_input());
