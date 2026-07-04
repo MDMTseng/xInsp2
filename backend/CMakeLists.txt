@@ -362,6 +362,33 @@ target_compile_definitions(test_cap_reinit_race PRIVATE
     CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
 add_test(NAME cap_reinit_race COMMAND test_cap_reinit_race)
 
+# A3/B2 triage (docs/new_gen/22-plausible-triage.md): hammer the cap funnel while
+# a writer evicts + re-creates the provider (the reload_machine_provider swap
+# shape). Measures the -4 (ESHAPE) / -1 (EUNKNOWN) transient window and asserts
+# it is fail-soft: no crash, no wrong answer, table balances, cap resolves after.
+add_executable(test_cap_reload_window tests/test_cap_reload_window.cpp)
+target_link_libraries(test_cap_reload_window PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_cap_reload_window PRIVATE Ws2_32)
+endif()
+add_dependencies(test_cap_reload_window cap_test_plugin)
+target_compile_definitions(test_cap_reload_window PRIVATE
+    CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
+add_test(NAME cap_reload_window COMMAND test_cap_reload_window)
+
+# R1 regression (docs/new_gen/22-plausible-triage.md): the PackRegistry
+# owner-ledger USED to over-release a co-held pack when a GUARDLESS (owner==0)
+# release with no untagged headroom mis-charged the wrong owner's bucket and that
+# owner was then swept. Fixed by making unattributable releases never touch a
+# bucket + a sweep that never frees while another owner's bucket is non-empty.
+# Deterministic multi-owner/off-guard repro + double-free/leak self-checks.
+add_executable(test_pack_ledger_misattribution tests/test_pack_ledger_misattribution.cpp)
+target_link_libraries(test_pack_ledger_misattribution PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_pack_ledger_misattribution PRIVATE Ws2_32)
+endif()
+add_test(NAME pack_ledger_misattribution COMMAND test_pack_ledger_misattribution)
+
 # V3 machine-level lib-plugin autoload (doc 14 / doc 19 V3): the REAL
 # PluginManager scans + autoloads cap_test_plugin (marked lib+autoload) and
 # proves a capability is available with NO project instance, project-instance
