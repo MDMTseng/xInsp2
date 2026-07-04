@@ -645,7 +645,7 @@ static void test_trigger_bus_reset_prunes_source_map() {
         xi_pack_builder b = pk->builder_new();
         pk->builder_add_i64(b, "seq", i);
         xi_pack_handle f = pk->builder_seal(b);
-        pk->emit_pack(src.c_str(), xi_trigger_id{0, 0}, /*ts*/0, f);
+        pk->emit_pack(src.c_str(), xi_trigger_id{0, 0}, f, /*ts*/0);
         pk->release(f);   // drop our creator ref (the forwarder took its own)
     }
     // Every distinct source name left a permanent entry pre-fix.

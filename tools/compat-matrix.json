@@ -5,8 +5,8 @@
     "extension": "0.2.0",
     "ui_components": "0.1.0",
     "python_client": "0.3.0",
-    "plugin_abi": 11,
-    "ws_protocol_abi": 1
+    "plugin_abi": 12,
+    "ws_protocol_abi": 2
   },
   "compat_ranges": {
     "_comment": "Advisory pre-1.0 ranges a consumer can check hello.data against. Kept next to the pinned set so the range and the tested point move together.",

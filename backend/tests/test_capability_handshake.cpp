@@ -123,7 +123,7 @@ static void test_caps_gate() {
 
     // host_publishes_iface honours ">= min" via the exact-match door.
     CHECK(xi::host_publishes_iface(&host, "xi.imaging", 1));
-    CHECK(xi::host_publishes_iface(&host, "xi.doc", 1));
+    CHECK(!xi::host_publishes_iface(&host, "xi.doc", 1));     // xi.doc retired at THE CUT (v12)
     CHECK(!xi::host_publishes_iface(&host, "xi.legacy", 9));  // xi.legacy retired in Phase 4
     CHECK(!xi::host_publishes_iface(&host, "xi.imaging", 2)); // host only publishes @1
     CHECK(!xi::host_publishes_iface(&host, "xi.nope", 1));    // unknown id
