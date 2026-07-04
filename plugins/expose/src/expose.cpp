@@ -127,7 +127,6 @@ public:
             for (auto& [name, ch] : channels_)
                 chans.set(name.c_str(), xi::Json::object()
                     .set("seen", (int64_t)ch.seen)
-                    .set("image_count", (int)ch.images.size())
                     .set("subscribed", subscribed_.count(name) != 0));
             return xi::Json::object().set("count", (int)channels_.size())
                 .set("channels", chans).dump();
@@ -137,11 +136,9 @@ public:
             auto it = channels_.find(channel);
             if (it == channels_.end())
                 return xi::Json::object().set("found", false).set("channel", channel).dump();
-            // A channel fed through the pack door already holds its encoded XEX1
-            // frame bytes; the Record path rebuilds from the stored record/images.
-            std::vector<uint8_t> frame = !it->second.frame_bytes.empty()
-                ? it->second.frame_bytes
-                : build_frame_(channel, it->second);
+            // A channel fed through the pack door holds its encoded XEX1 frame
+            // bytes — the sole data plane in v12 (the Record rebuild is gone).
+            const std::vector<uint8_t>& frame = it->second.frame_bytes;
             return xi::Json::object().set("found", true).set("channel", channel)
                 .set("seq", (int64_t)it->second.seq)
                 .set("frame_b64", b64(frame.data(), frame.size())).dump();
@@ -185,10 +182,8 @@ public:
 
 private:
     struct Channel {
-        std::string                       json = "{}";
         uint64_t                          seq  = 0;
         long long                         seen = 0;
-        std::map<std::string, xi::Image>  images;
         std::vector<uint8_t>              frame_bytes;  // latest encoded frame (pack-door path)
     };
 
@@ -369,30 +364,13 @@ private:
         return xi::xex1::encode_frame(channel, seq, vals.dump(), images);
     }
 
-    // Build the atomic XEX1 frame: magic + msgpack { v, channel, seq, json, images[] }.
-    // Framing (msgpack) lives in xex1_encode.hpp; here we JPEG-compress each image
-    // (skipping any that fail) and hand the finished entries to the shared encoder.
-    std::vector<uint8_t> build_frame_(const std::string& channel, const Channel& ch) const {
-        std::vector<xi::xex1::EncImage> encoded;
-        encoded.reserve(ch.images.size());
-        for (auto& [key, img] : ch.images) {
-            std::vector<uint8_t> jpeg = compress_(img);
-            if (!jpeg.empty()) encoded.push_back({key, std::move(jpeg)});
-        }
-        return xi::xex1::encode_frame(channel, ch.seq, ch.json, encoded);
-    }
-
     // JPEG-encode via the host cache, through the SDK xi::Plugin::compress()
     // wrapper: identical images are encoded once globally, and we don't link a
     // codec ourselves. compress() resolves the frozen xi.preview@1 interface
     // (ABI v10 capability segregation) once and caches it, falling back to the
     // legacy host->compress_image field on a pre-v10 host — same host encoder,
     // same bytes, same -needed/0 return convention.
-    std::vector<uint8_t> compress_(const xi::Image& img) const {
-        if (img.empty()) return {};
-        return compress_px_(img.data(), img.width, img.height, img.channels);
-    }
-    // Same JPEG-through-host-cache path, from raw pixel bytes (the pack-door
+    // JPEG-through-host-cache path, from raw pixel bytes (the pack-door
     // walk holds a borrowed pool span, not an xi::Image).
     std::vector<uint8_t> compress_px_(const uint8_t* px, int w, int h, int c) const {
         if (!px || w <= 0 || h <= 0 || c <= 0) return {};

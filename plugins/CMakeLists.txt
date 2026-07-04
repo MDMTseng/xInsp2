@@ -60,9 +60,9 @@ include_directories(${XI_CODEGEN})
 # own target (find_package(OpenCV ...) + target_link_libraries) — see the
 # example plugins under examples/*/plugins for the pattern.
 
-# yyjson — Record's DOM/codec and the only JSON lib plugins use. Every plugin
-# includes xi_record (via xi_abi), so
-# link + include it for ALL plugin targets defined below (directory scope).
+# yyjson — the only JSON lib plugins use (config docs, json_source, the pack
+# codec's canonical mp path). Link + include it for ALL plugin targets defined
+# below (directory scope).
 add_library(yyjson_plugin STATIC ${XI_VENDOR}/yyjson/yyjson.c)
 target_include_directories(yyjson_plugin PUBLIC ${XI_VENDOR}/yyjson)
 include_directories(${XI_VENDOR}/yyjson)
@@ -204,7 +204,7 @@ set_target_properties(blob_analysis PROPERTIES
 # the contract behaviour (structured missing-input failures, schema skew, and the
 # builder/extractor happy path). Plugins are trusted, so these are optional — but
 # they keep the two most-copied exemplars honest. yyjson is already link_libraries'd
-# for the whole directory (above), so the Record/Json code links in.
+# for the whole directory (above), so the JSON code links in.
 enable_testing()
 
 # (v12: the Record-based blob_analysis_test was deleted with the Record data
