@@ -6,6 +6,12 @@ Wave 3. It turns **one declaration per plugin** into the generated typed-view
 artifacts, and proves those artifacts are a **drop-in** for the hand-written
 `_keys.h`/`_io.h` the plugins ship today (guard 4: "stage 2 is a swap").
 
+> **THE CUT (v12):** the `_io.gen.h`/`_schema.gen.h` halves (and the compiled
+> `codegen_equiv_compile` gate) were retired with `xi::Record`/`xi_record_schema.hpp`;
+> only the ABI-neutral `_keys.gen.h` (+ `.gen.ts`/`_gen.py`/`_keys.md`) are still
+> generated, and `codegen_equiv` gates on keys alone. Sections below describing
+> the io/schema halves are historical.
+
 ## The two generators here
 
 | Script | Input | Output |

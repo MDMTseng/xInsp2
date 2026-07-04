@@ -1115,49 +1115,8 @@ if(Python3_Interpreter_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/../contract/codegen/check_equiv.py)
     set_tests_properties(codegen_equiv PROPERTIES LABELS "contract")
 
-    # codegen_equiv_compile: the COMPILED half of the same proof. A custom
-    # command REGENERATES the _keys/_io/_schema headers from the decls into the
-    # build tree; codegen_equiv_test then #includes those GENERATED headers in
-    # place of the hand-written ones and drives the exact builder/extractor call
-    # sites the plugin tests use -- a renamed constant or changed signature stops
-    # it compiling (drop-in equivalence, proven at compile+run time). The output
-    # Records are rebuilt from JSON exactly as the plugin tests do post-ABI, so no
-    # plugin DLL is needed. See contract/codegen/equiv/test_codegen_equiv.cpp.
-    set(CODEGEN_GEN_DIR ${CMAKE_BINARY_DIR}/codegen_gen)
-    set(CODEGEN_GEN_HEADERS
-        ${CODEGEN_GEN_DIR}/blob_analysis_keys.gen.h
-        ${CODEGEN_GEN_DIR}/blob_analysis_io.gen.h
-        ${CODEGEN_GEN_DIR}/blob_analysis_schema.gen.h
-        ${CODEGEN_GEN_DIR}/mock_camera_keys.gen.h
-        ${CODEGEN_GEN_DIR}/mock_camera_io.gen.h
-        ${CODEGEN_GEN_DIR}/mock_camera_schema.gen.h
-        ${CODEGEN_GEN_DIR}/config_swap_probe_keys.gen.h
-        ${CODEGEN_GEN_DIR}/config_swap_probe_io.gen.h
-        ${CODEGEN_GEN_DIR}/json_source_keys.gen.h
-        ${CODEGEN_GEN_DIR}/json_source_io.gen.h
-        ${CODEGEN_GEN_DIR}/synced_stereo_keys.gen.h
-        ${CODEGEN_GEN_DIR}/synced_stereo_io.gen.h
-        ${CODEGEN_GEN_DIR}/synced_stereo_schema.gen.h)
-    add_custom_command(
-        OUTPUT ${CODEGEN_GEN_HEADERS}
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/codegen/gen_contract.py
-                --out ${CODEGEN_GEN_DIR}
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../contract/codegen/gen_contract.py
-                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/blob_analysis.decl.json
-                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/mock_camera.decl.json
-                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/config_swap_probe.decl.json
-                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/json_source.decl.json
-                ${CMAKE_CURRENT_SOURCE_DIR}/../contract/plugins/synced_stereo.decl.json
-        COMMENT "codegen: regenerating contract headers into ${CODEGEN_GEN_DIR}")
-    add_custom_target(codegen_gen_headers DEPENDS ${CODEGEN_GEN_HEADERS})
-    add_executable(codegen_equiv_test
-        ${CMAKE_CURRENT_SOURCE_DIR}/../contract/codegen/equiv/test_codegen_equiv.cpp)
-    add_dependencies(codegen_equiv_test codegen_gen_headers)
-    target_include_directories(codegen_equiv_test PRIVATE ${CODEGEN_GEN_DIR})
-    target_link_libraries(codegen_equiv_test PRIVATE xi_core)
-    add_test(NAME codegen_equiv_compile COMMAND codegen_equiv_test)
-    set_tests_properties(codegen_equiv_compile PROPERTIES LABELS "contract")
+    # codegen_equiv_compile (the compiled _io/_schema half of the proof) was
+    # retired at THE CUT (v12) with xi::Record; codegen_equiv above is the gate.
 else()
     message(STATUS "doc_coverage ctest skipped: no Python3 interpreter found")
 endif()

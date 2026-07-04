@@ -33,7 +33,9 @@
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_pack_abi.hpp>       // install_pack_abi + pack_v1_iface + PackRegistry
 
-#include "config_swap_probe_io.gen.h"   // Config / Command / Status typed views
+#include "config_swap_probe_keys.gen.h"   // generated key constants (survive THE CUT)
+#include <xi/xi_contract.hpp>               // kSchemaKey
+#include <xi/xi_json.hpp>
 
 #include <cstdint>
 #include <cstdio>
@@ -54,6 +56,39 @@ static int g_failures = 0;
         }                                                                      \
     } while (0)
 #define SECTION(name) std::printf("[test] %s\n", name)
+
+// [v12 THE CUT — the generated Record-era io header (typed views) was retired
+//  with xi::Record; the tiny exchange-side JSON wrappers this test used are
+//  inlined here over the SURVIVING generated key constants (_keys.gen.h).]
+namespace xi::config_swap_probe {
+class Config {
+public:
+    Config() { j_ = xi::Json::object().set(xi::contract::kSchemaKey, kSchemaVersion); }
+    Config& value(int v) { j_.set(keys::kValue, v); return *this; }
+    std::string dump() const { return j_.dump(); }
+    operator std::string() const { return j_.dump(); }
+private:
+    xi::Json j_;
+};
+class Command {
+public:
+    static std::string get_status() {
+        return xi::Json::object().set(keys::kCommand, keys::kGetStatus).dump();
+    }
+};
+class Status {
+public:
+    explicit Status(const std::string& json) : j_(xi::Json::parse(json)) {}
+    bool valid() const { return j_.valid(); }
+    int active() const { return j_[keys::kActive].as_int(); }
+    bool has_staged() const { return j_[keys::kStaged].as_bool(); }
+    int staged_value() const { return j_[keys::kStagedValue].as_int(); }
+    int last_seen() const { return j_[keys::kLastSeen].as_int(); }
+    long long proc() const { return (long long)j_[keys::kProc].as_double(); }
+private:
+    xi::Json j_;
+};
+}  // namespace xi::config_swap_probe
 
 namespace csp = xi::config_swap_probe;
 

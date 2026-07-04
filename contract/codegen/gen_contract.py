@@ -8,14 +8,13 @@ itself TRANSCRIBED from today's hand-written headers) into
     <plugin>_keys.gen.h    the key-constants contract (guard 1) — same namespace,
                            constant NAMES + VALUES + kSchemaVersion as the
                            hand-written <plugin>_keys.h (formatting may differ).
-    <plugin>_schema.gen.h  the PackSchema<Derived> CRTP keyset (enum slots +
-                           keys array) for the offset-accessor frame path.
-    <plugin>_io.gen.h      the Input/Output (operator) or Config/Command/Frame
-                           (source) builder+extractor classes — byte-for-byte the
-                           call surface the plugin's .cpp and tests already use.
     <plugin>.gen.ts        TypeScript interfaces over the JSON-carried keys.
     <plugin>_gen.py        Python TypedDicts over the JSON-carried keys.
     <plugin>_keys.md       a docs keys-table fragment.
+
+The <plugin>_io.gen.h (typed xi::Record I/O views) and <plugin>_schema.gen.h
+(xi_record_schema keysets) halves were RETIRED at THE CUT (v12) together with
+xi::Record itself; only the ABI-neutral key constants remain generated.
 
 It EXTENDS contract/codegen/gen_types.py (the run-outcome TS/Py probe): same
 BANNER discipline, same scalar type maps, deterministic output (declaration
@@ -27,8 +26,8 @@ order, no timestamps) so a regenerate is a no-op diff.
                                                             # diff vs committed (stale?)
 
 The equivalence proof that these are a DROP-IN for the hand-written headers is
-contract/codegen/check_equiv.py (the codegen_equiv ctest) + the compiled
-codegen_equiv_test TU; see contract/codegen/README.md.
+contract/codegen/check_equiv.py (the codegen_equiv ctest); see
+contract/codegen/README.md.
 """
 from __future__ import annotations
 
@@ -60,13 +59,12 @@ def pascal(name: str) -> str:
 CPP_SCALAR = {"int": "int", "double": "double", "bool": "bool", "string": "std::string"}
 CONTRACT_TYPE = {"int": "Int", "double": "Double", "bool": "Bool",
                  "string": "String", "image": "Image"}
-GETTER = {"int": "get_int", "double": "get_double", "bool": "get_bool",
-          "string": "get_string"}
 TS_SCALAR = {"int": "number", "double": "number", "bool": "boolean", "string": "string"}
 PY_SCALAR = {"int": "int", "double": "float", "bool": "bool", "string": "str"}
 
-# Reply extractors read a JSON *reply string* (an exchange() result), not a
-# Record, so they go through xi::Json's as_* accessors.
+# Reply fields (exchange() reply strings) are still DECLARED and validated —
+# their keys ride _keys.gen.h — but the typed reply extractors went with
+# _io.gen.h at THE CUT (v12).
 REPLY_GETTER = {"int": ("int", "as_int"), "double": ("double", "as_double"),
                 "bool": ("bool", "as_bool"), "string": ("std::string", "as_string")}
 # A reply field may declare ONE whitelisted C++ cast over its as_* read (the
@@ -74,22 +72,6 @@ REPLY_GETTER = {"int": ("int", "as_int"), "double": ("double", "as_double"),
 # back as `long long`). Growing this set is a deliberate generator change, not
 # open templating.
 REPLY_CASTS = {"long long"}
-
-
-def _cpp_value(v, typ: str) -> str:
-    """A decl JSON scalar -> its C++ literal (for param/config defaults)."""
-    if typ == "bool":
-        return "true" if v else "false"
-    if typ == "string":
-        return json.dumps(v)  # JSON string escaping == C++ string escaping here
-    return str(v)
-
-
-def _section(title: str) -> str:
-    """The `// ---- Title ----…` section banner, dash-padded to 78 columns
-    (matches the hand-written and previously-literal generated banners)."""
-    line = f"// ---- {title} "
-    return line + "-" * max(3, 78 - len(line))
 
 
 def banner(decl_name: str, comment: str = "//") -> str:
@@ -218,428 +200,10 @@ def gen_keys(decl: dict) -> str:
     return "\n".join(L)
 
 
-# ---- <plugin>_schema.gen.h (PackSchema CRTP keyset) ------------------------
-
-def frame_slot_keys(decl: dict) -> list[str]:
-    """The flat, top-level keys that become PackSchema slots (the offset-accessor
-    frame path). Arrays are NOT slots (they ride as dynamic/Mp entries), so they
-    are skipped. operator: inputs + non-array outputs; source: the output frame."""
-    keys: list[str] = []
-    if decl["role"] == "operator":
-        for inp in decl.get("inputs", []):
-            keys.append(inp["key"])
-        for out in decl.get("outputs", []):
-            if out.get("type") != "array":
-                keys.append(out["key"])
-    else:  # source
-        for fr in decl.get("output_frame", []):
-            keys.append(fr["key"])
-    # de-dup preserving order
-    seen, uniq = set(), []
-    for k in keys:
-        if k not in seen:
-            seen.add(k)
-            uniq.append(k)
-    return uniq
-
-
-def gen_schema(decl: dict) -> str:
-    ns = decl["namespace"]
-    cls = pascal(decl["plugin"]) + "Schema"
-    slot_keys = frame_slot_keys(decl)
-    n = len(slot_keys)
-    keys_lit = ", ".join(f'"{k}"' for k in slot_keys)
-    enum_lit = ", ".join(k_name(k) for k in slot_keys)
-    L = [
-        "#pragma once",
-        banner(decl["plugin"]),
-        f"// PackSchema keyset for {decl['plugin']} — the compile-time declared key",
-        "// order the offset-accessor read path resolves to slots (docs/new_gen/07).",
-        "// enum names ARE the slots; TypedPack<Schema> reads slots_[kX] directly —",
-        "// no hash, no scan. Arrays are omitted (they are not flat slots).",
-        "",
-        "#include <xi/xi_pack.hpp>",
-        "",
-        "#include <array>",
-        "#include <string_view>",
-        "",
-        f"namespace {ns} {{",
-        "",
-        f"struct {cls} : xi::PackSchema<{cls}> {{",
-        f"    static constexpr std::array<std::string_view, {n}> keys = {{ {keys_lit} }};",
-        f"    enum : int {{ {enum_lit} }};",
-        "};",
-        "",
-        f"}}  // namespace {ns}",
-        "",
-    ]
-    return "\n".join(L)
-
-
-# ---- <plugin>_io.gen.h ------------------------------------------------------
-
-def _output_getter(key: str, typ: str, indent: str) -> str:
-    if typ == "image":
-        return (f"{indent}const xi::Image& {key}() const "
-                f"{{ return rec_.get_image(keys::{k_name(key)}); }}")
-    g = GETTER[typ]
-    ret = CPP_SCALAR[typ]
-    return f"{indent}{ret} {key}() const {{ return rec_.{g}(keys::{k_name(key)}); }}"
-
-
-def _emit_extractor_class(field: dict, indent: str, lines: list[str]) -> None:
-    """Emit a nested extractor class for an array-of-object output field."""
-    cls = field["item_class"]
-    lines.append(f"{indent}class {cls} {{")
-    lines.append(f"{indent}public:")
-    lines.append(f"{indent}    explicit {cls}(xi::Record r) : r_(std::move(r)) {{}}")
-    for sub in field["fields"]:
-        st = sub["type"]
-        if st == "array":
-            lines.append("")
-            # recurse: nested class, then size()/item(i)
-            nested: list[str] = []
-            _emit_extractor_class(sub, indent + "    ", nested)
-            lines.extend(nested)
-            sz, item, icls = sub["size_accessor"], sub["item_accessor"], sub["item_class"]
-            lines.append(f"{indent}    int {sz}() const "
-                         f"{{ return r_.get_array_size(keys::{k_name(sub['key'])}); }}")
-            lines.append(f"{indent}    {icls} {item}(int i) const "
-                         f"{{ return {icls}(r_.get_array_item(keys::{k_name(sub['key'])}, i)); }}")
-        else:
-            g, ret = GETTER[st], CPP_SCALAR[st]
-            lines.append(f"{indent}    {ret} {sub['key']}() const "
-                         f"{{ return r_.{g}(keys::{k_name(sub['key'])}); }}")
-    lines.append(f"{indent}private:")
-    lines.append(f"{indent}    xi::Record r_;")
-    lines.append(f"{indent}}};")
-
-
-def gen_io_operator(decl: dict) -> str:
-    ns = decl["namespace"]
-    L = [
-        "#pragma once",
-        banner(decl["plugin"]),
-        f"// Typed view over {decl['plugin']}'s Record I/O (stage-1 deliverable, now",
-        "// GENERATED). Input builder + Output extractor compile straight down to",
-        "// xi::Record set/get over the _keys.gen.h constants — nothing new crosses",
-        "// the ABI, a key typo is a compile error.",
-        "",
-        f'#include "{decl["plugin"]}_keys.gen.h"',
-        "",
-        "#include <xi/xi_contract.hpp>",
-        "#include <xi/xi_record.hpp>",
-        "",
-        f"namespace {ns} {{",
-        "",
-        "// ---- Input builder --------------------------------------------------------",
-        "class Input {",
-        "public:",
-        "    Input() { rec_.set(xi::contract::kSchemaKey, kSchemaVersion); }",
-        "",
-    ]
-    for inp in decl.get("inputs", []):
-        key, typ = inp["key"], inp["type"]
-        if typ == "image":
-            L.append(f"    Input& {key}(xi::Image img) "
-                     f"{{ rec_.image(keys::{k_name(key)}, std::move(img)); return *this; }}")
-        else:
-            arg = CPP_SCALAR[typ]
-            L.append(f"    Input& {key}({arg} v) "
-                     f"{{ rec_.set(keys::{k_name(key)}, v); return *this; }}")
-    L += [
-        "",
-        "    const xi::Record& record() const { return rec_; }",
-        "    operator const xi::Record&() const { return rec_; }",
-        "",
-        "private:",
-        "    xi::Record rec_;",
-        "};",
-        "",
-        "// ---- Output extractor -----------------------------------------------------",
-        "class Output {",
-        "public:",
-        "    explicit Output(xi::Record rec) : rec_(std::move(rec)) {}",
-        "",
-        "    bool ok() const { return !rec_.is_na(); }",
-        "    std::string na_reason() const { return rec_.na_reason(); }",
-        "    std::string fault_code() const {",
-        "        return rec_.get_record(xi::contract::kFaultKey).get_string(xi::contract::kCode);",
-        "    }",
-        "",
-    ]
-    # scalar/image outputs first, then array-of-object accessors + nested classes
-    for out in decl.get("outputs", []):
-        if out.get("type") != "array":
-            L.append(_output_getter(out["key"], out["type"], "    "))
-    for out in decl.get("outputs", []):
-        if out.get("type") == "array":
-            L.append("")
-            nested: list[str] = []
-            _emit_extractor_class(out, "    ", nested)
-            L.extend(nested)
-            sz, item, icls = out["size_accessor"], out["item_accessor"], out["item_class"]
-            L.append(f"    int {sz}() const "
-                     f"{{ return rec_.get_array_size(keys::{k_name(out['key'])}); }}")
-            L.append(f"    {icls} {item}(int i) const "
-                     f"{{ return {icls}(rec_.get_array_item(keys::{k_name(out['key'])}, i)); }}")
-    L += [
-        "",
-        "    const xi::Record& record() const { return rec_; }",
-        "",
-        "private:",
-        "    xi::Record rec_;",
-        "};",
-        "",
-        f"}}  // namespace {ns}",
-        "",
-    ]
-    return "\n".join(L)
-
-
-def gen_io_source(decl: dict) -> str:
-    ns = decl["namespace"]
-    cfgs = [c for c in decl.get("config", []) if not c.get("readonly")]
-    raw_cfgs = [c for c in cfgs if c.get("raw_json")]
-    pb = decl.get("patch_builder")
-    frame = decl.get("output_frame", [])
-    images = [fr for fr in frame if fr["type"] == "image"]
-
-    std_includes = {"string"}
-    if pb:
-        std_includes |= {"initializer_list", "utility"}
-    xi_includes = ["#include <xi/xi_contract.hpp>", "#include <xi/xi_json.hpp>"]
-    if images:  # only the Frame extractor touches xi::Record
-        xi_includes.append("#include <xi/xi_record.hpp>")
-
-    L = [
-        "#pragma once",
-        banner(decl["plugin"]),
-        f"// Typed view over {decl['plugin']}'s config, commands, and emitted frame",
-        "// (source plugin; GENERATED). Config -> set_def JSON, Command -> exchange",
-        "// JSON, Frame reads the emitted output Record. All compile down to plain",
-        "// xi::Json / xi::Record ops — nothing new crosses the ABI.",
-        "",
-        f'#include "{decl["plugin"]}_keys.gen.h"',
-        "",
-        *xi_includes,
-        "",
-        *(f"#include <{h}>" for h in sorted(std_includes)),
-        "",
-        f"namespace {ns} {{",
-        "",
-    ]
-
-    # ---- Config -------------------------------------------------------------
-    L.append(_section("Config builder (produces the set_def JSON)"))
-    if raw_cfgs:
-        # Raw-JSON config fields are spliced VERBATIM (open payload by design),
-        # so dump() concatenates the document instead of routing through typed
-        # setters; typed config keys ride the same raw JSON (see the decl).
-        L += [
-            "// Raw-JSON config fields are spliced VERBATIM (open payload by design), so",
-            "// dump() concatenates the document instead of routing through typed setters;",
-            "// typed config keys ride the same raw JSON (see the decl).",
-            "class Config {",
-            "public:",
-        ]
-        for c in raw_cfgs:
-            L.append(f"    Config& {c['key']}(const std::string& raw_json) "
-                     f"{{ {c['key']}_ = raw_json; return *this; }}")
-        splice = "               std::to_string(kSchemaVersion)"
-        for c in raw_cfgs:
-            splice += f' + ",\\"" + keys::{k_name(c["key"])} + "\\":" + {c["key"]}_'
-        L += [
-            "",
-            "    std::string dump() const {",
-            '        return std::string("{\\"") + xi::contract::kSchemaKey + "\\":" +',
-            splice + ' + "}";',
-            "    }",
-            "    operator std::string() const { return dump(); }",
-            "",
-            "private:",
-        ]
-        for c in raw_cfgs:
-            L.append(f"    std::string {c['key']}_ = {_cpp_value(c.get('default', '{}'), 'string')};")
-        L += ["};", ""]
-    else:
-        L += [
-            "class Config {",
-            "public:",
-            "    Config() { j_ = xi::Json::object().set(xi::contract::kSchemaKey, kSchemaVersion); }",
-            "",
-        ]
-        for cfg in cfgs:
-            arg = CPP_SCALAR[cfg["type"]]
-            L.append(f"    Config& {cfg['key']}({arg} v) "
-                     f"{{ j_.set(keys::{k_name(cfg['key'])}, v); return *this; }}")
-        L += [
-            "",
-            "    std::string dump() const { return j_.dump(); }",
-            "    operator std::string() const { return j_.dump(); }",
-            "",
-            "private:",
-            "    xi::Json j_;",
-            "};",
-            "",
-        ]
-
-    # ---- Command ------------------------------------------------------------
-    cmds = decl.get("commands")
-    if cmds:
-        sel = k_name(cmds["selector_key"])
-        L += [
-            _section("Command builder (produces the exchange JSON)"),
-            "class Command {",
-            "public:",
-        ]
-        for c in cmds["list"]:
-            name = c["name"]
-            params = c.get("params", [])
-            if c.get("doc"):
-                L.append(f"    // {c['doc']}")
-            if not params:
-                L.append(f"    static std::string {name}() "
-                         f"{{ return cmd_(keys::{k_name(name)}); }}")
-            elif any(p.get("raw_json") for p in params):
-                # validated: a raw-JSON command has exactly ONE param, spliced
-                # verbatim (the payload is arbitrary JSON text by design).
-                p = params[0]
-                L.append(f"    static std::string {name}(const std::string& {p['arg']}) {{")
-                L.append(f'        return std::string("{{\\"") + keys::{sel} + "\\":\\"" '
-                         f"+ keys::{k_name(name)} +")
-                L.append(f'               "\\",\\"" + keys::{k_name(p["key"])} + "\\":" '
-                         f'+ {p["arg"]} + "}}";')
-                L.append("    }")
-            else:
-                def _sig(p: dict) -> str:
-                    s = f"{CPP_SCALAR[p['type']]} {p['arg']}"
-                    if "default" in p:
-                        s += f" = {_cpp_value(p['default'], p['type'])}"
-                    return s
-                sig = ", ".join(_sig(p) for p in params)
-                body = f"xi::Json::object().set(keys::{sel}, keys::{k_name(name)})"
-                for p in params:
-                    body += f".set(keys::{k_name(p['key'])}, {p['arg']})"
-                L.append(f"    static std::string {name}({sig}) {{")
-                L.append(f"        return {body}.dump();")
-                L.append("    }")
-        L += [
-            "",
-            "private:",
-            "    static std::string cmd_(const char* name) {",
-            f"        return xi::Json::object().set(keys::{sel}, name).dump();",
-            "    }",
-            "};",
-            "",
-        ]
-
-    # ---- Patch builder (raw-JSON per-emit patch shape) -----------------------
-    if pb:
-        cls = pb["class"]
-        pk, vk, lk = pb["path_key"], pb["value_key"], pb["list_key"]
-        single = pb.get("single_accessor", "single")
-        batch = pb.get("batch_accessor", "batch")
-        L.append(_section(f"{cls} builder (produces the process() input JSON)"))
-        if pb.get("doc"):
-            L.append(f"// {pb['doc']}")
-        L += [
-            f"class {cls} {{",
-            "public:",
-            f'    // {{ "{pk}": <path>, "{vk}": <raw json> }}',
-            f"    static std::string {single}(const std::string& path, const std::string& raw_value) {{",
-            f'        return std::string("{{\\"") + keys::{k_name(pk)} + "\\":\\"" + path + "\\",\\"" +',
-            f'               keys::{k_name(vk)} + "\\":" + raw_value + "}}";',
-            "    }",
-            f'    // {{ "{lk}": [ {{{pk},{vk}}}, ... ] }}',
-            f"    static std::string {batch}(std::initializer_list<std::pair<std::string, std::string>> patches) {{",
-            f'        std::string out = std::string("{{\\"") + keys::{k_name(lk)} + "\\":[";',
-            "        bool first = true;",
-            "        for (auto& [path, raw_value] : patches) {",
-            '            if (!first) out += ",";',
-            f"            out += {single}(path, raw_value);",
-            "            first = false;",
-            "        }",
-            '        out += "]}";',
-            "        return out;",
-            "    }",
-            "};",
-            "",
-        ]
-
-    # ---- Reply extractors (typed readers over an exchange() reply string) ----
-    for rep in decl.get("replies", []):
-        cls = rep["class"]
-        title = (f"{cls} extractor (reads the {rep['of_command']} reply)"
-                 if rep.get("of_command") else f"{cls} extractor (reads a reply)")
-        L.append(_section(title))
-        if rep.get("doc"):
-            L.append(f"// {rep['doc']}")
-        L += [
-            f"class {cls} {{",
-            "public:",
-            f"    explicit {cls}(const std::string& json) : j_(xi::Json::parse(json)) {{}}",
-            "",
-            "    bool valid() const { return j_.valid(); }",
-            "",
-        ]
-        for f in rep["fields"]:
-            ret, getter = REPLY_GETTER[f["type"]]
-            acc = f.get("accessor", f["key"])
-            expr = f"j_[keys::{k_name(f['key'])}].{getter}()"
-            if f.get("cast"):
-                ret = f["cast"]
-                expr = f"({f['cast']}){expr}"
-            L.append(f"    {ret} {acc}() const {{ return {expr}; }}")
-        L += [
-            "",
-            "private:",
-            "    xi::Json j_;",
-            "};",
-            "",
-        ]
-
-    # ---- Frame (emitted only when there is an image to extract) --------------
-    if images:
-        composites = decl.get("frame_composites", [])
-        L += [
-            _section("Frame extractor (reads an emitted output Record)"),
-            "class Frame {",
-            "public:",
-            "    explicit Frame(xi::Record rec) : rec_(std::move(rec)) {}",
-            "",
-        ]
-        has_names = {}
-        for fr in images:
-            has = fr.get("has_accessor", "has_" + fr["key"])
-            has_names[fr["key"]] = has
-            L.append(f"    bool {has}() const "
-                     f"{{ return rec_.has_image(keys::{k_name(fr['key'])}); }}")
-        for comp in composites:
-            expr = " && ".join(f"{has_names[k]}()" for k in comp["all_of"])
-            doc = f"  // {comp['doc']}" if comp.get("doc") else ""
-            L.append(f"    bool {comp['accessor']}() const {{ return {expr}; }}{doc}")
-        if len(images) > 1 or composites:
-            L.append("")
-        for fr in images:
-            acc = fr.get("accessor", fr["key"])
-            L.append(f"    const xi::Image& {acc}() const "
-                     f"{{ return rec_.get_image(keys::{k_name(fr['key'])}); }}")
-        L += [
-            "",
-            "    const xi::Record& record() const { return rec_; }",
-            "",
-            "private:",
-            "    xi::Record rec_;",
-            "};",
-            "",
-        ]
-    L += [f"}}  // namespace {ns}", ""]
-    return "\n".join(L)
-
-
-def gen_io(decl: dict) -> str:
-    return gen_io_operator(decl) if decl["role"] == "operator" else gen_io_source(decl)
+# The _schema.gen.h (PackSchema CRTP keyset) and _io.gen.h (typed Record I/O
+# view) generators lived here until THE CUT (v12): xi::Record and
+# xi_record_schema.hpp left the SDK, so those artifact halves are retired.
+# Only the ABI-neutral _keys.gen.h (+ TS/Py/docs) halves remain.
 
 
 # ---- TS + Py (extends gen_types.py patterns) --------------------------------
@@ -758,10 +322,9 @@ def gen_keys_md(decl: dict) -> str:
 
 # ---- driver -----------------------------------------------------------------
 
+# "_io.gen.h" and "_schema.gen.h" were retired at THE CUT (v12) with xi::Record.
 ARTIFACTS = {
     "_keys.gen.h": gen_keys,
-    "_schema.gen.h": gen_schema,
-    "_io.gen.h": gen_io,
     ".gen.ts": gen_ts,
     "_gen.py": gen_py,
     "_keys.md": gen_keys_md,
@@ -940,30 +503,11 @@ def load_decls() -> list[dict]:
 
 
 def render(decl: dict) -> dict[str, str]:
-    """{filename: content} for one decl. Deterministic.
-
-    Two artifacts are conditional, so the generator never emits a file that would
-    be a lie about what it can express:
-
-      * `_io.gen.h` is SKIPPED when the decl sets `"handwritten_io": true` — the
-        escape hatch for a control surface the constrained decl subset cannot
-        express. Since the polaris2 codegen-gap-#2 extension (reply extractors,
-        param defaults, raw-JSON splicing, patch_builder, frame composites) NO
-        in-tree decl needs it any more (json_source / config_swap_probe /
-        synced_stereo are fully generated); it stays supported for future
-        plugins. See contract/codegen/README.md.
-      * `_schema.gen.h` is SKIPPED when the plugin declares no flat frame slots
-        (a source with no `output_frame`): an empty PackSchema is noise, nothing
-        adopts it, and it would never be compiled.
-    """
+    """{filename: content} for one decl. Deterministic. (The conditional
+    `_io.gen.h`/`_schema.gen.h` skip logic — `handwritten_io`, empty frame
+    slots — retired with those artifacts at THE CUT, v12.)"""
     plugin = decl["plugin"]
-    skip: set[str] = set()
-    if decl.get("handwritten_io"):
-        skip.add("_io.gen.h")
-    if not frame_slot_keys(decl):
-        skip.add("_schema.gen.h")
-    return {plugin + suffix: fn(decl)
-            for suffix, fn in ARTIFACTS.items() if suffix not in skip}
+    return {plugin + suffix: fn(decl) for suffix, fn in ARTIFACTS.items()}
 
 
 def generate(out_dir: Path) -> list[Path]:

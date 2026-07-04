@@ -24,11 +24,9 @@ Python interpreter is present -- like the contract_baseline gate.
       makes the ratchet direction visible without blocking -- the covered-plugin
       set only grows.
 
-The compiled half of the proof (a TU that includes the GENERATED _keys.gen.h +
-_io.gen.h against the same call sites the plugin tests use, proving the API is a
-drop-in at compile+run time) is the separate codegen_equiv_test executable
-(contract/codegen/equiv/test_codegen_equiv.cpp), wired alongside this in
-backend/CMakeLists.txt.
+The compiled half of the proof (the codegen_equiv_test TU over the generated
+_io.gen.h/_schema.gen.h) was RETIRED at THE CUT (v12) with xi::Record; the gate
+now proves the key-constant half alone.
 
     python contract/codegen/check_equiv.py     # the gate (read-only)
 """
