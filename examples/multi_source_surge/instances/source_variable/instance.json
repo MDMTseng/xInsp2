@@ -1,0 +1,5 @@
+{
+  "plugin": "burst_source",
+  "isolation": "in_process",
+  "config": { "fps": 45, "width": 800, "height": 600, "shape": "variable" }
+}
