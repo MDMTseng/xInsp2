@@ -1,133 +1,123 @@
-# Typed I/O + NA — the mechanics
+# Typed I/O + the contract codegen — the mechanics
 
-**Shipped design-of-record (phases 1–3; the wiring UI is deferred — see roadmap).**
-How nominal types + per-plugin `io.hpp` facades + NA propagation turn plugin
-wiring from hand-written JSON juggling into a straight line, **without putting a
-schema in the core**. The type *names* + Image bag the wiring author sees are in
-[`../reference/data-types.md`](../reference/data-types.md); this is how they work.
+**Shipped design-of-record (ABI v12).** What the plugin data contract generates
+now, and how compile-checked keyed reads work on the sealed-pack data plane.
 
-## Nominal types are just names over Record
+> **THE CUT (v12).** The typed **Record** I/O layer this page used to describe —
+> nominal types over `xi::Record`, per-plugin `io.hpp` extractor/constructor
+> facades, `xi::Typed` shallow views with write-through + COW, and `$na`
+> propagation — was **retired at THE CUT together with `xi::Record`**. The
+> generated `<plugin>_io.gen.h` (typed Record I/O views) and
+> `<plugin>_schema.gen.h` (`xi_record_schema` keysets) halves went with it. What
+> survives is the **ABI-neutral key contract** — key *names* and *values* — plus
+> the typed-keyed reads the **pack plane** provides. The deleted layer is kept as
+> labeled history at the end ([What THE CUT retired](#what-the-cut-retired-record-typed-io)).
 
-`Number / Point / Vec2/3/4 / Line / Arc / Pose / Roi / Mat2/3/4 / Region`
-(`xi/xi_types.hpp`) are each *just a name* over a generic `xi::Record` — no fields
-enforced, payload still schema-less JSON. A wrapper is a lightweight handle (holds
-a Record), carries schema-less accessors (`pose.angle()` reads `rec["angle"]`, NA
-if absent), and **can be NA**. The compiler stops you wiring a `Line` into a
-`Pose` input, but the data never leaves generic Record and `process()` stays
-untyped (`Record` only). Types live purely in the wiring layer; plugin/toolbox
-authors define their own (e.g. a toolbox `MatchResult`) in their own `io.hpp`.
+## What the contract generator emits now — `contract/codegen/gen_contract.py`
 
-### Shallow views, write-through, COW
+One declaration file (`contract/plugins/<plugin>.decl.json`) is the single source
+of truth; the generator turns it into these artifacts (deterministic — declaration
+order, no timestamps, so a regenerate is a no-op diff; `--check` is the staleness
+ctest):
 
-A `xi::Typed` is OWNED (holds its own Record) or a VIEW (shares a parent's
-`shared_ptr<Record>` + points a yyjson value at a sub-node — no copy). Extractors
-hand out views, so pulling N nested values costs no duplication; the one
-materialising copy is `record()`, when you embed a value into a constructor input.
-`set()` is **write-through by design** (like a NumPy view) — it mutates the node in
-the shared tree; `.clone()` first when you want an independent copy. (Note: the doc
-layer's COW means a write to a *frozen/shared* Record copies first — see
-[`data-layer.md`](./data-layer.md); a freshly-extracted owned Record is writable.)
+| Artifact | What it is |
+|---|---|
+| `<plugin>_keys.gen.h` | The key-constants contract (guard 1): `namespace keys { inline constexpr const char* kMinArea = "min_area"; … }` + `kSchemaVersion`. Every string key named exactly once; the builder, any extractor, and the plugin's own reader all compile from it. |
+| `<plugin>.gen.ts` | TypeScript interfaces over the JSON-carried keys (for the webUI). |
+| `<plugin>_gen.py` | Python `TypedDict`s over the JSON-carried keys. |
+| `<plugin>_keys.md` | A docs keys-table fragment. |
 
-`xi::Typed`/`Field` writes (`set()`, `roi["x"] = …`, `MatN::set`) honour that same
-copy-on-write boundary: they route through `Typed::prepare_write_()`, which calls
-`Record::materialize_unfrozen()` (the public hook over `Record::cow_`) **before**
-touching the tree. So writing through a Typed whose Record is **frozen** — shared,
-borrowed, or registry-managed across the ABI, e.g. `current_trigger().meta()` — no
-longer mutates the doc the other side still reads; it copies first. The fast path is
-unchanged: a non-frozen write is one relaxed flag-load + a pointer re-seat, **no
-copy**. Two cases:
+The `_io.gen.h` and `_schema.gen.h` generators lived in this file until THE CUT;
+the source now carries only the retirement note where they were (and `render()`
+lost the conditional `handwritten_io` / empty-frame-slot skip logic those
+artifacts needed). **Only the ABI-neutral halves remain generated.**
 
-- **OWNED** Typed (`node_ == root_->json()`): COWs the whole Record and re-seats
-  `node_` at the (possibly new) root. This is the common reachable path
-  (`xi::Roi(current_trigger().meta())` is an OWNED Typed via the `Typed(Record)`
-  ctor).
-- **VIEW into a frozen doc** (an interior sub-node of a cross-ABI shared tree): the
-  interior node can't be cheaply re-resolved into a copy, so the write **detaches**
-  — the view becomes an OWNED standalone copy of just that sub-node (an implicit
-  `.clone()`). The write lands in the private copy; the frozen original is untouched.
-  A *non-frozen* view still writes through in place (the NumPy semantics above) — the
-  detach only happens when the original is frozen, where in-place mutation would
-  corrupt the other side.
+The decl still **declares and validates** the full surface — `inputs`, `outputs`,
+`config`, `commands`, `replies`, `output_frame` — because those declarations still
+mint key constants (that is what `_keys.gen.h` collects, via `collect_keys`). What
+changed is that the *typed views* over those keys are no longer code-generated: a
+reply field, for instance, is still declared and its key still rides `_keys.gen.h`,
+but the typed reply **extractor** went with `_io.gen.h`. The `_validate_decl`
+constrained-subset checker (unknown sections/attributes are errors; the escape
+hatches — `raw_json` splice, whitelisted reply `cast`, `patch_builder` — are fixed
+shapes) is unchanged, so a decl the generator would mis-render is still refused at
+load by both `gen_contract.py` and `check_equiv.py`.
 
-## Per-plugin `io.hpp` — extractor + constructor facades
+## Typed, compile-checked reads on the pack plane
 
-Each plugin ships a header-only `io.hpp` (alongside `plugin.json`) the script
-`#include`s; it mirrors the manifest:
+Keys are still named exactly once and reads are still drift-proof — the mechanism
+moved from typed Record views to the sealed pack:
 
-```cpp
-auto e = matcher_io::extract(rec);     // one getter per output port
-e.count();                             // -> Number
-e.orientation(i);                      // -> xi::Pose (i-th, lazy view)
+- **By key constant.** A plugin door reads/writes with its `_keys.gen.h`
+  constants through `xi::PackIn`/`xi::PackOut` (`in.i64(keys::kThresh)`,
+  `out.image(keys::kDst, …)`), and a script through `xi::ScriptPack`
+  (`f.get_i64(...)`) — no string literals at call sites, no schema in the core.
+  Every typed read returns `std::optional`, so absence is explicit rather than a
+  silent default.
+- **By declared keyset (compile-checked slots).** `xi::ScriptTypedPack<Schema>`
+  (`xi_use.hpp`) wraps a `ScriptPack` with a schema of key **slots**:
+  `get_i64<Schema::kSeq>()` resolves the slot to its key constant at compile time,
+  so a mistyped slot is a build error, not a runtime miss (`examples/qa_pack_walk`
+  is the reference). This is the pack analogue of the retired declared-keyset
+  Record views.
+- **Producer-agnostic walk.** A sink that has no producer schema enumerates an
+  unknown pack with `count()` + `key_at`/`tag_at` (or the `for_each(key, tag)`
+  sugar) — the pack's self-description (doc 07 §2).
 
-auto in = line_fit_io::build()         // one setter per input port
-            .current(e.orientation(k))
-            .baseline(/* from config */)
-            .build();                  // -> xi::Record (complete)
-```
+## Provenance + fault ride the pack (same key *names*, pack shapes)
 
-**Extractors and constructors are TOTAL — they never fail.** A missing field
-yields an empty / NA value, not an exception. The wiring code is a straight line:
-no null-checks, no try/catch.
-
-## NA propagation — validate at the compute boundary
-
-Validation happens where the data is *used* — inside the plugin's `process()`:
-- If the **whole input Record is NA**, the framework short-circuits:
-  `use("x").process(na)` returns NA without running the plugin.
-- If **some fields are missing**, the plugin bails to NA in one line:
-  `if (auto na = xi::require(in, {"current","baseline"})) return *na;`
-- A plugin that can't proceed returns `xi::Record::na("reason")` — an empty output
-  carrying the reason. The next stage's input is then NA, so it short-circuits too:
-  **NA flows to the end of the pipeline carrying its reason, with no defensive code
-  in between.**
-
-NA is a first-class Record concept, a reserved `"$na"` key so it crosses the
-`process()` ABI + WS unchanged:
-
-```cpp
-xi::Record::na("reason")   // { "$na": "reason" }, no images
-rec.is_na(); rec.na_reason();
-```
-
-This extends run-level NA (`xi::result` code 0) down to the Record level so it
-flows *between* stages.
-
-> **Pack-plane mirror.** The v3 Pack plane has the same shape with different
-> vocabulary: a contract failure is a normal sealed pack carrying a `$fault`
-> reason code (never a null handle), and the host funnel short-circuits a fault
-> input by minting a new fault pack with the hop appended — the pack mirror of
-> `use("x").process(na)` returning NA without running the plugin. The contract
-> (reserved `$fault`/`$fault_key`/`$fault_detail`/`$src`/`$prov` keys,
-> `is_fault`, `propagate_fault`) lives in `xi/xi_pack_contract.hpp` — doc 15's
-> implementation — and is described in [`pack-plane.md`](./pack-plane.md).
-
-## Provenance (`$src` / `$prov`)
-
-A Record can carry **where it came from**, so non-image data flow is
-self-describing without parsing the script:
-- the host stamps an instance's output with its name (`$src`),
-- extractors **pipe** that onto the typed values they pull out (`pose.src()`),
-- constructors **record** which source each input field came from (`$prov`: field
-  → src), so the constructor knows the lineage.
-
-Reserved keys (`$src` / `$prov`), like `$na`, harmless to plugins. Complements the
-pipeline-graph image-handle edges: the same dataflow the graph can't trace for
-scalar/JSON, now explicit — a future graph can read `$prov` to draw those edges.
-(The pack plane reuses the same key *names* with its own shapes — `$src` is the
-immediate producer, `$prov` a `/`-joined hop chain, stamped by the door glue
-before seal; see [`pack-plane.md`](./pack-plane.md).)
-
-## Iconic types — payload on the image channel
-
-Most nominal types live in the JSON channel; **`Region` is the first whose data is
-an image** — a binary mask (CV_8U) under the image key `"mask"`, with frame `w`/`h`
-mirrored into JSON for cheap metadata. Still "just a name over a Record"; the
-difference is purely *which channel* holds the bytes — so the mask rides the
-zero-copy ImagePool and drops straight into OpenCV (`xi::to_cv(region)`). Embedding
-a Region as a sub-field copies only its JSON — `Record::set(sub)` deep-copies the
-JSON root, not the image map, so the mask must be re-attached explicitly.
+The `$src` / `$prov` provenance convention and the fail-loud discipline survived
+the currency swap with the same reserved key **names** but pack-native shapes:
+`$src` is the immediate producer (instance name), `$prov` a `/`-joined hop chain
+(oldest→newest), stamped by the pack-door glue **before seal** (an immutable pack
+means new lineage is a new pack); a contract failure is a normal sealed pack
+carrying `$fault` (never a null handle), and the host funnel short-circuits a fault
+input by minting a propagated fault pack — the pack mirror of the retired
+`use("x").process(na)` returning NA without running the plugin. One home for the
+reserved `$`-keys and the shared helpers: `xi/xi_pack_contract.hpp`. Full
+semantics: [`pack-plane.md`](./pack-plane.md).
 
 ## See also
 
-- [`../reference/data-types.md`](../reference/data-types.md) — the type vocabulary + Record/Image contract.
-- `xi/xi_types.hpp` (+ opt-in `xi_types_cv.hpp`) + each plugin's `io.hpp`.
+- `contract/codegen/gen_contract.py` — the generator; `contract/codegen/check_equiv.py`
+  (the `codegen_equiv` ctest) — the drop-in-equivalence proof vs the hand-written
+  `_keys.h`.
+- [`data-layer.md`](./data-layer.md) — the sealed-pack container + refcount mechanics.
+- [`pack-plane.md`](./pack-plane.md) — the pack contract, fault semantics and ingress.
+- `xi/xi_abi.hpp` (`PackIn`/`PackOut`), `xi/xi_use.hpp` (`ScriptPack`/`ScriptTypedPack`).
+
+---
+
+## What THE CUT retired (Record typed I/O) — historical
+
+> Everything below is **retired at THE CUT (v12)** with `xi::Record`. It is kept
+> as a tombstone for old links; none of it exists in the shipped SDK. The pack
+> plane above covers the same need (typed, drift-proof, self-describing keyed I/O)
+> without a schema in the core.
+
+- **Nominal types over Record.** `Number / Point / Vec2..4 / Line / Arc / Pose /
+  Roi / Mat2..4 / Region` (`xi/xi_types.hpp`) were each *just a name* over a
+  generic `xi::Record` — no fields enforced, payload schema-less JSON. The
+  compiler stopped you wiring a `Line` into a `Pose` input, but `process()` stayed
+  untyped (`Record` only) and the types lived purely in the wiring layer.
+- **`xi::Typed` shallow views + write-through + COW.** A `Typed` was OWNED or a
+  VIEW sharing a parent's `shared_ptr<Record>`; extractors handed out views so
+  pulling N nested values cost no duplication. `set()` was write-through (NumPy
+  semantics), routed through `prepare_write_()` → `Record::materialize_unfrozen()`
+  so a write to a *frozen/shared* Record (e.g. `current_trigger().meta()`) copied
+  first. All of this depended on the Record doc layer's COW, which is gone.
+- **Per-plugin `io.hpp` facades.** Each plugin shipped a header-only `io.hpp` the
+  script `#include`d — a `<plugin>_io.extract(rec)` extractor (one getter per
+  output port) and a `<plugin>_io.build()` constructor (one setter per input
+  port), both **total** (a missing field yielded NA, never threw). These were the
+  `_io.gen.h` half of the codegen, retired above.
+- **NA propagation (`$na`).** Validation happened at the compute boundary inside
+  `process()`: a whole-Record NA short-circuited `use("x").process(na)`;
+  `xi::require(in, {…})` bailed to NA in one line; `xi::Record::na("reason")` was
+  an empty output carrying a reason that flowed to the end of the pipeline. The
+  pack plane's `$fault` (a normal sealed pack, `is_fault`/`propagate_fault`) is the
+  direct replacement.
+- **Iconic `Region`.** The first nominal type whose data was an image — a binary
+  mask (CV_8U) under image key `"mask"` with `w`/`h` mirrored into JSON. On the
+  pack plane a mask is simply an image entry beside its scalar metadata in the same
+  sealed pack.

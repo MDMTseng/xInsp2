@@ -1,58 +1,72 @@
 # Dispatch — how an emit becomes a run
 
-**Shipped design-of-record (ABI v6).** Turning an emitted record into a script
+**Shipped design-of-record (ABI v12).** Turning an emitted **pack** into a script
 run: the **dispatch funnel** (one emit → one inspection) and **dispatch groups**
 (give critical work its own threads + CPU priority).
+
+> **THE CUT (v12).** The dispatch plane was **dual-carry** during the polaris2
+> window — every `TriggerEvent` carried both a Record payload (image map +
+> refcounted meta doc) and an optional sealed-pack handle. THE CUT deleted the
+> Record half: `emit_record`, `TriggerEvent`'s image/doc members, and the whole
+> Record data plane are gone. The sole payload is now the sealed **pack**
+> (`TriggerEvent::pack`, `xi_pack_handle`). This page describes the pack dispatch
+> funnel; the container/registry/fault contract is
+> [`pack-plane.md`](./pack-plane.md).
 
 ---
 
 ## 1. The dispatch funnel — one emit, one run
 
-A source plugin emits a **record** (images + metadata) with the SDK helper
-`xi::emit_record(host, name, record)` → `host->emit_record(emitter, id, rec, ts)`.
-The bus builds ONE `TriggerEvent` per emit and hands it to the worker; the script
-reads it via `xi::current_trigger()`:
+A source plugin emits a sealed **pack** (image entries + metadata, all keyed) via
+the inherited `emit(PackOut&&, id, ts)` → the host `xi_pack_v1::emit_pack(emitter,
+id, pack, ts)` verb. The bus (`xi_trigger_bus.hpp`) builds ONE `TriggerEvent` per
+emit and hands it to the worker; the script reads it via `xi::current_trigger()`:
 
 ```cpp
 auto t = xi::current_trigger();
 if (!t.is_active()) return;            // false for synthetic timer ticks
-auto img  = t.image("cam_left");       // image by the record's key
-auto meta = t.meta();                  // routing/context metadata (Record)
-auto id   = t.id_string();             // the emit id
+if (auto f = t.pack()) {               // the event's sealed pack (ScriptPack)
+    auto img    = f.get_image("cam_left");        // image entry by key
+    int64_t seq = f.get_i64("seq").value_or(0);   // metadata = ordinary entries
+}
+auto id = t.id_string();               // the emit id
 ```
 
 There is **no correlation**: a source that wants several frames inspected
-together puts them in the SAME record (a *gathering* source — see multi-camera
-below). `id == XI_TRIGGER_NULL` asks the host to mint one. Per-image keys: a
-single-image record keys by the emitter name (`t.image("<emitter>")`); a
-multi-image record keys by the record's own keys (`t.image("cam_left")`).
+together puts them in the SAME pack (a *gathering* source — see multi-camera
+below). `id == XI_TRIGGER_NULL` asks the host to mint one. The frame is read by
+whatever key the source used (`f.get_image("cam_left")`); a producer-agnostic
+sink enumerates the pack with `f.for_each(...)`.
 
-### Trigger metadata (zero-serialize)
+### Trigger metadata (rides the pack)
 
-The record's JSON metadata (command id, recipe, lane hint…) rides the event **by
-pointer** — a host-owned yyjson doc refcounted through the `DocRegistry` exactly
-as image handles ride the `ImagePool`, so there's no serialize on the live path.
-`t.meta()` returns a borrowed read-only `Record`; reads are free, a mutation
-copy-on-writes into the script's own doc. `t.meta()` is total — an emit with no
-metadata returns an empty `Record`.
+There is no separate metadata doc anymore. Command id, recipe, lane hint, `$seq`
+and the rest ride as **ordinary keyed entries inside the sealed pack** — the same
+container as the frames, read through the same `ScriptPack` accessors
+(`f.get_i64/get_str/...`). A sealed pack is immutable and self-describing, so
+there is nothing to serialize on the live path and no shared-mutable-doc to
+refcount across the ABI (the `DocRegistry`/COW/`t.meta()` machinery this used to
+need was deleted with Record — see the retired section in
+[`data-layer.md`](./data-layer.md)).
 
 ### Multi-camera sync = a gathering plugin
 
 Multi-camera synchronisation is **not** a bus policy (the old
 `Any`/`AllRequired`/`LeaderFollowers` correlation was removed). Instead, ONE
-gathering plugin grabs all cameras and emits a single record carrying every
-frame: `xi::Record().image("cam_left", L).image("cam_right", R)` → one
-`emit_record`. The frames are correlated because they ride the same record. See
-the `synced_stereo` plugin and the `stereo_sync` example.
+gathering plugin grabs all cameras and emits a single pack carrying every frame:
+one `PackOut` with `add_image("cam_left", L)` + `add_image("cam_right", R)`, then
+`emit()`. The frames are correlated because they ride the same pack. See the
+`synced_stereo` plugin and the `stereo_sync` example.
 
 ### Replay / hot-param re-run = a buffer-replay plugin
 
 Record/replay is **not** a host facility either. A buffer-replay plugin captures
-records (via its `process()`) into a ring and re-emits them with `emit_record` on
+packs (via its `process()`) into a ring and re-emits them with `emit()` on
 demand — that's the HDevelop-style "tune a Param, re-inspect the same frame"
-loop. See `examples/buffer_replay_demo` — its `inspect.cpp` drives the `cache`
-reference plugin (instance `buffer`) as the replay ring, with `pulse_src` as the
-live source.
+loop. Because a sealed pack is immutable, the re-emit is **byte-lossless**. See
+`examples/buffer_replay_demo` — its `inspect.cpp` drives the `cache` reference
+plugin (instance `buffer`) as the replay ring, with `pulse_src` as the live
+source.
 
 ### Headless injection
 
@@ -121,40 +135,40 @@ that re-impose order without throttling compute:
   `run_id` is monotonic on the wire.
 - **Ordered output sinks.** A plugin whose `plugin.json` declares `"sink": true`
   (alias `"role": "sink"`) is not called inline during inspect; the host **stages**
-  each `use(name).process(rec)` and **flushes** them after the inspect, inside the
+  each `use(name).push(pack)` and **flushes** them after the inspect, inside the
   same arrival-order gate, so deliveries land in **frame-arrival order** under
-  `dispatch_threads > 1`. Each flushed record is stamped with the reserved key
-  `"$seq"` == the wire `run_id`, so the sink can correlate its packet to the frame.
-  The `expose` plugin is a sink (live output never tears/reorders across workers).
-  See the `sink` row in [`../reference/c-abi.md`](../reference/c-abi.md) and the
-  *Parallel dispatch* section of
-  [`../guides/write-a-script.md`](../guides/write-a-script.md).
+  `dispatch_threads > 1`. A sealed pack is immutable, so — unlike the deleted
+  Record path, where the host injected `"$seq"` at flush — the **producer** stamps
+  `"$seq"` == the wire `run_id` before seal (`b.add_i64("$seq", xi::run_id())`, doc
+  17), so the sink can still correlate its packet to the frame. Feeding a declared
+  sink via `use(name).process(pack)` is refused fail-loud (rc −5) — `push()` is the
+  sink feed, `process()` is the reply chain. The `expose` plugin is a sink (live
+  output never tears/reorders across workers). See the `sink` row in
+  [`../reference/c-abi.md`](../reference/c-abi.md) and the *Parallel dispatch*
+  section of [`../guides/write-a-script.md`](../guides/write-a-script.md).
 
-## 5. The pack plane on dispatch — dual carry + staged pack push
+## 5. The pack plane on dispatch — the sole currency
 
-**Status: shipped (polaris2 wave-2 / U3), transitional until THE CUT.** Dispatch
-carries **two data currencies** on one machinery:
+**Status: shipped (ABI v12 / THE CUT).** The pack is the sole payload on the
+dispatch machinery (the transitional Record dual-carry was deleted at THE CUT):
 
-- **Dual-carry `TriggerEvent`.** Every event carries the Record payload (image
-  map + refcounted meta doc) *and* an optional sealed-pack handle
-  (`TriggerEvent::pack`, `XI_PACK_NULL` for Record-era events). A pack source
-  emits via `emit_pack(emitter, id, pack, ts)` (the `xi_pack_v1` verb — same
-  funnel discipline as `emit_record`: one emit, one run); the bus stores the
-  sealed handle on the event and extracts no images — the pack *is* the
-  payload. Ordering keys on `id + arrival_id` identically for both currencies.
-  The worker hands the pack to the script through the trigger view; the SDK
-  `Trigger` takes its own retain, so `t.pack()` (a `ScriptPack`) is valid
-  however long the script holds it while `t.image()`/`t.meta()` keep serving
-  the Record side.
-- **Staged pack push / flush.** The §4 ordered-sink discipline applies to packs
-  unchanged: `xi::use(sink).push(pack)` on a `"sink": true` target is staged
-  (the host retains the pack onto the staged emit) and flushed after the
-  inspect inside the same arrival-order gate, so pack deliveries land in frame
-  order under parallel dispatch; a non-sink target is pushed inline. One
-  asymmetry vs the Record path: a sealed pack is **immutable**, so the host
-  cannot stamp `"$seq"` at flush time — the producer stamps it before seal
-  (`b.add_i64("$seq", (int64_t)xi::run_id())`). `use(name).process(pack)` is
-  the request-reply sibling: a `$fault` input short-circuits (the host mints
+- **Pack-carrying `TriggerEvent`.** Every event carries exactly one sealed-pack
+  handle (`TriggerEvent::pack`; `XI_PACK_NULL` marks a non-payload event such as
+  a drop marker — `is_real()` keys on pack presence, since the Record-era
+  image/doc members an emptiness check used were deleted). A source emits via
+  `emit_pack(emitter, id, pack, ts)` (the `xi_pack_v1` verb — one emit, one run);
+  the bus stores the sealed handle on the event and extracts no images — the pack
+  *is* the payload. Ordering keys on `id + arrival_id`. The bus took ONE ref on
+  emit; the worker that consumes the event releases it after dispatch (via the
+  installed pack releaser). The SDK `Trigger` takes its own retain, so `t.pack()`
+  (a `ScriptPack`) is valid however long the script holds it.
+- **Staged pack push / flush.** The §4 ordered-sink discipline is the pack
+  discipline: `xi::use(sink).push(pack)` on a `"sink": true` target is staged
+  (the host retains the pack onto the staged emit) and flushed after the inspect
+  inside the same arrival-order gate, so pack deliveries land in frame order under
+  parallel dispatch; a non-sink target is pushed inline. Because a sealed pack is
+  **immutable**, the producer stamps `"$seq"` before seal (§4). `use(name).process(pack)`
+  is the request-reply sibling: a `$fault` input short-circuits (the host mints
   the propagated fault pack without entering the plugin), and a sink target is
   refused (rc −5) — feed sinks via `push()`.
 
@@ -163,8 +177,8 @@ Container, registry, fault contract and ingress:
 
 ## See also
 
-- [`../reference/c-abi.md`](../reference/c-abi.md) — the `emit_record` function
-  signature.
+- [`../reference/c-abi.md`](../reference/c-abi.md) — the `emit_pack` function
+  signature (`xi_pack_v1`).
 - [`../reference/instances.md`](../reference/instances.md) — per-source instances.
 - [`pack-plane.md`](./pack-plane.md) — the v3 pack currency riding this dispatch.
 - `xi_trigger_bus.hpp` — source.

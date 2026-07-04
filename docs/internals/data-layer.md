@@ -1,176 +1,176 @@
-# Data layer — yyjson + in-process doc pass-by-pointer + γ-4 refcount
+# Data layer — the sealed keyed-buffer Pack plane
 
-**Shipped design-of-record.** How `xi::Record`'s JSON data crosses between script
-and plugin with zero serialization and zero copy, and how either side caches it.
+**Shipped design-of-record (ABI v12).** How plugin/script data crosses every
+(in-process) plugin boundary as a **Pack** — one sealed, keyed, typed container
+(canonical msgpack) that is **byte-identical in memory, on the WS wire (XEX1-v3),
+and on disk (`.xex1`)** — and how the host refcounts it across the ABI.
 
-> **Record-era.** This page describes the Record/doc plane. The polaris2 line
-> added a second data currency — the v3 keyed-buffer **Pack** plane
-> ([`pack-plane.md`](./pack-plane.md)) — and both live side by side (dual carry)
-> until THE CUT. New pack-plane facts go there; this page stays the
-> design-of-record for the Record plane.
+> **THE CUT (v12).** The data layer this page describes REPLACED the Record/doc
+> plane. THE CUT deleted `xi::Record`, its yyjson mutable-doc backing, the
+> `DocRegistry` γ-4 cross-ABI refcount, copy-on-write, `share_out`/`adopt_shared`,
+> the host `DocChunkPool`, and the `xi_yyjson_abi` load gate. Those mechanisms are
+> **gone**; they survive here only as the labeled history at the end
+> ([What THE CUT deleted](#what-the-cut-deleted-record-doc-plane), retained so old
+> links and log breadcrumbs still resolve). The live contract, fault semantics and
+> ingress live in [`pack-plane.md`](./pack-plane.md); this page is the
+> design-of-record for the Pack data layer's refcount + storage mechanics.
 
-`xi::Record` is a yyjson mutable doc + a named-image map. (cJSON was removed; an
-explored MessagePack/CWPack codec was dropped — unknown-count headers + hard
-in-place mutation. The kept rationale lives in `docs/archive/` if you need it.)
+A **Pack** is a sealed, insertion-ordered list of `(key, tag, value)` entries.
+Values are the msgpack scalar/binary tags plus two domain tags: an **image**
+(dims + a pool-backed pixel buffer) and a **nested-mp** subtree (one canonical
+msgpack blob for arrays/maps). Once sealed a pack is **immutable** — new
+information is always a new pack. That immutability is what makes the three
+representations one format: the in-memory arena, the XEX1-v3 frame on the wire,
+and the `.xex1` file on disk are the same canonical bytes, so record → replay is
+byte-lossless with nothing to re-serialize.
 
-## The problem it solves
+## The model: mirror the image pool, for packs
 
-Record crosses every (now in-process) plugin boundary. The naive path serializes
-every hop: caller `yyjson_mut_write`s its doc to JSON bytes, callee `yyjson_read`s
-them back — twice per `use().process()`. Measured at N=150: cJSON ~1163 µs,
-yyjson ~75 µs/direction. The in-process doc-pointer path below skips **all of it**
-(0.00 µs — it doesn't serialize at all).
+A sealed pack is a C++ container (`xi::Pack`, `xi_pack.hpp`) that **owns an arena
+and pool handles**; a plugin in another DLL cannot touch its layout. So — exactly
+like an image — a pack crosses the ABI as an **opaque handle** (`xi_pack_handle`)
+plus a table of accessor C functions, never as raw struct layout:
 
-## The model: mirror the image pool, for docs
-
-Images are already cross-DLL-safe because the **host owns one refcounted pool**;
-plugins borrow handles. The data layer gives the yyjson doc the same shape:
-
-| | image | doc |
+| | image | pack |
 |---|---|---|
-| crosses the ABI as | `uint64` handle | `yyjson_mut_doc*` pointer |
-| backing store | host pixel pool | host **doc-chunk pool** |
-| reclaim | refcount → return slot | refcount → return chunks |
-| cache across frames | `image_addref` | refcount bump (no copy) |
-| foreign / cross-process | — | fall back to JSON `data`/`len` |
+| crosses the ABI as | `uint64` handle | `uint64` handle (`xi_pack_handle`) |
+| backing store | host pixel pool (`ImagePool`) | host `PackRegistry` (arena + adopted pool handles) |
+| reads / writes | `image_data(handle)` | the `xi_pack_v1` C vtable (spans in / spans out) |
+| reclaim | refcount → return slot | refcount → destroy pack, release its pool handles |
+| cache across frames | `image_addref` | `retain` (refcount bump, no copy) |
 
-So `xi_record.doc` / `xi_record_out.out_doc` carry a `yyjson_mut_doc*` directly;
-`data`/`len` carry JSON bytes only when the doc pointer is null.
+Because both currencies are opaque handles over a host-owned refcounted store,
+there is **no serialize on the live path and no shared-mutable state to protect**
+— the property the retired doc plane spent the `DocRegistry` + COW + leak-over-UAF
+machinery to approximate falls out for free once the payload is sealed.
 
-**Owner-sweep respects outstanding refs.** Each pool entry is tagged with the
-owner (instance) that allocated it, so the pool can reclaim a dead instance's
-handles (`ImagePool::release_all_for`, run on destroy / hot-recompile / rename).
-Because the *same* handle is shared zero-copy across instances (producer P's
-`image_addref` → consumer Q's `adopt_pool_handle`), a caching consumer Q can
-legitimately still hold a frame whose owner is P. The sweep therefore drops only
-**P's own ref** per entry (exactly like `release()`): a sole-held entry (genuine
-leak) is reclaimed immediately, while an entry a live consumer still holds
-survives — its owner neutralised to anonymous — and is freed by its last holder.
-The sweep never force-frees a still-referenced entry (which would dangle Q's
-cached `xi::Image`).
+## The accessor vtable — `xi_pack_v1` (`xi_abi.h`)
 
-## The host doc-chunk pool (`xi_doc_pool.hpp`)
+Everything a plugin, the script SDK and the host funnel do to a pack goes through
+one process-stable C vtable, resolved once via
+`host->get_interface("xi.pack", 1)` and cached (`Plugin::pack_iface()`). Its
+address and every fn-pointer are stable for the host's life (a Meyers singleton,
+`pack_v1_iface()` in `xi_pack_abi.hpp`). Two halves:
 
-`DocChunkPool` backs `host_api.doc_chunk_alloc/realloc/free`. A **thread-local,
-size-class segregated free-list** (powers of two, 64 B … 64 KiB; oversize →
-`malloc`): O(1) acquire/release, no search. yyjson bump-allocates nodes *within*
-a chunk, so the pool is hit a handful of times per doc, not per node — **zero
-`malloc` per frame after warm-up**. A 16-byte header carries the size class so
-`free`/`realloc` (which yyjson calls without a size) can find it.
+- **builder side (produce):** `builder_new` → `builder_add_i64/f64/str/bool/bin/
+  image/adopt_image/mp` → `builder_seal` (mints a handle, refcount 1) or
+  `builder_abandon`. The SDK sugar is `xi::PackOut` (`xi_abi.hpp`), which owns the
+  builder and calls these; a source seals + dispatches with `Plugin::emit()`.
+- **accessor side (consume):** `count`, `key_at`/`tag_at` (generic index walk —
+  the self-description a producer-agnostic sink enumerates), `tag_of`, and the
+  typed reads `get_i64/f64/str/bool/bin/image/mp`. The SDK sugar is `xi::PackIn`
+  (plugin door) and `xi::ScriptPack` (`t.pack()`, script side); both return
+  `std::optional` so absence is explicit. `retain`/`release` are the refcount, and
+  `emit_pack` is the source dispatch verb.
 
-Cross-DLL: the doc stores these fn pointers in `doc->alc`, so whichever side
-drops the last ref, the free routes back to the host pool. Safe under the
-project's `/MD` shared CRT — the cross-CRT *free* hazard that forced cJSON to
-serialize never applies to *reads*, and frees go through the host.
+Reads hand back **borrowed spans** into the pack's arena/pool buffers, valid while
+the caller's ref on the handle is held. There are no string literals at call sites
+in ported plugins: a plugin reads/writes with its schema's key **constants**
+(`_keys.gen.h`, see [`typed-io.md`](./typed-io.md)), still drift-proof, but the
+resolve across the door is by key **string** through the vtable, not by a
+compile-time offset (that offset speed is a same-DLL `TypedPack` property).
 
-## Record refcount + copy-on-write (`xi_record.hpp`)
+### Storage duality (D1)
 
-A Record's doc lives in an intrusive refcount box: `DocBox { yyjson_mut_doc* doc;
-atomic<int> rc; void(*host_release)(void*); }`.
+A binary or image entry lives either **inline in the arena** (small payloads) or
+in a **pool buffer** (large / image pixels, adopted by refcount so a source's
+painted frame crosses into the pack with no heap→pool copy — `adopt_image`). The
+consumer never sees the difference: `get_bin`/`get_image` resolve both to one
+borrowed span. Image pixels ride the same zero-copy `ImagePool` slots the image
+plane uses, so `get_image` yields a pixel span + dims a `cv::Mat` can wrap
+directly.
 
-- **Copy / assign = `rc++`, zero deep-copy.** Both copies are marked **frozen**;
-  the first mutation copy-on-writes (`cow_`) into a fresh sole-owned doc. Move
-  transfers the box. So same-side caching / fan-out is zero-copy; a held snapshot
-  is just the shared frozen doc.
-- `host_release` distinguishes a plain locally-owned doc (freed directly with
-  `yyjson_mut_doc_free`) from a **registry-managed** one (freed via the host — see
-  below). Every Record copy/assign is a refcount bump; there is **no deep copy
-  anywhere in the doc layer**.
+## Refcount + owner-tagged sweep — `PackRegistry` (`xi_pack_abi.hpp`)
 
-## Cross-ABI refcount — `DocRegistry` (γ-4, `xi_doc_registry.hpp`)
+The registry is the handle table behind `xi.pack@1`: it maps a handle → a sealed,
+**refcounted** `xi::Pack` (and a builder handle → a `PackBuilder` under
+construction). A sealed pack is single-owner in C++ but refcounted across the ABI
+— an event on the dispatch queue and the emitter can each hold a ref, exactly as
+image handles do — so the registry stores each pack with a small refcount and
+destroys it (releasing its pool handles) on the last release. Map nodes are
+pointer-stable, so a `Pack*` handed to an accessor stays valid across concurrent
+insert/erase of *other* handles; the caller holds a ref on its own handle, so that
+entry cannot vanish under it.
 
-`DocBox.rc` governs same-side copies (hot, no ABI). To hold a doc on **both sides
-of the ABI** without a copy, the host owns the authoritative refcount — the doc
-analogue of `ImagePool`. `host_api` gains `doc_retain` / `doc_release` /
-`doc_refcount` (ABI v4); `DocRegistry` is a **sharded** `doc* → count` map (16
-mutexes by pointer, so parallel emit doesn't contend).
+**Owner-tagged refs (the owner sweep).** This is the pack analogue of
+`ImagePool::release_all_for`. The `ImagePool` sweeps leaked image handles per
+owner on instance destroy; the registry does the same for sealed packs. Every ref
+acquired under an `ImagePool` owner context (a `seal` or `retain` inside the
+adapter's `OwnerGuard` around every plugin entry point) is tagged in a small
+per-slot ledger; `release_all_for(owner)` drops exactly that owner's outstanding
+refs — precisely as if the plugin had called `release()` itself — and returns the
+count so teardown can print "swept N leaked pack ref(s)". Framework-internal
+transient refs (the dispatch event's ref taken in `f_emit_pack` via
+`retain_untagged`, released from another thread with no owner context) are
+**untagged** and never swept. The ledger reconciles a release against the caller's
+own bucket first, then untagged headroom, then any bucket, so `sum(ledger) ≤ rc`
+always holds and a sweep can never free a pack out from under a live co-owner.
+`PackRegistry::live_frames()` + `live_builders()` (with `ImagePool::cumulative()`)
+are the leak oracle the pack-door tests assert against.
 
-The C++ seam is two methods on `Record`:
-- **`share_out(retain, release)`** — enroll this side's doc into the registry and
-  **reserve a ref for the adopter**, returning the raw pointer. The reserve is the
-  subtle part: the producer's own Record can die *before* the other side adopts
-  (a plugin's output Record is destroyed when `process()` returns; the host adopts
-  after), so without it the doc would free out from under the adopter.
-- **`adopt_shared(release, frozen)`** — the receiving side **consumes** the
-  reserved ref (no extra retain) and wraps the doc in a registry-managed box.
-  `frozen` comes from `host->doc_refcount`: **sole side → writable** (zero COW,
-  write-through intact — the common dispatch case); **shared → frozen** (a plugin
-  still caches the doc, so the first mutation COWs to isolate them).
+## Fault + provenance ride the pack
 
-A JSON-fallback target never adopts, so the side that took the JSON branch
-(`use_process_cb`) releases the reserve to balance it.
+There is no separate NA/metadata channel. A contract failure is a **normal sealed
+pack** carrying `$fault` (reason code), never `XI_PACK_NULL` (reserved for hard
+internal failure); producer identity (`$src`) and the `/`-joined hop chain
+(`$prov`) are stamped **before seal** by the producing side, and the host funnel
+propagates a fault input by minting a new fault pack (reason + this hop appended)
+*without* running the plugin — the pack mirror of the retired
+`if (input.is_na()) return Record::na(reason)`. The reserved `$`-keys and the
+vtable-level helpers (`is_fault`, `propagate_fault`, `prov_append`) are one home
+for all three sides of the seam: `xi/xi_pack_contract.hpp`. Full semantics:
+[`pack-plane.md`](./pack-plane.md) and docs/new_gen/15.
 
-### Both directions symmetric
+## Fallback paths
 
-Input and output both go through `share_out`/`adopt_shared`:
-- **Output**: plugin `share_out`s its result; the host adopts it. Plugin can cache
-  its own output zero-copy and re-emit.
-- **Input**: the host `share_out`s the input doc before the call; the plugin
-  adopts it and can **cache the borrowed input across frames zero-copy** — the
-  registry keeps it alive until the plugin drops it. (Cost: one retain/release per
-  node per dispatch — noise at image-processing ms scale.)
-
-### Caught-crash leak-over-UAF (Q0f)
-
-The input reserve/consume handshake has one deliberately unbalanced edge: **a
-plugin `process()` that crashes mid-call**. The host reserved a ref for the
-adopter and handed over the borrowed doc; the callee then faulted (SEH) or threw
-across the ABI. Whether it had *already* run `adopt_shared` (consuming the reserved
-ref) before faulting is **unknowable** — the crash tears the call at an arbitrary
-point. So the two outcomes the host must choose between are:
-
-- **Release the reserved ref** — correct *if* the plugin never adopted, but a
-  **double-free / use-after-free** if it did (the adopted box will also release).
-- **Leak the reserved ref** — one host-owned doc (and its pooled chunks) stranded,
-  but memory-safe under either callee state.
-
-The host chooses to **leak** (leak-over-UAF): a bounded, memory-safe leak beats an
-unbounded corruption. It happens at the host dispatch funnel every doc-carrying
-`process()` crash passes through — `service_sinks.cpp` `use_process_inline_`
-(synchronous `xi::use()` *and* the staged-sink flush) and `runner_main.cpp`
-`use_process_cb`. The script-side mirror of the decision is `xi_use.hpp`'s `-2`
-branch, which leaves the ref alone; but the *count* is taken host-side (the script
-DLL has its own per-DLL singletons, so only the host can both see the reserved
-`DocRegistry` ref and surface a number over WS).
-
-**What bounds it.** The `on_fault` quarantine (adoption-map item 14): a repeatedly-
-faulting instance escalates to `refuse` and is no longer entered (`rc -3` at the
-fail-fast gate, *before* touching any doc), so a crash **loop** cannot leak without
-end — it converges to a quarantined instance that leaks nothing further.
-
-**Observability.** `DocRegistry::note_crash_leak()` ticks once per such crash;
-`crash_leaked_docs_lifetime` in `dispatch_stats` (process-uptime cumulative) lets an
-operator tell **"one crash ever"** (constant non-zero) from **"leaking every N
-frames"** (climbing). See [`../reference/ws-protocol.md`](../reference/ws-protocol.md)
-"Crash-leak accounting".
-
-**How the class is dissolved.** The v3 all-msgpack frame plane
-([`../new_gen/07-...`](../new_gen)) removes the shared-mutable-doc handshake this
-leak protects: frames cross the ABI as self-contained, canonically-validated
-msgpack with no host-reserved ref to strand, so a torn callee has nothing the host
-must choose to leak-or-free. Until that cutover lands, the counter is the honest
-signal that the residue exists and whether it is accumulating.
-
-## The load gate (no silent fallback)
-
-Every `XI_PLUGIN_IMPL` plugin exports `xi_yyjson_abi()` = a stamp of
-`YYJSON_VERSION_HEX ^ (sizeof(yyjson_mut_doc) << 8) ^ (sizeof(yyjson_mut_val) << 18)`. The host hands
-a raw doc pointer **only** when the stamp matches its own. A mismatch (different
-vendored yyjson) or a missing export means the plugin can only run the slow JSON
-path — so it is **refused at load** with a clear error, unless its `plugin.json`
-sets `"json_fallback": true` (then it loads on JSON with a one-shot warning). See
-[`../reference/c-abi.md`](../reference/c-abi.md) §4.
-
-## Fallback paths (always correct)
-
-- Layout mismatch / no `xi_yyjson_abi` (opted into `json_fallback`) → serialize to
-  `data`/`len`.
-- Cross-process / remote (no shared address space) → JSON bytes.
-- Persistence, config, WS→JS → JSON text regardless (cold / human-readable).
+- **Cross-process / remote / persistence / WS→JS** — the pack's canonical msgpack
+  IS the wire (XEX1-v3) and disk (`.xex1`) form, so there is no separate
+  serialize step to fall back to: the same bytes travel unchanged. (Human-readable
+  JSON remains the currency of the *control* plane — `exchange`/config — which is
+  independent of the pack data plane.)
 
 ## Tests
 
-`test_record` (#17 refcount+COW, #18 share/adopt reserve-consume, #19 zero-copy
-input cache, #20 1000-round dispatch balance, #21 concurrency), `test_doc_pool`,
-`test_doc_registry`, `ws_fallback_gate` (load refusal + opt-in), `ws_cache_input`
-(end-to-end real plugin caching its input across frames).
+The pack plane's leak discipline is asserted by the pack-door tests (registry
+`live_frames`/`live_builders` == 0 after teardown, alongside `ImagePool`
+cumulative), the owner-sweep tests (`release_all_for` reclaims exactly a dying
+owner's refs, never a co-owner's), and the app-team QA references named in the
+migration brief: `qa_use_pack_door` (build → chain → push, zero Record),
+`qa_pack_record_replay` (record → save → replay, byte-lossless), `qa_pack_order`
+(`$seq` + ordering), `qa_pack_fault_path` (fault propagation). Container/registry
+detail: [`pack-plane.md`](./pack-plane.md).
+
+---
+
+## What THE CUT deleted (Record / doc plane) — historical
+
+> Everything below is **retired at THE CUT (v12)**. It is kept as a tombstone for
+> anyone following an old link or reading a pre-cut log line; none of these
+> mechanisms exist in the shipped backend. The pack plane above needs none of
+> them, because a sealed pack is immutable and self-contained.
+
+- **`xi::Record`** — a yyjson mutable doc + a named-image map — was the data
+  currency. It crossed every in-process plugin boundary by doc **pointer** (not
+  serialized), with an intrusive refcount box (`DocBox`) governing same-side
+  copies and **copy-on-write** freezing shared copies so the first mutation
+  isolated them.
+- **`DocRegistry` (γ-4, `xi_doc_registry.hpp`)** — a sharded `doc* → count` map —
+  was the host-owned authoritative refcount that let both sides of the ABI hold a
+  doc without a copy (the doc analogue of `ImagePool`). The C++ seam was
+  `Record::share_out(retain, release)` (enroll + reserve a ref for the adopter)
+  and `adopt_shared(release, frozen)` (consume the reserved ref). This whole
+  reserve/consume handshake — and its deliberately unbalanced **leak-over-UAF**
+  edge on a mid-call plugin crash (leak one host-owned doc rather than risk a
+  double-free), the `crash_leaked_docs_lifetime` counter that made that residue
+  observable, and the `on_fault` quarantine that bounded it — is gone: a sealed
+  pack has no host-reserved ref to strand, so a torn callee leaves nothing the
+  host must choose to leak-or-free.
+- **The host `DocChunkPool` (`xi_doc_pool.hpp`)** — a thread-local, size-class
+  segregated free-list backing `doc_chunk_alloc/realloc/free` so yyjson
+  bump-allocated nodes hit the pool a handful of times per doc — is deleted with
+  the doc slots it served.
+- **The `xi_yyjson_abi()` load gate** — every plugin exported a stamp of its
+  vendored yyjson layout, and the host handed a raw doc pointer only on a match
+  (else refuse-at-load, or the slow JSON path under `json_fallback`). A pack
+  crosses as an opaque handle and needs no layout stamp, so the export and the
+  gate are gone (the `xi_yyjson_abi` export was removed from `XI_PLUGIN_IMPL`).
