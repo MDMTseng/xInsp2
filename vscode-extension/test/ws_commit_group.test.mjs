@@ -26,9 +26,7 @@ const parse = (d) => (typeof d === 'string' ? JSON.parse(d) : d);
 
 async function setup(c) {
     await c.nextText(); // hello
-    c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'config_swap_probe' } });
-    assert.equal((await c.nextNonLog()).ok, true, 'load_plugin config_swap_probe');
-
+    // v12: `load_plugin` retired — create_instance loads config_swap_probe itself.
     const projDir = resolve(tmpdir(), `xi_commitgrp_${Date.now()}`);
     c.send({ type: 'cmd', id: 2, name: 'create_project', args: { folder: projDir, name: 'cg' } });
     assert.equal((await c.nextNonLog()).ok, true, 'create_project');

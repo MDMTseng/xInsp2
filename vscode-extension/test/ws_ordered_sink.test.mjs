@@ -1,12 +1,19 @@
 // Ordered output sink — a plugin marked "sink": true receives a script's
-// use(<sink>).process(rec) in FRAME (arrival) order even under parallel dispatch,
-// because the host stages the call and flushes it inside the ordered-emit gate.
+// use(<sink>).push(pack) in FRAME (arrival) order even under parallel dispatch,
+// because the host stages the push and flushes it inside the ordered-emit gate
+// (docs/new_gen/17).
 //
-// This builds the sdk/examples/comm plugin as a project source plugin, runs a script
-// that (a) sleeps a scrambled amount so inspects FINISH out of order under
-// dispatch_threads=4, and (b) calls use("comm0").process(...) each frame. The comm
-// sink records the host-stamped $seq it receives, in delivery order. With the ordered
-// sink the received $seq must be STRICTLY INCREASING (arrival order) — not scrambled.
+// v12 (THE CUT): process() on a declared sink is REJECTED fail-loud — push()
+// is the sink feed. The host no longer stamps $seq into the (immutable) sealed
+// pack; the PRODUCER stamps it before seal with the same host truth:
+// b.add_i64("$seq", xi::run_id()) — the arrival/run id, claimed at dequeue,
+// monotonic on the wire under result_order:"arrival".
+//
+// This embeds a pack-door comm sink as a project plugin, runs a script that
+// (a) sleeps a scrambled amount so inspects FINISH out of order under
+// dispatch_threads=4, and (b) pushes a $seq-stamped pack each frame. The sink
+// records the $seq it receives, in delivery order: it must be STRICTLY
+// INCREASING (arrival order) — not scrambled completion order.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,7 +27,7 @@ import WebSocket from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const backendExe = resolve(__dirname, '../../backend/build/Release/xinsp-backend.exe');
-const commDir = resolve(__dirname, '../../sdk/examples/comm');
+const commDir = resolve(__dirname, '../../sdk/examples/comm');   // pack-door ordered sink
 const slash = (p) => p.replace(/\\/g, '/');
 function randomPort() { return 30000 + Math.floor(Math.random() * 20000); }
 
@@ -59,7 +66,7 @@ async function withBackend(fn) {
     finally { try { client.close(); } catch {} if (child.exitCode === null) { child.kill(); await sleep(100); } }
 }
 
-test('ordered sink: use(sink).process() delivered in frame order under N>1', { timeout: 240000 }, async () => {
+test('ordered sink: use(sink).push() delivered in frame order under N>1', { timeout: 240000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'xinsp2-sink-'));
     // 4 workers, arrival-ordered emission, a deep queue so we don't drop samples.
     writeFileSync(join(dir, 'project.json'), JSON.stringify({
@@ -70,13 +77,17 @@ test('ordered sink: use(sink).process() delivered in frame order under N>1', { t
     // Scrambled sleep → inspects finish out of completion order; the gate must
     // re-serialize the sink delivery into arrival order.
     writeFileSync(join(dir, 'inspect.cpp'),
-        '#include <xi/xi.hpp>\n#include <xi/xi_use.hpp>\n#include <xi/xi_record.hpp>\n' +
+        '#include <xi/xi.hpp>\n#include <xi/xi_use.hpp>\n#include <xi/xi_script_pack.hpp>\n' +
         '#include <thread>\n#include <chrono>\n' +
         'XI_SCRIPT_EXPORT\nvoid xi_inspect_entry(int frame) {\n' +
         '    int ms = 4 + ((frame * 7) % 11) * 3;   // 4..34ms, non-monotonic\n' +
         '    std::this_thread::sleep_for(std::chrono::milliseconds(ms));\n' +
-        '    xi::use("comm0").process(xi::Record().set("frame", frame));\n}\n');
-    // The comm sink as a project source plugin (the backend compiles plugins/comm/).
+        '    xi::ScriptPackBuilder b;\n' +
+        '    b.add_i64("$seq", (long long)xi::run_id());   // producer-stamped (doc 17)\n' +
+        '    b.add_i64("frame", frame);\n' +
+        '    xi::use("comm0").push(b.seal());\n}\n');
+    // The comm sink (sdk/examples/comm, pack-door + "sink": true) as a project
+    // source plugin — the backend cl-compiles plugins/comm/.
     mkdirSync(join(dir, 'plugins', 'comm'), { recursive: true });
     copyFileSync(join(commDir, 'plugin.json'), join(dir, 'plugins', 'comm', 'plugin.json'));
     copyFileSync(join(commDir, 'comm.cpp'),    join(dir, 'plugins', 'comm', 'comm.cpp'));

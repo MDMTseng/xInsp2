@@ -134,8 +134,9 @@ test('save_project_locked preserves top-level keys owned by another writer', asy
         assert.equal(pj.watchdog_ms, 12345, 'watchdog_ms preserved');
         assert.deepEqual(pj.params, { sigma: 7.5, mode: 'fast' }, 'params preserved');
         // And the managed write still happened (the instance is in the model).
-        c.send({ type: 'cmd', id: 3, name: 'get_project' });
-        assert.ok(JSON.stringify(await c.nextRsp()).includes('cam0'), 'instance created');
+        // (v12: `get_project` retired — get_state is the instance-existence probe.)
+        c.send({ type: 'cmd', id: 3, name: 'get_state', args: { name: 'cam0' } });
+        assert.equal((await c.nextRsp()).ok, true, 'instance created');
     });
 });
 
@@ -168,9 +169,9 @@ test('remove_instance (keep folder) persists — instance does not resurrect on 
         // Reopen: the removed instance must NOT come back.
         c.send({ type: 'cmd', id: 4, name: 'open_project', args: { folder: proj } });
         assert.equal((await c.nextRsp()).ok, true, 'reopen ok');
-        c.send({ type: 'cmd', id: 5, name: 'get_project' });
-        const pj = await c.nextRsp();
-        assert.ok(!JSON.stringify(pj).includes('cam9'), 'removed instance did not resurrect on reopen');
+        // (v12: `get_project` retired — get_state ok:false proves absence.)
+        c.send({ type: 'cmd', id: 5, name: 'get_state', args: { name: 'cam9' } });
+        assert.equal((await c.nextRsp()).ok, false, 'removed instance did not resurrect on reopen');
     });
 });
 
@@ -252,8 +253,8 @@ test('create_instance rejects path-escaping names (no filesystem escape)', async
         assert.equal(rr.ok, false, 'rename to a path-escaping name rejected');
         assert.ok(!existsSync(join(proj, '..', 'evil')), 'rename did not escape above the project');
         // The original instance is untouched after a rejected rename.
-        c.send({ type: 'cmd', id: 5, name: 'get_project' });
-        const proj2 = await c.nextRsp();
-        assert.ok(JSON.stringify(proj2).includes('cam_0'), 'cam_0 survived the rejected rename');
+        // (v12: `get_project` retired — get_state ok:true proves presence.)
+        c.send({ type: 'cmd', id: 5, name: 'get_state', args: { name: 'cam_0' } });
+        assert.equal((await c.nextRsp()).ok, true, 'cam_0 survived the rejected rename');
     });
 });

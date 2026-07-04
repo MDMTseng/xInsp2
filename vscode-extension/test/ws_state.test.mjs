@@ -1,85 +1,100 @@
-// ws_state.test.mjs — Tests for xi::state() persistence across runs and recompiles.
+// ws_state.test.mjs — cross-frame script state (xi::kv(), docs/new_gen/16)
+// persists across runs, hot-reloads and param changes.
 //
-// Uses examples/use_demo.cpp which increments state["run_count"] each run
-// and exposes it as VAR(run_count, ...).
+// v12 (THE CUT): xi::state() (the Record/JSON state channel) is deleted;
+// xi::kv() is the ONE cross-frame store. The vars frame is gone too, so the
+// script surfaces the counter through the per-run verdict (xi::result → the
+// run_result event): code = the incremented run_count.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setTimeout as sleep } from 'node:timers/promises';
-import {
-    withBackend, compileScript, runInspection, scriptPath
-} from './helpers/client.mjs';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { withBackend, compileScript } from './helpers/client.mjs';
 
-const USE_DEMO = scriptPath('use_demo.cpp');
+const tmpDir = resolve(tmpdir(), `xi_kv_state_${Date.now()}`);
+mkdirSync(tmpDir, { recursive: true });
+
+// Counts runs in xi::kv()["run_count"]; the count IS the verdict code.
+const KV_SCRIPT = `#include <xi/xi.hpp>
+#include <xi/xi_result.hpp>
+XI_KV_SCHEMA(1);
+xi::Param<int> threshold{"threshold", 128, {0, 255}};
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int) {
+    long long n = xi::kv().get_i64("run_count", 0) + 1;
+    xi::kv().set_i64("run_count", n);
+    xi::result((int)n, "kv_carry");
+}
+`;
+const scriptFile = resolve(tmpDir, 'kv_state.cpp').split('\\').join('/');
+writeFileSync(scriptFile, KV_SCRIPT);
+
+// Run once and return the run_result event's data.
+async function runResult(c, id) {
+    c.send({ type: 'cmd', id, name: 'run' });
+    for (;;) {
+        const m = await c.nextText(120000);
+        if (m.type === 'event' && m.name === 'run_result') return m.data;
+    }
+}
 
 // ---------------------------------------------------------------
-// 1. state persists across runs — run_count increments each time
+// 1. kv state persists across runs — run_count increments each time
 // ---------------------------------------------------------------
-test('state persists across runs: run_count increments', { timeout: 90000, skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (state persistence still works; observed via vars)' }, async () => {
+test('kv state persists across runs: run_count increments', { timeout: 90000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello
 
-        const cr = await compileScript(c, USE_DEMO);
+        const cr = await compileScript(c, scriptFile);
         assert.equal(cr.ok, true, 'compile ok');
 
         // Run 3 times and verify run_count increments
         for (let expected = 1; expected <= 3; ++expected) {
-            const { rsp, vars } = await runInspection(c);
-            assert.equal(rsp.ok, true, `run ${expected} ok`);
-            assert.equal(vars.type, 'vars');
-
-            const byName = Object.fromEntries(vars.items.map(v => [v.name, v]));
-            assert.ok(byName.run_count, `run_count var exists on run ${expected}`);
-            assert.equal(byName.run_count.value, expected,
-                `run_count should be ${expected}, got ${byName.run_count.value}`);
+            const r = await runResult(c, 100 + expected);
+            assert.equal(r.code, expected,
+                `run_count should be ${expected}, got ${r.code}`);
         }
     });
 });
 
 // ---------------------------------------------------------------
-// 2. state survives hot-reload (recompile same script)
+// 2. kv state survives hot-reload (recompile same script, same schema)
 // ---------------------------------------------------------------
-test('state survives hot-reload: recompile does not reset run_count', { timeout: 90000, skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
+test('kv state survives hot-reload: recompile does not reset run_count', { timeout: 90000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
         // Compile and run once → run_count = 1
-        const cr1 = await compileScript(c, USE_DEMO);
+        const cr1 = await compileScript(c, scriptFile);
         assert.equal(cr1.ok, true);
+        assert.equal((await runResult(c, 110)).code, 1);
 
-        const r1 = await runInspection(c);
-        assert.equal(r1.rsp.ok, true);
-        const byName1 = Object.fromEntries(r1.vars.items.map(v => [v.name, v]));
-        assert.equal(byName1.run_count.value, 1);
-
-        // Recompile the same script (hot-reload)
-        const cr2 = await compileScript(c, USE_DEMO);
+        // Recompile the same script (hot-reload). The host captures the kv
+        // bytes off the OLD DLL and restores them into the NEW one (same
+        // XI_KV_SCHEMA → no state_dropped).
+        const cr2 = await compileScript(c, scriptFile);
         assert.equal(cr2.ok, true, 'recompile ok');
 
         // Run again → run_count should be 2, NOT reset to 1
-        const r2 = await runInspection(c);
-        assert.equal(r2.rsp.ok, true);
-        const byName2 = Object.fromEntries(r2.vars.items.map(v => [v.name, v]));
-        assert.equal(byName2.run_count.value, 2,
-            'run_count should be 2 after recompile, state must survive hot-reload');
+        assert.equal((await runResult(c, 111)).code, 2,
+            'run_count should be 2 after recompile, kv state must survive hot-reload');
     });
 });
 
 // ---------------------------------------------------------------
-// 3. state survives param change
+// 3. kv state survives param change
 // ---------------------------------------------------------------
-test('state survives param change: set_param does not clear state', { timeout: 90000, skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
+test('kv state survives param change: set_param does not clear state', { timeout: 90000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
-        const cr = await compileScript(c, USE_DEMO);
+        const cr = await compileScript(c, scriptFile);
         assert.equal(cr.ok, true);
 
         // Run once → run_count = 1
-        const r1 = await runInspection(c);
-        assert.equal(r1.rsp.ok, true);
-        const byName1 = Object.fromEntries(r1.vars.items.map(v => [v.name, v]));
-        assert.equal(byName1.run_count.value, 1);
+        assert.equal((await runResult(c, 120)).code, 1);
 
         // Change a param
         c.send({ type: 'cmd', id: 10, name: 'set_param',
@@ -88,38 +103,27 @@ test('state survives param change: set_param does not clear state', { timeout: 9
         assert.equal(sr.ok, true, 'set_param ok');
 
         // Run again → run_count should be 2 (state not cleared by param change)
-        const r2 = await runInspection(c);
-        assert.equal(r2.rsp.ok, true);
-        const byName2 = Object.fromEntries(r2.vars.items.map(v => [v.name, v]));
-        assert.equal(byName2.run_count.value, 2,
-            'run_count should be 2 after param change, state must survive');
+        assert.equal((await runResult(c, 121)).code, 2,
+            'run_count should be 2 after param change, kv state must survive');
     });
 });
 
 // ---------------------------------------------------------------
-// 4. state preserves nested Record structure
+// 4. kv state carries monotonically over many runs
 // ---------------------------------------------------------------
-test('state preserves data across multiple runs with varying values', { timeout: 90000, skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
+test('kv state carries monotonically across multiple runs', { timeout: 90000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
-        const cr = await compileScript(c, USE_DEMO);
+        const cr = await compileScript(c, scriptFile);
         assert.equal(cr.ok, true);
 
-        // Run 5 times — verify run_count tracks correctly each time
-        let prevCount = 0;
+        let prev = 0;
         for (let i = 1; i <= 5; ++i) {
-            const { rsp, vars } = await runInspection(c);
-            assert.equal(rsp.ok, true, `run ${i} ok`);
-            const byName = Object.fromEntries(vars.items.map(v => [v.name, v]));
-
-            const count = byName.run_count.value;
-            assert.equal(count, prevCount + 1,
-                `run_count should increment monotonically: expected ${prevCount + 1}, got ${count}`);
-            prevCount = count;
-
-            // Also verify blob_count is a number (last_blob_count stored in state)
-            assert.equal(typeof byName.blob_count.value, 'number', 'blob_count is a number');
+            const r = await runResult(c, 130 + i);
+            assert.equal(r.code, prev + 1,
+                `run_count should increment monotonically: expected ${prev + 1}, got ${r.code}`);
+            prev = r.code;
         }
     });
 });

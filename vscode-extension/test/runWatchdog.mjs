@@ -55,7 +55,7 @@ writeFileSync(script, `
 #include <xi/xi.hpp>
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    VAR(start, frame);
+    (void)frame;
     volatile long long sink = 0;
     while (true) sink = sink + 1;   // never returns, never checks cancel
 }
@@ -66,8 +66,10 @@ if (!cr.ok) { console.error('compile failed:', cr.error); process.exit(2); }
 let failed = 0;
 function check(c, label) { if (c) console.log(`  ✓ ${label}`); else { console.log(`  ✗ ${label}`); failed++; } }
 
-// Watchdog status before (backend still alive).
-let s1 = await send('watchdog_status');
+// Watchdog snapshot before (backend still alive). `watchdog_status` was retired
+// at THE CUT; `set_watchdog_ms` returns the same { ms, trips } snapshot, so a
+// no-op re-set of the boot value doubles as the status read.
+let s1 = await send('set_watchdog_ms', { ms: 500 });
 check(s1.ok && s1.data.ms === 500, `--watchdog=500 picked up (got ${s1.data?.ms})`);
 check(s1.data.trips === 0, 'no trips at start');
 

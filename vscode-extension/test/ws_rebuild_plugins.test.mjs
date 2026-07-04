@@ -41,15 +41,18 @@ include(\${XINSP2_ROOT}/sdk/cmake/xinsp2_plugin.cmake)
 xinsp2_add_plugin(verprobe plugin.cpp)
 `;
 
+// v12: the data plane is the xi.pack@1 pack door (process(PackIn&, PackOut&)
+// + XI_PLUGIN_PACK_DOOR) — the Record process() overload was deleted.
 const PLUGIN_CPP = (v) => `#include <xi/xi_abi.hpp>
 class VerProbe : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
-    xi::Record process(const xi::Record& in) override {
-        return xi::Record().set("v", ${v});
+    void process(xi::PackIn& /*in*/, xi::PackOut& out) override {
+        out.i64("v", ${v});
     }
 };
 XI_PLUGIN_IMPL(VerProbe)
+XI_PLUGIN_PACK_DOOR(VerProbe)
 `;
 
 // cmd:rebuild_plugins -> the item for `verprobe` from data.plugins[].

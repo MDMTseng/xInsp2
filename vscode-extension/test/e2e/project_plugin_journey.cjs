@@ -104,9 +104,11 @@ async function run() {
     console.log('\n[5] introduce typo → save → expect diagnostic');
     const cppPath = path.join(projDir, 'plugins', 'easy_thru', 'src', 'plugin.cpp');
     const cppUri  = vscode.Uri.file(cppPath);
+    // v12: the Easy template is a pack-door skeleton (no xi::Record anywhere);
+    // break the door macro line instead — same effect, a guaranteed compile error.
     const origText = await editAndSave(cppUri,
-        'return xi::Record{};',
-        'return xi::Record{}  /* MISSING SEMICOLON, intentional */');
+        'XI_PLUGIN_PACK_DOOR(',
+        'XI_PLUGIN_PACK_DOOR_TYPO(  /* INTENTIONAL compile error */ ');
     // Recompile is async — give cl.exe time. ~12s is conservative.
     await sleep(12000);
     shot('after_typo_save');

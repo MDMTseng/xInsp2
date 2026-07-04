@@ -1,8 +1,12 @@
 // ws_commands.test.mjs — Tests for untested WS commands.
 //
-// Covers: ping, version, unload_script+run, list_instances,
+// Covers: ping, version, run-with-no-script, list_instances,
 // set_instance_def,
 // save_project/load_project round-trip, get_plugin_ui, unknown command.
+//
+// THE CUT (v12): the retired commands (`load_plugin`, `unload_script`,
+// `get_project`, `watchdog_status`, `unquarantine_plugin`) are gone —
+// `create_instance` loads the plugin itself, so no explicit load step exists.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,30 +49,23 @@ test('version returns semver string and abi version', { timeout: 10000 }, async 
 });
 
 // ---------------------------------------------------------------
-// 3. unload_script + run → warning, no crash
+// 3. run with no script loaded → clean error, no crash
+// (was "unload_script + run" — `unload_script` retired at THE CUT; the
+// covering behavior, run-without-script, is asserted directly.)
 // ---------------------------------------------------------------
-test('unload_script then run produces warning, not crash', { timeout: 90000 }, async () => {
+test('run with no script loaded produces a clean error, not a crash', { timeout: 90000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
-        // Compile first so there's something to unload
-        const cr = await compileScript(c, scriptPath('user_script_example.cpp'));
-        assert.equal(cr.ok, true);
-
-        // Unload
-        c.send({ type: 'cmd', id: 2, name: 'unload_script' });
-        const ur = await c.nextNonLog();
-        assert.equal(ur.ok, true, 'unload_script ok');
-
-        // Run with no script loaded — clean error rsp, not a crash.
+        // Fresh backend, no script loaded — clean error rsp, not a crash.
         c.send({ type: 'cmd', id: 3, name: 'run' });
         const rr = await c.nextNonLog();
-        assert.equal(rr.ok, false, 'run after unload returns a clear no-script error');
+        assert.equal(rr.ok, false, 'run without a script returns a clear no-script error');
 
         // Backend still alive — verify with ping
         c.send({ type: 'cmd', id: 4, name: 'ping' });
         const pr = await c.nextNonLog();
-        assert.equal(pr.ok, true, 'backend alive after unload+run');
+        assert.equal(pr.ok, true, 'backend alive after no-script run');
     });
 });
 
@@ -79,10 +76,7 @@ test('list_instances shows created instance', { timeout: 10000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
-        // Load plugin + create project
-        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
-        assert.equal((await c.nextNonLog()).ok, true);
-
+        // create_instance loads the plugin itself (v12: no load_plugin step).
         const projDir = resolve(tmpdir(), `xi_listinst_${Date.now()}`);
         c.send({ type: 'cmd', id: 2, name: 'create_project',
                  args: { folder: projDir, name: 'test_list' } });
@@ -113,9 +107,6 @@ test('list_instances shows created instance', { timeout: 10000 }, async () => {
 test('set_instance_def updates instance definition', { timeout: 10000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
-
-        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
-        assert.equal((await c.nextNonLog()).ok, true);
 
         const projDir = resolve(tmpdir(), `xi_setdef_${Date.now()}`);
         c.send({ type: 'cmd', id: 2, name: 'create_project',
@@ -148,9 +139,6 @@ test('set_instance_def updates instance definition', { timeout: 10000 }, async (
 test('get_instance_def round-trips set_instance_def', { timeout: 10000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
-
-        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
-        assert.equal((await c.nextNonLog()).ok, true);
 
         const projDir = resolve(tmpdir(), `xi_getdef_${Date.now()}`);
         c.send({ type: 'cmd', id: 2, name: 'create_project',
@@ -193,9 +181,6 @@ test('save_project then load_project preserves instances and params', { timeout:
     // Phase 1: create project, add instance, save
     await withBackend(async (c) => {
         await c.nextText();
-
-        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
-        assert.equal((await c.nextNonLog()).ok, true);
 
         c.send({ type: 'cmd', id: 2, name: 'create_project',
                  args: { folder: projDir, name: 'saveload_test' } });
@@ -244,9 +229,8 @@ test('get_plugin_ui returns a valid path', { timeout: 10000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
-        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
-        assert.equal((await c.nextNonLog()).ok, true);
-
+        // mock_camera is discovered from the global plugins dir at boot; the
+        // UI path comes from its manifest (no load step needed at v12).
         c.send({ type: 'cmd', id: 2, name: 'get_plugin_ui',
                  args: { plugin: 'mock_camera' } });
         const rsp = await c.nextNonLog();

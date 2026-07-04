@@ -19,6 +19,28 @@ async function ackRsp(c) {
     for (;;) { const m = await c.nextNonLog(); if (m.type === 'rsp') return m; }
 }
 
+// Minimal inline script (the old examples/user_script_example.cpp was retired
+// with the VAR removal). Two script params so list_params has something to
+// list; the verdict rides run_result (xi::result), not the removed vars frame.
+const INLINE_SCRIPT = `#include <xi/xi.hpp>
+#include <xi/xi_result.hpp>
+xi::Param<int> user_amp{"user_amp", 5, {0, 100}};
+xi::Param<int> user_bias{"user_bias", 0, {0, 100}};
+XI_SCRIPT_EXPORT
+void xi_inspect_entry(int frame) {
+    xi::result(frame * (int)user_amp + (int)user_bias, "inline_script_v1");
+}
+`;
+let _inlineScriptPath = null;
+function inlineScript() {
+    if (_inlineScriptPath) return _inlineScriptPath;
+    const dir = resolve(tmpdir(), `xi_comprehensive_${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    _inlineScriptPath = resolve(dir, 'inline_script.cpp').split('\\').join('/');
+    writeFileSync(_inlineScriptPath, INLINE_SCRIPT);
+    return _inlineScriptPath;
+}
+
 // ---------------------------------------------------------------
 // 1. Compile failure returns error (not silent)
 // ---------------------------------------------------------------
@@ -34,29 +56,25 @@ test('compile failure returns ok:false with error message', async () => {
 });
 
 // ---------------------------------------------------------------
-// 2. Inspection output value verification
+// 2. Inspection output value verification (via run_result — the vars
+//    frame was removed; the script's verdict is the observable value)
 // ---------------------------------------------------------------
-test('run produces correct var values (not just ok:true)', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
+test('run produces the correct verdict values (not just ok:true)', async () => {
     await withBackend(async (c) => {
         await c.nextText();
-        const cr = await compileScript(c, scriptPath('user_script_example.cpp'));
+        const cr = await compileScript(c, inlineScript());
         assert.equal(cr.ok, true, 'compile ok');
 
-        const { rsp, vars } = await runInspection(c);
-        assert.equal(rsp.ok, true);
-        assert.equal(vars.type, 'vars');
-
-        const byName = Object.fromEntries(vars.items.map(v => [v.name, v]));
-
-        // frame=1, user_amp=5 → raw=1, scaled=5, dbl=10
-        assert.equal(byName.raw.kind, 'number');
-        assert.equal(byName.raw.value, 1);
-        assert.equal(byName.scaled.value, 5);
-        assert.equal(byName.dbl.value, 10);
-        assert.equal(byName.tag.kind, 'string');
-        assert.equal(byName.tag.value, 'user_script_v1');
-        assert.equal(byName.alive.kind, 'boolean');
-        assert.equal(byName.alive.value, true);
+        c.send({ type: 'cmd', id: 50, name: 'run' });
+        // Collect the run_result event (nextText — nextNonLog filters events).
+        let result = null;
+        for (;;) {
+            const m = await c.nextText();
+            if (m.type === 'event' && m.name === 'run_result') { result = m.data; break; }
+        }
+        // frame=1, user_amp=5, user_bias=0 → code 5; msg is the script tag.
+        assert.equal(result.code, 5, 'verdict code = frame * user_amp');
+        assert.equal(result.msg, 'inline_script_v1', 'verdict msg from xi::result');
     });
 });
 
@@ -80,7 +98,7 @@ test('run without loaded script returns a clean no-script error', async () => {
 test('cmd:run rejected while continuous mode active', async () => {
     await withBackend(async (c) => {
         await c.nextText();
-        const cr = await compileScript(c, scriptPath('user_script_example.cpp'));
+        const cr = await compileScript(c, inlineScript());
         assert.equal(cr.ok, true);
 
         // Start continuous
@@ -111,7 +129,7 @@ test('cmd:run rejected while continuous mode active', async () => {
 test('shutdown during continuous mode exits cleanly', async () => {
     await withBackend(async (c, child) => {
         await c.nextText();
-        const cr = await compileScript(c, scriptPath('user_script_example.cpp'));
+        const cr = await compileScript(c, inlineScript());
         assert.equal(cr.ok, true);
 
         // Start continuous
@@ -142,7 +160,7 @@ test('shutdown during continuous mode exits cleanly', async () => {
 test('compile_and_load during continuous mode stops worker safely', async () => {
     await withBackend(async (c) => {
         await c.nextText();
-        const cr1 = await compileScript(c, scriptPath('user_script_example.cpp'));
+        const cr1 = await compileScript(c, inlineScript());
         assert.equal(cr1.ok, true);
 
         // Start continuous
@@ -154,7 +172,7 @@ test('compile_and_load during continuous mode stops worker safely', async () => 
         c.drainText();
 
         // Recompile while streaming — should stop worker, reload, succeed
-        const cr2 = await compileScript(c, scriptPath('user_script_example.cpp'));
+        const cr2 = await compileScript(c, inlineScript());
         assert.equal(cr2.ok, true, 'hot-reload during continuous should succeed');
 
         // Backend still alive — ping works
@@ -168,7 +186,7 @@ test('compile_and_load during continuous mode stops worker safely', async () => 
 // ---------------------------------------------------------------
 // 7. SEH crash recovery + correct output after
 // ---------------------------------------------------------------
-test('crash recovery: normal script produces correct output after SEH crash', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
+test('crash recovery: normal script produces correct output after SEH crash', async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
@@ -187,33 +205,42 @@ test('crash recovery: normal script produces correct output after SEH crash', { 
         assert.ok(errors.some(e => e.msg.includes('ACCESS_VIOLATION')),
             'should log ACCESS_VIOLATION');
 
-        // Now: compile and run NORMAL script — must produce correct values
-        const cr2 = await compileScript(c, scriptPath('user_script_example.cpp'));
+        // Now: compile and run NORMAL script — must produce the correct verdict
+        // (observed via run_result; the vars frame was removed with VAR).
+        const cr2 = await compileScript(c, inlineScript());
         assert.equal(cr2.ok, true, 'normal script compiles after crash');
 
-        const { rsp, vars } = await runInspection(c);
-        assert.equal(rsp.ok, true);
-        assert.equal(vars.type, 'vars');
-
-        const byName = Object.fromEntries(vars.items.map(v => [v.name, v]));
-        assert.equal(byName.raw.value, 1, 'correct value after crash recovery');
-        assert.equal(byName.tag.value, 'user_script_v1');
+        c.send({ type: 'cmd', id: 3, name: 'run' });
+        let result = null;
+        for (;;) {
+            const m = await c.nextText();
+            if (m.type === 'event' && m.name === 'run_result') { result = m.data; break; }
+        }
+        assert.equal(result.code, 5, 'correct verdict after crash recovery (frame=1 * user_amp=5)');
+        assert.equal(result.msg, 'inline_script_v1');
     });
 });
 
 // ---------------------------------------------------------------
 // 8. set_param verifies actual value change
 // ---------------------------------------------------------------
-test('set_param changes inspection output', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin' }, async () => {
+test('set_param changes inspection output', async () => {
     await withBackend(async (c) => {
         await c.nextText();
-        const cr = await compileScript(c, scriptPath('user_script_example.cpp'));
+        const cr = await compileScript(c, inlineScript());
         assert.equal(cr.ok, true);
 
-        // Run with default user_amp=5
-        const r1 = await runInspection(c);
-        const scaled1 = r1.vars.items.find(i => i.name === 'scaled').value;
-        assert.equal(scaled1, 5); // frame=1 * 5
+        // The verdict rides the run_result event: code = frame * user_amp.
+        const runCode = async (id) => {
+            c.send({ type: 'cmd', id, name: 'run' });
+            for (;;) {
+                const m = await c.nextText();
+                if (m.type === 'event' && m.name === 'run_result') return m.data.code;
+            }
+        };
+
+        // Run with default user_amp=5 (cmd:run always passes frame=1 → 5)
+        assert.equal(await runCode(9), 5);
 
         // Change param
         c.send({ type: 'cmd', id: 10, name: 'set_param',
@@ -221,21 +248,18 @@ test('set_param changes inspection output', { skip: 'vars/preview/subscribe remo
         const sr = await c.nextNonLog();
         assert.equal(sr.ok, true);
 
-        // Run again
-        const r2 = await runInspection(c);
-        const scaled2 = r2.vars.items.find(i => i.name === 'scaled').value;
-        assert.equal(scaled2, 20); // frame=1 * 20
+        // Run again (frame=1 → 20)
+        assert.equal(await runCode(12), 20);
 
         // %g regression: a big integer must parse fully, not truncate. Before the fix
         // 1000000 -> "%g" -> "1e+06" -> std::stoll stops at 'e' -> the param was set to
-        // 1. user_amp clamps to its max (100), so a correct parse shows scaled==100; the
-        // truncated value would show scaled==1.
+        // 1. user_amp clamps to its max (100), so a correct parse shows frame*100; the
+        // truncated value would show frame*1.
         c.send({ type: 'cmd', id: 11, name: 'set_param',
                  args: { name: 'user_amp', value: 1000000 } });
         assert.equal((await c.nextNonLog()).ok, true);
-        const r3 = await runInspection(c);
-        const scaled3 = r3.vars.items.find(i => i.name === 'scaled').value;
-        assert.equal(scaled3, 100, 'big int parsed fully (clamped to 100), not truncated to 1');
+        assert.equal(await runCode(13), 100,
+            'big int parsed fully (clamped to 100), not truncated to 1');
     });
 });
 
@@ -246,10 +270,7 @@ test('create instance + exchange commands work', async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
-        // Load plugin
-        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
-        const lr = await c.nextNonLog();
-        assert.equal(lr.ok, true);
+        // v12: `load_plugin` retired — create_instance loads the plugin itself.
 
         // Create project (required for create_instance)
         const projDir = resolve(tmpdir(), `xi_test_${Date.now()}`);
@@ -289,7 +310,7 @@ test('create instance + exchange commands work', async () => {
 test('list_params returns params from loaded script', async () => {
     await withBackend(async (c) => {
         await c.nextText();
-        const cr = await compileScript(c, scriptPath('user_script_example.cpp'));
+        const cr = await compileScript(c, inlineScript());
         assert.equal(cr.ok, true);
 
         c.send({ type: 'cmd', id: 2, name: 'list_params' });
@@ -312,9 +333,6 @@ test('open_project restores instances', async () => {
     // Phase 1: create project with an instance
     await withBackend(async (c) => {
         await c.nextText();
-        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
-        assert.equal((await c.nextNonLog()).ok, true);
-
         c.send({ type: 'cmd', id: 2, name: 'create_project',
                  args: { folder: projDir, name: 'open_test' } });
         assert.equal((await c.nextNonLog()).ok, true);
@@ -346,20 +364,9 @@ test('open_project restores instances', async () => {
     });
 });
 
-test('get_project returns current state', async () => {
-    await withBackend(async (c) => {
-        await c.nextText();
-        const projDir = resolve(tmpdir(), `xi_getproj_${Date.now()}`);
-        c.send({ type: 'cmd', id: 1, name: 'create_project',
-                 args: { folder: projDir, name: 'getproj_test' } });
-        assert.equal((await c.nextNonLog()).ok, true);
-
-        c.send({ type: 'cmd', id: 2, name: 'get_project' });
-        const rsp = await c.nextNonLog();
-        assert.equal(rsp.ok, true);
-        assert.equal(rsp.data.name, 'getproj_test');
-    });
-});
+// ("get_project returns current state" was DELETED at THE CUT: `get_project`
+// is one of the five retired commands. Project-model reads are covered by the
+// open_project rsp payload (test above) and list_instances.)
 
 // ---------------------------------------------------------------
 // 11. JPEG preview binary frame verification
