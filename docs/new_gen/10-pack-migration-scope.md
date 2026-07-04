@@ -8,7 +8,7 @@
 | Field | Value |
 |---|---|
 | **Date** | 2026-07-03 |
-| **Status** | ADOPTED — IN EXECUTION (updated 2026-07-03; originally the wave-2 exit-gate DRAFT, docs/new_gen/08). Gates P1/P2/P3 all ACHIEVED; cut-gates U1/U2/U3 all RESOLVED (docs 15/16/17); the maintainer decisions below are adopted. THE CUT's sole remaining precondition is app-team cutover coordination — the brief is docs/new_gen/06 |
+| **Status** | **THE CUT EXECUTED (2026-07-04, branch `polaris2/the-cut-v12` — ABI v12)**: Record + doc machinery deleted, plugin data plane = xi.pack@1 door only, in-core codec evicted (imgcodec is the sole engine), xi::state() deleted (kv only), XEX1-v3 default wire (v1 behind `frame_wire_v3:false` one release), hello.abi 2, the five confirmed commands retired. Doc 20 is the executed runbook; verification = the 8-stage gate on the cut branch. (History: ADOPTED 2026-07-03; P1/P2/P3 + U1/U2/U3 all resolved pre-cut) |
 | **Basis** | Everything below is merged and gate-green on `polaris2_main` |
 
 ## What the pilot proved (evidence, not claims)

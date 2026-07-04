@@ -5,7 +5,7 @@
 | **Date** | 2026-07-03 |
 | **Audience** | The app-dev team consuming the xInsp2 backend: your inspection scripts, your plugins, your WS clients/tooling, your recorded artifacts |
 | **Scope** | ONE coordinated break ("THE CUT"): plugin ABI v11 → v12 pure pack door, Record deleted, XEX1-v3 default wire, `hello.abi` 1 → 2, plus the retirements listed in §1 — and the bilingual window you can use TODAY to make the cut a non-event |
-| **Status** | All engineering gates ACHIEVED on our side, and **§6 is ANSWERED (2026-07-04)** — all five decisions closed, app-side porting done + soaked (see §6's resolution block). THE CUT is GO pending only a train date on our release rhythm; two enablement items (E1 deployment refresh, E2 jpeg preview) tracked in §6 |
+| **Status** | **THE CUT EXECUTED (2026-07-04, branch `polaris2/the-cut-v12` — ABI v12, hello.abi 2)**. Everything in §1 landed: pure pack door, Record deleted, codec evicted (imgcodec required — E1: use `--autoload-lib` or a project imgcodec instance), xi::state() deleted, XEX1-v3 default (v1 via `frame_wire_v3:false` for one release), the five commands retired, record_save .json+.bmp door gone. Your side: recompile against the v12 SDK + the joint validation pass. (§6 was ANSWERED 2026-07-04 — all five closed, porting done + soaked) |
 | **Supersedes** | The previous version of this document (the `polaris_master` merge brief). That migration completed; the `hello.abi` bump it deferred as "Phase 3" now rides this train |
 
 ## TL;DR
