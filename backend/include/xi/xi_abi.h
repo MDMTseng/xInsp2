@@ -628,7 +628,7 @@ typedef struct xi_host_api {
     /*   get_interface("xi.preview", 1) -> const xi_preview_v1*  (the     */
     /*       compress_image capability, carved in Phase 2).              */
     /*   get_interface("xi.imaging", 1) -> const xi_imaging_v1*  (image   */
-    /*       pool + read_image_file, carved in Phase 3).                  */
+    /*       pool, carved in Phase 3; its file reader left at THE CUT).   */
     /*   get_interface("xi.imaging_rw", 1) -> const xi_imaging_rw_v1* (the */
     /*       read-only-input / writable-output access discipline; ext.     */
     /*       review 02 I.4).                                               */

@@ -126,19 +126,6 @@ __declspec(dllexport) int xi_script_kv_change(const uint8_t* old_bytes, int old_
                                        new_schema, buf, buflen);
 }
 
-// ---- Record-channel stand-in (SECTION E: the JSON-era self-seed) ------------
-
-__declspec(dllexport) int xi_script_get_state(char* buf, int buflen) {
-    int needed = (int)g_state_json.size();
-    if (buflen < needed + 1) return -needed;
-    std::memcpy(buf, g_state_json.data(), g_state_json.size());
-    buf[g_state_json.size()] = 0;
-    return needed;
-}
-__declspec(dllexport) int xi_script_set_state(const char* json) {
-    if (!json) return -1;
-    g_state_json = json;
-    return 0;
-}
-
-} // extern "C"
+// [v12 THE CUT — the Record-channel stand-in exports (xi_script_get_state/
+//  set_state) were removed with test_kv_migrate SECTION E (the JSON-era
+//  self-seed died with the Record state channel; doc 16).]

@@ -103,7 +103,7 @@ static bool same_pixels(const Img& a, const Img& b) {
 }
 
 int main() {
-    std::printf("[test] xi.imgcodec — HOST read_image_file eviction: "
+    std::printf("[test] xi.imgcodec — HOST decode eviction (was the read_image_file slot): "
                 "capability engine + stb fallback, byte-equivalent\n");
     xi::install_seh_translator();
 
@@ -113,9 +113,9 @@ int main() {
     (void)host;
 
     // The impl under test installs itself from xi_image_io.cpp (linked in).
-    auto read_image_file = xi::ImagePool::read_image_file_fn();
-    CHECK(read_image_file != nullptr);
-    if (!read_image_file) return 1;
+    auto decode_image = xi::ImagePool::decode_image_fn();
+    CHECK(decode_image != nullptr);
+    if (!decode_image) return 1;
 
     // ---- author on-disk fixtures ------------------------------------------
     constexpr int W = 16, H = 12;
@@ -177,15 +177,15 @@ int main() {
     CHECK(cap && cap->available("xi.image.decode") == 1);
 
     // ---- 1. capability engine serves; capture the reference pixels --------
-    SECTION("capability engine serves read_image_file (3-channel)");
+    SECTION("capability engine serves decode (3-channel)");
     int d0 = codec_decodes(codec.get());
-    Img cap_rgb = materialize(read_image_file(png3));
+    Img cap_rgb = materialize(decode_image(png3));
     CHECK(cap_rgb.ok && cap_rgb.w == W && cap_rgb.h == H && cap_rgb.c == 3);
     CHECK(codec_decodes(codec.get()) == d0 + 1);          // the CAPABILITY served
 
     SECTION("capability engine serves native 2-channel via the 'raw' reply");
     int d1 = codec_decodes(codec.get());
-    Img cap_ga = materialize(read_image_file(png2));
+    Img cap_ga = materialize(decode_image(png2));
     CHECK(cap_ga.ok && cap_ga.w == W && cap_ga.h == H && cap_ga.c == 2);
     CHECK(codec_decodes(codec.get()) == d1 + 1);
 
@@ -197,7 +197,7 @@ int main() {
         xi::ImagePool::OwnerGuard og(codec_owner);   // as if imgcodec called us
         // [v12 THE CUT: the stb fallback is deleted — a refused funnel call
         //  fails LOUD (0 handle), it does not silently decode in-core.]
-        CHECK(read_image_file(png3) == 0);
+        CHECK(decode_image(png3) == 0);
     }
     CHECK(codec_decodes(codec.get()) == d2);              // decoder did NOT serve
 
@@ -207,15 +207,15 @@ int main() {
     codec->set_quarantined(true);
     int d3 = codec_decodes(codec.get());
     // [v12 THE CUT: quarantined provider = decode unavailable = 0, fail loud.]
-    CHECK(read_image_file(png3) == 0);
+    CHECK(decode_image(png3) == 0);
     CHECK(codec_decodes(codec.get()) == d3);              // quarantined: not served
     CHECK(codec->quarantined());                          // attribution intact
     codec->set_quarantined(false);
 
     // ---- 5. contract $fault -> fallback -> stb also fails -> 0 ------------
     SECTION("corrupt bytes: $fault -> 0 (v12: capability is the only engine)");
-    CHECK(read_image_file(junkfile) == 0);
-    CHECK(read_image_file(nullptr) == 0);                 // null path unchanged
+    CHECK(decode_image(junkfile) == 0);
+    CHECK(decode_image(nullptr) == 0);                 // null path unchanged
 
     // ---- 2. absent capability: remove the instance, stb serves ------------
     SECTION("remove the imgcodec instance -> capability absent -> decode FAILS "
@@ -227,9 +227,9 @@ int main() {
     // [v12 THE CUT: with the provider gone there is NO decode engine — every
     //  decode fails loud (0). Deployments supply imgcodec via a project
     //  instance or machine autoload (--autoload-lib / XINSP2_AUTOLOAD_LIB=1).]
-    CHECK(read_image_file(png3) == 0);
-    CHECK(read_image_file(png2) == 0);
-    CHECK(read_image_file(junkfile) == 0);
+    CHECK(decode_image(png3) == 0);
+    CHECK(decode_image(png2) == 0);
+    CHECK(decode_image(junkfile) == 0);
 
     std::remove(png3); std::remove(png2); std::remove(junkfile);
 

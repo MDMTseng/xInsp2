@@ -463,7 +463,7 @@ public:
         };
         // [ABI v12 — emit_record + read_image_file host slots were DELETED at THE
         // CUT. Sources emit sealed packs (xi_pack_v1::emit_pack, wired below);
-        // image decode is the xi.image.decode capability. read_image_file_fn()
+        // image decode is the xi.image.decode capability. decode_image_fn()
         // still exists as an INTERNAL host helper (cmd:run disk frame injection,
         // service_cmd_dispatch.cpp), now capability-only — it is just no longer
         // published as a plugin-facing host_api slot.]
@@ -758,13 +758,13 @@ public:
         return ok;
     }
 
-    using ReadImageFileFn = xi_image_handle (*)(const char* path);
-    static ReadImageFileFn& read_image_file_fn() {
-        static ReadImageFileFn fn = nullptr;
+    using DecodeImageFn = xi_image_handle (*)(const char* path);
+    static DecodeImageFn& decode_image_fn() {
+        static DecodeImageFn fn = nullptr;
         return fn;
     }
-    static void install_read_image_file(ReadImageFileFn fn) {
-        read_image_file_fn() = fn;
+    static void install_decode_image(DecodeImageFn fn) {
+        decode_image_fn() = fn;
     }
 
 private:

@@ -118,7 +118,7 @@ void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
                     // Decode via the internal host helper (capability-only at v12:
                     // requires an xi.image.decode provider — imgcodec instance or
                     // --autoload-lib). 0 handle ⇒ nothing to inject.
-                    if (auto fn = xi::ImagePool::read_image_file_fn()) {
+                    if (auto fn = xi::ImagePool::decode_image_fn()) {
                         if (xi_image_handle h = fn(frame_path.c_str())) {
                             int32_t w = 0, hh = 0, c = 0;
                             {

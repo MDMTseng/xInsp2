@@ -1,6 +1,6 @@
-// Out-of-line installer of the backend's internal read_image_file function.
+// Out-of-line installer of the backend's internal image-decode function.
 // A static initialiser installs the function pointer into ImagePool; the
-// backend resolves it via ImagePool::read_image_file_fn() (service_cmd_
+// backend resolves it via ImagePool::decode_image_fn() (service_cmd_
 // dispatch.cpp's cmd:run frame injection). Tests that don't link this TU
 // leave the slot null — fine for in-process unit tests.
 //
@@ -18,7 +18,7 @@
 // The plugin-facing host_api.read_image_file ABI SLOT is gone at v12 (the
 // struct field was removed from xi_abi.h and its wiring dropped from
 // xi_image_pool.hpp's make_host_api). This install hook survives ONLY because
-// the backend itself still resolves read_image_file_fn() internally — see
+// the backend itself still resolves decode_image_fn() internally — see
 // service_cmd_dispatch.cpp (frame-injection for cmd:run). It installs a
 // capability-only reader into ImagePool; that is the whole remaining reason
 // this TU exists.
@@ -48,7 +48,7 @@ void note_engine_capability() {
     if (announced.exchange(true, std::memory_order_relaxed)) return;
     const char* text = "engine=capability (xi.image.decode, lib plugin)";
     std::fprintf(stderr, "[xinsp2] read_image_file: %s\n", text);
-    if (auto fn = xi::status_sink()) fn("read_image_file", text);
+    if (auto fn = xi::status_sink()) fn("image_decode", text);
 }
 
 // ---- the capability engine (the ONLY engine at v12) --------------------------
@@ -145,7 +145,7 @@ bool read_via_capability(const char* path, xi_image_handle* out_h) {
 
 } // namespace
 
-static xi_image_handle read_image_file_impl(const char* path) {
+static xi_image_handle decode_image_impl(const char* path) {
     if (!path) return 0;
     xi_image_handle h = 0;
     if (read_via_capability(path, &h)) {
@@ -156,12 +156,12 @@ static xi_image_handle read_image_file_impl(const char* path) {
 }
 
 namespace {
-struct InstallReadImageFile {
-    InstallReadImageFile() {
-        ImagePool::install_read_image_file(&read_image_file_impl);
+struct InstallDecodeImage {
+    InstallDecodeImage() {
+        ImagePool::install_decode_image(&decode_image_impl);
     }
 };
-static InstallReadImageFile s_install;
+static InstallDecodeImage s_install;
 }
 
 } // namespace xi
