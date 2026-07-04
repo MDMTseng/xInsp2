@@ -376,18 +376,18 @@ target_compile_definitions(test_cap_reload_window PRIVATE
     CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
 add_test(NAME cap_reload_window COMMAND test_cap_reload_window)
 
-# R1 triage (docs/new_gen/22-plausible-triage.md): the PackRegistry owner-ledger
-# over-releases a co-held pack when a GUARDLESS (owner==0) release with no
-# untagged headroom mis-charges the wrong owner's bucket and that owner is then
-# swept. DELIBERATELY RED — asserts the correct (survive) behaviour the current
-# ledger violates; WILL_FAIL keeps ctest green until the ledger is fixed.
+# R1 regression (docs/new_gen/22-plausible-triage.md): the PackRegistry
+# owner-ledger USED to over-release a co-held pack when a GUARDLESS (owner==0)
+# release with no untagged headroom mis-charged the wrong owner's bucket and that
+# owner was then swept. Fixed by making unattributable releases never touch a
+# bucket + a sweep that never frees while another owner's bucket is non-empty.
+# Deterministic multi-owner/off-guard repro + double-free/leak self-checks.
 add_executable(test_pack_ledger_misattribution tests/test_pack_ledger_misattribution.cpp)
 target_link_libraries(test_pack_ledger_misattribution PRIVATE xi_core)
 if(WIN32)
     target_link_libraries(test_pack_ledger_misattribution PRIVATE Ws2_32)
 endif()
 add_test(NAME pack_ledger_misattribution COMMAND test_pack_ledger_misattribution)
-set_tests_properties(pack_ledger_misattribution PROPERTIES WILL_FAIL TRUE)
 
 # V3 machine-level lib-plugin autoload (doc 14 / doc 19 V3): the REAL
 # PluginManager scans + autoloads cap_test_plugin (marked lib+autoload) and

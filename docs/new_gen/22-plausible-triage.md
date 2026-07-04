@@ -23,13 +23,13 @@ impossible; test (if any) deleted.
 | # | Finding | Verdict | Test |
 |---|---|---|---|
 | F2 | `$prov` unbounded growth | **REFUTED** | none (code-cited) |
-| R1 | PackRegistry owner-ledger mis-attribution → over-release | **CONFIRMED** | `backend/tests/test_pack_ledger_misattribution.cpp` (RED / WILL_FAIL) |
+| R1 | PackRegistry owner-ledger mis-attribution → over-release | **CONFIRMED → FIXED** | `backend/tests/test_pack_ledger_misattribution.cpp` |
 | A3 | cap-plane spurious `-4` (ESHAPE) during provider swap | **CONFIRMED-benign** | `backend/tests/test_cap_reload_window.cpp` |
 | B2 | autoload-swap unavailability window (`-1` EUNKNOWN) | **CONFIRMED-benign** | `backend/tests/test_cap_reload_window.cpp` |
 | 5th | doc-21 "F2" funnel crash-path fault-attribution | **REFUTED** (subsumed by RT6) | none |
 
-Net: **one real latent defect (R1)**; two real-but-benign fail-soft windows
-(A3/B2, quantified); two refutations. R1 is the one to act on.
+Net: **one real latent defect (R1) — now FIXED with regression**; two
+real-but-benign fail-soft windows (A3/B2, quantified); two refutations.
 
 ---
 
@@ -80,7 +80,7 @@ a plugin to deliberately re-inject the chain. No test kept.
 
 ---
 
-## R1 — PackRegistry owner-ledger over-release · CONFIRMED (RED test)
+## R1 — PackRegistry owner-ledger over-release · CONFIRMED → FIXED
 
 **Where.** `backend/include/xi/xi_pack_abi.hpp` — `PackRegistry` owner ledger
 (`ledger_release`, `ledger_take`, `release_all_for`).
@@ -118,41 +118,74 @@ event's untagged ref has already drained, hits exactly this corner. RT5's quiesc
 removed the *remove-instance* flavour of the guardless release, not the
 plugin-worker flavour.
 
-**Repro.** `backend/tests/test_pack_ledger_misattribution.cpp` drives the exact
-sequence through the public `PackRegistry` API (`retain_as`/`release_as`/
-`release_all_for`/`owner_refs`/`pack`) and asserts the CORRECT outcome (the pack
-survives one owner's sweep because a co-owner still holds). Today's ledger
-violates all four assertions — observed:
+**Repro + regression.** `backend/tests/test_pack_ledger_misattribution.cpp`
+drives the exact sequence through the public `PackRegistry` API
+(`retain_as`/`release_as`/`release_all_for`/`owner_refs`/`pack`) and pins the
+safety invariant across four sections: §1 over-release (the co-owned pack must
+SURVIVE the sweep — the key assertion, which the pre-fix ledger violated by
+freeing under B), §2 double-free (redundant sweep + a release on the freed handle
+are no-ops), §3 leak/defer (the deferred free still happens on B's true last
+release → count reaches 0), §4 leak/reclaim (a genuinely forgotten single-owner
+ref is still reclaimed by its sweep). On the pre-fix ledger §1 FAILS; on the
+fixed ledger all sections pass. Normal PASSING ctest target.
 
-```
-FAIL owner_refs(A) == 0   (A's phantom bucket lingers)
-FAIL owner_refs(B) == 1   (B's real bucket was popped by A's guardless release)
-FAIL R.pack(h) != nullptr (pack over-released by sweep(A))
-FAIL R.live_frames() == baseline + 1
-```
+**Fix (LANDED — `xi_pack_abi.hpp`).** Two coordinated changes; the naïve
+sweep-only guard is insufficient because the mis-attribution already *erased* the
+co-owner's bucket before the sweep ran.
 
-It is a **deliberately RED** test, wired `WILL_FAIL TRUE` in CMake so ctest stays
-green while R1 is open; when the ledger is fixed the exe returns 0, ctest flips
-to FAIL, and the test + WILL_FAIL come off together as the fix's regression.
+1. **`ledger_release`** — an unattributable release (owner 0, or a tagged owner
+   with no matching bucket) **never touches a bucket**. The prior code, once the
+   untagged headroom `rc - sum(buckets)` was exhausted, decremented
+   `owners.back()` — popping a *live co-owner's* bucket. That guess is deleted;
+   `rc` alone (decremented in `release_as`) records the drop, so a co-owner's
+   bucket is preserved.
+2. **`release_all_for` (the sweep)** — reclaim only the refs **not attributable
+   to a surviving owner**, and **never free while another owner's bucket is
+   non-empty**:
 
-**Proposed fix (NOT landed — needs review).** The root cause is that `owner==0`
-carries two distinct meanings that the ledger conflates: *"a genuinely untagged
-framework ref"* vs *"a tagged owner releasing off-guard"*. Options:
+   ```cpp
+   int k = ledger_take(s, owner);          // remove this owner's bucket
+   if (k > 0) {
+       int remaining = 0;                  // survivors' (max) holds
+       for (const OwnerRef& r : s.owners) remaining += r.n;
+       int reclaim = s.rc - remaining;     // refs beyond any survivor = this owner's
+       if (reclaim < 0) reclaim = 0;
+       if (reclaim > k) reclaim = k;       // never exceed this owner's own bucket
+       swept += reclaim;
+       s.rc -= reclaim;
+       if (s.rc <= 0 && s.owners.empty())  // free ONLY when no ref & no survivor
+           { /* drop + erase */ }
+   }
+   ```
 
-1. **Track untagged refs explicitly.** Add `int untagged` to `Slot`;
-   `retain_untagged`/untagged-seal `++untagged`; a guardless release decrements
-   `untagged` if `>0`, else it is a *tagged owner off-guard* — and must NOT
-   silently mis-charge a bucket. Safest: leave the ledger untouched and only
-   decrement `rc` (accepting `sum(ledger) > rc` transiently), then make
-   `release_all_for` never drive `rc` below `sum(ledger of OTHER owners) +
-   untagged` — i.e. a sweep frees only when its bucket is provably the last hold.
-2. **Refuse to free on a sweep while any OTHER owner bucket is non-empty** — a
-   pack with ≥2 live owner buckets is never freed by one owner's sweep; the last
-   owner's sweep (or the last untagged release) frees it. This is the minimal,
-   obviously-correct guard and directly kills the over-release.
+**Fail-closed reasoning.**
+- *Over-release (UAF) — impossible.* The sweep frees only when `rc<=0 && owners
+  empty`; a live co-owner keeps a non-empty bucket, so its pack is never freed by
+  another owner's sweep. `reclaim = rc - remaining` is clamped `≥0`, so `rc` never
+  drops below `remaining` (the survivors' holds). The true last holder frees it on
+  its own release (`release_as`: `if (--rc==0) erase`, rc-authoritative).
+- *Leak — the free still happens.* `rc` is the source of truth and is decremented
+  on **every** release (tagged, untagged, or off-guard), so any pack whose holders
+  all eventually release reaches `rc==0` and frees — even a stale bucket dies with
+  the frame (§3 pins this). A genuinely forgotten single-owner ref is reclaimed by
+  its sweep (`remaining==0 → reclaim==rc`, §4 pins this).
+- *ABI unchanged.* Header-internal `PackRegistry::Slot` logic only; no field
+  added, no struct in `xi_abi.h` touched. `test_abi_freeze` stays green at
+  **112 bytes / 14 fields** (`XI_ABI_EXPECTED_SIZE` unchanged).
 
-Recommend (2) as the tight fix (one predicate in `release_all_for`/the sweep) and
-(1) if the app team wants exact untagged accounting. Left for human decision.
+**Residual (flagged, strictly better than the UAF).** One narrow *double-fault*
+is fail-closed toward a **bounded leak**, never a UAF: if a surviving owner's
+bucket is *stale* (that owner released off-guard with no headroom, so its bucket
+lingers) **and** the swept owner had a genuinely forgotten ref, the stale bucket
+inflates `remaining` and the sweep defers that forgotten ref's reclaim — the pack
+lingers until registry teardown. This requires two simultaneous faults
+(off-guard release **and** a forgotten-ref sweep on the same co-owned pack); the
+pre-fix code handled *this* particular case but UAF'd the mirror case. A fully
+leak-free fix needs off-guard releases eliminated at the source (release under the
+same owner context the ref was acquired) — an adapter/discipline change, not a
+header-local one. For a WELL-BEHAVED caller (releases under its guard) neither the
+UAF nor the residual leak is reachable, and observable single-owner ledger
+semantics are unchanged.
 
 ---
 

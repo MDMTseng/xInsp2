@@ -67,10 +67,21 @@ inline std::atomic<bool> g_pack_registry_alive{false};
 // release() itself — returning the count so the teardown path can print the
 // "swept N leaked pack ref(s)" diagnostic. Refs acquired with no owner context
 // (dispatch-event refs via retain_untagged, test code outside a guard) are
-// untagged and never swept. A release under the wrong/no owner context is
-// reconciled against the untagged headroom first, then against any ledger
-// bucket, so the ledger can never claim more refs than the slot holds and a
-// sweep can never over-release.
+// untagged and never swept. A release under the wrong/no owner context (owner
+// 0, or a tagged owner releasing OFF its guard on a worker thread) is
+// UNATTRIBUTABLE: it is absorbed by the untagged headroom (rc - sum(buckets))
+// when there is any, and otherwise leaves the ledger untouched — it is NEVER
+// charged to an arbitrary bucket. (Guessing owners.back() was the R1
+// over-release: it could pop a live co-owner's bucket, and the later sweep of
+// the mis-charged owner then freed the pack out from under the true holder — a
+// UAF.) The sweep (release_all_for) reclaims only the refs NOT attributable to a
+// surviving owner and NEVER frees while another owner's bucket is non-empty, so
+// **a sweep can never over-release** — a co-owned pack frees only when its true
+// last holder releases (rc→0). This is fail-closed toward LEAK, never toward
+// UAF: in the narrow double-fault where a surviving owner's bucket is stale
+// (that owner released off-guard) AND the swept owner had a forgotten ref, the
+// sweep defers the forgotten ref's reclaim (bounded leak, reclaimed at registry
+// teardown) rather than risk freeing a live co-owner's pack.
 // ===================================================================
 class PackRegistry {
 public:
@@ -173,11 +184,24 @@ public:
             std::lock_guard<std::mutex> lk(mu_);
             for (auto it = frames_.begin(); it != frames_.end();) {
                 Slot& s = it->second;
-                int k = ledger_take(s, owner);
+                int k = ledger_take(s, owner);   // remove this owner's bucket
                 if (k > 0) {
-                    swept += k;
-                    s.rc -= k;
-                    if (s.rc <= 0) {
+                    // R1 guard: reclaim only the refs NOT attributable to a
+                    // surviving owner. A survivor Y's genuine holds are <= its
+                    // bucket, so anything beyond sum(remaining buckets) belongs
+                    // to THIS dying owner (a forgotten/leaked ref) and is safe to
+                    // drop. Never reclaim more than this owner's own bucket, and
+                    // NEVER free while another owner's bucket is non-empty — a
+                    // co-owned pack frees when the last co-owner releases (rc→0),
+                    // so the sweep can never over-release the true holder.
+                    int remaining = 0;
+                    for (const OwnerRef& r : s.owners) remaining += r.n;
+                    int reclaim = s.rc - remaining;
+                    if (reclaim < 0) reclaim = 0;
+                    if (reclaim > k) reclaim = k;
+                    swept += reclaim;
+                    s.rc -= reclaim;
+                    if (s.rc <= 0 && s.owners.empty()) {
                         dropped.push_back(std::move(s.pack));
                         it = frames_.erase(it);
                         continue;
@@ -218,11 +242,15 @@ private:
         s.owners.push_back(OwnerRef{owner, 1});
     }
     // Reconcile one release against the ledger BEFORE rc is decremented.
-    // Preference order keeps the invariant sum(ledger) <= rc:
-    //   1. the caller's own bucket (the well-behaved case);
-    //   2. untagged headroom (rc - ledger sum) absorbs it — nothing to adjust;
-    //   3. any bucket (a tagged ref released from a guard-less thread, e.g. a
-    //      plugin worker) — mis-attributed but never over-counted.
+    //   1. the caller's own bucket -> decrement it (the well-behaved case);
+    //   2. no matching bucket -> the ref is untagged, or a tagged ref released
+    //      OFF its owner guard (owner 0, or an owner with no bucket). Either way
+    //      it is UNATTRIBUTABLE: leave the ledger untouched. The rc decrement in
+    //      release_as records the drop; the sweep reclaims only refs beyond the
+    //      surviving buckets. We do NOT guess a bucket — the old code decremented
+    //      owners.back() once the untagged headroom (rc - sum(buckets)) was
+    //      exhausted, which could pop a LIVE co-owner's bucket and let a later
+    //      sweep of the mis-charged owner over-release the pack (R1 UAF).
     static void ledger_release(Slot& s, ImagePoolOwnerId owner) {
         if (owner) {
             for (size_t i = 0; i < s.owners.size(); ++i) {
@@ -235,12 +263,7 @@ private:
                 }
             }
         }
-        int sum = 0;
-        for (const OwnerRef& r : s.owners) sum += r.n;
-        if (sum < s.rc) return;          // an untagged ref absorbs this release
-        if (!s.owners.empty()) {
-            if (--s.owners.back().n == 0) s.owners.pop_back();
-        }
+        // Unattributable release: never mis-charge another owner's bucket.
     }
     // Remove and return owner's whole bucket (the sweep primitive).
     static int ledger_take(Slot& s, ImagePoolOwnerId owner) {

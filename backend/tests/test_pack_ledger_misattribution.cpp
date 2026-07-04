@@ -1,44 +1,26 @@
 //
-// test_pack_ledger_misattribution.cpp — R1 triage
+// test_pack_ledger_misattribution.cpp — R1 regression
 // (docs/new_gen/22-plausible-triage.md).
 //
-// The PackRegistry owner-ledger (xi_pack_abi.hpp) carries a stated invariant:
+// The PackRegistry owner-ledger (xi_pack_abi.hpp) USED to over-release a co-held
+// pack: a GUARDLESS release (ImagePool::current_owner()==0 — e.g. a reentrant
+// provider dropping a pack from its OWN worker thread, off any OwnerGuard) with
+// no untagged headroom mis-charged owners.back() — popping a LIVE co-owner's
+// bucket. A later owner-sweep of the mis-charged-FROM owner then drove rc to 0
+// and freed the pack out from under the true holder — a UAF.
 //
-//     "A release under the wrong/no owner context is reconciled against the
-//      untagged headroom first, then against any ledger bucket, so the ledger
-//      can never claim more refs than the slot holds and a SWEEP CAN NEVER
-//      OVER-RELEASE."
+// The fix (R1): an unattributable release never touches a bucket, and the sweep
+// reclaims only refs NOT attributable to a surviving owner and never frees while
+// another owner's bucket is non-empty — so a co-owned pack frees ONLY when its
+// true last holder releases (rc->0). This test pins that invariant with the
+// deterministic multi-owner / off-guard repro plus adversarial self-checks:
+//   §1 over-release: the exact R1 sequence — the pack must SURVIVE the sweep.
+//   §2 double-free:  a redundant sweep + a release on the freed handle are no-ops.
+//   §3 leak (defer): the deferred free still happens on the true last release.
+//   §4 leak (reclaim): a genuinely forgotten single-owner ref is still reclaimed.
 //
-// This probe FALSIFIES the "sweep can never over-release" half in the
-// multi-owner / no-untagged-headroom corner:
-//
-//   1. A sealed pack is co-held by TWO tagged owners (A and B) with NO untagged
-//      headroom left (the event ref has drained).
-//   2. A GUARDLESS release (ImagePool::current_owner()==0 — e.g. a reentrant
-//      provider dropping the pack from its OWN worker thread, off any
-//      OwnerGuard) arrives. ledger_release() has no untagged headroom to absorb
-//      it (sum(ledger)==rc), so it mis-charges the LAST bucket — decrementing an
-//      owner that did NOT release. rc still drops correctly, but the ledger now
-//      mis-attributes ownership: it believes the guardless releaser's OTHER
-//      bucket is the live one.
-//   3. The owner-sweep of the mis-charged-FROM owner (its adapter is torn down)
-//      then takes its phantom bucket and drives rc to 0 — freeing the pack while
-//      the true co-owner still holds a ref. Over-release / latent UAF.
-//
-// Threat model fit (well-behaved, heavy load): a reentrant provider contracts
-// to be thread-safe and the plane runs its handler off multiple dispatch
-// threads (xi_cap_abi.hpp header notes). A provider that retains a shared pack
-// under its OwnerGuard (tagged) but releases it from a worker thread it spawned
-// (no guard -> owner 0), while a second instance co-holds the same pack and the
-// emit event's untagged ref has already been dropped, hits exactly this corner.
-// RT5's quiesce removed the remove-instance flavour of the guardless release but
-// not the plugin-worker flavour.
-//
-// This is a DELIBERATELY RED test: it asserts the CORRECT behaviour (a co-owned
-// pack survives one owner's sweep) which the current ledger VIOLATES, so the exe
-// returns non-zero on today's code. CMake wires it WILL_FAIL so ctest stays
-// green; when the ledger is fixed the exe returns 0, ctest flips to FAIL, and
-// this test + its WILL_FAIL come off together (the fix's regression).
+// On the pre-fix ledger §1 FAILS (the pack is freed while a co-owner holds); on
+// the fixed ledger all sections pass. Normal PASSING ctest target.
 //
 #include <xi/xi_pack_abi.hpp>
 #include <xi/xi_image_pool.hpp>
@@ -58,9 +40,18 @@ static int g_failures = 0;
             ++g_failures;                                                      \
         }                                                                      \
     } while (0)
+#define SECTION(name) std::fprintf(stderr, "\n[section] %s\n", name)
+
+// Seal a pack WITH NO owner context (main thread, no OwnerGuard) -> the initial
+// ref is UNTAGGED (rc=1, ledger empty, one unit of untagged headroom).
+static xi_pack_handle seal_untagged(const xi_pack_v1* pk, int64_t payload) {
+    xi_pack_builder b = pk->builder_new();
+    pk->builder_add_i64(b, "payload", payload);
+    return pk->builder_seal(b);
+}
 
 int main() {
-    std::printf("[test] pack-ledger owner mis-attribution (R1 triage — RED)\n");
+    std::printf("[test] pack-ledger owner mis-attribution (R1 regression)\n");
 
     static xi_host_api host = xi::ImagePool::make_host_api();
     xi::install_pack_abi();
@@ -71,53 +62,92 @@ int main() {
     auto& R = xi::PackRegistry::instance();
     const xi::ImagePoolOwnerId A = 0xA11CE;   // two distinct lib-instance owners
     const xi::ImagePoolOwnerId B = 0xB0B;
-
     const size_t baseline = R.live_frames();
 
-    // Seal WITH NO owner context (main thread, no OwnerGuard) -> the initial ref
-    // is UNTAGGED. rc=1, ledger=[], untagged headroom=1.
-    xi_pack_builder bld = pk->builder_new();
-    pk->builder_add_i64(bld, "payload", 7);
-    xi_pack_handle h = pk->builder_seal(bld);
-    CHECK(h != XI_PACK_NULL);
+    // -----------------------------------------------------------------------
+    SECTION("1: over-release — a co-owned pack survives one owner's sweep");
+    {
+        xi_pack_handle h = seal_untagged(pk, 7);            // rc=1, untagged=1
+        CHECK(h != XI_PACK_NULL);
+        R.retain_as(h, A);                                  // rc=2, [{A,1}]
+        R.retain_as(h, B);                                  // rc=3, [{A,1},{B,1}]
+        R.release_as(h, 0);   // emit event's untagged ref drains (absorbed)  rc=2
 
-    // Two lib instances co-retain it under their OwnerGuards (tagged refs).
-    R.retain_as(h, A);   // rc=2, ledger=[{A,1}], untagged=1
-    R.retain_as(h, B);   // rc=3, ledger=[{A,1},{B,1}], untagged=1
-    CHECK(R.owner_refs(A) == 1);
-    CHECK(R.owner_refs(B) == 1);
+        // Owner A drops ITS ref from a spawned worker thread — off any
+        // OwnerGuard, so current_owner()==0: a GUARDLESS release with NO untagged
+        // headroom. The fix must NOT mis-charge B's bucket.
+        R.release_as(h, 0);                                 // rc=1 (B still holds)
+        CHECK(R.pack(h) != nullptr);                        // pack alive
+        CHECK(R.live_frames() == baseline + 1);
+        CHECK(R.owner_refs(B) >= 1);                        // B's bucket preserved
 
-    // The emit event's untagged ref drains (framework releaser, owner 0). It is
-    // absorbed by the untagged headroom — no bucket touched. rc=2, no headroom.
-    R.release_as(h, 0);
-    CHECK(R.owner_refs(A) == 1);
-    CHECK(R.owner_refs(B) == 1);   // both true holders still ledgered
+        // A's adapter is torn down -> its owner sweep. It must NOT free the pack:
+        // B still holds a live ref. (Pre-fix: freed here -> UAF.)
+        int swept = R.release_all_for(A);
+        CHECK(R.pack(h) != nullptr);                        // *** the R1 assertion
+        CHECK(R.live_frames() == baseline + 1);             // not over-released
+        (void)swept;
 
-    // Now owner A drops ITS ref from a spawned worker thread — off any
-    // OwnerGuard, so current_owner()==0: a GUARDLESS release. There is no
-    // untagged headroom (sum(ledger)==rc==2), so ledger_release mis-charges the
-    // LAST bucket (B) instead of A. The ledger now WRONGLY believes A holds and
-    // B is gone.
-    R.release_as(h, 0);
+        // B can still safely deref the pack the sweep would have freed.
+        int64_t v = -1; CHECK(pk->get_i64(h, "payload", &v) == 1); CHECK(v == 7);
 
-    // CORRECT post-state: A released, B still holds -> owner_refs(A)==0,
-    // owner_refs(B)==1. The buggy ledger reports the mirror image.
-    CHECK(R.owner_refs(A) == 0);   // RED: current code leaves A's phantom bucket
-    CHECK(R.owner_refs(B) == 1);   // RED: current code popped B's real bucket
+        // The true last holder releases -> NOW it frees (deferred free happens).
+        R.release_as(h, B);
+        CHECK(R.pack(h) == nullptr);
+        CHECK(R.live_frames() == baseline);
+    }
 
-    // Owner A's adapter is torn down -> its owner sweep. It must NOT free the
-    // pack: B still holds a live ref. The bug: the phantom A bucket is swept,
-    // rc -> 0, pack freed out from under B.
-    R.release_all_for(A);
-    CHECK(R.pack(h) != nullptr);                 // RED: pack over-released here
-    CHECK(R.live_frames() == baseline + 1);      // RED: frame vanished
+    // -----------------------------------------------------------------------
+    SECTION("2: double-free — redundant sweep + release on a freed handle no-op");
+    {
+        xi_pack_handle h = seal_untagged(pk, 11);
+        R.retain_as(h, A);                                  // rc=2, [{A,1}]
+        R.release_as(h, 0);                                 // drop untagged  rc=1, [{A,1}]
+        int s1 = R.release_all_for(A);                      // sole owner -> reclaim+free
+        CHECK(s1 == 1);
+        CHECK(R.pack(h) == nullptr);
+        CHECK(R.live_frames() == baseline);
+        // Redundant sweep + a stray release on the now-dead handle: pure no-ops.
+        CHECK(R.release_all_for(A) == 0);
+        R.release_as(h, A);
+        R.release_as(h, 0);
+        CHECK(R.live_frames() == baseline);
+    }
 
-    // Clean up the (correctly) surviving co-owner ref so the table balances when
-    // the test is later fixed-and-passing.
-    if (R.pack(h) != nullptr) R.release_as(h, B);
-    CHECK(R.live_frames() == baseline);
+    // -----------------------------------------------------------------------
+    SECTION("3: leak/defer — a deferred free still happens on the last release");
+    {
+        // A and B co-hold; A is swept while B genuinely holds (deferred), then B
+        // releases normally -> must reach 0 (no leak).
+        xi_pack_handle h = seal_untagged(pk, 21);
+        R.retain_as(h, A);
+        R.retain_as(h, B);
+        R.release_as(h, 0);                                 // drop untagged
+        R.release_all_for(A);                               // A gone; B holds -> deferred
+        CHECK(R.pack(h) != nullptr);
+        CHECK(R.live_frames() == baseline + 1);
+        R.release_as(h, B);                                 // B's genuine release
+        CHECK(R.pack(h) == nullptr);
+        CHECK(R.live_frames() == baseline);                 // count reaches 0
+    }
 
+    // -----------------------------------------------------------------------
+    SECTION("4: leak/reclaim — a forgotten single-owner ref is still reclaimed");
+    {
+        // A retains and FORGETS to release; its sweep must reclaim the ref (the
+        // whole point of the owner ledger) — the fix must not leak it.
+        xi_pack_handle h = seal_untagged(pk, 31);
+        R.retain_as(h, A);                                  // rc=2, [{A,1}]
+        R.release_as(h, 0);                                 // drop untagged  rc=1, [{A,1}]
+        CHECK(R.owner_refs(A) == 1);
+        int swept = R.release_all_for(A);                   // reclaim the forgotten ref
+        CHECK(swept == 1);
+        CHECK(R.pack(h) == nullptr);
+        CHECK(R.live_frames() == baseline);
+    }
+
+    CHECK(R.live_frames() == baseline);                     // table balances overall
     if (g_failures == 0) { std::printf("\n[test] pack-ledger mis-attribution: ALL OK\n"); return 0; }
-    std::fprintf(stderr, "\n%d FAILURES (expected while R1 is unfixed — WILL_FAIL)\n", g_failures);
+    std::fprintf(stderr, "\n%d FAILURES\n", g_failures);
     return 1;
 }
