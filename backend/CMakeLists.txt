@@ -1266,18 +1266,12 @@ file(GLOB_RECURSE _examples_scripts CONFIGURE_DEPENDS
 list(FILTER _examples_scripts EXCLUDE REGEX "/plugins/")
 list(FILTER _examples_scripts EXCLUDE REGEX "/vendor/")
 list(FILTER _examples_scripts EXCLUDE REGEX "/demo_async\\.cpp$")
-# qa_fault/badscript_project/inspect.cpp is a NEGATIVE fixture — it is
-# deliberately uncompilable (the autostart compile-error / stay-up test). It
-# must fail to compile, so it is intentionally NOT in this gate.
-list(FILTER _examples_scripts EXCLUDE REGEX "/qa_fault/badscript_project/")
+# [THE CUT (v12) — the qa_fault negative fixture and the script_external_dll demo
+#  (which supplied the examples_gate /I include) were deleted with the Record-era
+#  demo tree; their filter + include lines are removed.]
 if(_examples_scripts)
     add_library(examples_gate OBJECT EXCLUDE_FROM_ALL ${_examples_scripts})
     target_link_libraries(examples_gate PRIVATE xi_core)   # SDK + vendor + OpenCV include dirs
-    # One example (#include <extmath.h>) resolves a header from its own project
-    # folder via project.json "include_dirs"; the JIT adds it as /I. Compile-only,
-    # so only the header (not the .lib) is needed.
-    target_include_directories(examples_gate PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../examples/script_external_dll/include)
     if(MSVC)
         # Mirror the JIT's script compile (xi_script_compiler.hpp): force-include
         # the OpenCV umbrella FIRST (via the PCH below, which CMake injects as a

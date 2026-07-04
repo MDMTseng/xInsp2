@@ -11,6 +11,8 @@
 
 #include <yyjson.h>
 
+#include <xi/xi_pack_abi.hpp>   // v12: cmd:run injects a sealed pack (pack_v1_iface)
+
 #include "service_internal.hpp"
 
 // ---- dispatch-control ------------------------------------------------------
@@ -98,35 +100,78 @@ void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
             xi::install_seh_translator();
             std::lock_guard<std::mutex> lk(g_eng.run_mu);
 
-            // Stage 1b: build a one-shot record (frame image + meta) and expose
-            // it as this run's current_trigger — the same path the dispatch
-            // worker uses (thread_local g_current_trigger). Only injected when
+            // Stage 1b (v12, pack-only): build a one-shot sealed PACK (frame image
+            // + flat meta entries) and expose it as this run's current_trigger —
+            // the same payload shape a source's emit_pack produces, with no source
+            // plugin needed. The script reads it via t.pack(). Only injected when
             // there's something to inject, so a plain cmd:run keeps the previous
             // "no trigger" behaviour (current_trigger().is_active() == false).
+            // [THE CUT: the Record image-map + meta_doc injection is gone. Nested
+            //  meta objects are NOT converted (no in-tree caller uses them) — only
+            //  top-level scalars (str/i64/f64/bool) become pack entries.]
             xi::TriggerEvent ev;
             bool inject = false;
-            if (!frame_path.empty()) {
-                if (auto fn = xi::ImagePool::read_image_file_fn()) {
-                    if (xi_image_handle h = fn(frame_path.c_str())) {
-                        ev.images["frame"] = h;   // read under current_trigger().image("frame")
-                        inject = true;
+            const xi_pack_v1* pf = xi::pack_v1_iface();
+            xi_pack_builder pb = pf ? pf->builder_new() : XI_PACK_BUILDER_NULL;
+            if (pb != XI_PACK_BUILDER_NULL) {
+                if (!frame_path.empty()) {
+                    // Decode via the internal host helper (capability-only at v12:
+                    // requires an xi.image.decode provider — imgcodec instance or
+                    // --autoload-lib). 0 handle ⇒ nothing to inject.
+                    if (auto fn = xi::ImagePool::read_image_file_fn()) {
+                        if (xi_image_handle h = fn(frame_path.c_str())) {
+                            int32_t w = 0, hh = 0, c = 0;
+                            {
+                                const xi_host_api* ha = script_host_api_();
+                                w  = ha->image_width(h);
+                                hh = ha->image_height(h);
+                                c  = ha->image_channels(h);
+                            }
+                            // adopt_image consumes OUR pool ref into the pack.
+                            pf->builder_adopt_image(pb, "frame", w, hh, c, h);
+                            inject = true;
+                        }
                     }
                 }
-            }
-            if (!meta_json.empty()) {
-                if (yyjson_doc* idoc = yyjson_read(meta_json.data(), meta_json.size(), 0)) {
-                    yyjson_mut_doc* meta = yyjson_doc_mut_copy(idoc, nullptr);
-                    yyjson_doc_free(idoc);
-                    if (meta) {
-                        xi::DocRegistry::instance().addref(meta);   // register at rc=1
-                        ev.meta_doc = xi::DocRef::adopt(meta);
-                        inject = true;
+                if (!meta_json.empty()) {
+                    if (yyjson_doc* idoc = yyjson_read(meta_json.data(), meta_json.size(), 0)) {
+                        yyjson_val* root = yyjson_doc_get_root(idoc);
+                        if (root && yyjson_is_obj(root)) {
+                            size_t idx, max;
+                            yyjson_val *k, *v;
+                            yyjson_obj_foreach(root, idx, max, k, v) {
+                                const char* key = yyjson_get_str(k);
+                                if (!key) continue;
+                                if (yyjson_is_str(v)) {
+                                    const char* s = yyjson_get_str(v);
+                                    pf->builder_add_str(pb, key, s, (int32_t)std::strlen(s));
+                                    inject = true;
+                                } else if (yyjson_is_bool(v) && pf->builder_add_bool) {
+                                    pf->builder_add_bool(pb, key, yyjson_get_bool(v) ? 1 : 0);
+                                    inject = true;
+                                } else if (yyjson_is_int(v)) {
+                                    pf->builder_add_i64(pb, key, yyjson_get_sint(v));
+                                    inject = true;
+                                } else if (yyjson_is_real(v)) {
+                                    pf->builder_add_f64(pb, key, yyjson_get_real(v));
+                                    inject = true;
+                                }
+                                // nested obj/arr: skipped (see note above)
+                            }
+                        }
+                        yyjson_doc_free(idoc);
                     }
+                }
+                if (inject) {
+                    ev.pack = pf->builder_seal(pb);   // rc=1; the event owns our ref
+                    inject = (ev.pack != XI_PACK_NULL);
+                } else {
+                    pf->builder_abandon(pb);
                 }
             }
             if (inject) {
                 ev.id = { (uint64_t)run_id, 0 };   // synthesized, unique per run
-                CurrentTriggerScope trig(ev);      // clears g_current_trigger + releases ev on scope exit
+                CurrentTriggerScope trig(ev);      // clears g_current_trigger + releases ev.pack on scope exit
                 run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
             } else {
                 run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);

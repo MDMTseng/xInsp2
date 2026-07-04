@@ -170,24 +170,21 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         // view, mirroring current_trigger().is_active() == false on the old path.
         if (s.inspect_tv) {
             xi_trigger_view view{};
-            std::vector<xi_trigger_view_image> view_imgs;
             std::string leader;
             if (g_current_trigger) {
                 view.is_active      = 1;
                 view.id             = g_current_trigger->id;
                 view.timestamp_us   = g_current_trigger->timestamp_us;
                 view.dequeued_at_us = g_current_trigger->dequeued_at_us;
-                view_imgs.reserve(g_current_trigger->images.size());
-                for (auto& kv : g_current_trigger->images)
-                    view_imgs.push_back({ kv.first.c_str(), kv.second });
-                view.images       = view_imgs.data();
-                view.image_count  = (int32_t)view_imgs.size();
+                // [v12 THE CUT — the Record image-map + meta_doc planes are gone;
+                //  view.images/image_count/meta_doc stay zero (inert reserved
+                //  slots). The event payload rides the pack handle below, read
+                //  script-side via t.pack().]
                 leader            = g_current_trigger->leader_source;
                 view.leader_source = leader.c_str();
-                view.meta_doc     = (void*)g_current_trigger->meta_doc.get();
-                // polaris2 wave-2 Pack pilot: carry the event's optional v3 pack
-                // handle into the view. Borrowed — the dispatch's CurrentTriggerScope
-                // holds the event's ref for this call; the SDK Trigger takes its own.
+                // Carry the event's v3 pack handle into the view. Borrowed — the
+                // dispatch's CurrentTriggerScope holds the event's ref for this
+                // call; the SDK Trigger takes its own.
                 view.pack        = g_current_trigger->pack;
             }
             view.host = script_host_api_();
