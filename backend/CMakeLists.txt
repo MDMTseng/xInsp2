@@ -661,6 +661,21 @@ add_test(NAME ws_exclusive_bind_heavy COMMAND test_ws_exclusive_bind)
 set_tests_properties(ws_exclusive_bind_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
+# WS ordered async writer (RT8 / doc 21 §P2, docs/new_gen/23-rt8-async-writer.md).
+# Proves the gate-critical-section (send_frame) is decoupled from the client
+# socket drain rate: against a fully-wedged client every send_binary returns in
+# memcpy time (not the ~1.5s a blocking ::send would take), the caller keeps
+# moving, the wedged client is dropped cleanly under a bounded byte budget, and a
+# well-behaved client receives frames in strict FIFO order. Header-only server;
+# Winsock linked by the header's #pragma comment(lib) on MSVC.
+add_executable(test_ws_async_writer tests/test_ws_async_writer.cpp)
+target_include_directories(test_ws_async_writer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(NOT MSVC)
+    target_link_libraries(test_ws_async_writer PRIVATE pthread)
+endif()
+add_test(NAME ws_async_writer COMMAND test_ws_async_writer)
+set_tests_properties(ws_async_writer PROPERTIES TIMEOUT 60)
+
 # Ordered-emit gate probe (§28 Tier-1 GAP: dispatch queue + EmitGate). Header-only
 # primitive (xi_emit_gate.hpp) so it links nothing but the test itself; exercises
 # the parallel-compute/ordered-emit invariant, the dtor backstop, and the
