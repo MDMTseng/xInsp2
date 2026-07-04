@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <fstream>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -130,7 +131,9 @@ public:
     }
 
 private:
-    std::mutex               mu_;            // guards dir_/files_/scanned_/issued_*
+    std::mutex               mu_;
+    const xi_cap_v1*  cap_ = nullptr;           // xi.cap funnel (resolved once)
+    std::atomic<bool> cap_resolved_{false};            // guards dir_/files_/scanned_/issued_*
     std::string              dir_;
     bool                     scanned_ = false;
     std::vector<std::string> files_;          // absolute paths, sorted
@@ -158,15 +161,46 @@ private:
         scanned_ = true;
     }
 
-    // Load file[idx] full-resolution into an xi::Image (via the host's image
-    // reader → a pool handle we copy out of and release).
+    // v12 THE CUT: decode a file via the xi.image.decode CAPABILITY (imgcodec —
+    // this project declares a "codec" instance; the v11 host decode slot is
+    // gone). Reads the bytes, calls the funnel (thread-safe: handlers accept
+    // concurrent calls, so the auto worker may use this too), copies the reply
+    // image out. Empty Image when the provider is absent / the file won't decode.
+    xi::Image decode_file_(const std::string& path) {
+        const xi_pack_v1* pk = pack_iface();
+        if (!pk || !host() || !host()->get_interface) return {};
+        if (!cap_resolved_.exchange(true)) {
+            cap_ = static_cast<const xi_cap_v1*>(host()->get_interface("xi.cap", 1));
+        }
+        const xi_cap_v1* cap = cap_;
+        if (!cap) return {};
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return {};
+        std::vector<char> bytes((std::istreambuf_iterator<char>(f)),
+                                 std::istreambuf_iterator<char>());
+        if (bytes.empty()) return {};
+        xi_pack_builder b = pk->builder_new();
+        pk->builder_add_bin(b, "data", bytes.data(), (int32_t)bytes.size());
+        pk->builder_add_i64(b, "$v", 1);
+        xi_pack_handle req = pk->builder_seal(b);
+        xi_pack_handle rsp = XI_PACK_NULL;
+        const int32_t rc = cap->call("xi.image.decode", req, &rsp);
+        pk->release(req);
+        xi::Image img;
+        if (rc == XI_CAP_OK && rsp != XI_PACK_NULL) {
+            xi_pack_image di{};
+            if (pk->get_image(rsp, "image", &di) && di.pixels && di.width > 0)
+                img = xi::Image(di.width, di.height, di.channels,
+                                static_cast<const uint8_t*>(di.pixels));  // copies
+            pk->release(rsp);
+        }
+        return img;
+    }
+
+    // Load file[idx] full-resolution into an xi::Image (capability decode).
     xi::Image load_(int idx) {
         if (idx < 0 || idx >= (int)files_.size() || !host()) return {};
-        xi_image_handle h = host()->read_image_file(files_[(size_t)idx].c_str());
-        if (!h) return {};
-        xi::Image img = xi::Image::adopt_pool_handle(host(), h);  // addref's
-        host()->image_release(h);                                  // drop the read ref
-        return img;   // owns its own copy via adopt
+        return decode_file_(files_[(size_t)idx]);
     }
 
     // Load `path` full-res FROM DISK and emit it as a fresh-id trigger. Touches no
@@ -175,10 +209,7 @@ private:
     // file is auto-reloaded on its next emit.
     bool emit_file_(const std::string& path) {
         if (!host()) return false;
-        xi_image_handle rh = host()->read_image_file(path.c_str());
-        if (!rh) return false;
-        xi::Image img = xi::Image::adopt_pool_handle(host(), rh);
-        host()->image_release(rh);
+        xi::Image img = decode_file_(path);
         if (img.empty()) return false;
         // Emit the loaded image as a fresh-id trigger, PACK-plane (polaris2 THE
         // CUT): build a pack carrying the frame under key "frame" and emit it —
@@ -260,10 +291,7 @@ private:
     void make_thumb_(const std::string& path, std::string& out_uri, int& w, int& h) {
         out_uri.clear(); w = h = 0;
         if (!host()) return;
-        xi_image_handle hd = host()->read_image_file(path.c_str());
-        if (!hd) return;
-        xi::Image img = xi::Image::adopt_pool_handle(host(), hd);
-        host()->image_release(hd);
+        xi::Image img = decode_file_(path);
         if (img.empty()) return;
         w = img.width; h = img.height;
         const int TW = 140;

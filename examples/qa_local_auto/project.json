@@ -9,6 +9,10 @@
   },
   "instances": [
     {
+      "name": "codec",
+      "plugin": "imgcodec"
+    },
+    {
       "name": "cam",
       "plugin": "local_image_source"
     }
