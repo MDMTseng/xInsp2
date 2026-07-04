@@ -1,56 +1,59 @@
-# Data types at the boundary — Record, Image, typed I/O
+# Data types at the boundary — Pack, Image, typed I/O
 
-What crosses between a script and a plugin: a **Record** (schema-less JSON data +
-a named-image bag) carrying **Images** (refcounted pixel handles), optionally
-dressed in **nominal types** for ergonomic wiring. The mechanics live in
-[`../internals/data-layer.md`](../internals/data-layer.md) (how Record crosses
-zero-copy) and [`../internals/typed-io.md`](../internals/typed-io.md) (how the
-typed facades work); this is the contract you author against.
+What crosses between a script and a plugin: a **Pack** (a sealed, keyed, typed
+container — canonical msgpack) carrying **Images** (refcounted pixel handles).
+The mechanics live in [`../internals/pack-plane.md`](../internals/pack-plane.md)
+(how a pack crosses zero-copy); this is the contract you author against.
 
-## `xi::Record`
+## The Pack (`xi.pack@1`)
 
-The universal container: a yyjson document (schema-less JSON) + a `name → Image`
-map. Build fluently, read by path:
+The universal container since THE CUT (ABI v12): a sealed, immutable set of
+`key → typed entry` pairs. One encoding everywhere — the same bytes in memory,
+on the WS wire (XEX1-v3) and on disk (`.xex1`). Entry types: `i64`, `f64`,
+`bool`, `str`, `bin`, `image`, and `mp` (one nested canonical-msgpack subtree
+for arrays/maps — nesting is msgpack's job, not flattened keys).
 
-```cpp
-auto r = xi::Record()
-    .image("edges", edge_img)
-    .set("count", 5).set("pass", true)
-    .set("roi", xi::Record().set("x", 4).set("y", 8));
+Each side of the boundary has its own facade over the same door:
 
-r.get_int("count");              // 5
-r["roi.x"].as_int(0);            // 4   — dotted path
-r["points[2].score"].as_double();// path + array index
-r.has_image("edges");            // true
-```
+- **Script side** (`xi_use.hpp` / `xi_script_pack.hpp`): `t.pack()` yields a
+  `ScriptPack` — typed reads return `std::optional` (absence is explicit):
 
-- **Path expressions** (`a.b[0].c`) walk nested objects/arrays; a missing path
-  returns the caller's default, never throws.
-- **NA** is first-class: `xi::Record::na("reason")` is an empty result carrying a
-  reason (`{"$na":"reason"}`); `r.is_na()` / `r.na_reason()`. It short-circuits
-  `process()` and flows down the pipeline — see typed-io.
-- **Provenance** (`$src` / `$prov`, reserved keys) records where data came from.
-- Copies are cheap (a refcount bump) until mutated (copy-on-write) — see data-layer.
+  ```cpp
+  auto f = t.pack();                          // ScriptPack; empty if no pack
+  int64_t seq = f.get_i64("seq").value_or(0);
+  auto img = f.get_image("frame");            // zero-copy span + dims
+  ```
 
-### Reserved Record keys
+  Build with `xi::ScriptPackBuilder` (`add_i64/f64/str/bool/bin`, `add_image`,
+  `add_mp(key, xi::mp::Writer)`, then `seal()`), chain with
+  `xi::use("det0").process(pack)`, push to a sink with
+  `xi::use("expose").push(pack)`. See
+  [`../guides/write-a-script.md`](../guides/write-a-script.md).
+- **Plugin side** (`xi_abi.hpp`): the pack door
+  `void process(xi::PackIn& in, xi::PackOut& out)` published by
+  `XI_PLUGIN_PACK_DOOR`. `PackIn` reads (`i64(k)`, `i64_or(k, d)`, `image(k)`,
+  `mp(k)`, …); `PackOut` builds fluently (`out.i64(...).image(...).mp(...)`).
+  See [`../guides/write-a-plugin.md`](../guides/write-a-plugin.md).
 
-The framework reserves the `$`-prefixed key namespace. Don't name a plain field
-`na`/`src`/`prov`/`channel`/`seq` (they'd collide). Each has a named
-`constexpr` in `xi::Record` — prefer the constant over the literal in
-first-party code.
+Semantics worth knowing:
 
-| Key | Constant | Meaning |
-|---|---|---|
-| `$na` | `Record::kNaKey` | Not-available marker: `{"$na":"reason"}` (see `na()` / `is_na()` / `na_reason()`). |
-| `$src` | `Record::kSrcKey` | Producing source/operator id (`set_src()` / `src()`). |
-| `$prov` | `Record::kProvKey` | Per-field provenance map: field → source id (`set_prov()` / `prov_of()`). |
-| `$channel` | `Record::kChannelKey` | Staged-emit / `expose` sink lane selector (which channel a record surfaces on). |
-| `$seq` | `Record::kSeqKey` | Host-stamped arrival/run id, used to order sink deliveries. |
+- **Sealed = immutable.** A sealed pack never changes; routing/ordering
+  identity are the pack's *own* entries, stamped by the producer before seal.
+- **Fault is first-class** (the pack plane's one poison marker): a failure is a
+  *normal sealed pack* carrying `$fault` — check `is_fault()` before reading
+  results. Faults short-circuit the use-funnel host-side, so a plugin never
+  sees poison. Full contract:
+  [`../../docs/new_gen/15-pack-fault-semantics.md`](../new_gen/15-pack-fault-semantics.md).
+- **Provenance rides along**: `$src` (immediate producer) and `$prov` (hop
+  chain) are auto-stamped by the door glue on non-empty door outputs.
+- **Declared keysets**: when the field set is fixed, read via a compile-checked
+  schema — `xi::PackSchema` key slots (`TypedPack<Schema>` in-process,
+  `ScriptTypedPack<Schema>` script-side) — so key spelling can't drift.
 
-### Reserved Pack keys (the xi.pack@1 plane)
+### Reserved Pack keys
 
-The pack plane reserves the same `$` namespace; constants + helpers live in
-`xi::pack_contract` (`xi_pack_contract.hpp`; full contract:
+The framework reserves the `$`-prefixed key namespace. Constants + helpers live
+in `xi::pack_contract` (`xi_pack_contract.hpp`; full contract:
 `docs/new_gen/15-pack-fault-semantics.md`). `$fault` is the pack plane's ONE
 poison marker — there is deliberately no pack `$na`.
 
@@ -61,7 +64,8 @@ poison marker — there is deliberately no pack `$na`.
 | `$fault_detail` | `pack_contract::kFaultDetail` | str, human message (optional). |
 | `$src` | `pack_contract::kSrc` | str, immediate producer — auto-stamped at seal by the door glue on NON-EMPTY door outputs (`emit()` never stamps; sources/scripts attribute explicitly via `src()`). |
 | `$prov` | `pack_contract::kProv` | str, hop chain (`/`-joined, oldest→newest) — door hops append; the use-funnel appends on fault short-circuit too. |
-| `$channel` / `$seq` | — | Same routing/ordering roles as on Records; on packs they are the pack's OWN entries (never host-stamped — sealed packs are immutable). `propagate_fault` copies `$seq` forward. |
+| `$channel` | `pack_contract::kChannel` | str, staged-emit / `expose` sink lane selector (which channel a pack surfaces on). |
+| `$seq` | `pack_contract::kSeq` | i64, ordering identity for sink deliveries — the pack's OWN entry, producer-stamped before seal (`b.add_i64("$seq", xi::run_id())`); never host-stamped, sealed packs are immutable. `propagate_fault` copies it forward. |
 | `$stream` | `pack_contract::kStream` | i64, producer-chosen stream id — streaming-via-chunking convention (`docs/new_gen/18-stream-chunking-convention.md`): one logical payload as a sequence of sealed packs on one lane, all carrying the same id. |
 | `$part` | `pack_contract::kPart` | i64, 0-based DENSE chunk index within a `$stream` (+1 per chunk; a gap is a protocol fault — no reorder tolerance on one lane). |
 | `$eof` | `pack_contract::kEof` | bool, present-and-true on the LAST chunk only — the stream's only completion signal; missing `$eof` ends in a consumer-owned timeout fault. A mid-stream `$fault` pack poisons the whole stream. |
@@ -74,8 +78,8 @@ An owning, refcounted 8-bit image buffer (`xi_image.hpp`).
 |---|---|
 | `width` / `height` / `channels` | `channels` = 1 (gray) / 3 (RGB) / 4 (RGBA) |
 | `empty()` | true if any dim/channel is 0 — **the failure sentinel** |
-| `data()` / `size()` / `stride()` | packed bytes (`stride == width*channels`, rows contiguous) |
-| `as_cv_mat()` | **non-owning** `cv::Mat` view over the same bytes (no copy) |
+| `read()` / `write()` / `size()` / `stride()` | packed bytes (`stride == width*channels`, rows contiguous); `read()` is const, `write()` mutable-when-uniquely-owned |
+| `xi::as_cv_mat(img)` | **non-owning** `cv::Mat` view over the same bytes, no copy (`xi_cv.hpp`, free function) |
 
 > **Channels are RGB, not BGR.** OpenCV assumes BGR — `cvtColor(..., COLOR_RGB2BGR)`
 > before `imwrite`/`imshow` an `as_cv_mat()` view, or channels look swapped.
@@ -86,47 +90,42 @@ Construct: `Image(w,h,c)` (zero-filled) · `Image(w,h,c,data)` (copies) ·
 host handle). (The former SHM/worker branch was removed 2026-06; the `shm_*` ABI
 fields stay null-wired for binary compat.)
 
-**Load:** `xi::imread(path)` is **empty-on-failure, never throws** — a
-missing/garbage/0-byte/non-image path returns `.empty()`, so a bad frame path
-degrades cleanly. Always check.
+**Decode:** file decoding is the `xi.image.decode` **capability** (the in-core
+`xi::imread` and the `read_image_file` host slot were deleted at THE CUT). A
+plugin that needs to decode PNG/JPEG/BMP bytes resolves the capability funnel
+(`get_interface("xi.cap", 1)`) and calls `"xi.image.decode"` with a `bin "data"`
+request — an `xi.image.decode` provider (the `imgcodec` plugin, as a project
+instance or machine-wide via `--autoload-lib`) must be present. Scripts don't
+decode: the frame rides in on the trigger's pack.
 
-**OpenCV interop (both directions):**
-- `img.as_cv_mat()` — zero-copy borrow; the Mat must not outlive the Image.
+**OpenCV interop (both directions, `xi_cv.hpp`):**
+- `xi::as_cv_mat(img)` — zero-copy borrow; the Mat must not outlive the Image.
 - `xi::from_cv_mat(m)` — owning copy (8-bit 1/3/4-ch; non-continuous ROI is
   `clone()`d; empty/non-8-bit → empty Image). The supported way to return a
   computed `cv::Mat` lifetime-safely.
 
 **`VAR`/`EMIT` were removed** — they **no longer compile** (compiler error C3861);
 the per-run value/preview transport was removed from core. Surfacing values for
-viewing now goes through the shipped `expose` plugin. There is **no header and no
-macro**: build a plain `xi::Record`, tag it with the reserved key `"$channel"` (a
-string channel id), and call `xi::use("expose").process(rec)`. Display order = the
-record's own key order (insertion order is preserved); the host also stamps
-`"$seq"` for ordering.
+viewing goes through the shipped `expose` plugin. There is **no header and no
+macro**: build a pack with `xi::ScriptPackBuilder`, tag it with the reserved key
+`"$channel"` (a string channel id), and call `xi::use("expose").push(pack)`.
+Display order = the pack's own key order (insertion order is preserved); stamp
+`"$seq"` yourself (`b.add_i64("$seq", xi::run_id())`) for ordering.
 
-## Nominal types — names over Record
+## Typed I/O — names over the pack
 
-For ergonomic wiring, a small vocabulary wraps Record with a *name* (no fields
-enforced; payload stays schema-less): `Number`, `Point`, `Vec2/3/4`, `Line`,
-`Arc`, `Pose`, `Roi`, `Mat2/3/4`, `Region` (`xi/xi_types.hpp`). `Region` is iconic
-— its data is a binary **mask** on the image channel, not JSON. A wrapper can be
-NA and carries schema-less accessors (`pose.angle()`).
-
-Plugins ship a header-only `io.hpp` with **extractor + constructor facades** that
-mirror the manifest; they are **total (never throw)** — a missing field is NA, not
-an exception:
-
-```cpp
-auto e  = blob_centroid_detector_io::extract(rec);                  // one getter per output
-auto in = line_fit_io::build().current(e.orientation(k)).build();   // one setter per input
-```
-
-The compiler stops you wiring a `Line` into a `Pose` input, but `process()` itself
-stays untyped (`Record` only) — types live in the wiring layer. Authors define
-their own nominal types in their own `io.hpp`. Mechanics:
-[`../internals/typed-io.md`](../internals/typed-io.md).
+The Record-era nominal-type vocabulary (`Number`, `Point`, `Pose`, `Roi`, …,
+`xi_types.hpp`) and its generated `io.hpp` extractor/constructor facades were
+**deleted at THE CUT** together with the Record plane. The typed surface of the pack
+plane is the declared keyset: a `xi::PackSchema`-derived struct fixes the
+contract's key slots at compile time, `TypedPack<Schema>` (in-process) and
+`ScriptTypedPack<Schema>` (script side, `t.pack().typed<Schema>()`) read those
+slots with typed accessors, and a plugin's published key constants (e.g.
+`blob_analysis_keys.h`) keep call sites literal-free. See
+[`../internals/pack-plane.md`](../internals/pack-plane.md) and
+`examples/qa_pack_walk`.
 
 ## See also
 
-- [`c-abi.md`](./c-abi.md) — Record/Image at the raw ABI (`xi_record` + handles).
-- `xi_image.hpp` / `xi_record.hpp` / `xi_types.hpp` (+ opt-in `xi_types_cv.hpp`).
+- [`c-abi.md`](./c-abi.md) — the pack door at the raw ABI (`xi_pack_v1` + handles).
+- `xi_pack.hpp` / `xi_pack_contract.hpp` / `xi_image.hpp` (+ opt-in `xi_cv.hpp`).

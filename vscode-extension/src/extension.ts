@@ -1016,8 +1016,9 @@ export function activate(context: vscode.ExtensionContext) {
     // disables. framePath is optional (frame-driven projects need it; source /
     // continuous projects don't).
     // First image file under <project>/frames — a sample frame so the capture
-    // button works for frame-driven projects (imread current_frame_path) without
-    // the user wiring one up.
+    // button works for frame-driven projects (the script reads the per-run
+    // xi::current_frame_path() set by cmd:run's frame_path arg) without the
+    // user wiring one up.
     function firstProjectFrame(): string | undefined {
         if (!currentProjectPath) return undefined;
         try {
@@ -1366,15 +1367,16 @@ export function activate(context: vscode.ExtensionContext) {
                     + (f.inspect_compute_us != null ? ` (compute ${(f.inspect_compute_us / 1000).toFixed(2)}ms)` : ''));
             }
         } else if (msg.type === 'event' && msg.name === 'state_dropped') {
-            // Hot-reload dropped the persisted xi::state() because the new DLL
-            // declares a different state-schema version. The developer MUST see
-            // this — otherwise their state silently resets and they debug a phantom.
+            // Hot-reload dropped the persisted xi::kv() store because the new DLL
+            // declares a different kv-schema version (event data carries
+            // "store":"kv" + old/new versions). The developer MUST see this —
+            // otherwise their state silently resets and they debug a phantom.
             const oldS = msg.data?.old_schema;
             const newS = msg.data?.new_schema;
             const detail = (oldS != null && newS != null)
-                ? ` (state schema v${oldS} → v${newS})` : '';
+                ? ` (kv schema v${oldS} → v${newS})` : '';
             const warn = `xInsp2: persistent script state was DROPPED on reload${detail}`
-                + ' — xi::state() started empty because the schema changed.';
+                + ' — xi::kv() started empty because the schema changed.';
             output.appendLine('[xinsp2] ' + warn);
             vscode.window.showWarningMessage(warn);
         } else if (msg.type === 'event' && msg.name === 'health_changed') {
@@ -2459,17 +2461,21 @@ export function activate(context: vscode.ExtensionContext) {
                 // never reference an instance the generator didn't configure.
                 const exposeBlock = hasExpose ? `
     // Surface the input + result to a UI panel via the shipped \`expose\` sink.
-    // Build a plain Record, tag a "$channel", and push it — no macro, no VAR.
-    xi::use("expose").process(
-        xi::Record()
-            .set("$channel", "inspection")
-            .image("input",  input)
-            .image("binary", out.get_image("binary"))
-            .set("blob_count", blob_count));
+    // Build a pack, tag a "$channel", and push it — no macro, no VAR.
+    xi::ScriptPackBuilder e;
+    e.add_str("$channel", "inspection");
+    e.add_i64("$seq", (int64_t)xi::run_id());   // ordering identity, producer-stamped
+    e.add_image("input", input->width, input->height, input->channels,
+                input->pixels.data());
+    if (auto bin = out.get_image("binary"))
+        e.add_image("binary", bin->width, bin->height, bin->channels,
+                    bin->pixels.data());
+    e.add_i64("blob_count", blob_count);
+    xi::use("expose").push(e.seal());
 ` : `
     // (No \`expose\` instance in this project — add one to surface previews:
-    //  create an instance named "expose" of the \`expose\` plugin, then push a
-    //  Record via xi::use("expose").process(...).)
+    //  create an instance named "expose" of the \`expose\` plugin, then build a
+    //  pack with xi::ScriptPackBuilder and xi::use("expose").push(pack).)
 `;
                 fs.writeFileSync(scriptPath, `//
 // xInsp2 sample — mock_camera0 -> blob_analysis0 pipeline.
@@ -2480,6 +2486,7 @@ export function activate(context: vscode.ExtensionContext) {
 //
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>  // xi::ScriptPackBuilder — build packs script-side
 #include <xi/xi_result.hpp>   // xi::ok / xi::ng / xi::result (per-run verdict)
 
 // Explicit-trigger entry: the host hands the trigger in as \`t\` (no ambient
@@ -2487,20 +2494,38 @@ export function activate(context: vscode.ExtensionContext) {
 XI_INSPECT_ENTRY(t, frame) {
     (void)frame;
 
-    // Frames arrive by PUSH — the mock_camera0 source emits into the trigger
-    // bus. Read the correlated frame straight off the trigger view.
-    auto input = t.image("mock_camera0");
-    if (input.empty()) {
+    // Frames arrive by PUSH — the mock_camera0 source emits a sealed pack into
+    // the trigger bus. Read it straight off the trigger view.
+    auto f = t.pack();
+    auto input = f.get_image("frame");   // zero-copy view: dims + pixel span
+    if (!input) {
         // Nothing to inspect this run — record NA (code 0), not OK/NG.
         xi::result(0, "missing frame");
         return;
     }
 
-    // blob_analysis0 expects its input image under the key "gray" and returns
-    // a "binary" image plus an integer "blob_count".
-    auto out = xi::use("blob_analysis0")
-                   .process(xi::Record().image("gray", input));
-    int blob_count = out["blob_count"].as_int();
+    // blob_analysis0 expects a SINGLE-CHANNEL image under the key "gray" and
+    // returns a "binary" image plus an integer "blob_count". Fold the RGB
+    // frame to luma first (no OpenCV needed for that).
+    std::vector<uint8_t> gray((size_t)input->width * (size_t)input->height);
+    const uint8_t* px = input->pixels.data();
+    for (size_t i = 0, n = gray.size(); i < n; ++i) {
+        const uint8_t* p = px + i * (size_t)input->channels;
+        gray[i] = input->channels >= 3
+            ? (uint8_t)((p[0] * 77 + p[1] * 150 + p[2] * 29) >> 8)  // RGB → luma
+            : p[0];
+    }
+
+    xi::ScriptPackBuilder b;
+    b.add_image("gray", input->width, input->height, 1, gray.data());
+    auto out = xi::use("blob_analysis0").process(b.seal());
+    if (out.is_fault()) {
+        // A fault is a normal sealed pack carrying "$fault" — check it BEFORE
+        // reading results (poison in, poison out).
+        xi::ng(1, "blob_analysis0 fault");
+        return;
+    }
+    long long blob_count = out.get_i64("blob_count").value_or(0);
 ${exposeBlock}
     // One per-run verdict: OK if we found something, NG otherwise.
     if (blob_count > 0) xi::ok(1, "blobs found");

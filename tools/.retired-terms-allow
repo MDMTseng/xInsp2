@@ -36,8 +36,8 @@ docs/guides/write-a-script.md: legacy VAR/EMIT + legacy-entry material is docume
 # that TEACH it as current. Anchored to the retirement wording so only the
 # caveat lines are silenced. (overview.md and data-types.md dropped their
 # VAR()/EMIT() token forms in the truth-cut rewrite, so they no longer need a
-# rule; STUDY-sdk.md moved to docs/archive/ and is off the blessed scan set.)
-docs/reference/ws-protocol.md::were removed and no: ws-protocol documents the REMOVED `vars` message and that VAR()/EMIT() were removed and no longer compile
+# rule; ws-protocol.md dropped its token forms in the v12 THE CUT rewrite;
+# STUDY-sdk.md moved to docs/archive/ and is off the blessed scan set.)
 docs/guides/build-and-run.md::were removed and no: build-and-run note documents that VAR(...)/EMIT(...) were removed and no longer compile, pointing to expose
 
 # --- docs/archive/** --------------------------------------------------------

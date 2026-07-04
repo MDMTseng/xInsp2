@@ -49,10 +49,13 @@ def _read(p: Path) -> str:
 AUTHORING_MACROS = [
     "XI_INSPECT_ENTRY",   # the A4 explicit-trigger script entry
     "XI_SCRIPT_EXPORT",   # marks the legacy script entry / support exports
-    "XI_STATE_SCHEMA",    # state schema version (G4/OQ-5 migration opt-in)
+    # XI_STATE_SCHEMA left this list at THE CUT (v12, doc 16 item 7):
+    # xi_state.hpp was deleted with the Record plane; XI_KV_SCHEMA is the
+    # state-schema macro now.
     "XI_KV_SCHEMA",       # kv schema version (U2 post-Record state, doc 16)
     "XI_PLUGIN_IMPL",     # the plugin factory boilerplate
     "XI_PLUGIN_STAGED",   # opt into the v7 prepare/commit frame-perfect swap
+    "XI_PLUGIN_PACK_DOOR",# publish the xi.pack@1 data-plane door (v12 sole plane)
 ]
 
 def extract_exports() -> set[str]:

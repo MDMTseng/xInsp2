@@ -92,9 +92,10 @@ auto out  = det.process(input);        // forwards across the plugin ABI
 - `xi::use("cam0")` looks the name up in `InstanceRegistry` and holds a
   `shared_ptr` copy, so the proxy survives a hot-reload or close-project
   mid-call (it starts erroring only after the instance is removed).
-- A **source** instance (a camera) doesn't get called by the script — it calls
-  `host->emit_record(...)` from its own worker thread; each record dispatches one
-  inspection, which the script reads via `xi::current_trigger()`.
+- A **source** instance (a camera) doesn't get called by the script — it seals
+  a pack and emits it (`new_pack()` + `emit()`) from its own worker thread; each
+  emitted pack dispatches one inspection, which the script reads from the
+  trigger view (`XI_INSPECT_ENTRY(t, frame)` → `t.pack()`).
 - After editing the script, **Compile** (`Ctrl+Shift+B`) recompiles + hot-loads.
   A `xi::use("name")` whose instance doesn't exist compiles fine but errors at
   run time — names are the only glue, so a typo shows up only when it runs.

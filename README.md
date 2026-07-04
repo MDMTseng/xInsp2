@@ -53,9 +53,10 @@ stop and find the plugin-shaped version.
 ## The model
 
 ```cpp
-#include <xi/xi.hpp>           // xi::Image, xi::Param, xi::Record (OpenCV-free umbrella)
+#include <xi/xi.hpp>           // xi::Image, xi::Param, xi::kv (OpenCV-free umbrella)
 #include <xi/xi_cv.hpp>        // cv:: interop — only if the script calls cv:: directly
-#include <xi/xi_use.hpp>
+#include <xi/xi_use.hpp>       // xi::use / t.pack() — instances + the frame pack
+#include <xi/xi_script_pack.hpp> // xi::ScriptPackBuilder — build packs script-side
 #include <xi/xi_result.hpp>    // xi::ok / xi::ng — the per-run verdict
 
 xi::Param<int>    thresh {"threshold", 128, {0, 255}};
@@ -66,24 +67,29 @@ XI_INSPECT_ENTRY(t, frame) {
     (void)frame;
     auto& det = xi::use("detector0");         // survives hot-reload
 
-    auto img = t.image("frame");              // frames pushed by the cam0 source
-    if (img.empty()) { xi::result(0, "missing frame"); return; }  // NA
+    auto f = t.pack();                        // the sealed pack the cam0 source emitted
+    auto img = f.get_image("frame");          // zero-copy view: dims + pixel span
+    if (!img) { xi::result(0, "missing frame"); return; }  // NA
 
+    cv::Mat rgb(img->height, img->width, CV_8UC3, (void*)img->pixels.data());
     cv::Mat gm, bm;
-    cv::cvtColor(xi::as_cv_mat(img), gm, cv::COLOR_RGB2GRAY);
+    cv::cvtColor(rgb, gm, cv::COLOR_RGB2GRAY);
     int k = (int)(sigma * 2 + 1) | 1;
     cv::GaussianBlur(gm, bm, cv::Size(k, k), (double)sigma);
-    xi::Image blur = xi::from_cv_mat(bm);
 
-    auto result = det.process(xi::Record()
-        .image("gray", blur)
-        .set("threshold", (int)thresh));      // slider value, no recompile
+    xi::ScriptPackBuilder b;                  // request pack for the detector
+    b.add_image("gray", xi::from_cv_mat(bm));
+    b.add_i64("threshold", (int)thresh);      // slider value, no recompile
+    auto result = det.process(b.seal());      // drives det0's xi.pack@1 door
 
     // Surface intermediates for the UI through the shipped `expose` plugin.
-    xi::use("expose").process(xi::Record().set("$channel", "detection").image("input", img));
+    xi::ScriptPackBuilder e;
+    e.add_str("$channel", "detection");
+    e.add_image("input", img->width, img->height, img->channels, img->pixels.data());
+    xi::use("expose").push(e.seal());
 
-    if (result["blob_count"].as_int() <= 3) xi::ok(1, "pass");
-    else                                    xi::ng(1, "too many blobs");
+    if (result.get_i64("blob_count").value_or(0) <= 3) xi::ok(1, "pass");
+    else                                               xi::ng(1, "too many blobs");
 }
 ```
 
@@ -137,8 +143,8 @@ Key design choices:
 - **Uniform keyed Pack data plane.** Data moves as sealed **Packs** — keyed,
   typed entries (images, scalars, nested trees) over one canonical msgpack
   profile, byte-identical in memory, on the wire (**XEX1-v3**), and on disk
-  (`.xex1`). Every shipped plugin speaks it through a **bilingual door**
-  beside the legacy `xi::Record` path while that path winds down.
+  (`.xex1`). Since the v12 cut this is the **only** data plane: every plugin
+  speaks it through the `xi.pack@1` door (the legacy Record path was deleted).
 - **Shared heavy work is a lib plugin.** The capability plane: a lib plugin
   registers named capabilities (e.g. `plugins/imgcodec`'s `xi.jpeg.encode` —
   one deduplicated encode serves every consumer), and other plugins call it
@@ -149,13 +155,14 @@ Key design choices:
 - **SEH → C++ exception translation.** Null deref, div/0, array overrun,
   C++ throw — all recoverable without killing the backend.
 - **Hot-reload with state.** Cross-frame script state lives in `xi::kv()`
-  (a flat typed key-value store, canonical msgpack) — captured before DLL
-  unload, restored after, schema-gated with an opt-in migrate hook; the
-  legacy `xi::state()` JSON channel rides beside it until the cut. Script
-  edits are a one-file recompile.
-- **Dispatch.** Sources `emit_record` (images + metadata under a 128-bit
-  trigger id); the host dispatches one inspection per emit. Multi-camera
-  correlation is a gathering plugin (e.g. `synced_stereo`), not a policy.
+  (a flat typed key-value store, canonical msgpack — the only state channel
+  since v12) — captured before DLL unload, restored after, schema-gated
+  (`XI_KV_SCHEMA`) with an opt-in migrate hook. Script edits are a one-file
+  recompile.
+- **Dispatch.** Sources seal and emit packs (images + metadata entries under
+  a 128-bit trigger id); the host dispatches one inspection per emit.
+  Multi-camera correlation is a gathering plugin (e.g. `synced_stereo`), not
+  a policy.
 - **Lean host.** Only yyjson + stb_image vendored. **OpenCV is required**
   (image ops + every script/plugin force-includes it); libjpeg-turbo and
   IPP are optional accelerators behind `XINSP2_HAS_*`.
@@ -251,21 +258,28 @@ buffer style as any C++ file (IntelliSense, save, format).
 ```cpp
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>
 #include <xi/xi_result.hpp>
 
 XI_INSPECT_ENTRY(t, frame) {
     (void)frame;
-    auto& det   = xi::use("det0");
-    auto& saver = xi::use("saver0");
+    auto& det = xi::use("det0");
 
-    auto img = t.image("frame");           // frames pushed by the cam0 source
-    if (img.empty()) { xi::result(0, "missing frame"); return; }  // NA
+    auto f = t.pack();                     // the pack the cam0 source emitted
+    auto img = f.get_image("frame");
+    if (!img) { xi::result(0, "missing frame"); return; }  // NA
 
-    auto detection = det.process(xi::Record().image("gray", img));
-    saver.process(xi::Record().image("input", img));
+    xi::ScriptPackBuilder b;
+    b.add_image("gray", img->width, img->height, img->channels, img->pixels.data());
+    auto detection = det.process(b.seal());
+
+    xi::use("saver0").push(f);             // record_save captures the frame as .xex1
 
     // Surface the input for the UI via the shipped `expose` plugin.
-    xi::use("expose").process(xi::Record().set("$channel", "input").image("input", img));
+    xi::ScriptPackBuilder e;
+    e.add_str("$channel", "input");
+    e.add_image("input", img->width, img->height, img->channels, img->pixels.data());
+    xi::use("expose").push(e.seal());
     xi::ok(1, "done");
 }
 ```
@@ -282,7 +296,7 @@ Click the gear icon in the editor title bar (visible when on
 Click the `▷` icon in the Instances view title bar (or hit **Ctrl+F5**).
 Each channel you push through `xi::use("expose")` lights up in the
 Variable Window with type-specific renderers — numbers, booleans, image
-thumbnails, Record trees.
+thumbnails, nested trees.
 
 ![Inspections ran — viewer populated](docs/screenshots/inspections_ran_viewer.png)
 
@@ -401,22 +415,21 @@ This is the same script that produced the file on the Releases page.
 - **One-file scripts.** Include `<xi/xi.hpp>`; write a plain C++ function.
 - **Variable Window.** Every channel pushed through `xi::use("expose")`
   shows up live with a type-specific renderer (number, bool, string,
-  Image preview, Record tree).
+  Image preview, nested tree).
 - **Live tuning.** `xi::Param<T>` sliders drive `set_param` directly; no
   recompile. `set_param` → next `run` picks up the new value.
 - **Parallel ops.** `xi::async(fn, args...)` + `Future<T>` with implicit
   await. `ASYNC_WRAP(name)` to pre-wrap an operator.
-- **Record type.** `rec["roi.x"].as_int(0)`, `rec["items[0].score"].as_double()`
-  — path expressions, safe defaults, named-image bag, yyjson-backed.
 - **Pack, script-side.** `t.pack()` hands the frame to the script as a sealed
-  Pack (typed reads, zero-copy image spans); `xi::ScriptPackBuilder` builds
+  Pack (typed `std::optional` reads, zero-copy image spans, one nested
+  msgpack subtree per `add_mp` entry); `xi::ScriptPackBuilder` builds
   new ones; `xi::use("det0").process(pack)` chains them through plugin doors;
   `xi::use("expose").push(pack)` surfaces them to the UI in frame order.
 
 ### Operational
 
-- **Hot-reload.** Save `.cpp` → backend recompiles → instance state
-  survives (`xi::state()`, `get_def`/`set_def`).
+- **Hot-reload.** Save `.cpp` → backend recompiles → script + instance state
+  survives (`xi::kv()`, `get_def`/`set_def`).
 - **Crash isolation.** SEH `_set_se_translator` wraps every script /
   plugin call site. A null deref in user code returns an error message;
   the backend stays up.
@@ -425,14 +438,14 @@ This is the same script that produced the file on the Releases page.
 
 ### Image sources & dispatch
 
-- **`xi::emit_record(host, source, record)`** — source plugins push a
-  record (images + metadata) into the pipeline; the host stamps a 128-bit
-  trigger id and dispatches the inspection once per emit.
-- **Script API:** `xi::current_trigger().image("frame")`, `.id_string()`,
-  `.meta()`, `.sources()`.
+- **Pack emit** — a source plugin seals a pack (`xi::PackOut f = new_pack();
+  … emit(std::move(f));`) and pushes it into the pipeline; the host stamps a
+  128-bit trigger id and dispatches the inspection once per emit.
+- **Script API:** `t.pack().get_image("frame")`, `t.id_string()`,
+  `t.sources()`, `t.timestamp_us()`.
 - **Multi-source correlation** (e.g. a synced stereo pair) is plugin
   composition, not a bus policy: a **gathering plugin** subscribes to the
-  sources, combines their frames into one record, and emits that. See
+  sources, combines their frames into one pack, and emits that. See
   `examples/stereo_sync/`.
 
 ### Recording & replay
@@ -465,19 +478,26 @@ Write a plugin in ~30 lines of C++:
 
 ```cpp
 #include <xi/xi_abi.hpp>
+#include <xi/xi_cv.hpp>
 
 class MyPlugin : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
-    xi::Record process(const xi::Record& input) override {
-        int t   = input["threshold"].as_int(128);
-        auto in = input.get_image("gray");
-        auto out = pool_image(in.width, in.height, 1);
-        cv::threshold(in.as_cv_mat(), out.as_cv_mat(), t, 255, cv::THRESH_BINARY);
-        return xi::Record().image("dst", out).set("t_used", t);
+    void process(xi::PackIn& in, xi::PackOut& out) override {
+        int64_t t = in.i64_or("threshold", 128);
+        auto gray = in.image("gray");                       // zero-copy view
+        if (!gray) {
+            out.fault(xi::contract::kMissingInput, "gray", "need a 'gray' image");
+            return;                                         // fail-loud, pack-shaped
+        }
+        cv::Mat src(gray->height, gray->width, CV_8UC1, (void*)gray->pixels);
+        cv::Mat dst;
+        cv::threshold(src, dst, (double)t, 255, cv::THRESH_BINARY);
+        out.image("dst", gray->width, gray->height, 1, dst.data).i64("t_used", t);
     }
 };
 XI_PLUGIN_IMPL(MyPlugin)
+XI_PLUGIN_PACK_DOOR(MyPlugin)   // publish the xi.pack@1 data-plane door
 ```
 
 Scaffolding:
@@ -509,11 +529,11 @@ xInsp2/
 │   ├── reference/           ← per-API references (host_api, plugin-abi, instance-model, …)
 │   └── archive/             ← historical snapshots (M0 plan, retired audits)
 ├── backend/
-│   ├── include/xi/          ← 50+ headers (xi_abi, xi_async, xi_var, …)
+│   ├── include/xi/          ← 50+ headers (xi_abi, xi_async, xi_pack, …)
 │   ├── src/
 │   │   ├── service_main.cpp ← xinsp-backend.exe (WS server)
 │   │   └── runner_main.cpp  ← xinsp-runner.exe (headless)
-│   ├── tests/               ← C++ unit tests (xi_core, record, protocol, …)
+│   ├── tests/               ← C++ unit tests (xi_core, pack, protocol, …)
 │   └── CMakeLists.txt
 ├── vscode-extension/        ← VS Code integration + Node E2E tests
 ├── plugins/                 ← shipped plugins
@@ -527,7 +547,7 @@ xInsp2/
 
 | Layer                        | Command                                          | What it proves                                              |
 |------------------------------|--------------------------------------------------|-------------------------------------------------------------|
-| C++ unit                     | `ctest --test-dir backend/build -C Release` (12 targets) | Core types & traits; ImagePool concurrency; Record paths |
+| C++ unit                     | `ctest --test-dir backend/build -C Release` (12 targets) | Core types & traits; ImagePool concurrency; Pack paths |
 | WS protocol                  | `node --test vscode-extension/test/ws_*.test.mjs` | Command surface, crash recovery, fragmentation, adversarial |
 | Multi-camera correlation     | `node vscode-extension/test/runMulticam.mjs`     | `synced_stereo` pairs left+right under same tid, 17/17      |
 | Record/replay                | `node vscode-extension/test/runRecordReplay.mjs` | Observer records → replay dispatches every event, 11/11     |
@@ -559,7 +579,7 @@ There is no single monolithic product version.
 | Python client               | 0.3.0   | WS protocol client library              |
 
 **The one contract that actually gates compatibility is the plugin ABI**
-(`xi_host_api`, currently **frozen at v11** — see
+(`xi_host_api`, currently **frozen at v12** — THE CUT; see
 [`docs/internals/adr-001-host-api-freeze.md`](docs/internals/adr-001-host-api-freeze.md)).
 A plugin compiled against an ABI version keeps loading as long as the backend
 publishes that version; package SemVer numbers do not govern plugin loading.
@@ -568,7 +588,7 @@ publishes that version; package SemVer numbers do not govern plugin loading.
 
 | Backend | Extension | ui-components | Python client | ABI |
 |---------|-----------|---------------|---------------|-----|
-| 0.2.0   | 0.2.0     | 0.1.0         | 0.3.0         | v11 |
+| 0.2.0   | 0.2.0     | 0.1.0         | 0.3.0         | v12 |
 
 All packages are **pre-1.0**: minor bumps may still carry breaking changes,
 and there are no external consumers yet (first-party only). Pin to the

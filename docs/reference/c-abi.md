@@ -14,36 +14,44 @@ this page is the exact contract.
 
 ## 1. Plugin exports
 
-Every plugin DLL exports six C functions (all mandatory):
+Every plugin DLL exports five mandatory C functions, plus the `xi.pack@1`
+data-plane door:
 
 ```c
 void* xi_plugin_create(const xi_host_api* host, const char* name);
 void  xi_plugin_destroy(void* inst);
-void  xi_plugin_process(void* inst, const xi_record* input, xi_record_out* output);
 int   xi_plugin_exchange(void* inst, const char* cmd, char* rsp_buf, int rsp_buflen);
 int   xi_plugin_get_def(void* inst, char* buf, int buflen);
 int   xi_plugin_set_def(void* inst, const char* json);
+/* data plane (v12): resolved by the host, NOT a fixed export — see §6.1 */
+const void* xi_plugin_get_interface(const char* id, uint32_t version);
 ```
 
-`XI_PLUGIN_IMPL(YourClass)` generates all six (plus the `xi_plugin_abi_version`
-and `xi_yyjson_abi` stamps — see §4) from a class with these members:
+`XI_PLUGIN_IMPL(YourClass)` generates the five mandatory exports (plus the
+`xi_plugin_abi_version` stamp — see §4); `XI_PLUGIN_PACK_DOOR(YourClass)`, placed
+after it, generates `xi_plugin_get_interface` and wires the `xi.pack@1` door. A
+class with these members:
 
 ```cpp
 class MyPlugin {
 public:
     MyPlugin(const xi_host_api* host, const char* name);
-    const xi_host_api* host() const;              // the macro bridges xi_record ↔ xi::Record
-    xi::Record  process(const xi::Record& in);
+    void        process(xi::PackIn& in, xi::PackOut& out);   // the xi.pack@1 data-plane door
     std::string exchange(const std::string& cmd);
     std::string get_def() const;
     bool        set_def(const std::string& json);
 };
-XI_PLUGIN_IMPL(MyPlugin)                           // at the bottom of the .cpp
+XI_PLUGIN_IMPL(MyPlugin)                            // create/destroy/exchange/get_def/set_def
+XI_PLUGIN_PACK_DOOR(MyPlugin)                       // publishes the xi.pack@1 door (§6.1)
 ```
 
-Image sources are ordinary plugins too — they push frames by calling
-`host->emit_record(...)` from a worker thread (see the `mock_camera` plugin);
-there is no separate source interface or pull/`grab` model.
+(THE CUT (v12) deleted the Record `process` path — `xi_plugin_process` and the
+`xi_record` containers are gone; the pack door is a plugin's sole data plane.)
+
+Image sources are ordinary plugins too — they seal a frame pack and emit it via
+`xi_pack_v1::emit_pack` (SDK: `xi::Plugin::emit(std::move(pack))`) from a worker
+thread (see the `mock_camera` plugin); there is no separate source interface or
+pull/`grab` model.
 
 **Optional (ABI v7) — frame-perfect config swap.** A heavy-resource plugin (one
 that loads big assets — model weights, templates, calibration — on a config
@@ -110,8 +118,8 @@ const void* xi_plugin_get_interface(const char* id, uint32_t version);
 
 The host probes `xi_plugin_get_interface("xi.pack", 1)` → `const
 xi_pack_proc_v1*` to learn a plugin does **pack-in/pack-out** on the v3
-keyed-buffer Pack plane; `NULL` means the capability is absent (a Record-only
-plugin exports the symbol not at all, or returns `NULL`). This is the
+keyed-buffer Pack plane; `NULL` means the capability is absent (a plugin with no
+data plane exports the symbol not at all, or returns `NULL` for that id). This is the
 [synthesis §3](../new_gen/polaris2/00-synthesis.md) "pure door" dry run — a
 plugin capability reached ONLY through a door rather than a new fixed export.
 
@@ -120,8 +128,8 @@ xi_pack_v1*`: the Pack value-type ABI (build / read / retain-release / emit a
 Pack, all through an OPAQUE `xi_pack_handle` + accessor functions, never raw
 struct layout). A pack plugin does NOT write these by hand — it overrides
 `process(xi::PackIn&, xi::PackOut&)` and publishes the door with
-`XI_PLUGIN_PACK_DOOR(Class)` after `XI_PLUGIN_IMPL`; its Record `process()` is
-untouched, so the instance speaks **both** currencies. A contract failure
+`XI_PLUGIN_PACK_DOOR(Class)` after `XI_PLUGIN_IMPL`. Since THE CUT (v12) deleted
+the Record `process` path, this door is the plugin's sole data plane. A contract failure
 (missing/wrong entry) is a normal sealed pack stamped with a `$fault` reason
 code (`contract/canonical-profile-notes.md` § "Pack-shaped fail-loud"), not
 `XI_PACK_NULL` (which is reserved for a hard internal failure). The exact
@@ -136,7 +144,7 @@ below; see also `docs/new_gen/07-uniform-keyed-buffer-plane.md`,
 scan plugin.json → LoadLibrary → resolve 6 exports → ABI/yyjson load gate (§4)
   → xi_plugin_create(host, name)              once per instance
   → xi_plugin_set_def(saved_config)           if persisted
-  ── per cycle: xi_plugin_process / xi_plugin_exchange ──
+  ── per cycle: process (xi.pack@1 door) / xi_plugin_exchange ──
   → xi_plugin_get_def(buf,len)                on project save
   → xi_plugin_destroy(inst)                   on remove / close / shutdown
 ```
@@ -170,23 +178,32 @@ the project still opens).
 > instead. (The host ALSO guards its own call sites, so a same-runtime throw was
 > already survivable; this closes the cross-runtime UB gap.)
 
-**`xi_plugin_process(inst, input, output)`** — the hot path, once per cycle.
-- `input->images` — `{key, handle}` array; read pixels via `host->image_data(h)`.
-  Handles are **zero-copy views** over the pool, valid for the call's duration.
-- `input->data`/`input->len` — JSON bytes, used **iff `input->doc == NULL`**.
-  `input->doc` — a borrowed `yyjson_mut_doc*` for the in-process fast path
-  (zero-serialize); the C++ wrapper hides this behind `xi::Record`.
-- Fill `output` via `xi_record_out_add_image()` (handle ownership → host) and the
-  JSON/doc path (the C++ wrapper's `record_to_c` handles it).
-- **Don't release input handles** (host owns them for the call) **or output
-  handles** (host owns them after return).
+**The pack door — `process(PackIn&, PackOut&)`** — the hot path, once per cycle.
+It is published by `XI_PLUGIN_PACK_DOOR` and invoked through
+`xi_plugin_get_interface("xi.pack", 1)` → `xi_pack_proc_v1::process` (a borrowed,
+sealed input pack in; a new sealed output pack out), **not** a fixed `xi_plugin_*`
+export.
+- **Read** entries by key through `PackIn`. `in.image("gray")` returns a
+  zero-copy `xi_pack_image` view (dims + a borrowed pool-buffer pixel span, valid
+  for the call); `in.i64_or` / `in.f64` / `in.str` / `in.bin` / `in.mp` read the
+  typed scalars and nested trees. Getters are **fail-closed** — absent or
+  wrong-tag ⇒ `nullopt`, never coerced.
+- **Build** the output through `PackOut`. `out.image(...)` copies pixels into a
+  fresh pool slot; `out.adopt_image(k, w, h, c, handle)` addrefs a pool handle you
+  already own (zero-copy); `out.i64` / `out.str` / `out.boolean` / `out.mp` add
+  typed entries. The door seals it into a **new** `xi_pack_handle` the host takes
+  ownership of (and releases).
+- **Don't release the input handle** (host owns it for the call) **or the output
+  handle** (host owns it after return). A contract failure (missing input, wrong
+  type) is a normal sealed pack carrying a `$fault` entry (`out.fault(code, key,
+  detail)`); `XI_PACK_NULL` is reserved for a hard internal failure.
 
 Zero-copy: forwarding an unchanged image (plugin A's input mask → plugin B) is
-genuinely zero-copy — `record_from_c` adopts each handle as a refcounted view,
-`record_to_c` re-forwards a pool-backed output handle with an `addref` instead of
-a memcpy. A plugin that **produces new pixels** pays exactly one memcpy when its
-fresh `xi::Image` lands in the pool on the way out (structurally unavoidable
-until operators write straight into pool slots).
+genuinely zero-copy — an input image entry is a borrowed pool view, and
+`out.adopt_image(key, w, h, c, handle)` re-forwards a pool-backed handle with an
+`addref` instead of a memcpy. A plugin that **produces new pixels** pays exactly
+one memcpy when `out.image(...)` lands its fresh buffer in the pool on the way out
+(structurally unavoidable until operators write straight into pool slots).
 
 **`xi_plugin_exchange(inst, cmd, rsp, len)`** — generic JSON-in/JSON-out RPC, for
 UI button clicks and `xi::use("name").exchange(...)`. Return `> 0` = bytes
@@ -208,22 +225,34 @@ Keep the JSON small (hundreds of bytes); for bigger data use
 
 ## 3. The host API — `xi_host_api`
 
-The host hands every plugin a `const xi_host_api*` at construction. Append-only
-struct; null-check tail fields (an older host may leave them `nullptr`).
+The host hands every plugin a `const xi_host_api*` at construction; null-check
+tail fields (an older host may leave them `nullptr`). New capabilities arrive as
+carved `get_interface` interfaces, not new struct fields (§6).
 
 | Group | Fields | Notes |
 |---|---|---|
 | Image pool | `image_create` / `image_addref` / `image_release` / `image_data` / `image_width`/`height`/`channels`/`stride` | Refcounted opaque `uint64` handles; see below. |
 | Logging | `log(level, msg)` | 0=debug … 3=error → backend stderr. Any thread. SDK: `xi::Plugin::log_debug/log_info/log_warn/log_error(msg)` cover all four levels. |
-| Image I/O | `read_image_file(path)` | Decode an image file straight into the pool (v1). |
 | Status | `set_status(source, text)` | Push a status line to the FE status channel → `reference/ws-protocol.md`. |
 | Instance | `instance_folder(name, buf, len)` | Per-instance scratch dir, created before `create()`; never auto-deleted. |
-| Dispatch (v6) | `emit_record(emitter, id, rec, ts)` | **The one dispatch verb.** A source hands the host a record (images + metadata doc); the host dispatches one inspection. The script reads it via `current_trigger().image()/.meta()/.id_string()`. Metadata rides by pointer (zero-serialize). Use the SDK helper `xi::emit_record`, or the member sibling `xi::Plugin::emit(rec)` (fills `host()`/`name()` for you, mirroring the `emit_binary` member). → `internals/dispatch.md`. |
 | Binary push (v8) | `emit_binary(data, len)` | Push an opaque binary frame straight to connected WS clients. The host is a dumb byte pipe — the **frame format is the plugin's contract with its UI** (self-describe: channel/key + payload). Intended for the `expose` plugin shipping one atomic `XEX1` frame (values + JPEG images) per channel (no base64, no poll). Thread-safe from a worker; null on a pre-v8 host. SDK: `xi::Plugin::emit_binary(...)`. See `plugins/expose`. |
 | Compress cache (v9) | `compress_image(px, w, h, c, quality, out, cap)` | JPEG-encode an image **through a host-side N-rotate cache** keyed by a content hash: the same frame compressed by several plugins (or repeatedly) is encoded ONCE globally. Lets the `expose` plugin avoid linking opencv/turbojpeg and gives free global dedup. Returns bytes written / `-needed` / 0. Pair with `emit_binary` to push the result. |
-| Doc allocator (v3, γ) | `doc_chunk_alloc` / `doc_chunk_realloc` / `doc_chunk_free` | Host-owned pool behind the in-process yyjson doc → `internals/data-layer.md`. |
-| Doc refcount (v4, γ-4) | `doc_retain` / `doc_release` / `doc_refcount` | The doc analogue of `image_addref/release` → `internals/data-layer.md`. |
-| ~~SHM~~ | `shm_*` (5) | **Removed in v11** — the five slots were deleted from `xi_host_api` (they were `nullptr` placeholders from v6). Use `image_create` for buffers. |
+| Capability door (v10) | `get_interface(id, version)` | Resolve a carved, independently-frozen interface (`xi.pack` / `xi.imaging` / `xi.imaging_rw` / `xi.emit` / `xi.log` / `xi.preview` @1) or the capability planes (§6). The v12 data plane + dispatch verb both ride this door, not a struct field. |
+
+**Dispatch (the pack plane, not a struct field).** A source emits a frame with
+`xi_pack_v1::emit_pack(emitter, id, pack, ts)` — the one dispatch verb, on the
+`xi.pack@1` plane resolved through `get_interface("xi.pack", 1)`, not a raw
+`xi_host_api` slot. It seals a frame pack and hands it over; the host dispatches
+one inspection, and the script reads it via `current_trigger().pack()`. SDK
+helper: `xi::Plugin::emit(std::move(pack))` (fills `name()` for you). →
+`internals/dispatch.md`, §6.1.
+
+**Image decode is no longer a host slot.** THE CUT (v12) evicted the v1
+`read_image_file` field; decoding an image file is now the `xi.image.decode`
+capability (provider: `plugins/imgcodec`, stb_image behind it), reached through
+the `xi.cap` funnel (§6.2). The dead `shm_*` block (v6 placeholders) and the
+in-process yyjson doc slots (`doc_chunk_*`, `doc_retain`/`release`/`refcount`)
+were removed at v11 and v12 respectively.
 
 ### Image pool — the refcount contract
 
@@ -234,7 +263,10 @@ decrements (freed at 0; invalid handles are no-ops). `image_stride(h)` is
 - **Input handles** belong to the host for the `process()` call. To keep one
   across calls, `image_addref` it and `image_release` it in `destroy`.
 - **Output handles** transfer to the host on `process()` return — don't release.
-- Cross-plugin handoff through `xi::Record` is auto-refcounted by the host bridge.
+- Cross-plugin handoff rides the pack: an image entry is a borrowed pool view in,
+  and `out.adopt_image(...)` re-forwards it with an `addref` (host-owned refcounts,
+  no copy). Sealed packs are immutable and refcounted like image handles
+  (`xi_pack_v1::retain`/`release`).
 
 (The full image table + wiring is generated by `make_host_api()` in
 `xi_image_pool.hpp`.)
@@ -243,17 +275,19 @@ decrements (freed at 0; invalid handles are no-ops). `image_stride(h)` is
 
 ## 4. ABI version + load gate
 
-`XI_ABI_VERSION` is **11** (`backend/include/xi/xi_abi.h`). The struct was
+`XI_ABI_VERSION` is **12** (`backend/include/xi/xi_abi.h`). The struct was
 append-only through v5; v6 broke that to remove the retired dispatch fields; v7
 added only OPTIONAL *plugin* exports (not `xi_host_api` fields); v8 then v9
 **appended** `emit_binary` and `compress_image`; v10 appended `get_interface`
 (the capability-query door). v11 took the authorized "retire the monolith"
 break — it **removed** the five dead `shm_*` slots and stopped publishing the
-whole-table `xi.legacy` view, changing the struct layout. Because v11 is a
-layout break, `XI_ABI_MIN_COMPAT` was raised to **11**, so **every pre-v11
-plugin is refused at load** (rebuild required — all first-party plugins are
-rebuildable in-tree). Within the compatible range the gate only refuses a plugin
-asking for a *newer* ABI than the host. History:
+whole-table `xi.legacy` view. v12 is **THE CUT**: the Record `process` path is
+deleted (a plugin's data plane is the `xi.pack@1` door only), `read_image_file`
+is evicted to the `xi.image.decode` capability, and the in-process doc slots +
+the record-emit verb are removed. Each layout break raised `XI_ABI_MIN_COMPAT`
+(now **12**), so **every pre-v12 plugin is refused at load** (rebuild required —
+all first-party plugins are rebuildable in-tree). Within the compatible range the
+gate only refuses a plugin asking for a *newer* ABI than the host. History:
 
 | ver | added |
 |---|---|
@@ -262,58 +296,51 @@ asking for a *newer* ABI than the host. History:
 | 3 | in-process doc allocator `doc_chunk_*` (γ) |
 | 4 | in-process doc refcount `doc_retain`/`doc_release`/`doc_refcount` (γ-4) |
 | 5 | `emit_trigger_record` — trigger metadata doc (superseded by v6) |
-| 6 | dispatch collapsed to ONE verb `emit_record(emitter,id,rec,ts)`; `emit_trigger`, `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` REMOVED (no v4 compat — rebuild all plugins). Multi-cam = gathering plugin; replay = the `cache` plugin (`plugins/cache`, class `BufferReplay`; demo `examples/buffer_replay_demo`). |
+| 6 | dispatch collapsed to a single record-emit host verb (deleted at v12 → `xi_pack_v1::emit_pack`); `emit_trigger`, `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` REMOVED (no v4 compat — rebuild all plugins). Multi-cam = gathering plugin; replay = the `cache` plugin (`plugins/cache`, class `BufferReplay`; demo `examples/buffer_replay_demo`). |
 | 7 | optional plugin exports `xi_plugin_prepare(inst,def,folder)` + `xi_plugin_commit(inst)` for frame-perfect config swap (opt in via `XI_PLUGIN_STAGED`; prepare ungated, commit gated). PLUGIN exports, not host-api fields — no struct shift, older plugins still load. |
 | 8 | `emit_binary(data, len)` appended to `xi_host_api` — plugin→WS binary push (e.g. the `expose` plugin's live `XEX1` frames). Additive (last field); v6/v7 plugins still load on a v8 host. |
 | 9 | `compress_image(px,w,h,c,q,out,cap)` appended — host-side JPEG encode through an N-rotate content-hash cache (global dedup). Additive; older plugins still load on a v9 host. |
 | 10 | `get_interface(id, min)` appended (last field) — the capability-query door for carved per-capability interfaces (`xi.imaging` / `xi.doc` / `xi.emit` / `xi.log` / `xi.preview` @1). Additive; older plugins still load. |
 | 11 | **Layout break** (`docs/internals/adr-001-host-api-freeze.md` Phase 4): the five dead `shm_*` slots removed and the whole-table `xi.legacy` query retired. `XI_ABI_EXPECTED_SIZE` → 176 (22 function pointers); `XI_ABI_MIN_COMPAT` raised 6 → 11, so every pre-v11 plugin is now **refused** (rebuild required). |
+| 12 | **THE CUT** (authorized break): the Record `process` path is deleted — a plugin's data plane is the `xi.pack@1` door (`xi_plugin_get_interface("xi.pack",1)` → `xi_pack_proc_v1`) only; the host `process` export and the record-emit host verb are gone (sources emit a sealed pack via `xi_pack_v1::emit_pack`). `read_image_file` evicted to the `xi.image.decode` capability; the in-process doc heap/refcount (`doc_chunk_*`, `doc_retain`/`release`/`refcount`) removed with the Record dispatch path. `XI_ABI_EXPECTED_SIZE` → **112** (14 function pointers); `XI_ABI_MIN_COMPAT` raised 11 → 12, so every pre-v12 plugin is now **refused** (rebuild required). |
 
-**Two load gates** (a plugin failing either is refused at load with a clear
-error, then `FreeLibrary`'d):
-1. **ABI version** — `xi_plugin_abi_version()` is bounded on **both** ends: a
-   plugin asking for a version *newer* than the host is refused, and so is one
-   *older* than `XI_ABI_MIN_COMPAT` (currently **11** — the v11 layout break that
-   removed the `shm_*` slots). A pre-v11 (or pre-versioning, treated as v1)
-   plugin would dereference `xi_host_api` at stale offsets, so it is refused
-   rather than loaded with a warning. Bump `XI_ABI_MIN_COMPAT` on every future
-   breaking layout change.
-2. **yyjson layout** (γ-4) — `xi_yyjson_abi()` must match the host's stamp. A
-   mismatch (different yyjson build) or no export means the plugin can only run
-   the slow JSON-serialize path, so it is **refused unless** `plugin.json` sets
-   `"json_fallback": true` (then it loads on the JSON path with a one-shot
-   warning). Plugins built with `XI_PLUGIN_IMPL` against the host's vendored
-   yyjson pass automatically. See `internals/data-layer.md`.
+**The load gate** (a plugin failing it is refused at load with a clear error,
+then `FreeLibrary`'d):
+- **ABI version** — `xi_plugin_abi_version()` is bounded on **both** ends: a
+  plugin asking for a version *newer* than the host is refused, and so is one
+  *older* than `XI_ABI_MIN_COMPAT` (currently **12** — the v12 CUT, layered on
+  the v11 `shm_*` removal). A pre-v12 (or pre-versioning, treated as v1) plugin
+  would dereference `xi_host_api` at stale offsets — and speaks the deleted Record
+  `process` path — so it is refused rather than loaded with a warning. Bump
+  `XI_ABI_MIN_COMPAT` on every future breaking layout change.
+
+(The v3–v11 **yyjson layout** gate — `xi_yyjson_abi()` — was removed at THE CUT
+along with the in-process yyjson doc path: the pack plane crosses the ABI as an
+opaque handle and needs no layout stamp, so there is no second gate and
+`"json_fallback"` no longer applies to a data plane.)
 
 > **Migration note (v6).** "Rebuild all plugins" also covers your **native
 > tests**: the plugin certification suite (`xi/xi_baseline.hpp` + `xi/xi_cert.hpp`
 > — `xi::baseline::load_symbols` / `run_all`, `xi::cert::certify`) was removed
 > with the cert gate. A test that used it must resolve the plugin's C-ABI exports
 > directly: `LoadLibrary` the DLL, then `GetProcAddress` for `xi_plugin_create` /
-> `xi_plugin_destroy` / `xi_plugin_process` (+ `get_def`/`set_def`/`exchange` as
-> needed), and assert behaviour with `xi/xi_test.hpp` (which survives). See
+> `xi_plugin_destroy` / `xi_plugin_get_interface` (the `xi.pack@1` door — drive
+> `xi_pack_proc_v1::process` for the data plane; + `get_def`/`set_def`/`exchange`
+> as needed), and assert behaviour with `xi/xi_test.hpp` (which survives). See
 > `sdk/examples/counter/tests/test_counter.cpp` for the pattern.
 
 ---
 
-## 5. Record at the boundary
+## 5. Pack at the boundary
 
-The in-process fast path passes the yyjson doc by pointer (zero-serialize);
-`data`/`len` carry JSON bytes only when the doc pointer is null.
-
-```c
-typedef struct { const char* key; xi_image_handle handle; } xi_record_image;
-typedef struct {
-    const xi_record_image* images; int32_t image_count;
-    const uint8_t* data; int32_t len;   /* JSON bytes — used iff doc == NULL */
-    const void* doc;                    /* borrowed yyjson_mut_doc* (in-process) */
-} xi_record;
-typedef struct {
-    xi_record_image* images; int32_t image_count; int32_t image_capacity;
-    const uint8_t* data; int32_t len;   /* JSON bytes — used iff out_doc == NULL */
-    void* out_doc;                      /* adopted yyjson_mut_doc* (zero-copy) */
-} xi_record_out;
-```
+THE CUT (v12) deleted the Record container (`xi_record` / `xi_record_out` and the
+in-process yyjson doc). A plugin's data plane is the **Pack**: a sealed,
+immutable, refcounted `xi_pack_handle` that crosses the ABI as an **opaque handle
++ accessor functions** — never a raw C struct layout (raw layout + a hot-reload
+skew is silent corruption). A source emits one with `xi_pack_v1::emit_pack`; a
+processor reads a borrowed input pack and returns a new sealed output pack through
+the `xi_pack_proc_v1` door. The full value-type ABI — build / read /
+retain-release / emit — is **§6.1** below.
 
 ---
 
@@ -514,9 +541,9 @@ script lacks them and the host degrades as noted (canonical list:
 | `xi_script_set_use_pack_callback` | Host wires the `xi::use(name).process(ScriptPack)` pack-door callback (gate P2). | `process(ScriptPack)` yields an empty pack |
 | `xi_script_set_use_push_pack_callback` | Host wires the `xi::use(sink).push(pack)` staged-push thunk. | pack push not wired |
 | `xi_script_set_run_id` | Per-run arrival id → the script's `xi::run_id()` (U3, ordering — the value a producer stamps as `"$seq"` before seal). | `xi::run_id()` reads 0 |
-| `xi_script_kv_get` / `xi_script_kv_set` | The kv channel (U2, post-Record script state): the store crosses as **canonical-msgpack bytes with explicit lengths** — never NUL-terminated (msgpack contains NULs). `get` uses the grow-and-retry convention (bytes written, or `-needed`); `0` = the store is empty. | only the Record state channel rides |
-| `xi_script_kv_schema_version` | The kv schema stamp (`XI_KV_SCHEMA(N)`), the kv sibling of `xi_script_state_schema_version`. | schema treated as 0 |
-| `xi_script_kv_change` | Typed migration hook across a hot-reload (old bytes + schemas in, migrated bytes out, same `-needed` convention); declining (≤ 0) drops the prior store, exactly like the Record channel. | prior kv store dropped on schema mismatch |
+| `xi_script_kv_get` / `xi_script_kv_set` | The kv channel (U2) — the script's sole cross-frame state store: the store crosses as **canonical-msgpack bytes with explicit lengths** — never NUL-terminated (msgpack contains NULs). `get` uses the grow-and-retry convention (bytes written, or `-needed`); `0` = the store is empty. | the script has no kv state store |
+| `xi_script_kv_schema_version` | The kv schema stamp (`XI_KV_SCHEMA(N)`). | schema treated as 0 |
+| `xi_script_kv_change` | Typed migration hook across a hot-reload (old bytes + schemas in, migrated bytes out, same `-needed` convention); declining (≤ 0) drops the prior store. | prior kv store dropped on schema mismatch |
 
 ---
 

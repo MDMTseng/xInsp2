@@ -1,8 +1,9 @@
 # Overview — mental model + architecture in one picture
 
 > **Status:** shipped — describes the current architecture and core nouns.
-> **Last verified against:** master @ 2026-07 (`VAR`/`EMIT` retired from core;
-> per-run output via the `expose` plugin).
+> **Last verified against:** the v12 cut @ 2026-07 (`VAR`/`EMIT` retired from
+> core; the Record data plane replaced by the Pack; per-run output via the
+> `expose` plugin).
 
 The mental model and the core nouns. Read once (~20 min); then the [index](./README.md)
 maps tasks → docs.
@@ -39,8 +40,8 @@ script** that orchestrates them per frame. The bets:
 | **Script** (`inspect.cpp`) | The per-frame orchestration, compiled to a DLL. Calls plugins, emits results. One per project. |
 | **Plugin** | A DLL implementing the C ABI: a camera/source, detector, op, or I/O bridge. Reusable across projects. |
 | **Instance** | A *configured* plugin (`instances/<name>/instance.json`): which plugin + its config + its dispatch group. |
-| **Record** | The data passed between script and plugin: schema-less JSON + a named-image bag. Zero-copy across the ABI. (Transitional: the polaris2 **Pack** — a sealed keyed-buffer — is a second data currency riding the same dispatch; plugins can speak either or both. See [`internals/pack-plane.md`](./internals/pack-plane.md).) |
-| **Trigger bus** | Turns each emitted record into one inspection run; a record carrying several named images (a gathering source) is inspected together. |
+| **Pack** | The data passed between script and plugin: a sealed, keyed, typed container (canonical msgpack) carrying images zero-copy across the ABI — the same bytes in memory, on the WS wire (XEX1-v3), and on disk (`.xex1`). See [`internals/pack-plane.md`](./internals/pack-plane.md). |
+| **Trigger bus** | Turns each emitted pack into one inspection run; a pack carrying several named images (a gathering source) is inspected together. |
 | **Dispatch group** | Worker threads (own `max_parallel` + OS priority + queue) that run inspections; groups are isolated. |
 | **Run-result** | The one verdict per run: a signed status code + message (`>0` ok, `0` NA, `-1…` ng, `≤-990000` framework system-fail). Feeds HMI + PLC. |
 | **HMI** | A standalone browser SPA that connects over WebSocket and *only* visualizes. |
@@ -72,27 +73,28 @@ script** that orchestrates them per frame. The bets:
 
 ## The life of one inspection
 
-1. A **source** plugin `emit_record`s a record (one or more named images +
-   metadata) into its dispatch group.
-2. The **trigger bus** turns that record into ONE event carrying its images; a
+1. A **source** plugin builds a pack (one or more named images + metadata
+   entries), seals it, and emits it into its dispatch group.
+2. The **trigger bus** turns that pack into ONE event carrying it; a
    *gathering* source that wants several frames inspected together puts them all in
-   the same record.
+   the same pack.
 3. The event runs in its **group's lane** on a worker thread (up to `max_parallel`
    parallel).
-4. The **script** `xi_inspect_entry()` runs: reads the record's images, calls
-   plugins (`xi::use("det").process(...)` → a `Record`), computes a verdict, emits
-   `xi::result(code, msg)` (the one verdict), and may forward to a PLC via a comm
-   plugin. (`VAR`/`EMIT` were removed — they no longer compile (compiler error
-   C3861); surfacing per-run values/images for viewing is now the shipped `expose`
-   plugin's job — build a `xi::Record` and call `xi::use("expose").process(rec)`,
-   see [`guides/write-a-script.md`](guides/write-a-script.md).)
+4. The **script** entry (`XI_INSPECT_ENTRY(t, frame)`) runs: reads the event's
+   pack (`t.pack()`), calls plugins (`xi::use("det").process(pack)` → a reply
+   pack), computes a verdict, emits `xi::result(code, msg)` (the one verdict),
+   and may forward to a PLC via a comm plugin. (`VAR`/`EMIT` were removed — they
+   no longer compile (compiler error C3861); surfacing per-run values/images for
+   viewing is the shipped `expose` plugin's job — build a pack, tag `"$channel"`,
+   and call `xi::use("expose").push(pack)`, see
+   [`guides/write-a-script.md`](guides/write-a-script.md).)
 5. Emission is ordered per group (so the stream stays in frame order under parallel
    compute).
 6. The **HMI** renders the verdict; the **PLC** gets the verdict. Same
    run-result, multiple consumers.
 
 How a trigger becomes a run in detail: [`internals/dispatch.md`](./internals/dispatch.md).
-How Record crosses zero-copy: [`internals/data-layer.md`](./internals/data-layer.md).
+How a pack crosses zero-copy: [`internals/pack-plane.md`](./internals/pack-plane.md).
 
 ## Codebase layout
 
@@ -100,7 +102,7 @@ How Record crosses zero-copy: [`internals/data-layer.md`](./internals/data-layer
 backend/src/      service_main.cpp (BE — the big one), fe_main.cpp (supervisor),
                   runner_main.cpp (headless runner)
 backend/include/xi/  the SDK headers (50+): xi_plugin_manager, xi_trigger_bus,
-                  xi_image_pool, xi_doc_*, xi_use, xi_result, xi_types, …
+                  xi_image_pool, xi_pack_*, xi_use, xi_result, xi_kv, …
 backend/tests/    C++ unit tests (ctest) + benchmarks
 hmi/              the operator SPA       vscode-extension/  the dev front-end
 examples/         runnable projects + qa_*/driver.py regression suite
@@ -119,15 +121,16 @@ handling, dispatch pools, script lifecycle, crash filter.
 - **Docs ride with code:** a behavior change updates its matching doc in the same
   commit.
 - **`VAR`/`EMIT` were removed** — they no longer compile (compiler error C3861).
-  Per-run output goes through the `expose` plugin: build a `xi::Record` and call
-  `xi::use("expose").process(rec)`.
+  Per-run output goes through the `expose` plugin: build a pack with
+  `xi::ScriptPackBuilder`, tag `"$channel"`, and call
+  `xi::use("expose").push(pack)`.
 
 ## Glossary
 
 - **BE / FE** — backend (compute) / frontend (supervisor).
-- **record / emit** — a source `emit_record`s a record (named images + metadata);
-  each emit becomes one inspection run.
-- **gathering source** — one plugin that emits several frames in a single record
+- **pack / emit** — a source seals and emits a pack (named images + metadata
+  entries); each emit becomes one inspection run.
+- **gathering source** — one plugin that emits several frames in a single pack
   so they're inspected together (replaces multi-source correlation).
 - **dispatch group** — a per-group worker lane (`max_parallel`, `thread_priority`, …).
 - **run-result** — the one signed verdict code + message per run; the `≤-990000`
@@ -135,8 +138,8 @@ handling, dispatch pools, script lifecycle, crash filter.
 - **AOT bundle** — a self-contained export the target runs with no toolchain.
 - **working copy** — a transactional `.xinsp_work` scratch so edits survive a
   crash-respawn.
-- **ImagePool / DocRegistry** — host-side refcounted pools; images and docs move
-  by handle/pointer, zero-copy.
+- **ImagePool / PackRegistry** — host-side refcounted pools; images and sealed
+  packs move by handle, zero-copy.
 
 ---
 
