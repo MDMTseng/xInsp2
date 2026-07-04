@@ -414,7 +414,9 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
             if (yyjson_val* k = yyjson_obj_get(par, "queue_depth");
                 k && yyjson_is_num(k)) {
                 int n = (int)yyjson_get_num(k);
-                if (n < 1)     n = 1;
+                // 0 is now valid — the RENDEZVOUS (synchronous-handoff) rung (only
+                // with overflow:block; validated below once overflow is also known).
+                if (n < 0)     n = 0;
                 if (n > 10000) n = 10000;
                 project_.queue_depth = n;
             }
@@ -459,6 +461,17 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         s.c_str());
                 }
             }
+            // depth=0 (rendezvous) is ONLY valid with overflow:block. With a drop
+            // policy it has no slot to hold the event and no rendezvous wait, so it
+            // would degenerate to "drop unless a worker is idle this instant" AND
+            // could hit front() on an empty queue. Validate now that BOTH fields are
+            // known (either may have parsed first): clamp back to 1 + warn loudly.
+            if (project_.queue_depth == 0 && project_.overflow != "block") {
+                std::fprintf(stderr,
+                    "[xinsp2] project.json parallelism.queue_depth:0 (rendezvous) "
+                    "requires overflow:block — clamping depth to 1\n");
+                project_.queue_depth = 1;
+            }
             // parallelism.groups + default_group (optional; empty = legacy pool)
             if (yyjson_val* arr = yyjson_obj_get(par, "groups"); arr && yyjson_is_arr(arr)) {
                 auto warn = [&](const std::string& who, const std::string& msg) {
@@ -482,7 +495,7 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         }
                     }
                     if (yyjson_val* k = yyjson_obj_get(g, "queue_depth"); k && yyjson_is_num(k))
-                        grp.queue_depth = std::min(10000, std::max(1, (int)yyjson_get_num(k)));
+                        grp.queue_depth = std::min(10000, std::max(0, (int)yyjson_get_num(k)));  // 0 = rendezvous (block only)
                     if (yyjson_val* k = yyjson_obj_get(g, "overflow"); k && yyjson_is_str(k) && yyjson_get_str(k)) {
                         grp.overflow = yyjson_get_str(k);
                         // "block" supported again (interruptible back-pressure; opt-in;
@@ -526,6 +539,14 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                             auto s = parse_set(k);
                             if (!s.empty()) grp.cpu_affinity.push_back(std::move(s));
                         }
+                    }
+                    // depth=0 (rendezvous) requires overflow:block (both fields now
+                    // parsed for this group, in either order) — else clamp to 1 + warn.
+                    // Keeps the depth==0 dispatch branch's "never front()-on-empty"
+                    // invariant true by construction (see enqueue_to_lane_).
+                    if (grp.queue_depth == 0 && grp.overflow != "block") {
+                        warn(grp.name, "queue_depth:0 (rendezvous) requires overflow:block — clamping depth to 1");
+                        grp.queue_depth = 1;
                     }
                     project_.groups.push_back(std::move(grp));
                 }

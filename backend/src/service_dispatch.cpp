@@ -170,12 +170,54 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     if (!g_eng.continuous.load()) return false;
     std::shared_ptr<GroupLane> lane = lane_for_(ev.group);
     if (!lane) return false;
-    int depth = lane->cfg.queue_depth < 1 ? 1 : lane->cfg.queue_depth;
+    // depth 0 is now permitted (RENDEZVOUS lane — see the depth==0 branch below);
+    // only genuinely-negative values clamp to the depth=0 floor. The parser
+    // guarantees a depth==0 lane also has overflow=="block" (it warns + clamps to 1
+    // otherwise), so the depth==0 branch's "never reach the front()-on-empty drop
+    // path" invariant holds by construction.
+    int depth = lane->cfg.queue_depth < 0 ? 0 : lane->cfg.queue_depth;
     const std::string& ov = lane->cfg.overflow;
     std::unique_lock<std::mutex> lk(lane->mu);
     // Re-check after taking the lane lock: a concurrent stop may have flipped
     // g_eng.continuous + drained; don't push a now-orphaned event (would leak).
     if (!g_eng.continuous.load()) return false;
+    // ---- queue_depth:0 RENDEZVOUS (synchronous handoff; opt-in) ----------------
+    // DANGER — like overflow:block, rendezvous is ONLY safe for a back-pressure-
+    // TOLERANT source on a DEDICATED thread it can freely stall. NEVER a lane a
+    // WORKER of this same lane can self-feed (a worker parked here can't drain its
+    // own lane → self-deadlock until stop) and NEVER a real-time CAMERA-CALLBACK
+    // thread (parking it stalls acquisition). Config-side responsibility — the code
+    // can't tell a self-feeding thread from a dedicated one. A stop always breaks
+    // the park (predicate keys off g_eng.continuous) so it degrades to a drop rather
+    // than hanging teardown.
+    if (depth == 0) {
+        // Strict 1-wide handoff. Only ONE event can be in q at a time (each producer
+        // waits for empty before depositing), so taken_count can't mis-attribute
+        // another producer's take. Parser guarantees ov=="block" here, so this
+        // returns before any drop_oldest front()-on-empty path could run.
+        // 1) Wait for the handoff slot to be free (or stop).
+        lane->cv_not_full.wait(lk, [&] {
+            return lane->q.empty() || !g_eng.continuous.load();
+        });
+        if (!g_eng.continuous.load()) return false;          // stop → drop (guard releases ev)
+        // 2) Snapshot the take-generation UNDER lk, then deposit.
+        uint64_t t0 = lane->taken_count;
+        ev.arrival_id = ++g_eng.run_id;
+        lane->q.push_back(std::move(ev)); guard.dismiss();   // ownership → queue
+        // Raise the peak (rendezvous tops out at 1 — the whole point: the core lane
+        // never buffers more than the single in-flight handoff).
+        { uint64_t ns = lane->q.size(), prev = lane->high_watermark.load(std::memory_order_relaxed);
+          while (ns > prev && !lane->high_watermark.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
+          uint64_t gprev = g_eng.high_watermark_lifetime.load(std::memory_order_relaxed);
+          while (ns > gprev && !g_eng.high_watermark_lifetime.compare_exchange_weak(gprev, ns, std::memory_order_relaxed)) {} }
+        lane->cv.notify_one();                               // wake a worker to take it
+        // 3) Block until OUR event is TAKEN (taken_count advanced) or stop. On stop
+        //    the event is already in q; stop_group_pool_ drains it (no leak, no hang).
+        lane->cv_not_full.wait(lk, [&] {
+            return lane->taken_count != t0 || !g_eng.continuous.load();
+        });
+        return true;   // handed off (or stop-woken after deposit — teardown drains q)
+    }
     // ---- overflow:"block" back-pressure (opt-in; default stays drop_oldest) -----
     // DANGER — block is ONLY safe for a back-pressure-TOLERANT source that emits on
     // a DEDICATED thread it can freely stall (a file/disk batch reader, a dedicated
@@ -306,6 +348,11 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                         if (!g_eng.continuous.load()) break;
                         if (!lane->q.empty()) {
                             ev = std::move(lane->q.front()); lane->q.pop_front(); have = true;
+                            // depth=0 rendezvous: advance the take-generation UNDER lk
+                            // (paired with a depth=0 producer's under-lk snapshot) so a
+                            // producer parked in the rendezvous learns ITS event was taken.
+                            // The outside-lock cv_not_full.notify_one() below wakes it.
+                            ++lane->taken_count;
                             // run_id was claimed at ENQUEUE (push == FIFO order) so kept
                             // and dropped frames share one arrival sequence; read it back
                             // (fallback if unset). The emit seq (gate ordering) is still

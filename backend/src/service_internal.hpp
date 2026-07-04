@@ -137,6 +137,12 @@ struct GroupLane {
     // free slot, so a freed slot wakes a producer WITHOUT waking a worker (and vice
     // versa). Kept separate from cv precisely so the worker path can stay notify_one.
     std::condition_variable        cv_not_full;
+    // depth=0 RENDEZVOUS generation counter (guarded by `mu`): bumped by a worker
+    // each time it DEQUEUES an event. A depth=0 producer snapshots this under the
+    // lock before depositing, then waits until it advances — i.e. until *its* event
+    // was taken (not merely until the slot is empty, which interleaved producers
+    // would confuse). Only meaningful for queue_depth==0 lanes; harmless otherwise.
+    uint64_t                       taken_count = 0;
     std::vector<std::thread>       workers;
     std::atomic<uint64_t>          running{0};
     std::atomic<uint64_t>          dropped{0};

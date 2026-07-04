@@ -43,8 +43,16 @@ plugin's own buffer becomes the only real queue, and let the plugin pace itself:
 - The plugin **paces emits off completion feedback** (`run_result`) or the
   back-pressure of `overflow:block` — there is no separate push-back signal.
 
-Worked exemplar: **`examples/qa_plugin_queue_sim/`** — a self-buffering,
-self-pacing source over a `depth=1` (pipeline) and a `depth=0` (rendezvous) lane.
+Worked exemplar: **`examples/qa_plugin_queue_sim/`** (LANDED) — a `queue_source`
+plugin holding its own deep `std::deque` (backlog 500) and pacing its emits purely
+off the core lane's back-pressure, over a `depth=0` (rendezvous, group `rv`) and a
+`depth=1` (pipeline, group `pipe`) lane. Measured: both lossless (emitted==processed,
+0 drops), core lane `high_watermark == 1` on BOTH (the plugin's own deque holds the
+backlog — the core never buffers past the single handoff), the rendezvous is strict
+lock-step (2nd emit returns only after the 1st frame is TAKEN → `first_gap_ms ≈` the
+inspect time, `fast_returns == 0`) while the pipeline runs one ahead (`first_gap_ms
+≈ 0`, `fast_returns == 1`), and stop+close_project while the source is parked in the
+rendezvous returns in ~0.06s.
 
 ## 3. The depth ladder
 
@@ -84,6 +92,14 @@ the event (no run-ahead, zero core limbo).
 - **Same DANGER as block:** only for a back-pressure-TOLERANT source on a
   dedicated thread. NEVER a lane a worker can self-feed, or a real-time camera
   callback. Config-side responsibility.
+
+Landed as: `service_internal.hpp` (`GroupLane::taken_count`), `service_dispatch.cpp`
+(worker bumps `taken_count` under the lane lock at dequeue; `enqueue_to_lane_` gains
+the `depth==0` rendezvous branch that runs BEFORE the block/push/drop logic and
+returns before any drop path), `xi_pm_project.hpp` (queue_depth clamp min 0 + the
+"depth 0 requires overflow:block, else warn+clamp to 1" validation at both project
+and group scope), `xi_project_model.hpp` (field docs). Test: `examples/
+qa_plugin_queue_sim/` (run_qa `qa_*` glob; strict PASS x2).
 
 ## 4. What is explicitly NOT built
 

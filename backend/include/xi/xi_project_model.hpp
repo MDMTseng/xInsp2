@@ -72,8 +72,12 @@ struct ProjectInfo {
     // plugin process() reentrance, watchdog) — see docs/guides/write-a-script.md.
     int           dispatch_threads = 1;
 
-    // `parallelism.queue_depth`: maximum number of trigger events (real bus emits
-    // + synthetic timer ticks) buffered while workers are busy. Default 100.
+    // `parallelism.queue_depth`: size of the core's residual buffer (real bus emits
+    // + synthetic timer ticks) while workers are busy. Default 100. The depth ladder
+    // (docs/new_gen/24): 0 = RENDEZVOUS (synchronous handoff — the producer blocks
+    // until a worker TAKES the event; zero core buffer; plugin owns 100% of the
+    // queue), 1 = 1-deep pipeline (producer may run one ahead), N = N-slot buffer.
+    // depth 0 REQUIRES overflow:block (the parser warns + clamps to 1 otherwise).
     int           queue_depth      = 100;
 
     // `parallelism.max_inflight`: ceiling on concurrent DETACHED one-shot / cmd:run
@@ -110,7 +114,7 @@ struct ProjectInfo {
         std::string name;
         int         max_parallel    = 1;          // worker threads this group owns
         std::string thread_priority = "normal";   // "high" | "normal" | "low" (OS)
-        int         queue_depth     = 100;
+        int         queue_depth     = 100;         // 0=rendezvous (block only) / 1=pipeline / N=buffer; see doc 24
         std::string overflow        = "drop_oldest";
         std::string result_order    = "completion"; // "completion" | "arrival" (per-group)
         int         min_interval_ms = 0;             // 0 = unlimited; else min spacing between dispatch starts (rate cap)
