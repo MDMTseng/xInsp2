@@ -129,3 +129,5 @@ __declspec(dllexport) int xi_script_kv_change(const uint8_t* old_bytes, int old_
 // [v12 THE CUT — the Record-channel stand-in exports (xi_script_get_state/
 //  set_state) were removed with test_kv_migrate SECTION E (the JSON-era
 //  self-seed died with the Record state channel; doc 16).]
+
+} // extern "C"
