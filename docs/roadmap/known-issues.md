@@ -93,6 +93,23 @@ load-bearing contract that lives only in a comment/convention.
   a new producer that forgets the sentinel emits a bare `NaN` token and the whole
   frame is dropped. Cheap guard: a debug-build assert in the yyjson write path that
   fires on a bare `NaN`/`Inf` token; longer-term a single shared helper.
+- **GraphCapture recorder orphaned at THE CUT (v12) — `graph_snapshot` always
+  empty** (theme D). The `graph_capture`/`graph_snapshot` command surface, the
+  `xi::GraphCapture` singleton, and its edge-reconstruction algorithm
+  (`xi_graph_capture.hpp`) are all intact and wired to the dispatch table, but
+  `GraphCapture::record()` has **no call site**: it used to be invoked on the
+  Record `use()->process()` path, which was deleted at v12 (pack-door only). The
+  funnel is now `use_pack_process_cb` (`service_sinks.cpp`). Re-wiring is NOT a
+  simple call-site add — edge reconstruction keys on **image-handle identity**
+  (A's output handle later reused as B's input → A→B), but `ScriptPackBuilder::add_image`
+  is copy-only (no zero-copy pool-handle adoption), so a script-side re-add mints a
+  fresh handle and the lineage is lost. So even a wired recorder would populate
+  `ran` but produce **zero edges** for any script-chained pipeline. Making it real
+  needs zero-copy pack-handle adoption — a data-plane feature, deliberately not
+  built here. Kept (not removed) because the surface + algorithm are the intended
+  re-enable point once pack adoption lands. Test `ws_graph_capture.test.mjs` is
+  cleanly `skip`ped with this reason. **DECISION FLAGGED for coordinator:** re-hook
+  the recorder + add zero-copy pack adoption, or formally retire graph-capture.
 
 ## Minor / residual
 
