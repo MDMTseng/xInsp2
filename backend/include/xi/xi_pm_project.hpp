@@ -430,10 +430,15 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
             if (yyjson_val* k = yyjson_obj_get(par, "overflow");
                 k && yyjson_is_str(k) && yyjson_get_str(k)) {
                 std::string s = yyjson_get_str(k);
-                // "block" was removed (back-pressuring the source could deadlock a
-                // producer and isn't a sane factory behaviour — the line wants the
-                // freshest frame, i.e. drop_oldest).
-                if (s == "drop_oldest" || s == "drop_newest") {
+                // "block" is supported again (safe interruptible back-pressure form:
+                // the producer parks on a slot and a stop/teardown wakes it to DROP,
+                // so it can't hang teardown). OPT-IN only, and ONLY for a back-
+                // pressure-TOLERANT source (dedicated timer/emit or file/disk batch
+                // thread). Do NOT point block at a self-feeding worker lane (parked
+                // worker can't drain its own lane → deadlock until stop) or a real-
+                // time camera-callback thread (stalls acquisition). Default stays
+                // drop_oldest (the line wants the freshest frame).
+                if (s == "drop_oldest" || s == "drop_newest" || s == "block") {
                     project_.overflow = s;
                 } else {
                     std::fprintf(stderr,
@@ -480,7 +485,11 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         grp.queue_depth = std::min(10000, std::max(1, (int)yyjson_get_num(k)));
                     if (yyjson_val* k = yyjson_obj_get(g, "overflow"); k && yyjson_is_str(k) && yyjson_get_str(k)) {
                         grp.overflow = yyjson_get_str(k);
-                        if (grp.overflow != "drop_oldest" && grp.overflow != "drop_newest") {
+                        // "block" supported again (interruptible back-pressure; opt-in;
+                        // back-pressure-tolerant sources ONLY — deadlock risk on a self-
+                        // feeding worker lane or a camera-callback thread; see project-
+                        // level note above).
+                        if (grp.overflow != "drop_oldest" && grp.overflow != "drop_newest" && grp.overflow != "block") {
                             warn(grp.name, "unknown overflow '" + grp.overflow + "' — using drop_oldest");
                             grp.overflow = "drop_oldest";
                         }

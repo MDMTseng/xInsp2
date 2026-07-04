@@ -1,0 +1,14 @@
+{
+  "name": "burst_source",
+  "description": "Paced image source for the overflow:block test. Starts IDLE; exchange 'start' resets its counters and begins emitting one trigger every period_ms on a DEDICATED thread (a back-pressure-tolerant source — the intended safe target for overflow:block). exchange 'stop' halts + joins the emit thread. get_def reports 'emitted'.",
+  "dll": "burst_source.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [
+      {"name": "period_ms", "type": "int", "default": 15, "min": 1, "max": 10000}
+    ],
+    "inputs":  [],
+    "outputs": [{"name": "img", "kind": "image", "doc": "16x16 gray, first 8 bytes = uint64 LE seq"}]
+  }
+}

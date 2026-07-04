@@ -86,7 +86,12 @@ struct ProjectInfo {
 
     // `parallelism.overflow`: what to do when queue_depth is full and another
     // event arrives. "drop_oldest" (default; live prefers freshest) /
-    // "drop_newest" (keep FIFO; archival) / "block" (back-pressure the source).
+    // "drop_newest" (keep FIFO; archival) / "block" (back-pressure the source —
+    // lossless). "block" is the SAFE interruptible form (a stop/teardown wakes a
+    // parked producer to drop, never hangs), but OPT-IN and ONLY for a back-
+    // pressure-tolerant source on a dedicated emit thread (file/disk batch, a
+    // timer thread). NEVER for a self-feeding worker lane (deadlock until stop) or
+    // a real-time camera-callback thread (stalls acquisition) — a config error.
     std::string   overflow         = "drop_oldest";
 
     // `parallelism.result_order`: how per-frame output (ordered-sink flushes +

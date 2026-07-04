@@ -132,7 +132,11 @@ struct GroupLane {
     xi::ProjectInfo::DispatchGroup cfg;
     std::deque<xi::TriggerEvent>   q;
     std::mutex                     mu;
-    std::condition_variable        cv;
+    std::condition_variable        cv;           // WORKERS wait here (notify_one on push/pop)
+    // overflow:"block" back-pressure: producers park HERE (not on cv) waiting for a
+    // free slot, so a freed slot wakes a producer WITHOUT waking a worker (and vice
+    // versa). Kept separate from cv precisely so the worker path can stay notify_one.
+    std::condition_variable        cv_not_full;
     std::vector<std::thread>       workers;
     std::atomic<uint64_t>          running{0};
     std::atomic<uint64_t>          dropped{0};

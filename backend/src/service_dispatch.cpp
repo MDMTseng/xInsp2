@@ -176,6 +176,31 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     // Re-check after taking the lane lock: a concurrent stop may have flipped
     // g_eng.continuous + drained; don't push a now-orphaned event (would leak).
     if (!g_eng.continuous.load()) return false;
+    // ---- overflow:"block" back-pressure (opt-in; default stays drop_oldest) -----
+    // DANGER — block is ONLY safe for a back-pressure-TOLERANT source that emits on
+    // a DEDICATED thread it can freely stall (a file/disk batch reader, a dedicated
+    // timer/emit thread). NEVER point a block lane at:
+    //   * a lane a WORKER of this same lane can feed (a worker parked here can't
+    //     drain its own lane → self-deadlock until stop), or
+    //   * a real-time CAMERA-CALLBACK thread (parking it stalls acquisition / makes
+    //     the driver drop at the hardware instead — worse than a clean drop here).
+    // Enforcing that is a CONFIG-side responsibility (see the parser/model doc); the
+    // code cannot tell a self-feeding thread from a dedicated one. A stop always
+    // breaks any such park (predicate keys off g_eng.continuous) so it degrades to a
+    // drop rather than hanging teardown — but a mis-pointed block lane will stall its
+    // producer for the whole run.
+    if ((int)lane->q.size() >= depth && ov == "block") {
+        // Park until a slot frees OR the lane stops. INTERRUPTIBLE by design — a stop
+        // (continuous flips false) or teardown wakes us via cv_not_full and we DEGRADE
+        // TO DROP rather than hang. cv.wait releases lane->mu while parked so the
+        // worker can drain and free a slot; it re-acquires lk before returning.
+        lane->cv_not_full.wait(lk, [&] {
+            return (int)lane->q.size() < depth || !g_eng.continuous.load();
+        });
+        if (!g_eng.continuous.load()) return false;   // stop-wake → drop (guard releases ev)
+        // Fall through: a slot is now free AND we still hold lk, so no other producer
+        // can steal it before our push below (cv.wait returned with lane->mu HELD).
+    }
     if ((int)lane->q.size() < depth) {
         ev.arrival_id = ++g_eng.run_id;   // arrival/run id in push (== FIFO) order
         lane->q.push_back(std::move(ev)); guard.dismiss();   // ownership → queue
@@ -289,10 +314,13 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                             if (lane->ordered) eseq = lane->seq_next.fetch_add(1);
                         }
                     }
-                    // Only lane WORKERS wait on this cv now (the overflow:block
-                    // producer-park was removed), so notify_one is correct + cheaper:
-                    // one freed slot wakes one worker.
+                    // Two cvs, split by role: WORKERS wait on lane->cv (notify_one —
+                    // one freed slot wakes one worker), overflow:block PRODUCERS park
+                    // on lane->cv_not_full. A pop frees a slot, so wake one of each:
+                    // cv for a possibly-waiting worker, cv_not_full for one parked
+                    // producer (block is back — see enqueue_to_lane_'s block path).
                     lane->cv.notify_one();
+                    lane->cv_not_full.notify_one();
                     if (!have) continue;
                     // Rate limit: CAS-claim a dispatch slot ≥ min_interval after the
                     // lane's previous one, then sleep to it. Surplus events meanwhile
@@ -351,7 +379,11 @@ void stop_group_pool_() {
     // shared_ptrs while we tear down; new enqueues already bail on !g_eng.continuous.
     std::vector<std::shared_ptr<GroupLane>> lanes;
     { std::lock_guard<std::mutex> lk(g_eng.lanes_mu); lanes = g_eng.lanes; }
-    for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
+    // Wake workers (cv) AND any overflow:block producer parked on cv_not_full — the
+    // block-wait predicate keys off g_eng.continuous (already false here), so a parked
+    // producer returns-and-drops instead of hanging teardown (its join below / the
+    // source-instance destroy later would otherwise deadlock on a stuck emit thread).
+    for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); lp->cv_not_full.notify_all(); }
     for (auto& lp : lanes) for (auto& t : lp->workers) if (t.joinable()) t.join();
     // Workers are gone + g_eng.continuous is false → drain leftover queued events and
     // release their image handles before the lanes are dropped (release-before-
@@ -374,7 +406,10 @@ void stop_dispatch_pool_() {
         std::vector<std::shared_ptr<GroupLane>> lanes;
         { std::lock_guard<std::mutex> lk(g_eng.lanes_mu); lanes = g_eng.lanes; }
         for (auto& lp : lanes) {
-            { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); }
+            // cv → workers; cv_not_full → any parked overflow:block producer (so it
+            // observes continuous=false and returns-and-drops, not hang); gate.cv →
+            // anyone parked in a per-lane EmitTurn (ordered mode).
+            { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); lp->cv_not_full.notify_all(); }
             { std::lock_guard<std::mutex> lk(lp->gate.mu); lp->gate.cv.notify_all(); }
         }
     }
