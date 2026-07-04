@@ -3,21 +3,25 @@
 //
 // The SAME xi::Plugin skeleton as the easy template, with two layers turned
 // on: configurable params (get_def/set_def + an exchange RPC channel, all via
-// xi::Json) and a live status() line. It reads an input image keyed "gray",
-// thresholds it, and writes back:
-//   image  "binary"    — the thresholded result (uint8, 1 channel)
-//   number "fg_pct"     — fraction of foreground pixels, 0.0 .. 1.0
+// xi::Json) and a live status() line. Its xi.pack@1 door reads an input image
+// keyed "gray", thresholds it, and seals the results into the output pack:
+//   image "binary"     — the thresholded result (uint8, 1 channel)
+//   f64   "fg_pct"     — fraction of foreground pixels, 0.0 .. 1.0
+//   i64   "threshold"  — the threshold value that was applied
 //
-// Demonstrates the blessed patterns: pool_image() for a zero-copy output,
-// the xi::as_cv_read / xi::as_cv_write bridges, xi::Json for parsing, and
-// status() for the operator channel.
+// Demonstrates the blessed patterns: pool_image() for a zero-copy output +
+// out.adopt_image() to hand it to the pack by refcount, the xi::as_cv_read /
+// xi::as_cv_write bridges, out.fault() for the fail-loud missing-input path,
+// xi::Json for parsing, and status() for the operator channel.
 //
-// xi_plugin_support.hpp is force-included (xi::Plugin, xi::Image,
-// pool_image, the cv bridges). xi::Json is the one extra header a config
-// plugin pulls in.
+// xi_plugin_support.hpp is force-included (xi::Plugin, xi::PackIn/PackOut,
+// xi::Image, pool_image, the cv bridges). xi::Json and the canonical
+// xi::contract reason codes are the two extra headers a config plugin
+// pulls in.
 //
 
 #include <xi/xi_json.hpp>
+#include <xi/xi_contract.hpp>   // canonical fail-loud reason codes for out.fault()
 
 #include <atomic>
 #include <string>
@@ -46,39 +50,52 @@ public:
         return true;
     }
 
-    // ---- process: image in → image out ------------------------------------
-    xi::Record process(const xi::Record& in) override {
-        const xi::Image& src = in.get_image("gray");
-        if (src.empty()) return {};
+    // ---- process: the xi.pack@1 door — image in → image out ----------------
+    void process(xi::PackIn& in, xi::PackOut& out) override {
+        // Fail loud: a missing/mis-typed required input is a NORMAL sealed
+        // pack stamped with a $fault reason the caller routes to a verdict —
+        // never a silent empty default. (in.image() returns nullopt when
+        // "gray" is absent or not an image entry; no coercion.)
+        auto src = in.image("gray");
+        if (!src || !src->pixels) {
+            out.fault(xi::contract::kMissingInput, "gray",
+                      "{{NAME}}: required image 'gray' is missing");
+            return;
+        }
 
-        // A fresh single-channel output allocated IN THE HOST POOL — cv:: writes
-        // land in pool memory, so returning it is zero-copy (no heap→pool
-        // memcpy across the ABI). This is the standard way to produce an output.
-        xi::Image dst = pool_image(src.width, src.height, 1);
+        // A fresh single-channel output allocated IN THE HOST POOL — cv::
+        // writes land in pool memory, so adopt_image below hands it over
+        // zero-copy (no heap→pool memcpy across the ABI). This is the
+        // standard way to produce an output image.
+        xi::Image dst = pool_image(src->width, src->height, 1);
 
-        // Read the INPUT through as_cv_read (const view — never mutate a shared
-        // input) and WRITE the OUTPUT through as_cv_write. Collapse a colour
-        // input to gray first so the threshold has a single channel to work on.
-        cv::Mat srcMat = xi::as_cv_read(src);
+        // Read the INPUT through a non-owning view + as_cv_read (the pack's
+        // pixels are a zero-copy pool span shared with other consumers — read
+        // them, never mutate them) and WRITE the OUTPUT through as_cv_write.
+        // Collapse a colour input to gray first so the threshold has a single
+        // channel to work on.
+        xi::Image srcView = xi::Image::view(src->width, src->height, src->channels,
+                                            static_cast<const uint8_t*>(src->pixels));
+        cv::Mat srcMat = xi::as_cv_read(srcView);
         cv::Mat gray;
         if (srcMat.channels() == 1) gray = srcMat;
         else                        cv::cvtColor(srcMat, gray, cv::COLOR_BGR2GRAY);
 
-        cv::Mat out = xi::as_cv_write(dst);
-        cv::threshold(gray, out, (double)threshold_.load(), 255.0, cv::THRESH_BINARY);
+        cv::Mat binMat = xi::as_cv_write(dst);
+        cv::threshold(gray, binMat, (double)threshold_.load(), 255.0, cv::THRESH_BINARY);
 
-        const double pixels = (double)src.width * src.height;
-        const double fg_pct = pixels > 0 ? (double)cv::countNonZero(out) / pixels : 0.0;
+        const double pixels = (double)src->width * src->height;
+        const double fg_pct = pixels > 0 ? (double)cv::countNonZero(binMat) / pixels : 0.0;
         last_fg_pct_ = fg_pct;
         status("thr=" + std::to_string(threshold_.load()) +
                " fg=" + std::to_string(fg_pct));
 
-        // .image(key, img) builds the image map; .set(key, val) chains
-        // numbers / strings / bools into the JSON payload.
-        return xi::Record()
-            .image("binary", dst)
-            .set("fg_pct",    fg_pct)
-            .set("threshold", (double)threshold_.load());
+        // adopt_image hands the pool slot to the pack by refcount (zero-copy);
+        // scalars chain through the i64/f64/str/boolean builders.
+        out.adopt_image("binary", dst.width, dst.height, dst.channels,
+                        dst.pool_handle());
+        out.f64("fg_pct",    fg_pct);
+        out.i64("threshold", threshold_.load());
     }
 
     // ---- exchange: the UI / script RPC channel ----------------------------
@@ -112,3 +129,8 @@ private:
 };
 
 XI_PLUGIN_IMPL({{CLASS}})
+// Publish the xi.pack@1 pack-in/pack-out door — the host probes
+// xi_plugin_get_interface("xi.pack", 1) to learn this plugin speaks packs.
+// THE CUT (v12): this is the SOLE data-plane door, so a plugin that overrides
+// process(PackIn&, PackOut&) MUST publish it. Always after XI_PLUGIN_IMPL.
+XI_PLUGIN_PACK_DOOR({{CLASS}})

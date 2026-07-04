@@ -11,13 +11,14 @@
 //                       emitting via the blessed emit() path
 //
 // Every tier is `public xi::Plugin`, so every tier gets pool_image(),
-// status(), compress(), emit(), and the capability wrappers for free. Pick a
-// tier by how much you need, not by a different style.
+// status(), compress(), new_pack()/emit(), and the capability wrappers for
+// free. Pick a tier by how much you need, not by a different style.
 //
 // You don't need to #include anything for the basics: xi_plugin_support.hpp
 // is force-included by the project-plugin compile path, which pulls in
-// xi_abi.hpp (the XI_PLUGIN_IMPL macro + xi::Plugin base), xi_image.hpp
-// (xi::Image + xi::Image::create_in_pool), xi_record.hpp, and xi_cv.hpp
+// xi_abi.hpp (the XI_PLUGIN_IMPL / XI_PLUGIN_PACK_DOOR macros, the xi::Plugin
+// base, and the xi::PackIn / xi::PackOut views over the xi.pack@1 data
+// plane), xi_image.hpp (xi::Image + the host ImagePool bridge), and xi_cv.hpp
 // (OpenCV + the xi::as_cv_read / xi::as_cv_write zero-copy bridges). Image
 // ops: call cv:: directly.
 //
@@ -35,29 +36,44 @@ public:
 
     // ---- process — the one hook this tier overrides ------------------------
     //
-    // Called every time the inspection script does:
-    //     auto out = xi::use("{{NAME}}").process(in_record);
+    // The xi.pack@1 pack-in/pack-out door — THE data plane (the old
+    // xi::Record process() path was deleted in the v12 ABI cut). Called every
+    // time the inspection script does:
+    //     auto out = xi::use("{{NAME}}").process(in_pack);
     //
     // Image ops example (replace with your actual logic):
     //
-    //   auto src = in.get_image("src");                  // read-only INPUT
-    //   auto dst = pool_image(src.width, src.height, 1);  // writable OUTPUT
-    //   cv::threshold(xi::as_cv_read(src), xi::as_cv_write(dst), 128, 255,
+    //   auto src = in.image("src");                  // read-only INPUT view
+    //   if (!src) { out.fault("missing_input", "src"); return; }
+    //   xi::Image dst = pool_image(src->width, src->height, 1);  // writable OUTPUT
+    //   xi::Image srcView = xi::Image::view(src->width, src->height,
+    //                                       src->channels,
+    //                                       static_cast<const uint8_t*>(src->pixels));
+    //   cv::threshold(xi::as_cv_read(srcView), xi::as_cv_write(dst), 128, 255,
     //                 cv::THRESH_BINARY);
-    //   return xi::Record().image("binary", dst);
+    //   out.adopt_image("binary", dst.width, dst.height, dst.channels,
+    //                   dst.pool_handle());          // zero-copy handoff
+    //   out.i64("threshold_used", 128);              // scalars: i64/f64/str/boolean
     //
-    // Read the INPUT via as_cv_read (an input is a zero-copy view shared with
-    // other consumers — read it, never mutate it) and produce a SEPARATE OUTPUT
-    // via pool_image + as_cv_write. NEVER do an in-place cv:: op on an input
-    // (e.g. cv::threshold(as_cv_read(src), as_cv_read(src), ...)) — that corrupts
-    // every other consumer's view of the same pool slot.
+    // Read the INPUT via in.image() (its pixels are a zero-copy pool span
+    // shared with other consumers — read it, never mutate it) and produce a
+    // SEPARATE OUTPUT via pool_image + as_cv_write. NEVER write through the
+    // input's pixel pointer — that corrupts every other consumer's view of
+    // the same pool slot. The discipline is enforced: an input view is not
+    // writable, so as_cv_write on it yields an empty Mat instead of silent
+    // corruption.
     //
     // `pool_image` (inherited from xi::Plugin) allocates a fresh slot in the
-    // host's ImagePool — cv:: writes into it land there directly, and returning
-    // the Image short-circuits to addref (no memcpy across the plugin ABI).
+    // host's ImagePool — cv:: writes into it land there directly, and
+    // out.adopt_image(..., dst.pool_handle()) hands the slot to the pack by
+    // refcount (no memcpy across the plugin ABI). out.image(key, w, h, c, px)
+    // is the copying variant for pixels that don't live in the pool.
     //
-    xi::Record process(const xi::Record& /*in*/) override {
-        return xi::Record{};
+    // Leaving `out` untouched seals an EMPTY pack — the door's "no output"
+    // sentinel. A contract failure is a NORMAL sealed pack stamped with
+    // out.fault(code, key, detail) — fail loud, never a silent default.
+    //
+    void process(xi::PackIn& /*in*/, xi::PackOut& /*out*/) override {
     }
 
     // get_def()/set_def() (JSON config), exchange() (the script/UI RPC
@@ -68,6 +84,11 @@ public:
 };
 
 // XI_PLUGIN_IMPL emits the C ABI thunks (xi_plugin_create, _destroy,
-// _process, _exchange, _get_def, _set_def) that the backend's loader
-// resolves at LoadLibrary time. ALWAYS at file scope, after the class.
+// _exchange, _get_def, _set_def, _abi_version) that the backend's loader
+// resolves at LoadLibrary time. THE CUT (v12): there is no _process thunk —
+// the data plane is the xi.pack@1 door, published separately by
+// XI_PLUGIN_PACK_DOOR (it exports xi_plugin_get_interface, which the host
+// probes to learn this plugin speaks packs). Both ALWAYS at file scope,
+// after the class, in this order.
 XI_PLUGIN_IMPL({{CLASS}})
+XI_PLUGIN_PACK_DOOR({{CLASS}})

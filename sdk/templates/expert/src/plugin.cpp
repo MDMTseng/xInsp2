@@ -3,16 +3,19 @@
 //
 // The SAME xi::Plugin skeleton as easy/medium, with one more layer: a
 // background worker thread that PUSHES frames into the pipeline. While
-// running it paints a frame every `interval_ms` and emits it; a script reads
-// it back as xi::current_trigger().image("frame").
+// running it paints a frame every `interval_ms` and emits it as a sealed
+// xi.pack@1 pack; a script reads it back from the trigger:
+//     auto t = xi::current_trigger();
+//     if (auto f = t.pack()) { auto img = f.get_image("frame"); ... }
 //
 // Shows the blessed source patterns — nothing hand-rolled:
 //   - xi::spawn_worker for the SEH-safe worker thread (a stray fault on a
 //     raw std::thread with no translator brings down the whole backend)
-//   - pool_image() for a zero-copy frame + emit() to hand it to the host.
-//     emit() fills host()/name() and runs the RAII marshal/refcount path —
-//     NOT the manual host_->image_create / emit_record / image_release
-//     juggling that leaks on the first early return.
+//   - pool_image() for a zero-copy frame + new_pack()/emit() to hand it to
+//     the host. emit() seals the pack, dispatches it, and drops our ref —
+//     one call that owns the whole builder_seal / emit_pack / release
+//     refcount dance, NOT the manual C-API juggling that leaks on the
+//     first early return.
 //   - xi::Json for config + the exchange control channel
 //   - status() for the operator line
 //
@@ -56,9 +59,13 @@ public:
         return true;
     }
 
-    // A source pushes via emit() from its worker, so per-call process() is a
-    // no-op — but the base class already gives us that default, so this tier
-    // doesn't even override it.
+    // A source PUSHES via emit() from its worker, so it has no per-call data
+    // plane: this tier neither overrides process(xi::PackIn&, xi::PackOut&)
+    // nor publishes XI_PLUGIN_PACK_DOOR (the door macro is only for plugins
+    // that override the pack door). A source that ALSO wants an in-band
+    // control door — closed-loop actuation from a script, effective on the
+    // next emitted frame — overrides the door on top and adds the macro; see
+    // plugins/mock_camera for that pattern.
 
     // Control channel. The UI posts { command: "start" | "stop" |
     // "set_interval"(value) | "set_size"(width,height) | "get_status" }.
@@ -113,14 +120,18 @@ private:
             // camera you'd copy the grabbed frame in here.
             xi::Image frame = pool_image(w, h, 1);
             std::memset(frame.write(), (uint8_t)(seq & 0xFF), (size_t)w * h);
-            ++seq;
 
-            // Hand the frame to the host. emit() fills host()/name(), marshals
-            // the image through the pool refcount path, and mints a fresh
-            // trigger id (ts = host now) — one call, no manual refcount balance.
-            xi::Record rec;
-            rec.image("frame", frame);
-            emit(rec);
+            // Hand the frame to the host as a sealed xi.pack@1 pack — the sole
+            // data plane (v12). new_pack() starts a host-side builder;
+            // adopt_image hands the pool slot to the pack by refcount (no
+            // memcpy — the pack addrefs, `frame` keeps its own ref); emit()
+            // seals + dispatches and mints a fresh trigger id (ts = host now)
+            // — one call, no manual refcount balance.
+            xi::PackOut f = new_pack();
+            f.i64("seq", (int64_t)seq);
+            f.adopt_image("frame", w, h, 1, frame.pool_handle());
+            emit(std::move(f));
+            ++seq;
             emit_count_.fetch_add(1);
 
             std::this_thread::sleep_for(std::chrono::milliseconds(iv));
@@ -136,4 +147,6 @@ private:
     std::thread           worker_;
 };
 
+// No XI_PLUGIN_PACK_DOOR here on purpose: a pure source pushes via emit()
+// and never overrides the pack door (see the note above process()'s slot).
 XI_PLUGIN_IMPL({{CLASS}})
