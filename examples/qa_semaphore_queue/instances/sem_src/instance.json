@@ -1,0 +1,1 @@
+{ "plugin": "sem_queue", "isolation": "in_process", "group": "q", "config": { "role": "source", "permits": 4, "backlog": 200 } }
