@@ -276,6 +276,17 @@ void cmd_remove_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         bool delete_folder =
             parsed->args_json.find("\"delete_folder\":true") != std::string::npos;
+        // Finding 5 (red-team): remove_instance DESTROYS a DLL-backed runtime
+        // object (adapter dtor → xi_plugin_destroy + pack/cap owner sweeps) while
+        // dispatch workers and backpressured in-flight events may still hold
+        // owner-tagged refs to that instance. This was the ONLY DLL-affecting
+        // lifecycle op with no quiesce guard; every sibling (recompile/rebuild/
+        // commit/close/open/rename-via-reload) quiesces first. Pause detached
+        // launches, drop the bus sink, stop + drain the dispatch pool BEFORE the
+        // destroy, then resume (default) so continuous streaming for the
+        // remaining instances comes back on scope exit. Closes the ledger
+        // mis-attribution UAF window and narrows the cap-plane transient.
+        auto _rm_guard = quiesce_dispatch_for_lifecycle_op_("remove_instance", &srv);
         if (g_eng.plugin_mgr.remove_instance(*iname, delete_folder)) {
             // remove_instance drops the lifecycle state internally (atomic with the
             // unregister) — no separate drop_inst_state needed. Health contract:
