@@ -1,7 +1,7 @@
 {
   "plugin": "local_image_source",
   "config": {
-    "dir": "examples/blob_tracker/frames",
+    "dir": "examples/qa_local_auto/frames",
     "auto_ms": 300
   }
 }
