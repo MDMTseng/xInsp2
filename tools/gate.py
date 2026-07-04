@@ -26,9 +26,12 @@ STAGES (in order; stop on first failure unless --keep-going)
               CLI (sdk/host_mock) + a scaffold-and-compile of every plugin
               template (easy/medium/expert incl. their UI panels)
     ctest     the full C++ ctest suite (unit + integration + the perf gates
-              + script_selfcheck; also re-runs doc_coverage/retired_terms).
-              contract_live is excluded here — the `live` stage below runs it
-              under THIS gate's python with skipping forbidden
+              + script_selfcheck; also re-runs doc_coverage/retired_terms) from
+              backend/build, THEN the plugins/build pack suite (~16 tests incl.
+              the red-team regressions use_pack_door_test / record_replay_pack_
+              test — built by `build` but never previously run). contract_live
+              is excluded here — the `live` stage below runs it under THIS
+              gate's python with skipping forbidden
     fixtures  pytest tools/xinsp2_py/tests — the protocol golden-fixture
               round-trip (no live backend)
     live      contract/live_conformance.py — the third contract leg (live WS
@@ -231,14 +234,27 @@ def stage_sdk(_args) -> None:
 def stage_ctest(_args) -> None:
     """Full C++ suite: unit + integration + perf gates + doc gates + selfcheck.
 
-    contract_live is excluded (-E): the `live` stage runs the same script once
-    under THIS gate's python with XINSP2_REQUIRE_SCHEMA_GATE=1, which is
-    strictly stronger than the ctest variant (that one runs under the
-    configure-time Python3_EXECUTABLE and may self-skip if that interpreter
-    lacks jsonschema/websocket-client). The session cold-compiles a script via
-    cl.exe, so unlike the doc gates this overlap is NOT cheap — run it once."""
+    Two ctest trees, both built by the `build` stage:
+      1. backend/build — the core suite. contract_live is excluded (-E): the
+         `live` stage runs the same script once under THIS gate's python with
+         XINSP2_REQUIRE_SCHEMA_GATE=1, which is strictly stronger than the ctest
+         variant (that one runs under the configure-time Python3_EXECUTABLE and
+         may self-skip if that interpreter lacks jsonschema/websocket-client).
+         The session cold-compiles a script via cl.exe, so unlike the doc gates
+         this overlap is NOT cheap — run it once.
+      2. plugins/build — the ~16-test plugin pack suite (cap_imgcodec_test,
+         expose_pack_test, pack_order_gate_test, record_save_pack_test, ...).
+         These are BUILT by the build stage but were never RUN by the gate, so
+         the red-team pack regressions — use_pack_door_test (§8b/F1: the
+         use-after-swap door) and record_replay_pack_test (§G/F5) — rode a green
+         gate untested. Run them here so any plugins ctest failure fails the
+         gate. The plugins suite has no quarantine/exclusions of its own (the
+         qa_* flakies quarantined via examples/qa_known_failing.txt are the
+         `qa` stage's, not ctests)."""
     _run(["ctest", "--test-dir", BACKEND_BUILD, "-C", "Release",
           "--output-on-failure", "-E", "^contract_live$"])
+    _run(["ctest", "--test-dir", PLUGINS_BUILD, "-C", "Release",
+          "--output-on-failure"])
 
 
 def stage_fixtures(_args) -> None:
