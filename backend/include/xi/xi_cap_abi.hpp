@@ -56,10 +56,13 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <iterator>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace xi {
 
@@ -88,27 +91,47 @@ public:
 
     // Caller has already validated args + lifecycle context (f_cap_register).
     // Same-owner re-registration OVERWRITES (the reinit path: the fresh factory
-    // re-registers over its predecessor); a name held by ANOTHER live instance
-    // is refused — provider identity is configuration, not a race to the slot.
+    // re-registers over its predecessor). A name held by ANOTHER live instance
+    // is still REFUSED to the caller (XI_CAP_REG_ETAKEN — provider identity is
+    // configuration, not a race to the slot), BUT the losing registration is now
+    // REMEMBERED as a shadow (B1 fix): if the current holder is later removed,
+    // the most-recent live shadow is PROMOTED so the capability keeps resolving.
+    // Before this, a 2nd project instance of a provider plugin got ETAKEN and was
+    // silently live-but-unregistered; removing the 1st instance then swept the
+    // name, leaving the capability permanently GONE with a live provider.
     int32_t register_capability(const char* name, xi_cap_handler_fn handler,
                                 void* self, ImagePoolOwnerId owner) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = entries_.find(name);
-        if (it != entries_.end() && it->second.owner != owner)
-            return XI_CAP_REG_ETAKEN;
-        entries_[name] = Entry{handler, self, owner};
-        return XI_CAP_REG_OK;
+        if (it == entries_.end()) {
+            entries_[name] = Entry{handler, self, owner};
+            return XI_CAP_REG_OK;
+        }
+        if (it->second.owner == owner) {   // same owner: overwrite (reinit path)
+            it->second = Entry{handler, self, owner};
+            return XI_CAP_REG_OK;
+        }
+        // Held by another owner: shadow it (dedup per owner) and report ETAKEN.
+        auto& st = shadows_[name];
+        for (auto& e : st)
+            if (e.owner == owner) { e = Entry{handler, self, owner}; return XI_CAP_REG_ETAKEN; }
+        st.push_back(Entry{handler, self, owner});
+        return XI_CAP_REG_ETAKEN;
     }
 
     // Unregister by name, gated on the calling instance's identity (only the
-    // owner may drop its registration; `self` is not trusted as identity).
+    // owner may drop its registration; `self` is not trusted as identity). If
+    // the owner held the ACTIVE name, promote a shadow into its place (B1).
     int32_t unregister_capability(const char* name, ImagePoolOwnerId owner) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = entries_.find(name);
-        if (it == entries_.end() || it->second.owner != owner)
-            return XI_CAP_REG_EINVAL;
-        entries_.erase(it);
-        return XI_CAP_REG_OK;
+        if (it != entries_.end() && it->second.owner == owner) {
+            promote_or_erase_(it);
+            return XI_CAP_REG_OK;
+        }
+        // Not the active holder — maybe a shadow the owner still has queued.
+        if (drop_shadow_(name, owner)) return XI_CAP_REG_OK;
+        return XI_CAP_REG_EINVAL;
     }
 
     bool lookup(const char* name, Entry* out) {
@@ -121,14 +144,25 @@ public:
 
     // The owner sweep — the registration analogue of PackRegistry::
     // release_all_for. Drops every capability the dying (or about-to-be-
-    // rebuilt) instance still provides; returns the count for the teardown
-    // diagnostic.
+    // rebuilt) instance still provides — as the ACTIVE holder (promoting a
+    // shadow into its place) OR as a queued shadow; returns the count for the
+    // teardown diagnostic.
     int unregister_all_for(ImagePoolOwnerId owner) {
         if (owner == 0) return 0;
         std::lock_guard<std::mutex> lk(mu_);
         int n = 0;
+        // Drop this owner from every shadow queue first (a losing registration
+        // this instance never got to activate).
+        for (auto sit = shadows_.begin(); sit != shadows_.end();) {
+            auto& st = sit->second;
+            for (auto e = st.begin(); e != st.end();) {
+                if (e->owner == owner) { e = st.erase(e); ++n; } else ++e;
+            }
+            if (st.empty()) sit = shadows_.erase(sit); else ++sit;
+        }
+        // Then any ACTIVE name this owner holds: promote a shadow or erase it.
         for (auto it = entries_.begin(); it != entries_.end();) {
-            if (it->second.owner == owner) { it = entries_.erase(it); ++n; }
+            if (it->second.owner == owner) { it = promote_or_erase_(it); ++n; }
             else ++it;
         }
         return n;
@@ -140,8 +174,38 @@ public:
     }
 
 private:
+    // Replace the active entry at `it` with the most-recent shadow (if any) or
+    // erase it. Returns the iterator to the next active entry (erase-safe).
+    std::unordered_map<std::string, Entry>::iterator
+    promote_or_erase_(std::unordered_map<std::string, Entry>::iterator it) {
+        auto sit = shadows_.find(it->first);
+        if (sit != shadows_.end() && !sit->second.empty()) {
+            it->second = sit->second.back();
+            sit->second.pop_back();
+            if (sit->second.empty()) shadows_.erase(sit);
+            return std::next(it);   // promoted in place — advance past it
+        }
+        return entries_.erase(it);
+    }
+
+    bool drop_shadow_(const std::string& name, ImagePoolOwnerId owner) {
+        auto sit = shadows_.find(name);
+        if (sit == shadows_.end()) return false;
+        auto& st = sit->second;
+        for (auto e = st.begin(); e != st.end(); ++e)
+            if (e->owner == owner) {
+                st.erase(e);
+                if (st.empty()) shadows_.erase(sit);
+                return true;
+            }
+        return false;
+    }
+
     std::mutex mu_;
     std::unordered_map<std::string, Entry> entries_;
+    // Shadowed (ETAKEN) registrations, most-recent last, promoted when the
+    // active holder for the name is unregistered/swept (B1 ref-count).
+    std::unordered_map<std::string, std::vector<Entry>> shadows_;
 };
 
 namespace cap_abi_detail {
@@ -246,6 +310,15 @@ inline int32_t f_cap_call(const char* name, xi_pack_handle in, xi_pack_handle* o
     CapStackFrame provider_frame((uint64_t)e.owner);
     DataPlaneMark dp;
     ImagePool::OwnerGuard og(e.owner);
+    // A1/A2 (redteam doc 21): pin inst_ against a concurrent reinit for the whole
+    // handler run. reinit destroys the OLD inst_ under the EXCLUSIVE side of this
+    // gate; hold the SHARED side here and RE-RESOLVE the live handler/self UNDER
+    // it, so we never call a handler whose inst_ a reinit is about to (or already
+    // did) free. If reinit swept+rebuilt in the window, the fresh registration is
+    // visible under the lock (fresh self); the mid-sweep gap reads as EUNKNOWN.
+    std::shared_lock<std::shared_mutex> reinit_lk(adapter->cap_reinit_gate());
+    if (!CapRegistry::instance().lookup(name, &e)) return XI_CAP_EUNKNOWN;
+    if (e.owner != adapter->owner_id() || !e.handler) return XI_CAP_ESHAPE;
     try {
         *out = e.handler(e.self, in);
         return XI_CAP_OK;

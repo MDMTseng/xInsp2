@@ -29,6 +29,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <shared_mutex>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -478,6 +479,18 @@ public:
         reinit_factory_ = factory; reinit_host_ = host;
     }
 
+    // A1/A2 (redteam doc 21) — the reinit gate. The capability funnel runs the
+    // provider handler under NO CallScope (providers contract to be thread-safe),
+    // so reinit()'s destroy_fn_(old) could free inst_ under a concurrent cap
+    // handler — the shared_ptr pin protects the ADAPTER, not inst_. A cap call
+    // takes the SHARED side of this gate around its handler run (and re-resolves
+    // the live handler/self under it); reinit takes the EXCLUSIVE side around the
+    // destroy of the old inst_, so the destroy waits out every in-flight handler
+    // and no handler ever runs against a freed inst_. Reader-writer, not a plain
+    // mutex, so concurrent HEAVY cap calls (doc 14 sizing) still run in parallel;
+    // the exclusive lock is taken only on the rare fault/reinit path.
+    std::shared_mutex& cap_reinit_gate() const { return cap_gate_; }
+
     // Consecutive-rebuild-failure accounting (escalation to refuse after
     // kReinitEscalateAfter). Touched only on the rare fault/reinit path, but from a
     // dispatch worker (bump) and the control thread (reset via re-enable), so atomic.
@@ -513,7 +526,16 @@ public:
         if (!fresh) return false;                  // keep the old instance live
         void* old = inst_;
         inst_ = fresh;                             // swap BEFORE destroying old
-        if (destroy_fn_ && old) { try { destroy_fn_(old); } catch (...) {} }
+        // A1/A2 (redteam doc 21): the cap funnel runs the provider handler with
+        // no CallScope, so a concurrent cap handler may still be executing against
+        // `old`. Take the EXCLUSIVE side of the reinit gate before destroying it —
+        // this blocks until every in-flight cap handler (each holding the SHARED
+        // side and re-resolving the live handler under it) has drained, so the
+        // destroy can never free inst_ out from under a running handler.
+        {
+            std::unique_lock<std::shared_mutex> gate(cap_gate_);
+            if (destroy_fn_ && old) { try { destroy_fn_(old); } catch (...) {} }
+        }
         // Restore the last committed config onto the fresh instance. (We do NOT
         // sweep the old instance's leaked pool images here — both share owner_id_,
         // so a sweep would also free the fresh ctor's images; the rare residual is
@@ -625,6 +647,9 @@ private:
     PluginInfo::CFactoryFn reinit_factory_ = nullptr;    // armed by the PM
     const xi_host_api*     reinit_host_ = nullptr;       // armed by the PM
     std::string            committed_def_;               // last accepted config (for reinit)
+    // A1/A2 reinit gate: cap calls take it SHARED, reinit's destroy takes it
+    // EXCLUSIVE (see cap_reinit_gate()).
+    mutable std::shared_mutex cap_gate_;
 };
 
 } // namespace xi

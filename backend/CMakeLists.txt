@@ -110,7 +110,8 @@ target_include_directories(xi_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 )
-# xi_record.hpp is backed by yyjson — every xi_core user links it.
+# xi_json.hpp (the JSON/config/manifest layer) is backed by yyjson — every
+# xi_core user links it.
 target_link_libraries(xi_core INTERFACE yyjson)
 
 # xi_fe — the FE-supervisor header surface (crash history/report, fe_status,
@@ -332,6 +333,34 @@ add_dependencies(test_cap_plane cap_test_plugin)
 target_compile_definitions(test_cap_plane PRIVATE
     CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
 add_test(NAME cap_plane_test COMMAND test_cap_plane)
+
+# B1 regression (red-team hardening): a 2nd project instance of the same
+# capability-provider plugin is shadowed (ETAKEN) but REMEMBERED, and PROMOTED
+# when the 1st instance is removed — the capability is no longer left
+# permanently gone with a live provider.
+add_executable(test_cap_provider_refcount tests/test_cap_provider_refcount.cpp)
+target_link_libraries(test_cap_provider_refcount PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_cap_provider_refcount PRIVATE Ws2_32)
+endif()
+add_dependencies(test_cap_provider_refcount cap_test_plugin)
+target_compile_definitions(test_cap_provider_refcount PRIVATE
+    CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
+add_test(NAME cap_provider_refcount COMMAND test_cap_provider_refcount)
+
+# A1/A2 regression (red-team hardening): concurrent cap calls vs in-place
+# reinit() on the same adapter. The reinit gate (reader/writer) must keep the
+# provider handler from running against a freed inst_ — a UAF probe best run
+# under ASan/TSan, but also a Release deadlock/crash net.
+add_executable(test_cap_reinit_race tests/test_cap_reinit_race.cpp)
+target_link_libraries(test_cap_reinit_race PRIVATE xi_core)
+if(WIN32)
+    target_link_libraries(test_cap_reinit_race PRIVATE Ws2_32)
+endif()
+add_dependencies(test_cap_reinit_race cap_test_plugin)
+target_compile_definitions(test_cap_reinit_race PRIVATE
+    CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
+add_test(NAME cap_reinit_race COMMAND test_cap_reinit_race)
 
 # V3 machine-level lib-plugin autoload (doc 14 / doc 19 V3): the REAL
 # PluginManager scans + autoloads cap_test_plugin (marked lib+autoload) and
