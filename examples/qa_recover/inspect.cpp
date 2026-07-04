@@ -7,14 +7,17 @@
 //
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& healer = xi::use("healer");
-    auto out = healer.process(xi::Record().set("frame", frame));
+    xi::ScriptPackBuilder ib;
+    ib.add_i64("frame", frame);
+    auto out = xi::use("healer").process(ib.seal());   // drive healer's xi.pack@1 door
     // Surface the healer's count + recovery flag through `expose` (channel "qa").
-    xi::use("expose").process(xi::Record()
-        .set("$channel", "qa")
-        .set("count", out["count"].as_int(-1))
-        .set("recovered", out["recovered"].as_int(0)));
+    xi::ScriptPackBuilder rb;
+    rb.add_str("$channel", "qa");
+    rb.add_i64("count", out.get_i64("count").value_or(-1));
+    rb.add_i64("recovered", out.get_i64("recovered").value_or(0));
+    xi::use("expose").push(rb.seal());
 }

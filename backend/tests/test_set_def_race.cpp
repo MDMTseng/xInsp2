@@ -15,6 +15,7 @@
 //             → expect torn reads (the plugin would have to protect itself).
 //
 #include <xi/xi_cabi_adapter.hpp>
+#include <xi/xi_pack_abi.hpp>
 
 #ifdef _WIN32
   #include <windows.h>
@@ -54,10 +55,8 @@ static long long run_round(HMODULE dll, bool reentrant) {
 
     std::thread proc([&] {
         for (long long i = 0; i < N; ++i) {
-            xi_record in{};
-            xi_record_out out; xi_record_out_init(&out);
-            adapter.process(&in, &out);
-            xi_record_out_free(&out);
+            xi_pack_handle out = adapter.run_pack_door(XI_PACK_NULL);
+            if (out != XI_PACK_NULL) xi::pack_v1_iface()->release(out);
         }
         stop.store(true);
     });

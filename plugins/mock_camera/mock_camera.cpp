@@ -9,7 +9,7 @@
 //      mock_camera.cpp /Fe:mock_camera.dll
 //
 
-#include <xi/xi_abi.hpp>       // xi::Plugin, xi::Record, xi::Image, pool_image()/emit()
+#include <xi/xi_abi.hpp>       // xi::Plugin, xi::PackOut, xi::Image, pool_image()/emit()
 #include <xi/xi_thread.hpp>    // xi::spawn_worker — SEH-safe capture thread
 #include <xi/xi_json.hpp>      // parses set_def/exchange (canonical over cmd.find)
 #include <xi/xi_contract.hpp>  // fail-loud command inputs + schema-skew errors
@@ -159,15 +159,11 @@ public:
 
     // ---- pack-door CONSUMER (polaris2 ex-feedback) --------------------------
     //
-    // The other half of the bilingual source: mock_camera EMITS pack frames
-    // (run_loop below) and now also ACCEPTS control packs through its own
-    // xi.pack@1 door — the closed-loop pattern (analysis in the script,
-    // actuation back into the source, effective on the NEXT emitted frame:
-    // frame-latency control, examples/qa_pack_feedback). The door speaks the
-    // same command vocabulary as exchange(): {command:"set_gain", value:f64}.
-    // Strictly ADDITIVE — the Record emit path is byte-for-byte untouched and
-    // a Record-mode project never routes anything here.
-    using xi::Plugin::process;   // keep the Record process() overload visible
+    // mock_camera EMITS pack frames (run_loop below) and ACCEPTS control packs
+    // through this same xi.pack@1 door — the closed-loop pattern (analysis in the
+    // script, actuation back into the source, effective on the NEXT emitted frame:
+    // frame-latency control, examples/qa_pack_feedback). The door speaks the same
+    // command vocabulary as exchange(): {command:"set_gain", value:f64}.
     void process(xi::PackIn& in, xi::PackOut& out) override {
         auto cmd = in.str(keys::kCommand);
         if (!cmd) {
@@ -269,38 +265,27 @@ private:
             }
             draw_number(img, 4, 4, seq);
 
-            // polaris2 wave-2: in pack mode, emit on the v3 Pack plane instead
-            // of a Record — the pack carries the same pixels (adopt_image is a
-            // zero-copy pool-handle addref, not a memcpy) plus a "seq" entry. The
-            // Record path below is the unchanged default; only a project that set
-            // pack_mode (and a host that publishes xi.pack@1) takes this branch.
-            if (pack_mode_.load() && pack_iface()) {
-                // ex-feedback: apply the door-controlled brightness gain to THIS
-                // frame (saturating multiply; 1.0 is the identity). Pack-mode
-                // only — the Record branch below never scales a pixel. The pack
-                // ECHOES the gain it was painted with, so a closed-loop script
-                // controls against the actual per-frame plant state.
-                const double g = gain_.load();
-                if (g != 1.0) {
-                    const size_t n = (size_t)w * (size_t)h * 3;
-                    for (size_t i = 0; i < n; ++i) {
-                        const double v = p[i] * g;
-                        p[i] = v >= 255.0 ? (uint8_t)255 : (uint8_t)(v + 0.5);
-                    }
+            // v12: the sealed xi.pack@1 Pack is the sole data plane. Emit the
+            // frame's pixels (adopt_image is a zero-copy pool-handle addref, not a
+            // memcpy) plus a "seq" entry and the gain it was painted with.
+            //
+            // ex-feedback: apply the door-controlled brightness gain to THIS frame
+            // (saturating multiply; 1.0 is the identity). The pack ECHOES the gain
+            // so a closed-loop script controls against the actual per-frame plant
+            // state.
+            const double g = gain_.load();
+            if (g != 1.0) {
+                const size_t n = (size_t)w * (size_t)h * 3;
+                for (size_t i = 0; i < n; ++i) {
+                    const double v = p[i] * g;
+                    p[i] = v >= 255.0 ? (uint8_t)255 : (uint8_t)(v + 0.5);
                 }
-                xi::PackOut f = new_pack();
-                f.i64(keys::kSeq, seq);
-                f.f64(keys::kGain, g);
-                f.adopt_image(keys::kFrame, w, h, 3, img.pool_handle());
-                emit(std::move(f));
-            } else {
-                // emit() fills host()/name(), mints a fresh trigger id, and runs the
-                // RAII marshal/refcount path — the member sibling of the free
-                // xi::emit_record, no manual host_-> juggling.
-                xi::Record rec;
-                rec.image(keys::kFrame, img);
-                emit(rec);
             }
+            xi::PackOut f = new_pack();
+            f.i64(keys::kSeq, seq);
+            f.f64(keys::kGain, g);
+            f.adopt_image(keys::kFrame, w, h, 3, img.pool_handle());
+            emit(std::move(f));
             seq_.fetch_add(1);
 
             int sleep_ms = 1000 / std::max(fps, 1);

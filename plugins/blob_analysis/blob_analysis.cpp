@@ -127,95 +127,16 @@ class BlobAnalysis : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    xi::Record process(const xi::Record& input) override {
-        // Guard 3: reject a script compiled against an incompatible header
-        // version with a precise error that names both versions.
-        if (auto skew = xi::contract::check_schema(input, xi::blob::kSchemaVersion))
-            return *skew;
-
-        // Guard 2: a missing/mis-typed required input is a structured, fail-loud
-        // failure the script maps to a verdict — never a silent default.
-        if (auto miss = xi::contract::require_image(input, keys::kGray, 1))
-            return *miss;
-
-        // Schemaless tolerance retained: unknown extra keys are ignored, warned once.
-        xi::contract::warn_unknown_keys(
-            input,
-            {keys::kGray, keys::kThreshold, keys::kMinArea, keys::kMaxArea, keys::kInvert},
-            warned_unknown_, [this](const std::string& m) { log_warn(m); });
-
-        const xi::Image& gray = input.get_image(keys::kGray);
-
-        // Snapshot config defaults under the lock (exchange()/set_def() write them
-        // from another thread); per-frame input keys override each default.
-        int def_thresh, def_min, def_max; bool def_inv;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            def_thresh = thresh_; def_min = min_area_; def_max = max_area_; def_inv = invert_;
-        }
-        int thresh   = input[keys::kThreshold].as_int(def_thresh);
-        int min_area = input[keys::kMinArea].as_int(def_min);
-        int max_area = input[keys::kMaxArea].as_int(def_max);
-        bool inv     = input[keys::kInvert].as_bool(def_inv);
-
-        int w = gray.width, h = gray.height;
-
-        // Threshold — write straight into a pool slot so the cross-ABI return
-        // path is a zero-copy addref, not a heap-to-pool memcpy.
-        xi::Image binary = pool_image(w, h, 1);
-        const uint8_t* sp = gray.read();
-        uint8_t* dp = binary.write();
-        if (!dp) return xi::Record::na("blob_analysis: could not allocate output image");
-        for (int i = 0; i < w * h; ++i) {
-            if (inv)
-                dp[i] = (sp[i] < thresh) ? 255 : 0;
-            else
-                dp[i] = (sp[i] > thresh) ? 255 : 0;
-        }
-
-        // Find blobs
-        auto blobs = find_blobs(dp, w, h, min_area, max_area);
-
-        // Build output
-        xi::Record out;
-        out.image(keys::kBinary, std::move(binary));
-        out.set(keys::kBlobCount, (int)blobs.size());
-        out.set(keys::kThresholdUsed, thresh);
-
-        for (auto& b : blobs) {
-            xi::Record blob_rec;
-            blob_rec.set(keys::kArea, b.area);
-            blob_rec.set(keys::kCx, b.cx);
-            blob_rec.set(keys::kCy, b.cy);
-            blob_rec.set(keys::kMinX, b.min_x);
-            blob_rec.set(keys::kMinY, b.min_y);
-            blob_rec.set(keys::kMaxX, b.max_x);
-            blob_rec.set(keys::kMaxY, b.max_y);
-            blob_rec.set(keys::kContourPoints, (int)b.contour.size());
-
-            // Store contour as array of {x,y} objects
-            for (auto& [px, py] : b.contour) {
-                blob_rec.push(keys::kContour, xi::Record().set(keys::kX, px).set(keys::kY, py));
-            }
-
-            out.push(keys::kBlobs, std::move(blob_rec));
-        }
-
-        cache_result(out);
-        return out;
-    }
-
     // polaris2 wave-2 (docs/new_gen/08 Wave 2): the xi.pack@1 pack-in/pack-out
-    // door. Consumes the SAME contract keyset as the Record process() above (the
-    // blob_analysis_keys.h constants ARE the pack schema — read via PackIn's
-    // typed accessors, no string literals at the call sites) and produces its
-    // outputs as a pack: the binary image entry, the scalar counts, and the
-    // blobs array (incl. each blob's contour polygon) as ONE nested canonical-
-    // msgpack entry (doc 07 D3 — nesting is msgpack's job). Fail-loud carries
-    // over: a missing/mis-typed 'gray' is a normal sealed pack stamped with the
-    // xi::contract reason code (PackOut::fault), which the caller routes to a
-    // verdict — never a silent default. The Record process() above is untouched;
-    // this instance speaks BOTH currencies.
+    // door — THE data plane (v12: the Record process path is deleted). Consumes
+    // the contract keyset (the blob_analysis_keys.h constants ARE the pack schema
+    // — read via PackIn's typed accessors, no string literals at the call sites)
+    // and produces its outputs as a pack: the binary image entry, the scalar
+    // counts, and the blobs array (incl. each blob's contour polygon) as ONE
+    // nested canonical-msgpack entry (doc 07 D3 — nesting is msgpack's job).
+    // Fail-loud: a missing/mis-typed 'gray' is a normal sealed pack stamped with
+    // the xi::contract reason code (PackOut::fault), which the caller routes to a
+    // verdict — never a silent default.
     void process(xi::PackIn& in, xi::PackOut& out) override {
         auto gray = in.image(keys::kGray);
         if (!gray || !gray->pixels) {
@@ -285,15 +206,7 @@ public:
         if      (command == "set_threshold") thresh_   = p["value"].as_int(thresh_);
         else if (command == "set_min_area")  min_area_ = p["value"].as_int(min_area_);
         else if (command == "set_invert")    invert_   = p["value"].as_bool(invert_);
-        else if (command == "get_last_result" && last_result_json_.size() > 2)
-            return last_result_json_;
         return get_def_locked_();
-    }
-
-    // Cache last process result so the UI can fetch it via exchange.
-    void cache_result(const xi::Record& r) {
-        std::lock_guard<std::mutex> lk(mu_);
-        last_result_json_ = r.data_json();
     }
 
     std::string get_def() const override {
@@ -323,13 +236,11 @@ private:
             .dump();
     }
 
-    mutable std::mutex mu_;   // guards config members + last_result_json_
+    mutable std::mutex mu_;   // guards config members
     int thresh_ = 128;
     int min_area_ = 10;
     int max_area_ = 999999;
     bool invert_ = false;
-    bool warned_unknown_ = false;
-    std::string last_result_json_;
 };
 
 XI_PLUGIN_IMPL(BlobAnalysis)

@@ -24,7 +24,6 @@
 
 #include <xi/xi_contract.hpp>
 #include <xi/xi_json.hpp>
-#include <xi/xi_record.hpp>
 
 #include <string>
 
@@ -75,17 +74,10 @@ private:
     }
 };
 
-// ---- Capture acknowledgement (reads the process() output Record) -----------
-// process() returns {"buffered": <ring size>}. The buffered payload itself is
-// open — this reads only the ack the plugin stamps.
-class Capture {
-public:
-    explicit Capture(xi::Record rec) : rec_(std::move(rec)) {}
-    int buffered() const { return rec_.get_int(keys::kBuffered); }
-    const xi::Record& record() const { return rec_; }
-private:
-    xi::Record rec_;
-};
+// ---- Capture acknowledgement --------------------------------------------
+// (v12: the process() ack rides the xi.pack@1 door as {buffered:<ring size>} —
+// read it via the pack accessors at the driver, not a Record view. The Record-
+// based Capture class was removed with the Record data plane.)
 
 // ---- Status extractor (reads the get_def reply) ----------------------------
 class Status {

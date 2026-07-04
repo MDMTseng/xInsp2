@@ -26,8 +26,6 @@
 #include "xi_fault_policy.hpp"    // OnFault (per-instance post-fault policy, item 14)
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
-#include "xi_record.hpp"          // γ: yyjson_layout_stamp() for the doc-pointer gate
-#include "xi_record_schema.hpp"   // OQ-7: opt-in static Record field contract
 
 #include <atomic>
 #include <condition_variable>
@@ -41,22 +39,24 @@
 
 namespace xi {
 
-// Plugin ABI compatibility check. Two gates, run at load (caller FreeLibrary +
-// skip + record the warning on a false return):
-//   1. ABI VERSION — reads xi_plugin_abi_version(); a plugin requesting a newer
-//      ABI than the host provides is refused, as is one OLDER than
-//      XI_ABI_MIN_COMPAT (built against a pre-layout-break xi_host_api — see the
-//      macro in xi_abi.h). A pre-versioning plugin (no export) is treated as v1,
-//      so it too falls below the floor and is refused.
-//   2. yyjson LAYOUT (γ-4) — reads xi_yyjson_abi(); if it doesn't match the
-//      host's stamp (different yyjson build/version) or is absent, the plugin can
-//      only run the slow JSON-serialize path on every dispatch. We REFUSE it by
-//      default so that perf cliff is visible, unless the manifest opted in with
-//      `"json_fallback": true` (json_fallback_opt_in) — then it loads on the JSON
-//      path with a one-shot warning.
+// Plugin ABI compatibility check — the ABI VERSION gate, run at load (caller
+// FreeLibrary + skip + record the warning on a false return). Reads
+// xi_plugin_abi_version(): a plugin requesting a newer ABI than the host
+// provides is refused, as is one OLDER than XI_ABI_MIN_COMPAT (built against a
+// pre-layout-break xi_host_api — see the macro in xi_abi.h). A pre-versioning
+// plugin (no export) is treated as v1, so it too falls below the floor and is
+// refused.
+//
+// [ABI v12 — THE CUT] The former γ-4 yyjson-LAYOUT gate is GONE: a v12 plugin
+// has no yyjson doc path (the Record doc-pointer dispatch was deleted; the data
+// plane is the xi.pack@1 door), so there is nothing to gate on. The
+// `json_fallback_opt_in` parameter is retained for ABI/call-site stability but
+// no longer consulted. A plugin loads iff its ABI version passes min-compat and
+// it publishes what it needs (the required-capability handshake below).
 inline bool plugin_abi_compatible(HMODULE dll, const std::string& plugin_name,
                                   bool json_fallback_opt_in,
                                   std::string* err_msg = nullptr) {
+    (void)json_fallback_opt_in;   // THE CUT: no yyjson-layout gate remains
     using AbiVerFn = int (*)();
     auto fn = reinterpret_cast<AbiVerFn>(GetProcAddress(dll, "xi_plugin_abi_version"));
     int v = fn ? fn() : 1;
@@ -74,25 +74,6 @@ inline bool plugin_abi_compatible(HMODULE dll, const std::string& plugin_name,
                                 "memory) — rebuild it against the current ABI v"
                               + std::to_string(XI_ABI_VERSION);
         return false;
-    }
-    // γ-4 yyjson layout gate.
-    auto yfn = reinterpret_cast<uint32_t(*)()>(GetProcAddress(dll, "xi_yyjson_abi"));
-    bool layout_ok = yfn && (yfn() == xi::yyjson_layout_stamp());
-    if (!layout_ok) {
-        if (!json_fallback_opt_in) {
-            if (err_msg) *err_msg = "plugin '" + plugin_name + "' has an incompatible "
-                "yyjson layout (" + (yfn ? "different yyjson build/version"
-                                         : "no xi_yyjson_abi export")
-                + ") — it can only run the slow JSON-serialize path, not the "
-                  "zero-copy doc path. Rebuild it against the host's vendored "
-                  "yyjson, or set \"json_fallback\": true in its plugin.json to "
-                  "allow the JSON path.";
-            return false;
-        }
-        std::fprintf(stderr,
-            "[xinsp2] '%s': yyjson layout mismatch — running on JSON fallback "
-            "(json_fallback opt-in; serializes every dispatch)\n",
-            plugin_name.c_str());
     }
     return true;
 }
@@ -122,12 +103,11 @@ struct PluginInfo {
     // default — only plugins that opt in get true per-instance parallelism.
     // See docs/guides/write-a-script.md (parallelism) + docs/guides/write-a-plugin.md.
     bool        reentrant = false;
-    // Opt-in (plugin.json `"json_fallback": true`): allow this plugin to load
-    // even when its yyjson layout doesn't match the host's — it then runs the
-    // slow JSON-serialize path on every dispatch instead of the zero-copy doc
-    // path. Without it, a layout mismatch (or a plugin with no xi_yyjson_abi
-    // export) is REFUSED at load so the perf cliff is never silent. See
-    // plugin_abi_compatible / docs/reference/c-abi.md.
+    // [ABI v12 — THE CUT] Vestigial. Parsed from plugin.json `"json_fallback"`
+    // for manifest back-compat, but NO LONGER CONSULTED: the yyjson-layout load
+    // gate it opted out of was deleted with the Record doc path (a v12 plugin's
+    // data plane is the xi.pack@1 door — no yyjson doc crosses the ABI). Kept as
+    // a field so an older manifest carrying the key still parses cleanly.
     bool        json_fallback = false;
     // Build mode (plugin.json `"build"`): `"source"` (default) = the backend
     // compiles the plugin's .cpp with cl.exe in-place (PluginDev flags). `"cmake"`
@@ -289,35 +269,17 @@ public:
         get_def_fn_  = reinterpret_cast<xi_plugin_get_def_fn>(GetProcAddress(dll_, "xi_plugin_get_def"));
         set_def_fn_  = reinterpret_cast<xi_plugin_set_def_fn>(GetProcAddress(dll_, "xi_plugin_set_def"));
         destroy_fn_  = reinterpret_cast<xi_plugin_destroy_fn>(GetProcAddress(dll_, "xi_plugin_destroy"));
-        process_fn_  = reinterpret_cast<xi_plugin_process_fn>(GetProcAddress(dll_, "xi_plugin_process"));
         // ABI v7 (optional — present only if the plugin opted in with
         // XI_PLUGIN_STAGED). Their presence IS the opt-in signal: a plugin that
         // exports prepare promises it touches only its staging slot, so we may
         // call it ungated (concurrent with process). Absent → gated set_def / no-op.
         prepare_fn_  = reinterpret_cast<xi_plugin_prepare_fn>(GetProcAddress(dll_, "xi_plugin_prepare"));
         commit_fn_   = reinterpret_cast<xi_plugin_commit_fn>(GetProcAddress(dll_, "xi_plugin_commit"));
-        // OQ-7 (optional): capture the plugin's declared Record field contract at
-        // LOAD time, once, so a composer can validate the wired pipeline up front
-        // (see xi_record_schema.hpp). Absent export → schema stays undeclared and
-        // the plugin keeps its current schemaless behaviour.
-        if (auto schema_fn = reinterpret_cast<xi_plugin_record_schema_fn>(
-                GetProcAddress(dll_, "xi_plugin_record_schema"))) {
-            std::vector<char> buf(4096);
-            int n = schema_fn(buf.data(), (int)buf.size());
-            // ABI: callee returns -(exact content size). Alloc n+1: content + room for the trailing NUL a get_def-style export may write.
-            if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1); n = schema_fn(buf.data(), (int)buf.size()); }
-            if (n > 0) record_schema_ = parse_record_schema_json(buf.data(), (size_t)n);
-        }
-        // γ: may we hand this plugin a borrowed yyjson_mut_doc* (in-process zero-
-        // serialize input)? Only if it was built against our yyjson layout.
-        if (auto abi_fn = reinterpret_cast<uint32_t(*)()>(GetProcAddress(dll_, "xi_yyjson_abi")))
-            doc_input_ok_ = (abi_fn() == xi::yyjson_layout_stamp());
         // polaris2 wave-2 (synthesis §3 pure-door dry run): the plugin's OWN
         // capability door — the symmetric mirror of host->get_interface, resolved
-        // via GetProcAddress like prepare/commit (ABI-additive; absent on a
-        // Record-only plugin). Probe it once for the pack process capability. A
-        // plugin that answers xi.pack@1 speaks pack-in/pack-out; NULL = it does
-        // not (a Record-era script keeps driving it through process()).
+        // via GetProcAddress like prepare/commit (ABI-additive). Probe it once for
+        // the pack process capability. A plugin that answers xi.pack@1 speaks
+        // pack-in/pack-out; NULL = it publishes no data-plane door.
         plugin_get_iface_fn_ = reinterpret_cast<xi_plugin_get_interface_fn>(
             GetProcAddress(dll_, "xi_plugin_get_interface"));
         if (plugin_get_iface_fn_)
@@ -433,23 +395,6 @@ public:
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
     }
 
-    // Run the plugin's process() entry point. Wraps the OwnerGuard (image-leak
-    // tagging) and, for a non-reentrant plugin, the per-instance lock so a
-    // parallel dispatch pool can't re-enter the same instance's state
-    // concurrently. Returns output->image_count, or -1 if no process fn.
-    // The caller owns the SEH try/catch boundary (use_process_cb).
-    int process(const xi_record* in, xi_record_out* out) {
-        if (!process_fn_ || !inst_) return -1;
-#ifndef NDEBUG
-        LcGate lc(this, "process"); if (!lc.ok()) return -1;
-#endif
-        ImagePool::OwnerGuard og(owner_id_);
-        CallScope cs(this);
-        DataPlaneMark dp;   // capability plane: no registration from inside a door
-        process_fn_(inst_, in, out);
-        return out->image_count;
-    }
-
     // polaris2 wave-2: does this plugin publish the xi.pack@1 pack-in/pack-out
     // door (resolved once at construction via xi_plugin_get_interface)?
     bool has_pack_door() const { return frame_proc_ && frame_proc_->process; }
@@ -501,19 +446,9 @@ public:
         commit_fn_(inst_);
     }
 
-    // OQ-7: the plugin's declared cross-plugin Record field contract, captured at
-    // load. .declared == false when the plugin exported no xi_plugin_record_schema
-    // (the opt-in default). Feed a set of these (in pipeline order) to
-    // xi::validate_record_pipeline for wire-time contract checking.
-    const RecordSchema& record_schema() const { return record_schema_; }
-
     void* raw_instance() const { return inst_; }
-    xi_plugin_process_fn process_fn() const { return process_fn_; }
     bool reentrant() const { return reentrant_; }
     bool is_sink()   const { return is_sink_; }   // ordered output sink (see PluginInfo::is_sink)
-    // γ: true ⇒ caller may set xi_record.doc (borrowed yyjson doc) instead of
-    // serializing to data/len. False ⇒ JSON path (foreign/older plugin).
-    bool doc_input_ok() const { return doc_input_ok_; }
 
     // ---- item 14: post-fault policy + quarantine surface --------------------
     // The mechanical primitives the service-layer fault boundary (use_process_
@@ -676,13 +611,10 @@ private:
     xi_plugin_get_def_fn  get_def_fn_ = nullptr;
     xi_plugin_set_def_fn  set_def_fn_ = nullptr;
     xi_plugin_destroy_fn  destroy_fn_ = nullptr;
-    xi_plugin_process_fn  process_fn_ = nullptr;
     xi_plugin_prepare_fn  prepare_fn_ = nullptr;   // ABI v7, optional
     xi_plugin_commit_fn   commit_fn_  = nullptr;   // ABI v7, optional
     xi_plugin_get_interface_fn plugin_get_iface_fn_ = nullptr;  // wave-2, optional
     const xi_pack_proc_v1*    frame_proc_          = nullptr;  // xi.pack@1 door (null = absent)
-    RecordSchema          record_schema_;          // OQ-7, optional (declared==false ⇒ none)
-    bool                  doc_input_ok_ = false;
     ImagePoolOwnerId      owner_id_ = 0;
 
     // ---- item 14: post-fault policy state -----------------------------------

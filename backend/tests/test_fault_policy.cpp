@@ -25,6 +25,7 @@
 #include <xi/xi_fault_policy.hpp>
 #include <xi/xi_health.hpp>
 #include <xi/xi_image_pool.hpp>
+#include <xi/xi_pack_abi.hpp>   // install_pack_abi / pack_v1_iface (the xi.pack@1 door)
 #include <xi/xi_seh.hpp>
 #include <xi/xi_abi.h>
 
@@ -62,37 +63,31 @@ static int jint(const std::string& s, const char* key) {
     return std::atoi(s.c_str() + p + 1);
 }
 
-// Run one process() call; returns true if it faulted (caught at the SEH boundary,
-// exactly as use_process_inline_ does).
+// Run one pack-door call; returns true if it faulted (caught at the SEH boundary,
+// exactly as use_process_inline_ does). THE CUT (v12): the data plane is the
+// xi.pack@1 door — an armed fault fires inside run_pack_door under the host's SEH
+// boundary exactly as the old Record process() did. The output pack is ignored.
 static bool process_caught_fault(xi::CAbiInstanceAdapter& ad) {
-    const char* empty = "{}";
-    xi_record in{};
-    in.data = reinterpret_cast<const uint8_t*>(empty); in.len = 2;
-    xi_record_out out; xi_record_out_init(&out);
     bool faulted = false;
     try {
-        ad.process(&in, &out);
+        xi_pack_handle out = ad.run_pack_door(XI_PACK_NULL);
+        if (out != XI_PACK_NULL) xi::pack_v1_iface()->release(out);
     } catch (const xi::seh_exception&) {
         faulted = true;
     }
-    xi_record_out_free(&out);
     return faulted;
 }
 
 // Like process_caught_fault but reports the SEH code (0 = no fault) so a test can
 // assert the fault CLASS, not just that something faulted.
 static unsigned process_seh_code(xi::CAbiInstanceAdapter& ad) {
-    const char* empty = "{}";
-    xi_record in{};
-    in.data = reinterpret_cast<const uint8_t*>(empty); in.len = 2;
-    xi_record_out out; xi_record_out_init(&out);
     unsigned code = 0;
     try {
-        ad.process(&in, &out);
+        xi_pack_handle out = ad.run_pack_door(XI_PACK_NULL);
+        if (out != XI_PACK_NULL) xi::pack_v1_iface()->release(out);
     } catch (const xi::seh_exception& e) {
         code = e.code;
     }
-    xi_record_out_free(&out);
     return code;
 }
 
@@ -112,6 +107,7 @@ int main() {
     CHECK(create && create_null);
     if (!create) { FreeLibrary(dll); return 1; }
     static xi_host_api host = xi::ImagePool::make_host_api();
+    xi::install_pack_abi();   // publish the xi.pack@1 builder the door plane needs
 
     // Build a live adapter over a fresh plugin instance, wired like the PM does.
     auto make_adapter = [&](const char* name, xi::OnFault policy) {

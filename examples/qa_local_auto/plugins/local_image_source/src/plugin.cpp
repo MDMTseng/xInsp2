@@ -11,9 +11,9 @@
 //   - The EMITTER owns the trigger id: we pass XI_TRIGGER_NULL so the bus mints a
 //     fresh, collision-free id per issue. The file's own identity (its filename)
 //     is the source's key/provenance, kept separate from the dispatch id.
-//   - The image rides ON the trigger (emit_record carries it under key "frame");
-//     the script reads it back via xi::current_trigger().image("frame") — the
-//     same key cmd:run/replay inject under, so one script works against both.
+//   - The image rides ON the trigger (a pack carries it under key "frame");
+//     the script reads it back via t.pack().get_image("frame") — the same key
+//     cmd:run/replay inject under, so one script works against both.
 //
 // exchange() commands (from ui/index.html):
 //   "get_status"            -> { dir, files:[{name,w,h,thumb}], issued_name, ... }
@@ -74,17 +74,21 @@ public:
     using xi::Plugin::Plugin;
     ~LocalImageSource() override { stop_auto_(); }
 
-    // Headless/script path: process({"index":N}) loads & returns the image too,
-    // so the source is usable without the UI (e.g. in a driver test).
-    xi::Record process(const xi::Record& input) override {
+    // Headless/script path (v12 pack door): process({"index":N}) loads the
+    // chosen image and returns it as a pack keyed "frame", so the source is
+    // usable without the UI (e.g. in a driver test).
+    void process(xi::PackIn& in, xi::PackOut& out) override {
         std::lock_guard<std::mutex> lk(mu_);
         scan_();
-        int idx = input["index"].as_int(0);
+        int idx = (int)in.i64_or("index", 0);
         xi::Image img = load_(idx);
-        if (img.empty())
-            return xi::Record().set("loaded", false).set("index", idx);
-        return xi::Record().image("frame", img).set("loaded", true)
-            .set("index", idx).set("width", img.width).set("height", img.height);
+        if (img.empty()) {
+            out.boolean("loaded", false).i64("index", idx);
+            return;
+        }
+        out.image("frame", img.width, img.height, img.channels, img.read())
+           .boolean("loaded", true).i64("index", idx)
+           .i64("width", img.width).i64("height", img.height);
     }
 
     std::string exchange(const std::string& cmd) override {
@@ -283,3 +287,4 @@ private:
 };
 
 XI_PLUGIN_IMPL(LocalImageSource)
+XI_PLUGIN_PACK_DOOR(LocalImageSource)

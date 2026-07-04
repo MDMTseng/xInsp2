@@ -52,10 +52,14 @@ inline constexpr const char* kFaultDetail = "$fault_detail"; // str: human detai
 // U1 provenance (doc 15): who produced this pack, and through which hops.
 inline constexpr const char* kSrc  = "$src";   // str: immediate producer (instance name)
 inline constexpr const char* kProv = "$prov";  // str: hop chain, '/'-joined, oldest→newest
-// Ordering identity (the established $seq convention, xi_record.hpp kSeqKey /
-// expose routing). Named here because propagate_fault copies it forward so a
-// propagated fault stays correlatable with its frame.
+// Ordering identity (the established $seq convention). Named here because
+// propagate_fault copies it forward so a propagated fault stays correlatable
+// with its frame.
 inline constexpr const char* kSeq = "$seq";
+// UI/sink routing channel (expose + record_save/replay). A source/script stamps
+// $channel on an emitted pack to name the display/record channel it belongs to
+// (the v12 replacement for the deleted xi::Record::kChannelKey). str.
+inline constexpr const char* kChannel = "$channel";
 // Streaming via chunking (docs/new_gen/18-stream-chunking-convention.md): a
 // logical payload too large / too long-lived for one sealed pack travels as a
 // SEQUENCE of ordinary sealed packs on one lane — same "$stream" id, dense

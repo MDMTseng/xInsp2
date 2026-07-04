@@ -182,8 +182,14 @@ public:
     //   single patch:  { "key": ".a.b[2]", "value": <anything> }
     //   batch:         { "patches": [ { "key": ".x", "value": 1 }, ... ] }
     // The stored JSON is not modified — only the emitted Record is.
-    xi::Record process(const xi::Record& input) override {
-        // Parse the stored JSON into a mutable doc we can patch.
+    // v12: the xi.pack@1 door is THE data plane and json_source's per-frame tick.
+    // Each tick emits the stored (GUI-edited) document as a sealed pack through
+    // the host door (emit_pack_); the payload rides emit(), so `out` seals empty
+    // (the source ack) and the tick input `in` is ignored. (The former Record
+    // path's per-call input patching had no pack-tick analogue and was dropped
+    // with the Record plane — patches are applied to the stored def via exchange.)
+    void process(xi::PackIn& /*in*/, xi::PackOut& /*out*/) override {
+        // Parse the stored JSON into a mutable doc.
         yyjson_doc* base_rd = yyjson_read(stored_json_.c_str(), stored_json_.size(), 0);
         yyjson_mut_doc* doc = base_rd ? yyjson_doc_mut_copy(base_rd, NULL)
                                       : yyjson_mut_doc_new(NULL);
@@ -191,43 +197,8 @@ public:
         yyjson_mut_val* base = doc ? yyjson_mut_doc_get_root(doc) : nullptr;
         if (!base) { base = yyjson_mut_obj(doc); yyjson_mut_doc_set_root(doc, base); }
 
-        // Pull patches from input (re-parse via JSON since Record doesn't
-        // expose its value directly). Mutable-copy into `doc` so patch values
-        // can be transplanted into base.
-        std::string in_json = input.data_json();
-        yyjson_doc* in_rd = yyjson_read(in_json.c_str(), in_json.size(), 0);
-        yyjson_val* in_root = in_rd ? yyjson_doc_get_root(in_rd) : nullptr;
-        if (in_root) {
-            yyjson_mut_val* in = yyjson_val_mut_copy(doc, in_root);
-            yyjson_mut_val* batch = yyjson_mut_obj_get(in, jkeys::kPatches);
-            if (batch && yyjson_mut_is_arr(batch)) {
-                size_t _i, _n; yyjson_mut_val* it;
-                yyjson_mut_arr_foreach(batch, _i, _n, it) { apply_patch(doc, base, it); }
-            } else if (yyjson_mut_obj_get(in, jkeys::kKey)) {
-                apply_patch(doc, base, in);
-            }
-        }
-        if (in_rd) yyjson_doc_free(in_rd);
-
-        // polaris2 wave-2 (bilingual): when pack_mode is set AND the host
-        // publishes xi.pack@1, emit the (patched) document as a sealed Pack
-        // through the host door instead of returning a Record — the same emit
-        // path mock_camera takes. The Record output plane is left empty; the
-        // payload rides the pack. Default OFF, so the Record path below is
-        // byte-for-byte unchanged for every existing project.
-        if (pack_mode_.load() && pack_iface()) {
-            emit_pack_(base);
-            if (doc) yyjson_mut_doc_free(doc);
-            return xi::Record();
-        }
-
-        // Hand the built tree to a yyjson Record via a JSON round-trip.
-        char* s = doc ? yyjson_mut_write(doc, 0, NULL) : nullptr;
-        xi::Record result = s ? xi::Record::from_json_bytes((const uint8_t*)s, std::strlen(s))
-                              : xi::Record();
-        if (s) free(s);
+        emit_pack_(base);   // no-op without a pack plane (new_pack invalid)
         if (doc) yyjson_mut_doc_free(doc);
-        return result;
     }
 
     std::string exchange(const std::string& cmd) override {
@@ -423,3 +394,6 @@ private:
 };
 
 XI_PLUGIN_IMPL(JsonSource)
+// v12: publish the xi.pack@1 door — THE data plane. The host ticks this door
+// once per frame; json_source emits the stored document as a sealed pack.
+XI_PLUGIN_PACK_DOOR(JsonSource)

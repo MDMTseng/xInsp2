@@ -31,6 +31,5 @@
 
 #include "xi_abi.hpp"
 #include "xi_image.hpp"
-#include "xi_record.hpp"
 
 #include "xi_cv.hpp"

@@ -134,11 +134,9 @@ set_target_properties(json_source PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/json_source
 )
 
-# record_save (uses stb_image_write for BMP output)
-add_library(record_save SHARED
-    record_save/record_save.cpp
-    ../backend/src/stb_impl.cpp
-)
+# record_save (v12: the .xex1 pack dump is the sink; the .json/.bmp Record door
+# was deleted, so stb_image_write is no longer linked)
+add_library(record_save SHARED record_save/record_save.cpp)
 # expose/src is on the include path for xex1_pack_dump.hpp + xex1_encode.hpp — the
 # ONE shared pack->XEX1-v3 encoder record_save and expose both dump through (P3).
 target_include_directories(record_save PRIVATE ${XI_INCLUDE} ${XI_VENDOR}
@@ -209,16 +207,9 @@ set_target_properties(blob_analysis PROPERTIES
 # for the whole directory (above), so the Record/Json code links in.
 enable_testing()
 
-# blob_analysis contract test — needs the host ImagePool (make_host_api) to build
-# a real pool-backed gray input, so its process() runs exactly as in the backend.
-add_executable(blob_analysis_test blob_analysis/tests/test_blob_analysis.cpp)
-target_include_directories(blob_analysis_test PRIVATE
-    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
-    ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis)
-target_compile_definitions(blob_analysis_test PRIVATE
-    BLOB_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis/xi-blob_analysis.dll")
-add_dependencies(blob_analysis_test blob_analysis)
-add_test(NAME blob_analysis_test COMMAND blob_analysis_test)
+# (v12: the Record-based blob_analysis_test was deleted with the Record data
+# plane; the surviving coverage is the pack-door pilot pair below + the
+# blob_analysis pack path exercised by pack_pilot_test / use_pack_door_test.)
 
 # polaris2 wave-2 pilot pair (docs/new_gen/08 Wave 2) — the xi.pack@1 door end
 # to end against the REAL built DLLs: blob_analysis's pack-in/pack-out door
@@ -262,44 +253,10 @@ endif()
 add_dependencies(use_pack_door_test blob_analysis mock_camera json_source)
 add_test(NAME use_pack_door_test COMMAND use_pack_door_test)
 
-# mock_camera contract test — config/command surface only (source plugin).
-add_executable(mock_camera_test mock_camera/tests/test_mock_camera.cpp)
-target_include_directories(mock_camera_test PRIVATE
-    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
-    ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera)
-target_compile_definitions(mock_camera_test PRIVATE
-    MOCK_CAMERA_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera.dll")
-add_dependencies(mock_camera_test mock_camera)
-add_test(NAME mock_camera_test COMMAND mock_camera_test)
-
-# synced_stereo contract test — gathering source. Drives config/command via the
-# C ABI and captures a really-emitted stereo frame through a host emit_record
-# sink (needs the ImagePool host), reading it back through the Frame extractor.
-# polaris2 wave-2: also drives pack_mode ON and captures the sealed xi.pack@1
-# Pack off the TriggerBus (install_pack_abi + install_trigger_hook), so it links
-# Ws2_32 for the pack msgpack codec exactly like pack_pilot_test.
-add_executable(synced_stereo_test synced_stereo/tests/test_synced_stereo.cpp)
-target_include_directories(synced_stereo_test PRIVATE
-    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
-    ${CMAKE_CURRENT_SOURCE_DIR}/synced_stereo)
-target_compile_definitions(synced_stereo_test PRIVATE
-    SYNCED_STEREO_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/synced_stereo/xi-synced_stereo.dll")
-if(WIN32)
-    target_link_libraries(synced_stereo_test PRIVATE Ws2_32)
-endif()
-add_dependencies(synced_stereo_test synced_stereo)
-add_test(NAME synced_stereo_test COMMAND synced_stereo_test)
-
-# json_source contract test — open output data plane, typed control surface
-# (commands/config/patch). No images, so no pool host needed.
-add_executable(json_source_test json_source/tests/test_json_source.cpp)
-target_include_directories(json_source_test PRIVATE
-    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
-    ${CMAKE_CURRENT_SOURCE_DIR}/json_source)
-target_compile_definitions(json_source_test PRIVATE
-    JSON_SOURCE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/json_source/xi-json_source.dll")
-add_dependencies(json_source_test json_source)
-add_test(NAME json_source_test COMMAND json_source_test)
+# (v12: the Record-based mock_camera_test / synced_stereo_test / json_source_test
+# were deleted with the Record data plane. mock_camera + synced_stereo are now
+# pack-only sources; json_source's pack-door coverage lives in
+# json_source_pack_test + use_pack_door_test below.)
 
 # json_source BILINGUAL pack-mode test (polaris2 wave-2, docs/new_gen/10 Gate P1)
 # — drives the REAL DLL through the xi.pack@1 door: pack_mode OFF leaves the
@@ -320,16 +277,8 @@ endif()
 add_dependencies(json_source_pack_test json_source)
 add_test(NAME json_source_pack_test COMMAND json_source_pack_test)
 
-# config_swap_probe contract test — config/command/status + the prepare→commit
-# double-slot (observable only through the Status extractor).
-add_executable(config_swap_probe_test config_swap_probe/tests/test_config_swap_probe.cpp)
-target_include_directories(config_swap_probe_test PRIVATE
-    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
-    ${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe)
-target_compile_definitions(config_swap_probe_test PRIVATE
-    CONFIG_SWAP_PROBE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe/xi-config_swap_probe.dll")
-add_dependencies(config_swap_probe_test config_swap_probe)
-add_test(NAME config_swap_probe_test COMMAND config_swap_probe_test)
+# (v12: the Record-based config_swap_probe_test was deleted with the Record data
+# plane; the surviving coverage is the pack-door test below.)
 
 # config_swap_probe bilingual test (polaris2 wave-2, doc 10 gate P1) — the
 # xi.pack@1 door end to end against the REAL built DLL through the host adapter:
@@ -348,16 +297,8 @@ endif()
 add_dependencies(config_swap_probe_pack_test config_swap_probe)
 add_test(NAME config_swap_probe_pack_test COMMAND config_swap_probe_pack_test)
 
-# cache (BufferReplay) contract test — open buffered payload, typed command
-# surface. Captures + replays through the ImagePool host emit sink.
-add_executable(cache_test cache/tests/test_cache.cpp)
-target_include_directories(cache_test PRIVATE
-    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
-    ${CMAKE_CURRENT_SOURCE_DIR}/cache/src)
-target_compile_definitions(cache_test PRIVATE
-    CACHE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/cache/xi-cache.dll")
-add_dependencies(cache_test cache)
-add_test(NAME cache_test COMMAND cache_test)
+# (v12: the Record-based cache_test was deleted with the Record data plane; the
+# surviving coverage is the pack-door test below.)
 
 # cache (BufferReplay) pack-door test (polaris2 wave-2, docs/new_gen/10 gate P1)
 # — the xi.pack@1 side end to end against the REAL built DLL: pack retention

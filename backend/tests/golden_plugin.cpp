@@ -7,9 +7,11 @@
 // asserting byte-for-byte stable behaviour.
 //
 // It deliberately exercises the host_api surface a normal operator uses:
-//   * create() stashes the host_api pointer (image_create / image_data / log).
-//   * process() creates a 4x4x1 image through host->image_create, fills it with a
-//     deterministic ramp via host->image_data, and returns it under key "out".
+//   * create() stashes the host_api pointer and resolves the xi.pack@1 host door
+//     (host->get_interface("xi.pack",1)).
+//   * the xi.pack@1 data-plane door (xi_pack_proc_v1, published via
+//     xi_plugin_get_interface) builds a 4x4x1 image with a deterministic ramp
+//     through the host pack builder and returns it sealed under key "out".
 //   * get_def / set_def round-trip a single integer config field.
 //
 // Built from SOURCE against the live headers (not a committed binary blob), so it
@@ -26,8 +28,9 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <xi/xi_abi.h>        // XI_ABI_VERSION, xi_host_api
-#include <xi/xi_record.hpp>   // xi::yyjson_layout_stamp()
+#include <vector>
+
+#include <xi/xi_abi.h>        // XI_ABI_VERSION, xi_host_api, xi.pack@1 types
 
 // The golden plugin is the CURRENT contract incarnate. Phase 4 retired the
 // monolith with an authorized major break (shm_* removed, xi.legacy retired,
@@ -48,11 +51,30 @@ static_assert(kGoldenAbiVersion >= XI_ABI_MIN_COMPAT,
 
 namespace {
 
-// Minimal instance state: the host_api handed to create() + one config int.
+// Minimal instance state: the host_api handed to create() + the resolved
+// xi.pack@1 host door (data plane) + one config int.
 struct GoldenInstance {
     const xi_host_api* host = nullptr;
+    const xi_pack_v1*  pack = nullptr;   // resolved via host->get_interface("xi.pack",1)
     int32_t            value = 7;   // default; round-tripped via get_def/set_def
 };
+
+// The frozen behaviour the compat test pins: produce a 4x4 single-channel image
+// whose pixel[i] == (uint8_t)(i * 16). Deterministic, built through the host's
+// xi.pack@1 builder, returned under key "out". The old Record path built the
+// same ramp with image_stride; for w=4,c=1 the stride is 4, so a row-major
+// 4x4 buffer with gray[i] == i*16 is byte-for-byte identical.
+static xi_pack_handle golden_pack_process(void* p, xi_pack_handle /*input*/) {
+    auto* inst = static_cast<GoldenInstance*>(p);
+    if (!inst || !inst->pack) return XI_PACK_NULL;
+
+    std::vector<uint8_t> gray(16);
+    for (int i = 0; i < 16; ++i) gray[i] = static_cast<uint8_t>((i * 16) & 0xFF);
+
+    xi_pack_builder b = inst->pack->builder_new();
+    inst->pack->builder_add_image(b, "out", 4, 4, 1, gray.data());
+    return inst->pack->builder_seal(b);
+}
 
 } // namespace
 
@@ -64,43 +86,26 @@ __declspec(dllexport) int xi_plugin_abi_version(void) {
     return kGoldenAbiVersion;
 }
 
-__declspec(dllexport) uint32_t xi_yyjson_abi(void) {
-    return xi::yyjson_layout_stamp();
+// The sole plugin data plane: the xi.pack@1 door (xi_pack_proc_v1). The host
+// probes this to learn the golden speaks packs and drives it via run_pack_door.
+__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+    if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
+        static const xi_pack_proc_v1 iface = { &golden_pack_process };
+        return &iface;
+    }
+    return nullptr;
 }
 
 __declspec(dllexport) void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) {
     auto* inst = new GoldenInstance();
     inst->host = host;
+    if (host && host->get_interface)
+        inst->pack = static_cast<const xi_pack_v1*>(host->get_interface("xi.pack", 1));
     return inst;
 }
 
 __declspec(dllexport) void xi_plugin_destroy(void* p) {
     delete static_cast<GoldenInstance*>(p);
-}
-
-// The frozen behaviour the compat test pins: produce a 4x4 single-channel image
-// whose pixel[i] == (uint8_t)(i * 16). Deterministic, host-allocated, returned
-// under key "out". Exercises image_create + image_data through the real ABI.
-__declspec(dllexport) void xi_plugin_process(void* p, const xi_record* /*in*/, xi_record_out* out) {
-    auto* inst = static_cast<GoldenInstance*>(p);
-    if (!inst || !inst->host || !inst->host->image_create) return;
-
-    const int32_t w = 4, h = 4, ch = 1;
-    xi_image_handle img = inst->host->image_create(w, h, ch);
-    if (img == XI_IMAGE_NULL) return;
-
-    uint8_t* px = inst->host->image_data ? inst->host->image_data(img) : nullptr;
-    if (px) {
-        const int32_t stride = inst->host->image_stride
-                                 ? inst->host->image_stride(img) : (w * ch);
-        for (int32_t y = 0; y < h; ++y) {
-            for (int32_t x = 0; x < w; ++x) {
-                const int32_t i = y * w + x;
-                px[y * stride + x] = static_cast<uint8_t>((i * 16) & 0xFF);
-            }
-        }
-    }
-    xi_record_out_add_image(out, "out", img);
 }
 
 __declspec(dllexport) int xi_plugin_get_def(void* p, char* buf, int cap) {

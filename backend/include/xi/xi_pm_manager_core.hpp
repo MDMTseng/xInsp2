@@ -448,15 +448,16 @@ private:
     // then points at <canonical>/.xinsp_work). Empty = no working copy.
     std::string canonical_path_;
 
-    // Shared host_api for in-process C-ABI plugin factory calls (image-pool host
-    // + trigger hook). One process-wide instance: every factory site used to
-    // declare its own byte-identical function-local static — this dedups them.
-    // Cold path (instance create / recompile / rename), so the single shared
-    // static is fine and costs nothing extra.
+    // Shared host_api for in-process C-ABI plugin factory calls (image-pool
+    // host). One process-wide instance: every factory site used to declare its
+    // own byte-identical function-local static — this dedups them. Cold path
+    // (instance create / recompile / rename), so the single shared static is fine
+    // and costs nothing extra.
     static xi_host_api& default_host_api() {
         static xi_host_api host = []{
             auto a = ImagePool::make_host_api();
-            install_trigger_hook(a);
+            // THE CUT: the Record emit hook (install_trigger_hook) is gone —
+            // sources emit packs through the pack ABI wired below.
             // polaris2 wave-2: publish the xi.pack@1 data plane + wire the pack
             // dispatch releaser, so a pack-capable plugin resolving the door off
             // this table gets a live interface (and emit_pack reaches the bus).

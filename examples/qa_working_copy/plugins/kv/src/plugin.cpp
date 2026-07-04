@@ -12,8 +12,8 @@ class Kv : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    xi::Record process(const xi::Record& /*input*/) override {
-        return xi::Record().set("value", value_);
+    void process(xi::PackIn& /*in*/, xi::PackOut& out) override {
+        out.str("value", value_);
     }
 
     std::string get_def() const override {
@@ -31,3 +31,4 @@ private:
 };
 
 XI_PLUGIN_IMPL(Kv)
+XI_PLUGIN_PACK_DOOR(Kv)

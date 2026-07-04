@@ -29,7 +29,7 @@ class CrashThenHeal : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    xi::Record process(const xi::Record& /*input*/) override {
+    void process(xi::PackIn& /*in*/, xi::PackOut& out) override {
         long count = read_count();
         if (count < crash_count_) {
             write_count(count + 1);   // persist the crash BEFORE we die
@@ -38,7 +38,7 @@ public:
             t.join();                 // never returns: tears the process down
         }
         // Healed: never crash again. `recovered=1` lets the script/driver see it.
-        return xi::Record().set("count", ++frames_).set("recovered", 1);
+        out.i64("count", ++frames_).i64("recovered", 1);
     }
 
     std::string exchange(const std::string& /*cmd*/) override { return get_def(); }
@@ -80,3 +80,4 @@ private:
 };
 
 XI_PLUGIN_IMPL(CrashThenHeal)
+XI_PLUGIN_PACK_DOOR(CrashThenHeal)

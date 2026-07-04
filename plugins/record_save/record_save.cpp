@@ -1,13 +1,14 @@
 //
-// record_save.cpp — saves inspection results to disk. BILINGUAL (doc 10 gate P3):
+// record_save.cpp — saves inspection results to disk (doc 10 gate P3):
 //
-//   * Record door  process(const Record&) — the legacy sink, UNTOUCHED: writes
-//     <base>.json + one <base>_<key>.bmp per image, exactly as before.
-//   * Pack door     process(PackIn&, PackOut&) — persists the sealed pack as the
+//   * Pack door  process(PackIn&, PackOut&) — persists the sealed pack as the
 //     CANONICAL XEX1-v3 dump: one <base>.xex1 file per capture whose bytes are the
 //     shared encoder's output (xex1_pack_dump.hpp — the SAME encoder expose pushes
 //     on the wire), so disk ≈ wire ≈ memory (doc 07). Replay reads it back through
 //     xex1_pack_load.hpp (untrusted-disk ingress); see plugins/record_save/README.md.
+//
+// (v12: the legacy Record door that wrote <base>.json + <base>_<key>.bmp is
+// deleted along with the Record data plane — the .xex1 pack dump is the sink.)
 //
 // Configurable via UI:
 //   - output_dir: where to save files
@@ -16,8 +17,8 @@
 //
 
 #include <xi/xi_abi.hpp>
+#include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
 #include "yyjson.h"   // parses def commands with yyjson
-#include "stb_image_write.h"
 #include "xex1_pack_dump.hpp"  // xi::xex1::encode_pack_v3 — the shared pack->v3 dump
 
 #include <chrono>
@@ -33,62 +34,18 @@ class RecordSave : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    xi::Record process(const xi::Record& input) override {
-        xi::Record result;
-        if (!enabled_) {
-            result.set("saved", false);
-            result.set("reason", "disabled");
-            return result;
-        }
-        if (output_dir_.empty()) {
-            result.set("saved", false);
-            result.set("reason", "no output_dir set");
-            return result;
-        }
-
-        std::filesystem::create_directories(output_dir_);
-
-        // Generate filename from naming rule
-        std::string base = render_filename(naming_rule_, ++save_count_);
-        std::filesystem::path dir(output_dir_);
-
-        // Save JSON metadata
-        std::filesystem::path json_path = dir / (base + ".json");
-        {
-            std::ofstream f(json_path.string());
-            f << input.data_json_pretty();
-        }
-
-        // Save each image
-        int img_idx = 0;
-        for (auto& [key, img] : input.images()) {
-            if (img.empty()) continue;
-            std::filesystem::path img_path = dir / (base + "_" + key + ".bmp");
-            stbi_write_bmp(img_path.string().c_str(),
-                          img.width, img.height, img.channels, img.data());
-            img_idx++;
-        }
-
-        result.set("saved", true);
-        result.set("count", save_count_);
-        result.set("base_name", base);
-        result.set("images_saved", img_idx);
-        return result;
-    }
-
-    // Pack door (doc 10 gate P3): persist the sealed pack as ONE canonical
-    // XEX1-v3 file per capture. The bytes are the shared encoder's output — the
-    // exact frame expose pushes on the wire — so the persisted file IS the
-    // canonical dump (memory ≈ wire ≈ disk, doc 07). The Record door above is
-    // untouched; a project routes packs here to get the .xex1 dump instead of the
-    // .json + .bmp pair. Returns a small ack pack mirroring the Record ack.
+    // Pack door (doc 10 gate P3) — THE data plane (v12): persist the sealed pack
+    // as ONE canonical XEX1-v3 file per capture. The bytes are the shared
+    // encoder's output — the exact frame expose pushes on the wire — so the
+    // persisted file IS the canonical dump (memory ≈ wire ≈ disk, doc 07).
+    // Returns a small ack pack.
     void process(xi::PackIn& in, xi::PackOut& out) override {
         if (!enabled_)          { out.boolean("saved", false).str("reason", "disabled"); return; }
         if (output_dir_.empty()) { out.boolean("saved", false).str("reason", "no output_dir set"); return; }
 
         // Reserved fields ride the frame header (lifted, not dumped as entries).
-        const std::string channel(in.str(xi::Record::kChannelKey).value_or("default"));
-        const uint64_t    seq = (uint64_t)in.i64_or(xi::Record::kSeqKey, 0);
+        const std::string channel(in.str(xi::pack_contract::kChannel).value_or("default"));
+        const uint64_t    seq = (uint64_t)in.i64_or(xi::pack_contract::kSeq, 0);
 
         std::vector<uint8_t> frame = xi::xex1::encode_pack_v3(in, channel, seq);
 
@@ -195,6 +152,6 @@ private:
 };
 
 XI_PLUGIN_IMPL(RecordSave)
-// Bilingual (doc 10 gate P3): publish the xi.pack@1 door so the host learns
-// record_save consumes packs and persists them as the canonical XEX1-v3 dump.
+// Publish the xi.pack@1 door (doc 10 gate P3) so the host learns record_save
+// consumes packs and persists them as the canonical XEX1-v3 dump.
 XI_PLUGIN_PACK_DOOR(RecordSave)

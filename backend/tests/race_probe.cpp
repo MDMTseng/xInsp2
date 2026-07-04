@@ -32,13 +32,23 @@ __declspec(dllexport) void xi_plugin_destroy(void* p) {
     delete static_cast<Probe*>(p);
 }
 
-__declspec(dllexport) void xi_plugin_process(void* p, const xi_record*, xi_record_out* out) {
+// Data plane = the xi.pack@1 door. Identical tear-detection body as the old
+// xi_plugin_process; the answer is ignored (the test reads the tear counter).
+static xi_pack_handle race_pack_process(void* p, xi_pack_handle) {
     Probe* s = static_cast<Probe*>(p);
     int x = s->a;            // read the two halves of "config"
     int y = s->b;
     if (x != y) s->tears.fetch_add(1, std::memory_order_relaxed);
     s->proc_calls.fetch_add(1, std::memory_order_relaxed);
-    if (out) out->image_count = 0;
+    return XI_PACK_NULL;
+}
+
+__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+    if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
+        static const xi_pack_proc_v1 iface = { &race_pack_process };
+        return &iface;
+    }
+    return nullptr;
 }
 
 __declspec(dllexport) int xi_plugin_set_def(void* p, const char* json) {

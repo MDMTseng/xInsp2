@@ -24,7 +24,7 @@ class ConcurrencyProbe : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    xi::Record process(const xi::Record& /*input*/) override {
+    void process(xi::PackIn& /*in*/, xi::PackOut& out) override {
         calls_.fetch_add(1);
         int cur = ++in_flight_;
         // Track the max concurrency seen (lock-free CAS climb).
@@ -33,9 +33,8 @@ public:
         if (cur > 1) overlaps_.fetch_add(1);
         std::this_thread::sleep_for(std::chrono::milliseconds(8));  // widen the window
         --in_flight_;
-        return xi::Record()
-            .set("maxc",     max_c_.load())
-            .set("overlaps", overlaps_.load());
+        out.i64("maxc",     max_c_.load())
+           .i64("overlaps", overlaps_.load());
     }
 
     // The driver reads the accumulated counters here AFTER the run — no per-frame
@@ -68,3 +67,4 @@ private:
 };
 
 XI_PLUGIN_IMPL(ConcurrencyProbe)
+XI_PLUGIN_PACK_DOOR(ConcurrencyProbe)

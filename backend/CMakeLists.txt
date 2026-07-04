@@ -186,9 +186,7 @@ if(NOT MSVC)
 endif()
 add_test(NAME xi_core COMMAND test_xi_core)
 
-add_executable(test_record tests/test_record.cpp)
-target_link_libraries(test_record PRIVATE xi_core)
-add_test(NAME record COMMAND test_record)
+# [ABI v12 THE CUT: test_record removed — tests/test_record.cpp (xi::Record) deleted.]
 
 # Canonical msgpack codec (xi/xi_mp.hpp) — the v3 pack-plane foundation. The
 # header is zero-dependency (no yyjson, no OpenCV), so the unit test links
@@ -279,36 +277,11 @@ target_compile_definitions(test_golden_plugin PRIVATE
     STALE_V10_PLUGIN_DLL="$<TARGET_FILE:stale_plugin_v10>")
 add_test(NAME golden_plugin COMMAND test_golden_plugin)
 
-# --- OQ-7: static cross-plugin Record field contract ------------------------
-# Opt-in producer/consumer schema declared via the optional xi_plugin_record_schema
-# export (ABI-additive; xi_host_api untouched — see xi_record_schema.hpp). Four
-# fixtures from one source (SCHEMA_ROLE) + a test that drives the real adapter
-# load path and validates matched / wrong-type / missing-field pipelines.
-add_library(schema_producer          SHARED tests/schema_fixture_plugin.cpp)
-target_compile_definitions(schema_producer          PRIVATE SCHEMA_ROLE=0)
-add_library(schema_consumer_ok       SHARED tests/schema_fixture_plugin.cpp)
-target_compile_definitions(schema_consumer_ok       PRIVATE SCHEMA_ROLE=1)
-add_library(schema_consumer_badtype  SHARED tests/schema_fixture_plugin.cpp)
-target_compile_definitions(schema_consumer_badtype  PRIVATE SCHEMA_ROLE=2)
-add_library(schema_consumer_missing  SHARED tests/schema_fixture_plugin.cpp)
-target_compile_definitions(schema_consumer_missing  PRIVATE SCHEMA_ROLE=3)
-foreach(t schema_producer schema_consumer_ok schema_consumer_badtype schema_consumer_missing)
-    target_link_libraries(${t} PRIVATE xi_core)
-endforeach()
-
-add_executable(test_record_schema tests/test_record_schema.cpp)
-target_link_libraries(test_record_schema PRIVATE xi_core)
-if(WIN32)
-    target_link_libraries(test_record_schema PRIVATE Ws2_32)
-endif()
-add_dependencies(test_record_schema
-    schema_producer schema_consumer_ok schema_consumer_badtype schema_consumer_missing)
-target_compile_definitions(test_record_schema PRIVATE
-    PRODUCER_DLL="$<TARGET_FILE:schema_producer>"
-    CONSUMER_OK_DLL="$<TARGET_FILE:schema_consumer_ok>"
-    CONSUMER_BADTYPE_DLL="$<TARGET_FILE:schema_consumer_badtype>"
-    CONSUMER_MISSING_DLL="$<TARGET_FILE:schema_consumer_missing>")
-add_test(NAME record_schema COMMAND test_record_schema)
+# [ABI v12 THE CUT: OQ-7 static cross-plugin Record field contract removed. The
+#  xi_plugin_record_schema export + xi_record_schema.hpp were deleted with the
+#  Record data plane; schema_fixture_plugin.cpp and test_record_schema.cpp are
+#  gone. The pack plane carries its own schema (contract codegen / PackSchema),
+#  covered by the pack tests.]
 
 # B2 — a plugin operator that throws must not unwind across the extern "C" ABI
 # boundary. XI_PLUGIN_IMPL wraps every per-call export in try/catch (defense-in-
@@ -375,20 +348,11 @@ target_compile_definitions(test_cap_autoload PRIVATE
     CAP_TEST_PLUGIN_DLL="$<TARGET_FILE:cap_test_plugin>")
 add_test(NAME cap_autoload_test COMMAND test_cap_autoload)
 
-# Q0f — the deliberate per-crash doc leak is OBSERVABLE. Drives the real xi_use.hpp
-# UseProxy (share_out reserves a ref; rc -2 leaks it) against the real crashing
-# fault_plugin, and asserts DocRegistry::crash_leaked_lifetime (surfaced in
-# dispatch_stats as crash_leaked_docs_lifetime) ticks once per caught crash while a
-# host-owned doc genuinely stays stranded.
-add_executable(test_crash_leak_counter tests/test_crash_leak_counter.cpp)
-target_link_libraries(test_crash_leak_counter PRIVATE xi_core)
-if(WIN32)
-    target_link_libraries(test_crash_leak_counter PRIVATE Ws2_32)
-endif()
-add_dependencies(test_crash_leak_counter fault_plugin)
-target_compile_definitions(test_crash_leak_counter PRIVATE
-    FAULT_PLUGIN_DLL="$<TARGET_FILE:fault_plugin>")
-add_test(NAME crash_leak_counter COMMAND test_crash_leak_counter)
+# [ABI v12 THE CUT: test_crash_leak_counter removed — it asserted
+#  DocRegistry::crash_leaked_lifetime / crash_leaked_docs_lifetime, the
+#  Record-doc crash-leak counter, now obsolete (the DocRegistry doc plane was
+#  deleted). No pack-plane analogue; the pack refcount sweep is covered by
+#  test_pack_door's owner-sweep regression.]
 
 # ABI freeze-signature guard: declares xi_host_api@9 frozen and fails the BUILD
 # if its published layout changes (per-field offset + fn-pointer type, in order).
@@ -455,21 +419,9 @@ target_include_directories(test_yyjson PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME yyjson COMMAND test_yyjson)
 
-# γ pooled doc allocator (xi_doc_pool.hpp) — size-class free-list + yyjson round-trip.
-add_executable(test_doc_pool tests/test_doc_pool.cpp)
-target_link_libraries(test_doc_pool PRIVATE yyjson)
-target_include_directories(test_doc_pool PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
-    ${CMAKE_CURRENT_SOURCE_DIR}/include)
-add_test(NAME doc_pool COMMAND test_doc_pool)
-
-# γ-4 host-side doc refcount (xi_doc_registry.hpp) — retain/release/free + leak watch.
-add_executable(test_doc_registry tests/test_doc_registry.cpp)
-target_link_libraries(test_doc_registry PRIVATE yyjson)
-target_include_directories(test_doc_registry PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
-    ${CMAKE_CURRENT_SOURCE_DIR}/include)
-add_test(NAME doc_registry COMMAND test_doc_registry)
+# [ABI v12 THE CUT: test_doc_pool + test_doc_registry removed — xi_doc_pool.hpp
+#  and xi_doc_registry.hpp (the Record shared-doc allocator + host-side doc
+#  refcount) were deleted with the Record data plane.]
 
 # OQ-7a observability export (xi_metrics.hpp) — frame counters + latency
 # histogram. Drives record_frame from many threads and asserts counters/buckets
@@ -905,40 +857,10 @@ if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
 endif()
 _xinsp_perf_gate(perf_jpeg bench_jpeg jpeg.txt)
 
-# Record in-process handoff micro-bench: the REAL pointer-adoption + image
-# addref/release path a plugin call takes in-process (Record::share_out /
-# adopt_shared, xi::Image pool addref), NOT a JSON serialize/parse round trip
-# (that is only the layout-incompatible FALLBACK, kept exploratory in the bench).
-#
-# This bench needs ONLY the always-present vendored yyjson + the xi headers, so
-# it builds on a clean checkout (no separately-fetched sources required) and is
-# gated as `perf_record`. The bench-only serde_vendor sources (MPack/CWPack —
-# see tests/serde_vendor/FETCH.md) are OPTIONAL: when present they are compiled
-# in and enable an extra exploratory serde-floor comparison in the verbose
-# report (guarded by __has_include / XI_BENCH_HAVE_SERDE in the source); when
-# absent the bench still builds, gates, and runs — that comparison is skipped.
-add_executable(bench_record tests/bench_record.cpp)
-target_link_libraries(bench_record PRIVATE yyjson)
-target_include_directories(bench_record PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
-target_compile_definitions(bench_record PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
-if(NOT MSVC)
-    target_link_libraries(bench_record PRIVATE pthread)
-endif()
-# Optional serde-backend sources (MPack/CWPack) for the exploratory floor table.
-set(_serde ${CMAKE_CURRENT_SOURCE_DIR}/tests/serde_vendor)
-if(EXISTS ${_serde}/mpack/mpack.c AND EXISTS ${_serde}/cwpack/cwpack.c)
-    target_sources(bench_record PRIVATE
-        ${_serde}/mpack/mpack.c
-        ${_serde}/cwpack/cwpack.c)
-    target_include_directories(bench_record PRIVATE
-        ${_serde}/mpack ${_serde}/cwpack)
-endif()
-# Gate it. Baselines require the xi.perf-baseline/1 fingerprint; an old baseline
-# (or one keyed to the retired serialization metric) SKIPs-with-reason until it
-# is recaptured on this machine with UPDATE_BASELINE=ON.
-_xinsp_perf_gate(perf_record bench_record record.txt)
+# [ABI v12 THE CUT: bench_record + the perf_record gate removed — the bench
+#  measured the Record in-process handoff (Record::share_out / adopt_shared,
+#  the DocRegistry doc refcount), all deleted with the Record data plane. The
+#  pack-plane per-frame cost is measured by bench_pack (perf_pack).]
 
 # Per-frame hot-path bench: the ACTUAL emit -> trigger bus -> dispatch lane ->
 # tiny inspect -> ordered result span (05 review #6 — bench_record measured a

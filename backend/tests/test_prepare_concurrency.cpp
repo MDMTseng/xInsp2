@@ -11,6 +11,7 @@
 // when the slot is held/freed.
 //
 #include <xi/xi_cabi_adapter.hpp>
+#include <xi/xi_pack_abi.hpp>
 
 #ifdef _WIN32
   #include <windows.h>
@@ -57,11 +58,10 @@ int main() {
     // NON-reentrant → CallScope cap = 1.
     CAbiInstanceAdapter adapter("p0", "stage_probe", dll, inst, /*reentrant=*/false, /*max_concurrency=*/0);
 
-    // Thread P: enter process() and PARK there, holding the cap=1 slot.
+    // Thread P: enter the pack door and PARK there, holding the cap=1 slot.
     std::thread proc([&] {
-        xi_record in{}; xi_record_out out; xi_record_out_init(&out);
-        adapter.process(&in, &out);
-        xi_record_out_free(&out);
+        xi_pack_handle out = adapter.run_pack_door(XI_PACK_NULL);
+        if (out != XI_PACK_NULL) xi::pack_v1_iface()->release(out);
     });
     if (!wait_until([&] { return in_process() == 1; })) {
         std::fprintf(stderr, "FAIL: process() never entered\n"); release(); proc.join(); return 1;

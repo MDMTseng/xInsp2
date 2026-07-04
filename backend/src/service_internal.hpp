@@ -263,10 +263,6 @@ struct CurrentTriggerInfoC {        // mirrors xi::CurrentTriggerInfo (xi_use.hp
     int64_t       dequeued_at_us;   // worker-stamped on dequeue from its lane
 };
 const xi_host_api* script_host_api_();
-int  use_process_cb(const char* name, const void* input_doc,
-                    const uint8_t* input_data, int32_t input_len,
-                    const xi_record_image* input_images, int input_image_count,
-                    xi_record_out* output);
 int  use_exchange_cb(const char* name, const char* cmd, char* rsp, int rsplen);
 // polaris2 Gate P2: xi::use(...).process(ScriptPack) → the target's xi.pack@1
 // door. 0 ok (*out = new sealed handle the script owns); -1 no such instance;
@@ -280,10 +276,6 @@ xi_image_handle use_grab_cb(const char* name, int timeout_ms);
 uint32_t owner_get_cb();
 void     owner_set_cb(uint32_t id);
 void     trigger_info_cb(CurrentTriggerInfoC* out);
-xi_image_handle trigger_image_cb(const char* source);
-int32_t  trigger_sources_cb(char* buf, int32_t buflen);
-int32_t  trigger_leader_cb(char* buf, int32_t buflen);
-void*    trigger_meta_cb();
 
 // ---- toolchain / project helpers -------------------------------------------
 void resolve_toolchain_(const std::string& folder);

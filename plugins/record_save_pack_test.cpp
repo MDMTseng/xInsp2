@@ -12,16 +12,19 @@
 //     bytes, and image PIXELS are identical to the original; channel/seq are lifted.
 //   * POOL BALANCE — the input pack, the ack, and the loaded pack all release
 //     their pooled image handles; ImagePool + PackRegistry return to baseline.
-//   * RECORD DOOR UNTOUCHED — the legacy Record path still writes its <base>.json.
+//
+// (v12: the legacy Record door + its .json/.bmp writer are deleted — the .xex1
+// pack dump is the sink, so there is no Record-door parity leg any more.)
 //
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
 #endif
 
-#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_pack_door / run_pack_door / process)
+#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_pack_door / run_pack_door)
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_pack_abi.hpp>       // install_pack_abi + pack_v1_iface + PackRegistry
+#include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
 #include <xi/xi_mp.hpp>             // xi::mp::Writer (build the nested-mp fixture entry)
 
 #include "xex1_pack_dump.hpp"       // encode_pack_v3 — the shared encoder (the golden oracle)
@@ -62,7 +65,7 @@ static void expect_entries_identical(const xi::Pack& orig, const xi::Pack& loade
     std::vector<size_t> orig_idx;
     for (size_t i = 0; i < orig.size(); ++i) {
         std::string_view k = orig.key_at(i);
-        if (k == xi::Record::kChannelKey || k == xi::Record::kSeqKey) continue;
+        if (k == xi::pack_contract::kChannel || k == xi::pack_contract::kSeq) continue;
         orig_idx.push_back(i);
     }
     CHECK(orig_idx.size() == loaded.size());
@@ -232,22 +235,6 @@ int main() {
         std::vector<uint8_t> bad(good.begin(), good.begin() + good.size() / 2);
         xi::xex1::LoadResult r = xi::xex1::load_pack_v3(bad.data(), bad.size());
         CHECK(!r.ok);   // bounded ingress catches the truncation
-    }
-
-    // ---------------------------------------------------------------------
-    // (E) Record door untouched: the legacy .json still lands.
-    // ---------------------------------------------------------------------
-    SECTION("bilingual: the Record door still writes its .json");
-    {
-        std::string in_json = "{\"width\":640,\"defect\":false}";
-        xi_record in{};
-        in.data = reinterpret_cast<const uint8_t*>(in_json.c_str());
-        in.len  = (int32_t)in_json.size();
-        xi_record_out out; xi_record_out_init(&out);
-        rec->process(&in, &out);
-        xi_record_out_free(&out);
-        // count advanced to 2 (the pack door used 000001); the Record path names 000002.
-        CHECK(std::filesystem::exists(outdir / "cap_000002.json"));
     }
 
     // ---- teardown + balance ----

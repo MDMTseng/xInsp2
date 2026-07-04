@@ -22,8 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <xi/xi_abi.h>
-#include <xi/xi_record.hpp>   // xi::yyjson_layout_stamp()
+#include <xi/xi_abi.h>        // XI_ABI_*, xi_host_api, xi.pack@1 door types
 
 namespace {
 
@@ -72,26 +71,17 @@ int recurse_sum(int n) {
 constexpr int kDeepDepth   = 512;
 constexpr int kDeepExpected = kDeepDepth * (kDeepDepth + 1) / 2;
 
-} // namespace
-
-extern "C" {
-
-__declspec(dllexport) int xi_plugin_abi_version(void) { return XI_ABI_MIN_COMPAT; }
-__declspec(dllexport) uint32_t xi_yyjson_abi(void) { return xi::yyjson_layout_stamp(); }
-
-__declspec(dllexport) void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) {
-    auto* i = new FaultInstance();
-    i->host = host;
-    i->serial = ++g_creates;
-    return i;
-}
-__declspec(dllexport) void xi_plugin_destroy(void* p) { delete static_cast<FaultInstance*>(p); }
-
-// Raw export: an armed process() faults with an ACCESS_VIOLATION that propagates
-// to the host's SEH boundary (use_process_inline_) — a real caught fault.
-__declspec(dllexport) void xi_plugin_process(void* p, const xi_record* /*in*/, xi_record_out* /*out*/) {
+// THE CUT (v12): the data plane is the xi.pack@1 door, not Record. This is the
+// RAW pack-door process (no XI_PLUGIN_PACK_DOOR trampoline, exactly like the old
+// raw xi_plugin_process), so an armed hardware fault inside it propagates OUT to
+// the host's SEH boundary (CAbiInstanceAdapter::run_pack_door's caller) precisely
+// as a real crashing plugin would — that is what keeps the caught-fault path under
+// test genuine. The fault logic is byte-for-byte the old process(); the door's
+// output is IGNORED by test_fault_policy (it asserts the caught fault, not data),
+// so the normal path returns the XI_PACK_NULL hard-failure sentinel.
+static xi_pack_handle fault_pack_process(void* p, xi_pack_handle /*input*/) {
     auto* i = static_cast<FaultInstance*>(p);
-    if (!i) return;
+    if (!i) return XI_PACK_NULL;
     if (i->crash_next) {
         volatile int* np = nullptr;
         *np = 42;   // ACCESS_VIOLATION -> seh_exception at the host boundary
@@ -107,7 +97,33 @@ __declspec(dllexport) void xi_plugin_process(void* p, const xi_record* /*in*/, x
         i->deep_next   = false;             // one-shot
         i->deep_result = recurse_sum(kDeepDepth);
     }
+    return XI_PACK_NULL;
 }
+
+} // namespace
+
+extern "C" {
+
+__declspec(dllexport) int xi_plugin_abi_version(void) { return XI_ABI_MIN_COMPAT; }
+
+// THE CUT (v12): the sole data-plane door is xi.pack@1 (xi_pack_proc_v1),
+// published here. The host probes this to learn the plugin speaks packs and
+// drives it via run_pack_door. No xi_plugin_process, no xi_yyjson_abi.
+__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+    if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
+        static const xi_pack_proc_v1 iface = { &fault_pack_process };
+        return &iface;
+    }
+    return nullptr;
+}
+
+__declspec(dllexport) void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) {
+    auto* i = new FaultInstance();
+    i->host = host;
+    i->serial = ++g_creates;
+    return i;
+}
+__declspec(dllexport) void xi_plugin_destroy(void* p) { delete static_cast<FaultInstance*>(p); }
 
 __declspec(dllexport) int xi_plugin_get_def(void* p, char* buf, int cap) {
     auto* i = static_cast<FaultInstance*>(p);

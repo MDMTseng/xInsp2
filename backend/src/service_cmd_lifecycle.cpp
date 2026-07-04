@@ -275,7 +275,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             // ImagePool handles would be invisible to them.
             if (g_eng.script.set_use_callbacks) {
                 g_eng.script.set_use_callbacks(
-                    (void*)use_process_cb,
+                    nullptr,   // THE CUT: the Record use()->process bridge is gone
                     (void*)use_exchange_cb,
                     (void*)use_grab_cb,
                     (void*)script_host_api_());
@@ -297,23 +297,15 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             // Phase 3: trigger access callbacks. Older scripts that don't
             // import xi_script_set_trigger_callbacks just stay null and
             // xi::current_trigger().is_active() returns false.
+            // THE CUT: only the trigger INFO callback survives. The image /
+            // sources / leader / meta trigger-access callbacks read the deleted
+            // TriggerEvent Record members and are gone — pass null for the image
+            // and sources slots; the leader and meta wiring is removed entirely.
             if (g_eng.script.set_trigger_callbacks) {
                 g_eng.script.set_trigger_callbacks(
                     (void*)trigger_info_cb,
-                    (void*)trigger_image_cb,
-                    (void*)trigger_sources_cb);
-            }
-            // Optional newer symbol — scripts compiled before P2-2
-            // simply don't export it and t.primary_source() falls back
-            // to sources().front().
-            if (g_eng.script.set_trigger_leader_callback) {
-                g_eng.script.set_trigger_leader_callback((void*)trigger_leader_cb);
-            }
-            // ABI v5: metadata-doc callback. Scripts compiled before this symbol
-            // existed simply don't export it and current_trigger().meta() returns
-            // an empty Record.
-            if (g_eng.script.set_trigger_meta_callback) {
-                g_eng.script.set_trigger_meta_callback((void*)trigger_meta_cb);
+                    nullptr,
+                    nullptr);
             }
             // Status callback. Scripts without xi_status.hpp leave this null
             // and xi::status() is a no-op.

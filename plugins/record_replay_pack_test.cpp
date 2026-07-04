@@ -29,9 +29,10 @@
   #include <windows.h>
 #endif
 
-#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (process / run_pack_door)
+#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (run_pack_door)
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_pack_abi.hpp>       // install_pack_abi + pack_v1_iface + PackRegistry
+#include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
 #include <xi/xi_trigger_bus.hpp>    // install_trigger_hook + the pack dispatch sink
 #include <xi/xi_mp.hpp>             // xi::mp::Writer (build the nested-mp fixture entry)
 
@@ -129,15 +130,15 @@ struct Dll {
     void unload() { ad.reset(); if (h) { FreeLibrary(h); h = nullptr; } }
 };
 
-// Drive the Record door once (the replay source's "advance one file" verb).
-static void drive_process(xi::CAbiInstanceAdapter& ad) {
-    static const std::string in_json = "{}";
-    xi_record in{};
-    in.data = reinterpret_cast<const uint8_t*>(in_json.c_str());
-    in.len  = (int32_t)in_json.size();
-    xi_record_out out; xi_record_out_init(&out);
-    ad.process(&in, &out);
-    xi_record_out_free(&out);
+// Tick the replay source's pack door once (the "advance one file" verb). v12:
+// the door IS the data plane — it ignores its input pack and emits the next
+// file off the bus; the sealed (empty) ack pack is released here.
+static void drive_process(const xi_pack_v1* fi, xi::CAbiInstanceAdapter& ad) {
+    xi_pack_builder b = fi->builder_new();
+    xi_pack_handle in = fi->builder_seal(b);
+    xi_pack_handle ack = ad.run_pack_door(in);
+    if (ack != XI_PACK_NULL) fi->release(ack);
+    fi->release(in);
 }
 
 int main() {
@@ -229,7 +230,7 @@ int main() {
         std::string def = std::string("{\"dir\":\"") + outdir.generic_string() + "\"}";
         CHECK(replayer.ad->set_def(def));
 
-        drive_process(*replayer.ad);
+        drive_process(fi, *replayer.ad);
         {
             std::lock_guard<std::mutex> lk(m);
             CHECK(got.size() == 1);
@@ -257,8 +258,8 @@ int main() {
     if (replayed != XI_PACK_NULL) {
         xi::PackIn view(fi, replayed);
         // Lift channel/seq exactly the way the record_save sink does.
-        const std::string channel(view.str(xi::Record::kChannelKey).value_or("default"));
-        const uint64_t    seq = (uint64_t)view.i64_or(xi::Record::kSeqKey, 0);
+        const std::string channel(view.str(xi::pack_contract::kChannel).value_or("default"));
+        const uint64_t    seq = (uint64_t)view.i64_or(xi::pack_contract::kSeq, 0);
         CHECK(channel == "cam0");
         CHECK(seq == 7);
         std::vector<uint8_t> redump = xi::xex1::encode_pack_v3(view, channel, seq);
@@ -272,11 +273,11 @@ int main() {
     // -----------------------------------------------------------------------
     SECTION("end of files: nothing emitted past the last file; loop wraps");
     {
-        drive_process(*replayer.ad);                       // past the end
+        drive_process(fi, *replayer.ad);                       // past the end
         { std::lock_guard<std::mutex> lk(m); CHECK(got.empty()); }
 
         CHECK(replayer.ad->set_def("{\"loop\":true}"));    // opt into wrap-around
-        drive_process(*replayer.ad);                       // wraps to file 1
+        drive_process(fi, *replayer.ad);                       // wraps to file 1
         { std::lock_guard<std::mutex> lk(m); CHECK(got.size() == 1); }
         drain();
         CHECK(replayer.ad->set_def("{\"loop\":false}"));
@@ -294,7 +295,7 @@ int main() {
 
         replayer.ad->exchange("{\"command\":\"rewind\"}");  // rescan picks up both files
 
-        drive_process(*replayer.ad);                        // the bad file
+        drive_process(fi, *replayer.ad);                        // the bad file
         {
             std::lock_guard<std::mutex> lk(m);
             CHECK(got.size() == 1);
@@ -305,7 +306,7 @@ int main() {
         }
         drain();
 
-        drive_process(*replayer.ad);                        // advanced to the good file
+        drive_process(fi, *replayer.ad);                        // advanced to the good file
         {
             std::lock_guard<std::mutex> lk(m);
             CHECK(got.size() == 1);

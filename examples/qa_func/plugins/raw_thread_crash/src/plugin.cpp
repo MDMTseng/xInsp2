@@ -26,19 +26,9 @@ class RawThreadCrash : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    xi::Record process(const xi::Record& /*input*/) override {
-        if (armed_) {
-            // Uncatchable on purpose — see file header. Volatile store so
-            // the optimiser can't elide the null write.
-            std::thread t([] { *(volatile int*)nullptr = 0xDEAD; });
-            t.join();  // never returns: the faulting thread tears the process down
-        }
-        return xi::Record().set("count", ++frames_processed_);
-    }
-
-    // Pack door (polaris2 THE CUT): pack-in/pack-out mirror of the Record door
-    // above — same crash-if-armed behaviour, same {count} output. Bilingual:
-    // the Record path is untouched; scripts drive this via use("counter").process(pack).
+    // Pack door (polaris2 THE CUT / v12): the sole data plane — same
+    // crash-if-armed behaviour, {count} output. Scripts drive this via
+    // use("counter").process(pack).
     void process(xi::PackIn& /*in*/, xi::PackOut& out) override {
         if (armed_) {
             std::thread t([] { *(volatile int*)nullptr = 0xDEAD; });

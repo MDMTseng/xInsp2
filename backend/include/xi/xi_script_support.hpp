@@ -23,7 +23,6 @@
 // to scripts without an explicit include. (The xi.hpp umbrella itself stays
 // OpenCV-free; only this script force-include and xi_cv.hpp pull OpenCV.)
 #include "xi_cv.hpp"
-#include "xi_record.hpp"
 #include "xi_script.hpp"
 #include "xi_kv.hpp"      // U2: xi::kv() thunk bodies (xi_script_kv_* exports below)
 #include "xi_seh.hpp"     // B2 warmup installs the SEH translator on the omp pool
@@ -192,7 +191,6 @@ XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* c
 // and consumed from script code until DLL unload. The host MUST NOT
 // retain any pointer into these after calling FreeLibrary — all
 // reads happen inside the script's address space only.
-static void* g_use_process_fn_   = nullptr;
 static void* g_use_exchange_fn_  = nullptr;
 // Pointer to backend's xi_host_api — image_create / image_data /
 // image_release etc. all operate on the BACKEND's ImagePool, which is the
@@ -208,7 +206,6 @@ static void* g_trigger_info_fn_     = nullptr;
 static void* g_trigger_image_fn_    = nullptr;
 static void* g_trigger_sources_fn_  = nullptr;
 static void* g_trigger_leader_fn_   = nullptr;
-static void* g_trigger_meta_fn_     = nullptr;   // ABI v5: emit_trigger_record metadata doc
 
 // Status callback. Host sets this so xi::status(text) publishes the script's
 // latest status string to the host status registry. Signature: void(const char*).
@@ -270,7 +267,12 @@ XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
     void* process_fn, void* exchange_fn, void* grab_fn,
     void* host_api)
 {
-    g_use_process_fn_   = process_fn;
+    // process_fn: THE CUT (v12) removed the Record use()->process bridge that
+    // consumed this slot (g_use_process_fn_ is gone; xi::use(...).process now
+    // rides the pack door, see set_use_pack_callback). The ABI parameter is
+    // retained (dropping it is a coordinated host<->script signature change) but
+    // the host now passes null and nothing stores it.
+    (void)process_fn;
     g_use_exchange_fn_  = exchange_fn;
     // grab_fn: the host still feeds this slot with its use_grab_cb stub, but the
     // SDK-side landing pad (g_use_grab_fn_) is gone — the pull-style xi::grab()
@@ -298,13 +300,6 @@ XI_SCRIPT_EXPORT void xi_script_set_trigger_callbacks(
 // case xi::Trigger::primary_source() falls back to sources().front().
 XI_SCRIPT_EXPORT void xi_script_set_trigger_leader_callback(void* leader_fn) {
     g_trigger_leader_fn_ = leader_fn;
-}
-
-// ABI v5: metadata-doc callback (emit_trigger_record). Separate symbol for the
-// same back-compat reason as the leader callback; missing ⇒ meta unavailable
-// and xi::Trigger::meta() returns an empty Record.
-XI_SCRIPT_EXPORT void xi_script_set_trigger_meta_callback(void* meta_fn) {
-    g_trigger_meta_fn_ = meta_fn;
 }
 
 // Optional: install a status callback for xi::status(text). Scripts that don't
@@ -420,7 +415,7 @@ XI_SCRIPT_EXPORT int xi_script_kv_change(const uint8_t* old_bytes, int old_len,
 // --- polaris2 Gate P2: xi::use() pack-door callback (docs/new_gen/10) ---
 //
 // Storage for the pack-door process callback xi_use.hpp declares extern (same
-// lifetime invariant as g_use_process_fn_ above: lives in the script DLL,
+// lifetime invariant as the g_use_* globals above: lives in the script DLL,
 // written by the host once per load, never retained past FreeLibrary).
 // Signature (cast in xi_use.hpp, xi::UsePackProcessFn):
 //   int(const char* name, xi_pack_handle in, xi_pack_handle* out)

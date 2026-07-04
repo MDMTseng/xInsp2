@@ -23,6 +23,7 @@
 // out; those sections are skipped and only the legal sequence is exercised.
 //
 #include <xi/xi_cabi_adapter.hpp>
+#include <xi/xi_pack_abi.hpp>
 
 #ifdef _WIN32
   #include <windows.h>
@@ -71,17 +72,15 @@ static void reentry_trampoline(void* p) {
         case 0: c->a->set_def("{}"); break;                 // process → set_def
         case 1: c->a->commit();      break;                 // process → commit
         case 2: {                                           // process → process
-            xi_record in{}; xi_record_out out; xi_record_out_init(&out);
-            c->a->process(&in, &out);
-            xi_record_out_free(&out);
+            xi_pack_handle out = c->a->run_pack_door(XI_PACK_NULL);
+            if (out != XI_PACK_NULL) xi::pack_v1_iface()->release(out);
         } break;
     }
 }
 
 static void run_process(CAbiInstanceAdapter& a) {
-    xi_record in{}; xi_record_out out; xi_record_out_init(&out);
-    a.process(&in, &out);
-    xi_record_out_free(&out);
+    xi_pack_handle out = a.run_pack_door(XI_PACK_NULL);
+    if (out != XI_PACK_NULL) xi::pack_v1_iface()->release(out);
 }
 
 // ---- legal, non-nested sequence: no violation -----------------------------

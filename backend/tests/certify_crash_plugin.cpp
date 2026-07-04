@@ -3,20 +3,33 @@
 // but whose factory faults (null dereference) the instant it is instantiated.
 //
 // This is the canonical "would have killed the backend at discovery" plugin. It
-// exports a valid xi_plugin_abi_version + xi_yyjson_abi so plugin_abi_compatible
-// accepts it (reaching the factory call), then xi_plugin_create writes through a
-// null pointer → an SEH access violation. Under --certify-plugin the throwaway
-// child takes that fault (xi_crash_dump writes a minidump, the child terminates
-// with the SEH code), the parent reads the abnormal exit as `crashed`, and
+// exports a valid xi_plugin_abi_version so plugin_abi_compatible accepts it
+// (reaching the factory call), then xi_plugin_create writes through a null
+// pointer → an SEH access violation. Under --certify-plugin the throwaway child
+// takes that fault (xi_crash_dump writes a minidump, the child terminates with
+// the SEH code), the parent reads the abnormal exit as `crashed`, and
 // scan_plugins skips + surfaces it.
 //
 // Raw C exports (no XI_PLUGIN_IMPL) so the loader resolves them with
-// GetProcAddress exactly as production does — mirrors golden_plugin.cpp.
+// GetProcAddress exactly as production does — mirrors golden_plugin.cpp. Its
+// data plane is the v12 xi.pack@1 door (xi_pack_proc_v1); the fault fires in the
+// factory, so that door is never actually reached.
 //
 #include <cstdint>
+#include <cstring>
 
-#include <xi/xi_abi.h>        // XI_ABI_VERSION, xi_host_api
-#include <xi/xi_record.hpp>   // xi::yyjson_layout_stamp()
+#include <xi/xi_abi.h>        // XI_ABI_VERSION, xi_host_api, xi.pack@1 types
+
+namespace {
+
+// The pack data-plane door. The factory faults before an instance ever exists,
+// so this is never reached in practice; on any non-crash path there is no
+// resolved pack iface, so it returns XI_PACK_NULL.
+static xi_pack_handle crash_pack_process(void* /*inst*/, xi_pack_handle /*input*/) {
+    return XI_PACK_NULL;
+}
+
+} // namespace
 
 extern "C" {
 
@@ -24,8 +37,14 @@ __declspec(dllexport) int xi_plugin_abi_version(void) {
     return XI_ABI_VERSION;   // pass the version gate
 }
 
-__declspec(dllexport) uint32_t xi_yyjson_abi(void) {
-    return xi::yyjson_layout_stamp();   // pass the yyjson layout gate
+// The sole plugin data plane: the xi.pack@1 door. Published so the plugin is a
+// well-formed v12 plugin; the crash happens in the factory before it is driven.
+__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+    if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
+        static const xi_pack_proc_v1 iface = { &crash_pack_process };
+        return &iface;
+    }
+    return nullptr;
 }
 
 __declspec(dllexport) void* xi_plugin_create(const xi_host_api* /*host*/, const char* /*name*/) {
@@ -38,8 +57,5 @@ __declspec(dllexport) void* xi_plugin_create(const xi_host_api* /*host*/, const 
 }
 
 __declspec(dllexport) void xi_plugin_destroy(void* /*p*/) {}
-
-__declspec(dllexport) void xi_plugin_process(void* /*p*/, const xi_record* /*in*/,
-                                             xi_record_out* /*out*/) {}
 
 } // extern "C"

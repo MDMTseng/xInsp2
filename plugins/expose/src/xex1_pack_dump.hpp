@@ -11,7 +11,7 @@
 // memory ≈ wire ≈ disk; doc 10 gate P3).
 //
 // Why here and not in xex1_encode.hpp: this walk needs the plugin-side SDK
-// (xi::PackIn, xi::Record's reserved-key vocabulary), whereas xex1_encode.hpp is
+// (xi::PackIn, the pack_contract reserved-key vocabulary), whereas xex1_encode.hpp is
 // deliberately kept to xi_abi.h + xi_mp.hpp so the golden-fixture generator and
 // the host-side identity test can include it without the plugin SDK. Keeping the
 // PackIn walk in its own header preserves that separation.
@@ -23,7 +23,8 @@
 #include <string_view>
 #include <vector>
 
-#include <xi/xi_abi.hpp>   // xi::PackIn + xi::Record::kChannelKey/kSeqKey
+#include <xi/xi_abi.hpp>            // xi::PackIn
+#include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
 #include <xi/xi_mp.hpp>    // the canonical max-width msgpack Writer (re-encode path)
 
 #include "xex1_encode.hpp"  // xi::xex1::V3Entry / encode_frame_v3 (the shared encoder)
@@ -47,7 +48,7 @@ inline std::vector<uint8_t> encode_pack_v3(const xi::PackIn& in,
         auto keyv = in.key_at(i);
         if (!keyv) continue;
         std::string key(*keyv);
-        if (key == xi::Record::kChannelKey || key == xi::Record::kSeqKey) continue;
+        if (key == xi::pack_contract::kChannel || key == xi::pack_contract::kSeq) continue;
         const int tag = in.tag_at(i);
         xi::xex1::V3Entry e;
         e.key = key;

@@ -1,5 +1,0 @@
-{
-  "plugin": "work_detector",
-  "isolation": "in_process",
-  "config": { "sleep_ms": 5 }
-}

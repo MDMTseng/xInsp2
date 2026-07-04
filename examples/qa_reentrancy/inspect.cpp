@@ -12,13 +12,14 @@
 //
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& s = xi::use("serial");     // concurrency_probe    (not reentrant)
-    auto& p = xi::use("parallel");   // concurrency_probe_rt (reentrant, uncapped)
-    auto& c = xi::use("capped");     // concurrency_probe_rt (reentrant, max_concurrency=1)
-    s.process(xi::Record().set("frame", frame));
-    p.process(xi::Record().set("frame", frame));
-    c.process(xi::Record().set("frame", frame));
+    // Each probe ignores its input; a minimal pack carrying "frame" drives the
+    // xi.pack@1 door so the host's per-instance dispatch lock is exercised.
+    auto mk = [&] { xi::ScriptPackBuilder b; b.add_i64("frame", frame); return b.seal(); };
+    xi::use("serial").process(mk());     // concurrency_probe    (not reentrant)
+    xi::use("parallel").process(mk());   // concurrency_probe_rt (reentrant, uncapped)
+    xi::use("capped").process(mk());     // concurrency_probe_rt (reentrant, max_concurrency=1)
 }

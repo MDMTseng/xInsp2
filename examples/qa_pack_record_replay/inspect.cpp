@@ -12,7 +12,7 @@
 //     on channel "rec" so the driver holds the recorded truth on the wire.
 //
 //   pump: the synthetic timer tick (start fps>0 => t.is_active()==false)
-//     drives the replay source: one xi::use("replay").process(Record{}) per
+//     drives the replay source: one xi::use("replay").process(empty pack) per
 //     tick replays the NEXT .xex1 file (record_replay README "driving model").
 //     While the instance is disabled (phase 1) this is an honest no-op ack —
 //     the DRIVER phases the run by flipping the instance's `enabled` config,
@@ -28,7 +28,7 @@
 //     replayed wire, entry-for-entry and pixel-byte-for-byte.
 //
 // Zero xi::Record data-plane use: capture, route, replay, verify — all packs.
-// (The one Record{} is the replay source's empty "advance one file" verb.)
+// (The empty pack is the replay source's "advance one file" verb.)
 // The byte-level parity oracle for the loop is plugins/record_replay_pack_test.cpp;
 // THIS example is the composition proof that the loop is expressible as a
 // real project (source -> script routing -> sink door -> replay source -> wire).
@@ -54,7 +54,11 @@ XI_INSPECT_ENTRY(t, frame) {
     if (!t.is_active()) {
         // Synthetic timer tick: pump the replay source — one process() call =
         // one file re-emitted into the graph (disabled => honest no-op ack).
-        xi::use("replay").process(xi::Record{});
+        // A one-entry "advance" pack is the source's "next file" verb (an EMPTY
+        // pack would short-circuit host-side and never reach the door).
+        xi::ScriptPackBuilder pump;
+        pump.add_i64("advance", 1);
+        xi::use("replay").process(pump.seal());
         return;
     }
 

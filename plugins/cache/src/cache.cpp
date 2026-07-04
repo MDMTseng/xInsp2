@@ -9,7 +9,7 @@
 //
 //   in the inspect script:
 //     auto t = xi::current_trigger();
-//     xi::use("buffer").process(xi::Record().image("img", t.image("src")));  // capture
+//     xi::use("buffer").process(t.pack());   // capture the current sealed pack
 //     ... inspect with a tunable Param ...
 //   then, from the UI / a test (cmd as an OBJECT, not a string):
 //     exchange_instance("buffer", {"command":"replay_last"})  // re-inspect last frame
@@ -56,7 +56,6 @@ namespace keys = xi::cache::keys;
 class BufferReplay : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
-    using xi::Plugin::process;   // both process() overloads live in this scope
     // Teardown honesty: stop the replay worker (it releases its own snapshot
     // refs on exit), THEN release every pack the ring still owns. Releasing here
     // is the plugin's job — the host has no pack owner-sweep analogue of the
@@ -69,35 +68,11 @@ public:
         release_packs_(reclaim);
     }
 
-    // Pass-through + capture. Buffering keeps frames ACROSS calls, but an input
-    // image is only valid for THIS call (the host owns its handle for the
-    // duration of process). So we OWN the pixels: deep-copy each image into a
-    // heap-backed Image. The metadata doc rides the Record copy. We also stamp
-    // a monotonic capture time so replay_timed can reproduce the cadence.
-    xi::Record process(const xi::Record& in) override {
-        xi::Record owned = in;
-        for (auto& [k, img] : in.images())
-            if (!img.empty())
-                owned.image(k, xi::Image(img.width, img.height, img.channels, img.data()));
-
-        std::vector<xi_pack_handle> reclaim;
-        int size;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            ring_.push_back(Entry::from_record(std::move(owned), mono_us_()));
-            trim_locked_(reclaim);
-            size = (int)ring_.size();
-        }
-        release_packs_(reclaim);   // evicted pack entries (mixed ring) — outside the lock
-        return xi::Record().set(keys::kBuffered, (int64_t)size);
-    }
-
-    // polaris2 wave-2: the xi.pack@1 capture door. RETAIN the incoming sealed
-    // pack into the SAME ring (same capacity/eviction — evict = release), and ack
-    // with the buffered count exactly as the Record path returns {buffered:N}.
-    // The retained ref keeps the sealed pack + its pool handles alive past this
-    // frame; replay re-emits it (zero copy). Record ring untouched — one ring,
-    // variant entry. A host with no pack plane never calls this door.
+    // v12: the xi.pack@1 capture door is THE data plane. RETAIN the incoming
+    // sealed pack into the ring (bounded capacity/eviction — evict = release), and
+    // ack with the buffered count {buffered:N}. The retained ref keeps the sealed
+    // pack + its pool handles alive past this frame; replay re-emits it (zero
+    // copy). A host with no pack plane never calls this door.
     void process(xi::PackIn& in, xi::PackOut& out) override {
         const xi_pack_v1* fi = pack_iface();
         std::vector<xi_pack_handle> reclaim;
@@ -220,16 +195,14 @@ public:
     }
 
 private:
-    // One ring, variant entry. Exactly one of {rec, pack} is active per the
-    // is_pack flag; a pack entry OWNS one host Pack ref (retained at capture,
-    // released on evict/clear/teardown). t_us is the monotonic capture time both
-    // kinds carry for replay_timed pacing.
+    // A ring entry OWNS one host Pack ref (retained at capture, released on
+    // evict/clear/teardown). t_us is the monotonic capture time carried for
+    // replay_timed pacing. (v12: the Record variant is gone — packs are the sole
+    // data plane, so every entry is a pack.)
     struct Entry {
-        xi::Record     rec;
         xi_pack_handle pack = XI_PACK_NULL;
         int64_t        t_us = 0;
         bool is_pack() const { return pack != XI_PACK_NULL; }
-        static Entry from_record(xi::Record r, int64_t t) { Entry e; e.rec = std::move(r); e.t_us = t; return e; }
         static Entry from_pack(xi_pack_handle h, int64_t t) { Entry e; e.pack = h; e.t_us = t; return e; }
     };
 
@@ -276,17 +249,13 @@ private:
         if (fi) for (auto h : hs) fi->release(h);
     }
 
-    // Re-emit ONE buffered entry with a fresh trigger id. A pack entry re-emits
-    // the SAME sealed handle via the host emit door (emit_pack takes its own event
-    // ref — zero copy, the snapshot/ring refs are untouched); a record entry
-    // re-emits a copy through emit_record.
+    // Re-emit ONE buffered entry with a fresh trigger id. It re-emits the SAME
+    // sealed pack handle via the host emit door (emit_pack takes its own event
+    // ref — zero copy, the snapshot/ring refs are untouched).
     void emit_entry_(const Entry& e) {
         if (e.is_pack()) {
             if (const xi_pack_v1* fi = pack_iface())
                 fi->emit_pack(name().c_str(), XI_TRIGGER_NULL, e.pack, 0);  // fresh id, ts = now
-        } else {
-            xi::Record copy = e.rec;
-            xi::emit_record(host_, name().c_str(), copy);
         }
     }
 

@@ -30,9 +30,10 @@ int main() {
     double t = thresh.get();
     if (t != 128.0) return 5;
 
-    // --- Record: build a typed result carrying the image + a scalar ---
-    xi::Record rec;
-    rec.image("input", img).set("mean", (double)px).set("ok", true);
+    // THE CUT (v12): the xi::Record result type was deleted and is no longer in
+    // the <xi/xi.hpp> umbrella (the pack data plane lives in xi_pack.hpp, outside
+    // the umbrella). Image + Param above already prove the umbrella compiles with
+    // OpenCV removed from the command line, which is all OQ-9 asserts.
 
     std::printf("oq9 no-cv umbrella OK: px=%u thresh=%.1f\n",
                 (unsigned)px, t);

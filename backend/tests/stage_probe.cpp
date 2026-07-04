@@ -16,6 +16,7 @@
 #include <xi/xi_abi.h>
 
 #include <atomic>
+#include <cstring>
 #include <thread>
 
 static std::atomic<int> g_in_process{0};
@@ -30,11 +31,22 @@ extern "C" {
 __declspec(dllexport) void* xi_plugin_create(const xi_host_api*, const char*) { return (void*)1; }
 __declspec(dllexport) void  xi_plugin_destroy(void*) {}
 
-__declspec(dllexport) void xi_plugin_process(void*, const xi_record*, xi_record_out* out) {
+// Data plane = the xi.pack@1 door. Parks itself the same way the old
+// xi_plugin_process did (hold the non-reentrant CallScope slot until released),
+// then returns an empty answer — the test observes the parking, not the output.
+static xi_pack_handle stage_pack_process(void*, xi_pack_handle) {
     g_in_process.store(1);
     while (g_release.load() == 0) std::this_thread::yield();   // hold the slot
     g_in_process.store(0);
-    if (out) out->image_count = 0;
+    return XI_PACK_NULL;
+}
+
+__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+    if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
+        static const xi_pack_proc_v1 iface = { &stage_pack_process };
+        return &iface;
+    }
+    return nullptr;
 }
 
 // Ungated by the host: touches ONLY the staging marker, never g_active.

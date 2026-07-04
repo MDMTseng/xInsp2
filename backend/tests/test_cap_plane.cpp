@@ -233,12 +233,8 @@ int main() {
     // -----------------------------------------------------------------------
     SECTION("registration from the data-plane door is refused (lifecycle only)");
     {
-        const char* empty = "{}";
-        xi_record in{};
-        in.data = reinterpret_cast<const uint8_t*>(empty); in.len = 2;
-        xi_record_out out; xi_record_out_init(&out);
-        lib->process(&in, &out);                    // door carries DataPlaneMark
-        xi_record_out_free(&out);
+        xi_pack_handle out = lib->run_pack_door(XI_PACK_NULL);  // door carries DataPlaneMark
+        if (out != XI_PACK_NULL) pk->release(out);
         std::string s = lib->exchange("{\"command\":\"status\"}");
         CHECK(jint(s, "reg_in_process") == XI_CAP_REG_ECONTEXT);
         CHECK(cap->available("test.from_process") == 0);

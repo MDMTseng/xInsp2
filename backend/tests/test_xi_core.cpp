@@ -20,6 +20,7 @@
 #include <xi/xi_working_copy.hpp>
 #include <xi/xi_emit_gate.hpp>
 #include <xi/xi_trigger_bus.hpp>
+#include <xi/xi_pack_abi.hpp>   // THE CUT (v12): the bus is pack-only; drive it via emit_pack
 
 // Minimal test harness — each TEST() runs once; failures print and set a flag.
 static int g_failures = 0;
@@ -625,24 +626,27 @@ static void test_emit_gate() {
 static void test_trigger_bus_reset_prunes_source_map() {
     SECTION("TriggerBus::reset() prunes the per-source emit-time map");
     auto& bus = xi::TriggerBus::instance();
-    // Start from a clean, sink-less bus so emit() takes the no-sink path
-    // (which releases the images it addref'd) and nothing fires elsewhere.
+    // THE CUT (v12): the bus carries PACKS, not Record images. Install the pack
+    // plane so emit_pack has a builder + a releaser, then drive the no-sink path
+    // (emit_pack stamps the per-source liveness map, then releases the pack).
+    xi::install_pack_abi();
+    const xi_pack_v1* pk = xi::pack_v1_iface();
+    // Start from a clean, sink-less bus so emit_pack takes the no-sink path
+    // (which releases the pack it was handed) and nothing fires elsewhere.
     bus.clear_sink();
     bus.reset();
     CHECK(bus.source_emit_ages_us().empty());
 
-    // One real image handle is enough to drive emit() past its image_count
-    // guard; emit() addrefs it and the no-sink path releases that ref.
-    xi_image_handle h = xi::ImagePool::instance().create(2, 2, 1);
-    xi_record_image ri{};
-    ri.handle = h;
-    ri.key    = nullptr;
-
     const int N = 64;
     for (int i = 0; i < N; ++i) {
         std::string src = "cam_" + std::to_string(i);
-        bus.emit(src, xi_trigger_id{0, 0}, /*ts*/0, &ri, /*image_count*/1,
-                 /*meta_doc*/nullptr);
+        // A minimal sealed pack per emit; emit_pack stamps src into the liveness
+        // map before the sink check, then (no sink) drops the ref we hand it.
+        xi_pack_builder b = pk->builder_new();
+        pk->builder_add_i64(b, "seq", i);
+        xi_pack_handle f = pk->builder_seal(b);
+        pk->emit_pack(src.c_str(), xi_trigger_id{0, 0}, /*ts*/0, f);
+        pk->release(f);   // drop our creator ref (the forwarder took its own)
     }
     // Every distinct source name left a permanent entry pre-fix.
     CHECK(bus.source_emit_ages_us().size() == static_cast<size_t>(N));
@@ -650,8 +654,6 @@ static void test_trigger_bus_reset_prunes_source_map() {
     bus.reset();
     // Post-fix: reset() prunes the map. (Pre-fix / gated no-op: stays N -> FAIL.)
     CHECK(bus.source_emit_ages_us().empty());
-
-    xi::ImagePool::instance().release(h);   // drop our own create() ref
 }
 
 int main() {

@@ -12,10 +12,9 @@
 //   3. Refcount lifecycle — retain/release, sealed-pack immutability, and the
 //      pooled-handle balance verified against ImagePool's own live count (a
 //      pack's image entry mints exactly one pool handle, freed on last release).
-//   4. Dispatch DUAL-CARRY — TriggerBus::emit_pack carries a Pack on the SAME
-//      bus that TriggerBus::emit carries a Record, and neither bleeds into the
-//      other (a pack event has pack!=NULL/images empty; a record event has
-//      images!=empty/pack==NULL). Pack + image refs balance to baseline.
+//   4. Dispatch — TriggerBus::emit_pack carries a Pack (the sole dispatch
+//      currency after THE CUT; the image + metadata ride inside the pack).
+//      The pack + its pooled image refs balance to baseline once dropped.
 //
 // The plugin-side door (blob_analysis's pack-in/pack-out) + the real end-to-end
 // mock_camera->blob_analysis flow are exercised in the PLUGIN test
@@ -23,7 +22,7 @@
 //
 #include <xi/xi_pack_abi.hpp>    // PackRegistry, pack_v1_iface, install_pack_abi
 #include <xi/xi_image_pool.hpp>   // ImagePool::make_host_api / cumulative().live_now
-#include <xi/xi_trigger_bus.hpp>  // TriggerBus / install_trigger_hook
+#include <xi/xi_trigger_bus.hpp>  // TriggerBus (pack-only dispatch)
 #include <xi/xi_mp.hpp>           // decode the nested-msgpack round-trip
 #include <xi/xi_use.hpp>          // xi::Trigger / xi_trigger_view (H1 has_source)
 
@@ -198,13 +197,14 @@ static void test_refcount_lifecycle() {
 }
 
 // ---------------------------------------------------------------------------
-// (4) Dispatch dual-carry: Pack and Record on the SAME bus, no crosstalk.
+// (4) Dispatch: a Pack rides the bus via emit_pack. THE CUT (v12): the Record
+//     currency is gone — TriggerEvent carries ONLY a pack (its image + metadata
+//     ride inside the pack), so this exercises the sole dispatch path and proves
+//     the pack + its pooled image balance to baseline after the event is dropped.
 // ---------------------------------------------------------------------------
 static void test_dispatch_dual_carry() {
-    SECTION("TriggerBus carries a Pack (emit_pack) alongside a Record (emit)");
-    xi::install_pack_abi();
-    xi_host_api host = xi::ImagePool::make_host_api();
-    xi::install_trigger_hook(host);        // wires the Record emit path (api.emit_record)
+    SECTION("TriggerBus carries a Pack (emit_pack); image rides the pack, balances to baseline");
+    xi::install_pack_abi();                // wires the bus emit_pack forwarder + pack releaser
     const xi_pack_v1* fi = xi::pack_v1_iface();
 
     int base = pool_live();
@@ -213,7 +213,7 @@ static void test_dispatch_dual_carry() {
     std::vector<xi::TriggerEvent> got;
     xi::TriggerBus::instance().set_sink([&](xi::TriggerEvent ev) { got.push_back(std::move(ev)); });
 
-    // --- PACK currency: build a pack with an image + a scalar, emit it. ---
+    // Build a pack with an image + a scalar, emit it onto the bus.
     std::vector<uint8_t> gray(16, 0); gray[0] = 255;
     xi_pack_builder b = fi->builder_new();
     fi->builder_add_i64(b, "seq", 11);
@@ -222,46 +222,28 @@ static void test_dispatch_dual_carry() {
     fi->emit_pack("cam_frame", XI_TRIGGER_NULL, f, 0);  // event takes a 2nd ref
     fi->release(f);                                 // drop the emitter's ref (rc 1, held by event)
 
-    // --- RECORD currency: mint an image handle and emit it the classic way. ---
-    xi_image_handle rimg = xi::ImagePool::instance().create(4, 4, 1);   // my ref (rc 1)
-    xi_record_image rentry{ "frame", rimg };
-    xi::TriggerBus::instance().emit("cam_record", XI_TRIGGER_NULL, 0, &rentry, 1, nullptr); // bus addrefs
-    xi::ImagePool::instance().release(rimg);         // drop my ref (event holds one)
+    CHECK(got.size() == 1);
 
-    CHECK(got.size() == 2);
-
-    // The pack event: pack set, images empty; the pack reads back correctly.
-    const xi::TriggerEvent* fe = nullptr;
-    const xi::TriggerEvent* re = nullptr;
-    for (auto& ev : got) {
-        if (ev.pack != XI_PACK_NULL) fe = &ev; else re = &ev;
-    }
+    const xi::TriggerEvent* fe = got.empty() ? nullptr : &got.front();
     CHECK(fe != nullptr);
-    CHECK(re != nullptr);
     if (fe) {
+        CHECK(fe->is_real());                        // pack payload present
+        CHECK(fe->pack != XI_PACK_NULL);
         CHECK(fe->leader_source == "cam_frame");
-        CHECK(fe->images.empty());                   // a pack event carries no image map
         int64_t seq = 0;
         CHECK(fi->get_i64(fe->pack, "seq", &seq) == 1 && seq == 11);
         xi_pack_image iv{};
         CHECK(fi->get_image(fe->pack, "frame", &iv) == 1 && iv.width == 4);
     }
-    // The record event: images set, pack NULL (the Record path is untouched).
-    if (re) {
-        CHECK(re->leader_source == "cam_record");
-        CHECK(re->pack == XI_PACK_NULL);           // no pack bled into the Record path
-        CHECK(re->images.size() == 1);
-    }
 
-    // Release both events exactly as the dispatcher's release_trigger_event_ does.
+    // Release the event exactly as the dispatcher's release_trigger_event_ does.
     for (auto& ev : got) {
-        for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
         if (ev.pack != XI_PACK_NULL) xi::TriggerBus::instance().release_pack_(ev.pack);
     }
     got.clear();
     xi::TriggerBus::instance().clear_sink();
 
-    CHECK(pool_live() == base);   // every pack + image ref accounted for
+    CHECK(pool_live() == base);   // the pack + its pooled image ref accounted for
 }
 
 // ---------------------------------------------------------------------------
@@ -365,11 +347,12 @@ static void test_owner_sweep_regression() {
 //     — keying has_source() off it alone always answered false on the pack path
 //     (qa_multi_graph had to route via t.primary_source()). The source identity
 //     of a pack trigger is its leader_source (emitting instance) + the pack's
-//     own $src stamp; both must resolve true, a stranger false. The RECORD path
-//     (pack == NULL) stays byte-unchanged: the leader is NOT a source there.
+//     own $src stamp; both must resolve true, a stranger false.
+//     THE CUT (v12): the Record path (pack == NULL, image-map source) was removed
+//     with the Record data plane, so only the pack path is exercised here.
 // ---------------------------------------------------------------------------
 static void test_has_source_pack_identity() {
-    SECTION("H1: has_source()/sources() honest on the pack path; record path unchanged");
+    SECTION("H1: has_source()/sources() honest on the pack path");
     xi::install_pack_abi();
     xi_host_api host = xi::ImagePool::make_host_api();
     const xi_pack_v1* fi = xi::pack_v1_iface();
@@ -415,31 +398,6 @@ static void test_has_source_pack_identity() {
     }
     fi->release(f);                                    // drop our ref (Trigger dropped its own)
     CHECK(pool_live() == base);                        // pack + pooled image balanced
-
-    // --- RECORD path (pack == NULL): byte-unchanged. The source is the image
-    //     map key; the leader_source is NOT promoted to a source here. ---
-    xi_image_handle rimg = xi::ImagePool::instance().create(4, 4, 1);   // our ref
-    {
-        xi_trigger_view_image imgs[1] = { { "gray", rimg } };
-        xi_trigger_view v{};
-        v.is_active     = 1;
-        v.id            = xi_trigger_id{ 1, 2 };
-        v.leader_source = "cam0";                      // leader != any image key
-        v.images        = imgs;
-        v.image_count   = 1;
-        v.pack          = XI_PACK_NULL;                // Record path
-        v.host          = &host;
-
-        xi::Trigger t(&v);
-        CHECK(!(bool)t.pack());
-        CHECK(t.has_source("gray"));                  // the image-map key
-        CHECK(!t.has_source("cam0"));                 // leader NOT leaked into record path
-        CHECK(!t.has_source("nope"));
-        auto srcs = t.sources();
-        CHECK(srcs.size() == 1 && srcs.front() == "gray");
-    }
-    xi::ImagePool::instance().release(rimg);           // drop our ref (Trigger has its own)
-    CHECK(pool_live() == base);
 }
 
 int main() {

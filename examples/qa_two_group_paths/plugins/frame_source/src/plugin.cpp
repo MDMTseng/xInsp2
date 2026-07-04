@@ -113,14 +113,15 @@ private:
             // Stamp seq as little-endian uint64 in first 8 bytes.
             std::memcpy(px.data(), &seq, sizeof(seq));
 
-            xi::Record rec = xi::Record().image("img", xi::Image(W, H, 1, px.data()));
+            xi::PackOut out = new_pack();
+            out.image("img", W, H, 1, px.data());
             xi_trigger_id tid;
             tid.hi = BURST_TID_HI;
             tid.lo = seq + 1;            // avoid (0,0) which is NULL
 
             // timestamp_us = 0 → host stamps with its now() clock.
             // We need this for end-to-end latency measurement.
-            xi::emit_record(host_, name().c_str(), rec, tid);
+            emit(std::move(out), tid);
             emitted_.fetch_add(1);
 
             // sleep_until — cumulative drift stays bounded.

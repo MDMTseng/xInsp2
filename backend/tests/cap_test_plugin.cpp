@@ -34,7 +34,6 @@
 #include <string>
 
 #include <xi/xi_abi.h>
-#include <xi/xi_record.hpp>   // xi::yyjson_layout_stamp()
 
 namespace {
 
@@ -115,12 +114,33 @@ xi_pack_handle h_reenter(void* self, xi_pack_handle in) {
     return i->pack->builder_seal(b);
 }
 
+// The DATA-PLANE registration probe (pack door): registering from inside the
+// data-plane door must be refused with XI_CAP_REG_ECONTEXT (the adapter's door
+// carries the data-plane mark). Result readable via exchange. Returns an empty
+// sealed pack.
+static xi_pack_handle cap_test_pack_process(void* p, xi_pack_handle /*in*/) {
+    auto* i = static_cast<CapTestInstance*>(p);
+    if (!i || !i->provider) return XI_PACK_NULL;
+    i->reg_in_process_rc =
+        i->provider->register_capability("test.from_process", &h_echo, i);
+    if (!i->pack) return XI_PACK_NULL;
+    return i->pack->builder_seal(i->pack->builder_new());  // empty sealed pack
+}
+
 } // namespace
 
 extern "C" {
 
 __declspec(dllexport) int xi_plugin_abi_version(void) { return XI_ABI_MIN_COMPAT; }
-__declspec(dllexport) uint32_t xi_yyjson_abi(void) { return xi::yyjson_layout_stamp(); }
+
+// The sole plugin data plane: the xi.pack@1 door.
+__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+    if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
+        static const xi_pack_proc_v1 iface = { &cap_test_pack_process };
+        return &iface;
+    }
+    return nullptr;
+}
 
 __declspec(dllexport) void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) {
     auto* i = new CapTestInstance();
@@ -147,17 +167,6 @@ __declspec(dllexport) void* xi_plugin_create(const xi_host_api* host, const char
 // Deliberately NO unregister here: the adapter-dtor owner sweep is under test.
 __declspec(dllexport) void xi_plugin_destroy(void* p) {
     delete static_cast<CapTestInstance*>(p);
-}
-
-// The DATA-PLANE registration probe: registering from inside process() must be
-// refused with XI_CAP_REG_ECONTEXT (the adapter's door carries the data-plane
-// mark). Result readable via exchange.
-__declspec(dllexport) void xi_plugin_process(void* p, const xi_record* /*in*/,
-                                             xi_record_out* /*out*/) {
-    auto* i = static_cast<CapTestInstance*>(p);
-    if (!i || !i->provider) return;
-    i->reg_in_process_rc =
-        i->provider->register_capability("test.from_process", &h_echo, i);
 }
 
 __declspec(dllexport) int xi_plugin_get_def(void* /*p*/, char* buf, int cap) {

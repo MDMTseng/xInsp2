@@ -35,7 +35,9 @@
 #include <xi/xi.hpp>             // xi::async, xi::parallel_for, xi::seh_exception
 #include <xi/xi_use.hpp>         // xi::trigger_snapshot / TriggerSnapshot
 #include <xi/xi_image_pool.hpp>  // ImagePool + make_host_api + OwnerGuard
-#include <xi/xi_doc_registry.hpp>// DocRegistry refcount leak-check (A meta path)
+// THE CUT (v12): xi_doc_registry.hpp + the Record meta plane are gone. The A2/A4
+// trigger tests now cover the IMAGE round-trip only (the meta-doc half was the
+// deleted Record plane); B (SEH) and C (owner propagation) are unchanged.
 
 #include <atomic>
 #include <cstdint>
@@ -242,7 +244,6 @@ static void test_parallel_for_propagates_owner() {
 static bool                                         g_trig_active = false;
 static std::unordered_map<std::string, xi_image_handle> g_trig_images;
 static xi::CurrentTriggerInfo                       g_trig_info{};
-static yyjson_mut_doc*                              g_trig_meta = nullptr;
 
 static void test_trigger_info_fn(xi::CurrentTriggerInfo* out) {
     if (!out) return;
@@ -269,11 +270,6 @@ static int32_t test_trigger_sources_fn(char* buf, int32_t buflen) {
     std::memcpy(buf, out.data(), n); buf[n] = 0;
     return n;
 }
-static void* test_trigger_meta_fn() {
-    if (!g_trig_active || !g_trig_meta) return nullptr;
-    host_api().doc_retain(g_trig_meta);    // reserve a ref for the script's adopt_shared
-    return (void*)g_trig_meta;
-}
 
 static void test_trigger_snapshot_cross_thread() {
     SECTION("A2: trigger_snapshot round-trips cross-thread + outlives the dispatch");
@@ -283,23 +279,15 @@ static void test_trigger_snapshot_cross_thread() {
     g_trigger_info_fn_    = (void*)&test_trigger_info_fn;
     g_trigger_image_fn_   = (void*)&test_trigger_image_fn;
     g_trigger_sources_fn_ = (void*)&test_trigger_sources_fn;
-    g_trigger_meta_fn_    = (void*)&test_trigger_meta_fn;
 
-    // --- host sets up an in-flight trigger: one image + a metadata doc ---
+    // --- host sets up an in-flight trigger: one image (the metadata doc rode the
+    //     deleted Record plane — THE CUT removed it) ---
     xi_image_handle h = host.image_create(8, 8, 1);   // the "ev.images" ref (rc=1)
     {
         uint8_t* px = host.image_data(h);
         for (size_t i = 0; i < 64; ++i) px[i] = (uint8_t)(0x50 + (i & 0x0F));
     }
     g_trig_images["cam"] = h;
-
-    yyjson_mut_doc* d = yyjson_mut_doc_new(nullptr);   // the "ev.meta_doc"
-    yyjson_mut_val* root = yyjson_mut_obj(d);
-    yyjson_mut_doc_set_root(d, root);
-    yyjson_mut_obj_add_strcpy(d, root, "cmd", "inspect");
-    yyjson_mut_obj_add_int(d, root, "lane", 7);
-    host.doc_retain(d);                                // host/dispatch holds rc=1
-    g_trig_meta = d;
 
     g_trig_info = xi::CurrentTriggerInfo{};
     g_trig_info.id            = xi_trigger_id{0x1234ull, 0xABCDull};
@@ -313,14 +301,12 @@ static void test_trigger_snapshot_cross_thread() {
     CHECK(snap.sources().size() == 1);
     CHECK(snap.has_source("cam"));
 
-    // --- Simulate the dispatch ENDING: the host drops its image + meta refs
-    //     and tears down the ambient trigger. The snapshot's own addref'd image
-    //     ref + frozen-Record meta ref must keep both alive on their own. ---
+    // --- Simulate the dispatch ENDING: the host drops its image ref and tears
+    //     down the ambient trigger. The snapshot's own addref'd image ref must
+    //     keep it alive on its own. ---
     host.image_release(h);     // image rc 2 -> 1 (only the snapshot holds it now)
-    host.doc_release(d);       // meta  rc 2 -> 1 (only the snapshot's Record holds it)
     g_trig_active = false;
     g_trig_images.clear();
-    g_trig_meta = nullptr;
 
     // --- A DIFFERENT thread reads the snapshot. It touches NO thread_local and
     //     NO thunk — everything is by-value/addref'd into the snapshot. ---
@@ -344,22 +330,16 @@ static void test_trigger_snapshot_cross_thread() {
         CHECK(sentinel_ok);
         // sole-image fallback: any key resolves a single-image snapshot
         CHECK(!snap.image("anything-else").empty());
-
-        // meta: frozen Record read off-thread, survived host.doc_release above
-        const xi::Record& m = snap.meta();
-        CHECK(m["cmd"].as_string() == "inspect");
-        CHECK(m["lane"].as_int() == 7);
     });
     worker.join();
 
-    // --- Drop the snapshot: its held refs are the LAST, so both the pool image
-    //     and the meta doc are now reclaimed (no leak, no double-free). ---
+    // --- Drop the snapshot: its held image ref is the LAST, so the pool image
+    //     is now reclaimed (no leak, no double-free). ---
     {
         xi::TriggerSnapshot dead = std::move(snap);
         (void)dead;   // dead dies here
     }
     CHECK(xi::ImagePool::instance().data(h) == nullptr);          // image reclaimed
-    CHECK(xi::DocRegistry::instance().refcount(d) == 0);          // meta doc freed (no leak)
 }
 
 // ===========================================================================
@@ -379,20 +359,13 @@ static void test_explicit_trigger_view_cross_thread() {
     SECTION("A4: xi_trigger_view -> xi::Trigger self-contained + cross-thread safe");
     const xi_host_api& host = host_api();
 
-    // --- host sets up an in-flight trigger: one image + a metadata doc (the refs
-    //     the dispatch's CurrentTriggerScope would hold) ---
+    // --- host sets up an in-flight trigger: one image (the metadata doc rode the
+    //     deleted Record plane — THE CUT removed it) ---
     xi_image_handle h = host.image_create(8, 8, 1);
     { uint8_t* px = host.image_data(h); for (size_t i = 0; i < 64; ++i) px[i] = (uint8_t)(0xA0 + (i & 0x0F)); }
 
-    yyjson_mut_doc* d = yyjson_mut_doc_new(nullptr);
-    yyjson_mut_val* root = yyjson_mut_obj(d);
-    yyjson_mut_doc_set_root(d, root);
-    yyjson_mut_obj_add_strcpy(d, root, "cmd", "explicit");
-    yyjson_mut_obj_add_int(d, root, "lane", 3);
-    host.doc_retain(d);                         // dispatch holds rc=1
-
-    // --- host fills the explicit view (borrowed handle + borrowed doc) and the
-    //     SDK constructs the Trigger from it — exactly what run_one_inspection +
+    // --- host fills the explicit view (borrowed handle) and the SDK constructs
+    //     the Trigger from it — exactly what run_one_inspection +
     //     xi_inspect_entry_tv do ---
     xi_trigger_view_image imgs[1] = { { "cam", h } };
     xi_trigger_view view{};
@@ -403,7 +376,6 @@ static void test_explicit_trigger_view_cross_thread() {
     view.images         = imgs;
     view.image_count    = 1;
     view.leader_source  = "cam";
-    view.meta_doc       = d;
     view.host           = &host;
 
     xi::Trigger t(&view);
@@ -415,10 +387,9 @@ static void test_explicit_trigger_view_cross_thread() {
     CHECK(t.has_source("cam"));
     CHECK(t.sources().size() == 1);
 
-    // --- dispatch ENDS: host drops its image + meta refs. The Trigger's own
-    //     addref'd image ref + frozen-Record meta ref must keep both alive. ---
+    // --- dispatch ENDS: host drops its image ref. The Trigger's own addref'd
+    //     image ref must keep it alive. ---
     host.image_release(h);   // rc 2 -> 1 (only the Trigger holds it now)
-    host.doc_release(d);     // rc 2 -> 1 (only the Trigger's Record holds it)
 
     // --- a DIFFERENT thread reads a BY-VALUE copy (as a parallel body would). No
     //     thread_local, no thunk — everything came in through the explicit view. ---
@@ -433,17 +404,13 @@ static void test_explicit_trigger_view_cross_thread() {
             if (px[i] != (uint8_t)(0xA0 + (i & 0x0F))) { sentinel_ok = false; break; }
         CHECK(sentinel_ok);
         CHECK(!tcopy.image("anything-else").empty());   // sole-image fallback
-        const xi::Record& m = tcopy.meta();
-        CHECK(m["cmd"].as_string() == "explicit");
-        CHECK(m["lane"].as_int() == 3);
     });
     worker.join();
 
-    // --- drop both Trigger copies: their held refs are the LAST, so the pool
-    //     image and the meta doc are reclaimed (no leak, no double-free). ---
+    // --- drop both Trigger copies: their held image ref is the LAST, so the pool
+    //     image is reclaimed (no leak, no double-free). ---
     { xi::Trigger a = std::move(t); xi::Trigger b = std::move(tcopy); (void)a; (void)b; }
     CHECK(xi::ImagePool::instance().data(h) == nullptr);          // image reclaimed
-    CHECK(xi::DocRegistry::instance().refcount(d) == 0);          // meta doc freed (no leak)
 }
 
 // An INACTIVE view (plain cmd:run / timer tick: g_current_trigger == nullptr on

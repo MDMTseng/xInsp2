@@ -17,7 +17,7 @@
 //   (C) replay re-emits the SAME sealed handle with a FRESH trigger id and ZERO
 //       pixel copy: the replayed event's handle EQUALS the buffered handle, the
 //       pool live-count is unchanged across replay, and the image bytes match.
-//   (D) mixed ring — records and packs interleaved replay in capture order.
+//   (D) ring order — multiple packs replay in capture order (v12: pack-only ring).
 //   (E) teardown (destroy) releases every retained pack → both oracles return to
 //       baseline.
 //
@@ -30,7 +30,6 @@
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_pack_abi.hpp>      // install_pack_abi + pack_v1_iface + PackRegistry
 #include <xi/xi_trigger_bus.hpp>    // install_trigger_hook + the dispatch sink
-#include <xi/xi_record.hpp>
 
 #include "cache_io.h"               // the typed control/status view (Status/Command/Config)
 
@@ -65,9 +64,9 @@ static xi_host_api        g_host;
 static int    pool_live()   { return xi::ImagePool::instance().cumulative().live_now; }
 static size_t live_frames() { return xi::PackRegistry::instance().live_frames(); }
 
-// A captured dispatch event (record OR pack), recorded by the bus sink.
+// A captured dispatch event (a sealed pack), recorded by the bus sink.
 struct Captured {
-    xi_pack_handle pack = XI_PACK_NULL;   // XI_PACK_NULL ⇒ a Record event
+    xi_pack_handle pack = XI_PACK_NULL;
     xi_trigger_id  id   = XI_TRIGGER_NULL;
 };
 static std::mutex           g_mu;
@@ -95,23 +94,6 @@ static void capture_pack(xi::CAbiInstanceAdapter& a, xi_pack_handle in, int expe
         g_fi->release(ack);
     }
     g_fi->release(in);   // drop the producer's ref; the ring keeps its own
-}
-
-// Capture a Record (one pool image) through the Record door — for the mixed-ring
-// test. Returns nothing; the ring buffers a deep copy.
-static void capture_record(xi::CAbiInstanceAdapter& a) {
-    xi_image_handle h = g_host.image_create(64, 64, 1);
-    std::memset(g_host.image_data(h), 123, 64 * 64);
-    xi_record_image imgs[1] = { { "img", h } };
-    std::string meta = "{}";
-    xi_record in{};
-    in.images = imgs; in.image_count = 1;
-    in.data = reinterpret_cast<const uint8_t*>(meta.c_str());
-    in.len  = (int32_t)meta.size();
-    xi_record_out out; xi_record_out_init(&out);
-    a.process(&in, &out);
-    xi_record_out_free(&out);
-    g_host.image_release(h);
 }
 
 static xi::cache::Status status(xi::CAbiInstanceAdapter& a) {
@@ -232,17 +214,18 @@ int main() {
     CHECK(pool_live()   == base_pool);
 
     // ---------------------------------------------------------------------
-    // (D) Mixed ring: record + pack interleaved, replayed in capture order.
+    // (D) Multi-entry ring: packs replayed in capture order. (v12: the ring is
+    // pack-only — the Record entry variant was deleted with the Record plane.)
     // ---------------------------------------------------------------------
-    SECTION("mixed ring: pack, record, pack replay in capture order");
+    SECTION("ring order: three packs replay in capture order");
     adapter->exchange(xi::cache::Command::set_capacity(8));
-    capture_pack(*adapter, make_pack(100, 40), 1);   // slot 0: pack
-    capture_record(*adapter);                        // slot 1: record
-    capture_pack(*adapter, make_pack(101, 50), 3);   // slot 2: pack
+    capture_pack(*adapter, make_pack(100, 40), 1);   // slot 0
+    capture_pack(*adapter, make_pack(102, 60), 2);   // slot 1
+    capture_pack(*adapter, make_pack(101, 50), 3);   // slot 2
     {
         auto st = status(*adapter);
         CHECK(st.count() == 3);
-        CHECK(st.packs() == 2);        // two packs, one record
+        CHECK(st.packs() == 3);        // three retained packs
     }
     {
         drain_events();
@@ -250,19 +233,20 @@ int main() {
         std::lock_guard<std::mutex> lk(g_mu);
         CHECK(g_events.size() == 3);
         if (g_events.size() == 3) {
-            // Order preserved across the variant entries.
-            int64_t s0 = -1, s2 = -1;
-            CHECK(g_events[0].pack != XI_PACK_NULL);                 // pack (seq 100)
+            // Order preserved across the ring.
+            int64_t s0 = -1, s1 = -1, s2 = -1;
+            CHECK(g_events[0].pack != XI_PACK_NULL);
             CHECK(g_fi->get_i64(g_events[0].pack, "seq", &s0) == 1 && s0 == 100);
-            CHECK(g_events[1].pack == XI_PACK_NULL);                 // the record, mid-ring
-            CHECK(g_events[2].pack != XI_PACK_NULL);                 // pack (seq 101)
+            CHECK(g_events[1].pack != XI_PACK_NULL);
+            CHECK(g_fi->get_i64(g_events[1].pack, "seq", &s1) == 1 && s1 == 102);
+            CHECK(g_events[2].pack != XI_PACK_NULL);
             CHECK(g_fi->get_i64(g_events[2].pack, "seq", &s2) == 1 && s2 == 101);
         }
     }
     drain_events();
 
     // ---------------------------------------------------------------------
-    // (E) Teardown releases everything (the ring still holds 2 packs + 1 record).
+    // (E) Teardown releases everything (the ring still holds 3 packs).
     // ---------------------------------------------------------------------
     SECTION("destroy: ring teardown releases all retained packs");
     adapter.reset();     // ~CAbiInstanceAdapter -> xi_plugin_destroy -> ~BufferReplay

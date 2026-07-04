@@ -18,6 +18,7 @@
 //   (fixed shape, no dependency) but is valid msgpack wire format.
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
+#include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
 
 #include "xex1_encode.hpp"    // the XEX1 msgpack encoder (shared with the fixture test)
 #include "xex1_pack_dump.hpp"  // encode_pack_v3 — the generic pack->v3 walk (shared with record_save)
@@ -63,45 +64,12 @@ public:
             cap_ = static_cast<const xi_cap_v1*>(host->get_interface("xi.cap", 1));
     }
 
-    // Reserved keys — sourced from the central registry (xi::Record) so this
-    // sink can't drift from the framework's staged-emit contract.
-    static constexpr const char* kChannelKey = xi::Record::kChannelKey;
-    static constexpr const char* kSeqKey     = xi::Record::kSeqKey;
-
-    xi::Record process(const xi::Record& in) override {
-        xi::Json j = xi::Json::parse(in.data_json());
-        const std::string channel = j[kChannelKey].as_string("default");
-        const uint64_t    seq     = (uint64_t)(int64_t)j[kSeqKey].as_double(0);
-        // The frame's values = the record minus the framework-internal reserved keys
-        // (channel + seq are already top-level frame fields).
-        j.remove(kChannelKey).remove(kSeqKey);
-        const std::string values_json = j.dump();
-
-        std::lock_guard<std::mutex> lk(mu_);
-        Channel& ch = channels_[channel];
-        ch.json = values_json;
-        ch.seq  = seq;
-        ch.images.clear();
-        for (auto& [key, img] : in.images()) {
-            if (img.empty()) continue;
-            ch.images[key] = xi::Image(img.width, img.height, img.channels, img.data());  // own for pull
-        }
-        ++ch.seen;
-
-        // Subscription gating: only encode + push for channels someone is watching.
-        if (subscribed_.count(channel))
-            emit_binary(build_frame_(channel, ch));
-
-        return xi::Record().set("channel", channel).set("seen", (int64_t)ch.seen);
-    }
-
     // polaris2 wave-2 (docs/new_gen/08 Wave 2 step 3): the xi.pack@1 pack-in/
-    // pack-out door. expose is a SINK — it consumes a sealed pack and its real
-    // output is the emit_binary side-effect (exactly as process() above returns a
-    // small ack while emit_binary pushes the real payload). So this pack-door
-    // process() walks the input pack GENERICALLY (count()+key_at()+tag_at()+typed reads — zero
-    // producer knowledge; the r2 constraint made real) and returns a small ack
-    // pack {channel, seen}, mirroring the Record path's ack record.
+    // pack-out door — THE data plane (v12: the Record process path is deleted).
+    // expose is a SINK — it consumes a sealed pack and its real output is the
+    // emit_binary side-effect; this door returns a small ack pack {channel, seen}.
+    // It walks the input pack GENERICALLY (count()+key_at()+tag_at()+typed reads
+    // — zero producer knowledge; the r2 constraint made real).
     //
     // The framework-internal reserved keys ($channel/$seq) are lifted to the wire
     // frame's top-level fields; every OTHER entry is dumped by tag: scalars/str
@@ -110,8 +78,8 @@ public:
     // version is produced is the opt-in `frame_wire_v3` config (DEFAULT v1 — the
     // wire-breaking default stays out per the plan's governance).
     void process(xi::PackIn& in, xi::PackOut& out) override {
-        const std::string channel(in.str(xi::Record::kChannelKey).value_or("default"));
-        const uint64_t    seq = (uint64_t)in.i64_or(xi::Record::kSeqKey, 0);
+        const std::string channel(in.str(xi::pack_contract::kChannel).value_or("default"));
+        const uint64_t    seq = (uint64_t)in.i64_or(xi::pack_contract::kSeq, 0);
 
         bool v3;
         { std::lock_guard<std::mutex> lk(mu_); v3 = wire_v3_; }
@@ -377,7 +345,7 @@ private:
             auto keyv = in.key_at(i);
             if (!keyv) continue;
             std::string key(*keyv);
-            if (key == xi::Record::kChannelKey || key == xi::Record::kSeqKey) continue;
+            if (key == xi::pack_contract::kChannel || key == xi::pack_contract::kSeq) continue;
             switch (in.tag_at(i)) {
                 case XI_PACK_TAG_I64:
                     vals.set(key.c_str(), (int64_t)in.i64_or(key.c_str(), 0)); break;

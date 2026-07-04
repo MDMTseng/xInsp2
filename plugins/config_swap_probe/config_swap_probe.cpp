@@ -32,7 +32,7 @@
 // Build: part of plugins/CMakeLists.txt (target config_swap_probe).
 //
 
-#include <xi/xi_abi.hpp>       // xi::Plugin, xi::Record, XI_PLUGIN_IMPL
+#include <xi/xi_abi.hpp>       // xi::Plugin, xi::PackIn/PackOut, XI_PLUGIN_IMPL
 #include <xi/xi_json.hpp>      // canonical config/command parsing (over cmd.find/atoi)
 #include <xi/xi_contract.hpp>  // schema-version stamp key + skew rejection
 
@@ -97,26 +97,14 @@ public:
         return xi::Json::object().set(ckeys::kValue, a ? a->value : 0).dump();
     }
 
-    // Lock-free read of the LIVE slot. A swap that happens concurrently (commit on
-    // another thread) is invisible mid-run: this run sees old XOR new, never torn.
-    xi::Record process(const xi::Record&) override {
-        auto a = active_.load();
-        last_seen_.store(a ? a->value : -1);
-        proc_calls_.fetch_add(1, std::memory_order_relaxed);
-        return {};
-    }
-
     // polaris2 wave-2 (docs/new_gen/10 gate P1): the xi.pack@1 pack-in/pack-out
-    // door. This probe's process() is a no-op OBSERVATION step, so the honest
-    // mirror is an EXACT one: read the live slot into last_seen_, bump the call
-    // counter, and return an EMPTY pack — the same empty result the Record path
-    // returns (`{}` above). The probe emits NO output data in EITHER currency;
-    // its real surface is the config/prepare/commit control plane observed
-    // through get_status (below), which both drive paths reach identically. It
-    // has no input contract, so — like the Record path — there are no required-
-    // input faults and unknown pack entries are ignored. Making the pack path
-    // emit the status/counter keys would make it dishonestly richer than the
-    // Record path it mirrors (and gate P1 keeps that Record path untouched).
+    // door — THE data plane (v12: the Record process path is deleted). This
+    // probe's process() is a no-op OBSERVATION step: read the live slot into
+    // last_seen_, bump the call counter, and return an EMPTY pack (the door's
+    // absence sentinel). The probe emits NO output data; its real surface is the
+    // config/prepare/commit control plane observed through get_status (below).
+    // It has no input contract, so there are no required-input faults and
+    // unknown pack entries are ignored.
     void process(xi::PackIn& /*in*/, xi::PackOut& /*out*/) override {
         auto a = active_.load();
         last_seen_.store(a ? a->value : -1);

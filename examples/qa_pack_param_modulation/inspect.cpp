@@ -32,7 +32,7 @@
 //      thresholds) to expose channel "qa"; the driver reconstructs the
 //      staircase from the wire and re-asserts everything frame by frame.
 //
-// No xi::Record anywhere; blob's Record process() path is untouched.
+// No xi::Record anywhere; blob is driven purely through its xi.pack@1 door.
 #include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
 #include <xi/xi_script_pack.hpp>

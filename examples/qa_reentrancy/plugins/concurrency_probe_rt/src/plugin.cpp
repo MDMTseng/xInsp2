@@ -15,7 +15,7 @@ class ConcurrencyProbeRt : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    xi::Record process(const xi::Record& /*input*/) override {
+    void process(xi::PackIn& /*in*/, xi::PackOut& out) override {
         calls_.fetch_add(1);
         int cur = ++in_flight_;
         int prev = max_c_.load();
@@ -23,9 +23,8 @@ public:
         if (cur > 1) overlaps_.fetch_add(1);
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
         --in_flight_;
-        return xi::Record()
-            .set("maxc",     max_c_.load())
-            .set("overlaps", overlaps_.load());
+        out.i64("maxc",     max_c_.load())
+           .i64("overlaps", overlaps_.load());
     }
 
     // Read the accumulated counters after the run (see concurrency_probe).
@@ -55,3 +54,4 @@ private:
 };
 
 XI_PLUGIN_IMPL(ConcurrencyProbeRt)
+XI_PLUGIN_PACK_DOOR(ConcurrencyProbeRt)

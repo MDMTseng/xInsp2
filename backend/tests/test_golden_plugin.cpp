@@ -23,6 +23,7 @@
 //
 #include <xi/xi_cabi_adapter.hpp>
 #include <xi/xi_image_pool.hpp>
+#include <xi/xi_pack_abi.hpp>     // install_pack_abi + pack_v1_iface (xi.pack@1)
 
 #ifdef _WIN32
   #include <windows.h>
@@ -126,6 +127,7 @@ int main() {
     // (2) A real host_api backed by the live ImagePool — exactly what the backend
     // hands a plugin at create().
     static xi_host_api host = xi::ImagePool::make_host_api();
+    xi::install_pack_abi();                        // publish the host xi.pack@1 door
     CHECK(host.get_interface != nullptr);          // query door present on the host
     // Phase 4: xi.legacy@9 is RETIRED — the whole-table view is no longer
     // published, so the door now returns null for it (carved interfaces remain).
@@ -134,48 +136,42 @@ int main() {
     void* inst = create(&host, "golden0");
     CHECK(inst != nullptr);
 
-    // (3) Drive through the real adapter (OwnerGuard + CallScope). Non-reentrant.
+    // (3) Drive through the real adapter (OwnerGuard + CallScope) via the v12
+    // xi.pack@1 data-plane door — the same mechanics the dispatch worker runs.
+    // Non-reentrant.
     {
         xi::CAbiInstanceAdapter adapter("golden0", "golden", dll, inst,
                                         /*reentrant=*/false, /*max_concurrency=*/0);
 
-        xi_record in{};
-        xi_record_out out;
-        xi_record_out_init(&out);
-        int n = adapter.process(&in, &out);
+        xi_pack_handle out = adapter.run_pack_door(XI_PACK_NULL);
+        const xi_pack_v1* pk = xi::pack_v1_iface();
+        CHECK(pk != nullptr);
 
-        // (4) Frozen behaviour: one image "out", 4x4x1, pixel[i] == i*16.
-        CHECK(n == 1);
-        CHECK(out.image_count == 1);
-        if (out.image_count == 1) {
-            CHECK(std::string(out.images[0].key) == "out");
-            xi_image_handle h = out.images[0].handle;
-            CHECK(h != XI_IMAGE_NULL);
-            CHECK(host.image_width(h) == 4);
-            CHECK(host.image_height(h) == 4);
-            CHECK(host.image_channels(h) == 1);
-            uint8_t* px = host.image_data(h);
-            int32_t  stride = host.image_stride(h);
+        // (4) Frozen behaviour: one image "out", 4x4x1, pixel[i] == i*16, read
+        // back through the pack accessor (same deterministic ramp as before).
+        CHECK(out != XI_PACK_NULL);
+        xi_pack_image iv{};
+        bool got = out != XI_PACK_NULL && pk && pk->get_image(out, "out", &iv) == 1;
+        CHECK(got);
+        if (got) {
+            CHECK(iv.width == 4);
+            CHECK(iv.height == 4);
+            CHECK(iv.channels == 1);
+            CHECK(iv.length == 16);
+            const auto* px = static_cast<const uint8_t*>(iv.pixels);
             CHECK(px != nullptr);
             if (px) {
                 bool ramp_ok = true;
-                for (int32_t y = 0; y < 4; ++y)
-                    for (int32_t x = 0; x < 4; ++x) {
-                        int32_t i = y * 4 + x;
-                        if (px[y * stride + x] != (uint8_t)((i * 16) & 0xFF))
-                            ramp_ok = false;
-                    }
+                for (int32_t i = 0; i < 16; ++i)
+                    if (px[i] != (uint8_t)((i * 16) & 0xFF)) ramp_ok = false;
                 CHECK(ramp_ok);
                 // A couple of explicit anchors so a failure prints something useful.
                 CHECK(px[0] == 0);
-                CHECK(px[1 * stride + 1] == 80);    // i=5  -> 80
-                CHECK(px[3 * stride + 3] == 240);   // i=15 -> 240
+                CHECK(px[5] == 80);     // i=5  -> 80
+                CHECK(px[15] == 240);   // i=15 -> 240
             }
-            // The adapter took ownership tag of this handle; release our view of
-            // it so the pool count returns to baseline. (out_doc unused here.)
-            host.image_release(h);
         }
-        xi_record_out_free(&out);
+        if (out != XI_PACK_NULL) pk->release(out);
         // adapter dtor calls xi_plugin_destroy + sweeps the owner bucket.
     }
 

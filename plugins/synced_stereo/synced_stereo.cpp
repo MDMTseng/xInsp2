@@ -128,27 +128,15 @@ private:
         std::memcpy(lp, &seq, sizeof(seq));
         std::memcpy(rp, &seq, sizeof(seq));
 
-        // polaris2 wave-2: in pack mode, gather the correlated pair into ONE
-        // sealed Pack — both images plus the seq entry under a single trigger.
-        // adopt_image is a zero-copy pool-handle addref (the same pool slots the
-        // Record path would hand over), so the pixels are identical to the
-        // default path; only the emit currency differs. Taken only when a project
-        // set pack_mode AND the host publishes xi.pack@1 — otherwise the Record
-        // path below (byte-for-byte the original) runs.
-        if (pack_mode_.load() && pack_iface()) {
-            xi::PackOut f = new_pack();
-            f.i64(keys::kSeq, seq);
-            f.adopt_image(keys::kLeft,  W, H, 1, L.pool_handle());
-            f.adopt_image(keys::kRight, W, H, 1, R.pool_handle());
-            emit(std::move(f));
-        } else {
-            // Both frames in ONE record → one dispatched event, no bus policy.
-            // emit() fills host()/name() and runs the RAII marshal/refcount path.
-            xi::Record rec = xi::Record()
-                .image("left",  L)
-                .image("right", R);
-            emit(rec);
-        }
+        // v12: gather the correlated pair into ONE sealed Pack — both images plus
+        // the seq entry under a single trigger. adopt_image is a zero-copy
+        // pool-handle addref (not a memcpy). The sealed xi.pack@1 Pack is the sole
+        // data plane; a host without it can't run this source's emit path.
+        xi::PackOut f = new_pack();
+        f.i64(keys::kSeq, seq);
+        f.adopt_image(keys::kLeft,  W, H, 1, L.pool_handle());
+        f.adopt_image(keys::kRight, W, H, 1, R.pool_handle());
+        emit(std::move(f));
         ticks_++;
     }
 

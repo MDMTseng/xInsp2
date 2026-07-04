@@ -1,30 +1,35 @@
 //
-// test_json_source_pack.cpp — the polaris2 wave-2 BILINGUAL proof for json_source
-// against the REAL built DLL (docs/new_gen/10 Gate P1, mirroring pack_pilot_test).
+// test_json_source_pack.cpp — the json_source pack-door proof (docs/new_gen/10
+// Gate P1) against the REAL built DLL, mirroring pack_pilot_test.
 //
-// json_source is a SOURCE: in pack_mode it emits each (patched) document as a
-// sealed xi.pack@1 pack through the host door instead of returning a Record — the
-// same emit path mock_camera takes. This test loads the genuine DLL through the C
-// ABI, installs the real pack ABI + trigger bus, and drives process() while a bus
-// sink captures the emitted pack:
+// v12: the Record process path is deleted, so json_source is a PACK-DOOR SOURCE.
+// The host TICKS its xi.pack@1 door once per frame; json_source ignores the tick
+// input and EMITS the stored (GUI-edited) document as a sealed pack into
+// dispatch. This test loads the genuine DLL through the C ABI + host adapter,
+// installs the real pack ABI + trigger bus, ticks the door, and captures the
+// emitted pack off the bus:
 //
-//   * OFF (default) — pack_mode false: process() returns the Record byte-for-byte
-//     as before and NOTHING reaches the pack bus (the Record path is unchanged).
-//   * ON — the document's top-level scalars land as canonical pack entries
-//     (bool → bool tag, number → i64/f64, string → str), a nested object/array
-//     lands as ONE ingress-canonicalized `mp` entry that decodes back, and a
-//     leading `seq` counter mirrors mock_camera.
+//   * EMIT — one tick emits ONE sealed pack: the document's top-level scalars
+//     land as canonical pack entries (bool → bool tag, number → i64/f64,
+//     string → str), a nested object/array lands as ONE ingress-canonicalized
+//     `mp` entry that decodes back, and a leading `seq` counter mirrors
+//     mock_camera (free-running, one per emitted pack).
 //   * HOSTILE — a depth-bomb document is rejected LOUDLY: a sealed $fault pack
 //     (never a partial/silent result), per the doc-07 ingress semantics.
+//   * A non-object document root is rejected loudly too.
 //   * Pooled-handle balance across the whole run.
+//
+// (v12: the pack_mode-OFF Record-parity leg and the per-tick input-patch leg are
+// gone — the Record plane was deleted and the pack tick carries no patch input;
+// patches are applied to the stored def via exchange/set_def.)
 //
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
 #endif
 
-#include <xi/xi_abi.hpp>            // xi_record / xi_record_out C ABI
-#include <xi/xi_contract.hpp>      // shared fault reason codes (kWrongType)
+#include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_pack_door / run_pack_door)
+#include <xi/xi_contract.hpp>       // shared fault reason codes (kWrongType)
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_pack_abi.hpp>       // install_pack_abi + pack_v1_iface + PackRegistry
 #include <xi/xi_trigger_bus.hpp>    // install_trigger_hook + the dispatch sink
@@ -32,9 +37,9 @@
 
 #include "json_source_keys.gen.h"
 
-#include <chrono>
 #include <cstdio>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -56,60 +61,7 @@ namespace jkeys = xi::json_source::keys;
 
 static int pool_live() { return xi::ImagePool::instance().cumulative().live_now; }
 
-// The loaded C-ABI plugin.
-struct Plugin {
-    HMODULE dll = nullptr;
-    void*   inst = nullptr;
-    xi_plugin_create_fn   create   = nullptr;
-    xi_plugin_destroy_fn  destroy  = nullptr;
-    xi_plugin_process_fn  process  = nullptr;
-    xi_plugin_set_def_fn  set_def  = nullptr;
-    xi_plugin_get_def_fn  get_def  = nullptr;
-};
-
-static Plugin load_plugin(const char* path, const xi_host_api* host) {
-    Plugin p;
-    p.dll = LoadLibraryA(path);
-    if (!p.dll) { std::fprintf(stderr, "FAIL: LoadLibrary(%s) err %lu\n", path, GetLastError()); ++g_failures; return p; }
-    p.create  = (xi_plugin_create_fn)  GetProcAddress(p.dll, "xi_plugin_create");
-    p.destroy = (xi_plugin_destroy_fn) GetProcAddress(p.dll, "xi_plugin_destroy");
-    p.process = (xi_plugin_process_fn) GetProcAddress(p.dll, "xi_plugin_process");
-    p.set_def = (xi_plugin_set_def_fn) GetProcAddress(p.dll, "xi_plugin_set_def");
-    p.get_def = (xi_plugin_get_def_fn) GetProcAddress(p.dll, "xi_plugin_get_def");
-    CHECK(p.create && p.destroy && p.process && p.set_def && p.get_def);
-    if (p.create) p.inst = p.create(host, "src");
-    CHECK(p.inst != nullptr);
-    return p;
-}
-
-// Drive one process() call with a JSON input record (patches), returning the
-// output Record's serialized JSON (empty images assumed — json_source is metadata).
-static std::string run_process(Plugin& p, const std::string& in_json) {
-    xi_record in{};
-    in.images      = nullptr;
-    in.image_count = 0;
-    in.data        = reinterpret_cast<const uint8_t*>(in_json.c_str());
-    in.len         = static_cast<int32_t>(in_json.size());
-
-    xi_record_out out; xi_record_out_init(&out);
-    p.process(p.inst, &in, &out);
-
-    std::string js;
-    if (out.out_doc) {
-        size_t n = 0;
-        char* s = yyjson_mut_write(reinterpret_cast<yyjson_mut_doc*>(out.out_doc), 0, &n);
-        js = s ? std::string(s, n) : std::string();
-        if (s) free(s);
-    } else if (out.data) {
-        js = std::string(reinterpret_cast<const char*>(out.data), (size_t)out.len);
-    }
-    xi_record_out_free(&out);
-    return js;
-}
-
-// Capture-and-drain: run process() once and return the FIRST pack emitted to the
-// bus during the call (XI_PACK_NULL if none). The returned handle is still owned
-// by the captured event; the caller releases it via TriggerBus::release_pack_.
+// One captured drive: the packs a single door tick emitted to the bus.
 struct Captured {
     std::vector<xi::TriggerEvent> events;
     xi_pack_handle first_pack() const {
@@ -126,18 +78,24 @@ struct Captured {
     }
 };
 
-static Captured process_capturing(Plugin& p, const std::string& in_json) {
+// Tick the source's pack door once (empty input pack — the door ignores it) and
+// return the packs it emitted to the bus during the tick. The sealed (empty) ack
+// pack the door returns is released here.
+static Captured tick_capturing(const xi_pack_v1* fi, xi::CAbiInstanceAdapter& a) {
     Captured cap;
     xi::TriggerBus::instance().set_sink([&](xi::TriggerEvent ev) {
         cap.events.push_back(std::move(ev));
     });
-    run_process(p, in_json);
+    xi_pack_handle in  = fi->builder_seal(fi->builder_new());
+    xi_pack_handle ack = a.run_pack_door(in);
+    if (ack != XI_PACK_NULL) fi->release(ack);
+    fi->release(in);
     xi::TriggerBus::instance().clear_sink();
     return cap;
 }
 
 int main() {
-    std::printf("[test] json_source bilingual pack-mode (real DLL through xi.pack@1)\n");
+    std::printf("[test] json_source pack-door source (real DLL through xi.pack@1)\n");
 
     xi::install_pack_abi();
     xi_host_api host = xi::ImagePool::make_host_api();
@@ -146,36 +104,35 @@ int main() {
 
     const int base = pool_live();
 
-    Plugin p = load_plugin(JSON_SOURCE_DLL_PATH, &host);
-    if (!p.inst) { std::fprintf(stderr, "\nSETUP FAILED\n"); return 1; }
+    HMODULE dll = LoadLibraryA(JSON_SOURCE_DLL_PATH);
+    if (!dll) { std::fprintf(stderr, "FAIL: LoadLibrary(%s) err %lu\n", JSON_SOURCE_DLL_PATH, GetLastError()); return 1; }
+    auto factory   = reinterpret_cast<xi::PluginInfo::CFactoryFn>(GetProcAddress(dll, "xi_plugin_create"));
+    auto get_iface = reinterpret_cast<xi_plugin_get_interface_fn>(GetProcAddress(dll, "xi_plugin_get_interface"));
+    CHECK(factory != nullptr);
+    if (!factory) return 1;
+    void* inst = factory(&host, "src");
+    CHECK(inst != nullptr);
+    if (!inst) { std::fprintf(stderr, "\nSETUP FAILED\n"); return 1; }
+    auto p = std::make_unique<xi::CAbiInstanceAdapter>("src", "src", dll, inst);
 
     // ---------------------------------------------------------------------
-    // (A) OFF (default): the Record path is unchanged and nothing reaches the
-    //     pack bus. Seed a document via the config wrapper (pack_mode absent).
+    // Door probe: json_source publishes the xi.pack@1 door.
     // ---------------------------------------------------------------------
-    SECTION("pack_mode OFF: Record emit unchanged, zero packs on the bus");
-    {
-        CHECK(p.set_def(p.inst, R"({"data":{"n":5,"tag":"hi"}})") == 0);
-        Captured cap = process_capturing(p, "{}");
-        CHECK(cap.pack_count() == 0);                 // no pack emitted in Record mode
-        // The returned Record is the stored document (a raw-key read; open output).
-        auto rec_js = run_process(p, "{}");
-        CHECK(rec_js.find("\"n\":5") != std::string::npos);
-        CHECK(rec_js.find("\"tag\":\"hi\"") != std::string::npos);
-        cap.release_all();
-    }
+    SECTION("door probe: json_source answers xi.pack@1");
+    CHECK(get_iface && get_iface("xi.pack", 1) != nullptr);
+    CHECK(p->has_pack_door());
 
     // ---------------------------------------------------------------------
-    // (B) ON: scalars → canonical entries, nested → one canonical mp entry,
-    //     plus a leading seq. Turn pack_mode on through the config wrapper.
+    // (A) EMIT: scalars → canonical entries, nested → one canonical mp entry,
+    //     plus a leading seq. Seed the document through the config wrapper.
     // ---------------------------------------------------------------------
-    SECTION("pack_mode ON: scalars + canonicalized nested payload + seq");
+    SECTION("tick emits a sealed pack: scalars + canonicalized nested payload + seq");
     {
-        CHECK(p.set_def(p.inst, R"({"pack_mode":true,"data":{)"
-                                R"("n":42,"ratio":1.5,"name":"widget","ok":true,)"
-                                R"("roi":{"x":1,"y":2,"pts":[3,4,5]})"
-                                R"(}})") == 0);
-        Captured cap = process_capturing(p, "{}");
+        CHECK(p->set_def(R"({"data":{)"
+                         R"("n":42,"ratio":1.5,"name":"widget","ok":true,)"
+                         R"("roi":{"x":1,"y":2,"pts":[3,4,5]})"
+                         R"(}})"));
+        Captured cap = tick_capturing(fi, *p);
         CHECK(cap.pack_count() == 1);
         xi_pack_handle pk = cap.first_pack();
         CHECK(pk != XI_PACK_NULL);
@@ -188,8 +145,8 @@ int main() {
             double ratio = 0; CHECK(fi->get_f64(pk, "ratio", &ratio) == 1 && ratio == 1.5);
             const char* s = nullptr; int32_t sl = 0;
             CHECK(fi->get_str(pk, "name", &s, &sl) == 1 && std::string(s, (size_t)sl) == "widget");
-            // bool → a REAL bool entry (tag XI_PACK_TAG_BOOL) — the old i64 0/1
-            // workaround is gone: the i64 read now fail-closes on the bool tag.
+            // bool → a REAL bool entry (tag XI_PACK_TAG_BOOL) — the i64 read
+            // fail-closes on the bool tag.
             CHECK(fi->tag_of(pk, "ok") == XI_PACK_TAG_BOOL);
             int32_t okb = 0; CHECK(fi->get_bool(pk, "ok", &okb) == 1 && okb == 1);
             int64_t ok = -1; CHECK(fi->get_i64(pk, "ok", &ok) == 0);
@@ -200,10 +157,8 @@ int main() {
             const void* mp = nullptr; int32_t ml = 0;
             CHECK(fi->get_mp(pk, "roi", &mp, &ml) == 1 && ml > 0);
             if (mp && ml > 0) {
-                // Structurally valid canonical msgpack (the ingress edge proved it).
                 CHECK(xi::mp::validate(static_cast<const uint8_t*>(mp), (size_t)ml)
                           == xi::mp::Status::Ok);
-                // Walk the top-level map, tap roi.x / roi.pts to prove content survived.
                 xi::mp::Reader r(static_cast<const uint8_t*>(mp), (size_t)ml);
                 xi::mp::Element top;
                 CHECK(r.next(top) == xi::mp::Status::Ok && top.kind == xi::mp::Kind::Map);
@@ -228,7 +183,7 @@ int main() {
         cap.release_all();
 
         // seq advances per emit (mirrors mock_camera's free-running counter).
-        Captured cap2 = process_capturing(p, "{}");
+        Captured cap2 = tick_capturing(fi, *p);
         xi_pack_handle pk2 = cap2.first_pack();
         int64_t seq2 = -1;
         CHECK(pk2 && fi->get_i64(pk2, jkeys::kSeq, &seq2) == 1 && seq2 == 1);
@@ -236,33 +191,19 @@ int main() {
     }
 
     // ---------------------------------------------------------------------
-    // (C) A per-emit patch mutates ONLY the emitted pack (stored doc untouched),
-    //     exactly as it does on the Record path.
+    // (B) HOSTILE: a depth-bomb document is rejected loudly with a $fault pack.
     // ---------------------------------------------------------------------
-    SECTION("pack_mode ON: input patch mutates the emitted pack");
+    SECTION("depth-bomb document -> sealed $fault pack (fail loud)");
     {
-        Captured cap = process_capturing(p, R"({"key":".n","value":99})");
-        xi_pack_handle pk = cap.first_pack();
-        int64_t n = -1;
-        CHECK(pk && fi->get_i64(pk, "n", &n) == 1 && n == 99);   // patched value
-        cap.release_all();
-    }
-
-    // ---------------------------------------------------------------------
-    // (D) HOSTILE: a depth-bomb document is rejected loudly with a $fault pack.
-    // ---------------------------------------------------------------------
-    SECTION("pack_mode ON: depth-bomb document -> sealed $fault pack (fail loud)");
-    {
-        // Build {"deep":{{{...}}}} nested well beyond the ingress depth limit.
         std::string deep;
         const int D = xi::mp::kDefaultMaxDepth + 8;
         for (int i = 0; i < D; ++i) deep += "{\"a\":";
         deep += "1";
         for (int i = 0; i < D; ++i) deep += "}";
-        std::string cfg = std::string(R"({"pack_mode":true,"data":{"deep":)") + deep + "}}";
-        CHECK(p.set_def(p.inst, cfg.c_str()) == 0);
+        std::string cfg = std::string(R"({"data":{"deep":)") + deep + "}}";
+        CHECK(p->set_def(cfg));
 
-        Captured cap = process_capturing(p, "{}");
+        Captured cap = tick_capturing(fi, *p);
         CHECK(cap.pack_count() == 1);                 // a fault is still a sealed pack
         xi_pack_handle pk = cap.first_pack();
         if (pk) {
@@ -279,12 +220,12 @@ int main() {
     }
 
     // ---------------------------------------------------------------------
-    // (E) A non-object document root is rejected loudly too.
+    // (C) A non-object document root is rejected loudly too.
     // ---------------------------------------------------------------------
-    SECTION("pack_mode ON: non-object root -> $fault (wrong_type)");
+    SECTION("non-object root -> $fault (wrong_type)");
     {
-        CHECK(p.set_def(p.inst, R"({"pack_mode":true,"data":[1,2,3]})") == 0);
-        Captured cap = process_capturing(p, "{}");
+        CHECK(p->set_def(R"({"data":[1,2,3]})"));
+        Captured cap = tick_capturing(fi, *p);
         xi_pack_handle pk = cap.first_pack();
         if (pk) {
             const char* code = nullptr; int32_t cl = 0;
@@ -297,8 +238,9 @@ int main() {
     // ---------------------------------------------------------------------
     // Teardown + pooled-handle balance.
     // ---------------------------------------------------------------------
-    p.destroy(p.inst);
-    FreeLibrary(p.dll);
+    p.reset();               // ~CAbiInstanceAdapter -> xi_plugin_destroy
+    FreeLibrary(dll);
+    xi::TriggerBus::instance().clear_sink();
 
     CHECK(pool_live() == base);
     CHECK(xi::PackRegistry::instance().live_frames() == 0);

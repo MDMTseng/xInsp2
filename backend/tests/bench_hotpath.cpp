@@ -9,17 +9,24 @@
 //   through the trigger bus, handed to a dispatch lane, popped by a worker,
 //   inspected, and emitted back through the ordered-result gate. This bench times
 //   THAT span — emit → ordered result — exercising the REAL runtime primitives:
-//     - xi::TriggerBus      (the emit_record dispatch funnel)
+//     - xi::TriggerBus      (the emit_pack dispatch funnel, PACK-only post-CUT)
 //     - xi::ImagePool       (pooled frames, addref/release refcount, no copy)
-//     - xi::DocRegistry     (routing/context metadata doc, pointer-carried)
+//     - xi::PackRegistry / xi.pack@1 (the sealed keyed-buffer pack the frame rides)
 //     - xi::EmitGate/EmitTurn (arrival-ordered result emission)
 //     - xi::MetricsRegistry (the same record_frame the live path calls)
 //
+// POST-CUT (v11→v12 ABI break): the frame now rides an xi.pack@1 sealed pack —
+// the producer seals one pooled image ("frame") into a pack and emits it via the
+// real TriggerBus::emit_pack; the worker reads the image back through the pack
+// accessor. The Record/DocRegistry routing-meta doc (and the --no-meta knob that
+// toggled it) was RETIRED at THE CUT: TriggerEvent no longer carries images or a
+// meta_doc, only a pack handle. Everything else about the span is unchanged.
+//
 // WHAT IS REAL vs STUBBED (truth-in-labeling — this bench links xi_core, which is
 // header-only, so the service_*.cpp translation units are NOT available to it):
-//   REAL:    TriggerBus, ImagePool, DocRegistry, EmitGate/EmitTurn, MetricsRegistry
-//            — every allocation / refcount / cross-thread-handoff / ordering
-//            primitive on the per-frame path.
+//   REAL:    TriggerBus, ImagePool, PackRegistry (xi.pack@1), EmitGate/EmitTurn,
+//            MetricsRegistry — every allocation / refcount / cross-thread-handoff /
+//            ordering primitive on the per-frame path.
 //   STUBBED: the dispatch lane's queue plumbing (GroupLane, welded into the
 //            backend exe behind the private service_internal.hpp) is reproduced
 //            here as MiniLane — a faithful copy of GroupLane's shape and its
@@ -61,12 +68,11 @@
 
 #include "xi/xi_abi.h"
 #include "xi/xi_clock.hpp"
-#include "xi/xi_doc_registry.hpp"
 #include "xi/xi_emit_gate.hpp"
 #include "xi/xi_image_pool.hpp"
 #include "xi/xi_metrics.hpp"
+#include "xi/xi_pack_abi.hpp"
 #include "xi/xi_trigger_bus.hpp"
-#include "yyjson.h"
 
 #include <algorithm>
 #include <atomic>
@@ -116,7 +122,6 @@ struct Config {
     int  inflight = 0;                              // >0 => closed-loop, this many outstanding
     int  pace_us = 0;                               // open-loop inter-emit spacing (0 = burst)
     int  work = 256;                                // fixed inspect touch: sample this many pixels
-    bool meta = true;                               // attach a small routing/context meta doc
     int  queue_depth = 1024;
 };
 
@@ -139,24 +144,13 @@ static inline void tiny_inspect(const uint8_t* px, size_t nbytes, int work) {
     g_sink += acc;
 }
 
-// A small routing/context metadata doc, registered in DocRegistry at rc=1 exactly
-// as install_trigger_hook does before handing it to emit (which adopts, no retain).
-static yyjson_mut_doc* make_meta_doc(int64_t seq) {
-    yyjson_mut_doc* d = yyjson_mut_doc_new(nullptr);
-    yyjson_mut_val* root = yyjson_mut_obj(d);
-    yyjson_mut_doc_set_root(d, root);
-    yyjson_mut_obj_add_str(d, root, "source", "bench_cam");
-    yyjson_mut_obj_add_int(d, root, "seq", seq);
-    xi::DocRegistry::instance().addref(d);   // register at rc=1 (host's ref)
-    return d;
-}
-
-// Release a consumed event exactly like release_trigger_event_ (service_sinks.cpp):
-// drop every image-pool ref the event holds, then release the metadata doc ref.
+// Release a consumed (or dropped) event exactly like release_trigger_event_
+// (service_sinks.cpp) does post-CUT: the pack IS the payload, so a single pack
+// release drops the frame (and its pooled image) the event carried. No-op on a
+// XI_PACK_NULL event.
 static void release_event_(xi::TriggerEvent& ev) {
-    for (auto& [k, h] : ev.images) xi::ImagePool::instance().release(h);
-    ev.images.clear();
-    ev.meta_doc.reset();
+    xi::TriggerBus::instance().release_pack_(ev.pack);
+    ev.pack = XI_PACK_NULL;
 }
 
 // One full run. Spins up `cfg.parallel` workers on a MiniLane, installs the
@@ -166,7 +160,7 @@ static void release_event_(xi::TriggerEvent& ev) {
 static Result run_scenario(const Config& cfg) {
     auto& bus   = xi::TriggerBus::instance();
     auto& pool  = xi::ImagePool::instance();
-    const size_t nbytes = (size_t)cfg.width * cfg.height * cfg.channels;
+    const xi_pack_v1* pk = xi::pack_v1_iface();   // installed once in main()
 
     MiniLane lane;
     lane.ordered     = cfg.ordered && cfg.parallel > 1;   // ordered only with real concurrency
@@ -209,9 +203,12 @@ static Result run_scenario(const Config& cfg) {
 
                 ev.dequeued_at_us = xi::now_us();   // same stamp the real worker makes
 
-                // --- the fixed tiny inspect, timed exactly like run_inspection_compute_
+                // --- read the frame back off the pack (the real consume path), then
+                //     the fixed tiny inspect, timed exactly like run_inspection_compute_
+                xi_pack_image iv{};
+                pk->get_image(ev.pack, "frame", &iv);
                 auto t0 = clk::now();
-                tiny_inspect(pool.data(ev.images.begin()->second), nbytes, cfg.work);
+                tiny_inspect((const uint8_t*)iv.pixels, (size_t)iv.length, cfg.work);
                 double dt_us = std::chrono::duration<double, std::micro>(clk::now() - t0).count();
                 xi::MetricsRegistry::instance().record_frame(dt_us / 1000.0, /*ok=*/true);
 
@@ -271,14 +268,21 @@ static Result run_scenario(const Config& cfg) {
         } else if (cfg.pace_us > 0) {
             std::this_thread::sleep_for(std::chrono::microseconds(cfg.pace_us));
         }
-        // A real source hands the bus an ALREADY-captured pooled frame: create it,
-        // emit (bus addrefs), then release our create ref — rc rides on the event.
+        // A real source hands the bus an ALREADY-captured pooled frame, sealed into
+        // an xi.pack@1 pack. create() the pooled frame; builder_add_image COPIES its
+        // pixels into the pack's own pooled image (the realistic capture→pack hop),
+        // so we drop our create ref right after. seal → emit_pack (the host forwarder
+        // takes its OWN event ref) → release our seal ref, exactly the door pattern
+        // test_pack_door §4 uses. The pack (and its pooled image) then rides the
+        // event; the worker frees it via release_pack_.
         xi_image_handle h = pool.create(cfg.width, cfg.height, cfg.channels);
-        xi_record_image ri; ri.key = "frame"; ri.handle = h;
-        yyjson_mut_doc* meta = cfg.meta ? make_meta_doc(i) : nullptr;
+        xi_pack_builder b = pk->builder_new();
+        pk->builder_add_image(b, "frame", cfg.width, cfg.height, cfg.channels, pool.data(h));
+        xi_pack_handle f = pk->builder_seal(b);   // seal ref (rc 1)
+        pool.release(h);                          // pack copied the pixels; drop create ref
         int64_t t_emit = xi::steady_now_us();
-        bus.emit("bench_cam", xi::make_trigger_id(), t_emit, &ri, 1, meta);
-        pool.release(h);   // source drops its ref; the event keeps the bus's addref
+        pk->emit_pack("bench_cam", xi::make_trigger_id(), f, t_emit);  // event takes a 2nd ref
+        pk->release(f);   // drop our seal ref; the event holds the dispatch ref
     }
 
     // ---- drain: wait until every non-dropped frame has completed --------------
@@ -365,6 +369,8 @@ static int gate_main() {
 }
 
 int main(int argc, char** argv) {
+    xi::install_pack_abi();   // wire xi.pack@1 builder/accessors + the bus pack releaser
+
     Config cfg;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -380,16 +386,16 @@ int main(int argc, char** argv) {
         else if (a == "--channels")  cfg.channels = next(cfg.channels);
         else if (a == "--queue-depth") cfg.queue_depth = next(cfg.queue_depth);
         else if (a == "--ordered")   cfg.ordered  = true;
-        else if (a == "--no-meta")   cfg.meta     = false;
     }
 
     std::printf("Per-frame hot path — SPAN: emit -> trigger bus -> dispatch lane -> tiny inspect "
                 "-> ordered result.\n");
-    std::printf("Frame %dx%dx%d, fixed inspect touch=%d px, meta=%s. Latency is steady µs "
-                "(emit -> ordered-result).\n",
-                cfg.width, cfg.height, cfg.channels, cfg.work, cfg.meta ? "on" : "off");
-    std::printf("REAL: TriggerBus/ImagePool/DocRegistry/EmitGate/MetricsRegistry.  STUBBED: lane "
-                "queue plumbing (MiniLane).  NOT in span: script compute, JPEG/expose, WS/PLC.\n\n");
+    std::printf("Frame %dx%dx%d rides an xi.pack@1 pack, fixed inspect touch=%d px. Latency is "
+                "steady µs (emit -> ordered-result).\n",
+                cfg.width, cfg.height, cfg.channels, cfg.work);
+    std::printf("REAL: TriggerBus(emit_pack)/ImagePool/PackRegistry/EmitGate/MetricsRegistry.  "
+                "STUBBED: lane queue plumbing (MiniLane).  NOT in span: script compute, "
+                "JPEG/expose, WS/PLC.\n\n");
 
     if (cfg.parallel != 1 || cfg.frames != 20000 || cfg.inflight || cfg.pace_us) {
         // Explicit single-scenario run from the CLI knobs.

@@ -33,7 +33,8 @@
 #include <utility>
 #include <vector>
 
-#include <xi/xi_abi.hpp>   // xi::PackIn + xi::Record::kChannelKey/kSeqKey
+#include <xi/xi_abi.hpp>            // xi::PackIn
+#include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
 #include <xi/xi_mp.hpp>    // xi::mp::Writer (non-image entry re-encode)
 
 #include "xex1_encode.hpp"  // xi::xex1::V3Entry / encode_frame_v3 (shared encoder)
@@ -73,7 +74,7 @@ inline std::vector<uint8_t> encode_pack_v3_wire(const xi::PackIn& in,
         auto keyv = in.key_at(i);
         if (!keyv) continue;
         std::string key(*keyv);
-        if (key == xi::Record::kChannelKey || key == xi::Record::kSeqKey) continue;
+        if (key == xi::pack_contract::kChannel || key == xi::pack_contract::kSeq) continue;
         const int tag = in.tag_at(i);
         xi::xex1::V3Entry e;
         e.key = key;

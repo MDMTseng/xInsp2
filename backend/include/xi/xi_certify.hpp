@@ -56,7 +56,6 @@
 #include "xi_image_pool.hpp"     // ImagePool::make_host_api
 #include "xi_pm_parse.hpp"       // parse_manifest, extract_string
 #include "xi_sha256.hpp"         // sha256_file (content-hash cache key)
-#include "xi_trigger_bus.hpp"    // install_trigger_hook
 #include "xi_pack_abi.hpp"      // polaris2 wave-2: install_pack_abi (xi.pack@1 door)
 #include "xi_cap_abi.hpp"       // capability plane pilot (doc 14): install_cap_plane
 
@@ -145,11 +144,11 @@ inline int certify_in_process(const std::string& plugin_dir) {
         return kExitAbiMismatch;
     }
 
-    // A real host_api backed by the live ImagePool + trigger hook — exactly what
-    // the backend hands a plugin at create(). The riskiest single moment: a
-    // fault inside factory() terminates this child (-> minidump -> crashed).
+    // A real host_api backed by the live ImagePool — exactly what the backend
+    // hands a plugin at create(). The riskiest single moment: a fault inside
+    // factory() terminates this child (-> minidump -> crashed). THE CUT: the
+    // Record emit hook (install_trigger_hook) is gone — sources emit packs.
     xi_host_api host = ImagePool::make_host_api();
-    install_trigger_hook(host);
     install_pack_abi();   // polaris2 wave-2: certify a pack-capable plugin against a live xi.pack@1 door
     install_cap_plane();  // doc 14 pilot: certify a lib plugin against a live registration door
                           // (this child process is throwaway — registrations die with it)

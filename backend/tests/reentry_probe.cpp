@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 
 typedef void (*xi_reentry_fn)(void* ctx);
 static std::atomic<xi_reentry_fn> g_reentry{nullptr};
@@ -24,10 +25,19 @@ extern "C" {
 __declspec(dllexport) void* xi_plugin_create(const xi_host_api*, const char*) { return (void*)1; }
 __declspec(dllexport) void  xi_plugin_destroy(void*) {}
 
-__declspec(dllexport) void xi_plugin_process(void*, const xi_record*, xi_record_out* out) {
-    // Fire the armed reentry ONCE, on THIS (host) thread, mid-process().
+// Data plane = the xi.pack@1 door. Fires the armed reentry ONCE, on THIS (host)
+// thread, mid-door — same as the old xi_plugin_process — then returns empty.
+static xi_pack_handle reentry_pack_process(void*, xi_pack_handle) {
     if (xi_reentry_fn f = g_reentry.exchange(nullptr)) f(g_ctx);
-    if (out) out->image_count = 0;
+    return XI_PACK_NULL;
+}
+
+__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+    if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
+        static const xi_pack_proc_v1 iface = { &reentry_pack_process };
+        return &iface;
+    }
+    return nullptr;
 }
 
 __declspec(dllexport) int  xi_plugin_set_def(void*, const char*) { return 0; }

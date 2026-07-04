@@ -8,8 +8,8 @@
 // fed as instance B's input, that's an A→B edge. "Last producer wins" so a
 // recycled pool slot attributes to its most recent writer.
 //
-// What this does NOT see: data the script pulls out of a Record into a plain
-// C++ / cv::Mat var, computes on, and feeds back — once it leaves a Record its
+// What this does NOT see: data the script pulls out of a pack into a plain
+// C++ / cv::Mat var, computes on, and feeds back — once it leaves the pack its
 // provenance is gone (taint-tracking through OpenCV is infeasible). So image
 // edges are accurate; scalar/JSON flow through script math is not traced.
 //
@@ -18,10 +18,8 @@
 // hot path (a relaxed atomic load — identical cost to before) and formats the
 // snapshot to wire JSON; capture + the edge-reconstruction algorithm live here.
 //
-// TODO(linux): plain STL + xi_abi C structs — already portable.
+// TODO(linux): plain STL only — already portable.
 //
-#include "xi_abi.h"   // xi_record_image / xi_record_out
-
 #include <atomic>
 #include <cstdint>
 #include <deque>
@@ -52,20 +50,25 @@ public:
         on_.store(on, std::memory_order_relaxed);
     }
 
-    // Record one process() call's input/output image handles + keys. Called
-    // only when enabled(); handles are still valid at the call site.
+    // Record one dispatch call's input/output image handles + keys by plain
+    // identity (no data-plane struct dependency): the caller passes the instance
+    // name and the in/out image handles with their carried keys. Called only when
+    // enabled(); handles are still valid at the call site. A null key array (or a
+    // null slot in it) is treated as an empty key.
     void record(const char* name,
-                const xi_record_image* in_imgs, int in_n,
-                const xi_record_out* out) {
+                const uint64_t* in_handles, const char* const* in_keys, int in_n,
+                const uint64_t* out_handles, const char* const* out_keys, int out_n) {
         Call call;
         call.instance = name ? name : "";
         for (int i = 0; i < in_n; ++i) {
-            call.in_handles.push_back((uint64_t)in_imgs[i].handle);
-            call.in_keys.push_back(in_imgs[i].key ? in_imgs[i].key : "");
+            call.in_handles.push_back(in_handles[i]);
+            const char* k = (in_keys && in_keys[i]) ? in_keys[i] : "";
+            call.in_keys.push_back(k);
         }
-        for (int i = 0; i < out->image_count; ++i) {
-            call.out_handles.push_back((uint64_t)out->images[i].handle);
-            call.out_keys.push_back(out->images[i].key ? out->images[i].key : "");
+        for (int i = 0; i < out_n; ++i) {
+            call.out_handles.push_back(out_handles[i]);
+            const char* k = (out_keys && out_keys[i]) ? out_keys[i] : "";
+            call.out_keys.push_back(k);
         }
         std::lock_guard<std::mutex> lk(mu_);
         calls_.push_back(std::move(call));

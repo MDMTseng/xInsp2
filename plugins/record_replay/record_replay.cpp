@@ -35,6 +35,7 @@
 //
 
 #include <xi/xi_abi.hpp>
+#include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
 #include "yyjson.h"                // def/command parsing, like record_save
 #include "xex1_pack_parse.hpp"     // xi::xex1::parse_frame_v3_file — the shared parse
 
@@ -48,59 +49,47 @@ class RecordReplay : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    // One process() call = one file replayed (the ack Record is bookkeeping;
-    // the payload is the emitted pack).
-    xi::Record process(const xi::Record& /*input*/) override {
-        xi::Record ack;
-        if (!enabled_)   { ack.set("replayed", false); ack.set("reason", "disabled"); return ack; }
-        if (dir_.empty()) { ack.set("replayed", false); ack.set("reason", "no dir set"); return ack; }
-        if (!pack_iface()) {
-            // No pack plane, no replay: this source is pack-native by design.
-            ack.set("replayed", false);
-            ack.set("reason", "no pack plane (host does not publish xi.pack@1)");
-            return ack;
-        }
+    // v12: the xi.pack@1 door is THE data plane and record_replay's per-frame
+    // tick. Each tick replays the NEXT file (lexicographic order) as a sealed
+    // pack emitted into host dispatch; `out` seals empty (the source ack) and the
+    // tick input `in` is ignored — the payload rides emit(). A parse failure
+    // emits a sealed $fault pack (fail loud) and the cursor still advances so one
+    // bad file cannot wedge a loop.
+    void process(xi::PackIn& /*input*/, xi::PackOut& /*out*/) override {
+        if (!enabled_)     return;
+        if (dir_.empty())  return;
+        if (!pack_iface()) return;   // no pack plane, no replay: pack-native by design
 
         if (!scanned_) rescan_();
         if (position_ >= files_.size()) {
             if (loop_ && !files_.empty()) position_ = 0;
-            else {
-                ack.set("replayed", false);
-                ack.set("reason", files_.empty() ? "no .xex1 files in dir" : "end of files");
-                ack.set("total", (int64_t)files_.size());
-                return ack;
-            }
+            else return;             // no .xex1 files, or end of files
         }
 
         const std::string path = files_[position_];
-        const size_t pos = ++position_;   // 1-based position of the file just consumed
+        ++position_;
 
         xi::xex1::ParsedFrame pf = xi::xex1::parse_frame_v3_file(path);
         if (!pf.ok) {
-            // Fail loud on the pack plane too (pilot convention): the consumer
-            // gets a sealed $fault pack to route to a verdict. The cursor has
-            // advanced, so a corrupt file cannot wedge the sequence.
+            // Fail loud on the pack plane (pilot convention): the consumer gets a
+            // sealed $fault pack to route to a verdict. The cursor has advanced,
+            // so a corrupt file cannot wedge the sequence.
             xi::PackOut f = new_pack();
             if (f.valid()) {
                 f.str("file", std::filesystem::path(path).filename().generic_string());
                 f.fault("bad_replay_file", "file", pf.error);
                 emit(std::move(f));
             }
-            ack.set("replayed", false);
-            ack.set("file", std::filesystem::path(path).filename().generic_string());
-            ack.set("error", pf.error);
-            ack.set("position", (int64_t)pos);
-            ack.set("total", (int64_t)files_.size());
-            return ack;
+            return;
         }
 
         xi::PackOut f = new_pack();
-        if (!f.valid()) { ack.set("replayed", false); ack.set("reason", "pack builder unavailable"); return ack; }
+        if (!f.valid()) return;
 
         // Restore the reserved entries the sink LIFTED into the frame header,
         // first — so a pack that carried them round-trips entry-for-entry.
-        f.str(xi::Record::kChannelKey, pf.channel);
-        f.i64(xi::Record::kSeqKey, (int64_t)pf.seq);
+        f.str(xi::pack_contract::kChannel, pf.channel);
+        f.i64(xi::pack_contract::kSeq, (int64_t)pf.seq);
 
         // Rebuild every frame entry in wire order, typed by its on-wire tag.
         for (const xi::xex1::ParsedEntry& e : pf.entries) {
@@ -143,15 +132,6 @@ public:
             }
         }
         emit(std::move(f));   // seal + hand to host dispatch (the graph's pack door)
-
-        ack.set("replayed", true);
-        ack.set("file", std::filesystem::path(path).filename().generic_string());
-        ack.set("channel", pf.channel);
-        ack.set("seq", (int64_t)pf.seq);
-        ack.set("entries", (int64_t)pf.entries.size());
-        ack.set("position", (int64_t)pos);
-        ack.set("total", (int64_t)files_.size());
-        return ack;
     }
 
     std::string exchange(const std::string& cmd) override {
@@ -238,6 +218,8 @@ private:
 };
 
 XI_PLUGIN_IMPL(RecordReplay)
-// NOTE: no XI_PLUGIN_PACK_DOOR — record_replay is a SOURCE. It does not consume
-// packs; it EMITS them through the host xi.pack@1 iface (new_pack + emit), the
-// same path mock_camera / json_source / synced_stereo take in pack mode.
+// v12: publish the xi.pack@1 door — THE data plane. The host ticks this door
+// once per frame; record_replay ignores the tick input and EMITS the next
+// replayed .xex1 file as a sealed pack through the host xi.pack@1 iface
+// (new_pack + emit), the same emit path mock_camera / synced_stereo take.
+XI_PLUGIN_PACK_DOOR(RecordReplay)
