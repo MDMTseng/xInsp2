@@ -75,8 +75,10 @@ public:
     // frame's top-level fields; every OTHER entry is dumped by tag: scalars/str
     // pass through, image entries get the JPEG preview treatment (v1) or are
     // inlined as raw bin (v3), and nested msgpack rides verbatim (v3). Which wire
-    // version is produced is the opt-in `frame_wire_v3` config (DEFAULT v1 — the
-    // wire-breaking default stays out per the plan's governance).
+    // version is produced is the `frame_wire_v3` config. [v12 THE CUT: the DEFAULT
+    // flipped to v3 (the durable tagged-msgpack wire). XEX1-v1 encode stays
+    // selectable via frame_wire_v3:false for ONE release, then is deleted —
+    // doc 06 §6.2, app-team accepted.]
     void process(xi::PackIn& in, xi::PackOut& out) override {
         const std::string channel(in.str(xi::pack_contract::kChannel).value_or("default"));
         const uint64_t    seq = (uint64_t)in.i64_or(xi::pack_contract::kSeq, 0);
@@ -388,7 +390,7 @@ private:
     mutable std::mutex              mu_;
     std::map<std::string, Channel>  channels_;
     std::set<std::string>           subscribed_;
-    bool                            wire_v3_ = false;   // pack-door: emit XEX1-v3 (opt-in)
+    bool                            wire_v3_ = true;    // v12 default: XEX1-v3 (v1 opt-out for one release)
 
     // --- E2 preview state (all guarded by mu_) --------------------------------
     const xi_cap_v1*  cap_ = nullptr;      // xi.jpeg.encode funnel (resolved in ctor)

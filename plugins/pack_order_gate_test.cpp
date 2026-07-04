@@ -76,27 +76,40 @@ static void capture_binary(const void* data, int len) {
     g_emitted.emplace_back(p, p + (len > 0 ? len : 0));
 }
 
-// Decode the top-level `seq` off an XEX1-v1 frame: the frame is 'XEX1' + a
-// msgpack map whose fixed key order is v, channel, seq, ... — so the FIRST
-// fixstr(3) "seq" in the byte stream is the top-level field; the value that
-// follows is a msgpack uint (fixint / uint8 / 16 / 32 / 64).
+// Decode the top-level `seq` off an XEX1 wire frame, EITHER generation:
+//   v1 (legacy display wire): fixstr(3) "seq" (0xA3 's' 'e' 'q'), value a
+//       compact msgpack uint (fixint / uint8 / 16 / 32 / 64).
+//   v3 (the v12 default; canonical MAX-WIDTH profile, xi_mp.hpp): every key is
+//       Str32 (0xDB + be32 len) and every int is fixed-width int64 (0xD3) or
+//       uint64 (0xCF). The top-level map's fixed key order (v, channel, seq,
+//       frame) makes the FIRST "seq" key hit the top-level field either way.
 static long long wire_seq(const std::vector<uint8_t>& f) {
-    for (size_t i = 4; i + 4 < f.size(); ++i) {
-        if (f[i] == 0xA3 && f[i + 1] == 's' && f[i + 2] == 'e' && f[i + 3] == 'q') {
-            size_t v = i + 4;
-            uint8_t b = f[v];
-            if (b <= 0x7F) return b;
-            auto be = [&](int n) {
-                long long x = 0;
-                for (int k = 1; k <= n; ++k) x = (x << 8) | f[v + k];
-                return x;
-            };
-            if (b == 0xCC) return be(1);
-            if (b == 0xCD) return be(2);
-            if (b == 0xCE) return be(4);
-            if (b == 0xCF) return be(8);
-            return -1;
-        }
+    auto val_at = [&](size_t v) -> long long {
+        if (v >= f.size()) return -1;
+        uint8_t b = f[v];
+        if (b <= 0x7F) return b;                    // positive fixint (v1 compact)
+        auto be = [&](int n) {
+            long long x = 0;
+            for (int k = 1; k <= n; ++k) x = (x << 8) | f[v + k];
+            return x;
+        };
+        if (v + 8 >= f.size() && (b == 0xCF || b == 0xD3)) return -1;
+        if (b == 0xCC) return be(1);
+        if (b == 0xCD) return be(2);
+        if (b == 0xCE) return be(4);
+        if (b == 0xCF) return be(8);                // uint64 (canonical, huge)
+        if (b == 0xD3) return be(8);                // int64  (canonical scalar)
+        return -1;
+    };
+    for (size_t i = 0; i + 4 < f.size(); ++i) {
+        // v1 compact: fixstr(3) "seq"
+        if (f[i] == 0xA3 && f[i + 1] == 's' && f[i + 2] == 'e' && f[i + 3] == 'q')
+            return val_at(i + 4);
+        // v3 canonical: Str32 len=3 "seq"
+        if (f[i] == 0xDB && i + 8 < f.size()
+            && f[i + 1] == 0 && f[i + 2] == 0 && f[i + 3] == 0 && f[i + 4] == 3
+            && f[i + 5] == 's' && f[i + 6] == 'e' && f[i + 7] == 'q')
+            return val_at(i + 8);
     }
     return -1;
 }
