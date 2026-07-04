@@ -61,29 +61,11 @@ inline long long run_id() {
     return g_run_id_;
 }
 
-// Read a file into an xi::Image. Empty Image on any failure (file
-// missing, unsupported format, decode error). Decoder runs on the
-// host side (via host_api->read_image_file, which is stb_image).
-// **Pixel order is RGB**, NOT OpenCV's default BGR — when handing
-// the resulting `as_cv_mat()` to cv::cvtColor, use `cv::COLOR_RGB2*`,
-// not `BGR2*`. (Getting this wrong is a silent failure: red discs
-// would map to where blue ones should be in HSV space.)
-// Pixels are copied into a fresh xi::Image so the script's image
-// lifetime is independent
-// of the host pool.
-inline Image imread(const std::string& path) {
-    auto* host = static_cast<const xi_host_api*>(g_use_host_api_);
-    if (!host || !host->read_image_file) return {};
-    xi_image_handle h = host->read_image_file(path.c_str());
-    if (!h) return {};
-    int w  = host->image_width(h);
-    int ht = host->image_height(h);
-    int c  = host->image_channels(h);
-    const uint8_t* src = host->image_data(h);
-    Image img;
-    if (src && w > 0 && ht > 0 && c > 0) img = Image(w, ht, c, src);
-    host->image_release(h);
-    return img;
-}
+// [v12 THE CUT — xi::imread was DELETED with the read_image_file host slot.
+//  Image decode is the xi.image.decode capability (imgcodec provider): a script
+//  that needs a decoded file calls the capability through the xi.cap funnel
+//  with a bin "data" request (doc 06 §3.7), or lets a source plugin do the
+//  decode and ride the frame in on the pack. No in-tree script used xi::imread
+//  at the cut.]
 
 } // namespace xi

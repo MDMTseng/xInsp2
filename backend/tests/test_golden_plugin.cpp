@@ -82,13 +82,13 @@ int main() {
     std::printf("[test] golden-plugin ABI v%d compat — load + process() through "
                 "the real adapter\n", XI_ABI_VERSION);
 
-    // The golden contract this test guards. Post Phase 4 the golden plugin is a
-    // CURRENT (v11 / min-compat 11) binary (golden_plugin.cpp pins
+    // The golden contract this test guards. Post THE CUT the golden plugin is a
+    // CURRENT (v12 / min-compat 12) binary (golden_plugin.cpp pins
     // kGoldenAbiVersion = XI_ABI_MIN_COMPAT); this test proves a current plugin
-    // still loads + runs, and (below) that a stale pre-v11 plugin is refused.
+    // still loads + runs, and (below) that a stale pre-v12 plugin is refused.
     // Pinned here so a careless ABI edit fails the build, not just the run.
-    static_assert(XI_ABI_VERSION == 11, "Phase 4 baseline: host is v11");
-    static_assert(XI_ABI_MIN_COMPAT == 11, "Phase 4 raised min-compat to 11");
+    static_assert(XI_ABI_VERSION == 12, "THE CUT baseline: host is v12");
+    static_assert(XI_ABI_MIN_COMPAT == 12, "THE CUT raised min-compat to 12");
 
     HMODULE dll = LoadLibraryA(GOLDEN_PLUGIN_DLL);
     if (!dll) {

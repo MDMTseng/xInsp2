@@ -33,7 +33,7 @@
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_pack_abi.hpp>       // install_pack_abi + pack_v1_iface + PackRegistry
 #include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
-#include <xi/xi_trigger_bus.hpp>    // install_trigger_hook + the pack dispatch sink
+#include <xi/xi_trigger_bus.hpp>    // the pack dispatch sink (TriggerBus)
 #include <xi/xi_mp.hpp>             // xi::mp::Writer (build the nested-mp fixture entry)
 
 #include "xex1_pack_dump.hpp"       // encode_pack_v3 — the shared encoder (the oracle)
@@ -146,7 +146,7 @@ int main() {
 
     xi::install_pack_abi();
     xi_host_api host = xi::ImagePool::make_host_api();
-    xi::install_trigger_hook(host);                 // route emit_* -> TriggerBus
+    // [v12 THE CUT: the Record trigger hook is gone — install_pack_abi() wires the emit_pack forwarder]
     const xi_pack_v1* fi = xi::pack_v1_iface();
 
     const int base_live = xi::ImagePool::instance().cumulative().live_now;

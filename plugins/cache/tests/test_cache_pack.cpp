@@ -29,7 +29,7 @@
 #include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_pack_door / run_pack_door / process)
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_pack_abi.hpp>      // install_pack_abi + pack_v1_iface + PackRegistry
-#include <xi/xi_trigger_bus.hpp>    // install_trigger_hook + the dispatch sink
+#include <xi/xi_trigger_bus.hpp>    // the dispatch sink (TriggerBus)
 
 #include "cache_io.h"               // the typed control/status view (Status/Command/Config)
 
@@ -114,7 +114,7 @@ int main() {
 
     xi::install_pack_abi();
     g_host = xi::ImagePool::make_host_api();
-    xi::install_trigger_hook(g_host);
+    // [v12 THE CUT: the Record trigger hook is gone — install_pack_abi() wires the emit_pack forwarder]
     g_fi = xi::pack_v1_iface();
 
     // Sink: record every dispatched event (record + pack) in fire order.

@@ -32,7 +32,7 @@
 #include <xi/xi_contract.hpp>       // shared fault reason codes (kWrongType)
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now
 #include <xi/xi_pack_abi.hpp>       // install_pack_abi + pack_v1_iface + PackRegistry
-#include <xi/xi_trigger_bus.hpp>    // install_trigger_hook + the dispatch sink
+#include <xi/xi_trigger_bus.hpp>    // the dispatch sink (TriggerBus)
 #include <xi/xi_mp.hpp>             // decode the nested-object mp entry
 
 #include "json_source_keys.gen.h"
@@ -99,7 +99,7 @@ int main() {
 
     xi::install_pack_abi();
     xi_host_api host = xi::ImagePool::make_host_api();
-    xi::install_trigger_hook(host);
+    // [v12 THE CUT: the Record trigger hook is gone — install_pack_abi() wires the emit_pack forwarder]
     const xi_pack_v1* fi = xi::pack_v1_iface();
 
     const int base = pool_live();
