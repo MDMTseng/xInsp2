@@ -628,8 +628,20 @@ memory-unsafe P1s of this whole effort remain G1 (fixed) and G2 (unfixed).
 > **H1 FIXED @ `e72da07`:** `force_kill_be()` retries the terminate and returns true
 > only once the handle is signaled (reading the real exit code then, not `STILL_ACTIVE`
 > 259); on a budget miss the FE REFUSES to respawn — it latches the line down and
-> exits so the job-object close reaps the abandoned backend. H2–H8 remain
-> findings-only.
+> exits so the job-object close reaps the abandoned backend.
+>
+> **ROUND 4 FULLY CLOSED — H2–H8 ALL FIXED @ `e744e8e` (2026-07-05, 5-way parallel
+> implementation, full gate green):** H2 → a failed `be.log` open is now a spawn
+> failure (the backend never runs against a non-truncated log, so a stale
+> `autostart: ready` can't survive). H3 → `write_minidump` gated by a one-shot
+> interlocked flag (only the first faulter touches dbghelp) + tid/ms in the filename
+> stem. H4 → `reserve_fault_stack()` added to the OMP and async worker closures. H5 →
+> atomic `consume_reinit_pending()` so one fault → exactly one rebuild+accounting
+> (dispatch AND the cap-funnel sibling). H6 → job assigned at process creation via
+> `PROC_THREAD_ATTRIBUTE_JOB_LIST` (no CreateProcess→assign orphan window). H7 → the
+> three `_Exit` sites `await_dump()` (bounded) so a hard-exit can't truncate an
+> in-flight minidump. H8 → the stats/health readers iterate a `mu_`-locked
+> `snapshot_instances()`.
 
 ### H1 — FE unchecked kill-wait → abandoned backend + double-BE on one port/state dir · P2 (P1 blast radius) · CONFIRMED
 
@@ -858,8 +870,18 @@ escapees found) plus a **shared, non-namespaced build directory**.
 > now per-PID (`temp/xinsp2/<pid>`, wiped on start for PID reuse; `runner_main` too),
 > which also unblocks reliable parallel QA. J2 → `cmd_rescan_plugins_` wrapped in
 > `quiesce_dispatch_for_lifecycle_op_` (also bounds J6). J3 → `cmd_create_instance_`
-> wrapped in the same guard. Full gate green. **J4–J9 and all of round 4 remain
-> findings-only.**
+> wrapped in the same guard. Full gate green.
+>
+> **ROUND 5 FULLY CLOSED — J4–J9 ALL FIXED @ `e744e8e` (2026-07-05, full gate green):**
+> J4 → off-dispatch-thread `push()` is rejected fail-loud (rc -6 + once-per-sink warn,
+> mirroring the read-side off-thread guard) — no more leak / silent drop. J5 → the
+> cl.exe compile wait is bounded (300 s ceiling + `TerminateProcess` on trip; the
+> `_popen`/`std::system` fallbacks noted as residual). J6 → certify runs in an
+> unlocked pre-pass that warms the on-disk verdict cache, so the locked scan no longer
+> spawns a 30 s subprocess under `mu_`. J7 → prune keeps version N **and N-1** (the
+> still-mapped previous script's PDB survives). J8 → the rx-accumulation cap is
+> checked on the unparsed remainder (after the parse loop), not the raw buffer. J9 →
+> the stale `meta_doc`/`DocRef` comments reworded to the single pack-handle reality.
 >
 > **J1 follow-up @ `638dc26`:** the per-PID dirs (a ~200 MB PCH each) accumulated
 > unreaped and filled the disk (152 dirs / 27 GB → `C1085 No space left on device`);
