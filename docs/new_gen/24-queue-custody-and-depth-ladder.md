@@ -101,8 +101,63 @@ returns before any drop path), `xi_pm_project.hpp` (queue_depth clamp min 0 + th
 and group scope), `xi_project_model.hpp` (field docs). Test: `examples/
 qa_plugin_queue_sim/` (run_qa `qa_*` glob; strict PASS x2).
 
-## 4. What is explicitly NOT built
+## 4. Admission ⇄ envelope — the two valves (the reusable pattern)
+
+The `queue_depth`/`overflow` knobs and the `qa_semaphore_queue` exemplar are two
+instances of ONE pattern. A dispatch flow has two valves bracketing the core's
+parallel-compute mechanism, and BOTH valves' *policy* can live in a plugin while
+the core stays a lean parallel-compute-with-ordering engine:
+
+```
+ [plugin: ADMISSION valve]  →  [core: parallel compute + ENVELOPE gate]  →  [sinks]
+    controls ENTRY                     the mechanism (lean)                 controls EXIT ORDER
+    concurrency / resource /           N-way compute + per-lane            envelope (gate) /
+    priority / rate                    emit-gate ordering                  reorder (doc 19 D1)
+```
+
+- **Admission** (producer-side valve) decides *whether/when/how many* units ENTER
+  processing. A permit mechanism that (a) **bounds** concurrency/resource use, (b)
+  **back-pressures** the producer at capacity (stall, not drop, not unbounded
+  buffer), and (c) is a **policy injection point**. Custody of the deep backlog
+  stays in the producer (plugin). Realizations: `overflow:block` (core, permit ==
+  a queue slot), `queue_depth:0` rendezvous (core, permit == the 1 handoff), and
+  `qa_semaphore_queue` (plugin, permit == 1 of N via a counting semaphore).
+- **Envelope** (output-side) decides EXIT ORDER. It is the per-lane emit gate
+  (`result_order:"arrival"`), a core mechanism; the *reorder/priority policy* on
+  top of it is the D1 sink (doc 19). The two are **orthogonal**: admission never
+  provides ordering, the gate never bounds admission — you compose both.
+
+**The release point defines what admission bounds** (see `qa_semaphore_queue`):
+release-on-compute-done bounds *compute* concurrency; release-on-emit-done bounds
+the *whole pipeline* (a slow sink back-pressures the producer);
+release-on-resource-freed (e.g. a VRAM buffer returned) bounds *that resource*.
+Pick the release point to match what you are protecting.
+
+**Reuse targets** (the same permit valve, different permit meaning):
+
+| Use | Permit == | Release on |
+|---|---|---|
+| **Priority processing** (compute important first) | 1 of N, popped from a PRIORITY backlog | compute/emit done |
+| Concurrency bound (the exemplar) | 1 of N | compute done |
+| **Resource budget** (VRAM/RAM, not frame count) | a byte/chunk quota | the resource being freed |
+| Rate limit / pacing | a token-bucket token (refills R/s) | timer refill |
+| Fairness / multi-tenant | a weighted per-source quota | completion |
+| Device slots (K hardware channels) | 1 of K | channel free |
+| Health gate / circuit breaker | released only while healthy | health recovery |
+| Deterministic test harness | 1 (serial) or a stepped release | manual/step |
+
+**Two things to get right for reuse** (beyond the exemplar's scope): the permit
+must be **RAII-tied to the unit's lifetime** so a dropped/faulted/stopped unit
+RETURNS its permit (the exemplar's teardown permit-leak is benign for a count, but
+a leaked VRAM/resource permit is a permanent loss); and the **priority variant**
+answers the recurring "free priority" ask at the admission end — *process*
+important work first — complementing D1's *emit* important results first.
+Neither needs a core change: admission policy is plugin-side, the envelope is the
+core gate.
+
+## 5. What is explicitly NOT built
 
 - No admission-side dispatch-policy capability (custody must stay core; the
-  output-side D1 sink is the sanctioned policy seam).
+  output-side D1 sink is the sanctioned policy seam). The `qa_semaphore_queue`
+  pattern is the plugin-side way to get custom admission WITHOUT a core hook.
 - No moving event storage / ref custody / seq-claim into a plugin.
