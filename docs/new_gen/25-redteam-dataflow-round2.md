@@ -624,6 +624,12 @@ memory-unsafe P1s of this whole effort remain G1 (fixed) and G2 (unfixed).
 > `WaitForSingleObject` return with no `WAIT_TIMEOUT` branch before `CloseHandle` +
 > same-port/same-state-dir respawn; the shared job's `KILL_ON_JOB_CLOSE` fires only
 > on FE exit, so it never reaps an abandoned-but-alive BE#1.
+>
+> **H1 FIXED @ `e72da07`:** `force_kill_be()` retries the terminate and returns true
+> only once the handle is signaled (reading the real exit code then, not `STILL_ACTIVE`
+> 259); on a budget miss the FE REFUSES to respawn — it latches the line down and
+> exits so the job-object close reaps the abandoned backend. H2–H8 remain
+> findings-only.
 
 ### H1 — FE unchecked kill-wait → abandoned backend + double-BE on one port/state dir · P2 (P1 blast radius) · CONFIRMED
 
@@ -854,6 +860,11 @@ escapees found) plus a **shared, non-namespaced build directory**.
 > `quiesce_dispatch_for_lifecycle_op_` (also bounds J6). J3 → `cmd_create_instance_`
 > wrapped in the same guard. Full gate green. **J4–J9 and all of round 4 remain
 > findings-only.**
+>
+> **J1 follow-up @ `638dc26`:** the per-PID dirs (a ~200 MB PCH each) accumulated
+> unreaped and filled the disk (152 dirs / 27 GB → `C1085 No space left on device`);
+> `reap_stale_build_dirs()` now sweeps dead-PID sibling dirs at startup, bounding
+> usage to (live backends × PCH). H1 (round 4) also FIXED @ `e72da07`.
 
 ### J1 — script build uses a fixed, non-instance-namespaced `work_dir` → wrong/torn DLL load + corrupt PCH across co-resident backends · P1 · CONFIRMED
 
