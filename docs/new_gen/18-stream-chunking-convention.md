@@ -86,6 +86,22 @@ strip case, generalizes to any axis):
   not a cue to build a reorder buffer. Interleaving chunks of DIFFERENT
   streams on one lane is fine (the state machine is keyed by `$stream`).
 
+  **REQUIRED LANE CONFIG (doc 25 RT3-C3).** The arrival-order premise above holds
+  only when the streaming lane emits in arrival order. The emit gate is armed ONLY
+  under `result_order:"arrival"` *with* concurrency, and the shipped DEFAULT is
+  `result_order:"completion"`. So a chunk producer whose chunks are separate
+  triggers computed by a **multi-worker** lane (`max_parallel>1`) under the default
+  completion order delivers its `use(sink).push(chunk)` calls in COMPLETION order —
+  out of `$part` order — and the consumer `stream_gap`-aborts **every** stream under
+  load. A streaming lane MUST therefore be one of: **`queue_depth:0`** (rendezvous,
+  strict single-worker serial — the RB2 clamp makes this the natural safe shape),
+  **`max_parallel:1`** (single worker, inherently ordered), or **`result_order:
+  "arrival"`** (multi-worker, but the emit gate replays pushes in arrival order).
+  Do NOT run a stream over a default multi-worker lane. (Also: this ordering holds
+  for the ordered-**sink** `push` path only — a cross-frame reassembler must be a
+  SINK, not a `use().process()` door, whose intermediate calls run pre-gate on the
+  raw worker thread and are never arrival-ordered — doc 25 RT3-C4.)
+
 ## 4. Failure semantics
 
 - **A `$fault` pack mid-stream poisons the WHOLE stream** (doc 15: `$fault`

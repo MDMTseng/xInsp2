@@ -491,8 +491,16 @@ and `reinit()` stating the scope of the exclusive gate and that the combo is gua
 If the combo is ever a genuine need, fix the race (shared `cap_gate_` in `prepare()`
 + gate the reentrant doors) and lift the guard. Landed: `xi_cabi_adapter.hpp`.
 
-C3 (P2, doc-18/robustness) still pending — the fix is a doc-18 wording change
-(multi-worker streaming REQUIRES `result_order:"arrival"` or `queue_depth:0`) + an
-optional parser warn. A1/A8 are P3 and optional (a ≥4 GiB single bin / a
-thread-exhaustion example retry — neither a benign-load reality).
+**C3 FIXED (doc-18).** doc 18's "Out-of-order tolerance: NONE on one lane" bullet
+now carries a "REQUIRED LANE CONFIG" note: a streaming lane MUST be `queue_depth:0`
+(rendezvous, single-worker — the RB2 clamp makes it the natural safe shape),
+`max_parallel:1`, or `result_order:"arrival"`; a DEFAULT multi-worker completion
+lane delivers pushes out of `$part` order and `stream_gap`-aborts every stream.
+C4 folded into the same note (a cross-frame reassembler must be a SINK, not a
+`use().process()` door). No parser warn added — the parser cannot cleanly tell a
+lane will carry a stream, so the doc requirement is the right layer.
+
+A1/A8 remain P3 and optional (a ≥4 GiB single bin / a thread-exhaustion example
+retry — neither a benign-load reality); C8 is a diagnostic-only torn aggregate read
+(doc caveat at most). None scheduled.
 
