@@ -847,6 +847,13 @@ escapees found) plus a **shared, non-namespaced build directory**.
 >   flakiness: every co-resident backend shares the fixed `temp/xinsp2/script_build`
 >   + `.pch`, so parallel builds delete each other's `inspect_v0.dll` / tear the
 >   shared PCH. `work_dir` must be pid/port-namespaced before QA can run parallel.
+>
+> **FIXED 2026-07-05 @ `f1fd54e` — the three P1s (J1, J2, J3):** J1 → `work_dir` is
+> now per-PID (`temp/xinsp2/<pid>`, wiped on start for PID reuse; `runner_main` too),
+> which also unblocks reliable parallel QA. J2 → `cmd_rescan_plugins_` wrapped in
+> `quiesce_dispatch_for_lifecycle_op_` (also bounds J6). J3 → `cmd_create_instance_`
+> wrapped in the same guard. Full gate green. **J4–J9 and all of round 4 remain
+> findings-only.**
 
 ### J1 — script build uses a fixed, non-instance-namespaced `work_dir` → wrong/torn DLL load + corrupt PCH across co-resident backends · P1 · CONFIRMED
 
