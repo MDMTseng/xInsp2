@@ -600,3 +600,451 @@ g_run_result/g_current_trigger/g_staged).
   normal-reachable P1); G3 + G5 are small local fixes. G5 is on the RT8 writer.
 - **G4 (P2)** — CONFIRMED mechanism; a doc/header correction (host lock infeasible).
 
+---
+
+## Round-4 — process-lifecycle & fault-infrastructure sweep (2026-07-05, tree `78f4b0d`)
+
+A third 4-way parallel pass, this time over the surfaces the data-flow rounds
+never reached: the **FE supervisor / respawn path**, the **crash-dump / SEH /
+watchdog** infrastructure under *concurrent* faults, the **metrics/observability**
+snapshot readers, and the **image-codec + compress egress**. Each finding re-read
+and hand-verified against the tree. **Status: findings only.** Two of the four
+slices came back **clean** (codec, metrics); the defects cluster in the
+**kill/respawn** and **concurrent-crash** paths — the parts that only run when
+something is already going wrong, which is exactly why they were never stress-
+tested.
+
+Verdict spread: **3 P2 (one with P1 blast radius) · 5 P3.** No new P1s. The two
+memory-unsafe P1s of this whole effort remain G1 (fixed) and G2 (unfixed).
+
+> **Independent re-verification (2026-07-05, separate 4-way worktree pass @ tree
+> `f822e35`): all of H1–H8 CONFIRMED — no refutations.** H2 is code-fact-confirmed
+> but its reachability chains entirely off H1 (an abandoned BE#1 holding the log
+> handle); fix H1 and H2 stops compounding. H1's four kill sites all discard the
+> `WaitForSingleObject` return with no `WAIT_TIMEOUT` branch before `CloseHandle` +
+> same-port/same-state-dir respawn; the shared job's `KILL_ON_JOB_CLOSE` fires only
+> on FE exit, so it never reaps an abandoned-but-alive BE#1.
+
+### H1 — FE unchecked kill-wait → abandoned backend + double-BE on one port/state dir · P2 (P1 blast radius) · CONFIRMED
+
+**Where:** `backend/src/fe_main.cpp` — all four forced-kill sites use the same
+pattern and **discard the wait result**: `:573-576` (autostart degraded),
+`:582-585` (boot timeout), `:623-626` (heartbeat stale), `:646-649` (port
+unresponsive).
+
+```cpp
+TerminateProcess(sp.pi.hProcess, 1);
+WaitForSingleObject(sp.pi.hProcess, 5000);   // <-- return value discarded
+GetExitCodeProcess(sp.pi.hProcess, &exit_code);
+break;
+```
+
+`TerminateProcess` is **async** — the process object only signals once every
+thread has terminated. A backend thread stuck in an uninterruptible kernel op
+(blocking driver I/O, a page fault against a stalled mmap, an FS write to a
+pressured disk — the RT8 heavy-load + record-to-disk scenario) can delay
+signaling past 5 s. On `WAIT_TIMEOUT` the code doesn't check: it falls through,
+`break`s, `CloseHandle`s its only handle to the still-alive BE#1 (`:655`), then
+loops and spawns **BE#2 on the same WS port + `.xinsp_work` state dir**. Either
+two backends are briefly co-resident (data-corruption / double-serve = **P1
+impact**), or BE#2's bind fails → counted as a fresh failure → can latch the line
+`RespawnLimitExceeded` "down" while the zombie BE#1 keeps running. The Job object
+doesn't save it (`KILL_ON_JOB_CLOSE` fires only on FE exit, and both are in the
+same job). Secondary: after a timeout `GetExitCodeProcess` returns
+`STILL_ACTIVE (259)`, recorded as the death rc → forensic corruption.
+
+**Fix:** check the wait result; on `WAIT_TIMEOUT` re-terminate / escalate and do
+NOT respawn until the handle is signaled.
+
+### H2 — stale `autostart: ready` marker → boot-readiness gate bypassed · P2 · CONFIRMED (mechanism), chains off H1
+
+**Where:** `fe_main.cpp:564` (`log_contains(c.be_log, "autostart: ready")`) vs the
+truncate-on-spawn at `:427` (`CreateFileA(..., CREATE_ALWAYS)`, share mode
+`FILE_SHARE_READ` only).
+
+The boot gate decides readiness by substring-scanning the whole `be.log`. The log
+is truncated only by the spawn's `CreateFileA`. If that open **fails**
+(`INVALID_HANDLE_VALUE` → `STARTF_USESTDHANDLES` never set, `:431-436`), the log
+is neither truncated nor rewritten — it still holds the **previous** instance's
+`autostart: ready` line, so the FE's next poll matches the stale marker the
+instant BE#2's port opens and **skips the boot gate**; a genuinely boot-hanging
+BE#2 is never caught. The open fails exactly when an abandoned BE#1 (H1) still
+holds the log's write handle (share mode is read-only) → sharing violation. So H1
+and H2 compound: one zombie backend both double-serves *and* blinds the boot gate.
+
+**Fix:** gate readiness on a marker in a per-instance channel (or the heartbeat
+file the new PID owns), not a reused shared log; treat a failed `be.log` open as a
+spawn failure, not a continue-blind.
+
+### H3 — concurrent unhandled faults race the minidump writer · P2 · CONFIRMED
+
+**Where:** `backend/include/xi/xi_crash_dump.hpp:269` (`write_minidump`), installed
+as the process-global `SetUnhandledExceptionFilter` with **no gate** (`:510`);
+filename stem is pid + date + **HH MM SS only** (`:276-279`, no tid/ms);
+`CreateFileA` uses `dwShareMode=0` (`:288`); `MiniDumpWriteDump` at `:313`.
+
+The OS does **not** suspend sibling threads while one is in the unhandled-exception
+filter, so under "multiple workers fault at once" two+ threads enter
+`write_minidump` concurrently (reachable via faults that escape the per-inspect
+SEH try: two unmanaged detached/plugin threads, two `std::terminate`s, two CRT
+fastfail trips). Two consequences: **(a) dbghelp is not thread-safe** — concurrent
+`MiniDumpWriteDump` calls are documented by MS to corrupt/hang; a hang means the
+process never self-exits and the FE's coarse timeout has to kill it (delayed
+respawn). **(b) filename collision** — two faults in the same wall-clock second
+compute the same `.dmp`/`.json` path; the second `CreateFileA` (share=0) fails →
+that thread writes no dump (lost forensics, possibly for the root-cause thread),
+and thread A's `_Exit` can truncate B's in-progress dump. P2 not P1: the process
+is already dying (no live-state UAF), the damage is lost/hung forensics.
+
+**Fix:** gate `write_minidump` with a one-shot interlocked flag (first faulter
+writes; later ones block — they're dying anyway) so only one thread touches
+dbghelp; add tid+ms to the stem.
+
+### H4 — OMP / async pool workers don't `reserve_fault_stack` (lane workers do) · P3 · CONFIRMED
+
+**Where:** lane worker reserves (`service_dispatch.cpp:374`) and detached one-shot
+reserves (`:525-526`), but the OMP worker (`xi_parallel.hpp:83`) and async worker
+(`xi_async.hpp:354`) install only the SEH translator — no `reserve_fault_stack`.
+The 128 KB guarantee exists (`xi_crash_dump.hpp:254-261`) so the filter has stack
+to write a dump. A `STACK_OVERFLOW` that becomes **unhandled** on a pooled OMP/async
+worker (overflow during unwinding, or a `noexcept` violation → terminate →
+`write_minidump` on that worker) runs the dumper with only the default guard page →
+no dump / secondary overflow. Low confidence on the escape (needs an overflow past
+the closure's own catch), hence P3.
+
+**Fix:** call `reserve_fault_stack()` at the top of the OMP/async worker closures,
+matching the lane path.
+
+### H5 — concurrent faults on one `on_fault=reinit` (non-reentrant) instance → redundant double-rebuild + spurious-quarantine window · P3 · CONFIRMED (NOT covered by the G1 guard)
+
+**Where:** `service_sinks.cpp:111-113`/`:239-241` (the reinit-pending check runs
+OUTSIDE any `CallScope`) → `apply_pending_reinit_` (`:72-78`) → `reinit()`
+(`xi_cabi_adapter.hpp:537-583`, clears pending at entry THEN takes `CallScope`).
+
+The G1 combo guard (`set_on_fault`, `xi_cabi_adapter.hpp:479`) downgrades
+`on_fault=reinit` to `reuse` only for **reentrant OR prepare-exporting** instances
+— so a **non-reentrant, non-prepare** instance keeps `reinit` live. For it
+`effective_cap_()==1`, so `CallScope` IS engaged and two concurrent `reinit()`s
+**serialize** (no double-free — this is why it's P3, not a G1 repeat). But the
+check-then-act on `reinit_pending` isn't atomic with the rebuild: two faulting
+callers both observe pending, both call `reinit()` → back-to-back rebuilds, the
+second destroying the first's fresh `inst_` and building a third (redundant work
+under fault load). Escalation-ordering window: if failing-rebuild A's
+`note_reinit_fail` reaches the quarantine threshold before succeeding-rebuild B's
+`reset_reinit_fails()`, a healthy (B-rebuilt) instance ends up quarantined.
+
+**Fix:** fold the pending-check + rebuild + escalation under one per-instance
+reinit lock so one fault → exactly one rebuild+accounting.
+
+### H6 — `CREATE_SUSPENDED` → `AssignProcessToJobObject` window can orphan a suspended BE · P3 · CONFIRMED
+
+**Where:** `fe_main.cpp:442-454` — `CreateProcess(CREATE_SUSPENDED)` → `Assign
+ProcessToJobObject` → `ResumeThread`. If the FE dies between `CreateProcess` and
+the job-assign, the child isn't in the job yet, so `KILL_ON_JOB_CLOSE` can't reap
+it — it sits suspended forever holding the `be.log` handle. Narrow window, low
+impact (it never runs → no double-serve), but a true orphan. Assign-before-resume
+is otherwise the correct ordering.
+
+### H7 — watchdog / drain hard-exit can truncate a concurrent minidump · P3 · CONFIRMED
+
+**Where:** `std::_Exit` at `service_main.cpp:786` (watchdog hard trip),
+`service_dispatch.cpp:601` (drain timeout), `service_inspect.cpp:220` (overflow
+unrecoverable). If a worker is mid-`write_minidump` when the watchdog hard-trips or
+drain times out, `_Exit` truncates the in-progress dump. Best-effort forensics
+loss only (both events already mean "going down"); no live-state corruption.
+
+### H8 — unlocked `project_.instances` iteration in the stats/health readers · P3 (latent, one-commit-away P1) · CONFIRMED
+
+**Where:** `service_cmd_observability.cpp:246` (`cmd_image_pool_stats_`) and
+`service_health.cpp:96` (`cmd_get_health_`) iterate `g_eng.plugin_mgr.project()
+.instances` (an `unordered_map`) **without** `PluginManager::mu_`. Safe **today**
+only because every structural mutator (create/remove/rename/open/close_instance)
+and both readers run on the single WS poll thread and can't interleave. The
+contrast is sharp: `instance_group()` (`xi_pm_instances.hpp:303-316`) reads the
+same map and **does** take `mu_`, with a comment that unlocked reads race
+`erase()`→UAF — because it runs on the source emit thread. The two stats readers
+are the poll-thread cousins that never got the lock. The moment any off-poll-thread
+instance mutation lands (a background auto-respawn, a worker-triggered
+quarantine-remove), a concurrent `rehash`/`erase` turns both loops into
+iterator-invalidation/UAF crashes.
+
+**Fix (defensive):** take `mu_` for the loop, or add a `PluginManager` snapshot
+helper, mirroring `instance_group`'s fix — cheap insurance before any off-poll
+mutation lands.
+
+### Hand-off (low-confidence, for the cap-plane owner)
+
+`reinit()`'s `set_def_fn_(fresh)` (`xi_cabi_adapter.hpp:578-581`) runs under
+`CallScope` but NOT under the exclusive `cap_gate_` (which covers only the
+`destroy_fn_(old)`). For a **cap-providing, non-reentrant, non-prepare** instance
+the G1 guard does not downgrade `reinit`, so `set_def(fresh)` could run concurrently
+with a provider cap handler (which holds only the shared `cap_gate_`) on that fresh
+instance. Not confirmed reachable — a non-reentrant cap provider is itself an odd
+config (the funnel runs handlers with no `CallScope`). Flagged for the cap-plane
+owner to judge against the G1 combo guard's coverage.
+
+### Round-4 clean slices
+
+- **Image codec + compress egress — CLEAN.** At v12 the host compress memo cache is
+  DELETED (`service_main.cpp:638-655` is a pure `encode_via_capability` + memcpy,
+  no static/map), so the doc-14 double-cache concern is refuted at the source. The
+  one remaining cache (imgcodec plugin, content-hash keyed) copies the `shared_ptr`
+  under its mutex on hit and both racers encode into their own buffer on miss
+  (deterministic → byte-identical); `builder_add_bin`/`add_image` copy into a
+  pack-owned buffer at add time (no ref into the map escapes; free-before-seal is
+  safe). Only a P3-theoretical ~2⁻⁶⁴ hash collision (not load-induced).
+- **Metrics / observability — CLEAN of P1/P2.** Counters are `atomic<uint64_t>`
+  (no torn wire read); `source_emit_ages_us`/`stats_by_owner` copy under their
+  mutex / use the WalkGuard deferred-reclaim handshake; lane high-watermark only
+  grows under `lane->mu`. Residual P3s are by-design non-atomic multi-field
+  snapshots (aggregate vs per-group depth sampled at different instants; `frames_ok
+  + frames_error < frames_total` mid-update) — cosmetic, inherent to the lock-free
+  counters. Plus the H8 latent-lock item above.
+
+### Round-4 disposition & suggested order
+
+All round-4 items are **P2/P3, none memory-unsafe under current control flow**
+(H8 is latent). Suggested order:
+1. **H1** — FE kill-wait check. Small, and its blast radius (double-BE / line-down)
+   is the worst in this round; H2 stops compounding once H1 is fixed.
+2. **H3** — one-shot gate + tid/ms on the minidump writer. Small; protects
+   post-mortem quality on the exact multi-fault crash you most want to diagnose.
+3. **H5** — per-instance reinit lock (also closes the redundant double-rebuild).
+4. **H4 / H6 / H7 / H8** — one-liners / defensive guards, batch at leisure.
+5. **Hand-off** — cap-plane owner confirms or dismisses against the G1 guard.
+
+Nothing here blocks THE CUT.
+
+---
+
+## Round-5 — build/load/discovery & staged-egress sweep (2026-07-05, tree `78f4b0d`)
+
+A fourth 4-way parallel pass over the remaining un-audited core surfaces: the
+**WS receive framing + JSON command parse**, the **script-compile toolchain
+subprocess**, the **project-load / plugin-discovery / version-identity** path,
+and (after the metadata-doc plane came back deleted at v12) the **staged-egress
+pack-handle lifetime**. Each finding re-read and hand-verified. **Status:
+findings only.** Note: **documentation/comment defects are counted as findings
+this round** (per maintainer direction) — a stale comment that re-derives a
+deleted protocol is a real trap for the next reader.
+
+Verdict spread: **3 P1 · 3 P2 (one a leak that becomes P1 under load) · 2 P3 · 1
+doc-P3.** The WS RX slice came back essentially clean (one narrow P3). The P1s
+cluster where they did in round 4: **lifecycle paths that tear down a live
+DLL-backed adapter without quiescing** (the exact RT5 invariant — two more
+escapees found) plus a **shared, non-namespaced build directory**.
+
+> **Independent re-verification (2026-07-05, separate 4-way worktree pass @ tree
+> `f822e35`): all of J1–J9 CONFIRMED — no refutations.** Two load-bearing
+> corrections stand:
+> - **J2 + J3 invalidate RT5's premise.** RT5 (doc 19 §C / [[21-redteam-load-findings]])
+>   claimed `remove_instance` was *the ONLY* DLL-affecting lifecycle op without a
+>   `quiesce_dispatch_for_lifecycle_op_` guard. It is not: `cmd_rescan_plugins_`
+>   (J2, unconditional) and `cmd_create_instance_`'s machine-provider evict (J3,
+>   autoload-gated) run the identical un-quiesced `~CAbiInstanceAdapter` /
+>   `FreeLibrary` teardown. Both are one-line quiesce-wrap fixes.
+> - **J1 is the hard reason concurrent QA is unsafe** — not just CPU-oversubscription
+>   flakiness: every co-resident backend shares the fixed `temp/xinsp2/script_build`
+>   + `.pch`, so parallel builds delete each other's `inspect_v0.dll` / tear the
+>   shared PCH. `work_dir` must be pid/port-namespaced before QA can run parallel.
+
+### J1 — script build uses a fixed, non-instance-namespaced `work_dir` → wrong/torn DLL load + corrupt PCH across co-resident backends · P1 · CONFIRMED
+
+**Where:** `service_main.cpp:473` (`g_eng.work_dir = temp_directory_path()/"xinsp2"`
+— fixed, not pid/port-qualified) → `service_cmd_lifecycle.cpp:125`
+(`output_dir = work_dir/"script_build"`); the uniquifier is a **per-process**
+counter that resets to 0 each start (`xi_script_compiler.hpp:659`
+`static std::atomic<int> s_version{0}` → `inspect_v0.dll`, `:664`), with a
+`remove(out_dll)` before build (`:668`) and a fixed-name PCH under `.pch`
+(`:517-547`, sig keyed only on flags + backend-exe-mtime, not instance).
+
+Two backends can be co-resident (the listen socket's `SO_EXCLUSIVEADDRUSE` only
+blocks the *same* port; `--port` is configurable, and **the QA harness runs many
+backends concurrently on `free_port()`** — doc 19 H3). All of them share
+`temp/xinsp2/script_build` + `.pch`. Interleavings: **(a)** two backends both
+compiling `inspect.cpp` target `inspect_v0.dll` — backend A's `remove(out_dll)`
+can delete B's just-built DLL, or A `LoadLibrary`s a half-written / B's image
+(wrong script logic in A's project). **(b)** any two concurrent script compiles
+collide on the fixed-name `umbrella.{pch,obj}` — one `cl /Yc` writes it while the
+other `/Yu` consumes it → corrupt/mismatched PCH → spurious `C1852/C2858` build
+failure or a `cl.exe` crash. `inspect.obj` (`:789`, unversioned) is a second
+same-stem collision point. No lock, no per-instance subdir, no pid suffix
+anywhere. (Two `runner` processes collide the same way — `runner_main.cpp:396`
+uses a separate but likewise fixed `xinsp2_runner_build`.)
+
+**Fix:** pid/port-qualify `work_dir` (`temp/xinsp2/<pid>`), or put `script_build`
+under the project's `.xinsp_work`; at minimum give the PCH dir a per-instance name.
+
+### J2 — `cmd_rescan_plugins_` FreeLibrary's a LIVE plugin DLL out from under active instances · P1 · CONFIRMED
+
+**Where:** `service_cmd_plugin.cpp:64-77` (`cmd_rescan_plugins_` calls
+`scan_plugins` with **no** `quiesce_dispatch_for_lifecycle_op_` — unlike
+recompile/rebuild/export/remove) → `xi_pm_discovery.hpp:155-159`
+(`register_plugin_folder_locked_`, the "moved" branch):
+
+```cpp
+if (moved) {
+    FreeLibrary(existing->second.handle);   // no live-instance check
+    existing->second.handle = nullptr; ...
+    plugins_[info.name] = std::move(info);
+}
+```
+
+An open project has an instance backed by a global-dir plugin `foo` (a live
+`CAbiInstanceAdapter` caching `dll_` = that `HMODULE` + `destroy_fn_`/process
+pointers). A benign `cmd:rescan_plugins {"dir":"/other"}` where `/other` has a
+plugin also named `foo` but a different folder (or a manifest `dll` edited after a
+rebuild) makes `moved` true → **`FreeLibrary` on the still-referenced handle**.
+The live adapter now holds pointers into unmapped code: the next dispatch call into
+that instance, or `close_project`'s `~CAbiInstanceAdapter` → `destroy_fn_`, hits an
+access violation / UAF. This is the RT5 class (un-quiesced teardown of a DLL-backed
+runtime object) on the **discovery** path.
+
+**Fix:** wrap `cmd_rescan_plugins_` in `quiesce_dispatch_for_lifecycle_op_`, and/or
+refuse the FreeLibrary when a live instance references the handle.
+
+### J3 — `cmd_create_instance_` evicts a live machine-autoload provider without quiescing · P1 (autoload-gated → P2 by reachability) · CONFIRMED
+
+**Where:** `service_cmd_project.cpp:249-272` (`cmd_create_instance_` — no quiesce)
+→ `xi_pm_instances.hpp:88` (`create_instance` → `evict_machine_provider_locked_`)
+→ `xi_pm_load.hpp:62-72` (`InstanceRegistry::remove` + `machine_instances_.erase`
+→ `shared_ptr` drop → `~CAbiInstanceAdapter` → `destroy_fn_(inst_)` + `sweep_caps_for`
++ `release_all_for` + `sweep_packs_for`).
+
+With `--autoload-lib`, a lib plugin `cap.foo` is machine-provided and its cap
+handlers are live in `CapRegistry` while dispatch runs. Creating a project
+instance of `cap.foo` tears down the machine adapter — `xi_plugin_destroy` into
+the DLL **plus three owner-sweeps** — with **dispatch live and not quiesced**. The
+`shared_ptr` pin protects the adapter object during an in-flight cap call, but the
+pack-registry owner-sweep racing a worker releasing an owner-tagged ref is the same
+phantom-bucket window RT5 quiesced `remove_instance` for. RT5's claim that
+`remove_instance` was "the ONLY [lifecycle op] that didn't quiesce" is now false.
+P1 by class, gated on autoload-enabled + provider-machine-live (hence P2 by
+reachability).
+
+**Fix:** wrap `cmd_create_instance_` in `quiesce_dispatch_for_lifecycle_op_` like
+its siblings.
+
+### J4 — staged sink push from an off-dispatch thread leaks the pack ref (and silently drops the delivery) · P2 (P1 leak-to-exhaustion under load) · CONFIRMED
+
+**Where:** `service_sinks.cpp:92` (`thread_local std::vector<StagedEmit> g_staged`)
++ `:154-158` (`use_push_pack_cb` retains then `g_staged.push_back` on the **calling**
+thread) vs the drain/flush that only ever touch the **dispatch** thread's g_staged
+(`drain_staged_emits_` `:494`, `flush_staged_emits_` `:510`, both bracketed by the
+`StagedEmitGuard` over `run_one_inspection`, `service_inspect.cpp:341`).
+
+`g_staged` is thread-local ("so parallel workers stage independently" — the comment
+reveals the hole). A script that calls `xi::use("expose").push(pack)` from inside a
+`xi::parallel_for`/`xi::async` body runs `use_push_pack_cb` on a **child** pool
+thread `T_a ≠ T_d`: it `retain`s the pack (`:154`) and appends to **`T_a`'s**
+`g_staged`. The dispatch thread `T_d` flushes/drains only **its own** g_staged, and
+nothing ever drains `T_a`'s → the `+1` retain is never released (**pack leak**; with
+OpenMP pools that reuse threads, `T_a`'s g_staged also accumulates across frames →
+**leak-to-exhaustion**), and the push is **never delivered** (silent lost
+actuation). `StagedEmit`/`TriggerEvent` has no destructor, so `T_a` dying doesn't
+release it either. Manifests only at `max_parallel>1` (in the serial `#else`
+fallback `xi::async` runs inline on the dispatch thread and flushes correctly —
+which is why tests miss it). The codebase already guards the *read* sibling
+(`current_trigger()` off-thread via `g_trigger_ctx_` + `warn_trigger_off_thread_`)
+but has no analogue on the `push()` *write*.
+
+**Fix:** reject `push()` off the trigger thread (mirror the `g_trigger_ctx_`
+off-thread detection — fail-loud + once-per-name warn), or marshal off-thread staged
+pushes back to the dispatch thread's g_staged under a lock.
+
+### J5 — no timeout on any compile subprocess wait → a hung toolchain wedges the whole control plane · P2 · CONFIRMED
+
+**Where:** `xi_script_compiler.hpp:500` (`run_with_env` →
+`WaitForSingleObject(pi.hProcess, INFINITE)`), `:466` (`vcvars_env_block` blocking
+`_popen` under a static mutex), `:850` (`std::system` fallback),
+`xi_cmake_build.hpp:60` (`run_cmd_capture` `_popen`). All compile subprocess waits
+are **unbounded** and run on the **poll thread** (compile is inline/synchronous).
+A wedged child (`mspdbsrv.exe` contention, `link.exe` blocked on an AV-locked
+output, a hung `vcvars`) freezes **all** WS commands with no cancel/stop path —
+the compute-lane analog of RT8, but on the control plane, and not covered by any
+watchdog on the toolchain path.
+
+**Fix:** bounded `WaitForSingleObject` + `TerminateProcess` on trip; run compile
+off the poll thread (or make it cancellable).
+
+### J6 — `scan_plugins` holds `mu_` across the up-to-30 s certify subprocess wait → stalls `instance_group()` on the hot emit path · P2 · CONFIRMED
+
+**Where:** `xi_pm_discovery.hpp:30` (`scan_plugins` takes `lock_guard(mu_)` for the
+whole scan) → `:53` (`certify_folder_locked_` → `xi_certify.hpp:196-223`
+`WaitForSingleObject(pi.hProcess, 30000)`), held under `mu_` per changed plugin,
+vs `xi_pm_instances.hpp:308-316` (`instance_group` takes `mu_`, called on a
+**source plugin's emit thread** for every trigger). A `cmd:rescan_plugins` during a
+live run (un-quiesced, J2) can hold `mu_` up to 30 s per changed-hash plugin,
+blocking the lane router on the emit/sink hot path → dropped frames / stalled
+acquisition, plus every other PM entry (list/create/remove/to_json).
+
+**Fix:** run certify outside `mu_` (snapshot the work list under the lock, certify
+unlocked), or quiesce rescan (J2's fix helps here too).
+
+### J7 — compile prune deletes the CURRENTLY-LIVE script's PDB before the swap · P3 · CONFIRMED
+
+**Where:** `xi_script_compiler.hpp:878-904` — on a successful compile the prune
+removes every `<stem>_v<N>.*` with `N != current`, running **inside `compile()`**,
+i.e. **before** `load_script` + the `g_eng.script` swap
+(`service_cmd_lifecycle.cpp:229,255`). At that instant the previous version is
+still the live, mapped script; its `.dll` delete fails safely (mapped → sharing
+violation, ignored) but its **`.pdb`/`.lib`/`.exp`/`.obj` do delete**. A crash in
+the window (or a detached inspect still on the old module) then can't resolve the
+old script's frames in the minidump. Crash-diagnosability loss only, narrow window,
+no corruption/UAF.
+
+### J8 — WS rx accumulation cap can false-drop a benign near-max frame pipelined with a following frame · P3 · CONFIRMED (low real-world reachability)
+
+**Where:** `xi_ws_server.hpp:896-900` (`read_pending`) — the
+`rx_buf_.size() > kMaxFrame + 16` cap is checked on the **raw accumulated buffer
+before** the parse-loop (`:903-956`) parses+erases the completed frame.
+`kMaxFrame+16` gives a single max frame only ~2 bytes of slack; if one `recv`
+delivers the tail of a ~16 MiB frame *and* the head of a pipelined next frame
+(same TCP segment, up to 16 KiB), `rx_buf_` momentarily exceeds the cap → a valid
+client is closed (`:497-500`). Inbound frames are commands (small in practice —
+pixels come via `frame_path`, not inline), so a ~16 MiB inbound frame is
+near-unreachable for the real FE; hence P3.
+
+**Fix:** apply the growth cap to the *unparsed remainder* (move the check after the
+parse/erase loop), or raise it to `kMaxFrame + 16384 + 14`.
+
+### J9 (doc) — stale comments re-derive the deleted metadata-doc protocol · P3 (doc) · CONFIRMED
+
+**Where:** `service_internal.hpp:161` ("`xi::TriggerEvent rec; // images map +
+meta_doc; host owns one ref to each`") and `:220` ("`// non-const: dtor reset()s
+the event's DocRef`"). The metadata-doc plane (`DocRegistry`/`DocRef`/`DocChunkPool`)
+was **hard-deleted at THE CUT (v12)** — `TriggerEvent` has neither an images map
+nor a `meta_doc`/`DocRef`; it carries a single `xi_pack_handle`. These comments
+will lead a future reader to re-derive a phantom doc-refcount protocol.
+
+**Fix:** reword both to describe the pack handle.
+
+### Round-5 clean slices
+
+- **WS RX framing + JSON parse — essentially CLEAN.** 64-bit length is rejected
+  `> kMaxFrame` before any alloc (no OOM); header bounds math guards each 125/126/127
+  form; the fragmentation state machine resets on reconnect and caps `msg_buf_` at
+  16 MiB (no torn command, no unbounded growth); RX does one `recv` per poll
+  (select-gated → no poll-thread wedge from a dribbling client, unlike RT8 tx);
+  `ParsedCmd.name`/`.args_json` are **owned** strings (no view into a buffer the next
+  `recv` overwrites); parsers are iterative (no deep-nest stack overflow). Only J8.
+- **Metadata-doc plane — DELETED (no code to race).** `xi_doc_registry.hpp` /
+  `xi_doc_pool.hpp` are absent at v12; metadata now rides the pack plane or
+  SDK-side `xi::kv()` (a single-mutex value-map, no pool/refcount). The only residue
+  is the J9 comment-rot.
+
+### Round-5 disposition & suggested order
+
+1. **J2 / J3** — un-quiesced live-DLL teardown (rescan / create-instance). Memory-
+   unsafe; both are a one-line `quiesce_dispatch_for_lifecycle_op_` wrap matching the
+   sibling handlers. J2 is unconditional; J3 is autoload-gated.
+2. **J1** — namespace `work_dir` by pid/port. Closes the wrong-DLL-load + corrupt-PCH
+   for co-resident backends *and* runners; unblocks reliable concurrent QA.
+3. **J4** — off-thread staged-push guard (mirror the existing off-thread read
+   detection). Leak + silent lost actuation under `max_parallel>1`.
+4. **J5 / J6** — bounded compile wait + certify-outside-`mu_`. Control-plane liveness.
+5. **J7 / J8 / J9** — narrow / cosmetic / doc; batch at leisure.
+
+Nothing here blocks THE CUT; J1–J3 are the memory-safety / correctness items and
+each is a localized fix.
+
