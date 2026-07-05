@@ -173,6 +173,23 @@ static void wire_owner_thunks() {
     g_owner_set_fn_ = (void*)&test_owner_set;
 }
 
+// F4: trigger-context marker thunks — identical to service_sinks.cpp's
+// trigger_ctx_get_cb/set_cb: read/write THIS thread's marker slot. The host's
+// warn_trigger_off_thread_ keys off exactly this per-thread value (fires iff
+// != 0), so testing propagation of the value == testing the abort/no-abort
+// decision it drives.
+static thread_local int test_trigger_ctx_ = 0;
+static uint32_t test_trigger_ctx_get() { return (uint32_t)test_trigger_ctx_; }
+static void     test_trigger_ctx_set(uint32_t v) { test_trigger_ctx_ = (int)v; }
+static void wire_trigger_ctx_thunks() {
+    g_trigger_ctx_get_fn_ = (void*)&test_trigger_ctx_get;
+    g_trigger_ctx_set_fn_ = (void*)&test_trigger_ctx_set;
+}
+// The exact predicate warn_trigger_off_thread_ evaluates on the CALLING thread:
+// true ⇒ the host would fail loud (abort in debug / log-once in release); false ⇒
+// the read is a legitimate "no trigger" and stays quiet.
+static bool warn_would_fire_here() { return test_trigger_ctx_get() != 0; }
+
 static void test_async_propagates_owner() {
     SECTION("C2: xi::async-created pool image is attributed to the PARENT owner");
     wire_owner_thunks();
@@ -230,16 +247,95 @@ static void test_parallel_for_propagates_owner() {
 }
 
 // ===========================================================================
+// F4 — off-thread current_trigger() detection is RELATIONAL, not process-global
+// ===========================================================================
+//
+// The old A1 heuristic stored the last CurrentTriggerScope's thread id in a single
+// process-global atomic; warn_trigger_off_thread_ fired whenever it was != 0, WITHOUT
+// comparing to the calling thread. Under max_parallel>1 + a live timer, lane A runs
+// a TRIGGERED frame (stores tidA) while lane B runs a benign TIMER-TICK inspect and
+// its script calls current_trigger() — B saw tidA != 0 and aborted a correct script
+// (and B's scope storing 0 masked a genuine misuse on A). The fix makes the signal a
+// per-thread marker propagated only into the framework's own worker threads. This
+// test asserts the relational property the fix rests on — the same value
+// warn_trigger_off_thread_ keys on:
+//   * a triggered inspect's xi::async / xi::parallel_for CHILD reads marker 1
+//     (genuine off-thread read ⇒ WOULD fire — detection preserved), and
+//   * a timer-tick lane's own worker reads 0 (⇒ would NOT fire), CONCURRENTLY with a
+//     triggered lane whose marker is 1 (the exact false-positive the old code hit).
+static void test_off_thread_detection_is_relational() {
+    SECTION("F4: off-thread current_trigger() detection is per-thread-relative, not a process-global tid");
+    wire_trigger_ctx_thunks();
+    xi::clear_cancel();
+
+    // --- Lane A: an inspect thread INSIDE a trigger-bearing frame (CurrentTriggerScope
+    //     sets marker=1 on the dispatch thread). ---
+    test_trigger_ctx_ = 1;
+
+    // A child spawned by xi::async from the triggered inspect inherits marker=1, so a
+    // current_trigger() read on it is caught (genuine misuse — should snapshot).
+    std::atomic<int> child_marker{-1};
+    {
+        auto f = xi::async([&child_marker]() {
+            child_marker.store((int)test_trigger_ctx_get());
+            return 0;
+        });
+        (void)(int)f;   // await
+    }
+    CHECK(child_marker.load() == 1);           // detection preserved for the real child
+
+    // parallel_for body likewise inherits marker=1.
+    std::atomic<int> par_saw_marker{0};
+    std::atomic<int> par_iters{0};
+    xi::parallel_for(64, [&](int) {
+        par_iters.fetch_add(1);
+        if (test_trigger_ctx_get() != 0) par_saw_marker.fetch_add(1);
+    });
+    CHECK(par_iters.load() == 64);
+    CHECK(par_saw_marker.load() == 64);        // every worker inherited the trigger ctx
+
+    // --- Lane B: a DIFFERENT lane's timer-tick worker, running CONCURRENTLY while lane
+    //     A's marker is still 1. It was NOT spawned by lane A's async/parallel_for — it
+    //     is a plain thread with its own thread_local marker (0). Pre-fix it would read
+    //     the process-global tidA != 0 and abort a correct script. ---
+    std::atomic<bool> lane_b_would_fire{true};
+    std::thread lane_b([&]() {
+        // No CurrentTriggerScope ran for THIS inspect (timer tick / plain cmd:run):
+        // its marker is the fresh thread_local default, 0.
+        lane_b_would_fire.store(warn_would_fire_here());
+    });
+    lane_b.join();
+    CHECK(lane_b_would_fire.load() == false);  // THE FIX: benign lane-B worker is NOT aborted
+
+    // --- The async worker restored the marker on exit — a pooled worker thread reused
+    //     for a later, non-triggered task must not leak marker=1. ---
+    std::atomic<int> reused_marker{-1};
+    test_trigger_ctx_ = 0;                     // lane A's inspect ended (dtor clears)
+    {
+        auto f = xi::async([&reused_marker]() {
+            reused_marker.store((int)test_trigger_ctx_get());
+            return 0;
+        });
+        (void)(int)f;
+    }
+    CHECK(reused_marker.load() == 0);          // non-triggered inspect's child ⇒ quiet
+
+    // Reset for neighbouring tests.
+    test_trigger_ctx_ = 0;
+}
+
+// ===========================================================================
 // A — xi::trigger_snapshot() cross-thread (A2)
 // ===========================================================================
 //
 // We play the host: the trigger thunks read canned state below (mirroring the
-// ref semantics of service_main.cpp's trigger_*_cb). A1's off-thread fail-loud
-// (g_inspect_tid + warn_trigger_off_thread_) lives in service_main.cpp and is
-// only meaningful with the real dispatch worker + CurrentTriggerScope, so it is
-// exercised at INTEGRATION level — see the note in the report. Here we test the
-// unit-testable A2 surface: the snapshot round-trips correctly off-thread and
-// keeps its images + meta alive past the end of the originating dispatch.
+// ref semantics of service_sinks.cpp's trigger_*_cb). The off-thread fail-loud's
+// abort/log body (warn_trigger_off_thread_) lives in service_sinks.cpp and only
+// runs with the real dispatch worker + CurrentTriggerScope; its DECISION INPUT —
+// the per-thread trigger-context marker (F4) — is unit-tested above in
+// test_off_thread_detection_is_relational (the marker == the value warn keys on).
+// Here we test the unit-testable A2 surface: the snapshot round-trips correctly
+// off-thread and keeps its images + meta alive past the end of the dispatch.
 
 static bool                                         g_trig_active = false;
 static std::unordered_map<std::string, xi_image_handle> g_trig_images;
@@ -440,6 +536,10 @@ int main() {
     // C — owner propagation onto worker threads.
     test_async_propagates_owner();
     test_parallel_for_propagates_owner();
+
+    // F4 — off-thread current_trigger() detection is per-thread-relative (no
+    // process-global tid that false-aborts a benign timer-tick worker under N>1).
+    test_off_thread_detection_is_relational();
 
     // A — trigger snapshot cross-thread (A2). A1 fail-loud is integration-level.
     test_trigger_snapshot_cross_thread();
