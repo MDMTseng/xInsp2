@@ -820,6 +820,12 @@ add_executable(test_qa_race tests/test_qa_race.cpp)
 target_link_libraries(test_qa_race PRIVATE xi_core xi_fe)
 add_test(NAME qa_race COMMAND test_qa_race)
 
+# F2 start/resume-window drop-accounting guard (fix/f2-start-resume-drop). Models
+# enqueue_to_lane_'s no-lane branch faithfully (the real path is file-local static
+# in xinsp-backend, not linkable — see the test's header). Pure stdlib, no libs.
+add_executable(test_start_resume_drop tests/test_start_resume_drop.cpp)
+add_test(NAME start_resume_drop COMMAND test_start_resume_drop)
+
 add_executable(test_qa_edge tests/test_qa_edge.cpp)
 target_link_libraries(test_qa_edge PRIVATE xi_core xi_fe)
 add_test(NAME qa_edge COMMAND test_qa_edge)

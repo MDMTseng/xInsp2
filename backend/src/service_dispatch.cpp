@@ -169,7 +169,26 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     TriggerEventReleaser guard(ev);
     if (!g_eng.continuous.load()) return false;
     std::shared_ptr<GroupLane> lane = lane_for_(ev.group);
-    if (!lane) return false;
+    if (!lane) {
+        // F2 START/RESUME WINDOW: cmd_start_ and DispatchPoolGuard::resume flip
+        // g_eng.continuous=true BEFORE spawn_group_pool_ populates g_eng.lanes. A
+        // concurrent source emit landing in that window routes here with the lane
+        // set still empty (lane_for_ → nullptr). Historically this was a BARE
+        // `return false`: the guard (TriggerEventReleaser, above) freed the refs so
+        // nothing LEAKED, but the drop was otherwise INVISIBLE — no XI_SYS_DROPPED
+        // marker and no counter bump, unlike EVERY other drop path. Route it through
+        // the shared drop-accounting helper so a start/resume-window drop is
+        // observable + counted. (This branch is unreachable once lanes are populated,
+        // so the steady-state path stays byte-identical.)
+        ++g_eng.dropped_lifetime;   // P1-8: lifetime total (no per-lane lane to bump here)
+        // aid = -1: no arrival slot is claimed on this path (there is no lane to push
+        // into, so no ++g_eng.run_id). account_dropped_frame_ releases ev internally;
+        // release_trigger_event_ is idempotent (nulls ev.pack), so the guard's
+        // destructor release that follows is a harmless no-op — no double-free.
+        account_dropped_frame_(ev, g_eng.dropped_lifetime.load(), -1, "no_lane",
+                               "dropped: no lane (start/resume window)");
+        return false;
+    }
     // depth 0 is now permitted (RENDEZVOUS lane — see the depth==0 branch below);
     // only genuinely-negative values clamp to the depth=0 floor. The parser
     // guarantees a depth==0 lane also has overflow=="block" (it warns + clamps to 1
