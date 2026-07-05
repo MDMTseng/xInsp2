@@ -504,3 +504,99 @@ A1/A8 remain P3 and optional (a ≥4 GiB single bin / a thread-exhaustion exampl
 retry — neither a benign-load reality); C8 is a diagnostic-only torn aggregate read
 (doc caveat at most). None scheduled.
 
+---
+
+## Round-3b — app-team parallel fresh-surface sweep (G1–G5), independently verified
+
+A SECOND round-3, run in parallel by the app team over surfaces the A/B/C sweep did
+not reach (the RT8 writer teardown, the reentrant capability self-heal, the
+parallel/async primitives, and the SCRIPT-instance / `xi::kv` state plane). Merged
+here; every finding re-verified against `e1b95b9` by an independent verifier. It is
+strongly complementary — it found a P1 (G2) the A/B/C sweep missed and a defect (G5)
+on the RT8 writer itself.
+
+**Verdict (verified): G1 RESOLVED-by-guard · G2 CONFIRMED P1 · G3/G4/G5 CONFIRMED P2.**
+
+### G1 — cap-plane concurrent `reinit()` double-free / `inst_` data race · P1 · **RESOLVED (= B1/B2, defused by the combo guard)**
+Two threads in `f_cap_call` for the same reentrant provider both read `reinit_pending`
+true before either clears it (bare store, not a CAS) → both run `reinit()`'s unlocked
+`old=inst_` read → both `destroy_fn_(I0)` → double-free; plus `exchange`/`get_def`
+read `inst_` unlocked vs the swap. Same root as **B1/B2**: `reinit` on a reentrant
+(no-op `CallScope`) instance. **VERIFIED RESOLVED at e1b95b9:** the combo guard
+(`set_on_fault`, commit 192791f) downgrades `on_fault=reinit → reuse` for any
+reentrant (or staged-prepare) instance, and the machine-autoload path reaches it
+via `make_adapter_guarded_` → `set_on_fault` (`xi_pm_load.hpp:93`+50), so
+`reinit_pending` is never armed and `reinit()` never runs → the double-free is
+unreachable. (The app-team fix — CAS-claim `reinit_pending` + widen the exclusive
+gate around the whole read-swap-destroy — is the deeper fix IF the combo is ever
+un-guarded to support reentrant+reinit for real; recorded, not needed now.)
+
+### G2 — script `xi::Instance<T>` state plane unguarded vs a concurrent inspect · **P1 · CONFIRMED · UNFIXED**
+`InstanceBase::set_def`/`get_def`/`exchange` (`xi_instance.hpp:63-69`) are plain
+virtuals with NO locking; the inspect worker reads instance fields OUTSIDE `script_mu`
+(`service_inspect.cpp:71-79,191-193`); `cmd:set_instance_def` (`service_cmd_project.cpp:
+146-168`) does NOT quiesce dispatch. ASYMMETRY (verified): a BACKEND instance's
+`set_def` is `CAbiInstanceAdapter::set_def` with a serializing `CallScope`
+(`test_set_def_race`), but a SCRIPT `xi::Instance<T>` sits in the same registry with
+NO adapter, NO CallScope, and the host adds none. A live operator re-tuning a
+heavy-state instance (cv::Mat / string / vector / shared_ptr — the header's advertised
+use) mid-stream reassigns a member while a worker reads it → **UAF** (scalar def → torn
+read → wrong verdict, P2 floor). **NORMAL-REACHABLE** (live tuning is a standard
+workflow; this is the SCRIPT-side escape of what round-2 F-refuted for backend
+instances). Fix: quiesce dispatch around the script-instance `set_def`/`get_def`/
+`exchange`/`prepare` + the load_project def-replay (like the lifecycle ops), or give
+the script path a per-instance CallScope-equivalent the inspect deref also takes.
+
+### G3 — `parallel_for` drops the inspect cancel-ticket → epoch-cancel voids a spared frame's worker iterations · **P2 · CONFIRMED · UNFIXED**
+`parallel_for` (`xi_parallel.hpp:70-90`) captures owner + trigger-ctx per worker but
+NOT `current_inspect_ticket_ref()` (async captures it, `xi_async.hpp:331/365`). OMP
+workers keep ticket 0; `cancellation_requested()` treats 0 as "cancel me" when a cancel
+is armed (`xi_async.hpp:226`) → the worker `continue`s and skips its whole static
+`omp for` chunk → a watchdog-SPARED fresh frame (ticket ≥ cutoff) computes only the
+master's fraction yet returns `inspect_ok=true` → silent wrong verdict in the ~1s
+watchdog window. Normal (no-cancel) operation unaffected. Fix: capture `parent_ticket`
+(+ the cancel token, a P3 sibling) and re-install per worker via a RAII scope, mirroring
+async's `Scope`.
+
+### G4 — `xi::kv()` cross-frame store races under `max_parallel>1` · **P2 · CONFIRMED (mechanism) · doc fix**
+`xi::kv()` (`xi_kv.hpp:302`) is a process-global singleton `std::map`; the host does
+not lock `kv_mutex` around inspect; under `dispatch_threads>1` two frames RMW the map
+concurrently (UB on `std::map`). The header (`xi_kv.hpp:36-39`) tells authors to lock
+only for `xi::async` and that "single-threaded scripts can ignore the mutex" — but a
+script is single-threaded across frames only when `dispatch_threads==1`, so a
+doc-correct kv-using script + the parallelism knob = an unlocked concurrent RMW.
+**Reachable** by kv() + `max_parallel>1` (no exotic conditions). Fix: a host lock is the
+wrong layer (kv() is called inline SDK-side, no host interception without serializing
+the whole inspect) — the honest fix is the header/doc correction (`max_parallel>1` also
+requires `kv_mutex`; drop the misleading "single-threaded scripts can ignore" line), or
+make `Kv` internally synchronized so voluntary discipline isn't load-bearing.
+
+### G5 — RT8 writer `stop()`/join not bounded against a slow-but-alive client · **P2 · CONFIRMED · UNFIXED · (on the RT8 writer)**
+The writer's inner 1 MiB chunk loop (`xi_ws_server.hpp:703-716`) never re-checks
+`writer_stop_`; `stop()` (`:347-366`) sets the flag + notify + join but does NOT
+`::shutdown(client_)` before joining (shutdown is at `:360`, after). For a
+slow-but-progressing client (each chunk < 1.5s, so SO_SNDTIMEO — which by the code's own
+admission only catches a fully-wedged 0-drain peer — never fires), `join()` blocks for
+`remaining_frame_bytes ÷ drain_rate` (a 16 MiB preview at 500 KB/s ≈ 30s), violating the
+≤1.5s bound the header (`:344-346`) and doc 23 §Lifecycle promise. Not UAF/data-loss —
+ungraceful teardown (a supervisor SIGKILL on timeout). Fix (one line, low-risk):
+`stop()` does `::shutdown(client_, SHUT_RDWR)` BEFORE the join — the same unblock
+`close_client` and the writer's error path already use — collapsing the worst-case join
+to sub-second.
+
+### Round-3b refuted-safe (app-team, condensed)
+RT8 writer CORE solid (fd-reuse cross-connection send, epoch guard, single-FIFO order,
+lost-wakeup on stop, byte-cap double-close, lock-order) · cap plane (rc-5 reentrancy
+guard thread_local, quarantine never frees inst_, $v/$probe TOCTOU re-resolves under the
+shared gate, recompile/rebuild/export all quiesce before FreeLibrary) · parallel
+primitives (owner+trigger_ctx save/restore symmetric incl. rethrow path; worker
+exceptions rethrown on the inspect thread) · hot-recompile (readers snapshot under
+`script_mu` holding the module shared_ptr; `Param<T>` atomic scalar; thread_locals for
+g_run_result/g_current_trigger/g_staged).
+
+### Round-3b disposition
+- **G1** — RESOLVED (combo guard, 192791f).
+- **G2 (P1) / G3 (P2) / G5 (P2)** — CONFIRMED, UNFIXED. G2 is the priority (a
+  normal-reachable P1); G3 + G5 are small local fixes. G5 is on the RT8 writer.
+- **G4 (P2)** — CONFIRMED mechanism; a doc/header correction (host lock infeasible).
+
