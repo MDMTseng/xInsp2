@@ -44,6 +44,23 @@ if(CCACHE_PROGRAM)
     message(STATUS "xinsp2: ccache found (${CCACHE_PROGRAM}) — active under Ninja/Make; the VS generator ignores it")
 endif()
 
+# Faster linker: the build links ~76 executables (60 backend + 16 plugin tests),
+# and LINKING (not caching-friendly — ccache caches compiles, not links) is the
+# dominant cost of a full build. LLVM's lld-link is a drop-in for the MSVC link.exe
+# CLI and links several times faster. We keep the MSVC COMPILER (cl.exe) and only
+# swap the LINKER — CMAKE_LINKER is pointed at lld-link explicitly via find_program
+# HINTS so LLVM's bin dir is NEVER put on PATH (which would make CMake pick clang++
+# as the compiler and break the MSVC-flavoured link). Opt-in: no-op if LLVM absent.
+if(MSVC)
+    find_program(LLD_LINK_EXE lld-link
+        HINTS "$ENV{ProgramW6432}/LLVM/bin" "$ENV{ProgramFiles}/LLVM/bin"
+              "C:/Program Files/LLVM/bin")
+    if(LLD_LINK_EXE)
+        set(CMAKE_LINKER "${LLD_LINK_EXE}" CACHE FILEPATH "MSVC-compatible LLD linker" FORCE)
+        message(STATUS "xinsp2: using LLD linker (${LLD_LINK_EXE}) — faster than MSVC link.exe")
+    endif()
+endif()
+
 if(MSVC)
     add_compile_options(/W3 /permissive- /utf-8 /EHa)
 else()

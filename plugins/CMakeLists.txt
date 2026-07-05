@@ -3,6 +3,25 @@ project(xinsp2_plugins C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Build accelerators (mirror of backend/CMakeLists): ccache caches compiles
+# (active under Ninja; VS generator ignores the launcher), and lld-link swaps the
+# MSVC linker for LLVM's faster drop-in — the COMPILER stays cl.exe (we point
+# CMAKE_LINKER at lld-link via HINTS, never putting LLVM/bin on PATH). Both no-op if
+# the tool is absent.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER   "${CCACHE_PROGRAM}")
+endif()
+if(MSVC)
+    find_program(LLD_LINK_EXE lld-link
+        HINTS "$ENV{ProgramW6432}/LLVM/bin" "$ENV{ProgramFiles}/LLVM/bin" "C:/Program Files/LLVM/bin")
+    if(LLD_LINK_EXE)
+        set(CMAKE_LINKER "${LLD_LINK_EXE}" CACHE FILEPATH "MSVC-compatible LLD linker" FORCE)
+    endif()
+endif()
+
 if(MSVC)
     # /EHa (async exceptions) is REQUIRED, not cosmetic — it matches the SDK's own
     # plugin build (sdk/cmake/xinsp2_plugin.cmake) and the backend EXE. The host
