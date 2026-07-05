@@ -455,6 +455,26 @@ static Spawned spawn_backend(const FeConfig& c, HANDLE job) {
     return sp;
 }
 
+// Force-kill the backend and CONFIRM death before the caller may respawn (H1).
+// TerminateProcess is async: the handle signals only after every thread has
+// terminated, which a thread wedged in an uninterruptible kernel op (blocking
+// driver I/O, a page fault on a stalled mmap, an FS write to a disk under RT8
+// record-to-disk pressure) can delay past a single 5 s wait. Retry the terminate;
+// return true only once the handle is signaled — and read the REAL exit code THEN,
+// not the STILL_ACTIVE (259) a live process reports. Return false if it is still
+// alive after the budget: the caller must NOT respawn onto the same port +
+// .xinsp_work dir, or two live backends double-serve and corrupt shared state.
+static bool force_kill_be(HANDLE hProcess, DWORD* exit_code) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        TerminateProcess(hProcess, 1);
+        if (WaitForSingleObject(hProcess, 5000) == WAIT_OBJECT_0) {
+            GetExitCodeProcess(hProcess, exit_code);
+            return true;
+        }
+    }
+    return false;
+}
+
 static int run_supervisor(const FeConfig& c) {
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
@@ -543,6 +563,7 @@ static int run_supervisor(const FeConfig& c) {
         bool      hb_armed = false;
         int64_t   healthy_since = 0;   // when this instance first went healthy
         DWORD exit_code = 0;
+        bool  kill_confirmed = true;   // normal WAIT_OBJECT_0 exit is already dead
         xi::BeExitReason death_reason = xi::BeExitReason::BackendExit;
         for (;;) {
             DWORD w = WaitForSingleObject(sp.pi.hProcess, (DWORD)c.probe_interval_ms);
@@ -570,18 +591,14 @@ static int run_supervisor(const FeConfig& c) {
                     std::fprintf(stderr, "[xinsp-fe] backend reported autostart degraded "
                                  "(script did not load); killing for respawn\n");
                     death_reason = xi::BeExitReason::BootTimeout;
-                    TerminateProcess(sp.pi.hProcess, 1);
-                    WaitForSingleObject(sp.pi.hProcess, 5000);
-                    GetExitCodeProcess(sp.pi.hProcess, &exit_code);
+                    kill_confirmed = force_kill_be(sp.pi.hProcess, &exit_code);
                     break;
                 } else if (c.boot_timeout_ms > 0 && steady_ms() - spawn_ms > c.boot_timeout_ms) {
                     std::fprintf(stderr, "[xinsp-fe] backend did not reach 'autostart: ready' "
                                  "within %d ms (boot hang); killing for respawn\n",
                                  c.boot_timeout_ms);
                     death_reason = xi::BeExitReason::BootTimeout;
-                    TerminateProcess(sp.pi.hProcess, 1);
-                    WaitForSingleObject(sp.pi.hProcess, 5000);
-                    GetExitCodeProcess(sp.pi.hProcess, &exit_code);
+                    kill_confirmed = force_kill_be(sp.pi.hProcess, &exit_code);
                     break;
                 } else {
                     continue;   // still booting — don't declare healthy or count fails
@@ -620,9 +637,7 @@ static int run_supervisor(const FeConfig& c) {
                                      "(serving loop wedged); killing for respawn\n",
                                      c.heartbeat_stale_ms);
                         death_reason = xi::BeExitReason::PortUnresponsive;
-                        TerminateProcess(sp.pi.hProcess, 1);
-                        WaitForSingleObject(sp.pi.hProcess, 5000);
-                        GetExitCodeProcess(sp.pi.hProcess, &exit_code);
+                        kill_confirmed = force_kill_be(sp.pi.hProcess, &exit_code);
                         break;
                     }
                 }
@@ -643,9 +658,7 @@ static int run_supervisor(const FeConfig& c) {
                 std::fprintf(stderr, "[xinsp-fe] backend unresponsive (%d failed probes); "
                              "killing for respawn\n", probe_fails);
                 death_reason = xi::BeExitReason::PortUnresponsive;
-                TerminateProcess(sp.pi.hProcess, 1);
-                WaitForSingleObject(sp.pi.hProcess, 5000);
-                GetExitCodeProcess(sp.pi.hProcess, &exit_code);
+                kill_confirmed = force_kill_be(sp.pi.hProcess, &exit_code);
                 break;
             }
         }
@@ -656,6 +669,25 @@ static int run_supervisor(const FeConfig& c) {
         if (sp.log != INVALID_HANDLE_VALUE) CloseHandle(sp.log);
 
         if (intended) break;   // FE shutdown path handled after the loop
+
+        // H1: the forced kill did NOT confirm the BE dead — it is STILL RUNNING on
+        // this port + .xinsp_work dir. Respawning now would put a second live
+        // backend on the same port/state → double-serve + shared-state corruption
+        // (or BE#2's bind fails and latches the line falsely "down" while the zombie
+        // keeps serving). Refuse: stop supervising and fall through to FE shutdown,
+        // whose job-object close (KILL_ON_JOB_CLOSE) reaps the abandoned backend. A
+        // process manager can then restart the FE clean.
+        if (!kill_confirmed) {
+            std::fprintf(stderr, "[xinsp-fe] backend did not terminate within the kill "
+                         "budget — REFUSING to respawn (a second backend on port %d would "
+                         "double-serve). Exiting so the job object reaps the abandoned "
+                         "backend; restart the FE.\n", c.port);
+            st.state  = "down";
+            st.reason = "backend unkillable — FE exiting to reap it via job close";
+            publish_status(c, st);
+            rc = 1;
+            break;
+        }
 
         // ---- BE died unexpectedly: record forensics + respawn ----
         // ("Going safe" on a BE crash is now a comms plugin's own sidecar
