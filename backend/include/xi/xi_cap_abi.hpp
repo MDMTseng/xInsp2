@@ -244,6 +244,10 @@ inline void apply_on_fault_(CAbiInstanceAdapter* a) {
     }
 }
 inline void apply_pending_reinit_(CAbiInstanceAdapter* a) {
+    // H5 (cap-funnel sibling of service_sinks.cpp): atomically consume the pending
+    // flag so two concurrent faulters can't both rebuild (double-rebuild + spurious
+    // quarantine). Only the exchange winner reinit()s + accounts.
+    if (!a->consume_reinit_pending()) return;
     if (a->reinit()) {
         a->reset_reinit_fails();
         health().clear_instance_degraded(a->name());
