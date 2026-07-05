@@ -134,13 +134,14 @@ def test_metrics_snapshot_matches_backend_shape():
     block = Client.metrics_inspect_compute(None, snap)  # unbound; snapshot given
     assert block["count"] == 128
     assert "mean_ms" in block and "buckets" in block
-    # buckets is an ARRAY of {le,count} (MetricsRegistry::snapshot_json), NOT a
-    # fixed-key le_1..gt_50 object — assert the real shape so a regression to the
-    # old fixture shape fails here.
+    # buckets is an ARRAY of {bucket_ms,count} (MetricsRegistry::snapshot_json), NOT
+    # a fixed-key le_1..gt_50 object — assert the real shape so a regression to the
+    # old fixture shape fails here. (bucket_ms is the NON-cumulative upper bound; it
+    # was renamed from the misleading Prometheus `le`, which implies cumulative ≤.)
     assert isinstance(block["buckets"], list)
-    assert all("le" in b and "count" in b for b in block["buckets"])
-    # The final entry is the "inf" overflow bucket (le is the string "inf").
-    assert block["buckets"][-1]["le"] == "inf"
+    assert all("bucket_ms" in b and "count" in b for b in block["buckets"])
+    # The final entry is the "inf" overflow bucket (bucket_ms is the string "inf").
+    assert block["buckets"][-1]["bucket_ms"] == "inf"
     # Top-level frame counters exist (the old fixture omitted them) and partition.
     assert snap["frames_total"] == snap["frames_ok"] + snap["frames_error"]
     assert sum(b["count"] for b in block["buckets"]) == snap["frames_total"]

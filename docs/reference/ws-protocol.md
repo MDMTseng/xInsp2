@@ -659,13 +659,20 @@ itself (same contract as the `dispatch_stats` `*_lifetime` fields).
 > queue wait, emit-gate wait, staged sink flush, JPEG encode and WS send, so it is
 > NOT cycle/decision latency (external review 05 #7). The numeric values, bucket
 > edges and shape are unchanged; only the key name changed.
+>
+> **BREAKING (staged, not on master).** Each histogram bucket's key was `le` (the
+> Prometheus name for a **cumulative** `≤ edge` count) but the counts are
+> **non-cumulative** per-bucket occupancy, so a standard Prometheus consumer
+> misread every quantile. The key is renamed `le` → `bucket_ms` (the bucket's
+> upper bound); the bucket math is unchanged. A consumer bound to `le` was already
+> receiving wrong (non-cumulative) data.
 
 ```json
 { "frames_total": 1024, "frames_ok": 1020, "frames_error": 4,
   "inspect_compute_ms": {
     "count": 1024, "sum_ms": 8123.500, "mean_ms": 7.933,
-    "buckets": [ {"le": 0.5, "count": 12}, {"le": 1.0, "count": 40},
-                 "...", {"le": 5000.0, "count": 3}, {"le": "inf", "count": 1} ]
+    "buckets": [ {"bucket_ms": 0.5, "count": 12}, {"bucket_ms": 1.0, "count": 40},
+                 "...", {"bucket_ms": 5000.0, "count": 3}, {"bucket_ms": "inf", "count": 1} ]
   } }
 ```
 
@@ -676,7 +683,7 @@ itself (same contract as the `dispatch_stats` `*_lifetime` fields).
 | `inspect_compute_ms.count` | frames in the histogram (equals `frames_total`) |
 | `inspect_compute_ms.sum_ms` | Σ per-frame inspect **compute** time, ms (kept in integer µs internally; here in ms) |
 | `inspect_compute_ms.mean_ms` | `sum_ms / count`, or `0` when `count == 0` |
-| `inspect_compute_ms.buckets` | non-cumulative counts; each entry counts frames with `compute ≤ le`, partitioned by the 13 ms edges (`0.5 … 5000`). The final `{"le":"inf"}` is the overflow bucket. All bucket counts sum to `frames_total`. |
+| `inspect_compute_ms.buckets` | NON-cumulative counts; each entry counts frames in `[prev_edge, bucket_ms)` (NOT `≤ bucket_ms`), partitioned by the 13 ms edges (`0.5 … 5000`). `bucket_ms` is the bucket's upper bound (renamed from the Prometheus `le`, which implies a cumulative `≤`; these counts are per-bucket occupancy). The final `{"bucket_ms":"inf"}` is the overflow bucket. All bucket counts sum to `frames_total`. |
 
 ### `get_health`
 `args: {}` → `data: { ... }`. The **one canonical health read** — the

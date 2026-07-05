@@ -63,11 +63,11 @@ int main() {
     {
         m.reset();
         // Edges (ms): 0.5,1,2,5,10,20,50,100,200,500,1000,2000,5000, then +inf.
-        m.record_frame(0.2, true);      // -> bucket 0 (le 0.5)
-        m.record_frame(0.5, true);      // -> bucket 0 (le 0.5, inclusive)
-        m.record_frame(3.0, true);      // -> bucket 3 (le 5)
-        m.record_frame(3.0, true);      // -> bucket 3 (le 5)
-        m.record_frame(150.0, true);    // -> bucket 8 (le 200)
+        m.record_frame(0.2, true);      // -> bucket 0 (<= 0.5)
+        m.record_frame(0.5, true);      // -> bucket 0 (<= 0.5, inclusive)
+        m.record_frame(3.0, true);      // -> bucket 3 (<= 5)
+        m.record_frame(3.0, true);      // -> bucket 3 (<= 5)
+        m.record_frame(150.0, true);    // -> bucket 8 (<= 200)
         m.record_frame(999999.0, true); // -> +inf overflow (index kBuckets)
         CHECK(m.frames_total() == 6);
         CHECK(m.bucket(0) == 2);
@@ -112,11 +112,11 @@ int main() {
             CHECK(yyjson_is_arr(buckets));
             // kBuckets edges + 1 overflow entry.
             CHECK(yyjson_arr_size(buckets) == MetricsRegistry::kBuckets + 1);
-            // Last entry is the "inf" overflow bucket.
+            // Last entry is the "inf" overflow bucket (keyed bucket_ms = upper bound).
             yyjson_val* last = yyjson_arr_get_last(buckets);
-            yyjson_val* le   = yyjson_obj_get(last, "le");
-            CHECK(yyjson_is_str(le));
-            CHECK(std::string(yyjson_get_str(le)) == "inf");
+            yyjson_val* bucket_ms = yyjson_obj_get(last, "bucket_ms");
+            CHECK(yyjson_is_str(bucket_ms));
+            CHECK(std::string(yyjson_get_str(bucket_ms)) == "inf");
             yyjson_doc_free(doc);
         }
     }

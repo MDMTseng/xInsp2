@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://xinsp.dev/contract/schemas/rsp-metrics.schema.json",
   "title": "metrics rsp",
-  "description": "Response to cmd:metrics. Describes what MetricsRegistry::snapshot_json (backend/include/xi/xi_metrics.hpp) ACTUALLY emits into data: top-level frames_total/frames_ok/frames_error counters plus an inspect_compute_ms block (count/sum_ms/mean_ms and a `buckets` ARRAY of {le,count}). The array has one entry per fixed edge (0.5,1,2,5,10,20,50,100,200,500,1000,2000,5000) followed by a final overflow entry whose `le` is the STRING \"inf\" — hence `le` is number-or-string. The bucket counts partition frames_total. (An earlier fixture modelled buckets as a fixed-key object le_1..gt_50 and omitted the frame counters; that never matched the backend and is corrected here.)",
+  "description": "Response to cmd:metrics. Describes what MetricsRegistry::snapshot_json (backend/include/xi/xi_metrics.hpp) ACTUALLY emits into data: top-level frames_total/frames_ok/frames_error counters plus an inspect_compute_ms block (count/sum_ms/mean_ms and a `buckets` ARRAY of {bucket_ms,count}). The array has one entry per fixed edge (0.5,1,2,5,10,20,50,100,200,500,1000,2000,5000) followed by a final overflow entry whose `bucket_ms` is the STRING \"inf\" — hence `bucket_ms` is number-or-string. `bucket_ms` is the bucket's NON-cumulative upper bound: `count` is frames in [prev_bound, bucket_ms), NOT frames <= bucket_ms. (The key was `le` — the Prometheus name for a CUMULATIVE ≤ edge — but these counts are per-bucket occupancy, so it was renamed to bucket_ms to stop consumers misreading it as cumulative. An earlier fixture modelled buckets as a fixed-key object le_1..gt_50 and omitted the frame counters; that never matched the backend and is corrected here.)",
   "type": "object",
   "additionalProperties": true,
   "required": ["type", "id", "ok", "data"],
@@ -31,9 +31,9 @@
               "items": {
                 "type": "object",
                 "additionalProperties": true,
-                "required": ["le", "count"],
+                "required": ["bucket_ms", "count"],
                 "properties": {
-                  "le": { "type": ["number", "string"] },
+                  "bucket_ms": { "type": ["number", "string"] },
                   "count": { "type": "integer", "minimum": 0 }
                 }
               }

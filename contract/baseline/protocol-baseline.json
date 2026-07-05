@@ -499,20 +499,20 @@
                     "items": {
                       "additionalProperties": true,
                       "properties": {
-                        "count": {
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "le": {
+                        "bucket_ms": {
                           "type": [
                             "number",
                             "string"
                           ]
+                        },
+                        "count": {
+                          "minimum": 0,
+                          "type": "integer"
                         }
                       },
                       "required": [
-                        "count",
-                        "le"
+                        "bucket_ms",
+                        "count"
                       ],
                       "type": "object"
                     },
