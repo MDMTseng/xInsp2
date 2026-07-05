@@ -78,6 +78,14 @@ void parallel_for(int n, F&& body) {
     // body must capture xi::trigger_snapshot() by value). 0 when the thunk is unwired.
     const uint32_t parent_trigger_ctx = detail::trigger_ctx_get();
 
+    // G3: capture the inspect cancel-ticket + token ONCE on THIS (inspect) thread,
+    // before the region. Without re-installing them per worker, OMP workers keep
+    // ticket 0, which cancellation_requested() treats as "cancel me" the instant a
+    // watchdog cancel is armed — so a watchdog-SPARED fresh frame (ticket >= cutoff)
+    // has its worker `omp for` chunk silently skipped yet still returns inspect_ok,
+    // a wrong verdict in the ~1s cancel window. Mirrors xi::async's Scope.
+    const uint64_t parent_ticket = current_inspect_ticket_ref();
+    CancelToken* const parent_cancel_token = current_cancel_token_ref();
 #ifdef _OPENMP
     #pragma omp parallel
     {
@@ -85,6 +93,22 @@ void parallel_for(int n, F&& body) {
         xi::install_seh_translator();                   // per-OMP-thread (B1)
         detail::OwnerScope owner_scope(parent_owner);   // per-worker owner (C3)
         detail::TriggerCtxScope trigger_ctx_scope(parent_trigger_ctx);   // per-worker trigger ctx (F4)
+        // G3: re-install the parent inspect ticket + cancel token on this worker so
+        // it is not mistaken for ticket 0 (= unconditionally cancellable).
+        struct TicketScope {
+            uint64_t     prev_ticket;
+            CancelToken* prev_tok;
+            TicketScope(uint64_t t, CancelToken* k)
+                : prev_ticket(current_inspect_ticket_ref()),
+                  prev_tok(current_cancel_token_ref()) {
+                current_inspect_ticket_ref() = t;
+                current_cancel_token_ref()   = k;
+            }
+            ~TicketScope() {
+                current_inspect_ticket_ref() = prev_ticket;
+                current_cancel_token_ref()   = prev_tok;
+            }
+        } ticket_scope(parent_ticket, parent_cancel_token);
         #pragma omp for
         for (int i = 0; i < n; ++i) {
             // Drain fast once anyone has faulted; honour a cooperative cancel.

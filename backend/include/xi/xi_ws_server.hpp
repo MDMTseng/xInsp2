@@ -354,6 +354,17 @@ public:
             writer_stop_ = true;
         }
         out_cv_.notify_all();
+        // G5: unblock a writer parked in ::send() to a slow-but-PROGRESSING client
+        // BEFORE joining. SO_SNDTIMEO only catches a fully-wedged 0-drain peer; a
+        // client draining each 1 MiB chunk in <1.5s never trips it, so join() would
+        // otherwise wait out the whole in-flight frame (a 16 MiB preview at
+        // ~500 KB/s ≈ 30s), blowing the ≤1.5s stop bound. shutdown() is the same
+        // unblock close_client()/the writer error path use; full teardown still runs
+        // in close_client() below.
+        {
+            socket_t fd = client_.load(std::memory_order_acquire);
+            if (fd != INVALID_SOCK) ::shutdown(fd, 2 /* SD_BOTH / SHUT_RDWR */);
+        }
         if (writer_thread_.joinable()) writer_thread_.join();
         // 2) Now that no writer is touching client_ or the queue, tear down the
         //    client (close_client also clears the — now unattended — queue).

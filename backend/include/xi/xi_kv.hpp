@@ -33,10 +33,14 @@
 // to the whole incoming buffer and adopts ALL-OR-NOTHING (a refused buffer
 // leaves the store untouched).
 //
-// Thread safety: same discipline as xi::state() — kv() returns a reference;
-// callers that touch it from xi::async tasks lock xi::kv_mutex() around each
-// read-modify-write. Single-threaded scripts can ignore the mutex. (The
-// host-boundary thunks in xi::detail lock it themselves.)
+// Thread safety: kv() returns a reference to a process-global store; the host
+// does NOT serialize inspect, so any concurrent inspect body that touches kv()
+// MUST lock xi::kv_mutex() around each read-modify-write. That means BOTH: (a)
+// xi::async / xi::parallel_for tasks, AND (b) ANY kv()-using script running under
+// dispatch_threads/max_parallel > 1 — two frames then RMW the same std::map
+// concurrently, which is UB (G4). Only a script that is BOTH single-parallelism
+// (max_parallel==1) AND uses no async may skip the lock. (The host-boundary thunks
+// in xi::detail lock it themselves.)
 //
 // Hot-reload machinery mirrors the Record channel exactly:
 //   XI_KV_SCHEMA(N) / xi::set_kv_schema_version(N)  — version the shape;

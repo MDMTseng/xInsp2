@@ -131,6 +131,13 @@ void cmd_list_instances_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
 void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        // G2: a SCRIPT xi::Instance<T> has NO adapter/CallScope (unlike a backend
+        // instance, whose set_def serializes under one), yet the inspect worker
+        // reads its fields outside script_mu. A live operator re-tuning a heavy-state
+        // instance (cv::Mat / vector / shared_ptr) mid-stream would reassign a member
+        // while a worker reads it → UAF. Quiesce dispatch for the def swap so no
+        // worker is mid-deref, matching the other lifecycle ops (create/remove/...).
+        auto _def_guard = quiesce_dispatch_for_lifecycle_op_("set_instance_def", &srv);
         // Extract the def object as a raw JSON substring
         std::string def_str;
         const char* after;
