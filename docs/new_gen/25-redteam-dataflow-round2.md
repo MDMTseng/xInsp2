@@ -596,9 +596,17 @@ g_run_result/g_current_trigger/g_staged).
 
 ### Round-3b disposition
 - **G1** — RESOLVED (combo guard, 192791f).
-- **G2 (P1) / G3 (P2) / G5 (P2)** — CONFIRMED, UNFIXED. G2 is the priority (a
-  normal-reachable P1); G3 + G5 are small local fixes. G5 is on the RT8 writer.
-- **G4 (P2)** — CONFIRMED mechanism; a doc/header correction (host lock infeasible).
+- **G2 / G3 / G4 / G5 — ALL FIXED @ `d05ed4a` (2026-07-05, full gate green):** G2 →
+  `cmd_set_instance_def_` wrapped in `quiesce_dispatch_for_lifecycle_op_` (no worker
+  mid-deref during a script-instance def swap). G3 → `parallel_for` captures the
+  inspect ticket + cancel token and re-installs them per OMP worker (no more ticket-0
+  false-cancel). G4 → the `xi::kv()` header thread-safety note corrected
+  (`max_parallel>1` also requires `kv_mutex`; the "single-threaded scripts can ignore"
+  line was false under the parallelism knob). G5 → RT8 writer `stop()` does
+  `::shutdown(client_)` before `join()` (sub-second teardown vs a ~30s slow-client
+  drain).
+- **With this, EVERY finding across rounds 2–5 (F/RB/B/C/G/H/J) is FIXED, DEFUSED, or
+  REFUTED. The red-team effort is closed.**
 
 ---
 
