@@ -33,14 +33,21 @@
 // to the whole incoming buffer and adopts ALL-OR-NOTHING (a refused buffer
 // leaves the store untouched).
 //
-// Thread safety: kv() returns a reference to a process-global store; the host
-// does NOT serialize inspect, so any concurrent inspect body that touches kv()
-// MUST lock xi::kv_mutex() around each read-modify-write. That means BOTH: (a)
-// xi::async / xi::parallel_for tasks, AND (b) ANY kv()-using script running under
-// dispatch_threads/max_parallel > 1 — two frames then RMW the same std::map
-// concurrently, which is UB (G4). Only a script that is BOTH single-parallelism
-// (max_parallel==1) AND uses no async may skip the lock. (The host-boundary thunks
-// in xi::detail lock it themselves.)
+// Thread safety: kv() returns a reference to a PROCESS-GLOBAL store, and the ONE
+// inspect script DLL (g_eng.script) runs on EVERY dispatch lane. The host does not
+// serialize inspect, so any inspect body that touches kv() MUST lock xi::kv_mutex()
+// around each read-modify-write unless the TOTAL concurrency that can run the script
+// is exactly 1. Total concurrency = Σ (per-group max_parallel) across all lanes,
+// PLUS any xi::async / xi::parallel_for the body spawns — NOT a single group's
+// max_parallel. So (G4 / M1):
+//   - Multi-GROUP project (≥2 groups) — ALWAYS lock, even if every group is
+//     max_parallel==1: the groups' lanes run the shared script concurrently.
+//   - Single group with max_parallel>1, or ANY async/parallel_for — lock.
+//   - ONLY safe to skip: a SINGLE-group project, max_parallel==1, no async — the
+//     one configuration where the script is truly single-threaded across frames.
+// A benign author who reads "my group is max_parallel==1, skip the lock" but runs a
+// two-camera (two-group) project hits concurrent std::map RMW → torn count / red-black
+// tree corruption. (The host-boundary thunks in xi::detail lock it themselves.)
 //
 // Hot-reload machinery mirrors the Record channel exactly:
 //   XI_KV_SCHEMA(N) / xi::set_kv_schema_version(N)  — version the shape;

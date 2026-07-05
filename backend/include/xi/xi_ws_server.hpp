@@ -492,10 +492,16 @@ public:
                     // shutdown arg 1 == SD_SEND (Win32) == SHUT_WR (POSIX).
                     ::shutdown(s, 1);
 #ifdef _WIN32
-                    DWORD rto = 400;  // ms
-                    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rto, sizeof(rto));
+                    // M4: drain NON-BLOCKING so a benign reconnect storm can't stall the
+                    // poll thread (this runs on it, and it also owns the attached client's
+                    // inbound + drop_requested_ + heartbeat). Was a blocking recv-loop with
+                    // SO_RCVTIMEO=400ms → up to 400ms/reject on the liveness thread. One
+                    // non-blocking pass reads whatever's already buffered; any unread tail
+                    // is discarded by CLOSESOCK (harmless — the connection was rejected).
+                    u_long nb = 1;
+                    ::ioctlsocket(s, FIONBIO, &nb);
                     char drain[1024];
-                    while (::recv(s, drain, (int)sizeof(drain), 0) > 0) { /* until peer FIN/timeout */ }
+                    while (::recv(s, drain, (int)sizeof(drain), 0) > 0) { /* buffered only, no block */ }
 #endif
                     // TODO(linux): SO_RCVTIMEO via struct timeval, same drain.
                     CLOSESOCK(s);
@@ -653,9 +659,13 @@ private:
         // client_ after the handoff and could see a newly-accepted client). That
         // case is handled by the connection-epoch tag: the popped frame carries
         // this connection's epoch, the next accept bumps conn_epoch_, and the
-        // writer's under-tx_mu_ epoch check drops the superseded frame. Wake the
-        // writer in case it is parked on an empty queue (it will re-check the
-        // now-nulled client_).
+        // writer's under-tx_mu_ epoch check drops the superseded frame — that
+        // epoch check is the real barrier here. (M3: the notify_all below does NOT
+        // make the writer "re-check client_" — the writer only ever re-evaluates
+        // its wait predicate `writer_stop_ || !out_q_.empty()`, never client_; with
+        // the queue just cleared the predicate is false, so a woken writer simply
+        // re-parks. The notify is a harmless spurious wake, kept for stop-path
+        // symmetry.)
         {
             std::lock_guard<std::mutex> g(out_mu_);
             out_q_.clear();

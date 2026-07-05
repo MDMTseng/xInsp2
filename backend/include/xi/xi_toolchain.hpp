@@ -197,6 +197,11 @@ inline std::string health_json(const std::string& folder, const std::string& inc
 // Merge one override into the canonical project.json "toolchain" block. Empty
 // value clears that key (revert to env/probe). Returns false (with `err`) if the
 // project.json can't be read/parsed/written.
+// NOTE (RT8 latent): this rewrites project.json WITHOUT the PluginManager mu_ that
+// save_project_locked takes. Safe ONLY because every WS command handler runs serially
+// on the single poll thread, so this can't interleave with save_project_locked. If
+// command handling ever becomes multi-threaded, this must take mu_ too or it will tear
+// project.json against a concurrent save.
 inline bool write_override(const std::string& folder, const std::string& field,
                            const std::string& value, std::string& err) {
     namespace fs = std::filesystem;

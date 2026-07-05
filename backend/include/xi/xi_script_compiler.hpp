@@ -921,13 +921,18 @@ inline CompileResult compile(const CompileRequest& req) {
         //
         // We keep:
         //  - the just-written ver (current `ver`)
-        //  - the immediately-previous ver (`ver - 1`): this prune runs
-        //    INSIDE compile(), BEFORE load_script + the g_eng.script
-        //    swap, so v(ver-1) is still the LIVE mapped script. Its .dll
-        //    delete fails safely (mapped → sharing violation, ignored),
-        //    but deleting its .pdb/.lib/.exp/.obj would leave a crash in
-        //    the swap window unable to resolve the old script's frames.
-        //    Keeping N and N-1 bounds disk to two versions' artifacts.
+        //  - the actual PREVIOUS same-stem version = the highest `<stem>_v<n>`
+        //    with n < ver present on disk. This prune runs INSIDE compile(),
+        //    BEFORE load_script + the g_eng.script swap, so that previous build
+        //    is still the LIVE mapped script; its .dll delete fails safely
+        //    (mapped → sharing violation, ignored) but deleting its
+        //    .pdb/.lib/.exp/.obj would leave a crash in the swap window unable
+        //    to resolve the old script's frames. NOTE (M2): it is NOT `ver-1` —
+        //    `s_version` is a single process-global counter shared across ALL
+        //    compile modes (inspect scripts + project plugins + AOT), so an
+        //    intervening plugin build makes the real previous script build
+        //    `ver-2` or lower. We scan for it per stem instead of assuming
+        //    consecutive numbering.
         //  - any file whose <stem>_v prefix doesn't match (defensive
         //    — different scripts share the build dir)
         //
@@ -937,7 +942,25 @@ inline CompileResult compile(const CompileRequest& req) {
         std::error_code prune_ec;
         std::string prefix = stem + "_v";
         auto out_dir = std::filesystem::path(req.output_dir);
+        // Parse `<stem>_v<n>.<ext>` → n, or -1 if it doesn't match this stem.
+        auto parse_stem_ver = [&](const std::string& fn) -> int {
+            if (fn.size() <= prefix.size() || fn.compare(0, prefix.size(), prefix) != 0) return -1;
+            size_t av = prefix.size(); size_t d = fn.find('.', av);
+            if (d == std::string::npos || d == av) return -1;
+            try { return std::stoi(fn.substr(av, d - av)); } catch (...) { return -1; }
+        };
         if (std::filesystem::exists(out_dir, prune_ec)) {
+            // M2: the real previous same-stem version is the highest n < ver on disk,
+            // NOT `ver-1` (the global s_version counter is bumped by plugin/AOT builds
+            // too, so script versions are not consecutive per stem).
+            int prev_ver = -1;
+            for (auto& entry : std::filesystem::directory_iterator(
+                     out_dir, std::filesystem::directory_options::skip_permission_denied, prune_ec)) {
+                if (prune_ec) break;
+                if (!entry.is_regular_file(prune_ec)) continue;
+                int fv = parse_stem_ver(entry.path().filename().string());
+                if (fv >= 0 && fv < ver && fv > prev_ver) prev_ver = fv;
+            }
             for (auto& entry : std::filesystem::directory_iterator(
                      out_dir, std::filesystem::directory_options::skip_permission_denied, prune_ec)) {
                 if (prune_ec) break;
@@ -954,8 +977,8 @@ inline CompileResult compile(const CompileRequest& req) {
                 try {
                     file_ver = std::stoi(fname.substr(after_v, dot - after_v));
                 } catch (...) { continue; }
-                if (file_ver == ver) continue;      // keep current (N)
-                if (file_ver == ver - 1) continue;  // keep previous (N-1) — still live/mapped
+                if (file_ver == ver) continue;       // keep current (N)
+                if (file_ver == prev_ver) continue;  // keep the real previous same-stem version (M2)
                 std::error_code rm_ec;
                 std::filesystem::remove(entry.path(), rm_ec);
                 // Best-effort: ignore rm_ec (AV lock, etc.) — next
