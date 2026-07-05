@@ -318,6 +318,14 @@ void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         auto old_name = xp::get_string_field(parsed->args_json, "name");
         auto new_name = xp::get_string_field(parsed->args_json, "new_name");
         if (!old_name || !new_name) { send_rsp_err(srv, id, "missing name or new_name"); return; }
+        // L1 (RT5/J2/J3 family — the last un-quiesced live-adapter teardown): the
+        // in-place rename destroys the OLD CAbiInstanceAdapter (InstanceRegistry::remove
+        // + instances.erase → ~adapter → sweep_packs_for(owner)) to rebuild it under the
+        // new name. A door-output pack is charged to the PRODUCER owner and transferred
+        // single-owner to the script's `r`, so the co-owner fail-safe can't spare it —
+        // sweep_packs_for frees a pack a lane worker still holds mid-inspect → UAF.
+        // Quiesce dispatch first, exactly like every sibling lifecycle op.
+        auto _rn_guard = quiesce_dispatch_for_lifecycle_op_("rename_instance", &srv);
         using RR = xi::PluginManager::RenameResult;
         RR rr = g_eng.plugin_mgr.rename_instance(*old_name, *new_name);
         if (rr == RR::Rejected) {
