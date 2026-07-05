@@ -423,6 +423,12 @@ public:
     // pipeline. That is sound ONLY because a plugin that exports xi_plugin_prepare
     // (via XI_PLUGIN_STAGED) contracts to touch staging ONLY. A plugin without
     // the export falls back to the base prepare ≡ set_def, which IS gated (safe).
+    //
+    // HAZARD (doc 25 RT3-B1): this ungated entry reads inst_ with NO cap_gate_, so it
+    // would race reinit()'s destroy_fn_(old) → UAF. That combo (staged-prepare +
+    // on_fault=reinit) is DEFUSED at load — set_on_fault downgrades reinit→reuse for a
+    // prepare-exporting (or reentrant) instance — so reinit() never runs here. If that
+    // guard is ever lifted, prepare() MUST take shared_lock(cap_gate_) + re-read inst_.
     bool prepare(const std::string& def, const std::string& folder) override {
         if (!prepare_fn_ || !inst_) return InstanceBase::prepare(def, folder);
         ImagePool::OwnerGuard g(owner_id_);
@@ -458,7 +464,30 @@ public:
     // rebuild. Kept here because the per-instance CallScope gate — the natural
     // serialization point — already lives on the adapter.
     OnFault on_fault() const { return on_fault_; }
-    void set_on_fault(OnFault p) { on_fault_ = p; }
+    // RT3-B1/B2 (doc 25) COMBO GUARD: on_fault=reinit destroys the old inst_ under
+    // the EXCLUSIVE cap_gate_, but that gate is taken ONLY by the capability funnel.
+    // Two data-plane readers it never covers turn reinit into a use-after-free during
+    // fault recovery: (1) the UNGATED prepare() staging entry (a plugin exporting
+    // xi_plugin_prepare), and (2) any entry on a REENTRANT instance (CallScope is a
+    // no-op when effective_cap_()==0). These are dangerous config COMBINATIONS that
+    // nothing in-tree uses. Rather than make the race safe (a shared_lock in prepare()
+    // vs reinit()'s exclusive gate — real work + deadlock-review risk), DEFUSE the
+    // combo at load: refuse reinit for such an instance, fall back to the already-
+    // documented safe policy (reuse), and warn loudly. If the combo is ever a real
+    // need, fix the race and lift this guard — never silently run the UAF path.
+    void set_on_fault(OnFault p) {
+        if (p == OnFault::Reinit && (reentrant_ || prepare_fn_)) {
+            std::fprintf(stderr,
+                "[xinsp2] WARN instance '%s' (plugin '%s'): on_fault=reinit is UNSAFE with %s "
+                "— reinit's destroy races the %s (doc 25 RT3-B1/B2, a use-after-free). "
+                "Downgrading on_fault to 'reuse'.\n",
+                name_.c_str(), plugin_name_.c_str(),
+                reentrant_ ? "a reentrant plugin" : "staged-prepare (xi_plugin_prepare)",
+                reentrant_ ? "reentrant data plane" : "the ungated prepare() path");
+            p = OnFault::Reuse;
+        }
+        on_fault_ = p;
+    }
 
     // The refuse fail-fast gate: a single relaxed atomic load, cheap enough to
     // sit on the (non-fault) hot path. True ⇒ the instance is quarantined and
@@ -532,6 +561,12 @@ public:
         // this blocks until every in-flight cap handler (each holding the SHARED
         // side and re-resolving the live handler under it) has drained, so the
         // destroy can never free inst_ out from under a running handler.
+        // SCOPE (doc 25 RT3-B1/B2): this exclusive gate covers ONLY the capability
+        // funnel's SHARED-side readers. It does NOT cover the ungated prepare() entry
+        // or a reentrant instance's data plane (CallScope is a no-op there) — those
+        // would still race this destroy. They are DEFUSED at load (set_on_fault
+        // downgrades reinit→reuse for a prepare-exporting/reentrant instance), so
+        // reinit() is unreachable for them; do not rely on this gate to cover them.
         {
             std::unique_lock<std::shared_mutex> gate(cap_gate_);
             if (destroy_fn_ && old) { try { destroy_fn_(old); } catch (...) {} }

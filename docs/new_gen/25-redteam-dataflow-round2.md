@@ -475,12 +475,24 @@ the pop→send swap, CLOSESOCK under `tx_mu_`) · F2 start-window (fixed at this
   reentrant data-plane doors on the shared reinit-gate (or refuse reentrant+reinit
   at load).
 
-**STATUS: findings recorded, fixes NOT yet landed (round-3 was scoped doc-only).**
-B1 is a real P1 UAF but a pre-existing latent gap (the round-2 A1/A2 reinit-gate
-never covered prepare()/the reentrant data plane), narrow to reach, and the fix
-touches concurrency-critical capability-plane code (a shared_lock in prepare()
-against reinit()'s exclusive gate) that warrants a deliberate scheduled change +
-gate, not an unattended patch. Recommended schedule order: B1/B2/B3 (one shared
-`cap_gate_` fix) first, then C3 (doc-18 wording + optional parser warn); A1/A8 P3s
-optional.
+**STATUS: B1/B2/B3 DEFUSED at load (combo guard); C3 pending; A1/A8 optional.**
+
+B1/B2/B3 are all reachable ONLY via dangerous config COMBINATIONS that nothing
+in-tree uses — `on_fault=reinit` together with staged-prepare (`xi_plugin_prepare`)
+or a reentrant plugin — plus an actual fault + a race window. Rather than make the
+race safe (a `shared_lock(cap_gate_)` in `prepare()` vs `reinit()`'s exclusive gate
+— real concurrency work with deadlock-review risk, for a path nothing uses), the
+combo is **DEFUSED at the source**: `CAbiInstanceAdapter::set_on_fault` (the single
+chokepoint every load/reload path calls) detects `reinit` + (staged-prepare ‖
+reentrant) and **downgrades on_fault → reuse** (the already-documented safe fallback)
+with a loud stderr warning naming the hazard + doc-25 ref, so `reinit()` never runs
+for such an instance and the UAF is unreachable. Header notes added at `prepare()`
+and `reinit()` stating the scope of the exclusive gate and that the combo is guarded.
+If the combo is ever a genuine need, fix the race (shared `cap_gate_` in `prepare()`
++ gate the reentrant doors) and lift the guard. Landed: `xi_cabi_adapter.hpp`.
+
+C3 (P2, doc-18/robustness) still pending — the fix is a doc-18 wording change
+(multi-worker streaming REQUIRES `result_order:"arrival"` or `queue_depth:0`) + an
+optional parser warn. A1/A8 are P3 and optional (a ≥4 GiB single bin / a
+thread-exhaustion example retry — neither a benign-load reality).
 

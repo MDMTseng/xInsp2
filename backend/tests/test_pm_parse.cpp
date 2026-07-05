@@ -128,9 +128,34 @@ static void test_adapter_reentrant_wiring() {
     CHECK(parallel.is_sink()   == true);
 }
 
+// RT3-B1/B2 (doc 25): on_fault=reinit is a UAF combo with a reentrant plugin (or a
+// staged-prepare plugin); set_on_fault must DEFUSE it by downgrading reinit->reuse.
+static void test_reinit_combo_guard() {
+    SECTION("on_fault=reinit downgraded to reuse for a reentrant/staged-prepare instance");
+    using xi::CAbiInstanceAdapter;
+    using xi::OnFault;
+    // Reentrant instance + on_fault=reinit -> DOWNGRADED to reuse (dll=nullptr so
+    // prepare_fn_ is null; the reentrant_ branch of the guard fires).
+    CAbiInstanceAdapter re("i", "p", nullptr, reinterpret_cast<void*>(0x1),
+                           /*reentrant=*/true, /*max_concurrency=*/0, /*is_sink=*/false);
+    re.set_on_fault(OnFault::Reinit);
+    CHECK(re.on_fault() == OnFault::Reuse);      // defused
+
+    // Control: a plain non-reentrant, non-prepare instance keeps reinit (safe there).
+    CAbiInstanceAdapter ok("i", "p", nullptr, reinterpret_cast<void*>(0x1),
+                           /*reentrant=*/false, /*max_concurrency=*/0, /*is_sink=*/false);
+    ok.set_on_fault(OnFault::Reinit);
+    CHECK(ok.on_fault() == OnFault::Reinit);     // untouched
+
+    // Control: a non-reinit policy is never altered even on a reentrant instance.
+    re.set_on_fault(OnFault::Refuse);
+    CHECK(re.on_fault() == OnFault::Refuse);
+}
+
 int main() {
     test_json_flag_true_toplevel_only();
     test_parse_manifest_reentrant();
+    test_reinit_combo_guard();
     test_adapter_reentrant_wiring();
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
