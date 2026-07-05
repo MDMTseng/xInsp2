@@ -36,6 +36,34 @@
 
 namespace xi::script {
 
+// Reap per-PID script-build dirs left by DEAD backends under `base` (J1). Each
+// per-PID dir holds a ~200 MB PCH, so without reaping they pile up across every run
+// and fill the disk — the parallel-QA harness alone spawns dozens. A `<pid>` subdir
+// is reapable when no live process owns that pid. Called at startup so each new
+// backend collects its dead predecessors; best-effort (skip anything unclassifiable
+// or in-use). Never removes a live backend's dir (concurrent starts see each other
+// as alive).
+inline void reap_stale_build_dirs(const std::filesystem::path& base) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(base, ec)) return;
+    for (const auto& e : fs::directory_iterator(base, ec)) {
+        if (ec) break;
+        if (!e.is_directory(ec)) continue;
+        unsigned long pid = 0;
+        try { pid = std::stoul(e.path().filename().string()); }
+        catch (...) { continue; }   // not a <pid> dir — leave it
+        bool alive = false;
+#ifdef _WIN32
+        if (HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid)) {
+            alive = (WaitForSingleObject(h, 0) == WAIT_TIMEOUT);
+            CloseHandle(h);
+        }
+#endif
+        if (!alive) fs::remove_all(e.path(), ec);
+    }
+}
+
 // What kind of DLL we're building. Affects:
 //   - which header gets force-included (script vs plugin support)
 //   - debug vs optimized codegen / PDB emission

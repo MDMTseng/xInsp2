@@ -477,8 +477,11 @@ int main(int argc, char** argv) {
     // and the fixed-name umbrella.{pch,obj} in one shared dir: one's remove(out_dll)
     // deletes the other's fresh DLL, or a /Yc PCH write races a /Yu read → corrupt
     // load / spurious C1852. A per-PID subdir removes the sharing entirely.
-    g_eng.work_dir = (std::filesystem::temp_directory_path() / "xinsp2" /
-                      std::to_string(GetCurrentProcessId())).string();
+    // Per-PID dirs would otherwise accumulate (~200 MB PCH each) and fill the disk;
+    // reap the ones left by dead backends before claiming ours.
+    std::filesystem::path _xi_base = std::filesystem::temp_directory_path() / "xinsp2";
+    xi::script::reap_stale_build_dirs(_xi_base);
+    g_eng.work_dir = (_xi_base / std::to_string(GetCurrentProcessId())).string();
     // A reused PID may leave a stale dir from a dead process — start clean.
     std::error_code _wd_ec;
     std::filesystem::remove_all(g_eng.work_dir, _wd_ec);
