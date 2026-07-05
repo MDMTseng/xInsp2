@@ -514,9 +514,17 @@ inline const std::vector<char>* vcvars_env_block(const std::string& vcvars) {
     return slot.size() > 1 ? &slot : nullptr;
 }
 
+// Generous ceiling on a single cl.exe invocation. A wedged toolchain (mspdbsrv
+// contention, an AV-locked link output, a hung vcvars child) must NOT freeze the
+// poll thread — and thus ALL WS commands — indefinitely. On timeout we kill the
+// child and treat it as a compile failure (mirrors the certify path's
+// WaitForSingleObject-with-timeout + TerminateProcess in xi_certify.hpp).
+static constexpr DWORD kCompileTimeoutMs = 300000;   // 5 min
+
 // Run a command line under a custom environment block; returns the process exit
-// code, or -1 if it couldn't be launched. (cl.exe is invoked via `cmd /C` so the
-// env's PATH resolves cl + the redirection works.)
+// code, or -1 if it couldn't be launched, or -2 if it exceeded kCompileTimeoutMs
+// (the caller reports a "toolchain timed out" diagnostic). (cl.exe is invoked via
+// `cmd /C` so the env's PATH resolves cl + the redirection works.)
 inline int run_with_env(const std::string& cmdline, const std::vector<char>& env) {
     std::vector<char> mut(cmdline.begin(), cmdline.end());
     mut.push_back('\0');
@@ -525,7 +533,13 @@ inline int run_with_env(const std::string& cmdline, const std::vector<char>& env
     if (!CreateProcessA(nullptr, mut.data(), nullptr, nullptr, FALSE, 0,
                         (LPVOID)env.data(), nullptr, &si, &pi))
         return -1;
-    WaitForSingleObject(pi.hProcess, INFINITE);
+    if (WaitForSingleObject(pi.hProcess, kCompileTimeoutMs) == WAIT_TIMEOUT) {
+        // A hung toolchain is as dangerous to the control plane as a crashed one.
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 2000);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        return -2;   // timed out — caller surfaces a clear diagnostic
+    }
     DWORD code = 0; GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
     return (int)code;
@@ -884,6 +898,16 @@ inline CompileResult compile(const CompileRequest& req) {
     // page; ensure_utf8 transcodes them so they're never mojibake on the wire.
     // (TODO(linux): gcc/clang emit UTF-8 already; ensure_utf8 is a no-op there.)
     r.build_log = ensure_utf8(detail::read_file(log_path.string()));
+#ifdef _WIN32
+    if (rc == -2) {
+        // run_with_env killed a wedged toolchain (see kCompileTimeoutMs). Whatever
+        // partial log survives is prefixed with a plain-language diagnostic so the
+        // client sees a "toolchain timed out" failure rather than a silent stall.
+        r.build_log = "[xi] toolchain timed out after " +
+                      std::to_string(detail::kCompileTimeoutMs / 1000) +
+                      "s and was terminated\n" + r.build_log;
+    }
+#endif
 
     if (rc == 0 && std::filesystem::exists(out_dll)) {
         r.ok = true;
@@ -897,6 +921,13 @@ inline CompileResult compile(const CompileRequest& req) {
         //
         // We keep:
         //  - the just-written ver (current `ver`)
+        //  - the immediately-previous ver (`ver - 1`): this prune runs
+        //    INSIDE compile(), BEFORE load_script + the g_eng.script
+        //    swap, so v(ver-1) is still the LIVE mapped script. Its .dll
+        //    delete fails safely (mapped → sharing violation, ignored),
+        //    but deleting its .pdb/.lib/.exp/.obj would leave a crash in
+        //    the swap window unable to resolve the old script's frames.
+        //    Keeping N and N-1 bounds disk to two versions' artifacts.
         //  - any file whose <stem>_v prefix doesn't match (defensive
         //    — different scripts share the build dir)
         //
@@ -923,7 +954,8 @@ inline CompileResult compile(const CompileRequest& req) {
                 try {
                     file_ver = std::stoi(fname.substr(after_v, dot - after_v));
                 } catch (...) { continue; }
-                if (file_ver == ver) continue;  // keep current
+                if (file_ver == ver) continue;      // keep current (N)
+                if (file_ver == ver - 1) continue;  // keep previous (N-1) — still live/mapped
                 std::error_code rm_ec;
                 std::filesystem::remove(entry.path(), rm_ec);
                 // Best-effort: ignore rm_ec (AV lock, etc.) — next

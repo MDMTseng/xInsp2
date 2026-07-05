@@ -894,10 +894,6 @@ private:
         int n = ::recv(fd, reinterpret_cast<char*>(tmp), (int)sizeof(tmp), 0);
         if (n <= 0) return false;
         rx_buf_.insert(rx_buf_.end(), tmp, tmp + n);
-        // Guard against unbounded growth: if we've buffered more than a
-        // legal frame's worth without finding a frame boundary, the peer
-        // is either broken or malicious. Drop.
-        if (rx_buf_.size() > kMaxFrame + 16) return false;
 
         // Parse as many frames as present
         for (;;) {
@@ -954,6 +950,15 @@ private:
                 msg_opcode_      = 0;
             }
         }
+        // Guard against unbounded growth: check AFTER the parse loop has
+        // consumed every completed frame, so this measures the true
+        // UN-parseable remainder (a partial frame's head), not a benign
+        // pipelined backlog. A single recv delivering the tail of a ~max
+        // frame plus the head of the next frame would momentarily exceed
+        // the cap on the raw buffer; here those completed frames are
+        // already erased. If what's LEFT still exceeds a legal frame's
+        // worth, the peer is broken or malicious. Drop.
+        if (rx_buf_.size() > kMaxFrame + 16) return false;
         return true;
     }
 

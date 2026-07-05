@@ -158,7 +158,7 @@ struct GroupLane {
 // g_run_result  — result section (defined in service_main.cpp)
 struct StagedEmit {
     std::string      target;   // destination sink instance name
-    xi::TriggerEvent rec;      // images map + meta_doc; host owns one ref to each
+    xi::TriggerEvent rec;      // carries one xi_pack_handle (frames + meta doc live in the pack); host owns that ref
 };
 extern thread_local std::vector<StagedEmit> g_staged;
 
@@ -217,7 +217,7 @@ void reserve_fault_stack();
 
 // ---- RAII: current-trigger scope (defined in service_main.cpp) -------------
 struct CurrentTriggerScope {
-    xi::TriggerEvent& ev_;   // non-const: dtor reset()s the event's DocRef
+    xi::TriggerEvent& ev_;   // non-const: dtor releases the event's pack ref (release_trigger_event_)
     explicit CurrentTriggerScope(xi::TriggerEvent& ev);
     ~CurrentTriggerScope();
     CurrentTriggerScope(const CurrentTriggerScope&) = delete;
