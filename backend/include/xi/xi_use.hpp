@@ -917,7 +917,13 @@ public:
     //
     // Returns true iff the push was accepted (staged, or delivered inline);
     // false on an older host (no callback), an empty pack, a missing instance /
-    // missing pack door, a quarantined instance, or a crashed inline door.
+    // missing pack door, a quarantined instance, a crashed inline door, or an
+    // OFF-DISPATCH-THREAD call (-6, J4). push() STAGES into the dispatch thread's
+    // frame-ordered sink queue, so it is valid ONLY on the inspect/dispatch thread;
+    // calling it from a xi::async / xi::parallel_for body is a fail-loud programming
+    // error (rejected host-side with a once-per-sink-name log — the WRITE analogue of
+    // the current_trigger() off-thread guard). Capture the pack and push AFTER the
+    // parallel region instead.
     bool push(const ScriptPack& p) {
         auto push_fn = reinterpret_cast<UsePushPackFn>(g_use_push_pack_fn_);
         if (!push_fn || !p.valid()) return false;
@@ -925,6 +931,7 @@ public:
         if (rc == -1)   // -4 (live instance, no pack door) is NOT a name miss
             warn_use_miss_(reinterpret_cast<const xi_host_api*>(g_use_host_api_),
                            name_.c_str());
+        // -6 (off-thread) is logged host-side where the dispatch-thread markers live.
         return rc >= 0;
     }
 

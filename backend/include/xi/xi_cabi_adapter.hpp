@@ -500,6 +500,19 @@ public:
     bool reinit_pending() const { return reinit_pending_.load(std::memory_order_acquire); }
     void request_reinit() { reinit_pending_.store(true, std::memory_order_release); }
 
+    // H5: atomically CONSUME the pending-rebuild request — a single test-and-clear.
+    // When several callers fault concurrently on the SAME instance they all observe
+    // reinit_pending()==true; routing the rebuild through this exchange makes exactly
+    // ONE win (gets true) and perform the rebuild + escalation accounting, while the
+    // losers get false and skip. That closes two windows the bare check-then-act had:
+    // the DOUBLE rebuild (a 2nd reinit() destroying the 1st's fresh inst_ and building
+    // a 3rd) and the escalation-ORDERING race (a failing rebuild's note_reinit_fail()
+    // crossing the quarantine threshold before a succeeding rebuild's
+    // reset_reinit_fails(), quarantining a now-healthy instance). reinit() still clears
+    // the bit at its own entry (a direct reinit() consumes its request); after this
+    // exchange that store is the idempotent no-op.
+    bool consume_reinit_pending() { return reinit_pending_.exchange(false, std::memory_order_acq_rel); }
+
     // Arm the in-place rebuild with the DLL factory + host so reinit() can
     // reconstruct this instance's plugin object. Called by the PM at each
     // (re)construction site (it owns the factory pointer). If never armed, an

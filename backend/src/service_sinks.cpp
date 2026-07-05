@@ -70,6 +70,15 @@ static void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* ad
 // kReinitEscalateAfter consecutive failures. Runs on the caller thread just before
 // process(); reinit() serializes itself via the instance's CallScope.
 static void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+    // H5: CONSUME the pending flag with one atomic test-and-clear before rebuilding.
+    // Two callers can both observe reinit_pending()==true and reach here (the outer
+    // check is a cheap fast-path, not a gate); the exchange lets exactly ONE win.
+    // A loser returns without touching reinit()/escalation, so one fault → exactly
+    // ONE rebuild and the escalation counter is owned by a single thread per fault
+    // episode (no note_reinit_fail crossing the quarantine threshold ahead of a
+    // concurrent reset_reinit_fails). The winner runs the whole rebuild + accounting
+    // sequence below, exactly as the single-fault case always did.
+    if (!adapter->consume_reinit_pending()) return;
     if (adapter->reinit()) {
         adapter->reset_reinit_fails();
         xi::health().clear_instance_degraded(name);   // recovered → ok / running
@@ -133,6 +142,13 @@ static int use_push_pack_inline_(const char* name, xi_pack_handle pack) {
     }
 }
 
+// J4: reject a use(sink).push() issued off the dispatch thread. Defined below,
+// next to the READ-path guard (warn_trigger_off_thread_) whose g_trigger_ctx_ /
+// g_current_trigger markers they reuse — forward-declared here so use_push_pack_cb
+// can call them before those thread-context markers are defined.
+static bool push_off_dispatch_thread_();
+static void warn_push_off_thread_(const char* name);
+
 // xi::use().push(pack) entry wired into the script DLL (optional symbol —
 // xi_script_set_use_pack_callback). A declared ORDERED SINK target is staged and
 // flushed after the inspect in frame order: StagedEmit.rec is a TriggerEvent, whose `pack` slot carries our
@@ -143,6 +159,15 @@ static int use_push_pack_inline_(const char* name, xi_pack_handle pack) {
 // flush-time drop.
 int use_push_pack_cb(const char* name, xi_pack_handle pack) {
     if (!name || pack == XI_PACK_NULL) return -1;
+    // J4: push() STAGES into g_staged, which is drained ONLY on the dispatch thread
+    // that runs the inspect (drain_/flush_staged_emits_). A push from a xi::parallel_for
+    // / xi::async CHILD worker would stage into THAT child's thread_local g_staged,
+    // which is never flushed → the retained pack ref leaks (→ exhaustion under OpenMP
+    // pool reuse) and the delivery is silently dropped. push() is valid ONLY on the
+    // trigger/dispatch thread; off-thread is a fail-loud programming error (the WRITE
+    // analogue of the READ guard on current_trigger()). Reject BEFORE retaining, loudly
+    // + once per sink name.
+    if (push_off_dispatch_thread_()) { warn_push_off_thread_(name); return -6; }
     auto inst = xi::InstanceRegistry::instance().find(name);
     if (!inst) return -1;
     auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
@@ -433,6 +458,49 @@ static void warn_trigger_off_thread_() {
     static std::atomic<bool> warned{false};
     if (!warned.exchange(true, std::memory_order_relaxed))
         std::fprintf(stderr, "ERROR: %s\n", kMsg);
+#endif
+}
+
+// J4: WRITE-path analogue of the READ guard above — is this use(sink).push()
+// running off the dispatch thread? Detected the SAME way: g_trigger_ctx_ marks
+// "this thread is inside / a child of a trigger-bearing inspect" (set by
+// CurrentTriggerScope, propagated into xi::async / xi::parallel_for workers), while
+// g_current_trigger is thread_local and NOT inherited. So on the real dispatch
+// thread of a triggered frame g_current_trigger != null (→ allowed; its g_staged IS
+// flushed after the inspect); on a timer-tick / cmd:run dispatch thread the marker
+// is 0 (→ allowed; the same thread flushes). A CHILD worker of a triggered inspect
+// has marker=1 but g_current_trigger==null → its g_staged is never drained → REJECT.
+// Same documented blind spot as the read guard: a child of a source-less (marker-0)
+// inspect is not flagged (the marker only rides the blessed primitives).
+static bool push_off_dispatch_thread_() {
+    return g_trigger_ctx_ != 0 && g_current_trigger == nullptr;
+}
+
+// Once-per-sink-name loud rejection of an off-dispatch-thread push. Mirrors
+// warn_trigger_off_thread_ (abort in Debug; warn-once in Release), but keyed per
+// SINK NAME so each mis-wired sink surfaces once. The push was NOT retained and the
+// callback returns -6 (script push() → false), so a dropped delivery is now a
+// visible programming error instead of a silent leak.
+static void warn_push_off_thread_(const char* name) {
+    std::string key = name ? name : "";
+    std::string msg =
+        "xi::use(\"" + key + "\").push(pack) called off the inspect/dispatch thread — "
+        "push() stages into the dispatch thread's ordered-sink queue, which is never "
+        "flushed on a xi::async / xi::parallel_for worker (the ref would leak and the "
+        "delivery drop). Push ON the inspect thread — capture the pack and push after "
+        "the parallel region, not from inside it.";
+#ifndef NDEBUG
+    std::fprintf(stderr, "FATAL: %s\n", msg.c_str());
+    std::fflush(stderr);
+    std::abort();
+#else
+    static std::mutex mu;
+    static std::unordered_map<std::string, bool> warned;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (!warned.emplace(key, true).second) return;   // warned this sink already
+    }
+    std::fprintf(stderr, "ERROR: %s\n", msg.c_str());
 #endif
 }
 
