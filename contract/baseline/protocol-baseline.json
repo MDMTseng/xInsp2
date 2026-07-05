@@ -471,7 +471,7 @@
       }
     },
     "rsp-metrics.schema.json": {
-      "sha256": "33c38d2d133f671ab6dfaf6b934d1567404923bffa12e46327e29835026c3ad8",
+      "sha256": "31d682014aa431b48098e77bb05231029e015d003c7414cdbd737f9776b3f561",
       "shape": {
         "$id": "https://xinsp.dev/contract/schemas/rsp-metrics.schema.json",
         "$schema": "https://json-schema.org/draft/2020-12/schema",
