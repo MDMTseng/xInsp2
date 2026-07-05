@@ -426,31 +426,76 @@ static Spawned spawn_backend(const FeConfig& c, HANDLE job) {
     SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
     sp.log = CreateFileA(c.be_log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
                          CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-
-    STARTUPINFOA si{}; si.cb = sizeof(si);
-    if (sp.log != INVALID_HANDLE_VALUE) {
-        si.dwFlags |= STARTF_USESTDHANDLES;
-        si.hStdOutput = sp.log;
-        si.hStdError  = sp.log;
-        si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    // A failed open means the log was NOT truncated — e.g. a previous backend
+    // still holds its write handle. Launching anyway would let the prior
+    // instance's "autostart: ready" line survive into the new instance's log,
+    // and the boot-readiness scan (log_contains) would match that stale marker
+    // and skip the boot gate for a possibly-boot-hanging new backend. Treat a
+    // failed log open as a spawn failure so the supervisor's spawn-failure path
+    // (record + backoff + retry) runs: a backend then only ever runs against a
+    // freshly-truncated log, so a stale marker can never survive. (H2)
+    if (sp.log == INVALID_HANDLE_VALUE) {
+        std::fprintf(stderr, "[xinsp-fe] BE log open failed (%lu): %s - "
+                     "treating as spawn failure (won't launch onto a stale log)\n",
+                     GetLastError(), c.be_log.c_str());
+        return sp;   // sp.ok == false
     }
+
+    // The std-handle setup lives inside a STARTUPINFOEXA so we can (atomically)
+    // place the child into the job AT CREATION via a PROC_THREAD_ATTRIBUTE_JOB_LIST
+    // attribute — closing the CreateProcess->AssignProcessToJobObject window in
+    // which an FE crash could orphan a suspended child that KILL_ON_JOB_CLOSE
+    // cannot yet reap. (H6)
+    STARTUPINFOEXA six{};
+    six.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+    six.StartupInfo.hStdOutput = sp.log;
+    six.StartupInfo.hStdError  = sp.log;
+    six.StartupInfo.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+
+    // Build a one-entry attribute list carrying the job handle (Win8+; this build
+    // is Win-only). If there's no job (unlikely) or the list can't be built, fall
+    // back to the plain suspended launch + post-create AssignProcessToJobObject.
+    LPPROC_THREAD_ATTRIBUTE_LIST attr = nullptr;
+    std::vector<char> attr_buf;
+    DWORD create_flags = CREATE_SUSPENDED;
+    if (job) {
+        SIZE_T attr_sz = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_sz);
+        attr_buf.resize(attr_sz);
+        attr = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+        if (InitializeProcThreadAttributeList(attr, 1, 0, &attr_sz) &&
+            UpdateProcThreadAttribute(attr, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                                      &job, sizeof(job), nullptr, nullptr)) {
+            six.lpAttributeList = attr;
+            create_flags |= EXTENDED_STARTUPINFO_PRESENT;
+        } else {
+            if (attr) DeleteProcThreadAttributeList(attr);
+            attr = nullptr;   // fall back to post-create assign below
+        }
+    }
+    // cb must describe STARTUPINFOEXA only when the extended flag is set.
+    six.StartupInfo.cb = (create_flags & EXTENDED_STARTUPINFO_PRESENT)
+                             ? sizeof(six) : sizeof(six.StartupInfo);
 
     std::string cl = build_cmdline(c);
     std::vector<char> mut(cl.begin(), cl.end()); mut.push_back('\0');
 
     fs::path wd = fs::path(c.backend_exe).parent_path();
     sp.ok = CreateProcessA(c.backend_exe.c_str(), mut.data(), nullptr, nullptr,
-                           /*bInheritHandles=*/TRUE, CREATE_SUSPENDED,
-                           nullptr, wd.string().c_str(), &si, &sp.pi) != 0;
+                           /*bInheritHandles=*/TRUE, create_flags,
+                           nullptr, wd.string().c_str(), &six.StartupInfo, &sp.pi) != 0;
+    if (attr) DeleteProcThreadAttributeList(attr);
     if (!sp.ok) {
         std::fprintf(stderr, "[xinsp-fe] CreateProcess failed (%lu): %s\n",
                      GetLastError(), c.backend_exe.c_str());
-        if (sp.log != INVALID_HANDLE_VALUE) CloseHandle(sp.log);
+        CloseHandle(sp.log);
         return sp;
     }
-    // Assign to the job BEFORE resuming so the child can never escape the
-    // kill-on-close guarantee even if it spawns instantly.
-    if (job) AssignProcessToJobObject(job, sp.pi.hProcess);
+    // Fallback path only: if the job wasn't assigned at creation, assign it now,
+    // still BEFORE resuming so the child can never escape the kill-on-close
+    // guarantee even if it spawns instantly.
+    if (job && (create_flags & EXTENDED_STARTUPINFO_PRESENT) == 0)
+        AssignProcessToJobObject(job, sp.pi.hProcess);
     ResumeThread(sp.pi.hThread);
     return sp;
 }
