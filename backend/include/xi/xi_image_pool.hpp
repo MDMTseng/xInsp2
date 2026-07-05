@@ -1,6 +1,6 @@
 #pragma once
 //
-// xi_image_pool.hpp — host-side refcounted image pool (lock-free).
+// xi_image_pool.hpp — host-side refcounted image pool (mostly lock-free).
 //
 // Each handle resolves to a fixed-position slot in a flat array; the
 // slot holds an atomic pointer to a PoolEntry. Lookup, addref, release,
@@ -318,7 +318,11 @@ public:
         WalkGuard wg(*this);
         int swept = 0;
         for (uint32_t i = 0; i < SLOT_COUNT; ++i) {
-            PoolEntry* e = slots_[i].entry.load(std::memory_order_acquire);
+            // seq_cst (not acquire): this load must sit in the same total order
+            // as the releaser's null-store (:327) and the WalkGuard increment,
+            // so the StoreLoad handshake formally closes on weak-memory targets
+            // (see the deferred-reclamation note above).
+            PoolEntry* e = slots_[i].entry.load(std::memory_order_seq_cst);
             if (!e || e->owner.load(std::memory_order_relaxed) != owner) continue;
             // Drop P's ownership ref — same accounting as release().
             if (e->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -366,7 +370,10 @@ public:
         WalkGuard wg(*this);
         OwnerStats s{};
         for (uint32_t i = 0; i < SLOT_COUNT; ++i) {
-            PoolEntry* e = slots_[i].entry.load(std::memory_order_acquire);
+            // seq_cst: keeps this walk's slot read in the StoreLoad total order
+            // with the releaser's null-store, closing the handshake on weak
+            // memory (see the deferred-reclamation note above).
+            PoolEntry* e = slots_[i].entry.load(std::memory_order_seq_cst);
             if (!e) continue;
             if (owner != 0 && e->owner.load(std::memory_order_relaxed) != owner) continue;
             ++s.handle_count;
@@ -385,7 +392,8 @@ public:
         WalkGuard wg(*this);
         std::unordered_map<ImagePoolOwnerId, PerOwnerStat> agg;
         for (uint32_t i = 0; i < SLOT_COUNT; ++i) {
-            PoolEntry* e = slots_[i].entry.load(std::memory_order_acquire);
+            // seq_cst: same StoreLoad-handshake reason as stats() above.
+            PoolEntry* e = slots_[i].entry.load(std::memory_order_seq_cst);
             if (!e) continue;
             ImagePoolOwnerId ow = e->owner.load(std::memory_order_relaxed);
             auto& s = agg[ow];
@@ -719,11 +727,10 @@ public:
     // Freeze-guard (core_fix_plan.md §12): on a FULLY WIRED table (make_host_api
     // + install_trigger_hook), assert every carved interface fn-pointer is the
     // SAME pointer as its xi_host_api struct-field twin, so the door and the field
-    // can never silently drift onto different code paths. emit_record is the one
-    // FUNCTIONAL (not pointer) match: the door hands out a stable forwarder, so we
-    // check the published slot equals the wired field instead. Returns true when
-    // everything tracks. Called at startup on default_host_api (DEBUG assert) and
-    // by test_interface_domains. Pass a table AFTER install_trigger_hook.
+    // can never silently drift onto different code paths. Every check below is a
+    // straight pointer match. Returns true when everything tracks. Called at
+    // startup on default_host_api (DEBUG assert) and by test_interface_domains.
+    // Pass a table AFTER install_trigger_hook.
     static bool door_matches_fields(const xi_host_api& api) {
         if (!api.get_interface) return false;
         bool ok = true;
@@ -813,7 +820,10 @@ private:
     //
     // Correctness rests on a StoreLoad handshake: release stores nullptr into
     // the slot (seq_cst) BEFORE reclaim_entry_ loads active_walkers_ (seq_cst),
-    // and a walker bumps active_walkers_ (seq_cst) BEFORE loading the slot. The
+    // and a walker bumps active_walkers_ (seq_cst) BEFORE loading the slot
+    // (also seq_cst — the walker slot loads MUST be seq_cst, not merely acquire,
+    // or they fall outside the total order and the argument below does not close
+    // on weak-memory targets such as ARM64). The
     // seq_cst total order then guarantees: if a walker observed the entry
     // (i.e. loaded it before the slot was nulled), the releaser observes
     // active_walkers_ > 0 and defers — so a walker never frees, and never reads,
@@ -931,6 +941,11 @@ public:
         // the registry — sweep its registrations with its images (slot bridge;
         // no-op until install_cap_plane).
         ImagePool::sweep_caps_for(id_);
+        // Pack plane: a factory that sealed an owner-tagged pack before throwing
+        // would otherwise leak it — sweep the third plane too, matching the
+        // adapter dtor's three-plane sweep (slot bridge; no-op until the pack
+        // ABI is installed).
+        ImagePool::sweep_packs_for(id_);
     }
     ImagePoolOwnerScope(const ImagePoolOwnerScope&) = delete;
     ImagePoolOwnerScope& operator=(const ImagePoolOwnerScope&) = delete;
