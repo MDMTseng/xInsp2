@@ -67,6 +67,18 @@ jobs:
         with:
           arch: x64
 
+      # Compiler cache: gate.py configures with the Ninja Multi-Config generator,
+      # which honours CMAKE_<LANG>_COMPILER_LAUNCHER (backend/CMakeLists wires ccache
+      # in when found). This action installs ccache + persists its cache across runs,
+      # so an unchanged TU is a cache hit on the next CI run. (Ninja itself ships with
+      # the VS Desktop C++ workload the runner + msvc-dev-cmd provide.) Fallback: set
+      # env XINSP2_CMAKE_GENERATOR="Visual Studio 17 2022" to revert to the VS generator.
+      - name: Compiler cache (ccache)
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-gate
+          variant: ccache
+
       # OpenCV 4.x is a hard dependency (find_package(OpenCV REQUIRED)). Fetch it
       # and hand CMake the config dir. If this step fails, the native gate below
       # cannot run — but the pure-Python gate above has already reported.

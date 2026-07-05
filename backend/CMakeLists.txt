@@ -29,6 +29,21 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Optional compiler cache (ccache): a fresh/clean build reuses cached object files,
+# cutting the cold ~500s rebuild a reset worktree pays down to near-incremental. Set
+# BEFORE any target so the launcher applies to all. No-op if ccache isn't installed.
+# NOTE: CMAKE_<LANG>_COMPILER_LAUNCHER is honoured by the Ninja/Makefiles generators
+# but IGNORED by the Visual Studio (msbuild) generator. To actually benefit: install
+# ccache (>=4.x — has native MSVC/cl.exe support) and configure with
+#   cmake -S backend -B backend/build -G "Ninja Multi-Config"
+# (Ninja Multi-Config keeps the `--config Release` workflow the gate uses.)
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER   "${CCACHE_PROGRAM}")
+    message(STATUS "xinsp2: ccache found (${CCACHE_PROGRAM}) — active under Ninja/Make; the VS generator ignores it")
+endif()
+
 if(MSVC)
     add_compile_options(/W3 /permissive- /utf-8 /EHa)
 else()
@@ -871,6 +886,16 @@ set_target_properties(xinsp_backend PROPERTIES OUTPUT_NAME "xinsp-backend")
 target_compile_definitions(xinsp_backend PRIVATE
     XINSP2_VERSION="${XINSP2_VERSION}"
     XINSP2_COMMIT="${XINSP2_COMMIT}")
+# PCH: xinsp_backend is the one big MULTI-TU target (14 .cpp all pulling the same
+# heavy STD headers), so a per-target PCH is parsed once and reused across all 14 —
+# a real win here (unlike the ~70 single-TU test exes, where a PCH would only add
+# overhead, so they get none). Kept to macro-independent STD headers so stb_impl.cpp
+# / xi_image_io.cpp (which don't include the service headers) are never broken by the
+# force-include. (The big project headers vary by TU here — not PCH'd.)
+target_precompile_headers(xinsp_backend PRIVATE
+    <vector> <string> <string_view> <map> <unordered_map> <set> <memory>
+    <mutex> <atomic> <condition_variable> <thread> <chrono>
+    <cstdint> <cstring> <cstdio> <optional> <functional> <algorithm> <utility>)
 
 # xinsp_worker / xinsp_script_runner / evil_worker removed 2026-05:
 # the FE/BE in-process split means plugins and scripts run inside the

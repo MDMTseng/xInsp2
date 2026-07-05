@@ -122,27 +122,59 @@ def _cache_home(build_dir: Path) -> str | None:
     return None
 
 
+def _cache_generator(build_dir: Path) -> str | None:
+    """The generator a CMakeCache.txt was created with, or None."""
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.exists():
+        return None
+    for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("CMAKE_GENERATOR:INTERNAL="):
+            return line.split("=", 1)[1].strip()
+    return None
+
+
 def _ensure_fresh_cache(build_dir: Path) -> None:
-    """Wipe the build dir if its cache was generated for a DIFFERENT path.
+    """Wipe the build dir if its cache was generated for a DIFFERENT path OR a
+    DIFFERENT generator.
 
     Worktrees share build-dir *names* but not paths; a CMakeCache.txt copied
     from (or left by) another worktree hard-errors configure with
     'is different than the directory ... where CMakeCache.txt was created'.
-    Detect that and start clean instead of making a human debug it.
+    A generator switch (VS -> Ninja Multi-Config) likewise hard-errors
+    ('does not match the generator used previously'). Detect either and start
+    clean instead of making a human debug it.
     """
     home = _cache_home(build_dir)
     want = str(build_dir.resolve()).replace("\\", "/").rstrip("/")
+    want_gen = os.environ.get("XINSP2_CMAKE_GENERATOR", CMAKE_GENERATOR)
+    have_gen = _cache_generator(build_dir)
     if home is not None and home.lower() != want.lower():
         print(f"    stale CMakeCache (built for {home}); wiping {build_dir}",
               flush=True)
         shutil.rmtree(build_dir, ignore_errors=True)
+    elif have_gen is not None and have_gen != want_gen:
+        print(f"    generator changed ({have_gen} -> {want_gen}); wiping {build_dir}",
+              flush=True)
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
+CMAKE_GENERATOR = "Ninja Multi-Config"  # was "Visual Studio" (-A x64); Ninja + a
+# compiler cache (ccache, wired in backend/CMakeLists) collapse the cold ~500s
+# rebuild a reset worktree pays. Ninja Multi-Config keeps the `--config Release`
+# workflow. It needs cl.exe on PATH (vcvars) — already required for the runtime
+# script compile, and CI provides it via ilammy/msvc-dev-cmd. Override for a fallback
+# to the VS generator with env XINSP2_CMAKE_GENERATOR="Visual Studio 17 2022".
 
 
 def _cmake_project(src: Path, build: Path, targets: list[str] | None,
                    defines: list[str] | None = None) -> None:
     _ensure_fresh_cache(build)
+    gen = os.environ.get("XINSP2_CMAKE_GENERATOR", CMAKE_GENERATOR)
     if not (build / "CMakeCache.txt").exists():
-        _run(["cmake", "-S", src, "-B", build, "-A", "x64", *(defines or [])])
+        cfg = ["cmake", "-S", src, "-B", build, "-G", gen]
+        if gen.startswith("Visual Studio"):
+            cfg += ["-A", "x64"]   # VS generator takes the arch via -A; Ninja via env
+        _run([*cfg, *(defines or [])])
     cmd = ["cmake", "--build", build, "--config", "Release"]
     if targets:
         cmd += ["--target", *targets]
