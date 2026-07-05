@@ -598,6 +598,9 @@ void controlled_shutdown_teardown_() {
                 " wedged in-flight inspect(s); backend hard-exiting for respawn");
         std::fflush(stderr);
         std::fflush(stdout);
+        // H7: let an in-flight minidump on the wedged worker finish before we
+        // hard-exit (bounded — the drain already timed out, don't stall forever).
+        xi::crash::await_dump(10000);
         std::_Exit(WATCHDOG_EXIT_CODE);
     }
     { std::lock_guard<std::mutex> rl(g_eng.run_mu); }     // belt-and-suspenders

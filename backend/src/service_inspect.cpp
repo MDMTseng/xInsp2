@@ -217,6 +217,9 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
                                 "inspect worker; backend hard-exiting for respawn", run_id);
             std::fflush(stderr);
             std::fflush(stdout);
+            // H7: a concurrent worker may be writing its minidump; let it land
+            // before we hard-exit (bounded so a holed-stack worker still respawns).
+            xi::crash::await_dump(10000);
             std::_Exit(WATCHDOG_EXIT_CODE);
         }
     } catch (const std::exception& e) {

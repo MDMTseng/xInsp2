@@ -38,6 +38,7 @@
 #include "xi_seh.hpp"   // xi::seh_exception (on_terminate classifies it)
 
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -46,6 +47,7 @@
 #include <exception>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <typeinfo>
 
 // Stamped into each report so a dump can be tied to the exact build. CMake
@@ -182,6 +184,40 @@ inline void set_culprit(const char* instance, const char* plugin,
     set(g_culprit.dll,      sizeof(g_culprit.dll),      dll      ? dll      : "");
 }
 
+// ---- dump-in-progress flag (H3 gate + H7 hard-exit rendezvous) ---------------
+//
+// Set by write_minidump while it is inside dbghelp; cleared when the dump + json
+// sidecar are on disk. Two consumers of the one shared flag:
+//   H3 — write_minidump serializes on it. dbghelp/MiniDumpWriteDump is NOT
+//        thread-safe and the OS does NOT suspend sibling threads during an
+//        unhandled-exception filter, so two+ dying threads (multiplied by the
+//        terminate/abort re-raise paths) can enter the filter at once. The FIRST
+//        faulter wins the flag and writes; a later entrant is dying anyway and
+//        must NOT re-enter dbghelp (concurrent calls corrupt or HANG the dump —
+//        and a hang means the process never self-exits).
+//   H7 — the watchdog / drain / overflow hard-exit paths call await_dump() before
+//        std::_Exit so an in-flight dump can finish rather than be truncated.
+// Portable atomic so the helpers compile off-Windows too (where the flag never
+// sets and await_dump() is an immediate no-op).
+inline std::atomic<long> g_dump_in_progress{0};
+
+// True while a minidump is actively being written by some thread.
+inline bool dump_in_progress() {
+    return g_dump_in_progress.load(std::memory_order_acquire) != 0;
+}
+
+// Best-effort: spin (yielding) up to timeout_ms while a dump is in progress, so
+// an imminent hard exit lets an in-flight dump land first. Bounded — a dump that
+// overruns the timeout still yields to the caller's _Exit; never blocks shutdown
+// forever. Off-Windows the flag never sets, so this returns immediately.
+inline void await_dump(unsigned timeout_ms) {
+    unsigned waited = 0;
+    while (dump_in_progress() && waited < timeout_ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        waited += 5;
+    }
+}
+
 #ifdef _WIN32
 // ---- dump machinery (Windows-only) ------------------------------------------
 
@@ -267,16 +303,34 @@ inline void reserve_fault_stack() {
 // the extension shows it as a notification so the user knows *which* component
 // (script / plugin / core) caused the last session's death.
 inline LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
+    // H3 — serialize against concurrent unhandled faults. The FIRST faulter wins
+    // the flag and writes the dump. A later entrant is dying regardless; it must
+    // NOT touch dbghelp (concurrent MiniDumpWriteDump corrupts or HANGS) and must
+    // NOT return EXCEPTION_CONTINUE_SEARCH (that would fall into a second dbghelp
+    // call up the chain). It spins briefly — giving the real dump time to land —
+    // then EXECUTE_HANDLERs so the process terminates.
+    long expected = 0;
+    if (!g_dump_in_progress.compare_exchange_strong(
+            expected, 1, std::memory_order_acq_rel)) {
+        for (int i = 0; i < 200 && dump_in_progress(); ++i)
+            Sleep(10);   // ~2s cap; the owner is writing our shared post-mortem
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
     namespace fs = std::filesystem;
     auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
     std::error_code ec;
     fs::create_directories(dir, ec);
     SYSTEMTIME st; GetLocalTime(&st);
-    char stem[128];
+    // Stem carries tid + milliseconds (on top of pid + HH:MM:SS) so two faults in
+    // the same wall-clock second on different threads never collide on the dump
+    // filename (CreateFileA below opens with dwShareMode=0).
+    char stem[160];
     std::snprintf(stem, sizeof(stem),
-        "xinsp-backend-%lu-%04d%02d%02d-%02d%02d%02d",
+        "xinsp-backend-%lu-%04d%02d%02d-%02d%02d%02d%03d-t%lu",
         (unsigned long)GetCurrentProcessId(),
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+        st.wMilliseconds, (unsigned long)GetCurrentThreadId());
     auto dmp_path  = (dir / (std::string(stem) + ".dmp")).string();
     auto json_path = (dir / (std::string(stem) + ".json")).string();
 
@@ -405,6 +459,9 @@ inline LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
     std::fprintf(stderr, "[xinsp2] CRASH 0x%08X (%s) in %s — minidump: %s\n",
                  code, exception_name(code), blamed.c_str(), dmp_path.c_str());
     std::fflush(stderr);
+    // Dump + sidecar are on disk. Release the H3 flag so a hard-exit path blocked
+    // in await_dump() (H7) resumes promptly instead of waiting out its full bound.
+    g_dump_in_progress.store(0, std::memory_order_release);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 

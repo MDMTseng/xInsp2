@@ -795,6 +795,9 @@ int main(int argc, char** argv) {
                 + "ms and ignored cooperative cancel; backend exiting for respawn");
             std::fflush(stderr);
             std::fflush(stdout);
+            // H7: if a worker is mid-write_minidump, let its dump land before we
+            // hard-exit (bounded — never blocks the respawn forever).
+            xi::crash::await_dump(10000);
             // _Exit: skip static destructors / atexit — a wedged worker may hold
             // locks those would block on. The FE sees the exit and respawns.
             std::_Exit(WATCHDOG_EXIT_CODE);
