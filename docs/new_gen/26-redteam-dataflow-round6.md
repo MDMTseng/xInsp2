@@ -18,7 +18,32 @@
 > `bucket_ms` wire key (+ schema/baseline/fixture/python/doc — additive, no version
 > bump); K5/K6 metrics doc + `{}` init; K7 sample-clock-after-lock; K8 no-sink
 > null-releaser fail-loud; K9 clear+toggle under one lock; K10-K12 + minor doc
-> corrections. **The rounds-2..7 red-team effort is now genuinely closed.**
+> corrections. *(This "genuinely closed" claim was itself premature — round 8's
+> regression audit reopened G4 as M1; see the round-8 banner below.)*
+
+> **Round 8 (2026-07-06) REOPENS G4 — the "genuinely closed" line above is stale.** A
+> regression audit found the six fix commits clean (no regressions), and the WS
+> transport / hot-reload lifetime / dispatch custody are sound — **but the round-3b
+> G4 kv-race fix (`d05ed4a`) was DOC-ONLY, and its lock-skip carve-out is WRONG for
+> multi-group projects**: `max_parallel` is per-group, `xi::kv()` is process-global,
+> and one global script runs on every lane, so a benign author who follows the
+> documented "safe to skip the lock" advice still hits concurrent `std::map` RMW / UB.
+> **M1 (P2, reopens G4).** Plus M2 (P3 compile-prune deletes the live script's debug
+> artifacts), M3/M4 (P3 WS doc/load), one latent note. Full writeup in the **Round 8**
+> section at the end. Fix M1 before claiming closure.
+
+> **ROUND 8 FIXED @ `bfb1993` (2026-07-06, full gate green).** M1 (reopened G4) →
+> the `xi_kv.hpp` contract now states the ONLY lock-skip is a single-group,
+> `max_parallel==1`, no-async project; a multi-group project (Σ lane workers > 1)
+> must always lock `kv_mutex()`. M2 → the compile prune now scans for the actual
+> highest same-stem version < ver (not `ver-1`), so a plugin build bumping the shared
+> `s_version` no longer causes the live outgoing script's debug artifacts to be
+> deleted. M3 → `close_client` notify comment corrected (writer re-checks the queue
+> predicate, not `client_`). M4 → the 2nd-client reject drain is now a non-blocking
+> single pass (no 400ms poll-thread stall). Latent → `write_override`'s
+> no-`mu_`/poll-thread-serial dependency documented. **Not re-stamping "closed" —
+> rounds 2–8 findings are all currently FIXED/DEFUSED/REFUTED, but a fresh angle has
+> reopened a "closed" item twice now (G4 → still G4); treat the sweep as ongoing.**
 
 # 26 — Red-team data-flow findings, round 6 (peripheral primitives & egress)
 
@@ -512,3 +537,164 @@ of it for the identical off-thread-release reason.
 **L1 is the round-2..7 sweep's final P1** — and it is the same root cause (un-quiesced
 live-adapter teardown) as the RT5/J2/J3 family, now closed on the one remaining
 lifecycle command.
+
+---
+---
+
+# Round 8 — regression audit of the round-6/7 fixes + fresh-surface sweep
+
+**Goal:** the round-6/7 fixes had just landed (`02ad9e4..c3e7f1f`) plus the round-3b
+closures (`d05ed4a`, G2–G5). Fresh fixes are prime bug territory, so one probe hunted
+**regressions in those six commits**; three others swept surfaces rounds 2–7 hadn't
+deeply audited — the WS server + RT8 async egress, script compile/hot-reload module
+lifetime, and script-KV state + atomic-IO + config. Threat model unchanged.
+
+**Headline:** the fixes are clean (no regressions), and the WS transport / hot-reload
+lifetime / dispatch custody are all sound — **but the round-3b G4 kv-race fix was
+doc-only, and its doc is wrong**, so **G4 is effectively REOPENED as M1**. Everything
+else is P3 (one debug-artifact-loss, two WS doc/load notes) plus a latent note.
+
+## M1 — the G4 kv-race "fix" is doc-only and its lock-skip carve-out is **wrong for multi-group projects** → the exact concurrent-`std::map`-RMW UB it claims to prevent — **P2 (doc defect, data-race/UB consequence); REOPENS G4**
+`backend/include/xi/xi_kv.hpp:36-43` (the thread-safety contract) vs `:306-309`
+(`kv()` is a process-global `static Kv`), `service_dispatch.cpp:19-24, 330-332, 352`
+(per-group lanes), `service_inspect.cpp:71-79, 191-193` (script copied under
+`script_mu`, then the body runs **unlocked**).
+
+The G4 fix (`d05ed4a`) added a comment telling script authors when they must lock
+`kv_mutex()`. It **cannot** be code-enforced (the SDK can't force a script body to
+lock), so the comment IS the contract — and the contract is wrong. It says:
+
+> *Only a script that is BOTH single-parallelism (`max_parallel==1`) AND uses no
+> async may skip the lock.*
+
+But **`max_parallel` is per-group** while **`xi::kv()` is process-global** and the
+inspect script is **one global DLL** (`g_eng.script`) that **every** dispatch lane
+runs. `spawn_group_pool_` builds one lane per group (`service_dispatch.cpp:330-332`),
+each with its own `max_parallel` worker set, and the oversubscribe check literally
+sums `Σ lp->cfg.max_parallel` across lanes (`:352`). So a project with **two groups,
+each `max_parallel==1`, no async** — which the comment calls "safe to skip the lock" —
+still runs the one global script on two lane workers **concurrently**, both doing
+unlocked read-modify-write on the shared `std::map<std::string,Slot>`:
+
+```
+Thread A (group camA, max_parallel==1)      Thread B (group camB, max_parallel==1)
+  n = kv().get_i64("count",0)+1               n = kv().get_i64("count",0)+1   // concurrent map read
+  kv().set_i64("count", n)                    kv().set_i64("count", n)        // concurrent operator[]/rebalance
+```
+
+A benign author who followed the documented carve-out omits the lock, and gets a data
+race / UB on the `std::map`: **torn `count` (lost update / cross-frame KV bleed), or a
+corrupted red-black tree → later crash.** This is exactly the G4 defect the comment
+advertises as prevented. **Fix:** the safe condition is not "this group's
+`max_parallel==1`" but "total concurrency across *all* lanes that can run the global
+script is 1" — i.e. a single-group project with `max_parallel==1` and no async.
+A multi-group project (`Σ` lane workers > 1) must **always** lock `kv_mutex()`. Correct
+the contract (and consider a code assertion at the boundary, since it is already
+global).
+
+## M2 — compile prune "keep N-1" is defeated by the process-global `s_version` shared across compile modes → deletes the still-live outgoing script's debug artifacts — **P3 (debug-artifact data-loss + doc-correctness)**
+`backend/include/xi/xi_script_compiler.hpp:701,704` (`static std::atomic<int> s_version`
+inside `compile()`), `:771` (same `compile()` serves `CompileMode::PluginDev`), prune
+`:957-958` keeping `ver` and `ver-1`, comment `:924-930`.
+
+`s_version` is a single process-global counter bumped by **every** compile — inspect
+scripts *and* project plugins (`xi_pm_load.hpp` `PluginDev`) *and* AOT. The prune keeps
+`file_ver == ver` and `== ver-1`, and its comment asserts `ver-1` "is still the LIVE
+mapped script." That holds only if versions are **consecutive per stem**. They are not:
+whenever a plugin build (or a second script) consumes the intervening number, the real
+previous *script* build is at `ver-2` or lower and does **not** match `ver-1`, so it is
+deleted. The prune filters by same-stem prefix, so plugin artifacts in other dirs are
+untouched — but the outgoing `inspect_v<k+1>` (still mapped / in-flight via the
+`module_lifetime` deferral) has its `.dll` delete fail safely (sharing violation,
+ignored) while its **`.pdb/.lib/.obj/.exp` are unlocked and removed**. A crash on an
+inspect still running that outgoing module during the swap/in-flight window then yields
+a minidump with `inspect_v<k+1>.dll+0xNNN` and **no line info** — precisely what the
+comment claims to prevent. Routinely triggered by any plugin-bearing project or the
+parallel-QA harness. **No memory-safety impact** (the live `.dll` cannot be deleted).
+Same lineage as the J7 "keep N-1 PDB" fix, whose consecutive-version assumption the
+shared counter breaks. **Fix:** track the previous version *per stem* (or scan
+`script_build` for the highest existing `inspect_v<n> < ver`), not arithmetic `ver-1`
+on a global counter; fix the comment's assumption.
+
+## M3 — `close_client` notify comment misdescribes the writer's wake predicate — **P3 (doc)**
+`backend/include/xi/xi_ws_server.hpp:656-658` vs the writer wait predicate `:693`.
+
+The comment says the `out_cv_.notify_all()` at `:668` wakes the writer so "it will
+re-check the now-nulled `client_`." The writer is parked on
+`out_cv_.wait(lk, []{ return writer_stop_ || !out_q_.empty(); })` — it re-evaluates
+only that predicate, never `client_`. After `close_client` clears the queue the
+predicate is false, so the woken writer immediately re-parks; the notify is a harmless
+spurious wakeup, not the "re-check `client_`" the comment claims. Behavior is correct
+(the epoch guard is the real barrier), but this is load-bearing documentation for
+exactly the close/writer race a maintainer will reason about — it invites a false
+belief that the writer polls `client_`. **Fix:** correct the comment (or drop the
+now-unnecessary notify).
+
+## M4 — 2nd-client reject drain runs a 400 ms recv-loop on the poll thread → a benign reconnect storm delays liveness — **P3 (load, bounded)**
+`backend/include/xi/xi_ws_server.hpp:493-499` (Windows path; `TODO(linux)` at `:500`).
+
+Rejecting a second connector does `::shutdown(s,1)` then
+`while (::recv(s,drain,1024,0) > 0) {}` with `SO_RCVTIMEO=400ms`, **on the poll
+thread**. A benign client closes promptly (~2 recvs), but under a benign FE reconnect
+storm while a client is attached, each rejected SYN can cost the poll thread up to
+~400 ms in this loop — during which it services neither the attached client's inbound
+commands, nor the top-of-`poll()` `drop_requested_` proactive-close check, nor the
+heartbeat. Bounded per iteration (no hang), but it serializes reject latency onto the
+one thread that also owns liveness. The only place a benign peer can measurably delay
+the poll thread. **Fix (optional):** move the reject-drain off the poll thread, or cap
+it to a single non-blocking recv.
+
+### Latent note (not a finding — record for when command handling stops being serial)
+`toolchain::write_override` (`xi_toolchain.hpp:~200`) writes `project.json` **without**
+the PluginManager `mu_`, unlike `save_project_locked`. Harmless **today** because all
+WS command handlers run serially on the single poll thread — but it would tear
+`project.json` the moment command handling becomes multi-threaded. Flagging because it
+is an invariant the codebase now depends on implicitly.
+
+## REFUTED / verified-clean this round
+- **All six round-6/7 fix commits** (`02ad9e4` rename quiesce, `5612e52` sweep-packs +
+  seq_cst walkers, `9ef6b56` K3/K4/K5/K6, `e434f13` K7–K10, `c9d0b48` L2 untagged
+  push, `d05ed4a` G2–G5) — **no introduced defect.** Specifically: the rename quiesce
+  takes `_rn_guard` **before** `mu_`, byte-identical ordering to its siblings, no
+  lock-held-across-drain and no inversion (no deadlock); the L2 untagged-retain is
+  balanced by an untagged release in the emission half (`current_owner()==0`), ledger
+  `rc` balances, sweep stays fail-closed both ways; the seq_cst promotion covers **all
+  three** WalkGuard loops (`release_all_for`/`stats`/`stats_by_owner`); G3's
+  `parallel_for` TicketScope faithfully mirrors `xi::async`'s save/restore RAII and
+  closes the ticket window without shifting it. *(Minor wording nit: `5612e52`'s
+  comment says the scope dtor "matches the adapter dtor's three-plane sweep" but the
+  plane order differs — independent registries, identical behavior, wording only.)*
+- **WS server + RT8 async egress — 6/6 named vectors REFUTED.** Stale-epoch delivery
+  (null-before-clear + monotonic `conn_epoch_` under `tx_mu_`), queue-freed-under-writer
+  (move-out under `out_mu_`), torn frame from concurrent producers (whole-frame enqueue
+  under `out_mu_`, single writer), partial-write boundary desync (positive-return
+  advance, `s<=0` → whole-client drop), stop/join vs slow client (`::shutdown` before
+  `join`), and `SO_EXCLUSIVEADDRUSE` accept race all hold. No `tx_mu_`/`out_mu_` nesting
+  → no inversion. `drop_requested_` cleared in `close_client` → no cross-connection
+  fire.
+- **Script hot-reload `module_lifetime` — VERIFIED SAFE.** The `LoadedScript` (incl. the
+  `module_lifetime` shared_ptr) is copied by value under `script_mu` before any module
+  deref and lives in the `RunOutcome` that outlives both compute and emission halves —
+  covering the post-emit `set_run_context("")` tail. Swap defers teardown to the last
+  ref; two reloads serialize under `run_mu→script_mu`; `script_generation` is
+  mutex-ordered. No UAF into an unloaded DLL, no torn binding.
+- **kv get-by-reference / atomic_write / config-validate** — REFUTED (`std::map` pointer
+  stability holds the documented per-key contract; every `atomic_write` caller is
+  poll-thread-serial or uses a dedicated path; `validate_config_against_manifest` is
+  pure over its args).
+
+## Round-8 disposition
+1. **M1 (P2, reopens G4)** — correct the `xi_kv.hpp` contract: multi-group (Σ lanes > 1)
+   must always lock `kv_mutex()`; the `max_parallel==1` carve-out is only safe
+   single-group. Highest priority — a benign author following the current doc hits
+   `std::map` UB.
+2. **M2 (P3)** — per-stem previous-version tracking in the compile prune; fix the
+   comment.
+3. **M3 / M4 (P3)** — WS comment correction; optional reject-drain off the poll thread.
+4. **Latent** — decide whether `toolchain::write_override` should take `mu_` now, or
+   document the poll-thread-serial dependency explicitly.
+
+**No new memory-unsafety this round** (the fixes hold, the transport is hardened). The
+one that matters is **M1: a "closed" finding (G4) is not actually closed** — the fix was
+documentation, and the documentation is wrong for the multi-group configuration the
+product fully supports.
