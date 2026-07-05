@@ -19,10 +19,16 @@
 // no backend/toolchain — the registry is header-only.
 //
 #include <xi/xi_health.hpp>
+#include <xi/xi_health_mirror.hpp>
 #include "yyjson.h"
 
+#include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 #include <cstdio>
 
@@ -309,6 +315,85 @@ int main() {
             CHECK(comp_str(last_event(), "name") == std::string("weird\"name\\with\ttabs"));
             yyjson_doc_free(d);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // F3 regression: the FE health-mirror write must NEVER expose a torn/empty
+    // file, even when many threads write it concurrently. The real notifier fires
+    // with HealthRegistry::mu_ released, so two workers faulting different
+    // instances can land in the writer at once; the writer's function-static mutex
+    // + atomic_write must keep the canonical file always-complete. A concurrent
+    // reader polling the file (like the FE supervisor) must always parse valid JSON.
+    SECTION("F3: concurrent health-mirror writes never tear the file");
+    {
+        namespace fs = std::filesystem;
+        fs::path dir = fs::temp_directory_path() / "xinsp_health_mirror_test";
+        std::error_code ec; fs::create_directories(dir, ec);
+        fs::path mirror = dir / "health.json";
+        fs::remove(mirror, ec);
+
+        constexpr int kWriters = 8;
+        constexpr int kIters   = 400;
+        std::atomic<bool> go{false};
+        std::atomic<bool> stop{false};
+        std::atomic<int>  torn{0};      // reader saw an unparseable/empty file
+        std::atomic<int>  reads{0};
+
+        // Each writer emits a DISTINCT, differently-sized valid JSON payload so a
+        // clobbered/interleaved write would produce invalid JSON a reader can catch.
+        auto writer = [&](int id) {
+            while (!go.load()) std::this_thread::yield();
+            for (int i = 0; i < kIters; ++i) {
+                std::ostringstream js;
+                js << "{\"state\":\"degraded\",\"writer\":" << id
+                   << ",\"iter\":" << i
+                   << ",\"pad\":\"" << std::string((size_t)(id * 37 + i % 53), 'x')
+                   << "\"}";
+                xi::write_health_mirror_file(mirror.string(), js.str());
+            }
+        };
+        // The reader models the FE supervisor: it opens the canonical path and
+        // parses it. It must see a whole JSON object every time — never empty,
+        // never truncated. (An absent file before the first write is skipped.)
+        auto reader = [&]() {
+            while (!go.load()) std::this_thread::yield();
+            while (!stop.load()) {
+                std::ifstream f(mirror, std::ios::binary);
+                if (!f) continue;
+                std::string s((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+                if (s.empty()) continue;   // between remove and first write
+                reads.fetch_add(1);
+                yyjson_doc* d = yyjson_read(s.data(), s.size(), 0);
+                if (!d || !yyjson_is_obj(yyjson_doc_get_root(d))) {
+                    torn.fetch_add(1);
+                }
+                if (d) yyjson_doc_free(d);
+            }
+        };
+
+        std::vector<std::thread> ts;
+        for (int i = 0; i < kWriters; ++i) ts.emplace_back(writer, i);
+        std::thread rd(reader);
+        std::thread rd2(reader);
+        go.store(true);
+        for (auto& t : ts) t.join();
+        stop.store(true);
+        rd.join(); rd2.join();
+
+        // The file must end complete and valid too.
+        std::ifstream f(mirror, std::ios::binary);
+        std::string s((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+        yyjson_doc* d = yyjson_read(s.data(), s.size(), 0);
+        CHECK(d != nullptr);
+        CHECK(d && yyjson_is_obj(yyjson_doc_get_root(d)));
+        if (d) yyjson_doc_free(d);
+
+        CHECK(torn.load() == 0);         // <-- the F3 assertion: no torn read, ever
+        CHECK(reads.load() > 0);         // the reader actually observed the file
+        std::fprintf(stderr, "[F3] %d reads, %d torn\n", reads.load(), torn.load());
+        fs::remove_all(dir, ec);
     }
 
     if (fails) {
