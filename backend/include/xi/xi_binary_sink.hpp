@@ -12,6 +12,12 @@ namespace xi {
 
 using BinarySinkFn = void (*)(const void* data, int len);
 
+// The holder is a PLAIN non-atomic static. This is safe ONLY under the boot-once-
+// install discipline: the backend installs the sink once at startup (service_main)
+// before any plugin/worker thread can call through it, and never re-installs it at
+// runtime. A runtime re-install would be a data race against concurrent callers.
+// The thread-safety send_binary relies on (asserted in service_main) comes from the
+// WS-server serialization the installed fn forwards to, NOT from this holder.
 inline BinarySinkFn& binary_sink() {
     static BinarySinkFn fn = nullptr;
     return fn;

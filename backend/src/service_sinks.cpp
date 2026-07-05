@@ -176,7 +176,18 @@ int use_push_pack_cb(const char* name, xi_pack_handle pack) {
         // Our staged ref: the script's own ScriptPack ref may die right after
         // push() returns, so retain BEFORE returning. Balanced by
         // release_trigger_event_ at flush/drain.
-        xi::PackRegistry::instance().retain(pack);
+        //
+        // L2: retain_untagged, NOT the owner-tagged retain(). This staged ref is
+        // the exact analogue of f_emit_pack's dispatch-event ref — taken here on
+        // the dispatch thread (where current_owner() is the SCRIPT owner S via the
+        // service_inspect OwnerGuard) but RELEASED off-guard by the bus releaser
+        // (release_trigger_event_ → f_release_for_bus → release_as(pack, 0)), which
+        // is deliberately unattributable. An owner-tagged retain would charge bucket
+        // S while the untagged release can't decrement it, stranding a phantom S
+        // bucket (transient Σbuckets ≤ rc over-count — diagnostic only, fail-closed,
+        // never an over-release). retain_untagged keeps both sides untagged so they
+        // balance, mirroring f_emit_pack's deliberate choice for the same reason.
+        xi::PackRegistry::instance().retain_untagged(pack);
         StagedEmit item;
         item.target   = name;
         item.rec.pack = pack;
