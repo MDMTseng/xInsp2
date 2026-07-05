@@ -41,6 +41,13 @@
 // abort(), not by a permit). A production version would also release on
 // drop/stop (RAII permit tied to the frame's lifetime).
 //
+// SHARED-STATIC NOTE (RB4, doc 25): g_sem + its instrumentation are process-global,
+// shared across every instance of this DLL. A single-source claim (g_source_claimed)
+// admits exactly ONE `source` instance — a second one is refused (not seeded/spawned),
+// so it can't re-seed the semaphore or cross-abort the running source. The ack
+// instance runs no producer (its start_ is a no-op). This models the safe shape; a
+// real multi-source design would give each owner its own semaphore instance.
+//
 // isolation must be "in_process".
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
@@ -48,6 +55,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -112,6 +120,11 @@ private:
 
 CountingSem      g_sem;               // the N-permit admission gate (shared)
 std::atomic<int> g_permits_cfg{4};    // N — set from config; seeded on source start
+// RB4 (doc 25): g_sem + the instrumentation are process-global, shared across every
+// instance of this DLL. A SECOND `source` instance would re-seed g_sem (clobbering
+// the first source's in-flight count → more than N admitted) and its stop would
+// abort() the first source's parked acquire(). Admit exactly one source owner.
+std::atomic<bool> g_source_claimed{false};
 }  // namespace
 
 class SemQueue : public xi::Plugin {
@@ -166,6 +179,7 @@ public:
 
 private:
     std::string           role_ = "source";
+    bool                  owns_source_ = false;   // RB4: this instance holds the single-source claim
     std::atomic<bool>     running_{false};
     std::atomic<int>      backlog_{200};      // THE plugin-owned queue depth
     std::atomic<uint64_t> seq_{0};
@@ -177,6 +191,19 @@ private:
 
     void start_() {
         if (running_.load()) return;
+        // Only a SOURCE instance runs the producer/semaphore; the ack instance just
+        // releases permits via its door, so its start_ is a no-op (it must NOT seed or
+        // spawn — that was the RB4 shared-static footgun).
+        if (role_ != "source") return;
+        // RB4 (doc 25): claim single-source ownership. If another source instance
+        // already holds it, refuse rather than corrupt the shared semaphore.
+        bool expected = false;
+        if (!g_source_claimed.compare_exchange_strong(expected, true)) {
+            std::fprintf(stderr, "[sem_queue] refusing a 2nd 'source' instance — the "
+                         "process-global semaphore admits ONE source only (doc 25 RB4)\n");
+            return;
+        }
+        owns_source_ = true;
         // Seed the SHARED semaphore with N permits + reset the SHARED instrumentation
         // (clean per-run counters — this is why a runtime-seedable cv semaphore beats
         // a static std::counting_semaphore here).
@@ -198,6 +225,7 @@ private:
         running_ = false;
         g_sem.abort();  // wake a producer parked in acquire() → bounded teardown
         if (thread_.joinable()) thread_.join();
+        if (owns_source_) { owns_source_ = false; g_source_claimed.store(false); }  // RB4: release the claim
     }
 
     void emit_one_() {
