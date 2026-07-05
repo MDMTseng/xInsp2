@@ -22,6 +22,7 @@
 
 #include "service_internal.hpp"
 #include <xi/xi_health.hpp>
+#include <xi/xi_health_mirror.hpp>
 
 // FE mirror: the top-level health, written to a tiny file the FE supervisor polls
 // (it can't read get_health — that would consume the single WS client slot the
@@ -29,26 +30,17 @@
 // install_health_notifier_(); empty = no mirror (a bare/manually-run BE).
 static std::string g_health_mirror_path;
 
-// Write the mirror atomically (tmp + rename) so a mid-write poll never reads a
-// torn file. Lifecycle-rate (only on health_changed), so the I/O is cheap and off
-// the per-frame path. Best-effort — a failed mirror must never affect the BE.
+// Write the mirror so a mid-write poll never reads a torn file. Delegates to
+// xi::write_health_mirror_file, which (a) serializes all writers under a
+// function-static mutex — the notifier fires with HealthRegistry::mu_ RELEASED, so
+// two workers faulting different instances can reach here concurrently — and
+// (b) writes via xi::atomic_write (tmp + FlushFileBuffers + rename), which leaves
+// the canonical file intact on any failure (no in-place truncation). Lifecycle-rate
+// (only on health_changed), so the I/O is cheap and off the per-frame path.
+// Best-effort — a failed mirror must never affect the BE.
 static void write_health_mirror_() {
     if (g_health_mirror_path.empty()) return;
-    std::string js  = xi::health().mirror_json();
-    std::string tmp = g_health_mirror_path + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return;
-        f << js;
-        if (!f) return;
-    }
-    std::error_code ec;
-    std::filesystem::rename(tmp, g_health_mirror_path, ec);  // replaces on Win/POSIX
-    if (ec) {   // cross-volume or locked: fall back to a direct (non-atomic) write
-        std::ofstream f(g_health_mirror_path, std::ios::binary | std::ios::trunc);
-        if (f) f << js;
-        std::filesystem::remove(tmp, ec);
-    }
+    xi::write_health_mirror_file(g_health_mirror_path, xi::health().mirror_json());
 }
 
 // Route HealthRegistry state changes to WS clients AND mirror the top-level state
