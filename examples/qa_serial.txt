@@ -1,0 +1,43 @@
+# qa_serial.txt — tests that MUST run serially (never in the parallel pool).
+#
+# run_qa.py runs the parallel-safe qa_* concurrently (--jobs), THEN runs the
+# tests listed here one at a time with nothing else running. These assert on
+# TIMING / CONCURRENCY-COUNT / LOAD behaviour — a backend is itself multi-threaded
+# (dispatch workers + OpenMP + a runtime cl.exe compile), so N in parallel
+# oversubscribes the CPU and starves these of the determinism their assertions
+# need. (This is NOT a data-isolation issue — ports come from free_port() and
+# J1's per-PID work_dir removed the shared-build-dir collision; it is purely CPU
+# oversubscription breaking timing assertions.)
+#
+# Conservative on purpose: a wrongly-serial test only costs wall-time; a wrongly-
+# parallel timing test flakes. Add here if a parallelised test starts flaking.
+# Format: one folder name per line; # comments allowed.
+
+# --- known load-sensitive (already flaky-quarantined for exactly this reason) ---
+qa_reentrancy
+qa_cpu_affinity
+qa_lifecycle_teardown
+
+# --- queue / back-pressure timing (assert first_gap, max_inflight, ratios) ---
+qa_slow_consumer
+qa_semaphore_queue
+qa_plugin_queue_sim
+qa_overflow_block
+
+# --- dispatch / group parallelism + interval timing ---
+qa_dispatch_groups
+qa_group_parallelism
+qa_group_stress
+qa_two_group_paths
+qa_min_interval
+
+# --- watchdog window + under-load lifecycle ---
+qa_watchdog
+qa_remove_under_load
+qa_recover
+
+# --- capability-provider e2e: loads + certifies a lib-plugin DLL and drives cap
+#     calls; under 4x concurrent cl.exe + certify (J5/J6) the provider load starves
+#     and every cap call returns rc=-99 (empirically flaked here at jobs=4). ---
+qa_cap_imgcodec
+qa_cap_imgcodec_autoload
