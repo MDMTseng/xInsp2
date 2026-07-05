@@ -315,6 +315,22 @@ inline std::string PluginManager::instance_group(const std::string& name) {
     return project_.default_group;
 }
 
+// Locked snapshot for read-only observers — takes the SAME mu_ instance_group()
+// takes, so the observers no longer iterate project_.instances unlocked (which
+// races create/remove/rename_instance → erase-vs-read UAF). Copies each entry's
+// name + plugin_name + a shared_ptr ref (keeps the instance alive for the read),
+// then releases the lock so the caller can safely re-enter the manager (e.g. the
+// health reader's get_instance_state, which also takes mu_).
+inline std::vector<PluginManager::InstanceSnapshot>
+PluginManager::snapshot_instances() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<InstanceSnapshot> out;
+    out.reserve(project_.instances.size());
+    for (auto& [iname, ii] : project_.instances)
+        out.push_back({iname, ii.plugin_name, ii.instance});
+    return out;
+}
+
 inline void PluginManager::set_instance_state(const std::string& name, InstState s,
                         const std::string& err) {
     std::lock_guard<std::mutex> lk(mu_);

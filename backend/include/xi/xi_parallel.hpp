@@ -40,6 +40,7 @@
 
 #include "xi_async.hpp"   // cancellation_requested, detail::owner_get / OwnerScope
 #include "xi_seh.hpp"     // install_seh_translator, seh_exception
+#include "xi_crash_dump.hpp"   // xi::crash::reserve_fault_stack — 128 KB dump headroom
 
 #include <atomic>
 #include <cstdint>
@@ -80,6 +81,7 @@ void parallel_for(int n, F&& body) {
 #ifdef _OPENMP
     #pragma omp parallel
     {
+        xi::crash::reserve_fault_stack();               // 128 KB dump headroom (mirrors lane path)
         xi::install_seh_translator();                   // per-OMP-thread (B1)
         detail::OwnerScope owner_scope(parent_owner);   // per-worker owner (C3)
         detail::TriggerCtxScope trigger_ctx_scope(parent_trigger_ctx);   // per-worker trigger ctx (F4)

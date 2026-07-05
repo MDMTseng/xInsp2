@@ -93,7 +93,12 @@ void cmd_get_health_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parse
         //     registry's runtime-fault set. The PluginManager owns the base state
         //     (and migrates it atomically on rename/remove), so we read it here
         //     rather than keeping a parallel copy that could drift.
-        for (auto& [iname, ii] : g_eng.plugin_mgr.project().instances) {
+        // Locked snapshot instead of iterating project().instances unlocked (races
+        // create/remove/rename_instance → erase-vs-read UAF). We only need the name;
+        // the follow-up get_instance_state / instance_fault calls re-take mu_, so a
+        // copied snapshot (lock released) is required — a locked visitor would deadlock.
+        for (auto& snap : g_eng.plugin_mgr.snapshot_instances()) {
+            const std::string& iname = snap.name;
             InstState base = InstState::Created;
             std::string err; long long crashes = 0;
             if (!g_eng.plugin_mgr.get_instance_state(iname, base, err, &crashes)) {

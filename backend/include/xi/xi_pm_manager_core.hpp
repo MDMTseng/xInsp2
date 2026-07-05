@@ -174,6 +174,23 @@ public:
 
     std::string instance_group(const std::string& name);
 
+    // A locked, read-only snapshot of the live instance set for observers (the
+    // health + image-pool-stats readers) that must NOT iterate project().instances
+    // unlocked — an unlocked read races create/remove/rename_instance's map
+    // mutations (erase() → dangling entry / UAF), the exact race instance_group()
+    // guards mu_ against. Iterate the returned vector instead of the raw map. The
+    // shared_ptr keeps each instance alive for the whole read even if a concurrent
+    // remove erases it from the map. Deliberately a COPIED snapshot (not a locked
+    // visitor callback): the health reader re-enters get_instance_state(), which
+    // takes mu_ — running that under this lock would self-deadlock. Small fields
+    // only; take the lock, copy, release.
+    struct InstanceSnapshot {
+        std::string                   name;         // the map key = instance identity
+        std::string                   plugin_name;
+        std::shared_ptr<InstanceBase> instance;     // held alive for the reader
+    };
+    std::vector<InstanceSnapshot> snapshot_instances();
+
     // ---- V3 machine-level lib-plugin autoload (doc 14 / doc 19 V3) ----------
     // Instantiate every discovered plugin marked `"autoload": true` ONCE under a
     // stable machine owner, so its capabilities register WITHOUT any project
@@ -243,6 +260,17 @@ private:
     // (defined in xi_pm_discovery.hpp)
     certify::Verdict certify_folder_locked_(const std::string& folder,
                                             const PluginInfo& info);
+
+    // Off-lock cache-warm for certify_folder_locked_ — runs the throwaway-child
+    // certify subprocess (up to 30s) when the DLL hash is missing/changed and
+    // writes the verdict to the on-disk cache WITHOUT holding mu_. scan_plugins
+    // calls this in an UNLOCKED pre-pass so the subsequent locked certify_folder_
+    // locked_ reads the fresh cache instead of spawning under mu_ (which would
+    // stall instance_group() on the source emit hot path for up to 30s/plugin).
+    // Touches only the passed exe snapshot + the on-disk cache — no PluginManager
+    // shared state — so it is data-race free off-lock. (defined in xi_pm_discovery.hpp)
+    static void precertify_folder_(const std::string& folder, const PluginInfo& info,
+                                   const std::string& certify_exe);
 
     // Record the on-disk write-time of the DLL we just loaded, so
     // reload_changed_plugins() can later tell whether a rebuild produced a new

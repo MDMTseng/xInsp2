@@ -27,9 +27,31 @@ namespace xi {
 // handle and resolved factory — we refresh only manifest metadata so
 // rescan_plugins doesn't leak the prior HMODULE.
 inline int PluginManager::scan_plugins(const std::string& plugins_dir) {
+    if (!std::filesystem::exists(plugins_dir)) return 0;
+
+    // J6: the certify step per changed-hash plugin spawns a throwaway child that
+    // blocks up to 30s (WaitForSingleObject). Running it under mu_ stalls the bus
+    // sink's instance_group() (same mu_) on the source emit hot path for up to
+    // 30s/plugin during a live rescan. So do the subprocess work in an UNLOCKED
+    // pre-pass that only WARMS the on-disk verdict cache; the locked scan below is
+    // unchanged and its certify_folder_locked_ then hits the fresh cache without
+    // spawning. certify_exe_ is set once at startup (set_certify_exe, mu_-guarded)
+    // and never mutated during a scan — snapshot it under a brief lock so the
+    // off-lock precertify_folder_ never touches the member.
+    std::string certify_exe;
+    { std::lock_guard<std::mutex> lk(mu_); certify_exe = certify_exe_; }
+    for (auto& entry : std::filesystem::directory_iterator(plugins_dir)) {
+        if (!entry.is_directory()) continue;
+        const std::string folder = entry.path().string();
+        auto manifest = std::filesystem::path(folder) / "plugin.json";
+        if (!std::filesystem::exists(manifest)) continue;
+        auto info = parse_manifest(manifest.string(), folder);
+        if (info.name.empty()) continue;
+        precertify_folder_(folder, info, certify_exe);   // up-to-30s subprocess, OFF mu_
+    }
+
     std::lock_guard<std::mutex> lk(mu_);
     int count = 0;
-    if (!std::filesystem::exists(plugins_dir)) return 0;
     for (auto& entry : std::filesystem::directory_iterator(plugins_dir)) {
         if (!entry.is_directory()) continue;
         const std::string folder = entry.path().string();
@@ -281,6 +303,33 @@ inline certify::Verdict PluginManager::certify_folder_locked_(const std::string&
     return verdict;
 #else
     return certify::Verdict::unknown;
+#endif
+}
+
+// J6 off-lock cache-warm — mirrors certify_folder_locked_'s decision, but spawns
+// the up-to-30s certify child WITHOUT mu_ (certify_exe passed as a snapshot). It
+// only reads/writes the on-disk verdict cache; scan_plugins runs it in an unlocked
+// pre-pass so the locked certify_folder_locked_ then finds the cache fresh (hash
+// unchanged, G1.2) and returns without spawning under the lock. No-op when the DLL
+// hash is unresolvable, the cache is already fresh, or no certify exe is wired.
+inline void PluginManager::precertify_folder_(const std::string& folder,
+                                              const PluginInfo& info,
+                                              const std::string& certify_exe) {
+    auto dll_path = (std::filesystem::path(folder) / info.dll_name).string();
+    std::string hash = xi::sha256::sha256_file(dll_path);
+    if (hash.empty()) return;                       // source-only / unbuilt — nothing to certify
+
+    certify::CacheEntry cached;
+    if (certify::read_cache(folder, cached) &&
+        cached.dll == info.dll_name && cached.sha256 == hash)
+        return;                                     // G1.2 — hash unchanged, cache already fresh
+
+    if (certify_exe.empty()) return;                // certification disabled
+
+#ifdef _WIN32
+    auto verdict = certify::run_certify_subprocess(certify_exe, folder);
+    if (verdict != certify::Verdict::unknown)       // don't cache a spawn failure
+        certify::write_cache(folder, { info.dll_name, hash, certify::verdict_str(verdict) });
 #endif
 }
 

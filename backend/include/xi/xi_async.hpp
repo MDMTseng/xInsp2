@@ -21,6 +21,7 @@
 //
 
 #include "xi_seh.hpp"
+#include "xi_crash_dump.hpp"   // xi::crash::reserve_fault_stack — 128 KB dump headroom
 
 #include <atomic>
 #include <cstdint>
@@ -348,9 +349,12 @@ auto async(F&& f, Args&&... args)
          parent_ticket,
          parent_owner,
          parent_trigger_ctx]() mutable -> R {
-            // Install SEH translator on the worker thread so segfaults
-            // become seh_exception and propagate through std::promise
-            // to the .get() / await site.
+            // Reserve fault-stack headroom FIRST (mirrors the dispatch lane +
+            // one-shot worker paths) so the crash filter can still write a
+            // minidump after a STACK_OVERFLOW on this worker; then install the
+            // SEH translator so segfaults become seh_exception and propagate
+            // through std::promise to the .get() / await site.
+            xi::crash::reserve_fault_stack();
             xi::install_seh_translator();
             // Make this token + the parent inspect's ticket visible to
             // `xi::cancellation_requested()` for the duration of the user

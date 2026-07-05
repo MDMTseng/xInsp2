@@ -243,9 +243,12 @@ void cmd_image_pool_stats_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                     "script:" + std::filesystem::path(g_eng.script.path).filename().string();
             }
         }
-        for (auto& [iname, ii] : g_eng.plugin_mgr.project().instances) {
-            if (auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(ii.instance.get())) {
-                labels[a->owner_id()] = "instance:" + ii.name + " (" + ii.plugin_name + ")";
+        // Locked snapshot (shared_ptr-owning) instead of iterating project().instances
+        // unlocked — an unlocked read races create/remove/rename_instance's map
+        // mutations. The snapshot's shared_ptr keeps each instance alive for the cast.
+        for (auto& snap : g_eng.plugin_mgr.snapshot_instances()) {
+            if (auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(snap.instance.get())) {
+                labels[a->owner_id()] = "instance:" + snap.name + " (" + snap.plugin_name + ")";
             }
             // All instances are in-process CAbiInstanceAdapters now;
             // process-isolation + SHM were removed 2026-05.
