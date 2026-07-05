@@ -470,7 +470,18 @@ int main(int argc, char** argv) {
         // back to (see resolve_toolchain_).
         g_eng.include_dir_default = g_eng.include_dir;
     }
-    g_eng.work_dir = (std::filesystem::temp_directory_path() / "xinsp2").string();
+    // J1 (RT5): per-PID so co-resident backends never share script_build + .pch.
+    // Two backends CAN coexist (SO_EXCLUSIVEADDRUSE blocks only the same port;
+    // --port is configurable and the QA free_port() harness runs many at once), and
+    // the version counter resets to 0 each start → both would target inspect_v0.dll
+    // and the fixed-name umbrella.{pch,obj} in one shared dir: one's remove(out_dll)
+    // deletes the other's fresh DLL, or a /Yc PCH write races a /Yu read → corrupt
+    // load / spurious C1852. A per-PID subdir removes the sharing entirely.
+    g_eng.work_dir = (std::filesystem::temp_directory_path() / "xinsp2" /
+                      std::to_string(GetCurrentProcessId())).string();
+    // A reused PID may leave a stale dir from a dead process — start clean.
+    std::error_code _wd_ec;
+    std::filesystem::remove_all(g_eng.work_dir, _wd_ec);
     std::filesystem::create_directories(g_eng.work_dir);
 
     // Probe accelerators once. Logged so the user can see what their

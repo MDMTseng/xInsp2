@@ -393,7 +393,10 @@ int main(int argc, char** argv) {
     }
     xi::script::CompileRequest req;
     req.source_path    = script_path;
-    req.output_dir     = (fs::temp_directory_path() / "xinsp2_runner_build").string();
+    // J1 (RT5): per-PID — two runner processes would otherwise collide on the same
+    // fixed xinsp2_runner_build (same DLL stem + shared PCH).
+    req.output_dir     = (fs::temp_directory_path() / "xinsp2_runner_build" /
+                          std::to_string(GetCurrentProcessId())).string();
     req.include_dir    = include_dir;
     req.opencv_dir     = xi::script::detail::probe_opencv_dir();
     req.turbojpeg_root = xi::script::detail::probe_turbojpeg_root();

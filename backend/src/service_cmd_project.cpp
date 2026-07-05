@@ -257,6 +257,14 @@ void cmd_create_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
             send_rsp_err(srv, id, load_err.empty() ? "failed to load plugin" : load_err);
             return;
         }
+        // RT5/J3: create_instance can EVICT a live machine-autoload provider of the
+        // same plugin (evict_machine_provider_locked_ → ~CAbiInstanceAdapter →
+        // destroy_fn_ + cap/ref/pack owner sweeps) — the identical un-quiesced
+        // DLL-teardown that remove_instance guards. Quiesce dispatch across the
+        // create so the owner-sweep can't race a worker releasing an owner-tagged
+        // ref (the phantom-bucket window). Held after load succeeds so a load
+        // failure returns without paying the quiesce.
+        auto _create_guard = quiesce_dispatch_for_lifecycle_op_("create_instance", &srv);
         // G2.1 — create() runs the plugin's factory (untrusted native code); stamp
         // the culprit so a factory fault is attributed to this plugin.
         stamp_culprit_(iname->c_str(), *plugin);

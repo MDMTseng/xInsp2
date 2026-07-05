@@ -68,6 +68,13 @@ void cmd_rescan_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
         const std::string& dir = dir_opt ? *dir_opt : g_eng.plugins_dir;
         int n = 0;
         if (!dir.empty() && std::filesystem::exists(dir)) {
+            // RT5/J2: scan_plugins' "moved" branch FreeLibrary's a plugin DLL that a
+            // live CAbiInstanceAdapter may still hold (its dll_ + destroy_fn_) — the
+            // same un-quiesced DLL-teardown class as remove_instance. Quiesce dispatch
+            // for the scan so no worker is mid-call into an about-to-be-unmapped
+            // instance. (Also bounds J6: dispatch is paused, so holding mu_ across a
+            // certify subprocess can't stall the emit hot path.)
+            auto _rescan_guard = quiesce_dispatch_for_lifecycle_op_("rescan_plugins", &srv);
             n = g_eng.plugin_mgr.scan_plugins(dir);
         }
         std::string out = "{\"scanned\":";
