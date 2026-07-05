@@ -452,6 +452,69 @@ static void test_typed_pooled_handle_balance() {
     CHECK(pool_live() == base, "typed pack released both handles once on drop");
 }
 
+// F1 regression: a pooled-class bin (>= kPackLargeThreshold) added while the
+// ImagePool is EXHAUSTED must never resolve to a {nullptr, n>0} span. Pre-fix,
+// add_bin/set_bin stored {pooled=true, handle=0, inl_len=n} on a failed pool
+// alloc and get_bin did view(0).first(n) -> span{nullptr, n} (UB / OOB read).
+// The fix falls back to INLINE arena storage (producer honesty) and guards
+// get_bin's pooled branch (consumer safety). Covers BOTH the dynamic Pack path
+// and the TypedPack slot path.
+static void test_bin_pool_exhaustion_no_null_span() {
+    // Drain the pool with minimal 1x1x1 handles so the next alloc_bytes fails.
+    std::vector<xi_image_handle> hog;
+    hog.reserve(70000);
+    for (;;) {
+        xi_image_handle h = xi::ImagePool::instance().create(1, 1, 1);
+        if (!h) break;
+        hog.push_back(h);
+    }
+    CHECK(!hog.empty(), "pool actually filled to exhaustion");
+    CHECK(xi::ImagePool::instance().create(1, 1, 1) == XI_IMAGE_NULL,
+          "pool is genuinely exhausted");
+
+    const size_t N = 8192;   // >= kPackLargeThreshold (4096) -> pooled class
+    std::vector<uint8_t> payload(N);
+    for (size_t i = 0; i < N; ++i) payload[i] = uint8_t(i * 7 + 3);
+
+    // --- Dynamic Pack::add_bin under exhaustion ---
+    {
+        PackBuilder b;
+        b.add_bin("payload", payload.data(), N);
+        Pack f = b.seal();
+        auto v = f.get_bin("payload");
+        // Never a poisoned present-but-null span.
+        bool poisoned = v.has_value() && v->data() == nullptr && v->size() > 0;
+        CHECK(!poisoned, "Pack::get_bin never returns {nullptr, n>0} on pool exhaustion");
+        if (v) {
+            CHECK(v->data() != nullptr && v->size() == N,
+                  "add_bin fell back to inline; data rode intact (dynamic)");
+            bool ok = v->data() != nullptr && v->size() == N;
+            for (size_t i = 0; ok && i < N; ++i) ok = ((*v)[i] == uint8_t(i * 7 + 3));
+            CHECK(ok, "dynamic bin bytes intact under exhaustion");
+        }
+    }
+
+    // --- Typed set_bin<slot> under exhaustion ---
+    {
+        TypedBlobBuilder b;
+        b.set_bin<TSchema::kPayload>(payload.data(), N);
+        TypedBlob f = b.seal();
+        auto v = f.get_bin<TSchema::kPayload>();
+        bool poisoned = v.has_value() && v->data() == nullptr && v->size() > 0;
+        CHECK(!poisoned, "TypedPack::get_bin never returns {nullptr, n>0} on pool exhaustion");
+        if (v) {
+            CHECK(v->data() != nullptr && v->size() == N,
+                  "set_bin fell back to inline; data rode intact (typed)");
+            bool ok = v->data() != nullptr && v->size() == N;
+            for (size_t i = 0; ok && i < N; ++i) ok = ((*v)[i] == uint8_t(i * 7 + 3));
+            CHECK(ok, "typed bin bytes intact under exhaustion");
+        }
+    }
+
+    // Restore the pool for subsequent tests.
+    for (xi_image_handle h : hog) xi::ImagePool::instance().release(h);
+}
+
 int main() {
     std::printf("test_xi_pack\n");
     test_lifecycle_and_contract_layer();
@@ -465,6 +528,7 @@ int main() {
     test_typed_mixed_declared_and_dynamic();
     test_typed_arena_reuse_no_stale_bleed();
     test_typed_pooled_handle_balance();
+    test_bin_pool_exhaustion_no_null_span();
     if (g_fail == 0) { std::printf("  OK (all checks passed)\n"); return 0; }
     std::printf("  %d check(s) FAILED\n", g_fail);
     return 1;

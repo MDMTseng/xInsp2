@@ -59,6 +59,7 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 #include <span>
@@ -513,7 +514,16 @@ public:
     std::optional<std::span<const uint8_t>> get_bin(std::string_view key) const {
         const auto* e = find(key);
         if (!e || e->tag != PackTag::Bin) return std::nullopt;
-        if (e->pooled) return pack_pool::view(e->handle).first(e->inl_len);
+        if (e->pooled) {
+            // Guard the pooled span: a null handle (pool exhaustion at build)
+            // or an under-sized pool view would make `.first(inl_len)` violate
+            // std::span::first's precondition and surface a {nullptr, inl_len}
+            // span — an ABI success-with-null OOB read (F1). Report absence
+            // (nullopt -> f_get_bin rc=0) instead of a poisoned span.
+            auto v = pack_pool::view(e->handle);
+            if (!e->handle || v.size() < e->inl_len) return std::nullopt;
+            return v.first(e->inl_len);
+        }
         return pack_mp_detail::read_bin(e->inl);
     }
     // Image descriptor + zero-copy pixel span over the pool buffer.
@@ -633,15 +643,26 @@ public:
         assert(!sealed_ && "add after seal");
         if (n >= kPackLargeThreshold) {
             xi_image_handle h = pack_pool::alloc_bytes(data, n);
-            Entry e;
-            e.key = arena_.intern(key);
-            e.tag = PackTag::Bin;
-            e.pooled = true;
-            e.handle = h;
-            e.inl_len = uint32_t(n);   // logical byte length within the buffer
-            e.w = int32_t(n); e.h = 1; e.c = 1;
-            push(std::move(e), h);
-            return;
+            if (h) {
+                Entry e;
+                e.key = arena_.intern(key);
+                e.tag = PackTag::Bin;
+                e.pooled = true;
+                e.handle = h;
+                e.inl_len = uint32_t(n);   // logical byte length within the buffer
+                e.w = int32_t(n); e.h = 1; e.c = 1;
+                push(std::move(e), h);
+                return;
+            }
+            // Pool exhausted / alloc failed (h==0). NEVER store a live-looking
+            // {pooled=true, handle=0, inl_len=n} entry — that is exactly the F1
+            // bug where get_bin surfaced a {nullptr, n} span. Fall back to
+            // INLINE arena storage so the bytes still ride, honestly (no silent
+            // data loss) — the inline encoding carries any n up to UINT32_MAX.
+            std::fprintf(stderr,
+                "[xinsp2] pack add_bin('%.*s'): pool alloc failed for %zu bytes; "
+                "storing inline\n",
+                int(key.size()), key.data(), n);
         }
         Entry& e = begin_inline(key, PackTag::Bin, pack_mp_detail::bin_size(n));
         pack_mp_detail::write_bin(const_cast<uint8_t*>(e.inl), data, n);
@@ -865,7 +886,13 @@ public:
         static_assert(SlotIdx >= 0 && SlotIdx < (int)N, "slot not declared in schema");
         const Slot& s = slots_[SlotIdx];
         if (!s.present || s.tag != PackTag::Bin) return std::nullopt;
-        if (s.pooled) return pack_pool::view(s.handle).first(s.inl_len);
+        if (s.pooled) {
+            // Same F1 guard as Pack::get_bin: never let a null handle or an
+            // under-sized pool view produce a {nullptr, inl_len} span.
+            auto v = pack_pool::view(s.handle);
+            if (!s.handle || v.size() < s.inl_len) return std::nullopt;
+            return v.first(s.inl_len);
+        }
         return pack_mp_detail::read_bin(s.inl);
     }
     template <int SlotIdx>
@@ -1039,10 +1066,17 @@ public:
         Slot& s = slots_[SlotIdx];
         if (n >= kPackLargeThreshold) {
             xi_image_handle h = pack_pool::alloc_bytes(data, n);
-            s.tag = PackTag::Bin; s.present = true; s.pooled = true;
-            s.handle = h; s.inl_len = uint32_t(n);
-            s.w = int32_t(n); s.h = 1; s.c = 1;
-            return;
+            if (h) {
+                s.tag = PackTag::Bin; s.present = true; s.pooled = true;
+                s.handle = h; s.inl_len = uint32_t(n);
+                s.w = int32_t(n); s.h = 1; s.c = 1;
+                return;
+            }
+            // Pool alloc failed (h==0): fall back to inline (F1) rather than
+            // storing {pooled=true, handle=0} — no {nullptr,n} span, no data loss.
+            std::fprintf(stderr,
+                "[xinsp2] pack set_bin: pool alloc failed for %zu bytes; "
+                "storing inline\n", n);
         }
         s = Slot{};
         s.tag = PackTag::Bin; s.present = true;

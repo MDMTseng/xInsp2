@@ -400,6 +400,72 @@ static void test_has_source_pack_identity() {
     CHECK(pool_live() == base);                        // pack + pooled image balanced
 }
 
+// ---------------------------------------------------------------------------
+// (7) F1 regression: a large (pooled-class) bin added while the pool is
+//     EXHAUSTED must never surface a {nullptr, len>0} span. Pre-fix, add_bin
+//     stored {pooled=true, handle=0, inl_len=n} on a failed pool alloc, and
+//     get_bin did view(0).first(n) -> a span{nullptr, n}; f_get_bin then
+//     reported rc=1 (SUCCESS) with ptr=nullptr, len=n -> the consumer OOB-reads
+//     n bytes from nullptr. The fix (producer honesty) falls back to INLINE
+//     arena storage on pool failure, so the bytes still ride truthfully; the
+//     consumer-side get_bin guard additionally refuses to build a poisoned span.
+//     This exercises the real exhaustion path end-to-end through the C ABI.
+// ---------------------------------------------------------------------------
+static void test_bin_pool_exhaustion_no_null_span() {
+    SECTION("F1: large bin under pool exhaustion never yields success-with-null");
+    xi::install_pack_abi();
+    const xi_pack_v1* fi = xi::pack_v1_iface();
+
+    // Drain the ImagePool to exhaustion with minimal (1x1x1) handles so the
+    // next alloc_bytes() inside add_bin is forced to fail (handle==0).
+    std::vector<xi_image_handle> hog;
+    hog.reserve(70000);
+    for (;;) {
+        xi_image_handle h = xi::ImagePool::instance().create(1, 1, 1);
+        if (!h) break;                 // pool exhausted -> the failure we want
+        hog.push_back(h);
+    }
+    CHECK(!hog.empty());               // we actually filled it
+    // Confirm the pool is genuinely exhausted right now.
+    CHECK(xi::ImagePool::instance().create(1, 1, 1) == XI_IMAGE_NULL);
+
+    // A pooled-class payload (>= kPackLargeThreshold = 4096) built while the
+    // pool cannot mint a buffer.
+    const int32_t N = 8192;
+    std::vector<uint8_t> payload(N);
+    for (int32_t i = 0; i < N; ++i) payload[i] = uint8_t(i * 7 + 3);
+
+    xi_pack_builder b = fi->builder_new();
+    fi->builder_add_bin(b, "payload", payload.data(), N);
+    xi_pack_handle f = fi->builder_seal(b);
+    CHECK(f != XI_PACK_NULL);
+
+    const void* ptr = reinterpret_cast<const void*>(0x1);   // poison sentinel
+    int32_t     len = -1;
+    int32_t     rc  = fi->get_bin(f, "payload", &ptr, &len);
+
+    // THE INVARIANT: never success-with-null. rc==1 => ptr must be non-null and
+    // len==N with the exact bytes; rc==0 (truthful "absent") is also acceptable,
+    // but must NOT hand back ptr=nullptr, len>0.
+    CHECK(!(rc == 1 && ptr == nullptr && len > 0));   // the F1 crash condition
+    if (rc == 1) {
+        CHECK(ptr != nullptr);
+        CHECK(len == N);
+        bool bytes_ok = (ptr != nullptr && len == N);
+        if (bytes_ok) {
+            const uint8_t* p = static_cast<const uint8_t*>(ptr);
+            for (int32_t i = 0; i < N && bytes_ok; ++i)
+                bytes_ok = (p[i] == uint8_t(i * 7 + 3));
+        }
+        CHECK(bytes_ok);   // producer-honesty: the data rode inline, intact
+    }
+
+    fi->release(f);
+
+    // Restore the pool for any subsequent test.
+    for (xi_image_handle h : hog) xi::ImagePool::instance().release(h);
+}
+
 int main() {
     std::printf("[test] xi.pack@1 carved data-plane door + dispatch dual-carry\n");
     test_door_probe();
@@ -408,6 +474,7 @@ int main() {
     test_dispatch_dual_carry();
     test_owner_sweep_regression();
     test_has_source_pack_identity();
+    test_bin_pool_exhaustion_no_null_span();
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
         return 0;
