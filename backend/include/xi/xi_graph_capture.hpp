@@ -44,9 +44,20 @@ public:
     // this inline before touching anything else so the disabled path is free.
     bool enabled() const { return on_.load(std::memory_order_relaxed); }
 
-    // Toggle capture. Enabling clears any prior recording.
+    // Toggle capture. Enabling clears any prior recording. The clear() and the
+    // on_ store are kept in ONE lock scope so the flag flip and the buffer clear
+    // publish together: record() appends under mu_ but gates on the unlocked
+    // relaxed enabled() at its call site. With the store outside the lock a
+    // reader could observe on_=false while calls_ was not yet cleared (or the
+    // reverse). Folding them removes that split-visibility window; a worker whose
+    // append serialises during set() blocks until both have happened. (This does
+    // not make disable perfectly atomic w.r.t. the call-site gate — a worker that
+    // already read enabled()==true can still acquire mu_ after set() returns and
+    // append one late call — but it closes the store/clear reordering window,
+    // which is the part set() controls.)
     void set(bool on) {
-        { std::lock_guard<std::mutex> lk(mu_); calls_.clear(); }
+        std::lock_guard<std::mutex> lk(mu_);
+        calls_.clear();
         on_.store(on, std::memory_order_relaxed);
     }
 
@@ -74,7 +85,12 @@ public:
         calls_.push_back(std::move(call));
         // Bound the buffer so capture left on in continuous/production mode can't
         // grow without limit. The dataflow topology repeats every frame, so a ring
-        // of recent calls still reconstructs the full graph; drop the oldest.
+        // of recent calls reconstructs the full graph IN STEADY STATE (across >=2
+        // complete frames). Note the eviction below can cut mid-frame: if a
+        // consumer's producer call was already dropped, snapshot() has no
+        // producer[h] entry for it and that A->B edge is missing from a snapshot
+        // taken right after eviction (or of a topology whose per-frame call count
+        // approaches kMaxCalls); a later complete frame restores it. Drop the oldest.
         while (calls_.size() > kMaxCalls) calls_.pop_front();
     }
 
@@ -128,7 +144,10 @@ private:
         std::vector<std::string> in_keys,    out_keys;
     };
     // Plenty to reconstruct any real pipeline's topology (which repeats per
-    // frame) while bounding memory if capture is accidentally left enabled.
+    // frame) in steady state across >=2 complete frames, while bounding memory if
+    // capture is accidentally left enabled. A pipeline whose per-frame call count
+    // approaches this bound leaves no room for two whole frames in the ring, so
+    // its snapshots can under-report edges cut by mid-frame eviction.
     static constexpr size_t kMaxCalls = 8192;
     std::atomic<bool>  on_{false};
     mutable std::mutex mu_;

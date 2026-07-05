@@ -20,6 +20,7 @@
 #include "xi_image_pool.hpp"
 
 #include <atomic>
+#include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -158,6 +159,24 @@ public:
         if (to_fire) {
             to_fire(std::move(ev));
         } else {
+            // No sink: hand the ref back to the installed releaser. A REAL pack
+            // (non-null — guaranteed by the XI_PACK_NULL guard at entry) arriving
+            // here while pack_releaser_ is still null means pack ingress was wired
+            // BEFORE set_pack_releaser ran (boot-ordering bug): release_pack_ then
+            // silently no-ops and the host PackRegistry ref leaks. Fail loud so the
+            // ordering bug surfaces instead of leaking quietly — assert in debug,
+            // and a once-only stderr warning in release.
+            if (pack_releaser_.load(std::memory_order_acquire) == nullptr) {
+                assert(false && "emit_pack: no-sink pack drop with no pack "
+                                "releaser installed — host ref leaked; wire "
+                                "set_pack_releaser before pack ingress");
+                static std::atomic<bool> warned{false};
+                if (!warned.exchange(true, std::memory_order_relaxed))
+                    std::fprintf(stderr,
+                        "[xi_trigger_bus] emit_pack dropped a real pack with no "
+                        "releaser installed — host PackRegistry ref leaked; wire "
+                        "set_pack_releaser before pack ingress.\n");
+            }
             release_pack_(pack);   // no consumer — drop the ref we were handed
         }
     }
@@ -209,8 +228,12 @@ public:
     // spot which of N cameras stalled.
     std::vector<std::pair<std::string, int64_t>> source_emit_ages_us() {
         std::vector<std::pair<std::string, int64_t>> out;
-        int64_t now = steady_now_us();
         std::lock_guard<std::mutex> lk(mu_);
+        // Sample the clock AFTER taking the lock (matching last_emit_age_us,
+        // which reads the clock after the atomic load). Sampling before the lock
+        // races a concurrent emit_pack that stamps source_last_emit_mono_us_ with
+        // a mono > our now, yielding a spurious negative age for that source.
+        int64_t now = steady_now_us();
         out.reserve(source_last_emit_mono_us_.size());
         for (auto& [s, t] : source_last_emit_mono_us_) out.emplace_back(s, now - t);
         return out;
