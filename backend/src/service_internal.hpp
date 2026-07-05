@@ -93,7 +93,6 @@ struct Engine {
     std::thread watchdog_thread;
     std::atomic<bool> watchdog_run{false};
     std::atomic<xi::ws::Server*> srv_for_bp{nullptr};
-    std::atomic<unsigned long> inspect_tid{0};
     std::mutex status_mu;
     std::map<std::string, StatusEntry> status;
     std::atomic<uint64_t> status_seq{0};
@@ -285,6 +284,13 @@ int  use_push_pack_cb(const char* name, xi_pack_handle pack);
 xi_image_handle use_grab_cb(const char* name, int timeout_ms);
 uint32_t owner_get_cb();
 void     owner_set_cb(uint32_t id);
+// F4: trigger-context marker get/set thunks. Mirror the owner thunks — bridge a
+// per-thread "this thread is inside / a child of a trigger-bearing inspect" flag
+// across the ABI seam so xi::async / xi::parallel_for can carry it onto the
+// worker threads they spawn. warn_trigger_off_thread_ keys the off-thread misuse
+// detection on THIS thread's flag (relational), never on a process-global tid.
+uint32_t trigger_ctx_get_cb();
+void     trigger_ctx_set_cb(uint32_t v);
 void     trigger_info_cb(CurrentTriggerInfoC* out);
 
 // ---- toolchain / project helpers -------------------------------------------

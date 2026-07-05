@@ -71,11 +71,18 @@ void parallel_for(int n, F&& body) {
     // region — re-installed per worker inside (0 when the owner thunk is unwired).
     const uint32_t parent_owner = detail::owner_get();
 
+    // F4: capture the trigger-context marker ONCE on the inspect thread — re-installed
+    // per worker so a current_trigger() read from a parallel body is caught as an
+    // off-thread misuse (the ambient trigger lives on the inspect thread only; the
+    // body must capture xi::trigger_snapshot() by value). 0 when the thunk is unwired.
+    const uint32_t parent_trigger_ctx = detail::trigger_ctx_get();
+
 #ifdef _OPENMP
     #pragma omp parallel
     {
         xi::install_seh_translator();                   // per-OMP-thread (B1)
         detail::OwnerScope owner_scope(parent_owner);   // per-worker owner (C3)
+        detail::TriggerCtxScope trigger_ctx_scope(parent_trigger_ctx);   // per-worker trigger ctx (F4)
         #pragma omp for
         for (int i = 0; i < n; ++i) {
             // Drain fast once anyone has faulted; honour a cooperative cancel.

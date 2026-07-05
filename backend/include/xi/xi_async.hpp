@@ -52,6 +52,18 @@
 inline void* g_owner_get_fn_ = nullptr;
 inline void* g_owner_set_fn_ = nullptr;
 
+// F4: trigger-context marker get/set thunks, injected by the host via
+// xi_script_set_trigger_ctx_callbacks. xi::async / xi::parallel_for carry the
+// inspect thread's "inside a trigger-bearing inspect" flag onto the worker threads
+// they spawn by reading/writing these, so the host's off-thread current_trigger()
+// misuse detection is RELATIONAL (per-thread lineage) instead of a process-global
+// heuristic. Null on an older host / non-script TU ⇒ the wrappers below are silent
+// no-ops (get() returns 0, set() does nothing) and detection degrades to off,
+// exactly as if the marker never propagated. Same `inline` rationale as the owner
+// thunks above (ODR-used unconditionally from generic async/parallel_for code).
+inline void* g_trigger_ctx_get_fn_ = nullptr;
+inline void* g_trigger_ctx_set_fn_ = nullptr;
+
 namespace xi {
 
 namespace detail {
@@ -68,6 +80,31 @@ inline void owner_set(uint32_t id) {
     auto fn = reinterpret_cast<OwnerSetFn>(::g_owner_set_fn_);
     if (fn) fn(id);
 }
+
+// F4: read/write THIS thread's trigger-context marker (0 if no host wired it).
+using TriggerCtxGetFn = uint32_t (*)();
+using TriggerCtxSetFn = void     (*)(uint32_t);
+inline uint32_t trigger_ctx_get() {
+    auto fn = reinterpret_cast<TriggerCtxGetFn>(::g_trigger_ctx_get_fn_);
+    return fn ? fn() : 0u;
+}
+inline void trigger_ctx_set(uint32_t v) {
+    auto fn = reinterpret_cast<TriggerCtxSetFn>(::g_trigger_ctx_set_fn_);
+    if (fn) fn(v);
+}
+
+// RAII: install `v` as this thread's trigger-context marker for the scope, restore
+// the previous value on exit. Symmetric with OwnerScope — used by xi::async and
+// xi::parallel_for so a worker inherits the spawning inspect's "inside a trigger"
+// flag, and the host's off-thread detection fires for a child that reads the
+// ambient trigger instead of a captured snapshot.
+struct TriggerCtxScope {
+    uint32_t prev;
+    explicit TriggerCtxScope(uint32_t v) : prev(trigger_ctx_get()) { trigger_ctx_set(v); }
+    ~TriggerCtxScope() { trigger_ctx_set(prev); }
+    TriggerCtxScope(const TriggerCtxScope&) = delete;
+    TriggerCtxScope& operator=(const TriggerCtxScope&) = delete;
+};
 
 // RAII: install `id` as this thread's image-pool owner for the scope, restore the
 // previous owner on exit. Symmetric with the cancel-token / inspect-ticket Scope
@@ -299,12 +336,18 @@ auto async(F&& f, Args&&... args)
     // in the closure below. Zero cost when unwired (owner_get() returns 0).
     uint32_t parent_owner = detail::owner_get();
 
+    // F4: capture the spawning thread's trigger-context marker so the worker
+    // inherits "I am a child of a trigger-bearing inspect". Re-installed via
+    // TriggerCtxScope in the closure. Zero cost when unwired (returns 0).
+    uint32_t parent_trigger_ctx = detail::trigger_ctx_get();
+
     auto closure =
         [fn  = std::forward<F>(f),
          tup = std::make_tuple(std::forward<Args>(args)...),
          tok = token,
          parent_ticket,
-         parent_owner]() mutable -> R {
+         parent_owner,
+         parent_trigger_ctx]() mutable -> R {
             // Install SEH translator on the worker thread so segfaults
             // become seh_exception and propagate through std::promise
             // to the .get() / await site.
@@ -329,6 +372,10 @@ auto async(F&& f, Args&&... args)
             // C2: re-install the parent's image-pool owner for the duration of the
             // user callable so any pool image it creates is attributed correctly.
             detail::OwnerScope owner_scope(parent_owner);
+            // F4: re-install the parent's trigger-context marker so a current_trigger()
+            // read from THIS worker is caught as an off-thread misuse (the ambient
+            // trigger is not on this thread — the script must snapshot first).
+            detail::TriggerCtxScope trigger_ctx_scope(parent_trigger_ctx);
             try {
                 return std::apply(std::move(fn), std::move(tup));
             } catch (const xi::seh_exception& e) {

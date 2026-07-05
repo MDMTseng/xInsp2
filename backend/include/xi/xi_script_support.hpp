@@ -318,6 +318,16 @@ XI_SCRIPT_EXPORT void xi_script_set_owner_callbacks(void* get_fn, void* set_fn) 
     g_owner_set_fn_ = set_fn;
 }
 
+// F4: install the trigger-context marker get/set thunks. Separate optional symbol
+// (same back-compat reasoning as the owner callbacks) so an older host that
+// doesn't know about relational off-thread detection simply leaves both null and
+// xi::async / xi::parallel_for propagation is a silent no-op. get_fn: uint32_t(void),
+// set_fn: void(uint32_t). Storage (g_trigger_ctx_*_fn_) lives in xi_async.hpp.
+XI_SCRIPT_EXPORT void xi_script_set_trigger_ctx_callbacks(void* get_fn, void* set_fn) {
+    g_trigger_ctx_get_fn_ = get_fn;
+    g_trigger_ctx_set_fn_ = set_fn;
+}
+
 // Optional: install a result callback for xi::result(code,msg). Scripts that
 // don't include xi_result.hpp leave this null.
 XI_SCRIPT_EXPORT void xi_script_set_result_callback(void* fn) {

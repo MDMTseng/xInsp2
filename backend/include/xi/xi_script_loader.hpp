@@ -90,6 +90,10 @@ struct LoadedScript {
     // it and worker-created images stay anonymous (owner=0).
     using SetOwnerCallbacksFn = void (*)(void* get_fn, void* set_fn);
     SetOwnerCallbacksFn set_owner_callbacks = nullptr;
+    // F4: trigger-context marker get/set thunks. Optional symbol — older scripts
+    // lack it and off-thread current_trigger() misuse detection is a no-op.
+    using SetTriggerCtxCallbacksFn = void (*)(void* get_fn, void* set_fn);
+    SetTriggerCtxCallbacksFn set_trigger_ctx_callbacks = nullptr;
     using SetResultCallbackFn = void (*)(void* fn);
     SetResultCallbackFn set_result_callback = nullptr;
     // polaris2 Gate P2: xi::use() pack-door process callback. Optional symbol —
@@ -171,6 +175,7 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_trigger_meta_callback = reinterpret_cast<LoadedScript::SetTriggerMetaCallbackFn>(GetProcAddress(h, "xi_script_set_trigger_meta_callback"));
     out.set_status_callback = reinterpret_cast<LoadedScript::SetStatusCallbackFn>(GetProcAddress(h, "xi_script_set_status_callback"));
     out.set_owner_callbacks = reinterpret_cast<LoadedScript::SetOwnerCallbacksFn>(GetProcAddress(h, "xi_script_set_owner_callbacks"));
+    out.set_trigger_ctx_callbacks = reinterpret_cast<LoadedScript::SetTriggerCtxCallbacksFn>(GetProcAddress(h, "xi_script_set_trigger_ctx_callbacks"));
     out.set_result_callback = reinterpret_cast<LoadedScript::SetResultCallbackFn>(GetProcAddress(h, "xi_script_set_result_callback"));
     out.set_use_pack_callback = reinterpret_cast<LoadedScript::SetUsePackCallbackFn>(GetProcAddress(h, "xi_script_set_use_pack_callback"));
     out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
