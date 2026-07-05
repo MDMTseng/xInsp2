@@ -218,7 +218,15 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         lane->cv_not_full.wait(lk, [&] {
             return lane->q.empty() || !g_eng.continuous.load();
         });
-        if (!g_eng.continuous.load()) return false;          // stop → drop (guard releases ev)
+        if (!g_eng.continuous.load()) {                      // stop → drop (guard releases ev)
+            // RB3 (doc 25): a producer parked here at stop drops an in-hand frame.
+            // Count it (frames-in vs verdicts+drops-out stays balanced) but do NOT
+            // emit an XI_SYS_DROPPED wire marker: this is teardown (unlike F2's
+            // start-window drop), the monitor is tearing down too, and emitting under
+            // the lane lock would need an unlock dance. Counter-only, by design.
+            ++g_eng.dropped_lifetime;
+            return false;
+        }
         // 2) Snapshot the take-generation UNDER lk, then deposit.
         uint64_t t0 = lane->taken_count;
         ev.arrival_id = ++g_eng.run_id;
@@ -258,7 +266,10 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         lane->cv_not_full.wait(lk, [&] {
             return (int)lane->q.size() < depth || !g_eng.continuous.load();
         });
-        if (!g_eng.continuous.load()) return false;   // stop-wake → drop (guard releases ev)
+        if (!g_eng.continuous.load()) {   // stop-wake → drop (guard releases ev)
+            ++g_eng.dropped_lifetime;     // RB3 (doc 25): count the teardown drop (no wire marker — see depth-0 note)
+            return false;
+        }
         // Fall through: a slot is now free AND we still hold lk, so no other producer
         // can steal it before our push below (cv.wait returned with lane->mu HELD).
     }
@@ -370,7 +381,7 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                             // depth=0 rendezvous: advance the take-generation UNDER lk
                             // (paired with a depth=0 producer's under-lk snapshot) so a
                             // producer parked in the rendezvous learns ITS event was taken.
-                            // The outside-lock cv_not_full.notify_one() below wakes it.
+                            // The outside-lock cv_not_full.notify_all() below wakes it.
                             ++lane->taken_count;
                             // run_id was claimed at ENQUEUE (push == FIFO order) so kept
                             // and dropped frames share one arrival sequence; read it back
@@ -381,12 +392,18 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                         }
                     }
                     // Two cvs, split by role: WORKERS wait on lane->cv (notify_one —
-                    // one freed slot wakes one worker), overflow:block PRODUCERS park
-                    // on lane->cv_not_full. A pop frees a slot, so wake one of each:
-                    // cv for a possibly-waiting worker, cv_not_full for one parked
-                    // producer (block is back — see enqueue_to_lane_'s block path).
+                    // one freed slot wakes one worker), PRODUCERS (overflow:block AND
+                    // depth-0 rendezvous) park on lane->cv_not_full. A pop frees a slot,
+                    // so wake a worker (cv) and the producers (cv_not_full).
+                    // RB1 (doc 25): cv_not_full must be notify_ALL, not notify_one — the
+                    // depth-0 producer does TWO distinct waits on this cv (slot-free, then
+                    // its-event-taken). With ≥2 producers on one depth-0 lane a single
+                    // notify could wake a slot-free waiter instead of the taken-waiter
+                    // whose event this pop just consumed, stranding that producer until
+                    // stop. notify_all + the under-lock predicate re-check (harmless
+                    // thundering-herd at lane-drain rate) closes the lost-wakeup.
                     lane->cv.notify_one();
-                    lane->cv_not_full.notify_one();
+                    lane->cv_not_full.notify_all();
                     if (!have) continue;
                     // Rate limit: CAS-claim a dispatch slot ≥ min_interval after the
                     // lane's previous one, then sleep to it. Surplus events meanwhile
