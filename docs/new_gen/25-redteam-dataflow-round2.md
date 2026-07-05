@@ -344,3 +344,143 @@ behaviour-unchanged (both new branches skipped; only a harmless unused `++taken_
 no lost-wakeup (single shared predicate, `wait` returns holding `mu` so no
 slot-steal).
 
+---
+
+## Round-3 (2026-07-05) — fixes audit · capability/lifecycle · streaming/WS
+
+A third 3-way parallel pass, verified against the tree at `3966748` (i.e. AFTER
+the round-2/2b fixes landed). Surfaces: (A) the round-2/2b FIXES themselves —
+never adversarially audited; (B) the capability plane + plugin lifecycle
+transactional paths; (C) pack streaming reassembly + WS command/dispatch
+concurrency. Threat model unchanged (benign plugins/users, stress/load/race only).
+
+**Verdict: 3 CONFIRMED (1×P1, 2×P2) · 5 PLAUSIBLE (1×P1, 4×P3) · many REFUTED.**
+The round-2 fixes are CLEAN (0 introduced defects). The one new P1 is a
+capability-plane reinit UAF that the round-2 A1/A2 reinit-gate fix did NOT cover.
+
+### A — the round-2/2b fixes (audit): CLEAN
+
+**0 CONFIRMED.** F2, F3, F4, RB1, RB2, RB3 fully refuted; F1 and RB4 refuted on
+their primary surface. The fixes introduced no memory-safety or data-loss defect.
+Verified in depth: F4's per-thread trigger-ctx marker does NOT leak across pooled
+async/OMP threads (`TriggerCtxScope` save/restore + dtor-on-SEH-rethrow), its new
+optional export `xi_script_set_trigger_ctx_callbacks` is script-side (not
+`xi_host_api`) so `test_abi_freeze` is unaffected, and old-script/old-host
+directions are both null-guarded. F3's function-static mutex is one instance
+(inline, ODR) and never nests with `HealthRegistry::mu_`. RB2's `==0` clamp is
+complete at both parser scopes; nothing downstream sizes on `max_parallel`.
+Two narrow **P3** residuals only:
+- **RT3-A1 (F1):** a bin `n ≥ 4 GiB` now always takes the inline fallback and
+  `write_bin`'s `uint32_t(n)` truncates the length — the msgpack bin32 format
+  ceiling, not new logic, and not a benign-load reality. Optional: `$fault` when
+  `n > UINT32_MAX`.
+- **RT3-A8 (RB4):** `start_()` sets `owns_source_`/the global claim BEFORE
+  `std::thread` construction, so a throw during thread-creation-exhaustion leaves
+  the claim held → a same-instance `start` retry is refused until an explicit
+  `stop_` releases it. Recoverable, example-only. Fix: `if (owns_source_) return;`
+  or release on the throwing path.
+
+### B — capability plane + plugin lifecycle: the reinit-gate has two uncovered readers
+
+**Shared root cause.** `reinit()` (`xi_cabi_adapter.hpp:508-548`) destroys the old
+`inst_` under the EXCLUSIVE side of `cap_gate_` — but that gate is taken ONLY by
+the capability funnel (the round-1/2 A1/A2 fix). The data/lifecycle plane relies on
+`CallScope` for reinit-safety instead, and `CallScope` does NOT cover two reachable
+readers: the ungated `prepare()` staging entry, and *any* entry on a **reentrant**
+instance (`effective_cap_()==0` makes `CallScope` a no-op). The comment
+"reinit() serializes itself via the instance's CallScope" (`service_sinks.cpp:71`)
+is exactly the assumption that breaks.
+
+#### RT3-B1 — `prepare()` (ungated staging) races `reinit()`'s `destroy_fn_(old)` → UAF · **P1 · CONFIRMED** (hand-verified)
+`prepare()` (`xi_cabi_adapter.hpp:426-434`) runs `prepare_fn_(inst_, …)` with NO
+`CallScope` and NO `cap_gate_` — by design (staging concurrency contract). A WS
+command thread in `cmd_prepare_instance_` (`service_cmd_dispatch.cpp:323`, NOT
+quiesced) is mid-`prepare_fn_(P_old)` while a dispatch worker consumes a pending
+reinit (`service_sinks.cpp:239` → `apply_pending_reinit_` → `reinit()`), which
+swaps `inst_` and frees `P_old` under the exclusive gate — a gate `prepare()`
+never holds → **use-after-free on `P_old` mid-`prepare_fn_`**. Preconditions all
+benign-reachable: plugin exports `xi_plugin_prepare` (staged frame-perfect swap —
+the main intended use), `on_fault=reinit` (opt-in), one caught `process()` fault
+arms the pending reinit. `test_prepare_concurrency.cpp` covers prepare-vs-process
+but never prepare-vs-reinit. **Fix:** take `std::shared_lock(cap_gate_)` inside
+`prepare()` and re-read `inst_` under it (mirrors `f_cap_call`'s shared re-resolve;
+blocks only during reinit's brief exclusive destroy, not during `process()`).
+
+#### RT3-B2 — reentrant instance: `run_pack_door()`/`set_def()` race `reinit()`'s destroy (CallScope is a no-op) · **P1 · PLAUSIBLE**
+For a reentrant instance `effective_cap_()==0`, so `CallScope` engages nothing.
+`run_pack_door()` and `set_def()` (and `reinit()` itself) all take a no-op
+`CallScope`, so the data plane's only reinit-guard vanishes: two dispatch workers
+on a reentrant `on_fault=reinit` instance can have T2 inside `process(P_old)` while
+T3's `reinit()` frees `P_old` → UAF, plus an unsynchronized write/read data race on
+the `inst_` pointer itself. PLAUSIBLE (not CONFIRMED) only because it needs a plugin
+marked BOTH `reentrant` AND `on_fault=reinit` — semantically odd, nothing warns,
+but accepted at load. **Fix:** gate the reentrant data-plane doors on the shared
+reinit-gate unconditionally (not via `CallScope`), or refuse `on_fault=reinit` on a
+reentrant plugin at load.
+
+#### RT3-B3 — `committed_def_` written ungated by `prepare()` → torn `std::string` · **P2 · CONFIRMED**
+`prepare()` writes `committed_def_ = def` ungated (`:432`); `set_def()` writes it
+under `CallScope` and `reinit()` reads it. The ungated writer (and the no-op
+`CallScope` on reentrant) races a reader → torn read of a `std::string` that can
+dereference a reallocated buffer. Same root as B1; closed by the same shared-gate
+acquisition in `prepare()`.
+
+*B1/B2/B3 are hard to reproduce without instrumentation — recommend a `stage_probe`
+fixture (park inside `prepare()`/`process()` while a second thread drives `reinit()`)
+or a TSan/ASan build.*
+
+**REFUTED (B):** machine-provider `evict`/`reload` vs `f_cap_call` (the funnel pins
+the adapter `shared_ptr` for the whole handler; erase only decrements, `~adapter`
+deferred) · `commit_working_copy` mirror vs live inspect (caller quiesces; mirror
+copies scratch→canonical, inspect reads scratch) · `CapRegistry` shadow-stack
+(every mutation under the registry `mu_`, `lookup` returns by value, validity is the
+reinit-gate's job which `f_cap_call` honours).
+
+### C — streaming + WS/command: 1 CONFIRMED doc gap, rest hardened
+
+#### RT3-C3 — doc-18 "arrival order on one lane" is FALSE under the default `result_order:"completion"` → benign multi-worker lines silently `stream_gap`-abort their streams · **P2 · CONFIRMED**
+The ordered-emit gate arms only when `result_order=="arrival" && n>1`
+(`service_dispatch.cpp:368`), but the shipped default is `"completion"`
+(`xi_pm_project.hpp:298`). Doc 18's "no reorder on one lane" premise (chunk sink
+pushes arrive in `$part` order) therefore fails on a stock multi-worker lane: the
+staged pushes fire in COMPLETION order, so the doc-18 consumer's `part != next_part`
+check aborts every stream with `stream_gap` under load. Masked in QA because
+`qa_pack_stream` runs producer AND consumer synchronously inside one `inspect()` —
+it never crosses a frame boundary. **Fix:** doc 18 must state a multi-worker
+streaming lane REQUIRES `result_order:"arrival"` OR `queue_depth:0` (strict serial,
+the RB2 clamp actually makes depth-0 the *safe* streaming shape); ideally the parser
+warns on a stream-shaped source with `max_parallel>1 + result_order:"completion"`.
+
+**PLAUSIBLE (C):** RT3-C4 (P3) — a cross-frame `use().process()` DOOR reassembler is
+never arrival-ordered even in arrival mode (the gate orders sink PUSHES + run_result,
+not the door pull path in the compute half); doc 18 should restrict the cross-frame
+consumer to the ordered-SINK role. RT3-C8 (P3) — `cmd:metrics`/`dispatch_stats`
+read independent relaxed atomics with no transaction, so a snapshot can see
+`frames_total != ok+err`; strictly diagnostic (the header already disclaims
+happens-before), a monitor must not assume intra-snapshot consistency.
+
+**REFUTED (C):** propagate_fault still carries `$stream/$part/$eof` (round-1 F1
+holds at 3966748) · no host reassembly buffer to overflow (doc 18: consumer buffers,
+host never) · `set_def` vs `process` (CallScope blocks, `test_set_def_race`) · param
+retune vs read (all `Param<T>` are atomic scalars, no `Param<string>`) · WS async
+writer vs command-reply vs run_result (all serialized by `out_mu_`, epoch tag guards
+the pop→send swap, CLOSESOCK under `tx_mu_`) · F2 start-window (fixed at this commit).
+
+### Disposition
+
+- **A** (fixes audit): clean — the two P3s optional/example-only.
+- **C3** (P2): doc-18 fix + optional parser warn — a documentation/robustness item.
+- **B1 (P1) / B2 (P1) / B3 (P2):** ONE shared fix closes all three — acquire the
+  shared side of `cap_gate_` inside `prepare()` (+ re-read `inst_`), and gate the
+  reentrant data-plane doors on the shared reinit-gate (or refuse reentrant+reinit
+  at load).
+
+**STATUS: findings recorded, fixes NOT yet landed (round-3 was scoped doc-only).**
+B1 is a real P1 UAF but a pre-existing latent gap (the round-2 A1/A2 reinit-gate
+never covered prepare()/the reentrant data plane), narrow to reach, and the fix
+touches concurrency-critical capability-plane code (a shared_lock in prepare()
+against reinit()'s exclusive gate) that warrants a deliberate scheduled change +
+gate, not an unattended patch. Recommended schedule order: B1/B2/B3 (one shared
+`cap_gate_` fix) first, then C3 (doc-18 wording + optional parser warn); A1/A8 P3s
+optional.
+
