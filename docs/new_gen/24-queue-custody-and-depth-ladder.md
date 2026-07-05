@@ -85,10 +85,14 @@ the event (no run-ahead, zero core limbo).
 - **Interruptible:** a stop/teardown wakes the rendezvous (predicate keys off
   `g_eng.continuous`); the producer degrades to a drop, never hangs teardown —
   same discipline as `overflow:block` (cv_not_full stop-wake).
-- **max_parallel:** intended for `max_parallel:1` (true lock-step). With N>1 it
-  still functions but serializes to one in-flight event (each producer waits for
-  its handoff before the next), underusing the extra workers — documented, not
-  forbidden.
+- **max_parallel — clamped to 1 (RB2):** depth-0 is strict serial by definition,
+  so the dispatch pool spawns exactly ONE worker for a depth-0 lane regardless of
+  `max_parallel`/`dispatch_threads` (clamped at spawn in `spawn_group_pool_`; the
+  config value is left as-set). This is what makes "1-in-flight" REAL: without it,
+  the producer's release-on-take + >1 idle workers would pop-and-run inspections
+  concurrently (RB2, doc 25 — a broken guarantee, not a valid multi-thread mode).
+  Multi-threaded admission is the plugin-semaphore path over a NORMAL lane (§4 /
+  `qa_semaphore_queue`), NOT a core depth-0 lane.
 - **Same DANGER as block:** only for a back-pressure-TOLERANT source on a
   dedicated thread. NEVER a lane a worker can self-feed, or a real-time camera
   callback. Config-side responsibility.

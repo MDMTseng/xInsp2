@@ -472,14 +472,18 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                     "requires overflow:block — clamping depth to 1\n");
                 project_.queue_depth = 1;
             }
-            // Advisory (not clamped): rendezvous is strict 1-in-flight lock-step, so
-            // extra worker threads sit idle. Almost always a misconfig — flag it but
-            // honour it (see doc 24 "max_parallel").
+            // Advisory: depth-0 (rendezvous) is strict serial by definition, so the
+            // dispatch pool CLAMPS it to a single worker at spawn (RB2, doc 25) — with
+            // >1 the release-on-take path would otherwise run inspections concurrently
+            // and break the 1-in-flight guarantee. The config value is left as-set; the
+            // runtime just honours the rendezvous semantics. For multi-threaded
+            // admission use the plugin-semaphore path over a NORMAL lane (doc 24 §4).
             if (project_.queue_depth == 0 && project_.dispatch_threads > 1) {
                 std::fprintf(stderr,
-                    "[xinsp2] project.json parallelism.queue_depth:0 (rendezvous) "
-                    "serializes to one in-flight event — dispatch_threads>1 (%d) will "
-                    "sit idle\n", project_.dispatch_threads);
+                    "[xinsp2] project.json parallelism.queue_depth:0 (rendezvous) runs a "
+                    "SINGLE worker — dispatch_threads=%d is clamped to 1 at spawn "
+                    "(rendezvous is strict serial; use the plugin-semaphore path for "
+                    "multi-threaded admission)\n", project_.dispatch_threads);
             }
             // parallelism.groups + default_group (optional; empty = legacy pool)
             if (yyjson_val* arr = yyjson_obj_get(par, "groups"); arr && yyjson_is_arr(arr)) {
@@ -558,9 +562,9 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         grp.queue_depth = 1;
                     }
                     // Advisory (honoured, not clamped): rendezvous is strict 1-in-flight,
-                    // so max_parallel>1 leaves the extra workers idle (see doc 24).
+                    // so the pool clamps it to a single worker at spawn (RB2, doc 25).
                     if (grp.queue_depth == 0 && grp.max_parallel > 1)
-                        warn(grp.name, "queue_depth:0 (rendezvous) serializes to one in-flight event — max_parallel>1 will sit idle");
+                        warn(grp.name, "queue_depth:0 (rendezvous) runs a SINGLE worker — max_parallel is clamped to 1 at spawn (strict serial; use the plugin-semaphore path for multi-threaded admission)");
                     project_.groups.push_back(std::move(grp));
                 }
                 if (yyjson_val* k = yyjson_obj_get(par, "default_group"); k && yyjson_is_str(k) && yyjson_get_str(k))

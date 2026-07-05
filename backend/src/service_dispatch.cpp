@@ -354,6 +354,15 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
     for (auto& lp : g_eng.lanes) {
         std::shared_ptr<GroupLane> lane = lp;   // workers hold a ref → lane outlives them
         int n = lane->cfg.max_parallel < 1 ? 1 : lane->cfg.max_parallel;
+        // RB2 (doc 25): a queue_depth:0 (rendezvous) lane is STRICT SERIAL by
+        // definition — the producer releases at TAKE time, so >1 idle worker would
+        // pop-and-run inspections CONCURRENTLY, breaking the advertised 1-in-flight
+        // guarantee (and racing a non-reentrant script the user picked depth-0 to
+        // serialize). Force a single worker so the guarantee is REAL. (This clamps the
+        // WORKER COUNT at spawn, not the config value — max_parallel is left as-set;
+        // multi-threaded admission is the plugin-semaphore path over a normal lane,
+        // NOT a core depth-0 lane. See doc 24 §4 / qa_semaphore_queue.)
+        if (lane->cfg.queue_depth == 0) n = 1;
         // Arrival-ordered emission only when asked AND there's real concurrency
         // (n==1 is already in order). Reset the per-lane cursors per (re)start.
         lane->ordered = (lane->cfg.result_order == "arrival") && n > 1;

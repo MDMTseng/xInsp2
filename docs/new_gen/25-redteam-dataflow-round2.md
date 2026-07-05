@@ -275,7 +275,7 @@ pop — producers re-check their predicate under the lock, so the mild
 thundering-herd is harmless. (Alternatives: a separate cv for the taken-gen wait,
 or enforce single-producer for depth-0.)
 
-### RB2 — depth-0 + `max_parallel>1` runs inspections CONCURRENTLY, breaking the advertised "≤1 in-flight" rendezvous; the advisory misdirects · P2 · **CONFIRMED · disposition DEFERRED (maintainer decision)**
+### RB2 — depth-0 + `max_parallel>1` runs inspections CONCURRENTLY, breaking the advertised "≤1 in-flight" rendezvous; the advisory misdirects · P2 · **CONFIRMED · RESOLVED (Option A: single-worker clamp)**
 
 **Where:** parser advisory `xi_pm_project.hpp` (advisory-only, NOT clamped);
 `spawn_group_pool_` spawns `max_parallel` workers regardless of depth; the
@@ -287,15 +287,24 @@ doc 24 / every rendezvous comment promising "strict 1-in-flight lock-step," and 
 benign user who chose `queue_depth:0` to serialize a non-reentrant script gets a
 data race. Worse, the advisory says `max_parallel>1 will sit idle` — FALSE, they
 run concurrently — so the guardrail certifies an unsafe config as safe.
-**Options (unresolved):** (a) clamp a depth-0 lane's worker count to 1 in
+Options considered: (a) clamp a depth-0 lane's worker count to 1 in
 `spawn_group_pool_` so the 1-in-flight guarantee is REAL (distinct from the
 parser config-clamp that was intentionally removed — this makes the runtime
 DELIVER the promised semantics); (b) keep depth-0+N as "buffer≤1, N concurrent"
 but rewrite the advisory + doc 24 to state the truth (depth-0 bounds queue depth,
 not concurrency); (c) release-on-complete N-way rendezvous (large — the
 "six problems"; the plugin-semaphore path already achieves the same effect).
-**Decision deferred to the maintainer.** Until resolved, doc 24's "strict
-1-in-flight" wording holds ONLY for `max_parallel:1` (the intended/documented use).
+
+**RESOLVED — Option A (maintainer choice).** `spawn_group_pool_` now spawns a
+SINGLE worker for any `queue_depth:0` lane regardless of `max_parallel`
+(`if (lane->cfg.queue_depth == 0) n = 1;`), so the strict-serial 1-in-flight
+rendezvous is genuinely delivered and a non-reentrant script chosen for
+serialization is never raced. The config value is left as-set (not the removed
+parser config-mutation); the advisory + doc 24 now state the clamp honestly. This
+does NOT constrain multi-threaded work — that lives on the plugin-semaphore path
+over a normal `max_parallel:N` lane (doc 24 §4 / `qa_semaphore_queue`), which the
+core emit gate orders for the sink exactly as before. doc 24's "strict 1-in-flight"
+wording now holds unconditionally for depth-0.
 
 ### RB3 — `block`/depth-0 stop-wake degrades to a SILENT drop (no `XI_SYS_DROPPED`, no counter) · P3 · **PLAUSIBLE** · fixed alongside F2
 
