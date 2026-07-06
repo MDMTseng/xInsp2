@@ -20,6 +20,7 @@
 // MSVC-only — no-op everywhere else.
 //
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -96,11 +97,26 @@ inline bool recover_seh_stack(const seh_exception& e) { return recover_seh_stack
 // shared xi_parallel / xi_async workers can hard-exit without a service dependency.
 inline constexpr int kStackGuardExitCode = 0x5744;
 
+// Layering-safe pre-_Exit drain hook. recover_seh_stack_or_die may hard-exit while
+// a SIBLING thread is mid-write_minidump; a bare _Exit truncates that dump + drops
+// its .json sidecar. The drain (xi::crash::await_dump) that lets the sibling finish
+// lives in xi_crash_dump.hpp — the HIGHER layer (it #includes THIS file), so this
+// header cannot call it directly without a circular include. Instead the higher
+// layer registers await_dump here as a void()-thunk at crash::install(); the helper
+// below CALLS it (if non-null) right before _Exit. Null until registered (and
+// off-Windows, where the guard page can't fail and no _Exit path is reached), so
+// the default behavior is an immediate exit with no drain.
+inline std::atomic<void(*)()>& seh_predump_drain_hook() {
+    static std::atomic<void(*)()> hook{nullptr};
+    return hook;
+}
+
 // recover_seh_stack(), plus the unrecoverable-guard-page policy: if the guard page
 // cannot be restored the thread's stack is compromised and cannot be run again, so
 // we hard-exit crash-safely for the FE supervisor to respawn — the same trade the
-// watchdog HARD trip makes (log + std::_Exit, skipping dtors a wedged thread could
-// deadlock on). Used at every seh_exception catch site whose thread survives to run
+// watchdog HARD trip makes (drain an in-flight sibling minidump via the drain hook,
+// log, then std::_Exit, skipping dtors a wedged thread could deadlock on). Used at
+// every seh_exception catch site whose thread survives to run
 // more untrusted code. On the reset-SUCCESS path it returns and the caller proceeds
 // exactly as before (the fault is already recorded / policy already applied).
 inline void recover_seh_stack_or_die(unsigned int code, const char* where) {
@@ -111,6 +127,10 @@ inline void recover_seh_stack_or_die(unsigned int code, const char* where) {
         where ? where : "worker", (unsigned)kStackGuardExitCode);
     std::fflush(stderr);
     std::fflush(stdout);
+    // Let a sibling thread's in-flight minidump land before we _Exit (H7). The
+    // hook is xi::crash::await_dump when registered; null → immediate exit.
+    if (auto drain = seh_predump_drain_hook().load(std::memory_order_acquire))
+        drain();
     std::_Exit(kStackGuardExitCode);
 }
 inline void recover_seh_stack_or_die(const seh_exception& e, const char* where) {

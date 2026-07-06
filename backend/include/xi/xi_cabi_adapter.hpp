@@ -276,6 +276,30 @@ public:
         // call it ungated (concurrent with process). Absent → gated set_def / no-op.
         prepare_fn_  = reinterpret_cast<xi_plugin_prepare_fn>(GetProcAddress(dll_, "xi_plugin_prepare"));
         commit_fn_   = reinterpret_cast<xi_plugin_commit_fn>(GetProcAddress(dll_, "xi_plugin_commit"));
+        // prepare/commit are a CONTRACT PAIR — XI_PLUGIN_STAGED exports both, and the
+        // staged path is only coherent when both are present: prepare() stages into the
+        // background slot and commit() swaps it live. A plugin that exports exactly ONE
+        // tears its config either way: commit-only → prepare falls to the gated
+        // InstanceBase::prepare (immediate-live), then commit() swaps a never-prepared
+        // staging slot over live (torn/reverted config, yet commit_group still ok:true);
+        // prepare-only → commit() no-ops, so staged config silently never goes live.
+        // Fail loud AND make it safe: null BOTH so the instance degrades to the coherent
+        // gated InstanceBase::prepare(=set_def)/commit(=no-op) path — an immediate-live
+        // swap with no torn double-slot — instead of the half-wired staged path.
+        if ((prepare_fn_ != nullptr) != (commit_fn_ != nullptr)) {
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                std::fprintf(stderr,
+                    "[xinsp2] plugin '%s' exports only %s of the xi_plugin_prepare/"
+                    "xi_plugin_commit pair — CONTRACT VIOLATION; disabling the staged "
+                    "config path for it (falling back to the gated set_def path). "
+                    "Export BOTH (XI_PLUGIN_STAGED) or NEITHER.\n",
+                    plugin_name_.c_str(),
+                    prepare_fn_ ? "xi_plugin_prepare" : "xi_plugin_commit");
+            }
+            prepare_fn_ = nullptr;
+            commit_fn_  = nullptr;
+        }
         // polaris2 wave-2 (synthesis §3 pure-door dry run): the plugin's OWN
         // capability door — the symmetric mirror of host->get_interface, resolved
         // via GetProcAddress like prepare/commit (ABI-additive). Probe it once for

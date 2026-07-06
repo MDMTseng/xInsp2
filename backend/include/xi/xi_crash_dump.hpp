@@ -196,7 +196,10 @@ inline void set_culprit(const char* instance, const char* plugin,
 //        must NOT re-enter dbghelp (concurrent calls corrupt or HANG the dump —
 //        and a hang means the process never self-exits).
 //   H7 — the watchdog / drain / overflow hard-exit paths call await_dump() before
-//        std::_Exit so an in-flight dump can finish rather than be truncated.
+//        std::_Exit so an in-flight dump can finish rather than be truncated. The
+//        STACK_OVERFLOW helper (xi::recover_seh_stack_or_die, xi_seh.hpp — a LOWER
+//        layer that can't include this one) reaches await_dump indirectly: install()
+//        registers it into xi::seh_predump_drain_hook() as a void()-thunk.
 // Portable atomic so the helpers compile off-Windows too (where the flag never
 // sets and await_dump() is an immediate no-op).
 inline std::atomic<long> g_dump_in_progress{0};
@@ -578,6 +581,13 @@ inline void install() {
     _set_invalid_parameter_handler(on_invalid_parameter);
     _set_purecall_handler(on_purecall);
     reserve_fault_stack();   // BUG 2: dump on a main-thread stack overflow
+    // H7 (layering-safe): xi::recover_seh_stack_or_die (xi_seh.hpp, the LOWER layer)
+    // hard-exits on an unrecoverable STACK_OVERFLOW guard page. Give it await_dump so
+    // a sibling thread's in-flight minidump lands before that _Exit instead of being
+    // truncated. It can't call await_dump directly (circular include), so we inject
+    // it here — the one-time crash init — as a void()-thunk into the drain hook.
+    seh_predump_drain_hook().store(+[]{ await_dump(10000); },
+                                   std::memory_order_release);
 }
 
 #else  // !_WIN32
