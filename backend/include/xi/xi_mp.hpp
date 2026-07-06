@@ -41,6 +41,7 @@
 #ifndef XI_MP_HPP
 #define XI_MP_HPP
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -534,7 +535,13 @@ private:
                 // holds zero-copy views into the input buffer, valid for the
                 // duration of this walk.
                 std::unordered_set<std::string_view> seen;
-                seen.reserve(e.len);
+                // Clamp to what the buffer can actually hold: e.len is the
+                // DECLARED map count (up to 2^32-1 for map32) and a bogus huge
+                // count would otherwise reserve tens of GB before a single
+                // entry is read -> bad_alloc -> abort. Each entry costs >= 1
+                // byte, so remaining() is the true upper bound (matches the
+                // container-loop DoS note above).
+                seen.reserve(std::min<size_t>(e.len, remaining()));
                 for (uint32_t k = 0; k < e.len; ++k) {
                     Element key;
                     s = next(key);

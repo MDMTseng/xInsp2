@@ -134,9 +134,16 @@ struct StreamConsumer {
             // tagged for ANOTHER stream, or a stream-less fault, is NOT this
             // consumer's poison: ignore it, don't clear the in-progress
             // reassembly (a shared lane carries faults for every stream on it).
+            //
+            // A fault must NEVER bind this consumer's identity. While still
+            // UNBOUND (id < 0) a foreign fault delivered first would otherwise
+            // latch us onto the WRONG stream and then, below, immediately kill
+            // it — reintroducing cross-stream contamination in the unbound
+            // window. Stream identity is latched ONLY from a $stream-bearing
+            // data chunk (the non-fault path below). Until then every fault,
+            // including one that happens to name a real stream, is foreign.
             const long long fsid = p.get_i64("$stream").value_or(-1);
-            if (id < 0 && fsid >= 0) id = fsid;      // first thing seen binds the stream
-            if (fsid >= 0 && fsid == id)
+            if (id >= 0 && fsid == id)               // ours only once bound
                 abort(std::string(p.fault_reason().value_or("fault")));
             return;
         }

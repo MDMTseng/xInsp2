@@ -346,18 +346,28 @@ just be a canonical-mp schema riding the pack — the handle pattern exists for
 objects where one construction amortizes many queries, never as a general
 object-passing mechanism.
 
-### The five rules
+### The six rules
 
 1. **All alloc/free inside the owner's DLL.** The object never crosses the
    ABI; only handle entries and query answers do. (The per-DLL-singleton
    lesson — a foreign deleter is a layout bomb.)
 2. **Immutable after construction** — the seal-semantics extension. Mutation
    = build a new object (and get a new handle). This is what makes concurrent
-   consumers, dedup, and byte-deterministic dumps trivially sound.
+   consumers, dedup, and byte-deterministic dumps sound *at the level of
+   content*. Note the scope: immutability protects the object's *bytes* from a
+   concurrent writer; it does NOT protect its *storage* from a concurrent free.
+   A reader mid-deref while another lane recycles the slot is a
+   free-during-use, and immutability says nothing about it — that hazard is
+   rule 6's job, not this rule's.
 3. **Lifetime = ring/generation lease (pre-v12).** The owner keeps a ring of
    N slots; under pressure it recycles (LRU in the demo) and **bumps the slot
    generation from a monotonic, never-reused source** — never reused even
    across instance reinit, so a stale handle can never alias a fresh object.
+   Scope again: the generation lease governs only *future* resolves — a
+   `gen`-mismatched handle fails its NEXT resolve cleanly. It does nothing for
+   a reader already past the check and mid-deref when the slot is recycled; the
+   lease can never "can't alias" its way out of an in-flight free. That gap is
+   closed by rule 6, not by the generation bump alone.
    A resolve against a recycled lease answers a normal sealed
    `$fault "stale_handle"` pack (funnel rc stays 0 — staleness is capability
    contract, not transport verdict). Owner sweep on crash: the ring dies with
@@ -371,6 +381,20 @@ object-passing mechanism.
    sink-side); it never stores the handle itself.
 5. **Wrong-type resolve → `$fault "wrong_type"`.** A handle is only
    meaningful to its owning namespace; owners must check `type` before `id`.
+6. **Resolve must PIN the object for the duration of the call.** The load-
+   bearing safety mechanism — the one that actually prevents the cross-lane
+   free-during-use rules 2 and 3 do not — lives here. A resolve takes a
+   *refcount / deferred-free hold* on the object (the demo: a `shared_ptr`
+   copy, `lut_owner.cpp:367-385`) **atomically with the generation check, under
+   the same lock**. The generation lease governs FUTURE resolves only; it never
+   protects a resolve already in flight. Because the hold is taken under the
+   lock, a concurrent recycle on another lane cannot free the object out from
+   under a running query/dump — the object dies only when the last in-flight
+   reader drops its hold, still inside the owner's DLL (rule 1 intact). Resolve
+   to a *raw* pointer and free-on-recycle instead, and rules 1-5 followed
+   literally still give you a textbook cross-lane UAF / double-free. In the
+   `gpu.buf` VRAM sketch below this is not optional decoration: recycle there is
+   `cudaFree`, so an unpinned in-flight resolve is a device-memory UAF.
 
 ### What the demo proves (all green)
 
@@ -383,13 +407,26 @@ across recycles; ring-pressure recycle and `recycle_all` both → clean
 out-of-range handles → `bad_handle`; handle-`$v` gate; generations strictly
 increasing across rebuilds.
 
+> **Caveat on the "builds pinned at 1" headline.** The demo's dedup memo
+> checks `dedup_` under the lock, then *drops the lock to construct* and
+> re-leases without re-checking (`lut_owner.cpp:427-479`). The counter stays at
+> 1 because the two consumers are *serialized* — one builds and hops the handle
+> before the other resolves. Two genuinely concurrent same-content builds both
+> miss the memo, both construct, and both lease: one object is orphaned and the
+> build counter reads 2. So the guarantee is "builds once **per content, absent
+> a construction race**," not an unconditional once. Tightening it needs a
+> re-check (or an in-flight-build placeholder) under the second lock; the demo
+> does not, and that is fine for a demo — just don't read the headline as a
+> concurrency invariant.
+
 ### The GPU/VRAM variant (sketch — discussion-grade, NOT scheduled)
 
 The same convention extends to device memory with a **device pool owner** —
 a type-owner lib plugin owning a VRAM arena (e.g. `gpu.buf`): CUDA/D3D12
 allocations never cross the ABI; packs carry
 `{ "type": "gpu.buf", "id", "gen", "$v", "dev": <ordinal>, "event": <i64> }`.
-Two deltas on top of the five rules:
+Two deltas on top of the six rules (rule 6's pin becomes a device-lifetime
+hold — a deferred `cudaFree` gated on the last reader's release):
 
 - **`event` field for sync**: the producer records a fence/event id at
   enqueue; a consumer capability waits on it before touching the buffer —
