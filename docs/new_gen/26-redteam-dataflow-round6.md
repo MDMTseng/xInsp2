@@ -733,6 +733,22 @@ product fully supports.
 ---
 ---
 
+> **ROUNDS 9 & 10 ALL FIXED @ `9712aab`..`495f220` (2026-07-06, full 8-stage gate
+> green).** O2 (the P1) → app-team `9712aab` moves `g.dismiss()` to AFTER
+> `close_project`/`open_project` so the detached-launch pause holds through the
+> FreeLibrary (use-after-unload closed; RT5/J2/J3/L1 family's 2nd P1). N1 (P2) →
+> `evict_machine_provider_locked_` now `sweep_caps_for(owner)` synchronously at
+> eviction (verified: doesn't break an in-flight pinned cap call, later dtor sweep is
+> an idempotent no-op) — the ESHAPE burst window collapses to zero. O1 (P3, a hole in
+> the round-4 H7 fix) → a layering-safe `seh_predump_drain_hook` lets
+> `recover_seh_stack_or_die` drain an in-flight sibling minidump before `_Exit` (+ the
+> two overclaiming comments corrected). O3 (P3) → an unpaired prepare/commit export
+> now warns once + degrades to the coherent gated path (no torn swap). N2 (doc 14 —
+> added rule 6: resolve must pin). N3 (`xi_mp` reserve clamped to bytes-remaining).
+> N4 (`qa_pack_stream` — a fault no longer binds an unbound consumer's stream id).
+> *(Per the standing lesson: NOT stamping the whole sweep "closed" — treated as
+> ongoing.)*
+
 # Round 9 — net-new surfaces (autoload · stream · msgpack codec · resource-handle)
 
 **Goal:** four surfaces rounds 2–8 never swept — three of them (machine-autoload,
