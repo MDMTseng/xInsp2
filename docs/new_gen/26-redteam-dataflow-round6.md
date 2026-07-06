@@ -45,6 +45,37 @@
 > rounds 2–8 findings are all currently FIXED/DEFUSED/REFUTED, but a fresh angle has
 > reopened a "closed" item twice now (G4 → still G4); treat the sweep as ongoing.**
 
+> **Round 9 (2026-07-06) — four net-new surfaces (autoload · stream · msgpack · resource-handle).**
+> No UAF. **N1 (P2, CONFIRMED)**: the machine-autoload evict/reinstate path updates
+> `InstanceRegistry` synchronously but the `CapRegistry` sweep rides the pin-deferrable
+> adapter dtor → a transient window where a capability with a LIVE provider returns
+> `ESHAPE` on every call (dropped imgcodec decode/encode → frames fail to inspect);
+> self-heals when the in-flight cap-call pin drops. The RT5/L1 lifecycle-teardown family
+> again — but as a *lost-result*, not a UAF (the pin that prevents the UAF widens the
+> window). **N2 (P3 doc)**: the resource-handle "five rules" omit the resolve-time pin
+> that is the sole reason `lut_owner` is safe → seeds a cross-lane UAF into future
+> type-owner plugins (esp. the GPU `cudaFree` variant the doc says to copy "verbatim").
+> **N3 (P3 robustness, over the benign edge)**: `xi_mp.hpp` `canonicalize` `seen.reserve(e.len)`
+> unbounded from an unchecked map count → wild-alloc abort at the "untrusted bytes" door.
+> **N4 (P3 example)**: `qa_pack_stream`'s unbound consumer binds its stream id from a fault
+> → a foreign fault kills the wrong stream. Full writeup in the **Round 9** section.
+
+> **Round 10 (2026-07-06) — a second P1.** Four un-swept surfaces. **O2 (P1, CONFIRMED)**:
+> `close_project`/`open_project` are the only two lifecycle handlers that release the
+> detached-launch pause (`g.dismiss()`→`unpause`) *before* their FreeLibrary
+> (`service_cmd_lifecycle.cpp:896/786` vs the teardown at `:904/:809`); every sibling holds
+> the guard across the op. A source-emit thread that snapshotted the bus sink before the
+> quiesce's `clear_sink` then launches a detached one-shot after the pause is dropped —
+> `inflight.launch` sees `paused_==0` → the inspect runs concurrently with the FreeLibrary →
+> **call into an unmapped plugin DLL** (use-after-unload; worse than L1 — the `shared_ptr`
+> pin can't defend an unmapped `process_fn_`/`destroy_fn_`). Same RT5/L1 family — the pause
+> is established but released one step too early. Fix: move `dismiss()` to after the teardown.
+> **O1 (P3)**: the H7 await-dump fix missed the shared `recover_seh_stack_or_die` `_Exit`
+> (`xi_seh.hpp:114`, ~18 call sites) → a concurrent minidump is truncated (+ 2 doc defects
+> asserting it holds). **O3 (P3)**: no prepare/commit export-pairing check → a benign-but-buggy
+> plugin exporting only one gets torn/lost live config. Cap shadow-stack REFUTED clean. Full
+> writeup in the **Round 10** section.
+
 # 26 — Red-team data-flow findings, round 6 (peripheral primitives & egress)
 
 **Threat model (unchanged from doc 25):** BENIGN plugins + BENIGN users. Only
@@ -698,3 +729,351 @@ is an invariant the codebase now depends on implicitly.
 one that matters is **M1: a "closed" finding (G4) is not actually closed** — the fix was
 documentation, and the documentation is wrong for the multi-group configuration the
 product fully supports.
+
+---
+---
+
+# Round 9 — net-new surfaces (autoload · stream · msgpack codec · resource-handle)
+
+**Goal:** four surfaces rounds 2–8 never swept — three of them (machine-autoload,
+resource-handle lease, the stream chunking convention) landed *after* most rounds.
+Threat model unchanged (benign, stress/race, doc defects count). Each probe had to
+produce a concrete free/use interleaving or REFUTE its slice.
+
+**Headline:** no UAF this round — but **N1 (P2) is a genuine lost-result-under-load in
+the machine-autoload path** (the RT5/L1 family surfaced again, this time NOT as a UAF
+but as a two-registry ordering inversion), and N2/N4 are pattern/spec defects that
+*seed* concurrency bugs into future code. N3 is a robustness gap at the ingress door
+that sits just over the edge of the benign mandate (flagged honestly).
+
+## N1 — machine-autoload evict/reinstate: InstanceRegistry updated synchronously but CapRegistry sweep rides the (pin-deferrable) adapter dtor → transient `ESHAPE` burst on a capability that has a LIVE provider — **P2 (lost result under load); CONFIRMED**
+`backend/include/xi/xi_pm_load.hpp:62-72` (`evict_machine_provider_locked_`),
+`backend/include/xi/xi_cabi_adapter.hpp:309` (`sweep_caps_for` in `~CAbiInstanceAdapter`),
+`backend/include/xi/xi_cap_abi.hpp:281-285` (`f_cap_call` lookup→resolve→ESHAPE),
+`:114-119` (ETAKEN→shadow), `:180-189` (promote-on-sweep).
+
+The **4 UAF hypotheses were REFUTED** — `f_cap_call`'s `resolve_provider_` pins the whole
+adapter via a `shared_ptr` copy taken under `InstanceRegistry`'s mutex, so an evict can't
+free `inst_` under a running handler; the reinit-gate + monotonic-owner-id + owner-match
+close the reinstate/promote/reload races into a clean `ESHAPE`, never a wrong/dead call.
+
+But that same pin exposes a **registry inversion**. `evict_machine_provider_locked_`
+removes the provider from `InstanceRegistry` **synchronously** (`:70`, deliberately, "so
+the funnel's `resolve_provider_` can't hand it out mid-teardown") while the `CapRegistry`
+sweep rides the adapter dtor (`:71` shared_ptr drop → `~CAbiInstanceAdapter` →
+`sweep_caps_for`). A concurrent in-flight cap call holds a pin → the dtor (and thus the
+cap sweep) is **deferred arbitrarily long**. During that window:
+
+1. Worker T-B is mid-`f_cap_call("X")` on machine provider M (owner 5), holding `pin_M`
+   inside a HEAVY handler.
+2. Poll thread runs `create_instance` of the same autoloaded plugin →
+   `evict_machine_provider_locked_` removes M from `InstanceRegistry`. `~M` is
+   pin-deferred, so `CapRegistry["X"]` **still names owner 5**.
+3. The project factory's ctor calls `f_cap_register("X", …)`. "X" is still held by owner
+   5 → `ETAKEN` → filed as a **shadow**, not active.
+4. **Window:** `CapRegistry["X"]` → owner 5, but owner 5 is gone from `InstanceRegistry`
+   and the live project provider is only a shadow. **Every new `f_cap_call("X")` does
+   `lookup`→ok, `resolve_provider_(5)`→null → `XI_CAP_ESHAPE`** despite a healthy
+   provider existing.
+5. T-B finishes → drops `pin_M` → `~M` sweeps owner 5 → `promote_or_erase_` promotes the
+   project shadow → "X" active again. **Self-heals.**
+
+**Observable:** a transient burst of `ESHAPE` on a capability with a live provider,
+bounded by the longest pre-evict in-flight cap call — and this plane is *explicitly sized
+for HEAVY calls*, so the window is not negligible. For imgcodec that is dropped
+decode/encode → frames that fail to run their inspection (lost results). Reachable by a
+normal `create_instance` / `remove_instance` / `close_project` / `reload_machine_provider`
+racing dispatch — all four share the inversion. Not a UAF, not permanent. Single-threaded
+`test_cap_autoload` misses it (no pin is ever held across an evict, so the window has zero
+width). **Fix direction:** make the cap-registry handoff synchronous with the
+InstanceRegistry removal — `evict` should `unregister_all_for(owner)` (or hand the name
+directly to the incoming provider) rather than rely on the deferred dtor sweep; that
+collapses the window to zero and removes the ETAKEN-shadow detour.
+
+## N2 — resource-handle convention: the "five rules" omit the ONE rule that makes the demo safe (the resolve-time pin), and tells the next owner to copy the lease "verbatim" → seeds a cross-lane UAF into future type-owner plugins — **P3 (doc/spec defect); CONFIRMED**
+`docs/new_gen/14-lib-plugin-capability-plane.md:349-373` (the five rules) vs
+`plugins/lut_owner/lut_owner.cpp:367-385` (`resolve_` pins a `shared_ptr` copy under
+`mu_`, atomically with the gen check) and `:386-408` (the `gpu.buf` extrapolation).
+
+`lut_owner` itself is **sound** — I refuted every UAF/torn/ABA candidate: `resolve_`
+returns `s.obj` (a `shared_ptr<const Lut>` **copy**) under `mu_`, so a concurrent
+`recycle_locked_` (`s.obj.reset()` under the same `mu_`) drops the ring's ref while the
+in-flight reader keeps the object alive via its copy; generations come from a
+DLL-lifetime monotonic `atomic<int64_t>`, minted once, never reused → no stale-aliases-live.
+
+The defect is **pattern-level**. The convention credits concurrency-soundness to **rule 2
+(immutable — "what makes concurrent consumers … trivially sound")** and **rule 3 (the
+ring/generation lease — "a stale handle can never alias a fresh object")**. Neither
+prevents a free-during-use UAF: immutability protects object *content*, not its *storage*;
+the gen check only fails a **future** resolve, doing nothing for a reader that already
+passed the check and is mid-deref when another lane recycles the slot. The actual
+load-bearing mechanism — **the `shared_ptr` pin taken under the lock at resolve** — is in
+none of the five rules; it lives only in a private impl comment (`lut_owner.cpp:68-72`). A
+future owner implementing rules 1-5 literally but resolving to a raw pointer and freeing on
+recycle (fully rule-compliant) has a textbook cross-lane UAF/double-free. The doc's own
+`gpu.buf` VRAM sketch says the pattern carries over "verbatim … ring/generation lease over
+the arena" where recycle = `cudaFree` — with no `shared_ptr` analogue, that is a
+device-memory use-after-free under ring pressure + concurrent consumers. **Fix:** add a
+sixth rule — *"Resolve must pin the object (refcount / deferred-free) for the duration of
+the call, taken atomically with the gen check under the same lock; the generation lease
+governs future resolves only, not an in-flight one"* — and correct the rule-2/rule-3
+"trivially sound" claims. **Secondary (P3):** `lut_owner.cpp:427-479` `build_` checks dedup,
+constructs outside the lock, then re-leases without re-checking dedup → two concurrent
+same-content builds both miss and double-build (one orphaned duplicate), contradicting the
+doc's "build counter pinned at 1" / "builds ONCE". Not memory-unsafe; doc overstatement.
+
+## N3 — `xi_mp.hpp` `canonicalize()`: unbounded `seen.reserve(e.len)` from an unchecked map count → wild allocation → process abort — **P3 (robustness / doc-invariant mismatch; trigger is malformed input — over the benign edge, flagged)**
+`backend/include/xi/xi_mp.hpp:536-537` (the `Kind::Map` case in `walk_canon`) vs the
+codec's own "not a DoS" comment `:452-455`, reached from `xi_ingress.hpp:104`
+(`canonicalize_entry`, the door the header at `:70` labels the **"untrusted bytes"**
+boundary).
+
+`walk_canon` does `std::unordered_set<std::string_view> seen; seen.reserve(e.len);` where
+`e.len` is the declared map count (up to `0xFFFFFFFF` for `map32`), **before** the loop
+reads a single entry. `reserve(0xFFFFFFFF)` requests tens of GB → `std::bad_alloc` out of a
+`noexcept`-free path with no caller try/catch → process abort (or OOM thrash on an
+overcommit allocator). A 5-byte buffer `DF FF FF FF FF` triggers it. The codec's **own**
+comment at `:452-455` asserts "a bogus huge count is NOT a DoS … bounded by the buffer
+size, not the declared count" — true for the *loop* (and for the sibling `validate()`,
+which has no `reserve`), but the strict `canonicalize()` path violates the very invariant
+the comment claims. Every *offset/payload* read in the file is correctly bounds-checked; this
+`reserve` is the sole gap.
+
+**Scope caveat (honest):** the trigger requires a *malformed* count field, which is
+malicious-input hardening — **outside** the benign stress/race mandate. Under benign
+producers `e.len` is the real (small) count. Reported anyway because (a) the codebase itself
+labels this door "untrusted bytes," so the hole is a legitimate hardening gap *there*, (b) a
+benign disk/wire corruption of a replay file is a plausible non-adversarial path, and (c) it
+defeats the codec's own documented DoS-safety guarantee and the fix is one line:
+`seen.reserve(std::min<size_t>(e.len, remaining()));`.
+
+## N4 — `qa_pack_stream` example: an UNBOUND consumer binds its stream identity from a FAULT → a foreign fault delivered first kills the wrong stream (reintroduces the F3 contamination in the unbound window) — **P3 (example / teaching-pattern defect); CONFIRMED**
+`examples/qa_pack_stream/inspect.cpp:137-140` (the F3 fault branch).
+
+The core does **not** reassemble streams — `$stream/$part/$eof` is a pure convention
+(`xi_pack_contract.hpp:63-72`); reassembly lives entirely in the script, so the
+shared-buffer / unbounded-growth / unlocked-map hunt items are N/A to core (verified: the
+only host-side reassembly is the WS RFC-6455 fragment buffer, which is poll-thread-only +
+cap-enforced + reset on close — sound). The defect is in the **example** consumer that
+authors copy:
+
+```cpp
+const long long fsid = p.get_i64("$stream").value_or(-1);
+if (id < 0 && fsid >= 0) id = fsid;      // "first thing seen binds the stream"
+if (fsid >= 0 && fsid == id) abort(...); // treat as this stream's poison
+```
+
+On a shared lane carrying two streams A and B: an A-consumer still **unbound** (`id<0`)
+that sees a legitimate fault for stream **B** first binds `id = B` (line 138), then aborts
+itself with B's reason (line 140); A's real chunks then arrive with `sid != id` →
+`stream_mismatch` on every one → **stream A is lost, carrying B's fault reason**, though A
+never faulted. This is exactly the cross-stream contamination the F3 fix prevents *after*
+binding, reintroduced through the *unbound* window — the `id<0` branch binds identity from
+the fault itself, so an unbound consumer can't tell "my poison" from "someone else's." QA
+misses it because every test feeds a real chunk 0 before any fault. The doc-18-canonical
+design (a state machine **per `$stream` id**, keyed by the arriving chunk) does not hit
+this. **Fix direction:** bind `id` only from a non-fault chunk; ignore any fault while
+`id<0`. **Minor (P3 spec-tidiness):** `propagate_fault` carries `$eof` onto the minted
+fault pack (`xi_pack_contract.hpp:156-159`), so a non-last pack can carry `$eof=true`,
+nominally violating doc-18's "`$eof` on the last chunk only" — harmless because every
+compliant consumer checks `is_fault()` first.
+
+## REFUTED / verified-clean this round
+- **Machine-autoload — 4 UAF hypotheses REFUTED.** The `shared_ptr` pin +
+  `cap_reinit_gate` shared-lock re-lookup + `owner==adapter->owner_id()` match +
+  monotonic-never-reused owner ids close evict-mid-call, reinstate-vs-call,
+  reload-vs-call, and shadow-promotion-vs-call into `ESHAPE`, never a UAF. (Only N1 —
+  the registry-inversion lost-result — survives.)
+- **`lut_owner` resource-handle impl — REFUTED.** gen-wrap/reuse, recycle-during-deref,
+  torn pointer/gen, dump-vs-free all closed by the resolve-time `shared_ptr` pin + the
+  never-reused generation source. (The defect is the *spec*, N2, not the demo.)
+- **msgpack offset/payload reads — REFUTED clean.** `take_be` / `read_str` / `read_bin`
+  / `read_ext` / `read_fixext` all check `remaining()`/`p_>=end_` before advancing; every
+  `(uint32_t)len` narrowing occurs after `len <= remaining()` is proven. No OOB, no
+  size-arithmetic overflow. (Only the `reserve`, N3, is the gap.)
+- **Stream core — REFUTED (nothing to race).** No host/core stream reassembly buffer
+  exists; `propagate_fault` correctly carries `$stream/$part/$eof`; doc-18's lane-config
+  concurrency claims are accurate against `service_dispatch.cpp:356-400` + `xi_emit_gate`;
+  WS fragment reassembly is poll-thread-only and cap-enforced.
+
+## Round-9 disposition
+1. **N1 (P2)** — collapse the autoload registry-inversion window: `evict` should
+   `unregister_all_for(owner)` synchronously with the InstanceRegistry removal, not via the
+   pin-deferrable dtor. Highest priority — lost frames under a normal create/remove-under-load.
+2. **N2 (P3 doc)** — add the sixth "pin at resolve" rule to the resource-handle convention
+   before any new type-owner plugin (esp. the GPU variant) is built off it; fix the
+   rule-2/rule-3 over-credit.
+3. **N3 (P3 robustness)** — one-line `reserve` cap; closes the codec's own documented
+   DoS-safety guarantee at the untrusted-bytes door (over the benign edge, do it opportunistically).
+4. **N4 (P3 example)** — fix the example's unbound-fault binding so authors don't copy the
+   cross-stream-contamination pattern.
+
+**One P2 (N1), three P3 (N2/N3/N4), no UAF.** N1 is the notable one — the un-quiesced /
+non-atomic-lifecycle root cause that produced UAFs in earlier rounds shows up on the newest
+lifecycle path (machine-autoload) as a *lost-result* inversion instead, because the pin that
+now prevents the UAF is what widens the window.
+
+---
+---
+
+# Round 10 — un-swept surfaces (watchdog/_Exit · prepare/commit · cap shadow-stack · project teardown)
+
+**Goal:** four surfaces rounds 2–9 hadn't swept as a unit — the watchdog-slot/`_Exit`/crash-dump
+interplay, the ABI-v7 prepare/commit staged config swap, the cap shadow-stack promote/erase
+machinery (distinct from N1's eviction inversion), and the full project open/close/reload
+teardown ordering. Threat model unchanged.
+
+**Headline: O2 is a CONFIRMED P1** — `close_project`/`open_project` drop the detached-launch
+pause *before* their FreeLibrary, reopening a use-after-**unload** window. Same RT5/J2/J3/L1
+family (a live-DLL teardown without the launch gate held through the unload), and the sweep's
+second P1. Plus O1 (P3 watchdog await-dump hole) and O3 (P3 prepare/commit export pairing).
+The cap shadow-stack machinery REFUTED clean.
+
+## O2 — `close_project` / `open_project` release the detached-launch pause (`dismiss()`→`unpause`) BEFORE the FreeLibrary → a straggler source-emit one-shot calls into an unmapped plugin DLL — **P1 (use-after-unload); CONFIRMED**
+`backend/src/service_cmd_lifecycle.cpp:896` (close) and `:786` (open) — the guard is scoped to a
+throwaway block with `g.dismiss()` **on the same line**, so the pause is dropped before the
+destructive teardown at `:904` / `:809`. Contrast: `dismiss()` (`service_internal.hpp:363-366`)
+calls `g_eng.inflight.unpause()`.
+
+**The gate that gets dropped too early.** `quiesce_dispatch_for_lifecycle_op_`
+(`service_dispatch.cpp:712-746`) is explicit (`:716-723`): a one-shot dispatch runs on a
+**source plugin's own emit thread** (`bus sink → dispatch_one_shot_ → inflight.launch`), not the
+handler thread, so "without this a source emitting mid-op could launch an inspect that calls into
+a DLL being unloaded (use-after-unload). `clear_sink` stops future fires; `pause()+drain()` is the
+Dekker handshake that also catches an emit **already past the sink read but not yet counted**."
+The design REQUIRES `paused_` to stay set through the FreeLibrary — `drain()` alone can't catch
+the not-yet-counted straggler; only the `paused_` bail at `xi_inflight_runs.hpp:73` can.
+
+**Why close/open are the only two that break it.** Every sibling DLL-unloading op holds the
+guard across the destructive call (`remove_instance` `service_cmd_project.cpp:304`,
+`create_instance` `:274`, `rename_instance` `:328`, `set_instance_def`, `commit_group`,
+`commit/discard_working_copy`, `rescan/export/recompile/rebuild`) — their `resume()`/`dismiss()`
+(and its `unpause`) fire *after* the op. Only `close_project`/`open_project` `dismiss()` *before*.
+The intent was benign — `dismiss()` skips the continuous-resume (there is no project to stream
+after a close) — but `dismiss()` *also* unpauses launches, and that side effect drops the gate
+early. `close_project` itself (`xi_pm_project.hpp:66-109`) never touches `g_eng.inflight`, so
+after `dismiss()` there is no protection at all.
+
+**The interleaving (close; open identical):** continuous mode, a source actively emitting.
+1. Source emit thread T (inside the plugin DLL) enters `emit_pack`, snapshots `to_fire = sink_`
+   under `mu_` (`xi_trigger_bus.hpp:157`) — a stack-local `std::function` copy, valid regardless of
+   any later `clear_sink()` — then is descheduled before invoking it.
+2. `cmd_close_project_:896` runs the quiesce: `pause()` (paused_=1) → `clear_sink()` →
+   `stop_dispatch_pool_()` (joins workers, real wall time) → `drain()` returns immediately
+   (`count_==0`, T hasn't launched yet) → returns.
+3. `g.dismiss()` → **`unpause()` → paused_=0**; the block ends.
+4. `:902-903` `clear_sink()`/`reset()` again — a no-op for T (it holds its private `to_fire`).
+5. `:904 close_project()` → `instances.clear()` destroys adapters + owner sweeps, then
+   `FreeLibrary`s the plugin DLLs (`xi_pm_project.hpp:95`).
+6. T resumes, invokes `to_fire(ev)` → `dispatch_one_shot_` → `inflight.launch(...)`. The gate at
+   `xi_inflight_runs.hpp:73` sees `shutting_(false) || paused_(0)` → **both false → detached
+   inspect spawned.**
+7. That inspect runs concurrently with step 5's FreeLibrary. Even if it `find()`-pins the adapter
+   `shared_ptr` before `instances.clear()`, the pin keeps the adapter *object* alive but its
+   `process_fn_`/`destroy_fn_` point into a DLL `FreeLibrary` has now **unmapped** → call into
+   unmapped memory (AV) on `run_pack_door`, and again on the pinned adapter's eventual
+   `~CAbiInstanceAdapter → destroy_fn_`.
+
+**Observable:** access violation calling an unmapped project-plugin DLL (or UAF into a
+freshly-swept pack). This is exactly the use-after-unload the `close_project` comments
+(`xi_pm_project.hpp:72-81`) reason about for the *synchronous* order but miss for the
+*concurrent* detached one-shot the dropped pause lets through. **Worse than L1** — L1 was
+use-after-free of a pack; this is use-after-**unload** of the whole plugin DLL, which the
+`shared_ptr` pin cannot defend. Process-exit is safe (`controlled_shutdown_teardown_` uses the
+*terminal* `begin_shutdown()`, held through FreeLibrary — `service_dispatch.cpp:570,616`); only
+the interactive close/open and the `reopen_fresh_working_copy` reload cycle are exposed.
+Load-sensitive: the window is a single deschedule of T between the sink read and the launch CAS —
+benign under no load, realized under stress (more emit threads than cores). Reproducible via
+`harness_open_close_cycle.py` with a live source emitting at high fps during close/open.
+**Fix:** hold the guard across the teardown like every sibling — move `g.dismiss()` to *after*
+`plugin_mgr.close_project()` (and after `open_project(...)`), so `paused_` stays set through the
+FreeLibrary and a straggler launch bails at `xi_inflight_runs.hpp:73`. (`dismiss()` after the op
+still skips the unwanted continuous-resume.)
+
+## O1 — the H7 fix is incomplete: the shared `recover_seh_stack_or_die` hard-exit omits `await_dump()` → truncates a concurrent minidump — **P3 (forensic loss under double-fault + 2 doc defects)**
+`backend/include/xi/xi_seh.hpp:106-115` — `std::_Exit(kStackGuardExitCode)` at `:114` with no
+`xi::crash::await_dump()` first.
+
+Round-4's H7 added `await_dump(10000)` before every self-inflicted `_Exit` so a sibling thread
+mid-`write_minidump` can finish. It is present at exactly three sites (`service_main.cpp:800`
+watchdog hard trip, `service_inspect.cpp:222` inline stack-overflow, `service_dispatch.cpp:603`
+drain timeout) — but **not** at the shared `recover_seh_stack_or_die` helper, which is the
+unrecoverable-guard-page `_Exit` for ~18 call sites running untrusted plugin/script code
+(`xi_parallel.hpp` OMP worker, `xi_async.hpp` async worker, `xi_cap_abi.hpp` cap handler,
+`service_sinks.cpp` pack door / `exchange`, the `service_cmd_*` prepare/commit/exchange sites).
+Interleaving: an unmanaged plugin thread takes an AV → `SetUnhandledExceptionFilter` →
+`write_minidump` mid-`MiniDumpWriteDump` (slow); concurrently a dispatch worker in that plugin's
+door deep-recurses → `STACK_OVERFLOW` → `_resetstkoflw()` fails → `recover_seh_stack_or_die` →
+immediate `_Exit`. The dump is truncated **and** its `.json` sidecar (written after the `.dmp`)
+is entirely absent → `cmd:crash_reports` finds a dump with no readable report. **Structural, not a
+typo:** `await_dump` lives in `xi_crash_dump.hpp`, which `#include`s `xi_seh.hpp` (the lower
+layer), so the helper can't call it without a layering-safe hook — which is why H7 patched the
+three higher-level call sites and missed the shared helper. **Doc defects:** `xi_crash_dump.hpp:198-199`
+claims "the watchdog / drain / **overflow** hard-exit paths call `await_dump()` before `std::_Exit`"
+— false for this overflow helper; `xi_seh.hpp:99-105` claims the helper makes "the same trade the
+watchdog HARD trip makes," but the watchdog trade includes `await_dump` and this one omits it.
+**Fix:** register a drain callback (function-pointer / `std::atomic`) from the crash layer into the
+seh layer, or lift `await_dump` into each `recover_seh_stack_or_die` call site.
+
+## O3 — no prepare/commit export-pairing validation → a benign-but-buggy plugin exporting only one of the pair gets torn / lost live config — **P3 (missing load-time contract check)**
+`backend/include/xi/xi_cabi_adapter.hpp:277-278` (independent `GetProcAddress` for `prepare_fn_`
+and `commit_fn_`), `:433` (prepare's staged-vs-gated decision), `:447` (commit's) — the decision is
+made **independently** in each method, and nothing at load enforces the two exports come as a pair
+(the pairing lives only inside the `XI_PLUGIN_STAGED` macro). Constructible in-tree:
+`backend/tests/reentry_probe.cpp:48` exports `xi_plugin_commit` with no `xi_plugin_prepare`.
+
+- **commit-only plugin:** `prepare()` sees `prepare_fn_==null` → falls to the gated
+  `InstanceBase::prepare` (`set_def`), which makes the new config immediately live; the plugin's
+  staging slot is never populated. `commit_group` → `commit()` sees `commit_fn_!=null` → swaps the
+  **never-prepared** (empty/stale) staging slot over live → **torn / reverted config**, and
+  `commit_group` still reports `ok:true` with `get_def()` echoing garbage. (And because `prepare_fn_`
+  is null, the `set_on_fault` combo-guard does NOT downgrade reinit, so `on_fault=reinit` would
+  restore `committed_def_` and mask it on the next fault.)
+- **prepare-only plugin:** prepare stages + caches `committed_def_`, then `commit()` no-ops
+  (`commit_fn_==null`) → the staged config **never goes live**, silently dropped.
+
+Not a race (the three race hypotheses — commit-vs-`process`, ungated `committed_def_` write vs
+reinit read, back-to-back prepare on the single slot — are all **REFUTED** by the single-threaded
+command plane + the reinit combo-guard). It is a missing contract check reachable by a benign-but-
+buggy plugin. **Fix:** at adapter construction, if exactly one of `prepare_fn_`/`commit_fn_` is
+present, refuse the load with a reason (like the ABI/caps gates) or force both null (drop to the
+fully-gated `set_def` path) and warn, so the staged-vs-gated decision can never differ between
+`prepare()` and `commit()`.
+
+## REFUTED / verified-clean this round
+- **Watchdog per-inspect slot — REFUTED.** Slot claim is a `compare_exchange_strong(0, deadline)`
+  (no double-arm); disarm stores 0 then the owner sets `wd_slot=-1` (no free-while-arm overlap);
+  the hard-trip matches on slot index AND exact deadline value (a reused slot's future deadline
+  can't equal the stuck one's stale deadline — no ABA kill); `wd_deadlines` is
+  `atomic<int64_t>[64]`, 8-byte aligned (no torn read); disarm-vs-fire only kills a target that
+  stayed overrun through the full 1000ms cooperative grace (documented policy, not a spurious kill).
+- **Cap shadow-stack promote/erase — REFUTED clean.** Every mutator + `lookup` under the single
+  `mu_`; `lookup` copies the whole `Entry` by value (no torn owner/handler); `unregister`+`promote`
+  are one critical section; `unregister_all_for` phase-1 (drop this owner's shadows) precedes
+  phase-2 (promote), so a swept owner's shadow can't reinstate a dead owner; per-owner dedup bounds
+  the shadow list (no refcount under/overflow); a promote-to-dead-owner is only ever the *transient*
+  N1 ESHAPE (self-heals via the pending sweep), never permanent. Two load-bearing invariants to
+  protect under future edits: (1) phase-1-before-phase-2 in `unregister_all_for`; (2) every instance
+  destruction routes through `sweep_caps_for`. *(Non-finding, out of threat model: `CapRegistry::instance()`
+  re-flags `g_cap_registry_alive=true` on every call and only the sweep path checks it, so the
+  funnel/registration entry points call `instance()` unguarded — a process-exit static-destruction-order
+  concern, not a stress/race defect.)*
+- **prepare/commit compliant path — REFUTED** (single-threaded command plane + reinit combo-guard;
+  only O3, the asymmetric-export case, survives).
+
+## Round-10 disposition
+1. **O2 (P1) — FIX APPLIED (local, uncommitted).** `service_cmd_lifecycle.cpp`: the
+   `close_project`/`open_project` handlers now keep the quiesce guard alive across the teardown
+   and call `dismiss()` *after* `plugin_mgr.close_project()` / `open_project(...)`, so `paused_`
+   holds through the FreeLibrary and a straggler one-shot bails at `xi_inflight_runs.hpp:73`.
+   `dismiss()` after the op still skips the unwanted continuous-resume (close = no project;
+   open = new project autostarts). Only behavioral change: the launch pause is released a few
+   statements later. Verified: `xinsp_backend` builds+links clean; `project_versioning` +
+   `lifecycle_asserts` ctests pass. Full 8-stage gate NOT yet run; not committed — awaiting review.
+2. **O1 (P3)** — a layering-safe drain hook so `recover_seh_stack_or_die` awaits an in-flight dump;
+   fix the two doc defects that assert it already does.
+3. **O3 (P3)** — reject or normalize an asymmetric prepare/commit export at load.
+
+**One P1 (O2), two P3 (O1/O3).** O2 is the sweep's second P1 and the same root cause as L1 — a
+live-DLL teardown that lets a straggler in — this time not because the quiesce was missing (L1) but
+because it was *released one step too early*.
