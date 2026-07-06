@@ -11,6 +11,7 @@
 
 #include <yyjson.h>
 #include <xi/xi_metrics.hpp>
+#include <xi/xi_cap_abi.hpp>   // R2: cap_abi_detail::CapMetrics for cmd:metrics "capabilities"
 #include <xi/xi_graph_capture.hpp>
 
 #include "service_internal.hpp"
@@ -400,6 +401,15 @@ void cmd_metrics_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) 
         // (do not subtract across a restart — same caveat as dispatch_stats).
         std::string data;
         xi::MetricsRegistry::instance().snapshot_json(data);
+        // R2: fold the per-capability funnel metering into the SAME snapshot as an
+        // additive "capabilities" object (name -> {calls,errors,total_us,max_us}).
+        // Cumulative like the frame counters; a monitor derives its own rates.
+        if (!data.empty() && data.back() == '}') {
+            data.pop_back();
+            data += ",\"capabilities\":";
+            xi::cap_abi_detail::CapMetrics::instance().snapshot_json(data);
+            data += "}";
+        }
         send_rsp_ok(srv, id, data);
 }
 

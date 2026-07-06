@@ -471,7 +471,7 @@
       }
     },
     "rsp-metrics.schema.json": {
-      "sha256": "31d682014aa431b48098e77bb05231029e015d003c7414cdbd737f9776b3f561",
+      "sha256": "3eb413d021e7392032739dca33cbe9754a22fc1d98d05ab90aef4551978f740d",
       "shape": {
         "$id": "https://xinsp.dev/contract/schemas/rsp-metrics.schema.json",
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -480,6 +480,37 @@
           "data": {
             "additionalProperties": true,
             "properties": {
+              "capabilities": {
+                "additionalProperties": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "calls": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "errors": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "max_us": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "total_us": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "calls",
+                    "errors",
+                    "max_us",
+                    "total_us"
+                  ],
+                  "type": "object"
+                },
+                "type": "object"
+              },
               "frames_error": {
                 "minimum": 0,
                 "type": "integer"

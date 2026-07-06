@@ -39,6 +39,21 @@
               }
             }
           }
+        },
+        "capabilities": {
+          "type": "object",
+          "description": "R2: per-capability funnel metering (f_cap_call). Keyed by capability name (e.g. 'xi.jpeg.encode') → cumulative {calls, errors (rc != XI_CAP_OK), total_us, max_us}. Empty {} until a capability is called.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["calls", "errors", "total_us", "max_us"],
+            "properties": {
+              "calls": { "type": "integer", "minimum": 0 },
+              "errors": { "type": "integer", "minimum": 0 },
+              "total_us": { "type": "integer", "minimum": 0 },
+              "max_us": { "type": "integer", "minimum": 0 }
+            }
+          }
         }
       }
     }

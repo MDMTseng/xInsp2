@@ -52,11 +52,13 @@
 #include "xi_image_pool.hpp"  // owner context + the publish slots
 #include "xi_instance.hpp"    // InstanceRegistry (owner -> live adapter)
 #include "xi_seh.hpp"         // seh_exception + recover_seh_stack_or_die
+#include "xi_clock.hpp"       // R2: mono_us() for cap-call latency metering
 
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -274,7 +276,56 @@ inline std::shared_ptr<InstanceBase> resolve_provider_(ImagePoolOwnerId owner,
 }
 
 // ---- the forwarding funnel --------------------------------------------------
-inline int32_t f_cap_call(const char* name, xi_pack_handle in, xi_pack_handle* out) {
+// R2 (doc 14 "call-count/latency observability for free"): per-capability call
+// metering for the funnel. A HEAVY-call plane by doctrine, so a plain mutex+map
+// recorded once per call is negligible. Exposed via cmd:metrics "capabilities".
+class CapMetrics {
+public:
+    static CapMetrics& instance() { static CapMetrics m; return m; }
+
+    void record(const char* name, int32_t rc, uint64_t us) {
+        if (!name || !*name) return;
+        std::lock_guard<std::mutex> lk(mu_);
+        Stat& s = stats_[name];
+        s.calls++;
+        if (rc != XI_CAP_OK) s.errors++;
+        s.total_us += us;
+        if (us > s.max_us) s.max_us = us;
+    }
+
+    // A JSON object: { "<cap name>": {calls,errors,total_us,max_us}, ... }.
+    void snapshot_json(std::string& out) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        out += "{";
+        bool first = true;
+        for (const auto& [name, s] : stats_) {
+            if (!first) out += ",";
+            first = false;
+            out += "\"";
+            for (char ch : name) {   // minimal JSON-string escape (names are dotted ids)
+                if (ch == '"' || ch == '\\') { out += '\\'; out += ch; }
+                else if ((unsigned char)ch < 0x20) { char b[8]; std::snprintf(b, sizeof(b), "\\u%04x", ch); out += b; }
+                else out += ch;
+            }
+            out += "\":{\"calls\":"    + std::to_string(s.calls)
+                 + ",\"errors\":"      + std::to_string(s.errors)
+                 + ",\"total_us\":"    + std::to_string(s.total_us)
+                 + ",\"max_us\":"      + std::to_string(s.max_us) + "}";
+        }
+        out += "}";
+    }
+
+    void reset() { std::lock_guard<std::mutex> lk(mu_); stats_.clear(); }
+
+private:
+    struct Stat { uint64_t calls = 0, errors = 0, total_us = 0, max_us = 0; };
+    mutable std::mutex           mu_;
+    std::map<std::string, Stat>  stats_;   // sorted → stable snapshot order
+};
+
+// The metered entry point wraps the implementation: time the whole call (lookup +
+// resolve + handler) and record the final rc against the capability name.
+inline int32_t f_cap_call_impl(const char* name, xi_pack_handle in, xi_pack_handle* out) {
     if (out) *out = XI_PACK_NULL;
     if (!name || !*name || !out || in == XI_PACK_NULL) return XI_CAP_EUNKNOWN;
     CapRegistry::Entry e;
@@ -348,6 +399,14 @@ inline int32_t f_cap_call(const char* name, xi_pack_handle in, xi_pack_handle* o
         *out = XI_PACK_NULL;
         return XI_CAP_ECRASHED;
     }
+}
+
+// R2: metered funnel entry — times the whole call and records it per capability.
+inline int32_t f_cap_call(const char* name, xi_pack_handle in, xi_pack_handle* out) {
+    uint64_t t0 = (uint64_t)xi::mono_us();
+    int32_t rc = f_cap_call_impl(name, in, out);
+    CapMetrics::instance().record(name, rc, (uint64_t)xi::mono_us() - t0);
+    return rc;
 }
 
 inline int32_t f_cap_available(const char* name) {
