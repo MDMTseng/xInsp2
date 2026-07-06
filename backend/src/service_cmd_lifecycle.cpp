@@ -783,7 +783,12 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         // durable. Default false = legacy in-place behaviour.
         bool working_copy = parsed->args_json.find("\"working_copy\":true") != std::string::npos
                           || parsed->args_json.find("\"working_copy\": true") != std::string::npos;
-        { auto g = quiesce_dispatch_for_lifecycle_op_("open_project", &srv); g.dismiss(); }  // new project drives its own autostart
+        // O2 (round-10 red-team): hold the launch-pause across open_project()'s teardown of the
+        // OLD project (it FreeLibrary's the old plugin DLLs) — do NOT dismiss() here, or a
+        // straggler source-emit one-shot could launch (paused_==0) into an unmapped old DLL
+        // (use-after-unload). Dismiss AFTER open_project() returns; the new project drives its
+        // own autostart, so we still skip the guard's continuous-resume.
+        auto open_guard = quiesce_dispatch_for_lifecycle_op_("open_project", &srv);
         // Drop stale bus state from any previously-open project (the old sink +
         // the per-source emit-time map, whose source names belong to the project
         // we're replacing) before tearing it down + opening the new one.
@@ -806,7 +811,9 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             g_eng.persistent_kv_bytes.clear();  // U2: kv channel — same no-leak boundary
             g_eng.persistent_kv_schema = 0;
         }
-        if (g_eng.plugin_mgr.open_project(*folder, working_copy)) {
+        const bool opened = g_eng.plugin_mgr.open_project(*folder, working_copy);
+        open_guard.dismiss();   // old project torn down + DLLs unloaded — release the launch pause (skip resume: new project autostarts)
+        if (opened) {
             // F5: advisory single-writer stamp. If another LIVE backend already
             // owns this canonical, warn — two writers to one project clobber each
             // other when a working-copy commit mirrors over the canonical. A stale
@@ -893,7 +900,15 @@ void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
             if (s == xi::SysState::Running || s == xi::SysState::Degraded)
                 xi::health().set_state(xi::SysState::Draining);
         }
-        { auto g = quiesce_dispatch_for_lifecycle_op_("close_project", &srv); g.dismiss(); }  // project closed — nothing to stream
+        // O2 (round-10 red-team): keep the detached-launch pause HELD across the teardown
+        // below — do NOT dismiss() here. dismiss() unpauses g_eng.inflight, and
+        // close_project() FreeLibrary's the plugin DLLs; a source-emit thread that already
+        // snapshotted the bus sink (before the quiesce's clear_sink) could otherwise launch a
+        // detached one-shot — inflight.launch would see paused_==0 — that runs concurrently
+        // with the unload and calls into an unmapped DLL (use-after-unload). Dismiss AFTER
+        // close_project(): that still skips the continuous-resume (no project to stream), it
+        // just releases the pause once the DLLs are gone.
+        auto close_guard = quiesce_dispatch_for_lifecycle_op_("close_project", &srv);
         // Drop the bus's captured sink (it points at `srv`) BEFORE the plugin
         // DLLs are unloaded — otherwise the stale sink can fire into a torn-down
         // project. reset() also prunes the per-source emit-time map, whose source
@@ -902,6 +917,7 @@ void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
         xi::TriggerBus::instance().clear_sink();
         xi::TriggerBus::instance().reset();
         g_eng.plugin_mgr.close_project();
+        close_guard.dismiss();   // teardown done, DLLs unloaded — release the launch pause (skip resume: no project)
         clear_inst_state();   // instances are gone — drop host-tracked state
         // Health contract: no project → `boot`. The instances (and their runtime-
         // fault overlay) are gone; the script survives a close (its DLL is not
