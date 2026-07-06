@@ -62,13 +62,27 @@ inline bool PluginManager::project_provides_plugin_locked_(const std::string& pl
 inline void PluginManager::evict_machine_provider_locked_(const std::string& plugin_name) {
     auto it = machine_instances_.find(plugin_name);
     if (it == machine_instances_.end()) return;
-    // Drop it from the live-instance registry FIRST (so the funnel's
-    // resolve_provider_ can't hand it out mid-teardown), then release our ref.
-    // The adapter dtor runs the plugin destroy_fn AND owner-sweeps its capability
-    // registrations (CAbiInstanceAdapter::~ -> sweep_caps_for), freeing the names
-    // for the incoming project instance to claim.
+    // Hand the capability NAMES over SYNCHRONOUSLY with the eviction. Dropping our
+    // shared_ptr ref (below) normally runs the adapter dtor, whose sweep_caps_for
+    // frees this owner's cap registrations — BUT a concurrent in-flight f_cap_call
+    // pins the adapter (resolve_provider_'s shared_ptr), deferring that dtor (and
+    // its cap sweep) arbitrarily long (bounded by the longest in-flight HEAVY cap
+    // call). During that window CapRegistry still names the evicted owner while
+    // resolve_provider_ can no longer find it (removed from InstanceRegistry here),
+    // so every new f_cap_call fails XI_CAP_ESHAPE, and the incoming provider's
+    // f_cap_register is only a SHADOW (ETAKEN), not active — a transient
+    // result-dropping burst on a capability that HAS a live provider (RT6, doc 26).
+    // Sweep this owner's cap names NOW so the handoff is immediate: the incoming
+    // provider registers ACTIVE and new calls resolve it right away. The
+    // pin-deferred dtor's later sweep_caps_for is then an idempotent no-op (this
+    // owner already has no entries/shadows). The pin still protects the adapter +
+    // inst_ for any in-flight handler; an early name-drop only fail-SOFTs a call
+    // that straddles lookup→resolve to EUNKNOWN (the documented caller-retry code),
+    // never a use-after-free.
+    const ImagePoolOwnerId owner = it->second->owner_id();
+    ImagePool::sweep_caps_for(owner);   // synchronous cap-name handoff (was: dtor-deferred)
     InstanceRegistry::instance().remove(it->second->name());
-    machine_instances_.erase(it);   // shared_ptr drop -> ~CAbiInstanceAdapter
+    machine_instances_.erase(it);   // shared_ptr drop -> ~CAbiInstanceAdapter (cap sweep now a no-op)
 }
 
 inline int PluginManager::autoload_machine_providers_locked_() {
