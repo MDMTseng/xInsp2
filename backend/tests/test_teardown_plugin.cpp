@@ -18,10 +18,10 @@ static xi_pack_handle teardown_pack_process(void* /*inst*/, xi_pack_handle /*in*
     return XI_PACK_NULL;
 }
 
-extern "C" __declspec(dllexport) int xi_plugin_abi_version(void) {
+extern "C" XI_EXPORT int xi_plugin_abi_version(void) {
     return XI_ABI_VERSION;
 }
-extern "C" __declspec(dllexport)
+extern "C" XI_EXPORT
 const void* xi_plugin_get_interface(const char* id, uint32_t version) {
     if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
         static const xi_pack_proc_v1 iface = { &teardown_pack_process };
@@ -29,9 +29,9 @@ const void* xi_plugin_get_interface(const char* id, uint32_t version) {
     }
     return nullptr;
 }
-extern "C" __declspec(dllexport) void* xi_plugin_create(const xi_host_api*, const char*) {
+extern "C" XI_EXPORT void* xi_plugin_create(const xi_host_api*, const char*) {
     // Never dereferenced by the teardown test; non-null so the loader's
     // factory-resolution succeeds.
     return reinterpret_cast<void*>(0x1);
 }
-extern "C" __declspec(dllexport) void xi_plugin_destroy(void*) {}
+extern "C" XI_EXPORT void xi_plugin_destroy(void*) {}

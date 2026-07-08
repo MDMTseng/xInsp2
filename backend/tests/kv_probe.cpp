@@ -34,6 +34,12 @@
 #include <mutex>
 #include <string>
 
+#if defined(_WIN32)
+#  define XI_EXPORT __declspec(dllexport)
+#else
+#  define XI_EXPORT __attribute__((visibility("default")))
+#endif
+
 #ifndef KVP_SCHEMA
 #define KVP_SCHEMA 1
 #endif
@@ -90,7 +96,7 @@ static int _kvp_mig_init = [] {
 extern "C" {
 
 // Mandatory export (load_script fails without it).
-__declspec(dllexport) void xi_inspect_entry(int /*frame*/) {
+XI_EXPORT void xi_inspect_entry(int /*frame*/) {
     std::lock_guard<std::mutex> lk(xi::kv_mutex());
     if (!xi::kv().has("count")) {
         long long seeded = extract_count_(g_state_json);
@@ -110,16 +116,16 @@ __declspec(dllexport) void xi_inspect_entry(int /*frame*/) {
 
 // ---- the four kv exports: the REAL thunk bodies -----------------------------
 
-__declspec(dllexport) int xi_script_kv_get(uint8_t* buf, int buflen) {
+XI_EXPORT int xi_script_kv_get(uint8_t* buf, int buflen) {
     return xi::detail::kv_get_thunk(buf, buflen);
 }
-__declspec(dllexport) int xi_script_kv_set(const uint8_t* bytes, int len) {
+XI_EXPORT int xi_script_kv_set(const uint8_t* bytes, int len) {
     return xi::detail::kv_set_thunk(bytes, len);
 }
-__declspec(dllexport) int xi_script_kv_schema_version(void) {
+XI_EXPORT int xi_script_kv_schema_version(void) {
     return xi::kv_schema_version();
 }
-__declspec(dllexport) int xi_script_kv_change(const uint8_t* old_bytes, int old_len,
+XI_EXPORT int xi_script_kv_change(const uint8_t* old_bytes, int old_len,
                                               int old_schema, int new_schema,
                                               uint8_t* buf, int buflen) {
     return xi::detail::kv_change_thunk(old_bytes, old_len, old_schema,

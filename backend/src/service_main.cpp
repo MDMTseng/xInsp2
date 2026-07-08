@@ -58,10 +58,19 @@
 #include <xi/xi_ws_server.hpp>
 
 #include <condition_variable>
+#include <csignal>
 #include <filesystem>
 #include <thread>
 
-#include <windows.h>
+#ifdef _WIN32
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
 
 namespace xp = xi::proto;
 
@@ -371,7 +380,13 @@ int main(int argc, char** argv) {
     // top-level minidump filter fires. Used by runCrashDump E2E.
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--test-crash") {
+#ifdef _WIN32
             RaiseException(0xE0000001, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+#else
+            // POSIX: a genuine access violation so the SIGSEGV crash handler fires,
+            // mirroring the Win32 unhandled-exception filter path.
+            std::raise(SIGSEGV);
+#endif
             return 99;  // unreachable
         }
         // --test-abort: exercise the CRT abort() path (robustness BUG 1) — must

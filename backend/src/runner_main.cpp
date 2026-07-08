@@ -70,8 +70,16 @@
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_trigger_bus.hpp>
 
-#include <windows.h>
-#include <eh.h>
+#ifdef _WIN32
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#  include <eh.h>
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -89,7 +97,9 @@ namespace fs = std::filesystem;
 // --- SEH translator so backend survives script crashes ------------------
 #include <xi/xi_seh.hpp>
 using xi::seh_exception;
-using xi::seh_translator;
+#ifdef _MSC_VER
+using xi::seh_translator;   // MSVC-only; the portable installer is xi::install_seh_translator()
+#endif
 
 // --- xi::use() callbacks (minimal copy of service_main equivalents) -----
 
@@ -333,7 +343,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[runner] health_changed %s\n", ev.c_str());
     });
 
-    _set_se_translator(seh_translator);
+    xi::install_seh_translator();   // MSVC: SEH→C++ translator; POSIX: no-op
 
     // Resolve xInsp2 include dir + built-in plugins by walking up from exe.
     std::string include_dir, plugins_dir;
@@ -585,6 +595,8 @@ int main(int argc, char** argv) {
     std::fflush(stderr);
     std::fflush(stdout);
     int code = crashed > 0 ? 1 : 0;
-    ExitProcess((UINT)code);
+    // Skip C++ static dtors (see comment above): _Exit terminates without running
+    // them, on both platforms (the Win32 ExitProcess equivalent).
+    std::_Exit(code);
     return code; // unreachable
 }

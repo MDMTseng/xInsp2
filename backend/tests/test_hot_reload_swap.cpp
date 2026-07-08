@@ -25,9 +25,8 @@
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_image_pool.hpp>
 
-#ifdef _WIN32
-  #include <windows.h>
-#endif
+#include <filesystem>
+#include <system_error>
 
 #include <atomic>
 #include <chrono>
@@ -73,12 +72,20 @@ static constexpr int NCOPIES = 8;
 static std::vector<std::string> g_copies;
 
 static void make_copies() {
+    namespace fs = std::filesystem;
+    // Match the module suffix of the fixture we're copying (.dll / .so / .dylib).
+    const std::string ext = fs::path(RELOAD_PROBE_DLL).extension().string();
     for (int i = 0; i < NCOPIES; ++i) {
-        std::string dst = "reload_probe_copy_" + std::to_string(i) + ".dll";
+        // Absolute path: POSIX dlopen only searches the cwd for a name that
+        // contains a '/', so a bare "foo.so" would miss the copy we just wrote.
+        std::string dst = (fs::current_path() /
+                           ("reload_probe_copy_" + std::to_string(i) + ext)).string();
         // Overwrite any stale copy from a previous run.
-        if (!CopyFileA(RELOAD_PROBE_DLL, dst.c_str(), /*bFailIfExists=*/FALSE)) {
-            std::fprintf(stderr, "FAIL: CopyFileA %s -> %s (err %lu)\n",
-                         RELOAD_PROBE_DLL, dst.c_str(), GetLastError());
+        std::error_code ec;
+        fs::copy_file(RELOAD_PROBE_DLL, dst, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            std::fprintf(stderr, "FAIL: copy_file %s -> %s (%s)\n",
+                         RELOAD_PROBE_DLL, dst.c_str(), ec.message().c_str());
             std::abort();
         }
         g_copies.push_back(dst);
@@ -86,7 +93,9 @@ static void make_copies() {
 }
 
 static void remove_copies() {
-    for (auto& p : g_copies) DeleteFileA(p.c_str());  // best-effort (may be mapped still)
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    for (auto& p : g_copies) fs::remove(p, ec);  // best-effort (may be mapped still)
 }
 
 // Load one distinct copy, bind the shared counter into it, swap it into g_script,

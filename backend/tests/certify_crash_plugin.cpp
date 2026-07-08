@@ -33,13 +33,13 @@ static xi_pack_handle crash_pack_process(void* /*inst*/, xi_pack_handle /*input*
 
 extern "C" {
 
-__declspec(dllexport) int xi_plugin_abi_version(void) {
+XI_EXPORT int xi_plugin_abi_version(void) {
     return XI_ABI_VERSION;   // pass the version gate
 }
 
 // The sole plugin data plane: the xi.pack@1 door. Published so the plugin is a
 // well-formed v12 plugin; the crash happens in the factory before it is driven.
-__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+XI_EXPORT const void* xi_plugin_get_interface(const char* id, uint32_t version) {
     if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
         static const xi_pack_proc_v1 iface = { &crash_pack_process };
         return &iface;
@@ -47,7 +47,7 @@ __declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32
     return nullptr;
 }
 
-__declspec(dllexport) void* xi_plugin_create(const xi_host_api* /*host*/, const char* /*name*/) {
+XI_EXPORT void* xi_plugin_create(const xi_host_api* /*host*/, const char* /*name*/) {
     // Deliberate hard fault at instantiation — the exact DllMain/factory hazard
     // G1 isolates into a child process. `volatile` so the optimizer can't elide
     // the store into a trap.
@@ -56,6 +56,6 @@ __declspec(dllexport) void* xi_plugin_create(const xi_host_api* /*host*/, const 
     return nullptr;   // unreachable
 }
 
-__declspec(dllexport) void xi_plugin_destroy(void* /*p*/) {}
+XI_EXPORT void xi_plugin_destroy(void* /*p*/) {}
 
 } // extern "C"

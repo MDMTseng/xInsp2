@@ -31,6 +31,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Cross-platform symbol export for plugin/script ABI entry points.
+ * MSVC needs __declspec(dllexport); ELF toolchains (gcc/clang) export via
+ * default visibility — spelled explicitly so a -fvisibility=hidden build of a
+ * plugin/script still publishes the C entry points the host resolves. */
+#ifndef XI_EXPORT
+#  if defined(_WIN32)
+#    define XI_EXPORT __declspec(dllexport)
+#  else
+#    define XI_EXPORT __attribute__((visibility("default")))
+#  endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -80,7 +80,7 @@ static xi_pack_handle golden_pack_process(void* p, xi_pack_handle /*input*/) {
 
 extern "C" {
 
-__declspec(dllexport) int xi_plugin_abi_version(void) {
+XI_EXPORT int xi_plugin_abi_version(void) {
     // A current (v11) plugin. The loader gate accepts it on any host with
     // XI_ABI_MIN_COMPAT <= kGoldenAbiVersion <= XI_ABI_VERSION.
     return kGoldenAbiVersion;
@@ -88,7 +88,7 @@ __declspec(dllexport) int xi_plugin_abi_version(void) {
 
 // The sole plugin data plane: the xi.pack@1 door (xi_pack_proc_v1). The host
 // probes this to learn the golden speaks packs and drives it via run_pack_door.
-__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+XI_EXPORT const void* xi_plugin_get_interface(const char* id, uint32_t version) {
     if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
         static const xi_pack_proc_v1 iface = { &golden_pack_process };
         return &iface;
@@ -96,7 +96,7 @@ __declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32
     return nullptr;
 }
 
-__declspec(dllexport) void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) {
+XI_EXPORT void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) {
     auto* inst = new GoldenInstance();
     inst->host = host;
     if (host && host->get_interface)
@@ -104,17 +104,17 @@ __declspec(dllexport) void* xi_plugin_create(const xi_host_api* host, const char
     return inst;
 }
 
-__declspec(dllexport) void xi_plugin_destroy(void* p) {
+XI_EXPORT void xi_plugin_destroy(void* p) {
     delete static_cast<GoldenInstance*>(p);
 }
 
-__declspec(dllexport) int xi_plugin_get_def(void* p, char* buf, int cap) {
+XI_EXPORT int xi_plugin_get_def(void* p, char* buf, int cap) {
     auto* inst = static_cast<GoldenInstance*>(p);
     int v = inst ? inst->value : 0;
     return std::snprintf(buf, (size_t)cap, "{\"value\":%d}", v);
 }
 
-__declspec(dllexport) int xi_plugin_set_def(void* p, const char* json) {
+XI_EXPORT int xi_plugin_set_def(void* p, const char* json) {
     auto* inst = static_cast<GoldenInstance*>(p);
     if (!inst || !json) return 1;
     // Tiny hand parse: find "value": and read the int. Avoids pulling yyjson into

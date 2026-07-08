@@ -124,6 +124,7 @@ void read_script_deps_(const std::string& folder,
 // TODO(linux): equivalent is building the script .so with -Wl,-rpath plus
 // dlopen; AddDllDirectory has no portable analogue.
 void set_project_dll_search_(const std::string& folder) {
+#ifdef _WIN32
     if (g_eng.proj_dll_dir) { RemoveDllDirectory(g_eng.proj_dll_dir); g_eng.proj_dll_dir = nullptr; }
     if (folder.empty()) return;
     int wn = MultiByteToWideChar(CP_UTF8, 0, folder.c_str(), -1, nullptr, 0);
@@ -132,6 +133,12 @@ void set_project_dll_search_(const std::string& folder) {
     MultiByteToWideChar(CP_UTF8, 0, folder.c_str(), -1, w.data(), wn);
     if (!w.empty() && w.back() == L'\0') w.pop_back();
     g_eng.proj_dll_dir = AddDllDirectory(w.c_str());
+#else
+    // POSIX: no process-wide DLL-search-dir mechanism. A script's external .so
+    // deps are resolved via the compiled module's RPATH/$ORIGIN and
+    // LD_LIBRARY_PATH; this is intentionally a no-op. See TODO(linux) above.
+    (void)folder;
+#endif
 }
 
 // Plugin manager (global)

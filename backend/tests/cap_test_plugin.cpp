@@ -131,10 +131,10 @@ static xi_pack_handle cap_test_pack_process(void* p, xi_pack_handle /*in*/) {
 
 extern "C" {
 
-__declspec(dllexport) int xi_plugin_abi_version(void) { return XI_ABI_MIN_COMPAT; }
+XI_EXPORT int xi_plugin_abi_version(void) { return XI_ABI_MIN_COMPAT; }
 
 // The sole plugin data plane: the xi.pack@1 door.
-__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+XI_EXPORT const void* xi_plugin_get_interface(const char* id, uint32_t version) {
     if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
         static const xi_pack_proc_v1 iface = { &cap_test_pack_process };
         return &iface;
@@ -142,7 +142,7 @@ __declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32
     return nullptr;
 }
 
-__declspec(dllexport) void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) {
+XI_EXPORT void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) {
     auto* i = new CapTestInstance();
     i->host = host;
     if (host && host->get_interface) {
@@ -165,16 +165,16 @@ __declspec(dllexport) void* xi_plugin_create(const xi_host_api* host, const char
 }
 
 // Deliberately NO unregister here: the adapter-dtor owner sweep is under test.
-__declspec(dllexport) void xi_plugin_destroy(void* p) {
+XI_EXPORT void xi_plugin_destroy(void* p) {
     delete static_cast<CapTestInstance*>(p);
 }
 
-__declspec(dllexport) int xi_plugin_get_def(void* /*p*/, char* buf, int cap) {
+XI_EXPORT int xi_plugin_get_def(void* /*p*/, char* buf, int cap) {
     return std::snprintf(buf, (size_t)cap, "{}");
 }
-__declspec(dllexport) int xi_plugin_set_def(void* /*p*/, const char* /*json*/) { return 0; }
+XI_EXPORT int xi_plugin_set_def(void* /*p*/, const char* /*json*/) { return 0; }
 
-__declspec(dllexport) int xi_plugin_exchange(void* p, const char* cmd, char* buf, int cap) {
+XI_EXPORT int xi_plugin_exchange(void* p, const char* cmd, char* buf, int cap) {
     auto* i = static_cast<CapTestInstance*>(p);
     if (!i || !cmd) return 0;
     int unreg_rc = -999;

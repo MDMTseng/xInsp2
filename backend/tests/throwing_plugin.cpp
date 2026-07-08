@@ -38,7 +38,7 @@ static xi_pack_handle throwing_pack_process(void* /*inst*/, xi_pack_handle /*in*
     throw std::runtime_error("process boom");
 }
 
-extern "C" __declspec(dllexport)
+extern "C" XI_EXPORT
 const void* xi_plugin_get_interface(const char* id, uint32_t version) {
     if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
         static const xi_pack_proc_v1 iface = { &throwing_pack_process };

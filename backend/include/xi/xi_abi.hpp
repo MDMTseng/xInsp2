@@ -724,13 +724,13 @@ private:
 
 #define XI_PLUGIN_IMPL(ClassName)                                              \
                                                                                \
-extern "C" __declspec(dllexport)                                               \
+extern "C" XI_EXPORT                                               \
 void* xi_plugin_create(const xi_host_api* host, const char* name) {            \
     try { return new ClassName(host, name); }                                   \
     catch (...) { return nullptr; }                                             \
 }                                                                              \
                                                                                \
-extern "C" __declspec(dllexport)                                               \
+extern "C" XI_EXPORT                                               \
 void xi_plugin_destroy(void* inst) {                                           \
     /* A destructor throwing across the C ABI is UB — swallow it in-plugin. */  \
     try { delete static_cast<ClassName*>(inst); }                               \
@@ -747,7 +747,7 @@ void xi_plugin_destroy(void* inst) {                                           \
 /* nothing (a bad_alloc catch must not re-throw). THE CUT (v12): the Record      */ \
 /* xi_plugin_process trampoline is gone — the sole data plane is the xi.pack@1    */ \
 /* door published by XI_PLUGIN_PACK_DOOR (below).                                 */ \
-extern "C" __declspec(dllexport)                                               \
+extern "C" XI_EXPORT                                               \
 int xi_plugin_exchange(void* inst, const char* cmd,                            \
                        char* rsp, int rsplen) {                                \
     auto* self = static_cast<ClassName*>(inst);                                \
@@ -766,7 +766,7 @@ int xi_plugin_exchange(void* inst, const char* cmd,                            \
     return 0; /* safe sentinel: empty response, host won't re-grow the buf */  \
 }                                                                              \
                                                                                \
-extern "C" __declspec(dllexport)                                               \
+extern "C" XI_EXPORT                                               \
 int xi_plugin_get_def(void* inst, char* buf, int buflen) {                     \
     auto* self = static_cast<ClassName*>(inst);                                \
     try {                                                                      \
@@ -784,7 +784,7 @@ int xi_plugin_get_def(void* inst, char* buf, int buflen) {                     \
     return 0; /* safe sentinel: empty def */                                   \
 }                                                                              \
                                                                                \
-extern "C" __declspec(dllexport)                                               \
+extern "C" XI_EXPORT                                               \
 int xi_plugin_set_def(void* inst, const char* json) {                          \
     try { return static_cast<ClassName*>(inst)->set_def(json) ? 0 : -1; }      \
     catch (const std::exception& e) {                                          \
@@ -799,7 +799,7 @@ int xi_plugin_set_def(void* inst, const char* json) {                          \
 /* XI_ABI_VERSION and refuses plugins requesting a newer ABI than     */ \
 /* the host provides. Plugins compiled before this stamp existed are  */ \
 /* treated as v1 with a "pre-versioning" warning, not refused.        */ \
-extern "C" __declspec(dllexport)                                               \
+extern "C" XI_EXPORT                                               \
 int xi_plugin_abi_version(void) {                                              \
     return XI_ABI_VERSION;                                                     \
 }
@@ -815,7 +815,7 @@ int xi_plugin_abi_version(void) {                                              \
 // plugin that doesn't export these (didn't use this macro) is driven through the
 // host's gated set_def fallback instead, which is always safe.
 #define XI_PLUGIN_STAGED(ClassName)                                            \
-extern "C" __declspec(dllexport)                                               \
+extern "C" XI_EXPORT                                               \
 int xi_plugin_prepare(void* inst, const char* def_json, const char* folder) {  \
     try {                                                                      \
         return static_cast<ClassName*>(inst)->prepare(def_json ? def_json : "", \
@@ -827,7 +827,7 @@ int xi_plugin_prepare(void* inst, const char* def_json, const char* folder) {  \
     }                                                                          \
     return -1; /* sentinel: staging failed -> host keeps the live config */    \
 }                                                                              \
-extern "C" __declspec(dllexport)                                               \
+extern "C" XI_EXPORT                                               \
 void xi_plugin_commit(void* inst) {                                            \
     try { static_cast<ClassName*>(inst)->commit(); }                           \
     catch (const std::exception& e) {                                          \
@@ -858,7 +858,7 @@ extern "C" xi_pack_handle xi__frame_proc_##ClassName(void* inst,              \
     return XI_PACK_NULL; /* hard failure sentinel (a CONTRACT failure is a    \
                              normal sealed pack carrying a $fault entry) */    \
 }                                                                              \
-extern "C" __declspec(dllexport)                                               \
+extern "C" XI_EXPORT                                               \
 const void* xi_plugin_get_interface(const char* id, uint32_t version) {        \
     if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {             \
         static const xi_pack_proc_v1 iface = { &xi__frame_proc_##ClassName }; \
