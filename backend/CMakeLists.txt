@@ -65,6 +65,26 @@ if(MSVC)
     add_compile_options(/W3 /permissive- /utf-8 /EHa)
 else()
     add_compile_options(-Wall -Wextra)
+    # Hot-reload correctness on ELF/glibc: a script/plugin module MUST truly
+    # unload on dlclose so a rebuild swaps code and each load gets fresh module
+    # statics — exactly the Windows FreeLibrary semantics the loader assumes.
+    # GCC emits STB_GNU_UNIQUE symbols for inline-function-local statics (e.g.
+    # xi::kv()'s Meyers-singleton store); glibc then REFUSES to unload any module
+    # carrying such a symbol AND merges those statics process-globally, so module
+    # state leaks across loads and dlclose is a no-op. -fno-gnu-unique restores
+    # per-module statics + genuine unload. (GCC-only; Clang never emits UNIQUE.)
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag(-fno-gnu-unique XINSP2_HAS_NO_GNU_UNIQUE)
+    if(XINSP2_HAS_NO_GNU_UNIQUE)
+        add_compile_options(-fno-gnu-unique)
+    endif()
+    # Fault-as-exception (xi_seh.hpp POSIX path): the SIGSEGV/SIGFPE/SIGBUS/SIGILL
+    # handler THROWS a seh_exception so try/catch(seh_exception) around plugin calls
+    # catches a hardware fault (the Windows _set_se_translator behaviour). For the
+    # unwinder to leave the faulting frame, GCC/Clang must emit unwind info for
+    # trapping instructions — that is exactly what -fnon-call-exceptions does. The
+    # JIT compile driver adds the same flag to every script/plugin it builds.
+    add_compile_options(-fnon-call-exceptions)
 endif()
 
 # ---- Sanitizers (T0.1) --------------------------------------------------
@@ -570,7 +590,7 @@ add_library(race_probe SHARED tests/race_probe.cpp)
 target_include_directories(race_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_executable(test_set_def_race tests/test_set_def_race.cpp)
 target_link_libraries(test_set_def_race PRIVATE xi_core)
-target_compile_definitions(test_set_def_race PRIVATE RACE_PROBE_DLL="race_probe.dll")
+target_compile_definitions(test_set_def_race PRIVATE RACE_PROBE_DLL="$<TARGET_FILE:race_probe>")
 add_dependencies(test_set_def_race race_probe)
 add_test(NAME set_def_race COMMAND test_set_def_race
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_set_def_race>)
@@ -582,7 +602,7 @@ add_library(stage_probe SHARED tests/stage_probe.cpp)
 target_include_directories(stage_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_executable(test_prepare_concurrency tests/test_prepare_concurrency.cpp)
 target_link_libraries(test_prepare_concurrency PRIVATE xi_core)
-target_compile_definitions(test_prepare_concurrency PRIVATE STAGE_PROBE_DLL="stage_probe.dll")
+target_compile_definitions(test_prepare_concurrency PRIVATE STAGE_PROBE_DLL="$<TARGET_FILE:stage_probe>")
 add_dependencies(test_prepare_concurrency stage_probe)
 add_test(NAME prepare_concurrency COMMAND test_prepare_concurrency
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_prepare_concurrency>)
@@ -595,7 +615,7 @@ add_library(reentry_probe SHARED tests/reentry_probe.cpp)
 target_include_directories(reentry_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_executable(test_lifecycle_asserts tests/test_lifecycle_asserts.cpp)
 target_link_libraries(test_lifecycle_asserts PRIVATE xi_core)
-target_compile_definitions(test_lifecycle_asserts PRIVATE REENTRY_PROBE_DLL="reentry_probe.dll")
+target_compile_definitions(test_lifecycle_asserts PRIVATE REENTRY_PROBE_DLL="$<TARGET_FILE:reentry_probe>")
 add_dependencies(test_lifecycle_asserts reentry_probe)
 add_test(NAME lifecycle_asserts COMMAND test_lifecycle_asserts
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_lifecycle_asserts>)
@@ -758,7 +778,7 @@ set_tests_properties(emit_gate_heavy PROPERTIES
 add_library(reload_probe SHARED tests/reload_probe.cpp)
 add_executable(test_hot_reload_swap tests/test_hot_reload_swap.cpp)
 target_link_libraries(test_hot_reload_swap PRIVATE xi_core)
-target_compile_definitions(test_hot_reload_swap PRIVATE RELOAD_PROBE_DLL="reload_probe.dll")
+target_compile_definitions(test_hot_reload_swap PRIVATE RELOAD_PROBE_DLL="$<TARGET_FILE:reload_probe>")
 add_dependencies(test_hot_reload_swap reload_probe)
 add_test(NAME hot_reload_swap COMMAND test_hot_reload_swap
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_hot_reload_swap>)
@@ -795,9 +815,9 @@ target_include_directories(kv_probe_v2_nohook PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 add_executable(test_kv_migrate tests/test_kv_migrate.cpp)
 target_link_libraries(test_kv_migrate PRIVATE xi_core)
 target_compile_definitions(test_kv_migrate PRIVATE
-    KV_PROBE_V1_DLL="kv_probe_v1.dll"
-    KV_PROBE_V2_DLL="kv_probe_v2.dll"
-    KV_PROBE_V2_NOHOOK_DLL="kv_probe_v2_nohook.dll")
+    KV_PROBE_V1_DLL="$<TARGET_FILE:kv_probe_v1>"
+    KV_PROBE_V2_DLL="$<TARGET_FILE:kv_probe_v2>"
+    KV_PROBE_V2_NOHOOK_DLL="$<TARGET_FILE:kv_probe_v2_nohook>")
 add_dependencies(test_kv_migrate
     kv_probe_v1 kv_probe_v2 kv_probe_v2_nohook)
 add_test(NAME kv_migrate COMMAND test_kv_migrate
@@ -1274,7 +1294,9 @@ target_link_libraries(script_selfcheck PRIVATE xi_core)   # SDK + vendor + OpenC
 if(MSVC)
     target_compile_options(script_selfcheck PRIVATE /openmp)   # xi_script_support.hpp uses <omp.h>
 else()
-    target_compile_options(script_selfcheck PRIVATE -fopenmp)
+    # -fpermissive: matches the JIT g++ driver — the support header's extern→static
+    # per-module globals need it on gcc (MSVC accepts natively). See xi_script_compiler.
+    target_compile_options(script_selfcheck PRIVATE -fopenmp -fpermissive)
 endif()
 add_test(NAME script_selfcheck
     COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
@@ -1369,8 +1391,13 @@ if(_examples_scripts)
         # Silence the noise so a genuine linker issue isn't buried.
         set_target_properties(examples_gate PROPERTIES STATIC_LIBRARY_OPTIONS "/IGNORE:4006")
     else()
+        # SHELL: keeps each `-include <hdr>` flag/arg pair intact — without it CMake
+        # de-duplicates the repeated `-include` token and merges the two headers
+        # into one arg ("cannot specify -o with -c ... multiple files").
         target_compile_options(examples_gate PRIVATE
-            -fopenmp -include opencv2/opencv.hpp -include xi/xi_script_support.hpp)
+            -fopenmp -fpermissive
+            "SHELL:-include opencv2/opencv.hpp"
+            "SHELL:-include xi/xi_script_support.hpp")
     endif()
     add_test(NAME examples_gate
         COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}

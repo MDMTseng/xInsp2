@@ -296,14 +296,12 @@ inline certify::Verdict PluginManager::certify_folder_locked_(const std::string&
 
     if (certify_exe_.empty()) return certify::Verdict::unknown;   // certification disabled
 
-#ifdef _WIN32
+    // certify::run_certify_subprocess is cross-platform (CreateProcess on Windows,
+    // fork+execl on POSIX — see xi_certify.hpp), so the scan-time gate runs on both.
     auto verdict = certify::run_certify_subprocess(certify_exe_, folder);
     if (verdict != certify::Verdict::unknown)   // don't cache a spawn failure
         certify::write_cache(folder, { info.dll_name, hash, certify::verdict_str(verdict) });
     return verdict;
-#else
-    return certify::Verdict::unknown;
-#endif
 }
 
 // J6 off-lock cache-warm — mirrors certify_folder_locked_'s decision, but spawns
@@ -326,11 +324,10 @@ inline void PluginManager::precertify_folder_(const std::string& folder,
 
     if (certify_exe.empty()) return;                // certification disabled
 
-#ifdef _WIN32
+    // Cross-platform certify child (see certify_folder_locked_ above).
     auto verdict = certify::run_certify_subprocess(certify_exe, folder);
     if (verdict != certify::Verdict::unknown)       // don't cache a spawn failure
         certify::write_cache(folder, { info.dll_name, hash, certify::verdict_str(verdict) });
-#endif
 }
 
 } // namespace xi

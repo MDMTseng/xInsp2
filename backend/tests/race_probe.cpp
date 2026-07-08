@@ -25,10 +25,10 @@ struct Probe {
 
 extern "C" {
 
-__declspec(dllexport) void* xi_plugin_create(const xi_host_api*, const char*) {
+XI_EXPORT void* xi_plugin_create(const xi_host_api*, const char*) {
     return new Probe();
 }
-__declspec(dllexport) void xi_plugin_destroy(void* p) {
+XI_EXPORT void xi_plugin_destroy(void* p) {
     delete static_cast<Probe*>(p);
 }
 
@@ -43,7 +43,7 @@ static xi_pack_handle race_pack_process(void* p, xi_pack_handle) {
     return XI_PACK_NULL;
 }
 
-__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+XI_EXPORT const void* xi_plugin_get_interface(const char* id, uint32_t version) {
     if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
         static const xi_pack_proc_v1 iface = { &race_pack_process };
         return &iface;
@@ -51,7 +51,7 @@ __declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32
     return nullptr;
 }
 
-__declspec(dllexport) int xi_plugin_set_def(void* p, const char* json) {
+XI_EXPORT int xi_plugin_set_def(void* p, const char* json) {
     Probe* s = static_cast<Probe*>(p);
     const char* c = json ? std::strchr(json, ':') : nullptr;
     int t = c ? std::atoi(c + 1) : 0;
@@ -62,7 +62,7 @@ __declspec(dllexport) int xi_plugin_set_def(void* p, const char* json) {
     return 0;
 }
 
-__declspec(dllexport) int xi_plugin_get_def(void* p, char* buf, int cap) {
+XI_EXPORT int xi_plugin_get_def(void* p, char* buf, int cap) {
     Probe* s = static_cast<Probe*>(p);
     return std::snprintf(buf, (size_t)cap,
         "{\"tears\":%lld,\"proc\":%lld,\"set\":%lld}",
@@ -70,7 +70,7 @@ __declspec(dllexport) int xi_plugin_get_def(void* p, char* buf, int cap) {
         (long long)s->set_calls.load());
 }
 
-__declspec(dllexport) int xi_plugin_exchange(void*, const char*, char* rsp, int cap) {
+XI_EXPORT int xi_plugin_exchange(void*, const char*, char* rsp, int cap) {
     if (cap > 2) { rsp[0] = '{'; rsp[1] = '}'; rsp[2] = 0; return 2; }
     return 0;
 }

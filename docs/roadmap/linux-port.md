@@ -1,9 +1,44 @@
 # Cross-platform port (Linux / ARM / macOS) — inventory, effort + going-forward rule
 
-> **Status: NOT scheduled.** This is a parking lot for "things that
-> need to change when we eventually port off Windows" so we don't lose
-> track of them, plus a rule for new code to follow now. The actual port
-> is done later, on the target platform.
+> **Status: Linux (aarch64) build EXECUTED on the `linux-build` branch.** The
+> headless backend now configures, builds, links, and passes the ctest suite on
+> Linux/GCC (developed on ARM64 — Raspberry Pi, Debian, g++ 14). Phase 0 (build
+> green) and the Phase-1 core loop (runtime g++ compile driver + `.so` load) are
+> done; the crash-forensics *dump* leg (Breakpad/minidumps) and the FE-supervisor
+> `fe_main` POSIX path remain (see the phasing table). What landed:
+>
+> - **CMake:** configures with the system OpenCV (`find_package`), Ninja + g++.
+>   Tree-wide GCC flags added: `-fno-gnu-unique` (modules truly unload on
+>   `dlclose` → hot-reload works + per-load module statics), `-fnon-call-exceptions`
+>   (the fault→exception unwind, below).
+> - **`xi_dynlib.hpp` (new):** a drop-in for the loader's `<windows.h>` — on POSIX
+>   it maps `HMODULE`/`LoadLibraryExA`/`GetProcAddress`/`FreeLibrary`/
+>   `GetModuleHandleExA`/`GetModuleFileNameA`/`GetCurrentProcessId` + the
+>   `LOAD_LIBRARY_SEARCH_*` flags onto `dlopen`/`dlsym`/`dlclose`, so the loader
+>   family compiles unchanged. `AddDllDirectory`/`RemoveDllDirectory` are inert.
+> - **`XI_EXPORT`:** `__declspec(dllexport)` → `__attribute__((visibility("default")))`,
+>   defined once in `xi_abi.h`; plugin/script export macros + raw test fixtures use it.
+> - **SEH (`xi_seh.hpp`):** `install_seh_translator()` now installs a
+>   `sigaction(SIGSEGV/SIGFPE/SIGBUS/SIGILL)` handler that THROWS `seh_exception`,
+>   so the existing `try/catch(seh_exception)` sites catch hardware faults exactly
+>   as on Windows. Needs `-fnon-call-exceptions`; uses a per-thread `sigaltstack`
+>   for stack-overflow faults, classified via the thread's recorded stack bounds.
+> - **Compile driver (`xi_script_compiler.hpp`):** a POSIX `compile_posix_build_`
+>   spawns `g++ -fPIC -shared -fnon-call-exceptions -fno-gnu-unique -fpermissive`,
+>   OpenCV via `pkg-config`, yyjson compiled straight from its vendored `.c`,
+>   `.so` output; plus a gcc/clang diagnostic parser (`parse_diagnostics_gcc`).
+> - **Certify (`xi_certify.hpp`):** `run_certify_subprocess` ported to
+>   `fork`+`execl`+`waitpid` (timeout → SIGKILL); `certify_in_process` + the
+>   scan-time gate now run on POSIX via the dlopen shim.
+> - Already-portable leaves confirmed working: `xi_ws_server` (BSD sockets),
+>   `xi_atomic_io`, `xi_owner_lock`, `xi_cli_args`.
+>
+> The original parking-lot inventory below is kept for the remaining legs
+> (crash dumps, FE supervisor, watchdog redesign, macOS).
+>
+> **Historical note (pre-port):** This was a parking lot for "things that
+> need to change when we eventually port off Windows"; the actual port
+> is now underway on `linux-build`.
 >
 > **TL;DR.** Moderate, not scary. Only a minority of backend files touch Win32
 > (roughly a third), and most of those are already `#ifdef _WIN32`-gated; the OS

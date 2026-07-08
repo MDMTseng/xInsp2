@@ -20,6 +20,9 @@
     #define WIN32_LEAN_AND_MEAN
   #endif
   #include <windows.h>
+#else
+  #include <sys/wait.h>   // WIFEXITED / WEXITSTATUS for popen'd compile
+  #include <unistd.h>
 #endif
 
 #include <atomic>
@@ -186,6 +189,16 @@ inline std::string ensure_utf8(std::string s) {
     if (!converted)
         for (auto& c : s)
             if (static_cast<unsigned char>(c) >= 0x80) c = '?';
+#else
+    // POSIX: gcc/clang emit UTF-8, so valid diagnostics pass through untouched.
+    // The invariant is that the RESULT is always valid UTF-8 (the WS frame is
+    // UTF-8) — there is no code-page transcode to do, but if a diagnostic ever
+    // carries non-UTF-8 bytes (a mislocalized external toolchain, a stray byte),
+    // replace the non-ASCII bytes so nothing invalid reaches the wire. The ASCII
+    // skeleton (error codes, quotes, paths) survives intact.
+    if (!s.empty() && !is_valid_utf8(s))
+        for (auto& c : s)
+            if (static_cast<unsigned char>(c) >= 0x80) c = '?';
 #endif
     return s;
 }
@@ -274,6 +287,75 @@ inline std::vector<Diagnostic> parse_diagnostics(const std::string& log) {
             }
         } else {
             d.message = right;
+        }
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+
+// Parse gcc/clang diagnostics (the POSIX compile driver). The format is:
+//   foo.cpp:42:15: error: 'x' was not declared in this scope
+//   foo.cpp:42: warning: ...            (no column)
+//   foo.cpp:42:15: note: ...
+//   /usr/bin/ld: foo.o: undefined reference to 'bar'   (linker — no line/col)
+// The severity marker is " <sev>: " after the "file:line:col" prefix. Caret /
+// "In file included from" / "candidate:" continuation lines carry no marker and
+// are skipped, matching the MSVC parser's line-oriented behaviour.
+inline std::vector<Diagnostic> parse_diagnostics_gcc(const std::string& log) {
+    std::vector<Diagnostic> out;
+    auto is_num = [](const std::string& s) {
+        if (s.empty()) return false;
+        for (char c : s) if (c < '0' || c > '9') return false;
+        return true;
+    };
+    struct SevMatch { const char* tag; const char* sev; };
+    const SevMatch sevs[] = {
+        { ": fatal error: ", "error"   },
+        { ": error: ",       "error"   },
+        { ": warning: ",     "warning" },
+        { ": note: ",        "note"    },
+    };
+    size_t pos = 0;
+    while (pos < log.size()) {
+        size_t eol = log.find('\n', pos);
+        std::string line = log.substr(pos, (eol == std::string::npos ? log.size() : eol) - pos);
+        pos = (eol == std::string::npos) ? log.size() : eol + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        size_t sev_at = std::string::npos;
+        const char* sev_name = nullptr;
+        size_t sev_len = 0;
+        for (auto& s : sevs) {
+            size_t hit = line.find(s.tag);
+            if (hit != std::string::npos && (sev_at == std::string::npos || hit < sev_at)) {
+                sev_at = hit; sev_name = s.sev; sev_len = std::strlen(s.tag);
+            }
+        }
+        if (sev_at == std::string::npos) continue;
+
+        Diagnostic d;
+        d.severity = sev_name;
+        d.message  = line.substr(sev_at + sev_len);
+
+        // Left of the marker: "<file>", "<file>:<line>", or "<file>:<line>:<col>".
+        std::string left = line.substr(0, sev_at);
+        size_t c1 = left.rfind(':');
+        if (c1 != std::string::npos && is_num(left.substr(c1 + 1))) {
+            std::string last = left.substr(c1 + 1);
+            size_t c2 = (c1 == 0) ? std::string::npos : left.rfind(':', c1 - 1);
+            std::string mid = (c2 == std::string::npos) ? std::string() : left.substr(c2 + 1, c1 - c2 - 1);
+            try {
+                if (c2 != std::string::npos && is_num(mid)) {
+                    d.file = left.substr(0, c2);
+                    d.line = std::stoi(mid);
+                    d.col  = std::stoi(last);
+                } else {
+                    d.file = left.substr(0, c1);
+                    d.line = std::stoi(last);
+                }
+            } catch (...) { d.file = left; }
+        } else {
+            d.file = left;   // linker / driver error with no line info
         }
         out.push_back(std::move(d));
     }
@@ -590,6 +672,32 @@ inline PchResult ensure_pch(const std::string& output_dir, const std::string& fl
 }
 #endif // _WIN32
 
+#ifndef _WIN32
+// Run a shell command, capturing combined stdout+stderr into `out`. Returns the
+// child's exit code, or -1 if it could not be spawned / exited abnormally.
+inline int run_capture_posix(const std::string& cmd, std::string& out) {
+    std::string full = cmd + " 2>&1";
+    FILE* p = ::popen(full.c_str(), "r");
+    if (!p) return -1;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), p)) > 0) out.append(buf, n);
+    int rc = ::pclose(p);
+    if (rc == -1) return -1;
+    return WIFEXITED(rc) ? WEXITSTATUS(rc) : 128;
+}
+
+// Query pkg-config (e.g. "--cflags opencv4"); returns the trimmed output, or ""
+// if pkg-config fails / the package is missing.
+inline std::string pkgconfig(const std::string& args) {
+    std::string out;
+    if (run_capture_posix("pkg-config " + args, out) != 0) return {};
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' '))
+        out.pop_back();
+    return out;
+}
+#endif // !_WIN32
+
 } // namespace detail
 
 // Reject paths containing shell metacharacters to prevent command injection.
@@ -607,6 +715,103 @@ inline bool is_safe_path(const std::string& p) {
     }
     return true;
 }
+
+#ifndef _WIN32
+// POSIX compile driver: g++/clang++ -fPIC -shared, the Linux/macOS replacement
+// for the cl.exe path below. Produces a .so; OpenCV via pkg-config; the yyjson
+// codec is compiled straight from its single vendored .c; force-includes mirror
+// the cl.exe /FI order (OpenCV umbrella, then the mode's support header). Called
+// by compile() AFTER the shared, portable validation + raw-OpenMP guard have run,
+// so it assumes validated input and just builds. (The cl.exe path's _vN prune is
+// a Windows disk-churn mitigation not replicated here — ELF has no DLL file lock.)
+inline CompileResult compile_posix_build_(const CompileRequest& req) {
+    namespace fs = std::filesystem;
+    CompileResult r;
+
+    static std::atomic<int> s_version{0};
+    std::string stem = fs::path(req.source_path).stem().string();
+    int ver = s_version++;
+    std::string versioned_stem = stem + "_v" + std::to_string(ver);
+    fs::path out_so   = fs::path(req.output_dir) / (versioned_stem + ".so");
+    fs::path log_path = fs::path(req.output_dir) / (versioned_stem + ".log");
+    std::error_code ec;
+    fs::remove(out_so, ec);
+
+    // OpenCV via pkg-config — the Linux analogue of the Windows opencv_dir probe.
+    std::string ocv_cflags = detail::pkgconfig("--cflags opencv4");
+    std::string ocv_libs   = detail::pkgconfig("--libs opencv4");
+    if (ocv_libs.empty()) {
+        r.build_log = "OpenCV not found (pkg-config opencv4 failed); install "
+                      "libopencv-dev (or set PKG_CONFIG_PATH)";
+        return r;
+    }
+
+    const char* cxx_env = std::getenv("CXX");
+    std::string cxx = (cxx_env && *cxx_env) ? cxx_env : "g++";
+
+    // Codegen per mode (closest flag equivalents to the cl.exe modes).
+    //   -fnon-call-exceptions + -fno-gnu-unique: the fault→seh_exception unwind
+    //   and hot-reload-unload contracts the backend build documents — a script/
+    //   plugin MUST carry them too (the host catches its faults; the loader
+    //   unloads it). -fvisibility=default keeps the XI_EXPORT thunks exported.
+    std::string opt =
+        (req.mode == CompileMode::PluginDev)          ? "-O0 -g"
+      : (req.mode == CompileMode::Script && req.fast) ? "-O0 -g"
+      :                                                 "-O2 -g";
+
+    auto q = [](const std::string& s){ return "\"" + s + "\""; };
+    // -fpermissive: the script/plugin support headers declare the per-module
+    // globals (g_use_host_api_ etc.) `extern` in xi_io/xi_use then DEFINE them
+    // `static` in xi_script_support (each module needs its own copy). MSVC accepts
+    // that extern→static narrowing natively; g++ rejects it unless -fpermissive
+    // downgrades this specific linkage-conformance class to a warning. It does NOT
+    // relax diagnostics for ordinary user errors (undeclared names, type errors),
+    // so a real mistake in the author's inspect.cpp still fails the compile.
+    std::string cmd = cxx + " -std=c++20 -fPIC -shared -fexceptions -fpermissive"
+                            " -fnon-call-exceptions -fno-gnu-unique -fvisibility=default "
+                    + opt;
+    if (req.openmp_max_threads != 0) cmd += " -fopenmp";
+
+    cmd += " -I" + q(req.include_dir);
+    fs::path vendor_dir = fs::path(req.include_dir).parent_path() / "vendor";
+    if (fs::exists(vendor_dir)) cmd += " -I" + q(vendor_dir.string());
+    fs::path yyjson_inc = vendor_dir / "yyjson";
+    if (fs::exists(yyjson_inc)) cmd += " -I" + q(yyjson_inc.string());
+    for (auto& d : req.include_dirs) cmd += " -I" + q(d);
+    cmd += " " + ocv_cflags;
+
+    if (req.openmp_max_threads > 0)
+        cmd += " -D XI_OMP_MAX_THREADS=" + std::to_string(req.openmp_max_threads);
+
+    cmd += " -include opencv2/opencv.hpp";
+    cmd += (req.mode == CompileMode::Script) ? " -include xi/xi_script_support.hpp"
+                                             : " -include xi/xi_plugin_support.hpp";
+
+    cmd += " -o " + q(out_so.string());
+    cmd += " " + q(req.source_path);
+    for (auto& s : req.extra_sources) cmd += " " + q(s);
+
+    // yyjson codec: compile the single vendored .c straight in (as C, bracketed
+    // by -x c / -x none) so we never depend on a prebuilt lib path.
+    fs::path yyjson_c = yyjson_inc / "yyjson.c";
+    if (fs::exists(yyjson_c)) cmd += " -x c " + q(yyjson_c.string()) + " -x none";
+
+    cmd += " " + ocv_libs;
+    if (req.openmp_max_threads != 0) cmd += " -fopenmp";
+    for (auto& l : req.link_libs) cmd += " " + q(l);
+
+    cmd += " > " + q(log_path.string()) + " 2>&1";
+
+    int rc = std::system(cmd.c_str());
+    r.build_log   = detail::read_file(log_path.string());   // gcc/clang emit UTF-8
+    r.diagnostics = parse_diagnostics_gcc(r.build_log);
+    if (rc == 0 && fs::exists(out_so)) {
+        r.ok = true;
+        r.dll_path = out_so.string();
+    }
+    return r;
+}
+#endif // !_WIN32
 
 inline CompileResult compile(const CompileRequest& req) {
     CompileResult r;
@@ -681,6 +886,12 @@ inline CompileResult compile(const CompileRequest& req) {
     }
 
     std::filesystem::create_directories(req.output_dir);
+
+#ifndef _WIN32
+    // POSIX: hand off to the g++/clang++ driver. The portable validation +
+    // raw-OpenMP guard above have already run; everything below is cl.exe-only.
+    return compile_posix_build_(req);
+#endif
 
     std::string vcvars = req.vcvars_path;
     if (vcvars.empty()) vcvars = detail::auto_find_vcvars();

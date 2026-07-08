@@ -104,12 +104,12 @@ static xi_pack_handle fault_pack_process(void* p, xi_pack_handle /*input*/) {
 
 extern "C" {
 
-__declspec(dllexport) int xi_plugin_abi_version(void) { return XI_ABI_MIN_COMPAT; }
+XI_EXPORT int xi_plugin_abi_version(void) { return XI_ABI_MIN_COMPAT; }
 
 // THE CUT (v12): the sole data-plane door is xi.pack@1 (xi_pack_proc_v1),
 // published here. The host probes this to learn the plugin speaks packs and
 // drives it via run_pack_door. No xi_plugin_process, no xi_yyjson_abi.
-__declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32_t version) {
+XI_EXPORT const void* xi_plugin_get_interface(const char* id, uint32_t version) {
     if (id && version == 1u && std::strcmp(id, "xi.pack") == 0) {
         static const xi_pack_proc_v1 iface = { &fault_pack_process };
         return &iface;
@@ -117,19 +117,19 @@ __declspec(dllexport) const void* xi_plugin_get_interface(const char* id, uint32
     return nullptr;
 }
 
-__declspec(dllexport) void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) {
+XI_EXPORT void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) {
     auto* i = new FaultInstance();
     i->host = host;
     i->serial = ++g_creates;
     return i;
 }
-__declspec(dllexport) void xi_plugin_destroy(void* p) { delete static_cast<FaultInstance*>(p); }
+XI_EXPORT void xi_plugin_destroy(void* p) { delete static_cast<FaultInstance*>(p); }
 
-__declspec(dllexport) int xi_plugin_get_def(void* p, char* buf, int cap) {
+XI_EXPORT int xi_plugin_get_def(void* p, char* buf, int cap) {
     auto* i = static_cast<FaultInstance*>(p);
     return std::snprintf(buf, (size_t)cap, "{\"value\":%d}", i ? i->value : 0);
 }
-__declspec(dllexport) int xi_plugin_set_def(void* p, const char* json) {
+XI_EXPORT int xi_plugin_set_def(void* p, const char* json) {
     auto* i = static_cast<FaultInstance*>(p);
     if (!i || !json) return 1;
     if (const char* k = std::strstr(json, "\"value\"")) {
@@ -140,7 +140,7 @@ __declspec(dllexport) int xi_plugin_set_def(void* p, const char* json) {
 
 // exchange: "bump" (++scratch), "arm_crash" (crash_next=true), anything else just
 // reports. Always returns the current {serial,value,scratch,armed}.
-__declspec(dllexport) int xi_plugin_exchange(void* p, const char* cmd, char* buf, int cap) {
+XI_EXPORT int xi_plugin_exchange(void* p, const char* cmd, char* buf, int cap) {
     auto* i = static_cast<FaultInstance*>(p);
     if (!i || !cmd) return 0;
     if (std::strstr(cmd, "arm_crash"))        i->crash_next   = true;
@@ -154,7 +154,7 @@ __declspec(dllexport) int xi_plugin_exchange(void* p, const char* cmd, char* buf
 
 // A factory that always FAILS — used to force reinit rebuild failures so the
 // escalation-to-refuse path (after kReinitEscalateAfter) can be exercised.
-__declspec(dllexport) void* xi_plugin_create_null(const xi_host_api* /*host*/, const char* /*name*/) {
+XI_EXPORT void* xi_plugin_create_null(const xi_host_api* /*host*/, const char* /*name*/) {
     return nullptr;
 }
 

@@ -42,7 +42,15 @@
 #include <xi/xi_seh.hpp>
 #include <xi/xi_crash_dump.hpp>
 
-#include <windows.h>
+#ifdef _WIN32
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
 
 namespace xp = xi::proto;
 using xi::seh_exception;
@@ -321,7 +329,9 @@ void stop_group_pool_();
 void stop_dispatch_pool_();
 void install_trigger_sink_(xi::ws::Server* srv);
 void controlled_shutdown_teardown_();
+#ifdef _WIN32
 BOOL WINAPI console_ctrl_handler_(DWORD type);
+#endif
 
 // ---- dispatch quiesce guard (used by lifecycle-op cmd handlers) ------------
 struct DispatchPoolGuard {

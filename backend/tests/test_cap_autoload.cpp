@@ -101,6 +101,13 @@ static bool has(const std::vector<std::string>& v, const std::string& s) {
 }
 
 int main() {
+    // This thread drives a crashing capability handler directly (section 4), so it
+    // must install the fault→seh_exception translator so the cap funnel's
+    // catch(seh_exception) fires — same as test_cap_plane. On Windows MSVC /EHa
+    // lets the funnel's catch(...) absorb the SEH fault without this; on POSIX the
+    // signal-based translator has to be armed explicitly on the faulting thread.
+    xi::install_seh_translator();
+
     // ---- lay out a throwaway plugins dir with the autoload lib plugin --------
     fs::path root = fs::temp_directory_path() /
                     ("xi_cap_autoload_" + std::to_string(::GetCurrentProcessId()));

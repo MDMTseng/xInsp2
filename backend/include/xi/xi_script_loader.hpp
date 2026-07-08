@@ -4,15 +4,7 @@
 // resolved function pointers for the entry and thunks.
 //
 
-#ifdef _WIN32
-  #ifndef NOMINMAX
-    #define NOMINMAX
-  #endif
-  #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
-  #endif
-  #include <windows.h>
-#endif
+#include "xi_dynlib.hpp"   // HMODULE/LoadLibrary/GetProcAddress/FreeLibrary (win32 or dlopen shim)
 
 #include "xi_image_pool.hpp"
 

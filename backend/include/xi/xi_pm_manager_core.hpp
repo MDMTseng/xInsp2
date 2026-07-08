@@ -21,15 +21,7 @@
 // of the class body) — no logic, signature, ABI, or wire change.
 //
 
-#ifdef _WIN32
-  #ifndef NOMINMAX
-    #define NOMINMAX
-  #endif
-  #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
-  #endif
-  #include <windows.h>
-#endif
+#include "xi_dynlib.hpp"       // HMODULE/LoadLibrary/GetProcAddress/FreeLibrary (win32 or dlopen shim)
 
 #include "xi_abi.h"
 #include "xi_atomic_io.hpp"

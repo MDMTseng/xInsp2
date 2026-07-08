@@ -28,6 +28,12 @@
 #ifdef _MSC_VER
 #include <eh.h>
 #include <malloc.h>   // _resetstkoflw
+#elif !defined(_WIN32)
+#include <csignal>    // sigaction, siginfo_t, SIG* — POSIX fault→exception path
+#include <cstdint>    // uintptr_t
+#include <cstring>    // memset
+#include <vector>     // per-thread alt signal stack
+#include <pthread.h>  // pthread_getattr_np — thread stack bounds for overflow classify
 #endif
 
 namespace xi {
@@ -59,6 +65,112 @@ inline void seh_translator(unsigned int code, struct _EXCEPTION_POINTERS*) {
 
 inline void install_seh_translator() {
     _set_se_translator(seh_translator);
+}
+#elif !defined(_WIN32)
+// -------------------------------------------------------------------------
+// POSIX equivalent of _set_se_translator: a signal handler for the synchronous
+// hardware faults (SIGSEGV/SIGFPE/SIGBUS/SIGILL) that THROWS a seh_exception,
+// so the same `try { plugin_call(); } catch (const xi::seh_exception&)` sites
+// that catch translated SEH on Windows also catch a segfault/divide-by-zero on
+// Linux. This works ONLY because the whole tree (and the JIT-compiled scripts/
+// plugins) is built with -fnon-call-exceptions (see CMakeLists): that flag makes
+// GCC/Clang emit unwind info for trapping instructions, so the C++ unwinder can
+// unwind out of the faulting frame. Without it, the throw hits std::terminate.
+//
+// The handler is process-global (sigaction is not per-thread), but the THROW
+// happens on the faulting thread and unwinds ITS stack, so re-installing it from
+// every worker (as the Windows per-thread translator is re-set) is harmless and
+// idempotent. SA_NODEFER keeps the faulting signal unblocked as we leave the
+// handler via a throw rather than a normal return.
+// Low address of the faulting thread's stack, captured at install time (calling
+// pthread_getattr_np in the signal handler is not async-signal-safe — it reads
+// /proc/self/maps for the main thread — so we record it up front). 0 = unknown.
+inline uintptr_t& tls_stack_lo_() { thread_local uintptr_t v = 0; return v; }
+
+inline void record_stack_bounds_() {
+#ifdef __linux__
+    pthread_attr_t a;
+    if (::pthread_getattr_np(::pthread_self(), &a) == 0) {
+        void* base = nullptr; size_t size = 0;
+        if (::pthread_attr_getstack(&a, &base, &size) == 0)
+            tls_stack_lo_() = reinterpret_cast<uintptr_t>(base);
+        ::pthread_attr_destroy(&a);
+    }
+#endif
+}
+
+inline unsigned int posix_seh_code_(int sig, int si_code, void* addr) {
+    switch (sig) {
+        case SIGSEGV:
+        case SIGBUS: {
+            // The stack grows down and its guard page sits just below the recorded
+            // low bound. A fault whose address is in the guard region (or just
+            // inside the stack's low edge) is a STACK_OVERFLOW, not a wild pointer
+            // — the distinction the Win32 SEH code carries and the fault-policy
+            // classifier keys on. 1 MiB window below the low bound is generous
+            // enough for a deep single frame that jumped the guard.
+            uintptr_t lo = tls_stack_lo_();
+            if (lo && addr) {
+                uintptr_t fa = reinterpret_cast<uintptr_t>(addr);
+                if (fa + (uintptr_t(1) << 20) >= lo && fa <= lo + 4096u)
+                    return 0xC00000FD;   // STACK_OVERFLOW
+            }
+            return 0xC0000005;           // ACCESS_VIOLATION
+        }
+        case SIGILL:  return 0xC000001D; // ILLEGAL_INSTRUCTION
+        case SIGFPE:
+#ifdef FPE_INTDIV
+            if (si_code == FPE_INTDIV) return 0xC0000094; // INT_DIVIDE_BY_ZERO
+#endif
+#ifdef FPE_FLTDIV
+            if (si_code == FPE_FLTDIV) return 0xC0000091; // FLOAT_DIVIDE_BY_ZERO
+#endif
+            return 0xC0000090;           // FLOAT_INVALID_OPERATION (generic FP)
+        default:      return 0;          // UNKNOWN_SEH_EXCEPTION
+    }
+}
+
+inline void posix_seh_handler_(int sig, siginfo_t* info, void* /*ucontext*/) {
+    throw seh_exception(posix_seh_code_(sig, info ? info->si_code : 0,
+                                        info ? info->si_addr : nullptr));
+}
+
+// A STACK_OVERFLOW fault is a SIGSEGV delivered when the thread's stack is already
+// exhausted — the handler can only run on a SEPARATE stack. sigaltstack is
+// per-thread, so each thread that guards untrusted code registers its own alt
+// stack (once) before installing the handlers. thread_local storage keeps it
+// alive for the thread's lifetime and reclaims it automatically at thread exit.
+inline void ensure_altstack_() {
+    thread_local std::vector<char> alt_stack;
+    thread_local bool installed = false;
+    if (installed) return;
+    // SIGSTKSZ can be a runtime value on modern glibc; a generous fixed floor is
+    // fine and avoids depending on the exact macro form.
+    const size_t sz = (size_t)SIGSTKSZ > 65536 ? (size_t)SIGSTKSZ : 65536;
+    alt_stack.resize(sz);
+    stack_t ss;
+    std::memset(&ss, 0, sizeof(ss));
+    ss.ss_sp    = alt_stack.data();
+    ss.ss_size  = alt_stack.size();
+    ss.ss_flags = 0;
+    if (::sigaltstack(&ss, nullptr) == 0) installed = true;
+}
+
+inline void install_seh_translator() {
+    ensure_altstack_();
+    record_stack_bounds_();
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = posix_seh_handler_;
+    // SA_ONSTACK: run the handler on the per-thread alt stack so a stack-overflow
+    // SIGSEGV can still be caught. SA_NODEFER: leave the signal unblocked as we
+    // exit the handler via a throw rather than a normal return.
+    sa.sa_flags     = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    ::sigaction(SIGSEGV, &sa, nullptr);
+    ::sigaction(SIGFPE,  &sa, nullptr);
+    ::sigaction(SIGBUS,  &sa, nullptr);
+    ::sigaction(SIGILL,  &sa, nullptr);
 }
 #else
 inline void install_seh_translator() {}
