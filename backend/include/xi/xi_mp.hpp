@@ -142,6 +142,33 @@ public:
     // Convenience: a map key is just a canonical string.
     void key(std::string_view k) { str(k); }
 
+    // --- count-free containers (backpatch) --------------------------------
+    // Canonical msgpack needs the element count in the map32/array32 header,
+    // but a sequential builder only knows it at close. Because the canonical
+    // profile ALWAYS uses the fixed-width map32/array32 header (5 bytes), the
+    // count field is at a fixed offset and can be backpatched in place:
+    //   size_t at = w.open_map();   // header with a 0 placeholder; remember `at`
+    //   ... append `n` key+value pairs ...
+    //   w.set_count(at, n);         // fix the count
+    // The final bytes are byte-identical to map(n)/array(n), so canonical
+    // cross-language parity is preserved. `at` is the offset of the 4-byte
+    // big-endian count (just past the tag byte).
+    size_t open_map()   { buf_.push_back(tag::Map32);   size_t at = buf_.size(); put_be32(buf_, 0); return at; }
+    size_t open_array() { buf_.push_back(tag::Array32); size_t at = buf_.size(); put_be32(buf_, 0); return at; }
+    void set_count(size_t at, uint32_t n) {
+        buf_[at]     = (uint8_t)(n >> 24);
+        buf_[at + 1] = (uint8_t)(n >> 16);
+        buf_[at + 2] = (uint8_t)(n >> 8);
+        buf_[at + 3] = (uint8_t)(n);
+    }
+#ifndef NDEBUG
+    // Interleave guard for the count-free builders (xi_mp_build.hpp): the
+    // innermost still-open builder. Debug-only, zero release footprint. A
+    // builder asserts it equals `this` before every write, so writing to a
+    // parent while a child container is still open trips at the call site.
+    const void* dbg_leaf_ = nullptr;
+#endif
+
     // PRIVILEGED. The default builder above cannot emit ext; this is the SOLE
     // ext path. It exists for (a) the pack layer minting a pool-handle ext and
     // (b) the canonicalizer passing an accept-listed ext through. Untrusted
