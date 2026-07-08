@@ -8,9 +8,26 @@
 > end-to-end. The Phase-4 watchdog needed NO port work — the design already
 > evolved off `TerminateThread` to cooperative-cancel + `std::_Exit` (portable);
 > it is validated on Linux via `examples/qa_watchdog` (real g++-JIT'd runaway
-> script → cooperative cancel → HARD trip → exit). Remaining: full
-> Breakpad/Crashpad dumps (the stop-gap writes a backtrace sidecar today).
+> script → cooperative cancel → HARD trip → exit). Real **Breakpad** minidumps
+> are now wired as an opt-in (`-DXINSP2_HAS_BREAKPAD=ON`); the default build keeps
+> the text-backtrace sidecar. The headless Linux backend is functionally complete.
 > What landed:
+>
+> - **Breakpad minidumps (opt-in):** `-DXINSP2_HAS_BREAKPAD=ON -DBREAKPAD_ROOT=<checkout>`
+>   links Google Breakpad's client lib into **only** the backend + runner (via
+>   `_xinsp_add_breakpad`); the single dependent TU is `backend/src/crash_breakpad.cpp`,
+>   so the rest of the tree + all tests stay Breakpad-free. It registers a
+>   minidump-writer hook that `xi_crash_dump.hpp` calls from the terminate/SIGABRT
+>   path — producing a REAL `.dmp` (validated: `file` → "Mini DuMP crash report,
+>   13 streams") next to the FE-parseable `.json` sidecar. Off by default → the
+>   text-backtrace sidecar. Because the SEH translator owns the fatal signals (so a
+>   plugin fault is catchable), the dump is taken on the UNCAUGHT path (terminate),
+>   so the faulting thread's stack is unwound to the terminate frame; precise
+>   fault-site module blame is preserved separately via `xi::last_fault_addr()`.
+>   Build Breakpad: `git clone https://chromium.googlesource.com/breakpad/breakpad`
+>   + its `linux-syscall-support` into `src/third_party/lss`, `./configure && make
+>   src/client/linux/libbreakpad_client.a`.
+> What landed (earlier):
 >
 > - **Watchdog (`service_main.cpp`):** already portable — `std::thread` monitor,
 >   atomic per-worker deadlines, Phase-1 cooperative cancel via the script's

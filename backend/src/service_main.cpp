@@ -359,6 +359,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--certify-plugin") {
             const char* dir = (i + 1 < argc) ? argv[i + 1] : nullptr;
+            xi::crash::install_minidump_writer();   // Breakpad when built in
             xi::crash::install();   // a crashed certify still yields a minidump
             int code = dir ? xi::certify::certify_in_process(dir)
                            : xi::certify::kExitAbiMismatch;
@@ -371,6 +372,7 @@ int main(int argc, char** argv) {
     // Install the crash-forensics handlers (minidump filter + CRT death-path
     // interceptors + first-chance logger + fault-stack reserve). Lives in the
     // extracted leaf xi_crash_dump.hpp.
+    xi::crash::install_minidump_writer();   // Breakpad minidump writer when built in
     xi::crash::install();
     // SEH → C++ exception translator so try/catch catches segfaults (a separate
     // concern from the dump machinery; owned here, re-set per inspect thread).

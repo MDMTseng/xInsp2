@@ -1,6 +1,7 @@
 build/
 **/build/
 build-linux/
+build-*/
 **/build-linux/
 *.obj
 *.exe

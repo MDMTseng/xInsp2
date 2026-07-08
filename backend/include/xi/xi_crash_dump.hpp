@@ -682,6 +682,38 @@ inline std::string crash_dir_() {
 // Write the .json sidecar + a .dmp backtrace text, print the FE trigger line.
 // `exc_name` is the exception/signal name; `fault_addr` the faulting instruction
 // (may be null); frames/n a captured backtrace. First faulter wins (H3 analogue).
+// Optional real-minidump writer, registered by the backend/runner when built with
+// Breakpad (-DXINSP2_HAS_BREAKPAD). It writes a minidump into `dir`, fills `out`
+// with the resulting .dmp path, and returns true on success. Kept as a function
+// pointer so Breakpad stays isolated in ONE TU (backend/src/crash_breakpad.cpp)
+// linked only into the backend + runner — this header, and the many test TUs that
+// include it, never depend on Breakpad. Null → the text-backtrace fallback below.
+using MinidumpWriterFn = bool (*)(const char* dir, char* out, int out_cap);
+inline std::atomic<MinidumpWriterFn>& minidump_writer_hook() {
+    static std::atomic<MinidumpWriterFn> h{nullptr};
+    return h;
+}
+inline void set_minidump_writer(MinidumpWriterFn fn) {
+    minidump_writer_hook().store(fn, std::memory_order_release);
+}
+
+#if defined(XINSP2_HAS_BREAKPAD)
+// Defined in backend/src/crash_breakpad.cpp (the single Breakpad TU). Registers
+// the Breakpad minidump writer into the hook above. Call once at boot, before
+// install(). Only visible to TUs built with XINSP2_HAS_BREAKPAD (backend/runner).
+void register_breakpad_writer();
+#endif
+
+// Wire up the best available minidump writer for this build: Breakpad when
+// compiled in, otherwise nothing (the handler falls back to a text backtrace).
+// No-op + zero dependency when XINSP2_HAS_BREAKPAD is off, so entrypoints can
+// call it unconditionally right before install().
+inline void install_minidump_writer() {
+#if defined(XINSP2_HAS_BREAKPAD)
+    register_breakpad_writer();
+#endif
+}
+
 inline void write_crash_report_posix(const char* exc_name, void* fault_addr,
                                      void* const* frames, int nframes) {
     static std::atomic<int> once{0};
@@ -696,20 +728,38 @@ inline void write_crash_report_posix(const char* exc_name, void* fault_addr,
     std::snprintf(stem, sizeof stem, "xinsp-backend-%ld-%04d%02d%02d-%02d%02d%02d",
                   pid, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
                   tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-    auto dmp_path  = dir + "/" + stem + ".dmp";
-    auto json_path = dir + "/" + stem + ".json";
 
     // Precise module blame from the fault address (fault→throw path), else the
     // top non-runtime backtrace frame.
     std::string blamed = fault_addr ? blame_addr(fault_addr) : blame_backtrace(frames, nframes);
 
-    // .dmp: a symbolized backtrace (there is no minidump; this is the stand-in the
-    // FE can preserve and a human can read).
-    if (int fd = ::open(dmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); fd >= 0) {
-        dprintf(fd, "xInsp2 backtrace (%s, signal/exception %s, module %s)\n",
-                XINSP2_VERSION, exc_name, blamed.c_str());
-        if (frames && nframes > 0) backtrace_symbols_fd(const_cast<void**>(frames), nframes, fd);
-        ::close(fd);
+    // Prefer a REAL Breakpad minidump when the writer hook is registered; the
+    // .json sidecar is then written next to Breakpad's <uuid>.dmp. Otherwise fall
+    // back to a text-backtrace .dmp beside a <stem>.json. Either way the FE finds
+    // the sidecar via the "minidump: <path>.dmp" line printed at the end.
+    std::string dmp_path, json_path, minidump_name;
+    bool real_dump = false;
+    if (auto w = minidump_writer_hook().load(std::memory_order_acquire)) {
+        char buf[1024] = {0};
+        if (w(dir.c_str(), buf, (int)sizeof buf) && buf[0]) {
+            dmp_path = buf;
+            std::filesystem::path p(dmp_path);
+            minidump_name = p.filename().string();
+            json_path = (p.parent_path() / (p.stem().string() + ".json")).string();
+            real_dump = true;
+        }
+    }
+    if (!real_dump) {
+        dmp_path      = dir + "/" + stem + ".dmp";
+        json_path     = dir + "/" + stem + ".json";
+        minidump_name = std::string(stem) + ".dmp";
+        // Text-backtrace .dmp stand-in (a human-readable, preservable stack).
+        if (int fd = ::open(dmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); fd >= 0) {
+            dprintf(fd, "xInsp2 backtrace (%s, signal/exception %s, module %s)\n",
+                    XINSP2_VERSION, exc_name, blamed.c_str());
+            if (frames && nframes > 0) backtrace_symbols_fd(const_cast<void**>(frames), nframes, fd);
+            ::close(fd);
+        }
     }
 
     // .json: byte-compatible with the Windows write_minidump sidecar the FE reads.
@@ -768,7 +818,7 @@ inline void write_crash_report_posix(const char* exc_name, void* fault_addr,
         }
     }
     out += "]";
-    out += ",\"minidump\":"; json_escape(out, (std::string(stem) + ".dmp").c_str());
+    out += ",\"minidump\":"; json_escape(out, minidump_name.c_str());
     out += "}\n";
 
     if (int fd = ::open(json_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); fd >= 0) {
