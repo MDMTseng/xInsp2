@@ -5,8 +5,23 @@
 > Linux/GCC (developed on ARM64 — Raspberry Pi, Debian, g++ 14). Phase 0 (build
 > green), Phase-1 core loop (runtime g++ compile driver + `.so` load), Phase-2 FE
 > supervisor, and the Phase-3 crash-forensics **stop-gap** are done and validated
-> end-to-end. Remaining: full Breakpad/Crashpad dumps (the stop-gap writes a
-> backtrace sidecar today) and the Phase-4 watchdog redesign. What landed:
+> end-to-end. The Phase-4 watchdog needed NO port work — the design already
+> evolved off `TerminateThread` to cooperative-cancel + `std::_Exit` (portable);
+> it is validated on Linux via `examples/qa_watchdog` (real g++-JIT'd runaway
+> script → cooperative cancel → HARD trip → exit). Remaining: full
+> Breakpad/Crashpad dumps (the stop-gap writes a backtrace sidecar today).
+> What landed:
+>
+> - **Watchdog (`service_main.cpp`):** already portable — `std::thread` monitor,
+>   atomic per-worker deadlines, Phase-1 cooperative cancel via the script's
+>   `set_global_cancel` thunk, Phase-2 hard trip = `std::_Exit(WATCHDOG_EXIT_CODE)`
+>   for FE respawn. No `TerminateThread`. `examples/qa_watchdog/driver.py` is now
+>   cross-platform (was `nt`-only because the JIT compile was) and PASSES on Linux.
+>   (Note: `std::_Exit(0x5744)` truncates to `0x44` on POSIX — exit codes are 8-bit;
+>   the FE records it either way, and does not branch on the value.)
+> - **JIT fix:** the g++ driver compiles `vendor/yyjson/yyjson.c` in its OWN C
+>   invocation (a cached `.o`) rather than inline — the C++-only force-includes
+>   (`-include opencv2/opencv.hpp`) apply to every input and broke it as a C file.
 >
 > - **FE supervisor (`fe_main.cpp`):** POSIX `run_supervisor` — fork/exec the
 >   backend into its own process group, `waitpid`(WNOHANG) monitor, boot-readiness
@@ -129,7 +144,7 @@ the port itself; it's a record so we know what to expect.
 
 | Mechanism | Why hard |
 |---|---|
-| `TerminateThread` watchdog (`backend/src/service_main.cpp`) | Linux has no synchronous "kill thread" primitive. `pthread_cancel` requires cooperative cancellation points the user script won't honour. The earlier "kill the worker process" fix is gone — process isolation was removed 2026-05 and everything runs in-process — so the Linux watchdog story is an open **TODO(linux)**: options include a cooperative-cancellation checkpoint API in the script ABI, or a `SIGUSR`-based interrupt that longjmps out of the inspect thread. |
+| ~~`TerminateThread` watchdog~~ **(RESOLVED — was never ported because it never needed it)** | The watchdog design already evolved off `TerminateThread`: Phase 1 arms the script's cooperative-cancel epoch (`set_global_cancel`), Phase 2 (script ignored the grace) `std::_Exit`s the whole process for the FE to respawn — a forced thread-kill was rejected as unsafe (leaks the per-instance lock, risks heap corruption). Both phases are plain `std::thread`/atomics/`_Exit`, so the watchdog is portable as-is and passes `examples/qa_watchdog` on Linux. No cooperative-checkpoint-API or `SIGUSR`-longjmp work is needed. |
 | Plugin DLL versioning (`stem_vN.dll` per `xi_script_compiler.hpp`) | Exists only because Windows holds a load lock on the previous DLL until unload completes. Linux `dlclose` has no such lock, so this whole hack can be deleted on the Linux build. Make sure to keep it conditional, not retroactively rip it out from Windows. |
 
 ## Outside the backend

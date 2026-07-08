@@ -34,10 +34,17 @@ from xinsp2 import Client  # noqa: E402
 from ports import free_port  # noqa: E402
 
 SUF = ".exe" if os.name == "nt" else ""
-BE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{SUF}"
+# Windows builds to build/Release; the Linux/POSIX port builds to build-linux.
+_BE_CANDIDATES = [
+    REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{SUF}",
+    REPO_ROOT / "backend" / "build-linux" / f"xinsp-backend{SUF}",
+]
+BE = next((p for p in _BE_CANDIDATES if p.exists()), _BE_CANDIDATES[0])
 PORT = free_port()  # ephemeral (was 7873); no squatter cross-talk
 WD_MS = 500
-WATCHDOG_EXIT_CODE = 0x5744   # 'WD' — must match service_main.cpp
+# service_main.cpp exits std::_Exit(0x5744) on a hard trip. POSIX exit codes are
+# only the low 8 bits, so a Linux waitpid sees 0x44; Windows keeps the full word.
+WATCHDOG_EXIT_CODE = 0x5744 if os.name == "nt" else (0x5744 & 0xFF)   # 'WD'
 
 
 def port_open(p, timeout=0.3):
@@ -48,9 +55,6 @@ def port_open(p, timeout=0.3):
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: backend compile is Windows-only here")
-        return 0
     if not BE.exists():
         sys.exit(f"FAIL: missing {BE} (build xinsp_backend)")
     if port_open(PORT):

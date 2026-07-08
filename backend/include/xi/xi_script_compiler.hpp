@@ -791,10 +791,24 @@ inline CompileResult compile_posix_build_(const CompileRequest& req) {
     cmd += " " + q(req.source_path);
     for (auto& s : req.extra_sources) cmd += " " + q(s);
 
-    // yyjson codec: compile the single vendored .c straight in (as C, bracketed
-    // by -x c / -x none) so we never depend on a prebuilt lib path.
+    // yyjson codec: some SDK headers pull it in. It is C, so it CANNOT share this
+    // command — the C++-only force-includes (-include opencv2/opencv.hpp) apply to
+    // every input and would break a C file ("must be compiled as C++"). Compile it
+    // to a cached object in its own C invocation (no force-includes), then link
+    // that object in. Best-effort: if the object build fails the link just omits
+    // it (a script that truly needs yyjson then fails at link with a clear error).
     fs::path yyjson_c = yyjson_inc / "yyjson.c";
-    if (fs::exists(yyjson_c)) cmd += " -x c " + q(yyjson_c.string()) + " -x none";
+    if (fs::exists(yyjson_c)) {
+        fs::path yyjson_o = fs::path(req.output_dir) / "xi_yyjson_c.o";
+        if (!fs::exists(yyjson_o, ec)) {
+            std::string cc = cxx + " -x c -c -fPIC -O2 -fvisibility=default -I"
+                           + q(yyjson_inc.string())
+                           + " -o " + q(yyjson_o.string()) + " " + q(yyjson_c.string());
+            std::string clog;
+            detail::run_capture_posix(cc, clog);
+        }
+        if (fs::exists(yyjson_o, ec)) cmd += " " + q(yyjson_o.string());
+    }
 
     cmd += " " + ocv_libs;
     if (req.openmp_max_threads != 0) cmd += " -fopenmp";
