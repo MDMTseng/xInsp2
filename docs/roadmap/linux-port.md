@@ -3,9 +3,30 @@
 > **Status: Linux (aarch64) build EXECUTED on the `linux-build` branch.** The
 > headless backend now configures, builds, links, and passes the ctest suite on
 > Linux/GCC (developed on ARM64 — Raspberry Pi, Debian, g++ 14). Phase 0 (build
-> green) and the Phase-1 core loop (runtime g++ compile driver + `.so` load) are
-> done; the crash-forensics *dump* leg (Breakpad/minidumps) and the FE-supervisor
-> `fe_main` POSIX path remain (see the phasing table). What landed:
+> green), Phase-1 core loop (runtime g++ compile driver + `.so` load), Phase-2 FE
+> supervisor, and the Phase-3 crash-forensics **stop-gap** are done and validated
+> end-to-end. Remaining: full Breakpad/Crashpad dumps (the stop-gap writes a
+> backtrace sidecar today) and the Phase-4 watchdog redesign. What landed:
+>
+> - **FE supervisor (`fe_main.cpp`):** POSIX `run_supervisor` — fork/exec the
+>   backend into its own process group, `waitpid`(WNOHANG) monitor, boot-readiness
+>   gate + heartbeat + health-mirror + respawn/quarantine policy (all the shared
+>   portable logic), `killpg` shutdown, SIGINT/SIGTERM handlers, BSD-socket port
+>   probe. Validated: spawn→healthy→SIGKILL-a-child→crash-history record→respawn→
+>   clean shutdown with no orphans. GAP vs the Job Object: an FE that is itself
+>   SIGKILLed orphans the backend (reparented to init) — cgroup/pidfd is the
+>   follow-up; clean + signalled FE exits kill the backend.
+> - **Crash forensics stop-gap (`xi_crash_dump.hpp`):** POSIX `install()` hooks
+>   `std::set_terminate` (the fault→seh_exception→uncaught path) + `SIGABRT`, and
+>   writes the SAME `.json` crash-report the FE parser reads (exception.name from
+>   the seh_exception, module blame via `dladdr(xi::last_fault_addr())`, the
+>   portable breadcrumb `context`/`culprit`/`threads`) beside a `.dmp` backtrace,
+>   printing the `minidump:` trigger line. Composes with the SEH translator instead
+>   of fighting it for SIGSEGV. Validated: backend crash → sidecar → FE enriches
+>   its crash-history (`exception`, `report`, `dump`). Precise plugin-quarantine
+>   attribution still wants a real dump (follow-up).
+>
+> Earlier legs (Phase 0/1):
 >
 > - **CMake:** configures with the system OpenCV (`find_package`), Ninja + g++.
 >   Tree-wide GCC flags added: `-fno-gnu-unique` (modules truly unload on

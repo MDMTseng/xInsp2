@@ -33,9 +33,15 @@
   #include <psapi.h>
   #pragma comment(lib, "dbghelp.lib")  // top-level crash filter
   #pragma comment(lib, "psapi.lib")    // module-blame lookup
+#else
+  #include <execinfo.h>   // backtrace / backtrace_symbols_fd (stop-gap dump)
+  #include <dlfcn.h>      // dladdr — module blame from an instruction address
+  #include <unistd.h>     // getpid
+  #include <ctime>        // timestamp for the report stem
+  #include <fcntl.h>
 #endif
 
-#include "xi_seh.hpp"   // xi::seh_exception (on_terminate classifies it)
+#include "xi_seh.hpp"   // xi::seh_exception + xi::last_fault_addr()
 
 #include <atomic>
 #include <chrono>
@@ -591,10 +597,241 @@ inline void install() {
 }
 
 #else  // !_WIN32
-// TODO(linux): dbghelp/SEH have no portable analogue yet. Stub so the host
-// compiles; the breadcrumb model above still works.
+// ---- POSIX crash forensics (stop-gap) ---------------------------------------
+//
+// No minidump; instead, on an uncaught crash we write the SAME .json crash-report
+// the FE's parser reads (exception.{name,module}, context.last_phase, culprit,
+// threads[]) next to a <stem>.dmp text file carrying a symbolized backtrace for
+// preservation, and print the "... — minidump: <stem>.dmp" trigger line the FE
+// greps. This composes with the xi_seh.hpp fault→exception translator rather than
+// fighting it for SIGSEGV: we hook std::set_terminate (a hardware fault becomes a
+// thrown seh_exception; if it escapes unhandled it reaches terminate here) plus
+// SIGABRT (the abort()/assert path the translator does not touch). Module blame
+// uses xi::last_fault_addr() (dladdr) for the fault→throw path, else the top
+// non-runtime backtrace frame. The FULL forensic dump (Breakpad/Crashpad) is the
+// follow-up; this gives the FE non-empty forensics + a stack today.
+
+inline void json_escape(std::string& out, const char* s) {
+    out += '"';
+    for (const char* p = s ? s : ""; *p; ++p) {
+        unsigned char c = (unsigned char)*p;
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (c < 0x20) { char b[8]; std::snprintf(b, sizeof b, "\\u%04x", c); out += b; }
+                else out += (char)c;
+        }
+    }
+    out += '"';
+}
+
+inline const char* signal_name(int sig) {
+    switch (sig) {
+        case SIGSEGV: return "ACCESS_VIOLATION";
+        case SIGBUS:  return "BUS_ERROR";
+        case SIGFPE:  return "FLOAT_EXCEPTION";
+        case SIGILL:  return "ILLEGAL_INSTRUCTION";
+        case SIGABRT: return "ABORT";
+        default:      return "SIGNAL";
+    }
+}
+
+// "<soname>+0x<off>" for an instruction address via dladdr, or "<unknown>".
+inline std::string blame_addr(void* addr) {
+    if (!addr) return "<unknown>";
+    Dl_info info;
+    if (dladdr(addr, &info) && info.dli_fname) {
+        std::string base = std::filesystem::path(info.dli_fname).filename().string();
+        uintptr_t off = (uintptr_t)addr - (uintptr_t)info.dli_fbase;
+        char b[32]; std::snprintf(b, sizeof b, "+0x%lx", (unsigned long)off);
+        return base + b;
+    }
+    return "<unknown>";
+}
+
+// First backtrace frame that is NOT in the C/C++ runtime, ld, or this exe — i.e.
+// the most likely script/plugin culprit module. Falls back to "<unknown>".
+inline std::string blame_backtrace(void* const* frames, int n) {
+    for (int i = 0; i < n; ++i) {
+        Dl_info info;
+        if (!dladdr(frames[i], &info) || !info.dli_fname) continue;
+        std::string base = std::filesystem::path(info.dli_fname).filename().string();
+        if (base.rfind("libc", 0) == 0 || base.rfind("libstdc++", 0) == 0 ||
+            base.rfind("libgcc", 0) == 0 || base.rfind("ld-", 0) == 0 ||
+            base.rfind("libpthread", 0) == 0 || base.rfind("libm", 0) == 0)
+            continue;
+        uintptr_t off = (uintptr_t)frames[i] - (uintptr_t)info.dli_fbase;
+        char b[32]; std::snprintf(b, sizeof b, "+0x%lx", (unsigned long)off);
+        return base + b;
+    }
+    return "<unknown>";
+}
+
+inline std::string crash_dir_() {
+    const char* t = std::getenv("TMPDIR");
+    std::filesystem::path d = (t && *t) ? t : "/tmp";
+    d /= "xinsp2"; d /= "crashdumps";
+    std::error_code ec; std::filesystem::create_directories(d, ec);
+    return d.string();
+}
+
+// Write the .json sidecar + a .dmp backtrace text, print the FE trigger line.
+// `exc_name` is the exception/signal name; `fault_addr` the faulting instruction
+// (may be null); frames/n a captured backtrace. First faulter wins (H3 analogue).
+inline void write_crash_report_posix(const char* exc_name, void* fault_addr,
+                                     void* const* frames, int nframes) {
+    static std::atomic<int> once{0};
+    if (once.fetch_add(1, std::memory_order_acq_rel) != 0) return;
+    g_dump_in_progress.store(1, std::memory_order_release);
+
+    std::string dir = crash_dir_();
+    long pid = (long)getpid();
+    std::time_t now = std::time(nullptr);
+    std::tm tmv{}; gmtime_r(&now, &tmv);
+    char stem[96];
+    std::snprintf(stem, sizeof stem, "xinsp-backend-%ld-%04d%02d%02d-%02d%02d%02d",
+                  pid, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                  tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    auto dmp_path  = dir + "/" + stem + ".dmp";
+    auto json_path = dir + "/" + stem + ".json";
+
+    // Precise module blame from the fault address (fault→throw path), else the
+    // top non-runtime backtrace frame.
+    std::string blamed = fault_addr ? blame_addr(fault_addr) : blame_backtrace(frames, nframes);
+
+    // .dmp: a symbolized backtrace (there is no minidump; this is the stand-in the
+    // FE can preserve and a human can read).
+    if (int fd = ::open(dmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); fd >= 0) {
+        dprintf(fd, "xInsp2 backtrace (%s, signal/exception %s, module %s)\n",
+                XINSP2_VERSION, exc_name, blamed.c_str());
+        if (frames && nframes > 0) backtrace_symbols_fd(const_cast<void**>(frames), nframes, fd);
+        ::close(fd);
+    }
+
+    // .json: byte-compatible with the Windows write_minidump sidecar the FE reads.
+    char tsbuf[32];
+    std::snprintf(tsbuf, sizeof tsbuf, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                  tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                  tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    std::string out = "{\"version\":\"" XINSP2_VERSION "\",\"commit\":\"" XINSP2_COMMIT "\"";
+    out += ",\"pid\":" + std::to_string(pid);
+    out += ",\"timestamp\":"; json_escape(out, tsbuf);
+    out += ",\"exception\":{\"name\":"; json_escape(out, exc_name);
+    char addrbuf[40];
+    std::snprintf(addrbuf, sizeof addrbuf, "\"0x%llx\"", (unsigned long long)(uintptr_t)fault_addr);
+    out += ",\"address\":"; out += addrbuf;
+    out += ",\"module\":"; json_escape(out, blamed.c_str());
+    out += "}";
+    {
+        auto& c = ctx();
+        out += ",\"context\":{";
+        out += "\"last_cmd\":";       json_escape(out, c.last_cmd);
+        out += ",\"last_script\":";   json_escape(out, c.last_script);
+        out += ",\"last_instance\":"; json_escape(out, c.last_instance);
+        out += ",\"last_plugin\":";   json_escape(out, c.last_plugin);
+        out += ",\"last_phase\":";    json_escape(out, c.last_phase);
+        out += ",\"last_status\":";   json_escape(out, c.last_status);
+        out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
+        out += ",\"last_frame\":"  + std::to_string(c.last_frame);
+        out += "}";
+    }
+    {
+        out += ",\"culprit\":{";
+        out += "\"instance\":"; json_escape(out, g_culprit.instance);
+        out += ",\"plugin\":";  json_escape(out, g_culprit.plugin);
+        out += ",\"folder\":";  json_escape(out, g_culprit.folder);
+        out += ",\"dll\":";     json_escape(out, g_culprit.dll);
+        out += "}";
+    }
+    out += ",\"threads\":[";
+    {
+        bool first = true;
+        for (int i = 0; i < kMaxSlots; ++i) {
+            uint32_t tid = g_slot_tid[i].load(std::memory_order_acquire);
+            if (tid == 0) continue;
+            auto& c = g_slots[i];
+            if (!first) out += ",";
+            first = false;
+            out += "{\"thread_id\":" + std::to_string(tid);
+            out += ",\"last_cmd\":";      json_escape(out, c.last_cmd);
+            out += ",\"last_instance\":"; json_escape(out, c.last_instance);
+            out += ",\"last_plugin\":";   json_escape(out, c.last_plugin);
+            out += ",\"last_phase\":";    json_escape(out, c.last_phase);
+            out += ",\"last_status\":";   json_escape(out, c.last_status);
+            out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
+            out += ",\"last_frame\":"  + std::to_string(c.last_frame);
+            out += "}";
+        }
+    }
+    out += "]";
+    out += ",\"minidump\":"; json_escape(out, (std::string(stem) + ".dmp").c_str());
+    out += "}\n";
+
+    if (int fd = ::open(json_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); fd >= 0) {
+        ssize_t w = ::write(fd, out.data(), out.size()); (void)w;
+        ::close(fd);
+    }
+
+    std::fprintf(stderr, "[xinsp2] CRASH (%s) in %s — minidump: %s\n",
+                 exc_name, blamed.c_str(), dmp_path.c_str());
+    std::fflush(stderr);
+    g_dump_in_progress.store(0, std::memory_order_release);
+}
+
+// std::terminate hook: the fault→seh_exception→uncaught path (and any uncaught
+// C++ exception / noexcept violation) lands here on the faulting thread. Identify
+// the in-flight exception, capture a backtrace, write the report, then die.
+inline void posix_terminate_handler() {
+    void* bt[64];
+    int n = backtrace(bt, 64);
+    const char* name = "TERMINATE";
+    void* fault = xi::last_fault_addr();   // set by the seh handler on this thread
+    try {
+        if (auto e = std::current_exception()) std::rethrow_exception(e);
+    } catch (const xi::seh_exception& se) {
+        name = se.what();                  // ACCESS_VIOLATION / INT_DIVIDE_BY_ZERO / …
+    } catch (const std::exception&) {
+        name = "CPP_EXCEPTION";
+    } catch (...) {
+        name = "UNKNOWN_EXCEPTION";
+    }
+    write_crash_report_posix(name, fault, bt, n);
+    std::fflush(stdout); std::fflush(stderr);
+    std::abort();   // actually terminate (our SIGABRT handler already ran once → no re-entry)
+}
+
+inline void posix_signal_handler(int sig, siginfo_t* si, void*) {
+    void* bt[64];
+    int n = backtrace(bt, 64);
+    write_crash_report_posix(signal_name(sig), si ? si->si_addr : nullptr, bt, n);
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);   // re-raise so the process dies with the real signal disposition
+}
+
+// No dedicated fault stack needed here: the SIGABRT path does not exhaust the
+// stack, and the SIGSEGV/stack-overflow altstack is owned by xi_seh.hpp's
+// translator (install_seh_translator). Kept for API parity with the Windows side.
 inline void reserve_fault_stack() {}
-inline void install() {}
+
+inline void install() {
+    std::set_terminate(posix_terminate_handler);
+    // SIGABRT (abort/assert) — the translator never touches it. No SA_ONSTACK:
+    // abort doesn't overflow the stack. (SIGSEGV/FPE/BUS/ILL are owned by the seh
+    // translator, which throws → the uncaught path routes through set_terminate.)
+    struct sigaction sa; std::memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = posix_signal_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    ::sigaction(SIGABRT, &sa, nullptr);
+    // Let the seh hard-exit path (recover_seh_stack_or_die) drain an in-flight
+    // report before _Exit, mirroring the Windows H7 rendezvous.
+    xi::seh_predump_drain_hook().store(+[]{ xi::crash::await_dump(2000); },
+                                      std::memory_order_release);
+}
 #endif // _WIN32
 
 } // namespace crash

@@ -47,6 +47,21 @@
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
 #  pragma comment(lib, "Ws2_32.lib")
+#else
+#  include <unistd.h>
+#  include <fcntl.h>
+#  include <csignal>
+#  include <cerrno>
+#  include <ctime>
+#  include <poll.h>
+#  include <sys/types.h>
+#  include <sys/wait.h>
+#  include <sys/socket.h>
+#  include <netinet/in.h>
+#  include <arpa/inet.h>
+#  if defined(__linux__)
+#    include <sys/prctl.h>   // PR_SET_PDEATHSIG (best-effort kill-on-parent-death)
+#  endif
 #endif
 
 namespace fs = std::filesystem;
@@ -815,6 +830,426 @@ static int run_supervisor(const FeConfig& c) {
 }
 #endif // _WIN32
 
+#ifndef _WIN32
+// ----------------------------------------------------------------------------
+// POSIX supervisor (Linux / macOS)
+//
+// Mirrors the Win32 supervisor's control flow verbatim — the boot-readiness
+// gate, serve-time heartbeat, health mirror, respawn/quarantine policy, and
+// crash-history logic are all shared, portable code; only the OS primitives
+// differ:
+//   CreateProcess(suspended)+Job Object -> fork/exec into its own process group
+//                                          (killpg on shutdown; PR_SET_PDEATHSIG
+//                                          best-effort — see gap note below)
+//   WaitForSingleObject(hProc, ms)      -> waitpid(WNOHANG) poll with a timeout
+//   GetExitCodeProcess                  -> WIFEXITED/WEXITSTATUS | 128+signal
+//   TerminateProcess                    -> kill(SIGKILL) + reap
+//   port_open (Winsock)                 -> BSD connect + poll
+//   MoveFileEx status write             -> std::filesystem::rename (atomic)
+//   SetConsoleCtrlHandler               -> sigaction(SIGINT/SIGTERM)
+//
+// GAP vs the Windows Job Object: KILL_ON_JOB_CLOSE reaps the backend even if the
+// FE is SIGKILLed. On POSIX the backend is killed on every CLEAN or signalled FE
+// exit (killpg of the child's group), but an FE that is itself SIGKILLed leaves
+// the backend orphaned (reparented to init). The backend's own watchdog + the
+// project owner-lock (reclaimed on the next FE/BE start) bound the blast radius;
+// full parity would need a cgroup or a pidfd babysitter (follow-up).
+// ----------------------------------------------------------------------------
+static std::atomic<bool> g_stop{false};   // set by the SIGINT/SIGTERM handler
+
+static void posix_stop_handler(int) { g_stop.store(true); }
+
+// Atomic status publish: write a sibling .tmp then rename() over the target
+// (POSIX rename atomically replaces on the same filesystem). Best-effort — a
+// failed status write must never take the supervisor down.
+static void publish_status(const FeConfig& c, xi::FeStatus& st) {
+    if (c.status_file.empty()) return;
+    st.ts_ms = now_ms();
+    std::string json = st.render();
+    std::string tmp  = c.status_file + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        f << json;
+        if (!f) return;
+    }
+    std::error_code ec;
+    fs::rename(tmp, c.status_file, ec);
+}
+
+// Shallow "is the WS port accepting?" probe — the POSIX twin of the Win32
+// port_open: a non-blocking connect with a short poll timeout so a hung backend
+// never stalls the supervisor. Tells us only that the accept loop is alive.
+static bool port_open(int port) {
+    int s = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return false;
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons((uint16_t)port);
+    ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    int fl = ::fcntl(s, F_GETFL, 0);
+    ::fcntl(s, F_SETFL, fl | O_NONBLOCK);
+    bool ok = false;
+    int rc = ::connect(s, (sockaddr*)&addr, sizeof(addr));
+    if (rc == 0) {
+        ok = true;
+    } else if (errno == EINPROGRESS) {
+        struct pollfd pfd { s, POLLOUT, 0 };
+        if (::poll(&pfd, 1, 250) > 0 && (pfd.revents & POLLOUT)) {
+            int err = 0; socklen_t len = sizeof(err);
+            ::getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len);
+            ok = (err == 0);
+        }
+    }
+    ::close(s);
+    return ok;
+}
+
+static void sleep_ms(int ms) {
+    if (ms <= 0) return;
+    struct timespec ts { ms / 1000, (long)(ms % 1000) * 1000000L };
+    ::nanosleep(&ts, nullptr);
+}
+
+struct Spawned {
+    pid_t pid = -1;
+    bool  ok  = false;
+};
+
+// Assemble the backend argv (execv — no shell, so no quoting needed). Mirrors
+// build_cmdline's flag set exactly.
+static std::vector<std::string> build_argv(const FeConfig& c) {
+    std::vector<std::string> a;
+    a.push_back(c.backend_exe);
+    a.push_back("--port=" + std::to_string(c.port));
+    if (!c.project.empty()) a.push_back("--project=" + c.project);
+    if (!c.script.empty())  a.push_back("--script=" + c.script);
+    if (c.autostart_fps > 0) a.push_back("--autostart-fps=" + std::to_string(c.autostart_fps));
+    for (auto& d : c.plugins_dirs) a.push_back("--plugins-dir=" + d);
+    if (c.heartbeat_stale_ms > 0 && !c.heartbeat_file.empty())
+        a.push_back("--heartbeat-file=" + c.heartbeat_file);
+    if (!c.health_file.empty()) a.push_back("--health-file=" + c.health_file);
+    if (c.watchdog_ms > 0) a.push_back("--watchdog=" + std::to_string(c.watchdog_ms));
+    if (c.working_copy)    a.push_back("--working-copy");
+    for (auto& x : c.be_args) a.push_back(x);
+    return a;
+}
+
+// fork + exec the backend into its OWN process group (so shutdown can killpg the
+// whole tree), stdout/stderr redirected to a freshly-truncated be_log. A failed
+// log open is a spawn failure (same rationale as the Win32 path — never launch
+// onto a stale log whose old "autostart: ready" marker could fool the boot gate).
+static Spawned spawn_backend(const FeConfig& c) {
+    Spawned sp;
+    int logfd = ::open(c.be_log.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (logfd < 0) {
+        std::fprintf(stderr, "[xinsp-fe] BE log open failed (%s): %s — treating as "
+                     "spawn failure (won't launch onto a stale log)\n",
+                     std::strerror(errno), c.be_log.c_str());
+        return sp;   // sp.ok == false
+    }
+
+    std::vector<std::string> args = build_argv(c);
+    std::string wd = fs::path(c.backend_exe).parent_path().string();
+
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        std::fprintf(stderr, "[xinsp-fe] fork failed: %s\n", std::strerror(errno));
+        ::close(logfd);
+        return sp;
+    }
+    if (pid == 0) {
+        // ---- child ----
+        ::setpgid(0, 0);                       // own process group -> killpg on shutdown
+#if defined(__linux__)
+        ::prctl(PR_SET_PDEATHSIG, SIGKILL);    // best-effort (cleared on execve; see gap note)
+#endif
+        ::dup2(logfd, STDOUT_FILENO);
+        ::dup2(logfd, STDERR_FILENO);
+        if (logfd != STDOUT_FILENO && logfd != STDERR_FILENO) ::close(logfd);
+        if (!wd.empty()) { if (::chdir(wd.c_str()) != 0) { /* non-fatal */ } }
+        std::vector<char*> cargv;
+        cargv.reserve(args.size() + 1);
+        for (auto& s : args) cargv.push_back(const_cast<char*>(s.c_str()));
+        cargv.push_back(nullptr);
+        ::execv(c.backend_exe.c_str(), cargv.data());
+        // Only reached if exec failed.
+        std::fprintf(stderr, "[xinsp-fe] execv failed: %s (%s)\n",
+                     c.backend_exe.c_str(), std::strerror(errno));
+        _exit(127);
+    }
+    // ---- parent ----
+    ::setpgid(pid, pid);   // race-free group set (also done in child)
+    ::close(logfd);        // the child holds its own dup'd copies
+    sp.pid = pid;
+    sp.ok  = true;
+    return sp;
+}
+
+// Map a waitpid status to the DWORD-shaped code the shared crash logic records:
+// a clean exit keeps its code; a signal death is 128+signo (shell convention).
+static int status_to_code(int status) {
+    if (WIFEXITED(status))   return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 1;
+}
+
+// Non-blocking "did the backend exit within timeout_ms?" — the waitpid(WNOHANG)
+// poll twin of WaitForSingleObject. Returns true + fills exit_code on exit;
+// false on timeout (still running).
+static bool wait_be(pid_t pid, int timeout_ms, int* exit_code) {
+    int waited = 0;
+    for (;;) {
+        int status = 0;
+        pid_t r = ::waitpid(pid, &status, WNOHANG);
+        if (r == pid) { *exit_code = status_to_code(status); return true; }
+        if (r < 0 && errno == ECHILD) { *exit_code = 1; return true; }  // already reaped
+        if (waited >= timeout_ms) return false;
+        int slice = timeout_ms - waited < 25 ? timeout_ms - waited : 25;
+        sleep_ms(slice);
+        waited += slice;
+    }
+}
+
+// Force-kill the backend and CONFIRM death before the caller may respawn (the H1
+// invariant): SIGKILL the whole process group, then reap. Retry; return true
+// only once reaped (with the real exit code), false if it somehow can't be — the
+// caller then refuses to respawn onto the same port/state.
+static bool force_kill_be(pid_t pid, int* exit_code) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        ::kill(-pid, SIGKILL);   // whole group (pgid == pid)
+        ::kill(pid, SIGKILL);    // and the leader directly, in case setpgid raced
+        int waited = 0;
+        while (waited < 5000) {
+            int status = 0;
+            pid_t r = ::waitpid(pid, &status, WNOHANG);
+            if (r == pid)  { *exit_code = status_to_code(status); return true; }
+            if (r < 0 && errno == ECHILD) { *exit_code = 1; return true; }
+            sleep_ms(25);
+            waited += 25;
+        }
+    }
+    return false;
+}
+
+static int run_supervisor(const FeConfig& c) {
+    // SIGINT/SIGTERM -> graceful stop; ignore SIGPIPE (a dropped probe socket
+    // must never kill the supervisor). SIGCHLD stays default so waitpid works.
+    struct sigaction sa; std::memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = posix_stop_handler; sigemptyset(&sa.sa_mask);
+    ::sigaction(SIGINT,  &sa, nullptr);
+    ::sigaction(SIGTERM, &sa, nullptr);
+    ::signal(SIGPIPE, SIG_IGN);
+
+    std::fprintf(stderr, "[xinsp-fe] supervisor up: backend=%s port=%d project=%s fps=%d\n",
+                 c.backend_exe.c_str(), c.port, c.project.c_str(), c.autostart_fps);
+    std::fprintf(stderr, "[xinsp-fe] BE log -> %s\n", c.be_log.c_str());
+
+    xi::CrashHistory history(c.crash_history, c.preserve_dir);
+    if (history.enabled()) {
+        std::fprintf(stderr, "[xinsp-fe] crash history -> %s%s\n", c.crash_history.c_str(),
+                     c.preserve_dir.empty() ? "" : (" (dumps -> " + c.preserve_dir + ")").c_str());
+    }
+
+    xi::FeStatus st;
+    st.respawn_max   = c.respawn_max;
+    st.port          = c.port;
+    st.working_copy  = c.working_copy;
+    st.crash_history = c.crash_history;
+    st.state         = "starting";
+    if (!c.status_file.empty())
+        std::fprintf(stderr, "[xinsp-fe] status -> %s\n", c.status_file.c_str());
+    publish_status(c, st);
+
+    xi::RespawnTracker resp;
+    xi::PluginFaultTracker plugin_faults;
+    int  rc = 0;
+    pid_t live_pid = -1;   // for shutdown killpg
+
+    while (!g_stop.load()) {
+        Spawned sp = spawn_backend(c);
+        if (!sp.ok) {
+            xi::BeExitEvent ev; ev.reason = xi::BeExitReason::BackendExit;
+            ev.ts_ms = now_ms(); ev.backend_rc = -1;
+            bool cap_hit = resp.note_death(c.respawn_max);
+            history.record(ev, resp.consecutive, cap_hit);
+            st.state = "down"; st.reason = "BackendSpawnFailed"; st.backend_pid = 0;
+            st.consecutive = resp.consecutive;
+            st.set_event(ev); publish_status(c, st);
+            if (g_stop.load()) { rc = 1; break; }
+            if (cap_hit) {
+                std::fprintf(stderr, "[xinsp-fe] backend spawn failed %d consecutive times "
+                             "(cap %d) - staying down; manual restart required\n",
+                             resp.consecutive, c.respawn_max);
+                st.latched = true; st.reason = "RespawnLimitExceeded"; publish_status(c, st);
+                rc = 2;
+                break;
+            }
+            std::fprintf(stderr, "[xinsp-fe] backend spawn failed (failure %d/%d); "
+                         "retrying after %dms\n", resp.consecutive, c.respawn_max, c.respawn_backoff_ms);
+            sleep_ms(c.respawn_backoff_ms);
+            continue;
+        }
+        live_pid = sp.pid;
+        std::fprintf(stderr, "[xinsp-fe] backend up pid=%d\n", (int)sp.pid);
+        st.backend_pid = (int)sp.pid;
+        publish_status(c, st);
+
+        // ---- monitor this instance ----
+        int   probe_fails = 0;
+        bool  healthy_announced = false;
+        bool    ready_seen = c.project.empty();
+        int64_t spawn_ms   = steady_ms();
+        long long hb_last_val = -2;
+        int64_t   hb_last_change_ms = 0;
+        bool      hb_armed = false;
+        int64_t   healthy_since = 0;
+        int   exit_code = 0;
+        bool  kill_confirmed = true;
+        xi::BeExitReason death_reason = xi::BeExitReason::BackendExit;
+        for (;;) {
+            if (wait_be(sp.pid, c.probe_interval_ms, &exit_code)) {   // BE exited
+                death_reason = xi::BeExitReason::BackendExit;
+                break;
+            }
+            if (g_stop.load()) break;
+
+            bool port = port_open(c.port);
+
+            if (!ready_seen) {
+                if (port && log_contains(c.be_log, "autostart: ready")) {
+                    ready_seen = true;
+                } else if (log_contains(c.be_log, "autostart: degraded")) {
+                    std::fprintf(stderr, "[xinsp-fe] backend reported autostart degraded "
+                                 "(script did not load); killing for respawn\n");
+                    death_reason = xi::BeExitReason::BootTimeout;
+                    kill_confirmed = force_kill_be(sp.pid, &exit_code);
+                    break;
+                } else if (c.boot_timeout_ms > 0 && steady_ms() - spawn_ms > c.boot_timeout_ms) {
+                    std::fprintf(stderr, "[xinsp-fe] backend did not reach 'autostart: ready' "
+                                 "within %d ms (boot hang); killing for respawn\n",
+                                 c.boot_timeout_ms);
+                    death_reason = xi::BeExitReason::BootTimeout;
+                    kill_confirmed = force_kill_be(sp.pid, &exit_code);
+                    break;
+                } else {
+                    continue;
+                }
+            }
+
+            if (port) {
+                probe_fails = 0;
+                if (!healthy_announced) {
+                    healthy_announced = true;
+                    std::fprintf(stderr, "[xinsp-fe] backend healthy (port %d up)\n", c.port);
+                    if (st.state != "healthy") {
+                        st.state = "healthy"; st.reason.clear();
+                        publish_status(c, st);
+                    }
+                }
+                if (healthy_since == 0) healthy_since = steady_ms();
+                resp.note_healthy(steady_ms() - healthy_since, c.respawn_reset_ms);
+                if (c.heartbeat_stale_ms > 0) {
+                    long long hb = read_heartbeat(c.heartbeat_file);
+                    int64_t now = steady_ms();
+                    if (!hb_armed) { hb_armed = true; hb_last_val = hb; hb_last_change_ms = now; }
+                    else if (hb != hb_last_val) { hb_last_val = hb; hb_last_change_ms = now; }
+                    else if (now - hb_last_change_ms > c.heartbeat_stale_ms) {
+                        std::fprintf(stderr, "[xinsp-fe] backend heartbeat stale for >%d ms "
+                                     "(serving loop wedged); killing for respawn\n",
+                                     c.heartbeat_stale_ms);
+                        death_reason = xi::BeExitReason::PortUnresponsive;
+                        kill_confirmed = force_kill_be(sp.pid, &exit_code);
+                        break;
+                    }
+                }
+                {
+                    xi::BeHealth bh;
+                    if (xi::parse_be_health(read_health_mirror(c.health_file), bh)) {
+                        if (st.set_be_health(bh.state, bh.since_ms, bh.last_reason))
+                            publish_status(c, st);
+                    }
+                }
+            } else if (++probe_fails >= c.probe_fail_max) {
+                std::fprintf(stderr, "[xinsp-fe] backend unresponsive (%d failed probes); "
+                             "killing for respawn\n", probe_fails);
+                death_reason = xi::BeExitReason::PortUnresponsive;
+                kill_confirmed = force_kill_be(sp.pid, &exit_code);
+                break;
+            }
+        }
+
+        bool intended = g_stop.load();
+        if (intended) break;
+
+        if (!kill_confirmed) {
+            std::fprintf(stderr, "[xinsp-fe] backend did not terminate within the kill "
+                         "budget — REFUSING to respawn (a second backend on port %d would "
+                         "double-serve). Exiting; restart the FE.\n", c.port);
+            st.state  = "down";
+            st.reason = "backend unkillable — FE exiting";
+            publish_status(c, st);
+            rc = 1;
+            break;
+        }
+
+        // ---- BE died unexpectedly: record forensics + respawn ----
+        xi::BeExitEvent ev;
+        ev.reason     = death_reason;
+        ev.backend_rc = exit_code;
+        ev.ts_ms      = now_ms();
+        xi::enrich_from_crash_report(c.be_log, ev);
+
+        bool quarantined_this_death = false;
+        if (!ev.culprit_plugin.empty() && plugin_faults.note_fault(ev.culprit_plugin, ev.ts_ms)) {
+            bool wrote = quarantine_plugin(ev.culprit_folder, ev.culprit_dll);
+            quarantined_this_death = true;
+            std::fprintf(stderr, "[xinsp-fe] plugin '%s' attributed %d crash(es) -> "
+                         "QUARANTINED%s; respawning with it disabled (line stays up)\n",
+                         ev.culprit_plugin.c_str(), plugin_faults.count(ev.culprit_plugin),
+                         wrote ? "" : " (cache write failed — gate may not apply)");
+            st.reason = "PluginQuarantined:" + ev.culprit_plugin;
+            resp.reset();
+        }
+
+        bool cap_hit = resp.note_death(c.respawn_max);
+        history.record(ev, resp.consecutive, cap_hit);
+        st.state = "down";
+        st.has_be_health = false; st.be_state.clear(); st.be_last_reason.clear();
+        if (!quarantined_this_death) st.reason = xi::to_string(death_reason);
+        st.consecutive = resp.consecutive; st.backend_pid = 0;
+        st.set_event(ev); publish_status(c, st);
+        if (cap_hit) {
+            std::fprintf(stderr, "[xinsp-fe] respawn limit (%d consecutive failures without "
+                         "%ds sustained-healthy) exceeded - staying down; manual restart required\n",
+                         c.respawn_max, c.respawn_reset_ms / 1000);
+            st.latched = true; st.reason = "RespawnLimitExceeded";
+            publish_status(c, st);
+            rc = 2;
+            break;
+        }
+        std::fprintf(stderr, "[xinsp-fe] respawning backend (failure %d/%d) after %dms\n",
+                     resp.consecutive, c.respawn_max, c.respawn_backoff_ms);
+        sleep_ms(c.respawn_backoff_ms);
+    }
+
+    // Shutdown: kill the live backend's process group (the killpg equivalent of
+    // the Windows job-object close), then reap it.
+    std::fprintf(stderr, "[xinsp-fe] supervisor stopping\n");
+    if (live_pid > 0) {
+        int status = 0;
+        if (::waitpid(live_pid, &status, WNOHANG) == 0) {  // still running
+            int code = 0;
+            force_kill_be(live_pid, &code);
+        }
+    }
+    st.state = "stopped"; st.backend_pid = 0;
+    if (!st.latched) st.reason = "SupervisorShutdown";
+    publish_status(c, st);
+    return rc;
+}
+#endif // !_WIN32
+
 static void print_help() {
     std::printf(
         "xinsp-fe - xInsp2 frontend supervisor\n"
@@ -866,15 +1301,5 @@ int main(int argc, char** argv) {
         return 0;
     }
     FeConfig c = load_config(argc, argv);
-#ifdef _WIN32
-    return run_supervisor(c);
-#else
-    // TODO(linux): implement the supervisor with posix_spawn/fork+execv,
-    // prctl(PR_SET_PDEATHSIG) for the kill-on-parent-death guarantee, a
-    // ::connect probe (POSIX sockets), and SIGTERM/SIGINT handling. The
-    // The crash-event model + crash-report parsing above are already portable.
-    std::fprintf(stderr, "[xinsp-fe] not implemented on this platform yet "
-                 "(backend=%s)\n", c.backend_exe.c_str());
-    return 3;
-#endif
+    return run_supervisor(c);   // Win32 + POSIX implementations above
 }
