@@ -126,8 +126,15 @@ inline Context& ctx() {
     if (guard.idx >= 0) return g_slots[guard.idx];
 #ifdef _WIN32
     uint32_t tid = (uint32_t)GetCurrentThreadId();
+#elif defined(__linux__)
+    // Kernel thread id — small, stable, always non-zero (0 means "slot free"), so
+    // each live thread claims a distinct breadcrumb slot and the crash report's
+    // threads[] can tell them apart (per-thread plugin attribution).
+    uint32_t tid = (uint32_t)::gettid();
 #else
-    uint32_t tid = 1;  // TODO(linux): pthread_self()-derived id
+    // Portable fallback (e.g. macOS): fold pthread_self() and force non-zero.
+    uint32_t tid = (uint32_t)(uintptr_t)::pthread_self();
+    if (tid == 0) tid = 1;
 #endif
     for (int i = 0; i < kMaxSlots; ++i) {
         uint32_t expected = 0;

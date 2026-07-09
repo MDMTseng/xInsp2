@@ -450,21 +450,21 @@ int main(int argc, char** argv) {
     // Raise the OS timer resolution to 1ms (default ~15.6ms) so timer-tick fps,
     // sleeps, and CV waits are tight. winmm.timeBeginPeriod via runtime-load so we
     // don't add a link dependency. Process-wide; the paired timeEndPeriod is optional.
+    // (POSIX clock_nanosleep is already high-res, so no equivalent is needed.)
     if (HMODULE w = LoadLibraryA("winmm.dll")) {
         if (auto fn = (UINT(WINAPI*)(UINT))GetProcAddress(w, "timeBeginPeriod")) fn(1);
     }
+#endif
     // --priority=<class>: bump the whole backend's process priority (for a
-    // dedicated inspection PC). Default = leave as-is. Also settable live via
-    // cmd:set_process_priority / project.json runtime.process_priority.
+    // dedicated inspection PC). Default = leave as-is. Cross-platform:
+    // SetPriorityClass on Windows, setpriority(nice) on POSIX (see
+    // apply_process_priority_). Also settable live via cmd:set_process_priority /
+    // project.json runtime.process_priority.
     if (std::string pri = xi::cli::parse_str_flag(argc, argv, "--priority"); !pri.empty()) {
         if (!apply_process_priority_(pri))
             std::fprintf(stderr,
                 "[xinsp2] unknown --priority '%s' (high|above|normal|below|realtime)\n", pri.c_str());
     }
-#else
-    // TODO(linux): clock_nanosleep is already high-res; setpriority(PRIO_PROCESS)
-    // / sched_setscheduler for --priority.
-#endif
 
     // Derive include dir for the script compiler. In a normal dev tree the
     // backend .exe is at backend/build/Release, and headers are at
