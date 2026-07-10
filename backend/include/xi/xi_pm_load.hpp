@@ -498,6 +498,26 @@ inline int PluginManager::compile_plugin_folders_locked_(const std::vector<std::
             // not the folder leaf, or a renamed plugin's old HMODULE survives.
             auto prev = plugins_.find(manifest_name);
             if (prev != plugins_.end() && prev->second.handle) {
+                // RT5/N1/J2/J3/L1/O2 family — DLL teardown without machine-
+                // provider reconciliation. The prior version being dropped may
+                // back a live machine autoload provider (machine_instances_
+                // [manifest_name], the "@auto:" adapter) — e.g. a global lib
+                // plugin this project plugin shadows by manifest name, or the
+                // previous open's build of this same plugin. FreeLibrary with
+                // the provider still registered leaves its InstanceRegistry
+                // entry and CapRegistry registrations ACTIVE with handlers
+                // pointing into the UNMAPPED module (same crash as the rebuild
+                // lanes fixed in detach_plugin_instances_locked_ /
+                // recompile_project_plugin). Evict NOW, before FreeLibrary —
+                // evict_machine_provider_locked_ sweeps this owner's cap names
+                // SYNCHRONOUSLY, so no handler can outlive the module. The
+                // provider is reinstated below once the NEW module loads
+                // (targeted single-plugin reinstate, mirroring the reattach
+                // lanes); every `continue` between here and there (LoadLibrary
+                // / ABI / caps / factory failure) leaves it evicted until the
+                // next autoload reconcile — a lost capability, fail-soft,
+                // never a dangling handler.
+                evict_machine_provider_locked_(manifest_name);
                 FreeLibrary(prev->second.handle);   // TODO(linux): dlclose
                 prev->second.handle = nullptr;
                 prev->second.c_factory = nullptr;
@@ -581,6 +601,35 @@ inline int PluginManager::compile_plugin_folders_locked_(const std::vector<std::
             plugins_[key] = std::move(pi);
             project_plugin_origin_[key] = entry.path().string();
             project_loaded_plugins_.insert(key);
+            // Leg B reinstate (compile lane): the drop-prior-version evict
+            // above tore the machine autoload provider down (if one existed)
+            // BEFORE FreeLibrary; the NEW module is now loaded + registered,
+            // so bring the "@auto:" adapter back up on the new code. Same
+            // eligibility gates + targeted single-plugin instantiation as
+            // reattach_plugin_from_dll_locked_ / recompile_project_plugin
+            // (autoload enabled, plugin autoload-eligible, project precedence,
+            // synthetic "@auto:" name, plugin-default on_fault) — see the
+            // rationale there. No-op when nothing was evicted and the plugin
+            // isn't autoload-eligible.
+            auto& npi = plugins_[key];
+            if (autoload_enabled_ && npi.autoload
+                    && !machine_instances_.count(key)
+                    && !project_provides_plugin_locked_(key)) {
+                const std::string minst_name = "@auto:" + key;
+                auto minst = make_adapter_guarded_(npi, key, minst_name,
+                                                   /*max_concurrency=*/0, npi.default_on_fault);
+                if (minst) {
+                    InstanceRegistry::instance().add(minst);
+                    machine_instances_[key] = minst;
+                    std::fprintf(stderr, "[xinsp2] compile: machine lib provider '%s' back up "
+                                 "on freshly-built DLL (owner=%llu)\n", key.c_str(),
+                                 (unsigned long long)minst->owner_id());
+                } else {
+                    std::fprintf(stderr, "[xinsp2] compile: factory failed re-establishing "
+                                 "machine lib provider '%s' — capability lost until next "
+                                 "autoload\n", key.c_str());
+                }
+            }
             ok_count++;
         } catch (const std::exception& e) {
             last_open_warnings_.push_back(

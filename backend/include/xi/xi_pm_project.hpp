@@ -92,6 +92,25 @@ inline void PluginManager::close_project() {
     for (auto& key : project_loaded_plugins_) {
         auto it = plugins_.find(key);
         if (it != plugins_.end()) {
+            // RT5/N1/J2/J3/L1/O2 family — DLL teardown without machine-provider
+            // reconciliation. A machine autoload provider can be backed by a
+            // module this loop is about to FreeLibrary (an autoload-eligible
+            // PROJECT plugin, or a global lib plugin this project's same-named
+            // plugin shadowed in plugins_). The autoload reconciler at the end
+            // of close_project only ADDS providers — it never removes a stale
+            // machine_instances_ entry, and for a plugin erased from plugins_
+            // below it can't recreate one either — so pre-fix the provider's
+            // InstanceRegistry entry + CapRegistry registrations stayed ACTIVE
+            // with handlers pointing into the UNMAPPED module (forever, for an
+            // erased plugin; and even transiently a plugin-owned thread is
+            // outside close_project's host-dispatch drain and can call into
+            // freed code). Evict BEFORE FreeLibrary — evict_machine_provider_
+            // locked_ sweeps this owner's cap names synchronously, so no
+            // handler outlives the module. close_project is full teardown, so
+            // plain evict-before-free with NO reinstate is correct here; the
+            // reconciler below reinstates any provider whose global DLL is
+            // still mapped, exactly as before.
+            evict_machine_provider_locked_(key);
             if (it->second.handle) FreeLibrary(it->second.handle);   // TODO(linux): dlclose
             plugins_.erase(it);
         }
