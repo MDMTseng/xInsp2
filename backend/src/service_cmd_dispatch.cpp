@@ -15,6 +15,14 @@
 
 #include "service_internal.hpp"
 
+// Item-14 caught-fault policy helpers, DEFINED in service_sinks.cpp (given
+// external linkage there specifically so cmd_exchange_instance_ below can share
+// the exact same fault boundary as the script-side exchange/pack-door surfaces
+// — use_exchange_cb / use_pack_process_cb). Declared here rather than in
+// service_internal.hpp while these two TUs are the only sharers.
+void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* adapter);
+void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter);
+
 // ---- dispatch-control ------------------------------------------------------
 void cmd_set_timer_fps_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Live synthetic-tick rate. fps <= 0 = trigger-only (no ticks). Takes
@@ -255,6 +263,15 @@ void cmd_stop_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         g_eng.continuous = false;
         xi::TriggerBus::instance().clear_sink();
         stop_dispatch_pool_();   // joins lanes + drains their queues (handles released)
+        // Re-install the trigger sink now that the pool is stopped. clear_sink above
+        // only exists to stop the lanes being fed WHILE they drain; leaving the bus
+        // sink-less would kill the trigger-driven one-shot model (issue/replay works
+        // WITHOUT cmd:start — see install_trigger_sink_) until the next
+        // compile_and_load: every subsequent source emit would take the silent
+        // no-sink drop path. With g_eng.continuous now false the re-installed sink
+        // routes each emit through dispatch_one_shot_, exactly like the post-
+        // compile_and_load state and the lifecycle guard's restore_sink_ resume.
+        install_trigger_sink_(&srv);
         xi::health().set_state(xi::SysState::ProjectLoaded);
         send_rsp_ok(srv, id, R"({"stopped":true})");
 }
@@ -283,6 +300,27 @@ void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd
         }
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
+            // Item-14 fault surface — same gates as the script-side exchange
+            // boundary (use_exchange_cb, mirroring use_pack_process_cb in
+            // service_sinks.cpp): quarantined → refuse WITHOUT entering plugin
+            // code; a pending (on_fault=reinit) rebuild is applied first; and a
+            // caught crash below feeds note_instance_crash_ +
+            // apply_on_fault_policy_ so an exchange()-only crash-loop trips
+            // health/reinit/refuse like a process() one.
+            auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+            if (adapter) {
+                if (adapter->quarantined()) {
+                    send_rsp_err(srv, id, "instance quarantined (on_fault=refuse): " + *iname);
+                    return;
+                }
+                if (adapter->reinit_pending()) {
+                    apply_pending_reinit_(iname->c_str(), adapter);
+                    if (adapter->quarantined()) {
+                        send_rsp_err(srv, id, "instance quarantined (on_fault=refuse): " + *iname);
+                        return;
+                    }
+                }
+            }
             try {
                 std::string result = inst->exchange(cmd_str);
                 send_rsp_ok(srv, id, result);
@@ -291,9 +329,14 @@ void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd
                 std::snprintf(msg, sizeof(msg), "exchange '%s' crashed: 0x%08X (%s)",
                              iname->c_str(), e.code, e.what());
                 send_rsp_err(srv, id, msg);
+                char why[96]; std::snprintf(why, sizeof(why), "exchange() crashed: 0x%08X", e.code);
+                note_instance_crash_(iname->c_str(), why);
+                if (adapter) apply_on_fault_policy_(iname->c_str(), adapter);
                 xi::recover_seh_stack_or_die(e.code, "cmd exchange_instance");
             } catch (const std::exception& e) {
                 send_rsp_err(srv, id, std::string("exchange error: ") + e.what());
+                note_instance_crash_(iname->c_str(), "exchange() threw an exception");
+                if (adapter) apply_on_fault_policy_(iname->c_str(), adapter);
             }
         } else {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
