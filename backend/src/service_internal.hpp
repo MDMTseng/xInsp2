@@ -150,6 +150,16 @@ struct GroupLane {
     // was taken (not merely until the slot is empty, which interleaved producers
     // would confuse). Only meaningful for queue_depth==0 lanes; harmless otherwise.
     uint64_t                       taken_count = 0;
+    // Per-lane death flag (guarded by `mu`, like taken_count — every reader holds
+    // lane->mu). Set true by the stop paths (stop_dispatch_pool_/stop_group_pool_)
+    // in the same critical section that notifies this lane's cvs. Producers check
+    // THIS — not only the global g_eng.continuous — after locking mu: a stop→resume
+    // cycle (hot-recompile via DispatchPoolGuard) re-arms the GLOBAL flag while
+    // g_eng.lanes holds NEW lanes, so a producer holding a stale shared_ptr to an
+    // OLD lane would otherwise pass the global re-check and deposit into (or park
+    // forever on) a dead, worker-less lane (lane-ABA; frame loss / pack-ref leak /
+    // teardown deadlock). Fresh lanes start unstopped; the flag is never cleared.
+    bool                           stopped = false;
     std::vector<std::thread>       workers;
     std::atomic<uint64_t>          running{0};
     std::atomic<uint64_t>          dropped{0};

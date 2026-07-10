@@ -199,7 +199,11 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     std::unique_lock<std::mutex> lk(lane->mu);
     // Re-check after taking the lane lock: a concurrent stop may have flipped
     // g_eng.continuous + drained; don't push a now-orphaned event (would leak).
-    if (!g_eng.continuous.load()) return false;
+    // lane->stopped is the AUTHORITATIVE per-lane check (lane-ABA guard): a
+    // stop→resume cycle re-arms the global flag while g_eng.lanes holds NEW lane
+    // objects, so a producer that resolved THIS (old) lane before the stop would
+    // pass a global-only re-check and deposit into a dead, worker-less lane.
+    if (lane->stopped || !g_eng.continuous.load()) return false;
     // ---- queue_depth:0 RENDEZVOUS (synchronous handoff; opt-in) ----------------
     // DANGER — like overflow:block, rendezvous is ONLY safe for a back-pressure-
     // TOLERANT source on a DEDICATED thread it can freely stall. NEVER a lane a
@@ -216,9 +220,9 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         // returns before any drop_oldest front()-on-empty path could run.
         // 1) Wait for the handoff slot to be free (or stop).
         lane->cv_not_full.wait(lk, [&] {
-            return lane->q.empty() || !g_eng.continuous.load();
+            return lane->q.empty() || lane->stopped || !g_eng.continuous.load();
         });
-        if (!g_eng.continuous.load()) {                      // stop → drop (guard releases ev)
+        if (lane->stopped || !g_eng.continuous.load()) {     // stop → drop (guard releases ev)
             // RB3 (doc 25): a producer parked here at stop drops an in-hand frame.
             // Count it (frames-in vs verdicts+drops-out stays balanced) but do NOT
             // emit an XI_SYS_DROPPED wire marker: this is teardown (unlike F2's
@@ -241,7 +245,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         // 3) Block until OUR event is TAKEN (taken_count advanced) or stop. On stop
         //    the event is already in q; stop_group_pool_ drains it (no leak, no hang).
         lane->cv_not_full.wait(lk, [&] {
-            return lane->taken_count != t0 || !g_eng.continuous.load();
+            return lane->taken_count != t0 || lane->stopped || !g_eng.continuous.load();
         });
         return true;   // handed off (or stop-woken after deposit — teardown drains q)
     }
@@ -264,9 +268,9 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         // TO DROP rather than hang. cv.wait releases lane->mu while parked so the
         // worker can drain and free a slot; it re-acquires lk before returning.
         lane->cv_not_full.wait(lk, [&] {
-            return (int)lane->q.size() < depth || !g_eng.continuous.load();
+            return (int)lane->q.size() < depth || lane->stopped || !g_eng.continuous.load();
         });
-        if (!g_eng.continuous.load()) {   // stop-wake → drop (guard releases ev)
+        if (lane->stopped || !g_eng.continuous.load()) {   // stop-wake → drop (guard releases ev)
             ++g_eng.dropped_lifetime;     // RB3 (doc 25): count the teardown drop (no wire marker — see depth-0 note)
             return false;
         }
@@ -475,7 +479,12 @@ void stop_group_pool_() {
     // block-wait predicate keys off g_eng.continuous (already false here), so a parked
     // producer returns-and-drops instead of hanging teardown (its join below / the
     // source-instance destroy later would otherwise deadlock on a stuck emit thread).
-    for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); lp->cv_not_full.notify_all(); }
+    // Mark each lane DEAD (lp->stopped, under its mu, in the SAME critical section
+    // as the notify so a woken waiter is guaranteed to see it) — the global flag
+    // alone is not enough: a later resume re-arms g_eng.continuous, and a producer
+    // still holding one of THESE (old) shared_ptrs must not deposit/park on a lane
+    // that no longer has workers (lane-ABA).
+    for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->stopped = true; lp->cv.notify_all(); lp->cv_not_full.notify_all(); }
     for (auto& lp : lanes) for (auto& t : lp->workers) if (t.joinable()) t.join();
     // Workers are gone + g_eng.continuous is false → drain leftover queued events and
     // release their image handles before the lanes are dropped (release-before-
@@ -500,8 +509,11 @@ void stop_dispatch_pool_() {
         for (auto& lp : lanes) {
             // cv → workers; cv_not_full → any parked overflow:block producer (so it
             // observes continuous=false and returns-and-drops, not hang); gate.cv →
-            // anyone parked in a per-lane EmitTurn (ordered mode).
-            { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); lp->cv_not_full.notify_all(); }
+            // anyone parked in a per-lane EmitTurn (ordered mode). Also mark the
+            // lane DEAD (lp->stopped, under mu, same critical section as the
+            // notify) so a producer holding a stale shared_ptr can't be fooled by
+            // a subsequent resume re-arming the global flag (lane-ABA).
+            { std::lock_guard<std::mutex> lk(lp->mu); lp->stopped = true; lp->cv.notify_all(); lp->cv_not_full.notify_all(); }
             { std::lock_guard<std::mutex> lk(lp->gate.mu); lp->gate.cv.notify_all(); }
         }
     }
