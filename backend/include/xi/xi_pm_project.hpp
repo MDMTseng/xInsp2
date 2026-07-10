@@ -282,6 +282,26 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     auto name_opt = extract_string(content, "name");
     if (name_opt) project_.name = *name_opt;
     auto script_opt = extract_string(content, "script");
+    // SECURITY (P1): `script` is VERBATIM from project.json and becomes the
+    // cl.exe SOURCE for the project compile — joined with operator/, an
+    // absolute value discards the project folder and a "../" chain climbs out
+    // of it, so a semi-trusted project could compile+run an out-of-tree,
+    // pre-planted source file. Refuse the open loudly (same fail-loud shape
+    // as the schema gate below: last_open_error_ + stderr + return false)
+    // rather than degrade — a project whose script points outside its own
+    // tree is hostile or broken either way. See path_is_contained
+    // (xi_pm_parse.hpp) for the guard + threat model.
+    if (script_opt &&
+        !path_is_contained(std::filesystem::path(folder), *script_opt)) {
+        last_open_error_ =
+            "project.json 'script' (\"" + *script_opt + "\") is absolute or "
+            "escapes the project folder ('..') — refusing to open: the "
+            "inspection script must live inside the project tree "
+            "(path-containment guard; an out-of-tree script would be compiled "
+            "and executed from an arbitrary machine path).";
+        std::fprintf(stderr, "[xinsp2] %s\n", last_open_error_.c_str());
+        return false;
+    }
     if (script_opt) project_.script_path = (std::filesystem::path(folder) / *script_opt).string();
     else            project_.script_path = (std::filesystem::path(folder) / "inspect.cpp").string();
 

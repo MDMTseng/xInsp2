@@ -275,6 +275,27 @@ inline void PluginManager::resolve_external_project_plugins_locked_(
     for (auto& d : dirs_raw) roots.push_back(expand_plugin_root_(d, project_folder));
     std::vector<std::filesystem::directory_entry> to_compile;
     for (auto& ref : refs) {
+        // SECURITY (P1): ref.path is VERBATIM from project.json and is joined
+        // onto each search root below — an absolute value DISCARDS the root
+        // (operator/ semantics) and a "../" chain climbs out of it, so a
+        // semi-trusted project folder could LoadLibrary a pre-planted DLL
+        // from an arbitrary machine path (only plugin_abi_compatible gates
+        // it). Require a contained relative path; the check is lexical, so a
+        // passing ref.path stays inside WHICHEVER root resolves it. The
+        // plugin_dirs roots themselves are NOT constrained: an absolute root
+        // (machine-wide toolbox via ${ENV}/~, see expand_plugin_root_) is
+        // host-side configuration, not project-embedded data.
+        if (!path_is_contained(std::filesystem::path(project_folder), ref.path)) {
+            std::string msg =
+                "plugin path '" + ref.path + "' is absolute or escapes the "
+                "project tree ('..') — SKIPPED by the path-containment guard "
+                "(project.json plugins[].path must be relative and resolve "
+                "inside a declared plugin_dir; see path_is_contained)";
+            last_open_warnings_.push_back({ref.label, "", msg});
+            std::fprintf(stderr, "[xinsp2] plugin '%s': %s\n",
+                         ref.label.c_str(), msg.c_str());
+            continue;
+        }
         std::filesystem::path found;
         for (auto& root : roots) {
             auto cand = std::filesystem::path(root) / ref.path;

@@ -153,6 +153,52 @@ inline std::vector<IfaceReq> parse_iface_reqs(const std::string& json,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// SECURITY (P1) — path-containment guard for semi-trusted project-folder
+// path strings.
+//
+// ROOT CAUSE: path strings read VERBATIM from project.json / plugin.json
+// (`plugins[].path`, `script`, manifest `dll`) were joined onto a trusted base
+// with std::filesystem::operator/ and used with NO containment check.
+// operator/ with an ABSOLUTE right-hand side silently DISCARDS the base, and
+// a "../" chain climbs out of it — so a project folder obtained from a
+// semi-trusted source (unzipped customer project, network share, repo
+// checkout) could address ANY path on the machine.
+// THREAT: LoadLibrary of a PRE-PLANTED out-of-tree DLL (the only remaining
+// gate is plugin_abi_compatible), or handing cl.exe an OUT-OF-TREE source
+// file to compile and run.
+//
+// The guard: the candidate must be RELATIVE — no root directory and no root
+// name, which also rejects drive-relative "C:foo" and UNC "//server/share"
+// forms is_absolute() alone can miss on Windows — and
+// (base / candidate).lexically_normal() must still start with
+// base.lexically_normal(), i.e. no ".."-escape. Purely LEXICAL by design:
+// it constrains what the untrusted STRING can address; symlink traversal is
+// out of scope here (planting a symlink already requires machine access).
+inline bool path_is_contained(const std::filesystem::path& base,
+                              const std::filesystem::path& candidate) {
+    if (candidate.is_absolute() ||
+        candidate.has_root_name() || candidate.has_root_directory())
+        return false;
+    const auto b   = base.lexically_normal();
+    const auto rel = (b / candidate).lexically_normal().lexically_relative(b);
+    if (rel.empty()) return false;      // not expressible under base at all
+    return *rel.begin() != "..";        // leading ".." = climbed out of base
+}
+
+// Companion (same P1): a plugin.json `dll` must be a BARE FILENAME, resolved
+// inside the plugin's own folder. Any separator, ".." or drive prefix would
+// let a semi-trusted manifest point the LoadLibrary target outside the plugin
+// dir (e.g. "../../../Windows/Temp/evil.dll").
+inline bool dll_name_is_bare(const std::string& n) {
+    if (n.empty()) return false;
+    if (n.find('/')  != std::string::npos ||
+        n.find('\\') != std::string::npos ||
+        n.find("..") != std::string::npos)
+        return false;
+    return !std::filesystem::path(n).has_root_name();   // "C:evil.dll"
+}
+
 inline PluginInfo parse_manifest(const std::string& path, const std::string& folder) {
     PluginInfo pi;
     std::ifstream f(path);
@@ -167,6 +213,23 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
 
     if (name) pi.name = *name;
     if (desc) pi.description = *desc;
+    // SECURITY (P1): a manifest `dll` is used verbatim to build the
+    // LoadLibrary target (<folder>/<dll_name> at every load/certify site), so
+    // a separator / ".." / drive prefix escapes the plugin's own folder and
+    // loads a pre-planted binary from anywhere. Require a bare filename;
+    // otherwise warn loudly and INVALIDATE the plugin (empty name — the
+    // established "invalid manifest" signal every parse_manifest caller
+    // already skips on). See dll_name_is_bare / path_is_contained above.
+    if (dll && !dll_name_is_bare(*dll)) {
+        std::fprintf(stderr,
+            "[xinsp2] plugin.json %s: \"dll\": \"%s\" is not a bare filename "
+            "(contains a path separator, '..' or a drive prefix) — a manifest "
+            "dll must name a file in the plugin's own folder. REJECTING "
+            "plugin '%s' (path-containment guard).\n",
+            path.c_str(), dll->c_str(), pi.name.c_str());
+        pi.name.clear();   // invalid manifest — callers skip on empty name
+        return pi;
+    }
     if (dll)  pi.dll_name = *dll;
     else      pi.dll_name = pi.name + ".dll";
     if (fact) pi.factory_symbol = *fact;
