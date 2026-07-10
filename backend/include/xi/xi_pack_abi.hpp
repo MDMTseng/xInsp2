@@ -50,32 +50,19 @@ namespace xi {
 // valid across concurrent insert/erase of OTHER handles — the caller holds a ref
 // on its own handle, so that entry cannot vanish under it.
 //
-// OWNER-TAGGED REFS (pack-plane hardening — the cache plugin's registry
-// finding). The ImagePool sweeps leaked image handles per owner on instance
-// destroy (release_all_for); the registry used to have NO such analogue, so a
-// pack-retaining plugin that forgot to release on destroy leaked its sealed
-// packs silently until static teardown. Now every ref acquired under an
-// ImagePool owner context (seal / retain inside the adapter's OwnerGuard) is
-// tagged in a small per-slot ledger, and release_all_for(owner) drops exactly
-// that owner's outstanding refs — precisely as if the plugin had called
-// release() itself — returning the count so the teardown path can print the
-// "swept N leaked pack ref(s)" diagnostic. Refs acquired with no owner context
-// (dispatch-event refs via retain_untagged, test code outside a guard) are
-// untagged and never swept. A release under the wrong/no owner context (owner
-// 0, or a tagged owner releasing OFF its guard on a worker thread) is
-// UNATTRIBUTABLE: it is absorbed by the untagged headroom (rc - sum(buckets))
-// when there is any, and otherwise leaves the ledger untouched — it is NEVER
-// charged to an arbitrary bucket. (Guessing owners.back() was the R1
-// over-release: it could pop a live co-owner's bucket, and the later sweep of
-// the mis-charged owner then freed the pack out from under the true holder — a
-// UAF.) The sweep (release_all_for) reclaims only the refs NOT attributable to a
-// surviving owner and NEVER frees while another owner's bucket is non-empty, so
-// **a sweep can never over-release** — a co-owned pack frees only when its true
-// last holder releases (rc→0). This is fail-closed toward LEAK, never toward
-// UAF: in the narrow double-fault where a surviving owner's bucket is stale
-// (that owner released off-guard) AND the swept owner had a forgotten ref, the
-// sweep defers the forgotten ref's reclaim (bounded leak, reclaimed at registry
-// teardown) rather than risk freeing a live co-owner's pack.
+// SINGLE CREATOR TAG (the counted per-owner ledger's replacement). The only
+// ref the registry tracks by owner is the CREATOR'S one seal ref: seal() stamps
+// the slot with the sealing thread's ImagePool owner and sets creator_ref_live.
+// Every other ref (retain / retain_untagged / retain_as) is an untracked ++rc —
+// a consumer's ref is its own responsibility. release_as clears the flag when
+// the creator drops its own ref (so a later sweep won't double-drop it), and
+// the owner sweep (release_all_for) drops AT MOST the creator's ONE seal ref,
+// and only iff it is still outstanding — so a sweep is mathematically incapable
+// of over-releasing (no clamp needed): a pack a consumer still holds survives
+// (rc never reaches 0 under the sweep), a creator that leaked its seal ref is
+// reclaimed. A CONSUMER-retain leak is NOT swept — it is a DIAGNOSED leak
+// (live_frames() / the teardown diagnostic), reclaimed only at process
+// teardown: the registry fails toward LEAK, never toward UAF.
 // ===================================================================
 class PackRegistry {
 public:
@@ -116,11 +103,12 @@ public:
         Slot s;
         s.pack = fb->seal();
         s.rc   = 1;
-        // The creator's initial ref is owner-tagged (seal runs inside the
-        // producing plugin's OwnerGuard), so a source that seals and forgets
-        // to release is swept on destroy exactly like a leaked image handle.
-        if (ImagePoolOwnerId ow = ImagePool::current_owner())
-            s.owners.push_back(OwnerRef{ow, 1});
+        // The creator's initial ref is the ONLY owner-tracked ref (seal runs
+        // inside the producing plugin's OwnerGuard), so a source that seals and
+        // forgets to release is swept on destroy exactly like a leaked image
+        // handle. Sealed with no owner context -> no creator tag, never swept.
+        s.creator          = ImagePool::current_owner();
+        s.creator_ref_live = (s.creator != 0);
         std::lock_guard<std::mutex> lk(mu_);
         frames_.emplace(id, std::move(s));
         return id;
@@ -136,20 +124,17 @@ public:
         auto it = frames_.find(f);
         return it == frames_.end() ? nullptr : &it->second.pack;
     }
-    // Owner-tagged retain: the ref is charged to the calling thread's ImagePool
-    // owner context (the adapter's OwnerGuard around every plugin entry point),
-    // so release_all_for(owner) knows it is outstanding if the plugin forgets.
-    void retain(xi_pack_handle f) { retain_as(f, ImagePool::current_owner()); }
-    // Untagged retain — for framework-internal transient refs (the dispatch
-    // event's ref in f_emit_pack) that are released from OTHER threads with no
-    // owner context and must never be charged to (or swept with) the plugin.
+    // Retain: an untracked ++rc. A consumer's ref is never owner-tracked (only
+    // the creator's seal ref is — see the class comment), so all three retain
+    // spellings are identical; they survive as aliases for source compat with
+    // the old counted-ledger call sites (adapter, dispatch, tests).
+    void retain(xi_pack_handle f) { retain_as(f, 0); }
     void retain_untagged(xi_pack_handle f) { retain_as(f, 0); }
-    void retain_as(xi_pack_handle f, ImagePoolOwnerId owner) {
+    void retain_as(xi_pack_handle f, ImagePoolOwnerId /*owner*/) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = frames_.find(f);
         if (it == frames_.end()) return;
         ++it->second.rc;
-        if (owner) ledger_bump(it->second, owner);
     }
     void release(xi_pack_handle f) { release_as(f, ImagePool::current_owner()); }
     void release_as(xi_pack_handle f, ImagePoolOwnerId owner) {
@@ -158,21 +143,37 @@ public:
             std::lock_guard<std::mutex> lk(mu_);
             auto it = frames_.find(f);
             if (it == frames_.end()) return;
-            ledger_release(it->second, owner);
-            if (--it->second.rc > 0) return;
-            dropped = std::move(it->second.pack);
+            Slot& s = it->second;
+            // The creator releasing its OWN ref, under its own guard, clears
+            // the tag so the later teardown sweep won't double-drop it. Owner 0
+            // (bus/dispatcher, off-guard threads) never matches a real creator.
+            if (s.creator_ref_live && owner == s.creator)
+                s.creator_ref_live = false;
+            if (--s.rc > 0) return;
+            dropped = std::move(s.pack);
             frames_.erase(it);
         }
     }
+    // Ownership handoff (the cap/door funnel-output path): the caller now owns
+    // what was the creator's seal ref, so clear the creator tag WITHOUT touching
+    // rc — the creator's teardown sweep must not reclaim a ref it handed off.
+    void untag(xi_pack_handle f, ImagePoolOwnerId owner) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = frames_.find(f);
+        if (it == frames_.end()) return;
+        Slot& s = it->second;
+        if (s.creator_ref_live && owner == s.creator)
+            s.creator_ref_live = false;
+    }
 
     // The owner sweep — the release_all_for analogue for sealed packs. Drops
-    // every ref still charged to `owner` in the ledger (exactly as if the dying
-    // plugin had called release() per outstanding ref), destroying any pack
-    // whose count reaches zero. Returns the number of leaked refs dropped so
-    // the caller (adapter dtor / script unload) can print the diagnostic.
-    // A ref another consumer holds is untouched — the ledger sum never exceeds
-    // the slot's refcount (see ledger_release), so the sweep cannot free a pack
-    // out from under a live co-owner.
+    // AT MOST ONE ref per slot: the creator's seal ref, iff still outstanding
+    // (creator_ref_live). A pack a consumer still holds survives (its rc
+    // includes the consumer's untracked ref, so rc cannot reach 0 here); a
+    // creator that leaked its seal ref is reclaimed. Mathematically incapable
+    // of over-release — no clamp, no surviving-bucket arithmetic. Returns the
+    // number of creator refs reclaimed so the caller (adapter dtor / script
+    // unload) can print the "swept N leaked pack ref(s)" diagnostic.
     int release_all_for(ImagePoolOwnerId owner) {
         if (owner == 0) return 0;
         std::vector<Pack> dropped;   // destroyed OUTSIDE the lock
@@ -181,24 +182,10 @@ public:
             std::lock_guard<std::mutex> lk(mu_);
             for (auto it = frames_.begin(); it != frames_.end();) {
                 Slot& s = it->second;
-                int k = ledger_take(s, owner);   // remove this owner's bucket
-                if (k > 0) {
-                    // R1 guard: reclaim only the refs NOT attributable to a
-                    // surviving owner. A survivor Y's genuine holds are <= its
-                    // bucket, so anything beyond sum(remaining buckets) belongs
-                    // to THIS dying owner (a forgotten/leaked ref) and is safe to
-                    // drop. Never reclaim more than this owner's own bucket, and
-                    // NEVER free while another owner's bucket is non-empty — a
-                    // co-owned pack frees when the last co-owner releases (rc→0),
-                    // so the sweep can never over-release the true holder.
-                    int remaining = 0;
-                    for (const OwnerRef& r : s.owners) remaining += r.n;
-                    int reclaim = s.rc - remaining;
-                    if (reclaim < 0) reclaim = 0;
-                    if (reclaim > k) reclaim = k;
-                    swept += reclaim;
-                    s.rc -= reclaim;
-                    if (s.rc <= 0 && s.owners.empty()) {
+                if (s.creator == owner && s.creator_ref_live) {
+                    s.creator_ref_live = false;
+                    ++swept;
+                    if (--s.rc <= 0) {
                         dropped.push_back(std::move(s.pack));
                         it = frames_.erase(it);
                         continue;
@@ -214,66 +201,24 @@ public:
     // the pack-door tests as a leak oracle alongside ImagePool::cumulative().
     size_t live_frames()   { std::lock_guard<std::mutex> lk(mu_); return frames_.size(); }
     size_t live_builders() { std::lock_guard<std::mutex> lk(mu_); return builders_.size(); }
-    // Diagnostic: refs currently charged to `owner` across all live packs (the
-    // amount a sweep would reclaim right now).
+    // Diagnostic: live packs whose creator seal ref is still charged to `owner`
+    // (the amount a sweep would reclaim right now — at most 1 per slot).
     int owner_refs(ImagePoolOwnerId owner) {
         std::lock_guard<std::mutex> lk(mu_);
         int n = 0;
         for (auto& [id, s] : frames_)
-            for (const OwnerRef& r : s.owners)
-                if (r.owner == owner) n += r.n;
+            if (s.creator == owner && s.creator_ref_live) ++n;
         return n;
     }
 
 private:
-    struct OwnerRef { ImagePoolOwnerId owner; int n; };
     struct Slot {
         Pack pack;
         int rc = 0;
-        std::vector<OwnerRef> owners;   // per-owner outstanding-ref ledger
+        ImagePoolOwnerId creator = 0;   // seal-time owner; 0 = sealed off-guard
+        bool creator_ref_live = false;  // creator's seal ref still outstanding
     };
 
-    static void ledger_bump(Slot& s, ImagePoolOwnerId owner) {
-        for (OwnerRef& r : s.owners)
-            if (r.owner == owner) { ++r.n; return; }
-        s.owners.push_back(OwnerRef{owner, 1});
-    }
-    // Reconcile one release against the ledger BEFORE rc is decremented.
-    //   1. the caller's own bucket -> decrement it (the well-behaved case);
-    //   2. no matching bucket -> the ref is untagged, or a tagged ref released
-    //      OFF its owner guard (owner 0, or an owner with no bucket). Either way
-    //      it is UNATTRIBUTABLE: leave the ledger untouched. The rc decrement in
-    //      release_as records the drop; the sweep reclaims only refs beyond the
-    //      surviving buckets. We do NOT guess a bucket — the old code decremented
-    //      owners.back() once the untagged headroom (rc - sum(buckets)) was
-    //      exhausted, which could pop a LIVE co-owner's bucket and let a later
-    //      sweep of the mis-charged owner over-release the pack (R1 UAF).
-    static void ledger_release(Slot& s, ImagePoolOwnerId owner) {
-        if (owner) {
-            for (size_t i = 0; i < s.owners.size(); ++i) {
-                if (s.owners[i].owner == owner) {
-                    if (--s.owners[i].n == 0) {
-                        s.owners[i] = s.owners.back();
-                        s.owners.pop_back();
-                    }
-                    return;
-                }
-            }
-        }
-        // Unattributable release: never mis-charge another owner's bucket.
-    }
-    // Remove and return owner's whole bucket (the sweep primitive).
-    static int ledger_take(Slot& s, ImagePoolOwnerId owner) {
-        for (size_t i = 0; i < s.owners.size(); ++i) {
-            if (s.owners[i].owner == owner) {
-                int n = s.owners[i].n;
-                s.owners[i] = s.owners.back();
-                s.owners.pop_back();
-                return n;
-            }
-        }
-        return 0;
-    }
     std::mutex mu_;
     std::unordered_map<uint64_t, std::unique_ptr<PackBuilder>> builders_;
     std::unordered_map<uint64_t, Slot> frames_;
@@ -425,38 +370,29 @@ inline void f_release(xi_pack_handle f) {
 inline void f_emit_pack(const char* emitter, xi_trigger_id id,
                          xi_pack_handle f, int64_t ts) {
     if (f == XI_PACK_NULL) return;
-    // UNTAGGED: the event's ref is framework-transient — released by the
-    // dispatcher on another thread with no owner context. Tagging it to the
-    // emitting plugin would leave a phantom ledger entry the owner sweep
-    // could later double-release.
+    // The event's ref is framework-transient — an untracked ++rc, released by
+    // the dispatcher on another thread via f_release_for_bus.
     PackRegistry::instance().retain_untagged(f);       // the event's ref
     TriggerBus::instance().emit_pack(emitter ? emitter : "", id, ts, f);
 }
 
-// The releaser the bus/dispatcher calls to drop an event's pack ref.
-// UNTAGGED (owner 0) to pair with f_emit_pack's retain_untagged: the dispatcher
-// runs with no owner context, and an owner-tagged release here would mis-charge
-// the ambient plugin's ledger bucket and skew the later owner sweep.
+// The releaser the bus/dispatcher calls to drop an event's pack ref. Owner 0
+// never matches a real creator tag, so this is a plain rc decrement — correct
+// for the untagged dispatch-event ref, and it can never clear a creator's tag.
 inline void f_release_for_bus(xi_pack_handle f) {
     PackRegistry::instance().release_as(f, 0);
 }
 
 // Ownership HANDOFF for a pack a plugin produced FOR ITS CALLER (capability-
 // funnel output, pack-door output) — published into ImagePool::pack_untag_slot.
-// seal() owner-tags the initial ref to the thread's current owner (the
-// producing plugin's OwnerGuard), but a funnel hands that very ref to the
-// CALLER, who owns it. Left producer-tagged, the ledger carries a PHANTOM
-// {producer,1} charge for a ref the consumer legitimately holds, and the
-// producer's teardown sweep (f_sweep_packs_for → release_all_for) would later
-// reclaim it and free the caller's live pack — a UAF / wrong-answer. Same
-// doctrine as f_emit_pack's retain_untagged above: a ref that outlives the
-// producing plugin must not sit in its ledger bucket. Retain FIRST so the
-// refcount never transits zero: +1 untagged, then -1 popping the producer-
-// tagged ref — net refcount unchanged, tag moved off the producer.
+// seal() tags the initial ref to the producing plugin (the creator), but a
+// funnel hands that very ref to the CALLER, who owns it. Left creator-tagged,
+// the producer's teardown sweep (f_sweep_packs_for → release_all_for) would
+// later reclaim the handed-off ref and free the caller's live pack — a UAF /
+// wrong-answer. So: clear the creator tag, rc UNCHANGED (PackRegistry::untag).
 inline void f_untag_pack_ref(xi_pack_handle f, ImagePoolOwnerId owner) {
     if (f == XI_PACK_NULL) return;
-    PackRegistry::instance().retain_untagged(f);
-    PackRegistry::instance().release_as(f, owner);
+    PackRegistry::instance().untag(f, owner);
 }
 
 // The owner-sweep trampoline published into ImagePool::pack_sweep_slot, so the

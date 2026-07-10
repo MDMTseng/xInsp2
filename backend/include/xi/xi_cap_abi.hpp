@@ -374,17 +374,15 @@ inline int32_t f_cap_call_impl(const char* name, xi_pack_handle in, xi_pack_hand
     if (e.owner != adapter->owner_id() || !e.handler) return XI_CAP_ESHAPE;
     try {
         *out = e.handler(e.self, in);
-        // Ownership handoff (phantom-ledger fix; the f_emit_pack retain_untagged
-        // precedent, xi_pack_abi.hpp): the handler ran under OwnerGuard(e.owner),
-        // so its sealed OUTPUT pack's initial PackRegistry ref was owner-tagged
-        // to the PROVIDER — but that ref is handed to the CALLER, who owns it.
-        // Left provider-tagged, the provider's teardown sweep (adapter dtor →
-        // sweep_packs_for → release_all_for) would reclaim the phantom charge
-        // and free the consumer's live pack (wrong answer / data loss). Retag
-        // while the provider pin is still held: +1 untagged, -1 popping the
-        // provider-tagged ref — net refcount unchanged, tag moved off the
-        // provider. Slot bridge (no-op until install_pack_abi — same layering
-        // as sweep_packs_for).
+        // Ownership handoff (xi_pack_abi.hpp): the handler ran under
+        // OwnerGuard(e.owner), so its sealed OUTPUT pack carries the PROVIDER's
+        // creator tag — but the seal ref is handed to the CALLER, who owns it.
+        // Left tagged, the provider's teardown sweep (adapter dtor →
+        // sweep_packs_for → release_all_for) would reclaim the handed-off ref
+        // and free the consumer's live pack (wrong answer / data loss). Clear
+        // the creator tag while the provider pin is still held — rc unchanged
+        // (PackRegistry::untag). Slot bridge (no-op until install_pack_abi —
+        // same layering as sweep_packs_for).
         if (*out != XI_PACK_NULL)
             ImagePool::untag_pack_ref(*out, e.owner);
         return XI_CAP_OK;

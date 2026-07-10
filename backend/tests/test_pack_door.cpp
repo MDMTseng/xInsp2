@@ -247,17 +247,16 @@ static void test_dispatch_dual_carry() {
 }
 
 // ---------------------------------------------------------------------------
-// (5) Owner-tagged sweep — the PackRegistry analogue of ImagePool's
-//     release_all_for (pack-plane hardening; the cache plugin's registry
-//     finding). THE ORIGINAL ASYMMETRIC SCENARIO: a pack-retaining plugin
-//     (cache's ring) retains a sealed host pack under its OwnerGuard and is
-//     destroyed WITHOUT releasing. Pre-hardening the sealed pack — and the
-//     pool image it holds — leaked in the registry silently (no sweep, no
-//     diagnostic) until static teardown. Now the teardown sweep reclaims and
-//     counts it, and a co-owner's live ref is never touched.
+// (5) Creator-tag sweep — the PackRegistry analogue of ImagePool's
+//     release_all_for, on the SINGLE-CREATOR-TAG model: the only owner-tracked
+//     ref is the creator's seal ref. A producer that seals and forgets to
+//     release is swept on destroy (the leak diagnostic); a consumer's retain is
+//     an UNTRACKED ++rc, so a consumer that leaks is DIAGNOSED (live_frames),
+//     never swept — the sweep drops at most one ref per slot and can never
+//     free a pack out from under a live holder.
 // ---------------------------------------------------------------------------
 static void test_owner_sweep_regression() {
-    SECTION("owner-tagged sweep reclaims a forgotten pack ref; co-owners untouched");
+    SECTION("creator-tag sweep: producer leak reclaimed; consumer leak diagnosed, never UAF");
     xi::install_pack_abi();
     const xi_pack_v1* fi = xi::pack_v1_iface();
     size_t base_frames = xi::PackRegistry::instance().live_frames();
@@ -279,16 +278,16 @@ static void test_owner_sweep_regression() {
     }
     CHECK(f != XI_PACK_NULL);
     CHECK(xi::PackRegistry::instance().live_frames() == base_frames + 1);
-    CHECK(xi::PackRegistry::instance().owner_refs(P) == 1);
+    CHECK(xi::PackRegistry::instance().owner_refs(P) == 1);   // the creator tag
     CHECK(pool_live() == base_live + 1);              // the pack's pooled image
 
     // Consumer: retains the incoming sealed pack into its ring under ITS guard
-    // (the cache capture path).
+    // (the cache capture path). Untracked — no owner charge.
     { xi::ImagePool::OwnerGuard g(C); fi->retain(f); }
-    CHECK(xi::PackRegistry::instance().owner_refs(C) == 1);
+    CHECK(xi::PackRegistry::instance().owner_refs(C) == 0);   // consumer refs untracked
 
-    // The producer releases its own ref properly -> its ledger drains; a sweep
-    // of the WELL-BEHAVED owner reclaims nothing and disturbs nothing.
+    // The producer releases its own ref properly -> its creator tag clears; a
+    // sweep of the WELL-BEHAVED owner reclaims nothing and disturbs nothing.
     { xi::ImagePool::OwnerGuard g(P); fi->release(f); }
     CHECK(xi::PackRegistry::instance().owner_refs(P) == 0);
     CHECK(xi::ImagePool::sweep_packs_for(P) == 0);
@@ -296,19 +295,28 @@ static void test_owner_sweep_regression() {
     int64_t v = 0;
     CHECK(fi->get_i64(f, "seq", &v) == 1 && v == 1);
 
-    // THE ASYMMETRY, REGRESSED: C dies without releasing. The sweep (what the
-    // adapter dtor now calls through ImagePool::sweep_packs_for) reclaims the
-    // forgotten ref, frees the pack AND its pool image, and reports the count.
+    // CONSUMER-RETAIN LEAK: C dies without releasing. Its sweep (what the
+    // adapter dtor calls through ImagePool::sweep_packs_for) reclaims NOTHING —
+    // creator != C, and consumer refs are untracked by design. The pack must
+    // neither vanish (no over-release) nor dangle: it stays a live, readable,
+    // DIAGNOSED leak (live_frames), reclaimed only at process teardown.
     int swept = xi::ImagePool::sweep_packs_for(C);
-    CHECK(swept == 1);
+    CHECK(swept == 0);
+    CHECK(xi::PackRegistry::instance().live_frames() == base_frames + 1);  // diagnosed leak
+    CHECK(pool_live() == base_live + 1);              // pooled image rides the live pack
+    CHECK(fi->get_i64(f, "seq", &v) == 1 && v == 1);  // no UAF: still readable
+    // (Test hygiene: drop the leaked ref so the table balances — in production
+    // this ref survives to process exit, by design.)
+    xi::PackRegistry::instance().release_as(f, 0);
     CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
-    CHECK(pool_live() == base_live);                  // pooled image freed with the pack
-    CHECK(fi->get_i64(f, "seq", &v) == 0);            // the handle is dead
+    CHECK(pool_live() == base_live);
+    CHECK(fi->get_i64(f, "seq", &v) == 0);            // the handle is dead now
 
-    // Co-owner protection: one leaking consumer, one live one. Sweeping the
-    // leaker drops ONLY its ref; the live consumer's pack stays readable.
-    xi::ImagePoolOwnerId Ca = xi::ImagePool::alloc_owner_id();  // will leak
-    xi::ImagePoolOwnerId Cb = xi::ImagePool::alloc_owner_id();  // well-behaved
+    // PRODUCER LEAK + live consumer: the creator P seals and FORGETS to
+    // release; consumer Cb holds. Sweeping P reclaims exactly the creator's one
+    // seal ref (the leak diagnostic) and the pack survives for Cb — the sweep
+    // is incapable of dropping more than that one ref.
+    xi::ImagePoolOwnerId Cb = xi::ImagePool::alloc_owner_id();  // well-behaved consumer
     xi_pack_handle f2 = XI_PACK_NULL;
     {
         xi::ImagePool::OwnerGuard g(P);
@@ -316,16 +324,15 @@ static void test_owner_sweep_regression() {
         fi->builder_add_i64(b, "n", 42);
         f2 = fi->builder_seal(b);
     }
-    { xi::ImagePool::OwnerGuard g(Ca); fi->retain(f2); }
     { xi::ImagePool::OwnerGuard g(Cb); fi->retain(f2); }
-    { xi::ImagePool::OwnerGuard g(P);  fi->release(f2); }
-    CHECK(xi::ImagePool::sweep_packs_for(Ca) == 1);   // the leaker's ref only
+    CHECK(xi::ImagePool::sweep_packs_for(P) == 1);    // the leaked seal ref only
     CHECK(fi->get_i64(f2, "n", &v) == 1 && v == 42);  // Cb's pack still alive
+    CHECK(xi::ImagePool::sweep_packs_for(P) == 0);    // redundant sweep: no-op
     { xi::ImagePool::OwnerGuard g(Cb); fi->release(f2); }
     CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
 
     // Untagged framework refs are never charged to a plugin: an emit's event
-    // ref (retain_untagged) does not appear in any owner ledger.
+    // ref (retain_untagged) is a plain ++rc alongside the creator tag.
     xi_pack_handle f3 = XI_PACK_NULL;
     {
         xi::ImagePool::OwnerGuard g(P);
@@ -334,8 +341,8 @@ static void test_owner_sweep_regression() {
         f3 = fi->builder_seal(b);
     }
     xi::PackRegistry::instance().retain_untagged(f3);  // the event's ref
-    CHECK(xi::PackRegistry::instance().owner_refs(P) == 1);   // creator ref only
-    { xi::ImagePool::OwnerGuard g(P); fi->release(f3); }      // producer done
+    CHECK(xi::PackRegistry::instance().owner_refs(P) == 1);   // creator tag only
+    { xi::ImagePool::OwnerGuard g(P); fi->release(f3); }      // producer done, tag clears
     CHECK(xi::ImagePool::sweep_packs_for(P) == 0);            // nothing charged to P
     xi::PackRegistry::instance().release(f3);                 // dispatcher drops the event ref
     CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
