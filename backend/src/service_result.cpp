@@ -65,6 +65,40 @@ thread_local RunResult g_run_result;
 // visible warning + the offending code preserved in the message, so the mistake
 // surfaces instead of masquerading as a real verdict.
 void result_cb(int code, const char* msg) {
+    // F4/J4-MIRROR guard: xi::result()/xi::ng() must run on the inspect
+    // (dispatch) thread. g_run_result is thread_local (parallel lanes must not
+    // clobber each other), so a call from inside xi::parallel_for / xi::async
+    // lands on a child worker and writes THAT thread's copy — the dispatch
+    // thread's copy stays unset and the run silently flips to no_verdict (a
+    // flaky, silent NG loss). Detection mirrors the trigger/push guards in
+    // service_sinks.cpp: g_trigger_ctx_ (read via trigger_ctx_get_cb) marks
+    // "this thread is inside / a CHILD of a trigger-bearing inspect" and IS
+    // propagated into parallel_for/async workers, while g_current_trigger is
+    // thread_local and NOT inherited — so marker!=0 && trigger==null ⇒ this is
+    // a child worker, not the inspect thread. Same documented blind spot as
+    // F4/J4: a child of a source-less (marker-0) inspect (plain cmd:run /
+    // timer tick) is not flagged — the marker only rides the blessed
+    // primitives. Fail LOUD, once, and IGNORE the verdict (do NOT marshal it
+    // across threads): the fix for the script is to compute in the parallel
+    // body and call xi::result() ON the inspect thread after the join/await.
+    if (trigger_ctx_get_cb() != 0 && g_current_trigger == nullptr) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true, std::memory_order_relaxed)) {
+            static constexpr const char* kMsg =
+                "xi::result()/xi::ng() called OFF the inspect thread (inside "
+                "xi::parallel_for / xi::async) — the verdict is IGNORED and this "
+                "run will report no_verdict. Compute in the parallel body, then "
+                "call xi::result() ON the inspect thread after the join/await.";
+            std::fprintf(stderr, "ERROR: [xinsp2] %s\n", kMsg);
+            if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire)) {
+                xp::LogMsg lm;
+                lm.level = "error";
+                lm.msg = kMsg;
+                srv->send_text(lm.to_json());
+            }
+        }
+        return;   // the write would land in the WRONG thread's g_run_result
+    }
     if (code <= kResultSystemBand) {
         if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire)) {
             xp::LogMsg lm;

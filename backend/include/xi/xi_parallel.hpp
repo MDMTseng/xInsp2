@@ -21,7 +21,11 @@
 //     region joins.
 //   * Cooperative cancellation — polls xi::cancellation_requested() and SKIPs
 //     the remaining iterations (OpenMP forbids breaking out of a for-region), so
-//     a watchdog-cancelled inspect drains the loop quickly.
+//     a watchdog-cancelled inspect drains the loop quickly. C1 SAFETY: if
+//     iterations WERE skipped and the skip was the watchdog's TARGETED cancel,
+//     parallel_for throws xi::inspect_cancelled after the region joins (see
+//     below) instead of returning normally — so the inspect unwinds rather than
+//     computing a verdict over half-processed buffers.
 //   * Owner attribution (C3) — reads the inspect-thread image-pool owner ONCE
 //     before the region and re-installs it per worker (detail::OwnerScope),
 //     exactly as it installs the SEH translator, so parallel-created pool images
@@ -53,6 +57,41 @@
 
 namespace xi {
 
+// C1 SAFETY: thrown by parallel_for (on the calling/inspect thread, AFTER the
+// region joins) when a watchdog-TARGETED cooperative cancel actually skipped
+// iterations. Before this, a targeted cancel made parallel_for RETURN NORMALLY
+// with the tail of the loop silently undone — the script then computed a verdict
+// over half-processed buffers and the host shipped it (a possibly-wrong PASS +
+// staged PLC actuation) as if the frame were fully inspected. Throwing unwinds
+// the whole inspect instead; the HOST (service_inspect.cpp) catches this exact
+// type and routes the run to a no-verdict / no-actuation outcome. Defined here —
+// a header BOTH the script DLL and the backend compile — so the catch-by-type
+// works across the module boundary, exactly like the std::exception catches the
+// host already does around s.inspect(). Deliberately NOT a seh_exception: a
+// cancel is not a crash (the host's crash path is unchanged).
+struct inspect_cancelled : std::exception {
+    const char* what() const noexcept override {
+        return "inspect cancelled (watchdog targeted cancel skipped parallel_for iterations)";
+    }
+};
+
+// C1: the watchdog-targeted-cancel predicate ALONE — the same ticket-vs-cutoff
+// test cancellation_requested() applies, WITHOUT the per-task xi::async token.
+// Keeping the token out means a Future::cancel() / dropped-Future cooperative
+// cancel keeps its old return-normally semantics; only the watchdog cancel
+// (armed via xi_script_set_global_cancel → arm_cancel) escalates to the throw.
+// NOTE (module boundary): these statics live per module — in the SCRIPT DLL this
+// reads the state the host armed through the exported thunk; in the backend it
+// reads the backend's own copy (never armed by the watchdog → always false), so
+// backend-internal parallel_for users are unaffected.
+inline bool watchdog_cancel_targets_this_inspect() {
+    if (!cancel_active().load(std::memory_order_relaxed)) return false;
+    const uint64_t my = current_inspect_ticket_ref();
+    // my == 0 ⇒ no ticket drawn (legacy script / outside any inspect):
+    // cancellation_requested() treats that as "in flight" — mirror it here.
+    return my == 0 || my < cancel_cutoff().load(std::memory_order_relaxed);
+}
+
 // Run body(i) for i in [0, n) across OpenMP worker threads. body must be safe to
 // call concurrently for distinct i. Rethrows (on the calling/inspect thread) the
 // first fault any iteration raised. n <= 0 is a no-op.
@@ -67,6 +106,12 @@ void parallel_for(int n, F&& body) {
     std::atomic<bool>     faulted{false};
     std::atomic<unsigned> seh_code{0};
     std::exception_ptr    cpp_eptr;   // written only by the flag-CAS winner
+
+    // C1: did any iteration observe a cooperative cancel and SKIP its work? A
+    // loop that ran every iteration before the cancel armed is complete — it
+    // must NOT be failed. Only skipped-work + a watchdog-targeted cancel (both
+    // checked after the region joins) escalates to the inspect_cancelled throw.
+    std::atomic<bool>     cancelled_skip{false};
 
     // C3: capture the image-pool owner ONCE on the inspect thread, before the
     // region — re-installed per worker inside (0 when the owner thunk is unwired).
@@ -111,9 +156,13 @@ void parallel_for(int n, F&& body) {
         } ticket_scope(parent_ticket, parent_cancel_token);
         #pragma omp for
         for (int i = 0; i < n; ++i) {
-            // Drain fast once anyone has faulted; honour a cooperative cancel.
+            // Drain fast once anyone has faulted; honour a cooperative cancel
+            // (C1: record that work was actually skipped — see post-region check).
             if (faulted.load(std::memory_order_relaxed)) continue;
-            if (xi::cancellation_requested())            continue;
+            if (xi::cancellation_requested()) {
+                cancelled_skip.store(true, std::memory_order_relaxed);
+                continue;
+            }
             try {
                 body(i);
             } catch (const xi::seh_exception& e) {
@@ -141,7 +190,11 @@ void parallel_for(int n, F&& body) {
     // without /openmp behaves identically (just single-threaded).
     for (int i = 0; i < n; ++i) {
         if (faulted.load(std::memory_order_relaxed)) break;
-        if (xi::cancellation_requested())            break;
+        if (xi::cancellation_requested()) {
+            // C1: record that work was actually skipped (post-loop check below).
+            cancelled_skip.store(true, std::memory_order_relaxed);
+            break;
+        }
         try {
             body(i);
         } catch (const xi::seh_exception& e) {
@@ -161,6 +214,20 @@ void parallel_for(int n, F&& body) {
         if (cpp_eptr) std::rethrow_exception(cpp_eptr);
         throw xi::seh_exception(seh_code.load(std::memory_order_relaxed));
     }
+
+    // ---- C1 SAFETY (deliberate WIRE-BEHAVIOR-relevant change) ----------------
+    // Iterations were SKIPPED and this inspect is targeted by the watchdog's
+    // cooperative cancel ⇒ the output buffers are TRUNCATED. Returning normally
+    // here (the old behaviour) let the script compute — and the host ship — a
+    // verdict + PLC actuation over a half-processed frame. Throw instead so the
+    // inspect unwinds; the host maps xi::inspect_cancelled to a no-verdict /
+    // no-actuation outcome (never a crash, never a PASS). The fault rethrow
+    // above deliberately wins over this: a crash is the more specific diagnosis.
+    // A pure Future-token cancel (no watchdog involvement) keeps the old
+    // return-normally semantics — see watchdog_cancel_targets_this_inspect().
+    if (cancelled_skip.load(std::memory_order_relaxed) &&
+        watchdog_cancel_targets_this_inspect())
+        throw inspect_cancelled{};
 }
 
 } // namespace xi

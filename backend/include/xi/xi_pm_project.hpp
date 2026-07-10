@@ -92,6 +92,25 @@ inline void PluginManager::close_project() {
     for (auto& key : project_loaded_plugins_) {
         auto it = plugins_.find(key);
         if (it != plugins_.end()) {
+            // RT5/N1/J2/J3/L1/O2 family — DLL teardown without machine-provider
+            // reconciliation. A machine autoload provider can be backed by a
+            // module this loop is about to FreeLibrary (an autoload-eligible
+            // PROJECT plugin, or a global lib plugin this project's same-named
+            // plugin shadowed in plugins_). The autoload reconciler at the end
+            // of close_project only ADDS providers — it never removes a stale
+            // machine_instances_ entry, and for a plugin erased from plugins_
+            // below it can't recreate one either — so pre-fix the provider's
+            // InstanceRegistry entry + CapRegistry registrations stayed ACTIVE
+            // with handlers pointing into the UNMAPPED module (forever, for an
+            // erased plugin; and even transiently a plugin-owned thread is
+            // outside close_project's host-dispatch drain and can call into
+            // freed code). Evict BEFORE FreeLibrary — evict_machine_provider_
+            // locked_ sweeps this owner's cap names synchronously, so no
+            // handler outlives the module. close_project is full teardown, so
+            // plain evict-before-free with NO reinstate is correct here; the
+            // reconciler below reinstates any provider whose global DLL is
+            // still mapped, exactly as before.
+            evict_machine_provider_locked_(key);
             if (it->second.handle) FreeLibrary(it->second.handle);   // TODO(linux): dlclose
             plugins_.erase(it);
         }
@@ -282,6 +301,26 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     auto name_opt = extract_string(content, "name");
     if (name_opt) project_.name = *name_opt;
     auto script_opt = extract_string(content, "script");
+    // SECURITY (P1): `script` is VERBATIM from project.json and becomes the
+    // cl.exe SOURCE for the project compile — joined with operator/, an
+    // absolute value discards the project folder and a "../" chain climbs out
+    // of it, so a semi-trusted project could compile+run an out-of-tree,
+    // pre-planted source file. Refuse the open loudly (same fail-loud shape
+    // as the schema gate below: last_open_error_ + stderr + return false)
+    // rather than degrade — a project whose script points outside its own
+    // tree is hostile or broken either way. See path_is_contained
+    // (xi_pm_parse.hpp) for the guard + threat model.
+    if (script_opt &&
+        !path_is_contained(std::filesystem::path(folder), *script_opt)) {
+        last_open_error_ =
+            "project.json 'script' (\"" + *script_opt + "\") is absolute or "
+            "escapes the project folder ('..') — refusing to open: the "
+            "inspection script must live inside the project tree "
+            "(path-containment guard; an out-of-tree script would be compiled "
+            "and executed from an arbitrary machine path).";
+        std::fprintf(stderr, "[xinsp2] %s\n", last_open_error_.c_str());
+        return false;
+    }
     if (script_opt) project_.script_path = (std::filesystem::path(folder) / *script_opt).string();
     else            project_.script_path = (std::filesystem::path(folder) / "inspect.cpp").string();
 

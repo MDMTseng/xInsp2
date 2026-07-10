@@ -253,6 +253,16 @@ static void* g_use_push_pack_fn_    = nullptr;
 // path. Each thread's `xi_script_set_run_context` writes its own
 // slot; `xi::current_frame_path()` reads it back from the same
 // thread.
+//
+// NOT PROPAGATED to xi::async / xi::parallel_for workers (unlike the owner /
+// trigger-ctx / cancel-ticket scopes) — a worker-thread read sees "" / 0. That
+// off-thread misuse is now detected fail-loud by the guard in xi_io.hpp
+// (detail::run_context_missing_off_thread_), which keys off g_run_id_ == 0
+// while the propagated inspect ticket is nonzero. INVARIANT the guard relies
+// on: 0 is g_run_id_'s reserved "no live run on this thread" sentinel — the
+// host's run ids start at 1 and xi_script_set_run_id(0) is the explicit
+// post-inspect clear. The real fix (marshal the per-run context into workers
+// like the other scopes) is deferred.
 static thread_local char g_run_frame_path_[1024] = {0};
 
 // U3 (docs/new_gen/17): the arrival/run id of the inspection THIS THREAD is
@@ -260,7 +270,8 @@ static thread_local char g_run_frame_path_[1024] = {0};
 // records as `$seq`. Surfaced to the script (xi::run_id(), xi_io.hpp) so a
 // producer can stamp it into a pack ENTRY before seal (sealed packs are
 // immutable — the host never stamps them). 0 outside an inspect. Same
-// thread_local per-run-context discipline as g_run_frame_path_ above.
+// thread_local per-run-context discipline as g_run_frame_path_ above,
+// including the not-propagated caveat + 0-sentinel invariant documented there.
 static thread_local long long g_run_id_ = 0;
 
 XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(

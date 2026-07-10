@@ -54,7 +54,7 @@ inline std::vector<uint8_t> encode_pack_v3(const xi::PackIn& in,
         auto keyv = in.key_at(i);
         if (!keyv) continue;
         std::string key(*keyv);
-        if (key == xi::pack_contract::kChannel || key == xi::pack_contract::kSeq) continue;
+        if (xi::pack_contract::is_lifted(key)) continue;  // $channel/$seq ride the frame header
         const int tag = in.tag_at(i);
         xi::xex1::V3Entry e;
         e.key = key;

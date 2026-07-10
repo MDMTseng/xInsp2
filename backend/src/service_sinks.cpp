@@ -56,7 +56,9 @@ static void quarantine_instance_(const char* name, xi::CAbiInstanceAdapter* adap
 // Consult the caught-fault policy AFTER note_instance_crash_ has already marked the
 // instance runtime-`degraded`. reuse: nothing more (stays in service). reinit:
 // request a rebuild before the instance's next use. refuse: quarantine now.
-static void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+// External linkage (not static): cmd_exchange_instance_ (service_cmd_dispatch.cpp)
+// shares this fault boundary for its own plugin-entering exchange() call.
+void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* adapter) {
     switch (adapter->on_fault()) {
         case xi::OnFault::Reuse:  break;
         case xi::OnFault::Reinit: adapter->request_reinit(); break;
@@ -69,7 +71,9 @@ static void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* ad
 // failed rebuild keeps the old instance live and escalates to refuse after
 // kReinitEscalateAfter consecutive failures. Runs on the caller thread just before
 // process(); reinit() serializes itself via the instance's CallScope.
-static void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+// External linkage (not static): shared with cmd_exchange_instance_ — see
+// apply_on_fault_policy_ above.
+void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter) {
     // H5: CONSUME the pending flag with one atomic test-and-clear before rebuilding.
     // Two callers can both observe reinit_pending()==true and reach here (the outer
     // check is a cheap fast-path, not a gate); the exchange lets exactly ONE win.
@@ -197,11 +201,36 @@ int use_push_pack_cb(const char* name, xi_pack_handle pack) {
     return use_push_pack_inline_(name, pack);
 }
 
+// Script→plugin request/reply (xi::use(name).exchange(cmd)). exchange() ENTERS
+// PLUGIN CODE, so it carries the same item-14 fault surface as its siblings
+// (use_push_pack_inline_ / use_pack_process_cb): refuse → -3 without entering
+// plugin code, pending reinit applied first, culprit stamped, and a caught
+// crash feeds note_instance_crash_ + apply_on_fault_policy_ — otherwise a
+// quarantined instance is still entered every frame via exchange(), and an
+// exchange()-only crash-loop never trips health/reinit/refuse.
+// NOTE on the crash return: this surface keeps -1 (NOT the pack path's -2).
+// The script-side caller (UseProxy::exchange, xi_use.hpp) treats -1 as the
+// terminal miss and RETRIES any other negative as "buffer too small, need -n
+// bytes" — a -2 would re-enter a just-crashed plugin once more. The -3
+// quarantine refuse is safe under that retry: the retry hits this gate again
+// and is refused without touching the plugin.
 int use_exchange_cb(const char* name, const char* cmd,
                            char* rsp, int rsplen) {
+    if (!name) return -1;
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    // Item-14 gates live on the C-ABI adapter; a non-adapter instance has no
+    // quarantine/reinit state and keeps the plain guarded call below.
+    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    if (adapter) {
+        if (adapter->quarantined()) return -3;
+        if (adapter->reinit_pending()) {
+            apply_pending_reinit_(name, adapter);
+            if (adapter->quarantined()) return -3;
+        }
+    }
+    stamp_culprit_(name, inst->plugin_name());
     try {
-        auto inst = xi::InstanceRegistry::instance().find(name);
-        if (!inst) return -1;
         std::string result = inst->exchange(cmd);
         int n = (int)result.size();
         if (rsplen < n + 1) return -n;
@@ -211,12 +240,17 @@ int use_exchange_cb(const char* name, const char* cmd,
     } catch (const seh_exception& e) {
         std::fprintf(stderr, "[xinsp2] use_exchange('%s') crashed: 0x%08X (%s)\n",
                      name, e.code, e.what());
+        char why[96]; std::snprintf(why, sizeof(why), "exchange() crashed: 0x%08X", e.code);
+        note_instance_crash_(name, why);
+        if (adapter) apply_on_fault_policy_(name, adapter);
         // Swallowed on a surviving thread (lane worker under a script's use().exchange(),
         // or the command thread) — restore the stack guard page after an overflow.
         xi::recover_seh_stack_or_die(e.code, "plugin exchange()");
         return -1;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[xinsp2] use_exchange('%s') threw: %s\n", name, e.what());
+        note_instance_crash_(name, "exchange() threw an exception");
+        if (adapter) apply_on_fault_policy_(name, adapter);
         return -1;
     }
 }

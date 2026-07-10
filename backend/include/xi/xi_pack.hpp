@@ -41,10 +41,11 @@
 //     beats a hash map for a handful of keys and allocates NO index nodes — and
 //     only a large pack builds an unordered_map to keep lookups O(1) at scale.
 //
-// The msgpack codec is a SIBLING branch. This file speaks to a deliberately
-// tiny internal reader/writer (`pack_mp_detail`) that emits/reads only the
-// canonical max-width scalar/str/bin forms the tests need. At integration it
-// is replaced wholesale by xi_mp.hpp — the Pack API above it does not change.
+// The msgpack codec is xi_mp.hpp — the ONE canonical-encode truth. This file's
+// `pack_mp_detail` is not a second encoder: it is a set of thin arena-side
+// adapters over xi_mp.hpp's canonical forms (the swap the old "SWAP TARGET"
+// banner promised, done in place so the arena fast path survives). The Pack
+// API above it is unchanged.
 //
 // Large payloads (images, big binaries) do NOT live in the arena: they are
 // raw pool buffers referenced by a handle. The handle mechanics are the
@@ -55,6 +56,7 @@
 
 #include "xi_abi.h"
 #include "xi_image_pool.hpp"
+#include "xi_mp.hpp"
 
 #include <array>
 #include <cassert>
@@ -71,19 +73,28 @@
 namespace xi {
 
 // ===================================================================
-// pack_mp_detail — minimal canonical-profile msgpack reader/writer.
+// pack_mp_detail — arena-side adapters over the canonical codec (xi_mp.hpp).
 //
-//   SWAP TARGET: replace this whole namespace with xi_mp.hpp at codec
-//   integration. Fixed-width forms only (int64 0xd3, float64 0xcb,
-//   str32 0xdb, bin32 0xc6) — the canonical max-width profile of doc 07,
-//   just enough to store scalars/strings/small binaries and read them back.
-//   Everything is 100% standard msgpack; a stock decoder reads it.
+//   xi::mp::Writer is the ONE canonical-encode truth. The pack path writes
+//   into a bump-arena at fixed offsets rather than a growing vector, so this
+//   namespace adapts rather than duplicates:
+//
+//     * write_i64 / write_f64 route through a reused thread-local Writer and
+//       memcpy its 9 fixed bytes into the arena — every VALUE TRANSFORM is
+//       xi_mp's own code, never a copy of it. In particular ruling 1's NaN
+//       flatten (any NaN -> 0x7ff8000000000000) now applies on this path too;
+//       the old hand-rolled write_f64 stored raw NaN bits, a canonicality bug.
+//     * write_bool / write_str / write_bin have NO value transform — they are
+//       pure header composition (a xi::mp::tag byte + big-endian length) plus
+//       a single memcpy of the payload straight into the arena (no double
+//       copy through a vector), byte-identical to Writer::boolean/str/bin.
+//
+//   Fixed-width forms only (int64 0xd3, float64 0xcb, str32 0xdb, bin32 0xc6)
+//   — the canonical max-width profile of doc 07. Everything is 100% standard
+//   msgpack; a stock decoder reads it.
 // ===================================================================
 namespace pack_mp_detail {
 
-inline void put_u64_be(uint8_t* p, uint64_t v) {
-    for (int i = 7; i >= 0; --i) { p[i] = uint8_t(v & 0xFF); v >>= 8; }
-}
 inline uint64_t get_u64_be(const uint8_t* p) {
     uint64_t v = 0;
     for (int i = 0; i < 8; ++i) v = (v << 8) | p[i];
@@ -105,53 +116,72 @@ inline constexpr size_t kBoolSize = 1;   // 0xc2 / 0xc3 — the canonical bool I
 inline size_t str_size(size_t n) { return 5 + n; }  // 0xdb + 4 len + bytes
 inline size_t bin_size(size_t n) { return 5 + n; }  // 0xc6 + 4 len + bytes
 
+// The scalar encode scratch: one Writer per thread, CLEARED (capacity kept)
+// per call, so after the first scalar on a thread this allocates nothing —
+// the arena fast path stays heap-free. Same thread-local discipline as the
+// ArenaPool below (a pack is built within one lane worker's thread).
+inline xi::mp::Writer& scalar_writer() {
+    thread_local xi::mp::Writer w;
+    w.clear();
+    return w;
+}
+
 inline void write_i64(uint8_t* out, int64_t v) {
-    out[0] = 0xd3;
-    put_u64_be(out + 1, uint64_t(v));
+    xi::mp::Writer& w = scalar_writer();
+    w.int_(v);                              // canonical int64 (0xd3), xi_mp's emit
+    assert(w.size() == kI64Size);
+    std::memcpy(out, w.bytes().data(), kI64Size);
 }
 inline void write_f64(uint8_t* out, double v) {
-    uint64_t bits;
-    std::memcpy(&bits, &v, sizeof bits);
-    out[0] = 0xcb;
-    put_u64_be(out + 1, bits);
+    xi::mp::Writer& w = scalar_writer();
+    w.float_(v);                            // canonical float64 (0xcb) — flattens
+    assert(w.size() == kF64Size);           // every NaN per ruling 1 (bug fix)
+    std::memcpy(out, w.bytes().data(), kF64Size);
 }
 inline void write_bool(uint8_t* out, bool v) {
-    out[0] = v ? 0xc3 : 0xc2;   // msgpack true / false (already canonical)
+    out[0] = v ? xi::mp::tag::True : xi::mp::tag::False;  // == Writer::boolean
 }
 inline void write_str(uint8_t* out, std::string_view s) {
-    out[0] = 0xdb;
+    out[0] = xi::mp::tag::Str32;                          // == Writer::str header
     put_u32_be(out + 1, uint32_t(s.size()));
     if (!s.empty()) std::memcpy(out + 5, s.data(), s.size());
 }
 inline void write_bin(uint8_t* out, const void* data, size_t n) {
-    out[0] = 0xc6;
+    out[0] = xi::mp::tag::Bin32;                          // == Writer::bin header
     put_u32_be(out + 1, uint32_t(n));
     if (n) std::memcpy(out + 5, data, n);
 }
 
+// Readers stay LOCAL by design: these decode TRUSTED bytes the pack itself
+// wrote (canonical by construction), at a known fixed offset, on the C3 fast
+// read path — assert-only tag checks, zero validation cost, zero-copy views.
+// xi::mp::Reader is the wrong shape for that job (a bounded VALIDATING pull
+// decoder with an Element out-param, built for foreign input); there is no
+// shared fixed-offset read form in xi_mp.hpp to fold these into.
 inline int64_t read_i64(const uint8_t* p) {
-    assert(p[0] == 0xd3 && "pack entry is not a canonical int64");
+    assert(p[0] == xi::mp::tag::Int64 && "pack entry is not a canonical int64");
     return int64_t(get_u64_be(p + 1));
 }
 inline double read_f64(const uint8_t* p) {
-    assert(p[0] == 0xcb && "pack entry is not a canonical float64");
+    assert(p[0] == xi::mp::tag::Float64 && "pack entry is not a canonical float64");
     uint64_t bits = get_u64_be(p + 1);
     double v;
     std::memcpy(&v, &bits, sizeof v);
     return v;
 }
 inline bool read_bool(const uint8_t* p) {
-    assert((p[0] == 0xc2 || p[0] == 0xc3) && "pack entry is not a canonical bool");
-    return p[0] == 0xc3;
+    assert((p[0] == xi::mp::tag::False || p[0] == xi::mp::tag::True) &&
+           "pack entry is not a canonical bool");
+    return p[0] == xi::mp::tag::True;
 }
 // str/bin readers return a view straight into the arena payload region.
 inline std::string_view read_str(const uint8_t* p) {
-    assert(p[0] == 0xdb && "pack entry is not a canonical str32");
+    assert(p[0] == xi::mp::tag::Str32 && "pack entry is not a canonical str32");
     uint32_t n = get_u32_be(p + 1);
     return std::string_view(reinterpret_cast<const char*>(p + 5), n);
 }
 inline std::span<const uint8_t> read_bin(const uint8_t* p) {
-    assert(p[0] == 0xc6 && "pack entry is not a canonical bin32");
+    assert(p[0] == xi::mp::tag::Bin32 && "pack entry is not a canonical bin32");
     uint32_t n = get_u32_be(p + 1);
     return std::span<const uint8_t>(p + 5, n);
 }
@@ -324,6 +354,24 @@ private:
 // and resolved to a raw const span. This is the ONLY mint path in the pack
 // layer, satisfying doc 07's "handles are mintable only by the domain's own
 // allocator". See docs/new_gen/09-bufferpool-audit.md for the reuse verdict.
+//
+// OWNER-NEUTRAL MINT (cross-plane owner-sweep data-loss fix). A buffer minted
+// INTO a pack is governed by the pack alone: the builder/pack `handles_`
+// ledger releases it exactly once on destruction, and a LEAKED pack is
+// reclaimed by the PACK registry's own owner sweep (sweep_packs_for -> pack
+// destroy -> handle release). Tagging it with the producing INSTANCE's
+// ImagePool owner (current_owner()) was therefore redundant AND harmful:
+// PackRegistry::retain bumps only the pack-registry rc, never the pool rc, so
+// the buffer stayed at pool rc 1 — and the instance's image-plane sweep
+// (ImagePool::release_all_for on producer teardown) freed it out from under a
+// co-owner still holding the PACK (cache/buffer_replay retain pack-level).
+// The pack survived (the registry's R1 guard is correct) but get_image then
+// returned an empty span — silent data loss. Minting owner-0 makes the image
+// sweep skip pack buffers (owner != instance) so the pack solely governs
+// them. Standalone mints (host->image_create / xi::Image) keep the instance
+// owner and are still leak-swept; the ADOPT path (adopt_image: pool addref ->
+// rc 2 -> spared+orphaned by the sweep) was already correct. Diagnostic-only
+// side effect: stats_by_owner attributes pack buffers to owner 0.
 // ===================================================================
 namespace pack_pool {
 
@@ -331,12 +379,14 @@ namespace pack_pool {
 // (n==0, over the pool's 1 GiB per-buffer cap, or pool exhausted).
 inline xi_image_handle alloc_bytes(const void* src, size_t n) {
     if (n == 0 || n > size_t(INT32_MAX)) return XI_IMAGE_NULL;
+    ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
     xi_image_handle h = ImagePool::instance().create(int32_t(n), 1, 1);
     if (h && src) std::memcpy(ImagePool::instance().data(h), src, n);
     return h;
 }
 // Mint an image buffer (w*h*c bytes) and copy pixels in. 0 on failure.
 inline xi_image_handle alloc_image(int32_t w, int32_t h, int32_t c, const void* px) {
+    ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
     xi_image_handle handle = ImagePool::instance().create(w, h, c);
     if (handle && px) {
         std::memcpy(ImagePool::instance().data(handle),

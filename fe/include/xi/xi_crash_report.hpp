@@ -97,10 +97,53 @@ inline void enrich_from_crash_report(const std::string& be_log, BeExitEvent& ev)
         std::string c_instance = cstr("instance");
         std::string c_folder   = cstr("folder");
         std::string c_dll      = cstr("dll");
-        // faulting_module is "<dll>+0x<off>" (or "<unknown>"); match on the dll
-        // basename so a callee offset / path noise doesn't defeat the check.
-        bool dll_matches = !c_dll.empty() &&
-            ev.faulting_module.find(c_dll) != std::string::npos;
+        // faulting_module is "<module>+0x<off>" (or "<unknown>"), where <module>
+        // today is just the DLL BASENAME (crash::blame_module strips the
+        // directory). ROOT CAUSE of the mis-attribution bug: under the standard
+        // build convention many plugins share the SAME basename (plugin_vN.dll —
+        // real collisions exist across examples/circle_counting), and g_culprit
+        // is a single last-writer process-global stamp, so a crash in plugin A
+        // can carry same-basename plugin B's identity. Matching here therefore:
+        //   1. prefers a FULL-PATH match whenever the report's module carries a
+        //      directory (unambiguous — compares against culprit folder + dll);
+        //   2. otherwise requires EXACT basename equality (the old substring
+        //      find() also matched suffixes, e.g. culprit dll "plugin.dll"
+        //      inside "myplugin.dll+0x...").
+        // A basename-only match remains inherently ambiguous when >=2 loaded
+        // plugins share that basename; the FE supervisor (fe_main.cpp) detects
+        // that collision and then refuses to quarantine / reset the respawn
+        // budget. FULL FIX direction: record + match the full module path
+        // end-to-end (blame_module keeps GetModuleFileNameA's absolute path,
+        // the report stores it, and branch 1 below then always applies).
+        auto path_ieq = [](const std::string& a, const std::string& b) {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i) {
+                char x = a[i], y = b[i];
+                if (x >= 'A' && x <= 'Z') x += 32;   // Windows paths: case-insensitive
+                if (y >= 'A' && y <= 'Z') y += 32;
+                if (x == '\\') x = '/';              // separators equivalent
+                if (y == '\\') y = '/';
+                if (x != y) return false;
+            }
+            return true;
+        };
+        std::string mod = ev.faulting_module.substr(0, ev.faulting_module.find('+'));
+        size_t      sep = mod.find_last_of("/\\");
+        bool mod_has_path = sep != std::string::npos;
+        std::string mod_base = mod_has_path ? mod.substr(sep + 1) : mod;
+        bool dll_matches = false;
+        if (!c_dll.empty() && !mod.empty() && mod != "<unknown>") {
+            if (mod_has_path && !c_folder.empty()) {
+                // Full module path available: disambiguate by the whole path.
+                std::string full = (std::filesystem::path(c_folder) / c_dll)
+                                       .lexically_normal().string();
+                dll_matches = path_ieq(
+                    std::filesystem::path(mod).lexically_normal().string(), full);
+            } else {
+                // Basename-only report: exact (not substring) basename equality.
+                dll_matches = path_ieq(mod_base, c_dll);
+            }
+        }
         if (dll_matches) {
             ev.culprit_plugin   = c_plugin;
             ev.culprit_instance = c_instance;

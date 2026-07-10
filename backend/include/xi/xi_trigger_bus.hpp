@@ -65,6 +65,47 @@ struct TriggerEvent {
     // payload pack. Keyed on pack presence (the Record-era image/doc members that
     // an emptiness check would have used were deleted by THE CUT).
     bool is_real() const { return pack != XI_PACK_NULL; }
+
+    // Move semantics are USER-DECLARED so a moved-from husk truly owns nothing.
+    // `pack` is a scalar handle with no destructor, so the implicit move merely
+    // COPIED it and left the source still set: any path that moves an event into
+    // a queue and later releases the husk (a missed/late TriggerEventReleaser
+    // dismiss(), or a throw inserted between the push and the dismiss) would
+    // double-release a handle the queue now owns — a UAF waiting for a refactor.
+    // Nulling the source's pack here makes the F7 guard's documented invariant
+    // ("a move leaves ev empty, so even a missed dismiss() releases nothing —
+    // never a double-free", service_sinks.cpp) actually hold. Copy stays
+    // defaulted: a copy intentionally ALIASES the handle without taking a ref —
+    // the manual release discipline (release_trigger_event_) is unchanged.
+    // Note: like the implicit assign it replaces, move-assign does NOT release
+    // this->pack before overwriting (this header has no releaser); callers own
+    // releasing a live event before assigning over it.
+    TriggerEvent() = default;
+    TriggerEvent(const TriggerEvent&)            = default;
+    TriggerEvent& operator=(const TriggerEvent&) = default;
+    TriggerEvent(TriggerEvent&& o) noexcept
+        : id(o.id),
+          timestamp_us(o.timestamp_us),
+          dequeued_at_us(o.dequeued_at_us),
+          arrival_id(o.arrival_id),
+          leader_source(std::move(o.leader_source)),
+          group(std::move(o.group)),
+          pack(o.pack) {
+        o.pack = XI_PACK_NULL;
+    }
+    TriggerEvent& operator=(TriggerEvent&& o) noexcept {
+        if (this != &o) {
+            id             = o.id;
+            timestamp_us   = o.timestamp_us;
+            dequeued_at_us = o.dequeued_at_us;
+            arrival_id     = o.arrival_id;
+            leader_source  = std::move(o.leader_source);
+            group          = std::move(o.group);
+            pack           = o.pack;
+            o.pack         = XI_PACK_NULL;
+        }
+        return *this;
+    }
 };
 
 #ifndef XI_NOW_US_DEFINED

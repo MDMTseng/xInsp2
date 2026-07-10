@@ -40,6 +40,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -224,14 +225,25 @@ inline void await_dump(unsigned timeout_ms) {
 #ifdef _WIN32
 // ---- dump machinery (Windows-only) ------------------------------------------
 
+// Dump directory (e.g. %TEMP%\xinsp2\crashdumps), resolved + created ONCE at
+// install() time — on a healthy heap — into a fixed static buffer. The fatal
+// filter reads it without touching std::filesystem or the heap. Empty means
+// install() hasn't run (or resolution failed); the filter then falls back to a
+// Win32-only (still alloc-free) GetTempPathA + CreateDirectoryA resolution.
+inline char g_dump_dir[MAX_PATH] = {};
+
 // Map an instruction pointer to "<module>+0x<offset>" by scanning loaded
-// modules. Used in the crash filter to point at which DLL (script vs plugin vs
-// xinsp-backend itself) was executing.
-inline std::string blame_module(void* addr) {
+// modules, writing into a caller-provided fixed buffer. Used in the crash
+// filter to point at which DLL (script vs plugin vs xinsp-backend itself) was
+// executing. Alloc-free (stack buffers + snprintf + Win32 only): it runs on
+// faults whose root cause may be the heap itself (0xC0000374), so it must
+// honor the same signal-safe discipline as the POD breadcrumb model.
+inline void blame_module_into(void* addr, char* out, size_t out_sz) {
+    std::snprintf(out, out_sz, "<unknown>");
     HMODULE mods[1024];
     DWORD needed = 0;
     if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed))
-        return "<unknown>";
+        return;
     int n = (int)(needed / sizeof(HMODULE));
     for (int i = 0; i < n; ++i) {
         MODULEINFO mi{};
@@ -241,31 +253,60 @@ inline std::string blame_module(void* addr) {
         char name[MAX_PATH];
         GetModuleFileNameA(mods[i], name, sizeof(name));
         const char* slash = std::strrchr(name, '\\');
-        std::string out = (slash ? slash + 1 : name);
-        char off[64];
-        std::snprintf(off, sizeof(off), "+0x%llx", (unsigned long long)((uintptr_t)addr - base));
-        return out + off;
+        std::snprintf(out, out_sz, "%s+0x%llx", slash ? slash + 1 : name,
+                      (unsigned long long)((uintptr_t)addr - base));
+        return;
     }
-    return "<unknown>";
 }
 
-// JSON-escape a path segment in-place (writes into out). Tiny copy of
-// xp::json_escape_into to keep this filter free of any nontrivial dep.
-inline void json_escape(std::string& out, const char* s) {
-    out.push_back('"');
+namespace detail {
+// Bounded appender for the fatal path: writes into a caller-provided fixed
+// buffer, silently truncating when full (never overruns, always leaves room
+// for a NUL). No heap, no locks — the crash filter's signal-safe discipline.
+// Truncation over allocation: a clipped sidecar field beats a filter that
+// faults in operator new on the corrupt heap it is reporting on.
+struct FixedWriter {
+    char*  buf;
+    size_t cap;      // total capacity, including the trailing NUL
+    size_t len = 0;
+    void put(char c) {
+        if (len + 1 < cap) buf[len++] = c;
+    }
+    void append(const char* s) {
+        while (*s) put(*s++);
+    }
+    void appendf(const char* fmt, ...) {
+        if (len + 1 >= cap) return;
+        va_list ap;
+        va_start(ap, fmt);
+        int n = std::vsnprintf(buf + len, cap - len, fmt, ap);
+        va_end(ap);
+        if (n <= 0) return;
+        size_t room = cap - len - 1;                 // chars actually writable
+        len += ((size_t)n < room) ? (size_t)n : room;
+    }
+    void finish() { buf[len < cap ? len : cap - 1] = 0; }
+};
+
+// JSON-escape s (quoted) into w. Alloc-free replacement for the old
+// std::string json_escape; tiny copy of xp::json_escape_into's escape set to
+// keep this filter free of any nontrivial dep.
+inline void json_escape_append(FixedWriter& w, const char* s) {
+    w.put('"');
     for (; *s; ++s) {
         char c = *s;
         switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:   out.push_back(c);
+            case '"':  w.append("\\\""); break;
+            case '\\': w.append("\\\\"); break;
+            case '\n': w.append("\\n");  break;
+            case '\r': w.append("\\r");  break;
+            case '\t': w.append("\\t");  break;
+            default:   w.put(c);
         }
     }
-    out.push_back('"');
+    w.put('"');
 }
+} // namespace detail
 
 inline const char* exception_name(DWORD code) {
     switch (code) {
@@ -305,6 +346,12 @@ inline void reserve_fault_stack() {
 // read by the backend on the NEXT startup and surfaced via cmd:crash_reports —
 // the extension shows it as a notification so the user knows *which* component
 // (script / plugin / core) caused the last session's death.
+//
+// INVARIANT: this filter is signal-safe — no heap, no locks. It must keep
+// working when the fault IS the heap (0xC0000374 heap corruption), so the
+// whole path uses only stack/static buffers, snprintf, and raw Win32 file
+// APIs. The dump directory is pre-resolved at install(); anything heap-y
+// (std::string, std::filesystem, new/malloc) is banned here.
 inline LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
     // H3 — serialize against concurrent unhandled faults. The FIRST faulter wins
     // the flag and writes the dump. A later entrant is dying regardless; it must
@@ -320,10 +367,33 @@ inline LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
         return EXCEPTION_EXECUTE_HANDLER;
     }
 
-    namespace fs = std::filesystem;
-    auto dir = fs::temp_directory_path() / "xinsp2" / "crashdumps";
-    std::error_code ec;
-    fs::create_directories(dir, ec);
+    // SIGNAL-SAFE WRITER INVARIANT — from here to the final return the filter
+    // now honors the discipline the breadcrumb model documents: NO heap, NO
+    // locks. Only stack/static buffers, snprintf, and raw Win32 file APIs
+    // (CreateFileA/WriteFile). No std::string, no std::filesystem, no
+    // new/malloc. This matters because the product's most serious crash class
+    // is heap corruption (0xC0000374, flagged by veh_logger below): on that
+    // fault the heap is the thing that just failed, and a single std::string
+    // append here could fault or deadlock — killing the process with a
+    // truncated/absent dump and no .json sidecar, i.e. forensics failing on
+    // exactly the crash class they exist for.
+
+    // Dump directory: pre-resolved + created at install() into g_dump_dir.
+    // Fallback (filter fired before/without install, or resolution failed
+    // there): GetTempPathA + CreateDirectoryA — still alloc-free.
+    char dir[MAX_PATH];
+    if (g_dump_dir[0]) {
+        std::snprintf(dir, sizeof(dir), "%s", g_dump_dir);
+    } else {
+        char tmp[MAX_PATH];
+        DWORD tn = GetTempPathA((DWORD)sizeof(tmp), tmp);  // ends with '\'
+        if (tn == 0 || tn >= sizeof(tmp)) { tmp[0] = '.'; tmp[1] = '\\'; tmp[2] = 0; }
+        std::snprintf(dir, sizeof(dir), "%sxinsp2", tmp);
+        CreateDirectoryA(dir, nullptr);                    // ok if it exists
+        std::snprintf(dir, sizeof(dir), "%sxinsp2\\crashdumps", tmp);
+        CreateDirectoryA(dir, nullptr);
+    }
+
     SYSTEMTIME st; GetLocalTime(&st);
     // Stem carries tid + milliseconds (on top of pid + HH:MM:SS) so two faults in
     // the same wall-clock second on different threads never collide on the dump
@@ -334,15 +404,18 @@ inline LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
         (unsigned long)GetCurrentProcessId(),
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
         st.wMilliseconds, (unsigned long)GetCurrentThreadId());
-    auto dmp_path  = (dir / (std::string(stem) + ".dmp")).string();
-    auto json_path = (dir / (std::string(stem) + ".json")).string();
+    char dmp_path[MAX_PATH + 176];
+    char json_path[MAX_PATH + 176];
+    std::snprintf(dmp_path,  sizeof(dmp_path),  "%s\\%s.dmp",  dir, stem);
+    std::snprintf(json_path, sizeof(json_path), "%s\\%s.json", dir, stem);
 
     DWORD code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
     void* addr = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionAddress : nullptr;
-    std::string blamed = blame_module(addr);
+    char blamed[MAX_PATH + 32];
+    blame_module_into(addr, blamed, sizeof(blamed));
 
     // 1. Minidump
-    HANDLE h = CreateFileA(dmp_path.c_str(), GENERIC_WRITE, 0, nullptr,
+    HANDLE h = CreateFileA(dmp_path, GENERIC_WRITE, 0, nullptr,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
         MINIDUMP_EXCEPTION_INFORMATION mei;
@@ -372,99 +445,121 @@ inline LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
         CloseHandle(h);
     }
 
-    // 2. JSON sidecar — what the next-startup report path reads.
-    std::string out = "{\"version\":\""  XINSP2_VERSION "\""
-                      ",\"commit\":\""  XINSP2_COMMIT "\""
-                      ",\"pid\":" + std::to_string(GetCurrentProcessId())
-                    + ",\"thread_id\":" + std::to_string(GetCurrentThreadId());
+    // 2. JSON sidecar — what the next-startup report path reads. Built with
+    // the bounded FixedWriter (snprintf-style appends, truncate-don't-allocate)
+    // into a STATIC buffer, not the stack: the filter may be running on the
+    // 128 KB SetThreadStackGuarantee fault stack after a STACK_OVERFLOW, and
+    // the worst-case sidecar (64 live thread slots, every field full +
+    // escaped) is ~56 KB. Sharing the static buffer is safe: the H3 flag above
+    // guarantees exactly one thread is in this section at a time.
+    static char g_json_buf[64 * 1024];
+    detail::FixedWriter w{ g_json_buf, sizeof(g_json_buf) };
+    w.append("{\"version\":\"" XINSP2_VERSION "\""
+             ",\"commit\":\"" XINSP2_COMMIT "\"");
+    w.appendf(",\"pid\":%lu", (unsigned long)GetCurrentProcessId());
+    w.appendf(",\"thread_id\":%lu", (unsigned long)GetCurrentThreadId());
     char tsbuf[64];
     std::snprintf(tsbuf, sizeof(tsbuf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    out += ",\"timestamp\":";
-    json_escape(out, tsbuf);
-    out += ",\"exception\":{\"code\":";
-    char codebuf[24];
-    std::snprintf(codebuf, sizeof(codebuf), "\"0x%08X\"", code);
-    out += codebuf;
-    out += ",\"name\":";
-    json_escape(out, exception_name(code));
-    char addrbuf[40];
-    std::snprintf(addrbuf, sizeof(addrbuf), "\"0x%llx\"", (unsigned long long)addr);
-    out += ",\"address\":"; out += addrbuf;
-    out += ",\"module\":"; json_escape(out, blamed.c_str());
-    out += "}";
-    // `context` = the faulting thread's breadcrumb (the handler runs on
-    // the faulting thread, so ctx() is its slot). Back-compat with the
-    // existing report reader which expects this object.
+    w.append(",\"timestamp\":");
+    detail::json_escape_append(w, tsbuf);
+    w.appendf(",\"exception\":{\"code\":\"0x%08X\"", (unsigned)code);
+    w.append(",\"name\":");
+    detail::json_escape_append(w, exception_name(code));
+    w.appendf(",\"address\":\"0x%llx\"", (unsigned long long)(uintptr_t)addr);
+    w.append(",\"module\":");
+    detail::json_escape_append(w, blamed);
+    w.append("}");
+    // `context` = the faulting thread's breadcrumb (the handler runs on the
+    // faulting thread, so its slot — looked up READ-ONLY by tid, not via
+    // ctx(): ctx() can CLAIM a slot, and constructing its thread_local
+    // SlotGuard on this path may allocate inside the CRT's TLS-dtor
+    // registration. A thread with no slot yields empty fields, exactly what a
+    // freshly claimed slot would have shown. Back-compat with the existing
+    // report reader which expects this object.
     uint32_t fault_tid = (uint32_t)GetCurrentThreadId();
     {
-        auto& c = ctx();
-        out += ",\"context\":{";
-        out += "\"last_cmd\":";      json_escape(out, c.last_cmd);
-        out += ",\"last_script\":";  json_escape(out, c.last_script);
-        out += ",\"last_instance\":";json_escape(out, c.last_instance);
-        out += ",\"last_plugin\":";  json_escape(out, c.last_plugin);
-        out += ",\"last_phase\":";   json_escape(out, c.last_phase);
-        out += ",\"last_status\":";  json_escape(out, c.last_status);
-        out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
-        out += ",\"last_frame\":"  + std::to_string(c.last_frame);
-        out += "}";
+        Context c_none{};                 // stack fallback: no slot => empty fields
+        const Context* cp = &c_none;
+        for (int i = 0; i < kMaxSlots; ++i) {
+            if (g_slot_tid[i].load(std::memory_order_acquire) == fault_tid) {
+                cp = &g_slots[i];
+                break;
+            }
+        }
+        const Context& c = *cp;
+        w.append(",\"context\":{");
+        w.append("\"last_cmd\":");      detail::json_escape_append(w, c.last_cmd);
+        w.append(",\"last_script\":");  detail::json_escape_append(w, c.last_script);
+        w.append(",\"last_instance\":");detail::json_escape_append(w, c.last_instance);
+        w.append(",\"last_plugin\":");  detail::json_escape_append(w, c.last_plugin);
+        w.append(",\"last_phase\":");   detail::json_escape_append(w, c.last_phase);
+        w.append(",\"last_status\":");  detail::json_escape_append(w, c.last_status);
+        w.appendf(",\"last_run_id\":%lld", (long long)c.last_run_id);
+        w.appendf(",\"last_frame\":%d", c.last_frame);
+        w.append("}");
     }
     // `culprit` (Part III G2.1) = the process-global plugin/instance the host
     // last entered, plus that plugin's folder + dll. The FE reads this to
     // attribute the death to a plugin and (cross-checked against `module`)
     // quarantine it via G1's .xi_certify.json. Empty fields = not attributable.
     {
-        out += ",\"culprit\":{";
-        out += "\"instance\":";  json_escape(out, g_culprit.instance);
-        out += ",\"plugin\":";   json_escape(out, g_culprit.plugin);
-        out += ",\"folder\":";   json_escape(out, g_culprit.folder);
-        out += ",\"dll\":";      json_escape(out, g_culprit.dll);
-        out += "}";
+        w.append(",\"culprit\":{");
+        w.append("\"instance\":");  detail::json_escape_append(w, g_culprit.instance);
+        w.append(",\"plugin\":");   detail::json_escape_append(w, g_culprit.plugin);
+        w.append(",\"folder\":");   detail::json_escape_append(w, g_culprit.folder);
+        w.append(",\"dll\":");      detail::json_escape_append(w, g_culprit.dll);
+        w.append("}");
     }
     // `threads` = every claimed breadcrumb slot, so a multi-dispatch crash shows
     // what ALL concurrent inspects were doing, not just the faulting one.
     // `faulting:true` flags the culprit.
-    out += ",\"threads\":[";
+    w.append(",\"threads\":[");
     {
         bool first = true;
         for (int i = 0; i < kMaxSlots; ++i) {
             uint32_t tid = g_slot_tid[i].load(std::memory_order_acquire);
             if (tid == 0) continue;
             auto& c = g_slots[i];
-            if (!first) out += ",";
+            if (!first) w.append(",");
             first = false;
-            out += "{\"thread_id\":" + std::to_string(tid);
-            out += ",\"faulting\":" + std::string(tid == fault_tid ? "true" : "false");
-            out += ",\"last_cmd\":";     json_escape(out, c.last_cmd);
-            out += ",\"last_instance\":";json_escape(out, c.last_instance);
-            out += ",\"last_plugin\":";  json_escape(out, c.last_plugin);
-            out += ",\"last_phase\":";   json_escape(out, c.last_phase);
-            out += ",\"last_status\":";  json_escape(out, c.last_status);
-            out += ",\"last_run_id\":" + std::to_string(c.last_run_id);
-            out += ",\"last_frame\":"  + std::to_string(c.last_frame);
-            out += "}";
+            w.appendf("{\"thread_id\":%lu", (unsigned long)tid);
+            w.append(tid == fault_tid ? ",\"faulting\":true" : ",\"faulting\":false");
+            w.append(",\"last_cmd\":");     detail::json_escape_append(w, c.last_cmd);
+            w.append(",\"last_instance\":");detail::json_escape_append(w, c.last_instance);
+            w.append(",\"last_plugin\":");  detail::json_escape_append(w, c.last_plugin);
+            w.append(",\"last_phase\":");   detail::json_escape_append(w, c.last_phase);
+            w.append(",\"last_status\":");  detail::json_escape_append(w, c.last_status);
+            w.appendf(",\"last_run_id\":%lld", (long long)c.last_run_id);
+            w.appendf(",\"last_frame\":%d", c.last_frame);
+            w.append("}");
         }
     }
-    out += "]";
-    out += ",\"minidump\":";
-    json_escape(out, (std::string(stem) + ".dmp").c_str());
-    out += "}\n";
+    w.append("]");
+    w.append(",\"minidump\":");
+    char dmpname[176];
+    std::snprintf(dmpname, sizeof(dmpname), "%s.dmp", stem);
+    detail::json_escape_append(w, dmpname);
+    w.append("}\n");
+    w.finish();
 
-    HANDLE jh = CreateFileA(json_path.c_str(), GENERIC_WRITE, 0, nullptr,
+    HANDLE jh = CreateFileA(json_path, GENERIC_WRITE, 0, nullptr,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (jh != INVALID_HANDLE_VALUE) {
         DWORD wrote = 0;
-        WriteFile(jh, out.data(), (DWORD)out.size(), &wrote, nullptr);
+        WriteFile(jh, w.buf, (DWORD)w.len, &wrote, nullptr);
         CloseHandle(jh);
     }
 
-    std::fprintf(stderr, "[xinsp2] CRASH 0x%08X (%s) in %s — minidump: %s\n",
-                 code, exception_name(code), blamed.c_str(), dmp_path.c_str());
-    std::fflush(stderr);
-    // Dump + sidecar are on disk. Release the H3 flag so a hard-exit path blocked
-    // in await_dump() (H7) resumes promptly instead of waiting out its full bound.
+    // Dump + sidecar are on disk. Release the H3 flag FIRST — before the stdio
+    // logging below (fprintf takes the CRT stream lock, the one step here that
+    // can still block) — so a hard-exit path blocked in await_dump() (H7)
+    // resumes promptly instead of waiting out its full bound.
     g_dump_in_progress.store(0, std::memory_order_release);
+
+    std::fprintf(stderr, "[xinsp2] CRASH 0x%08X (%s) in %s — minidump: %s\n",
+                 code, exception_name(code), blamed, dmp_path);
+    std::fflush(stderr);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -549,11 +644,15 @@ inline LONG WINAPI veh_logger(EXCEPTION_POINTERS* info) {
         (code >= 0xE0000001 && code <= 0xE0000010);
     if (concerning) {
         void* addr = info->ExceptionRecord->ExceptionAddress;
-        std::string blamed = blame_module(addr);
+        // Alloc-free blame: this logger fires FIRST-CHANCE on 0xC0000374
+        // (heap corruption) — allocating a std::string here would run on the
+        // very heap that just failed, before the real filter even gets a shot.
+        char blamed[MAX_PATH + 32];
+        blame_module_into(addr, blamed, sizeof(blamed));
         std::fprintf(stderr,
             "[xinsp2] VEH first-chance 0x%08X (%s) thread %lu at %s\n",
             code, exception_name(code),
-            (unsigned long)GetCurrentThreadId(), blamed.c_str());
+            (unsigned long)GetCurrentThreadId(), blamed);
         std::fflush(stderr);
     }
     return EXCEPTION_CONTINUE_SEARCH;
@@ -565,6 +664,30 @@ inline LONG WINAPI veh_logger(EXCEPTION_POINTERS* info) {
 // bypasses SetUnhandledExceptionFilter / set_terminate, so each entry point gets
 // its own interceptor — a crash report is ALWAYS written.
 inline void install() {
+    // Resolve + create the dump directory ONCE, here, on a healthy heap.
+    // std::filesystem (and any other allocation) is banned inside the fatal
+    // filter — its most serious customer is heap corruption (0xC0000374) —
+    // so the heap-y work happens at install time and the result lands in the
+    // fixed static g_dump_dir the filter reads allocation-free. On any
+    // failure g_dump_dir stays empty and write_minidump falls back to its
+    // Win32-only GetTempPathA resolution.
+    try {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::path dir = fs::temp_directory_path(ec);
+        if (!ec) {
+            dir /= "xinsp2";
+            dir /= "crashdumps";
+            fs::create_directories(dir, ec);
+            if (!ec) {
+                std::string s = dir.string();
+                if (s.size() < sizeof(g_dump_dir))
+                    std::snprintf(g_dump_dir, sizeof(g_dump_dir), "%s", s.c_str());
+            }
+        }
+    } catch (...) {
+        g_dump_dir[0] = 0;   // fall back to the filter's Win32-only path
+    }
     // Top-level guard: minidump on crashes that escape the SEH translator
     // (stack overflow, plugin static destructor faults, etc.).
     SetUnhandledExceptionFilter(write_minidump);

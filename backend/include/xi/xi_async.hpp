@@ -182,6 +182,25 @@ inline std::atomic<uint64_t>& cancel_ticket_counter() {
     static std::atomic<uint64_t> c{1};   // 0 reserved: "no ticket / legacy"
     return c;
 }
+
+// Reserved ticket marking a thread as a PLUGIN-OWNED worker, never an inspect
+// worker — `cancellation_requested()` never reports an inspect cancel for it.
+// Installed by xi::spawn_worker (xi_thread.hpp) at worker entry.
+//
+// Root cause this exists for: spawn_worker threads used to run with the
+// default thread-local ticket 0, and ticket 0 is the "legacy inspect with no
+// begin-hook" fallback that the cancel check treats as always-in-flight. So a
+// plugin's long-running worker (camera grab loop, ...) polling
+// xi::cancellation_requested() — as the SDK advises — was spuriously cancelled
+// for the whole ~1s grace window whenever an UNRELATED frame's watchdog
+// tripped. Plugin workers are not inspect work; they must be immune to the
+// inspect-epoch cancel entirely (their lifecycle is the plugin's own).
+// Distinct from 0, so the legacy-inspect fallback is unaffected; also never
+// drawn by cancel_ticket_counter() (which counts up from 1), and never below
+// any cancel_cutoff — but the check excludes it explicitly rather than relying
+// on that arithmetic.
+inline constexpr uint64_t kNonInspectTicket = UINT64_MAX;
+
 inline std::atomic<uint64_t>& cancel_cutoff() {
     static std::atomic<uint64_t> c{0};
     return c;
@@ -220,11 +239,16 @@ inline void clear_cancel() {
 inline bool cancellation_requested() {
     if (cancel_active().load(std::memory_order_relaxed)) {
         uint64_t my = current_inspect_ticket_ref();
+        // my == kNonInspectTicket ⇒ a plugin-owned worker (xi::spawn_worker),
+        // not an inspect worker: NEVER subject to the inspect-epoch cancel.
+        // (Its per-task CancelToken below still applies if one is installed.)
+        //
         // my == 0 ⇒ no ticket was drawn (legacy script lacking the
         // inspect-begin hook, or code running outside any inspect). Treat it as
         // "in flight" so the watchdog's cooperative cancel still reaches such
         // code — preserves the pre-epoch global-cancel behaviour for them.
-        if (my == 0 || my < cancel_cutoff().load(std::memory_order_relaxed))
+        if (my != kNonInspectTicket &&
+            (my == 0 || my < cancel_cutoff().load(std::memory_order_relaxed)))
             return true;
     }
     auto* t = current_cancel_token_ref();
@@ -242,6 +266,16 @@ public:
     Future& operator=(Future&&) noexcept = default;
     Future(const Future&) = delete;
     Future& operator=(const Future&) = delete;
+
+    // Dropping an unconsumed Future: cooperatively cancel the sibling task
+    // BEFORE the std::future member's dtor blocks on it, so a task that polls
+    // `xi::cancellation_requested()` can bail out promptly. Signal only —
+    // the blocking wait itself is unchanged.
+    ~Future() {
+        if (f_.valid()) {
+            if (token_) token_->cancelled.store(true, std::memory_order_relaxed);
+        }
+    }
 
     // The "await": implicit conversion blocks and returns the value.
     // Safe to call multiple times — caches the result after first get().
@@ -291,6 +325,13 @@ public:
     Future& operator=(Future&&) noexcept = default;
     Future(const Future&) = delete;
     Future& operator=(const Future&) = delete;
+
+    // Same as Future<T>::~Future: signal cancel before the blocking wait.
+    ~Future() {
+        if (f_.valid()) {
+            if (token_) token_->cancelled.store(true, std::memory_order_relaxed);
+        }
+    }
 
     void get() {
         if (!consumed_) { f_.get(); consumed_ = true; }

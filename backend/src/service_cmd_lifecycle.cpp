@@ -248,6 +248,14 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 g_eng.persistent_kv_schema = g_eng.script.kv_schema_version
                                            ? g_eng.script.kv_schema_version()
                                            : 0;
+            } else {
+                // No kv channel on the OLD script (or no old script at all):
+                // disarm any snapshot captured in an earlier era. Without this,
+                // a script that stopped exporting get_kv leaves the previous
+                // capture armed, and a LATER set_kv-bearing DLL silently
+                // resurrects a weeks-old store.
+                g_eng.persistent_kv_bytes.clear();
+                g_eng.persistent_kv_schema = 0;
             }
             // Swap: move-assign drops the old module's last ref — its deleter
             // does the owner-sweep + FreeLibrary once any in-flight inspect that
@@ -398,8 +406,18 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 int new_kv_schema = g_eng.script.kv_schema_version
                                   ? g_eng.script.kv_schema_version()
                                   : 0;
+                // Downgrade hole: a new script that LOST its XI_KV_SCHEMA decl
+                // (new_kv_schema == 0) while the captured store WAS versioned
+                // must also drop — we can't distinguish "never versioned" from
+                // "version decl lost", so the safe choice is drop rather than
+                // blind-restoring a versioned store into an unversioned script.
+                // 0 → 0 (never versioned on either side) keeps the blind
+                // best-effort restore.
+                bool kv_downgrade = (g_eng.persistent_kv_schema != 0 &&
+                                     new_kv_schema == 0);
                 bool kv_drop = (new_kv_schema != 0 &&
-                                g_eng.persistent_kv_schema != new_kv_schema);
+                                g_eng.persistent_kv_schema != new_kv_schema)
+                             || kv_downgrade;
                 if (kv_drop) {
                     std::string kv_migrated;
                     if (xi::script::migrate_kv(g_eng.script, g_eng.persistent_kv_bytes,
@@ -449,11 +467,27 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                                    + std::to_string(g_eng.persistent_kv_schema)
                                    + ",\"new_schema\":"
                                    + std::to_string(new_kv_schema)
-                                   + "}}";
+                                   + ",\"reason\":\""
+                                   + (kv_downgrade ? "schema_downgrade" : "schema_mismatch")
+                                   + "\"}}";
                     srv.send_text(ev);
                     g_eng.persistent_kv_bytes.clear();
                     }
                 } else {
+                    // A refused/faulted restore loses the whole cross-frame
+                    // store while compile_and_load still reports success —
+                    // surface it as the same state_dropped event the schema
+                    // drop path emits, so a headless controller can detect
+                    // the loss (stderr alone is invisible over WS).
+                    auto kv_restore_dropped = [&](const char* reason) {
+                        std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
+                                         "\"data\":{\"store\":\"kv\",\"old_schema\":"
+                                       + std::to_string(g_eng.persistent_kv_schema)
+                                       + ",\"new_schema\":"
+                                       + std::to_string(new_kv_schema)
+                                       + ",\"reason\":\"" + reason + "\"}}";
+                        srv.send_text(ev);
+                    };
                     try {
                         if (g_eng.script.set_kv((const uint8_t*)g_eng.persistent_kv_bytes.data(),
                                                 (int)g_eng.persistent_kv_bytes.size()) == 0) {
@@ -462,15 +496,18 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                         } else {
                             std::fprintf(stderr,
                                 "[xinsp2] replay kv_set (restore) refused the bytes — skipped\n");
+                            kv_restore_dropped("restore_refused");
                         }
                     } catch (const seh_exception& e) {
                         std::fprintf(stderr,
                             "[xinsp2] replay kv_set (restore) crashed: 0x%08X (%s) — skipped\n",
                             e.code, e.what());
                         xi::recover_seh_stack_or_die(e.code, "replay kv_set (restore)");
+                        kv_restore_dropped("restore_faulted");
                     } catch (const std::exception& e) {
                         std::fprintf(stderr,
                             "[xinsp2] replay kv_set (restore) threw: %s — skipped\n", e.what());
+                        kv_restore_dropped("restore_faulted");
                     }
                 }
             }

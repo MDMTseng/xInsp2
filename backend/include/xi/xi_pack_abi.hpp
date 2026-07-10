@@ -412,8 +412,21 @@ inline int32_t f_get_mp(xi_pack_handle f, const char* key, const void** ptr, int
 }
 
 // ---- lifetime / emit -------------------------------------------------------
-inline void f_retain(xi_pack_handle f)  { PackRegistry::instance().retain(f); }
-inline void f_release(xi_pack_handle f) { PackRegistry::instance().release(f); }
+// Guarded like f_sweep_packs_for: during static destruction the registry
+// singleton may already be gone, so a late retain/release must not touch it.
+// RELAXED (not acquire): this is the per-frame pack refcount hot path. The flag
+// is written exactly once (true->false in ~PackRegistry at static teardown) and
+// reads nothing it guards — a relaxed load is sufficient (during normal run it
+// is always true), so we don't tax every retain/release with an acquire barrier
+// for a teardown-only case. See docs: speed-first, no hot-path tax for the rare.
+inline void f_retain(xi_pack_handle f) {
+    if (!g_pack_registry_alive.load(std::memory_order_relaxed)) return;
+    PackRegistry::instance().retain(f);
+}
+inline void f_release(xi_pack_handle f) {
+    if (!g_pack_registry_alive.load(std::memory_order_relaxed)) return;
+    PackRegistry::instance().release(f);
+}
 
 // The emit_pack forwarder. The caller (an SDK source) still holds its own ref;
 // we take a SECOND ref for the async dispatch event and hand it to the bus,
@@ -430,7 +443,13 @@ inline void f_emit_pack(const char* emitter, xi_trigger_id id,
 }
 
 // The releaser the bus/dispatcher calls to drop an event's pack ref.
-inline void f_release_for_bus(xi_pack_handle f) { PackRegistry::instance().release(f); }
+// UNTAGGED (owner 0) to pair with f_emit_pack's retain_untagged: the dispatcher
+// runs with no owner context, and an owner-tagged release here would mis-charge
+// the ambient plugin's ledger bucket and skew the later owner sweep.
+inline void f_release_for_bus(xi_pack_handle f) {
+    if (!g_pack_registry_alive.load(std::memory_order_relaxed)) return;
+    PackRegistry::instance().release_as(f, 0);
+}
 
 // The owner-sweep trampoline published into ImagePool::pack_sweep_slot, so the
 // teardown paths that already sweep leaked image handles (adapter dtor, script

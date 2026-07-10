@@ -13,6 +13,7 @@
 
 #include <yyjson.h>
 #include <xi/xi_metrics.hpp>
+#include <xi/xi_parallel.hpp>   // xi::inspect_cancelled (C1 watchdog-cancel escalation)
 
 #include "service_internal.hpp"
 
@@ -46,6 +47,10 @@ static void emit_run_event_(xi::ws::Server& srv, int64_t run_id, const char* nam
 struct RunOutcome {
     xi::script::LoadedScript s;      // script snapshot (also used for the set_run_context clear)
     bool        inspect_ok = false;  // set exactly once by compute
+    // C1 SAFETY: this run was TARGETED by the watchdog's cooperative cancel —
+    // its buffers are (or may be) half-processed. Mutually exclusive with
+    // inspect_ok; emission routes it to a no-verdict / no-actuation outcome.
+    bool        cancelled  = false;
     std::string run_error_what;      // run_error payload (empty on success)
     int64_t     dt_us = 0;           // inspect latency, measured once after inspect
     std::string rr_source, rr_group; // Result provenance snapshot (this thread's trigger)
@@ -194,7 +199,55 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         }
         crash_set_phase("done");
         disarm();
-        out.inspect_ok = true;
+        // ---- C1 SAFETY: was THIS run targeted by the watchdog's cancel? ------
+        // The ticket-vs-cutoff cancel state (cancel_active / cancel_cutoff /
+        // the per-run inspect ticket drawn by s.inspect_begin) lives in the
+        // SCRIPT module's copies of the xi_async.hpp statics — the host only
+        // DRIVES them via s.set_global_cancel and has no getter export, so it
+        // cannot read the predicate directly. It reconstructs the targeted-
+        // cancel fact from the two signals it CAN see:
+        //   1. xi::inspect_cancelled thrown by xi::parallel_for (catch below):
+        //      the script module itself evaluated ticket-vs-cutoff and found
+        //      iterations were actually skipped — covers an innocent co-flight
+        //      run cancelled by ANOTHER lane's trip.
+        //   2. HERE: the run overran its own watchdog budget. A run that trips
+        //      the watchdog is by definition targeted by the cancel it caused;
+        //      xi::ops that drained cooperatively (no parallel_for throw) still
+        //      leave truncated results. Conservative in the SAFE direction: a
+        //      run that overran but returned before the watchdog's next 100ms
+        //      poll is also withheld — a lost good verdict on an over-budget
+        //      frame, never a shipped bad one. Gated on s.set_global_cancel
+        //      (an old script without the thunk can never be cancelled, so its
+        //      results are complete and stay trusted).
+        if (wd_ms > 0 && s.set_global_cancel) {
+            auto ran_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0).count();
+            if (ran_ms >= wd_ms) {
+                out.cancelled = true;
+                emit_error_log(srv, "inspect overran the watchdog budget ("
+                                    + std::to_string((long long)ran_ms) + "ms >= "
+                                    + std::to_string(wd_ms) + "ms) — verdict withheld "
+                                    "(no_verdict), sinks not actuated", run_id);
+            }
+        }
+        out.inspect_ok = !out.cancelled;   // cancelled is NOT the success path
+    } catch (const xi::inspect_cancelled&) {
+        // C1 SAFETY: the watchdog's targeted cancel skipped parallel_for
+        // iterations mid-inspect; xi_parallel.hpp threw so the inspect unwound
+        // instead of computing a verdict over a truncated frame. NOT a crash —
+        // route to the cancelled (no-verdict / no-actuation) outcome, keeping
+        // the crash path below for genuine faults only.
+        disarm();
+        out.cancelled = true;
+        auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - t0).count();
+        std::fprintf(stderr, "[xinsp2] inspect cancelled by watchdog after %lldms — "
+                             "verdict withheld (run_id=%lld)\n",
+                     (long long)dt_ms, (long long)run_id);
+        emit_error_log(srv, "inspect cancelled by watchdog after "
+                            + std::to_string((long long)dt_ms)
+                            + "ms — verdict withheld (no_verdict), sinks not actuated",
+                       run_id);
     } catch (const seh_exception& e) {
         disarm();
         auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -263,7 +316,44 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
     // The turn was claimed BEFORE compute; its dtor (in the driver) is the backstop
     // if anything throws. No-op for emit_seq < 0 (completion mode).
     bool my_turn = turn.wait_turn();
-    if (out.inspect_ok) {
+    if (out.cancelled) {
+        // ---- C1 SAFETY — DELIBERATE WIRE-BEHAVIOR CHANGE (flag for maintainer
+        // review). A watchdog-TARGETED-cancelled run used to fall through the
+        // success path: inspect_ok was set unconditionally, the script's verdict
+        // (computed over half-processed buffers after parallel_for/ops skipped
+        // work) was emitted as a normal run_result, and the staged sink pushes
+        // (PLC actuation) were flushed — shipping a possibly-wrong PASS for a
+        // truncated frame. Reachable in production: the FE launches the backend
+        // with --watchdog=60000 by default. Now a cancelled run:
+        //   * emits XI_SYS_NO_VERDICT (class "no_verdict", reason_code
+        //     "watchdog_cancelled") INSTEAD of the script's verdict — even if
+        //     the script called xi::result() before the cancel hit, that verdict
+        //     is untrusted (g_run_result is deliberately ignored here);
+        //   * does NOT flush the staged sink emits — the driver's
+        //     StagedEmitGuard drains them, exactly like the crash path, so
+        //     NOTHING actuates;
+        //   * still emits run_finished (with an additive "cancelled":true) so
+        //     the run_started bracket closes and ordered consumers see no gap.
+        // WHY: never ship a verdict — or actuate a line — from a frame the
+        // watchdog truncated mid-inspect. Consumers already had to handle
+        // class "no_verdict" (script-set-no-result case); reason_code
+        // distinguishes the cancel. Crash and normal paths are UNCHANGED.
+        // (Emitted regardless of my_turn, mirroring the crash path: there is no
+        // actuation to couple the verdict to.)
+        emit_run_result(srv, XI_SYS_NO_VERDICT,
+                        "watchdog cancelled — frame partially processed; verdict withheld",
+                        run_id, dt_ms, out.rr_source, out.rr_group,
+                        out.rr_trigger_hex, "no_verdict", "watchdog_cancelled",
+                        out.rr_script_gen);
+        emit_run_event_(srv, run_id, "run_finished",
+                        "\"ms\":" + std::to_string((long long)dt_ms) +
+                        ",\"inspect_compute_us\":" + std::to_string((long long)out.dt_us) +
+                        ",\"cancelled\":true");
+        // Clear the per-run context exactly like the success path — the script
+        // ran, so the next run must not see this run's frame_path / run_id.
+        if (out.s.set_run_context) out.s.set_run_context("");
+        if (out.s.set_run_id) out.s.set_run_id(0);
+    } else if (out.inspect_ok) {
         // P1 (redteam doc 21): a successful frame's staged sink pushes (PLC
         // actuation / expose) AND its run_result verdict are ONE coupled output —
         // delivered together or not at all. Both are gated by emit_success_outputs
