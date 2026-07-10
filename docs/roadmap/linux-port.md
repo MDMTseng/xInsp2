@@ -108,7 +108,7 @@ the port itself; it's a record so we know what to expect.
 
 | Mechanism | Why hard |
 |---|---|
-| `TerminateThread` watchdog (`backend/src/service_main.cpp`) | Linux has no synchronous "kill thread" primitive. `pthread_cancel` requires cooperative cancellation points the user script won't honour. The earlier "kill the worker process" fix is gone — process isolation was removed 2026-05 and everything runs in-process — so the Linux watchdog story is an open **TODO(linux)**: options include a cooperative-cancellation checkpoint API in the script ABI, or a `SIGUSR`-based interrupt that longjmps out of the inspect thread. |
+| Watchdog (`backend/src/service_main.cpp`) | **Update 2026-07-11 (`93de38b`): mostly moot.** The watchdog no longer kills threads or soft-cancels at all — it is one phase: overrun → grace → hard `_Exit` + supervisor respawn. `_Exit` is POSIX, so the mechanism ports as-is; the remaining Linux work is only the supervisor-respawn side (see `fe_main.cpp` row above). The previously-sketched options (cooperative-cancellation checkpoint API, `SIGUSR`+longjmp) are obsolete — the cooperative-cancel layer was retired. |
 | Plugin DLL versioning (`stem_vN.dll` per `xi_script_compiler.hpp`) | Exists only because Windows holds a load lock on the previous DLL until unload completes. Linux `dlclose` has no such lock, so this whole hack can be deleted on the Linux build. Make sure to keep it conditional, not retroactively rip it out from Windows. |
 
 ## Outside the backend

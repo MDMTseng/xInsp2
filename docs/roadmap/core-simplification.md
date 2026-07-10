@@ -1,6 +1,12 @@
 # Core simplification — patch-necessity archaeology
 
-> **Status:** analysis-only (nothing here is implemented). Product of the 2026-07-10
+> **Status (2026-07-11): EXECUTED.** All ranked items (Tier 0–2) have landed —
+> Tier 0: `516d8cc` (owner-0 mint), `8316e2a` (leaked singletons), `fa7c688`
+> (is_reserved) + `0fe0f34` (pack_mp fold); Tier 1: `1b88412` (#4 QuiesceToken),
+> `cba51fe` (#5 TypedPack delete), `c82dfd5` (#6 single creator tag); Tier 2:
+> `a293cfe` (#7 finish A4 — explicit RunContext), `93de38b` (#8 retire
+> cooperative cancel — one-phase watchdog). Per-item DONE markers below.
+> Originally analysis-only, product of the 2026-07-10
 > essential-vs-accidental complexity audit across five core patch families. Grounded
 > in spine principle #2 (**minimal core**): the core does only dispatch, lifecycle,
 > crash-safety, refcounted zero-copy pools, and the frozen ABI — everything else is a
@@ -42,18 +48,18 @@ Each family below is "the same move, not yet made everywhere."
 ## Ranked roadmap (payoff ÷ interface-disruption)
 
 **Tier 0 — do now, tiny + already-proven (zero interface):**
-1. **Owner-0 mint pack-interior buffers** — 2 lines; kills the cross-plane sweep UAF class. *(Already implemented as the A1 fix on `fix/redteam-round11`; port/keep it.)*
-2. **Leak the process-lifetime singletons** (ImagePool/PackRegistry/cap registry) — deletes 3 alive-flag guards + the static-destruction-UB class, ~30 LOC + 3 atomics.
-3. **`is_reserved()` helper + dequeue `run_id` fallback removal** — collapse 5 duplicated `$`-filters; drop the dead `++g_eng.run_id` fallback.
+1. ✅ **DONE `516d8cc`** — **Owner-0 mint pack-interior buffers** — 2 lines; kills the cross-plane sweep UAF class. *(Already implemented as the A1 fix on `fix/redteam-round11`; port/keep it.)*
+2. ✅ **DONE `8316e2a`** — **Leak the process-lifetime singletons** (ImagePool/PackRegistry/cap registry) — deletes 3 alive-flag guards + the static-destruction-UB class, ~30 LOC + 3 atomics.
+3. ✅ **DONE `fa7c688`** — **`is_reserved()` helper + dequeue `run_id` fallback removal** — collapse 5 duplicated `$`-filters; drop the dead `++g_eng.run_id` fallback.
 
 **Tier 1 — high leverage, structural, zero external change:**
-4. **QuiesceToken capability + one `unload_live_module_()` + `skip_resume()`** — converts the ~9-incident live-teardown family from recurring review finding to compile error. Same pattern as `InflightRuns::launch`.
-5. **Delete TypedPack + fold `pack_mp_detail`** — ~500 LOC, one container/one encoder to audit, closes the NaN divergence. Nothing in production reaches TypedPack across the opaque-handle ABI.
-6. **Collapse the PackRegistry ledger to a single creator tag** — deletes the R1 clamp + `ledger_*` + `OwnerRef` + tagged/untagged split; the two nastiest historical UAF mechanisms become unrepresentable. (Consumer-retain leaks downgrade from swept to *diagnosed* + teardown-reclaimed — needs a hot-reload soak test.)
+4. ✅ **DONE `1b88412`** — **QuiesceToken capability + one `unload_live_module_()` + `skip_resume()`** — converts the ~9-incident live-teardown family from recurring review finding to compile error. Same pattern as `InflightRuns::launch`.
+5. ✅ **DONE** (fold `0fe0f34`, delete `cba51fe`) — **Delete TypedPack + fold `pack_mp_detail`** — ~500 LOC, one container/one encoder to audit, closes the NaN divergence. Nothing in production reaches TypedPack across the opaque-handle ABI.
+6. ✅ **DONE `c82dfd5`** — **Collapse the PackRegistry ledger to a single creator tag** — deletes the R1 clamp + `ledger_*` + `OwnerRef` + tagged/untagged split; the two nastiest historical UAF mechanisms become unrepresentable. (Consumer-retain leaks downgrade from swept to *diagnosed* + teardown-reclaimed — needs a hot-reload soak test.)
 
 **Tier 2 — larger, still interface-preserving (bilingual-window migration):**
-7. **Finish A4: explicit per-run context** (run_id/frame_path/result onto the trigger; free functions become shims; cut the legacy ambient-trigger path). Retires the whole F4/J4/U3/silent-result family + the `spawn_worker` gap. Fold owner+cancel into one `PropagatedContext`. The only "break" is scripts that already misuse free-functions inside async bodies — they change from silent-wrong to fail-loud (a fix).
-8. **Retire the cooperative-cancel layer** (keep hard-trip + tokens; one-phase watchdog). Flag to the app team: a >1s-over-budget *polling* script now respawns instead of soft-aborting. Note this also retires the need for the C1 verdict-safety patch (the wrong-PASS class it guards vanishes when a frame either completes or the process dies).
+7. ✅ **DONE `a293cfe` (2026-07-11)** — **Finish A4: explicit per-run context** (run_id/frame_path/result onto the trigger; free functions become shims; cut the legacy ambient-trigger path). Retires the whole F4/J4/U3/silent-result family + the `spawn_worker` gap. Fold owner+cancel into one `PropagatedContext`. The only "break" is scripts that already misuse free-functions inside async bodies — they change from silent-wrong to fail-loud (a fix).
+8. ✅ **DONE `93de38b` (2026-07-11)** — **Retire the cooperative-cancel layer** (keep hard-trip + tokens; one-phase watchdog). Flag to the app team: a >1s-over-budget *polling* script now respawns instead of soft-aborting. Note this also retires the need for the C1 verdict-safety patch (the wrong-PASS class it guards vanishes when a frame either completes or the process dies).
 
 ## Essential — do NOT touch
 

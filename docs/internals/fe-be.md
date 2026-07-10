@@ -70,8 +70,14 @@ independent budgets, each watching a different boundary:
   plugin's `process()` — so on an unattended line the inspection could silently
   stop while the FE shows healthy. The FE arms the BE's per-inspect watchdog
   (`--watchdog=N`, off in the bare BE), which times each inspect on the worker
-  itself (continuous workers + `cmd:run`); on overrun it cooperatively cancels then
-  exits the process, and the FE respawns. Generous by default so a legitimately
+  itself (continuous workers + `cmd:run`); the watchdog is **one phase**:
+  overrun → grace window → hard `_Exit`, and the FE respawns. (The former
+  cooperative soft-cancel phase — the ticket-epoch cancel the watchdog used to
+  arm before exiting — was retired 2026-07-11, commit `93de38b`. Wire deltas: a
+  frame that exceeds its budget but returns during the grace is a **normal
+  trusted verdict** — there is no `no_verdict`/`watchdog_cancelled` result
+  anymore; a genuinely wedged frame hard-exits and respawns instead of
+  soft-aborting.) Generous by default so a legitimately
   long frame isn't killed; `--watchdog-ms=0` disables it (e.g. a dev stepping a
   long inspect). The arming is the *supervised-deployment* fail-safe — the bare BE
   default stays off.

@@ -1,5 +1,7 @@
 # Pack Plane — Migration Scope Decision (Wave-2 Exit)
 
+> [2026-07-11] Partially superseded: the in-process `TypedPack` benchmarked below was deleted (`cba51fe`), and the `xi_script_set_run_id` export was replaced by the explicit RunContext thunks (`a293cfe`) — see docs/internals/pack-plane.md / docs/reference/c-abi.md.
+
 > **Naming note:** the container was renamed **Frame → Pack** after this
 > document was first drafted (zero image connotation; see doc 07). Container
 > tokens below are updated; quoted test/bench names from the pilot era keep

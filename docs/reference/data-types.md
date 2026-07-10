@@ -47,8 +47,10 @@ Semantics worth knowing:
 - **Provenance rides along**: `$src` (immediate producer) and `$prov` (hop
   chain) are auto-stamped by the door glue on non-empty door outputs.
 - **Declared keysets**: when the field set is fixed, read via a compile-checked
-  schema — `xi::PackSchema` key slots (`TypedPack<Schema>` in-process,
-  `ScriptTypedPack<Schema>` script-side) — so key spelling can't drift.
+  schema — a plain struct with a constexpr `keys` array, read script-side via
+  `ScriptTypedPack<Schema>` (`t.pack().typed<Schema>()`) — so key spelling
+  can't drift. (The in-process `TypedPack<Schema>` / `PackSchema` container was
+  deleted 2026-07-11 — `Pack`/`PackBuilder` is the only in-process container.)
 
 ### Reserved Pack keys
 
@@ -117,11 +119,15 @@ Display order = the pack's own key order (insertion order is preserved); stamp
 The Record-era nominal-type vocabulary (`Number`, `Point`, `Pose`, `Roi`, …,
 `xi_types.hpp`) and its generated `io.hpp` extractor/constructor facades were
 **deleted at THE CUT** together with the Record plane. The typed surface of the pack
-plane is the declared keyset: a `xi::PackSchema`-derived struct fixes the
-contract's key slots at compile time, `TypedPack<Schema>` (in-process) and
-`ScriptTypedPack<Schema>` (script side, `t.pack().typed<Schema>()`) read those
+plane is the declared keyset: a plain schema struct with a constexpr `keys`
+array fixes the contract's key slots at compile time,
+`ScriptTypedPack<Schema>` (script side, `t.pack().typed<Schema>()`) reads those
 slots with typed accessors, and a plugin's published key constants (e.g.
-`blob_analysis_keys.h`) keep call sites literal-free. See
+`blob_analysis_keys.h`) keep call sites literal-free. (The in-process
+`TypedPack<Schema>`/`TypedPackBuilder`/`PackSchema` container was deleted
+2026-07-11 with zero production consumers; `Pack`/`PackBuilder` is the one
+in-process container, and `ScriptTypedPack` — key-based over the opaque
+`xi_pack_v1` ABI — lives on unchanged.) See
 [`../internals/pack-plane.md`](../internals/pack-plane.md) and
 `examples/qa_pack_walk`.
 

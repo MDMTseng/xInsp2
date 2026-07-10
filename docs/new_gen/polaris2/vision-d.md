@@ -1,5 +1,7 @@
 # xInsp3 — One Truth, Many Projections
 
+> [2026-07-11] Partially superseded: the cooperative-cancel ticket this page recommends keeping verbatim was retired (`93de38b` — one-phase watchdog: overrun → grace → hard _Exit+respawn) — see docs/internals/fe-be.md.
+
 A next-generation design for the xInsp machine-vision framework, argued from the code of `polaris_master`.
 
 | | |
