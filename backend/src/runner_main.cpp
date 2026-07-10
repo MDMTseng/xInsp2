@@ -49,15 +49,19 @@
 //   xinsp-runner.exe C:\factory\project --frames=1000 --output=today.json
 //
 // Exit: 0 if all frames dispatched without crashing; 1 on compile/load
-// failure or any script crash. This is an EXECUTION status, not an
-// inspection-verdict roll-up — grep the per-frame "class" or summary "counts"
-// for pass/fail (see the verdict note above).
+// failure or any script crash; 2 on infra failure (bad args, missing
+// project/script, or the final report could not be written — the report is
+// written atomically and checked, so exit 0 guarantees a complete artifact).
+// This is an EXECUTION status, not an inspection-verdict roll-up — grep the
+// per-frame "class" or summary "counts" for pass/fail (see the verdict note
+// above).
 //
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 
 #include <xi/xi_abi.hpp>
+#include <xi/xi_atomic_io.hpp>   // xi::atomic_write — temp+rename report write; no torn/missing artifact behind exit 0
 #include <xi/xi_certify.hpp>     // Part III G1: --certify-plugin child mode + verdict subprocess
 #include <xi/xi_crash_dump.hpp>  // xi::crash::install() — a crashed certify still yields a minidump
 #include <xi/xi_health.hpp>      // xi::health() — canonical health/state contract (schema xi.health/1)
@@ -580,12 +584,20 @@ int main(int argc, char** argv) {
     }
     body += "}}";
 
-    std::ofstream report(args.output);
-    report << body;
-    report.close();
-
-    std::fprintf(stderr, "[runner] wrote %s — %d frames in %.0fms (%d crashed)\n",
-                 args.output.c_str(), args.frames, ms, crashed);
+    // Atomic + checked: a bad --output path or disk-full mid-write must not
+    // leave a missing/torn report behind an exit-0 "wrote" line (CI/MES reads
+    // exit 0 = success). atomic_write stages to <output>.tmp and renames, so
+    // consumers never observe a partial file; on failure the report is the
+    // runner's whole artifact, so it exits 2 (infra failure, like the other
+    // setup/load failures above).
+    const bool report_ok = xi::atomic_write(args.output, body);
+    if (report_ok) {
+        std::fprintf(stderr, "[runner] wrote %s — %d frames in %.0fms (%d crashed)\n",
+                     args.output.c_str(), args.frames, ms, crashed);
+    } else {
+        std::fprintf(stderr, "[runner] ERROR: failed to write report %s (bad path or disk full?) — %d frames in %.0fms (%d crashed)\n",
+                     args.output.c_str(), args.frames, ms, crashed);
+    }
 
     xi::script::unload_script(script);
     // Skip global dtors: plugin-DLL ordering during C++ static teardown is
@@ -594,7 +606,7 @@ int main(int argc, char** argv) {
     // process. Short-lived headless utility — no long-running state to flush.
     std::fflush(stderr);
     std::fflush(stdout);
-    int code = crashed > 0 ? 1 : 0;
+    int code = !report_ok ? 2 : (crashed > 0 ? 1 : 0);
     // Skip C++ static dtors (see comment above): _Exit terminates without running
     // them, on both platforms (the Win32 ExitProcess equivalent).
     std::_Exit(code);
