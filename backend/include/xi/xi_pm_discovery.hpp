@@ -175,6 +175,38 @@ inline bool PluginManager::register_plugin_folder_locked_(const std::string& fol
         bool moved = (existing->second.folder_path != info.folder_path) ||
                      (existing->second.dll_name     != info.dll_name);
         if (moved) {
+            // SAFETY GUARD (UAF): live CAbiInstanceAdapters (project instances
+            // and machine-autoload providers) cache raw GetProcAddress pointers
+            // into this HMODULE. FreeLibrary-ing it while any such consumer is
+            // alive unmaps the module under them — the next dispatch or adapter
+            // dtor then calls into unmapped memory (SEGV). This branch is only
+            // reachable via a deliberate on-disk move/rename of an in-use
+            // plugin (e.g. an in-place prebuilt upgrade that edits "dll" in
+            // plugin.json), so REFUSE the unload+swap here instead of paying
+            // for a full detach→FreeLibrary→reattach rebuild: keep the old,
+            // still-mapped handle and registration, and tell the operator how
+            // to adopt the new binary. Same in-use predicates the autoload /
+            // reload paths use (see xi_pm_load.hpp).
+            bool in_use = project_provides_plugin_locked_(info.name) ||
+                          machine_instances_.count(info.name) > 0;
+            if (in_use) {
+                std::fprintf(stderr,
+                    "[xinsp2] plugin '%s' moved on disk (%s/%s -> %s/%s) but is IN USE "
+                    "by a live project instance or machine provider — REFUSING the "
+                    "in-place unload+swap (unloading now would leave live adapters "
+                    "calling into an unmapped DLL). The previously loaded binary stays "
+                    "active at its old location. Close the project / evict the machine "
+                    "provider, or recompile via the reload path, then rescan to adopt "
+                    "the new binary.\n",
+                    info.name.c_str(),
+                    existing->second.folder_path.c_str(), existing->second.dll_name.c_str(),
+                    info.folder_path.c_str(), info.dll_name.c_str());
+                // Do NOT touch the entry (its folder/dll must keep describing the
+                // module actually mapped) and do NOT tag it project-tracked here —
+                // retagging could let close_project FreeLibrary a handle a machine
+                // provider still holds. The plugin stays registered and valid.
+                return true;
+            }
             FreeLibrary(existing->second.handle);   // TODO(linux): dlclose
             existing->second.handle    = nullptr;
             existing->second.c_factory = nullptr;
